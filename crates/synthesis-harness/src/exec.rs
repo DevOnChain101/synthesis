@@ -672,8 +672,9 @@ impl Harness {
                         text: verdict.message.map_or_else(
                             || {
                                 format!(
-                                    "Permission denied: {}. The tool was NOT run. This is a policy decision (a rule or mode), not a missing approval: do not retry the same call and do not ask the user to run it manually; choose another approach, or stop, name the permission or rule that blocks it and report the task as blocked.",
-                                    verdict.reason
+                                    "Permission denied: {}. The tool was NOT run. This is a policy decision (a rule or mode), not a missing approval: do not retry the same call and do not ask the user to run it manually; choose another approach, or stop, name the permission or rule that blocks it and report the task as blocked.{}",
+                                    verdict.reason,
+                                    bash_hint(&call.name, input)
                                 )
                             },
                             String::from,
@@ -813,9 +814,10 @@ impl Harness {
             rules.join(", ")
         };
         format!(
-            "{} requires approval; no approver available in this run; do not ask the user to run it manually; report status blocked and name the permission needed: {needed} ({}). The tool was NOT run.",
+            "{} requires approval; no approver available in this run; do not ask the user to run it manually; report status blocked and name the permission needed: {needed} ({}). The tool was NOT run.{}",
             call.name,
-            sanitize_for_display(reason)
+            sanitize_for_display(reason),
+            bash_hint(&call.name, input)
         )
     }
 
@@ -1692,5 +1694,51 @@ impl Harness {
                 unavailable: false,
             }
         })
+    }
+}
+
+/// Tool-specific advice appended to a denied `Bash` call: the dedicated tool that does the job
+/// without a shell trick. Keyed on the command text; advice only, never a permission decision.
+fn bash_hint(tool: &str, input: &Value) -> &'static str {
+    let cmd = input.get("command").and_then(Value::as_str).unwrap_or("");
+    if tool != "Bash" {
+        return "";
+    }
+    let stripped = cmd
+        .replace("2>&1", "")
+        .replace("&>/dev/null", "")
+        .replace(">/dev/null", "");
+    let inline = ["python -c", "python3 -c", "node -e", "perl -e", "ruby -e"];
+    if cmd.contains("<<")
+        || stripped.contains('>')
+        || cmd.contains("tee ")
+        || cmd.contains("sed -i")
+        || inline.iter().any(|i| cmd.contains(i))
+    {
+        " Use the Write/Edit/MultiEdit tool for file changes instead of redirects, heredocs, tee, sed -i or inline interpreters; report blocked only if no dedicated tool can do it."
+    } else if cmd.contains("-exec")
+        || cmd.trim_start().starts_with("for ")
+        || cmd.contains("| xargs")
+    {
+        " Use the Read, Grep or Glob tools to read and search files instead of find -exec, loops or pipelines; report blocked only if no dedicated tool can do it."
+    } else {
+        ""
+    }
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::bash_hint;
+    use serde_json::json;
+
+    #[test]
+    fn hints_follow_the_denied_pattern() {
+        let h = |c: &str| bash_hint("Bash", &json!({ "command": c }));
+        assert!(h("cat > f <<EOF\nx\nEOF").contains("Write/Edit"));
+        assert!(h("python3 -c 'open(1)'").contains("Write/Edit"));
+        assert!(h("find . -exec cat {} +").contains("Read, Grep"));
+        assert!(h("for f in *; do cat $f; done").contains("Read, Grep"));
+        assert_eq!(h("cargo test 2>&1"), "");
+        assert_eq!(bash_hint("Write", &json!({ "command": "a > b" })), "");
     }
 }

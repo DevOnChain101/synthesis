@@ -283,7 +283,7 @@ async fn low_gain_pauses_auto_compact_and_warns() {
     let sum = Sum::new(false, &"y".repeat(2000));
     // 1_400 = the input size of request 1: it puts the first compaction at request 2 (the system
     // rules grew by the <agent_message> sentence; the number tracks their size).
-    let mut turns = vec![Turn::tool("t0", "Probe", json!({"x": "0"})).with_usage(1_400, 10)];
+    let mut turns = vec![Turn::tool("t0", "Probe", json!({"x": "0"})).with_usage(1_500, 10)];
     turns.extend((1..4).map(|i| tool(i, 10_800 + 10_000 * i as u64)));
     turns.push(Turn::text("done"));
     let p = Probe::new("Probe", SideEffectClass::Read, 0, &"z".repeat(40_000));
