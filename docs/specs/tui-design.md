@@ -1,5 +1,7 @@
 # Spec: TUI redesign (brand theme, panel registry, /config) — draft 0.1
 
+> **2026-10-31: §16 supersedes §14 and the P3/P4 plan.** The only visual reference is now the owner's HTML prototype, `design/tui-prototype/` (the PNG mockups of §14 are deleted). §16 holds the font rules and the remaining work list. P2 (§15) is the kept groundwork.
+
 Date 2026-10-29. Status: **accepted: the owner took all recommendations D1–D11 on 2026-10-30** (see §13). P1 and P2 are implemented (P2: 2026-10-30, goldens pending owner review, see §15); P3 and P4 are not started. **Later the same day the owner supplied two reference mockups; §14 is authoritative and overrides this document where they disagree** (default theme, default panel visibility, the title, the greeting). Tags: `[fact file:line]` = read in the repo, `[assumption]` = not verified, `[derived]` = a value this spec adds that is not in the kit.
 
 **Inputs:** `design/02-design-tokens/tokens.css`, the desktop and landing previews, and `design/01-brand/logo/png/synthesis-symbol-transparent-256.png`. The brand boards (`04`) were never copied into the repo (`design/README.md` "Not included"), so they were not used.
@@ -877,3 +879,35 @@ Checked on 80x24, 120x36 and 200x50 with `synth --once` and tty-qa, against the 
 **Goldens.** `SYNTHESIS_UPDATE_GOLDEN=redesign-p2` rewrites only `frame` cases (and creates the files of a new case directory), after checking the frame size, the header and, from 100 columns, the locked panels; it refuses every other op. 29 existing cases were rewritten and 26 `layout-*` cases added, all stamped `pending-owner-review (P2 2026-10-30)`; `node tools/golden-contact-p2.mjs` writes `docs/research/tui-p2-contact-sheet.html`. The nine `dash-*`/`frame-*` entries of `golden_divergences.txt` were dropped (those cases are now Rust-authored). Live frames: `docs/research/tui-p2-frames/` (`tests/tty-qa/qa_config.py --frames`).
 
 **Unverified.** Windows ConPTY, legacy conhost and any terminal other than the macOS pty used by tty-qa; Linux tty-qa; the clipboard and mouse paths on `/config` (unit-tested only, not run in a real terminal).
+
+## 16. New TUI (2026-10-31): the HTML prototype is the target
+
+**Status: not started beyond groundwork.** Done in this phase: the `--cwd` default fix (commit "Default --cwd to the launch directory"), the prototype copied to `design/tui-prototype/`, and the P2 groundwork (§15: layout planner, panel registry, `/config`, settings persistence) kept as the base. Nothing of N1 to N5 below is implemented yet.
+
+**Supersedes.** §14 (mockups) and the P3/P4 rows of §9 are replaced by this section; §15's registry and planner stay and are extended with the prototype's panel ids.
+
+**Reference.** `design/tui-prototype/index.html` (read as text, never executed) and `screenshots/view1.png`, `view2.png`. Two views: 1 Mission and 2 Chat, switched by Tab, keys `1`/`2` and the clickable footer chips. Colour tokens are the HTML `:root` (bg `#0B0C0F`, surface `#15171B`, elevated `#242830`, border `#606978`, text `#C4CAD6`, text-strong `#F2F4F8`, accent `#D9D9E0`, green `#4ade80`, amber `#e0b252`, red `#e5636b`, blue `#6ea8ff`, teal `#4fd1c5`, purple `#b794f6`, pink `#f472b6`, orange `#f59e42`).
+
+**Font rules (owner, 2026-10-31).** The TUI uses the terminal's own font; it never ships, embeds, requests or assumes a font (no font escape sequences, no bundled TTF).
+1. Glyphs must exist in common monospace fonts without Nerd Font: box drawing, block elements, braille, geometric shapes (`● ○ ◆ ▸ ✓ ✗ ▲ ▼`). No private-use-area icons; no emoji in layout-critical places.
+2. Every icon has an ASCII fallback (`SYNTHESIS_ASCII=1`, `TERM=linux|dumb`).
+3. Layout never assumes a cell aspect ratio or a specific font; widths always come from the repo's wide-char width function.
+4. The headless-Chrome visual loop is an approximation: it uses the generic `monospace` font stack (the prototype's fonts are not shipped).
+5. `/config` > Appearance gets `Icons: auto | unicode | ascii` (default auto), stored in USER settings `synthesis.tui.icons`.
+
+**Themes.** `synthesis` (default; paints the app background and surfaces from the tokens above), `classic` (kept), `system` (paints no background at all: every cell keeps the terminal's own background; surfaces are shown by borders, dim and underline; a test must assert no `48;` SGR in its output). `/themes` is a picker; the choice is stored in USER settings `synthesis.tui.theme` (default `synthesis`); project settings can never set it.
+
+**Panel rules.** Workspace, Running sessions and Chat can never be hidden. If every optional left panel is hidden, the left column splits equally between Workspace and Running. The sub-agent transcript panel lives in the right sidebar and is always visible. Remaining panels reflow into freed space without holes; narrow terminals degrade to tabs or a single column. Registry ids from the prototype: workspace, running, session, tools_skills, recent_activity, session_stats, agent_status, context, project_tree, diff, terminal, topology, usage_metrics, system_health, subagents.
+
+**Remaining (all of it), in commit order.**
+- N1: theme `synthesis` from the tokens, theme `system`, painted background, topbar (logo, spaced SYNTHESIS wordmark, `1 live`, workspace, session, model, context, health, date/time), footer chips `1 mission` / `2 chat`, view switch (Tab, `1`, `2`, click), `/themes`, `/config` additions (Icons, theme), `synthesis.tui.theme` and `synthesis.tui.icons` in `tui_settings.rs`, ASCII/16-colour/NO_COLOR fallbacks.
+- N2: Mission view left column (Workspace, Session, Tools and Skills, Recent Activity, Session Stats) and centre (Agent Status and Context cards, tab strip Terminal/agent/workspace/diff/+, project tree, diff viewer, test terminal, prompt with model chip and send button, slash hint bar).
+- N3: Chat view (header strip ready, planning, coding, verifying; USER and SYNTHESIS cards; tool cards Reading file, Searching, Running, Applying patch with diff, Verifying; tabs chat/diff/terminal/browser/tests/files).
+- N4: right column (Synthesis Topology of 9 coloured cards, Capability Topology in Chat, Usage and Metrics with the 7-days select, System Health, sub-agent transcript view and diff file cards from the prototype keyboard handlers) and the backend providers: workspaces, session info, tools and skills on/off, activity ages, session stats, agent status from todos, context meter, project tree with `git status --porcelain` letters (read-only, bounded, off the render thread), diff from the change tracker, terminal tabs, usage counters, MCP status with latency, hooks and guards summaries, memory (`n/a` until it exists), health probes with measured latency, cached. Extend `docs/specs/events.md` additively. Never fabricate numbers: `n/a` or an empty state.
+- N5: re-baseline the render goldens with `SYNTHESIS_UPDATE_GOLDEN=redesign-new-tui`, stamp `pending-owner-review (new TUI 2026-10-31)`; property tests for planner, registry, `/config` persistence, view switching and providers; frames at 80x24, 100x30, 120x36, 160x45, 200x50 for both views and both themes; side-by-side PNGs against the screenshots in `docs/research/tui-new-visual/` (at most 3 MB); `docs/CLI.md` (views, keys, `/themes`, `/config`, settings keys).
+
+**Kept behaviours.** Bypass confirmation, Shift+Tab modes, mouse copy, Ctrl+click links, `!cmd`, queue, `@` routing, resume, NO_COLOR, 16-colour and ASCII fallbacks.
+
+**Suggested improvements (not built; owner pre-approved recording only).**
+- Start the interactive app with no model configured and open a first-run setup instead of exiting 2 with `no model configured`.
+- Add an npm shim smoke test to CI (`package-npm.mjs`, `npm pack`, install into a temp prefix, run `synth --version` and `synth doctor`).

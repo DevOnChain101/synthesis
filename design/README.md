@@ -15,7 +15,7 @@ Brand kit and design references for Synthesis. Provenance: the owner's "Synthesi
 - `03-designs/landing` (HTML plus preview) is the reference for the future landing page.
 - Take colours and radii from `tokens.css`; do not copy the mockup HTML into product code.
 - Packaging: the Windows icon is `01-brand/app-icons/synthesis-app-icon.ico` (no installer uses it yet, see docs/RELEASE.md).
-- TUI: the terminal UI follows the owner's HTML prototype `~/Vibe/synthesis-cli-ui` (see `design/tui-reference/README.md`) (default theme `synthesis`, panel layout and `/config`); the kit's silver tokens are the optional `graphite` theme. See `docs/specs/tui-design.md`.
+- TUI: `design/tui-prototype/` holds the owner's HTML prototype (the ONLY TUI visual reference; no fonts shipped, the TUI uses the terminal's own font). The terminal UI follows the owner's HTML prototype `~/Vibe/synthesis-cli-ui` (see `design/tui-reference/README.md`) (default theme `synthesis`, panel layout and `/config`); the kit's silver tokens are the optional `graphite` theme. See `docs/specs/tui-design.md`.
 
 ## Not included
 
