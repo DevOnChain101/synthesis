@@ -1,6 +1,6 @@
 # Spec: TUI redesign (brand theme, panel registry, /config) — draft 0.1
 
-Date 2026-10-29. Status: **accepted: the owner took all recommendations D1–D11 on 2026-10-30** (see §13). P1 is implemented; P2–P4 are not started. **Later the same day the owner supplied two reference mockups; §14 is authoritative and overrides this document where they disagree** (default theme, default panel visibility, the title, the greeting). Tags: `[fact file:line]` = read in the repo, `[assumption]` = not verified, `[derived]` = a value this spec adds that is not in the kit.
+Date 2026-10-29. Status: **accepted: the owner took all recommendations D1–D11 on 2026-10-30** (see §13). P1 and P2 are implemented (P2: 2026-10-30, goldens pending owner review, see §15); P3 and P4 are not started. **Later the same day the owner supplied two reference mockups; §14 is authoritative and overrides this document where they disagree** (default theme, default panel visibility, the title, the greeting). Tags: `[fact file:line]` = read in the repo, `[assumption]` = not verified, `[derived]` = a value this spec adds that is not in the kit.
 
 **Inputs:** `design/02-design-tokens/tokens.css`, the desktop and landing previews, and `design/01-brand/logo/png/synthesis-symbol-transparent-256.png`. The brand boards (`04`) were never copied into the repo (`design/README.md` "Not included"), so they were not used.
 
@@ -704,7 +704,7 @@ Choices made while implementing P1 that the spec left open:
 | **D13** | `graphite` (kit silver) stays as an optional theme, with a more saturated accent and brighter body and strong text. |
 | **D14** | The old second title of the header (the two words after "Synthesis") is removed everywhere: header, terminal title, tests, goldens, docs. The title is "Synthesis" only. |
 | **D15** | The welcome greeting "Hello there! I'm Synthesis." is replaced: a time-of-day line ("Good evening.") over "What shall we build?", without first person. The strings live in one constant (`greeting.rs`, `GREETING`), so a translation is one more constant of the same type. |
-| **D16** | The two mockups in `design/tui-reference/` are the authoritative visual target for P2 and P3 (§14). |
+| **D16** | The owner's HTML prototype `~/Vibe/synthesis-cli-ui` (it replaced the two PNG mockups, 2026-10-31) is the authoritative visual target for P2 and P3 (§14). |
 
 ### Theme setting (P1 rework, 2026-10-30)
 
@@ -712,7 +712,7 @@ Choices made while implementing P1 that the spec left open:
 
 ## 14. Owner reference mockups (authoritative)
 
-**Files.** `design/tui-reference/mockup-A-chat.png` (A, chat-centred) and `mockup-B-dashboard.png` (B, dashboard-centred), 1672x941 each, supplied by the owner on 2026-10-30. They are the owner-approved visual reference for the TUI. Both still show the old second title after "Synthesis" in the header; the owner removed it (D14), everything else is the target. P2 and P3 acceptance means **matches mockups A/B within terminal limits** (§14.8).
+**Files (removed 2026-10-31; superseded by the HTML prototype `~/Vibe/synthesis-cli-ui`).** `design/tui-reference/mockup-A-chat.png` (A, chat-centred) and `mockup-B-dashboard.png` (B, dashboard-centred), 1672x941 each, supplied by the owner on 2026-10-30. They are the owner-approved visual reference for the TUI. Both still show the old second title after "Synthesis" in the header; the owner removed it (D14), everything else is the target. P2 and P3 acceptance means **matches mockups A/B within terminal limits** (§14.8).
 
 ### 14.1 What is in mockup A (chat-centred)
 
@@ -856,3 +856,24 @@ Checked on 80x24, 120x36 and 200x50 with `synth --once` and tty-qa, against the 
 6. **Look:** the default theme's surfaces, accents and ticks are those of §14.7; green check marks, amber and orange warnings, soft white text; the greeting of D15 on the empty chat.
 7. **Rules:** Workspace, Running sessions and Chat cannot be hidden; every other panel can be hidden in `/config`; hiding a panel gives its rows to the others with no hole (the §6.3 invariants).
 8. **Goldens and contact sheet:** frames per size per theme, reviewed by the owner against the mockups; deviations are listed with the reason (terminal limit or data not available).
+
+## 15. Phase P2 status (2026-10-30): layout engine, panel registry, `/config`
+
+**Implemented.** `layout.rs` (registry of 16 ids, pure planner, 8 property tests over sizes 40..260 x 11..80 and all 512 visibility masks), `panels.rs` (agent status, context, tools & skills, recent activity, session stats, topology cards, usage & metrics, system health, sub-agents), `config_view.rs` and `tui/src/config_screen.rs` (`/config`), `dash.rs` rewritten around the plan (borderless sections, header chips of §14.3, Tabs-mode strip, footer with `project | branch | n files changed`), `synthesis_settings::persist_user_tui` and the extended `synthesis.tui` schema (`tui_settings.rs`). User docs: `docs/CLI.md` "Layout, panels and /config".
+
+**Decisions.**
+- Registry ids follow §14.4 (the merged ids `status`, `tasks`, `tools`, `mcp`, `activity`, `usage` do not exist). Defaults: every panel of the mockups is on; the three centre tabs (`project_tree`, `diff`, `terminal`) are off and have no content yet.
+- Planner priority when a column has spare rows: locked panels reach their ideal height first, then fixed optional panels in registry order, then flex optional panels, then the leftover goes to flex optional panels, then to Workspace and Running up to half of the column each (so hiding a panel never shortens a locked one and the 50/50 rule is the limit case), then to the last panel. Gaps are dropped before panels.
+- Right sidebar width is 28% of the width (30 to 56); it grows to 47 columns (the topology cards need 46 of panel width) when the chat keeps at least 70 columns, so the topology is drawn from about 140 columns instead of §14.5's 200. With less room it is "starved": on, but not drawn; `/config` says so.
+- The frame height the planner gets is the rows above the app's status line, so the smallest terminal is 40x12 (frame 40x11). The status line stays a second bottom row: merging it into the key-hint bar (§5.1) is **not done** (the `status_line_with` row is pinned by the e2e tests and `--once`); the right end of the key-hint row carries `project | branch | n files changed` instead.
+- Tab: in Tabs mode it cycles the views; the old Tab meaning (cycle the message target among sub-agents) is unreachable below 100 columns (`@name` still routes a line). In Columns mode nothing changed.
+- No-agent dashboard (D10): kept; the chat pane then reads "no conversation attached". The `dash-*` goldens exercise it.
+- Removed with the old layout: `layout_for`, `Layout`, `topology_column`, `agent_detail`, `detail_panels`, `tasks_usage_row`, `side_column`, the Status/Tokens/Tasks panels and the heat-map Usage panel (year and month views). Their 14 goldens (`layout-for-table`, `panel-tasks-*`, `panel-usage-*`) were deleted with them. `flow.rs` (the old topology diagram) is no longer called; it is left in place and can go in a follow-up.
+
+**Data-backed vs placeholder.** Backed by events or the host: session counters (files read and edited, commands, tool calls and errors, success rate, tokens), the context meter and cost, phase and the running tool, todos (plan checklist), activity feed with ages, sub-agents and their transcripts, MCP state (live, through `Options.mcp_status`), sandbox mode, memory-store availability, hooks seen in the transcript, last verification. Honest "no data yet": quotas, latencies (none measured), the browser sandbox, the memory feedback beyond writes, `7 days` totals (the app keeps no usage history, so the panel says `this session`; the history view is wired for hosts that pass one). Placeholder text, not data: the Synthesis core card (`plan -> act -> verify -> learn`).
+
+**Deviations from the mockups.** Tool cards (Reading file, Searching, Running, Applying patch, Verifying), user and Synthesis cards, the prompt box with model chip and `Enter send`, and the slash bar are chat content: phase P3 (the P2 row of the phase table does not include them). The centre tab strip (chat, diff, terminal, browser, tests, files) and the files/diff/terminal split are P3 as well, so `project_tree`, `diff` and `terminal` only exist as registry ids. The topology is a two-column card grid with connectors, not a hub; cards show 0 to 4 detail rows by height. Behaviour and Mouse rows of `/config` are stored but take effect in P3 and P4.
+
+**Goldens.** `SYNTHESIS_UPDATE_GOLDEN=redesign-p2` rewrites only `frame` cases (and creates the files of a new case directory), after checking the frame size, the header and, from 100 columns, the locked panels; it refuses every other op. 29 existing cases were rewritten and 26 `layout-*` cases added, all stamped `pending-owner-review (P2 2026-10-30)`; `node tools/golden-contact-p2.mjs` writes `docs/research/tui-p2-contact-sheet.html`. The nine `dash-*`/`frame-*` entries of `golden_divergences.txt` were dropped (those cases are now Rust-authored). Live frames: `docs/research/tui-p2-frames/` (`tests/tty-qa/qa_config.py --frames`).
+
+**Unverified.** Windows ConPTY, legacy conhost and any terminal other than the macOS pty used by tty-qa; Linux tty-qa; the clipboard and mouse paths on `/config` (unit-tested only, not run in a real terminal).

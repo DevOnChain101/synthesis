@@ -1,16 +1,11 @@
-# TUI reference mockups
+# TUI reference
 
-The owner-approved visual reference for the Synthesis terminal UI (supplied 2026-10-30). The inventory of
-what each shows, how the two merge, the panel-id mapping and the acceptance criteria are in
-`docs/specs/tui-design.md` section 14 ("Owner reference mockups (authoritative)").
+The two PNG mockups that used to live here were removed (owner, 2026-10-31). The visual source of truth
+for the terminal UI is now the owner's HTML prototype, kept OUTSIDE this repository:
 
-| File | Shows |
-|---|---|
-| `mockup-A-chat.png` | Chat-centred: Workspace tree, Session, Tools & Skills, Activity on the left; chat with rich tool cards (Reading file, Searching, Running, Applying patch, Verifying), tab strip chat/diff/terminal/browser/tests/files and prompt in the centre; capability topology and usage on the right. |
-| `mockup-B-dashboard.png` | Dashboard-centred: Workspace list, Session, Tools & Skills, Recent activity, Session stats on the left; Agent Status and Context cards, tab strip TERMINAL/agent/workspace/diff, project tree + diff + terminal split, prompt with model chip and slash-command bar in the centre; topology hub, Usage & Metrics, System Health on the right. |
+    ~/Vibe/synthesis-cli-ui/   (index.html, assets/, screenshots/view1.png, screenshots/view2.png)
 
-Notes
-- Both images still show the old second title after "Synthesis" in the header. The owner removed it: the title is
-  "Synthesis" only. Everything else is the target, within terminal limits (no images, shadows or glow).
-- Palette: `tools/sample-mockup-palette.py` (standard library only) samples the dominant colours; the default theme
-  `synthesis` is built from them (spec section 14.7).
+Two views: **Mission** (view 1) and **Chat** (view 2). Colour tokens are the `:root` variables of `index.html`
+(bg `#0B0C0F`, surface `#15171B`, elevated `#242830`, border `#606978`, text `#C4CAD6`, strong `#F2F4F8`,
+accent `#D9D9E0`, green `#4ade80`, amber `#e0b252`, red `#e5636b`, blue `#6ea8ff`, teal `#4fd1c5`,
+purple `#b794f6`, pink `#f472b6`, orange `#f59e42`). `docs/specs/tui-design.md` describes how the TUI follows it.
