@@ -36,7 +36,7 @@
 34|                               │  │ ✻ Good evening.  · 0.1.0                                                                                 │  │ ● Core agent                                    ready
 35|                               │  │ What shall we build?                                                                                     │  │ ● Tool runtime                        sandbox enforce
 36|                               │  │ /help for commands · alt+v pastes an image                                                               │  │ ○ MCP servers                         none configured
-37|                               │  │ cwd: …/claude-501/-Users-hunghq-Vibe-Nemo-ACD/267e4f0e-f43b-4ec2-89e8-488a8602f780/scratchpad/qa-p2/repo │  │
+37|                               │  │ cwd: …/scratchpad/qa-p2/repo │  │
 38|                               │  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯  │ SUB-AGENTS
 39|                               │                                                                                                                │ No sub-agents yet · /agents
 40|                               │   Tips for getting started:                                                                                    │

@@ -9,6 +9,7 @@ token scripts/nemo-leftovers\.allow
 token Vibe/Nemo-ACD                      # the local folder keeps its name
 file tools/golden-capture/**             # reads the Node repo; cannot regenerate the goldens after the rename (tests/golden/README.md)
 file tests/agent-evals/adapters/node/**  # drives the Node NativeAgent, which still reads NEMO_HOME and nemoHome
+file design/tui-prototype/**             # the owner's HTML prototype, copied unchanged (its sample code uses "nemo-session")
 in tests/agent-evals/README.md NEMO_HOME
 in tests/agent-evals/harness/selftest.js nemo-cli
 in tests/golden/README.md (Node|NEMO_|nemo_home|loadNemoEnv|nemo-cli|nemo import)[^ ]*
