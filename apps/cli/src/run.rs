@@ -189,6 +189,9 @@ pub struct Common {
     pub approve_mcp: Vec<String>,
     #[arg(long)]
     pub no_session_store: bool,
+    /// Run without long-term memory: nothing is retrieved, injected or saved.
+    #[arg(long)]
+    pub no_memory: bool,
     /// Allow a tool call without asking, e.g. `--allow 'Bash(cargo test:*)'` (settings rule
     /// syntax; repeatable). Typed by you, so trusted; it cannot lift critical-path or
     /// protected-path protections.
@@ -278,6 +281,8 @@ pub struct Prepared {
     pub sandbox: synthesis_tui::SandboxStatus,
     pub link: Option<synthesis_tui::UiLink>,
     pub homes: crate::Homes,
+    /// Open long-term memory store (None with --no-memory, a failure, or `synthesis.memory.enabled: false`).
+    pub memory: Option<Arc<crate::memcmd::MemoryRun>>,
     /// `#` notes and `/memory` (TUI).
     pub notes: crate::memory::Notes,
 }
@@ -917,6 +922,35 @@ pub fn prepare(
         synthesis_tools::discover_skills(env, &ws.root),
         trust == ProjectTrust::Trusted,
     );
+    let repo = crate::memcmd::repo_of(&ws.root);
+    let memory = (!c.no_memory && crate::memcmd::enabled(&h.synthesis.join("settings.json")))
+        .then(|| crate::memcmd::open_for_run(&h, &res.secrets, &repo))
+        .flatten()
+        .map(|mut s| {
+            let block = (!s.opted_out(&repo.key))
+                .then(|| {
+                    crate::memcmd::inject(
+                        &mut s,
+                        &repo,
+                        &prompt,
+                        &sid,
+                        trust == ProjectTrust::Trusted,
+                    )
+                })
+                .flatten();
+            (std::sync::Mutex::new(s), block)
+        });
+    let (memory, memory_block) = match memory {
+        Some((s, b)) => (
+            Some(Arc::new(crate::memcmd::MemoryRun {
+                store: s,
+                key: repo.key.clone(),
+                sid: sid.clone(),
+            })),
+            b,
+        ),
+        None => (None, None),
+    };
     let mut context = SynthesisContext::new(
         instructions,
         &prompt,
@@ -925,7 +959,8 @@ pub fn prepare(
         cancel.clone(),
         put,
     )
-    .with_skills(&skills);
+    .with_skills(&skills)
+    .with_memory(memory_block);
     if let Some(t) = &transcript {
         context = context.with_transcript(t.clone());
     }
@@ -1093,6 +1128,7 @@ pub fn prepare(
         link,
         homes: h,
         notes,
+        memory,
     })
 }
 
@@ -1151,12 +1187,14 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
         notices,
         worktree,
         artifact_root,
+        memory,
         ..
     } = p;
     let cleanup = a.common.cleanup_worktree;
     let code = tokio_rt.block_on(async {
         on_signals(cancel.clone()).map_err(|e| format!("signal handlers: {e}"))?;
         let (store2, sink2, h2) = (store.clone(), sink.clone(), harness.clone());
+        let (memory2, request2) = (memory.clone(), prompt.clone());
         let task = tokio::spawn(async move {
             let mut session = session;
             let r = async {
@@ -1200,6 +1238,9 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
             .await;
             if let (Some(s), Ok(out)) = (&store2, &r) {
                 finish_store(s, transcript.as_deref(), out, &session.usage);
+            }
+            if let (Some(m), Ok(out)) = (&memory2, &r) {
+                crate::memcmd::task_ended(m, &request2, out);
             }
             r
         });

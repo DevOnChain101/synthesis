@@ -1,6 +1,6 @@
 # Spec: Long-term memory — draft 0.1
 
-Status: accepted (2026-10-29); decisions D1–D8 are settled (§15); M0 (F1–F7) is implemented. Tags as in events.md. Design doc: §5.5.1, ADR-013, roadmap R11.
+Status: accepted (2026-10-29); decisions D1–D8 are settled (§15); M0 (F1–F7) and M1 are implemented (see "M1 status" at the end). Tags as in events.md. Design doc: §5.5.1, ADR-013, roadmap R11.
 
 ## 0. Non-negotiables
 1. Memory is **data, never instructions or permission grants**. It never reaches the permission engine, the auto-mode judge's user intent, approval dialogs or `set_mode`.
@@ -268,3 +268,19 @@ The owner accepted every recommendation above:
 - **F5** Auto-memory staged by `synth import claude` (`$SYNTHESIS_HOME/projects/<sanitized dir>/memory/*.md`) loads at the lowest priority, `MEMORY.md` first, 8 KiB per file and 16 KiB in total, inside the untrusted-data fence.
 - **F6** `workspace_key`, `workspace_label` and `repo_key` (synthesis-core `key.rs`) are on `WorkspaceContext`; `session.started.workspace.workspace_key` carries the key (events.md). `repo_key` follows the `.git` file and `commondir` as `git rev-parse --git-common-dir` does, without spawning git.
 - **F7** Confirmed on macOS: without a deny rule a sandboxed command read `synthesis.db` and the memory files. `synthesis_sandbox::synthesis_state_paths` (`auth.json`, `settings.json`, `synthesis.db`, `-wal`, `-shm`, `memory/`) is now denied in the sandbox policy (also in the standard credential list for `~/.synthesis`) and in the permission engine's protected paths (`Env::protect`), so it also holds for a custom `SYNTHESIS_HOME`.
+
+### M1 status (store, retrieval, CLI; implemented 2026-10-31)
+Done, in new crate `crates/synthesis-memory`:
+- `memory/memory.db` with the §5 schema (v1), WAL, `busy_timeout` 5000, 0700/0600, symlinks refused, `VACUUM INTO memory.v<N>.bak.db` before a migration of an existing DB, a schema newer than the build refuses to open (the run goes on without memory). FTS5 runs in tests on all three OSes.
+- Write path `Store::put`: secrets masked (`Redactor` plus the run's exact secret values; a body more than 20% masked is dropped), caps (2 KiB, skills 16 KiB), scanner (§9: fence tags and invisible Unicode for every trust level; the phrase, fetch-to-shell and base64 rules skip `owner` text), exact-hash dedupe, slot supersede (a lower-trust value, or any non-owner value over an `owner` slot, becomes `proposed`).
+- Retrieval (§6): quoted OR terms, 50 BM25 candidates, the §6.4 score, anchors halve a stale score, budgets (pinned 600 tokens, retrieved 1,400, k 8, body 600 chars), `memory_uses` rows with the task outcome counted on the record. In a project that is not trusted only user-scope `owner` notes are injected (§9.5).
+- Wiring: `apps/cli/src/run.rs` `prepare` opens the store and retrieves once at start (`SynthesisContext::with_memory`, `ctx.rs`; sub-agents get no memory block); `run` writes the deterministic episode (trust `verified`, source `task_end`) after the task; `--no-memory`; user `settings.json` `synthesis.memory.enabled`; per-repository `synth memory optout on`. `memory` and `note` joined `FENCE_TAGS` and the RULES text names `<memory>`.
+- CLI `synth memory list|search|show|add|delete|forget|approve|review|export|import|stats|prune|optout` (docs/CLI.md).
+
+Deviations and gaps (to do):
+- The block is the last system block, after `<task_state>`, not before it (the skills block is appended the same way).
+- The 4 in-task tools (`MemorySearch/Write/Update/Forget`), the `memory` permission class, `/memory`, `#` wiring, the TUI `/status` row, the typed `memory.*` events and the `synth doctor` rows are not built (they touch the TUI, tools, permissions and events crates). `synth memory edit` is not built.
+- The memory directory is protected by M0's `synthesis_state_paths` (sandbox and permission engine); no further protection was added.
+- Verified-command facts (`cmd.verify.<hash>`) need the verification report commands, which `TaskOutcome` does not carry; only the episode is written. Compaction checkpoints are not stored.
+- A project `.synthesis/settings.json` opt-out (D7) and the `disabled_workspaces` globs are not read; `--no-memory`, the user setting and `optout` are.
+- Import never keeps `owner`/`verified` trust (a file can claim anything); the Claude auto-memory import path is not wired.

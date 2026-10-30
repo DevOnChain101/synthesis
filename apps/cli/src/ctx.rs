@@ -96,6 +96,8 @@ pub struct SynthesisContext {
     summarizer: Arc<ProviderSummarizer>,
     put: PutArtifact,
     skills: Option<String>,
+    /// Frozen `<memory>` block for the task (memory.md §6), after the instructions.
+    memory: Option<String>,
     transcript: Option<Arc<Transcript>>,
 }
 
@@ -235,12 +237,18 @@ impl SynthesisContext {
             }),
             put,
             skills: None,
+            memory: None,
             transcript: None,
         }
     }
 
     pub fn with_skills(mut self, skills: &[SkillInfo]) -> Self {
         self.skills = skills_block(skills);
+        self
+    }
+
+    pub fn with_memory(mut self, block: Option<String>) -> Self {
+        self.memory = block;
         self
     }
 
@@ -331,6 +339,16 @@ impl ContextProvider for SynthesisContext {
         }
         assemble(&input, &unbounded, &CharsPerToken::default())
             .map(|mut a| {
+                // sub-agents get no workspace memory (memory.md §4)
+                if let (Some(m), System::Blocks(b)) = (
+                    self.memory.as_ref().filter(|_| agent_prompt.is_none()),
+                    &mut a.system,
+                ) {
+                    b.push(SystemBlock {
+                        kind: Some("text".into()),
+                        text: Some(m.clone()),
+                    });
+                }
                 if let (Some(skills), System::Blocks(b)) = (&self.skills, &mut a.system) {
                     b.push(SystemBlock {
                         kind: Some("text".into()),

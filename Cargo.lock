@@ -2648,6 +2648,7 @@ dependencies = [
  "synthesis-harness",
  "synthesis-hooks",
  "synthesis-mcp",
+ "synthesis-memory",
  "synthesis-permissions",
  "synthesis-providers",
  "synthesis-sandbox",
@@ -2768,6 +2769,21 @@ dependencies = [
  "tokio",
  "tokio-util",
  "which",
+]
+
+[[package]]
+name = "synthesis-memory"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "synthesis-events",
+ "tempfile",
+ "time",
+ "uuid",
 ]
 
 [[package]]

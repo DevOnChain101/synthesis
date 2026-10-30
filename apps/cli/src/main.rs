@@ -28,6 +28,7 @@ mod fake;
 mod import;
 mod info;
 mod mcp;
+mod memcmd;
 mod memory;
 mod run;
 mod taskdb;
@@ -83,6 +84,11 @@ enum Cmd {
     Import {
         #[command(subcommand)]
         cmd: import::ImportCmd,
+    },
+    /// Long-term memory: list, search, add, review, export (data only; never permissions).
+    Memory {
+        #[command(subcommand)]
+        cmd: memcmd::MemoryCmd,
     },
 }
 
@@ -149,6 +155,7 @@ fn main() -> ExitCode {
         Some(Cmd::Doctor(a)) => info::doctor(&env, a.cwd.as_deref()),
         Some(Cmd::Mcp { cmd }) => mcp::run_cmd(&env, cmd),
         Some(Cmd::Import { cmd }) => import::run_cmd(&env, cmd),
+        Some(Cmd::Memory { cmd }) => memcmd::run_cmd(&env, cmd),
     };
     match r {
         Ok(code) => ExitCode::from(code),

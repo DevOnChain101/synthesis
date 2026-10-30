@@ -31,7 +31,9 @@ pub use truncate::*;
 /// Tag that delimits untrusted repository instructions in the system prompt.
 pub const REPO_INSTRUCTIONS_TAG: &str = "repository_instructions";
 
-const FENCE_TAGS: [&str; 7] = [
+const FENCE_TAGS: [&str; 9] = [
+    "memory",
+    "note",
     "file",
     "directory",
     "repository_instructions",
