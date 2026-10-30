@@ -1,0 +1,91 @@
+{
+  "cols": 140,
+  "rows": 40,
+  "lines": [
+    " ⢎⡱  S Y N T H E S I S   ● 2 live │ workspace proj │ session session- │ model anthropic/fake-sonnet │ context 5.9k/200.0k      ● │ 12:00:00 ",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    " WORKSPACE         1 │ AGENT STATUS                     · coding    CONTEXT               3% │ TOPOLOGY                            1 active ",
+    " ▌● proj           2 │ ready · planning · coding · verifying        tokens     5.9k / 200.0k │ ╭─ USER / PROJECT ──╮ ╭─ GUARDS ───────────╮ ",
+    "                     │ Working on  Agent explorer: find files       ▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ ╰───────────────────╯ ╰────────────────────╯ ",
+    " RUNNING SESSIONS  2 │ Next        Test                             in 9.0k · out 1.5k       │           │                      │           ",
+    " ►● proj-0       10% │                                              cache 20.0k (hit 69%) · …│ ╭─ SKILLS ──────────╮ ╭─ SUB-AGENTS ───────╮ ",
+    " project-0 (…ace)    │                                                                       │ ╰───────────────────╯ ╰────────────────────╯ ",
+    "  ● proj-1       10% │ SYNTHESIS                                       /work/proj  · working │           │                      │           ",
+    " project-1 (…ace)    │                                                                       │ ╭─ SYNTHESIS CORE ─────────────────────────╮ ",
+    "                     │                                                                       │ │ plan → act → verify → learn              │ ",
+    " SESSION     running │                                                                       │ ╰──────────────────────────────────────────╯ ",
+    " model  anthropic/f… │                                                                       │           │                      │           ",
+    " mode   manual       │                                                                       │ ╭─ EXECUTION ───────╮ ╭─ HOOKS ────────────╮ ",
+    " effort auto         │                                                                       │ ╰───────────────────╯ ╰────────────────────╯ ",
+    " window 200.0k toke… │  > fix the flaky login test                                           │           │                      │           ",
+    " cwd    proj         │                                                                       │ ╭─ EXTERNAL / MCP ──╮ ╭─ MEMORY / FEEDBACK ╮ ",
+    " uptime 1m00s        │  ✻ Thinking · 2.0s                                                    │ ╰───────────────────╯ ╰────────────────────╯ ",
+    " turns  1 prompts ·… │  │ look                                                               │                                              ",
+    " errors 1            │                                                                       │ USAGE & METRICS                       7 days ",
+    "                     │  ● I will check login.ts and retry():                                 │ Tokens     ████████████████████████████ 6.0k ",
+    " TOOLS & SKILLS    5 │    • first                                                            │ Tool calls ███████████████████░░░░░░░░░   14 ",
+    " ● Read   ▇▇▇▇▇ 1    │    • second                                                           │ Messages   ████████████████████████████   21 ",
+    " ● Bash   ▇▇▇▇▇ 1    │                                                                       │                                              ",
+    " ● Skill  ▇▇▇▇▇ 1    │  ● Bash(npm test)                                                     │ SYSTEM HEALTH                        healthy ",
+    " ● Agent  ▇▇▇▇▇ 1    │    ⎿  Exit code 1                                                     │ ● Core agent                         working ",
+    " skills scout ×1     │       FAIL login.test.ts                                              │ ● Tool runtime               sandbox enforce ",
+    " mcp       0 servers │       expected 2                                                      │ ○ MCP servers                none configured ",
+    " configured · synthe…│                                                                       │                                              ",
+    "                     │  · Read(login.ts)                                                     │ SUB-AGENTS                                   ",
+    " RECENT ACTIVITY   2 │    ⎿  running                                                         │ No sub-agents yet · /agents                  ",
+    " · Lookin… 9m59s ago │  · Working    (4s · ↓ 0 tokens · esc to interrupt)                    │                                              ",
+    " › refac… 10m00s ago │    ⎿ ☒ Read                                                           │                                              ",
+    "                     │      ■ Fixing                                                         │                                              ",
+    "                     │      ☐ Test                                                           │                                              ",
+    " SESSION STA…  1m00s │  ╭─────────────────────────────────────────────────────────────────╮  │                                              ",
+    " files read        1 │  │ > hello                                                         │  │                                              ",
+    " files edited      0 │  ╰─────────────────────────────────────────────────────────────────╯  │                                              ",
+    " commands run      1 │  ⏸ manual mode on (shift+tab to cycle)    fake-sonnet · effort: auto  │                                              ",
+    " enter send   esc interrupt   ⇧tab mode   tab agent   /config panels   alt+v paste image   ! shell   ctrl+o expand   proj │ 0 files changed "
+  ],
+  "rects": {
+    "chatRect": {
+      "x": 22,
+      "y": 8,
+      "w": 71,
+      "h": 31
+    },
+    "sidebarRect": {
+      "x": 0,
+      "y": 2,
+      "w": 22,
+      "h": 37
+    },
+    "dockRect": {
+      "x": 94,
+      "y": 29,
+      "w": 46,
+      "h": 10
+    },
+    "activityRect": {
+      "x": 0,
+      "y": 30,
+      "w": 21,
+      "h": 4
+    },
+    "sessionRows": [
+      {
+        "y": 6,
+        "id": "session-0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "y": 7,
+        "id": "session-0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "y": 8,
+        "id": "session-1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "y": 9,
+        "id": "session-1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ],
+    "workspaceRows": []
+  }
+}

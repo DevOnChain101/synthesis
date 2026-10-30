@@ -1,20 +1,20 @@
- ⢎⡱  SYNTHESIS   project  ⎇ main         ● 3 live  │  12:00 
-┏━ ◆ Running 3 ━━━━━━┓┏━ ◆ Status ━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ ►● proj-0       10%┃┃                                    ┃
-│ project-0 (…ace)   ││                                    │
-│  ● proj-1       10%││                                    │
-│ project-1 (…ace)   ││ · RUNNING TOOL  last activity 9m54…│
-│  ● proj-2       10%││   ✻ Agent explorer: find files 9m5…│
-│ project-2 (…ace)   ││ Context  ░░░░░░░░   3% 5.9k/200.0k │
-│                    ││                                    │
-│                    ││                                    │
-│                    ││                                    │
-│                    │┃                                    ┃
-│                    │┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-│                    │┏━ ◆ Activity ━━━━━━━━━━━━━━━━━━━━━━━┓
-│                    │┃ 11:50:00 ❯ refactor the parser     ┃
-│                    ││ 11:50:01 ✎ Looking.                │
-│                    ││                                    │
-┃                    ┃┃                                    ┃
-┗━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-↑/↓ select session   a follow newest   u usage metric   r r…
+ ⢎⡱   workspace project        12:00:00 
+ SYNTHESIS                              
+  no conversation attached              
+                                        
+                                        
+                                        
+                                        
+                                        
+                                        
+                                        
+                                        
+                                        
+                                        
+                                        
+                                        
+                                        
+                                        
+                                        
+                                        
+ ↑/↓ select session             project 

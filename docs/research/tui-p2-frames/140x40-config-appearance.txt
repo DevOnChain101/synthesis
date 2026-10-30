@@ -1,0 +1,42 @@
+===== 140x40-config-appearance.txt [140x40] cursor=(140,33) hidden=True modes={7: False, 25: False, 1000: True, 1002: True, 1006: True, 1049: True, 2004: True, 2026: False}
+00| ⢎⡱  S Y N T H E S I S   ● 1 live │ workspace repo │ session 629e1bc2 │ model anthropic/claude-sonnet-4-5       ● system healthy │ 21:28:55
+01|────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+02| WORKSPACE         1 │ AGENT STATUS                   · planning    CONTEXT                  │ TOPOLOGY                                idle
+03| ▌● repo           1 │ ready · planning · coding · verifying        tokens       no data yet │ ╭─ USER / PROJECT ──╮ ╭─ GUARDS ───────────╮
+04|                     │ Working on  nothing yet                      ▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ ╰───────────────────╯ ╰────────────────────╯
+05| RUNNING SESSIONS  1 │ Next        no plan yet                      in 0 · out 0             │ ╭─ SKILLS ──────────╮ ╭─ SUB-AGENTS ───────╮
+06| ▌● synthesis ⌘      │                                              cache 0 · $ –            │ ╰───────────────────╯ ╰────────────────────╯
+07| repo (…/qa-p2)      │                                                                       │ ╭─ SYNTHESIS CORE ─────────────────────────╮
+08|                     │ ╭─ C O N F I G ────────────────────────────────────────── esc close … │ │ plan → act → verify → learn              │
+09| TOOLS & SKILLS    0 │ │  / filter                                                         │ │ ╰──────────────────────────────────────────╯
+10| no tool calls yet   │ │                                                                   │ │ ╭─ EXECUTION ───────╮ ╭─ HOOKS ────────────╮
+11|                     │ │  Panels   ·   APPEARANCE   ·   Behaviour   ·   Mouse              │ │ ╰───────────────────╯ ╰────────────────────╯
+12|                     │ │                                                                   │ │ ╭─ EXTERNAL / MCP ──╮ ╭─ MEMORY / FEEDBACK ╮
+13| RECENT ACTIVITY     │ │  ▍‹ Theme             synthesis › colour theme (NO_COLOR forces … │ │ ╰───────────────────╯ ╰────────────────────╯
+14| no events yet       │ │   ‹ Glyphs            auto › unicode or ascii symbols             │ │
+15|                     │ │   ‹ Logo              art › welcome screen art                    │ │
+16|                     │ │                                                                   │ │
+17|                     │ │                                                                   │ │
+18|                     │ │                                                                   │ │ USAGE & METRICS                 this session
+19|                     │ │                                                                   │ │ Tokens           ░░░░░░░░░░░░░░░░ 0 / 200.0k
+20|                     │ │                                                                   │ │ Tool calls       ░░░░░░░░░░░░░░░░          0
+21|                     │ │                                                                   │ │ Files modified   ░░░░░░░░░░░░░░░░          0
+22|                     │ │                                                                   │ │
+23|                     │ │                                                                   │ │ SYSTEM HEALTH                        healthy
+24|                     │ │                                                                   │ │ ● Core agent                           ready
+25|                     │ │                                                                   │ │ ● Tool runtime               sandbox enforce
+26|                     │ │                                                                   │ │ ○ MCP servers                none configured
+27|                     │ │                                                                   │ │
+28|                     │ │                                                                   │ │ SUB-AGENTS
+29|                     │ │                                                                   │ │ No sub-agents yet · /agents
+30|                     │ │                                                                   │ │
+31| SESSION STATS    3s │ │                                                                   │ │
+32| files read        0 │ │                                                                   │ │
+33| files edited      0 │ │                                                                   │ │
+34| commands run      0 │ │                                                                   │ │
+35| tokens used       0 │ │                                                                   │ │
+36| tool calls        0 │ │  ↑↓ move  space toggle  tab group  / filter  r reset  esc close   │ │
+37| success rate no dat…│ ╰───────────────────────────────────────────────────────────────────╯ │
+38| enter send   esc interrupt   ⇧tab mode   tab agent   /config panels   alt+v paste image   ! shell   ctrl+o expand   repo │ 0 files changed
+39| sandbox: enforce [seatbelt fs:weak net:weak] · turns 0/50 · tools 0/200 · tok 0↑ 0↓ · verify n/a · ctrl+o: expand
+

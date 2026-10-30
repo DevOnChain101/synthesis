@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 synthesis-config = { path = "../synthesis-config" }
+synthesis-settings = { path = "../synthesis-settings" }
 synthesis-core = { path = "../synthesis-core" }
 synthesis-events = { path = "../synthesis-events" }
 synthesis-harness = { path = "../synthesis-harness" }

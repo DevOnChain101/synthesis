@@ -1,0 +1,81 @@
+{
+  "cols": 120,
+  "rows": 36,
+  "lines": [
+    " ⢎⡱  S Y N T H E S I S   ● 2 live │ workspace proj │ session session- │ model anthropic/fake-sonnet            12:00:00 ",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    " WORKSPACE         1 │ SYNTHESIS                                 /work/proj  · working │ SUB-AGENTS                     ",
+    " ▌● proj           2 │                                                                 │ No sub-agents yet · /agents    ",
+    "                     │                                                                 │                                ",
+    "                     │                                                                 │                                ",
+    "                     │                                                                 │                                ",
+    "                     │                                                                 │                                ",
+    "                     │                                                                 │                                ",
+    "                     │                                                                 │                                ",
+    "                     │                                                                 │                                ",
+    "                     │  > fix the flaky login test                                     │                                ",
+    "                     │                                                                 │                                ",
+    "                     │  ✻ Thinking · 2.0s                                              │                                ",
+    "                     │  │ look                                                         │                                ",
+    "                     │                                                                 │                                ",
+    "                     │  ● I will check login.ts and retry():                           │                                ",
+    "                     │    • first                                                      │                                ",
+    "                     │    • second                                                     │                                ",
+    " RUNNING SESSIONS  2 │                                                                 │                                ",
+    " ►● proj-0       10% │  ● Bash(npm test)                                               │                                ",
+    " project-0 (…ace)    │    ⎿  Exit code 1                                               │                                ",
+    "  ● proj-1       10% │       FAIL login.test.ts                                        │                                ",
+    " project-1 (…ace)    │       expected 2                                                │                                ",
+    "                     │                                                                 │                                ",
+    "                     │  · Read(login.ts)                                               │                                ",
+    "                     │    ⎿  running                                                   │                                ",
+    "                     │  · Working    (4s · ↓ 0 tokens · esc to interrupt)              │                                ",
+    "                     │    ⎿ ☒ Read                                                     │                                ",
+    "                     │      ■ Fixing                                                   │                                ",
+    "                     │      ☐ Test                                                     │                                ",
+    "                     │  ╭───────────────────────────────────────────────────────────╮  │                                ",
+    "                     │  │ > hello                                                   │  │                                ",
+    "                     │  ╰───────────────────────────────────────────────────────────╯  │                                ",
+    "                     │  ⏸ manual mode on (shift+tab to cycle)             fake-sonnet  │                                ",
+    " enter send   esc interrupt   ⇧tab mode   tab agent   /config panels   alt+v paste image         proj │ 0 files changed "
+  ],
+  "rects": {
+    "chatRect": {
+      "x": 22,
+      "y": 2,
+      "w": 65,
+      "h": 33
+    },
+    "sidebarRect": {
+      "x": 0,
+      "y": 2,
+      "w": 22,
+      "h": 33
+    },
+    "dockRect": {
+      "x": 88,
+      "y": 2,
+      "w": 32,
+      "h": 33
+    },
+    "sessionRows": [
+      {
+        "y": 20,
+        "id": "session-0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "y": 21,
+        "id": "session-0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "y": 22,
+        "id": "session-1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "y": 23,
+        "id": "session-1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ],
+    "workspaceRows": []
+  }
+}

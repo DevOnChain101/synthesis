@@ -1,0 +1,42 @@
+===== 140x40-config-panels.txt [140x40] cursor=(140,37) hidden=True modes={7: False, 25: False, 1000: True, 1002: True, 1006: True, 1049: True, 2004: True, 2026: False}
+00| ⢎⡱  S Y N T H E S I S   ● 1 live │ workspace repo │ session 629e1bc2 │ model anthropic/claude-sonnet-4-5       ● system healthy │ 21:28:53
+01|────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+02| WORKSPACE         1 │ AGENT STATUS                   ✻ planning    CONTEXT                  │ TOPOLOGY                                idle
+03| ▌● repo           1 │ ready · planning · coding · verifying        tokens       no data yet │ ╭─ USER / PROJECT ──╮ ╭─ GUARDS ───────────╮
+04|                     │ Working on  nothing yet                      ▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ ╰───────────────────╯ ╰────────────────────╯
+05| RUNNING SESSIONS  1 │ Next        no plan yet                      in 0 · out 0             │ ╭─ SKILLS ──────────╮ ╭─ SUB-AGENTS ───────╮
+06| ▌● synthesis ⌘      │                                              cache 0 · $ –            │ ╰───────────────────╯ ╰────────────────────╯
+07| repo (…/qa-p2)      │                                                                       │ ╭─ SYNTHESIS CORE ─────────────────────────╮
+08|                     │ ╭─ C O N F I G ────────────────────────────────────────── esc close … │ │ plan → act → verify → learn              │
+09| SESSION             │ │  / filter                                                         │ │ ╰──────────────────────────────────────────╯
+10| model  anthropic/c… │ │                                                                   │ │ ╭─ EXECUTION ───────╮ ╭─ HOOKS ────────────╮
+11| mode   manual       │ │  PANELS   ·   Appearance   ·   Behaviour   ·   Mouse              │ │ ╰───────────────────╯ ╰────────────────────╯
+12| effort auto         │ │                                                                   │ │ ╭─ EXTERNAL / MCP ──╮ ╭─ MEMORY / FEEDBACK ╮
+13| cwd    repo         │ │  LEFT SIDEBAR                                                     │ │ ╰───────────────────╯ ╰────────────────────╯
+14| uptime 1s           │ │  ▍▣ Workspace         locked · always visible                     │ │
+15| turns  0 prompts ·… │ │   ▣ Running sessions  locked · always visible                     │ │
+16|                     │ │   ● Session           model, mode, effort, branch, cwd            │ │
+17|                     │ │   ● Tools & skills    tools used, skills, MCP servers             │ │
+18|                     │ │   ● Recent activity   the latest events with their age            │ │ USAGE & METRICS                 this session
+19| TOOLS & SKILLS    0 │ │   ● Session stats     files, commands, tokens, tool calls, succe… │ │ Tokens           ░░░░░░░░░░░░░░░░ 0 / 200.0k
+20| no tool calls yet   │ │                                                                   │ │ Tool calls       ░░░░░░░░░░░░░░░░          0
+21|                     │ │  CENTRE                                                           │ │ Files modified   ░░░░░░░░░░░░░░░░          0
+22|                     │ │   ▣ Chat              locked · always visible                     │ │
+23| RECENT ACTIVITY     │ │   ● Agent status      phase, working on, next, plan               │ │ SYSTEM HEALTH                        healthy
+24| no events yet       │ │   ● Context           window meter, input, output, cache          │ │ ● Core agent                           ready
+25|                     │ │   ○ Project tree      folder tree with git status (tab arrives i… │ │ ● Tool runtime               sandbox enforce
+26|                     │ │   ○ Diff              the session's file changes (tab arrives in… │ │ ○ MCP servers                none configured
+27|                     │ │   ○ Terminal          bash tool output, read only (tab arrives i… │ │
+28|                     │ │                                                                   │ │ SUB-AGENTS
+29|                     │ │  RIGHT SIDEBAR                                                    │ │ No sub-agents yet · /agents
+30|                     │ │   ● Topology          cards: guards, skills, sub-agents, executi… │ │
+31| SESSION STATS    1s │ │   ● Usage & metrics   bars of the session counters                │ │
+32| files read        0 │ │   ● System health     core agent, tool runtime, MCP, memory, bro… │ │
+33| files edited      0 │ │   ▣ Sub-agents        locked · always on the right                │ │
+34| commands run      0 │ │                                                                   │ │
+35| tokens used       0 │ │                                                                   │ │
+36| tool calls        0 │ │  ↑↓ move  space toggle  tab group  / filter  r reset  esc close   │ │
+37| success rate no dat…│ ╰───────────────────────────────────────────────────────────────────╯ │
+38| enter send   esc interrupt   ⇧tab mode   tab agent   /config panels   alt+v paste image   ! shell   ctrl+o expand   repo │ 0 files changed
+39| sandbox: enforce [seatbelt fs:weak net:weak] · turns 0/50 · tools 0/200 · tok 0↑ 0↓ · verify n/a · ctrl+o: expand
+

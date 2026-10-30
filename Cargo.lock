@@ -2901,6 +2901,7 @@ dependencies = [
  "synthesis-permissions",
  "synthesis-providers",
  "synthesis-session",
+ "synthesis-settings",
  "synthesis-terminal",
  "synthesis-tools",
  "synthesis-tui-base",

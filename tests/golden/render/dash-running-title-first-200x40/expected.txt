@@ -1,40 +1,40 @@
- ⢎⡱  S Y N T H E S I S   project                                                                                                                                                     ● 1 live  │  12:00 
+ ⢎⡱  S Y N T H E S I S   ● 1 live │ workspace project │ session session- │ model claude-sonnet                                                                 ● system healthy │ Fri Oct  2 │ 12:00:00 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-┏━ ◆ Running 1 ━━━━━━━━━━━━━━━━━━┓┏━ ◆ Status ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┏━ ◆ TOPOLOGY 0 nodes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ ►● first user message          ┃┃                                                                          ┃┃ ○ 1 Plan ━► ○ 2 Guard ━► ○ 3 Orchestrate ━► ○ 4 Execute ━► ○ 5 Verify ━► ○ 6 Learn     ┃
-│ project (D:/workspace)         ││                                                                          ││ idle · waiting for a prompt                                                            │
-┃                                ┃│                                                                          ││                                                                                        │
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│ ● IDLE  last activity 0s ago                                             ││   ╭─── USER · PROJECT ───────────────────╮  ╭─── GUARDS ────────────────────────────╮  │
-┏━ ◆ Session ━━━━━━━━━━━━━━━━━━━━┓│   waiting for the next prompt…                                           ││ ┌─│ ❯ waiting for a prompt…              │  │ 0 guards                              ◄─┐│
-┃                                ┃│ Context  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0% 0/200.0k      ││ │ │ prompts 0                            │  │                                       │ ││
-│                                ││                                                                          ││ │ │ project project                      │  │                                       │ ││
-│ model  claude-sonnet           ││                                                                          ││ │ ╰──────────────────────────────────────╯  ╰───────────────────────────────────────╯ ││
-│ cwd    project                 ││                                                                          ││ │                                                                                     ││
-│ uptime 1m00s                   │┃                                                                          ┃│ │                                                                                     ││
-│ turns  0 prompts · 0 tools     │┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│ │ ╭─── SUB-AGENTS ───────────────────────╮  ╭─── SKILLS ────────────────────────────╮ ││
-│                                │┏━ ◆ Activity ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓│ │ │ no sub-agents yet                    │  │ no skills used yet                    │ ││
-│                                │┃                                                                          ┃│ │ ╰───────────────────────────────────▲──╯  ╰──────────────────────────────────▲────╯ ││
-┃                                ┃│                                                                          ││ │                                     │                                        │      ││
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│                                                                          ││ │ ╭───────────────────────────────────┻─ SYNTHESIS CORE  sonnet ───────────────┻────╮ ││
-┏━ ◆ Tools & Skills ━━━━━━━━━━━━━┓│                                                                          ││ └─► · Intent       parse request                                                    ┣─┘│
-┃                                ┃│                                                                          ││   │ · Plan         decompose                                                        │  │
-│                                ││                                                                          ││   │ · Orchestrator route work                                                  idle │  │
-│                                ││                                                                          ││ ┌─┫ ctx 0% · 0 tok                                                                  ┣─┐│
-│                                ││                                                                          ││ │ ╰───────────────────────────────────┳────────────────────────────────────────┳────╯ ││
-│                                ││                                                                          ││ │                                     │                                        │      ││
-│                                ││                                                                          ││ │ ╭─ EXECUTION ───────────────────────▼──╮  ╭─ HOOKS ──────────────────────────▼────╮ ││
-│                                ││                                                                          ││ │ │ 0 calls                    no errors │  │ no event hooks fired                  │ ││
-│                                ││                                                                          ││ │ ╰──────────────────────────────────────╯  ╰───────────────────────────────────────╯ ││
-│                                ││                                                                          ││ │                                                                                     ││
-│ no tool calls yet              ││                                                                          ││ │ ╭─── EXTERNAL · MCP ───────────────────╮  ╭─── MEMORY · FEEDBACK ─────────────────╮ ││
-│                                ││                                                                          ││ └─► no MCP servers called                │  │ context ▱▱▱▱▱▱▱▱▱▱                 0% ◄─┘│
-│                                ││                                                                          ││   │                                      │  │ verify  no test / build run yet       │  │
-│                                ││                                                                          ││   │                                      │  │ memory  0 writes                      │  │
-│                                ││                                                                          ││   │                                      │  │ tasks   none                          │  │
-│                                ││                                                                          │┃   ╰──────────────────────────────────────╯  ╰───────────────────────────────────────╯  ┃
-│                                ││                                                                          │┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-│                                ││                                                                          │┏━ ◆ Usage · tokens · 1.0k this month ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-│                                ││                                                                          │┃ ■ ■                                                                                    ┃
-┃                                ┃┃                                                                          ┃┃ Less ■ ■ ■ ■ ■ More                                                                    ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-↑/↓ select session   a follow newest   u usage metric   r reload   q quit                                                                                                                               
+ WORKSPACE                   1 │ AGENT STATUS                                                   ready    CONTEXT                                │ TOPOLOGY                                         idle 
+ ▌● project                  1 │ ready · planning · coding · verifying                                   tokens                     no data yet │ ╭─ USER / PROJECT ───────╮ ╭─ GUARDS ───────────────╮ 
+                               │ Working on  nothing yet                                                 ▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ ╰────────────────────────╯ ╰────────────────────────╯ 
+ RUNNING SESSIONS            1 │ Next        no plan yet                                                 in 0 · out 0                           │              │                          │             
+ ►● first user message         │                                                                         cache 0 · $ –                          │ ╭─ SKILLS ───────────────╮ ╭─ SUB-AGENTS ───────────╮ 
+ project (D:/workspace)        │                                                                                                                │ ╰────────────────────────╯ ╰────────────────────────╯ 
+                               │ SYNTHESIS                                                                                                      │              │                          │             
+ SESSION                       │  no conversation attached                                                                                      │ ╭─ SYNTHESIS CORE ──────────────────────────────────╮ 
+ model  claude-sonnet          │                                                                                                                │ │ plan → act → verify → learn                       │ 
+ cwd    project                │                                                                                                                │ ╰───────────────────────────────────────────────────╯ 
+ uptime 1m00s                  │                                                                                                                │              │                          │             
+ turns  0 prompts · 0 tools    │                                                                                                                │ ╭─ EXECUTION ────────────╮ ╭─ HOOKS ────────────────╮ 
+                               │                                                                                                                │ ╰────────────────────────╯ ╰────────────────────────╯ 
+                               │                                                                                                                │              │                          │             
+                               │                                                                                                                │ ╭─ EXTERNAL / MCP ───────╮ ╭─ MEMORY / FEEDBACK ────╮ 
+                               │                                                                                                                │ ╰────────────────────────╯ ╰────────────────────────╯ 
+                               │                                                                                                                │                                                       
+ TOOLS & SKILLS              0 │                                                                                                                │ USAGE & METRICS                                7 days 
+ no tool calls yet             │                                                                                                                │ Tokens     █████████████████████████████████████ 6.0k 
+                               │                                                                                                                │ Tool calls █████████████████████████░░░░░░░░░░░░   14 
+                               │                                                                                                                │ Messages   █████████████████████████████████████   21 
+ RECENT ACTIVITY               │                                                                                                                │                                                       
+ no events yet                 │                                                                                                                │ SYSTEM HEALTH                                 healthy 
+                               │                                                                                                                │ ○ Core agent                        no agent attached 
+                               │                                                                                                                │ ○ Tool runtime                            no data yet 
+                               │                                                                                                                │ ○ MCP servers                         none configured 
+                               │                                                                                                                │                                                       
+                               │                                                                                                                │ SUB-AGENTS                                            
+                               │                                                                                                                │ No sub-agents yet · /agents                           
+                               │                                                                                                                │                                                       
+ SESSION STATS           1m00s │                                                                                                                │                                                       
+ files read                  0 │                                                                                                                │                                                       
+ files edited                0 │                                                                                                                │                                                       
+ commands run                0 │                                                                                                                │                                                       
+ tokens used                 0 │                                                                                                                │                                                       
+ tool calls                  0 │                                                                                                                │                                                       
+ success rate      no data yet │                                                                                                                │                                                       
+ ↑/↓ select session   a follow newest   u usage metric   r reload   q quit                                                                                                    project │ 0 files changed 

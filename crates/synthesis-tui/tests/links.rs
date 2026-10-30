@@ -36,7 +36,7 @@ fn rig(reply: &str, hyperlinks: &'static str, opened: Arc<Mutex<Vec<OpenTarget>>
     let root = std::fs::canonicalize(dir.path()).unwrap();
     std::fs::create_dir_all(root.join("w")).unwrap();
     std::fs::write(root.join("w").join("notes.txt"), "x").unwrap();
-    let (script, tty) = ScriptedTty::new(120, 40);
+    let (script, tty) = ScriptedTty::new(160, 40);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

@@ -312,6 +312,51 @@ pub fn persist_allow_rules(project_root: &Path, rules: &[String]) -> std::io::Re
     Ok(())
 }
 
+/// Writes `tui` as the `synthesis.tui` subtree of `<synthesis_home>/settings.json` (the `/config`
+/// screen, spec docs/specs/tui-design.md §7). The file is read again first, so edits made while the
+/// TUI was open survive; every other key and the key order are kept. A file that cannot be parsed
+/// (or whose `synthesis` is not an object) is never overwritten: the error (`InvalidData`) says why. The write goes
+/// through a temp file and a rename, with the permissions of the file it replaces.
+pub fn persist_user_tui(synthesis_home: &Path, tui: &Value) -> std::io::Result<()> {
+    let path = synthesis_home.join("settings.json");
+    let mut v = match read_json(&path, "user settings") {
+        Ok(Some(v)) => v,
+        Ok(None) => Value::Object(Map::new()),
+        Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+    };
+    let section = v
+        .as_object_mut()
+        .map(|o| {
+            o.entry("synthesis")
+                .or_insert_with(|| Value::Object(Map::new()))
+        })
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "user settings: `synthesis` is not an object",
+            )
+        })?;
+    section.insert("tui".into(), tui.clone());
+    std::fs::create_dir_all(synthesis_home)?;
+    let tmp = synthesis_home.join(format!("settings.json.tmp-{}", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_string_pretty(&v)? + "\n")?;
+    let done = std::fs::metadata(&path)
+        .and_then(|m| std::fs::set_permissions(&tmp, m.permissions()))
+        .or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
+        .and_then(|()| std::fs::rename(&tmp, &path));
+    if done.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    done
+}
+
 /// `Ok(None)`: no such file. `Err`: it exists but is unusable (names the file, never a value).
 fn read_json(path: &Path, what: &str) -> Result<Option<Value>, String> {
     let meta = match std::fs::metadata(path) {
@@ -411,7 +456,9 @@ impl Settings {
             }
             self.apply_env(raw);
             self.apply_synthesis(raw, what);
-            if !user && raw.get("synthesis").and_then(|n| n.get("tui")).is_some() {
+            // `user` is also true for the managed file: only the user settings file may set it
+            if what != "user settings" && raw.get("synthesis").and_then(|n| n.get("tui")).is_some()
+            {
                 self.diagnostics.push(format!(
                     "{what}: synthesis.tui is read from user settings only, ignored"
                 ));

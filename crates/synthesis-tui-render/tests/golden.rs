@@ -10,6 +10,11 @@
 //! summary. Cases listed in `golden_divergences.txt` differ from the oracle in text already and are
 //! skipped (their rebaseline belongs to the phase that changes that text).
 //!
+//! `SYNTHESIS_UPDATE_GOLDEN=redesign-p2` is the gate of phase P2 (layout engine, panel registry): it
+//! rewrites only `frame` cases and fills the files of a case directory that has none yet, after
+//! checking that the new rows are a frame of the new layout (size, header, locked panels from 100
+//! columns). Every other op is refused. It stamps `reviewed_by = "pending-owner-review (P2 2026-10-30)"`.
+//!
 //! `SYNTHESIS_UPDATE_GOLDEN=1` rewrites the expected files of a failing case from the actual output
 //! ONLY when the difference is explained by the Nemo -> Synthesis rename (same text once the
 //! product name, whitespace and box drawing are ignored, or only text dropped: the longer name
@@ -26,6 +31,7 @@ use synthesis_tui_render::agent::{
     Agent, AgentOpts, EditorView, Pending, QHit, render_agent, todo_window,
 };
 use synthesis_tui_render::dash::*;
+use synthesis_tui_render::layout::{PanelId, Panels, View};
 use synthesis_tui_render::model::{Session, Todo, apply_entry};
 use synthesis_tui_render::picker::{Picker, PickerItem};
 use synthesis_tui_render::theme::*;
@@ -280,6 +286,7 @@ struct Owned {
     view: DashView,
     metric: String,
     index: usize,
+    host: HostInfo,
 }
 
 fn hydrate_state(st: &Value) -> Owned {
@@ -329,7 +336,22 @@ fn hydrate_state(st: &Value) -> Owned {
     let agent = st.get("agent").map(hydrate_agent);
     let view = DashView {
         opts: st.get("agentView").map(hydrate_opts).unwrap_or_default(),
+        panels: hydrate_panels(st.get("panels")),
+        tab: match st.get("tab").and_then(Value::as_str) {
+            Some("sessions") => View::Sessions,
+            Some("agents") => View::Agents,
+            Some("panels") => View::Panels,
+            _ => View::Chat,
+        },
         ..Default::default()
+    };
+    let host = HostInfo {
+        sandbox_mode: st
+            .pointer("/host/sandbox")
+            .and_then(Value::as_str)
+            .map(String::from),
+        sandbox_backend: String::new(),
+        memory: st.pointer("/host/memory").and_then(Value::as_bool),
     };
     Owned {
         session: hydrate_session(st.get("session").unwrap_or(&json!({}))),
@@ -346,6 +368,24 @@ fn hydrate_state(st: &Value) -> Owned {
             .unwrap_or("tokens")
             .into(),
         index: st.get("index").and_then(Value::as_u64).unwrap_or(0) as usize,
+        host,
+    }
+}
+
+/// `"panels"` of a case state: `"all"`, `"none"` (every hideable panel off) or `{"off": [ids]}`;
+/// absent = the registry defaults.
+fn hydrate_panels(v: Option<&Value>) -> Panels {
+    match v {
+        Some(Value::String(m)) if m == "all" => Panels::all(),
+        Some(Value::String(m)) if m == "none" => Panels::none(),
+        Some(o) if o.get("off").is_some() => {
+            let mut p = Panels::default();
+            for id in o["off"].as_array().unwrap() {
+                p.set(PanelId::parse(id.as_str().unwrap()).unwrap(), false);
+            }
+            p
+        }
+        _ => Panels::default(),
     }
 }
 
@@ -370,6 +410,7 @@ impl Owned {
             view: &self.view,
             agent_session_id: None,
             tz_offset_min: 0,
+            host: &self.host,
         }
     }
 }
@@ -634,34 +675,6 @@ fn run_case(dir: &std::path::Path, input: &Value) -> Vec<Check> {
             }
             frame_checks(dir, &out.lines, vec![], json_ok)
         }
-        "tasks" | "usage" | "tasksUsage" => {
-            let st = hydrate_state(&input["state"]);
-            let ds = st.dash(&[], 0);
-            let (w, h) = (input["w"].as_i64().unwrap(), input["h"].as_i64().unwrap());
-            let (rows, flags) = match op {
-                "tasks" => (tasks_panel(&ds, w, h, 0, VAlign::Top), None),
-                "usage" => (
-                    usage_panel(&ds, w, h, VAlign::Evenly, UsageView::Auto, NOW),
-                    None,
-                ),
-                _ => {
-                    let r = tasks_usage_row(&ds, w, h, 0, NOW);
-                    (r.rows, Some((r.tasks, r.usage)))
-                }
-            };
-            let plain: Vec<String> = rows.iter().map(|l| strip_ansi(l)).collect();
-            let mut json_ok = cmp_lines("lines", &plain, &expected["lines"]);
-            if let Some((t, u)) = flags {
-                note_json("tasks", json!(t));
-                note_json("usage", json!(u));
-            }
-            if let Some((t, u)) = flags
-                && (expected["tasks"] != json!(t) || expected["usage"] != json!(u))
-            {
-                json_ok = json_ok.and(Err("tasks/usage flags".to_string()));
-            }
-            frame_checks(dir, &rows, vec![], json_ok)
-        }
         _ => vec![("json", helper_case(op, input, &expected))],
     }
 }
@@ -707,10 +720,6 @@ fn helper_case(op: &str, input: &Value, expected: &Value) -> Result<(), String> 
             json!({"todos": c["todos"], "cap": c["cap"], "start": todo_window(&todos, c["cap"].as_u64().unwrap() as usize)})
         }).collect::<Vec<_>>()),
         "heatLevel" => json!(input["cases"].as_array().unwrap().iter().map(|c| json!({"v": c[0], "max": c[1], "level": heat_level(nf(&c[0]), nf(&c[1]))})).collect::<Vec<_>>()),
-        "layoutFor" => json!(input["sizes"].as_array().unwrap().iter().map(|c| {
-            let (w, h) = (c[0].as_i64().unwrap(), c[1].as_i64().unwrap());
-            json!({"w": w, "h": h, "layout": match layout_for(w, h) { Layout::Right => "right", Layout::Bottom => "bottom", Layout::None => "none" }})
-        }).collect::<Vec<_>>()),
         "fmt" => json!({
             "nums": input["nums"].as_array().unwrap().iter().map(|n| json!({"n": n, "s": fmt_num(nf(n))})).collect::<Vec<_>>(),
             "durs": input["durs"].as_array().unwrap().iter().map(|n| json!({"ms": n, "s": fmt_dur(nf(n))})).collect::<Vec<_>>(),
@@ -826,6 +835,68 @@ fn dialogs_json() -> Value {
 }
 
 const P1_STAMP: &str = "pending-owner-review (P1 2026-10-30)";
+const P2_STAMP: &str = "pending-owner-review (P2 2026-10-30)";
+
+/// What phase P2 (layout engine, panel registry) may rewrite: `frame` cases only, whose new rows
+/// must still be a frame of the layout: the right size, the header, and (from 100 columns) the
+/// locked panels. Everything else (agent pane, pickers, dialogs, helpers) stays as it is, so a
+/// change there still fails.
+fn p2_check_frame(input: &Value, a: &Actual) -> Result<(), String> {
+    if input["op"] != "frame" || a.ansi.is_empty() {
+        return Err("not a frame case: outside the P2 scope".into());
+    }
+    let (cols, rows) = (
+        input["cols"].as_u64().unwrap() as usize,
+        input["rows"].as_u64().unwrap() as usize,
+    );
+    let (cols, rows) = (cols.max(40), rows.max(11));
+    let plain: Vec<String> = a.ansi.iter().map(|l| strip_ansi(l)).collect();
+    if plain.len() != rows {
+        return Err(format!("{} rows, expected {rows}", plain.len()));
+    }
+    if let Some(r) = plain
+        .iter()
+        .position(|l| synthesis_tui_base::text::width(l) != cols)
+    {
+        return Err(format!("row {r} is not {cols} cells wide"));
+    }
+    if !plain[0].contains("SYNTH") && !plain[0].contains("⢎⡱") {
+        return Err("no header".into());
+    }
+    if cols >= 100 {
+        let all = plain.join("\n");
+        for label in ["WORKSPACE", "RUNNING SESSIONS", "SUB-AGENTS"] {
+            if !all.contains(label) {
+                return Err(format!("locked panel {label} missing"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Files of a case that does not exist yet, so the gate can fill them from the renderer.
+fn p2_new_case(dir: &std::path::Path, input: &Value) {
+    let put = |name: &str, v: &Value| {
+        std::fs::write(
+            dir.join(name),
+            format!("{}\n", serde_json::to_string_pretty(v).unwrap()),
+        )
+        .unwrap()
+    };
+    put(
+        "expected.json",
+        &json!({"cols": input["cols"], "rows": input["rows"], "lines": []}),
+    );
+    std::fs::write(dir.join("expected.txt"), "\n").unwrap();
+    put(
+        "expected.ansi.json",
+        &json!({"color_mode": "truecolor", "lines": [], "encoded_truecolor": []}),
+    );
+    put(
+        "meta.json",
+        &json!({"captured_at": "<TS>", "source": "Rust renderer (redesign P2): no Node oracle", "reviewed_by": P2_STAMP}),
+    );
+}
 
 /// Helper cases whose `expected.json` may change in P1, with the keys (at any depth) that may.
 const P1_HELPER_KEYS: [(&str, &[&str]); 2] = [
@@ -972,6 +1043,12 @@ fn render_golden() {
     let mode = std::env::var("SYNTHESIS_UPDATE_GOLDEN").unwrap_or_default();
     let update = mode == "1";
     let p1 = mode == "redesign-p1";
+    let p2 = mode == "redesign-p2";
+    let (mut p2_done, mut p2_new, mut p2_refused) = (
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+        Vec::<(String, String)>::new(),
+    );
     let (mut rewritten, mut unexplained) = (Vec::<String>::new(), Vec::<String>::new());
     // P1 summary: (case, what changed), refusals with the reason, divergent cases left alone
     let (mut p1_done, mut p1_refused, mut p1_skipped) = (
@@ -996,6 +1073,10 @@ fn render_golden() {
         let id = format!("render/{name}");
         let input = read(dir.join("input.json"));
         ACTUAL.with(|a| *a.borrow_mut() = Actual::default());
+        let is_new = p2 && !dir.join("expected.json").exists();
+        if is_new {
+            p2_new_case(dir, &input);
+        }
         let mut checks =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_case(dir, &input)))
                 .unwrap_or_else(|e| {
@@ -1024,6 +1105,33 @@ fn render_golden() {
                 checks = vec![("json", Ok(()))];
             } else if !allowed.keys().any(|k| k.starts_with(&id)) {
                 unexplained.push(name.clone());
+            }
+        }
+        if p2 && checks.iter().any(|(_, r)| r.is_err()) {
+            let a = ACTUAL.with(|a| std::mem::take(&mut *a.borrow_mut()));
+            match p2_check_frame(&input, &a) {
+                Ok(()) => {
+                    rewrite_expected(dir, &read(dir.join("expected.json")), &a);
+                    let mut m = read(dir.join("meta.json"));
+                    m["reviewed_by"] = json!(P2_STAMP);
+                    std::fs::write(
+                        dir.join("meta.json"),
+                        format!("{}\n", serde_json::to_string_pretty(&m).unwrap()),
+                    )
+                    .unwrap();
+                    if is_new {
+                        p2_new.push(name.clone())
+                    } else {
+                        p2_done.push(name.clone())
+                    }
+                    checks = vec![("json", Ok(()))];
+                }
+                Err(why) => {
+                    if is_new {
+                        let _ = std::fs::remove_dir_all(dir);
+                    }
+                    p2_refused.push((name.clone(), why))
+                }
             }
         }
         if p1 && checks.iter().any(|(_, r)| r.is_err()) {
@@ -1121,6 +1229,21 @@ fn render_golden() {
             rewritten.join("\n  "),
             unexplained.len(),
             unexplained.join("\n  ")
+        );
+    }
+    if p2 {
+        println!(
+            "SYNTHESIS_UPDATE_GOLDEN=redesign-p2: rewrote {} case(s), created {} new case(s), marked reviewed_by = {P2_STAMP:?}\nREFUSED {} (outside the P2 scope or not a layout frame):\n  {}\nrewritten:\n  {}\nnew:\n  {}",
+            p2_done.len(),
+            p2_new.len(),
+            p2_refused.len(),
+            p2_refused
+                .iter()
+                .map(|(c, w)| format!("{c}: {w}"))
+                .collect::<Vec<_>>()
+                .join("\n  "),
+            p2_done.join("\n  "),
+            p2_new.join("\n  ")
         );
     }
     if p1 {

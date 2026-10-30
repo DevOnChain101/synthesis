@@ -10,7 +10,8 @@ use synthesis_tui_base::sgr::{ColorMode, encode};
 use synthesis_tui_base::text::strip_ansi;
 use synthesis_tui_render::agent::{Agent, EditorView};
 use synthesis_tui_render::dash::{
-    DashState, DashView, Focus, Live, SessionRow, Usage, Workspace, render_frame, workspace_key,
+    DashState, DashView, Focus, HostInfo, Live, SessionRow, Usage, Workspace, render_frame,
+    workspace_key,
 };
 use synthesis_tui_render::model::session_from_events;
 use synthesis_tui_render::util::basename;
@@ -51,6 +52,7 @@ fn opts(events: Vec<Envelope>) -> OnceOptions {
         startup_notes: vec![],
         tui: synthesis_tui::TuiSettings::default(),
         env: synthesis_config::Env::from_pairs(Vec::<(String, String)>::new()),
+        config_group: None,
     }
 }
 
@@ -125,6 +127,12 @@ fn once_is_render_frame_plus_the_status_line() {
         view: &view,
         agent_session_id: Some("s1"),
         tz_offset_min: 0,
+        // what the app tells the panels: the sandbox of `opts`, and whether notes can be saved
+        host: &HostInfo {
+            sandbox_mode: Some("enforce".into()),
+            sandbox_backend: "seatbelt".into(),
+            memory: Some(false),
+        },
     };
     let frame = render_frame(&state, 120, 39, (NOW / 80) as usize, NOW);
     let want: Vec<String> = frame

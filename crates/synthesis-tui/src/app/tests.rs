@@ -52,7 +52,11 @@ fn screen(app: &mut App) -> String {
 }
 
 fn screen_at(app: &mut App, now: i64) -> String {
-    app.render(COLS, ROWS, now)
+    screen_size(app, COLS, ROWS, now)
+}
+
+fn screen_size(app: &mut App, cols: u32, rows: u32, now: i64) -> String {
+    app.render(cols, rows, now)
         .iter()
         .map(|l| strip_ansi(l).trim_end().to_string())
         .collect::<Vec<_>>()
@@ -1073,11 +1077,18 @@ fn copied_text_leaves_out_gutters_and_joins_wide_and_wrapped_rows() {
     // a selection across the wrapped wide-char paragraph keeps every glyph exactly once
     let para = "日本語のテキスト".repeat(12);
     let (wx, wy) = find_cell(&mut a, "日本語", 0);
-    let cmds = drag(&mut a, (wx, wy), (COLS - 1, wy + 3));
+    // the paragraph ends on the last row that holds its tail (the chat column is narrower now)
+    let last = a
+        .render(COLS, ROWS, T0)
+        .iter()
+        .rposition(|l| strip_ansi(l).contains("tailtail"))
+        .unwrap() as u32;
+    let cmds = drag(&mut a, (wx, wy), (COLS - 1, last));
     let t = copied(&cmds).expect("copied").to_string();
     // wrapped over four screen rows, copied as the one line it is (no indent, no breaks)
     assert!(t.starts_with(&format!("{para} tail")), "{t:?}");
     assert!(!t.contains('\n') && !t.starts_with(' '), "{t:?}");
+    assert!(t.contains("tailtail"), "{t:?}");
 }
 
 #[test]
@@ -1096,7 +1107,8 @@ fn ctrl_click_opens_urls_and_existing_paths_only() {
         ),
         T0,
     );
-    let lines = a.render(COLS, ROWS, T0);
+    // wide enough for the chat column to hold the whole path on one row
+    let lines = a.render(200, 50, T0);
     let find = |needle: &str| {
         let row = lines
             .iter()
@@ -1716,22 +1728,22 @@ fn header_status_panel_and_footer_share_one_context_meter_and_clear_resets_it() 
         T0,
     );
     let s = screen(&mut a);
-    // the header no longer carries the meter (spec §5.1: it moved to the Context panel); the Status
-    // panel's context bar and the footer still share it
+    // the header carries `context used/limit` (spec §14.3), the Context card and the footer share it
     let head = s.lines().next().unwrap();
     assert!(
-        head.contains("S Y N T H E S I S") && !head.contains("ctx"),
+        head.contains("S Y N T H E S I S")
+            && head.contains("context 100.0k/200.0k")
+            && !head.contains("ctx"),
         "{head}"
     );
-    assert!(s.contains("Context") && s.contains("50%"), "{s}");
-    assert!(
-        s.contains("100.0k/200.0k") || s.contains("100k/200k"),
-        "{s}"
-    );
+    assert!(s.contains("CONTEXT") && s.contains("50%"), "{s}");
+    assert!(s.contains("100.0k / 200.0k"), "{s}");
     assert!(s.lines().last().unwrap().contains("ctx 50% 100k/200k"));
     keys(&mut a, "/clear\r");
+    // the conversation is gone: no meter reading is left, nothing is made up
     let s = screen(&mut a);
-    assert!(s.contains("Context") && s.contains("0/200"), "{s}");
+    assert!(s.contains("CONTEXT") && s.contains("no data yet"), "{s}");
+    assert!(!s.contains("100.0k / 200.0k"), "{s}");
     assert!(!s.lines().last().unwrap().contains("ctx 50%"), "{s}");
 }
 
@@ -1802,13 +1814,13 @@ fn resume_picker_lists_this_folder_first_with_the_prompt_and_age() {
     ];
     let mut a = App::new(c, &[], T0);
     keys(&mut a, "/resume\r");
-    let s = screen(&mut a);
+    let s = screen_size(&mut a, 160, ROWS, T0);
     assert!(s.contains("fix the parser") && s.contains("3h ago"), "{s}");
     assert!(!s.contains("other folder work"), "{s}");
     assert!(s.contains("show sessions from all folders"), "{s}");
     keys(&mut a, "\x1b[B");
     keys(&mut a, "\r");
-    let s = screen(&mut a);
+    let s = screen_size(&mut a, 160, ROWS, T0);
     assert!(
         s.contains("other folder work") && s.contains("/elsewhere"),
         "{s}"
@@ -2202,4 +2214,95 @@ fn mouse_debug_shows_what_the_terminal_sent() {
         "{}",
         screen(&mut a)
     );
+}
+
+#[test]
+fn config_toggles_a_panel_with_a_live_preview_and_saves_once_on_close() {
+    let mut a = app();
+    assert!(screen_size(&mut a, 160, 40, T0).contains("SESSION STATS"));
+    assert!(keys(&mut a, "/config\r").is_empty());
+    let s = screen_size(&mut a, 160, 40, T0);
+    assert!(
+        s.contains("C O N F I G") && s.contains("▣ Workspace"),
+        "{s}"
+    );
+    // locked row: nothing changes, the hint says why
+    keys(&mut a, " ");
+    assert!(
+        screen_size(&mut a, 160, 40, T0)
+            .contains("Workspace is always visible: it switches workspaces.")
+    );
+    // Down x5 = Session stats: space hides it and the sidebar reflows at once
+    keys(&mut a, "\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B ");
+    let s = screen_size(&mut a, 160, 40, T0);
+    assert!(!s.contains("SESSION STATS\n"), "{s}");
+    assert!(
+        !a.tui
+            .panels
+            .is_on(synthesis_tui_render::layout::PanelId::SessionStats)
+    );
+    // Esc closes and asks the host to write once
+    let cmds = keys(&mut a, "\x1b");
+    let [Cmd::SaveTui(v)] = &cmds[..] else {
+        panic!("{cmds:?}")
+    };
+    assert_eq!(v["panels"]["session_stats"], false);
+    assert_eq!(v["panels"]["session"], true);
+    assert!(a.config.is_none());
+    // opened and closed without a change: nothing to write
+    keys(&mut a, "/config\r");
+    assert!(keys(&mut a, "\x1b").is_empty());
+}
+
+#[test]
+fn config_filter_reset_and_escape_order() {
+    let mut a = app();
+    keys(&mut a, "/config\r");
+    keys(&mut a, "/mot");
+    let s = screen_size(&mut a, 160, 40, T0);
+    assert!(
+        s.contains("/ mot") && s.contains("Motion") && !s.contains("Expand diffs"),
+        "{s}"
+    );
+    // first Esc clears the filter, the second closes
+    keys(&mut a, "\x1b");
+    assert!(a.config.is_some());
+    // reset restores the group's defaults
+    keys(&mut a, "\x1b[B\x1b[B ");
+    assert!(
+        !a.tui
+            .panels
+            .is_on(synthesis_tui_render::layout::PanelId::Session)
+    );
+    keys(&mut a, "r");
+    assert!(
+        a.tui
+            .panels
+            .is_on(synthesis_tui_render::layout::PanelId::Session)
+    );
+    keys(&mut a, "\x1b");
+    assert!(a.config.is_none());
+}
+
+#[test]
+fn tab_switches_the_views_below_100_columns_and_chat_only_below_60() {
+    let mut a = app();
+    let s = screen_size(&mut a, 80, 24, T0);
+    assert!(s.lines().nth(1).unwrap().contains("Chat"), "{s}");
+    keys(&mut a, "\t");
+    let s = screen_size(&mut a, 80, 24, T0);
+    assert!(
+        s.contains("WORKSPACE") && s.contains("RUNNING SESSIONS") && !s.contains("SYNTHESIS  "),
+        "{s}"
+    );
+    keys(&mut a, "\t");
+    screen_size(&mut a, 80, 24, T0); // each frame tells Tab which view is shown
+    keys(&mut a, "\t");
+    assert!(
+        screen_size(&mut a, 80, 24, T0).contains("TOOLS & SKILLS"),
+        "Panels view after two more tabs"
+    );
+    // below 60 columns: chat only, no strip
+    let s = screen_size(&mut a, 50, 16, T0);
+    assert!(!s.contains("Sessions") && !s.contains("WORKSPACE"), "{s}");
 }

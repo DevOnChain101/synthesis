@@ -1,0 +1,24 @@
+ ⢎⡱  S Y N T H E S I S   workspace proj │ model anthropic/fake-sonnet  12:00:00 
+  Chat     Sessions 2    ▍Agents     Panels 7                      tab switches 
+ SUB-AGENTS                                                                     
+ No sub-agents yet · /agents                                                    
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ enter send   esc interrupt   ⇧tab mode   tab switch view proj │ 0 files changed

@@ -24,10 +24,11 @@ use synthesis_tui_render::agent::{
     Suggestions as RSug, body_sel_rows,
 };
 use synthesis_tui_render::dash::{
-    DashState, DashView, Focus, Frame, Live, MIN_COLS, MIN_ROWS, SessionRow, Usage, Workspace,
-    render_frame, workspace_key,
+    DashState, DashView, Focus, Frame, HostInfo, Live, MIN_COLS, MIN_ROWS, McpLive, SessionRow,
+    Tap, Usage, Workspace, render_frame, workspace_key,
 };
 use synthesis_tui_render::dialogs::HELP;
+use synthesis_tui_render::layout::{Mode as LayoutMode, View};
 use synthesis_tui_render::model::{
     self, Session, apply_event, parse_ts, session_from_events, session_phase,
 };
@@ -38,6 +39,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::chat::Chat;
+use crate::config_screen::{ConfigScreen, Step};
 use crate::link::{ApprovalAsk, InputAsk};
 use crate::links::{
     Link, OpenTarget, existing_path, join_wrapped, link_at, mouse_debug, open_gesture,
@@ -45,6 +47,7 @@ use crate::links::{
 use crate::route::{self, Known, Route};
 use crate::sanitize::{clean_input, clean_input_lines, clean_line, clean_text};
 use crate::status::{SandboxStatus, StatusExtra, status_line_with};
+use crate::tui_settings::TuiSettings;
 use crate::{ExitReason, SavedSession};
 
 const QUIT_ARM_MS: i64 = 1500;
@@ -148,6 +151,9 @@ pub(crate) enum Cmd {
     Compact {
         instructions: Option<String>,
     },
+    /// `/config` closed with changes: the host writes this `synthesis.tui` subtree to the user
+    /// settings file (once, re-reading the file first) and reports the outcome.
+    SaveTui(Value),
 }
 
 #[derive(Debug)]
@@ -316,6 +322,18 @@ pub(crate) struct App {
     lines: Vec<String>,
     size: (u32, u32),
     commands: Vec<CmdDef>,
+    /// The TUI settings in force (live: `/config` edits them, the next frame previews them).
+    pub tui: TuiSettings,
+    /// Problems found while reading `synthesis.tui` (the first one is the hint line of `/config`).
+    tui_diagnostics: Vec<String>,
+    /// Colour mode and environment, for the live theme preview.
+    color: synthesis_tui_base::sgr::ColorMode,
+    env: synthesis_config::Env,
+    config: Option<ConfigScreen>,
+    /// The view of Tabs mode (terminals under 100 columns).
+    tab: View,
+    /// Live MCP server state, asked for at each frame.
+    pub mcp_status: Option<Box<dyn Fn() -> Vec<McpLive>>>,
 }
 
 fn local_commands() -> Vec<CmdDef> {
@@ -368,6 +386,7 @@ fn local_commands() -> Vec<CmdDef> {
             "toggle focus view (prompt, summary and response only)",
             "[on|off]",
         ),
+        c("config", "panels, theme and options", ""),
         c("exit", "quit", ""),
     ]
 }
@@ -495,6 +514,69 @@ impl App {
             lines: vec![],
             size: (80, 24),
             commands,
+            tui: TuiSettings::default(),
+            tui_diagnostics: vec![],
+            color: synthesis_tui_base::sgr::ColorMode::TrueColor,
+            env: synthesis_config::Env::default(),
+            config: None,
+            tab: View::Chat,
+            mcp_status: None,
+        }
+    }
+
+    /// The settings read from the user file, the terminal's colour mode and the environment (the
+    /// theme and glyph set follow them, also while `/config` previews a change).
+    pub fn set_tui(
+        &mut self,
+        tui: TuiSettings,
+        diagnostics: Vec<String>,
+        color: synthesis_tui_base::sgr::ColorMode,
+        env: synthesis_config::Env,
+    ) {
+        self.tui = tui;
+        self.tui_diagnostics = diagnostics;
+        self.color = color;
+        self.env = env;
+        self.render_cfg = self.tui.render_config(self.color, &self.env);
+    }
+
+    /// Opens `/config` (the host of `--once` uses it to draw the screen without keys).
+    pub fn open_config(&mut self, group: usize) {
+        let mut c = ConfigScreen::new(
+            &self.tui,
+            self.color == synthesis_tui_base::sgr::ColorMode::Mono,
+            &self.tui_diagnostics,
+        );
+        c.view.group = group.min(3);
+        self.config = Some(c);
+        self.tab = View::Chat;
+    }
+
+    /// Changes made in `/config` that were not written yet (the app is leaving with it open).
+    pub fn unsaved_tui(&self) -> Option<Value> {
+        self.config
+            .as_ref()
+            .filter(|c| c.changed(&self.tui))
+            .map(|_| self.tui.to_value())
+    }
+
+    fn config_key(&mut self, k: &Key, out: &mut Vec<Cmd>) {
+        let Some(c) = self.config.as_mut() else {
+            return;
+        };
+        let step = c.key(k, &mut self.tui);
+        self.after_config(step, out);
+    }
+
+    fn after_config(&mut self, step: Step, out: &mut Vec<Cmd>) {
+        if step != Step::Stay {
+            self.render_cfg = self.tui.render_config(self.color, &self.env);
+        }
+        if step == Step::Close
+            && let Some(c) = self.config.take()
+            && c.changed(&self.tui)
+        {
+            out.push(Cmd::SaveTui(self.tui.to_value()));
         }
     }
 
@@ -557,6 +639,7 @@ impl App {
             reply,
             deadline_ms,
         } = ask;
+        self.tab = View::Chat; // an approval is answered in the chat view
         let suggestions: Vec<Value> = req.suggestions.iter().map(suggestion_view).collect();
         let mut pending = Pending {
             kind: "permission".into(),
@@ -839,6 +922,8 @@ impl App {
         if !self.dialogs.is_empty() {
             self.dialog_key(&k, now);
             self.sync_arming(now);
+        } else if self.config.is_some() {
+            self.config_key(&k, &mut out);
         } else if self.picker.is_some() {
             self.picker_key(&k, now, &mut out);
         } else if self.search.is_some() {
@@ -1039,6 +1124,14 @@ impl App {
                     self.esc_at = Some(now);
                 }
             }
+            Tab if tab_cycles
+                && self
+                    .frame
+                    .as_ref()
+                    .is_some_and(|f| f.mode == LayoutMode::Tabs) =>
+            {
+                self.next_view()
+            }
             Tab if tab_cycles => self.cycle_target(),
             CtrlR => {
                 let from = e.history.len() as i64 - 1;
@@ -1110,6 +1203,17 @@ impl App {
         } else {
             e.down();
         }
+    }
+
+    /// Tab in Tabs mode: the next view of the strip.
+    fn next_view(&mut self) {
+        let Some(f) = self.frame.as_ref() else { return };
+        let i = f
+            .tabs
+            .iter()
+            .position(|v| *v == f.view)
+            .map_or(0, |i| i + 1);
+        self.tab = f.tabs[i % f.tabs.len()];
     }
 
     fn cycle_mode(&mut self) {
@@ -1396,6 +1500,7 @@ impl App {
                 instructions: (!arg.is_empty()).then(|| arg.to_string()),
             }),
             "exit" | "quit" => self.quit = Some(ExitReason::Quit),
+            "config" => self.open_config(0),
             "clear" => {
                 if self.running() {
                     self.out_item("/clear: a task is running · esc cancels it first", true);
@@ -2403,6 +2508,57 @@ impl App {
     }
 
     fn mouse(&mut self, k: &Key, now: i64, out: &mut Vec<Cmd>) {
+        // `/config` owns the mouse: a click toggles the row under it, the wheel moves the cursor
+        if self.config.is_some() && self.dialogs.is_empty() {
+            match *k {
+                Key::Wheel { dir, .. } if matches!(dir, WheelDir::Up | WheelDir::Down) => {
+                    if let Some(c) = self.config.as_mut() {
+                        c.scroll(dir == WheelDir::Down);
+                    }
+                }
+                Key::Mouse {
+                    y,
+                    button: 0,
+                    action: MouseAction::Down,
+                    ..
+                } => {
+                    let row = self.frame.as_ref().and_then(|f| {
+                        f.rects
+                            .config_hits
+                            .iter()
+                            .find(|(r, _)| *r == i64::from(y) - 1)
+                            .map(|h| h.1)
+                    });
+                    if let (Some(k), Some(c)) = (row, self.config.as_mut()) {
+                        let step = c.click(k, &mut self.tui);
+                        self.after_config(step, out);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        // a click on a tab of the Tabs-mode strip selects that view
+        if let Key::Mouse {
+            x,
+            y,
+            button: 0,
+            action: MouseAction::Down,
+            ..
+        } = *k
+            && self.dialogs.is_empty()
+            && let Some(f) = self.frame.as_ref()
+            && f.rects.tab_row == Some(i64::from(y) - 1)
+            && let Some(v) = f
+                .rects
+                .tab_hits
+                .iter()
+                .find(|(a, b, _)| (*a..*b).contains(&(i64::from(x) - 1)))
+                .map(|h| h.2)
+        {
+            self.tab = v;
+            return;
+        }
         match *k {
             Key::Wheel { dir, x, y, mods } => {
                 let ev = SelEvent::Wheel {
@@ -2983,9 +3139,30 @@ impl App {
         }
         let view = DashView {
             opts,
+            panels: self.tui.panels,
+            tab: self.tab,
+            // a dialog (an approval) is answered in the chat: /config waits behind it
+            config: self
+                .config
+                .as_ref()
+                .filter(|_| self.dialogs.is_empty())
+                .map(|c| c.view.clone()),
             ..DashView::default()
         };
-        let usage = Usage::default();
+        // what the event stream knows of the cost; the quotas and the context size come from the meter
+        let usage = Usage {
+            tap: self.chat.totals.cost_usd.map(|c| Tap {
+                cost_usd: Some(c),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let host = HostInfo {
+            sandbox_mode: Some(self.cfg.sandbox.mode.clone()).filter(|m| !m.is_empty()),
+            sandbox_backend: self.cfg.sandbox.backend.clone(),
+            memory: Some(self.memory_files.is_some()),
+        };
+        let mcp: Option<Vec<McpLive>> = self.mcp_status.as_ref().map(|f| f());
         let sid = self.cfg.session_id.clone();
         let frame = {
             let state = DashState {
@@ -2997,7 +3174,7 @@ impl App {
                 history: &[],
                 usage_metric: "tokens",
                 mcp_servers: &[],
-                mcp_live: None,
+                mcp_live: mcp.as_deref(),
                 workspaces: Some(&ws),
                 active_workspace: &key,
                 agent: Some(&self.chat.agent),
@@ -3010,6 +3187,7 @@ impl App {
                 view: &view,
                 agent_session_id: Some(&sid),
                 tz_offset_min: self.cfg.tz_offset_min,
+                host: &host,
             };
             render_frame(&state, w, h - 1, frame_no, now)
         };

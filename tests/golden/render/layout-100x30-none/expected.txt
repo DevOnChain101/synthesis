@@ -1,0 +1,30 @@
+ ⢎⡱  S Y N T H E S I S   ● 2 live │ workspace proj │ model anthropic/fake-sonnet           12:00:00 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ WORKSPACE         1 │ SYNTHESIS                /work/proj  · working │ SUB-AGENTS                  
+ ▌● proj           2 │                                                │ No sub-agents yet · /agents 
+                     │                                                │                             
+                     │  > fix the flaky login test                    │                             
+                     │                                                │                             
+                     │  ✻ Thinking · 2.0s                             │                             
+                     │  │ look                                        │                             
+                     │                                                │                             
+                     │  ● I will check login.ts and retry():          │                             
+                     │    • first                                     │                             
+                     │    • second                                    │                             
+                     │                                                │                             
+                     │  ● Bash(npm test)                              │                             
+                     │    ⎿  Exit code 1                              │                             
+ RUNNING SESSIONS  2 │       FAIL login.test.ts                       │                             
+ ►● proj-0       10% │       expected 2                               │                             
+ project-0 (…ace)    │                                                │                             
+  ● proj-1       10% │  · Read(login.ts)                              │                             
+ project-1 (…ace)    │    ⎿  running                                  │                             
+                     │  · Working    (4s · ↓ 0 tokens · esc to interr…│                             
+                     │    ⎿ ☒ Read                                    │                             
+                     │      ■ Fixing                                  │                             
+                     │      ☐ Test                                    │                             
+                     │  ╭──────────────────────────────────────────╮  │                             
+                     │  │ > hello                                  │  │                             
+                     │  ╰──────────────────────────────────────────╯  │                             
+                     │  ⏸ manual mode on  fake-sonnet · effort: auto  │                             
+ enter send   esc interrupt   ⇧tab mode   tab agent   /config panels         proj │ 0 files changed 

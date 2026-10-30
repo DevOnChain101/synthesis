@@ -1,0 +1,101 @@
+{
+  "cols": 200,
+  "rows": 50,
+  "lines": [
+    " ⢎⡱  S Y N T H E S I S   ● 2 live │ workspace proj │ session session- │ model anthropic/fake-sonnet │ context 5.9k/200.0k                                      ● system healthy │ Fri Oct  2 │ 12:00:00 ",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    " WORKSPACE                   1 │ AGENT STATUS                                                · coding    CONTEXT                             3% │ SUB-AGENTS                                            ",
+    " ▌● proj                     2 │ ready · planning · coding · verifying  ✓ Read                           tokens                   5.9k / 200.0k │ No sub-agents yet · /agents                           ",
+    "                               │ Working on  Agent explorer: find fil…  · Fixing                         ▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │                                                       ",
+    " RUNNING SESSIONS            2 │ Next        Test                       ○ Test                           in 9.0k · out 1.5k                     │                                                       ",
+    " ►● proj-0                 10% │                                                                         cache 20.0k (hit 69%) · $ –            │                                                       ",
+    " project-0 (D:/workspace)      │                                                                                                                │                                                       ",
+    "  ● proj-1                 10% │ SYNTHESIS                                                                                /work/proj  · working │                                                       ",
+    " project-1 (D:/workspace)      │                                                                                                                │                                                       ",
+    "                               │                                                                                                                │                                                       ",
+    " SESSION               running │                                                                                                                │                                                       ",
+    " model  anthropic/fake-sonnet  │                                                                                                                │                                                       ",
+    " mode   manual                 │                                                                                                                │                                                       ",
+    " effort auto                   │                                                                                                                │                                                       ",
+    " window 200.0k tokens          │                                                                                                                │                                                       ",
+    " cwd    proj                   │                                                                                                                │                                                       ",
+    " uptime 1m00s                  │                                                                                                                │                                                       ",
+    " turns  1 prompts · 5 tools    │                                                                                                                │                                                       ",
+    " errors 1                      │                                                                                                                │                                                       ",
+    "                               │                                                                                                                │                                                       ",
+    " TOOLS & SKILLS              5 │                                                                                                                │                                                       ",
+    " ● Read       ▇▇▇▇▇▇▇▇▇▇▇ 1    │                                                                                                                │                                                       ",
+    " ● Bash       ▇▇▇▇▇▇▇▇▇▇▇ 1    │                                                                                                                │                                                       ",
+    " ● Skill      ▇▇▇▇▇▇▇▇▇▇▇ 1    │                                                                                                                │                                                       ",
+    " ● Agent      ▇▇▇▇▇▇▇▇▇▇▇ 1    │  > fix the flaky login test                                                                                    │                                                       ",
+    " skills scout ×1               │                                                                                                                │                                                       ",
+    " mcp                 0 servers │  ✻ Thinking · 2.0s                                                                                             │                                                       ",
+    " configured · synthesis has no…│  │ look                                                                                                        │                                                       ",
+    "                               │                                                                                                                │                                                       ",
+    " RECENT ACTIVITY             2 │  ● I will check login.ts and retry():                                                                          │                                                       ",
+    " · Looking.          9m59s ago │    • first                                                                                                     │                                                       ",
+    " › refactor the pa… 10m00s ago │    • second                                                                                                    │                                                       ",
+    "                               │                                                                                                                │                                                       ",
+    "                               │  ● Bash(npm test)                                                                                              │                                                       ",
+    "                               │    ⎿  Exit code 1                                                                                              │                                                       ",
+    "                               │       FAIL login.test.ts                                                                                       │                                                       ",
+    "                               │       expected 2                                                                                               │                                                       ",
+    "                               │                                                                                                                │                                                       ",
+    "                               │  · Read(login.ts)                                                                                              │                                                       ",
+    "                               │    ⎿  running                                                                                                  │                                                       ",
+    "                               │  · Working    (4s · ↓ 0 tokens · esc to interrupt)                                                             │                                                       ",
+    " SESSION STATS           1m00s │    ⎿ ☒ Read                                                                                                    │                                                       ",
+    " files read                  1 │      ■ Fixing                                                                                                  │                                                       ",
+    " files edited                0 │      ☐ Test                                                                                                    │                                                       ",
+    " commands run                1 │  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────╮  │                                                       ",
+    " tokens used             30.5k │  │ > hello                                                                                                  │  │                                                       ",
+    " tool calls                  5 │  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────╯  │                                                       ",
+    " success rate              80% │  ⏸ manual mode on (shift+tab to cycle)                                             fake-sonnet · effort: auto  │                                                       ",
+    " enter send   esc interrupt   ⇧tab mode   tab agent   /config panels   alt+v paste image   ! shell   ctrl+o expand   ctrl+r search history   ctrl+l redraw   ctrl+n new workspace proj │ 0 files changed"
+  ],
+  "rects": {
+    "chatRect": {
+      "x": 32,
+      "y": 8,
+      "w": 112,
+      "h": 41
+    },
+    "sidebarRect": {
+      "x": 0,
+      "y": 2,
+      "w": 32,
+      "h": 47
+    },
+    "dockRect": {
+      "x": 145,
+      "y": 2,
+      "w": 55,
+      "h": 47
+    },
+    "activityRect": {
+      "x": 0,
+      "y": 30,
+      "w": 31,
+      "h": 11
+    },
+    "sessionRows": [
+      {
+        "y": 6,
+        "id": "session-0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "y": 7,
+        "id": "session-0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "y": 8,
+        "id": "session-1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "y": 9,
+        "id": "session-1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ],
+    "workspaceRows": []
+  }
+}

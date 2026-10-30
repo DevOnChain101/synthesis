@@ -10,6 +10,7 @@
 mod sanitize;
 mod app;
 mod chat;
+mod config_screen;
 mod link;
 pub mod links;
 mod preview;
@@ -27,8 +28,9 @@ pub use runtime::{
     Exit, ExitReason, MemoryHook, OnceOptions, Options, render_once, run_interactive, size_from_env,
 };
 pub use status::{SandboxStatus, status_line};
+pub use synthesis_tui_render::dash::McpLive;
 pub use tty::{ScriptedTty, Tty, replay};
-pub use tui_settings::{GlyphChoice, TuiSettings};
+pub use tui_settings::{GlyphChoice, LogoChoice, TuiSettings};
 
 /// A session in the store, for the sidebar and the resume picker.
 #[derive(Clone, Debug, Default)]

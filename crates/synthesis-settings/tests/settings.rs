@@ -358,3 +358,89 @@ fn settings_are_read_from_project_root_not_cwd() {
         ["Bash(rm:*)"]
     );
 }
+
+#[test]
+fn synthesis_tui_is_read_from_the_user_file_only_and_the_others_are_named() {
+    let f = fx();
+    f.user(json!({"synthesis":{"tui":{"theme":"pearl"}}}));
+    f.project(json!({"synthesis":{"tui":{"theme":"mono"}}}));
+    write(
+        f.proj.path(),
+        ".synthesis/settings.local.json",
+        json!({"synthesis":{"tui":{"panels":{"session":false}}}}),
+    );
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"synthesis":{"tui":{"theme":"classic"}}}),
+    );
+    let s = f.load(ProjectTrust::Trusted);
+    let warned = |what: &str| {
+        s.diagnostics.iter().any(|d| {
+            d.starts_with(what) && d.contains("synthesis.tui is read from user settings only")
+        })
+    };
+    assert!(warned("project settings"), "{:?}", s.diagnostics);
+    assert!(warned("local settings"), "{:?}", s.diagnostics);
+    assert!(warned("managed settings"), "{:?}", s.diagnostics);
+    assert!(!warned("user settings"), "{:?}", s.diagnostics);
+}
+
+#[test]
+fn persisting_the_tui_section_keeps_everything_else_and_never_overwrites_a_bad_file() {
+    let f = fx();
+    let home = f.home.path();
+    let tui = json!({"theme": "pearl", "panels": {"session": false}});
+    // no file yet: created
+    persist_user_tui(home, &tui).unwrap();
+    let read = || -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(home.join("settings.json")).unwrap()).unwrap()
+    };
+    assert_eq!(read(), json!({"synthesis": {"tui": tui}}));
+    // other keys, their order and the rest of `synthesis` stay; the old tui subtree is replaced
+    fs::write(
+        home.join("settings.json"),
+        r#"{"zeta":1,"permissions":{"deny":["x"]},"synthesis":{"budget":{"max_turns":3},"tui":{"old":1}},"alpha":2}"#,
+    )
+    .unwrap();
+    persist_user_tui(home, &tui).unwrap();
+    let text = fs::read_to_string(home.join("settings.json")).unwrap();
+    assert!(text.find("zeta").unwrap() < text.find("permissions").unwrap());
+    assert!(
+        text.find("permissions").unwrap() < text.find("alpha").unwrap(),
+        "{text}"
+    );
+    let v = read();
+    assert_eq!(v["synthesis"]["budget"]["max_turns"], 3);
+    assert_eq!(v["synthesis"]["tui"], tui);
+    assert_eq!(v["permissions"]["deny"][0], "x");
+    // an unparseable file, or one whose `synthesis` is not an object, is left exactly as it is
+    for bad in ["{not json", r#"{"synthesis": 5}"#, "[1]"] {
+        fs::write(home.join("settings.json"), bad).unwrap();
+        assert!(persist_user_tui(home, &tui).is_err(), "{bad}");
+        assert_eq!(fs::read_to_string(home.join("settings.json")).unwrap(), bad);
+    }
+    // no temp file is left behind
+    assert!(
+        fs::read_dir(home).unwrap().all(|e| !e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("tmp"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn persisting_keeps_the_permissions_of_the_file_it_replaces() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fx();
+    let p = f.home.path().join("settings.json");
+    fs::write(&p, "{}").unwrap();
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+    persist_user_tui(f.home.path(), &json!({"theme": "mono"})).unwrap();
+    assert_eq!(
+        fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}

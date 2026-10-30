@@ -71,6 +71,21 @@ fn now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
+/// `SYNTHESIS_ONCE_SCREEN=config[:panels|appearance|behaviour|mouse]` makes `--once` draw the
+/// `/config` screen: the headless way to look at it (docs/CLI.md).
+fn config_group(env: &Env) -> Option<usize> {
+    let v = env.get_nonempty("SYNTHESIS_ONCE_SCREEN")?;
+    let group = v.strip_prefix("config")?;
+    match group.strip_prefix(':') {
+        None if group.is_empty() => Some(0),
+        Some("panels") => Some(0),
+        Some("appearance") => Some(1),
+        Some("behaviour") => Some(2),
+        Some("mouse") => Some(3),
+        _ => None,
+    }
+}
+
 fn once(a: &TuiArgs, env: &Env) -> Result<u8, String> {
     let h = homes(env)?;
     let resume = a
@@ -113,6 +128,7 @@ fn once(a: &TuiArgs, env: &Env) -> Result<u8, String> {
             .collect(),
         tui,
         env: env.clone(),
+        config_group: config_group(env),
     };
     // colour escapes belong to a terminal: into a pipe or file the frame is plain text
     let mut frame = Vec::new();
@@ -214,13 +230,16 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
         o.startup_notes = notices;
         let (tui, tui_notes) = synthesis_tui::TuiSettings::load_user(&ph.synthesis);
         o.tui = tui;
+        o.tui_diagnostics = tui_notes.clone();
         o.startup_notes.extend(tui_notes);
+        o.synthesis_home = Some(ph.synthesis.clone());
         o.memory = Some(notes.hook());
         o.startup_notes.extend(switch_note.take());
         switch_from = None;
         if let Some(m) = &mcp {
-            let m = m.clone();
-            o.mcp_report = Some(Box::new(move || mcp_lines(&m)));
+            let (report, status) = (m.clone(), m.clone());
+            o.mcp_report = Some(Box::new(move || mcp_lines(&report)));
+            o.mcp_status = Some(Box::new(move || mcp_live(&status)));
         }
         o.saved = synthesis_tui::list_saved(&ph.synthesis, None).unwrap_or_default();
         o.resume = resume.take();
@@ -269,6 +288,20 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
             ExitReason::Quit | ExitReason::InputClosed => return Ok(0),
         }
     }
+}
+
+/// What the panels show of the MCP servers: name, state, tool count, last error.
+fn mcp_live(m: &synthesis_mcp::McpManager) -> Vec<synthesis_tui::McpLive> {
+    use synthesis_harness::sanitize_for_display as clean;
+    m.status()
+        .into_iter()
+        .map(|s| synthesis_tui::McpLive {
+            name: clean(&s.name),
+            state: format!("{:?}", s.state).to_lowercase(),
+            tool_count: s.tool_count as u32,
+            error: s.error.as_deref().map(clean).unwrap_or_default(),
+        })
+        .collect()
 }
 
 /// `/mcp`: one block per server with state, tools and the last error.

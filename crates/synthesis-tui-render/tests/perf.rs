@@ -73,6 +73,7 @@ fn frame_with_5k_history_is_fast() {
         view: &view,
         agent_session_id: None,
         tz_offset_min: 0,
+        host: &Default::default(),
     };
     let t = Instant::now();
     let cold = render_frame(&st, 120, 40, 0, 1_790_942_400_000);

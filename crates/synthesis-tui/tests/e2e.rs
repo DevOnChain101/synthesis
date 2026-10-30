@@ -135,7 +135,7 @@ fn rig(turns: Vec<Turn>, k: Knobs) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
     std::fs::create_dir_all(root.join("w")).unwrap();
-    let (script, tty) = ScriptedTty::new(120, 40);
+    let (script, tty) = ScriptedTty::new(160, 40);
     let tool = Mutate::new();
     let provider = Arc::new(FakeProvider::new(turns));
     let (t2, p2, r2) = (tool.clone(), provider.clone(), root.clone());

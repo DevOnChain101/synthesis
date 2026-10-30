@@ -1,40 +1,40 @@
- ⢎⡱  S Y N T H E S I S   proj                                                                        ● 2 live  │  12:00 
+ ⢎⡱  S Y N T H E S I S   ● 2 live │ workspace proj │ session session- │ model anthropic/fake-sonnet            12:00:00 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-┏━ ◆ Running 2 ━━━━┓┏━ ◆ Status ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┏━ ◆ Tokens ━━━━━━━━━━━━┓┏━ ◆ Tasks · 2 open ━━━━━━━━━┓
-┃ ►● proj-0     10%┃┃                                           ┃┃ total  30.5k    agent…┃┃ █████░░░░░░░░░ 1/3         ┃
-│ project-0        ││ · RUNNING TOOL  last activity 9m54s ago   ││ input  9.0k     outpu…││ 1 ✓ Read                   │
-│  ● proj-1     10%││   ✻ Agent explorer: find files 9m59s      ││ cache  20.0k    hit  …││ 2 · Fixing                 │
-│ project-1        ││ Context  ░░░░░░░░░░░░░   3% 5.9k/200.0k   ││ cost   -        lines…││ 3 ○ Test                   │
-┃                  ┃┃                                           ┃┃                     █ ┃┃                            ┃
-┗━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-┏━ ◆ Session ━━━━━━┓┏━ ◆ SYNTHESIS · /work/proj  · working ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ model  anthropic…┃┃      expected 2                                                                                  ┃
-│ mode   manual    ││                                                                                                  │
-│ effort auto      ││ · Read(login.ts)                                                                                 │
-│ window 200.0k to…││   ⎿  running                                                                                     │
-│ cwd    proj      ││ · Conjuring    (4s · ↓ 0 tokens · esc to interrupt)                                              │
-│ uptime 1m00s     ││   ⎿ ☒ Read                                                                                       │
-│ turns  1 prompts…││     ■ Fixing                                                                                     │
-│ errors 1         ││     ☐ Test                                                                                       │
-┃                  ┃│ ╭───────────────────────────────────────────────────────────────────────────────────────────────╮│
-┗━━━━━━━━━━━━━━━━━━┛│ │ > hello                                                                                       ││
-                    │ ╰───────────────────────────────────────────────────────────────────────────────────────────────╯│
-                    ┃ ⏸ manual mode on (shift+tab to cycle)                                  fake-sonnet · effort: auto┃
-                    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-┏━ ◆ TOPOLOGY 1 active ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ ✓ 1 Plan ━► ○ 2 Guard ━► ✶ 3 Orchestrate ━► ○ 4 Execute ━► ✓ 5 Verify ━► ○ 6 Learn                                   ┃
-│ ▸ Orchestrate: select skills / sub-agents — Agent explorer: find files                                               │
-│                                                                                                                      │
-│ ╭─── USER · PROJECT ────────────────╮   ╭─── GUARDS ────────────────────────╮   ╭─── SKILLS  1 ─────────────────────╮│
-│ │ +3 more                           │   │ 0 guards                          │   │ ★ scout                   ×1 · 9m ││
-│ ╰───────────────────────────────────╯   ╰──────────────────────────────▲────╯   ╰──▲────────────────────────────────╯│
-│                                  └────────┐                            │  ┌────────┘                                 │
-│ ╭─── MEMORY · FEEDBACK ─────────────╮   ┏━▼━ SYNTHESIS CORE  opus-5.5 ━━━━━━┻━━┻━┓   ┏━━━ SUB-AGENTS  1 active / 1 ━━━━━━┓│
-│ │ context ▱▱▱▱▱▱▱▱▱▱             3% │   ┃ · Intent       parse … understood ┃   ┃ · explorer · find files  working… ┃│
-│ │ +3 more                           ◄───┫ +3 more                           ┣●━━►                                   ┃│
-│ ╰───────────────────────────────────╯   ┗━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━┳━┛   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│
-│                                  ┌────────┘                            │  └────────┐                                 │
-│ ╭─ EXTERNAL · MCP ───────────────▼──╮   ╭─ EXECUTION  3 ───────────────▼────╮   ╭──▼─ HOOKS ────────────────────────╮│
-┃ ╰───────────────────────────────────╯   ╰───────────────────────────────────╯   ╰───────────────────────────────────╯┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-tab workspace selector (when multiple) → sessions → prompt   enter send   esc interrupt   ⇧tab mode   alt+v paste image…
+ WORKSPACE         1 │ AGENT STATUS                 · coding    CONTEXT             3% │ USAGE & METRICS         7 days 
+ ▌● proj           2 │ ready · planning · coding · verifying    tokens   5.9k / 200.0k │ Tokens     ██████████████ 6.0k 
+                     │ Working on  Agent explorer: find fil…    ▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ Tool calls █████████░░░░░   14 
+ RUNNING SESSIONS  2 │ Next        Test                         in 9.0k · out 1.5k     │ Messages   ██████████████   21 
+ ►● proj-0       10% │                                          cache 20.0k (hit 69%) …│ Agents     ██░░░░░░░░░░░░    3 
+ project-0 (…ace)    │                                                                 │ Sessions   █████░░░░░░░░░    7 
+  ● proj-1       10% │ SYNTHESIS                                 /work/proj  · working │                                
+ project-1 (…ace)    │                                                                 │                                
+                     │                                                                 │                                
+ SESSION     running │                                                                 │                                
+ model  anthropic/f… │                                                                 │ SYSTEM HEALTH          healthy 
+ mode   manual       │                                                                 │ ● Core agent           working 
+ effort auto         │                                                                 │ ○ Tool runtime     no data yet 
+ window 200.0k toke… │  > fix the flaky login test                                     │ ○ MCP servers     none config… 
+ cwd    proj         │                                                                 │ ○ Memory store     no data yet 
+ uptime 1m00s        │  ✻ Thinking · 2.0s                                              │ ○ Browser sandbox  no data yet 
+ turns  1 prompts ·… │  │ look                                                         │                                
+ errors 1            │                                                                 │                                
+                     │  ● I will check login.ts and retry():                           │                                
+ TOOLS & SKILLS    5 │    • first                                                      │ SUB-AGENTS                     
+ ● Read   ▇▇▇▇▇ 1    │    • second                                                     │ No sub-agents yet · /agents    
+ ● Bash   ▇▇▇▇▇ 1    │                                                                 │                                
+ ● Skill  ▇▇▇▇▇ 1    │  ● Bash(npm test)                                               │                                
+ ● Agent  ▇▇▇▇▇ 1    │    ⎿  Exit code 1                                               │                                
+ skills scout ×1     │       FAIL login.test.ts                                        │                                
+ mcp       0 servers │       expected 2                                                │                                
+ configured · synthe…│                                                                 │                                
+                     │  · Read(login.ts)                                               │                                
+ RECENT ACTIVITY   2 │    ⎿  running                                                   │                                
+ · Lookin… 9m59s ago │  · Working    (4s · ↓ 0 tokens · esc to interrupt)              │                                
+ › refac… 10m00s ago │    ⎿ ☒ Read                                                     │                                
+                     │      ■ Fixing                                                   │                                
+                     │      ☐ Test                                                     │                                
+ SESSION STA…  1m00s │  ╭───────────────────────────────────────────────────────────╮  │                                
+ files read        1 │  │ > hello                                                   │  │                                
+ files edited      0 │  ╰───────────────────────────────────────────────────────────╯  │                                
+ commands run      1 │  ⏸ manual mode on (shift+tab to cycle)             fake-sonnet  │                                
+ enter send   esc interrupt   ⇧tab mode   tab agent   /config panels   alt+v paste image         proj │ 0 files changed 

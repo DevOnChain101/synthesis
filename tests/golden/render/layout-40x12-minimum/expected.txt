@@ -1,0 +1,11 @@
+ ⢎⡱   workspace proj           12:00:00 
+ SYNTHESIS        /work/proj  · working 
+  · Working    (4s · ↓ 0 tokens · esc t…
+    ⎿ ☒ Read                            
+      ■ Fixing                          
+      ☐ Test                            
+  ╭──────────────────────────────────╮  
+  │ > hello                          │  
+  ╰──────────────────────────────────╯  
+  ⏸ manual mode on         fake-sonnet  
+ enter send   esc interrupt        proj 

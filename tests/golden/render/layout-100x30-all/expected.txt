@@ -1,0 +1,30 @@
+ ⢎⡱  S Y N T H E S I S   ● 2 live │ workspace proj │ model anthropic/fake-sonnet           12:00:00 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ WORKSPACE         1 │ AGENT STATUS                          · coding │ USAGE & METRICS      7 days 
+ ▌● proj           2 │ ready · planning · coding · verifying          │ Tokens     ███████████ 6.0k 
+                     │ Working on  Agent explorer: find files         │ Tool calls ███████░░░░   14 
+ RUNNING SESSIONS  2 │ Next        Test                               │ Messages   ███████████   21 
+ ►● proj-0       10% │                                                │ Agents     ██░░░░░░░░░    3 
+ project-0 (…ace)    │ SYNTHESIS                /work/proj  · working │ Sessions   ████░░░░░░░    7 
+  ● proj-1       10% │  │ look                                        │                             
+ project-1 (…ace)    │                                                │                             
+                     │  ● I will check login.ts and retry():          │                             
+ SESSION     running │    • first                                     │                             
+ model  anthropic/f… │    • second                                    │ SYSTEM HEALTH       healthy 
+ mode   manual       │                                                │ ● Core agent        working 
+ effort auto         │  ● Bash(npm test)                              │ ● Tool runtime    sandbox … 
+                     │    ⎿  Exit code 1                              │ ○ MCP servers     none con… 
+ TOOLS & SKILLS    5 │       FAIL login.test.ts                       │ ● Memory store    available 
+ ● Read   ▇▇▇▇▇ 1    │       expected 2                               │ ○ Browser sandbox no data … 
+ skills scout ×1     │                                                │                             
+                     │  · Read(login.ts)                              │ SUB-AGENTS                  
+ RECENT ACTIVITY   2 │    ⎿  running                                  │ No sub-agents yet · /agents 
+ · Lookin… 9m59s ago │  · Working    (4s · ↓ 0 tokens · esc to interr…│                             
+ › refac… 10m00s ago │    ⎿ ☒ Read                                    │                             
+                     │      ■ Fixing                                  │                             
+                     │      ☐ Test                                    │                             
+ SESSION STA…  1m00s │  ╭──────────────────────────────────────────╮  │                             
+ files read        1 │  │ > hello                                  │  │                             
+ files edited      0 │  ╰──────────────────────────────────────────╯  │                             
+ commands run      1 │  ⏸ manual mode on  fake-sonnet · effort: auto  │                             
+ enter send   esc interrupt   ⇧tab mode   tab agent   /config panels         proj │ 0 files changed 

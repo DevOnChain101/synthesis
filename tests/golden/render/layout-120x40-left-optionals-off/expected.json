@@ -1,0 +1,85 @@
+{
+  "cols": 120,
+  "rows": 40,
+  "lines": [
+    " ⢎⡱  S Y N T H E S I S   ● 2 live │ workspace proj │ session session- │ model anthropic/fake-sonnet            12:00:00 ",
+    "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+    " WORKSPACE         1 │ AGENT STATUS                 · coding    CONTEXT             3% │ USAGE & METRICS         7 days ",
+    " ▌● proj           2 │ ready · planning · coding · verifying    tokens   5.9k / 200.0k │ Tokens     ██████████████ 6.0k ",
+    "                     │ Working on  Agent explorer: find fil…    ▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ Tool calls █████████░░░░░   14 ",
+    "                     │ Next        Test                         in 9.0k · out 1.5k     │ Messages   ██████████████   21 ",
+    "                     │                                          cache 20.0k (hit 69%) …│ Agents     ██░░░░░░░░░░░░    3 ",
+    "                     │                                                                 │ Sessions   █████░░░░░░░░░    7 ",
+    "                     │ SYNTHESIS                                 /work/proj  · working │                                ",
+    "                     │                                                                 │                                ",
+    "                     │                                                                 │                                ",
+    "                     │                                                                 │                                ",
+    "                     │                                                                 │ SYSTEM HEALTH          healthy ",
+    "                     │                                                                 │ ● Core agent           working ",
+    "                     │                                                                 │ ● Tool runtime    sandbox enf… ",
+    "                     │  > fix the flaky login test                                     │ ○ MCP servers     none config… ",
+    "                     │                                                                 │ ● Memory store       available ",
+    "                     │  ✻ Thinking · 2.0s                                              │ ○ Browser sandbox  no data yet ",
+    "                     │  │ look                                                         │                                ",
+    "                     │                                                                 │                                ",
+    "                     │  ● I will check login.ts and retry():                           │                                ",
+    " RUNNING SESSIONS  2 │    • first                                                      │ SUB-AGENTS                     ",
+    " ►● proj-0       10% │    • second                                                     │ No sub-agents yet · /agents    ",
+    " project-0 (…ace)    │                                                                 │                                ",
+    "  ● proj-1       10% │  ● Bash(npm test)                                               │                                ",
+    " project-1 (…ace)    │    ⎿  Exit code 1                                               │                                ",
+    "                     │       FAIL login.test.ts                                        │                                ",
+    "                     │       expected 2                                                │                                ",
+    "                     │                                                                 │                                ",
+    "                     │  · Read(login.ts)                                               │                                ",
+    "                     │    ⎿  running                                                   │                                ",
+    "                     │  · Working    (4s · ↓ 0 tokens · esc to interrupt)              │                                ",
+    "                     │    ⎿ ☒ Read                                                     │                                ",
+    "                     │      ■ Fixing                                                   │                                ",
+    "                     │      ☐ Test                                                     │                                ",
+    "                     │  ╭───────────────────────────────────────────────────────────╮  │                                ",
+    "                     │  │ > hello                                                   │  │                                ",
+    "                     │  ╰───────────────────────────────────────────────────────────╯  │                                ",
+    "                     │  ⏸ manual mode on (shift+tab to cycle)             fake-sonnet  │                                ",
+    " enter send   esc interrupt   ⇧tab mode   tab agent   /config panels   alt+v paste image         proj │ 0 files changed "
+  ],
+  "rects": {
+    "chatRect": {
+      "x": 22,
+      "y": 8,
+      "w": 65,
+      "h": 31
+    },
+    "sidebarRect": {
+      "x": 0,
+      "y": 2,
+      "w": 22,
+      "h": 37
+    },
+    "dockRect": {
+      "x": 88,
+      "y": 21,
+      "w": 32,
+      "h": 18
+    },
+    "sessionRows": [
+      {
+        "y": 22,
+        "id": "session-0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "y": 23,
+        "id": "session-0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "y": 24,
+        "id": "session-1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      {
+        "y": 25,
+        "id": "session-1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ],
+    "workspaceRows": []
+  }
+}

@@ -29,6 +29,7 @@ use crate::resume::Resume;
 use crate::status::SandboxStatus;
 use crate::tty::{SharedOut, Tty};
 use crate::tui_settings::TuiSettings;
+use synthesis_tui_render::dash::McpLive;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExitReason {
@@ -98,8 +99,15 @@ pub struct Options {
     /// Shown as warnings in the pane from the first frame (sanitised on ingest); the matching
     /// `Notice` events arriving later are not shown twice.
     pub startup_notes: Vec<String>,
-    /// Theme and glyph set from the user settings (the CLI reads the file).
+    /// Theme, glyph set and panels from the user settings (the CLI reads the file).
     pub tui: TuiSettings,
+    /// What was wrong in `synthesis.tui` (shown at the top of `/config`).
+    pub tui_diagnostics: Vec<String>,
+    /// Where `settings.json` lives: `/config` writes the `synthesis.tui` section there when it
+    /// closes. `None`: nowhere to write, the changes last for the session.
+    pub synthesis_home: Option<std::path::PathBuf>,
+    /// Live MCP server state for the panels (asked for at each frame).
+    pub mcp_status: Option<Box<dyn Fn() -> Vec<McpLive>>>,
     /// Default: the OS tool, then OSC 52.
     pub clipboard: Option<Vec<Box<dyn ClipboardSink>>>,
     /// Right-click paste. Default: the OS tool(s) for the platform.
@@ -144,6 +152,9 @@ impl Options {
             resume: None,
             startup_notes: vec![],
             tui: TuiSettings::default(),
+            tui_diagnostics: vec![],
+            synthesis_home: None,
+            mcp_status: None,
             clipboard: None,
             paste_source: None,
             opener: None,
@@ -197,6 +208,7 @@ fn cfg_for(o: &Options) -> AppConfig {
 }
 
 struct Runner {
+    settings_home: Option<std::path::PathBuf>,
     mcp_report: Option<Box<dyn Fn() -> Vec<String>>>,
     memory: Option<MemoryHook>,
     harness: Arc<Harness>,
@@ -476,7 +488,13 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
         .map(|r| r.history.clone())
         .unwrap_or_default();
     let mut app = App::new(cfg_for(&o), &replay, clock());
-    app.render_cfg = o.tui.render_config(color, &o.env);
+    app.set_tui(
+        o.tui,
+        std::mem::take(&mut o.tui_diagnostics),
+        color,
+        o.env.clone(),
+    );
+    app.mcp_status = o.mcp_status.take();
     if let Some(m) = &o.memory {
         app.set_memory_files(m.user_file.clone(), m.project_file.clone());
         app.set_note_preview(m.preview.clone());
@@ -539,6 +557,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
     };
 
     let mut runner = Runner {
+        settings_home: o.synthesis_home.clone(),
         mcp_report: o.mcp_report.take(),
         memory: o.memory.take(),
         harness: o.harness.clone(),
@@ -806,6 +825,10 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
         }
     };
 
+    // `/config` was still open when the app left: its changes are written like on close
+    if let Some(v) = app.unsaved_tui() {
+        let _ = save_tui(runner.settings_home.as_deref(), &v);
+    }
     guard.restore();
     #[cfg(unix)]
     if let Some(h) = signals {
@@ -891,6 +914,10 @@ fn exec(
             None => app.output("# notes are not available in this session".into(), true),
         },
         Cmd::Compact { instructions } => runner.compact(app, instructions, now),
+        Cmd::SaveTui(v) => {
+            let (text, bad) = save_tui(runner.settings_home.as_deref(), &v);
+            app.toast(text, now, bad);
+        }
         Cmd::Open(t) => match opener.open(&t) {
             Ok(()) => {
                 let verb = if matches!(t, OpenTarget::Url(_)) {
@@ -944,6 +971,25 @@ fn exec(
     Ok(())
 }
 
+/// Writes the `/config` result to the user settings file: `(toast text, is it a failure)`.
+fn save_tui(home: Option<&std::path::Path>, v: &serde_json::Value) -> (String, bool) {
+    let Some(home) = home else {
+        return (
+            "no settings folder: changes kept for this session".into(),
+            true,
+        );
+    };
+    match synthesis_settings::persist_user_tui(home, v) {
+        Ok(()) => ("settings saved".into(), false),
+        // the file exists but cannot be used (not valid JSON, not an object): it is left alone
+        Err(e) if e.kind() == io::ErrorKind::InvalidData => (
+            "settings.json is unreadable; changes kept for this session".into(),
+            true,
+        ),
+        Err(e) => (format!("settings not saved: {e}"), true),
+    }
+}
+
 fn describe(t: &OpenTarget) -> String {
     t.describe()
 }
@@ -970,6 +1016,9 @@ pub struct OnceOptions {
     pub tui: TuiSettings,
     /// Read only for `SYNTHESIS_ASCII` and `TERM` (the glyph set).
     pub env: Env,
+    /// Draw the `/config` screen, on this group (0 Panels .. 3 Mouse), instead of the chat: the
+    /// headless way to see it (the CLI sets it from `SYNTHESIS_ONCE_SCREEN`).
+    pub config_group: Option<usize>,
 }
 
 /// `--once`: one frame to `out`, no raw mode, no input. The text is exactly the lines the
@@ -993,11 +1042,39 @@ pub fn render_once(o: &OnceOptions, out: &mut impl Write) -> io::Result<()> {
         agent_defs: vec![],
     };
     let mut app = App::new(cfg, &o.events, o.now);
-    app.render_cfg = o.tui.render_config(o.color, &o.env);
+    app.set_tui(o.tui, vec![], o.color, o.env.clone());
     app.startup_notes(&o.startup_notes);
+    if let Some(g) = o.config_group {
+        app.open_config(g);
+    }
     let lines = app.render(o.cols, o.rows, o.now);
     for l in &lines {
         writeln!(out, "{}", encode(l, o.color))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+
+    #[test]
+    fn saving_writes_the_user_file_and_reports_an_unreadable_one_without_touching_it() {
+        let d = tempfile::tempdir().unwrap();
+        let v = TuiSettings::default().to_value();
+        assert_eq!(
+            save_tui(Some(d.path()), &v),
+            ("settings saved".to_string(), false)
+        );
+        let (back, diags) = TuiSettings::load_user(d.path());
+        assert_eq!((back, diags.len()), (TuiSettings::default(), 0));
+        std::fs::write(d.path().join("settings.json"), "{oops").unwrap();
+        let (text, bad) = save_tui(Some(d.path()), &v);
+        assert!(bad && text.contains("unreadable"), "{text}");
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("settings.json")).unwrap(),
+            "{oops"
+        );
+        assert!(save_tui(None, &v).1);
+    }
 }
