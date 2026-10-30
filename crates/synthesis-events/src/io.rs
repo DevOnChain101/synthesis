@@ -218,6 +218,18 @@ mod tests {
             background: true,
         }
     }
+    fn peer() -> PeerAddr {
+        PeerAddr {
+            workspace_key: "k".into(),
+            workspace_label: "api".into(),
+            workspace_root: Some("/r".into()),
+            session_id: "s".into(),
+            session_name: None,
+            agent_id: None,
+            instance: "main".into(),
+            kind: "main".into(),
+        }
+    }
     fn end() -> SessionEnd {
         SessionEnd {
             reason: "r".into(),
@@ -450,6 +462,41 @@ mod tests {
             Event::MessageDropped {
                 message_id: s("m"),
                 reason: s("cancelled"),
+            },
+            Event::PeerListening {
+                endpoint_kind: s("unix"),
+            },
+            Event::PeerStopped {
+                endpoint_kind: s("pipe"),
+            },
+            Event::PeerRequestSent {
+                request_id: s("r"),
+                from: peer(),
+                to: peer(),
+                summary: s("q"),
+                bytes: 3,
+                chain_len: 1,
+            },
+            Event::PeerRequestReceived {
+                request_id: s("r"),
+                from: peer(),
+                to: peer(),
+                summary: s("q"),
+                bytes: 3,
+                decision: s("rejected"),
+                reason: Some(s("denied")),
+            },
+            Event::PeerReplyPartial {
+                request_id: s("r"),
+                seq: 1,
+                text: s("t"),
+            },
+            Event::PeerReply {
+                request_id: s("r"),
+                status: s("answered"),
+                text: s("t"),
+                bytes: 1,
+                duration_ms: 5,
             },
             Event::SessionModeChanged {
                 from: s("default"),
