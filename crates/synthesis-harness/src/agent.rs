@@ -229,6 +229,7 @@ impl Harness {
             .specs()
             .into_iter()
             .filter(|s| agent.allowed.as_ref().is_none_or(|a| a.contains(&s.name)))
+            .filter(|s| s.name != "ListSessions" || self.peers_on())
             .map(|s| ToolDef {
                 name: s.name,
                 description: Some(s.description),

@@ -95,6 +95,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "Task",
     "Agent",
     "ListAgents",
+    "ListSessions",
     "AskUserQuestion",
     "ExitPlanMode",
 ];

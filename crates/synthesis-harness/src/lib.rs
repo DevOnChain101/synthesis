@@ -33,6 +33,7 @@ mod harness;
 mod hub;
 mod live;
 mod mcp_guard;
+mod peer;
 mod sink;
 pub mod testing;
 mod toolbox;
@@ -51,6 +52,7 @@ pub use harness::{
     ShellSettings, TaskOutcome, TaskRequest, browser_config, budget_from_settings,
 };
 pub use mcp_guard::{Check, GuardConfig, McpCatalog, McpGuard, McpToolInfo, ServerRules};
+pub use peer::PeerLink;
 pub use sink::{EventSink, Scope};
 pub use toolbox::{ToolBox, ToolSource, validate};
 pub use traits::*;

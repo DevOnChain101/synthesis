@@ -75,6 +75,10 @@ pub struct EventWriter<W: Write> {
 }
 
 impl<W: Write> EventWriter<W> {
+    pub fn redactor(&self) -> &Redactor {
+        &self.redactor
+    }
+
     pub fn new(out: W, session_id: impl Into<String>, redactor: Redactor) -> Self {
         Self {
             out,

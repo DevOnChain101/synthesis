@@ -90,7 +90,8 @@ async fn rig(cfg: Value, fake: Fake) -> Rig {
         config(cfg),
         addr("api", "/work/api", "sess-a"),
         fake.clone(),
-        redact,
+        Arc::new(redact),
+        Arc::new(|_, _| {}),
     );
     tokio::spawn(server.run(l));
     Rig {

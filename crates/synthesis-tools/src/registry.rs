@@ -50,9 +50,8 @@ fn side_effect(name: &str) -> SideEffectClass {
 
 fn runtime(name: &str) -> ToolRuntime {
     match name {
-        "Task" | "AskUserQuestion" | "ExitPlanMode" | "SendMessage" | "ListAgents" => {
-            ToolRuntime::Harness
-        }
+        "Task" | "AskUserQuestion" | "ExitPlanMode" | "SendMessage" | "ListAgents"
+        | "ListSessions" => ToolRuntime::Harness,
         _ => ToolRuntime::Builtin,
     }
 }

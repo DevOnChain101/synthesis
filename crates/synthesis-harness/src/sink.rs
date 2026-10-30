@@ -57,6 +57,12 @@ impl EventSink {
         }
     }
 
+    /// Masks secrets the way event payloads are masked (for text that leaves the session).
+    pub fn redact(&self, s: &str) -> String {
+        let w = self.0.writer.lock().unwrap_or_else(|e| e.into_inner());
+        w.redactor().redact_str(s)
+    }
+
     pub fn is_broken(&self) -> bool {
         self.0.broken.load(Ordering::SeqCst)
     }

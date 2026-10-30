@@ -25,6 +25,12 @@ const PARTIAL_EVERY: Duration = Duration::from_millis(500);
 const DEFAULT_TIMEOUT_S: u64 = 300;
 const MAX_TIMEOUT_S: u64 = 1800;
 const STATUS_TIMEOUT: Duration = Duration::from_millis(500);
+const ACCEPT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The owner session's redactor, applied to every outgoing byte of text.
+pub type Redact = Arc<dyn Fn(&str) -> String + Send + Sync>;
+/// Called once per parsed request with `None` (accepted) or the rejection reason.
+pub type Observer = Arc<dyn Fn(&Request, Option<&str>) + Send + Sync>;
 
 pub type BoxFut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
@@ -59,8 +65,8 @@ pub struct Server {
     /// This session's main agent.
     pub me: Addr,
     pub responder: Arc<dyn Responder>,
-    /// The owner session's `Redactor`, applied to every outgoing byte of text.
-    pub redact: fn(&str) -> String,
+    pub redact: Redact,
+    pub observer: Observer,
     state: Mutex<State>,
 }
 
@@ -94,7 +100,8 @@ impl Server {
         config: Config,
         me: Addr,
         responder: Arc<dyn Responder>,
-        redact: fn(&str) -> String,
+        redact: Redact,
+        observer: Observer,
     ) -> Arc<Self> {
         Arc::new(Self {
             key,
@@ -102,6 +109,7 @@ impl Server {
             me,
             responder,
             redact,
+            observer,
             state: Mutex::default(),
         })
     }
@@ -181,10 +189,12 @@ impl Server {
         };
         let id = req.id.clone();
         let reject = |reason: &str| json!({"t":"rejected","id":id,"reason":reason});
-        if let Some(reason) = self.check(&req, req.text.len()) {
-            return c.send(&reject(reason)).await;
-        }
-        let _slot = match self.admit(&req.from.session_id) {
+        let slot = match self.check(&req, req.text.len()) {
+            Some(reason) => Err(reason),
+            None => self.admit(&req.from.session_id),
+        };
+        (self.observer)(&req, slot.as_ref().err().copied());
+        let _slot = match slot {
             Ok(s) => s,
             Err(reason) => return c.send(&reject(reason)).await,
         };
@@ -303,13 +313,19 @@ pub struct Outgoing<'a> {
     pub timeout_s: u64,
 }
 
-/// Send one request and wait for its reply; `on_partial(seq, text)` sees every partial.
-pub async fn ask(
-    endpoint: &str,
-    key: &Key,
-    o: &Outgoing<'_>,
-    mut on_partial: impl FnMut(u64, &str),
-) -> Result<ReplyFrame, PeerError> {
+/// A request the receiver accepted. Dropping it closes the connection, which cancels the request.
+pub struct Call {
+    c: Conn,
+    id: String,
+    timeout_s: u64,
+}
+
+fn eof() -> PeerError {
+    PeerError::Io(io::ErrorKind::UnexpectedEof.into())
+}
+
+/// Connect, authenticate, send the request and wait for `accepted` / `rejected`.
+pub async fn begin(endpoint: &str, key: &Key, o: &Outgoing<'_>) -> Result<Call, PeerError> {
     let mut c = open(endpoint, key).await?;
     let timeout_s = o.timeout_s.clamp(1, MAX_TIMEOUT_S);
     c.send(
@@ -317,41 +333,81 @@ pub async fn ask(
         "text":o.text,"chain":o.chain,"timeout_s":timeout_s}),
     )
     .await?;
-    let wait = async {
+    let first = async {
         loop {
-            let f = c
-                .recv()
-                .await?
-                .ok_or_else(|| PeerError::Io(io::ErrorKind::UnexpectedEof.into()))?;
+            let f = c.recv().await?.ok_or_else(eof)?;
             if f.get("id").and_then(Value::as_str) != Some(o.id) {
                 continue;
             }
-            let s = |k| {
-                f.get(k)
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string()
-            };
             match f.get("t").and_then(Value::as_str) {
-                Some("rejected") => return Err(PeerError::Rejected(s("reason"))),
-                Some("partial") => on_partial(
-                    f.get("seq").and_then(Value::as_u64).unwrap_or(0),
-                    &s("text"),
-                ),
-                Some("reply") => {
-                    return Ok(ReplyFrame {
-                        status: s("status"),
-                        text: s("text"),
-                        from: f.get("from").and_then(|a| Addr::deserialize(a).ok()),
-                    });
+                Some("accepted") => return Ok(()),
+                Some("rejected") => {
+                    let r = f.get("reason").and_then(Value::as_str).unwrap_or("denied");
+                    return Err(PeerError::Rejected(r.to_string()));
                 }
                 _ => {}
             }
         }
     };
-    tokio::time::timeout(Duration::from_secs(timeout_s + 5), wait)
+    tokio::time::timeout(ACCEPT_TIMEOUT, first)
         .await
-        .map_err(|_| PeerError::Io(io::ErrorKind::TimedOut.into()))?
+        .map_err(|_| PeerError::Io(io::ErrorKind::TimedOut.into()))??;
+    Ok(Call {
+        c,
+        id: o.id.to_string(),
+        timeout_s,
+    })
+}
+
+impl Call {
+    /// Waits for the reply; `on_partial(seq, text)` sees every partial.
+    pub async fn wait(
+        mut self,
+        mut on_partial: impl FnMut(u64, &str),
+    ) -> Result<ReplyFrame, PeerError> {
+        let id = self.id.clone();
+        let wait = async {
+            loop {
+                let f = self.c.recv().await?.ok_or_else(eof)?;
+                if f.get("id").and_then(Value::as_str) != Some(id.as_str()) {
+                    continue;
+                }
+                let s = |k| {
+                    f.get(k)
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                match f.get("t").and_then(Value::as_str) {
+                    Some("partial") => on_partial(
+                        f.get("seq").and_then(Value::as_u64).unwrap_or(0),
+                        &s("text"),
+                    ),
+                    Some("reply") => {
+                        return Ok(ReplyFrame {
+                            status: s("status"),
+                            text: s("text"),
+                            from: f.get("from").and_then(|a| Addr::deserialize(a).ok()),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(self.timeout_s + 5), wait)
+            .await
+            .map_err(|_| PeerError::Io(io::ErrorKind::TimedOut.into()))?
+    }
+}
+
+/// Send one request and wait for its reply; `on_partial(seq, text)` sees every partial.
+pub async fn ask(
+    endpoint: &str,
+    key: &Key,
+    o: &Outgoing<'_>,
+    on_partial: impl FnMut(u64, &str),
+) -> Result<ReplyFrame, PeerError> {
+    begin(endpoint, key, o).await?.wait(on_partial).await
 }
 
 #[derive(Debug)]
