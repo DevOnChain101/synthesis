@@ -208,9 +208,9 @@ pub struct Common {
 
 #[derive(Args)]
 pub struct RunArgs {
-    /// Workspace directory (required; no implicit cwd).
+    /// Workspace directory (default: the current directory).
     #[arg(long)]
-    cwd: PathBuf,
+    cwd: Option<PathBuf>,
     #[arg(long, conflicts_with = "prompt_file")]
     prompt: Option<String>,
     #[arg(long)]
@@ -1107,8 +1107,12 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
     if a.max_cost_usd.is_some_and(|c| !c.is_finite() || c <= 0.0) {
         return Err("--max-cost-usd must be a positive number".into());
     }
-    let cwd = synthesis_core::canonicalize(&a.cwd)
-        .map_err(|e| format!("--cwd {}: {e}", a.cwd.display()))?;
+    let dir = match a.cwd.as_ref() {
+        Some(d) => d.clone(),
+        None => crate::launch_dir()?,
+    };
+    let cwd =
+        synthesis_core::canonicalize(&dir).map_err(|e| format!("--cwd {}: {e}", dir.display()))?;
     if !cwd.is_dir() {
         return Err(format!("--cwd {} is not a directory", cwd.display()));
     }

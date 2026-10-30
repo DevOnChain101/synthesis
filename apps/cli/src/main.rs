@@ -98,6 +98,14 @@ pub struct CwdArg {
     pub cwd: Option<PathBuf>,
 }
 
+/// The directory `synth` was started in. This is the ONE place the process cwd is read (the CLI
+/// boundary): the libraries still take an explicit cwd, `--cwd DIR` always wins.
+#[allow(clippy::disallowed_methods)]
+pub fn launch_dir() -> Result<PathBuf, String> {
+    std::env::current_dir()
+        .map_err(|e| format!("cannot read the current directory: {e}; pass --cwd DIR"))
+}
+
 pub struct Homes {
     pub user: PathBuf,
     pub synthesis: PathBuf,

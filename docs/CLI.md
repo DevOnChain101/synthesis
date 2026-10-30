@@ -1,5 +1,8 @@
 # CLI notes: shell prompt, approvals, permission flags
 
+## Workspace directory (`--cwd`)
+`--cwd DIR` is optional for `synth`, `synth run` and `synth --once`: without it the workspace is the directory `synth` was started in (read once at the CLI boundary; the libraries never read the process cwd). `--resume` uses the saved session's cwd. `synth doctor` needs no workspace.
+
 ## `!` shell prompt (interactive app)
 - Type `!` at the start of the prompt: the prompt shows `! bash mode`. Enter runs the command; Esc (or backspace on the empty prompt) leaves the mode; while a command runs, Esc cancels it and kills its process tree. Only a typed `!` starts a command: pasted text or a burst of characters starting with `!` is plain text.
 - `!cmd` runs as a user-initiated `Bash` call: same terminal runtime, sandbox, `--network` mode and artifact log as the model's Bash tool; events carry `origin:"user"`. A plain `ask` is approved (you typed it); deny rules, protected paths and critical removals still block, with the reason shown. `PreToolUse` hooks run for it and only a deny is honoured (ask and allow are moot: you typed it).

@@ -19,7 +19,7 @@ use crate::run::{
 
 #[derive(Args)]
 pub struct TuiArgs {
-    /// Start folder (required: no implicit process cwd).
+    /// Start folder (default: the current directory).
     #[arg(long)]
     pub cwd: Option<PathBuf>,
     /// Reopen a saved session (id or unique prefix).
@@ -32,15 +32,15 @@ pub struct TuiArgs {
     pub common: Common,
 }
 
-const USAGE: &str = "synth: the interactive app needs a terminal on stdin and stdout.\nUsage: synth --cwd DIR [--resume ID] [--once] [--worktree] [--sandbox MODE] [--network MODE] ...\n       synth run --cwd DIR --prompt TEXT   (headless; events as JSONL)\n       synth --help";
+const USAGE: &str = "synth: the interactive app needs a terminal on stdin and stdout.\nUsage: synth [--cwd DIR] [--resume ID] [--once] [--worktree] [--sandbox MODE] [--network MODE] ...\n       synth run [--cwd DIR] --prompt TEXT   (headless; events as JSONL)\n       synth --help";
 
 fn start_dir(a: &TuiArgs) -> Result<PathBuf, String> {
-    // The workspace is always explicit (clippy.toml forbids reading the process cwd).
-    let d = a
-        .cwd
-        .as_ref()
-        .ok_or("pass --cwd DIR: synthesis never assumes the process working directory")?;
-    synthesis_core::canonicalize(d).map_err(|e| format!("--cwd {}: {e}", d.display()))
+    // `--cwd DIR`, else the directory `synth` was started in (the only place the process cwd is read).
+    let d = match a.cwd.as_ref() {
+        Some(d) => d.clone(),
+        None => crate::launch_dir()?,
+    };
+    synthesis_core::canonicalize(&d).map_err(|e| format!("--cwd {}: {e}", d.display()))
 }
 
 /// Canonical project root of `cwd`.

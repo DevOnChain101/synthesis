@@ -112,8 +112,8 @@ Transitions not listed are rejected (error + `notice`). Each accepted transition
 ## 4. Invariants
 
 ### 4.1 No implicit cwd inheritance [new; doc §5.2]
-1. A session is created only from an explicit `WorkspaceSelection`: `Path(p)` (CLI `--cwd`, TUI folder picker), `Resume(session_id)` (persisted `root`/`cwd`), or `LaunchDir` (TUI only: the binary's start directory, captured once at startup and recorded as the explicit selection).
-2. Node defaults the agent cwd to `process.cwd()` [from-node agent.js:303]; Rust MUST NOT. Enforcement: `clippy.toml` `disallowed-methods = ["std::env::current_dir", "std::env::set_current_dir"]` for all crates except `apps/cli/src/main.rs`.
+1. A session is created only from an explicit `WorkspaceSelection`: `Path(p)` (CLI `--cwd`, TUI folder picker), `Resume(session_id)` (persisted `root`/`cwd`), or `LaunchDir` (CLI `synth`, `synth run` and the TUI when `--cwd` is absent: the binary's start directory, read once at the CLI boundary by `launch_dir()` and recorded as the explicit selection; `--cwd` always wins).
+2. Node defaults the agent cwd to `process.cwd()` [from-node agent.js:303]; Rust MUST NOT. The libraries never read the process cwd; only `launch_dir()` in the CLI boundary does. Enforcement: `clippy.toml` `disallowed-methods = ["std::env::current_dir", "std::env::set_current_dir"]` for all crates except `apps/cli/src/main.rs`.
 3. `root` never changes. `cwd` changes only through an explicit session command, and the new value must be inside `root` or `additional_dirs`. `cd` inside a Bash command does not persist (each command runs in a fresh shell with `current_dir(ctx.workspace.cwd)`) [from-node bash.js:173].
 4. Every child process is spawned with explicit `current_dir` and an explicit env built from `ctx.env`.
 

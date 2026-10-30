@@ -20,7 +20,7 @@ Review record: all seven specs were reviewed and approved by the product owner o
 ## Decisions taken in these drafts (challenge them here)
 1. Ported tools keep their Node/Claude names (`Read`, `Bash`, …). Doc §5.6 ids map onto them; new tools use `_` instead of `.` on the wire (dots are not valid in provider tool names). tools.md §1.
 2. `Idle` and `Recovering` are added to `SessionStatus`; terminal statuses are per task, and the session ends with `session.completed|failed|cancelled`. workspace-context.md §3.
-3. Headless `--cwd` is mandatory; the core is barred from `std::env::current_dir` by clippy. workspace-context.md §4.1.
+3. `--cwd DIR` is optional: without it the CLI boundary (`launch_dir()` in `apps/cli/src/main.rs`) reads the launch directory once; the libraries never read the process cwd (clippy bars `std::env::current_dir`) and always take an explicit cwd. Owner fix 2026-10-31 (plain `synth` used to fail with `pass --cwd DIR`). workspace-context.md §4.1.
 4. Headless `ask` is never prompted (no stdin approval). What happens depends on the permission MODE (`synth run --permission-mode`, tools.md §3) plus a pre-declared allowlist (`--allow` / settings); an ask nobody can answer is auto-denied, and a denied write/execute call ends the task `blocked` / `approval_unavailable`. Node's "outside read is allowed when nobody can answer" is not carried over. Owner decision 2026-10-28. tools.md §3.
 5. Policy is re-checked after a hook or approver rewrites tool input (Node does not). tools.md §3.
 6. Rust adds nothing to `config.json/v1` during the parallel run; Rust-only settings live under `"synthesis"` in `settings.json`. config.md §6.

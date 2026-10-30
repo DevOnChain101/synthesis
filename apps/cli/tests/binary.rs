@@ -23,12 +23,45 @@ fn text(b: &[u8]) -> String {
 }
 
 #[test]
-fn run_without_cwd_is_a_usage_error() {
+fn run_without_cwd_uses_the_launch_dir() {
+    // no --cwd: the launch directory is the workspace, so the failure is the missing model, not the cwd
     let h = tempfile::tempdir().unwrap();
-    let o = synthesis(h.path(), &["run", "--prompt", "x"]);
+    let o = Command::new(env!("CARGO_BIN_EXE_synth"))
+        .args(["run", "--prompt", "x"])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", h.path())
+        .env("SYNTHESIS_HOME", h.path().join("synthesis"))
+        .current_dir(h.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
     assert_eq!(o.status.code(), Some(2));
     assert!(o.stdout.is_empty());
-    assert!(text(&o.stderr).contains("--cwd"), "{}", text(&o.stderr));
+    assert!(!text(&o.stderr).contains("--cwd"), "{}", text(&o.stderr));
+}
+
+#[test]
+fn once_and_doctor_work_without_cwd_flag() {
+    let h = tempfile::tempdir().unwrap();
+    let ws = h.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    for args in [&["--once"][..], &["doctor"][..]] {
+        let o = Command::new(env!("CARGO_BIN_EXE_synth"))
+            .args(args)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", h.path())
+            .env("SYNTHESIS_HOME", h.path().join("synthesis"))
+            .env("COLUMNS", "100")
+            .env("LINES", "30")
+            .current_dir(&ws)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{args:?}: {}", text(&o.stderr));
+        assert!(!text(&o.stdout).is_empty(), "{args:?}");
+    }
 }
 
 #[test]
