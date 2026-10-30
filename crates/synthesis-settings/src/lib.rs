@@ -101,6 +101,8 @@ pub struct SynthesisSettings {
     pub budget: Budget,
     /// Verification policy keys, shallow-merged per key; interpreted by `synthesis-verification`.
     pub verification: Map<String, Value>,
+    /// `peers` (messaging.md B8.5), user settings only; interpreted by `synthesis-peers`.
+    pub peers: Map<String, Value>,
     pub compat: Compat,
 }
 
@@ -410,11 +412,13 @@ impl Settings {
                 self.disable_all_hooks = b;
             }
             self.apply_env(raw);
-            self.apply_synthesis(raw, what);
-            if !user && raw.get("synthesis").and_then(|n| n.get("tui")).is_some() {
-                self.diagnostics.push(format!(
-                    "{what}: synthesis.tui is read from user settings only, ignored"
-                ));
+            self.apply_synthesis(raw, what, user);
+            for key in ["tui", "peers"] {
+                if !user && raw.get("synthesis").and_then(|n| n.get(key)).is_some() {
+                    self.diagnostics.push(format!(
+                        "{what}: synthesis.{key} is read from user settings only, ignored"
+                    ));
+                }
             }
         } else if raw.get("disableAllHooks").is_some()
             || raw.get("env").is_some()
@@ -515,7 +519,7 @@ impl Settings {
         };
     }
 
-    fn apply_synthesis(&mut self, raw: &Value, what: &str) {
+    fn apply_synthesis(&mut self, raw: &Value, what: &str, user: bool) {
         let Some(n) = raw.get("synthesis").and_then(Value::as_object) else {
             return;
         };
@@ -525,6 +529,9 @@ impl Settings {
                 "{what}: synthesis section version {version} is newer than supported {SYNTHESIS_SECTION_VERSION}, ignored"
             ));
             return;
+        }
+        if user && let Some(p) = n.get("peers").and_then(Value::as_object) {
+            self.synthesis.peers.extend(p.clone());
         }
         let num = |o: Option<&Value>, k: &str| o.and_then(|b| b.get(k)).and_then(Value::as_u64);
         let b = n.get("budget").filter(|b| b.is_object());

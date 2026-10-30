@@ -1,6 +1,6 @@
 # Spec: Inter-agent messaging (in-session sub-agents, cross-session peers) — draft 0.3
 
-Status: draft (2026-10-29). D1–D16 accepted by the owner on 2026-10-29. Tags as in events.md. Design doc: §5.13, ADR-012, roadmap R10.
+Status: draft (2026-10-29); R10b-1 transport built, see section G. D1–D16 accepted by the owner on 2026-10-29. Tags as in events.md. Design doc: §5.13, ADR-012, roadmap R10.
 Scope: **Part A**, in-session messaging (agent ↔ sub-agent, user `@agent` in chat). **Part B**, agent-to-agent request/response between live sessions of the same OS user on the same machine, in the same or different workspaces, with no human in the loop. **§1 addressing** covers both parts. Out of scope: a user CLI `synthesis send`, cross-user and network delivery.
 
 ## 0. Non-negotiables
@@ -337,3 +337,20 @@ Not done (left for R10a follow-up or R10b):
 - A queued line (shell line, `@agent:` start) is routed when it leaves the queue, so it follows the target at that time.
 - Several agents asking for approval at once toggle the single session status (`waiting_approval`/`running`) approximately.
 - Event field is `name` (not `instance`) on `subagent.started` / `subagent.status_changed`.
+
+## G. R10b-1 status (peer transport) — Partly done
+Built in `crates/synthesis-peers` (no harness dependency; OFF unless `synthesis.peers.enabled`):
+- Endpoint: unix socket `run/<rand16hex>.sock` (0700 dir, 0600 socket, `peer_cred` uid equals the `run/` owner, path over 100 B refuses to bind) or Windows pipe `\\.\pipe\synthesis-peer-<rand32hex>` (`first_pipe_instance`, `reject_remote_clients`). `run/peer.key` (32 random bytes, 0600). `platform_ok` implements the Windows "home under the user profile" rule.
+- Protocol B5: NDJSON, 1 MiB frame cap, 2 s handshake, mutual HMAC-SHA256 (`hmac` crate, D14; constant-time verify, nonces base64). The client sends only a nonce until the server proves the key.
+- Server (`serve::Server`): `disabled|too_large|denied|cycle|no_agent|rate_limited|busy` rejections, 2 concurrent responders, 10 requests per sender session per 10 min, request timeout (default 300 s, max 1800 s), cancel by frame or close (the answer future is dropped), partials coalesced to 1 per 500 ms, every outgoing text through the injected `redact` and capped at 32 KiB. The answer comes from the `serve::Responder` trait.
+- Client: `status`, `ask` (partials callback), `discover` (parallel `status`, allow-list filter, `offline` with entry cleanup through a caller-supplied writer-lock probe, else `unreachable`).
+- Registry `run/<session_id>.json` (temp+rename, removed on drop), `name_taken`. `Config::from_settings` (defaults, deny beats allow, rules `workspace:`/`ws:`/`sess:`). `synthesis-settings` keeps `synthesis.peers` from user settings only (`Settings.synthesis.peers`); project values are ignored with a diagnostic.
+- Tests: `crates/synthesis-peers/tests/peers.rs` covers C15 (round trip, same id, redaction), C20, C21 (partly), C22, C23 (policy part), C24.
+
+Not done (needs the harness or other owners, so it is left for R10b-2/3):
+- The read-only responder (`Responder` impl: snapshot per agent, tool allowlist, `stricter(mode, plan)`, snapshot withholding, budget, `max_cost_usd`), the `peer-responder` sub-agent in A's events.
+- `SendMessage` with `ws:`/`sess:` addresses, `ListSessions`, `ListAgents{scope:"all"}`, the address resolver (`not_found`/`ambiguous`), the sender permission rule `SendMessage(ws:..)`, the 4-in-flight cap, `<peer_reply>` inbox delivery, the `peer.*` events and schema.
+- `$SYNTHESIS_HOME/run` as a protected/secret path in `synthesis-permissions` and the R7 sandbox deny.
+- App wiring in `apps/cli` (starting the server, `--name`, `/name`, `/peers`, `synth doctor`, `notice` when peers are off for a long path), and the TUI. No CLI flags were added, so `docs/CLI.md` is unchanged.
+- Windows: the code is written against tokio's named-pipe API and checked with `cargo clippy --target x86_64-pc-windows-msvc`, but not run on Windows; the pipe DACL assumption stays unverified. Not yet reviewed by `security-reviewer` (D14 gate).
+- R10c offline resume.
