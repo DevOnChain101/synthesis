@@ -66,7 +66,10 @@ CREATE TABLE proposals(id TEXT PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT 
 ";
 
 /// Append-only (memory.md §11); `schema_migrations` records what ran.
-const MIGRATIONS: &[&str] = &[V1];
+/// v2 (M2): the digest a reflection job works from (redacted, capped), so a job can run later.
+const V2: &str = "ALTER TABLE reflection_jobs ADD COLUMN payload TEXT NOT NULL DEFAULT '';";
+
+const MIGRATIONS: &[&str] = &[V1, V2];
 
 pub const BODY_CAP: usize = 2048;
 pub const SKILL_BODY_CAP: usize = 16 * 1024;
@@ -624,6 +627,31 @@ impl Store {
             "UPDATE memories SET pinned=?2 WHERE id=?1",
             params![id, pinned],
         )? > 0)
+    }
+
+    /// A new version of `old` (a reflection `update`): `old` is superseded once the new record is in.
+    /// `owner` records are never replaced automatically.
+    pub fn replace(&mut self, old: &str, n: NewMemory) -> Result<PutOutcome> {
+        let Some(prev) = self.get(old)? else {
+            return bad("no such record");
+        };
+        if prev.trust == Trust::Owner {
+            return bad("owner records are never replaced automatically");
+        }
+        let out = self.put(n)?;
+        if matches!(out.op, "added" | "superseded") {
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let now = now_iso();
+            tx.execute("UPDATE memories SET status='superseded', updated_at=?2 WHERE id=?1 AND status='active'", params![old, now])?;
+            tx.execute(
+                "UPDATE memories SET supersedes=coalesce(supersedes, ?2), version=?3 WHERE id=?1",
+                params![out.id, old, prev.version + 1],
+            )?;
+            tx.commit()?;
+        }
+        Ok(out)
     }
 
     /// Hard delete (the owner's `delete`); `memory_uses` rows cascade, `supersedes` links clear.

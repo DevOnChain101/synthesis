@@ -3,10 +3,14 @@
 //! permission or reaches the permission engine. The crate reads no environment variables; the
 //! caller passes the home directory and the exact secret values to mask.
 
+mod jobs;
+mod reflect;
 mod retrieve;
 mod scan;
 mod store;
 
+pub use jobs::*;
+pub use reflect::*;
 pub use retrieve::*;
 pub use scan::{masked_fraction, scan};
 pub use store::*;

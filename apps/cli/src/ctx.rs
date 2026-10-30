@@ -51,11 +51,26 @@ pub fn read_shell_settings(user_settings: &Path) -> (ShellSettings, Vec<String>)
 
 pub type PutArtifact = Box<dyn Fn(&[u8]) -> Result<ArtifactRef, String> + Send + Sync>;
 
-struct ProviderSummarizer {
+pub(crate) struct ProviderSummarizer {
     provider: Arc<dyn ModelProvider>,
     model: String,
     cancel: CancellationToken,
     last: Mutex<String>,
+}
+
+impl ProviderSummarizer {
+    pub(crate) fn new(
+        provider: Arc<dyn ModelProvider>,
+        model: String,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self {
+            provider,
+            model,
+            cancel,
+            last: Mutex::default(),
+        }
+    }
 }
 
 impl Summarizer for ProviderSummarizer {

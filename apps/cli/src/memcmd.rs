@@ -3,13 +3,16 @@
 //! reaches the permission engine.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use clap::{Args, Subcommand};
-use synthesis_config::Env;
+use synthesis_config::{Env, ProjectTrust};
 use synthesis_core::{PathPolicy, repo_key, workspace_label};
 use synthesis_harness::sanitize_for_display as san;
-use synthesis_memory::{Filter, Memory, NewMemory, Store, Trust, now_iso};
+use synthesis_memory::{Digest, Filter, Memory, NewMemory, Store, ToolRow, Trust, now_iso};
+use synthesis_providers::{Block, Content, ModelProvider, Role};
 use synthesis_settings::find_project_root;
+use tokio_util::sync::CancellationToken;
 
 use crate::{Homes, homes};
 
@@ -31,11 +34,16 @@ pub fn repo_of(cwd: &Path) -> Repo {
 
 /// `synthesis.memory.enabled` of the USER settings.json (default on). A repository cannot turn it on.
 pub fn enabled(user_settings: &Path) -> bool {
+    flag(user_settings, "enabled")
+}
+
+/// `synthesis.memory.<key>` of the user settings.json as a bool; default on.
+fn flag(user_settings: &Path, key: &str) -> bool {
     std::fs::read(user_settings)
         .ok()
         .filter(|b| b.len() <= 1 << 20)
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|v| v.pointer("/synthesis/memory/enabled")?.as_bool())
+        .and_then(|v| v.pointer(&format!("/synthesis/memory/{key}"))?.as_bool())
         .unwrap_or(true)
 }
 
@@ -145,6 +153,20 @@ pub enum MemoryCmd {
     },
     /// Delete episodes older than 365 days; archive decayed, unused records.
     Prune,
+    /// Run the queued reflection jobs now (one capped model call each); `--retry` re-queues failed ones.
+    Reflect {
+        /// Provider id; with --model NAME, or give --model provider/model. Default: smallModel.
+        #[arg(long)]
+        provider: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+        #[arg(long)]
+        retry: bool,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
     /// Stop (`on`) or resume (`off`) memory for one repository.
     Optout {
         #[arg(value_parser = ["on", "off"])]
@@ -355,6 +377,38 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
                 now_iso()
             );
         }
+        MemoryCmd::Reflect {
+            provider,
+            model,
+            limit,
+            retry,
+            cwd,
+        } => {
+            if retry {
+                out!("re-queued {} failed job(s)", s.retry_failed().map_err(e)?);
+            }
+            let cfg = crate::load_config(env, &h, Some(&cwd_of(&cwd)), ProjectTrust::Untrusted)?;
+            let model_arg = model.or_else(|| cfg.small_model.clone());
+            let res = crate::run::resolve_provider(
+                provider.as_deref(),
+                model_arg.as_deref(),
+                &cfg,
+                &h.synthesis,
+                env,
+            )?;
+            let store = Mutex::new(Store::open(&h.synthesis, res.secrets.clone()).map_err(e)?);
+            let rf = Reflector {
+                provider: res.provider,
+                model: res.model,
+                cancel: CancellationToken::new(),
+            };
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|x| x.to_string())?;
+            let (done, failed) = rt.block_on(reflect_jobs(&store, &rf, limit));
+            out!("reflection: {done} done, {failed} failed");
+        }
         MemoryCmd::Optout { state, cwd } => {
             let repo = repo_of(&cwd_of(&cwd));
             s.touch_workspace(&repo.key, &repo.root, &repo.label)
@@ -370,11 +424,72 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
     Ok(0)
 }
 
+/// Model used for reflection (memory.md D5): `smallModel` when it names the run's provider, else
+/// the run's own model.
+pub fn small_model(cfg: &synthesis_config::Config, label: &str, fallback: &str) -> String {
+    cfg.small_model
+        .as_deref()
+        .and_then(|s| synthesis_config::parse_model(Some(s), cfg).ok())
+        .and_then(|p| {
+            let id = p.provider_id?;
+            label.starts_with(&format!("{id}/")).then_some(p.model)
+        })
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+pub struct Reflector {
+    pub provider: Arc<dyn ModelProvider>,
+    pub model: String,
+    pub cancel: CancellationToken,
+}
+
 /// The run's open store (a Mutex: the task runs on another thread).
 pub struct MemoryRun {
-    pub store: std::sync::Mutex<Store>,
+    pub store: Mutex<Store>,
     pub key: String,
     pub sid: String,
+    /// None when `synthesis.memory.reflection` is false.
+    pub reflect: Option<Reflector>,
+}
+
+pub struct StartArgs<'a> {
+    pub enabled: bool,
+    pub home: &'a Homes,
+    pub repo: &'a Repo,
+    pub prompt: &'a str,
+    pub sid: &'a str,
+    pub project_trusted: bool,
+    pub secrets: &'a [String],
+    pub provider: Arc<dyn ModelProvider>,
+    pub model: String,
+}
+
+/// Opens memory for a run and retrieves the block. No store, an opted-out repository or a disabled
+/// setting all mean "no memory this run".
+pub fn start(a: &StartArgs, cancel: CancellationToken) -> (Option<Arc<MemoryRun>>, Option<String>) {
+    let settings = a.home.synthesis.join("settings.json");
+    if !a.enabled || !enabled(&settings) {
+        return (None, None);
+    }
+    let Some(mut s) = open_for_run(a.home, a.secrets, a.repo) else {
+        return (None, None);
+    };
+    if s.opted_out(&a.repo.key) {
+        return (None, None);
+    }
+    let block = inject(&mut s, a.repo, a.prompt, a.sid, a.project_trusted);
+    let reflect = flag(&settings, "reflection").then(|| Reflector {
+        provider: a.provider.clone(),
+        model: a.model.clone(),
+        cancel,
+    });
+    let run = MemoryRun {
+        store: Mutex::new(s),
+        key: a.repo.key.clone(),
+        sid: a.sid.to_string(),
+        reflect,
+    };
+    (Some(Arc::new(run)), block)
 }
 
 fn warn(e: impl std::fmt::Display) {
@@ -408,13 +523,95 @@ pub fn inject(
     synthesis_memory::render(&r, now)
 }
 
-/// Deterministic episode from data the harness already holds (no model call), plus the outcome of
-/// the notes this task was given.
+fn clip(t: &str, n: usize) -> String {
+    t.chars().take(n).collect()
+}
+
+/// What identifies a tool call for the digest; a call that touches a secret path is left out so the
+/// reflection model never sees (or cites) it.
+fn tool_arg(input: &serde_json::Value) -> Option<String> {
+    let field = |k: &str| input.get(k).and_then(|v| v.as_str());
+    for k in ["file_path", "notebook_path", "path"] {
+        if field(k).is_some_and(|p| synthesis_core::secrets::is_secret_path(Path::new(p))) {
+            return None;
+        }
+    }
+    let arg = [
+        "command",
+        "file_path",
+        "notebook_path",
+        "path",
+        "pattern",
+        "url",
+        "query",
+        "skill",
+    ]
+    .iter()
+    .find_map(|k| field(k))
+    .unwrap_or("");
+    Some(clip(arg, 120))
+}
+
+pub fn digest_of(request: &str, out: &synthesis_harness::TaskOutcome) -> Digest {
+    let mut d = Digest {
+        request: clip(request, 400),
+        status: format!("{:?}", out.status),
+        reason: clip(&out.reason, 200),
+        files: out.changed_files.iter().take(10).cloned().collect(),
+        verification: out.verification_report_id.clone(),
+        denied: !out.needed_permissions.is_empty(),
+        ..Digest::default()
+    };
+    for m in &out.messages {
+        match &m.content {
+            Content::Text(t) if m.role == Role::User => d.user_turns.push(clip(t, 300)),
+            Content::Blocks(bs) => {
+                let mut user_text = String::new();
+                for b in bs {
+                    match b {
+                        Block::Text { text } if m.role == Role::User => user_text.push_str(text),
+                        Block::ToolUse {
+                            id,
+                            name,
+                            input: Some(input),
+                        } => {
+                            if let Some(arg) = tool_arg(input) {
+                                d.tools.push(ToolRow {
+                                    id: id.clone(),
+                                    name: name.clone(),
+                                    arg,
+                                    failed: false,
+                                });
+                            }
+                        }
+                        Block::ToolResult {
+                            tool_use_id,
+                            is_error: Some(true),
+                            ..
+                        } => {
+                            if let Some(t) = d.tools.iter_mut().find(|t| &t.id == tool_use_id) {
+                                t.failed = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if !user_text.is_empty() {
+                    d.user_turns.push(clip(&user_text, 300));
+                }
+            }
+            Content::Text(_) => {}
+        }
+    }
+    d
+}
+
+/// Deterministic episode from data the harness already holds (no model call), the outcome of the
+/// notes this task was given, and a queued reflection job when the task qualifies.
 pub fn task_ended(m: &MemoryRun, request: &str, out: &synthesis_harness::TaskOutcome) {
     let mut s = m.store.lock().unwrap_or_else(|e| e.into_inner());
     let status = format!("{:?}", out.status);
     let ok = out.status == synthesis_events::TaskStatus::Completed;
-    let clip = |t: &str, n: usize| t.chars().take(n).collect::<String>();
     let mut body = format!(
         "Request: {}\nStatus: {status}: {}",
         clip(request, 400),
@@ -432,14 +629,15 @@ pub fn task_ended(m: &MemoryRun, request: &str, out: &synthesis_harness::TaskOut
     if let Some(r) = &out.verification_report_id {
         body.push_str(&format!("\nVerification report: {r}"));
     }
+    let title = format!(
+        "{status}: {}",
+        clip(request.lines().next().unwrap_or(""), 90)
+    );
     let mut n = NewMemory::new(
         "workspace",
         &m.key,
         "episode",
-        &format!(
-            "{status}: {}",
-            clip(request.lines().next().unwrap_or(""), 90)
-        ),
+        &title,
         &body,
         Trust::Verified,
     );
@@ -451,4 +649,90 @@ pub fn task_ended(m: &MemoryRun, request: &str, out: &synthesis_harness::TaskOut
     if let Err(e) = s.finish_uses(&m.sid, None, ok) {
         warn(e);
     }
+    if m.reflect.is_some() {
+        let d = digest_of(request, out);
+        if d.qualifies()
+            && let Ok(payload) = serde_json::to_string(&d)
+            && let Err(e) = s.enqueue_job(&m.key, &m.sid, &out.task_id, &payload)
+        {
+            warn(e);
+        }
+    }
+}
+
+const REFLECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Drains up to `max` queued jobs, one capped model call each (60 s, daily call cap). A failure
+/// puts the job back; nothing here can change a task result. Returns (done, failed).
+pub async fn reflect_jobs(store: &Mutex<Store>, r: &Reflector, max: usize) -> (usize, usize) {
+    let (mut done, mut failed) = (0, 0);
+    for _ in 0..max {
+        let now = synthesis_memory::OffsetDateTime::now_utc();
+        let job = {
+            let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
+            if s.reflections_today(now).unwrap_or(i64::MAX) >= synthesis_memory::MAX_CALLS_PER_DAY {
+                eprintln!("synth: memory: daily reflection cap reached; jobs stay queued");
+                break;
+            }
+            match s.claim_job("synth", now) {
+                Ok(Some(j)) => j,
+                _ => break,
+            }
+        };
+        let result = reflect_one(store, r, &job).await;
+        let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
+        match result {
+            Ok(a) => {
+                let _ = s.finish_job(&job.id, None);
+                done += 1;
+                eprintln!(
+                    "synth: memory: reflection saved {} new, {} updated, {} to review, {} quarantined, {} dropped",
+                    a.added, a.updated, a.proposed, a.quarantined, a.dropped
+                );
+            }
+            Err(e) => {
+                let _ = s.finish_job(&job.id, Some(&e));
+                failed += 1;
+                warn(format!("reflection failed: {e}"));
+            }
+        }
+    }
+    (done, failed)
+}
+
+async fn reflect_one(
+    store: &Mutex<Store>,
+    r: &Reflector,
+    job: &synthesis_memory::Job,
+) -> Result<synthesis_memory::Applied, String> {
+    use synthesis_context::Summarizer;
+    let d: Digest = serde_json::from_str(&job.payload).map_err(|e| format!("bad payload: {e}"))?;
+    let (system, user) = {
+        let s = store.lock().unwrap_or_else(|e| e.into_inner());
+        let f = Filter {
+            workspace: Some(job.workspace_key.clone()),
+            status: Some("active".into()),
+            limit: 10,
+            ..Filter::default()
+        };
+        let existing = s.search(&d.request, &f).map_err(|e| e.to_string())?;
+        synthesis_memory::prompt(&d, &existing)
+    };
+    let sum =
+        crate::ctx::ProviderSummarizer::new(r.provider.clone(), r.model.clone(), r.cancel.clone());
+    let reply = tokio::time::timeout(REFLECT_TIMEOUT, sum.summarize(&system, &user))
+        .await
+        .map_err(|_| "timed out after 60 s".to_string())?
+        .map_err(|e| e.to_string())?;
+    let (ops, bad) = synthesis_memory::parse_ops(&reply);
+    let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
+    let c = synthesis_memory::Ctx {
+        workspace_key: &job.workspace_key,
+        session_id: &job.session_id,
+        task_id: &job.task_id,
+        job_id: &job.id,
+    };
+    let mut a = synthesis_memory::apply(&mut s, &d, ops, &c).map_err(|e| e.to_string())?;
+    a.dropped += bad;
+    Ok(a)
 }

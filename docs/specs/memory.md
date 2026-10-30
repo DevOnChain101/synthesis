@@ -1,6 +1,6 @@
 # Spec: Long-term memory — draft 0.1
 
-Status: accepted (2026-10-29); decisions D1–D8 are settled (§15); M0 (F1–F7) and M1 are implemented (see "M1 status" at the end). Tags as in events.md. Design doc: §5.5.1, ADR-013, roadmap R11.
+Status: accepted (2026-10-29); decisions D1–D8 are settled (§15); M0 (F1–F7), M1 and M2 are implemented (see the status sections at the end). Tags as in events.md. Design doc: §5.5.1, ADR-013, roadmap R11.
 
 ## 0. Non-negotiables
 1. Memory is **data, never instructions or permission grants**. It never reaches the permission engine, the auto-mode judge's user intent, approval dialogs or `set_mode`.
@@ -284,3 +284,16 @@ Deviations and gaps (to do):
 - Verified-command facts (`cmd.verify.<hash>`) need the verification report commands, which `TaskOutcome` does not carry; only the episode is written. Compaction checkpoints are not stored.
 - A project `.synthesis/settings.json` opt-out (D7) and the `disabled_workspaces` globs are not read; `--no-memory`, the user setting and `optout` are.
 - Import never keeps `owner`/`verified` trust (a file can claim anything); the Claude auto-memory import path is not wired.
+
+### M2 status (reflection; implemented 2026-10-31)
+Done (`crates/synthesis-memory` `reflect.rs`, `jobs.rs`; `apps/cli/src/memcmd.rs`):
+- Schema v2 adds `reflection_jobs.payload` (the redacted task digest, so a job can run in a later process). Opening a v1 file first writes `memory.v1.bak.db` (`VACUUM INTO`), then migrates.
+- Qualifying tasks (>= 8 tool calls, a failed call followed by a success of the same tool, more than one user turn, or a permission the run needed and did not get) queue one job at task end. Calls that touch a secret path are left out of the digest.
+- The run then drains up to 2 queued jobs after the task result is final (`synth run` only): one call each on the `Summarizer` path (`ProviderSummarizer`), 60 s timeout, the run's provider with `smallModel` when it names that provider. `synth memory reflect [--provider P --model M] [--limit N] [--retry]` drains the queue by hand. 3 attempts, then `failed`; claims expire after 10 minutes. `synthesis.memory.reflection: false` in the user settings.json stops queueing.
+- The reply is parsed tolerantly (fenced or prose-wrapped JSON, at most 8 ops, bad ops counted as dropped). Trust comes from the cited evidence: never above `agent`; `untrusted` when it cites WebFetch/WebSearch/Browser/MCP tool calls; evidence must name a real digest item (`user_msg:N`, `tool:<id>`, `verify:<id>`, `summary`) or the op is dropped. Kinds are `fact|preference|lesson` only; `episode` and `skill` are never model-written.
+- Every op goes through `Store::put`/`replace` (masking, scanner, dedupe, slots). An `add` whose title is a near copy (Jaccard >= 0.8) of an active non-owner record becomes an update (the old record is `superseded`); an op aimed at an `owner` record is dropped. User-scope results are `proposed` for `synth memory review`.
+
+Deviations and gaps:
+- Cap is 20 reflection calls per UTC day (`MAX_CALLS_PER_DAY`), not 0.50 USD: the summarizer returns no usage, so cost is not measurable here. A job is drained at the end of the next `synth run`, not at its start. The interactive app does not queue or run reflection (its code is outside this change); `synth memory reflect` drains what `synth run` queued.
+- No `memory.reflection.*` events (events crate untouched); progress goes to stderr.
+- Compaction checkpoints and the "10 nearest records" use the same FTS search on the request only.

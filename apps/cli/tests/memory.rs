@@ -172,3 +172,55 @@ mod run {
         assert!(list.contains("verified"));
     }
 }
+
+#[cfg(feature = "test-provider")]
+mod reflection {
+    use super::*;
+
+    /// A task with a failed call and a recovery qualifies; the scripted model's next reply is the
+    /// reflection answer. One op cites a real call, one cites a call that does not exist.
+    #[test]
+    fn a_recovering_task_is_reflected_into_a_note() {
+        let r = Rig::new();
+        std::fs::write(r.repo().join("a.txt"), "hello\n").unwrap();
+        let ops = serde_json::json!({"ops": [
+            {"op": "add", "kind": "fact", "scope": "workspace", "title": "a.txt greets",
+             "body": "a.txt holds a greeting used by the tests", "evidence": ["tool:fake_1_0"]},
+            {"op": "add", "kind": "fact", "scope": "workspace", "title": "Invented",
+             "body": "never happened", "evidence": ["tool:nope"]}
+        ]});
+        let script = serde_json::json!([
+            {"tools": [{"name": "Read", "input": {"file_path": "missing.txt"}}]},
+            {"tools": [{"name": "Read", "input": {"file_path": "a.txt"}}]},
+            {"text": "done"},
+            {"text": ops.to_string()}
+        ]);
+        let path = r.dir.path().join("script.json");
+        std::fs::write(&path, script.to_string()).unwrap();
+        let mut c = Command::new(env!("CARGO_BIN_EXE_synth"));
+        c.args(["run", "--cwd", cwd(&r.repo()), "--prompt", "read a.txt"])
+            .arg("--provider")
+            .arg(format!("fake:{}", path.display()))
+            .args(["--sandbox", "off"])
+            .env_clear();
+        for k in ["PATH", "SystemRoot", "PATHEXT", "ComSpec", "TEMP", "TMP"] {
+            if let Some(v) = std::env::var_os(k) {
+                c.env(k, v);
+            }
+        }
+        c.env("HOME", r.dir.path())
+            .env("USERPROFILE", r.dir.path())
+            .env("SYNTHESIS_HOME", r.dir.path().join("synthesis"))
+            .stdin(Stdio::null());
+        let o = c.output().unwrap();
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(err.contains("reflection saved 1 new"), "{err}");
+        let list = r.ok(&["list", "--cwd", cwd(&r.repo()), "--kind", "fact"]);
+        assert!(
+            list.contains("a.txt greets") && list.contains(" agent "),
+            "{list}"
+        );
+        assert!(!list.contains("Invented"));
+        assert!(r.ok(&["stats"]).contains("0 queued"));
+    }
+}

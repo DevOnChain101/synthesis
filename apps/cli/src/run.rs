@@ -495,7 +495,13 @@ pub fn prepare(
             sanitize_for_display(&settings.env_refused.join(", "))
         );
     }
-    let res = resolve_provider(c, &cfg, &h.synthesis, env)?;
+    let res = resolve_provider(
+        c.provider.as_deref(),
+        c.model.as_deref(),
+        &cfg,
+        &h.synthesis,
+        env,
+    )?;
 
     let price = pricing(&h.synthesis.join("settings.json"), &res.label, &res.model);
     if limits.max_cost_usd.is_some() && price.is_none() {
@@ -923,34 +929,20 @@ pub fn prepare(
         trust == ProjectTrust::Trusted,
     );
     let repo = crate::memcmd::repo_of(&ws.root);
-    let memory = (!c.no_memory && crate::memcmd::enabled(&h.synthesis.join("settings.json")))
-        .then(|| crate::memcmd::open_for_run(&h, &res.secrets, &repo))
-        .flatten()
-        .map(|mut s| {
-            let block = (!s.opted_out(&repo.key))
-                .then(|| {
-                    crate::memcmd::inject(
-                        &mut s,
-                        &repo,
-                        &prompt,
-                        &sid,
-                        trust == ProjectTrust::Trusted,
-                    )
-                })
-                .flatten();
-            (std::sync::Mutex::new(s), block)
-        });
-    let (memory, memory_block) = match memory {
-        Some((s, b)) => (
-            Some(Arc::new(crate::memcmd::MemoryRun {
-                store: s,
-                key: repo.key.clone(),
-                sid: sid.clone(),
-            })),
-            b,
-        ),
-        None => (None, None),
-    };
+    let (memory, memory_block) = crate::memcmd::start(
+        &crate::memcmd::StartArgs {
+            enabled: !c.no_memory,
+            home: &h,
+            repo: &repo,
+            prompt: &prompt,
+            sid: &sid,
+            project_trusted: trust == ProjectTrust::Trusted,
+            secrets: &res.secrets,
+            provider: res.provider.clone(),
+            model: crate::memcmd::small_model(&cfg, &res.label, &res.model),
+        },
+        cancel.clone(),
+    );
     let mut context = SynthesisContext::new(
         instructions,
         &prompt,
@@ -1241,6 +1233,9 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
             }
             if let (Some(m), Ok(out)) = (&memory2, &r) {
                 crate::memcmd::task_ended(m, &request2, out);
+                if let Some(rf) = &m.reflect {
+                    crate::memcmd::reflect_jobs(&m.store, rf, 2).await;
+                }
             }
             r
         });
@@ -1353,23 +1348,24 @@ fn read_criteria(f: &Path) -> Result<Vec<Criterion>, String> {
         .collect()
 }
 
-struct Resolved {
-    provider: Arc<dyn ModelProvider>,
-    model: String,
-    label: String,
-    secrets: Vec<String>,
+pub(crate) struct Resolved {
+    pub provider: Arc<dyn ModelProvider>,
+    pub model: String,
+    pub label: String,
+    pub secrets: Vec<String>,
 }
 
-fn resolve_provider(
-    a: &Common,
+pub(crate) fn resolve_provider(
+    provider_arg: Option<&str>,
+    model_arg: Option<&str>,
     cfg: &Config,
     synthesis_home: &Path,
     env: &Env,
 ) -> Result<Resolved, String> {
-    if let Some(script) = a.provider.as_deref().and_then(|p| p.strip_prefix("fake:")) {
+    if let Some(script) = provider_arg.and_then(|p| p.strip_prefix("fake:")) {
         #[cfg(feature = "test-provider")]
         {
-            let model = a.model.clone().unwrap_or_else(|| "fake-model".into());
+            let model = model_arg.map_or_else(|| "fake-model".to_string(), String::from);
             return Ok(Resolved {
                 provider: crate::fake::load(Path::new(script))?,
                 label: format!("fake/{model}"),
@@ -1382,7 +1378,7 @@ fn resolve_provider(
             "--provider fake:{script} needs a build with the test-provider feature"
         ));
     }
-    let spec = match (&a.provider, &a.model) {
+    let spec = match (provider_arg, model_arg) {
         (Some(p), Some(m)) if !m.contains('/') => Some(format!("{p}/{m}")),
         (Some(p), None) => cfg
             .model
@@ -1396,7 +1392,7 @@ fn resolve_provider(
                     .first()
                     .map(|m| format!("{p}/{m}"))
             }),
-        (_, m) => m.clone(),
+        (_, m) => m.map(String::from),
     };
     let parsed = parse_model(spec.as_deref(), cfg).map_err(|_| {
         "no model configured: pass --model provider/model or set SYNTHESIS_MODEL".to_string()
