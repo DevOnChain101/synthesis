@@ -424,7 +424,7 @@ fn canon_lossy(p: &Path) -> PathBuf {
 
 /// Synthesis's own state under `synthesis_home` that a sandboxed command must neither read nor write:
 /// credentials, settings, the session database (prompts, tool output), the memory store and
-/// `projects/` (transcripts, imported notes).
+/// `projects/` (transcripts, imported notes), `run/` (peer key, sockets, registry).
 pub fn synthesis_state_paths(synthesis_home: &Path) -> Vec<PathBuf> {
     [
         "auth.json",
@@ -434,6 +434,8 @@ pub fn synthesis_state_paths(synthesis_home: &Path) -> Vec<PathBuf> {
         "synthesis.db-shm",
         "memory",
         "projects",
+        // peer endpoint sockets, `peer.key` and the session registry (messaging.md B8.4)
+        "run",
     ]
     .map(|n| synthesis_home.join(n))
     .to_vec()
@@ -626,6 +628,12 @@ mod tests {
         } else {
             s.into()
         })
+    }
+
+    #[test]
+    fn peer_run_dir_is_synthesis_state() {
+        let home = p("/h/.synthesis");
+        assert!(synthesis_state_paths(&home).contains(&home.join("run")));
     }
 
     #[test]

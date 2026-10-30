@@ -4,6 +4,7 @@
 //! This crate is the transport, registry, policy and protocol. The model-facing parts (the
 //! read-only responder, `SendMessage`, inbox) plug in through [`serve::Responder`].
 
+pub mod address;
 pub mod net;
 pub mod serve;
 
