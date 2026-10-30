@@ -1,6 +1,6 @@
 # Spec: Inter-agent messaging (in-session sub-agents, cross-session peers) — draft 0.3
 
-Status: draft (2026-10-29); R10b-1 transport built, see section G. D1–D16 accepted by the owner on 2026-10-29. Tags as in events.md. Design doc: §5.13, ADR-012, roadmap R10.
+Status: draft (2026-10-29); R10b built except TUI, confirm_replies and offline resume, see section G. D1–D16 accepted by the owner on 2026-10-29. Tags as in events.md. Design doc: §5.13, ADR-012, roadmap R10.
 Scope: **Part A**, in-session messaging (agent ↔ sub-agent, user `@agent` in chat). **Part B**, agent-to-agent request/response between live sessions of the same OS user on the same machine, in the same or different workspaces, with no human in the loop. **§1 addressing** covers both parts. Out of scope: a user CLI `synthesis send`, cross-user and network delivery.
 
 ## 0. Non-negotiables
@@ -329,7 +329,7 @@ The owner accepted every recommendation of D9–D16:
 ## F. R10a status (in-session messaging) — Not done
 Built: hub, drain points, wait for background agents, `Task{name,run_in_background}`, SendMessage/ListAgents, `TaskAgent` (a task driven by a retained or new sub-agent), additive events, TUI `@` routing, Tab target cycle, target line, agent rows, `/agents`.
 Not done (left for R10a follow-up or R10b):
-- Cross-session peers (all of Part B) and session-qualified addresses (`ws:`/`sess:` are rejected with a note). `ListSessions` is not registered.
+- Cross-session peers: now built, see section G.
 - `@file` mentions in the text routed to a sub-agent are not expanded (the line goes as typed); the picker inserts plain text, not a coloured agent chip.
 - `/agents --all` and per-agent docked transcript view: agents show as `◆` rows and as `@name` prefixed rows in the main transcript; the docked view (`chat_agent`) is not fed.
 - The hub lives in the `Harness`: a `/model` switch builds a new harness and loses the retained sub-agents.
@@ -338,19 +338,29 @@ Not done (left for R10a follow-up or R10b):
 - Several agents asking for approval at once toggle the single session status (`waiting_approval`/`running`) approximately.
 - Event field is `name` (not `instance`) on `subagent.started` / `subagent.status_changed`.
 
-## G. R10b-1 status (peer transport) — Partly done
-Built in `crates/synthesis-peers` (no harness dependency; OFF unless `synthesis.peers.enabled`):
-- Endpoint: unix socket `run/<rand16hex>.sock` (0700 dir, 0600 socket, `peer_cred` uid equals the `run/` owner, path over 100 B refuses to bind) or Windows pipe `\\.\pipe\synthesis-peer-<rand32hex>` (`first_pipe_instance`, `reject_remote_clients`). `run/peer.key` (32 random bytes, 0600). `platform_ok` implements the Windows "home under the user profile" rule.
-- Protocol B5: NDJSON, 1 MiB frame cap, 2 s handshake, mutual HMAC-SHA256 (`hmac` crate, D14; constant-time verify, nonces base64). The client sends only a nonce until the server proves the key.
-- Server (`serve::Server`): `disabled|too_large|denied|cycle|no_agent|rate_limited|busy` rejections, 2 concurrent responders, 10 requests per sender session per 10 min, request timeout (default 300 s, max 1800 s), cancel by frame or close (the answer future is dropped), partials coalesced to 1 per 500 ms, every outgoing text through the injected `redact` and capped at 32 KiB. The answer comes from the `serve::Responder` trait.
-- Client: `status`, `ask` (partials callback), `discover` (parallel `status`, allow-list filter, `offline` with entry cleanup through a caller-supplied writer-lock probe, else `unreachable`).
-- Registry `run/<session_id>.json` (temp+rename, removed on drop), `name_taken`. `Config::from_settings` (defaults, deny beats allow, rules `workspace:`/`ws:`/`sess:`). `synthesis-settings` keeps `synthesis.peers` from user settings only (`Settings.synthesis.peers`); project values are ignored with a diagnostic.
-- Tests: `crates/synthesis-peers/tests/peers.rs` covers C15 (round trip, same id, redaction), C20, C21 (partly), C22, C23 (policy part), C24.
+## G. R10b status (cross-session peers) — Built, security review pending
+Built:
+- `crates/synthesis-peers` (OFF unless `synthesis.peers.enabled` or `--peers`):
+  - Endpoint: unix socket `run/<rand16hex>.sock` (0700 dir, 0600 socket, `peer_cred` uid equals the `run/` owner, path over 100 B refuses to bind) or Windows pipe `\\.\pipe\synthesis-peer-<rand32hex>` (`first_pipe_instance`, `reject_remote_clients`). `run/peer.key` (32 random bytes, 0600). `platform_ok` implements the Windows "home under the user profile" rule.
+  - Protocol B5: NDJSON, 1 MiB frame cap, 2 s handshake, mutual HMAC-SHA256 (`hmac` crate, D14; constant-time verify, base64 nonces). The client sends only a nonce until the server proves the key.
+  - Server (`serve::Server`): `disabled|too_large|denied|cycle|no_agent|rate_limited|busy`, 2 concurrent responders, 10 requests per sender session per 10 min, request timeout (default 300 s, max 1800 s), cancel by frame or close, partials coalesced to 1 per 500 ms, all outgoing text through the owner's redactor and capped at 32 KiB; an observer hook reports every decision. Client: `status`, `begin` / `Call::wait`, `ask`, `discover` (parallel `status`, allow-list filter, `offline` with entry cleanup through the writer-lock probe, else `unreachable`).
+  - Registry `run/<session_id>.json` (temp+rename, removed on drop), `name_taken`; `Config::from_settings`; `address` (grammar, resolver: exactly one session or `not_found` / `ambiguous` with up to 10 `canonical (display)` candidates, allow list applied first, the caller's own session never).
+- Settings: `synthesis.peers` is read from user settings only (`Settings.synthesis.peers`); a project value is ignored with a diagnostic.
+- Events (additive v1, events.md): `peer.listening|stopped` (never the endpoint), `peer.request_sent|request_received|reply_partial|reply`.
+- Harness (`synthesis-harness/src/peer.rs`):
+  - Snapshots per agent at every drain point and at the end of each run; the responder forks the addressed agent's snapshot (`main` or an instance), with results of calls whose input names a secret or protected file replaced by `[withheld from peers]` and thinking blocks dropped.
+  - Responder (`kind:"peer-responder"`, instance `peer-<n>`, visible in A's events as `subagent.started|stopped`): tools Read, Glob, Grep, LS (and `git_status` / `git_diff` once they exist); mode `stricter(A's current mode, plan)`; asks auto-denied; 8 turns, 20 tool calls; cost added to `max_cost_usd` (`Harness::peer_cost_usd`), the next request is `declined` once it is spent; a first line `DECLINED:` makes the status `declined`. The request is the first user turn as a fenced `<peer_request ... trust="peer-data">`.
+  - Sender: `SendMessage` with `ws:`/`sess:` (resolve, connect, handshake, wait for `accepted` / `rejected`, then a background wait), `ListSessions` (only offered with peers on), `ListAgents{scope:"all"}`, 4 in flight, `<peer_reply>` queued and moved into history at the next drain point (never between a `tool_use` and its `tool_result`), and the task waits for outstanding replies (D3). A `SendMessage` to a permitted peer is allowed without a prompt when `initiate` is true (any other reason for ask/deny is kept: deny rules, `plan`, `dontAsk`).
+- `$SYNTHESIS_HOME/run` is in `synthesis_sandbox::synthesis_state_paths`: protected path in the permission engine and sandbox deny path.
+- `apps/cli`: `--peers`, `--name`, endpoint + registry entry + server at `prepare` (headless and TUI share it; no TUI file changed), `synth doctor` peers block, `docs/CLI.md`.
+- Tests: `crates/synthesis-peers/tests/peers.rs` and unit tests (C15, C20-C24 transport side, C10-C12 resolver), `crates/synthesis-harness/tests/peers.rs` (C15-C19, C23: two harnesses, real socket, fake providers, `FakeProvider.requests()` assertions), `apps/cli/tests/e2e.rs` (peers off by default, flagged run registers and cleans up, bad `--name`).
 
-Not done (needs the harness or other owners, so it is left for R10b-2/3):
-- The read-only responder (`Responder` impl: snapshot per agent, tool allowlist, `stricter(mode, plan)`, snapshot withholding, budget, `max_cost_usd`), the `peer-responder` sub-agent in A's events.
-- `SendMessage` with `ws:`/`sess:` addresses, `ListSessions`, `ListAgents{scope:"all"}`, the address resolver (`not_found`/`ambiguous`), the sender permission rule `SendMessage(ws:..)`, the 4-in-flight cap, `<peer_reply>` inbox delivery, the `peer.*` events and schema.
-- `$SYNTHESIS_HOME/run` as a protected/secret path in `synthesis-permissions` and the R7 sandbox deny.
-- App wiring in `apps/cli` (starting the server, `--name`, `/name`, `/peers`, `synth doctor`, `notice` when peers are off for a long path), and the TUI. No CLI flags were added, so `docs/CLI.md` is unchanged.
-- Windows: the code is written against tokio's named-pipe API and checked with `cargo clippy --target x86_64-pc-windows-msvc`, but not run on Windows; the pipe DACL assumption stays unverified. Not yet reviewed by `security-reviewer` (D14 gate).
-- R10c offline resume.
+Not done:
+- TUI: `/name`, `/peers` panel, `/agents --all`, the `⇄` rows and the `peers on` status bar (TUI files are owned by the TUI rewrite). `peer.*` events are not rendered yet.
+- `confirm_replies` (D11: dialog before a reply leaves) and R10c offline resume (`resume_offline`, `peer-answer`).
+- Responder details: streamed `partial` frames (the responder answers in one piece), `git_status` / `git_diff` (no such tools exist yet), the snapshot is the last drain-point state (a compaction in flight keeps the earlier snapshot, which matches the spec, but there is no separate mid-approval case), `peer.reply.text` has no ArtifactRef.
+- `SendMessage` side-effect class is still reported as `read` in `tool.started` (it should be `external` for a peer target).
+- `ws:<ref>/agent:<x>` without `sess:` is ambiguous whenever the workspace has several sessions (the instance is not used to narrow the candidates).
+- Liveness for sessions started with `--no-session-store` is unknown (no writer lock): a dead one shows `unreachable`, not `offline`.
+- Windows: written against tokio's named-pipe API and linted with `cargo clippy --target x86_64-pc-windows-msvc`, never run on Windows; the pipe ACL assumption (B3) is unverified.
+- The `security-reviewer` pass required by D14 has not happened.
