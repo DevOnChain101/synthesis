@@ -26,6 +26,7 @@ synthesis-events = { path = "../../crates/synthesis-events" }
 synthesis-harness = { path = "../../crates/synthesis-harness" }
 synthesis-hooks = { path = "../../crates/synthesis-hooks" }
 synthesis-mcp = { path = "../../crates/synthesis-mcp" }
+synthesis-peers = { path = "../../crates/synthesis-peers" }
 synthesis-permissions = { path = "../../crates/synthesis-permissions" }
 synthesis-providers = { path = "../../crates/synthesis-providers" }
 synthesis-sandbox = { path = "../../crates/synthesis-sandbox" }

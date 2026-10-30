@@ -340,6 +340,9 @@ fn report_discovery(env: &Env, h: &crate::Homes, cfg: &Config, cwd: Option<&Path
             if p.is_file() { "present" } else { "absent" }
         )
     };
+    for l in crate::peers::doctor_lines(&st.synthesis.peers, &h.synthesis, env) {
+        out!("{l}");
+    }
     out!("settings.json:");
     out!("  user file: {}", file(h.synthesis.join("settings.json")));
     out!(
