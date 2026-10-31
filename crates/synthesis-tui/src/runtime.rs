@@ -246,6 +246,14 @@ impl Runner {
         });
     }
 
+    /// The sessions of other workspaces as the columns of messaging.md B9; one line when peers are off.
+    fn peer_table(&mut self, main_only: bool) -> Vec<String> {
+        match self.runtime.block_on(self.harness.peer_rows(main_only)) {
+            Some(rows) => crate::peers_view::table(&rows),
+            None => vec!["peers are off (synthesis.peers.enabled in user settings)".into()],
+        }
+    }
+
     /// `/mcp`, `/agents`, `/permissions`: text for the pane and whether it is an error.
     fn info(&mut self, i: Info) -> (Vec<String>, bool) {
         match i {
@@ -260,7 +268,7 @@ impl Runner {
                 Some(m) => ((m.report)(), false),
                 None => (vec!["/memory: not available in this session".into()], true),
             },
-            Info::Agents => {
+            Info::Agents { all } => {
                 let mut v = vec!["Agents in this session (@name routes a line):".to_string()];
                 v.extend(self.harness.agents().into_iter().map(|a| {
                     format!(
@@ -282,8 +290,36 @@ impl Runner {
                         .into_iter()
                         .map(|(n, d)| format!("  {n} · {d}")),
                 );
+                if all {
+                    v.push(String::new());
+                    v.extend(self.peer_table(false));
+                }
                 (v, false)
             }
+            Info::Peers => {
+                let v = self.peer_table(true);
+                let off = self.harness.peer_summary().is_none();
+                (v, off)
+            }
+            Info::Name(new) => match self.harness.peer_summary() {
+                None => (
+                    vec!["/name: peers are off (synthesis.peers.enabled in user settings)".into()],
+                    true,
+                ),
+                Some((name, _)) => {
+                    let shown = name.as_deref().unwrap_or("(none)");
+                    if new.is_empty() {
+                        (vec![format!("Session name for peers: {shown}")], false)
+                    } else {
+                        (
+                            vec![format!(
+                                "/name: the name is fixed for the run (now {shown}); start with --name {new}"
+                            )],
+                            true,
+                        )
+                    }
+                }
+            },
             Info::Permissions(a) => {
                 let perms = self.harness.permissions();
                 let mut p = perms.lock().unwrap_or_else(|e| e.into_inner());
@@ -495,6 +531,10 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
         o.env.clone(),
     );
     app.mcp_status = o.mcp_status.take();
+    if o.harness.peer_summary().is_some() {
+        let h = o.harness.clone();
+        app.peer_status = Some(Box::new(move || h.peer_summary().map(|p| p.1)));
+    }
     if let Some(m) = &o.memory {
         app.set_memory_files(m.user_file.clone(), m.project_file.clone());
         app.set_note_preview(m.preview.clone());

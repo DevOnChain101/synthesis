@@ -164,7 +164,14 @@ pub(crate) enum Cmd {
 pub(crate) enum Info {
     Mcp,
     Memory,
-    Agents,
+    /// `/agents`; `all`: also the other sessions (`--all`).
+    Agents {
+        all: bool,
+    },
+    /// `/peers`.
+    Peers,
+    /// `/name [NAME]`.
+    Name(String),
     Permissions(PermAction),
 }
 
@@ -344,6 +351,8 @@ pub(crate) struct App {
     setup: bool,
     /// Live MCP server state, asked for at each frame.
     pub mcp_status: Option<Box<dyn Fn() -> Vec<McpLive>>>,
+    /// Requests this session has in flight to peers; `None` when peers are off.
+    pub peer_status: Option<Box<dyn Fn() -> Option<usize>>>,
 }
 
 fn local_commands() -> Vec<CmdDef> {
@@ -379,7 +388,17 @@ fn local_commands() -> Vec<CmdDef> {
         c(
             "agents",
             "agents of this session and the types you can start",
+            "[--all]",
+        ),
+        c(
+            "peers",
+            "sessions of other workspaces that can talk to this one",
             "",
+        ),
+        c(
+            "name",
+            "this session's name for peers (set with --name)",
+            "[name]",
         ),
         c(
             "permissions",
@@ -540,6 +559,7 @@ impl App {
             project: ProjectData::default(),
             setup: false,
             mcp_status: None,
+            peer_status: None,
         }
     }
 
@@ -1592,7 +1612,11 @@ impl App {
             "effort" => self.set_effort(arg, out),
             "mcp" => out.push(Cmd::Info(Info::Mcp)),
             "memory" => out.push(Cmd::Info(Info::Memory)),
-            "agents" => out.push(Cmd::Info(Info::Agents)),
+            "agents" => out.push(Cmd::Info(Info::Agents {
+                all: arg.split_whitespace().any(|a| a == "--all"),
+            })),
+            "peers" => out.push(Cmd::Info(Info::Peers)),
+            "name" => out.push(Cmd::Info(Info::Name(arg.into()))),
             "permissions" | "perms" => {
                 let (sub, rule) = arg.split_once(char::is_whitespace).unwrap_or((arg, ""));
                 let rule = rule.trim();
@@ -3306,6 +3330,7 @@ impl App {
             sandbox_mode: Some(self.cfg.sandbox.mode.clone()).filter(|m| !m.is_empty()),
             sandbox_backend: self.cfg.sandbox.backend.clone(),
             memory: Some(self.memory_files.is_some()),
+            peers: self.peer_status.as_ref().and_then(|f| f()),
         };
         let mcp: Option<Vec<McpLive>> = self.mcp_status.as_ref().map(|f| f());
         let sid = self.cfg.session_id.clone();

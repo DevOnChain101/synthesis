@@ -1775,7 +1775,19 @@ fn new_slash_commands_ask_the_host_and_status_has_no_debug_output() {
     ));
     assert!(matches!(
         &keys(&mut a, "/agents\r")[..],
-        [Cmd::Info(Info::Agents)]
+        [Cmd::Info(Info::Agents { all: false })]
+    ));
+    assert!(matches!(
+        &keys(&mut a, "/agents --all\r")[..],
+        [Cmd::Info(Info::Agents { all: true })]
+    ));
+    assert!(matches!(
+        &keys(&mut a, "/peers\r")[..],
+        [Cmd::Info(Info::Peers)]
+    ));
+    assert!(matches!(
+        &keys(&mut a, "/name backend\r")[..],
+        [Cmd::Info(Info::Name(n))] if n == "backend"
     ));
     assert!(matches!(
         &keys(&mut a, "/permissions\r")[..],

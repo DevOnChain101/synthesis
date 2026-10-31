@@ -145,6 +145,15 @@ pub(crate) fn friendly_compact_error(e: &str) -> (String, &'static str) {
     }
 }
 
+/// `ws:label/sess:name` (the short id when the session has no name), the form peers are addressed by.
+fn peer_name(a: &synthesis_events::PeerAddr) -> String {
+    let sess = a
+        .session_name
+        .clone()
+        .unwrap_or_else(|| a.session_id.chars().take(8).collect());
+    format!("ws:{}/sess:{sess}", a.workspace_label)
+}
+
 fn note(text: impl Into<String>, tone: &str) -> Item {
     item! {
         kind: "note".into(),
@@ -590,6 +599,44 @@ impl Chat {
                 } else {
                     self.note(format!("@{from} → @{to}: {what}"), "");
                 }
+            }
+            // `⇄` rows of messaging.md B11: the request, the receiver's view, the reply
+            Event::PeerRequestSent { to, summary, .. } => {
+                self.push(item! {
+                    kind: "handoff".into(),
+                    text: clean_text(&format!("asked {}: {summary}", peer_name(to))),
+                });
+            }
+            Event::PeerRequestReceived {
+                from,
+                to,
+                summary,
+                decision,
+                reason,
+                ..
+            } => {
+                if decision == "accepted" {
+                    self.push(item! {
+                        kind: "handoff".into(),
+                        text: clean_text(&format!(
+                            "{} asked {}: {summary}",
+                            peer_name(from),
+                            to.instance
+                        )),
+                    });
+                } else {
+                    let why = reason.as_deref().unwrap_or("rejected");
+                    self.note(
+                        format!("⇄ declined a question from {}: {why}", peer_name(from)),
+                        "warn",
+                    );
+                }
+            }
+            Event::PeerReply { status, .. } => {
+                self.push(item! {
+                    kind: "handoff".into(),
+                    text: clean_text(&format!("replied ({status})")),
+                });
             }
             Event::MessageDelivered { message_id, .. } => {
                 self.unqueue(message_id);

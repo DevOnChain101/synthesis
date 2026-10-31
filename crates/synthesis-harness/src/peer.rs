@@ -649,13 +649,19 @@ impl Harness {
 
     /// `ListSessions` (`only_main`) and `ListAgents{scope:"all"}`.
     pub(crate) async fn run_peer_list(&self, only_main: bool) -> Res {
-        let Some(link) = self.peers.clone().filter(|p| p.on()) else {
-            return self.plain(
+        match self.peer_rows(only_main).await {
+            Some(rows) => self.plain(Value::Array(rows).to_string(), false, ToolStatus::Ok),
+            None => self.plain(
                 "disabled: cross-session messaging is off (synthesis.peers.enabled in user settings)",
                 true,
                 ToolStatus::SoftError,
-            );
-        };
+            ),
+        }
+    }
+
+    /// The rows of B9 for the front end (`/peers`, `/agents --all`); `None` when peers are off.
+    pub async fn peer_rows(&self, only_main: bool) -> Option<Vec<Value>> {
+        let link = self.peers.clone().filter(|p| p.on())?;
         let status = if self.hub.task_id().is_some() {
             "running"
         } else {
@@ -692,7 +698,13 @@ impl Harness {
                 }
             }
         }
-        self.plain(Value::Array(rows).to_string(), false, ToolStatus::Ok)
+        Some(rows)
+    }
+
+    /// `(session name, requests in flight)` when peers are on; the front end shows `peers on`.
+    pub fn peer_summary(&self) -> Option<(Option<String>, usize)> {
+        let link = self.peers.as_ref().filter(|p| p.on())?;
+        Some((link.me.session_name.clone(), lock(&link.state).inflight))
     }
 
     // ---- receiver --------------------------------------------------------------------------

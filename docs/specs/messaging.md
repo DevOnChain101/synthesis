@@ -372,7 +372,7 @@ Built:
 - Tests: `crates/synthesis-peers/tests/peers.rs` and unit tests (C15, C20-C24 transport side, C10-C12 resolver), `crates/synthesis-harness/tests/peers.rs` (C15-C19, C23: two harnesses, real socket, fake providers, `FakeProvider.requests()` assertions), `apps/cli/tests/e2e.rs` (peers off by default, flagged run registers and cleans up, bad `--name`).
 
 Not done:
-- TUI: `/name`, `/peers` panel, `/agents --all`, the `⇄` rows and the `peers on` status bar (TUI files are owned by the TUI rewrite). `peer.*` events are not rendered yet.
+- TUI (built 2026-10-31): `/peers` and `/agents --all` print the B9 columns, `/name` shows the session name (a running session cannot be renamed: use `--name`), `⇄` rows for `peer.request_sent|request_received|reply`, `peers on · N in flight` in the footer. Not rendered: `peer.reply_partial`, a `/peers` panel with live refresh.
 - `confirm_replies` (D11: dialog before a reply leaves) and R10c offline resume (`resume_offline`, `peer-answer`).
 - Responder details: streamed `partial` frames (the responder answers in one piece), `git_status` / `git_diff` (no such tools exist yet), the snapshot is the last drain-point state (a compaction in flight keeps the earlier snapshot, which matches the spec, but there is no separate mid-approval case), `peer.reply.text` has no ArtifactRef.
 - `ws:<ref>/agent:<x>` without `sess:` is ambiguous whenever the workspace has several sessions (the instance is not used to narrow the candidates).

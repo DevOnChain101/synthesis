@@ -13,6 +13,7 @@ mod chat;
 mod config_screen;
 mod link;
 pub mod links;
+mod peers_view;
 mod preview;
 mod project;
 mod resume;

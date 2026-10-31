@@ -53,7 +53,21 @@ pub const LOCAL_COMMANDS: &[(&str, &str, Option<&str>)] = &[
         "pick reasoning effort, or set it directly",
         Some("[low | medium | high | xhigh | max | auto]"),
     ),
-    ("agents", "list configured agents and show their file", None),
+    (
+        "agents",
+        "list configured agents and show their file",
+        Some("[--all]"),
+    ),
+    (
+        "peers",
+        "sessions of other workspaces that can talk to this one",
+        None,
+    ),
+    (
+        "name",
+        "this session's name for peers (set with --name)",
+        Some("[name]"),
+    ),
     (
         "status",
         "session, model, version, tools and MCP servers",
