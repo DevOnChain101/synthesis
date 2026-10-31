@@ -143,7 +143,7 @@ async fn answers_with_partial_redaction_and_same_id() {
     assert_eq!(f.text, "developer-2: hi key=[REDACTED]");
     assert_eq!(f.from.unwrap().session_id, "sess-a");
     assert_eq!(seen, vec![(1, "thinking".to_string())]);
-    let st = status(&r.endpoint, &r.key).await.unwrap();
+    let st = status(&r.endpoint, &r.key, &from).await.unwrap();
     assert_eq!(st["t"], "status");
     assert_eq!(st["task_summary"], "fixing auth");
 }
@@ -270,6 +270,27 @@ async fn busy_timeout_and_cancel() {
 }
 
 #[tokio::test]
+async fn status_applies_the_allow_and_deny_lists() {
+    let r = rig(
+        json!({"enabled": true, "deny": ["ws:web"]}),
+        Fake::default(),
+    )
+    .await;
+    let ok = addr("api", "/work/api", "sess-b");
+    assert!(status(&r.endpoint, &r.key, &ok).await.is_ok());
+    let denied = addr("web", "/work/web", "sess-c");
+    assert!(matches!(
+        status(&r.endpoint, &r.key, &denied).await,
+        Err(PeerError::Rejected(x)) if x == "denied"
+    ));
+    let off = rig(json!({"enabled": false}), Fake::default()).await;
+    assert!(matches!(
+        status(&off.endpoint, &off.key, &ok).await,
+        Err(PeerError::Rejected(_))
+    ));
+}
+
+#[tokio::test]
 async fn wrong_key_and_impostor_leak_nothing() {
     let r = rig(ON(), Fake::default()).await;
     let from = addr("api", "/work/api", "sess-b");
@@ -287,7 +308,7 @@ async fn wrong_key_and_impostor_leak_nothing() {
         Err(PeerError::Auth)
     ));
     assert!(matches!(
-        status(&r.endpoint, &bad).await,
+        status(&r.endpoint, &bad, &from).await,
         Err(PeerError::Auth)
     ));
     assert_eq!(r.fake.calls.load(Ordering::SeqCst), 0);
@@ -360,7 +381,14 @@ async fn discovery_lists_permitted_live_peers_and_cleans_dead_ones() {
         Registration::create(&r.dir, &entry("other-1", "web", "/work/web", &r.endpoint)).unwrap(),
     ];
     let cfg = config(ON());
-    let peers = discover(&r.dir, &r.key, &cfg, "self-1", |e| e.session_id == "dead-1").await;
+    let peers = discover(
+        &r.dir,
+        &r.key,
+        &cfg,
+        &addr("api", "/work/api", "self-1"),
+        |e| e.session_id == "dead-1",
+    )
+    .await;
     let got: Vec<_> = peers
         .iter()
         .map(|p| (p.entry.session_id.as_str(), p.state.is_ok()))

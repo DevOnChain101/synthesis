@@ -120,7 +120,7 @@ fn side_with(
     slow_ms: u64,
     priced: bool,
 ) -> (Side, Entry) {
-    side_full(sid, label, run, cfg, responder, slow_ms, priced, None)
+    side_full(sid, label, run, cfg, responder, slow_ms, priced, None, &[])
 }
 
 /// Answers every approval dialog the same way.
@@ -151,7 +151,8 @@ fn side_full(
     responder: Responder,
     slow_ms: u64,
     priced: bool,
-    approve: Option<bool>,
+    approve: Option<Arc<dyn synthesis_harness::Approver>>,
+    deny: &[&str],
 ) -> (Side, Entry) {
     let link_cfg = cfg.map(config);
     let key = load_or_create_key(run).unwrap();
@@ -171,6 +172,7 @@ fn side_full(
                 |_| {}
             },
             tools: probe_tools(slow_ms),
+            deny: deny.iter().map(|s| s.to_string()).collect(),
             allow: vec![
                 "Slow".into(),
                 "SlowEnv".into(),
@@ -194,7 +196,7 @@ fn side_full(
                 },
             ]));
             let h = match approve {
-                Some(y) => h.with_approver(Arc::new(Fixed(y))),
+                Some(a) => h.with_approver(a),
                 None => h,
             };
             match link_cfg {
@@ -881,7 +883,8 @@ async fn confirm_run(approve: Option<bool>) -> String {
         a_resp,
         10,
         true,
-        approve,
+        approve.map(|y| Arc::new(Fixed(y)) as Arc<dyn synthesis_harness::Approver>),
+        &[],
     );
     let (mut b, _) = side("sess-b", "beta", &run, Some(on), b_resp, 10);
     let _reg = serve(&a, &run, ea);
@@ -906,7 +909,7 @@ async fn confirm_replies_lets_the_owner_decide_and_headless_declines() {
 }
 
 #[tokio::test]
-async fn an_agent_name_without_a_session_picks_the_one_session_that_has_it() {
+async fn an_agent_name_without_a_session_never_picks_among_several_by_self_report() {
     let home = tempfile::tempdir().unwrap();
     let run = run_dir(home.path());
     let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
@@ -933,7 +936,7 @@ async fn an_agent_name_without_a_session_picks_the_one_session_that_has_it() {
     assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
     let _r1 = serve(&a1, &run, e1);
     let _r2 = serve(&a2, &run, e2);
-    // two alpha sessions: `main` would be ambiguous, but only one has a developer-2
+    // two alpha sessions: a peer's own claim of having a developer-2 does not choose for us
     let (mut b, _) = side(
         "sess-b",
         "beta",
@@ -945,8 +948,18 @@ async fn an_agent_name_without_a_session_picks_the_one_session_that_has_it() {
     go(&mut b, "ask").await;
     let (res, err) = tool_result(&b.rig.requests()[1], "ask").unwrap();
     assert!(
-        !err && res.contains("sess-a1") && res.contains("accepted"),
+        err && res.starts_with("ambiguous") && res.contains("sess-a1") && res.contains("sess-a2"),
         "{res}"
+    );
+    assert!(
+        sent_ids(&b).is_empty()
+            && b.rig
+                .find(|e| match e {
+                    Event::PeerReply { status, .. } => Some(status.clone()),
+                    _ => None,
+                })
+                .is_empty(),
+        "nothing was sent"
     );
     let (mut b2, _) = side(
         "sess-b2",
@@ -1003,4 +1016,194 @@ async fn a_responders_text_streams_to_the_asker_as_partial_events() {
         _ => None,
     });
     assert_eq!(partials, [(1, "alpha beta gamma ".to_string())]);
+}
+
+// ---- security review of the messaging merge --------------------------------------------------
+
+/// Approves everything and keeps what the dialog showed.
+struct Rec(Arc<std::sync::Mutex<Vec<serde_json::Value>>>);
+impl synthesis_harness::Approver for Rec {
+    fn approve<'a>(
+        &'a self,
+        r: synthesis_harness::ApprovalRequest,
+        _: &'a CancellationToken,
+    ) -> synthesis_harness::BoxFut<'a, synthesis_harness::Approval> {
+        self.0.lock().unwrap().push(r.input.clone());
+        Box::pin(async { synthesis_harness::Approval::allow() })
+    }
+}
+
+#[tokio::test]
+async fn the_confirm_dialog_shows_exactly_the_reply_that_is_sent() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "confirm_replies": true});
+    let long: &'static str =
+        Box::leak(format!("{} END-OF-REPLY", "word ".repeat(1500)).into_boxed_str());
+    let a_resp: Responder = Arc::new(move |r| {
+        Some(if is_responder(r) {
+            Turn::text(long)
+        } else {
+            Turn::text("A idle")
+        })
+    });
+    let shown = Arc::new(std::sync::Mutex::new(vec![]));
+    let (a, ea) = side_full(
+        "sess-a",
+        "alpha",
+        &run,
+        Some(on.clone()),
+        a_resp,
+        10,
+        true,
+        Some(Arc::new(Rec(shown.clone()))),
+        &[],
+    );
+    let (mut b, _) = side(
+        "sess-b",
+        "beta",
+        &run,
+        Some(on),
+        b_asks("ws:alpha/sess:sess-a"),
+        10,
+    );
+    let _reg = serve(&a, &run, ea);
+    go(&mut b, "ask").await;
+    until(|| !shown.lock().unwrap().is_empty()).await;
+    let dialog = shown.lock().unwrap()[0]["reply"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        dialog.len() > 2000 && dialog.ends_with("END-OF-REPLY"),
+        "the whole reply is shown"
+    );
+    assert_eq!(dialog, long.trim(), "what is approved is what is sent");
+}
+
+#[tokio::test]
+async fn deny_rules_hold_against_every_spelling_of_a_peer_address() {
+    for to in [
+        "ws:alpha/sess:sess-a",
+        " ws:alpha/sess:sess-a",
+        "sess:sess-a",
+        "sess:sess-a/agent:main",
+        "ws:alpha/sess:sess-a/main",
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let run = run_dir(home.path());
+        let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+        let idle: Responder = Arc::new(|_| Some(Turn::text("A idle")));
+        let (a, ea) = side("sess-a", "alpha", &run, Some(on.clone()), idle, 10);
+        let _reg = serve(&a, &run, ea);
+        let (mut b, _) = side_full(
+            "sess-b",
+            "beta",
+            &run,
+            Some(on),
+            b_asks(to),
+            10,
+            true,
+            None,
+            &["SendMessage(ws:alpha/*)"],
+        );
+        go(&mut b, "ask").await;
+        let (t, err) = tool_result(&b.rig.requests()[1], "ask").unwrap();
+        assert!(err, "{to}: {t}");
+        assert!(sent_ids(&b).is_empty(), "{to}: a request left");
+        assert!(
+            a.rig
+                .find(|e| matches!(e, Event::PeerRequestReceived { .. }).then_some(()))
+                .is_empty(),
+            "{to}: the peer saw a request"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_late_reply_must_come_from_who_was_asked_and_stays_until_shown() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let key = load_or_create_key(&run).unwrap();
+    let mb = Mailbox::new(&run, &key);
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "resume_offline": true});
+    let idle: Responder = Arc::new(|_| Some(Turn::text("A idle")));
+    let (a0, ea0) = side("dead-a", "alpha", &run, Some(on.clone()), idle, 10);
+    mb.write_card(&ea0).unwrap();
+    drop(a0);
+    let (mut b, _) = side(
+        "sess-b",
+        "beta",
+        &run,
+        Some(on.clone()),
+        b_asks("ws:alpha/sess:dead-a"),
+        10,
+    );
+    go(&mut b, "ask").await;
+    let id = sent_ids(&b).remove(0);
+    drop(b);
+    let reply = |from_sid: &str, ws: &str| {
+        let mut e = Envelope {
+            id: id.clone(),
+            kind: "reply".into(),
+            from: synthesis_peers::Addr {
+                session_id: from_sid.into(),
+                workspace_key: ws.into(),
+                instance: "main".into(),
+                ..Default::default()
+            },
+            to_session: "sess-b".into(),
+            to_agent: "main".into(),
+            text: "THE-REAL-ANSWER".into(),
+            chain: vec![],
+            status: "answered".into(),
+            created: now_s(),
+            mac: String::new(),
+        };
+        e.sign(&key);
+        e
+    };
+    let alpha_key = ea0.workspace_key.clone();
+    // another session, and the right session in another workspace, answering with the asked id
+    assert_eq!(
+        mb.enqueue(reply("intruder", &alpha_key)),
+        Ok(Queued::Stored)
+    );
+    let back: Responder = Arc::new(|_| Some(Turn::text("B again")));
+    let (mut b2, _) = side("sess-b", "beta", &run, Some(on.clone()), back, 10);
+    go(&mut b2, "continue").await;
+    assert!(
+        !all_text(&b2).contains("THE-REAL-ANSWER"),
+        "a stranger's reply was shown"
+    );
+    assert!(mb.pending("sess-b").is_empty(), "and it was discarded");
+    assert_eq!(mb.enqueue(reply("dead-a", "other-ws")), Ok(Queued::Stored));
+    let back: Responder = Arc::new(|_| Some(Turn::text("B again")));
+    let (mut b2b, _) = side("sess-b", "beta", &run, Some(on.clone()), back, 10);
+    go(&mut b2b, "again").await;
+    assert!(!all_text(&b2b).contains("THE-REAL-ANSWER"));
+    assert!(mb.pending("sess-b").is_empty());
+    // the genuine reply (the stranger's attempt did not use up the id) is shown, and is still on
+    // disk while the model is working on it: a crash then shows it again instead of losing it
+    assert_eq!(mb.enqueue(reply("dead-a", &alpha_key)), Ok(Queued::Stored));
+    let on_disk = Arc::new(AtomicBool::new(false));
+    let (flag, mb2) = (on_disk.clone(), Mailbox::new(&run, &key));
+    let probe: Responder = Arc::new(move |r| {
+        if texts(r).contains("THE-REAL-ANSWER") && mb2.pending("sess-b").len() == 1 {
+            flag.store(true, Ordering::SeqCst);
+        }
+        Some(Turn::text("B sees it"))
+    });
+    let (mut b3, _) = side("sess-b", "beta", &run, Some(on), probe, 10);
+    go(&mut b3, "last").await;
+    assert!(all_text(&b3).contains("THE-REAL-ANSWER"));
+    assert!(
+        on_disk.load(Ordering::SeqCst),
+        "retired before the model had it"
+    );
+    assert!(
+        mb.pending("sess-b").is_empty(),
+        "retired when the task ended"
+    );
 }

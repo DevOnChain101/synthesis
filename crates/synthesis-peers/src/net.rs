@@ -87,6 +87,8 @@ impl Conn {
 
 fn mac(key: &Key, label: &[u8], a: &[u8], b: &[u8]) -> Hmac<Sha256> {
     let mut m = Hmac::<Sha256>::new_from_slice(&key.0).expect("hmac takes any key length");
+    // Length-prefixed label: one domain's input can never be read as another's.
+    m.update(&[label.len() as u8]);
     m.update(label);
     m.update(a);
     m.update(b);

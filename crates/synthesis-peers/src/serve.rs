@@ -34,6 +34,8 @@ const MAX_PARTIALS: usize = 64;
 const MAX_PARTIAL_BYTES: usize = 64 * 1024;
 const STATUS_TIMEOUT: Duration = Duration::from_millis(500);
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The owner has this long to approve a reply (`confirm_replies`); silence declines.
+const CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The owner session's redactor, applied to every outgoing byte of text.
 pub type Redact = Arc<dyn Fn(&str) -> String + Send + Sync>;
@@ -109,6 +111,82 @@ impl Drop for Slot<'_> {
     fn drop(&mut self) {
         self.0.state.lock().unwrap().active -= 1;
     }
+}
+
+/// Outgoing partial text of one request. Redaction runs over everything released so far (a secret
+/// may span frames) and only the new part is sent; the unfinished tail is held back.
+struct Stream {
+    acc: String,
+    sent: String,
+    /// confirm_replies: frames carry no text at all.
+    quiet: bool,
+    seen: usize,
+}
+
+impl Stream {
+    fn new(quiet: bool) -> Self {
+        Self {
+            acc: String::new(),
+            sent: String::new(),
+            quiet,
+            seen: 0,
+        }
+    }
+
+    /// Text for the next frame, `None` when there is nothing new that may leave yet.
+    fn next(&mut self, redact: &Redact, fin: bool) -> Option<String> {
+        if self.quiet {
+            let new = self.acc.len() > self.seen;
+            self.seen = self.acc.len();
+            return new.then(String::new);
+        }
+        let red = redact(&self.acc[..releasable(&self.acc, fin)]);
+        // Sent text cannot be taken back: if redaction now rewrites it, hold everything.
+        let delta = red.strip_prefix(self.sent.as_str())?;
+        if delta.is_empty() || self.sent.len() >= MAX_PARTIAL_BYTES {
+            return None;
+        }
+        let d = cap(delta.to_string(), MAX_REPLY);
+        self.sent.push_str(&d);
+        Some(d)
+    }
+}
+
+/// Byte length of the prefix of `acc` that may be released. Held back: the last word; from an
+/// opening `"` until it closes; from an unterminated `-----BEGIN` always. shortcut: other
+/// multi-token secrets rely on the owner's redactor seeing the whole prefix; upgrade with a
+/// streaming redactor if one needs more lookahead.
+fn releasable(acc: &str, fin: bool) -> usize {
+    let mut end = acc.len();
+    if !fin {
+        end = acc
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace())
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        let (mut open, mut esc) = (None, false);
+        for (i, c) in acc[..end].char_indices() {
+            match c {
+                _ if esc => esc = false,
+                '\\' => esc = open.is_some(),
+                '"' => open = if open.is_some() { None } else { Some(i) },
+                _ => {}
+            }
+        }
+        end = open.unwrap_or(end);
+    }
+    let mut from = 0;
+    while let Some(i) = acc[from..].find("-----BEGIN").map(|i| i + from) {
+        let rest = &acc[i + 10..];
+        if !rest
+            .find("-----END")
+            .is_some_and(|e| rest[e + 8..].contains("-----"))
+        {
+            return end.min(i);
+        }
+        from = i + 10;
+    }
+    end
 }
 
 fn cap(mut s: String, n: usize) -> String {
@@ -209,6 +287,14 @@ impl Server {
         };
         match f.get("t").and_then(Value::as_str) {
             Some("status") => {
+                // The same list that governs requests governs what a session reveals about itself.
+                let allowed = self.config.enabled
+                    && f.get("from")
+                        .and_then(|a| Addr::deserialize(a).ok())
+                        .is_some_and(|a| self.config.permits(&a.clamped()));
+                if !allowed {
+                    return c.send(&json!({"t":"rejected","reason":"denied"})).await;
+                }
                 let mut v = self.responder.status();
                 if let Some(o) = v.as_object_mut() {
                     o.insert("t".into(), json!("status"));
@@ -254,7 +340,9 @@ impl Server {
         let answering = self.responder.answer(req, tx);
         let deadline = tokio::time::sleep(Duration::from_secs(secs));
         tokio::pin!(deadline);
-        let (mut seq, mut last, mut pending) = (0u64, None::<Instant>, String::new());
+        let (mut seq, mut last) = (0u64, None::<Instant>);
+        // With confirm_replies nothing of the answer may leave before the owner approved it.
+        let mut stream = Stream::new(self.config.confirm_replies);
         let mut fut = Box::pin(async {
             let r = answering.await;
             self.finish(&req2, r).await
@@ -270,11 +358,12 @@ impl Server {
                 },
                 Some(p) = rx.recv() => {
                     // Text arriving inside the 500 ms window is joined to the next frame, not lost.
-                    pending.push_str(&p);
-                    if last.is_none_or(|t| t.elapsed() >= PARTIAL_EVERY) {
+                    stream.acc.push_str(&p);
+                    if last.is_none_or(|t| t.elapsed() >= PARTIAL_EVERY)
+                        && let Some(text) = stream.next(&self.redact, false)
+                    {
                         last = Some(Instant::now());
                         seq += 1;
-                        let text = cap((self.redact)(&std::mem::take(&mut pending)), MAX_REPLY);
                         c.send(&json!({"t":"partial","id":id,"seq":seq,"text":text})).await?;
                     }
                 }
@@ -282,11 +371,12 @@ impl Server {
         };
         // Text that arrived as the answer finished still goes out as a partial (same 500 ms rule).
         while let Ok(p) = rx.try_recv() {
-            pending.push_str(&p);
+            stream.acc.push_str(&p);
         }
-        if !pending.is_empty() && last.is_none_or(|t| t.elapsed() >= PARTIAL_EVERY) {
+        if last.is_none_or(|t| t.elapsed() >= PARTIAL_EVERY)
+            && let Some(text) = stream.next(&self.redact, true)
+        {
             seq += 1;
-            let text = cap((self.redact)(&pending), MAX_REPLY);
             c.send(&json!({"t":"partial","id":id,"seq":seq,"text":text}))
                 .await?;
         }
@@ -297,16 +387,17 @@ impl Server {
     /// `confirm_replies`, then the owner's redactor and the size cap: the last gate before a
     /// reply leaves this session.
     async fn finish(&self, req: &Request, mut r: Reply) -> Reply {
-        if self.config.confirm_replies
-            && r.status != "timeout"
-            && !self.responder.confirm(req, &r).await
-        {
-            r = Reply {
-                status: "declined".into(),
-                text: "the owner of this session did not approve sending a reply".into(),
-            };
-        }
+        // The owner approves exactly the text that is sent: redacted and capped first.
         r.text = cap((self.redact)(&r.text), MAX_REPLY);
+        if self.config.confirm_replies && r.status != "timeout" {
+            let yes = tokio::time::timeout(CONFIRM_TIMEOUT, self.responder.confirm(req, &r)).await;
+            if !matches!(yes, Ok(true)) {
+                r = Reply {
+                    status: "declined".into(),
+                    text: "the owner of this session did not approve sending a reply".into(),
+                };
+            }
+        }
         r
     }
 
@@ -398,13 +489,20 @@ async fn open(endpoint: &str, key: &Key) -> Result<Conn, PeerError> {
 }
 
 /// The peer's `status` frame (500 ms budget on top of the handshake).
-pub async fn status(endpoint: &str, key: &Key) -> Result<Value, PeerError> {
+pub async fn status(endpoint: &str, key: &Key, from: &Addr) -> Result<Value, PeerError> {
     tokio::time::timeout(STATUS_TIMEOUT + net::HANDSHAKE_TIMEOUT, async {
         let mut c = open(endpoint, key).await?;
-        c.send(&json!({"t":"status"})).await?;
-        c.recv()
-            .await?
-            .ok_or_else(|| PeerError::Io(io::ErrorKind::UnexpectedEof.into()))
+        c.send(&json!({"t":"status","from":from})).await?;
+        let f = c.recv().await?.ok_or_else(eof)?;
+        match f.get("t").and_then(Value::as_str) {
+            Some("rejected") => Err(PeerError::Rejected(
+                f.get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("denied")
+                    .into(),
+            )),
+            _ => Ok(f),
+        }
     })
     .await
     .map_err(|_| PeerError::Io(io::ErrorKind::TimedOut.into()))?
@@ -562,23 +660,24 @@ pub enum Down {
 
 /// Live sessions the allow list permits, with fresh `status` frames fetched in parallel. A
 /// connect failure goes through `lock_free` (the session writer-lock probe): free means dead, and
-/// the stale entry is deleted. `self_session` is excluded.
+/// the stale entry is deleted. `me` is sent with each `status` frame (the peer applies its list);
+/// its own session is excluded.
 pub async fn discover(
     run_dir: &std::path::Path,
     key: &Key,
     config: &Config,
-    self_session: &str,
+    me: &Addr,
     lock_free: impl Fn(&Entry) -> bool,
 ) -> Vec<Peer> {
     let mut set = tokio::task::JoinSet::new();
     for e in crate::read_entries(run_dir).into_iter().filter(|e| {
-        e.session_id != self_session
+        e.session_id != me.session_id
             && config.permits(&e.addr("main", ""))
             && crate::endpoint_ok(run_dir, &e.endpoint)
     }) {
-        let key = key.clone();
+        let (key, me) = (key.clone(), me.clone());
         set.spawn(async move {
-            let r = status(&e.endpoint, &key).await;
+            let r = status(&e.endpoint, &key, &me).await;
             (e, r)
         });
     }
@@ -590,6 +689,8 @@ pub async fn discover(
                 crate::remove_entry(run_dir, &entry.session_id);
                 Err(Down::Offline)
             }
+            // a session whose list refuses us is not listed
+            Err(PeerError::Rejected(_)) => continue,
             Err(_) => Err(Down::Unreachable),
         };
         out.push(Peer { entry, state });
