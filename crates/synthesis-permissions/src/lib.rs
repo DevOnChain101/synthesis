@@ -1543,6 +1543,10 @@ impl Permissions {
         fn v(d: Decision, r: impl Into<String>) -> Verdict {
             Verdict::new(d, r)
         }
+        // plan mode changes nothing, long-term memory included
+        if mode == Mode::Plan && matches!(tool, "MemoryWrite" | "MemoryUpdate" | "MemoryForget") {
+            return v(Deny, "plan mode: memory is not written");
+        }
         // deny: ANY sub-command/match triggers deny.
         if self.some_match(&self.rules.deny, tool, input) {
             return v(Deny, "blocked by a deny rule");

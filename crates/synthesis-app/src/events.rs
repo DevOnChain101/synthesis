@@ -31,6 +31,9 @@ pub struct Persist {
     checkpointed: std::collections::HashSet<String>,
     /// File-changing tool calls in flight: their path, hashed when the call completes.
     writing: std::collections::HashMap<String, String>,
+    /// Raised when a call that taints the task is requested (web, browser, MCP, network Bash):
+    /// the Memory tools read it, so a note saved afterwards is `untrusted` at once.
+    taint: Option<Arc<AtomicBool>>,
     /// Set when the stdout reader went away: the run is cancelled, the store keeps recording.
     closed: Option<(Arc<AtomicBool>, CancellationToken)>,
 }
@@ -53,11 +56,27 @@ impl Persist {
             base,
             checkpointed: std::collections::HashSet::new(),
             writing: std::collections::HashMap::new(),
+            taint: None,
             closed,
         }
     }
 
+    pub fn with_taint(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.taint = Some(flag);
+        self
+    }
+
     fn line(&mut self, line: &[u8]) -> io::Result<()> {
+        if let Some(flag) = self.taint.as_ref().filter(|f| !f.load(Ordering::SeqCst))
+            && let Ok(env) = serde_json::from_slice::<Envelope>(line)
+            && let Event::ToolRequested { name, input, .. } = &env.event
+            && synthesis_memory::taints_task(
+                name,
+                input.get("command").and_then(|c| c.as_str()).unwrap_or(""),
+            )
+        {
+            flag.store(true, Ordering::SeqCst);
+        }
         if let Some(store) = &self.store {
             let bad = |m: String| io::Error::other(m);
             let env: Envelope = serde_json::from_slice(line).map_err(|e| bad(e.to_string()))?;
@@ -154,5 +173,53 @@ impl Write for Persist {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn requested(name: &str, input: serde_json::Value) -> Vec<u8> {
+        let env = Envelope {
+            v: 1,
+            seq: 1,
+            ts: "2026-01-01T00:00:00Z".into(),
+            session_id: "s".into(),
+            task_id: None,
+            turn_id: None,
+            agent_id: None,
+            event: Event::ToolRequested {
+                tool_call_id: "c".into(),
+                name: name.into(),
+                input,
+                input_truncated: false,
+                origin: None,
+            },
+        };
+        let mut l = serde_json::to_vec(&env).unwrap();
+        l.push(b'\n');
+        l
+    }
+
+    #[test]
+    fn web_browser_mcp_and_network_bash_requests_raise_the_taint_flag() {
+        for (name, input, tainted) in [
+            ("Read", serde_json::json!({"file_path": "a"}), false),
+            ("Bash", serde_json::json!({"command": "ls"}), false),
+            ("WebFetch", serde_json::json!({"url": "http://x"}), true),
+            ("mcp__srv__tool", serde_json::json!({}), true),
+            (
+                "Bash",
+                serde_json::json!({"command": "curl http://x"}),
+                true,
+            ),
+        ] {
+            let flag = Arc::new(AtomicBool::new(false));
+            let mut p = Persist::new(Box::new(io::sink()), None, None, None, 0, None)
+                .with_taint(flag.clone());
+            p.write_all(&requested(name, input)).unwrap();
+            assert_eq!(flag.load(Ordering::SeqCst), tainted, "{name}");
+        }
     }
 }

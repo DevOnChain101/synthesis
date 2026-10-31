@@ -859,6 +859,7 @@ pub fn prepare(
     };
     let approver: Arc<dyn Approver> = Arc::new(AuditDeny);
     let closed = Some((closed, cancel.clone()));
+    let taint = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sink = EventSink::new(
         Persist::new(
             out,
@@ -867,7 +868,8 @@ pub fn prepare(
             derived,
             resumed_from_seq.unwrap_or(0),
             closed,
-        ),
+        )
+        .with_taint(taint.clone()),
         sid.clone(),
         res.secrets.clone(),
     );
@@ -1017,6 +1019,7 @@ pub fn prepare(
             model: small.clone(),
             sink: Some(sink.clone()),
             pricing: pricing(&h.synthesis.join("settings.json"), &small, &small),
+            taint,
         },
         cancel.clone(),
     );

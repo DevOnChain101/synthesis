@@ -2258,7 +2258,7 @@ fn memory_class_defaults_and_scope_rules() {
     let f = fx();
     let ws = json!({"scope": "workspace", "kind": "fact"});
     let user = json!({"scope": "user", "kind": "preference"});
-    for mode in [Mode::Default, Mode::AcceptEdits, Mode::Plan, Mode::Auto] {
+    for mode in [Mode::Default, Mode::AcceptEdits, Mode::Auto] {
         let p = f.perms(mode);
         assert_eq!(d(&p, "MemorySearch", json!({"query": "x"})), A, "{mode:?}");
         assert_eq!(d(&p, "MemoryWrite", ws.clone()), A, "{mode:?}");
@@ -2296,7 +2296,7 @@ fn memory_class_defaults_and_scope_rules() {
 fn memory_update_and_forget_allow_agent_notes_and_ask_for_the_rest() {
     let f = fx();
     let oracle = crate::NoteOracle(std::sync::Arc::new(|id: &str| id == "m-agent"));
-    for mode in [Mode::Default, Mode::AcceptEdits, Mode::Plan, Mode::Auto] {
+    for mode in [Mode::Default, Mode::AcceptEdits, Mode::Auto] {
         let mut env = f.env(mode);
         env.memory_notes = Some(oracle.clone());
         let p = Permissions::new(PermissionRules::default(), env);
@@ -3089,4 +3089,20 @@ fn glob_deny_rules_are_prefix_matches_and_cheap() {
     assert!(bash_any_match(&r(&many), "ls"));
     assert!(!crate::bash::bash_all_match(&r(&many), "ls"));
     assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+}
+
+#[test]
+fn plan_mode_denies_every_memory_write() {
+    let f = fx();
+    let p = f.with(rules(&["MemoryWrite"], &[], &[]), Mode::Plan);
+    for (tool, input) in [
+        ("MemoryWrite", json!({"scope": "workspace"})),
+        ("MemoryUpdate", json!({"id": "m1"})),
+        ("MemoryForget", json!({"id": "m1"})),
+    ] {
+        assert_eq!(d(&p, tool, input), D, "{tool}");
+    }
+    assert_ne!(d(&p, "MemorySearch", json!({"query": "x"})), D);
+    let p = f.with(rules(&[], &[], &[]), Mode::Default);
+    assert_ne!(d(&p, "MemoryWrite", json!({"scope": "workspace"})), D);
 }

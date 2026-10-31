@@ -71,7 +71,7 @@ impl Digest {
             || self
                 .tools
                 .iter()
-                .any(|t| outside(&t.name) || (t.name == "Bash" && network_command(&t.arg)))
+                .any(|t| taints_task(&t.name, &t.arg))
     }
 
     /// Spec §7: at least 8 tool calls, a failure followed by a recovery, a user correction (more
@@ -85,6 +85,11 @@ impl Digest {
         });
         self.tools.len() >= 8 || recovered || self.user_turns.len() > 1 || self.denied
     }
+}
+
+/// One tool call that taints the whole task (see [`Digest::tainted`]); `arg` is the Bash command.
+pub fn taints_task(name: &str, arg: &str) -> bool {
+    outside(name) || (name == "Bash" && network_command(arg))
 }
 
 /// Tools whose output comes from outside the workspace: evidence citing them is `untrusted`.
