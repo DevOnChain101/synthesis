@@ -84,7 +84,12 @@ pub struct Tool {
     pub is_error: bool,
     pub cat: &'static str,
     pub comp_key: Option<String>,
+    /// The first lines of the result (the terminal tab shows them), cut at [`OUTPUT_KEEP`] bytes.
+    pub output: String,
 }
+
+/// Bytes of a tool result kept for the terminal tab.
+const OUTPUT_KEEP: usize = 1200;
 
 #[derive(Clone, Debug)]
 pub struct CurrentTool {
@@ -615,6 +620,7 @@ fn handle_assistant(s: &mut Session, entry: &Value, ts: Option<i64>) {
                     is_error: false,
                     cat,
                     comp_key: None,
+                    output: String::new(),
                 };
                 if cat == "learn" {
                     s.memory_writes += 1;
@@ -723,6 +729,13 @@ fn handle_user(s: &mut Session, entry: &Value, ts: Option<i64>) {
                 && tool.end.is_none()
             {
                 tool.end = ts;
+                tool.output = text_of_content(&bcontent)
+                    .chars()
+                    .scan(0, |n, c| {
+                        *n += c.len_utf8();
+                        (*n <= OUTPUT_KEEP).then_some(c)
+                    })
+                    .collect();
                 tool.is_error = is_err && !is_soft_tool_error(&text_of_content(&bcontent));
                 let (ck, cat, name, summary, terr) = (
                     tool.comp_key.clone(),

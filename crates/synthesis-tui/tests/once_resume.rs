@@ -132,6 +132,7 @@ fn once_is_render_frame_plus_the_status_line() {
             sandbox_mode: Some("enforce".into()),
             sandbox_backend: "seatbelt".into(),
             memory: Some(false),
+            peers: None,
         },
     };
     let frame = render_frame(&state, 120, 39, (NOW / 80) as usize, NOW);

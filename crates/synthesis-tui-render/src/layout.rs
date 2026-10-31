@@ -59,9 +59,10 @@ pub enum PanelId {
     UsageMetrics,
     SystemHealth,
     Subagents,
+    History,
 }
 
-pub const PANEL_COUNT: usize = 16;
+pub const PANEL_COUNT: usize = 17;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -172,8 +173,8 @@ pub static REGISTRY: [PanelSpec; PANEL_COUNT] = [
         true,
         None,
         4,
-        9,
-        9,
+        10,
+        10,
         0,
         0,
         4,
@@ -327,13 +328,13 @@ pub static REGISTRY: [PanelSpec; PANEL_COUNT] = [
         Topology,
         "topology",
         "Topology",
-        "cards: guards, skills, sub-agents, execution, hooks, MCP, memory",
+        "cards: user, hooks, guards, sub-agents, skills, MCP, tools, memory",
         Right,
         true,
         None,
-        12,
-        32,
-        32,
+        10,
+        18,
+        18,
         48,
         0,
         1,
@@ -386,6 +387,22 @@ pub static REGISTRY: [PanelSpec; PANEL_COUNT] = [
         2,
         0,
         "agent.subagents + transcript_rows"
+    ),
+    spec!(
+        History,
+        "history",
+        "User prompt",
+        "your prompts of this session with their time",
+        Left,
+        true,
+        None,
+        7,
+        7,
+        7,
+        0,
+        0,
+        1,
+        "session activity feed (prompts)"
     ),
 ];
 
@@ -748,12 +765,13 @@ fn place(f: &Fit, x: i64, y0: i64, w: i64, out: &mut Vec<Placed>) {
     }
 }
 
-const LEFT_OPTIONAL: [PanelId; 6] = [
+const LEFT_OPTIONAL: [PanelId; 7] = [
     PanelId::Workspace,
     PanelId::Running,
     PanelId::Session,
     PanelId::ToolsSkills,
     PanelId::RecentActivity,
+    PanelId::History,
     PanelId::SessionStats,
 ];
 const RIGHT: [PanelId; 6] = [
@@ -1069,8 +1087,16 @@ mod tests {
                         for id in [PanelId::Workspace, PanelId::Running, PanelId::Subagents] {
                             assert!(
                                 q.rect(id).unwrap().h >= pl.rect(id).unwrap().h,
-                                "{w}x{h} mask {mask:b}: hiding {:?} shortened {id:?}",
-                                s.id
+                                "{w}x{h} mask {mask:b}: hiding {:?} shortened {id:?} {:?} -> {:?}",
+                                s.id,
+                                pl.panels
+                                    .iter()
+                                    .map(|x| (x.id, x.rect.h))
+                                    .collect::<Vec<_>>(),
+                                q.panels
+                                    .iter()
+                                    .map(|x| (x.id, x.rect.h))
+                                    .collect::<Vec<_>>()
                             );
                         }
                     }
@@ -1145,6 +1171,7 @@ mod tests {
                         PanelId::Session,
                         PanelId::ToolsSkills,
                         PanelId::RecentActivity,
+                        PanelId::History,
                         PanelId::SessionStats,
                     ] {
                         m.set(id, false);

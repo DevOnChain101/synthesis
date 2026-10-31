@@ -3,7 +3,7 @@
 //! host reads git and hands the result over, an absent value is "n/a" or an empty state.
 
 use crate::dash::{DashState, col_bad, col_muted, col_ok, col_text, col_warn};
-use crate::theme::{fit, glyphs, paint, t};
+use crate::theme::{fit, glyphs, icon, paint, t};
 use synthesis_tui_base::text::width;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -160,29 +160,150 @@ pub fn project(p: &ProjectData, w: i64, h: i64) -> Vec<String> {
     pad_to(out, w, h)
 }
 
+struct FileDiff<'a> {
+    path: &'a str,
+    add: usize,
+    del: usize,
+    /// Hunk headers and body lines, header lines (`index`, `---`, `+++`) left out.
+    body: Vec<&'a str>,
+}
+
+/// The unified diff split per file (`diff --git a/x b/x` starts a file).
+fn files_of(diff: &[String]) -> Vec<FileDiff<'_>> {
+    let mut out: Vec<FileDiff> = vec![];
+    let mut in_hunk = false;
+    for l in diff {
+        if let Some(rest) = l.strip_prefix("diff --git ") {
+            let path = rest.rsplit_once(" b/").map_or(rest, |(_, b)| b);
+            out.push(FileDiff {
+                path,
+                add: 0,
+                del: 0,
+                body: vec![],
+            });
+            in_hunk = false;
+        } else if let Some(f) = out.last_mut() {
+            if l.starts_with("@@") {
+                in_hunk = true;
+            }
+            if !in_hunk {
+                continue;
+            }
+            match l.as_bytes().first() {
+                Some(b'+') => f.add += 1,
+                Some(b'-') => f.del += 1,
+                _ => {}
+            }
+            f.body.push(l);
+        }
+    }
+    out
+}
+
+/// `(old, new)` first line numbers of a hunk header `@@ -12,6 +12,28 @@ ...`.
+fn hunk_start(h: &str) -> (i64, i64) {
+    let num = |t: &str| {
+        t.trim_start_matches(['-', '+'])
+            .split(',')
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0)
+    };
+    let mut it = h.split_whitespace().skip(1);
+    (num(it.next().unwrap_or("")), num(it.next().unwrap_or("")))
+}
+
+/// One bordered card per changed file (the HTML `.dfile`): the path with `+n -m`, the hunk header,
+/// then the lines with old and new line numbers.
+fn diff_cards(diff: &[String], w: i64) -> Vec<String> {
+    let th = t();
+    let g = glyphs();
+    let edge = |c: &str| paint(th.border, c);
+    let inner = (w - 4).max(8) as usize;
+    let mut out = vec![];
+    for f in files_of(diff) {
+        let meta = format!(
+            "{} {}",
+            paint(col_ok(), &format!("{}{}", g.add, f.add)),
+            paint(col_bad(), &format!("{}{}", g.del, f.del))
+        );
+        let left_w = inner.saturating_sub(width(&meta) + 1);
+        let left = format!(
+            "{} {}",
+            paint(th.label, icon("file")),
+            paint(
+                th.strong,
+                &crate::util::short(f.path, left_w.saturating_sub(2))
+            )
+        );
+        out.push(format!(
+            "{}{}",
+            edge(&format!(
+                "{}{}",
+                g.box_tl,
+                g.box_h.repeat(w.max(4) as usize - 2)
+            )),
+            edge(g.box_tr)
+        ));
+        out.push(format!(
+            "{} {} {meta} {}",
+            edge(g.box_v),
+            fit(&left, left_w),
+            edge(g.box_v)
+        ));
+        let (mut o, mut n) = (0, 0);
+        for l in &f.body {
+            let text = if l.starts_with("@@") {
+                (o, n) = hunk_start(l);
+                paint(th.info, l)
+            } else {
+                let (sign, c) = match l.as_bytes().first() {
+                    Some(b'+') => ('+', Some(col_ok())),
+                    Some(b'-') => ('-', Some(col_bad())),
+                    _ => (' ', None),
+                };
+                let (so, sn) = match sign {
+                    '+' => (String::new(), n.to_string()),
+                    '-' => (o.to_string(), String::new()),
+                    _ => (o.to_string(), n.to_string()),
+                };
+                if sign != '+' {
+                    o += 1;
+                }
+                if sign != '-' {
+                    n += 1;
+                }
+                let body = l.get(1..).unwrap_or("");
+                format!(
+                    "{} {} {} {}",
+                    paint(col_muted(), &format!("{so:>4}")),
+                    paint(col_muted(), &format!("{sn:>4}")),
+                    c.map_or(" ".into(), |c| paint(c, &sign.to_string())),
+                    c.map_or(paint(col_text(), body), |c| paint(c, body))
+                )
+            };
+            out.push(format!(
+                "{} {} {}",
+                edge(g.box_v),
+                fit(&text, inner),
+                edge(g.box_v)
+            ));
+        }
+        out.push(edge(&format!(
+            "{}{}{}",
+            g.box_bl,
+            g.box_h.repeat(w.max(4) as usize - 2),
+            g.box_br
+        )));
+    }
+    out
+}
+
 pub fn diff(p: &ProjectData, w: i64, h: i64) -> Vec<String> {
     if let Some(n) = empty(p) {
         return pad_to(vec![format!(" {}", paint(col_muted(), &n))], w, h);
     }
-    let th = t();
-    let mut out: Vec<String> = p
-        .diff
-        .iter()
-        .map(|l| {
-            let c = if l.starts_with("+++") || l.starts_with("---") || l.starts_with("diff ") {
-                th.strong
-            } else if l.starts_with('+') {
-                col_ok()
-            } else if l.starts_with('-') {
-                col_bad()
-            } else if l.starts_with("@@") {
-                th.info
-            } else {
-                col_muted()
-            };
-            format!(" {}", paint(c, l))
-        })
-        .collect();
+    let mut out = diff_cards(&p.diff, w);
     if out.is_empty() {
         out.push(format!(" {}", paint(col_muted(), "no tracked changes")));
     } else if p.truncated && out.len() as i64 >= h {
@@ -192,22 +313,54 @@ pub fn diff(p: &ProjectData, w: i64, h: i64) -> Vec<String> {
     pad_to(out, w, h)
 }
 
-/// Browser tool calls of the session, with how each ended; no browser use is an empty state.
+/// File explorer: the tree on the left, the changes of the working tree on the right, side by side
+/// (the HTML `.fx`). Narrow centres keep the tree alone.
+pub fn files(p: &ProjectData, w: i64, h: i64) -> Vec<String> {
+    if w < 60 || empty(p).is_some() {
+        return project(p, w, h);
+    }
+    let tw = (w / 3).clamp(20, 30);
+    let (left, right) = (project(p, tw, h), diff(p, w - tw - 1, h));
+    let rule = paint(t().border, glyphs().box_v);
+    left.into_iter()
+        .zip(right)
+        .map(|(l, r)| format!("{}{rule}{r}", fit(&l, tw as usize)))
+        .collect()
+}
+
+/// Browser tool calls of the session as a request list (the HTML `.rows`): a status dot, the
+/// action, what it was applied to, how it ended. No browser use is an empty state.
 pub fn browser(s: &DashState, w: i64, h: i64, now: i64) -> Vec<String> {
-    calls(
+    let mut v = calls(
         s,
         w,
-        h,
+        h.saturating_sub(2),
         now,
         |n| n.starts_with("browser"),
         "no browser activity yet",
-    )
+        false,
+    );
+    let (total, failed) = s
+        .session
+        .tools
+        .items
+        .iter()
+        .filter(|t| t.name.starts_with("browser"))
+        .fold((0, 0), |(a, b), t| (a + 1, b + usize::from(t.is_error)));
+    if total > 0 && h > 2 {
+        v.push(String::new());
+        v.push(format!(
+            " {}",
+            paint(col_muted(), &format!("{total} calls · {failed} failed"))
+        ));
+    }
+    pad_to(v, w, h)
 }
 
-/// The shell commands the session ran, newest last, with how each ended. Output text is not kept
-/// by the event model, so it is not shown.
+/// The shell commands the session ran, newest last, each with the start of its output and how it
+/// ended (the HTML terminal pane: a `>` prompt line per command).
 pub fn terminal(s: &DashState, w: i64, h: i64, now: i64) -> Vec<String> {
-    calls(s, w, h, now, |n| n == "Bash", "no shell commands yet")
+    calls(s, w, h, now, |n| n == "Bash", "no shell commands yet", true)
 }
 
 fn calls(
@@ -217,37 +370,56 @@ fn calls(
     now: i64,
     pick: impl Fn(&str) -> bool,
     none: &str,
+    output: bool,
 ) -> Vec<String> {
-    let runs: Vec<String> = s
-        .session
-        .tools
-        .items
-        .iter()
-        .filter(|t| pick(&t.name))
-        .map(|t| {
-            let (mark, c) = match (t.end, t.is_error) {
-                (None, _) => ("…", col_warn()),
-                (Some(_), true) => (glyphs().fail, col_bad()),
-                (Some(_), false) => (glyphs().ok, col_ok()),
-            };
-            let dur = t
-                .start
-                .map(|a| crate::util::fmt_dur_ms((t.end.unwrap_or(now) - a).max(0)))
-                .unwrap_or_else(|| "n/a".into());
-            let left = format!(" {} {}", paint(c, mark), paint(col_text(), &t.summary));
-            let gap = (w - 1 - width(&left) as i64 - dur.len() as i64).max(1);
-            format!(
-                "{left}{}{}",
-                " ".repeat(gap as usize),
-                paint(col_muted(), &dur)
-            )
-        })
-        .collect();
+    let mut runs: Vec<String> = vec![];
+    for t in s.session.tools.items.iter().filter(|t| pick(&t.name)) {
+        let (mark, c) = match (t.end, t.is_error) {
+            (None, _) => ("…", col_warn()),
+            (Some(_), true) => (glyphs().fail, col_bad()),
+            (Some(_), false) => (glyphs().ok, col_ok()),
+        };
+        let dur = t
+            .start
+            .map(|a| crate::util::fmt_dur_ms((t.end.unwrap_or(now) - a).max(0)))
+            .unwrap_or_else(|| "n/a".into());
+        let lead = if output {
+            paint(t_strong(), ">")
+        } else {
+            paint(c, mark)
+        };
+        let left = format!(" {lead} {}", paint(col_text(), &t.summary));
+        let tail = if output {
+            format!("{} {dur}", paint(c, mark))
+        } else {
+            let verb = t.name.trim_start_matches("browser").trim_start_matches('_');
+            format!("{} {dur}", if verb.is_empty() { "call" } else { verb })
+        };
+        let gap = (w - 1 - width(&left) as i64 - width(&tail) as i64).max(1);
+        runs.push(format!(
+            "{left}{}{}",
+            " ".repeat(gap as usize),
+            paint(col_muted(), &tail)
+        ));
+        if output {
+            runs.extend(
+                t.output
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .take(4)
+                    .map(|l| format!("   {}", paint(col_muted(), l.trim_end()))),
+            );
+        }
+    }
     if runs.is_empty() {
         return pad_to(vec![format!(" {}", paint(col_muted(), none))], w, h);
     }
     let skip = runs.len().saturating_sub(h.max(0) as usize);
     pad_to(runs.into_iter().skip(skip).collect(), w, h)
+}
+
+fn t_strong() -> crate::theme::Rgb {
+    t().strong
 }
 
 #[cfg(test)]
@@ -283,12 +455,48 @@ mod tests {
                 dir: false,
                 status: Some('M'),
             }],
-            diff: vec!["+x".into()],
+            diff: vec![
+                "diff --git a/a.rs b/a.rs".into(),
+                "@@ -1 +1 @@".into(),
+                "+x".into(),
+            ],
             ..Default::default()
         };
         let l = strip_ansi(&project(&d, 20, 2)[0]);
         assert!(l.contains("a.rs") && l.trim_end().ends_with('M'));
         assert_eq!(project(&d, 20, 2).len(), 2);
-        assert!(strip_ansi(&diff(&d, 20, 2)[0]).contains("+x"));
+        let card = diff(&d, 24, 5)
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            card.contains("a.rs") && card.contains("+1") && card.contains("+ x"),
+            "{card}"
+        );
+    }
+
+    #[test]
+    fn file_explorer_keeps_the_rule_in_one_column_on_every_row() {
+        let d = ProjectData {
+            loaded: true,
+            rows: vec![TreeRow {
+                depth: 0,
+                name: "a.rs".into(),
+                dir: false,
+                status: Some('M'),
+            }],
+            diff: vec![
+                "diff --git a/a.rs b/a.rs".into(),
+                "@@ -1 +1 @@".into(),
+                "+x".into(),
+            ],
+            ..Default::default()
+        };
+        let rows = files(&d, 70, 8);
+        assert_eq!(rows.len(), 8);
+        for r in &rows {
+            assert_eq!(strip_ansi(r).chars().nth(23), Some('│'), "{r:?}");
+        }
     }
 }

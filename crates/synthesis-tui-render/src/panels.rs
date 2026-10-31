@@ -7,8 +7,8 @@
 use crate::agent::{self, Agent};
 use crate::dash::{
     DashState, Lines, Rects, VAlign, col_accent, col_bad, col_muted, col_ok, col_skill, col_subtle,
-    col_text, col_tool, col_warn, col_white, context_size, ctx_pct_of, level_color, mcp_lines,
-    mcp_rows_of, mode_line, model_of, open_todos, phase_label, section, u,
+    col_text, col_tool, col_warn, col_white, context_size, ctx_pct_of, fmt_time, level_color,
+    mcp_lines, mcp_rows_of, mode_line, model_of, open_todos, phase_label, section, u,
 };
 use crate::model::{Phase, Session, session_phase};
 use crate::theme::*;
@@ -417,6 +417,40 @@ pub fn recent_activity(s: &DashState, w: i64, h: i64, now: i64, rects: &mut Rect
     section("Recent activity", &right, lines, w, h, false, VAlign::Top)
 }
 
+/// The user's prompts of the session with their time, the latest last (HTML "User prompt").
+pub fn user_prompts(s: &DashState, w: i64, h: i64) -> Lines {
+    let inner = w - 2;
+    let all: Vec<_> = s
+        .session
+        .activity
+        .iter()
+        .filter(|f| f.kind == "prompt")
+        .collect();
+    let shown = &all[all.len().saturating_sub(u(h - 1))..];
+    let mut lines: Lines = shown
+        .iter()
+        .map(|f| {
+            let at =
+                f.ts.map_or(String::new(), |ts| fmt_time(ts, s.tz_offset_min));
+            let text_w = (inner - 1 - width(&at) as i64).max(4);
+            format!(
+                "{} {}",
+                paint(col_subtle(), &at),
+                paint(col_text(), &short(&f.text, u(text_w)))
+            )
+        })
+        .collect();
+    if lines.is_empty() {
+        lines.push(paint(col_subtle(), "No messages yet"));
+    }
+    let right = if all.is_empty() {
+        String::new()
+    } else {
+        paint(col_white(), &all.len().to_string())
+    };
+    section("User prompt", &right, lines, w, h, false, VAlign::Top)
+}
+
 pub fn session_stats(s: &DashState, w: i64, h: i64, now: i64) -> Lines {
     let inner = w - 2;
     let c = counters(s.session);
@@ -618,7 +652,7 @@ pub fn usage_metrics(s: &DashState, w: i64, h: i64) -> Lines {
             let (v, f) = cnt(n);
             rows.push((label, v, f));
         }
-        right = paint(col_muted(), "this session");
+        right = paint(col_muted(), &format!("this session {}", icon("chev")));
     } else {
         // the last 7 days of the usage history: what the history holds (no files or commands)
         let week = &s.history[s.history.len().saturating_sub(7)..];
@@ -647,7 +681,7 @@ pub fn usage_metrics(s: &DashState, w: i64, h: i64) -> Lines {
                 sum(|d| d.sessions) / peak,
             ),
         ];
-        right = paint(col_muted(), "7 days");
+        right = paint(col_muted(), &format!("7 days {}", icon("chev")));
     }
     let label_w = rows.iter().map(|r| width(r.0)).max().unwrap_or(0).min(16) as i64;
     let val_w = rows.iter().map(|r| width(&r.1)).max().unwrap_or(0) as i64;
@@ -691,30 +725,49 @@ fn col_track() -> Rgb {
 
 struct Card {
     title: &'static str,
+    icon: &'static str,
     colour: Rgb,
     rows: Vec<String>,
 }
 
-fn card_box(c: &Card, w: i64, detail: usize) -> Lines {
+/// A coloured card `w` wide with `detail` rows of text (the HTML `.ncard`); `core` draws the heavier,
+/// centred frame of the middle card.
+fn card_box(c: &Card, w: i64, detail: usize, core: bool) -> Lines {
+    let g = glyphs();
+    let (tl, tr, bl, br, h, v) = if core && g.box_h != "-" {
+        ("╔", "╗", "╚", "╝", "═", "║")
+    } else {
+        (g.box_tl, g.box_tr, g.box_bl, g.box_br, g.box_h, g.box_v)
+    };
     let b = |s: &str| paint(c.colour, s);
     let inner = u(w - 4);
-    let title = format!(" {} ", c.title.to_uppercase());
-    let top = format!(
-        "{}{}{}",
-        b("╭─"),
-        paint(c.colour, &title),
-        b(&format!("{}╮", "─".repeat(u(w - 3 - width(&title) as i64))))
-    );
-    let mut out = vec![top];
+    let room = u(w - 3);
+    let title = fit(&format!(" {} {}", c.icon, c.title.to_uppercase()), room);
+    let title = title.trim_end();
+    let title = if width(title) < room {
+        format!("{title} ")
+    } else {
+        title.to_string()
+    };
+    let fill = u(w - 2 - 1 - width(&title) as i64);
+    let mut out = vec![format!(
+        "{}{}{}{}",
+        b(&format!("{tl}{h}")),
+        b(&title),
+        b(&h.repeat(fill)),
+        b(tr)
+    )];
     for i in 0..detail {
-        out.push(format!(
-            "{} {} {}",
-            b("│"),
-            fit(c.rows.get(i).map_or("", String::as_str), inner),
-            b("│")
-        ));
+        let row = c.rows.get(i).map_or("", String::as_str);
+        let row = if core {
+            let pad = inner.saturating_sub(width(row)) / 2;
+            format!("{}{row}", " ".repeat(pad))
+        } else {
+            row.to_string()
+        };
+        out.push(format!("{} {} {}", b(v), fit(&row, inner), b(v)));
     }
-    out.push(b(&format!("╰{}╯", "─".repeat(u(w - 2)))));
+    out.push(b(&format!("{bl}{}{br}", h.repeat(u(w - 2)))));
     out
 }
 
@@ -722,13 +775,16 @@ fn dot(c: Rgb) -> String {
     paint(c, glyphs().live)
 }
 
+/// The eight outer cards in grid order (row by row, the core is drawn between `skills` and `sub`),
+/// each at most three rows, like the HTML.
 fn cards(s: &DashState, now: i64) -> Vec<Card> {
     let th = t();
-    let c = counters(s.session);
     let session = s.session;
     let g = glyphs();
     let subs: &[Agent] = s.agent.map_or(&[], |a| &a.subagents);
     let val = |k: &str, v: String| format!("{} {v}", paint(col_muted(), k));
+    let none = |m: &str| vec![paint(col_subtle(), m)];
+    let item = |c: Rgb, text: &str| format!("{} {}", dot(c), paint(col_text(), text));
     let project = {
         let b = basename(&session.cwd);
         if b.is_empty() {
@@ -737,21 +793,27 @@ fn cards(s: &DashState, now: i64) -> Vec<Card> {
             b
         }
     };
-    let ph = session_phase(session, now);
     let live = s.agent.is_some();
+    let sid: String = s
+        .agent_session_id
+        .unwrap_or(&session.id)
+        .chars()
+        .take(8)
+        .collect();
     let user = Card {
-        title: "User / project",
-        colour: th.teal(),
+        title: "User & prompt",
+        icon: icon("user"),
+        colour: th.blue(),
         rows: vec![
-            format!(
-                "{} {}",
-                dot(if live { col_ok() } else { col_subtle() }),
-                paint(
-                    col_text(),
-                    if live { "active session" } else { "no session" }
-                )
+            item(
+                if live { col_ok() } else { col_subtle() },
+                if project.is_empty() {
+                    "no project"
+                } else {
+                    &project
+                },
             ),
-            paint(col_text(), &project),
+            paint(col_text(), if sid.is_empty() { "no session" } else { &sid }),
             if session.last_prompt.is_empty() {
                 paint(col_subtle(), "no prompt yet")
             } else {
@@ -759,15 +821,34 @@ fn cards(s: &DashState, now: i64) -> Vec<Card> {
             },
         ],
     };
-    let hooks_blocked: u32 = session
+    let hooks: Vec<_> = session
         .components
         .values()
         .filter(|x| x.kind == "hook")
-        .map(|x| x.blocked)
-        .sum();
+        .collect();
+    let hooks_blocked: u32 = hooks.iter().map(|x| x.blocked).sum();
+    let hk = Card {
+        title: "Hooks",
+        icon: icon("hook"),
+        colour: th.warn,
+        rows: if hooks.is_empty() {
+            none("no hook events yet")
+        } else {
+            hooks
+                .iter()
+                .map(|x| {
+                    item(
+                        if x.error { col_bad() } else { col_ok() },
+                        &format!("{} ×{}", x.name, x.count),
+                    )
+                })
+                .collect()
+        },
+    };
     let guards = Card {
         title: "Guards",
-        colour: th.orange(),
+        icon: icon("shield"),
+        colour: th.err,
         rows: vec![
             val(
                 "sandbox",
@@ -776,7 +857,7 @@ fn cards(s: &DashState, now: i64) -> Vec<Card> {
                 }),
             ),
             val(
-                "approvals",
+                "approval",
                 paint(
                     col_text(),
                     &s.agent.map_or("–".to_string(), |a| mode_line(a).0),
@@ -795,29 +876,9 @@ fn cards(s: &DashState, now: i64) -> Vec<Card> {
             ),
         ],
     };
-    let mut top_tools: Vec<&(String, u32)> = session.tool_counts.iter().collect();
-    top_tools.sort_by_key(|e| std::cmp::Reverse(e.1));
-    let skills = Card {
-        title: "Skills",
-        colour: th.ok,
-        rows: if session.skills.is_empty() {
-            vec![paint(col_subtle(), "no skills used yet")]
-        } else {
-            session
-                .skills
-                .iter()
-                .map(|(k, n)| {
-                    format!(
-                        "{} {}",
-                        dot(col_ok()),
-                        paint(col_text(), &format!("{k} ×{n}"))
-                    )
-                })
-                .collect()
-        },
-    };
     let sub = Card {
-        title: "Sub-agents",
+        title: "Subagents",
+        icon: icon("users"),
         colour: th.purple(),
         rows: if subs.is_empty() {
             vec![
@@ -827,99 +888,72 @@ fn cards(s: &DashState, now: i64) -> Vec<Card> {
         } else {
             subs.iter()
                 .map(|a| {
-                    lr_plain(
-                        &format!(
-                            "{} {}",
-                            dot(if a.status == "running" {
+                    format!(
+                        "{} {}",
+                        item(
+                            if a.status == "running" {
                                 col_ok()
                             } else {
                                 col_subtle()
-                            }),
-                            paint(col_text(), &a.display_name())
+                            },
+                            &a.display_name()
                         ),
-                        &paint(col_muted(), &a.status),
+                        paint(col_muted(), &format!("· {}", a.status))
                     )
                 })
                 .collect()
         },
     };
-    let core = Card {
-        title: "Synthesis core",
-        colour: th.border,
-        rows: vec![paint(
-            col_text(),
-            &format!(
-                "plan {a} act {a} verify {a} learn",
-                a = if g.ok == "+" { "->" } else { "→" }
-            ),
-        )],
-    };
-    let exec = Card {
-        title: "Execution",
-        colour: th.teal(),
-        rows: vec![
-            val("tool calls", paint(col_white(), &c.tool_calls.to_string())),
-            val("running", paint(col_white(), &ph.running.len().to_string())),
-            val(
-                "errors",
-                paint(
-                    if c.tool_errors > 0 {
-                        col_bad()
-                    } else {
-                        col_white()
-                    },
-                    &c.tool_errors.to_string(),
-                ),
-            ),
-            val(
-                "success",
-                c.success_pct().map_or_else(no_data, |p| {
-                    paint(col_ok(), &format!("{}%", to_fixed(p, 0)))
-                }),
-            ),
-        ],
-    };
-    let hooks: Vec<_> = session
-        .components
-        .values()
-        .filter(|x| x.kind == "hook")
-        .collect();
-    let hk = Card {
-        title: "Hooks",
-        colour: th.warn,
-        rows: if hooks.is_empty() {
-            vec![paint(col_subtle(), "no hook events yet")]
+    let skills = Card {
+        title: "Skills",
+        icon: icon("layers"),
+        colour: th.ok,
+        rows: if session.skills.is_empty() {
+            none("no skills used yet")
         } else {
-            hooks
+            session
+                .skills
                 .iter()
-                .map(|x| {
-                    format!(
-                        "{} {}",
-                        dot(if x.error { col_bad() } else { col_ok() }),
-                        paint(col_text(), &format!("{} ×{}", x.name, x.count))
-                    )
-                })
+                .map(|(k, n)| item(col_ok(), &format!("{k} ×{n}")))
                 .collect()
         },
     };
     let (_, mcp_rows) = mcp_rows_of(s);
     let mcp = Card {
-        title: "External / MCP",
-        colour: th.blue(),
+        title: "MCP",
+        icon: icon("link"),
+        colour: th.orange(),
         rows: if mcp_rows.is_empty() {
-            vec![paint(col_subtle(), "no servers")]
+            none("no servers")
         } else {
             mcp_rows
                 .iter()
                 .map(|r| {
-                    let c = match r.state.as_str() {
-                        "connected" => col_ok(),
-                        "failed" => col_bad(),
-                        "disabled" => col_subtle(),
-                        _ => col_warn(),
-                    };
-                    format!("{} {}", dot(c), paint(col_text(), &r.name))
+                    item(
+                        match r.state.as_str() {
+                            "connected" => col_ok(),
+                            "failed" => col_bad(),
+                            "disabled" => col_subtle(),
+                            _ => col_warn(),
+                        },
+                        &r.name,
+                    )
                 })
+                .collect()
+        },
+    };
+    let mut top_tools: Vec<&(String, u32)> = session.tool_counts.iter().collect();
+    top_tools.sort_by_key(|e| std::cmp::Reverse(e.1));
+    let tools = Card {
+        title: "Tools",
+        icon: icon("tools"),
+        colour: th.teal(),
+        rows: if top_tools.is_empty() {
+            none("no tool calls yet")
+        } else {
+            top_tools
+                .iter()
+                .map(|(k, n)| item(col_ok(), &format!("{k} ×{n}")))
                 .collect()
         },
     };
@@ -932,70 +966,120 @@ fn cards(s: &DashState, now: i64) -> Vec<Card> {
             )
         },
     );
+    let _ = now;
     let memory = Card {
-        title: "Memory / feedback",
-        colour: th.err,
+        title: "Memory",
+        icon: icon("db"),
+        colour: th.pink(),
         rows: vec![
-            val(
-                "writes",
-                paint(col_white(), &session.memory_writes.to_string()),
-            ),
-            val("last verify", verify),
             val(
                 "store",
                 s.host.memory.map_or_else(no_data, |m| {
                     paint(col_text(), if m { "available" } else { "not available" })
                 }),
             ),
+            val(
+                "writes",
+                paint(col_white(), &session.memory_writes.to_string()),
+            ),
+            val("verify", verify),
         ],
     };
-    vec![user, guards, skills, sub, core, exec, hk, mcp, memory]
+    vec![user, hk, guards, sub, skills, mcp, tools, memory]
 }
 
-fn lr_plain(l: &str, r: &str) -> String {
-    format!("{l}  {r}")
-}
-
-/// Two columns of cards with the core row in the middle; as many detail rows per card as the
-/// height allows (0 to 4), connectors between the card rows when there is room.
+/// The 3x3 grid of the HTML: USER, HOOKS, GUARDS over SUBAGENTS, CORE, SKILLS over MCP, TOOLS,
+/// MEMORY, with link lines from the outer cards to the core when there is room. As many detail rows
+/// per card as the height allows (0 to 3).
 pub fn topology(s: &DashState, w: i64, h: i64, now: i64) -> Lines {
+    let g = glyphs();
     let inner = w - 2;
     let all = cards(s, now);
-    // (detail rows, connector rows) by height: 12 + 4 d + 4 c
-    let (d, conn) = [(4, 1), (3, 1), (2, 1), (1, 1), (0, 1), (0, 0)]
+    // (detail rows, connector rows) by height: 3 (d + 2) + 2 c content rows
+    let (d, conn) = [(3, 1), (2, 1), (1, 1), (1, 0), (0, 0)]
         .into_iter()
-        .find(|(d, c)| 12 + 4 * d + 4 * c <= h)
+        .find(|(d, c)| 3 * (d + 2) + 2 * c < h)
         .unwrap_or((0, 0));
-    let (lw, rw) = ((inner - 1) / 2, inner - 1 - (inner - 1) / 2);
-    let pair = |a: &Card, b: &Card| -> Lines {
-        let (x, y) = (card_box(a, lw, d as usize), card_box(b, rw, d as usize));
-        x.into_iter()
-            .zip(y)
-            .map(|(l, r)| format!("{l} {r}"))
+    let (d, conn) = (d as usize, conn as usize);
+    let base = (inner - 2) / 3;
+    let cw = [base, inner - 2 - 2 * base, base];
+    let x2 = cw[0] + 1;
+    let cx = [cw[0] / 2, x2 + cw[1] / 2, x2 + cw[1] + 1 + cw[2] / 2];
+    let off = (cw[1] * 24 / 100).max(1);
+    let (al, ar) = (cx[1] - off, cx[1] + off);
+    let core = Card {
+        title: "Core",
+        icon: icon("spark"),
+        colour: t().accent_light,
+        rows: vec![
+            paint(t().strong, "SYNTHESIS"),
+            paint(t().accent_light, "C O R E"),
+            paint(col_muted(), "Reason • Act • Verify"),
+        ],
+    };
+    let link = col_subtle();
+    let row3 = |a: &Card, m: &Card, z: &Card, mid_core: bool| -> Lines {
+        let (l, c, r) = (
+            card_box(a, cw[0], d, false),
+            card_box(m, cw[1], d, mid_core),
+            card_box(z, cw[2], d, false),
+        );
+        let mid = (d + 2) / 2;
+        (0..d + 2)
+            .map(|k| {
+                let gap = |on: bool| if on { paint(link, g.box_h) } else { " ".into() };
+                format!(
+                    "{}{}{}{}{}",
+                    l[k],
+                    gap(mid_core && k == mid),
+                    c[k],
+                    gap(mid_core && k == mid),
+                    r[k]
+                )
+            })
             .collect()
     };
-    let connector = |lines: &mut Lines| {
-        if conn == 1 {
-            let half = u(lw / 2);
-            lines.push(format!(
-                "{}{}{}{}",
-                " ".repeat(half),
-                paint(col_subtle(), "│"),
-                " ".repeat(u(lw + 1 + rw / 2 - lw / 2 - 1)),
-                paint(col_subtle(), "│")
-            ));
+    // one row of line art: (x, glyph) pairs and horizontal runs
+    let conn_row = |marks: &[(i64, &str)], runs: &[(i64, i64)]| -> String {
+        let mut cells = vec![" ".to_string(); u(inner)];
+        for (a, b) in runs {
+            for x in *a..*b {
+                cells[u(x)] = g.box_h.to_string();
+            }
         }
+        for (x, m) in marks {
+            cells[u(*x)] = m.to_string();
+        }
+        cells.iter().map(|c| paint(link, c)).collect()
     };
     let mut lines: Lines = vec![];
-    lines.extend(pair(&all[0], &all[1]));
-    connector(&mut lines);
-    lines.extend(pair(&all[2], &all[3]));
-    connector(&mut lines);
-    lines.extend(card_box(&all[4], inner, 1));
-    connector(&mut lines);
-    lines.extend(pair(&all[5], &all[6]));
-    connector(&mut lines);
-    lines.extend(pair(&all[7], &all[8]));
+    lines.extend(row3(&all[0], &all[1], &all[2], false));
+    if conn == 1 {
+        lines.push(conn_row(
+            &[
+                (cx[0], g.box_bl),
+                (al, g.box_tr),
+                (cx[1], g.box_v),
+                (ar, g.box_tl),
+                (cx[2], g.box_br),
+            ],
+            &[(cx[0] + 1, al), (ar + 1, cx[2])],
+        ));
+    }
+    lines.extend(row3(&all[3], &core, &all[4], true));
+    if conn == 1 {
+        lines.push(conn_row(
+            &[
+                (cx[0], g.box_tl),
+                (al, g.box_br),
+                (cx[1], g.box_v),
+                (ar, g.box_bl),
+                (cx[2], g.box_tr),
+            ],
+            &[(cx[0] + 1, al), (ar + 1, cx[2])],
+        ));
+    }
+    lines.extend(row3(&all[5], &all[6], &all[7], false));
     let active = session_phase(s.session, now).running.len();
     let right = if active > 0 {
         paint(col_ok(), &format!("{active} active"))
@@ -1164,4 +1248,29 @@ pub fn status_line(s: &DashState, w: i64, frame: usize, now: i64) -> String {
 
 pub fn model_chip(s: &DashState) -> Option<String> {
     model_of(s).or(Some(s.session.model.clone()).filter(|m| !m.is_empty()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use synthesis_tui_base::text::strip_ansi;
+
+    #[test]
+    fn topology_cards_are_exactly_as_wide_as_asked_even_with_long_titles() {
+        let c = Card {
+            title: "User & prompt",
+            icon: "@",
+            colour: [1, 2, 3],
+            rows: vec!["a row that is much too long for the card".into()],
+        };
+        for core in [false, true] {
+            for w in [10, 14, 20] {
+                let rows = card_box(&c, w, 2, core);
+                assert_eq!(rows.len(), 4);
+                for r in &rows {
+                    assert_eq!(width(&strip_ansi(r)) as i64, w, "{core} {w}: {r:?}");
+                }
+            }
+        }
+    }
 }

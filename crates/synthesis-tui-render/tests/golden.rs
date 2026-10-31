@@ -30,6 +30,7 @@ use synthesis_tui_base::text::strip_ansi;
 use synthesis_tui_render::agent::{
     Agent, AgentOpts, EditorView, Pending, QHit, render_agent, todo_window,
 };
+use synthesis_tui_render::centre::{Centre, ProjectData, TreeRow};
 use synthesis_tui_render::dash::*;
 use synthesis_tui_render::layout::{PanelId, Panels, View};
 use synthesis_tui_render::model::{Session, Todo, apply_entry};
@@ -352,6 +353,10 @@ fn hydrate_state(st: &Value) -> Owned {
             .map(String::from),
         sandbox_backend: String::new(),
         memory: st.pointer("/host/memory").and_then(Value::as_bool),
+        peers: st
+            .pointer("/host/peers")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize),
     };
     Owned {
         session: hydrate_session(st.get("session").unwrap_or(&json!({}))),
@@ -1428,6 +1433,61 @@ fn write_visual_frames() {
                 .unwrap();
             }
         }
+    }
+}
+
+/// The centre tabs (diff, terminal, browser, file explorer) with a small working-tree fixture, as
+/// `synthesis-<tab>-160x45.ansi` for `tools/frames-to-png.mjs`.
+#[test]
+fn write_visual_tab_frames() {
+    let Ok(dir) = std::env::var("SYNTHESIS_FRAMES_DIR") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = read(root().join("../../tests/golden/render/layout-100x30-all/input.json"));
+    let diff = "diff --git a/src/lib/auth.ts b/src/lib/auth.ts\n--- a/src/lib/auth.ts\n+++ b/src/lib/auth.ts\n@@ -12,3 +12,4 @@ export async function createSession(user: User) {\n   const sessionId = generateSessionId()\n-  const session = await db.session.create({ data: { id: sessionId } })\n+  const session = await db.session.create({\n+    data: { id: sessionId, userId: user.id },\n+  })\n   return session\ndiff --git a/src/lib/session.ts b/src/lib/session.ts\n--- a/src/lib/session.ts\n+++ b/src/lib/session.ts\n@@ -3,3 +3,3 @@\n export const SESSION_DURATION = 1000 * 60\n-  return Math.random().toString(36)\n+  return crypto.randomUUID()\n }";
+    let row = |depth, name: &str, dir, status| TreeRow {
+        depth,
+        name: name.into(),
+        dir,
+        status,
+    };
+    for (name, centre) in [
+        ("diff", Centre::Diff),
+        ("terminal", Centre::Terminal),
+        ("browser", Centre::Browser),
+        ("files", Centre::Files),
+    ] {
+        let _scope = ConfigScope::new(RenderConfig {
+            theme: ThemeId::Synthesis,
+            ascii: false,
+        });
+        let mut st = hydrate_state(&input["state"]);
+        st.view.panels = Panels::all();
+        st.view.centre = centre;
+        st.view.project = ProjectData {
+            loaded: true,
+            rows: vec![
+                row(0, "src", true, None),
+                row(1, "lib", true, None),
+                row(2, "auth.ts", false, Some('M')),
+                row(2, "session.ts", false, Some('M')),
+                row(0, "tests", true, None),
+                row(1, "auth.test.ts", false, Some('A')),
+                row(0, "README.md", false, None),
+            ],
+            diff: diff.split('\n').map(String::from).collect(),
+            ..Default::default()
+        };
+        let chars = st.editor.chars.clone();
+        let ds = st.dash(&chars, st.editor.cur);
+        let fr = render_frame(&ds, 160, 45, 0, input["now"].as_i64().unwrap());
+        std::fs::write(
+            dir.join(format!("synthesis-{name}-160x45.ansi")),
+            paint_background(fr.lines).join("\n") + "\n",
+        )
+        .unwrap();
     }
 }
 

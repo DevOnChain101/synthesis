@@ -135,6 +135,8 @@ pub struct HostInfo {
     pub sandbox_backend: String,
     /// The memory store (instruction files) is available.
     pub memory: Option<bool>,
+    /// Cross-session messaging is on: the requests in flight (`peers on · N in flight`).
+    pub peers: Option<usize>,
 }
 
 pub struct DashState<'a> {
@@ -322,6 +324,25 @@ pub enum VAlign {
 /// A borderless section (spec §3 "C2"): a label row (UPPERCASE label, `right` flush right, the
 /// label in the accent colour when `active`) and `h - 1` content rows. Each row has one column of
 /// padding on both sides, so content may use `w - 2` cells. No frame, no heavy line.
+/// The glyph and tint of a panel's header (the HTML `<symbol>` icon beside each `<h2>`), by label.
+fn panel_icon(label: &str) -> Option<(&'static str, Rgb)> {
+    let th = t();
+    let (name, c) = match label.to_lowercase().as_str() {
+        "workspace" => ("folder", th.blue()),
+        "running sessions" => ("play", th.ok),
+        "session" => ("term", th.teal()),
+        "tools & skills" => ("tools", th.warn),
+        "recent activity" => ("pulse", th.purple()),
+        "user prompt" => ("clock", th.pink()),
+        "topology" => ("graph", th.purple()),
+        "agent status" => ("spark", th.ok),
+        "context" => ("chip", th.teal()),
+        "usage & metrics" => ("bars", th.orange()),
+        _ => return None,
+    };
+    Some((icon(name), c))
+}
+
 pub(crate) fn section(
     label: &str,
     right: &str,
@@ -335,23 +356,26 @@ pub(crate) fn section(
         return vec![];
     }
     let th = t();
+    let icon = panel_icon(label);
     let label = label.to_uppercase();
+    let iw = if icon.is_some() { 2 } else { 0 };
     // the right-hand text is secondary: it goes when it would cut the label
-    let right = if width(&label) as i64 + width(right) as i64 + 3 > w {
+    let right = if width(&label) as i64 + width(right) as i64 + 3 + iw > w {
         ""
     } else {
         right
     };
     let rw = width(right) as i64;
-    let max_label = u((w - 3 - rw - i64::from(rw > 0)).max(1));
+    let max_label = u((w - 3 - rw - iw - i64::from(rw > 0)).max(1));
     let lab = if width(&label) > max_label {
         fit(&label, max_label)
     } else {
         label
     };
-    let gap = u(w - 2 - width(&lab) as i64 - rw).max(1);
+    let gap = u(w - 2 - iw - width(&lab) as i64 - rw).max(1);
     let head = format!(
-        " {}{}{} ",
+        " {}{}{}{} ",
+        icon.map_or(String::new(), |(g, c)| format!("{} ", paint(c, g))),
         paint(if active { th.accent } else { th.label }, &lab),
         " ".repeat(gap),
         right
@@ -370,7 +394,7 @@ pub(crate) fn section(
     rows
 }
 
-fn fmt_time(ts: i64, tz: i32) -> String {
+pub(crate) fn fmt_time(ts: i64, tz: i32) -> String {
     if ts == 0 {
         return "--:--:--".into();
     }
@@ -865,6 +889,14 @@ pub(crate) fn session_info_panel(s: &DashState, w: i64, h: i64, frame: usize, no
             "cwd",
             &basename(&session.cwd),
             col_text(),
+            inner,
+        ));
+    }
+    if let Some(m) = s.host.memory {
+        lines.push(session_row(
+            "memory",
+            if m { "on" } else { "off" },
+            if m { col_ok() } else { col_subtle() },
             inner,
         ));
     }
@@ -1373,6 +1405,23 @@ fn header(s: &DashState, w: i64, _frame: usize, now: i64) -> String {
     add(
         6,
         true,
+        s.agent.map_or(String::new(), |a| {
+            let e = a
+                .effort_label
+                .as_deref()
+                .filter(|e| !e.is_empty())
+                .unwrap_or(if a.effort.is_empty() {
+                    "auto"
+                } else {
+                    &a.effort
+                });
+            format!("{} {}", paint(th.muted, "effort"), paint(th.purple(), e))
+        }),
+        None,
+    );
+    add(
+        6,
+        true,
         ctx.map_or(String::new(), |c| labelled("context", &c)),
         None,
     );
@@ -1389,17 +1438,15 @@ fn header(s: &DashState, w: i64, _frame: usize, now: i64) -> String {
         None,
     );
     add(8, false, health_full, Some(paint(hc, g.live)));
-    if w >= 140 {
-        add(
-            9,
-            false,
-            paint(
-                th.muted,
-                &format!("{} {} {:>2}", DAYS[c.dow], MONTHS[c.month], c.day),
-            ),
-            None,
-        );
-    }
+    add(
+        9,
+        false,
+        paint(
+            th.muted,
+            &format!("{} {} {:02}", DAYS[c.dow], MONTHS[c.month], c.day),
+        ),
+        None,
+    );
     add(0, false, paint(th.body, &clock), None);
     let words = wordmarks(w);
     for (li, word) in words.iter().enumerate() {
@@ -1562,6 +1609,22 @@ fn footer(s: &DashState, w: i64) -> String {
             ),
         ),
     ];
+    if let Some(n) = s.host.peers {
+        parts.insert(
+            0,
+            (
+                4,
+                paint(
+                    col_ok(),
+                    &if n > 0 {
+                        format!("peers on · {n} in flight")
+                    } else {
+                        "peers on".to_string()
+                    },
+                ),
+            ),
+        );
+    }
     parts.retain(|p| {
         !strip_ansi(&p.1).trim().is_empty() && strip_ansi(&p.1).trim() != glyphs().branch
     });
@@ -1595,6 +1658,7 @@ fn tab_strip(s: &DashState, pl: &Plan, w: i64) -> (String, Vec<(i64, i64, View)>
         PanelId::Session,
         PanelId::ToolsSkills,
         PanelId::RecentActivity,
+        PanelId::History,
         PanelId::SessionStats,
         PanelId::Topology,
         PanelId::UsageMetrics,
@@ -1885,6 +1949,7 @@ pub fn render_frame(
                 rects.activity_rect = Some(r);
                 panels::recent_activity(s, cw, ch, now, &mut rects)
             }
+            PanelId::History => panels::user_prompts(s, cw, ch),
             PanelId::SessionStats => panels::session_stats(s, cw, ch, now),
             PanelId::AgentStatus if r.h == 1 => vec![panels::status_line(s, r.w, frame, now)],
             PanelId::AgentStatus => panels::agent_status(s, cw, ch, frame, now),
@@ -1945,7 +2010,7 @@ pub fn render_frame(
         let other = rects.centre_row.is_some() && s.view.centre != Centre::Chat;
         if other {
             let lines = match s.view.centre {
-                Centre::Files => centre::project(&s.view.project, c.w, c.h),
+                Centre::Files => centre::files(&s.view.project, c.w, c.h),
                 Centre::Diff => centre::diff(&s.view.project, c.w, c.h),
                 Centre::Browser => centre::browser(s, c.w, c.h, now),
                 _ => centre::terminal(s, c.w, c.h, now),
