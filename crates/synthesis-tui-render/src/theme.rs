@@ -28,13 +28,16 @@ pub enum ThemeId {
     HighContrast,
     Mono,
     Pearl,
+    /// Paints nothing: every cell keeps the terminal's own background (surfaces are borders, dim and
+    /// underline); the foreground tokens are the Synthesis ones.
+    System,
     /// Chosen automatically for 16-colour terminals; never by the user.
     Ansi16,
 }
 
 impl ThemeId {
     /// The values `synthesis.tui.theme` accepts.
-    pub const CHOICES: [(&'static str, ThemeId); 7] = [
+    pub const CHOICES: [(&'static str, ThemeId); 8] = [
         ("synthesis", ThemeId::Synthesis),
         ("classic", ThemeId::Classic),
         ("graphite", ThemeId::Graphite),
@@ -42,6 +45,7 @@ impl ThemeId {
         ("high-contrast", ThemeId::HighContrast),
         ("mono", ThemeId::Mono),
         ("pearl", ThemeId::Pearl),
+        ("system", ThemeId::System),
     ];
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -69,8 +73,14 @@ pub struct Syntax {
 /// the colour is painted, so tokens stay plain `Rgb` values.
 pub struct Theme {
     pub id: ThemeId,
-    /// The terminal background this theme is designed for (never painted).
+    /// The terminal background this theme is designed for. Painted over the whole frame only when
+    /// `paint_bg` is set.
     pub bg_ref: Rgb,
+    /// Paint the app background and the card surfaces (Synthesis); the other themes keep the
+    /// terminal's own background.
+    pub paint_bg: bool,
+    /// No `48;` SGR is ever emitted (System): `bg()` is empty and selection is reverse video.
+    pub flat: bool,
     /// Header band, toasts.
     pub surface: Rgb,
     /// Dialogs and selection.
@@ -151,6 +161,8 @@ const MONOKAI: Syntax = Syntax {
 const BASE: Theme = Theme {
     id: ThemeId::Graphite,
     bg_ref: hex(0x0B0C0F),
+    paint_bg: false,
+    flat: false,
     surface: hex(0x15171B),
     elevated: hex(0x242830),
     border: hex(0x3A3F4A),
@@ -255,21 +267,86 @@ const CLASSIC_T: Theme = Theme {
 };
 pub static CLASSIC: Theme = CLASSIC_T;
 
-/// The owner's reference mockups (design/tui-reference): Classic's foreground colours, which agree
-/// with the colours sampled from the mockups (`tools/sample-mockup-palette.py`: blue, teal, green,
-/// amber, red and purple fall in the same hue families), on the mockups' deep navy surfaces
-/// (sampled: page `#080E12`, header band `#0E141A`, selected row `#161E26`, diff-added row `#122220`).
+/// The owner's HTML prototype (design/tui-prototype/index.html, `:root` tokens value for value):
+/// paints the app background (`#0B0C0F`) and the card surfaces (`#15171B`). The default theme.
 pub static SYNTHESIS: Theme = Theme {
     id: ThemeId::Synthesis,
-    bg_ref: hex(0x080E12),
-    surface: hex(0x0E141A),
-    elevated: hex(0x1A2433),
-    diff_add_bg: hex(0x122220),
+    bg_ref: hex(0x0B0C0F),
+    paint_bg: true,
+    surface: hex(0x15171B),
+    elevated: hex(0x242830),
+    border: hex(0x606978),
+    label: hex(0xB5BECD),
+    muted: hex(0x8A93A3),
+    body: hex(0xC4CAD6),
+    strong: hex(0xF2F4F8),
+    accent: hex(0xD9D9E0),
+    accent_light: hex(0xF7F8FA),
+    pearl: hex(0xD7CEC7),
+    ok: hex(0x4ADE80),
+    warn: hex(0xE0B252),
+    err: hex(0xE5636B),
+    info: hex(0x6EA8FF),
+    sand: hex(0xF472B6),
+    ink: hex(0x0B0C0F),
+    diff_add_bg: hex(0x0F2A1D),
+    diff_del_bg: hex(0x2B1519),
+    heat: [
+        hex(0x1B1E24),
+        hex(0x3A3F4A),
+        hex(0x6B717C),
+        hex(0x9CA3AF),
+        hex(0xE5E7EB),
+    ],
+    tints: [hex(0x4ADE80), hex(0x6EA8FF), hex(0xE0B252), hex(0xB794F6)],
     select: (
-        "\x1b[38;2;245;245;245m\x1b[48;2;26;36;51m",
+        "\x1b[38;2;242;244;248m\x1b[48;2;36;40;48m",
         "\x1b[39m\x1b[49m",
     ),
+    extra: Some(&SYNTHESIS_EXTRA),
     ..CLASSIC_T
+};
+
+static SYNTHESIS_EXTRA: Extra = Extra {
+    track: hex(0x3A3F4A),
+    slate: hex(0xB5BECD),
+    cream: hex(0xF7F8FA),
+    blue: hex(0x6EA8FF),
+    teal: hex(0x4FD1C5),
+    purple: hex(0xB794F6),
+    pink: hex(0xF472B6),
+    orange: hex(0xF59E42),
+    code: hex(0x6EA8FF),
+    ctx: [
+        hex(0x6EA8FF),
+        hex(0xB794F6),
+        hex(0x4FD1C5),
+        hex(0xE0B252),
+        hex(0xF472B6),
+        hex(0x4FD1C5),
+        hex(0x4ADE80),
+        hex(0xE5636B),
+    ],
+    agents: [
+        hex(0xB794F6),
+        hex(0x6EA8FF),
+        hex(0x4ADE80),
+        hex(0xE0B252),
+        hex(0x4FD1C5),
+        hex(0xF472B6),
+        hex(0xF59E42),
+        hex(0xE5636B),
+    ],
+};
+
+/// Same foreground tokens as Synthesis, but nothing is painted: the terminal's own background shows
+/// through everywhere. Surfaces are expressed with borders, dim and underline.
+pub static SYSTEM: Theme = Theme {
+    id: ThemeId::System,
+    paint_bg: false,
+    flat: true,
+    select: (REVERSE_SGR, "\x1b[27m"),
+    ..SYNTHESIS
 };
 
 /// Silver and pearl surfaces with the kit's blue (hue 219, the hue of the kit's Muted Blue `#0B1322`)
@@ -349,6 +426,8 @@ const M_PLAIN: Rgb = hex(0xC8C8C8);
 pub static MONO: Theme = Theme {
     id: ThemeId::Mono,
     bg_ref: hex(0x000000),
+    paint_bg: false,
+    flat: false,
     surface: M_PLAIN,
     elevated: M_PLAIN,
     border: M_DIM,
@@ -390,6 +469,8 @@ pub static MONO: Theme = Theme {
 pub static PEARL: Theme = Theme {
     id: ThemeId::Pearl,
     bg_ref: hex(0xF7F8FA),
+    paint_bg: false,
+    flat: false,
     surface: hex(0xEDEFF3),
     elevated: hex(0xE1E4EA),
     border: hex(0xB7BCC6),
@@ -450,6 +531,8 @@ const A_BRIGHT: Rgb = [255, 255, 255]; // 15
 pub static ANSI16: Theme = Theme {
     id: ThemeId::Ansi16,
     bg_ref: A_BLACK,
+    paint_bg: false,
+    flat: false,
     surface: A_BLACK,
     elevated: A_BLACK,
     border: A_GREY,
@@ -497,6 +580,7 @@ pub fn theme_for(id: ThemeId) -> &'static Theme {
         ThemeId::HighContrast => &HIGH_CONTRAST,
         ThemeId::Mono => &MONO,
         ThemeId::Pearl => &PEARL,
+        ThemeId::System => &SYSTEM,
         ThemeId::Ansi16 => &ANSI16,
     }
 }
@@ -541,6 +625,13 @@ pub struct Glyphs {
     pub dot: &'static str,
     pub vbar: &'static str,
     pub dash: &'static str,
+    /// Thin rounded card border.
+    pub box_tl: &'static str,
+    pub box_tr: &'static str,
+    pub box_bl: &'static str,
+    pub box_br: &'static str,
+    pub box_h: &'static str,
+    pub box_v: &'static str,
 }
 
 pub static UNICODE: Glyphs = Glyphs {
@@ -565,6 +656,12 @@ pub static UNICODE: Glyphs = Glyphs {
     dot: "·",
     vbar: "│",
     dash: "┄",
+    box_tl: "╭",
+    box_tr: "╮",
+    box_bl: "╰",
+    box_br: "╯",
+    box_h: "─",
+    box_v: "│",
 };
 
 pub static ASCII: Glyphs = Glyphs {
@@ -589,6 +686,12 @@ pub static ASCII: Glyphs = Glyphs {
     dot: "-",
     vbar: "|",
     dash: "-",
+    box_tl: "+",
+    box_tr: "+",
+    box_bl: "+",
+    box_br: "+",
+    box_h: "-",
+    box_v: "|",
 };
 
 impl Glyphs {
@@ -733,6 +836,9 @@ pub fn fg(c: Rgb) -> String {
 }
 pub fn bg(c: Rgb) -> String {
     let t = t();
+    if t.flat {
+        return String::new();
+    }
     format!(
         "{}\x1b[48;2;{};{};{}m",
         t.attr(t.bg_attrs, c),
@@ -1220,4 +1326,25 @@ mod theme_tests {
             }
         }
     }
+}
+
+/// Paints the app background under a finished frame (themes with `paint_bg`): every row starts on
+/// the background colour and returns to it after each reset, so only cells that name another
+/// background (cards, selection, diffs) differ. Other themes: the rows unchanged.
+pub fn paint_background(lines: Vec<String>) -> Vec<String> {
+    let th = t();
+    if !th.paint_bg {
+        return lines;
+    }
+    let b = bg(th.bg_ref);
+    lines
+        .into_iter()
+        .map(|l| {
+            format!(
+                "{b}{}{RESET}",
+                l.replace(RESET, &format!("{RESET}{b}"))
+                    .replace("\x1b[49m", &format!("\x1b[49m{b}"))
+            )
+        })
+        .collect()
 }

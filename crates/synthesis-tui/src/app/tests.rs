@@ -907,12 +907,14 @@ fn selection_drag_copies_chat_text() {
     }
     // the highlight is painted until something clears it
     let hl = a.render(COLS, ROWS, T0).join("\n");
-    assert!(hl.contains("\x1b[48;2;26;36;51m")); // Synthesis `select` background
+    // Synthesis `select` background (the `elevated` token also marks the active footer chip)
+    let sel = "\x1b[48;2;36;40;48m";
+    let n = hl.matches(sel).count();
     keys(&mut a, "x");
+    let cleared = a.render(COLS, ROWS, T0).join("\n").matches(sel).count();
     assert!(
-        !a.render(COLS, ROWS, T0)
-            .join("\n")
-            .contains("\x1b[48;2;36;40;48m")
+        n > cleared,
+        "the selection was not painted or not cleared ({n} vs {cleared})"
     );
     // a click without a drag copies nothing
     let click_up = Key::Mouse {

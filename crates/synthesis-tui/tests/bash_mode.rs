@@ -303,7 +303,15 @@ fn running_command_shows_the_live_tail_of_its_output() {
     assert!(s.contains("+4 more lines (ctrl+o to expand)"), "{s}");
     r.tty.send("\x0f"); // ctrl+o: everything
     r.wait_for("(ctrl+o to collapse)");
-    assert!(r.tty.screen_text().contains("line1 "));
+    // (rows are read back without trailing blanks: `line1` ends its row)
+    assert!(
+        r.tty
+            .screen()
+            .iter()
+            .any(|l| l.trim_end().ends_with("⎿  line1")),
+        "{}",
+        r.tty.screen_text()
+    );
     r.tty.send("\x1b");
     r.wait_for("interrupted");
     r.tty.send("\x04");

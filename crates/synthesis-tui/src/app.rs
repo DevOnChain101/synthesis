@@ -28,12 +28,12 @@ use synthesis_tui_render::dash::{
     Tap, Usage, Workspace, render_frame, workspace_key,
 };
 use synthesis_tui_render::dialogs::HELP;
-use synthesis_tui_render::layout::{Mode as LayoutMode, View};
+use synthesis_tui_render::layout::{Mode as LayoutMode, Screen, View};
 use synthesis_tui_render::model::{
     self, Session, apply_event, parse_ts, session_from_events, session_phase,
 };
 use synthesis_tui_render::picker::{Picker, PickerItem};
-use synthesis_tui_render::theme::{self, ConfigScope, RenderConfig};
+use synthesis_tui_render::theme::{self, ConfigScope, RenderConfig, ThemeId};
 use synthesis_tui_render::util::basename;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -207,6 +207,7 @@ impl Dialog {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PickerKind {
     Model,
+    Theme,
     Command,
     Folder,
     Resume,
@@ -332,6 +333,12 @@ pub(crate) struct App {
     config: Option<ConfigScreen>,
     /// The view of Tabs mode (terminals under 100 columns).
     tab: View,
+    /// Mission or Chat (Tab, `1` / `2` after Esc, the footer chips).
+    screen: Screen,
+    /// First run: no model is configured yet. The app shows the setup card and refuses to start a task.
+    setup: bool,
+    /// Esc on an empty prompt: `1` and `2` pick a screen instead of typing a digit, until a key types.
+    nav: bool,
     /// Live MCP server state, asked for at each frame.
     pub mcp_status: Option<Box<dyn Fn() -> Vec<McpLive>>>,
 }
@@ -387,6 +394,7 @@ fn local_commands() -> Vec<CmdDef> {
             "[on|off]",
         ),
         c("config", "panels, theme and options", ""),
+        c("themes", "pick a colour theme", "[name]"),
         c("exit", "quit", ""),
     ]
 }
@@ -520,6 +528,9 @@ impl App {
             env: synthesis_config::Env::default(),
             config: None,
             tab: View::Chat,
+            screen: Screen::Mission,
+            setup: false,
+            nav: false,
             mcp_status: None,
         }
     }
@@ -538,6 +549,20 @@ impl App {
         self.color = color;
         self.env = env;
         self.render_cfg = self.tui.render_config(self.color, &self.env);
+    }
+
+    /// First-run mode: shows the setup `card` and refuses tasks until a model exists. `/reload` asks
+    /// the host to check the configuration again.
+    pub fn set_setup(&mut self, card: Vec<String>) {
+        self.setup = true;
+        self.commands.push(CmdDef {
+            name: "reload".into(),
+            aliases: vec![],
+            description: "check the configuration again".into(),
+            argument_hint: String::new(),
+            local: true,
+        });
+        self.chat.push(item! { kind: "setup".into(), lines: card, });
     }
 
     /// Opens `/config` (the host of `--once` uses it to draw the screen without keys).
@@ -1018,7 +1043,15 @@ impl App {
 
     fn agent_key(&mut self, k: &Key, now: i64, out: &mut Vec<Cmd>) {
         match k {
+            Key::Text(t) if self.nav && self.editor.chars.is_empty() && (t == "1" || t == "2") => {
+                self.screen = if t == "1" {
+                    Screen::Mission
+                } else {
+                    Screen::Chat
+                };
+            }
             Key::Text(t) => {
+                self.nav = false;
                 self.scroll = 0; // typing brings the view back to the prompt
                 if t == "?" && self.editor.chars.is_empty() {
                     self.run_slash("help", "", now, out);
@@ -1034,6 +1067,7 @@ impl App {
                 }
             }
             Key::Paste(t) => {
+                self.nav = false;
                 // pasted text never becomes a shell command (or an agent message) by itself: type
                 // the `!` / `@` yourself
                 let t = if self.editor.cur == 0 && t.starts_with(['!', '#', '@']) {
@@ -1062,9 +1096,11 @@ impl App {
         use Named::*;
         let recall_queue = self.editor.chars.is_empty() && !self.queue.is_empty();
         let tab_cycles = self.editor.chars.is_empty() && self.dialogs.is_empty();
+        let tab_screen = self.chat.agents.is_empty() && self.tab_columns();
         let e = &mut self.editor;
         match n {
             Enter => {
+                self.nav = false;
                 if e.chars.last() == Some(&'\\') {
                     e.backspace();
                     e.insert("\n");
@@ -1122,8 +1158,10 @@ impl App {
                     }
                 } else {
                     self.esc_at = Some(now);
+                    self.nav = true;
                 }
             }
+            Tab if tab_cycles && tab_screen => self.screen = self.screen.other(),
             Tab if tab_cycles
                 && self
                     .frame
@@ -1205,6 +1243,13 @@ impl App {
         }
     }
 
+    /// The last frame was drawn in Columns mode (Mission and Chat differ there).
+    fn tab_columns(&self) -> bool {
+        self.frame
+            .as_ref()
+            .is_none_or(|f| f.mode == LayoutMode::Columns)
+    }
+
     /// Tab in Tabs mode: the next view of the strip.
     fn next_view(&mut self) {
         let Some(f) = self.frame.as_ref() else { return };
@@ -1246,6 +1291,14 @@ impl App {
     fn submit(&mut self, now: i64, out: &mut Vec<Cmd>) {
         let text = self.editor.text();
         if text.trim().is_empty() {
+            return;
+        }
+        // first run: only slash commands work (/config, /themes, /help, /reload, /exit ...)
+        if self.setup && !text.trim_start().starts_with('/') {
+            self.out_item(
+                "no model is configured yet, so nothing was sent · create the config shown in the setup card above, then type /reload",
+                true,
+            );
             return;
         }
         if self.memory() {
@@ -1489,6 +1542,15 @@ impl App {
 
     fn run_slash(&mut self, name: &str, arg: &str, now: i64, out: &mut Vec<Cmd>) {
         match name {
+            "reload" if self.setup => {
+                self.quit = Some(ExitReason::OpenFolder(PathBuf::from(&self.cfg.cwd)))
+            }
+            "model" | "effort" | "compact" if self.setup => self.out_item(
+                format!(
+                    "/{name}: no model is configured yet · see the setup card above, then /reload"
+                ),
+                true,
+            ),
             "help" => {
                 self.chat.push(item! {
                     kind: "help".into(),
@@ -1501,6 +1563,8 @@ impl App {
             }),
             "exit" | "quit" => self.quit = Some(ExitReason::Quit),
             "config" => self.open_config(0),
+            "themes" => self.themes(arg, out),
+
             "clear" => {
                 if self.running() {
                     self.out_item("/clear: a task is running · esc cancels it first", true);
@@ -1781,6 +1845,54 @@ impl App {
         }
     }
 
+    /// `/themes`: the picker, or `/themes NAME` to set one. The choice is saved in the USER settings.
+    fn themes(&mut self, arg: &str, out: &mut Vec<Cmd>) {
+        if self.color == synthesis_tui_base::sgr::ColorMode::Mono {
+            self.out_item("/themes: NO_COLOR is set, the theme is mono", true);
+            return;
+        }
+        if arg.is_empty() {
+            let items = ThemeId::CHOICES
+                .iter()
+                .map(|(n, id)| {
+                    let detail = match id {
+                        ThemeId::Synthesis => "paints the background (default)",
+                        ThemeId::System => "your terminal's own background",
+                        ThemeId::Classic => "the first palette",
+                        _ => "",
+                    };
+                    (
+                        PickerItem {
+                            label: (*n).to_string(),
+                            detail: detail.into(),
+                            current: *id == self.tui.theme,
+                        },
+                        (*n).to_string(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            self.open_picker(
+                PickerKind::Theme,
+                "Theme",
+                "enter selects",
+                items,
+                PathBuf::new(),
+            );
+        } else if let Some(id) = ThemeId::parse(arg.trim()) {
+            self.tui.theme = id;
+            self.render_cfg = self.tui.render_config(self.color, &self.env);
+            out.push(Cmd::SaveTui(self.tui.to_value()));
+        } else {
+            self.out_item(
+                format!(
+                    "/themes: unknown theme · one of {}",
+                    ThemeId::CHOICES.map(|c| c.0).join(", ")
+                ),
+                true,
+            );
+        }
+    }
+
     fn open_command_picker(&mut self) {
         let items = self
             .commands
@@ -1990,6 +2102,10 @@ impl App {
             PickerKind::Model => {
                 self.picker = None;
                 self.switch_model(value, out);
+            }
+            PickerKind::Theme => {
+                self.picker = None;
+                self.themes(value, out);
             }
             PickerKind::BypassConfirm => {
                 self.picker = None;
@@ -2536,6 +2652,27 @@ impl App {
                 }
                 _ => {}
             }
+            return;
+        }
+        // a click on a footer chip picks the screen
+        if let Key::Mouse {
+            x,
+            y,
+            button: 0,
+            action: MouseAction::Down,
+            ..
+        } = *k
+            && self.dialogs.is_empty()
+            && let Some(f) = self.frame.as_ref()
+            && f.rects.footer_row == Some(i64::from(y) - 1)
+            && let Some(sc) = f
+                .rects
+                .chip_hits
+                .iter()
+                .find(|(a, b, _)| (*a..*b).contains(&(i64::from(x) - 1)))
+                .map(|h| h.2)
+        {
+            self.screen = sc;
             return;
         }
         // a click on a tab of the Tabs-mode strip selects that view
@@ -3141,6 +3278,7 @@ impl App {
             opts,
             panels: self.tui.panels,
             tab: self.tab,
+            screen: self.screen,
             // a dialog (an approval) is answered in the chat: /config waits behind it
             config: self
                 .config
@@ -3230,7 +3368,7 @@ impl App {
                 theme::RESET
             );
         }
-        lines
+        theme::paint_background(lines)
     }
 }
 

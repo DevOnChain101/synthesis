@@ -836,6 +836,7 @@ fn dialogs_json() -> Value {
 
 const P1_STAMP: &str = "pending-owner-review (P1 2026-10-30)";
 const P2_STAMP: &str = "pending-owner-review (P2 2026-10-30)";
+const NEW_STAMP: &str = "pending-owner-review (new TUI 2026-10-31)";
 
 /// What phase P2 (layout engine, panel registry) may rewrite: `frame` cases only, whose new rows
 /// must still be a frame of the layout: the right size, the header, and (from 100 columns) the
@@ -1027,9 +1028,9 @@ fn p1_check_helper(name: &str, expected: &Value, a: &Actual) -> Result<(), Strin
     }
 }
 
-fn stamp_pending(dir: &std::path::Path) {
+fn stamp_pending(dir: &std::path::Path, stamp: &str) {
     let mut m = read(dir.join("meta.json"));
-    m["reviewed_by"] = json!(P1_STAMP);
+    m["reviewed_by"] = json!(stamp);
     std::fs::write(
         dir.join("meta.json"),
         format!("{}\n", serde_json::to_string_pretty(&m).unwrap()),
@@ -1042,8 +1043,13 @@ fn render_golden() {
     let allowed = divergences();
     let mode = std::env::var("SYNTHESIS_UPDATE_GOLDEN").unwrap_or_default();
     let update = mode == "1";
-    let p1 = mode == "redesign-p1";
-    let p2 = mode == "redesign-p2";
+    // `redesign-new-tui` (the new TUI of docs/specs/tui-design.md §16) is both gates in one run:
+    // `frame` cases may change layout and colour (the P2 check), every other op may change colour
+    // only (the P1 check). Stamp: NEW_STAMP.
+    let nt = mode == "redesign-new-tui";
+    let p1 = mode == "redesign-p1" || nt;
+    let p2 = mode == "redesign-p2" || nt;
+    let stamp1 = if nt { NEW_STAMP } else { P1_STAMP };
     let (mut p2_done, mut p2_new, mut p2_refused) = (
         Vec::<String>::new(),
         Vec::<String>::new(),
@@ -1113,7 +1119,7 @@ fn render_golden() {
                 Ok(()) => {
                     rewrite_expected(dir, &read(dir.join("expected.json")), &a);
                     let mut m = read(dir.join("meta.json"));
-                    m["reviewed_by"] = json!(P2_STAMP);
+                    m["reviewed_by"] = json!(if nt { NEW_STAMP } else { P2_STAMP });
                     std::fs::write(
                         dir.join("meta.json"),
                         format!("{}\n", serde_json::to_string_pretty(&m).unwrap()),
@@ -1126,6 +1132,8 @@ fn render_golden() {
                     }
                     checks = vec![("json", Ok(()))];
                 }
+                // the new-TUI gate leaves a non-frame case to its colour check below
+                Err(_) if nt && !is_new => ACTUAL.with(|x| *x.borrow_mut() = a),
                 Err(why) => {
                     if is_new {
                         let _ = std::fs::remove_dir_all(dir);
@@ -1142,7 +1150,7 @@ fn render_golden() {
                     .then(|| p1_sync_rows(dir, input["op"].as_str().unwrap(), &want, &a))
                 {
                     Some(Ok(rows)) if !rows.is_empty() => {
-                        stamp_pending(dir);
+                        stamp_pending(dir, stamp1);
                         p1_done.push((name.clone(), format!("divergent case, rows {rows:?} only")));
                     }
                     _ => p1_skipped.push(name.clone()),
@@ -1177,7 +1185,7 @@ fn render_golden() {
                 };
                 match verdict {
                     Ok(what) => {
-                        stamp_pending(dir);
+                        stamp_pending(dir, stamp1);
                         p1_done.push((name.clone(), what));
                         checks = vec![("json", Ok(()))];
                     }
@@ -1231,7 +1239,7 @@ fn render_golden() {
             unexplained.join("\n  ")
         );
     }
-    if p2 {
+    if p2 && !nt {
         println!(
             "SYNTHESIS_UPDATE_GOLDEN=redesign-p2: rewrote {} case(s), created {} new case(s), marked reviewed_by = {P2_STAMP:?}\nREFUSED {} (outside the P2 scope or not a layout frame):\n  {}\nrewritten:\n  {}\nnew:\n  {}",
             p2_done.len(),
@@ -1246,7 +1254,19 @@ fn render_golden() {
             p2_new.join("\n  ")
         );
     }
-    if p1 {
+    if nt {
+        println!(
+            "SYNTHESIS_UPDATE_GOLDEN=redesign-new-tui: layout frames rewritten {} (new {}), colour rewrites {}, marked reviewed_by = {NEW_STAMP:?}\nREFUSED by the colour check (text changed outside a frame case):\n  {}",
+            p2_done.len(),
+            p2_new.len(),
+            p1_done.len(),
+            p1_refused
+                .iter()
+                .map(|(c, w)| format!("{c}: {w}"))
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        );
+    } else if p1 {
         let n = |w: &str| p1_done.iter().filter(|(_, x)| x.starts_with(w)).count();
         println!(
             "SYNTHESIS_UPDATE_GOLDEN=redesign-p1: rewrote {} case(s) ({} colour only, {} colour + header rows, {} helper colour keys), marked reviewed_by = {P1_STAMP:?}\nREFUSED {} case(s) (outside the P1 scope, left unchanged, still failing):\n  {}\nskipped {} case(s) listed in golden_divergences.txt (text differs from the oracle already):\n  {}\nrewritten:\n  {}",
@@ -1360,5 +1380,165 @@ fn theme_frames_golden() {
         }
         let want = read(dir.join("expected.ansi.json"));
         assert_eq!(json!(fr.lines), want["lines"], "{name}");
+    }
+}
+
+/// Visual loop (not a check): with `SYNTHESIS_FRAMES_DIR=<dir>` writes the scripted frame of the
+/// golden `layout-100x30-all` data at the five reference sizes, both screens, themes synthesis and
+/// system, as `<theme>-<screen>-<cols>x<rows>.ansi` (raw SGR rows). `tools/frames-to-png.mjs` turns
+/// them into PNGs.
+#[test]
+fn write_visual_frames() {
+    let Ok(dir) = std::env::var("SYNTHESIS_FRAMES_DIR") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let input = read(root().join("../../tests/golden/render/layout-100x30-all/input.json"));
+    for (name, theme) in [
+        ("synthesis", ThemeId::Synthesis),
+        ("system", ThemeId::System),
+    ] {
+        for screen in synthesis_tui_render::layout::Screen::ALL {
+            for (cols, rows) in [(80, 24), (100, 30), (120, 36), (160, 45), (200, 50)] {
+                let _scope = ConfigScope::new(RenderConfig {
+                    theme,
+                    ascii: false,
+                });
+                let mut st = hydrate_state(&input["state"]);
+                st.view.screen = screen;
+                st.view.panels = Panels::all();
+                let chars = st.editor.chars.clone();
+                let ds = st.dash(&chars, st.editor.cur);
+                let fr = render_frame(&ds, cols, rows, 0, input["now"].as_i64().unwrap());
+                let lines = paint_background(fr.lines);
+                std::fs::write(
+                    dir.join(format!("{name}-{}-{cols}x{rows}.ansi", screen.label())),
+                    lines.join("\n") + "\n",
+                )
+                .unwrap();
+            }
+        }
+    }
+}
+
+/// The `system` theme paints nothing: not one `48;` SGR (truecolor or 256-colour) in any frame, in
+/// either screen, at any size, with every panel on or off. Positive control: the `synthesis` theme
+/// paints the token background `#0B0C0F` and the card surface `#15171B`.
+#[test]
+fn system_theme_emits_no_background_and_synthesis_paints_the_tokens() {
+    let input = read(root().join("../../tests/golden/render/layout-100x30-all/input.json"));
+    let frames = |theme: ThemeId, mode: ColorMode| -> Vec<String> {
+        let mut all = vec![];
+        for screen in synthesis_tui_render::layout::Screen::ALL {
+            for (cols, rows) in [
+                (40, 12),
+                (59, 20),
+                (80, 24),
+                (100, 30),
+                (160, 45),
+                (200, 50),
+            ] {
+                for panels in [Panels::all(), Panels::none(), Panels::default()] {
+                    let _scope = ConfigScope::new(RenderConfig {
+                        theme,
+                        ascii: false,
+                    });
+                    let mut st = hydrate_state(&input["state"]);
+                    st.view.screen = screen;
+                    st.view.panels = panels;
+                    let chars = st.editor.chars.clone();
+                    let ds = st.dash(&chars, st.editor.cur);
+                    let fr = render_frame(&ds, cols, rows, 3, input["now"].as_i64().unwrap());
+                    all.extend(paint_background(fr.lines).iter().map(|l| encode(l, mode)));
+                }
+            }
+        }
+        all
+    };
+    for mode in [ColorMode::TrueColor, ColorMode::Ansi256] {
+        let sys = frames(ThemeId::System, mode).join("\n");
+        assert!(
+            !sets_background(&sys),
+            "system emitted a background ({mode:?})"
+        );
+        assert!(sys.contains("38;"), "system must still colour text");
+    }
+    let syn = frames(ThemeId::Synthesis, ColorMode::TrueColor).join("\n");
+    assert!(sets_background(&syn));
+    assert!(
+        syn.contains(";48;2;11;12;15") || syn.contains("[48;2;11;12;15"),
+        "app background missing"
+    );
+    assert!(syn.contains("[48;2;21;23;27"), "card surface missing");
+}
+
+/// Does any SGR sequence of `s` select a background colour (`40`-`47`, `48;..`, `100`-`107`)? Reads the
+/// parameters one by one, skipping the colour operands of `38;2;r;g;b` and `38;5;n`.
+fn sets_background(s: &str) -> bool {
+    let mut rest = s;
+    while let Some(i) = rest.find("\x1b[") {
+        rest = &rest[i + 2..];
+        let Some(end) = rest.find(|c: char| !(c.is_ascii_digit() || c == ';')) else {
+            break;
+        };
+        if rest.as_bytes()[end] == b'm' {
+            let p: Vec<u32> = rest[..end]
+                .split(';')
+                .map(|x| x.parse().unwrap_or(0))
+                .collect();
+            let mut k = 0;
+            while k < p.len() {
+                match p[k] {
+                    40..=48 | 100..=107 => return true,
+                    38 => k += if p.get(k + 1) == Some(&2) { 4 } else { 2 },
+                    _ => {}
+                }
+                k += 1;
+            }
+        }
+        rest = &rest[end..];
+    }
+    false
+}
+
+/// Every theme, in Unicode and ASCII, on both screens: each row is exactly `cols` cells wide and the
+/// frame has `rows` rows (the card chrome never breaks the grid); ASCII cards use `+ - |`.
+#[test]
+fn every_theme_and_glyph_set_keeps_the_grid() {
+    use synthesis_tui_base::text::width;
+    let input = read(root().join("../../tests/golden/render/layout-100x30-all/input.json"));
+    for theme in [
+        ThemeId::Synthesis,
+        ThemeId::System,
+        ThemeId::Classic,
+        ThemeId::Mono,
+        ThemeId::Ansi16,
+    ] {
+        for ascii in [false, true] {
+            for screen in synthesis_tui_render::layout::Screen::ALL {
+                for (cols, rows) in [(40, 12), (60, 20), (80, 24), (100, 30), (200, 50)] {
+                    let _scope = ConfigScope::new(RenderConfig { theme, ascii });
+                    let mut st = hydrate_state(&input["state"]);
+                    st.view.screen = screen;
+                    st.view.panels = Panels::all();
+                    let chars = st.editor.chars.clone();
+                    let ds = st.dash(&chars, st.editor.cur);
+                    let fr = render_frame(&ds, cols, rows, 0, input["now"].as_i64().unwrap());
+                    assert_eq!(fr.lines.len(), rows);
+                    for (i, l) in fr.lines.iter().enumerate() {
+                        assert_eq!(
+                            width(l),
+                            cols,
+                            "{theme:?} ascii={ascii} {cols}x{rows} row {i}"
+                        );
+                    }
+                    if ascii && cols >= 100 {
+                        let all = strip_ansi(&fr.lines.join("\n"));
+                        assert!(all.contains("+-"), "{theme:?}"); // (the chat's prompt box keeps its Unicode corners)
+                    }
+                }
+            }
+        }
     }
 }

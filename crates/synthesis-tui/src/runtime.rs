@@ -994,6 +994,189 @@ fn describe(t: &OpenTarget) -> String {
     t.describe()
 }
 
+// ---------------------------------------------------------------- first run
+
+/// The interactive app before any model is configured (`synth` with nothing set up): the setup
+/// card, `/config`, `/themes`, `/help` and quitting work; a task is refused with an inline message.
+pub struct SetupOptions {
+    pub cwd: String,
+    pub version: String,
+    pub env: Env,
+    pub platform: Platform,
+    pub tui: TuiSettings,
+    pub tui_diagnostics: Vec<String>,
+    pub synthesis_home: Option<std::path::PathBuf>,
+    /// Lines of the setup card (built by the host, which knows the configuration).
+    pub card: Vec<String>,
+    pub saved: Vec<SavedSession>,
+    pub sandbox: SandboxStatus,
+    pub clock: fn() -> i64,
+}
+
+impl SetupOptions {
+    pub fn new(cwd: String, version: String, env: Env, card: Vec<String>) -> Self {
+        Self {
+            cwd,
+            version,
+            env,
+            platform: Platform::current(),
+            tui: TuiSettings::default(),
+            tui_diagnostics: vec![],
+            synthesis_home: None,
+            card,
+            saved: vec![],
+            sandbox: SandboxStatus::default(),
+            clock: crate::wall_clock_ms,
+        }
+    }
+}
+
+/// Runs the first-run app until the person quits (`Quit`), asks to check the configuration again
+/// (`OpenFolder(cwd)`, from `/reload` or `/new`) or opens a saved session (`Resume`).
+pub fn run_setup(o: SetupOptions, tty: Tty) -> io::Result<ExitReason> {
+    let color = ColorMode::detect(&o.env, o.platform);
+    let cfg = AppConfig {
+        cwd: o.cwd.clone(),
+        session_id: String::new(),
+        model: "none".into(),
+        version: o.version.clone(),
+        budget: Default::default(),
+        sandbox: o.sandbox.clone(),
+        mode: Mode::Default,
+        models: vec![],
+        effort_tiers: vec![],
+        extra_commands: vec![],
+        saved: o.saved.clone(),
+        home: None,
+        mouse_debug: false,
+        tz_offset_min: 0,
+        agent_defs: vec![],
+    };
+    let clock = o.clock;
+    let mut app = App::new(cfg, &[], clock());
+    app.set_tui(o.tui, o.tui_diagnostics.clone(), color, o.env.clone());
+    app.set_setup(o.card.clone());
+    let Tty {
+        input,
+        output,
+        size,
+        raw_mode,
+        signals: watch_signals,
+    } = tty;
+    let out = SharedOut::new(output);
+    let guard = TerminalGuard::enter(out.clone(), GuardOptions { raw_mode })?;
+    let mut screen = Screen::new(out.clone(), color);
+    screen.enter()?;
+    out.clone().write_all(BRACKETED_PASTE_ON.as_bytes())?;
+    #[cfg(not(unix))]
+    let _ = watch_signals;
+    let link = UiLink::default();
+    let UiLink { tx, rx, .. } = link;
+    spawn_reader(input, tx.clone());
+    #[cfg(unix)]
+    let signals = if watch_signals {
+        Some(spawn_signals(tx.clone())?)
+    } else {
+        None
+    };
+    let clipboard = default_chain(o.platform, &o.env);
+    let opener = SystemOpener {
+        platform: o.platform,
+        env: o.env.clone(),
+    };
+    let mut parser = KeyParser::default();
+    let mut last_size = size();
+    let reason = loop {
+        let now = clock();
+        let (cols, rows) = last_size;
+        let lines = app.render(cols, rows, now);
+        screen.set_caret(app.caret());
+        screen.draw(&lines, cols, rows)?;
+        if let Some(r) = app.quit.clone() {
+            break r;
+        }
+        let msg = match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(m) => Some(m),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => break ExitReason::InputClosed,
+        };
+        let now = clock();
+        let mut batch: Vec<Msg> = msg.into_iter().collect();
+        while let Ok(m) = rx.try_recv() {
+            batch.push(m);
+            if batch.len() >= 256 {
+                break;
+            }
+        }
+        if batch.is_empty() {
+            app.tick(now);
+            batch.push(Msg::Bytes(Vec::new()));
+        }
+        for m in batch {
+            let keys = match m {
+                Msg::Bytes(b) => parser.feed_at(&b, now),
+                Msg::InputClosed => {
+                    app.quit.get_or_insert(ExitReason::InputClosed);
+                    vec![]
+                }
+                Msg::Interrupt => vec![Key::Named(Named::CtrlC)],
+                _ => vec![],
+            };
+            for k in keys {
+                for c in app.on_key(k, now) {
+                    match c {
+                        Cmd::SaveTui(v) => {
+                            let (text, bad) = save_tui(o.synthesis_home.as_deref(), &v);
+                            app.toast(text, now, bad);
+                        }
+                        Cmd::Copy(text) => {
+                            let sinks: Vec<&dyn ClipboardSink> =
+                                clipboard.iter().map(|b| &**b).collect();
+                            let ok = copy_to_clipboard(&text, &sinks);
+                            app.toast(
+                                if ok {
+                                    "Copied"
+                                } else {
+                                    "copy failed: no clipboard tool"
+                                },
+                                now,
+                                !ok,
+                            );
+                        }
+                        Cmd::Open(t) => {
+                            if let Err(e) = opener.open(&t) {
+                                app.toast(
+                                    format!("could not open {}: {e}", t.describe()),
+                                    now,
+                                    true,
+                                );
+                            }
+                        }
+                        Cmd::ResetScreen => screen.reset()?,
+                        // everything else needs a harness
+                        _ => app.note("not available until a model is configured", "warn"),
+                    }
+                }
+            }
+        }
+        let s = size();
+        if s != last_size {
+            last_size = s;
+            app.set_size(s.0, s.1);
+            screen.resize()?;
+        }
+    };
+    if let Some(v) = app.unsaved_tui() {
+        let _ = save_tui(o.synthesis_home.as_deref(), &v);
+    }
+    guard.restore();
+    #[cfg(unix)]
+    if let Some(h) = signals {
+        h.close();
+    }
+    Ok(reason)
+}
+
 // ---------------------------------------------------------------- --once
 
 pub struct OnceOptions {

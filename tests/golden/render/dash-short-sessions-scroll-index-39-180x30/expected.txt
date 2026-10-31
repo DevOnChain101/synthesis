@@ -1,30 +1,30 @@
  ⢎⡱  S Y N T H E S I S   ● 40 live │ workspace project │ session session- │ model claude-sonnet                                            ● system healthy │ Fri Oct  2 │ 12:00:00 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- WORKSPACE               1 │ AGENT STATUS                                           ready    CONTEXT                              │ TOPOLOGY                                   idle 
- ▌● project             40 │ ready · planning · coding · verifying                           tokens                   no data yet │ ╭─ USER / PROJECT ────╮ ╭─ GUARDS ────────────╮ 
-                           │ Working on  nothing yet                                         ▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ ╰─────────────────────╯ ╰─────────────────────╯ 
- RUNNING SESSIONS       40 │ Next        no plan yet                                         in 0 · out 0                         │ ╭─ SKILLS ────────────╮ ╭─ SUB-AGENTS ────────╮ 
-    ↑ 39 more              │                                                                                                      │ ╰─────────────────────╯ ╰─────────────────────╯ 
- ►● proj-39            10% │ SYNTHESIS                                                                                            │ ╭─ SYNTHESIS CORE ────────────────────────────╮ 
- project-39 (…orkspace)    │  no conversation attached                                                                            │ │ plan → act → verify → learn                 │ 
-                           │                                                                                                      │ ╰─────────────────────────────────────────────╯ 
-                           │                                                                                                      │ ╭─ EXECUTION ─────────╮ ╭─ HOOKS ─────────────╮ 
- SESSION                   │                                                                                                      │ ╰─────────────────────╯ ╰─────────────────────╯ 
- model  claude-sonnet      │                                                                                                      │ ╭─ EXTERNAL / MCP ────╮ ╭─ MEMORY / FEEDBACK ─╮ 
- cwd    project            │                                                                                                      │ ╰─────────────────────╯ ╰─────────────────────╯ 
- uptime 1m00s              │                                                                                                      │ USAGE & METRICS                          7 days 
-                           │                                                                                                      │ Tokens     ███████████████████████████████ 6.0k 
- TOOLS & SKILLS          0 │                                                                                                      │ Tool calls █████████████████████░░░░░░░░░░   14 
- no tool calls yet         │                                                                                                      │ Messages   ███████████████████████████████   21 
-                           │                                                                                                      │ SYSTEM HEALTH                           healthy 
-                           │                                                                                                      │ ○ Core agent                  no agent attached 
- RECENT ACTIVITY           │                                                                                                      │ ○ Tool runtime                      no data yet 
- no events yet             │                                                                                                      │ ○ MCP servers                   none configured 
-                           │                                                                                                      │ SUB-AGENTS                                      
-                           │                                                                                                      │ No sub-agents yet · /agents                     
-                           │                                                                                                      │                                                 
- SESSION STATS       1m00s │                                                                                                      │                                                 
- files read              0 │                                                                                                      │                                                 
- files edited            0 │                                                                                                      │                                                 
- commands run            0 │                                                                                                      │                                                 
- ↑/↓ select session   a follow newest   u usage metric   r reload   q quit                                                                                project │ 0 files changed 
+ WORKSPACE               1  ╭ AGENT STATUS ───────────────────────────────────── ready ╮  ╭ CONTEXT ─────────────────────────────╮ ╭ USAGE & METRICS ────────────────────── 7 days ╮
+ ▌● project             40  │ ready · planning · coding · verifying                    │  │ tokens                   no data yet │ │ Tokens     █████████████████████████████ 6.0k │
+                            │ Working on  nothing yet                                  │  │ ▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ │ Tool calls ███████████████████░░░░░░░░░░   14 │
+╭ RUNNING SESSIONS ─── 40 ╮ │ Next        no plan yet                                  │  │ in 0 · out 0                         │ │ Messages   █████████████████████████████   21 │
+│    ↑ 39 more            │ ╰──────────────────────────────────────────────────────────╯  ╰──────────────────────────────────────╯ │ Agents     ████░░░░░░░░░░░░░░░░░░░░░░░░░    3 │
+│ ►● proj-39          10% │                                                                                                        │ Sessions   ██████████░░░░░░░░░░░░░░░░░░░    7 │
+│ project-39 (…kspace)    │  SYNTHESIS                                                                                             │                                               │
+╰─────────────────────────╯   no conversation attached                                                                             │                                               │
+╭ SESSION ────────────────╮                                                                                                        ╰───────────────────────────────────────────────╯
+│ model  claude-sonnet    │                                                                                                                                                         
+│ cwd    project          │                                                                                                        ╭ SYSTEM HEALTH ─────────────────────── healthy ╮
+│ uptime 1m00s            │                                                                                                        │ ○ Core agent                no agent attached │
+╰─────────────────────────╯                                                                                                        │ ○ Tool runtime                    no data yet │
+╭ TOOLS & SKILLS ────── 0 ╮                                                                                                        │ ○ MCP servers                 none configured │
+│ no tool calls yet       │                                                                                                        ╰───────────────────────────────────────────────╯
+│                         │                                                                                                                                                         
+╰─────────────────────────╯                                                                                                        ╭ SUB-AGENTS ───────────────────────────────────╮
+╭ RECENT ACTIVITY ────────╮                                                                                                        │ No sub-agents yet · /agents                   │
+│ no events yet           │                                                                                                        │                                               │
+│                         │                                                                                                        │                                               │
+│                         │                                                                                                        │                                               │
+╰─────────────────────────╯                                                                                                        │                                               │
+╭ SESSION STATS ─── 1m00s ╮                                                                                                        │                                               │
+│ files read            0 │                                                                                                        │                                               │
+│ files edited          0 │                                                                                                        │                                               │
+│ commands run          0 │                                                                                                        │                                               │
+╰─────────────────────────╯                                                                                                        ╰───────────────────────────────────────────────╯
+ ↑/↓ select session   a follow newest   u usage metric   r reload   q quit                                                           project │ 0 files changed  1 mission   2 chat  

@@ -4,6 +4,6 @@
   "platform": "darwin",
   "ref_tree_sha256": "fbc7e2f4a1288f2bfae9ca4aa183d5e3b9bd4ef02dc1d38bf9f03d45f9d37b3b",
   "ref_version": "1.0.13",
-  "reviewed_by": "pending-owner-review (P2 2026-10-30)",
+  "reviewed_by": "pending-owner-review (new TUI 2026-10-31)",
   "source": "src/render.js + src/agentview.js + src/theme.js + src/highlight.js + src/picker.js + src/dialogs.js"
 }

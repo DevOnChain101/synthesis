@@ -1,40 +1,40 @@
  ⢎⡱  S Y N T H E S I S   ● 3 live │ workspace project │ session session- │ model claude-sonnet             ● │ 23:59:59 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- WORKSPACE         1 │ AGENT STATUS                    ready    CONTEXT                │ USAGE & METRICS         7 days 
- ▌● project        3 │ ready · planning · coding · verifying    tokens     no data yet │ Tokens     ██████████████ 6.0k 
-                     │ Working on  nothing yet                  ▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ Tool calls █████████░░░░░   14 
- RUNNING SESSIONS  3 │ Next        no plan yet                  in 0 · out 0           │ Messages   ██████████████   21 
- ►● proj-0       10% │                                          cache 0 · $ –          │ Agents     ██░░░░░░░░░░░░    3 
- project-0 (…ace)    │                                                                 │ Sessions   █████░░░░░░░░░    7 
-  ● proj-1       10% │ SYNTHESIS                                                       │                                
- project-1 (…ace)    │  no conversation attached                                       │                                
-  ● proj-2       10% │                                                                 │                                
- project-2 (…ace)    │                                                                 │                                
-                     │                                                                 │ SYSTEM HEALTH          healthy 
- SESSION             │                                                                 │ ○ Core agent      no agent at… 
- model  claude-sonn… │                                                                 │ ○ Tool runtime     no data yet 
- cwd    project      │                                                                 │ ○ MCP servers     none config… 
- uptime 90d12h       │                                                                 │ ○ Memory store     no data yet 
- turns  0 prompts ·… │                                                                 │ ○ Browser sandbox  no data yet 
-                     │                                                                 │                                
-                     │                                                                 │                                
-                     │                                                                 │                                
-                     │                                                                 │ SUB-AGENTS                     
-                     │                                                                 │ No sub-agents yet · /agents    
- TOOLS & SKILLS    0 │                                                                 │                                
- no tool calls yet   │                                                                 │                                
-                     │                                                                 │                                
-                     │                                                                 │                                
- RECENT ACTIVITY     │                                                                 │                                
- no events yet       │                                                                 │                                
-                     │                                                                 │                                
-                     │                                                                 │                                
-                     │                                                                 │                                
- SESSION STATS       │                                                                 │                                
- files read        0 │                                                                 │                                
- files edited      0 │                                                                 │                                
- commands run      0 │                                                                 │                                
- tokens used       0 │                                                                 │                                
- tool calls        0 │                                                                 │                                
- success rate no dat…│                                                                 │                                
- ↑/↓ select session   a follow newest   u usage metric   r reload   q quit                    project │ 0 files changed 
+ WORKSPACE         1  ╭ AGENT STATUS ────────────── ready ╮  ╭ CONTEXT ───────────────╮ ╭ USAGE & METRICS ───── 7 days ╮
+ ▌● project        3  │ ready · planning · coding · veri… │  │ tokens     no data yet │ │ Tokens     ████████████ 6.0k │
+                      │ Working on  nothing yet           │  │ ▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ │ Tool calls ████████░░░░   14 │
+                      │ Next        no plan yet           │  │ in 0 · out 0           │ │ Messages   ████████████   21 │
+╭ RUNNING SESSIONS  ╮ │                                   │  │ cache 0 · $ –          │ │ Agents     ██░░░░░░░░░░    3 │
+│ ►● proj-0     10% │ ╰───────────────────────────────────╯  ╰────────────────────────╯ │ Sessions   ████░░░░░░░░    7 │
+│ project-0         │                                                                   │                              │
+│  ● proj-1     10% │  SYNTHESIS                                                        │                              │
+│ project-1         │   no conversation attached                                        │                              │
+│  ● proj-2     10% │                                                                   ╰──────────────────────────────╯
+│ project-2         │                                                                                                   
+╰───────────────────╯                                                                   ╭ SYSTEM HEALTH ────── healthy ╮
+                                                                                        │ ○ Core agent      no agent … │
+╭ SESSION ──────────╮                                                                   │ ○ Tool runtime    no data y… │
+│ model  claude-so… │                                                                   │ ○ MCP servers     none conf… │
+│ cwd    project    │                                                                   │ ○ Memory store    no data y… │
+│ uptime 90d12h     │                                                                   │ ○ Browser sandbox no data y… │
+│ turns  0 prompts… │                                                                   │                              │
+│                   │                                                                   │                              │
+╰───────────────────╯                                                                   ╰──────────────────────────────╯
+                                                                                                                        
+╭ TOOLS & SKILLS  0 ╮                                                                   ╭ SUB-AGENTS ──────────────────╮
+│ no tool calls yet │                                                                   │ No sub-agents yet · /agents  │
+│                   │                                                                   │                              │
+╰───────────────────╯                                                                   │                              │
+                                                                                        │                              │
+╭ RECENT ACTIVITY ──╮                                                                   │                              │
+│ no events yet     │                                                                   │                              │
+│                   │                                                                   │                              │
+│                   │                                                                   │                              │
+╰───────────────────╯                                                                   │                              │
+                                                                                        │                              │
+╭ SESSION STATS ────╮                                                                   │                              │
+│ files read      0 │                                                                   │                              │
+│ files edited    0 │                                                                   │                              │
+│ commands run    0 │                                                                   │                              │
+╰───────────────────╯                                                                   ╰──────────────────────────────╯
+ ↑/↓ select session   a follow newest   u usage metric   r reload        project │ 0 files changed  1 mission   2 chat  

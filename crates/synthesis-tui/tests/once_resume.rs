@@ -135,8 +135,8 @@ fn once_is_render_frame_plus_the_status_line() {
         },
     };
     let frame = render_frame(&state, 120, 39, (NOW / 80) as usize, NOW);
-    let want: Vec<String> = frame
-        .lines
+    // (the app paints the theme's background under the frame)
+    let want: Vec<String> = synthesis_tui_render::theme::paint_background(frame.lines.clone())
         .iter()
         .map(|l| encode(l, ColorMode::TrueColor))
         .collect();

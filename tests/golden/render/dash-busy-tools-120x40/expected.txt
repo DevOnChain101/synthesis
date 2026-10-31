@@ -1,40 +1,40 @@
  ⢎⡱  S Y N T H E S I S   ● 3 live │ workspace project │ session session- │ model claude-opus-5.5               12:00:00 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- WORKSPACE         1 │ AGENT STATUS                 · coding    CONTEXT             3% │ USAGE & METRICS         7 days 
- ▌● project        3 │ ready · planning · coding · verifying    tokens   5.9k / 200.0k │ Tokens     ██████████████ 6.0k 
-                     │ Working on  Agent explorer: find fil…    ▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ Tool calls █████████░░░░░   14 
- RUNNING SESSIONS  3 │ Next        Test                         in 9.0k · out 1.5k     │ Messages   ██████████████   21 
- ►● proj-0       10% │                                          cache 20.0k (hit 69%) …│ Agents     ██░░░░░░░░░░░░    3 
- project-0 (…ace)    │                                                                 │ Sessions   █████░░░░░░░░░    7 
-  ● proj-1       10% │ SYNTHESIS                                                       │                                
- project-1 (…ace)    │  no conversation attached                                       │                                
-  ● proj-2       10% │                                                                 │                                
- project-2 (…ace)    │                                                                 │                                
-                     │                                                                 │ SYSTEM HEALTH          healthy 
- SESSION             │                                                                 │ ○ Core agent      no agent at… 
- model  claude-opus… │                                                                 │ ○ Tool runtime     no data yet 
- branch main         │                                                                 │ ○ MCP servers     1 configured 
- cwd    project      │                                                                 │ ○ Memory store     no data yet 
- uptime 10m00s       │                                                                 │ ○ Browser sandbox  no data yet 
- turns  1 prompts ·… │                                                                 │                                
- errors 1            │                                                                 │                                
-                     │                                                                 │                                
-                     │                                                                 │ SUB-AGENTS                     
-                     │                                                                 │ No sub-agents yet · /agents    
- TOOLS & SKILLS    5 │                                                                 │                                
- skills scout ×1     │                                                                 │                                
- mcp        1 server │                                                                 │                                
- ● alpha       stdio │                                                                 │                                
- ○ pending   not ap… │                                                                 │                                
- configured · synthe…│                                                                 │                                
-                     │                                                                 │                                
- RECENT ACTIVITY   2 │                                                                 │                                
- · Lookin… 9m59s ago │                                                                 │                                
- › refac… 10m00s ago │                                                                 │                                
-                     │                                                                 │                                
-                     │                                                                 │                                
- SESSION STATS       │                                                                 │                                
- files read        1 │                                                                 │                                
- files edited      0 │                                                                 │                                
- commands run      1 │                                                                 │                                
- ↑/↓ select session   a follow newest   u usage metric   r reload   q quit           project │ ⎇ main │ 0 files changed 
+ WORKSPACE         1  ╭ AGENT STATUS ─────────── · coding ╮  ╭ CONTEXT ─────────── 3% ╮ ╭ USAGE & METRICS ───── 7 days ╮
+ ▌● project        3  │ ready · planning · coding · veri… │  │ tokens   5.9k / 200.0k │ │ Tokens     ████████████ 6.0k │
+                      │ Working on  Agent explorer: find… │  │ ▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ │ Tool calls ████████░░░░   14 │
+                      │ Next        Test                  │  │ in 9.0k · out 1.5k     │ │ Messages   ████████████   21 │
+╭ RUNNING SESSIONS  ╮ │                                   │  │ cache 20.0k (hit 69%) …│ │ Agents     ██░░░░░░░░░░    3 │
+│ ►● proj-0     10% │ ╰───────────────────────────────────╯  ╰────────────────────────╯ │ Sessions   ████░░░░░░░░    7 │
+│ project-0         │                                                                   │                              │
+│  ● proj-1     10% │  SYNTHESIS                                                        │                              │
+│ project-1         │   no conversation attached                                        │                              │
+│  ● proj-2     10% │                                                                   ╰──────────────────────────────╯
+│ project-2         │                                                                                                   
+╰───────────────────╯                                                                   ╭ SYSTEM HEALTH ────── healthy ╮
+                                                                                        │ ○ Core agent      no agent … │
+╭ SESSION ──────────╮                                                                   │ ○ Tool runtime    no data y… │
+│ model  claude-op… │                                                                   │ ○ MCP servers     1 configu… │
+│ branch main       │                                                                   │ ○ Memory store    no data y… │
+│ cwd    project    │                                                                   │ ○ Browser sandbox no data y… │
+│ uptime 10m00s     │                                                                   │                              │
+│ turns  1 prompts… │                                                                   │                              │
+╰───────────────────╯                                                                   ╰──────────────────────────────╯
+                                                                                                                        
+╭ TOOLS & SKILLS  5 ╮                                                                   ╭ SUB-AGENTS ──────────────────╮
+│ skills scout ×1   │                                                                   │ No sub-agents yet · /agents  │
+│ mcp      1 server │                                                                   │                              │
+╰───────────────────╯                                                                   │                              │
+                                                                                        │                              │
+╭ RECENT ACTIVI…  2 ╮                                                                   │                              │
+│ · Look… 9m59s ago │                                                                   │                              │
+│ › ref… 10m00s ago │                                                                   │                              │
+│                   │                                                                   │                              │
+╰───────────────────╯                                                                   │                              │
+                                                                                        │                              │
+╭ SESSION STATS ────╮                                                                   │                              │
+│ files read      1 │                                                                   │                              │
+│ files edited    0 │                                                                   │                              │
+│ commands run    1 │                                                                   │                              │
+╰───────────────────╯                                                                   ╰──────────────────────────────╯
+ ↑/↓ select session   a follow newest   u usage metric          project │ ⎇ main │ 0 files changed  1 mission   2 chat  

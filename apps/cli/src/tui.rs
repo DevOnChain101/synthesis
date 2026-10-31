@@ -13,7 +13,7 @@ use synthesis_tui_base::sgr::ColorMode;
 
 use crate::homes;
 use crate::run::{
-    Common, Front, Limits, Prepared, prepare, sandbox_default_notice, sandbox_notices,
+    Common, Front, Limits, NO_MODEL, Prepared, prepare, sandbox_default_notice, sandbox_notices,
     sandbox_status,
 };
 
@@ -185,6 +185,30 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
             resume.as_ref(),
         ) {
             Ok(p) => p,
+            Err(e) if switch_from.is_none() && is_first_run(&e) => {
+                // nothing is configured yet: the app starts anyway, with a setup card
+                let (tui, tui_notes) = synthesis_tui::TuiSettings::load_user(&h.synthesis);
+                let mut o = synthesis_tui::SetupOptions::new(
+                    cwd.to_string_lossy().into_owned(),
+                    env!("CARGO_PKG_VERSION").into(),
+                    env.clone(),
+                    setup_card(&env, &h.synthesis, &cwd, &e),
+                );
+                o.tui = tui;
+                o.tui_diagnostics = tui_notes;
+                o.synthesis_home = Some(h.synthesis.clone());
+                o.saved = synthesis_tui::list_saved(&h.synthesis, None).unwrap_or_default();
+                match synthesis_tui::run_setup(o, Tty::stdio(&env)).map_err(|e| e.to_string())? {
+                    ExitReason::OpenFolder(p) => {
+                        cwd = synthesis_core::canonicalize(&p)
+                            .map_err(|e| format!("{}: {e}", p.display()))?;
+                        resume = None;
+                    }
+                    ExitReason::Resume(id) => resume = Some(load_resume(&h.synthesis, &id)?),
+                    _ => return Ok(0),
+                }
+                continue;
+            }
             Err(e) => {
                 let Some((prev, sid)) = switch_from.take() else {
                     return Err(e);
@@ -288,6 +312,69 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
             ExitReason::Quit | ExitReason::InputClosed => return Ok(0),
         }
     }
+}
+
+/// Start errors that mean "nothing is set up yet": the interactive app opens its first-run card
+/// instead of exiting (`synth run` keeps failing with exit 2).
+fn is_first_run(e: &str) -> bool {
+    e.starts_with(NO_MODEL)
+        || e.starts_with("no provider configured")
+        || e.starts_with("no API key for provider")
+}
+
+/// The first-run card: what to do, which providers and variables were found (names only, never
+/// values), and copyable examples. Lines indented by four spaces are examples.
+pub(crate) fn setup_card(env: &Env, home: &Path, cwd: &Path, reason: &str) -> Vec<String> {
+    use synthesis_config::{ProjectTrust, resolve_credential};
+    let mut found = vec![];
+    let h = crate::homes(env).ok();
+    if let Some(cfg) = h
+        .as_ref()
+        .and_then(|h| crate::load_config(env, h, Some(cwd), ProjectTrust::Untrusted).ok())
+    {
+        for (id, p) in &cfg.providers {
+            let key = resolve_credential(id, Some(p), home, env).is_some() || p.is_no_auth();
+            found.push(format!(
+                "{id} ({})",
+                if key { "key found" } else { "no key" }
+            ));
+        }
+    }
+    let vars: Vec<&str> = [
+        "SYNTHESIS_PROVIDER",
+        "SYNTHESIS_MODEL",
+        "SYNTHESIS_API_KEY",
+        "SYNTHESIS_AUTH_TOKEN",
+        "SYNTHESIS_BASE_URL",
+    ]
+    .into_iter()
+    .filter(|n| env.get_nonempty(n).is_some())
+    .collect();
+    let file = home.join("synthesis.json");
+    let ex = |s: &str| format!("    {s}");
+    vec![
+        "Synthesis needs a model and an API key before it can run a task. Nothing has been sent anywhere.".into(),
+        format!("why: {reason}"),
+        format!(
+            "found: providers {} · variables set {} · config file {}",
+            if found.is_empty() { "none".to_string() } else { found.join(", ") },
+            if vars.is_empty() { "none".to_string() } else { vars.join(", ") },
+            if file.exists() { "present" } else { "missing" }
+        ),
+        format!("1. Create {} with a provider and a model. An OpenAI-compatible gateway:", file.display()),
+        ex("{"),
+        ex("  \"$schema\": \"config.json/v1\","),
+        ex("  \"model\": \"gateway/my-model\","),
+        ex("  \"providers\": {\"gateway\": {\"type\": \"openai\", \"baseURL\": \"https://llm.example.com/v1\","),
+        ex("    \"apiKey\": \"{env:SYNTHESIS_API_KEY}\", \"models\": [\"my-model\"]}}"),
+        ex("}"),
+        "   Anthropic: \"model\": \"anthropic/MODEL_ID\" and \"providers\": {\"anthropic\": {\"apiKey\": \"{env:SYNTHESIS_API_KEY}\"}} (`synth models` lists the ids your key can use).".into(),
+        "2. Export the key in the shell that starts synth (Synthesis never writes or stores keys):".into(),
+        ex("export SYNTHESIS_API_KEY=..."),
+        "3. Check it from a shell: `synth auth status` shows what was found, `synth models` lists the models.".into(),
+        "4. Type /reload here (or restart synth). Later, /model provider/model picks another model.".into(),
+        "Works now: /config (panels, icons) · /themes · /help · /exit. Anything else you type is not sent.".into(),
+    ]
 }
 
 /// What the panels show of the MCP servers: name, state, tool count, last error.

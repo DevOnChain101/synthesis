@@ -21,4 +21,4 @@
                                                                                 
                                                                                 
                                                                                 
- ↑/↓ select session   a follow newest        project │ ⎇ main │ 0 files changed 
+ ↑/↓ select session     project │ ⎇ main │ 0 files changed  1 mission   2 chat  

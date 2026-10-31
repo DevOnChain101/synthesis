@@ -1323,6 +1323,11 @@ struct Resolved {
     secrets: Vec<String>,
 }
 
+/// The error `synth run` exits 2 with when no model is configured; the interactive app starts its
+/// first-run setup on this prefix instead (`tui.rs`).
+pub const NO_MODEL: &str =
+    "no model configured: pass --model provider/model or set SYNTHESIS_MODEL";
+
 fn resolve_provider(
     a: &Common,
     cfg: &Config,
@@ -1361,9 +1366,7 @@ fn resolve_provider(
             }),
         (_, m) => m.clone(),
     };
-    let parsed = parse_model(spec.as_deref(), cfg).map_err(|_| {
-        "no model configured: pass --model provider/model or set SYNTHESIS_MODEL".to_string()
-    })?;
+    let parsed = parse_model(spec.as_deref(), cfg).map_err(|_| NO_MODEL.to_string())?;
     let id = parsed.provider_id.ok_or("no provider configured")?;
     let p = cfg
         .providers

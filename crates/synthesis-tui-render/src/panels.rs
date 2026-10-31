@@ -1106,19 +1106,19 @@ pub fn demand(s: &DashState) -> crate::layout::Demand {
     let mcp = mcp_rows_of(s).1.len() as i64;
     let _ = c;
     crate::layout::Demand::default()
-        .with(P::Workspace, 1 + n_ws.max(1))
-        .with(P::Running, 1 + 2 * sessions.max(1))
+        .with(P::Workspace, 2 + n_ws.max(1))
+        .with(P::Running, 2 + 2 * sessions.max(1))
         .with(
             P::ToolsSkills,
-            2 + tools.max(1)
+            3 + tools.max(1)
                 + i64::from(!s.session.skills.is_empty())
                 + if mcp > 0 { 1 + mcp } else { 0 },
         )
         .with(
             P::RecentActivity,
-            1 + s.session.activity.len().max(1) as i64,
+            2 + s.session.activity.len().max(1) as i64,
         )
-        .with(P::AgentStatus, if open_todos(s) > 2 { 5 } else { 4 })
+        .with(P::AgentStatus, if open_todos(s) > 2 { 6 } else { 5 })
 }
 
 /// The Tabs-mode compact status line: the phase and what the agent is working on.

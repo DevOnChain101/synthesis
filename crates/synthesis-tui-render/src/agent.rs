@@ -1835,6 +1835,20 @@ fn item_rows(it: &Item, w: usize, frame: usize, now: i64, expanded: bool) -> Vec
                 ));
             }
         }
+        // the first-run card: a title, prose lines, and indented lines that are text to copy
+        "setup" => {
+            rows.push(vec![]);
+            rows.push(vec![rb("Set up a model to start", c_bright())]);
+            for ln in &it.lines {
+                let code = ln.starts_with("    ");
+                rows.extend(wrap(
+                    &[r(ln, if code { c_text() } else { c_dim() })],
+                    w,
+                    &[r("  ", c_text())],
+                    &[r("    ", c_text())],
+                ));
+            }
+        }
         "bash" => {
             rows.push(vec![]);
             let dot = if it.status == "running" {

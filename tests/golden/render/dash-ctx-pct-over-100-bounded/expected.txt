@@ -1,60 +1,60 @@
  ⢎⡱  S Y N T H E S I S   ● 1 live │ workspace project │ session session- │ model claude-sonnet                                             ● system healthy │ Fri Oct  2 │ 12:00:00 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- WORKSPACE               1 │ AGENT STATUS                                           ready    CONTEXT                              │ TOPOLOGY                                   idle 
- ▌● project              1 │ ready · planning · coding · verifying                           tokens                   no data yet │ ╭─ USER / PROJECT ────╮ ╭─ GUARDS ────────────╮ 
-                           │ Working on  nothing yet                                         ▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ │ ● no session        │ │ sandbox no data yet │ 
- RUNNING SESSIONS        1 │ Next        no plan yet                                         in 0 · out 0                         │ │ project             │ │ approvals –         │ 
- ►● proj-0            100% │                                                                 cache 0 · $ –                        │ │ no prompt yet       │ │ blocked 0 by hooks  │ 
- project-0 (…workspace)    │                                                                                                      │ │                     │ │                     │ 
-                           │ SYNTHESIS                                                                                            │ ╰─────────────────────╯ ╰─────────────────────╯ 
- SESSION                   │  no conversation attached                                                                            │            │                       │            
- model  claude-sonnet      │                                                                                                      │ ╭─ SKILLS ────────────╮ ╭─ SUB-AGENTS ────────╮ 
- cwd    project            │                                                                                                      │ │ no skills used yet  │ │ no sub-agents       │ 
- uptime 1m00s              │                                                                                                      │ │                     │ │ single agent mode   │ 
- turns  0 prompts · 0 too… │                                                                                                      │ │                     │ │                     │ 
-                           │                                                                                                      │ │                     │ │                     │ 
-                           │                                                                                                      │ ╰─────────────────────╯ ╰─────────────────────╯ 
-                           │                                                                                                      │            │                       │            
-                           │                                                                                                      │ ╭─ SYNTHESIS CORE ────────────────────────────╮ 
-                           │                                                                                                      │ │ plan → act → verify → learn                 │ 
- TOOLS & SKILLS          0 │                                                                                                      │ ╰─────────────────────────────────────────────╯ 
- no tool calls yet         │                                                                                                      │            │                       │            
-                           │                                                                                                      │ ╭─ EXECUTION ─────────╮ ╭─ HOOKS ─────────────╮ 
-                           │                                                                                                      │ │ tool calls 0        │ │ no hook events yet  │ 
- RECENT ACTIVITY           │                                                                                                      │ │ running 0           │ │                     │ 
- no events yet             │                                                                                                      │ │ errors 0            │ │                     │ 
-                           │                                                                                                      │ │ success no data yet │ │                     │ 
-                           │                                                                                                      │ ╰─────────────────────╯ ╰─────────────────────╯ 
-                           │                                                                                                      │            │                       │            
-                           │                                                                                                      │ ╭─ EXTERNAL / MCP ────╮ ╭─ MEMORY / FEEDBACK ─╮ 
-                           │                                                                                                      │ │ no servers          │ │ writes 0            │ 
-                           │                                                                                                      │ │                     │ │ last verify none y… │ 
-                           │                                                                                                      │ │                     │ │ store no data yet   │ 
-                           │                                                                                                      │ │                     │ │                     │ 
-                           │                                                                                                      │ ╰─────────────────────╯ ╰─────────────────────╯ 
-                           │                                                                                                      │                                                 
-                           │                                                                                                      │ USAGE & METRICS                          7 days 
-                           │                                                                                                      │ Tokens     ███████████████████████████████ 6.0k 
-                           │                                                                                                      │ Tool calls █████████████████████░░░░░░░░░░   14 
-                           │                                                                                                      │ Messages   ███████████████████████████████   21 
-                           │                                                                                                      │ Agents     ████░░░░░░░░░░░░░░░░░░░░░░░░░░░    3 
-                           │                                                                                                      │ Sessions   ██████████░░░░░░░░░░░░░░░░░░░░░    7 
-                           │                                                                                                      │                                                 
-                           │                                                                                                      │                                                 
-                           │                                                                                                      │                                                 
-                           │                                                                                                      │ SYSTEM HEALTH                           healthy 
-                           │                                                                                                      │ ○ Core agent                  no agent attached 
-                           │                                                                                                      │ ○ Tool runtime                      no data yet 
-                           │                                                                                                      │ ○ MCP servers                   none configured 
-                           │                                                                                                      │                                                 
-                           │                                                                                                      │ SUB-AGENTS                                      
-                           │                                                                                                      │ No sub-agents yet · /agents                     
-                           │                                                                                                      │                                                 
- SESSION STATS       1m00s │                                                                                                      │                                                 
- files read              0 │                                                                                                      │                                                 
- files edited            0 │                                                                                                      │                                                 
- commands run            0 │                                                                                                      │                                                 
- tokens used             0 │                                                                                                      │                                                 
- tool calls              0 │                                                                                                      │                                                 
- success rate  no data yet │                                                                                                      │                                                 
- ↑/↓ select session   a follow newest   u usage metric   r reload   q quit                                                                                project │ 0 files changed 
+ WORKSPACE               1  ╭ AGENT STATUS ───────────────────────────────────── ready ╮  ╭ CONTEXT ─────────────────────────────╮ ╭ TOPOLOGY ─────────────────────────────── idle ╮
+ ▌● project              1  │ ready · planning · coding · verifying                    │  │ tokens                   no data yet │ │ ╭─ USER / PROJECT ───╮ ╭─ GUARDS ───────────╮ │
+                            │ Working on  nothing yet                                  │  │ ▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ │ │ ● no session       │ │ sandbox no data y… │ │
+                            │ Next        no plan yet                                  │  │ in 0 · out 0                         │ │ │ project            │ │ approvals –        │ │
+╭ RUNNING SESSIONS ──── 1 ╮ │                                                          │  │ cache 0 · $ –                        │ │ │ no prompt yet      │ │ blocked 0 by hooks │ │
+│ ►● proj-0          100% │ ╰──────────────────────────────────────────────────────────╯  ╰──────────────────────────────────────╯ │ │                    │ │                    │ │
+│ project-0 (…rkspace)    │                                                                                                        │ ╰────────────────────╯ ╰────────────────────╯ │
+╰─────────────────────────╯  SYNTHESIS                                                                                             │            │                      │           │
+                              no conversation attached                                                                             │ ╭─ SKILLS ───────────╮ ╭─ SUB-AGENTS ───────╮ │
+╭ SESSION ────────────────╮                                                                                                        │ │ no skills used yet │ │ no sub-agents      │ │
+│ model  claude-sonnet    │                                                                                                        │ │                    │ │ single agent mode  │ │
+│ cwd    project          │                                                                                                        │ │                    │ │                    │ │
+│ uptime 1m00s            │                                                                                                        │ │                    │ │                    │ │
+│ turns  0 prompts · 0 t… │                                                                                                        │ ╰────────────────────╯ ╰────────────────────╯ │
+│                         │                                                                                                        │            │                      │           │
+│                         │                                                                                                        │ ╭─ SYNTHESIS CORE ──────────────────────────╮ │
+│                         │                                                                                                        │ │ plan → act → verify → learn               │ │
+│                         │                                                                                                        │ ╰───────────────────────────────────────────╯ │
+╰─────────────────────────╯                                                                                                        │            │                      │           │
+                                                                                                                                   │ ╭─ EXECUTION ────────╮ ╭─ HOOKS ────────────╮ │
+╭ TOOLS & SKILLS ────── 0 ╮                                                                                                        │ │ tool calls 0       │ │ no hook events yet │ │
+│ no tool calls yet       │                                                                                                        │ │ running 0          │ │                    │ │
+│                         │                                                                                                        │ │ errors 0           │ │                    │ │
+╰─────────────────────────╯                                                                                                        │ │ success no data y… │ │                    │ │
+                                                                                                                                   │ ╰────────────────────╯ ╰────────────────────╯ │
+╭ RECENT ACTIVITY ────────╮                                                                                                        │            │                      │           │
+│ no events yet           │                                                                                                        │ ╭─ EXTERNAL / MCP ───╮ ╭─ MEMORY / FEEDBACK ╮ │
+│                         │                                                                                                        │ │ no servers         │ │ writes 0           │ │
+│                         │                                                                                                        │ │                    │ │ last verify none … │ │
+│                         │                                                                                                        │ │                    │ │ store no data yet  │ │
+│                         │                                                                                                        │ │                    │ │                    │ │
+│                         │                                                                                                        │ ╰────────────────────╯ ╰────────────────────╯ │
+│                         │                                                                                                        ╰───────────────────────────────────────────────╯
+│                         │                                                                                                                                                         
+│                         │                                                                                                        ╭ USAGE & METRICS ────────────────────── 7 days ╮
+│                         │                                                                                                        │ Tokens     █████████████████████████████ 6.0k │
+│                         │                                                                                                        │ Tool calls ███████████████████░░░░░░░░░░   14 │
+│                         │                                                                                                        │ Messages   █████████████████████████████   21 │
+│                         │                                                                                                        ╰───────────────────────────────────────────────╯
+│                         │                                                                                                                                                         
+│                         │                                                                                                        ╭ SYSTEM HEALTH ─────────────────────── healthy ╮
+│                         │                                                                                                        │ ○ Core agent                no agent attached │
+│                         │                                                                                                        │ ○ Tool runtime                    no data yet │
+│                         │                                                                                                        │ ○ MCP servers                 none configured │
+│                         │                                                                                                        ╰───────────────────────────────────────────────╯
+│                         │                                                                                                                                                         
+│                         │                                                                                                        ╭ SUB-AGENTS ───────────────────────────────────╮
+╰─────────────────────────╯                                                                                                        │ No sub-agents yet · /agents                   │
+                                                                                                                                   │                                               │
+╭ SESSION STATS ─── 1m00s ╮                                                                                                        │                                               │
+│ files read            0 │                                                                                                        │                                               │
+│ files edited          0 │                                                                                                        │                                               │
+│ commands run          0 │                                                                                                        │                                               │
+│ tokens used           0 │                                                                                                        │                                               │
+│ tool calls            0 │                                                                                                        │                                               │
+│ success rate no data yet│                                                                                                        │                                               │
+╰─────────────────────────╯                                                                                                        ╰───────────────────────────────────────────────╯
+ ↑/↓ select session   a follow newest   u usage metric   r reload   q quit                                                           project │ 0 files changed  1 mission   2 chat  

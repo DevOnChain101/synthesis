@@ -1,40 +1,40 @@
  ⢎⡱  S Y N T H E S I S   ● 2 live │ ◆ 1 waiting │ workspace proj │ model anthropic/fake-sonnet                 12:00:00 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- WORKSPACE         1 │ AGENT STATUS                 · coding    CONTEXT             3% │ USAGE & METRICS         7 days 
- ▌● proj           2 │ ready · planning · coding · verifying    tokens   5.9k / 200.0k │ Tokens     ██████████████ 6.0k 
-                     │ Working on  Agent explorer: find fil…    ▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ Tool calls █████████░░░░░   14 
- RUNNING SESSIONS  2 │ Next        Test                         in 9.0k · out 1.5k     │ Messages   ██████████████   21 
- ►● proj-0       10% │                                          cache 20.0k (hit 69%) …│ Agents     ██░░░░░░░░░░░░    3 
- project-0 (…ace)    │                                                                 │ Sessions   █████░░░░░░░░░    7 
-  ● proj-1       10% │ SYNTHESIS                       /work/proj  ◆ permission needed │                                
- project-1 (…ace)    │                                                                 │                                
-                     │                                                                 │                                
- SESSION             │                                                                 │                                
- model  anthropic/f… │                                                                 │ SYSTEM HEALTH        attention 
- mode   manual       │                                                                 │ ● Core agent      waiting for… 
- effort auto         │                                                                 │ ○ Tool runtime     no data yet 
- window 200.0k toke… │                                                                 │ ○ MCP servers     none config… 
- cwd    proj         │                                                                 │ ○ Memory store     no data yet 
- uptime 1m00s        │                                                                 │ ○ Browser sandbox  no data yet 
- turns  1 prompts ·… │                                                                 │                                
- errors 1            │                                                                 │                                
-                     │                                                                 │                                
- TOOLS & SKILLS    5 │                                                                 │ SUB-AGENTS                     
- ● Read   ▇▇▇▇▇ 1    │                                                                 │ No sub-agents yet · /agents    
- ● Bash   ▇▇▇▇▇ 1    │  > fix the flaky login test                                     │                                
- ● Skill  ▇▇▇▇▇ 1    │                                                                 │                                
- ● Agent  ▇▇▇▇▇ 1    │  ✻ Thinking · 2.0s                                              │                                
- skills scout ×1     │  │ look                                                         │                                
- mcp       0 servers │  ◆ Synthesis needs your permission  ↑/↓ choose · enter confirm …│                                
- configured · synthe…│    ⎿ ☒ Read                                                     │                                
-                     │      ■ Fixing                                                   │                                
- RECENT ACTIVITY   2 │      ☐ Test                                                     │                                
- · Lookin… 9m59s ago │  ╭─ Bash command ────────────────────────────────────────────╮  │                                
- › refac… 10m00s ago │  │   ls                                                      │  │                                
-                     │  │                                                           │  │                                
-                     │  │ Do you want to proceed?                                   │  │                                
- SESSION STA…  1m00s │  │ ❯ 1. Yes                                                  │  │                                
- files read        1 │  │   2. No, and tell Synthesis what to do differently (esc)  │  │                                
- files edited      0 │  ╰───────────────────────────────────────────────────────────╯  │                                
- commands run      1 │  ⏸ manual mode on (shift+tab to cycle)             fake-sonnet  │                                
- ↑/↓ 1-3 choose   enter confirm   esc reject   tab dashboard                                     proj │ 0 files changed 
+ WORKSPACE         1  ╭ AGENT STATUS ─────────── · coding ╮  ╭ CONTEXT ─────────── 3% ╮ ╭ USAGE & METRICS ───── 7 days ╮
+ ▌● proj           2  │ ready · planning · coding · veri… │  │ tokens   5.9k / 200.0k │ │ Tokens     ████████████ 6.0k │
+                      │ Working on  Agent explorer: find… │  │ ▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ │ Tool calls ████████░░░░   14 │
+                      │ Next        Test                  │  │ in 9.0k · out 1.5k     │ │ Messages   ████████████   21 │
+╭ RUNNING SESSIONS  ╮ │                                   │  │ cache 20.0k (hit 69%) …│ │ Agents     ██░░░░░░░░░░    3 │
+│ ►● proj-0     10% │ ╰───────────────────────────────────╯  ╰────────────────────────╯ │ Sessions   ████░░░░░░░░    7 │
+│ project-0         │                                                                   │                              │
+│  ● proj-1     10% │  SYNTHESIS                       /work/proj  ◆ permission needed  │                              │
+│ project-1         │                                                                   │                              │
+╰───────────────────╯                                                                   ╰──────────────────────────────╯
+                                                                                                                        
+╭ SESSION ──────────╮                                                                   ╭ SYSTEM HEALTH ──── attention ╮
+│ model  anthropic… │                                                                   │ ● Core agent      waiting f… │
+│ mode   manual     │                                                                   │ ○ Tool runtime    no data y… │
+│ effort auto       │                                                                   │ ○ MCP servers     none conf… │
+│ window 200.0k to… │                                                                   │ ○ Memory store    no data y… │
+│ cwd    proj       │                                                                   │ ○ Browser sandbox no data y… │
+│ uptime 1m00s      │                                                                   │                              │
+│ turns  1 prompts… │                                                                   │                              │
+╰───────────────────╯                                                                   ╰──────────────────────────────╯
+                                                                                                                        
+╭ TOOLS & SKILLS  5 ╮   > fix the flaky login test                                      ╭ SUB-AGENTS ──────────────────╮
+│ ● Read   ▇▇▇ 1    │                                                                   │ No sub-agents yet · /agents  │
+│ skills scout ×1   │   ✻ Thinking · 2.0s                                               │                              │
+╰───────────────────╯   │ look                                                          │                              │
+                        ◆ Synthesis needs your permission  ↑/↓ choose · enter confirm … │                              │
+╭ RECENT ACTIVI…  2 ╮     ⎿ ☒ Read                                                      │                              │
+│ · Look… 9m59s ago │       ■ Fixing                                                    │                              │
+│ › ref… 10m00s ago │       ☐ Test                                                      │                              │
+│                   │   ╭─ Bash command ────────────────────────────────────────────╮   │                              │
+╰───────────────────╯   │   ls                                                      │   │                              │
+                        │                                                           │   │                              │
+╭ SESSION STATS ────╮   │ Do you want to proceed?                                   │   │                              │
+│ files read      1 │   │ ❯ 1. Yes                                                  │   │                              │
+│ files edited    0 │   │   2. No, and tell Synthesis what to do differently (esc)  │   │                              │
+│ commands run    1 │   ╰───────────────────────────────────────────────────────────╯   │                              │
+╰───────────────────╯   ⏸ manual mode on (shift+tab to cycle)             fake-sonnet   ╰──────────────────────────────╯
+ ↑/↓ 1-3 choose   enter confirm   esc reject   tab dashboard                proj │ 0 files changed  1 mission   2 chat  

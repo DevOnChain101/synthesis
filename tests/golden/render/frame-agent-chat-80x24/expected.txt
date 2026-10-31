@@ -21,4 +21,4 @@
   │ > hello                                                                  │  
   ╰──────────────────────────────────────────────────────────────────────────╯  
   ⏸ manual mode on (shift+tab to cycle)             fake-sonnet · effort: auto  
- enter send   esc interrupt   ⇧tab mode   tab switch view proj │ 0 files changed
+ enter send   esc interrupt         proj │ 0 files changed  1 mission   2 chat  

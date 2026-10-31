@@ -88,10 +88,10 @@ pub(crate) fn rows(s: &TuiSettings, no_color: bool) -> Vec<Row> {
         ),
         row(
             1,
-            "glyphs",
-            "Glyphs",
-            "unicode or ascii symbols",
-            State::Choice(s.glyphs_name().into()),
+            "icons",
+            "Icons",
+            "auto, unicode or ascii symbols",
+            State::Choice(s.icons_name().into()),
             None,
         ),
         row(
@@ -217,9 +217,9 @@ impl ConfigScreen {
                     let all: Vec<ThemeId> = ThemeId::CHOICES.iter().map(|c| c.1).collect();
                     s.theme = next(&all, s.theme, back);
                 }
-                "glyphs" => {
+                "icons" => {
                     let all: Vec<GlyphChoice> = GlyphChoice::CHOICES.iter().map(|c| c.1).collect();
-                    s.glyphs = next(&all, s.glyphs, back);
+                    s.icons = next(&all, s.icons, back);
                 }
                 "logo" => {
                     let all: Vec<LogoChoice> = LogoChoice::CHOICES.iter().map(|c| c.1).collect();
@@ -246,7 +246,7 @@ impl ConfigScreen {
         let d = TuiSettings::default();
         match self.view.rows[i].group {
             0 => s.panels = d.panels,
-            1 => (s.theme, s.glyphs, s.logo) = (d.theme, d.glyphs, d.logo),
+            1 => (s.theme, s.icons, s.logo) = (d.theme, d.icons, d.logo),
             2 => {
                 (
                     s.show_thinking,

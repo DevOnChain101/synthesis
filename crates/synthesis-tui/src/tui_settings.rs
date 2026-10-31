@@ -1,4 +1,4 @@
-//! `synthesis.tui` of the USER settings file (spec docs/specs/tui-design.md §7): theme, glyphs, logo,
+//! `synthesis.tui` of the USER settings file (spec docs/specs/tui-design.md §7): theme, icons, logo,
 //! which panels are on, the chat and mouse switches. Project, local and managed files never set it
 //! (`synthesis-settings` reports that). `/config` edits these and writes them back on close.
 
@@ -41,7 +41,8 @@ impl LogoChoice {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TuiSettings {
     pub theme: ThemeId,
-    pub glyphs: GlyphChoice,
+    /// `synthesis.tui.icons` (read from `glyphs` too, its name before N1).
+    pub icons: GlyphChoice,
     pub logo: LogoChoice,
     pub panels: Panels,
     pub show_thinking: bool,
@@ -56,7 +57,7 @@ impl Default for TuiSettings {
     fn default() -> Self {
         Self {
             theme: ThemeId::Synthesis,
-            glyphs: GlyphChoice::Auto,
+            icons: GlyphChoice::Auto,
             logo: LogoChoice::Art,
             panels: Panels::default(),
             show_thinking: true,
@@ -81,8 +82,8 @@ impl TuiSettings {
     pub fn theme_name(&self) -> &'static str {
         name_of(&ThemeId::CHOICES, self.theme)
     }
-    pub fn glyphs_name(&self) -> &'static str {
-        name_of(&GlyphChoice::CHOICES, self.glyphs)
+    pub fn icons_name(&self) -> &'static str {
+        name_of(&GlyphChoice::CHOICES, self.icons)
     }
     pub fn logo_name(&self) -> &'static str {
         name_of(&LogoChoice::CHOICES, self.logo)
@@ -118,14 +119,19 @@ impl TuiSettings {
             }
             None => {}
         }
-        match tui.get("glyphs").map(Value::as_str) {
+        // `icons`; `glyphs` is the name it had before N1 and still works when `icons` is absent
+        let (icons_key, icons) = match tui.get("icons") {
+            Some(v) => ("icons", Some(v)),
+            None => ("glyphs", tui.get("glyphs")),
+        };
+        match icons.map(Value::as_str) {
             Some(Some(n)) if choice(&GlyphChoice::CHOICES, n).is_some() => {
-                s.glyphs = choice(&GlyphChoice::CHOICES, n).unwrap_or_default()
+                s.icons = choice(&GlyphChoice::CHOICES, n).unwrap_or_default()
             }
             None => {}
-            Some(_) => {
-                diags.push("synthesis.tui.glyphs must be auto, unicode or ascii, using auto".into())
-            }
+            Some(_) => diags.push(format!(
+                "synthesis.tui.{icons_key} must be auto, unicode or ascii, using auto"
+            )),
         }
         match tui.get("logo").map(Value::as_str) {
             Some(Some(n)) if choice(&LogoChoice::CHOICES, n).is_some() => {
@@ -194,7 +200,7 @@ impl TuiSettings {
         }
         json!({
             "theme": self.theme_name(),
-            "glyphs": self.glyphs_name(),
+            "icons": self.icons_name(),
             "logo": self.logo_name(),
             "panels": panels,
             "chat": {
@@ -226,7 +232,7 @@ impl TuiSettings {
     /// The theme and glyph set for this terminal: `NO_COLOR` and 16 colours override the theme;
     /// `SYNTHESIS_ASCII` and a basic `TERM` choose ASCII glyphs unless the user said otherwise.
     pub fn render_config(&self, mode: ColorMode, env: &Env) -> RenderConfig {
-        let ascii = match self.glyphs {
+        let ascii = match self.icons {
             GlyphChoice::Ascii => true,
             GlyphChoice::Unicode => false,
             GlyphChoice::Auto => match env.get_nonempty("SYNTHESIS_ASCII") {
@@ -255,16 +261,16 @@ mod tests {
     }
 
     #[test]
-    fn theme_and_glyphs_are_read_and_bad_values_keep_defaults() {
+    fn theme_and_icons_are_read_and_bad_values_keep_defaults() {
         let (s, d) = TuiSettings::from_settings(
-            &json!({"synthesis": {"tui": {"theme": "pearl", "glyphs": "ascii"}}}),
+            &json!({"synthesis": {"tui": {"theme": "pearl", "icons": "ascii"}}}),
         );
         assert_eq!(
-            (s.theme, s.glyphs, d.len()),
+            (s.theme, s.icons, d.len()),
             (ThemeId::Pearl, GlyphChoice::Ascii, 0)
         );
         let (s, d) = TuiSettings::from_settings(
-            &json!({"synthesis": {"tui": {"theme": "neon", "glyphs": 3}}}),
+            &json!({"synthesis": {"tui": {"theme": "neon", "icons": 3}}}),
         );
         assert_eq!(s, TuiSettings::default());
         assert_eq!(d.len(), 2);
@@ -379,11 +385,7 @@ mod panel_tests {
         // the defaults are the schema of the spec
         let d = TuiSettings::default().to_value();
         assert_eq!(
-            (
-                d["theme"].as_str(),
-                d["glyphs"].as_str(),
-                d["logo"].as_str()
-            ),
+            (d["theme"].as_str(), d["icons"].as_str(), d["logo"].as_str()),
             (Some("synthesis"), Some("auto"), Some("art"))
         );
     }
