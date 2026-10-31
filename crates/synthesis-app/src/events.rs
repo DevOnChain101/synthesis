@@ -118,7 +118,10 @@ impl Persist {
                 && let Some(p) = ["file_path", "notebook_path"]
                     .iter()
                     .find_map(|k| input.get(k).and_then(|v| v.as_str()))
-                && self.writing.insert(tool_call_id.clone(), p.to_string()).is_none()
+                && self
+                    .writing
+                    .insert(tool_call_id.clone(), p.to_string())
+                    .is_none()
                 && self.checkpointed.insert(p.to_string())
                 && let Err(e) = w.create_checkpoint(
                     &format!("before-first-write-{}", self.checkpointed.len()),

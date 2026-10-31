@@ -14,9 +14,9 @@ use reqwest::Url;
 use rmcp::RoleClient;
 use rmcp::service::{RxJsonRpcMessage, TxJsonRpcMessage};
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 /// Largest message and frame accepted from the server.
 const MAX_MESSAGE: usize = 4 << 20;

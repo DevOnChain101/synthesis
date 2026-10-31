@@ -1195,7 +1195,7 @@ pub fn lenient_segments(cmd: &str) -> Vec<Words> {
         } else if c == '|' && cur.ends_with('>') {
             // `>|` is a clobbering redirect, not a pipe
         } else if matches!(c, ';' | '|' | '&' | '\n' | '(' | ')')
-            || ((c == '{'|| c == '}') && !has && next.is_none_or(|n| is_ws(n) || n == ';'))
+            || ((c == '{' || c == '}') && !has && next.is_none_or(|n| is_ws(n) || n == ';'))
         {
             end_seg(&mut words, &mut segs, &mut cur, &mut has);
         } else if is_ws(c) {

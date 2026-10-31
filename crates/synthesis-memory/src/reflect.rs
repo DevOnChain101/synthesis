@@ -67,11 +67,7 @@ impl Digest {
     /// uses the network. Nothing in a tainted task is trusted beyond `untrusted`, and the model's
     /// citations cannot lower that.
     pub fn tainted(&self) -> bool {
-        self.untrusted_project
-            || self
-                .tools
-                .iter()
-                .any(|t| taints_task(&t.name, &t.arg))
+        self.untrusted_project || self.tools.iter().any(|t| taints_task(&t.name, &t.arg))
     }
 
     /// Spec §7: at least 8 tool calls, a failure followed by a recovery, a user correction (more

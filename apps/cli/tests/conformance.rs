@@ -219,10 +219,20 @@ fn run_resume_by_id_is_limited_to_the_current_workspace_unless_asked() {
             .unwrap()
     };
     let o = go(&[]);
-    assert_eq!(o.status.code(), Some(2), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        o.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     assert_eq!(messages(&rig, &sid), 2, "nothing was loaded or appended");
     let o = go(&["--resume-any-workspace"]);
-    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
 }
 
 #[test]

@@ -3077,9 +3077,18 @@ fn bash_writers_beyond_the_fs_list_are_denied_on_a_denied_path() {
 fn glob_deny_rules_are_prefix_matches_and_cheap() {
     use crate::bash::bash_any_match;
     let r = |s: &str| vec![s.to_string()];
-    assert!(bash_any_match(&r("Bash(git push * main)"), "git push origin main --force"));
-    assert!(bash_any_match(&r("Bash(git push * main)"), "git push origin main"));
-    assert!(!bash_any_match(&r("Bash(git push * main)"), "git push origin dev"));
+    assert!(bash_any_match(
+        &r("Bash(git push * main)"),
+        "git push origin main --force"
+    ));
+    assert!(bash_any_match(
+        &r("Bash(git push * main)"),
+        "git push origin main"
+    ));
+    assert!(!bash_any_match(
+        &r("Bash(git push * main)"),
+        "git push origin dev"
+    ));
     let t = std::time::Instant::now();
     let long = "a".repeat(50_000);
     assert!(!bash_any_match(&r("Bash(*a*a*a*a*a*b)"), &long));
@@ -3088,7 +3097,11 @@ fn glob_deny_rules_are_prefix_matches_and_cheap() {
     let many = format!("Bash({})", "a*".repeat(40));
     assert!(bash_any_match(&r(&many), "ls"));
     assert!(!crate::bash::bash_all_match(&r(&many), "ls"));
-    assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(2),
+        "{:?}",
+        t.elapsed()
+    );
 }
 
 #[test]

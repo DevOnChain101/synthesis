@@ -169,7 +169,9 @@ pub fn matcher_matches(pattern: Option<&str>, value: Option<&str>) -> bool {
 /// A matcher that is a regex but does not compile.
 pub fn matcher_invalid(pattern: Option<&str>) -> bool {
     pattern.is_some_and(|p| {
-        !p.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '|') && Regex::new(p).is_err()
+        !p.chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '|')
+            && Regex::new(p).is_err()
     })
 }
 

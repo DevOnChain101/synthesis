@@ -1272,8 +1272,23 @@ impl Permissions {
             "sleep", "exit", "return", "break", "continue", "cd",
         ];
         const GIT_WRITERS: &[&str] = &[
-            "checkout", "restore", "apply", "reset", "clean", "stash", "am", "mv", "rm", "merge",
-            "pull", "switch", "cherry-pick", "rebase", "revert", "read-tree", "checkout-index",
+            "checkout",
+            "restore",
+            "apply",
+            "reset",
+            "clean",
+            "stash",
+            "am",
+            "mv",
+            "rm",
+            "merge",
+            "pull",
+            "switch",
+            "cherry-pick",
+            "rebase",
+            "revert",
+            "read-tree",
+            "checkout-index",
         ];
         let specs: Vec<&str> = self
             .rules
@@ -1309,7 +1324,10 @@ impl Permissions {
                 let in_place = |a: &String| {
                     (a.starts_with('-')
                         && !a.starts_with("--")
-                        && a[1..].chars().take_while(char::is_ascii_alphabetic).any(|c| c == 'i'))
+                        && a[1..]
+                            .chars()
+                            .take_while(char::is_ascii_alphabetic)
+                            .any(|c| c == 'i'))
                         || a.starts_with("--in-place")
                 };
                 let flagless = || -> Vec<String> {
@@ -1318,12 +1336,11 @@ impl Permissions {
                         .iter()
                         .filter_map(|a| match a.strip_prefix('-') {
                             None => Some(a.strip_prefix("of=").unwrap_or(a).to_string()),
-                            Some(f) => f
-                                .split_once('=')
-                                .map(|(_, v)| v.to_string())
-                                .or_else(|| {
+                            Some(f) => {
+                                f.split_once('=').map(|(_, v)| v.to_string()).or_else(|| {
                                     (!f.starts_with('-') && f.len() > 1).then(|| f[1..].to_string())
-                                }),
+                                })
+                            }
                         })
                         .collect()
                 };
@@ -1350,12 +1367,12 @@ impl Permissions {
                         ops.extend(flagless());
                     }
                 } else if name == "awk" || name == "gawk" || name == "sort" {
-                    if w.iter().any(|a| a == "inplace" || a.starts_with("-o") || a == "--output") {
+                    if w.iter()
+                        .any(|a| a == "inplace" || a.starts_with("-o") || a == "--output")
+                    {
                         ops.extend(flagless());
                     }
-                } else if !HARMLESS.contains(&name)
-                    && !READERS.contains(&name)
-                    && !name.is_empty()
+                } else if !HARMLESS.contains(&name) && !READERS.contains(&name) && !name.is_empty()
                 {
                     ops.extend(flagless());
                 }
