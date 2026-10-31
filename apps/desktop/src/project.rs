@@ -179,6 +179,19 @@ pub fn diff_of(cwd: &Path, path: &str) -> Vec<String> {
         .collect()
 }
 
+/// `(added, removed)` lines of a unified diff, headers excluded.
+pub fn count_changes(diff: &[String]) -> (u32, u32) {
+    diff.iter().fold((0, 0), |(a, r), l| {
+        if l.starts_with('+') && !l.starts_with("+++") {
+            (a + 1, r)
+        } else if l.starts_with('-') && !l.starts_with("---") {
+            (a, r + 1)
+        } else {
+            (a, r)
+        }
+    })
+}
+
 /// The first lines of a text file for the viewer (binary or unreadable files give a note).
 pub fn read_head(cwd: &Path, path: &str) -> Vec<String> {
     match std::fs::read(cwd.join(path)) {
@@ -195,6 +208,22 @@ pub fn read_head(cwd: &Path, path: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn count_changes_skips_the_file_headers() {
+        let d: Vec<String> = [
+            "--- a/x",
+            "+++ b/x",
+            "@@ -1 +1,2 @@",
+            "-old",
+            "+new",
+            "+more",
+            " ctx",
+        ]
+        .map(String::from)
+        .into();
+        assert_eq!(count_changes(&d), (2, 1));
+    }
 
     #[test]
     fn tree_rows_nest_directories_once() {

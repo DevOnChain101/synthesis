@@ -15,9 +15,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
-use gpui_component::{
-    ActiveTheme as _, Root, Sizable as _, StyledExt as _, TitleBar, h_flex, v_flex,
-};
+use gpui_component::{ActiveTheme as _, Root, Sizable as _, StyledExt as _, h_flex, v_flex};
 use synthesis_config::Env;
 
 use crate::activity;
@@ -50,6 +48,91 @@ pub fn bindings() -> Vec<gpui::KeyBinding> {
 }
 
 const FONT_SIZE: f32 = 13.0;
+
+/// Height of the top strip that holds the macOS traffic lights (inset over the rail) and the drag
+/// region; elsewhere a slim strip above the content.
+pub(super) const TOP_SAFE: f32 = if cfg!(target_os = "macos") { 38. } else { 12. };
+/// Reading width of the conversation and width of the Inspector slide-over.
+pub(super) const READING_W: f32 = 760.;
+pub(super) const INSPECTOR_W: f32 = 560.;
+
+/// A part of the full-bleed top edge that moves the window (double click zooms). Only for areas
+/// with no interactive content.
+pub(super) fn drag(id: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .window_control_area(gpui::WindowControlArea::Drag)
+        .on_mouse_down(MouseButton::Left, |ev, window, _| {
+            // Windows moves the window itself from the Drag area
+            if cfg!(target_os = "windows") {
+                return;
+            }
+            if ev.click_count >= 2 {
+                if cfg!(target_os = "macos") {
+                    window.titlebar_double_click();
+                } else {
+                    window.zoom_window();
+                }
+            } else {
+                window.start_window_move();
+            }
+        })
+}
+
+/// Minimise, maximise and close, top right, for client-decorated windows (Windows, Linux). None on
+/// macOS (native traffic lights) and under server-side decorations.
+fn window_controls(window: &Window) -> Option<AnyElement> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    if !matches!(
+        window.window_decorations(),
+        gpui::Decorations::Client { .. }
+    ) {
+        return None;
+    }
+    let linux = cfg!(target_os = "linux");
+    let btn = |id: &'static str, ic: &'static str, area, hover: u32| {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(px(40.))
+            .h(px(32.))
+            .rounded(px(8.))
+            .window_control_area(area)
+            .hover(move |d| d.bg(hsla(hover)))
+            .child(icon(ic, 13., theme::MUTED))
+    };
+    use gpui::WindowControlArea as A;
+    let max = if window.is_maximized() {
+        "window-restore"
+    } else {
+        "window-maximize"
+    };
+    Some(
+        h_flex()
+            .absolute()
+            .top(px(4.))
+            .right(px(8.))
+            .gap(px(2.))
+            .child(
+                btn("wc-min", "window-minimize", A::Min, 0x1E242B)
+                    .when(linux, |d| d.on_click(|_, w, _| w.minimize_window())),
+            )
+            .child(
+                btn("wc-max", max, A::Max, 0x1E242B)
+                    .when(linux, |d| d.on_click(|_, w, _| w.zoom_window())),
+            )
+            .child(
+                btn("wc-close", "window-close", A::Close, theme::ERROR)
+                    .when(linux, |d| d.on_click(|_, w, _| w.remove_window())),
+            )
+            .into_any_element(),
+    )
+}
 
 /// Registers the bundled OFL fonts (apps/desktop/assets/fonts: the code fonts and Inter) with GPUI.
 pub fn register_fonts(cx: &App) {
@@ -196,6 +279,12 @@ pub struct Shell {
     shell_term: Option<Entity<TermPane>>,
     agent_on: bool,
     sheet: bool,
+    /// Evidence cards the person collapsed (tool call ids); cards start open.
+    collapsed: std::collections::HashSet<String>,
+    /// Per changed file: lines added, removed and the head of its diff, taken when the tool ends.
+    file_diffs: std::collections::HashMap<String, (u32, u32, Vec<String>)>,
+    /// The Inspector slide-over; `bottom` is its tab.
+    inspector_open: bool,
     focus: FocusHandle,
     /// The Cmd/Ctrl+K palette: open flag and its query input.
     palette_open: bool,
@@ -393,6 +482,9 @@ impl Shell {
             shell_term: None,
             agent_on: !st.plain_terminal,
             sheet: false,
+            collapsed: Default::default(),
+            file_diffs: Default::default(),
+            inspector_open: false,
             focus: cx.focus_handle(),
             palette_open: false,
             palette_q,
@@ -672,6 +764,7 @@ impl Shell {
                     t.title = text.lines().next().unwrap_or("").chars().take(28).collect();
                 }
                 t.events.push(*e);
+                self.record_file_diff();
             }
             UiMsg::TaskDone(r) => {
                 if let Err(e) = r {
@@ -688,6 +781,25 @@ impl Shell {
             }
         }
         cx.notify();
+    }
+
+    /// Diff head and +N -M of the file a finished Write/Edit tool changed (for its evidence card).
+    fn record_file_diff(&mut self) {
+        let Some(synthesis_events::Event::ToolCompleted { tool_call_id, .. }) =
+            self.tabs[0].events.last().map(|e| &e.event)
+        else {
+            return;
+        };
+        let file = self.tabs[0].convo.items.iter().find_map(|i| match i {
+            crate::convo::Item::Tool { id, file, .. } if id == tool_call_id => file.clone(),
+            _ => None,
+        });
+        if let Some(f) = file {
+            let mut lines = project::diff_of(&self.cwd, &f);
+            let (a, r) = project::count_changes(&lines);
+            lines.truncate(40);
+            self.file_diffs.insert(f, (a, r, lines));
+        }
     }
 
     fn refresh_project(&mut self) {
@@ -805,6 +917,8 @@ impl Shell {
             diff,
         });
         self.nav = Nav::Session;
+        self.bottom = Bottom::Code;
+        self.inspector_open = true;
         cx.notify();
     }
 
@@ -952,19 +1066,6 @@ fn label(text: impl Into<SharedString>) -> gpui::Div {
         .child(text.into().to_uppercase())
 }
 
-/// Panel surface of desktop.html: `linear-gradient(150deg,#191d23,#111419)` with a 1px hairline.
-pub(super) fn surface() -> gpui::Div {
-    div()
-        .border_1()
-        .border_color(hsla(theme::LINE))
-        .rounded(px(16.))
-        .bg(gpui::linear_gradient(
-            160.,
-            gpui::linear_color_stop(hsla(0x191D23), 0.),
-            gpui::linear_color_stop(hsla(0x111419), 1.),
-        ))
-}
-
 /// A Lucide icon from the bundled set (one set, one stroke weight), `size` px.
 pub(super) fn icon(name: &str, size: f32, rgb: u32) -> gpui_component::Icon {
     use gpui::Styled as _;
@@ -992,25 +1093,6 @@ pub(super) fn kbd(key: &str) -> String {
         } else {
             "Ctrl"
         }
-    )
-}
-
-fn panel(title: &str, sub: &str) -> gpui::Div {
-    surface().flex().flex_col().overflow_hidden().child(
-        h_flex()
-            .h(px(45.))
-            .px(px(16.))
-            .justify_between()
-            .border_b_1()
-            .border_color(hsla(0x2D333B))
-            .text_size(px(13.))
-            .child(div().font_semibold().child(title.to_string()))
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(hsla(0x9DA4AE))
-                    .child(sub.to_string()),
-            ),
     )
 }
 
@@ -1159,10 +1241,15 @@ impl ActiveNav for gpui::Stateful<gpui::Div> {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match self.screen {
-            Screen::Onboarding => self.onboarding(cx),
+            Screen::Onboarding => v_flex()
+                .size_full()
+                .child(drag("drag-onb").h(px(TOP_SAFE)).w_full())
+                .child(div().flex_1().min_h_0().child(self.onboarding(cx)))
+                .into_any_element(),
             Screen::Main => {
+                let own_strip = self.nav == Nav::Session && self.settings.mode == Mode::Gpui;
                 let content = match self.nav {
                     Nav::Configuration => self.settings_page(cx),
                     Nav::Activity => self.activity_page(cx),
@@ -1173,6 +1260,15 @@ impl Render for Shell {
                         Mode::Gpui => self.session_view(cx),
                         Mode::Tui => self.mode1(cx),
                     },
+                };
+                let content = if own_strip {
+                    content
+                } else {
+                    v_flex()
+                        .size_full()
+                        .child(drag("drag-page").h(px(TOP_SAFE.max(30.))).w_full())
+                        .child(div().flex_1().min_h_0().child(content))
+                        .into_any_element()
                 };
                 h_flex()
                     .size_full()
@@ -1200,21 +1296,18 @@ impl Render for Shell {
                     cx.notify();
                 }
             }))
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                if ev.keystroke.key == "escape" && this.inspector_open {
+                    this.inspector_open = false;
+                    cx.notify();
+                }
+            }))
             .bg(hsla(theme::BG))
             .text_color(hsla(theme::TEXT))
             .font_family(crate::brand::UI_FONT)
-            .child(
-                TitleBar::new().child(
-                    div()
-                        .flex_1()
-                        .text_center()
-                        .text_size(px(12.))
-                        .text_color(hsla(theme::MUTED))
-                        .child(format!("Synthesis — {}", self.project_name())),
-                ),
-            )
             .child(div().flex_1().min_h_0().child(body))
             .children(palette)
+            .children(window_controls(window))
     }
 }
 
@@ -1323,7 +1416,14 @@ impl Render for TermPane {
 /// Opens the main window.
 pub fn open(l: Launch, cx: &mut App) {
     let opts = gpui::WindowOptions {
-        titlebar: Some(TitleBar::title_bar_options()),
+        // Full-bleed: no title bar strip; the traffic lights sit over the Workspace rail.
+        titlebar: Some(gpui::TitlebarOptions {
+            title: Some("Synthesis".into()),
+            appears_transparent: true,
+            traffic_light_position: Some(gpui::point(px(16.), px(14.))),
+        }),
+        app_owns_titlebar_drag: true,
+        window_decorations: cfg!(target_os = "linux").then_some(gpui::WindowDecorations::Client),
         window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::centered(
             None,
             gpui::size(px(1280.), px(800.)),

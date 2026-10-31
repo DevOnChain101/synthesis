@@ -32,6 +32,13 @@ pub enum Item {
         summary: String,
         state: ToolState,
         preview: String,
+        /// The file a Write/Edit-style tool changes (an evidence card with its diff).
+        file: Option<String>,
+    },
+    /// A verification report: `status` is `passed`, `failed`, ... and `summary` one check per line.
+    Verification {
+        status: String,
+        summary: String,
     },
     Approval {
         id: String,
@@ -45,12 +52,43 @@ pub enum Item {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepState {
+    Done,
+    Active,
+    Todo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Step {
+    pub text: String,
+    pub state: StepState,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Convo {
     pub items: Vec<Item>,
     /// A task is between `task.started` and `task.ended`.
     pub running: bool,
     pub tokens: u64,
+    pub cost_usd: f64,
+    /// The mission plan: the agent's todo list, latest version.
+    pub plan: Vec<Step>,
+    /// Sub-agents that started and have not stopped (`agent_type`).
+    pub agents: Vec<(String, String)>,
+}
+
+/// The file a Write/Edit-style tool call changes.
+pub fn changed_file(name: &str, input: &Value) -> Option<String> {
+    matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit")
+        .then(|| {
+            input
+                .get("file_path")
+                .or_else(|| input.get("notebook_path"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .flatten()
 }
 
 /// One line for a tool row: the command, the path, or the start of the JSON input.
@@ -87,6 +125,26 @@ impl Convo {
             c.apply(e);
         }
         c
+    }
+
+    /// What the agent is doing right now, for the activity line (None when no task runs).
+    pub fn activity(&self) -> Option<String> {
+        if !self.running {
+            return None;
+        }
+        if let Some((_, t)) = self.agents.last() {
+            return Some(format!("{t} agent is working"));
+        }
+        let tool = self.items.iter().rev().find_map(|i| match i {
+            Item::Tool {
+                state: ToolState::Running,
+                name,
+                summary,
+                ..
+            } => Some(format!("Synthesis is running {name}  {summary}")),
+            _ => None,
+        });
+        Some(tool.unwrap_or_else(|| "Synthesis is thinking".into()))
     }
 
     /// Approvals waiting for the person: the "needs you" count.
@@ -127,6 +185,7 @@ impl Convo {
                 self.running = false;
                 self.close_stream();
                 self.tokens = self.tokens.max(usage.input_tokens + usage.output_tokens);
+                self.cost_usd = self.cost_usd.max(usage.cost_usd.unwrap_or(0.0));
             }
             Event::UserMessage {
                 text, display_text, ..
@@ -161,7 +220,41 @@ impl Convo {
             }
             Event::TurnCompleted { usage: Some(u), .. } => {
                 self.tokens += u.input_tokens + u.output_tokens;
+                self.cost_usd += u.cost_usd.unwrap_or(0.0);
             }
+            Event::TodoUpdated { todos } => {
+                let first_open = todos.iter().position(|t| t.status != "completed");
+                self.plan = todos
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| Step {
+                        text: if t.status == "in_progress" && !t.active_form.is_empty() {
+                            t.active_form.clone()
+                        } else {
+                            t.content.clone()
+                        },
+                        state: if t.status == "completed" {
+                            StepState::Done
+                        } else if t.status == "in_progress"
+                            || (Some(i) == first_open && self.running)
+                        {
+                            StepState::Active
+                        } else {
+                            StepState::Todo
+                        },
+                    })
+                    .collect();
+            }
+            Event::SubagentStarted(i) => {
+                self.agents.push((i.agent_id.clone(), i.agent_type.clone()))
+            }
+            Event::SubagentStopped(i) => self.agents.retain(|(id, _)| *id != i.agent_id),
+            Event::VerificationCompleted {
+                status, summary, ..
+            } if main => self.items.push(Item::Verification {
+                status: status.clone(),
+                summary: summary.clone(),
+            }),
             Event::ToolRequested {
                 tool_call_id,
                 name,
@@ -175,6 +268,7 @@ impl Convo {
                     summary: summarize_input(name, input),
                     state: ToolState::Running,
                     preview: String::new(),
+                    file: changed_file(name, input),
                 });
             }
             Event::ToolCompleted {
@@ -318,6 +412,59 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn plan_agents_cost_verification_and_changed_files_feed_the_mission_view() {
+        let mut c = Convo {
+            running: true,
+            ..Default::default()
+        };
+        c.apply(&ev(
+            "todo.updated",
+            json!({"todos":[
+                {"content":"Read","status":"completed","active_form":"Reading"},
+                {"content":"Write","status":"in_progress","active_form":"Writing"},
+                {"content":"Test","status":"pending","active_form":"Testing"}]}),
+        ));
+        let s: Vec<_> = c.plan.iter().map(|s| (s.text.as_str(), s.state)).collect();
+        assert_eq!(
+            s,
+            [
+                ("Read", StepState::Done),
+                ("Writing", StepState::Active),
+                ("Test", StepState::Todo)
+            ]
+        );
+        c.apply(&ev(
+            "subagent.started",
+            json!({"agent_id":"a1","agent_type":"developer"}),
+        ));
+        assert_eq!(c.agents, [("a1".to_string(), "developer".to_string())]);
+        c.apply(&ev(
+            "subagent.stopped",
+            json!({"agent_id":"a1","agent_type":"developer"}),
+        ));
+        assert!(c.agents.is_empty());
+        c.apply(&ev(
+            "verification.completed",
+            json!({"report_id":"r","status":"passed","attempt":1,"summary":"tests ok"}),
+        ));
+        assert!(matches!(&c.items[0], Item::Verification { status, .. } if status == "passed"));
+        assert_eq!(
+            changed_file("Write", &json!({"file_path":"/a/b.rs"})).as_deref(),
+            Some("/a/b.rs")
+        );
+        assert_eq!(changed_file("Bash", &json!({"command":"ls"})), None);
+        assert_eq!(c.activity().as_deref(), Some("Synthesis is thinking"));
+        c.apply(&ev(
+            "tool.requested",
+            json!({"tool_call_id":"t9","name":"Bash","input":{"command":"ls"},"input_truncated":false}),
+        ));
+        assert_eq!(
+            c.activity().as_deref(),
+            Some("Synthesis is running Bash  ls")
+        );
     }
 
     #[test]

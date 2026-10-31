@@ -25,7 +25,7 @@ pub fn mark() -> Arc<Image> {
 }
 
 // Lucide icons the design uses beyond gpui-kit's default set (one icon set, one stroke weight).
-gpui_kit_assets::icon_assets!(ExtraIcons, [Activity, GitBranch, Wrench, Zap]);
+gpui_kit_assets::icon_assets!(ExtraIcons, [Activity, GitBranch, Wrench, Zap, Circle]);
 
 /// The app's asset source: the default gpui-kit set plus [`ExtraIcons`].
 pub struct Assets;

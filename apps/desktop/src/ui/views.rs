@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 
+use gpui::AnimationExt as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, HighlightStyle, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -16,11 +17,11 @@ use gpui_component::{Sizable as _, StyledExt as _, h_flex, v_flex};
 use synthesis_permissions::Mode as Perm;
 
 use super::{
-    ActiveNav, Bottom, Menu, Nav, Shell, SideTab, Tab, choice, empty, icon, kbd, label, panel,
-    spaced, surface,
+    ActiveNav, Bottom, INSPECTOR_W, Menu, Nav, READING_W, Shell, SideTab, TOP_SAFE, Tab, choice,
+    drag, empty, icon, kbd, label, spaced,
 };
 use crate::activity::{self, Filter};
-use crate::convo::{ApprovalState, Item, ToolState};
+use crate::convo::{ApprovalState, Item, StepState, ToolState};
 use crate::engine::Choice;
 use crate::sessions::{self, Status};
 use crate::syntax;
@@ -74,6 +75,7 @@ fn nav_row(
         .child(icon(icon_name, 16., 0xB6BDC6))
         .child(div().flex_1().child(text))
         .cursor_pointer()
+        .hover(|d| d.bg(hsla(0x1A1F26)))
         .when_active(active)
 }
 
@@ -137,7 +139,8 @@ impl Shell {
             .flex_shrink_0()
             .h_full()
             .justify_between()
-            .p(px(13.))
+            .px(px(13.))
+            .pb(px(13.))
             .bg(gpui::linear_gradient(
                 160.,
                 gpui::linear_color_stop(hsla(0x151A20), 0.),
@@ -147,6 +150,7 @@ impl Shell {
             .border_color(hsla(0x2C3139))
             .child(
                 v_flex()
+                    .child(drag("drag-rail").h(px(TOP_SAFE)).w_full())
                     .child(
                         h_flex()
                             .gap(px(10.))
@@ -324,10 +328,10 @@ impl Shell {
             .flex_shrink_0()
             .h_full()
             .gap(px(10.))
-            .p(px(13.))
+            .px(px(13.))
+            .pb(px(13.))
             .bg(hsla(theme::SURFACE))
-            .border_r_1()
-            .border_color(hsla(0x2C3139))
+            .child(drag("drag-side").h(px(TOP_SAFE - 10.)).w_full())
             .child(
                 h_flex()
                     .justify_between()
@@ -538,20 +542,21 @@ impl Shell {
             h_flex()
                 .id(sid("tab", i))
                 .gap(px(8.))
-                .px(px(14.))
-                .py(px(8.))
+                .px(px(12.))
+                .py(px(6.))
+                .rounded(px(8.))
                 .text_size(px(12.))
                 .text_color(hsla(if on { 0xFFFFFF } else { theme::MUTED }))
                 .cursor_pointer()
-                .when(on, |d| d.border_b_1().border_color(hsla(theme::PEARL)))
+                .when(on, |d| d.bg(hsla(0x1A1F26)))
+                .hover(|d| d.text_color(hsla(0xFFFFFF)))
                 .child(dot(st))
                 .child(t.title.clone())
                 .when(!t.live, |d| {
                     d.child(
                         div()
                             .id(sid("tabx", i))
-                            .text_color(hsla(theme::MUTED))
-                            .child("×")
+                            .child(icon("close", 12., theme::MUTED))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.tabs.remove(i);
                                 this.active = this.active.min(this.tabs.len() - 1);
@@ -565,85 +570,74 @@ impl Shell {
                 }))
         });
         h_flex()
-            .border_b_1()
-            .border_color(hsla(0x2D333B))
+            .h(px(TOP_SAFE))
+            .flex_shrink_0()
+            .px(px(16.))
+            .gap(px(4.))
             .children(tabs)
+            .child(drag("drag-tabs").flex_1().h_full())
             .into_any_element()
     }
 
     /// One conversation item. Approvals never focus Allow: Deny comes first.
     fn item(&self, i: usize, it: &Item, interactive: bool, cx: &mut Context<Self>) -> AnyElement {
         match it {
-            Item::User(t) => v_flex()
-                .gap(px(4.))
-                .child(label("You"))
-                .child(
-                    div()
-                        .p(px(10.))
-                        .rounded(px(10.))
-                        .bg(hsla(0x232831))
-                        .text_size(px(13.))
-                        .child(t.clone()),
-                )
+            Item::User(t) => div()
+                .px(px(16.))
+                .py(px(12.))
+                .rounded(px(14.))
+                .bg(hsla(0x1A1F26))
+                .text_size(px(13.))
+                .line_height(px(20.))
+                .child(t.clone())
                 .into_any_element(),
-            Item::Assistant { text, streaming } => v_flex()
-                .gap(px(4.))
-                .child(label("Synthesis"))
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .line_height(px(19.))
-                        .child(format!("{text}{}", if *streaming { " ▍" } else { "" })),
-                )
+            Item::Assistant { text, streaming } => div()
+                .text_size(px(14.))
+                .line_height(px(22.))
+                .text_color(hsla(theme::TEXT))
+                .child(format!("{text}{}", if *streaming { " ▍" } else { "" }))
                 .into_any_element(),
             Item::Tool {
+                id,
                 name,
                 summary,
                 state,
                 preview,
-                ..
-            } => {
-                let (g, c) = match state {
-                    ToolState::Running => ("◉", theme::PENDING),
-                    ToolState::Ok => ("✓", theme::SUCCESS),
-                    ToolState::Failed => ("✗", theme::ERROR),
-                    ToolState::NotRun => ("○", theme::MUTED),
+                file,
+            } => self.tool_item(i, id, name, summary, *state, preview, file.as_deref(), cx),
+            Item::Verification { status, summary } => {
+                let ok = status == "passed";
+                let (ic, c) = if ok {
+                    ("circle-check", theme::SUCCESS)
+                } else {
+                    ("circle-x", theme::ERROR)
                 };
                 v_flex()
-                    .px(px(10.))
-                    .py(px(7.))
-                    .rounded(px(9.))
-                    .border_1()
-                    .border_color(hsla(0x2D333B))
-                    .bg(hsla(0x15191E))
-                    .font_family(self.font())
-                    .text_size(px(12.))
+                    .gap(px(8.))
+                    .p(px(16.))
+                    .rounded(px(14.))
+                    .bg(hsla(0x14181D))
                     .child(
                         h_flex()
                             .gap(px(8.))
-                            .child(div().text_color(hsla(c)).child(g))
-                            .child(div().font_semibold().child(name.clone()))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_color(hsla(theme::MUTED))
-                                    .child(summary.clone()),
-                            ),
+                            .text_size(px(13.))
+                            .child(icon(ic, 16., c))
+                            .child(div().font_semibold().child("Verification"))
+                            .child(div().text_color(hsla(c)).child(status.clone())),
                     )
-                    .when(!preview.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .mt(px(3.))
-                                .max_h(px(54.))
-                                .overflow_hidden()
-                                .text_color(hsla(theme::MUTED))
-                                .child(preview.lines().take(3).collect::<Vec<_>>().join("\n")),
-                        )
-                    })
+                    .children(summary.lines().filter(|l| !l.trim().is_empty()).map(|l| {
+                        h_flex()
+                            .gap(px(8.))
+                            .pl(px(24.))
+                            .text_size(px(12.))
+                            .text_color(hsla(theme::SILVER))
+                            .child(icon(
+                                "check",
+                                12.,
+                                if ok { theme::SUCCESS } else { theme::MUTED },
+                            ))
+                            .child(l.trim().to_string())
+                    }))
                     .into_any_element()
             }
             Item::Approval {
@@ -684,13 +678,13 @@ impl Shell {
                 };
                 v_flex()
                     .gap(px(8.))
-                    .p(px(12.))
-                    .rounded(px(11.))
+                    .p(px(16.))
+                    .rounded(px(14.))
                     .border_1()
                     .border_color(hsla(if *state == ApprovalState::Pending {
                         theme::PEARL
                     } else {
-                        0x2D333B
+                        0x1B1F26
                     }))
                     .bg(hsla(0x1B1F26))
                     .text_size(px(12.))
@@ -716,11 +710,240 @@ impl Shell {
         }
     }
 
+    /// Tool calls as evidence: a diff card per changed file, a terminal snippet for Bash, a browser
+    /// card for browser tools; every other tool is one quiet line.
+    #[allow(clippy::too_many_arguments)]
+    fn tool_item(
+        &self,
+        i: usize,
+        id: &str,
+        name: &str,
+        summary: &str,
+        state: ToolState,
+        preview: &str,
+        file: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (state_icon, c) = match state {
+            ToolState::Running => ("loader-circle", theme::PENDING),
+            ToolState::Ok => ("circle-check", theme::SUCCESS),
+            ToolState::Failed => ("circle-x", theme::ERROR),
+            ToolState::NotRun => ("circle", theme::MUTED),
+        };
+        let lower = name.to_lowercase();
+        let ev = if let Some(f) = file {
+            Evidence::Diff(f.to_string())
+        } else if name == "Bash" {
+            Evidence::Terminal
+        } else if lower.starts_with("browser") {
+            Evidence::Browser
+        } else {
+            return h_flex()
+                .gap(px(8.))
+                .text_size(px(12.))
+                .text_color(hsla(theme::MUTED))
+                .child(icon(state_icon, 13., c))
+                .child(name.to_string())
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(summary.to_string()),
+                )
+                .into_any_element();
+        };
+        let open = !self.collapsed.contains(id);
+        let mono = self.font();
+        let diff = file.and_then(|f| self.file_diffs.get(f));
+        let (kind_icon, title) = match &ev {
+            Evidence::Diff(f) => (
+                "file",
+                f.rsplit(['/', '\\']).next().unwrap_or(f).to_string(),
+            ),
+            Evidence::Terminal => ("square-terminal", summary.to_string()),
+            Evidence::Browser => ("globe", summary.to_string()),
+        };
+        let body: Option<AnyElement> = match &ev {
+            Evidence::Diff(_) => diff.filter(|d| !d.2.is_empty()).map(|(_, _, lines)| {
+                v_flex()
+                    .p(px(12.))
+                    .rounded(px(10.))
+                    .bg(hsla(0x0F1216))
+                    .font_family(mono.clone())
+                    .text_size(px(11.))
+                    .line_height(px(17.))
+                    .children(lines.iter().take(14).map(|l| {
+                        let c = if l.starts_with('+') && !l.starts_with("+++") {
+                            theme::SUCCESS
+                        } else if l.starts_with('-') && !l.starts_with("---") {
+                            theme::ERROR
+                        } else if l.starts_with("@@") {
+                            theme::ACCENT
+                        } else {
+                            theme::MUTED
+                        };
+                        div()
+                            .text_color(hsla(c))
+                            .whitespace_nowrap()
+                            .child(l.clone())
+                    }))
+                    .into_any_element()
+            }),
+            Evidence::Terminal => (!preview.is_empty()).then(|| {
+                div()
+                    .p(px(12.))
+                    .rounded(px(10.))
+                    .bg(hsla(0x0F1216))
+                    .font_family(mono.clone())
+                    .text_size(px(11.))
+                    .line_height(px(17.))
+                    .text_color(hsla(theme::SILVER))
+                    .child(preview.lines().take(8).collect::<Vec<_>>().join("\n"))
+                    .into_any_element()
+            }),
+            Evidence::Browser => (!preview.is_empty()).then(|| {
+                div()
+                    .px(px(4.))
+                    .text_size(px(12.))
+                    .line_height(px(18.))
+                    .text_color(hsla(theme::SILVER))
+                    .child(preview.lines().take(4).collect::<Vec<_>>().join("\n"))
+                    .into_any_element()
+            }),
+        };
+        let toggle_id = id.to_string();
+        let ev2 = ev.clone();
+        v_flex()
+            .gap(px(8.))
+            .p(px(12.))
+            .rounded(px(14.))
+            .bg(hsla(0x14181D))
+            .child(
+                h_flex()
+                    .id(sid("ev", i))
+                    .gap(px(8.))
+                    .text_size(px(12.))
+                    .cursor_pointer()
+                    .child(icon(state_icon, 14., c))
+                    .child(icon(kind_icon, 14., 0x6B727C))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .font_family(mono)
+                            .child(title),
+                    )
+                    .children(diff.map(|(a, r, _)| {
+                        h_flex()
+                            .gap(px(6.))
+                            .text_size(px(11.))
+                            .child(
+                                div()
+                                    .text_color(hsla(theme::SUCCESS))
+                                    .child(format!("+{a}")),
+                            )
+                            .child(
+                                div()
+                                    .text_color(hsla(theme::ERROR))
+                                    .child(format!("\u{2212}{r}")),
+                            )
+                    }))
+                    .child(
+                        div()
+                            .id(sid("ins", i))
+                            .child(icon("panel-right-open", 15., 0x6B727C))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.inspect(&ev2, cx);
+                            })),
+                    )
+                    .child(icon(
+                        if open { "chevron-up" } else { "chevron-down" },
+                        14.,
+                        0x6B727C,
+                    ))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.collapsed.remove(&toggle_id) {
+                            this.collapsed.insert(toggle_id.clone());
+                        }
+                        cx.notify();
+                    })),
+            )
+            .when(open, |d| d.children(body))
+            .into_any_element()
+    }
+
+    /// Opens the Inspector slide-over on the evidence of a card.
+    fn inspect(&mut self, ev: &Evidence, cx: &mut Context<Self>) {
+        match ev {
+            Evidence::Diff(f) => self.open_file(f, true, cx),
+            Evidence::Terminal => {
+                self.bottom = Bottom::Terminal;
+                self.inspector_open = true;
+            }
+            Evidence::Browser => {
+                self.bottom = Bottom::Browser;
+                self.inspector_open = true;
+            }
+        }
+        cx.notify();
+    }
+
+    /// The mission at the top of a session: the agent's plan with progress.
+    fn mission_card(&self) -> Option<AnyElement> {
+        let c = &self.tabs[self.active].convo;
+        if c.plan.is_empty() {
+            return None;
+        }
+        let done = c.plan.iter().filter(|s| s.state == StepState::Done).count();
+        let steps = c.plan.iter().map(|s| {
+            let (ic, col) = match s.state {
+                StepState::Done => ("circle-check", theme::SUCCESS),
+                StepState::Active => ("loader-circle", theme::PENDING),
+                StepState::Todo => ("circle", theme::MUTED),
+            };
+            h_flex()
+                .gap(px(8.))
+                .text_size(px(13.))
+                .text_color(hsla(if s.state == StepState::Todo {
+                    theme::MUTED
+                } else {
+                    theme::TEXT
+                }))
+                .child(icon(ic, 15., col))
+                .child(s.text.clone())
+        });
+        Some(
+            v_flex()
+                .gap(px(8.))
+                .p(px(16.))
+                .rounded(px(14.))
+                .bg(hsla(0x14181D))
+                .child(
+                    h_flex().justify_between().child(label("Mission")).child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(hsla(theme::MUTED))
+                            .child(format!("{done} of {}", c.plan.len())),
+                    ),
+                )
+                .children(steps)
+                .into_any_element(),
+        )
+    }
+
     fn items(&self, tab: usize, interactive: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let items = self.tabs[tab].convo.items.clone();
         items
             .iter()
             .enumerate()
+            // the plan is the mission card, not a row
+            .filter(|(_, it)| !matches!(it, Item::Tool { name, .. } if name == "TodoWrite"))
             .map(|(i, it)| self.item(i, it, interactive, cx))
             .collect()
     }
@@ -989,42 +1212,74 @@ impl Shell {
     fn conversation(&self, cx: &mut Context<Self>) -> AnyElement {
         let tab = &self.tabs[self.active];
         let live = tab.live;
-        let sub = match sessions::status_of(live.then_some(&tab.convo)) {
-            _ if !live => "stored session".to_string(),
-            Status::Running => "running".into(),
-            Status::NeedsYou => "needs you".into(),
-            Status::Done if tab.convo.items.is_empty() => "No task running".into(),
-            Status::Done => "done".into(),
-        };
         let items = self.items(self.active, live, cx);
-        let landing = self.is_landing();
         if live && (tab.convo.running || tab.convo.needs_you() > 0) {
             self.convo_scroll.scroll_to_bottom();
         }
-        if landing && live {
+        if self.is_landing() {
             return self.landing(cx);
         }
-        panel("Session", &sub)
+        let activity = tab.convo.activity().filter(|_| live);
+        let composer = live.then(|| self.composer_box(false, cx));
+        v_flex()
             .flex_1()
-            .min_w_0()
-            .m(px(12.))
+            .min_h_0()
+            .items_center()
+            .children(self.mission_card().map(|m| {
+                div()
+                    .flex_shrink_0()
+                    .w_full()
+                    .max_w(px(READING_W))
+                    .px(px(24.))
+                    .pt(px(8.))
+                    .child(m)
+            }))
             .child(
-                v_flex()
+                div()
                     .id("convo-scroll")
+                    .flex()
+                    .flex_col()
+                    .items_center()
                     .overflow_y_scroll()
                     .track_scroll(&self.convo_scroll)
                     .flex_1()
                     .min_h_0()
-                    .gap(px(12.))
-                    .p(px(16.))
-                    .children(items),
+                    .w_full()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .max_w(px(READING_W))
+                            .gap(px(16.))
+                            .px(px(24.))
+                            .py(px(24.))
+                            .children(items)
+                            .when(!live, |d| {
+                                d.child(empty("Read-only replay of a stored session."))
+                            }),
+                    ),
             )
-            .child(if live {
-                self.composer_box(false, cx)
-            } else {
-                empty("Read-only replay of a stored session. Resuming it in the window is not built yet.")
-                    .into_any_element()
-            })
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(px(READING_W))
+                    .px(px(12.))
+                    .children(activity.map(|a| {
+                        h_flex()
+                            .gap(px(8.))
+                            .px(px(12.))
+                            .text_size(px(12.))
+                            .text_color(hsla(theme::MUTED))
+                            .child(icon("loader-circle", 13., theme::PENDING))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .child(a),
+                            )
+                    }))
+                    .children(composer),
+            )
             .into_any_element()
     }
 
@@ -1107,20 +1362,6 @@ impl Shell {
             .into_any_element()
     }
 
-    fn viewer_panel(&self) -> AnyElement {
-        let sub = self
-            .viewer
-            .as_ref()
-            .map_or("Code · Diff", |v| if v.diff { "Diff" } else { "Code" });
-        panel("File / Diff", sub)
-            .w(px(380.))
-            .flex_shrink_0()
-            .my(px(12.))
-            .mr(px(12.))
-            .child(self.viewer_body())
-            .into_any_element()
-    }
-
     fn viewer_body(&self) -> AnyElement {
         let mono = self.font();
         match &self.viewer {
@@ -1198,7 +1439,9 @@ impl Shell {
         }
     }
 
-    fn bottom_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The Inspector: a slide-over on the right, on demand (Esc closes), for the full diff, file,
+    /// terminal and browser evidence.
+    fn inspector(&self, cx: &mut Context<Self>) -> AnyElement {
         let tab = |id: &'static str, text: &'static str, b: Bottom| {
             let on = self.bottom == b;
             div()
@@ -1206,10 +1449,11 @@ impl Shell {
                 .cursor_pointer()
                 .px(px(10.))
                 .py(px(4.))
-                .rounded(px(7.))
+                .rounded(px(8.))
                 .text_size(px(12.))
                 .text_color(hsla(if on { 0xFFFFFF } else { theme::MUTED }))
-                .when(on, |d| d.bg(hsla(theme::NAV_ACTIVE)))
+                .when(on, |d| d.bg(hsla(0x1E242B)))
+                .hover(|d| d.text_color(hsla(0xFFFFFF)))
                 .child(text)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.bottom = b;
@@ -1239,27 +1483,55 @@ impl Shell {
                 empty(&format!("{n} verification reports in this session.")).into_any_element()
             }
         };
-        surface()
-            .flex()
-            .flex_col()
-            .h(px(200.))
-            .flex_shrink_0()
-            .mx(px(12.))
-            .mb(px(8.))
-            .overflow_hidden()
+        v_flex()
+            .id("inspector")
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .w(px(INSPECTOR_W))
+            .bg(hsla(0x12161B))
+            .border_l_1()
+            .border_color(hsla(0x20252C))
+            .shadow(vec![gpui::BoxShadow {
+                color: hsla(0x000000).opacity(0.45),
+                offset: gpui::point(px(-8.), px(0.)),
+                blur_radius: px(32.),
+                spread_radius: px(0.),
+                inset: false,
+            }])
             .child(
                 h_flex()
-                    .gap(px(6.))
-                    .px(px(12.))
-                    .py(px(8.))
-                    .border_b_1()
-                    .border_color(hsla(0x2D333B))
+                    .gap(px(4.))
+                    .px(px(16.))
+                    .pt(px(if cfg!(target_os = "macos") { 14. } else { 40. }))
+                    .pb(px(12.))
                     .child(tab("b-code", "Code", Bottom::Code))
                     .child(tab("b-term", "Terminal", Bottom::Terminal))
                     .child(tab("b-browser", "Browser", Bottom::Browser))
-                    .child(tab("b-verify", "Verification", Bottom::Verification)),
+                    .child(tab("b-verify", "Verification", Bottom::Verification))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("inspector-close")
+                            .p(px(6.))
+                            .rounded(px(8.))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(hsla(0x1E242B)))
+                            .child(icon("close", 14., theme::MUTED))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.inspector_open = false;
+                                cx.notify();
+                            })),
+                    ),
             )
-            .child(div().flex_1().min_h_0().child(body))
+            .child(div().flex_1().min_h_0().px(px(8.)).child(body))
+            .with_animation(
+                "inspector-in",
+                gpui::Animation::new(std::time::Duration::from_millis(160))
+                    .with_easing(gpui::ease_out_quint()),
+                |d, t| d.right(px(-INSPECTOR_W * (1. - t))).opacity(t),
+            )
             .into_any_element()
     }
 
@@ -1269,28 +1541,36 @@ impl Shell {
             .engine
             .as_ref()
             .map_or(String::new(), |e| format!("sandbox {}", e.sandbox.mode));
-        let parts: Vec<String> = [self.model.clone().unwrap_or_default(), sandbox]
-            .into_iter()
-            .filter(|p| !p.is_empty())
-            .collect();
+        let left: Vec<String> = [
+            self.model.clone().unwrap_or_default(),
+            perm_label(self.perm).to_string(),
+            sandbox,
+        ]
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .collect();
+        let needs = self.pending_total();
+        let right = format!("${:.2}   ·   {} tokens", t.convo.cost_usd, t.convo.tokens);
         h_flex()
-            .px(px(16.))
-            .py(px(6.))
+            .px(px(24.))
+            .py(px(8.))
             .justify_between()
             .text_size(px(11.))
-            .text_color(hsla(theme::MUTED))
-            .child(h_flex().gap(px(6.)).child(parts.join("  ·  ")).when(
+            .text_color(hsla(0x6B727C))
+            .child(h_flex().gap(px(6.)).child(left.join("  ·  ")).when(
                 !self.branch.is_empty(),
                 |d| {
-                    d.child(icon("git-branch", 12., theme::MUTED))
+                    d.child(icon("git-branch", 12., 0x6B727C))
                         .child(self.branch.clone())
                 },
             ))
-            .child(format!(
-                "{} tokens   ·   needs you: {}",
-                t.convo.tokens,
-                self.pending_total()
-            ))
+            .child(
+                h_flex().gap(px(12.)).child(right).child(
+                    div()
+                        .text_color(hsla(if needs > 0 { theme::PENDING } else { 0x6B727C }))
+                        .child(format!("needs you: {needs}")),
+                ),
+            )
             .into_any_element()
     }
 
@@ -1301,20 +1581,13 @@ impl Shell {
     }
 
     pub(super) fn session_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        let landing = self.is_landing();
         v_flex()
             .size_full()
+            .relative()
             .child(self.tab_strip(cx))
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .items_stretch()
-                    .child(self.conversation(cx))
-                    .when(!landing, |d| d.child(self.viewer_panel())),
-            )
-            .child(self.bottom_panel(cx))
+            .child(self.conversation(cx))
             .child(self.status_line())
+            .when(self.inspector_open, |d| d.child(self.inspector(cx)))
             .into_any_element()
     }
 
@@ -1837,6 +2110,7 @@ fn session_row(
         .rounded(px(8.))
         .text_size(px(12.))
         .cursor_pointer()
+        .hover(|d| d.bg(hsla(0x1A1F26)))
         .when(on, |d| d.bg(hsla(theme::NAV_ACTIVE)))
         .child(
             h_flex()
@@ -1861,4 +2135,12 @@ fn session_row(
         .when(has_chips, |d| {
             d.child(h_flex().gap(px(6.)).pl(px(15.)).children(chips))
         })
+}
+
+/// What a tool card is evidence of (and what the Inspector opens on).
+#[derive(Clone)]
+enum Evidence {
+    Diff(String),
+    Terminal,
+    Browser,
 }
