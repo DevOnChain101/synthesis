@@ -12,12 +12,13 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, StyledText, canvas, div, img, px,
 };
 use gpui_component::input::Input;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{StyledExt as _, h_flex, v_flex};
 use synthesis_permissions::Mode as Perm;
 
 use super::{
-    ActiveNav, Bottom, HEADER_H, INSPECTOR_W, LIGHTS_W, MAX_TABS, Menu, Nav, READING_W, Shell,
-    SideTab, Tab, Variant, btn, choice, drag, empty, icon, kbd, label,
+    ActiveNav, Bottom, HEADER_H, INSPECTOR_W, LIGHTS_W, MAX_TABS, Menu, Nav, RAIL_W, READING_W,
+    SessionsResize, Shell, SideTab, Tab, Variant, btn, choice, drag, empty, icon, kbd, label,
 };
 use crate::activity::{self, Filter};
 use crate::convo::{ApprovalState, Item, StepState, ToolState};
@@ -75,22 +76,17 @@ fn rule() -> gpui::Div {
     div().h(px(8.))
 }
 
-fn nav_row(
-    id: impl Into<gpui::ElementId>,
-    icon_name: &str,
-    text: String,
-    active: bool,
-) -> gpui::Stateful<gpui::Div> {
-    h_flex()
+/// A 40 px square button of the icon rail.
+fn rail_btn(id: impl Into<gpui::ElementId>, active: bool) -> gpui::Stateful<gpui::Div> {
+    div()
         .id(id)
-        .gap(px(12.))
-        .p(px(10.))
-        .my(px(2.))
-        .rounded(px(9.))
-        .text_size(px(13.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .size(px(40.))
+        .rounded(px(10.))
         .text_color(hsla(if active { 0xFFFFFF } else { 0xAAB0BA }))
-        .child(icon(icon_name, 16., 0xB6BDC6))
-        .child(div().flex_1().child(text))
         .cursor_pointer()
         .hover(|d| d.bg(hsla(0x1A1F26)))
         .when_active(active)
@@ -116,167 +112,127 @@ const PERMS: [Perm; 5] = [
 ];
 
 impl Shell {
-    /// Sidebar 1, `Workspace`: workspaces from the session store, Inbox, search, Configuration.
+    /// Sidebar 1, `Workspace`: a compact icon rail (64 px). Names, counts and shortcuts are
+    /// tooltips; the Inbox count is a badge.
     pub(super) fn workspace_rail(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.cwd.display().to_string();
         let list = sessions::workspaces(&self.saved, &current);
+        // on the landing the window-level wash shows through the sidebars
+        let wash = if self.is_landing() { 0.7 } else { 1. };
         let pending = self.pending_total();
+        let tip = |t: String| {
+            move |w: &mut gpui::Window, cx: &mut gpui::App| Tooltip::new(t.clone()).build(w, cx)
+        };
         let rows = list.into_iter().enumerate().map(|(i, w)| {
             let active = w.cwd == current;
-            let stat = (active && self.proj.stat != (0, 0)).then(|| {
-                h_flex()
-                    .gap(px(5.))
-                    .text_size(px(11.))
-                    .child(
-                        div()
-                            .text_color(hsla(theme::SUCCESS))
-                            .child(format!("+{}", self.proj.stat.0)),
-                    )
-                    .child(
-                        div()
-                            .text_color(hsla(theme::ERROR))
-                            .child(format!("−{}", self.proj.stat.1)),
-                    )
-            });
+            let mut t = w.name.clone();
+            if active && self.proj.stat != (0, 0) {
+                t = format!("{t}  +{} −{}", self.proj.stat.0, self.proj.stat.1);
+            }
             let path = PathBuf::from(&w.cwd);
-            nav_row(sid("ws", i), "folder", w.name, active)
-                .children(stat)
+            rail_btn(sid("ws", i), active)
+                .text_size(px(14.))
+                .font_semibold()
+                .child(
+                    w.name
+                        .chars()
+                        .next()
+                        .unwrap_or('?')
+                        .to_uppercase()
+                        .to_string(),
+                )
+                .tooltip(tip(t))
                 .on_click(
                     cx.listener(move |this, _, _, cx| this.select_workspace(path.clone(), cx)),
                 )
         });
-        let hint = |t: String| {
-            div()
-                .text_size(px(11.))
-                .text_color(hsla(theme::MUTED))
-                .child(t)
-        };
         v_flex()
-            .w(px(210.))
+            .w(px(RAIL_W))
             .flex_shrink_0()
             .h_full()
             .justify_between()
-            .px(px(13.))
-            .pb(px(13.))
+            .items_center()
+            .pb(px(12.))
             .bg(gpui::linear_gradient(
                 160.,
-                gpui::linear_color_stop(hsla(0x151A20), 0.),
-                gpui::linear_color_stop(hsla(theme::SIDEBAR), 1.),
+                gpui::linear_color_stop(hsla(0x151A20).opacity(wash), 0.),
+                gpui::linear_color_stop(hsla(theme::SIDEBAR).opacity(wash), 1.),
             ))
             .border_r_1()
             .border_color(hsla(0x1C2127))
             .child(
                 v_flex()
-                    // the top bar over the rail: traffic-light safe area, then the sidebar toggle
+                    .items_center()
+                    .gap(px(6.))
+                    // the top bar over the rail: drag only; the traffic lights sit over it
+                    .child(drag("drag-rail").w(px(RAIL_W)).h(px(HEADER_H)))
                     .child(
-                        h_flex()
-                            .h(px(HEADER_H))
-                            .mx(px(-13.))
-                            .pl(px(LIGHTS_W))
-                            .pr(px(13.))
-                            .child(self.sidebar_toggle(cx))
-                            .child(drag("drag-rail").flex_1().h_full()),
-                    )
-                    .child(div().h(px(8.)))
-                    .child(
-                        h_flex()
-                            .id("new-task")
-                            .gap(px(10.))
-                            .px(px(12.))
-                            .py(px(9.))
-                            .rounded(px(10.))
+                        rail_btn("new-task", false)
                             .bg(hsla(0x1B2027))
-                            .text_size(px(13.))
-                            .font_medium()
-                            .cursor_pointer()
-                            .hover(|d| d.bg(hsla(0x222831)))
                             .child(icon("plus", 16., 0xD4D9DF))
-                            .child(div().flex_1().child("New Task"))
-                            .child(hint(kbd("N")))
+                            .tooltip(tip(format!("New Task  {}", kbd("N"))))
                             .on_click(cx.listener(|this, _, _, cx| this.new_session(cx))),
                     )
-                    .child(rule())
                     .child(
-                        nav_row("search", "search", "Search".into(), false)
-                            .child(hint(kbd("K")))
+                        rail_btn("search", false)
+                            .child(icon("search", 16., 0xB6BDC6))
+                            .tooltip(tip(format!("Search  {}", kbd("K"))))
                             .on_click(cx.listener(|this, _, w, cx| this.open_palette(w, cx))),
                     )
                     .child(
-                        nav_row(
-                            "inbox",
-                            "inbox",
-                            if pending > 0 {
-                                format!("Inbox  ({pending})")
+                        rail_btn("inbox", self.nav == Nav::Inbox)
+                            .relative()
+                            .child(icon("inbox", 16., 0xB6BDC6))
+                            .when(pending > 0, |d| {
+                                d.child(
+                                    div()
+                                        .absolute()
+                                        .top(px(2.))
+                                        .right(px(2.))
+                                        .min_w(px(16.))
+                                        .h(px(16.))
+                                        .px(px(4.))
+                                        .rounded(px(8.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(hsla(theme::PENDING))
+                                        .text_size(px(10.))
+                                        .font_semibold()
+                                        .text_color(hsla(0x14171C))
+                                        .child(pending.to_string()),
+                                )
+                            })
+                            .tooltip(tip(if pending > 0 {
+                                format!("Inbox ({pending})")
                             } else {
                                 "Inbox".into()
-                            },
-                            self.nav == Nav::Inbox,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.nav = Nav::Inbox;
-                            cx.notify();
-                        })),
+                            }))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.nav = Nav::Inbox;
+                                cx.notify();
+                            })),
                     )
-                    .child(rule())
-                    .child(
-                        h_flex()
-                            .justify_between()
-                            .px(px(10.))
-                            .child(label("Workspace"))
-                            .child(icon("plus", 14., theme::MUTED)),
-                    )
+                    .child(rule().w(px(32.)))
                     .children(rows),
             )
             .child(
-                v_flex()
-                    .child(
-                        nav_row(
-                            "config",
-                            "settings",
-                            "Configuration".into(),
-                            self.nav == Nav::Configuration,
-                        )
-                        .child(hint(kbd(",")))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.nav = Nav::Configuration;
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        v_flex()
-                            .mt(px(8.))
-                            .gap(px(4.))
-                            .p(px(10.))
-                            .rounded(px(12.))
-                            .bg(hsla(0x151A20))
-                            .child(
-                                h_flex()
-                                    .gap(px(8.))
-                                    .text_size(px(12.))
-                                    .child(icon("folder-open", 15., 0xB6BDC6))
-                                    .child(div().flex_1().child(self.project_name()))
-                                    .child(icon("chevron-down", 14., theme::MUTED)),
-                            )
-                            .when(!self.branch.is_empty(), |d| {
-                                d.child(
-                                    h_flex()
-                                        .gap(px(8.))
-                                        .text_size(px(11.))
-                                        .text_color(hsla(theme::MUTED))
-                                        .child(icon("git-branch", 14., theme::MUTED))
-                                        .child(self.branch.clone()),
-                                )
-                            }),
-                    )
-                    .child(div().px(px(10.)).pt(px(8.)).child(hint(format!(
-                        "v{} · {}",
+                rail_btn("config", self.nav == Nav::Configuration)
+                    .child(icon("settings", 16., 0xB6BDC6))
+                    .tooltip(tip(format!(
+                        "Configuration  {}  ·  v{} · {}",
+                        kbd(","),
                         env!("CARGO_PKG_VERSION"),
                         match (self.settings.mode, self.settings.plain_terminal) {
                             (crate::settings::Mode::Gpui, _) => "GPUI",
                             (crate::settings::Mode::Tui, false) => "TUI",
                             (crate::settings::Mode::Tui, true) => "TUI · plain terminal",
                         }
-                    )))),
+                    )))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.nav = Nav::Configuration;
+                        cx.notify();
+                    })),
             )
             .into_any_element()
     }
@@ -339,27 +295,46 @@ impl Shell {
                 }))
                 .child(
                     h_flex()
-                        .gap(px(8.))
+                        .gap(px(6.))
                         .child(icon(ic, 14., theme::MUTED))
                         .child(text),
                 )
         };
         v_flex()
-            .w(px(260.))
+            .relative()
+            .w(px(self.settings.sessions_w()))
             .flex_shrink_0()
             .h_full()
             .gap(px(16.))
-            .px(px(16.))
+            .px(px(12.))
             .pb(px(16.))
-            .bg(hsla(theme::SURFACE))
+            .bg(hsla(theme::SURFACE).opacity(if self.is_landing() { 0.7 } else { 1. }))
+            // drag the right edge to resize (ui.rs saves the width on mouse up)
+            .child(
+                div()
+                    .id("sessions-resize")
+                    .absolute()
+                    .top_0()
+                    .right(px(-3.))
+                    .w(px(6.))
+                    .h_full()
+                    .cursor_col_resize()
+                    .on_drag(SessionsResize, |_, _, _, cx| {
+                        gpui::AppContext::new(cx, |_| SessionsResize)
+                    }),
+            )
             .child(
                 h_flex()
                     .h(px(HEADER_H))
                     .flex_shrink_0()
+                    .gap(px(8.))
+                    .child(self.sidebar_toggle(cx))
                     .child(
                         div()
+                            .flex_1()
                             .text_size(px(15.))
                             .font_semibold()
+                            .truncate()
                             .child(self.project_name()),
                     )
                     .child(drag("drag-side").flex_1().h_full())
@@ -379,7 +354,7 @@ impl Shell {
             )
             .child(
                 h_flex()
-                    .gap(px(14.))
+                    .gap(px(10.))
                     .child(page("p-activity", "activity", "Activity", Nav::Activity))
                     .child(page("p-tools", "wrench", "Tools", Nav::Tools))
                     .child(page("p-topology", "network", "Topology", Nav::Topology)),
@@ -1826,33 +1801,16 @@ impl Shell {
     }
 
     /// The first screen: a live session with nothing said yet and no file opened.
-    fn is_landing(&self) -> bool {
+    pub(super) fn is_landing(&self) -> bool {
         let t = &self.tabs[self.active];
         t.live && t.convo.items.is_empty() && self.viewer.is_none()
     }
 
     pub(super) fn session_view(&self, cx: &mut Context<Self>) -> AnyElement {
-        let landing = self.is_landing();
         v_flex()
             .size_full()
             .relative()
             .overflow_hidden()
-            // landing: a soft warm wash with the swoosh as faint art bleeding off the edge
-            .when(landing, |d| {
-                d.bg(gpui::linear_gradient(
-                    200.,
-                    gpui::linear_color_stop(hsla(0x1F1E1D), 0.),
-                    gpui::linear_color_stop(hsla(theme::BG), 0.6),
-                ))
-                .child(
-                    img(crate::brand::mark())
-                        .absolute()
-                        .top(px(-90.))
-                        .right(px(-110.))
-                        .size(px(460.))
-                        .opacity(0.12),
-                )
-            })
             .child(self.tab_strip(cx))
             .child(self.conversation(cx))
             .child(self.status_line())
