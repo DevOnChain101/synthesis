@@ -19,6 +19,8 @@ const STOPWORDS: &[&str] = &[
     "just", "like",
 ];
 
+/// Normalised bm25 below this drops a candidate.
+const MIN_MATCH: f64 = 0.3;
 const MAX_TERMS: usize = 24;
 const CANDIDATES: i64 = 50;
 const NOTE_CHARS: usize = 600;
@@ -210,13 +212,17 @@ impl Store {
             .fold((f64::MAX, f64::MIN), |(l, h), b| (l.min(b), h.max(b)));
         let mut scored: Vec<Note> = cands
             .into_iter()
-            .map(|(m, b)| {
+            .filter_map(|(m, b)| {
                 // bm25() is negative and smaller is better
                 let norm = match b {
                     Some(_) if hi <= lo => 1.0,
                     Some(b) => (hi - b) / (hi - lo),
                     None => 0.0,
                 };
+                // a weak match of one common word is noise, not memory (pinned notes always stay)
+                if b.is_some() && !m.pinned && norm < MIN_MATCH {
+                    return None;
+                }
                 let stale = is_stale(&m, q.root);
                 let mut score = 0.5 * norm
                     + 0.15 * scope_weight(&m)
@@ -226,11 +232,11 @@ impl Store {
                 if stale {
                     score /= 2.0;
                 }
-                Note {
+                Some(Note {
                     memory: m,
                     score,
                     stale,
-                }
+                })
             })
             .collect();
         scored.sort_by(|a, b| b.score.total_cmp(&a.score));

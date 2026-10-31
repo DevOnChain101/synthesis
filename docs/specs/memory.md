@@ -1,6 +1,6 @@
 # Spec: Long-term memory — draft 0.1
 
-Status: accepted (2026-10-29); decisions D1–D8 are settled (§15); M0 (F1–F7), M1, M2 and M3 are implemented (see the status sections at the end). Tags as in events.md. Design doc: §5.5.1, ADR-013, roadmap R11.
+Status: accepted (2026-10-29); decisions D1–D8 are settled (§15); M0 (F1–F7), M1, M2, M3 and the offline part of M4 are implemented (see the status sections at the end). Tags as in events.md. Design doc: §5.5.1, ADR-013, roadmap R11.
 
 ## 0. Non-negotiables
 1. Memory is **data, never instructions or permission grants**. It never reaches the permission engine, the auto-mode judge's user intent, approval dialogs or `set_mode`.
@@ -100,7 +100,7 @@ CREATE UNIQUE INDEX memories_dedupe ON memories(scope, scope_key, content_hash)
 CREATE UNIQUE INDEX memories_slot ON memories(scope, scope_key, slot)
   WHERE slot IS NOT NULL AND status = 'active';
 CREATE VIRTUAL TABLE memories_fts USING fts5(title, body, tags, content='memories',
-  content_rowid='rid', tokenize='unicode61 remove_diacritics 2');  -- + sync triggers
+  content_rowid='rid', tokenize='porter unicode61 remove_diacritics 2');  -- + sync triggers
 CREATE TABLE memory_uses(memory_id TEXT NOT NULL REFERENCES memories(id), session_id TEXT NOT NULL,
   task_id TEXT, via TEXT NOT NULL CHECK(via IN ('injected','searched')), at TEXT NOT NULL, outcome TEXT);
 CREATE TABLE reflection_jobs(id TEXT PRIMARY KEY, kind TEXT NOT NULL, workspace_key TEXT,
@@ -306,3 +306,11 @@ Done (`crates/synthesis-memory/src/skills.rs`, `synthesis-tools` `skill.rs`, `me
 - A use of a learned skill (a `Skill` call in the task) is recorded and its outcome counted; Wilson < 0.4 after 5 outcomes returns it to `proposed`.
 
 Gaps: "same successful command sequence in >= 2 episodes" is not detected (episodes hold no command list); `Learned` stats in the description are read when the skill list is built, not refreshed mid-task; no consolidation merge, embeddings (`memory-embeddings`) or `messages_fts` (spec roadmap M3) were built.
+
+### M4 status (evaluation; offline part implemented 2026-10-31)
+`crates/synthesis-memory/tests/quality.rs` (runs in `cargo test --workspace` on every OS; no model, no network):
+- **Retrieval (§12.3):** 16 notes, 12 labelled queries. Result on this synthetic corpus: every query finds its note, precision@k 1.00, wrong 0.00 (targets: >= 0.6 and <= 5%). It caught two real defects that were fixed in the same change: no stemming (`tests` did not match `test`), so the FTS tokenizer is now `porter unicode61 remove_diacritics 2`; and weak one-word matches were injected, so a candidate with normalised bm25 below 0.3 is dropped (pinned notes stay). The corpus is small and written by the implementer: it is a regression check, not the owner-labelled 50-note evaluation, which is still to do.
+- **Poisoned arm (§12.2):** three planted records (write path, forged import claiming `owner`, a row forged directly in the database). Two are quarantined at the door; the forged row is rendered inside one `<memory trust="data">` block with `<` escaped, and the block's text says it grants nothing. A test also pins that the memory crate has no dependency on the permission, sandbox, harness or tools crates.
+- Unrelated requests inject no block.
+
+Not run (needs provider keys and the owner): the cold/warm/warm-poisoned paired task runs (§12.1) and their targets (-20% turns and tool calls), the 4-week dogfooding review (§12.4), and the 8-scenario regression with memory on (§12.5). Gate §12 is therefore **unverified**; `--no-memory` and `synthesis.memory.enabled` exist so injection can be switched off if it fails.

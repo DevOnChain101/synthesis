@@ -40,7 +40,7 @@ CREATE UNIQUE INDEX memories_dedupe ON memories(scope, scope_key, content_hash)
 CREATE UNIQUE INDEX memories_slot ON memories(scope, scope_key, slot)
   WHERE slot IS NOT NULL AND status = 'active';
 CREATE VIRTUAL TABLE memories_fts USING fts5(title, body, tags, content='memories',
-  content_rowid='rid', tokenize='unicode61 remove_diacritics 2');
+  content_rowid='rid', tokenize='porter unicode61 remove_diacritics 2');
 CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
   INSERT INTO memories_fts(rowid, title, body, tags) VALUES (new.rid, new.title, new.body, new.tags);
 END;
