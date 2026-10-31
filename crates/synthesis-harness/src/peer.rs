@@ -299,6 +299,36 @@ const SHARED_RESULTS: [&str; 9] = [
     "TodoWrite",
 ];
 
+/// Longest Bash output a responder inherits (P3).
+const SHARED_OUTPUT: usize = 8 * 1024;
+
+/// P3: a Bash call whose whole command matches a `share_commands` pattern (a trailing `*` is a
+/// prefix) and has no shell metacharacter, so it cannot chain, pipe, redirect or substitute.
+fn shares(patterns: &[String], name: &str, input: Option<&Value>) -> bool {
+    name == "Bash"
+        && input
+            .and_then(|i| i.get("command"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|c| {
+                !c.is_empty()
+                    && !c.contains(|ch| ";|&$`<>()\n\r".contains(ch))
+                    && patterns.iter().any(|p| match p.strip_suffix('*') {
+                        Some(pre) => c.starts_with(pre),
+                        None => c == p,
+                    })
+            })
+}
+
+fn cut_value(v: &Value, n: usize) -> Value {
+    match v {
+        Value::String(t) => Value::String(t.chars().take(n).collect()),
+        Value::Array(a) => Value::Array(a.iter().map(|x| cut_value(x, n)).collect()),
+        Value::Object(o) => Value::Object(o.iter().map(|(k, x)| (k.clone(), cut_value(x, n))).collect()),
+        other => other.clone(),
+    }
+}
+
 fn redact_value(v: &Value, redact: &dyn Fn(&str) -> String) -> Value {
     match v {
         Value::String(t) => Value::String(redact(t)),
@@ -349,14 +379,17 @@ fn leaves(v: &Value, out: &mut Vec<String>) {
 
 /// Snapshot copy for a responder (B6 Sanitising). A call is withheld, input and result, when its
 /// tool is not one whose results are shared, or its input names a secret, state or an outside
-/// path; the rest goes through the session's redactor. Thinking blocks are dropped.
+/// path; the rest goes through the session's redactor. Thinking blocks are dropped. A Bash call
+/// matching `share` (see [`shares`]) is kept like a read, its output cut to 8 KiB.
 fn sanitize(
     history: &[Message],
     root: &str,
     home: &str,
+    share: &[String],
     redact: &dyn Fn(&str) -> String,
 ) -> Vec<Message> {
     let mut hidden: BTreeSet<String> = BTreeSet::new();
+    let mut shared: BTreeSet<String> = BTreeSet::new();
     for m in history {
         if let Content::Blocks(bs) = &m.content {
             for b in bs {
@@ -365,7 +398,11 @@ fn sanitize(
                     if let Some(i) = input {
                         leaves(i, &mut toks);
                     }
-                    if !SHARED_RESULTS.contains(&name.as_str())
+                    let ok = shares(share, name, input.as_ref());
+                    if ok {
+                        shared.insert(id.clone());
+                    }
+                    if !(SHARED_RESULTS.contains(&name.as_str()) || ok)
                         || toks.iter().any(|t| names_private_path(t, root, home))
                     {
                         hidden.insert(id.clone());
@@ -401,7 +438,14 @@ fn sanitize(
                 is_error,
             } => Block::ToolResult {
                 tool_use_id: tool_use_id.clone(),
-                content: content.as_ref().map(|c| redact_value(c, redact)),
+                content: content.as_ref().map(|c| {
+                    let c = redact_value(c, redact);
+                    if shared.contains(tool_use_id) {
+                        cut_value(&c, SHARED_OUTPUT)
+                    } else {
+                        c
+                    }
+                }),
                 is_error: *is_error,
             },
             Block::Text { text } => Block::Text { text: redact(text) },
@@ -1366,6 +1410,7 @@ impl Harness {
                 &home
                     .map(|h| h.to_string_lossy().into_owned())
                     .unwrap_or_default(),
+                &link.config.share_commands,
                 &redact,
             )
         });
@@ -1707,6 +1752,49 @@ mod tests {
     }
 
     #[test]
+    fn shared_commands_need_a_pattern_and_no_shell_metacharacters() {
+        let pats: Vec<String> = vec!["cargo test*".into(), "ls".into()];
+        let bash = |c: &str| shares(&pats, "Bash", Some(&json!({"command": c})));
+        assert!(bash("cargo test -p api"));
+        assert!(bash("ls"));
+        assert!(!bash("ls -la"), "no wildcard, so the whole command must match");
+        assert!(!bash("cargo build"));
+        for chained in [
+            "cargo test; cat .env",
+            "cargo test | tee x",
+            "cargo test && env",
+            "cargo test $(env)",
+            "cargo test `env`",
+            "cargo test > out",
+            "cargo test\nenv",
+            "cargo test (x)",
+        ] {
+            assert!(!bash(chained), "{chained}");
+        }
+        assert!(!shares(&pats, "Read", Some(&json!({"command": "ls"}))));
+        assert!(!shares(&[], "Bash", Some(&json!({"command": "ls"}))), "empty list shares nothing");
+    }
+
+    #[test]
+    fn a_shared_command_keeps_its_redacted_output_cut_to_8_kib_and_a_private_path_still_hides_it() {
+        let hist = vec![
+            use_("a", "Bash", json!({"command": "cargo test -p api"})),
+            result("a", &format!("FAIL token=sk-LEAK-1 {}", "x".repeat(20_000))),
+            use_("b", "Bash", json!({"command": "cargo test /etc/passwd"})),
+            result("b", "outside-output"),
+            use_("c", "Bash", json!({"command": "cargo test; id"})),
+            result("c", "chained-output"),
+        ];
+        let red = |s: &str| s.replace("sk-LEAK-1", "[REDACTED]");
+        let share = vec!["cargo test*".to_string()];
+        let t = dump(&sanitize(&hist, "/w", "/h/.synthesis", &share, &red));
+        assert!(t.contains("FAIL token=[REDACTED]") && !t.contains("sk-LEAK-1"), "{t}");
+        assert!(!t.contains(&"x".repeat(9_000)), "cut to 8 KiB");
+        assert!(t.contains(&"x".repeat(8_000)));
+        assert!(!t.contains("outside-output") && !t.contains("chained-output"), "{t}");
+    }
+
+    #[test]
     fn snapshots_withhold_secrets_bash_and_outside_paths_and_redact_the_rest() {
         let hist = vec![
             use_("a", "Read", json!({"file_path": "/w/src/lib.rs"})),
@@ -1727,7 +1815,7 @@ mod tests {
             result("f", "other-repo-line"),
         ];
         let red = |s: &str| s.replace("sk-LEAK-1", "[REDACTED]");
-        let out = sanitize(&hist, "/w", "/h/.synthesis", &red);
+        let out = sanitize(&hist, "/w", "/h/.synthesis", &[], &red);
         let t = dump(&out);
         assert!(t.contains("fn main() {} token=[REDACTED]"), "{t}");
         for leaked in [

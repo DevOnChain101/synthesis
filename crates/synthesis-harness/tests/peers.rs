@@ -180,6 +180,7 @@ fn side_full(
                 "SlowEnv".into(),
                 "Read".into(),
                 "Task".into(),
+                "Bash".into(),
             ],
             responder: Some(responder),
             ..Opts::default()
@@ -1619,4 +1620,64 @@ async fn a_session_waiting_on_x_refuses_a_subscription_from_x() {
     let (n2, err) = tool_result(&b.rig.requests().last().unwrap(), "n2").unwrap();
     assert!(err && n2.contains("cycle"), "{n2}");
     assert!(texts(a.rig.requests().last().unwrap()).contains("B done"));
+}
+
+// ---- P3 shared Bash output (messaging.md J1) --------------------------------------------------------
+
+/// What the responder reports it can see of A's Bash results.
+async fn bash_visibility(settings: serde_json::Value) -> String {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let a_resp: Responder = Arc::new(|r| {
+        Some(if is_responder(r) {
+            let t = texts(r);
+            Turn::text(&format!(
+                "shared={} chained={} private={}",
+                t.contains("SHARED_MARK_1"),
+                t.contains("CHAIN_MARK_2"),
+                t.contains("ENVLIKE_MARK_3")
+            ))
+        } else if tool_result(r, "b1").is_none() {
+            Turn::tool("b1", "Bash", json!({"command": "echo SHARED_MARK_1"}))
+        } else if tool_result(r, "b2").is_none() {
+            Turn::tool(
+                "b2",
+                "Bash",
+                json!({"command": "echo CHAIN_MARK_2 && echo more"}),
+            )
+        } else if tool_result(r, "b3").is_none() {
+            Turn::tool("b3", "Bash", json!({"command": "echo ENVLIKE_MARK_3 /etc/hosts"}))
+        } else if tool_result(r, "s1").is_none() {
+            Turn::tool("s1", "Slow", json!({}))
+        } else {
+            Turn::text("A done")
+        })
+    });
+    let (mut a, ea) = side("sess-a", "alpha", &run, Some(settings.clone()), a_resp, 900);
+    let (mut b, _) = side("sess-b", "beta", &run, Some(settings), b_asks("ws:alpha/sess:sess-a"), 10);
+    let _reg = serve(&a, &run, ea);
+    let a_task = tokio::spawn(async move {
+        let out = run_a(&mut a).await;
+        (a, out)
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let out = go(&mut b, "ask").await;
+    assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
+    let (_a, _) = a_task.await.unwrap();
+    texts(b.rig.requests().last().unwrap())
+}
+
+#[tokio::test]
+async fn bash_output_reaches_the_responder_only_for_a_listed_command_without_metacharacters() {
+    let base = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let none = bash_visibility(base.clone()).await;
+    assert!(none.contains("shared=false chained=false private=false"), "{none}");
+
+    let mut on = base;
+    on["share_commands"] = json!(["echo SHARED*", "echo CHAIN*", "echo ENVLIKE*"]);
+    let some = bash_visibility(on).await;
+    assert!(
+        some.contains("shared=true chained=false private=false"),
+        "a listed plain command is shared; a chained one and one naming an outside path are not: {some}"
+    );
 }
