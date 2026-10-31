@@ -345,3 +345,78 @@ fn failed_mcp_server_is_a_notice_event_and_required_mcp_exits_2() {
     let (o, _) = rig.run(text_script("ok"), &["--require-mcp", "missing"]);
     assert_eq!(o.status.code(), Some(2));
 }
+
+#[test]
+fn closed_stderr_does_not_panic() {
+    let rig = Rig::new();
+    let s = rig.dir.path().join("script.json");
+    std::fs::write(&s, text_script("x").to_string()).unwrap();
+    let mut c = std::process::Command::new("sh");
+    c.env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", rig.dir.path())
+        .env("SYNTHESIS_HOME", rig.home())
+        .stdin(Stdio::null())
+        .arg("-c")
+        .arg(format!(
+            "exec \"$0\" run --cwd \"$1\" --provider \"fake:$2\" --prompt hi --sandbox off 2>&-"
+        ))
+        .arg(env!("CARGO_BIN_EXE_synth"))
+        .arg(rig.ws())
+        .arg(&s);
+    let out = c.output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn stderr_pipe_closed_by_the_reader_does_not_panic() {
+    let rig = Rig::new();
+    let s = rig.dir.path().join("script.json");
+    std::fs::write(&s, text_script("x").to_string()).unwrap();
+    let mut c = rig.base();
+    c.args(["run", "--cwd"])
+        .arg(rig.ws())
+        .arg("--provider")
+        .arg(format!("fake:{}", s.display()))
+        .args(["--prompt", "hi", "--sandbox", "off"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut ch = c.spawn().unwrap();
+    drop(ch.stderr.take()); // the reader goes away: every later write to stderr is EPIPE
+    let out = ch.wait_with_output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a dead stderr must not change the result"
+    );
+}
+
+#[test]
+fn checkpoint_is_taken_before_the_first_write() {
+    let rig = Rig::new();
+    let script = json!([
+        {"tools": [{"name": "Read", "input": {"file_path": "a.txt"}}]},
+        {"tools": [{"name": "Edit", "input": {"file_path": "a.txt", "old_string": "hello", "new_string": "bye"}}]},
+        {"tools": [{"name": "Edit", "input": {"file_path": "a.txt", "old_string": "bye", "new_string": "ciao"}}]},
+        {"text": "done"}
+    ]);
+    let (_, ev) = rig.run(script, &["--permission-mode", "acceptEdits"]);
+    let sid = session_id(&ev);
+    let c = rusqlite::Connection::open(rig.home().join("synthesis.db")).unwrap();
+    let n: i64 = c
+        .query_row(
+            "SELECT count(*) FROM checkpoints WHERE session_id=?1",
+            [&sid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        n, 1,
+        "one restore point per file, taken before its first write"
+    );
+}

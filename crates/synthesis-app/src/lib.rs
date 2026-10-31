@@ -4,6 +4,16 @@
 #[cfg(all(feature = "test-provider", not(debug_assertions)))]
 compile_error!("feature `test-provider` must never be enabled in release builds");
 
+/// `eprintln!` that ignores a dead stderr (the reader closed the pipe) instead of panicking;
+/// shadows std's macro in this crate and, through `#[macro_use]`, in `synth`.
+#[macro_export]
+macro_rules! eprintln {
+    ($($a:tt)*) => {{
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), $($a)*);
+    }};
+}
+
 /// `println!` that exits quietly when the reader went away (`synth doctor | head`).
 #[macro_export]
 macro_rules! out {
