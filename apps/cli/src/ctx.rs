@@ -51,18 +51,40 @@ pub fn read_shell_settings(user_settings: &Path) -> (ShellSettings, Vec<String>)
 
 pub type PutArtifact = Box<dyn Fn(&[u8]) -> Result<ArtifactRef, String> + Send + Sync>;
 
-struct ProviderSummarizer {
+pub(crate) struct ProviderSummarizer {
     provider: Arc<dyn ModelProvider>,
     model: String,
     cancel: CancellationToken,
     last: Mutex<String>,
+    max_tokens: u32,
+}
+
+impl ProviderSummarizer {
+    pub(crate) fn with_max_tokens(mut self, n: u32) -> Self {
+        self.max_tokens = n;
+        self
+    }
+
+    pub(crate) fn new(
+        provider: Arc<dyn ModelProvider>,
+        model: String,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self {
+            provider,
+            model,
+            cancel,
+            last: Mutex::default(),
+            max_tokens: 4096,
+        }
+    }
 }
 
 impl Summarizer for ProviderSummarizer {
     async fn summarize(&self, system: &str, prompt: &str) -> Result<String, SummarizeError> {
         let req = Request {
             model: self.model.clone(),
-            max_tokens: 4096,
+            max_tokens: self.max_tokens,
             system: Some(System::Text(system.into())),
             messages: vec![Message {
                 role: Role::User,
@@ -96,6 +118,8 @@ pub struct SynthesisContext {
     summarizer: Arc<ProviderSummarizer>,
     put: PutArtifact,
     skills: Option<String>,
+    /// Frozen `<memory>` block for the task (memory.md §6), after the instructions.
+    memory: Option<String>,
     transcript: Option<Arc<Transcript>>,
 }
 
@@ -232,15 +256,22 @@ impl SynthesisContext {
                 model,
                 cancel,
                 last: Mutex::default(),
+                max_tokens: 4096,
             }),
             put,
             skills: None,
+            memory: None,
             transcript: None,
         }
     }
 
     pub fn with_skills(mut self, skills: &[SkillInfo]) -> Self {
         self.skills = skills_block(skills);
+        self
+    }
+
+    pub fn with_memory(mut self, block: Option<String>) -> Self {
+        self.memory = block;
         self
     }
 
@@ -331,6 +362,16 @@ impl ContextProvider for SynthesisContext {
         }
         assemble(&input, &unbounded, &CharsPerToken::default())
             .map(|mut a| {
+                // sub-agents get no workspace memory (memory.md §4)
+                if let (Some(m), System::Blocks(b)) = (
+                    self.memory.as_ref().filter(|_| agent_prompt.is_none()),
+                    &mut a.system,
+                ) {
+                    b.push(SystemBlock {
+                        kind: Some("text".into()),
+                        text: Some(m.clone()),
+                    });
+                }
                 if let (Some(skills), System::Blocks(b)) = (&self.skills, &mut a.system) {
                     b.push(SystemBlock {
                         kind: Some("text".into()),

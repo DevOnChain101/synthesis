@@ -189,6 +189,9 @@ pub struct Common {
     pub approve_mcp: Vec<String>,
     #[arg(long)]
     pub no_session_store: bool,
+    /// Run without long-term memory: nothing is retrieved, injected or saved.
+    #[arg(long)]
+    pub no_memory: bool,
     /// Allow a tool call without asking, e.g. `--allow 'Bash(cargo test:*)'` (settings rule
     /// syntax; repeatable). Typed by you, so trusted; it cannot lift critical-path or
     /// protected-path protections.
@@ -286,6 +289,8 @@ pub struct Prepared {
     pub sandbox: synthesis_tui::SandboxStatus,
     pub link: Option<synthesis_tui::UiLink>,
     pub homes: crate::Homes,
+    /// Open long-term memory store (None with --no-memory, a failure, or `synthesis.memory.enabled: false`).
+    pub memory: Option<Arc<crate::memcmd::MemoryRun>>,
     /// `#` notes and `/memory` (TUI).
     pub notes: crate::memory::Notes,
 }
@@ -498,7 +503,13 @@ pub fn prepare(
             sanitize_for_display(&settings.env_refused.join(", "))
         );
     }
-    let res = resolve_provider(c, &cfg, &h.synthesis, env)?;
+    let res = resolve_provider(
+        c.provider.as_deref(),
+        c.model.as_deref(),
+        &cfg,
+        &h.synthesis,
+        env,
+    )?;
 
     let price = pricing(&h.synthesis.join("settings.json"), &res.label, &res.model);
     if limits.max_cost_usd.is_some() && price.is_none() {
@@ -922,6 +933,22 @@ pub fn prepare(
         secrets: res.secrets.clone(),
         loaded: crate::memory::describe(&instructions),
     };
+    let repo = crate::memcmd::repo_of(&ws.root);
+    let (memory, memory_block) = crate::memcmd::start(
+        &crate::memcmd::StartArgs {
+            enabled: !c.no_memory,
+            home: &h,
+            repo: &repo,
+            prompt: &prompt,
+            sid: &sid,
+            project_trusted: trust == ProjectTrust::Trusted,
+            secrets: &res.secrets,
+            provider: res.provider.clone(),
+            model: crate::memcmd::small_model(&cfg, &res.label, &res.model),
+        },
+        cancel.clone(),
+    );
+    // after memory starts: learned skills are installed by `start`
     let skills = crate::ctx::visible_skills(
         synthesis_tools::discover_skills(env, &ws.root),
         trust == ProjectTrust::Trusted,
@@ -934,7 +961,8 @@ pub fn prepare(
         cancel.clone(),
         put,
     )
-    .with_skills(&skills);
+    .with_skills(&skills)
+    .with_memory(memory_block);
     if let Some(t) = &transcript {
         context = context.with_transcript(t.clone());
     }
@@ -1126,6 +1154,7 @@ pub fn prepare(
         link,
         homes: h,
         notes,
+        memory,
     })
 }
 
@@ -1188,12 +1217,14 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
         notices,
         worktree,
         artifact_root,
+        memory,
         ..
     } = p;
     let cleanup = a.common.cleanup_worktree;
     let code = tokio_rt.block_on(async {
         on_signals(cancel.clone()).map_err(|e| format!("signal handlers: {e}"))?;
         let (store2, sink2, h2) = (store.clone(), sink.clone(), harness.clone());
+        let (memory2, request2) = (memory.clone(), prompt.clone());
         let task = tokio::spawn(async move {
             let mut session = session;
             let r = async {
@@ -1237,6 +1268,12 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
             .await;
             if let (Some(s), Ok(out)) = (&store2, &r) {
                 finish_store(s, transcript.as_deref(), out, &session.usage);
+            }
+            if let (Some(m), Ok(out)) = (&memory2, &r) {
+                crate::memcmd::task_ended(m, &request2, out);
+                if let Some(rf) = &m.reflect {
+                    crate::memcmd::reflect_jobs(&m.store, rf, 2).await;
+                }
             }
             r
         });
@@ -1349,11 +1386,11 @@ fn read_criteria(f: &Path) -> Result<Vec<Criterion>, String> {
         .collect()
 }
 
-struct Resolved {
-    provider: Arc<dyn ModelProvider>,
-    model: String,
-    label: String,
-    secrets: Vec<String>,
+pub(crate) struct Resolved {
+    pub provider: Arc<dyn ModelProvider>,
+    pub model: String,
+    pub label: String,
+    pub secrets: Vec<String>,
 }
 
 /// The error `synth run` exits 2 with when no model is configured; the interactive app starts its
@@ -1361,16 +1398,17 @@ struct Resolved {
 pub const NO_MODEL: &str =
     "no model configured: pass --model provider/model or set SYNTHESIS_MODEL";
 
-fn resolve_provider(
-    a: &Common,
+pub(crate) fn resolve_provider(
+    provider_arg: Option<&str>,
+    model_arg: Option<&str>,
     cfg: &Config,
     synthesis_home: &Path,
     env: &Env,
 ) -> Result<Resolved, String> {
-    if let Some(script) = a.provider.as_deref().and_then(|p| p.strip_prefix("fake:")) {
+    if let Some(script) = provider_arg.and_then(|p| p.strip_prefix("fake:")) {
         #[cfg(feature = "test-provider")]
         {
-            let model = a.model.clone().unwrap_or_else(|| "fake-model".into());
+            let model = model_arg.map_or_else(|| "fake-model".to_string(), String::from);
             return Ok(Resolved {
                 provider: crate::fake::load(Path::new(script))?,
                 label: format!("fake/{model}"),
@@ -1383,7 +1421,7 @@ fn resolve_provider(
             "--provider fake:{script} needs a build with the test-provider feature"
         ));
     }
-    let spec = match (&a.provider, &a.model) {
+    let spec = match (provider_arg, model_arg) {
         (Some(p), Some(m)) if !m.contains('/') => Some(format!("{p}/{m}")),
         (Some(p), None) => cfg
             .model
@@ -1397,7 +1435,7 @@ fn resolve_provider(
                     .first()
                     .map(|m| format!("{p}/{m}"))
             }),
-        (_, m) => m.clone(),
+        (_, m) => m.map(String::from),
     };
     let parsed = parse_model(spec.as_deref(), cfg).map_err(|_| NO_MODEL.to_string())?;
     let id = parsed.provider_id.ok_or("no provider configured")?;

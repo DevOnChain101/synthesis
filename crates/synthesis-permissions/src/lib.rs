@@ -1027,6 +1027,50 @@ impl Permissions {
         false
     }
 
+    /// `synth memory <subcommand>` that changes long-term memory, also inside (...), `bash -c` and
+    /// eval. Memory is the person's: the agent may read it, never approve, delete, import or opt out.
+    fn memory_mutation(&self, cmd: &str, depth: u32) -> bool {
+        const MUTATING: [&str; 11] = [
+            "add", "delete", "forget", "approve", "reject", "apply", "import", "optout", "prune",
+            "promote", "reflect",
+        ];
+        for seg in bash::lenient_segments(cmd) {
+            let w = bash::unwrap_words(&seg, true);
+            let name = paths::basename(w.first().map_or("", String::as_str), self.policy());
+            if bash::SHELLS.contains(&name) {
+                let i = w
+                    .iter()
+                    .enumerate()
+                    .position(|(k, x)| k > 0 && bash::is_dash_c(x));
+                if let Some(i) = i
+                    && depth < 3
+                    && w.get(i + 1)
+                        .is_some_and(|s| self.memory_mutation(s, depth + 1))
+                {
+                    return true;
+                }
+            } else if name == "eval"
+                && depth < 3
+                && self.memory_mutation(&w[1..].join(" "), depth + 1)
+            {
+                return true;
+            }
+            let mut rest = w.iter().skip_while(|x| {
+                let b = paths::basename(x, self.policy());
+                b != "synth" && b != "synth.exe"
+            });
+            if rest.next().is_some() {
+                let mut args = rest.filter(|x| !x.starts_with('-'));
+                if args.next().is_some_and(|x| x == "memory")
+                    && args.next().is_some_and(|x| MUTATING.contains(&x.as_str()))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// A static path from a command word: (the file, or the directory before the first wildcard;
     /// had-wildcard). `None` when it cannot be known without running the shell ($ expansions,
     /// braces, ~user) or a wildcard could hit dotfiles.
@@ -1416,6 +1460,13 @@ impl Permissions {
             r.critical = auto || classify;
             r.hard = true;
             return r;
+        }
+
+        if tool == "Bash" && self.memory_mutation(bash_cmd, 0) {
+            return v(
+                Deny,
+                "changes long-term memory: only the person may run `synth memory` approve, apply, delete, import, optout or similar",
+            );
         }
 
         // Read/Grep/Glob outside the working directories

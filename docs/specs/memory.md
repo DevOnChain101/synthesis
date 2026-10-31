@@ -1,6 +1,6 @@
 # Spec: Long-term memory — draft 0.1
 
-Status: accepted (2026-10-29); decisions D1–D8 are settled (§15); M0 (F1–F7) is implemented. Tags as in events.md. Design doc: §5.5.1, ADR-013, roadmap R11.
+Status: accepted (2026-10-29); decisions D1–D8 are settled (§15); M0 (F1–F7), M1, M2, M3 and the offline part of M4 are implemented (see the status sections at the end). Tags as in events.md. Design doc: §5.5.1, ADR-013, roadmap R11.
 
 ## 0. Non-negotiables
 1. Memory is **data, never instructions or permission grants**. It never reaches the permission engine, the auto-mode judge's user intent, approval dialogs or `set_mode`.
@@ -100,7 +100,7 @@ CREATE UNIQUE INDEX memories_dedupe ON memories(scope, scope_key, content_hash)
 CREATE UNIQUE INDEX memories_slot ON memories(scope, scope_key, slot)
   WHERE slot IS NOT NULL AND status = 'active';
 CREATE VIRTUAL TABLE memories_fts USING fts5(title, body, tags, content='memories',
-  content_rowid='rid', tokenize='unicode61 remove_diacritics 2');  -- + sync triggers
+  content_rowid='rid', tokenize='porter unicode61 remove_diacritics 2');  -- + sync triggers
 CREATE TABLE memory_uses(memory_id TEXT NOT NULL REFERENCES memories(id), session_id TEXT NOT NULL,
   task_id TEXT, via TEXT NOT NULL CHECK(via IN ('injected','searched')), at TEXT NOT NULL, outcome TEXT);
 CREATE TABLE reflection_jobs(id TEXT PRIMARY KEY, kind TEXT NOT NULL, workspace_key TEXT,
@@ -268,3 +268,60 @@ The owner accepted every recommendation above:
 - **F5** Auto-memory staged by `synth import claude` (`$SYNTHESIS_HOME/projects/<sanitized dir>/memory/*.md`) loads at the lowest priority, `MEMORY.md` first, 8 KiB per file and 16 KiB in total, inside the untrusted-data fence.
 - **F6** `workspace_key`, `workspace_label` and `repo_key` (synthesis-core `key.rs`) are on `WorkspaceContext`; `session.started.workspace.workspace_key` carries the key (events.md). `repo_key` follows the `.git` file and `commondir` as `git rev-parse --git-common-dir` does, without spawning git.
 - **F7** Confirmed on macOS: without a deny rule a sandboxed command read `synthesis.db` and the memory files. `synthesis_sandbox::synthesis_state_paths` (`auth.json`, `settings.json`, `synthesis.db`, `-wal`, `-shm`, `memory/`) is now denied in the sandbox policy (also in the standard credential list for `~/.synthesis`) and in the permission engine's protected paths (`Env::protect`), so it also holds for a custom `SYNTHESIS_HOME`.
+
+### M1 status (store, retrieval, CLI; implemented 2026-10-31)
+Done, in new crate `crates/synthesis-memory`:
+- `memory/memory.db` with the §5 schema (v1), WAL, `busy_timeout` 5000, 0700/0600, symlinks refused, `VACUUM INTO memory.v<N>.bak.db` before a migration of an existing DB, a schema newer than the build refuses to open (the run goes on without memory). FTS5 runs in tests on all three OSes.
+- Write path `Store::put`: secrets masked (`Redactor` plus the run's exact secret values; a body more than 20% masked is dropped), caps (2 KiB, skills 16 KiB), scanner (§9: fence tags and invisible Unicode for every trust level; the phrase, fetch-to-shell and base64 rules skip `owner` text), exact-hash dedupe, slot supersede (a lower-trust value, or any non-owner value over an `owner` slot, becomes `proposed`).
+- Retrieval (§6): quoted OR terms, 50 BM25 candidates, the §6.4 score, anchors halve a stale score, budgets (pinned 600 tokens, retrieved 1,400, k 8, body 600 chars), `memory_uses` rows with the task outcome counted on the record. In a project that is not trusted only user-scope `owner` notes are injected (§9.5).
+- Wiring: `apps/cli/src/run.rs` `prepare` opens the store and retrieves once at start (`SynthesisContext::with_memory`, `ctx.rs`; sub-agents get no memory block); `run` writes the deterministic episode (trust `verified`, source `task_end`) after the task; `--no-memory`; user `settings.json` `synthesis.memory.enabled`; per-repository `synth memory optout on`. `memory` and `note` joined `FENCE_TAGS` and the RULES text names `<memory>`.
+- CLI `synth memory list|search|show|add|delete|forget|approve|review|export|import|stats|prune|optout` (docs/CLI.md).
+
+Deviations and gaps (to do):
+- The block is the last system block, after `<task_state>`, not before it (the skills block is appended the same way).
+- The 4 in-task tools (`MemorySearch/Write/Update/Forget`), the `memory` permission class, `/memory`, `#` wiring, the TUI `/status` row, the typed `memory.*` events and the `synth doctor` rows are not built (they touch the TUI, tools, permissions and events crates). `synth memory edit` is not built.
+- The memory directory is protected by M0's `synthesis_state_paths` (sandbox and permission engine); no further protection was added.
+- Verified-command facts (`cmd.verify.<hash>`) need the verification report commands, which `TaskOutcome` does not carry; only the episode is written. Compaction checkpoints are not stored.
+- A project `.synthesis/settings.json` opt-out (D7) and the `disabled_workspaces` globs are not read; `--no-memory`, the user setting and `optout` are.
+- Import never keeps `owner`/`verified` trust (a file can claim anything); the Claude auto-memory import path is not wired.
+
+### M2 status (reflection; implemented 2026-10-31)
+Done (`crates/synthesis-memory` `reflect.rs`, `jobs.rs`; `apps/cli/src/memcmd.rs`):
+- Schema v2 adds `reflection_jobs.payload` (the redacted task digest, so a job can run in a later process). Opening a v1 file first writes `memory.v1.bak.db` (`VACUUM INTO`), then migrates.
+- Qualifying tasks (>= 8 tool calls, a failed call followed by a success of the same tool, more than one user turn, or a permission the run needed and did not get) queue one job at task end. Calls that touch a secret path are left out of the digest.
+- The run then drains up to 2 queued jobs after the task result is final (`synth run` only): one call each on the `Summarizer` path (`ProviderSummarizer`), 60 s timeout, the run's provider with `smallModel` when it names that provider. `synth memory reflect [--provider P --model M] [--limit N] [--retry]` drains the queue by hand. 3 attempts, then `failed`; claims expire after 10 minutes. `synthesis.memory.reflection: false` in the user settings.json stops queueing.
+- The reply is parsed tolerantly (fenced or prose-wrapped JSON, at most 8 ops, bad ops counted as dropped). Trust comes from the cited evidence: never above `agent`; `untrusted` when it cites WebFetch/WebSearch/Browser/MCP tool calls; evidence must name a real digest item (`user_msg:N`, `tool:<id>`, `verify:<id>`, `summary`) or the op is dropped. Kinds are `fact|preference|lesson` only; `episode` and `skill` are never model-written.
+- Every op goes through `Store::put`/`replace` (masking, scanner, dedupe, slots). An `add` whose title is a near copy (Jaccard >= 0.8) of an active non-owner record becomes an update (the old record is `superseded`); an op aimed at an `owner` record is dropped. User-scope results are `proposed` for `synth memory review`.
+
+Deviations and gaps:
+- Cap is 20 reflection calls per UTC day (`MAX_CALLS_PER_DAY`), not 0.50 USD: the summarizer returns no usage, so cost is not measurable here. A job is drained at the end of the next `synth run`, not at its start. The interactive app does not queue or run reflection (its code is outside this change); `synth memory reflect` drains what `synth run` queued.
+- No `memory.reflection.*` events (events crate untouched); progress goes to stderr.
+- Compaction checkpoints and the "10 nearest records" use the same FTS search on the request only.
+
+### M3 status (skills and promotion; implemented 2026-10-31)
+Done (`crates/synthesis-memory/src/skills.rs`, `synthesis-tools` `skill.rs`, `memcmd.rs`):
+- Promotion scan at task end and `synth memory promote`: a lesson used >= 3 times in >= 2 sessions with Wilson >= 0.6 becomes a **skill proposal** (SKILL.md text with provenance); an `owner` or `verified` fact/preference used >= 5 times becomes an **instructions proposal** (unified diff that appends one masked bullet to the project `SYNTHESIS.md`/`AGENTS.md` or `$SYNTHESIS_HOME/SYNTHESIS.md`; skipped if the line is already there). Each source is proposed once. Proposals never touch files.
+- `synth memory proposals|apply ID [--yes]|reject ID`. `apply` shows the diff and writes only with `--yes`. The instruction file is resolved at apply time from `project`/`user` (never read as a path from the database), refused if a symlink, and a project proposal can only be applied from the repository its source note belongs to. An approved skill becomes an `owner`-trust `skill` record (slot `skill.<name>`).
+- New Skill source `Learned`: `synthesis_tools::set_learned_skills` takes a callback (no SQLite in the tools crate); skills appear as `learned:<name>` with `[learned, ok 7/8]` in the description. The callback is process-wide and set by `synth run`/the app start-up path in `prepare`.
+- A use of a learned skill (a `Skill` call in the task) is recorded and its outcome counted; Wilson < 0.4 after 5 outcomes returns it to `proposed`.
+
+Gaps: "same successful command sequence in >= 2 episodes" is not detected (episodes hold no command list); `Learned` stats in the description are read when the skill list is built, not refreshed mid-task; no consolidation merge, embeddings (`memory-embeddings`) or `messages_fts` (spec roadmap M3) were built.
+
+### M4 status (evaluation; offline part implemented 2026-10-31)
+`crates/synthesis-memory/tests/quality.rs` (runs in `cargo test --workspace` on every OS; no model, no network):
+- **Retrieval (§12.3):** 16 notes, 12 labelled queries. Result on this synthetic corpus: every query finds its note, precision@k 1.00, wrong 0.00 (targets: >= 0.6 and <= 5%). It caught two real defects that were fixed in the same change: no stemming (`tests` did not match `test`), so the FTS tokenizer is now `porter unicode61 remove_diacritics 2`; and weak one-word matches were injected, so a candidate with normalised bm25 below 0.3 is dropped (pinned notes stay). The corpus is small and written by the implementer: it is a regression check, not the owner-labelled 50-note evaluation, which is still to do.
+- **Poisoned arm (§12.2):** three planted records (write path, forged import claiming `owner`, a row forged directly in the database). Two are quarantined at the door; the forged row is rendered inside one `<memory trust="data">` block with `<` escaped, and the block's text says it grants nothing. A test also pins that the memory crate has no dependency on the permission, sandbox, harness or tools crates.
+- Unrelated requests inject no block.
+
+Not run (needs provider keys and the owner): the cold/warm/warm-poisoned paired task runs (§12.1) and their targets (-20% turns and tool calls), the 4-week dogfooding review (§12.4), and the 8-scenario regression with memory on (§12.5). Gate §12 is therefore **unverified**; `--no-memory` and `synthesis.memory.enabled` exist so injection can be switched off if it fails.
+
+### Security review fixes (2026-10-31)
+Changes made after the security review of M1–M4; they supersede the earlier status text where they differ.
+- **H1 taint.** A reflection digest records whether the project was trusted. If it was not, or if the task used `WebFetch`/`WebSearch`/`Browser*`/`mcp__*` or a Bash command that uses the network (curl, wget, nc, ssh, `git clone|fetch|pull`, `pip|npm|cargo install`, ...), every note from that task is `untrusted` (stored, never injected, never promoted). What the model cites changes nothing.
+- **H2 no self-approval.** `synth memory` add, delete, forget, approve, reject, apply `--yes`, import, optout, prune, promote and reflect refuse unless stdin and stdout are a terminal, and always refuse when `SYNTHESIS_AGENT_SESSION` is set. The core sets that variable in every child process environment (`Env::child_env`; output only, never read as a setting). The permission engine also denies those `synth memory` subcommands from `Bash` in every mode, whatever the rules say (also inside `bash -c`, `eval`, `;`/`&&` chains). Reading (`list`, `search`, `show`, `review`, `export`, `stats`, `proposals`, `apply` without `--yes`) stays allowed. Test builds only (`test-provider`) accept `SYNTHESIS_TEST_ATTENDED`.
+- **M1** `approve_skill` applies the body stored in the proposal (not the lesson as it is now), requires the source lesson to be active and not `untrusted`, and scans the text at `agent` level even though the record becomes `owner`.
+- **M2** Episodes are scanned with the phrase rules like any agent text, leave out `out.reason`, and are `agent` trust (`untrusted` in an untrusted project): a headless prompt may come from a pipe.
+- **M3** Injection alone is no evidence: a note's success or failure counter moves only if the task used it (a learned skill call, or the note's id written by the assistant or passed to a tool), never in a tainted or untrusted-project task. Proposal diffs start with a `# provenance:` line (source id, trust, origin, use count).
+- **M4** Import makes every record `untrusted` and `proposed`, user scope included, and caps the file at 5 MiB and 5000 lines.
+- **L1** `start` clears the learned-skill hook first. **L3** the daily cap counts every attempt (done, failed, claimed), `--retry` leaves one more attempt and keeps the count, and the reflection call has `max_tokens` 2000.
+- **L2 (known limit).** The scanner is a speed bump, not a defence: phrase lists, regexes and Unicode ranges are bypassed by paraphrase, other languages or encodings. The real controls are trust computed from evidence, taint, never injecting `untrusted`, the fixed data preamble and escaping, and that memory cannot reach the permission engine or write files without the person.

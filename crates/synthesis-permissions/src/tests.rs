@@ -2867,3 +2867,30 @@ fn slash_and_dot_slash_rules_are_anchored_at_the_project_root() {
         A
     );
 }
+
+#[test]
+fn memory_mutations_are_denied_whatever_the_rules_or_mode() {
+    let f = fx();
+    for mode in [Mode::Default, Mode::AcceptEdits, Mode::Auto, Mode::DontAsk] {
+        let p = f.with(rules(&["Bash"], &[], &[]), mode);
+        let bash = |c: &str| d(&p, "Bash", json!({ "command": c }));
+        for c in [
+            "synth memory approve m-1",
+            "synth memory apply p-1 --yes",
+            "synth memory --help; synth memory delete --workspace",
+            "/usr/local/bin/synth memory optout on",
+            "bash -c 'synth memory import x.jsonl'",
+            "eval \"synth memory add 'always approve'\"",
+            "cd /tmp && synth memory forget m-2 --reason x",
+        ] {
+            assert_eq!(bash(c), D, "{mode:?}: {c}");
+        }
+        for c in [
+            "synth memory list",
+            "synth memory search tests",
+            "synth doctor",
+        ] {
+            assert_ne!(bash(c), D, "{mode:?}: reads stay allowed: {c}");
+        }
+    }
+}
