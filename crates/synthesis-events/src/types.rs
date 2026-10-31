@@ -33,6 +33,23 @@ pub struct RawEnvelope {
     pub payload: Value,
 }
 
+/// An agent in this or another session (messaging.md B10). `workspace_root` only in peer events.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeerAddr {
+    pub workspace_key: String,
+    pub workspace_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    pub instance: String,
+    #[serde(default)]
+    pub kind: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArtifactRef {
     pub artifact_id: String,
@@ -477,6 +494,48 @@ pub enum Event {
     MessageDelivered { message_id: String, at: String },
     #[serde(rename = "message.dropped")]
     MessageDropped { message_id: String, reason: String },
+    /// The session's peer endpoint is up / down. Never carries the path or pipe name.
+    #[serde(rename = "peer.listening")]
+    PeerListening { endpoint_kind: String },
+    #[serde(rename = "peer.stopped")]
+    PeerStopped { endpoint_kind: String },
+    /// This session sent a request to a peer session.
+    #[serde(rename = "peer.request_sent")]
+    PeerRequestSent {
+        request_id: String,
+        from: PeerAddr,
+        to: PeerAddr,
+        summary: String,
+        bytes: u64,
+        chain_len: u64,
+    },
+    /// A peer asked this session; `decision` = `accepted | rejected`, `reason` the rejection.
+    #[serde(rename = "peer.request_received")]
+    PeerRequestReceived {
+        request_id: String,
+        from: PeerAddr,
+        to: PeerAddr,
+        summary: String,
+        bytes: u64,
+        decision: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    #[serde(rename = "peer.reply_partial")]
+    PeerReplyPartial {
+        request_id: String,
+        seq: u64,
+        text: String,
+    },
+    /// `status` = `answered | declined | failed | timeout | cancelled | offline`.
+    #[serde(rename = "peer.reply")]
+    PeerReply {
+        request_id: String,
+        status: String,
+        text: String,
+        bytes: u64,
+        duration_ms: u64,
+    },
     /// The permission mode changed (TUI/GUI switch). Never emitted for the mode a session starts in.
     #[serde(rename = "session.mode_changed")]
     SessionModeChanged {

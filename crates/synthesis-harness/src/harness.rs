@@ -433,6 +433,8 @@ pub struct Harness {
     pub(crate) verify_ok: Mutex<std::collections::HashSet<String>>,
     /// Sub-agents of this session and their inboxes (messaging.md Part A).
     pub(crate) hub: crate::hub::Hub,
+    /// Cross-session peers (messaging.md Part B); `None` = off.
+    pub(crate) peers: Option<Arc<crate::peer::PeerLink>>,
 }
 
 impl Harness {
@@ -470,6 +472,7 @@ impl Harness {
             verify_ok: Mutex::default(),
             rule_store: None,
             hub: crate::hub::Hub::default(),
+            peers: None,
         }
     }
 
@@ -683,6 +686,7 @@ impl Harness {
                 reason: None,
             },
         );
+        self.peer_endpoint_event(true);
         Ok(())
     }
 
@@ -700,6 +704,7 @@ impl Harness {
             }),
             _ => Event::SessionCompleted(end),
         };
+        self.peer_endpoint_event(false);
         self.sink.emit(&Scope::default(), ev);
     }
 
@@ -798,6 +803,7 @@ impl Harness {
         let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel();
         self.hub
             .begin_task(bg_tx, task.cancel.clone(), task.task_id.clone());
+        self.peer_task_started(&req.request);
         *lock(&task.user_texts) = crate::classifier::user_texts(&st.messages, &req.request);
         st.messages.push(Message {
             role: Role::User,
@@ -886,6 +892,8 @@ impl Harness {
         let (status, reason, report_id, final_text) =
             self.with_background(&task, &mut bg_rx, work).await;
         self.hub.end_task();
+        self.peer_task_ended();
+        self.peer_snapshot(&main.name, &st.messages);
         match parked_kind {
             Some(kind) => {
                 let why = if status == TaskStatus::Cancelled {
@@ -1320,6 +1328,7 @@ impl Harness {
             approval_token: None,
             deadline: task.deadline,
             cancel: task.cancel.child_token(),
+            skip_secrets: lock(&agent.perms).env.deny_secret_reads,
         }
     }
 

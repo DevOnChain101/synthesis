@@ -204,6 +204,14 @@ pub struct Common {
     /// With --worktree: remove the worktree at the end when nothing changed.
     #[arg(long, requires = "worktree")]
     pub cleanup_worktree: bool,
+    /// Let other live sessions of this user message this one, and this one message them (turns
+    /// `synthesis.peers.enabled` on for this run; the allow list still applies).
+    #[arg(long)]
+    pub peers: bool,
+    /// Session name other sessions can address (`sess:<name>`): `[a-z0-9_-]`, at most 32; unique
+    /// among live sessions of the workspace. Only used with peers on.
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
 }
 
 #[derive(Args)]
@@ -821,6 +829,7 @@ pub fn prepare(
         synthesis_permissions::Env::new(&ws.cwd, &h.user, mode)
             .with_project_root(&ws.root)
             .interactive(true)
+            .deny_reads(state_paths.clone())
             .protect(state_paths),
     );
     perms.env.auto_mode = synthesis_permissions::AutoModeSettings {
@@ -1002,6 +1011,23 @@ pub fn prepare(
     }
     let gate_cfg = vs.gate(budget.max_verify_attempts);
     let rt_gate = rt.clone();
+    // Peer endpoint (off by default). Bound here, inside the runtime; the server starts below.
+    let peers = {
+        let _enter = tokio_rt.enter();
+        crate::peers::setup(
+            c.peers,
+            c.name.as_deref(),
+            &user_settings.synthesis.peers,
+            &h.synthesis,
+            env,
+            &session,
+            &mut notices,
+        )?
+    };
+    let (peer_link, peer_listener) = match peers {
+        Some(s) => (Some(s.link), Some(s.listener)),
+        None => (None, None),
+    };
     let mut harness = Harness::new(res.provider.clone(), toolbox, perms, sink.clone(), hcfg)
         .with_approver(approver)
         .with_agents(agents.table)
@@ -1014,6 +1040,9 @@ pub fn prepare(
         }));
     if let Some(l) = &link {
         harness = harness.with_input(l.input());
+    }
+    if let Some(l) = peer_link {
+        harness = harness.with_peers(l);
     }
     // "Allow always" persists to .synthesis/settings.local.json, but only in a trusted project: an
     // untrusted project's allow rules are ignored on load, so writing them would be misleading.
@@ -1071,8 +1100,12 @@ pub fn prepare(
                 .collect()
         })
         .unwrap_or_default();
+    let harness = Arc::new(harness);
+    if let (Some(l), Some(server)) = (peer_listener, harness.peer_server()) {
+        tokio_rt.spawn(server.run(l));
+    }
     Ok(Prepared {
-        harness: Arc::new(harness),
+        harness,
         session,
         sid,
         cancel,

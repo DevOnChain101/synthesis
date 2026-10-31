@@ -144,7 +144,7 @@ pub(crate) fn child_parts(
     // Never delegable, even when the definition lists them: no nesting, no questions to the
     // user from a child.
     allowed.retain(|n| !matches!(n.as_str(), "Task" | "AskUserQuestion" | "ExitPlanMode"));
-    allowed.extend(["SendMessage".to_string(), "ListAgents".to_string()]);
+    allowed.extend(["SendMessage", "ListAgents", "ListSessions"].map(String::from));
     if let Some(pa) = &parent.allowed {
         allowed.retain(|n| pa.contains(n));
     }
@@ -311,8 +311,10 @@ impl Harness {
     /// Drain point: moves the agent's inbox into its history as text blocks next to the tool
     /// results of the round that just ended. Returns whether anything was delivered.
     pub(crate) fn deliver(&self, task: &TaskRun, agent: &AgentCtx, st: &mut AgentState) -> bool {
+        self.peer_snapshot(&agent.name, &st.messages);
         let msgs = self.hub.drain(&agent.name);
-        if msgs.is_empty() {
+        let peer = self.peer_take(&agent.name);
+        if msgs.is_empty() && peer.is_empty() {
             return false;
         }
         let at = std::mem::replace(&mut st.drain_at, "tool_round");
@@ -348,6 +350,7 @@ impl Harness {
                 });
             }
         }
+        blocks.extend(peer.into_iter().map(|text| Block::Text { text }));
         match st.messages.last_mut() {
             Some(Message {
                 role: Role::User,
@@ -384,12 +387,13 @@ impl Harness {
                 end => return end,
             };
             let mut changed = self.hub.subscribe();
+            let mut peer_changed = self.peer_subscribe();
             loop {
-                if self.hub.has_mail(&main.name) {
+                if self.hub.has_mail(&main.name) || self.peer_has_mail(&main.name) {
                     st.drain_at = "turn_end";
                     break;
                 }
-                if !self.hub.any_running(&main.name) {
+                if !self.hub.any_running(&main.name) && self.peer_inflight() == 0 {
                     return AgentEnd::Finished(text);
                 }
                 let wait = async {
@@ -409,6 +413,7 @@ impl Harness {
                         }
                     }
                     _ = changed.changed() => {}
+                    () = Self::peer_changed(&mut peer_changed) => {}
                 }
             }
         }
@@ -540,6 +545,7 @@ impl Harness {
         text: &str,
         notify_parent: Option<&str>,
     ) {
+        self.peer_snapshot(&ctx.name, &messages);
         let to = if reason == "cancelled" {
             CANCELLED
         } else {
@@ -564,6 +570,7 @@ impl Harness {
             Some(reason),
         );
         if to == CANCELLED {
+            self.peer_forget(&ctx.name);
             for m in self.hub.drain(&ctx.name) {
                 self.dropped(Some(task.task_id.clone()), &m, "recipient cancelled");
             }
@@ -752,6 +759,7 @@ impl Harness {
             self.hub
                 .register(&def.name, want, &parent.name, &agent_id, cancel.clone())?;
         if let Some(e) = evicted {
+            self.peer_forget(&e.name);
             for m in &e.lost {
                 self.dropped(Some(task.task_id.clone()), m, "recipient was evicted");
             }

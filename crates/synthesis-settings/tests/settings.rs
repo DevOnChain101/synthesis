@@ -275,6 +275,24 @@ fn user_only_keys_ignore_the_project() {
 }
 
 #[test]
+fn peers_settings_come_from_user_settings_only() {
+    let f = fx();
+    f.user(json!({"synthesis":{"peers":{"enabled":true,"max_hops":3}}}));
+    f.project(json!({"synthesis":{"peers":{"enabled":true,"allow":["ws:evil"]}}}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(s.synthesis.peers.len(), 2);
+    assert_eq!(s.synthesis.peers["max_hops"], 3);
+    assert!(
+        s.diagnostics
+            .iter()
+            .any(|d| d.contains("synthesis.peers is read from user settings only"))
+    );
+    let f = fx();
+    f.project(json!({"synthesis":{"peers":{"enabled":true}}}));
+    assert!(f.load(ProjectTrust::Trusted).synthesis.peers.is_empty());
+}
+
+#[test]
 fn synthesis_section_is_versioned_and_tolerant() {
     let f = fx();
     f.user(json!({"synthesis":{"budget":{"max_turns":50,"max_tool_calls":"x"},"compat":{"write_node_transcripts":true},

@@ -29,6 +29,7 @@ mod import;
 mod info;
 mod mcp;
 mod memory;
+mod peers;
 mod run;
 mod taskdb;
 mod transcript;

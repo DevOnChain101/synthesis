@@ -14,6 +14,7 @@ synthesis-context = { path = "../synthesis-context" }
 synthesis-core = { path = "../synthesis-core" }
 synthesis-events = { path = "../synthesis-events" }
 synthesis-hooks = { path = "../synthesis-hooks" }
+synthesis-peers = { path = "../synthesis-peers" }
 synthesis-permissions = { path = "../synthesis-permissions" }
 synthesis-providers = { path = "../synthesis-providers" }
 synthesis-settings = { path = "../synthesis-settings" }

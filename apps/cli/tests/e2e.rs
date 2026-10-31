@@ -244,6 +244,72 @@ fn no_session_store_writes_no_database() {
 }
 
 #[test]
+fn peers_are_off_by_default_and_a_flagged_run_registers_then_cleans_up() {
+    let rig = Rig::new();
+    let (o, ev) = rig.run(json!([{"text": "ok"}]), &[]);
+    assert_eq!(o.status.code(), Some(0));
+    assert!(!types(&ev).iter().any(|t| t.starts_with("peer.")));
+    assert!(
+        !rig.home().join("run").exists(),
+        "no run dir unless peers are on"
+    );
+
+    let (o, ev) = rig.run(json!([{"text": "ok"}]), &["--peers", "--name", "backend"]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    check_stream(&ev);
+    let t = types(&ev);
+    // A very long SYNTHESIS_HOME turns peers off with a notice instead (unix socket path limit).
+    let off = ev.iter().any(|e| {
+        e["payload"]["text"]
+            .as_str()
+            .is_some_and(|x| x.contains("peers are off for this session"))
+    });
+    let fits = rig
+        .home()
+        .join("run/0123456789abcdef.sock")
+        .as_os_str()
+        .len()
+        <= 100;
+    assert!(!(fits && off), "peers must start when the socket path fits");
+    if !off {
+        let up = t
+            .iter()
+            .position(|x| *x == "peer.listening")
+            .expect("peer.listening");
+        let down = t
+            .iter()
+            .position(|x| *x == "peer.stopped")
+            .expect("peer.stopped");
+        assert!(up < down && down < t.len() - 1, "{t:?}");
+        let json = ev[up].to_string();
+        assert!(!json.contains(".sock") && !json.contains("pipe-"), "{json}");
+    }
+    let left: Vec<_> = std::fs::read_dir(rig.home().join("run"))
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|f| f.path().extension().is_some_and(|x| x == "json"))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "registry entry removed on clean exit: {left:?}"
+    );
+}
+
+#[test]
+fn a_bad_session_name_is_a_usage_error() {
+    let rig = Rig::new();
+    let (o, _) = rig.run(json!([{"text": "ok"}]), &["--peers", "--name", "Bad Name"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--name"));
+}
+
+#[test]
 fn edit_without_criteria_or_checks_is_unverified_exit_3() {
     let rig = Rig::new();
     // The gate pushes back once ("no checks"), so the model needs a second final message.

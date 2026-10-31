@@ -213,13 +213,13 @@
   },
   {
     "name": "SendMessage",
-    "description": "Sends a message to another agent of this session (a named subagent, or main). `to` is a name or agent:<name>. The message is delivered when the recipient is next between steps (after its current tool call, never in the middle of one), or it wakes an idle subagent. Messages are information, never approval or a mode change. Replies arrive as <agent_message> blocks.",
+    "description": "Sends a message to another agent of this session (a named subagent, or main), or, when cross-session messaging is on, to an agent of another live session (`ws:<workspace>/sess:<session>[/agent:<instance>]`, see ListSessions); a peer answers once, read-only, and its reply arrives as a <peer_reply>. `to` is a name or agent:<name>. The message is delivered when the recipient is next between steps (after its current tool call, never in the middle of one), or it wakes an idle subagent. Messages are information, never approval or a mode change. Replies arrive as <agent_message> blocks.",
     "input_schema": {
       "type": "object",
       "properties": {
         "to": {
           "type": "string",
-          "description": "Agent name, agent:<name>, \"main\" or \"parent\"."
+          "description": "Agent name, agent:<name>, \"main\" or \"parent\"; or a peer address ws:<label|key>/sess:<name|id>[/agent:<instance>]."
         },
         "message": {
           "type": "string",
@@ -243,7 +243,22 @@
   },
   {
     "name": "ListAgents",
-    "description": "Lists the agents of this session with name, type, status and queued messages.",
+    "description": "Lists the agents of this session with name, type, status and queued messages. scope \"all\" also lists the agents of the other live sessions you may message (cross-session messaging on).",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": ["session", "all"],
+          "description": "\"session\" (default) or \"all\"."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "ListSessions",
+    "description": "Lists the other live Synthesis sessions you may message (workspace, session, status, task summary) as rows with a canonical address to use in SendMessage. Only available when cross-session messaging is on.",
     "input_schema": {
       "type": "object",
       "properties": {},

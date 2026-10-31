@@ -340,6 +340,14 @@ fn report_discovery(env: &Env, h: &crate::Homes, cfg: &Config, cwd: Option<&Path
             if p.is_file() { "present" } else { "absent" }
         )
     };
+    let enforcing = {
+        let root = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let policy = synthesis_sandbox::SandboxPolicy::standard(&root, &std::env::temp_dir());
+        crate::run::sandbox_preflight(&*synthesis_sandbox::detect(), Some(&policy)).is_ok()
+    };
+    for l in crate::peers::doctor_lines(&st.synthesis.peers, &h.synthesis, env, enforcing) {
+        out!("{l}");
+    }
     out!("settings.json:");
     out!("  user file: {}", file(h.synthesis.join("settings.json")));
     out!(

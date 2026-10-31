@@ -499,7 +499,10 @@ impl Harness {
         }
         // The interface tools only describe a question; they are not policy-checked here.
         if spec.runtime == ToolRuntime::Harness
-            && !matches!(call.name.as_str(), "Task" | "SendMessage" | "ListAgents")
+            && !matches!(
+                call.name.as_str(),
+                "Task" | "SendMessage" | "ListAgents" | "ListSessions"
+            )
         {
             return Plan::Special { input };
         }
@@ -642,6 +645,15 @@ impl Harness {
             if verdict.decision == Decision::Classify {
                 self.resolve_classify(task, agent, turn, call, input, mode, &mut verdict)
                     .await;
+            }
+            // A peer session the allow list permits may be asked without a prompt (B7); plan and
+            // dontAsk, deny rules and every other reason stay as decided.
+            if call.name == "SendMessage"
+                && matches!(verdict.decision, Decision::Ask | Decision::Deny)
+                && verdict.reason.contains("SendMessage requires confirmation")
+                && self.peer_preapproved(input)
+            {
+                verdict.decision = Decision::Allow;
             }
             if verdict.decision == Decision::Allow
                 && let Some(why) = forced.take()
@@ -1365,13 +1377,36 @@ impl Harness {
             Event::ToolStarted {
                 tool_call_id: call.id.clone(),
                 name: call.name.clone(),
-                side_effect: "read".into(),
+                // a message to a peer session leaves this one: `external`
+                side_effect: if call.name == "SendMessage"
+                    && input
+                        .get("to")
+                        .and_then(Value::as_str)
+                        .is_some_and(|t| synthesis_peers::address::parse(t).is_some())
+                {
+                    "external"
+                } else {
+                    "read"
+                }
+                .into(),
                 cwd: task.workspace.cwd.to_string_lossy().into_owned(),
             },
         );
         let t0 = Instant::now();
         let res = if call.name == "Task" {
             self.run_subagent(task, agent, turn, &call.id, input).await
+        } else if call.name == "SendMessage"
+            && input
+                .get("to")
+                .and_then(Value::as_str)
+                .is_some_and(|t| synthesis_peers::address::parse(t).is_some())
+        {
+            self.run_peer_send(task, agent, &input).await
+        } else if call.name == "ListSessions"
+            || (call.name == "ListAgents"
+                && input.get("scope").and_then(Value::as_str) == Some("all"))
+        {
+            self.run_peer_list(call.name == "ListSessions").await
         } else if matches!(call.name.as_str(), "SendMessage" | "ListAgents") {
             self.run_comm(task, agent, &call.name, &input)
         } else {

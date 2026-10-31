@@ -95,6 +95,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "Task",
     "Agent",
     "ListAgents",
+    "ListSessions",
     "AskUserQuestion",
     "ExitPlanMode",
 ];
@@ -300,6 +301,13 @@ pub struct Env {
     /// Extra protected paths (files or directories, e.g. Synthesis's own state under a custom
     /// `SYNTHESIS_HOME`, which the `.synthesis` directory name does not cover).
     pub protected: Vec<PathBuf>,
+    /// Paths nothing may read, whatever the mode or rules (Synthesis's own state, the peer key):
+    /// Read/Grep/Glob/LS/edit tools on them or on an ancestor are denied, and so is a Bash command
+    /// that names one of them.
+    pub deny_read: Vec<PathBuf>,
+    /// Also deny reads of secret-shaped files (`.env*`, keys, `.ssh`, `.aws`, `.git-credentials`).
+    /// Set for the peer responder, which answers a stranger.
+    pub deny_secret_reads: bool,
     /// The repository / project root when the session started in a subdirectory of it. `None` =
     /// `cwd`. Rules written `/x` or `./x`, and the inside-the-workspace test, are anchored here;
     /// a bare cwd-relative path keeps `cwd`.
@@ -317,6 +325,8 @@ impl Env {
             path_policy: PathPolicy::NATIVE,
             interactive: false,
             protected: vec![],
+            deny_read: vec![],
+            deny_secret_reads: false,
             project_root: None,
         }
     }
@@ -340,6 +350,16 @@ impl Env {
         self.interactive = yes;
         self
     }
+
+    pub fn deny_reads(mut self, paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.deny_read.extend(paths);
+        self
+    }
+}
+
+/// `.ssh` / `.aws` / `.gnupg` directories and secret-shaped file names.
+fn secret_shaped(p: &Path) -> bool {
+    synthesis_core::secrets::is_secret_shaped(p)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -670,6 +690,60 @@ impl Permissions {
             v.push(paths::resolve(&base, g).to_string_lossy().into_owned());
         }
         v
+    }
+
+    /// Engine-enforced read ban (`Env::deny_read`, `Env::deny_secret_reads`); no rule or mode lifts it.
+    fn hard_read_denied(&self, tool: &str, input: &Value) -> Option<&'static str> {
+        const WHY: &str = "blocked: that path is Synthesis state or a secret and may not be read";
+        if self.env.deny_read.is_empty() && !self.env.deny_secret_reads {
+            return None;
+        }
+        let policy = self.policy();
+        if tool == "Bash" {
+            let cmd = command_of(input);
+            let hit = self
+                .env
+                .deny_read
+                .iter()
+                .any(|p| cmd.contains(p.to_string_lossy().as_ref()));
+            return hit.then_some(WHY);
+        }
+        let mut targets: Vec<String> = ["file_path", "path", "notebook_path"]
+            .iter()
+            .filter_map(|k| non_empty(input, k).map(str::to_string))
+            .collect();
+        if matches!(tool, "Grep" | "Glob" | "LS") && targets.is_empty() {
+            targets.push(".".into());
+        }
+        targets.extend(self.path_targets(tool, input));
+        if targets.is_empty() || !(PATH_TOOLS.contains(&tool) || tool == "LS") {
+            return None;
+        }
+        // the roots and their real paths: a state dir reached through a link is still the state dir
+        let roots: Vec<PathBuf> = self
+            .env
+            .deny_read
+            .iter()
+            .flat_map(|x| [Some(x.clone()), paths::real_of(x)])
+            .flatten()
+            .collect();
+        for t in targets {
+            let abs = paths::resolve(&self.env.cwd, &t);
+            for c in [Some(paths::lexical_normalize(&abs)), paths::real_of(&abs)]
+                .into_iter()
+                .flatten()
+            {
+                // a target inside a denied path, or an ancestor a search would walk into it from
+                let hit = roots.iter().any(|x| {
+                    paths::within(x, &c, policy)
+                        || (self.env.deny_secret_reads && paths::within(&c, x, policy))
+                });
+                if hit || (self.env.deny_secret_reads && secret_shaped(&c)) {
+                    return Some(WHY);
+                }
+            }
+        }
+        None
     }
 
     /// ANY rule matches (deny/ask). Bash: ANY sub-command against ANY rule.
@@ -1285,6 +1359,9 @@ impl Permissions {
         // deny: ANY sub-command/match triggers deny.
         if self.some_match(&self.rules.deny, tool, input) {
             return v(Deny, "blocked by a deny rule");
+        }
+        if let Some(why) = self.hard_read_denied(tool, input) {
+            return v(Deny, why);
         }
         if tool == "Bash" && self.bash_reads_denied(command_of(input)) {
             return v(
