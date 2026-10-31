@@ -2790,6 +2790,7 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.3.4",
  "hmac",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

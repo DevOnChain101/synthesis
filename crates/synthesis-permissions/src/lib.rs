@@ -517,8 +517,26 @@ fn scope_match(spec: &str, tool: &str, input: &Value, any: bool) -> bool {
     match tool {
         "Task" | "Agent" => name(field("subagent_type")),
         "Skill" => name(field("skill")),
-        // `SendMessage(ws:<label>/sess:<name>)` (messaging.md B7): the address as typed
-        "SendMessage" => name(field("to")),
+        // `SendMessage(ws:<label>/sess:<name>)` (messaging.md B7): the address as typed, trimmed
+        // (the sender trims too). Deny/ask also meet every spelling the harness resolved the
+        // target to (`_resolved_targets`, set by the harness only); allow never uses them.
+        "SendMessage" => {
+            let hit = |v: &str| {
+                spec.strip_suffix('*')
+                    .map_or(v == spec, |p| v.starts_with(p))
+            };
+            match field("to") {
+                Some(v) => {
+                    hit(v.trim())
+                        || (any
+                            && input
+                                .get("_resolved_targets")
+                                .and_then(Value::as_array)
+                                .is_some_and(|a| a.iter().filter_map(Value::as_str).any(hit)))
+                }
+                None => any,
+            }
+        }
         "WebFetch" | "browser_navigate" => {
             let Some(d) = spec.strip_prefix("domain:") else {
                 return any;
@@ -1547,6 +1565,8 @@ impl Permissions {
         }
 
         // A message can wake another agent and steer it: not read-only, never in plan/dontAsk.
+        // acceptEdits and auto allow it here; for a peer session the gate is `synthesis.peers`
+        // (the sender resolves only allowed, non-denied sessions), not this mode (messaging.md H).
         if tool == "SendMessage" {
             return match mode {
                 Mode::Plan | Mode::DontAsk => v(Deny, format!("{} mode", mode.as_str())),

@@ -89,6 +89,10 @@ struct Rig {
 }
 
 async fn rig(cfg: Value, spy: Spy) -> Rig {
+    rig_with(cfg, spy, Arc::new(redact)).await
+}
+
+async fn rig_with(cfg: Value, spy: Spy, red: synthesis_peers::serve::Redact) -> Rig {
     let home = tempfile::tempdir().unwrap();
     let dir = run_dir(home.path());
     let key = load_or_create_key(&dir).unwrap();
@@ -100,7 +104,7 @@ async fn rig(cfg: Value, spy: Spy) -> Rig {
         Config::from_settings(cfg.as_object().unwrap_or(&Map::new()), "/work/api"),
         addr("api", "/work/api", "sess-a"),
         spy.clone(),
-        Arc::new(redact),
+        red,
         Arc::new(|_, _| {}),
     );
     tokio::spawn(server.clone().run(l));
@@ -317,4 +321,126 @@ async fn pushed_replies_need_signature_session_kind_and_permission() {
         .await
         .unwrap()
     );
+}
+
+/// Partials seen by the asker (seq, text) and the final reply.
+async fn partials(r: &Rig) -> (Vec<(u64, String)>, String) {
+    let from = addr("api", "/work/api", "sess-b");
+    let o = Outgoing {
+        id: "pp",
+        from: &from,
+        to_agent: "main",
+        text: "q",
+        chain: &[],
+        timeout_s: 30,
+    };
+    let mut seen = Vec::new();
+    let f = ask(&r.endpoint, &r.key, &o, |s, t| {
+        seen.push((s, t.to_string()))
+    })
+    .await
+    .unwrap();
+    (seen, format!("{}|{}", f.status, f.text))
+}
+
+#[tokio::test]
+async fn confirm_replies_sends_no_response_text_in_partials() {
+    for confirm in [Some(false), Some(true), None] {
+        let r = rig(
+            json!({"enabled": true, "confirm_replies": true}),
+            Spy {
+                confirm,
+                chunks: vec![(0, "draft one "), (650, "draft two "), (650, "draft three")],
+                ..Spy::new()
+            },
+        )
+        .await;
+        let (seen, last) = partials(&r).await;
+        assert!(!seen.is_empty(), "progress frames still flow");
+        for (_, t) in &seen {
+            assert!(t.is_empty(), "response text leaked in a partial: {t:?}");
+        }
+        if confirm != Some(true) {
+            assert!(
+                last.starts_with("declined|") && !last.contains("draft"),
+                "{last}"
+            );
+        }
+    }
+}
+
+/// A stand-in for the owner's redactor with the constructs a stream can split.
+fn strong(s: &str) -> String {
+    use regex::Regex;
+    let pem = Regex::new(
+        r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)",
+    )
+    .unwrap();
+    let bearer = Regex::new(r"Bearer [A-Za-z0-9._~+/=-]+").unwrap();
+    let pw = Regex::new(r"password\s*=\s*\S+").unwrap();
+    let js = Regex::new(r#""password"\s*:\s*"[^"]*""#).unwrap();
+    let s = pem.replace_all(s, "[R:pem]");
+    let s = bearer.replace_all(&s, "Bearer [R]");
+    let s = pw.replace_all(&s, "password = [R]");
+    js.replace_all(&s, r#""password": "[R]""#).into_owned()
+}
+
+/// Chunks arrive in separate frames (650 ms apart); the secret must never be in any of them.
+async fn split_secret(chunks: Vec<&'static str>, secret: &str) {
+    let spy = Spy {
+        chunks: chunks.into_iter().map(|c| (650, c)).collect(),
+        ..Spy::new()
+    };
+    let r = rig_with(on(), spy, Arc::new(strong)).await;
+    let (seen, _) = partials(&r).await;
+    assert!(!seen.is_empty(), "something streams");
+    let all: String = seen.iter().map(|(_, t)| t.as_str()).collect();
+    assert!(
+        !all.contains(secret),
+        "{secret} leaked across frames: {seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_pem_key_split_across_frames_never_leaves() {
+    split_secret(
+        vec![
+            "key:\n-----BEGIN PRIVATE KEY-----\n",
+            "MIIEvQIBADANBgkqhkiG9w0BAQEF\n",
+            "AASCBKcwggSjAgEAAoIBAQC7\n-----END PRIVATE KEY-----\nafter ",
+        ],
+        "MIIEvQ",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_password_assignment_split_across_frames_never_leaves() {
+    split_secret(
+        vec!["use password", " = ", "hunter2zz ", "now "],
+        "hunter2zz",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_bearer_header_split_across_frames_never_leaves() {
+    split_secret(
+        vec!["Authorization: Bearer ", "abc.def-SECRETTOKEN ", "ok "],
+        "SECRETTOKEN",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn json_with_spaces_split_across_frames_never_leaves() {
+    split_secret(
+        vec![
+            "{\"password\": \"my ",
+            "secret value",
+            "\", \"u\": 1} done ",
+        ],
+        "secret",
+    )
+    .await;
 }
