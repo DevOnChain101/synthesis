@@ -1020,6 +1020,17 @@ impl Harness {
                 deadline: None,
             },
         );
+        // Claude Code's `permission_prompt` notification: the run is waiting on an approval
+        let _ = self
+            .run_hook(
+                task,
+                agent,
+                turn,
+                HookEvent::Notification,
+                json!({"message": prompt, "notification_type": "permission_prompt"}),
+                Some("permission_prompt"),
+            )
+            .await;
         // An approval during verification returns to `verifying`, not `running`.
         let before = *lock(&task.status);
         self.set_status(

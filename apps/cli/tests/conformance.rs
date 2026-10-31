@@ -137,3 +137,191 @@ fn mcp_add_then_run_works_on_a_fresh_home() {
     );
     assert!(!ev.is_empty());
 }
+
+fn text_script(t: &str) -> Value {
+    json!([{"text": t}])
+}
+
+fn session_id(ev: &[Value]) -> String {
+    ev[0]["session_id"].as_str().unwrap().to_string()
+}
+
+fn messages(rig: &Rig, sid: &str) -> i64 {
+    let c = rusqlite::Connection::open(rig.home().join("synthesis.db")).unwrap();
+    c.query_row(
+        "SELECT count(*) FROM messages WHERE session_id=?1",
+        [sid],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn run_resume_continues_a_stored_session() {
+    let rig = Rig::new();
+    let (_, ev1) = rig.run(text_script("first"), &[]);
+    let sid = session_id(&ev1);
+    assert_eq!(messages(&rig, &sid), 2);
+    let (o, ev2) = rig.run(text_script("second"), &["--resume", &sid]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert_eq!(session_id(&ev2), sid, "same session");
+    assert_eq!(ev2[0]["payload"]["source"], "resume");
+    assert_eq!(messages(&rig, &sid), 4, "history kept, new turn appended");
+}
+
+#[test]
+fn run_continue_picks_the_latest_session_and_fork_starts_a_new_one() {
+    let rig = Rig::new();
+    let (_, ev1) = rig.run(text_script("first"), &[]);
+    let sid = session_id(&ev1);
+    let (_, ev2) = rig.run(text_script("second"), &["--continue"]);
+    assert_eq!(session_id(&ev2), sid);
+    let (o, ev3) = rig.run(text_script("third"), &["--continue", "--fork-session"]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let forked = session_id(&ev3);
+    assert_ne!(forked, sid);
+    assert_eq!(messages(&rig, &sid), 4, "the original is untouched");
+    assert_eq!(
+        messages(&rig, &forked),
+        6,
+        "history copied, new turn appended"
+    );
+}
+
+#[test]
+fn run_resume_of_an_unknown_session_is_a_usage_error() {
+    let rig = Rig::new();
+    let (o, _) = rig.run(text_script("x"), &["--resume", "nope"]);
+    assert_eq!(o.status.code(), Some(2));
+}
+
+#[test]
+fn output_format_text_prints_only_the_final_message() {
+    let rig = Rig::new();
+    let o = rig
+        .run_cmd(text_script("the answer"), &["--output-format", "text"])
+        .args(["--prompt", "do it"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&o.stdout), "the answer\n");
+}
+
+#[test]
+fn output_format_json_has_result_session_id_usage_and_exit_code_matches() {
+    let rig = Rig::new();
+    let o = rig
+        .run_cmd(
+            json!([{"text": "the answer", "usage": [3, 4]}]),
+            &["--output-format", "json"],
+        )
+        .args(["--prompt", "do it"])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["result"], "the answer");
+    assert_eq!(v["status"], "completed");
+    assert_eq!(v["usage"]["output_tokens"], 4);
+    assert!(v["session_id"].as_str().is_some_and(|s| !s.is_empty()));
+    assert_eq!(v["exit_code"].as_i64(), o.status.code().map(i64::from));
+}
+
+#[test]
+fn json_schema_accepts_matching_and_rejects_mismatching_answers() {
+    let rig = Rig::new();
+    let schema = r#"{"type":"object","required":["n"],"properties":{"n":{"type":"integer"}}}"#;
+    let args = ["--output-format", "json", "--json-schema", schema];
+    let raw = |t: &str| {
+        rig.run_cmd(text_script(t), &args)
+            .args(["--prompt", "do it"])
+            .output()
+            .unwrap()
+    };
+    let o = raw("{\"n\": 3}");
+    let v: Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(v["structured_output"]["n"], 3);
+    assert_eq!(o.status.code(), Some(0));
+    let o = raw("{\"n\": \"x\"}");
+    assert_eq!(o.status.code(), Some(1));
+}
+
+#[test]
+fn session_start_and_end_hooks_fire() {
+    let rig = Rig::new();
+    let h = |f: &str| json!([{"hooks": [{"type": "command", "command": format!("cat > $SYNTHESIS_PROJECT_DIR/{f}")}]}]);
+    rig.settings(json!({"hooks": {"SessionStart": h("start.json"), "SessionEnd": h("end.json")}}));
+    let (_, ev) = rig.run(text_script("ok"), &[]);
+    for (f, name) in [("start.json", "SessionStart"), ("end.json", "SessionEnd")] {
+        let v: Value =
+            serde_json::from_str(&std::fs::read_to_string(rig.ws().join(f)).unwrap()).unwrap();
+        assert_eq!(v["hook_event_name"], name);
+    }
+    let ran: Vec<_> = ev.iter().filter(|e| e["type"] == "hook.ran").collect();
+    assert_eq!(ran.len(), 2);
+    assert!(
+        ev.last().unwrap()["type"]
+            .as_str()
+            .unwrap()
+            .starts_with("session.")
+    );
+}
+
+#[test]
+fn flag_aliases_and_manual_mode_are_accepted() {
+    let rig = Rig::new();
+    let (o, _) = rig.run(
+        text_script("ok"),
+        &[
+            "--permission-mode",
+            "manual",
+            "--allowedTools",
+            "Read",
+            "--disallowedTools",
+            "Bash(rm *)",
+            "--append-system-prompt",
+            "hi",
+            "--bare",
+        ],
+    );
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
+#[test]
+fn stdin_over_10mb_is_a_usage_error() {
+    use std::io::Write;
+    let rig = Rig::new();
+    let s = rig.dir.path().join("script.json");
+    std::fs::write(&s, text_script("x").to_string()).unwrap();
+    let mut c = rig.base();
+    c.args(["run", "--cwd"])
+        .arg(rig.ws())
+        .arg("--provider")
+        .arg(format!("fake:{}", s.display()))
+        .args(["--sandbox", "off"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut ch = c.spawn().unwrap();
+    let mut si = ch.stdin.take().unwrap();
+    let t = std::thread::spawn(move || {
+        let _ = si.write_all(&vec![b'a'; 11 << 20]);
+    });
+    let o = ch.wait_with_output().unwrap();
+    let _ = t.join();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("10 MB"));
+}

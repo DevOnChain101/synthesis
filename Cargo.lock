@@ -2582,6 +2582,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "futures-util",
+ "jsonschema",
  "rusqlite",
  "serde_json",
  "sha2",

@@ -117,6 +117,10 @@ pub struct SynthesisContext {
     /// Frozen `<memory>` block for the task (memory.md §6), after the instructions.
     memory: Option<String>,
     transcript: Option<Arc<Transcript>>,
+    /// `--system-prompt`: replaces the default rules (the untrusted-data rule is kept).
+    rules: String,
+    /// `--append-system-prompt`: typed by the user, so a trusted block after the rules.
+    append: Option<String>,
 }
 
 const AUTO_MEMORY_FILE_CAP: usize = 8 * 1024;
@@ -258,7 +262,17 @@ impl SynthesisContext {
             skills: None,
             memory: None,
             transcript: None,
+            rules: RULES.to_string(),
+            append: None,
         }
+    }
+
+    pub fn with_system_prompt(mut self, replace: Option<String>, append: Option<String>) -> Self {
+        if let Some(r) = replace {
+            self.rules = format!("{r}\n{}", RULES.lines().nth(1).unwrap_or_default());
+        }
+        self.append = append;
+        self
     }
 
     pub fn with_skills(mut self, skills: &[SkillInfo]) -> Self {
@@ -338,7 +352,7 @@ impl ContextProvider for SynthesisContext {
             observe(&mut state, history);
         }
         let input = ContextInput {
-            system_rules: RULES,
+            system_rules: &self.rules,
             task_instructions: agent_prompt.map(|p| if p.is_empty() { SUB_RULES } else { p }),
             instructions: &self.instructions,
             task_state: &state,
@@ -366,6 +380,14 @@ impl ContextProvider for SynthesisContext {
                     b.push(SystemBlock {
                         kind: Some("text".into()),
                         text: Some(m.clone()),
+                    });
+                }
+                if let (Some(t), System::Blocks(b), None) =
+                    (&self.append, &mut a.system, agent_prompt)
+                {
+                    b.push(SystemBlock {
+                        kind: Some("text".into()),
+                        text: Some(t.clone()),
                     });
                 }
                 if let (Some(skills), System::Blocks(b)) = (&self.skills, &mut a.system) {
@@ -576,5 +598,37 @@ mod tests {
         let (ab, a_b) = (d.path().join("a/b"), d.path().join("a-b"));
         assert_ne!(auto_memory_key(&ab), auto_memory_key(&a_b));
         assert!(load_auto_memory(&home, &[&a_b]).is_none());
+    }
+
+    #[test]
+    fn append_system_prompt_reaches_the_request_and_system_prompt_replaces_the_rules() {
+        let provider: Arc<dyn ModelProvider> =
+            Arc::new(synthesis_harness::testing::FakeProvider::new(vec![]));
+        let ctx = |replace: Option<&str>, append: Option<&str>| {
+            SynthesisContext::new(
+                vec![],
+                "g",
+                provider.clone(),
+                "m".into(),
+                CancellationToken::new(),
+                Box::new(|_| Err("unused".into())),
+            )
+            .with_system_prompt(replace.map(Into::into), append.map(Into::into))
+        };
+        let system = |c: &SynthesisContext| match c.build(&[], None).unwrap().system {
+            System::Blocks(b) => b
+                .iter()
+                .filter_map(|x| x.text.clone())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            System::Text(t) => t,
+        };
+        let plain = system(&ctx(None, None));
+        assert!(plain.contains("autonomous coding agent") && !plain.contains("ZZ-APPEND"));
+        let appended = system(&ctx(None, Some("ZZ-APPEND")));
+        assert!(appended.contains("autonomous coding agent") && appended.contains("ZZ-APPEND"));
+        let replaced = system(&ctx(Some("ZZ-REPLACE"), None));
+        assert!(replaced.contains("ZZ-REPLACE") && !replaced.contains("autonomous coding agent"));
+        assert!(replaced.contains("untrusted DATA"), "the data rule stays");
     }
 }
