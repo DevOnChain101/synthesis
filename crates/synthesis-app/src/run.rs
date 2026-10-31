@@ -159,7 +159,7 @@ impl Common {
     }
 }
 
-/// Flags shared by `synth run` and the interactive app.
+/// Flags of `synth run`.
 #[derive(Args, Clone)]
 pub struct Common {
     /// Command confinement: enforce (default), best-effort, or off (loud warning). On Windows,
@@ -261,18 +261,6 @@ pub enum Front {
         /// Set (and the run cancelled) when stdout is closed by the reader.
         closed: Arc<std::sync::atomic::AtomicBool>,
     },
-    /// Events go to the UI; the UI approves.
-    Tui,
-    /// A native front end (the desktop window): the host supplies the event writer, approver and
-    /// input provider instead of the TUI's `UiLink`. Behaves like `Tui` otherwise.
-    Native(Native),
-}
-
-/// The host side of [`Front::Native`].
-pub struct Native {
-    pub out: Box<dyn std::io::Write + Send>,
-    pub approver: Arc<dyn Approver>,
-    pub input: Arc<dyn synthesis_harness::InputProvider>,
 }
 
 /// Everything a front end needs, built once by [`prepare`].
@@ -293,16 +281,9 @@ pub struct Prepared {
     pub criteria: Vec<Criterion>,
     pub artifact_root: PathBuf,
     pub label: String,
-    pub models: Vec<String>,
-    /// `effort_tiers` the model declares (enables `/effort`).
-    pub effort_tiers: Vec<String>,
-    pub sandbox: synthesis_tui::SandboxStatus,
-    pub link: Option<synthesis_tui::UiLink>,
     pub homes: crate::Homes,
     /// Open long-term memory store (None with --no-memory, a failure, or `synthesis.memory.enabled: false`).
     pub memory: Option<Arc<crate::memcmd::MemoryRun>>,
-    /// `#` notes and `/memory` (TUI).
-    pub notes: crate::memory::Notes,
 }
 
 /// Rows of `{"synthesis":{"pricing":{"<provider/model>"|"<model>": {input_per_mtok, output_per_mtok}}}}`
@@ -392,24 +373,6 @@ pub fn sandbox_notices(mode: SandboxMode, network: NetworkArg) -> Vec<String> {
     n
 }
 
-pub fn sandbox_status(mode: SandboxMode, unsandboxed: bool) -> synthesis_tui::SandboxStatus {
-    let b = synthesis_sandbox::detect();
-    let c = b.capabilities();
-    let g = |x: Guarantee| format!("{x:?}").to_lowercase();
-    synthesis_tui::SandboxStatus {
-        mode: match mode {
-            SandboxMode::Enforce => "enforce",
-            SandboxMode::BestEffort => "best-effort",
-            SandboxMode::Off => "off",
-        }
-        .into(),
-        backend: b.name().into(),
-        filesystem: g(c.filesystem),
-        network: g(c.network),
-        unsandboxed_by_request: unsandboxed,
-    }
-}
-
 /// Does a `Read(..)` deny rule (or any deny) cover `p`? Bypass mode keeps the answer to the rules
 /// alone: no ask for outside reads or protected paths.
 fn read_denied(perms: &Permissions, p: &Path) -> bool {
@@ -445,13 +408,11 @@ pub fn prepare(
     env: &Env,
     limits: &Limits,
     front: Front,
-    resume: Option<&synthesis_tui::Resume>,
 ) -> Result<Prepared, String> {
     let (cli_allow, cli_deny) = (
         rules_arg(&c.allow, "--allow")?,
         rules_arg(&c.deny, "--deny")?,
     );
-    let is_tui = matches!(front, Front::Tui | Front::Native(_));
     let h = homes(env)?;
     let synthesis_deny = synthesis_sandbox::synthesis_state_paths(&h.synthesis);
     // Before anything is created (worktree, store): a bad grant is a usage error.
@@ -486,7 +447,7 @@ pub fn prepare(
     };
     let settings = load_settings(&lc, trust);
     // A settings file we cannot read would silently drop its deny rules: stop before anything runs
-    // (`synth run` exits 2; the TUI never opens).
+    // (`synth run` exits 2).
     if !settings.errors.is_empty() {
         return Err(format!(
             "settings error: {}\nsynth: fix or remove the file; nothing was started because its deny/ask rules would not apply",
@@ -537,17 +498,7 @@ pub fn prepare(
         Some(ModeArg::Plan) => Mode::Plan,
         Some(ModeArg::DontAsk) => Mode::DontAsk,
         Some(ModeArg::Auto) => Mode::Auto,
-        Some(ModeArg::BypassPermissions) => {
-            // A TUI session switches into bypass with a confirmation dialog instead (Shift+Tab
-            // never reaches it); the flag is for `synth run`.
-            if is_tui {
-                return Err(
-                    "--permission-mode bypassPermissions is only for `synth run`; in the TUI press Shift+Tab until the bypass dialog opens"
-                        .into(),
-                );
-            }
-            Mode::BypassPermissions
-        }
+        Some(ModeArg::BypassPermissions) => Mode::BypassPermissions,
         // Settings (user or project) never select bypassPermissions: only the CLI flag does.
         None => match Mode::parse(&settings.permissions.default_mode) {
             Some(m @ (Mode::Default | Mode::AcceptEdits | Mode::Plan | Mode::DontAsk)) => m,
@@ -563,10 +514,7 @@ pub fn prepare(
         Some(m @ (Mode::Default | Mode::AcceptEdits | Mode::Plan | Mode::DontAsk)) => m,
         _ => mode,
     };
-    let mut budget = resume.map_or_else(
-        || budget_from_settings(&settings),
-        |r| r.record.budget.clone(),
-    );
+    let mut budget = budget_from_settings(&settings);
     if let Some(v) = limits.max_turns {
         budget.max_turns = v;
     }
@@ -577,10 +525,10 @@ pub fn prepare(
         budget.max_verify_attempts = v;
     }
     budget.max_cost_usd = limits.max_cost_usd;
-    // an unattended run must not run (and spend) forever; the TUI has a person watching
+    // an unattended run must not run (and spend) forever
     budget.max_wall_ms = limits
         .max_wall_secs
-        .or((!is_tui).then_some(HEADLESS_WALL_SECS))
+        .or(Some(HEADLESS_WALL_SECS))
         .map(|s| s.saturating_mul(1000));
 
     let mut extra_dirs: Vec<PathBuf> = settings
@@ -596,16 +544,9 @@ pub fn prepare(
         })
         .collect();
 
-    let sid = resume.map_or_else(|| uuid::Uuid::new_v4().to_string(), |r| r.record.id.clone());
+    let sid = uuid::Uuid::new_v4().to_string();
     let artifact_root = h.synthesis.join("sessions").join(&sid);
-    let (ws, worktree) = if let Some(r) = resume {
-        (
-            r.record
-                .open_workspace(&h.synthesis)
-                .map_err(|e| e.to_string())?,
-            None,
-        )
-    } else if c.worktree {
+    let (ws, worktree) = if c.worktree {
         if !extra_dirs.is_empty() {
             eprintln!("synth: warning: additionalDirectories are ignored with --worktree");
             extra_dirs.clear();
@@ -626,41 +567,20 @@ pub fn prepare(
             None,
         )
     };
-    let session = match resume {
-        Some(r) => AgentSession {
-            id: sid.clone(),
-            task_id: None,
-            status: r.record.status,
-            workspace: ws.clone(),
-            model_config_id: res.label.clone(),
-            permission_policy_id: r.record.permission_policy_id.clone(),
-            // a session never resumes in bypassPermissions
-            permission_mode: match r.record.permission_mode {
-                synthesis_core::PermissionMode::BypassPermissions => from_mode(mode),
-                m => m,
-            },
-            event_cursor: r.record.event_cursor,
-            budget: budget.clone(),
-            usage: r.record.usage.clone(),
-            created_at: r.record.created_at.clone(),
-            updated_at: r.record.updated_at.clone(),
-            parent: None,
-        },
-        None => AgentSession {
-            id: sid.clone(),
-            task_id: None,
-            status: SessionStatus::Created,
-            workspace: ws.clone(),
-            model_config_id: res.label.clone(),
-            permission_policy_id: "default".into(),
-            permission_mode: from_mode(mode),
-            event_cursor: 0,
-            budget: budget.clone(),
-            usage: BudgetUsage::default(),
-            created_at: String::new(),
-            updated_at: String::new(),
-            parent: None,
-        },
+    let session = AgentSession {
+        id: sid.clone(),
+        task_id: None,
+        status: SessionStatus::Created,
+        workspace: ws.clone(),
+        model_config_id: res.label.clone(),
+        permission_policy_id: "default".into(),
+        permission_mode: from_mode(mode),
+        event_cursor: 0,
+        budget: budget.clone(),
+        usage: BudgetUsage::default(),
+        created_at: String::new(),
+        updated_at: String::new(),
+        parent: None,
     };
     let ws = Arc::new(ws);
 
@@ -730,9 +650,8 @@ pub fn prepare(
             ..StoreOptions::default()
         };
         let w = SessionStore::open(&h.synthesis, opts)
-            .and_then(|s| match resume {
-                Some(_) => s.resume_session(&sid, true),
-                None => s.create_session(NewSession {
+            .and_then(|s| {
+                s.create_session(NewSession {
                     id: Some(sid.clone()),
                     workspace: &ws,
                     model_config_id: res.label.clone(),
@@ -741,18 +660,14 @@ pub fn prepare(
                     budget: budget.clone(),
                     parent: None,
                     title: None,
-                }),
+                })
             })
             .map_err(|e| {
                 format!("session store: {e} (use --no-session-store to run without it)")
             })?;
         Some(Arc::new(Mutex::new(w)))
     };
-    let transcript = store.clone().map(|s| {
-        let t = Transcript::new(s);
-        t.skip(resume.map_or(0, |r| r.history.len()));
-        Arc::new(t)
-    });
+    let transcript = store.clone().map(|s| Arc::new(Transcript::new(s)));
     let derived = match (&store, &transcript) {
         (Some(_), Some(t)) => match TaskDb::open(&h.synthesis, &sid, res.secrets.clone()) {
             Ok(db) => Some((db, t.clone())),
@@ -764,53 +679,16 @@ pub fn prepare(
         _ => None,
     };
     let cancel = CancellationToken::new();
-    let mut native_input = None;
-    let (out, tee, prompt, link, approver, closed): (
-        Box<dyn std::io::Write + Send>,
-        _,
-        String,
-        _,
-        Arc<dyn Approver>,
-        _,
-    ) = match front {
-        Front::Native(n) => {
-            native_input = Some(n.input);
-            (n.out, None, String::new(), None, n.approver, None)
-        }
-        Front::Headless {
-            prompt,
-            tee,
-            closed,
-        } => (
-            Box::new(std::io::stdout()),
-            tee,
-            prompt,
-            None,
-            Arc::new(AuditDeny),
-            Some((closed, cancel.clone())),
-        ),
-        Front::Tui => {
-            let l = synthesis_tui::UiLink::new();
-            let ap = l.approver();
-            (
-                Box::new(l.event_writer()),
-                None,
-                String::new(),
-                Some(l),
-                ap,
-                None,
-            )
-        }
-    };
+    let Front::Headless {
+        prompt,
+        tee,
+        closed,
+    } = front;
+    let out: Box<dyn std::io::Write + Send> = Box::new(std::io::stdout());
+    let approver: Arc<dyn Approver> = Arc::new(AuditDeny);
+    let closed = Some((closed, cancel.clone()));
     let sink = EventSink::new(
-        Persist::new(
-            out,
-            tee,
-            store.clone(),
-            derived,
-            resume.map_or(0, |r| r.record.event_cursor),
-            closed,
-        ),
+        Persist::new(out, tee, store.clone(), derived, 0, closed),
         sid.clone(),
         res.secrets.clone(),
     );
@@ -941,13 +819,6 @@ pub fn prepare(
         0..0,
         crate::ctx::load_auto_memory(&h.synthesis, &[&ws.root, &ws.cwd]),
     );
-    let notes = crate::memory::Notes {
-        user: user_files[0].clone(),
-        project: crate::memory::project_file(&ws.root),
-        root: ws.root.clone(),
-        secrets: res.secrets.clone(),
-        loaded: crate::memory::describe(&instructions),
-    };
     let repo = crate::memcmd::repo_of(&ws.root);
     let (memory, memory_block) = crate::memcmd::start(
         &crate::memcmd::StartArgs {
@@ -1017,8 +888,7 @@ pub fn prepare(
             .as_deref(),
     );
     mplan.artifact_dir = Some(artifact_root.join("mcp"));
-    // Printed now (before any TUI alt screen) and kept in `notices`, which become `notice`
-    // events (headless) or TUI startup notes, so approvals stay visible after the screen clears.
+    // Printed now and kept in `notices`, which become `notice` events.
     for n in &mplan.notices {
         let n = sanitize_for_display(n);
         eprintln!("synth: {n}");
@@ -1043,11 +913,11 @@ pub fn prepare(
         (Some(m), Some(t))
     };
 
-    // interactive: a Bash call that times out moves to the background; headless kills it (D6)
+    // headless: a Bash call that times out is killed (D6)
     let mut toolbox = ToolBox::new(
         Registry::with_terminal_policy(rt.clone(), make_policy)
             .with_new_tools()
-            .with_background_on_timeout(is_tui),
+            .with_background_on_timeout(false),
     );
     if let Some(a) = mcp_attach {
         toolbox = a.apply(toolbox);
@@ -1081,12 +951,6 @@ pub fn prepare(
                 gate_cfg.clone(),
             )
         }));
-    if let Some(l) = &link {
-        harness = harness.with_input(l.input());
-    }
-    if let Some(i) = native_input {
-        harness = harness.with_input(i);
-    }
     if let Some(l) = peer_link {
         harness = harness.with_peers(l);
     }
@@ -1118,34 +982,6 @@ pub fn prepare(
         ws.cwd.display(),
         mode.as_str()
     );
-    if is_tui {
-        // Event log / replay copy; the UI also gets `notices` as startup notes (tui.rs) and shows
-        // each text once, so it no longer depends on this channel buffering.
-        for n in &notices {
-            sink.emit(
-                &Scope::default(),
-                Event::Notice {
-                    level: "warning".into(),
-                    text: n.clone(),
-                },
-            );
-        }
-    }
-    let models = synthesis_config::list_models(&cfg, None)
-        .into_iter()
-        .map(|m| m.value)
-        .collect();
-    let effort_tiers = res
-        .label
-        .strip_suffix(&format!("/{}", res.model))
-        .and_then(|id| cfg.providers.get(id)?.models_meta.as_ref()?.get(&res.model))
-        .and_then(|m| m.capabilities.get("effort_tiers")?.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
     let harness = Arc::new(harness);
     if let (Some(l), Some(server)) = (peer_listener, harness.peer_server()) {
         tokio_rt.spawn(server.run(l));
@@ -1166,12 +1002,7 @@ pub fn prepare(
         criteria: vs.checks,
         artifact_root,
         label: res.label,
-        models,
-        effort_tiers,
-        sandbox: sandbox_status(sandbox_mode, sandbox_mode != SandboxMode::Enforce),
-        link,
         homes: h,
-        notes,
         memory,
     })
 }
@@ -1218,7 +1049,6 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
             tee,
             closed: closed.clone(),
         },
-        None,
     )?;
     criteria.extend(p.criteria.iter().cloned());
     let Prepared {
@@ -1411,8 +1241,7 @@ pub struct Resolved {
     pub secrets: Vec<String>,
 }
 
-/// The error `synth run` exits 2 with when no model is configured; the interactive app starts its
-/// first-run setup on this prefix instead (`tui.rs`).
+/// The error `synth run` exits 2 with when no model is configured.
 pub const NO_MODEL: &str =
     "no model configured: pass --model provider/model or set SYNTHESIS_MODEL";
 
@@ -1491,7 +1320,7 @@ pub fn resolve_provider(
 /// stdout was closed by the reader; the task was cancelled and its events are in the store.
 pub const EXIT_STDOUT_CLOSED: u8 = 141;
 
-/// `synth: blocked: approval needed for ... - rerun with --allow ... or in the TUI`.
+/// `synth: blocked: approval needed for ... - rerun with --allow ...`.
 fn blocked_hint(out: &TaskOutcome) -> Option<String> {
     if out.needed_permissions.is_empty() {
         return None;
@@ -1520,9 +1349,9 @@ fn blocked_hint(out: &TaskOutcome) -> Option<String> {
         .collect::<Vec<_>>()
         .join(", ");
     let how = if flags.len() == rules.len() {
-        format!("rerun with {} or in the TUI", flags.join(" "))
+        format!("rerun with {}", flags.join(" "))
     } else {
-        "the rule text comes from the model's command, so review it and add it with --allow yourself, or approve in the TUI".to_string()
+        "the rule text comes from the model's command, so review it and add it with --allow yourself".to_string()
     };
     Some(format!("{lead} {names} \u{2014} {how}"))
 }

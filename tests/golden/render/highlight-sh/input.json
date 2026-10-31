@@ -1,5 +1,0 @@
-{
-  "code": "if [ -f \"$X\" ]; then echo $HOME; fi # c",
-  "lang": "bash",
-  "op": "highlight"
-}

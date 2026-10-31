@@ -124,7 +124,7 @@ pub struct Settings {
     pub diagnostics: Vec<String>,
     /// A settings file that exists but cannot be used (malformed JSON, not an object, unreadable,
     /// oversized): its deny/ask rules are NOT in force, so callers must refuse to start (`synth run`
-    /// exits 2, the TUI does not open) instead of running without them. Also in `diagnostics`.
+    /// exits 2) instead of running without them. Also in `diagnostics`.
     pub errors: Vec<String>,
 }
 
@@ -314,34 +314,6 @@ pub fn persist_allow_rules(project_root: &Path, rules: &[String]) -> std::io::Re
     Ok(())
 }
 
-/// Writes `tui` as the `synthesis.tui` subtree of `<synthesis_home>/settings.json` (the `/config`
-/// screen, spec docs/specs/tui-design.md §7). Every other key and the key order are kept. A file
-/// that cannot be parsed (or whose `synthesis` is not an object) is never overwritten: the error
-/// (`InvalidData`) says why. See [`edit_json_atomic`].
-pub fn persist_user_tui(synthesis_home: &Path, tui: &Value) -> std::io::Result<()> {
-    edit_json_atomic(
-        &synthesis_home.join("settings.json"),
-        "user settings",
-        |v| {
-            let section = v
-                .as_object_mut()
-                .map(|o| {
-                    o.entry("synthesis")
-                        .or_insert_with(|| Value::Object(Map::new()))
-                })
-                .and_then(Value::as_object_mut)
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "user settings: `synthesis` is not an object",
-                    )
-                })?;
-            section.insert("tui".into(), tui.clone());
-            Ok(())
-        },
-    )
-}
-
 /// Read-modify-write of one JSON file: the file is read again first (edits made meanwhile
 /// survive), `edit` changes it (a missing file starts as `{}`), every other key and the key order
 /// are kept. A file that cannot be parsed is never overwritten (`InvalidData`). The write goes
@@ -478,13 +450,6 @@ impl Settings {
             }
             self.apply_env(raw);
             self.apply_synthesis(raw, what, user);
-            // `user` is also true for the managed file: only the user settings file may set tui
-            if what != "user settings" && raw.get("synthesis").and_then(|n| n.get("tui")).is_some()
-            {
-                self.diagnostics.push(format!(
-                    "{what}: synthesis.tui is read from user settings only, ignored"
-                ));
-            }
             if !user && raw.get("synthesis").and_then(|n| n.get("peers")).is_some() {
                 self.diagnostics.push(format!(
                     "{what}: synthesis.peers is read from user settings only, ignored"

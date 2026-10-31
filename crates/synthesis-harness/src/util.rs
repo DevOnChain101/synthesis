@@ -11,7 +11,7 @@ pub(crate) fn uuid() -> String {
 
 /// Characters that draw nothing (or only blank space) yet are not ASCII space: controls, bidi,
 /// tag, format and variation selectors, fillers, NBSP and the Unicode space separators. One list
-/// for every display sanitiser (this crate's and `synthesis-tui`'s), so none can drift behind another.
+/// for every display sanitiser (so none can drift behind another).
 pub fn is_invisible_or_blank(c: char) -> bool {
     c.is_control()
         || matches!(

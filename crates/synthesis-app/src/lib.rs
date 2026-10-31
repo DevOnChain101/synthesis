@@ -1,7 +1,5 @@
-//! The harness wiring shared by `synth` and the desktop app: `run::prepare` builds the harness,
-//! session, sandbox, MCP, memory and peers from the config files; the front ends (headless run,
-//! TUI, desktop) take the `Prepared` it returns. Moved out of `apps/cli` without behaviour change
-//! (docs/specs/desktop.md section 1).
+//! The harness wiring behind `synth`: `run::prepare` builds the harness, session, sandbox, MCP,
+//! memory and peers from the config files; the headless run takes the `Prepared` it returns.
 
 #[cfg(all(feature = "test-provider", not(debug_assertions)))]
 compile_error!("feature `test-provider` must never be enabled in release builds");

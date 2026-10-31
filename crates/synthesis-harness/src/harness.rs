@@ -520,7 +520,7 @@ impl Harness {
     }
 
     /// Switches the permission mode for the tasks that start from now on (a running task keeps
-    /// the mode it was sent in). The one entry point for every front end (TUI, GUI). Entering
+    /// the mode it was sent in). The one entry point for every front end. Entering
     /// `bypassPermissions` needs `confirmed_bypass`: the caller vouches that the person said yes
     /// to a dialog that named what it disables; it is checked here, not only in the UI.
     /// Emits `session.mode_changed` (and a warning notice for bypass).

@@ -1,7 +1,0 @@
-{
-  "env": {
-    "TERM": "xterm-kitty"
-  },
-  "op": "detect",
-  "platform": "linux"
-}

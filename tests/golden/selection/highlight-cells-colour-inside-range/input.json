@@ -1,6 +1,0 @@
-{
-  "from": 1,
-  "line": "ab\u001b[31mcd\u001b[0mef",
-  "op": "highlightCells",
-  "to": 4
-}

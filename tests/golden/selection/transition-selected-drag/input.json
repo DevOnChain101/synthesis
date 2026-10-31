@@ -1,9 +1,0 @@
-{
-  "events": [
-    {
-      "type": "drag"
-    }
-  ],
-  "mode": "selected",
-  "op": "transition"
-}

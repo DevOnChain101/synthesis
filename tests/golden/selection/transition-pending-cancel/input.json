@@ -1,9 +1,0 @@
-{
-  "events": [
-    {
-      "type": "cancel"
-    }
-  ],
-  "mode": "pending",
-  "op": "transition"
-}

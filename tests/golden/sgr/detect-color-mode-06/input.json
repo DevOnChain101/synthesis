@@ -1,7 +1,0 @@
-{
-  "env": {
-    "CLAUDE_MONITOR_COLOR": "24bit"
-  },
-  "op": "detect",
-  "platform": "linux"
-}

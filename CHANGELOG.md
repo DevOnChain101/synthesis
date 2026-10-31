@@ -4,6 +4,9 @@ Format: Keep a Changelog. Versioning: SemVer (pre-1.0: minor versions may break)
 
 ## [Unreleased]
 
+### Removed (owner decision 2026-10-31)
+- All interactive UI: the TUI (`synthesis-tui`, `-tui-base`, `-tui-render`, `synth tui`, `synthesis.tui.*` settings, `SYNTHESIS_ASCII`/`SYNTHESIS_COLOR`/`SYNTHESIS_ONCE_SCREEN`), the GPUI desktop app (`apps/desktop`) and their goldens, tty-qa and frame tooling. `synth` with no subcommand prints help. Archived at tag `archive/ui-before-removal`; a new UI will be built later from the HTML design.
+
 ### Changed (rename Nemo to Synthesis, owner decision 2026-10-30)
 - The product is **Synthesis**; the command is `synth` (`synth run|tui|doctor|auth|models|mcp|import`). Crates `nemo-*` are `synthesis-*` (package `synthesis-cli`, bin `synth`), env `NEMO_*` is `SYNTHESIS_*`, `~/.nemo` is `~/.synthesis`, `.nemo/` is `.synthesis/`, `nemo.json` is `synthesis.json`, `NEMO.md` is `SYNTHESIS.md`, `nemo.db` is `synthesis.db`, settings section `"nemo"` is `"synthesis"`, npm `@devonchain101/synthesis`, archives `synthesis-<version>-<target>`, bundled skill `nemocode-config` is `synthesis-config`. The GitHub slug stays `DevOnChain101/nemo-acd` until the new repository exists (docs/RELEASE.md). Repository variables `NEMO_ALLOW_ANY_VERIFIED_TAGGER` and `NEMO_NPM_TRUSTED_PUBLISHING` are now `SYNTHESIS_*`.
 - No automatic migration: the old names are not read. `synth doctor` prints the manual migration steps when `~/.nemo` exists and `~/.synthesis` does not, names any set `NEMO_*` variable (never values) and warns when another `synth` on PATH shadows this one (docs/MIGRATION.md).
