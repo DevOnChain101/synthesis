@@ -10,6 +10,13 @@ publish = false
 [lints]
 workspace = true
 
+# App icon for packaging (macOS .icns, Windows .ico, Linux png), from design/01-brand/app-icons.
+# GPUI has no API to set a window icon at run time; the bundle (or the .desktop file) carries it.
+[package.metadata.bundle]
+name = "Synthesis"
+identifier = "dev.synthesis.desktop"
+icon = ["assets/icons/synthesis.icns", "assets/icons/synthesis.ico", "assets/icons/synthesis-512.png", "assets/icons/synthesis-256.png"]
+
 [lib]
 name = "synthesis_desktop"
 path = "src/lib.rs"
