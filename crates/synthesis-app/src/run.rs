@@ -24,7 +24,7 @@ use synthesis_providers::{
 };
 use synthesis_sandbox::{NetworkPolicy, SandboxBackend, SandboxPolicy, SandboxedCommand};
 use synthesis_session::{NewSession, Retention, Store as SessionStore, StoreOptions};
-use synthesis_settings::load_settings;
+use synthesis_settings::load_settings_with_file;
 use synthesis_terminal::{Guarantee, SandboxMode, TerminalRuntime};
 use synthesis_tools::{Registry, standard_policy_git};
 use synthesis_verification::{CompletionGate, Criterion, VerifyRunner};
@@ -245,6 +245,9 @@ pub struct Common {
     /// Extra working directory the agent may access (repeatable).
     #[arg(long, value_name = "DIR")]
     pub add_dir: Vec<PathBuf>,
+    /// Extra settings.json layered above local settings (managed settings still win).
+    #[arg(long, value_name = "FILE")]
+    pub settings: Option<PathBuf>,
     /// Fail (exit 2) unless this MCP server starts (repeatable).
     #[arg(long, value_name = "NAME")]
     pub require_mcp: Vec<String>,
@@ -563,7 +566,7 @@ pub fn prepare(
     } else {
         cfg.clone()
     };
-    let settings = load_settings(&lc, trust);
+    let settings = load_settings_with_file(&lc, trust, c.settings.as_deref());
     // A settings file we cannot read would silently drop its deny rules: stop before anything runs
     // (`synth run` exits 2).
     if !settings.errors.is_empty() {
@@ -573,7 +576,7 @@ pub fn prepare(
         ));
     }
     let user_settings = if c.trust_project {
-        load_settings(&lc, ProjectTrust::Untrusted)
+        load_settings_with_file(&lc, ProjectTrust::Untrusted, c.settings.as_deref())
     } else {
         settings.clone()
     };

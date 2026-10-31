@@ -420,3 +420,28 @@ fn checkpoint_is_taken_before_the_first_write() {
         "one restore point per file, taken before its first write"
     );
 }
+
+#[test]
+fn settings_flag_adds_a_layer_and_a_bad_file_is_a_usage_error() {
+    let rig = Rig::new();
+    let f = rig.dir.path().join("extra.json");
+    std::fs::write(
+        &f,
+        json!({"permissions": {"deny": ["Bash(touch *)"]}}).to_string(),
+    )
+    .unwrap();
+    let args = [
+        "--permission-mode",
+        "bypassPermissions",
+        "--settings",
+        f.to_str().unwrap(),
+    ];
+    rig.run(bash("touch made.txt"), &args);
+    assert!(
+        !rig.ws().join("made.txt").exists(),
+        "the --settings deny rule did not apply"
+    );
+    std::fs::write(&f, "{not json").unwrap();
+    let (o, _) = rig.run(text_script("x"), &args);
+    assert_eq!(o.status.code(), Some(2));
+}

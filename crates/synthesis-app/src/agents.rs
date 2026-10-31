@@ -62,7 +62,8 @@ fn parse(file_stem: &str, raw: &str) -> AgentDef {
         description: get("description").unwrap_or("").to_string(),
         prompt: body.trim().to_string(),
         tools: get("tools").map(tool_list),
-        mode: None,
+        // a requested mode is still capped by the parent's (`stricter`)
+        mode: get("permissionMode").and_then(synthesis_permissions::Mode::parse),
     }
 }
 

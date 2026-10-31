@@ -224,6 +224,25 @@ pub fn load_settings_with_managed(
     trust: ProjectTrust,
     managed: &Path,
 ) -> Settings {
+    load_settings_layers(ctx, trust, managed, None)
+}
+
+/// [`load_settings`] plus the `--settings <file>` layer: typed on the command line, so trusted;
+/// it sits between local settings and the managed file (managed > flag > local > project > user).
+pub fn load_settings_with_file(
+    ctx: &LoadContext<'_>,
+    trust: ProjectTrust,
+    extra: Option<&Path>,
+) -> Settings {
+    load_settings_layers(ctx, trust, &managed_settings_path(), extra)
+}
+
+fn load_settings_layers(
+    ctx: &LoadContext<'_>,
+    trust: ProjectTrust,
+    managed: &Path,
+    extra: Option<&Path>,
+) -> Settings {
     let mut project_root = find_project_root(ctx.cwd);
     if ctx.user_home.starts_with(&project_root) {
         project_root = ctx.cwd.to_path_buf(); // home (or an ancestor) is never a project
@@ -234,7 +253,7 @@ pub fn load_settings_with_managed(
     };
     let t = trust == ProjectTrust::Trusted;
     // (path, label, user-level, trusted)
-    let layers = [
+    let mut layers = vec![
         (
             ctx.synthesis_home.join("settings.json"),
             "user settings",
@@ -255,6 +274,9 @@ pub fn load_settings_with_managed(
         ),
         (managed.to_path_buf(), "managed settings", true, true),
     ];
+    if let Some(f) = extra {
+        layers.insert(3, (f.to_path_buf(), "--settings file", true, true));
+    }
     for (path, what, user, trusted) in &layers {
         match read_json(path, what) {
             Ok(Some(raw)) => {
