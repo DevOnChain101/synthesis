@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 synthesis-core = { path = "../synthesis-core" }
+synthesis-permissions = { path = "../synthesis-permissions" }
 synthesis-terminal = { path = "../synthesis-terminal" }
 regex = "1.13.1"
 serde = { version = "1.0.229", features = ["derive"] }

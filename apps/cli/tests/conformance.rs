@@ -199,6 +199,43 @@ fn run_continue_picks_the_latest_session_and_fork_starts_a_new_one() {
 }
 
 #[test]
+fn run_resume_by_id_is_limited_to_the_current_workspace_unless_asked() {
+    let rig = Rig::new();
+    let (_, ev1) = rig.run(text_script("first"), &[]);
+    let sid = session_id(&ev1);
+    let other = rig.dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let script = rig.dir.path().join("s2.json");
+    std::fs::write(&script, text_script("second").to_string()).unwrap();
+    let go = |extra: &[&str]| {
+        rig.base()
+            .args(["run", "--cwd"])
+            .arg(&other)
+            .arg("--provider")
+            .arg(format!("fake:{}", script.display()))
+            .args(["--sandbox", "off", "--prompt", "x", "--resume", &sid])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let o = go(&[]);
+    assert_eq!(
+        o.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert_eq!(messages(&rig, &sid), 2, "nothing was loaded or appended");
+    let o = go(&["--resume-any-workspace"]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
+#[test]
 fn run_resume_of_an_unknown_session_is_a_usage_error() {
     let rig = Rig::new();
     let (o, _) = rig.run(text_script("x"), &["--resume", "nope"]);
@@ -479,4 +516,46 @@ fn rewind_restores_changed_files_and_removes_created_ones_only_with_apply() {
         rig.synth(&["rewind", "no-such-session"]).status.code(),
         Some(2)
     );
+}
+
+#[test]
+fn rewind_refuses_files_changed_since_the_run_and_symlinks() {
+    let rig = Rig::new();
+    let script = json!([
+        {"tools": [{"name": "Read", "input": {"file_path": "a.txt"}}]},
+        {"tools": [{"name": "Edit", "input": {"file_path": "a.txt", "old_string": "hello", "new_string": "bye"}}]},
+        {"tools": [{"name": "Write", "input": {"file_path": "b.txt", "content": "new\n"}}]},
+        {"text": "done"}
+    ]);
+    let (_, ev) = rig.run(script, &["--permission-mode", "acceptEdits"]);
+    let sid = session_id(&ev);
+    let (a, b) = (rig.ws().join("a.txt"), rig.ws().join("b.txt"));
+    std::fs::write(&a, "later edit\n").unwrap();
+    std::fs::write(&b, "later edit\n").unwrap();
+    let text = |o: &Output| String::from_utf8_lossy(&o.stdout).into_owned();
+    // the dry run lists them; --apply leaves both alone
+    let o = rig.synth(&["rewind", &sid]);
+    assert!(text(&o).contains("changed since the run"), "{}", text(&o));
+    assert_eq!(o.status.code(), Some(1));
+    let o = rig.synth(&["rewind", &sid, "--apply"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(std::fs::read_to_string(&a).unwrap(), "later edit\n");
+    assert!(b.exists());
+    // a symlink at the final component is never followed, even with --force
+    let outside = rig.ws().join("..").join("outside.txt");
+    std::fs::write(&outside, "keep").unwrap();
+    std::fs::remove_file(&a).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside, &a).unwrap();
+        let o = rig.synth(&["rewind", &sid, "--apply", "--force"]);
+        assert!(text(&o).contains("symlink"), "{}", text(&o));
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+        std::fs::remove_file(&a).unwrap();
+    }
+    // --force restores the rest
+    let o = rig.synth(&["rewind", &sid, "--apply", "--force"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert_eq!(std::fs::read_to_string(&a).unwrap(), "hello\n");
+    assert!(!b.exists());
 }

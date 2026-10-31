@@ -85,6 +85,16 @@ async fn ws_connects_lists_and_calls_with_a_handshake_header() {
     assert_eq!(call(&m, "w", "ping", json!({})).await.text(), "pong");
     m.close().await;
 
+    // a configured Sec-WebSocket-* header is refused, not allowed to replace the transport's
+    let mut c = cfg(&url);
+    c.headers
+        .insert("Authorization".into(), "Bearer tok".into());
+    c.headers
+        .insert("sec-websocket-protocol".into(), "evil".into());
+    let m = McpManager::new(vec![c], opts(base_env()));
+    m.start().await;
+    assert_eq!(m.status()[0].state, ServerState::Failed);
+
     let m = McpManager::new(vec![cfg(&url)], opts(base_env()));
     m.start().await;
     assert_eq!(

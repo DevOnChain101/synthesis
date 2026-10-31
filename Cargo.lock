@@ -2745,6 +2745,7 @@ dependencies = [
  "serde",
  "serde_json",
  "synthesis-core",
+ "synthesis-permissions",
  "synthesis-terminal",
  "tempfile",
  "tokio",

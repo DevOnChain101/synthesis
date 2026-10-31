@@ -872,6 +872,8 @@ pub struct MemoryRun {
     pub sink: Option<EventSink>,
     /// Ids the `Memory*` tools wrote this run (lowered to `untrusted` if the task turns out tainted).
     pub tool_written: Mutex<Vec<String>>,
+    /// Raised the moment the task requests a web, browser, MCP or network call (see `Persist`).
+    pub taint: Arc<std::sync::atomic::AtomicBool>,
     /// The `memory.retrieved` event, held until the session has started (`announce`).
     pub retrieved: Mutex<Option<Event>>,
 }
@@ -933,6 +935,7 @@ pub struct StartArgs<'a> {
     pub model: String,
     pub sink: Option<EventSink>,
     pub pricing: Option<synthesis_harness::Pricing>,
+    pub taint: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Opens memory for a run and retrieves the block. No store, an opted-out repository or a disabled
@@ -975,6 +978,7 @@ pub fn start(a: &StartArgs, cancel: CancellationToken) -> (Option<Arc<MemoryRun>
         prompt: a.prompt.to_string(),
         sink: a.sink.clone(),
         tool_written: Mutex::default(),
+        taint: a.taint.clone(),
         retrieved: Mutex::new(retrieved),
     };
     let run = Arc::new(run);
@@ -1785,6 +1789,7 @@ mod tests {
             prompt: "fix the flaky parser test".into(),
             sink: None,
             tool_written: Mutex::default(),
+            taint: Arc::default(),
             retrieved: Mutex::default(),
         });
         Run { _d: d, run }
