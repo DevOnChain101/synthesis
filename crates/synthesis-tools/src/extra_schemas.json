@@ -240,6 +240,10 @@
         "thread_id": {
           "type": "string",
           "description": "Peer sessions only: continue the thread with this id (from an earlier result or <peer_reply>)."
+        },
+        "notify_on_end": {
+          "type": "boolean",
+          "description": "Peer sessions only: do not ask a question; get that session's final summary when its current task ends (at once, as idle, if none runs). Your task waits for it, up to an hour."
         }
       },
       "required": [

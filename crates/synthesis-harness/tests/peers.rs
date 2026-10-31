@@ -1432,3 +1432,191 @@ async fn sendmessage_thread_continues_one_conversation_through_the_model() {
     let (first, _) = tool_result(&b.rig.requests()[1], "ask1").unwrap();
     assert!(first.contains("\"thread_id\":\""), "{first}");
 }
+
+// ---- P2 notify_on_end (messaging.md J2) -----------------------------------------------------------
+
+/// A runs one slow tool, then ends with `final_text`.
+fn slow_then(final_text: &'static str) -> Responder {
+    Arc::new(move |r| {
+        Some(if is_responder(r) {
+            Turn::text("responder must not run")
+        } else if tool_result(r, "s1").is_none() {
+            Turn::tool("s1", "Slow", json!({}))
+        } else {
+            Turn::text(final_text)
+        })
+    })
+}
+
+fn b_notifies(to: &'static str) -> Responder {
+    Arc::new(move |r| {
+        let all = texts(r);
+        Some(if tool_result(r, "n1").is_none() {
+            Turn::tool(
+                "n1",
+                "SendMessage",
+                json!({"to": to, "message": "tell me when you are done", "notify_on_end": true}),
+            )
+        } else if !all.contains("<peer_reply") {
+            Turn::text("waiting for the result")
+        } else {
+            Turn::text("B continues")
+        })
+    })
+}
+
+#[tokio::test]
+async fn notify_on_end_delivers_the_result_when_the_peers_task_ends() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let (mut a, ea) = side("sess-a", "alpha", &run, Some(on.clone()), slow_then("generated client v2"), 700);
+    let (mut b, _) = side("sess-b", "beta", &run, Some(on), b_notifies("ws:alpha/sess:sess-a"), 10);
+    let _reg = serve(&a, &run, ea);
+    let a_task = tokio::spawn(async move {
+        let out = run_a(&mut a).await;
+        (a, out)
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let t0 = std::time::Instant::now();
+    let out_b = go(&mut b, "wait for alpha").await;
+    let (a, out_a) = a_task.await.unwrap();
+    assert_eq!(out_a.status, TaskStatus::Completed, "{}", out_a.reason);
+    assert_eq!(out_b.status, TaskStatus::Completed, "{}", out_b.reason);
+    assert_eq!(out_b.final_text, "B continues");
+    assert!(
+        t0.elapsed() >= Duration::from_millis(300),
+        "B waited for A's task, it did not get an answer at once"
+    );
+    let last = texts(b.rig.requests().last().unwrap());
+    assert!(
+        last.contains("kind=\"result\"")
+            && last.contains("trust=\"peer-data\"")
+            && last.contains("generated client v2"),
+        "{last}"
+    );
+    // no responder ran: a subscription is not a question
+    assert!(a.rig.requests().iter().all(|r| !is_responder(r)));
+    let ended = a.rig.find(|e| match e {
+        Event::PeerReply { status, .. } => Some(status.clone()),
+        _ => None,
+    });
+    assert!(ended.iter().all(|s| s == "answered"), "{ended:?}");
+}
+
+#[tokio::test]
+async fn notify_on_end_of_an_idle_session_answers_idle_at_once() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let idle: Responder = Arc::new(|_| Some(Turn::text("A idle")));
+    let (a, ea) = side("sess-a", "alpha", &run, Some(on.clone()), idle, 10);
+    let (mut b, _) = side("sess-b", "beta", &run, Some(on), b_notifies("ws:alpha/sess:sess-a"), 10);
+    let _reg = serve(&a, &run, ea);
+    let out = go(&mut b, "wait").await;
+    assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
+    let last = texts(b.rig.requests().last().unwrap());
+    assert!(last.contains("status=\"idle\"") && last.contains("kind=\"result\""), "{last}");
+}
+
+#[tokio::test]
+async fn a_subscription_is_gated_one_per_asker_and_refused_in_a_cycle() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let key = load_or_create_key(&run).unwrap();
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let (mut a, ea) = side("sess-a", "alpha", &run, Some(on.clone()), slow_then("A done"), 900);
+    let (_ra, ep) = serve_ep(&a, &run, ea.clone());
+    let _ = &ea;
+    let a_task = tokio::spawn(async move {
+        let out = run_a(&mut a).await;
+        (a, out)
+    });
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let from = asker("beta", "sess-b");
+    let sub = |from: synthesis_peers::Addr| {
+        let (ep, key) = (ep.clone(), key.clone());
+        async move {
+            let o = Outgoing {
+                id: &synthesis_harness_uuid(),
+                from: &from,
+                to_agent: "main",
+                text: "notify me",
+                chain: &[from.session_id.clone()],
+                timeout_s: 30,
+                extra: Extra {
+                    notify_on_end: true,
+                    ..Default::default()
+                },
+            };
+            synthesis_peers::serve::begin(&ep, &key, &o).await
+        }
+    };
+    let first = sub(from.clone()).await.expect("accepted");
+    // the same asker session cannot hold two
+    match sub(from.clone()).await {
+        Err(PeerError::Rejected(r)) => assert_eq!(r, "busy"),
+        other => panic!("{:?}", other.err()),
+    }
+    // a session off the allow list is refused like any request
+    match sub(asker("gamma", "sess-g")).await {
+        Err(PeerError::Rejected(r)) => assert_eq!(r, "denied"),
+        other => panic!("{:?}", other.err()),
+    }
+    let r = first.wait(|_, _| {}).await.unwrap();
+    assert_eq!(r.status, "answered");
+    assert!(r.text.contains("A done"), "{}", r.text);
+    let (_a, _) = a_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_session_waiting_on_x_refuses_a_subscription_from_x() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    // A waits for B (B stays busy for 1.4 s); B, still busy, then tries to wait for A.
+    let a_resp: Responder = Arc::new(|r| {
+        let all = texts(r);
+        Some(if tool_result(r, "n1").is_none() {
+            Turn::tool(
+                "n1",
+                "SendMessage",
+                json!({"to": "ws:beta/sess:sess-b", "message": "ping me when done", "notify_on_end": true}),
+            )
+        } else if !all.contains("<peer_reply") {
+            Turn::text("waiting")
+        } else {
+            Turn::text("A done")
+        })
+    });
+    let b_resp: Responder = Arc::new(|r| {
+        Some(if tool_result(r, "s1").is_none() {
+            Turn::tool("s1", "Slow", json!({}))
+        } else if tool_result(r, "n2").is_none() {
+            Turn::tool(
+                "n2",
+                "SendMessage",
+                json!({"to": "ws:alpha/sess:sess-a", "message": "ping me", "notify_on_end": true}),
+            )
+        } else {
+            Turn::text("B done")
+        })
+    });
+    let (mut a, ea) = side("sess-a", "alpha", &run, Some(on.clone()), a_resp, 10);
+    let (mut b, eb) = side("sess-b", "beta", &run, Some(on), b_resp, 1400);
+    let _ra = serve(&a, &run, ea);
+    let _rb = serve(&b, &run, eb);
+    let b_task = tokio::spawn(async move {
+        let out = go(&mut b, "work").await;
+        (b, out)
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let out_a = go(&mut a, "wait for beta").await;
+    let (b, out_b) = b_task.await.unwrap();
+    assert_eq!(out_a.status, TaskStatus::Completed, "{}", out_a.reason);
+    assert_eq!(out_b.status, TaskStatus::Completed, "{}", out_b.reason);
+    let (n2, err) = tool_result(&b.rig.requests().last().unwrap(), "n2").unwrap();
+    assert!(err && n2.contains("cycle"), "{n2}");
+    assert!(texts(a.rig.requests().last().unwrap()).contains("B done"));
+}

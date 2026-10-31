@@ -944,7 +944,7 @@ impl Harness {
         let (status, reason, report_id, final_text) =
             self.with_background(&task, &mut bg_rx, work).await;
         self.hub.end_task();
-        self.peer_task_ended();
+        self.peer_task_ended(status, &final_text, &lock(&task.changed));
         self.peer_snapshot(&main.name, &st.messages);
         match parked_kind {
             Some(kind) => {

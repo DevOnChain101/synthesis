@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use synthesis_core::{AgentSession, Budget, SessionStatus, secrets::is_secret_path};
-use synthesis_events::{Event, PeerAddr, SubagentInfo};
+use synthesis_events::{Event, PeerAddr, SubagentInfo, TaskStatus};
 use synthesis_peers::address::{candidates, parse, resolve};
 use synthesis_peers::mailbox::{Envelope, MailError, Mailbox, now_s};
 use synthesis_peers::serve::{
@@ -126,6 +126,8 @@ pub struct PeerLink {
     registration: Mutex<Option<Registration>>,
     state: Mutex<PeerState>,
     changed: watch::Sender<u64>,
+    /// Bumped when a task ends (`notify_on_end` subscribers wake).
+    ended: watch::Sender<u64>,
     /// Durable queue for offline sessions (R10c).
     mailbox: Mailbox,
     /// Wakes the mailbox worker (a task started: queued requests may be answered now).
@@ -153,6 +155,11 @@ struct PeerState {
     /// Running responders: where their streamed text goes, and the unsent tail of a word.
     partials: HashMap<String, (mpsc::UnboundedSender<String>, String)>,
     threads: HashMap<String, Thread>,
+    /// `notify_on_end` requests this session sent and still waits on: request id to the target's
+    /// session id (a subscription from that session would be a cycle).
+    waiting_on: HashMap<String, String>,
+    /// What the last task ended with, for `notify_on_end` subscribers (redacted, <= 8 KiB).
+    result: String,
 }
 
 impl PeerLink {
@@ -181,6 +188,7 @@ impl PeerLink {
                 ..Default::default()
             }),
             changed: watch::channel(0).0,
+            ended: watch::channel(0).0,
         })
     }
 
@@ -475,10 +483,20 @@ impl Harness {
     }
 
     /// The task is over: in-flight asks are cancelled (the connection closes) and unread replies dropped.
-    pub(crate) fn peer_task_ended(&self) {
+    pub(crate) fn peer_task_ended(&self, status: TaskStatus, final_text: &str, changed: &[String]) {
         if let Some(p) = self.peers.as_ref().filter(|p| p.on()) {
             let mut st = lock(&p.state);
             st.summary.clear();
+            let files = changed
+                .iter()
+                .take(50)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let result = format!("task {status:?}: {final_text}\nchanged files: {files}");
+            let result: String = self.sink.redact(&result).chars().take(8 * 1024).collect();
+            st.result = result;
+            p.ended.send_modify(|v| *v += 1);
             st.cancel.cancel();
             st.replies.clear();
             drop(st);
@@ -691,6 +709,36 @@ impl Harness {
         }
     }
 
+    /// `notify_on_end` (P2) at the receiver: refused as `cycle` while this session itself waits on
+    /// the asker; answers `idle` at once when no task runs, else when the task ends.
+    fn peer_subscribe_end(&self, req: &Request) -> Result<BoxFut<Reply>, &'static str> {
+        let link = self.peers.clone().ok_or("disabled")?;
+        if lock(&link.state)
+            .waiting_on
+            .values()
+            .any(|s| *s == req.from.session_id)
+        {
+            return Err("cycle");
+        }
+        let mut rx = link.ended.subscribe();
+        if self.hub.task_id().is_none() {
+            return Ok(Box::pin(async {
+                Reply {
+                    status: "idle".into(),
+                    text: "no task is running in that session".into(),
+                }
+            }));
+        }
+        Ok(Box::pin(async move {
+            let _ = rx.changed().await;
+            let text = lock(&link.state).result.clone();
+            Reply {
+                status: "answered".into(),
+                text,
+            }
+        }))
+    }
+
     pub(crate) fn peer_subscribe(&self) -> Option<watch::Receiver<u64>> {
         self.peers.as_ref().map(|p| p.changed.subscribe())
     }
@@ -786,6 +834,10 @@ impl Harness {
                 .unwrap_or(false)
                 .then(uuid),
         };
+        let notify = input
+            .get("notify_on_end")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         if text.len() > MAX_BYTES {
             return fail("too_large: a message is at most 32 KiB".into());
         }
@@ -844,9 +896,14 @@ impl Harness {
             to_agent: &addr.instance,
             text,
             chain: &chain,
-            timeout_s: REQUEST_TIMEOUT_S,
+            timeout_s: if notify {
+                link.config.notify_wait_max_s
+            } else {
+                REQUEST_TIMEOUT_S
+            },
             extra: Extra {
                 thread_id: thread_id.as_deref(),
+                notify_on_end: notify,
                 ..Default::default()
             },
         };
@@ -892,7 +949,13 @@ impl Harness {
                 return fail(why);
             }
         };
-        lock(&link.state).inflight += 1;
+        {
+            let mut st = lock(&link.state);
+            st.inflight += 1;
+            if notify {
+                st.waiting_on.insert(id.clone(), entry.session_id.clone());
+            }
+        }
         let (sink, l2, cancel) = (
             self.sink.clone(),
             link.clone(),
@@ -953,13 +1016,14 @@ impl Harness {
                 &rid,
                 tid.as_deref(),
                 &from_addr,
-                &from_addr.kind,
+                if notify { "result" } else { &from_addr.kind },
                 &status,
                 &text,
             );
             {
                 let mut st = lock(&l2.state);
                 st.inflight = st.inflight.saturating_sub(1);
+                st.waiting_on.remove(&rid);
                 if status != "cancelled" {
                     st.replies.push((to_name, block));
                 }
@@ -1596,6 +1660,10 @@ impl Responder for HarnessResponder {
 
     fn claim(&self, req: &Request) -> Result<Box<dyn Send>, &'static str> {
         self.h.peer_claim(req)
+    }
+
+    fn subscribe(&self, req: &Request) -> Result<BoxFut<Reply>, &'static str> {
+        self.h.peer_subscribe_end(req)
     }
 
     fn deliver_reply(&self, env: Envelope) -> bool {
