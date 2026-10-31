@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
 
+/// Set in the environment of every child process the core starts (see [`Env::child_env`]).
+pub const AGENT_SESSION_VAR: &str = "SYNTHESIS_AGENT_SESSION";
+
 /// Explicit environment snapshot. Library code never reads the process env
 /// except through [`Env::from_process`].
 ///
@@ -59,7 +62,7 @@ impl Env {
     /// else (`AWS_*`, `GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, ...) is dropped. The only ways to
     /// opt another variable in are `{env:NAME}` in config and an explicit per-server env map.
     pub fn child_env(&self) -> Env {
-        Env(self
+        let mut env = Env(self
             .0
             .iter()
             .filter(|(k, _)| {
@@ -70,7 +73,11 @@ impl Env {
                 CHILD_ENV_ALLOWLIST.contains(&k) || k.starts_with("LC_") || k.starts_with("XDG_")
             })
             .map(|(k, v)| (k.clone(), v.clone()))
-            .collect())
+            .collect());
+        // Output only (never read as a setting): commands the agent starts can tell they are not
+        // the person, so `synth memory` refuses to approve or delete from there.
+        env.0.insert(AGENT_SESSION_VAR.into(), "1".into());
+        env
     }
 
     #[deprecated(note = "denylist; use Env::child_env (allowlist)")]

@@ -101,3 +101,5 @@ After a task that went wrong and recovered, was corrected by you, hit a denial o
 Proposals: once a lesson or note proves useful across runs, `synth memory proposals` lists a skill or an instruction-file addition. `synth memory apply ID` only shows the diff; `apply ID --yes` writes it (a skill becomes `learned:NAME`, available to the Skill tool). `reject ID` declines; `promote` looks for candidates now. Memory never edits an instruction file or skill by itself.
 
 Retrieval quality and the poisoned-record checks run offline in `cargo test -p synthesis-memory --test quality`.
+
+Commands that change memory (add, delete, forget, approve, reject, apply --yes, import, optout, prune, promote, reflect) need a terminal and refuse inside the agent's own commands; the agent cannot run them (a permission rule denies them). Imported records arrive `untrusted` and `proposed`; notes learned in an untrusted project or in a task that used the web, MCP or network commands are stored `untrusted` and never injected.

@@ -194,6 +194,47 @@ pub enum MemoryCmd {
     },
 }
 
+/// Commands that change what the model will later read or what gets written to instruction files.
+fn mutates(cmd: &MemoryCmd) -> bool {
+    match cmd {
+        MemoryCmd::Apply { yes, .. } => *yes,
+        MemoryCmd::List { .. }
+        | MemoryCmd::Search { .. }
+        | MemoryCmd::Show { .. }
+        | MemoryCmd::Review { .. }
+        | MemoryCmd::Export { .. }
+        | MemoryCmd::Stats { .. }
+        | MemoryCmd::Proposals => false,
+        _ => true,
+    }
+}
+
+/// The agent must not approve, delete, import or opt out of its own memory: such a command needs a
+/// person at a terminal, and refuses inside a process the core started for the agent (the marker
+/// `SYNTHESIS_AGENT_SESSION` is set by the core for children; it is output, not a setting).
+/// A permission rule also denies these from `Bash`; this is the second lock.
+fn refuse_unattended(env: &Env, cmd: &MemoryCmd) -> Result<(), String> {
+    use std::io::IsTerminal;
+    if !mutates(cmd) {
+        return Ok(());
+    }
+    if env.get(synthesis_config::AGENT_SESSION_VAR).is_some() {
+        return Err("this command changes memory and cannot run from an agent session; run it yourself in a terminal".into());
+    }
+    // test builds only (the feature cannot be enabled in release): lets the test harness drive it
+    #[cfg(feature = "test-provider")]
+    if env.get("SYNTHESIS_TEST_ATTENDED").is_some() {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Err(
+            "this command changes memory and needs an interactive terminal (stdin and stdout)"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 /// `list`/`show` line: the markdown form of memory.md §10.
 pub fn markdown(m: &Memory) -> String {
     let scope = match m.scope.as_str() {
@@ -234,6 +275,7 @@ fn filter(scope: &Scope, kind: Option<String>, status: &str, limit: usize) -> Fi
 }
 
 pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
+    refuse_unattended(env, &cmd)?;
     let h = homes(env)?;
     let mut s = Store::open(&h.synthesis, vec![]).map_err(|e| e.to_string())?;
     let e = |x: synthesis_memory::Error| x.to_string();
@@ -357,6 +399,12 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
             }
         }
         MemoryCmd::Import { file } => {
+            let len = std::fs::metadata(&file)
+                .map_err(|x| format!("{}: {x}", file.display()))?
+                .len();
+            if len > 5 << 20 {
+                return Err("import file is over 5 MiB".into());
+            }
             let text =
                 std::fs::read_to_string(&file).map_err(|x| format!("{}: {x}", file.display()))?;
             let (done, skipped) = s.import_jsonl(&text).map_err(e)?;
@@ -534,6 +582,7 @@ pub struct MemoryRun {
     pub reflect: Option<Reflector>,
     pub root: PathBuf,
     pub home: PathBuf,
+    pub project_trusted: bool,
 }
 
 pub struct StartArgs<'a> {
@@ -551,6 +600,8 @@ pub struct StartArgs<'a> {
 /// Opens memory for a run and retrieves the block. No store, an opted-out repository or a disabled
 /// setting all mean "no memory this run".
 pub fn start(a: &StartArgs, cancel: CancellationToken) -> (Option<Arc<MemoryRun>>, Option<String>) {
+    // a hook left by an earlier session in this process must not outlive its store
+    synthesis_tools::set_learned_skills(None);
     let settings = a.home.synthesis.join("settings.json");
     if !a.enabled || !enabled(&settings) {
         return (None, None);
@@ -574,6 +625,7 @@ pub fn start(a: &StartArgs, cancel: CancellationToken) -> (Option<Arc<MemoryRun>
         reflect,
         root: a.repo.root.clone(),
         home: a.home.synthesis.clone(),
+        project_trusted: a.project_trusted,
     };
     let run = Arc::new(run);
     let for_skills = run.clone();
@@ -631,6 +683,31 @@ pub fn inject(
             .ok()?;
     }
     synthesis_memory::render(&r, now)
+}
+
+/// Injected notes whose id the assistant wrote or passed to a tool: the only sign that one was used.
+fn cited_notes(s: &Store, m: &MemoryRun, out: &synthesis_harness::TaskOutcome) -> Vec<String> {
+    let mut text = String::new();
+    for msg in out.messages.iter().filter(|x| x.role == Role::Assistant) {
+        match &msg.content {
+            Content::Text(t) => text.push_str(t),
+            Content::Blocks(bs) => {
+                for b in bs {
+                    match b {
+                        Block::Text { text: t } => text.push_str(t),
+                        Block::ToolUse { input: Some(i), .. } => text.push_str(&i.to_string()),
+                        _ => {}
+                    }
+                    text.push('\n');
+                }
+            }
+        }
+    }
+    s.open_use_ids(&m.sid, None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|id| text.contains(id.as_str()))
+        .collect()
 }
 
 fn clip(t: &str, n: usize) -> String {
@@ -722,11 +799,8 @@ pub fn task_ended(m: &MemoryRun, request: &str, out: &synthesis_harness::TaskOut
     let mut s = m.store.lock().unwrap_or_else(|e| e.into_inner());
     let status = format!("{:?}", out.status);
     let ok = out.status == synthesis_events::TaskStatus::Completed;
-    let mut body = format!(
-        "Request: {}\nStatus: {status}: {}",
-        clip(request, 400),
-        clip(&out.reason, 200)
-    );
+    // out.reason is model-influenced text: it is left out of the episode
+    let mut body = format!("Request: {}\nStatus: {status}", clip(request, 400));
     if !out.changed_files.is_empty() {
         let files: Vec<&str> = out
             .changed_files
@@ -749,14 +823,20 @@ pub fn task_ended(m: &MemoryRun, request: &str, out: &synthesis_harness::TaskOut
         "episode",
         &title,
         &body,
-        Trust::Verified,
+        // a headless prompt may come from automation or a pipe: never above `agent`
+        if m.project_trusted {
+            Trust::Agent
+        } else {
+            Trust::Untrusted
+        },
     );
     n.source =
         serde_json::json!({"origin": "task_end", "session_id": m.sid, "task_id": out.task_id});
     if let Err(e) = s.put(n) {
         warn(e);
     }
-    let d = digest_of(request, out);
+    let mut d = digest_of(request, out);
+    d.untrusted_project = !m.project_trusted;
     let skills = s.learned_skills(&m.key).unwrap_or_default();
     let used: Vec<String> = d
         .tools
@@ -771,7 +851,15 @@ pub fn task_ended(m: &MemoryRun, request: &str, out: &synthesis_harness::TaskOut
     {
         warn(e);
     }
-    if let Err(e) = s.finish_uses(&m.sid, None, ok) {
+    // only notes the task used count for or against them, and never from a tainted task
+    let counted = if d.tainted() {
+        vec![]
+    } else {
+        let mut u = used;
+        u.extend(cited_notes(&s, m, out));
+        u
+    };
+    if let Err(e) = s.finish_uses(&m.sid, None, ok, &counted) {
         warn(e);
     }
     if let Ok(weak) = s.demote_weak_skills()
@@ -860,7 +948,8 @@ async fn reflect_one(
         synthesis_memory::prompt(&d, &existing)
     };
     let sum =
-        crate::ctx::ProviderSummarizer::new(r.provider.clone(), r.model.clone(), r.cancel.clone());
+        crate::ctx::ProviderSummarizer::new(r.provider.clone(), r.model.clone(), r.cancel.clone())
+            .with_max_tokens(2000);
     let reply = tokio::time::timeout(REFLECT_TIMEOUT, sum.summarize(&system, &user))
         .await
         .map_err(|_| "timed out after 60 s".to_string())?

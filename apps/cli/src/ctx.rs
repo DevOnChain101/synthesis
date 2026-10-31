@@ -56,9 +56,15 @@ pub(crate) struct ProviderSummarizer {
     model: String,
     cancel: CancellationToken,
     last: Mutex<String>,
+    max_tokens: u32,
 }
 
 impl ProviderSummarizer {
+    pub(crate) fn with_max_tokens(mut self, n: u32) -> Self {
+        self.max_tokens = n;
+        self
+    }
+
     pub(crate) fn new(
         provider: Arc<dyn ModelProvider>,
         model: String,
@@ -69,6 +75,7 @@ impl ProviderSummarizer {
             model,
             cancel,
             last: Mutex::default(),
+            max_tokens: 4096,
         }
     }
 }
@@ -77,7 +84,7 @@ impl Summarizer for ProviderSummarizer {
     async fn summarize(&self, system: &str, prompt: &str) -> Result<String, SummarizeError> {
         let req = Request {
             model: self.model.clone(),
-            max_tokens: 4096,
+            max_tokens: self.max_tokens,
             system: Some(System::Text(system.into())),
             messages: vec![Message {
                 role: Role::User,
@@ -249,6 +256,7 @@ impl SynthesisContext {
                 model,
                 cancel,
                 last: Mutex::default(),
+                max_tokens: 4096,
             }),
             put,
             skills: None,

@@ -473,7 +473,13 @@ mod tests {
         let b = stdio_base_env(&env);
         assert_eq!(
             b.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["HTTPS_PROXY", "LC_ALL", "PATH", "SYNTHESIS_HOME"]
+            [
+                "HTTPS_PROXY",
+                "LC_ALL",
+                "PATH",
+                "SYNTHESIS_AGENT_SESSION",
+                "SYNTHESIS_HOME"
+            ]
         );
     }
 

@@ -71,6 +71,8 @@ const V2: &str = "ALTER TABLE reflection_jobs ADD COLUMN payload TEXT NOT NULL D
 
 const MIGRATIONS: &[&str] = &[V1, V2];
 
+const MAX_IMPORT_BYTES: usize = 5 << 20;
+const MAX_IMPORT_LINES: usize = 5000;
 pub const BODY_CAP: usize = 2048;
 pub const SKILL_BODY_CAP: usize = 16 * 1024;
 const MASK_LIMIT: f64 = 0.2;
@@ -436,9 +438,7 @@ impl Store {
             return bad(&format!("body is over {cap} bytes"));
         }
         let scanned = format!("{title}\n{body}\n{}", tags.join(" "));
-        // the harness-written episode quotes the person's own request: only the structural rules apply
-        let episode = n.kind == "episode" && n.source["origin"] == "task_end";
-        let rule = scan(&scanned, if episode { Trust::Owner } else { n.trust });
+        let rule = scan(&scanned, n.trust);
         let mut status = n.status.clone().unwrap_or_else(|| "active".into());
         if !STATUSES.contains(&status.as_str()) {
             return bad("unknown status");
@@ -728,19 +728,38 @@ impl Store {
         Ok(())
     }
 
+    /// Ids of the notes given to this task whose outcome is still open.
+    pub fn open_use_ids(&self, session_id: &str, task_id: Option<&str>) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare(
+            "SELECT DISTINCT memory_id FROM memory_uses
+             WHERE session_id=?1 AND task_id IS ?2 AND outcome IS NULL",
+        )?;
+        let rows = st.query_map(params![session_id, task_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Fills the outcome of the open uses of this task and counts it on the records.
-    pub fn finish_uses(&mut self, session_id: &str, task_id: Option<&str>, ok: bool) -> Result<()> {
+    pub fn finish_uses(
+        &mut self,
+        session_id: &str,
+        task_id: Option<&str>,
+        ok: bool,
+        used: &[String],
+    ) -> Result<()> {
         let col = if ok { "success_count" } else { "failure_count" };
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute(
-            &format!(
-                "UPDATE memories SET {col} = {col} + 1 WHERE id IN (SELECT memory_id FROM memory_uses
-                 WHERE session_id=?1 AND task_id IS ?2 AND outcome IS NULL)"
-            ),
-            params![session_id, task_id],
-        )?;
+        // being injected is not evidence: only notes the task actually used count for or against
+        for id in used {
+            tx.execute(
+                &format!(
+                    "UPDATE memories SET {col} = {col} + 1 WHERE id = ?3 AND id IN (SELECT memory_id
+                     FROM memory_uses WHERE session_id=?1 AND task_id IS ?2 AND outcome IS NULL)"
+                ),
+                params![session_id, task_id, id],
+            )?;
+        }
         tx.execute(
             "UPDATE memory_uses SET outcome=?3 WHERE session_id=?1 AND task_id IS ?2 AND outcome IS NULL",
             params![session_id, task_id, if ok { "success" } else { "failure" }],
@@ -824,11 +843,19 @@ impl Store {
         Ok(out)
     }
 
-    /// Lines from `export_jsonl`. Imported records never keep `owner`/`verified` trust (a file can
-    /// say anything) and go through the whole write path again. Returns outcomes and skipped lines.
+    /// Lines from `export_jsonl`. A file can say anything, so every imported record becomes
+    /// `untrusted` and `proposed` (not injected until the person approves it) and goes through the
+    /// whole write path again. At most 5 MiB and 5000 lines. Returns outcomes and skipped lines.
     pub fn import_jsonl(&mut self, text: &str) -> Result<(Vec<PutOutcome>, usize)> {
+        if text.len() > MAX_IMPORT_BYTES {
+            return bad("import file is over 5 MiB");
+        }
         let (mut done, mut skipped) = (vec![], 0);
-        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        for line in text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .take(MAX_IMPORT_LINES)
+        {
             let Ok(m) = serde_json::from_str::<Memory>(line) else {
                 skipped += 1;
                 continue;
@@ -843,8 +870,9 @@ impl Store {
                 &m.kind,
                 &m.title,
                 &m.body,
-                Trust::Agent.min(m.trust),
+                Trust::Untrusted,
             );
+            n.status = Some("proposed".into());
             n.slot = m.slot;
             n.name = m.name;
             n.tags = m.tags;
@@ -997,14 +1025,16 @@ mod tests {
     }
 
     #[test]
-    fn import_never_raises_trust() {
+    fn import_is_untrusted_and_proposed_and_capped() {
         let (_d, mut s) = store();
         s.put(fact("A", "alpha", Trust::Owner)).unwrap();
         let dump = s.export_jsonl(None).unwrap();
         let (_d2, mut t) = store();
         let (done, skipped) = t.import_jsonl(&dump).unwrap();
         assert_eq!((done.len(), skipped), (1, 0));
-        assert_eq!(t.get(&done[0].id).unwrap().unwrap().trust, Trust::Agent);
+        let m = t.get(&done[0].id).unwrap().unwrap();
+        assert_eq!((m.trust, m.status.as_str()), (Trust::Untrusted, "proposed"));
+        assert!(t.import_jsonl(&"x".repeat(MAX_IMPORT_BYTES + 1)).is_err());
     }
 
     #[test]
@@ -1013,10 +1043,18 @@ mod tests {
         let o = s.put(fact("A", "alpha", Trust::Owner)).unwrap();
         s.record_uses(std::slice::from_ref(&o.id), "s1", Some("t1"), "injected")
             .unwrap();
-        s.finish_uses("s1", Some("t1"), true).unwrap();
-        s.finish_uses("s1", Some("t1"), false).unwrap(); // already closed: no double count
+        let used = [o.id.clone()];
+        s.finish_uses("s1", Some("t1"), true, &used).unwrap();
+        s.finish_uses("s1", Some("t1"), false, &used).unwrap(); // already closed: no double count
         let m = s.get(&o.id).unwrap().unwrap();
         assert_eq!((m.use_count, m.success_count, m.failure_count), (1, 1, 0));
+        // injected but not used: the outcome is recorded, the counters do not move
+        let p = s.put(fact("B", "beta", Trust::Owner)).unwrap();
+        s.record_uses(std::slice::from_ref(&p.id), "s2", None, "injected")
+            .unwrap();
+        s.finish_uses("s2", None, true, &[]).unwrap();
+        let m = s.get(&p.id).unwrap().unwrap();
+        assert_eq!((m.success_count, m.failure_count), (0, 0));
     }
 
     #[test]

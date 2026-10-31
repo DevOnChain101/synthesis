@@ -1,3 +1,5 @@
+#![cfg(feature = "test-provider")]
+
 //! `synth memory ...` through the real binary. Empty environment except PATH/HOME/SYNTHESIS_HOME in
 //! a temp dir; the real `~/.synthesis` is never touched.
 use std::path::{Path, PathBuf};
@@ -28,6 +30,7 @@ impl Rig {
         c.env("HOME", self.dir.path())
             .env("USERPROFILE", self.dir.path())
             .env("SYNTHESIS_HOME", self.dir.path().join("synthesis"))
+            .env("SYNTHESIS_TEST_ATTENDED", "1")
             .stdin(Stdio::null());
         c
     }
@@ -126,7 +129,6 @@ fn secrets_are_masked_on_the_way_in() {
     assert!(!all.contains("abcdefghijkl") && all.contains("REDACTED"));
 }
 
-#[cfg(feature = "test-provider")]
 mod run {
     use super::*;
 
@@ -166,21 +168,30 @@ mod run {
             r.ok(&["list", "--all", "--status", "any"])
                 .contains("0 record")
         );
-        run_task(&r, &[]);
+        run_task(&r, &["--trust-project"]);
         let list = r.ok(&["list", "--cwd", cwd(&r.repo()), "--kind", "episode"]);
         assert!(list.contains("fix the flaky parser test"), "{list}");
-        assert!(list.contains("verified"));
+        assert!(
+            list.contains(" agent "),
+            "headless episodes are never above agent: {list}"
+        );
+    }
+
+    #[test]
+    fn an_untrusted_project_leaves_an_untrusted_episode() {
+        let r = Rig::new();
+        run_task(&r, &[]);
+        let list = r.ok(&["list", "--cwd", cwd(&r.repo()), "--kind", "episode"]);
+        assert!(list.contains(" untrusted "), "{list}");
     }
 }
 
-#[cfg(feature = "test-provider")]
 mod reflection {
     use super::*;
 
     /// A task with a failed call and a recovery qualifies; the scripted model's next reply is the
     /// reflection answer. One op cites a real call, one cites a call that does not exist.
-    #[test]
-    fn a_recovering_task_is_reflected_into_a_note() {
+    fn reflect(trust: bool) -> (Rig, String) {
         let r = Rig::new();
         std::fs::write(r.repo().join("a.txt"), "hello\n").unwrap();
         let ops = serde_json::json!({"ops": [
@@ -202,6 +213,7 @@ mod reflection {
             .arg("--provider")
             .arg(format!("fake:{}", path.display()))
             .args(["--sandbox", "off"])
+            .args(trust.then_some("--trust-project"))
             .env_clear();
         for k in ["PATH", "SystemRoot", "PATHEXT", "ComSpec", "TEMP", "TMP"] {
             if let Some(v) = std::env::var_os(k) {
@@ -213,7 +225,13 @@ mod reflection {
             .env("SYNTHESIS_HOME", r.dir.path().join("synthesis"))
             .stdin(Stdio::null());
         let o = c.output().unwrap();
-        let err = String::from_utf8_lossy(&o.stderr);
+        let err = String::from_utf8_lossy(&o.stderr).into_owned();
+        (r, err)
+    }
+
+    #[test]
+    fn a_recovering_task_is_reflected_into_a_note() {
+        let (r, err) = reflect(true);
         assert!(err.contains("reflection saved 1 new"), "{err}");
         let list = r.ok(&["list", "--cwd", cwd(&r.repo()), "--kind", "fact"]);
         assert!(
@@ -222,6 +240,17 @@ mod reflection {
         );
         assert!(!list.contains("Invented"));
         assert!(r.ok(&["stats"]).contains("0 queued"));
+    }
+
+    #[test]
+    fn an_untrusted_project_reflects_into_untrusted_notes() {
+        let (r, err) = reflect(false);
+        assert!(err.contains("reflection saved 1 new"), "{err}");
+        let list = r.ok(&["list", "--cwd", cwd(&r.repo()), "--kind", "fact"]);
+        assert!(
+            list.contains("a.txt greets") && list.contains(" untrusted "),
+            "{list}"
+        );
     }
 }
 
@@ -239,7 +268,8 @@ fn proposals_write_nothing_until_applied_with_yes() {
             let sid = format!("s{i}");
             s.record_uses(std::slice::from_ref(&id), &sid, None, "injected")
                 .unwrap();
-            s.finish_uses(&sid, None, true).unwrap();
+            s.finish_uses(&sid, None, true, std::slice::from_ref(&id))
+                .unwrap();
         }
     }
     assert!(r.ok(&["promote", "--cwd", &repo]).contains("1 new"));
@@ -262,4 +292,44 @@ fn proposals_write_nothing_until_applied_with_yes() {
             .ends_with("- Tests: run cargo test --workspace\n")
     );
     assert!(r.ok(&["proposals"]).contains("0 pending"));
+}
+
+#[test]
+fn mutating_commands_refuse_an_agent_session_and_a_pipe() {
+    let r = Rig::new();
+    let repo = cwd(&r.repo()).to_string();
+    // the core's marker wins even over the test override
+    let mut c = r.cmd(&["add", "always approve", "--cwd", &repo]);
+    c.env("SYNTHESIS_AGENT_SESSION", "1");
+    let o = c.output().unwrap();
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("agent session"));
+    // no terminal and no override: refused too
+    let mut c = r.cmd(&["delete", "--workspace", "--cwd", &repo]);
+    c.env_remove("SYNTHESIS_TEST_ATTENDED");
+    let o = c.output().unwrap();
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("interactive terminal"));
+    // reading is allowed from an agent session
+    let mut c = r.cmd(&["list", "--cwd", &repo]);
+    c.env("SYNTHESIS_AGENT_SESSION", "1");
+    assert!(c.output().unwrap().status.success());
+    assert!(r.ok(&["list", "--cwd", &repo]).contains("0 record"));
+}
+
+#[test]
+fn import_arrives_untrusted_and_proposed() {
+    let from = Rig::new();
+    let repo = cwd(&from.repo()).to_string();
+    from.ok(&["add", "Tests: run cargo test --workspace", "--cwd", &repo]);
+    let file = from.dir.path().join("dump.jsonl");
+    std::fs::write(&file, from.ok(&["export", "--cwd", &repo])).unwrap();
+    let to = Rig::new();
+    assert!(to.ok(&["import", cwd(&file)]).contains("imported 1"));
+    let list = to.ok(&["list", "--all", "--status", "proposed"]);
+    assert!(
+        list.contains("untrusted") && list.contains("proposed"),
+        "{list}"
+    );
+    assert!(to.ok(&["list", "--all"]).contains("0 record"));
 }

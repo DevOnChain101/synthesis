@@ -799,6 +799,7 @@ fn child_env_is_an_allowlist() {
             "LC_ALL",
             "PATH",
             "Path",
+            "SYNTHESIS_AGENT_SESSION",
             "SYNTHESIS_HOME",
             "SYNTHESIS_MODEL",
             "XDG_CONFIG_HOME",

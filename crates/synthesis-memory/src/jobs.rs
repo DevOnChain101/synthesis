@@ -91,19 +91,21 @@ impl Store {
         Ok(())
     }
 
-    /// `synth memory reflect --retry`: failed jobs get a fresh set of attempts.
+    /// `synth memory reflect --retry`: failed jobs get one more attempt (past attempts stay counted).
     pub fn retry_failed(&mut self) -> Result<usize> {
         Ok(self.conn.execute(
-            "UPDATE reflection_jobs SET status='queued', attempts=0, error=NULL WHERE status='failed'",
-            [],
+            "UPDATE reflection_jobs SET status='queued', attempts=?1, error=NULL WHERE status='failed'",
+            [MAX_ATTEMPTS - 1],
         )?)
     }
 
-    /// Jobs that reached a model today (UTC), for the daily cap.
+    /// Model calls made today (UTC): every attempt of a job counts, failed or still claimed, so a
+    /// job that keeps failing cannot spend past the cap. Jobs that reached a model today (UTC), for the daily cap.
     pub fn reflections_today(&self, now: OffsetDateTime) -> Result<i64> {
         let day = now.date().to_string();
         Ok(self.conn.query_row(
-            "SELECT count(*) FROM reflection_jobs WHERE status='done' AND substr(finished_at,1,10)=?1",
+            "SELECT coalesce(sum(attempts), 0) FROM reflection_jobs
+             WHERE attempts > 0 AND substr(coalesce(finished_at, claimed_at, created_at), 1, 10) = ?1",
             [day],
             |r| r.get(0),
         )?)
@@ -136,7 +138,11 @@ mod tests {
         assert_eq!(s.retry_failed().unwrap(), 1);
         s.claim_job("w", now).unwrap().unwrap();
         s.finish_job(&id, None).unwrap();
-        assert_eq!(s.reflections_today(OffsetDateTime::now_utc()).unwrap(), 1);
+        assert_eq!(
+            s.reflections_today(OffsetDateTime::now_utc()).unwrap(),
+            3,
+            "every attempt counts"
+        );
     }
 
     #[test]
