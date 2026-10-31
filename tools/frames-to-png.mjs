@@ -3,15 +3,13 @@
 // `SYNTHESIS_FRAMES_DIR=<dir> cargo test -p synthesis-tui-render --test golden write_visual_frames`)
 // into PNGs with headless Chrome. Chrome draws them with the generic `monospace` stack, so this is an
 // APPROXIMATION of a terminal (cell aspect and glyph shapes differ; the prototype's fonts are not shipped).
-// Usage: node tools/frames-to-png.mjs <frames-dir> <out-dir> [--pair view1.png=mission view2.png=chat --proto <dir>]
-//   with --proto, every mission/chat frame is also put next to the owner's screenshot.
+// Usage: node tools/frames-to-png.mjs <frames-dir> <out-dir> [--only <name-part>]
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 const [dir, out] = process.argv.slice(2, 4);
 const arg = (k) => { const i = process.argv.indexOf(k); return i > 0 ? process.argv[i + 1] : null; };
-const proto = arg('--proto');
 const only = arg('--only');
 const chrome = process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const FONT = 13, LH = 1.22;
@@ -65,11 +63,4 @@ for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.ansi')).sort()) {
   const w = Math.ceil(cols * FONT * 0.602) + 16, h = Math.ceil(rows * FONT * LH) + 16;
   const png = path.join(out, f.replace('.ansi', '.png'));
   shot(html, png, w, h);
-  if (proto && theme === 'synthesis') {
-    const ref = { mission: 'view1.png', chat: 'view2.png' }[screen];
-    const b64 = (p) => 'data:image/png;base64,' + fs.readFileSync(p).toString('base64');
-    const pair = `<!doctype html><meta charset="utf-8"><style>body{margin:0;background:#000;display:flex;gap:10px;align-items:flex-start}div{color:#888;font:11px sans-serif}img{display:block;height:${Math.max(h, 520)}px}</style>
-<div>prototype (owner)<img src="${b64(path.join(proto, ref))}"></div><div>Synthesis TUI ${cols}x${rows} (Chrome, generic monospace)<img src="${b64(png)}"></div>`;
-    shot(pair, path.join(out, `side-${screen}-${cols}x${rows}.png`), Math.ceil(Math.max(h, 520) * 1672 / 1041) + w * Math.max(h, 520) / h + 30, Math.max(h, 520) + 30);
-  }
 }

@@ -1634,14 +1634,83 @@ fn context_rows(d: &Value, w: usize) -> Vec<Row> {
     rows
 }
 
+/// Border colour and title of an item's card (HTML `.msg` / `.tool`), `None` for items drawn flat.
+fn card_style(it: &Item) -> Option<(Col, &'static str)> {
+    match it.kind.as_str() {
+        "user" => Some((c_perm(), "USER")),
+        "text" => Some((if it.is_final { c_ok() } else { c_border() }, "")),
+        "tool" => Some((
+            match (it.status.as_str(), base_name(&it.name)) {
+                ("error", _) if !it.soft => c_bad(),
+                (_, "Read") => c_perm(),
+                (_, "Grep" | "Glob" | "WebSearch") => c_purple(),
+                (_, "Bash" | "PowerShell") => c_warn(),
+                (_, "Edit" | "MultiEdit" | "Write" | "NotebookEdit") => col(t().orange()),
+                _ => c_border(),
+            },
+            "",
+        )),
+        _ => None,
+    }
+}
+
+/// `rows` inside a rounded border of width `w`. Every border cell is decoration (`copy: false`), so
+/// selection and copy still see the plain rows; leading blank separator rows stay outside.
+fn boxed(mut rows: Vec<Row>, w: usize, c: Col, title: &str) -> Vec<Row> {
+    let g = glyphs();
+    let lead = rows.iter().take_while(|rw| rw.is_empty()).count();
+    let mut out: Vec<Row> = rows.drain(..lead).collect();
+    let inner = w.saturating_sub(4);
+    let t = if title.is_empty() {
+        String::new()
+    } else {
+        format!(" {title} ")
+    };
+    let fill = w.saturating_sub(2 + str_w(&t));
+    out.push(vec![
+        deco(g.box_tl, c),
+        Run {
+            b: BOLD_ON,
+            ..deco(&t, c)
+        },
+        deco(&format!("{}{}", g.box_h.repeat(fill), g.box_tr), c),
+    ]);
+    for rw in rows {
+        let pad = inner.saturating_sub(row_w(&rw));
+        let mut line = vec![deco(&format!("{} ", g.box_v), c)];
+        let soft = rw.last().is_some_and(|x| x.soft);
+        line.extend(rw);
+        // the right border keeps the wrap flag, so a URL or sentence still joins across rows
+        line.push(Run {
+            soft,
+            ..deco(&format!("{} {}", " ".repeat(pad), g.box_v), c)
+        });
+        out.push(line);
+    }
+    out.push(vec![deco(
+        &format!(
+            "{}{}{}",
+            g.box_bl,
+            g.box_h.repeat(w.saturating_sub(2)),
+            g.box_br
+        ),
+        c,
+    )]);
+    out
+}
+
 fn item_rows(it: &Item, w: usize, frame: usize, now: i64, expanded: bool) -> Vec<Row> {
+    match card_style(it).filter(|_| cards() && w >= 12) {
+        Some((c, title)) => boxed(item_rows_flat(it, w - 4, frame, now, expanded), w, c, title),
+        None => item_rows_flat(it, w, frame, now, expanded),
+    }
+}
+
+fn item_rows_flat(it: &Item, w: usize, frame: usize, now: i64, expanded: bool) -> Vec<Row> {
     let mut rows: Vec<Row> = vec![];
     match it.kind.as_str() {
         "user" => {
             rows.push(vec![]);
-            if cards() {
-                rows.push(vec![deco("USER", c_light())]);
-            }
             if !it.text.is_empty() {
                 let norm = it.text.replace("\r\n", "\n").replace('\r', "\n");
                 let lines: Vec<&str> = norm.split('\n').collect();
@@ -2201,7 +2270,7 @@ fn welcome_rows(agent: &Agent, w: usize, now: i64, tz_offset_min: i32) -> Vec<Ro
         ]),
         line(vec![r(prompt, c_dim())]),
         line(vec![r(
-            "/help for commands · alt+v pastes an image",
+            "/help for commands · shift+tab cycles the mode",
             c_subtle(),
         )]),
         line(vec![
@@ -2915,7 +2984,7 @@ fn input_mode(m: Option<&str>) -> Option<InputMode> {
             lead: "# ",
             col: c_purple(),
             lead_col: None,
-            hint: "remember this in ./AGENTS.md · backspace to leave memory mode",
+            hint: "remember this note (you pick the file) · backspace to leave memory mode",
             label: "# memory mode",
         }),
         _ => None,
@@ -2947,6 +3016,9 @@ fn input_rows(
     route_hint: Option<&str>,
 ) -> (Vec<Row>, Option<(usize, usize)>) {
     let inner = w.saturating_sub(6).max(4);
+    // the HTML's send button takes the last two cells of the first row (chat screen only)
+    let send = cards() && inner >= 12;
+    let inner = if send { inner - 2 } else { inner };
     let (shown, pos, top) = layout_input(ed.chars, ed.cur, inner);
     let im = input_mode(mode);
     let border = if let Some(im) = &im {
@@ -2966,7 +3038,10 @@ fn input_rows(
             r("  ", c_text()),
             r(&label, c_light()),
             r(
-                format!("{} │", " ".repeat(inner.saturating_sub(str_w(&label)))),
+                format!(
+                    "{} │",
+                    " ".repeat((inner + 2 * usize::from(send)).saturating_sub(str_w(&label)))
+                ),
                 border,
             ),
         ]);
@@ -3044,10 +3119,25 @@ fn input_rows(
         }
         let mut line = vec![r("│ ", border), lead];
         line.extend(cells);
-        line.push(r(
-            format!("{} │", " ".repeat(inner.saturating_sub(used))),
-            border,
-        ));
+        line.push(r(" ".repeat(inner.saturating_sub(used)), c_text()));
+        if send {
+            line.push(if rr == 0 {
+                Run {
+                    copy: false,
+                    ..r(
+                        format!(" {}", icon("send")),
+                        if ed.chars.is_empty() {
+                            c_subtle()
+                        } else {
+                            c_light()
+                        },
+                    )
+                }
+            } else {
+                r("  ", c_text())
+            });
+        }
+        line.push(r(" │", border));
         out.push(line);
     }
     out.push(vec![r(format!("╰{}╯", "─".repeat(w - 2)), border)]);
@@ -3784,7 +3874,9 @@ pub fn body_sel_rows(body: &Body, from: usize, to: usize) -> Vec<SelRow> {
                     .take_while(|x| !x.copy)
                     .map(width)
                     .sum::<usize>();
-                let copy: Row = rw
+                // decoration after the last text (a card's padding and right border) is not text
+                let end = rw.iter().rposition(|x| x.copy).map_or(0, |i| i + 1);
+                let copy: Row = rw[..end]
                     .iter()
                     .map(|x| {
                         if x.copy {
@@ -3847,5 +3939,26 @@ mod cards_tests {
         };
         assert!(flat(&user).contains("USER"));
         assert_eq!(tool_verb("Weird"), None);
+    }
+
+    #[test]
+    fn card_borders_are_decoration_so_copy_sees_the_plain_rows() {
+        let _on = CardsScope::new(true);
+        let user = Item {
+            kind: "user".into(),
+            text: "hello there".into(),
+            ..Default::default()
+        };
+        let rows = item_rows(&user, 30, 0, 0, false);
+        let body: Vec<&Row> = rows.iter().filter(|r| !r.is_empty()).collect();
+        assert!(body.len() >= 3);
+        for r in &body {
+            assert_eq!(row_w(r), 30);
+        }
+        let copied: String = body
+            .iter()
+            .flat_map(|r| r.iter().filter(|x| x.copy).map(|x| x.t.as_str()))
+            .collect();
+        assert_eq!(copied.trim(), "hello there");
     }
 }

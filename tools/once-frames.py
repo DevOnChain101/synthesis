@@ -2,7 +2,7 @@
 """Frame dumps of `synth --once` (stdlib only): the welcome frame at four sizes (plain text, numbered
 rows) and at 120x36 in every theme (ANSI text, run in a pty so the colour codes are kept).
 
-Usage: python3 tools/once-frames.py [--bin target/debug/synth] [--out docs/research/tui-p1-frames]
+Usage: python3 tools/once-frames.py [--bin target/debug/synth] [--out DIR]  (default: <tmp>/synthesis-once-frames)
 The user settings of each run live in a throwaway SYNTHESIS_HOME; the process working directory
 and your own settings are never used.
 """
@@ -45,7 +45,7 @@ def run(binary, repo, home, cols, lines, tty, extra_env=None):
 def main(argv):
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     binary = os.path.join(root, "target/debug/synth")
-    out = os.path.join(root, "docs/research/tui-p1-frames")
+    out = os.path.join(tempfile.gettempdir(), "synthesis-once-frames")
     it = iter(argv)
     for a in it:
         if a == "--bin":

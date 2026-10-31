@@ -694,6 +694,36 @@ pub static ASCII: Glyphs = Glyphs {
     box_v: "|",
 };
 
+/// A one-cell header icon for the HTML's SVG symbols (`folder`, `play`, ...): geometric shapes that
+/// common monospace fonts have, and one ASCII character each under `Icons: ascii`.
+pub fn icon(name: &str) -> &'static str {
+    let ascii = config().ascii;
+    let (u, a) = match name {
+        "folder" => ("▤", "#"),
+        "play" => ("▶", ">"),
+        "term" => ("▭", "$"),
+        "tools" => ("◆", "*"),
+        "pulse" => ("≈", "~"),
+        "clock" => ("◷", "@"),
+        "graph" => ("◈", "%"),
+        "spark" => ("✦", "+"),
+        "chip" => ("▦", "="),
+        "bars" => ("▥", "|"),
+        "send" => ("➤", ">"),
+        "chev" => ("▾", "v"),
+        "file" => ("▫", "-"),
+        "user" => ("◉", "@"),
+        "hook" => ("↯", "!"),
+        "shield" => ("▣", "#"),
+        "users" => ("∷", ":"),
+        "layers" => ("≡", "="),
+        "link" => ("⊕", "&"),
+        "db" => ("≣", "%"),
+        _ => ("•", "-"),
+    };
+    if ascii { a } else { u }
+}
+
 impl Glyphs {
     pub fn spin(&self, frame: usize) -> &'static str {
         self.spinner[frame % self.spinner.len()]
