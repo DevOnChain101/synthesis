@@ -1,6 +1,6 @@
 # Spec: Long-term memory — draft 0.1
 
-Status: accepted (2026-10-29); decisions D1–D8 are settled (§15); M0 (F1–F7), M1 and M2 are implemented (see the status sections at the end). Tags as in events.md. Design doc: §5.5.1, ADR-013, roadmap R11.
+Status: accepted (2026-10-29); decisions D1–D8 are settled (§15); M0 (F1–F7), M1, M2 and M3 are implemented (see the status sections at the end). Tags as in events.md. Design doc: §5.5.1, ADR-013, roadmap R11.
 
 ## 0. Non-negotiables
 1. Memory is **data, never instructions or permission grants**. It never reaches the permission engine, the auto-mode judge's user intent, approval dialogs or `set_mode`.
@@ -297,3 +297,12 @@ Deviations and gaps:
 - Cap is 20 reflection calls per UTC day (`MAX_CALLS_PER_DAY`), not 0.50 USD: the summarizer returns no usage, so cost is not measurable here. A job is drained at the end of the next `synth run`, not at its start. The interactive app does not queue or run reflection (its code is outside this change); `synth memory reflect` drains what `synth run` queued.
 - No `memory.reflection.*` events (events crate untouched); progress goes to stderr.
 - Compaction checkpoints and the "10 nearest records" use the same FTS search on the request only.
+
+### M3 status (skills and promotion; implemented 2026-10-31)
+Done (`crates/synthesis-memory/src/skills.rs`, `synthesis-tools` `skill.rs`, `memcmd.rs`):
+- Promotion scan at task end and `synth memory promote`: a lesson used >= 3 times in >= 2 sessions with Wilson >= 0.6 becomes a **skill proposal** (SKILL.md text with provenance); an `owner` or `verified` fact/preference used >= 5 times becomes an **instructions proposal** (unified diff that appends one masked bullet to the project `SYNTHESIS.md`/`AGENTS.md` or `$SYNTHESIS_HOME/SYNTHESIS.md`; skipped if the line is already there). Each source is proposed once. Proposals never touch files.
+- `synth memory proposals|apply ID [--yes]|reject ID`. `apply` shows the diff and writes only with `--yes`. The instruction file is resolved at apply time from `project`/`user` (never read as a path from the database), refused if a symlink, and a project proposal can only be applied from the repository its source note belongs to. An approved skill becomes an `owner`-trust `skill` record (slot `skill.<name>`).
+- New Skill source `Learned`: `synthesis_tools::set_learned_skills` takes a callback (no SQLite in the tools crate); skills appear as `learned:<name>` with `[learned, ok 7/8]` in the description. The callback is process-wide and set by `synth run`/the app start-up path in `prepare`.
+- A use of a learned skill (a `Skill` call in the task) is recorded and its outcome counted; Wilson < 0.4 after 5 outcomes returns it to `proposed`.
+
+Gaps: "same successful command sequence in >= 2 episodes" is not detected (episodes hold no command list); `Learned` stats in the description are read when the skill list is built, not refreshed mid-task; no consolidation merge, embeddings (`memory-embeddings`) or `messages_fts` (spec roadmap M3) were built.

@@ -924,10 +924,6 @@ pub fn prepare(
         secrets: res.secrets.clone(),
         loaded: crate::memory::describe(&instructions),
     };
-    let skills = crate::ctx::visible_skills(
-        synthesis_tools::discover_skills(env, &ws.root),
-        trust == ProjectTrust::Trusted,
-    );
     let repo = crate::memcmd::repo_of(&ws.root);
     let (memory, memory_block) = crate::memcmd::start(
         &crate::memcmd::StartArgs {
@@ -942,6 +938,11 @@ pub fn prepare(
             model: crate::memcmd::small_model(&cfg, &res.label, &res.model),
         },
         cancel.clone(),
+    );
+    // after memory starts: learned skills are installed by `start`
+    let skills = crate::ctx::visible_skills(
+        synthesis_tools::discover_skills(env, &ws.root),
+        trust == ProjectTrust::Trusted,
     );
     let mut context = SynthesisContext::new(
         instructions,

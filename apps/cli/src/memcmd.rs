@@ -14,6 +14,7 @@ use synthesis_providers::{Block, Content, ModelProvider, Role};
 use synthesis_settings::find_project_root;
 use tokio_util::sync::CancellationToken;
 
+use crate::memory::project_file;
 use crate::{Homes, homes};
 
 /// Identity of the repository a directory belongs to (memory.md §4).
@@ -164,6 +165,23 @@ pub enum MemoryCmd {
         limit: usize,
         #[arg(long)]
         retry: bool,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Pending proposals (skills and instruction-file additions) with their diffs.
+    Proposals,
+    /// Show a proposal; with --yes write it (a skill becomes active, a bullet is appended).
+    Apply {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+    /// Decline a proposal.
+    Reject { id: String },
+    /// Look for promotion candidates now.
+    Promote {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
@@ -409,6 +427,70 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
             let (done, failed) = rt.block_on(reflect_jobs(&store, &rf, limit));
             out!("reflection: {done} done, {failed} failed");
         }
+        MemoryCmd::Proposals => {
+            let ps = s.proposals(Some("pending")).map_err(e)?;
+            for p in &ps {
+                out!("## {} · {} · {}\n{}", p.id, p.kind, p.target, san(&p.diff));
+            }
+            out!("{} pending", ps.len());
+        }
+        MemoryCmd::Reject { id } => {
+            if !s.decide_proposal(&id, "rejected").map_err(e)? {
+                return Err(format!("no pending proposal {id}"));
+            }
+            out!("rejected {id}");
+        }
+        MemoryCmd::Promote { cwd } => {
+            let repo = repo_of(&cwd_of(&cwd));
+            let made = synthesis_memory::propose_promotions(
+                &mut s,
+                &repo.key,
+                &project_file(&repo.root),
+                &h.synthesis.join("SYNTHESIS.md"),
+            )
+            .map_err(e)?;
+            out!("{} new proposal(s)", made.len());
+        }
+        MemoryCmd::Apply { id, yes, cwd } => {
+            let Some(p) = s.proposal(&id).map_err(e)? else {
+                return Err(format!("no proposal {id}"));
+            };
+            out!("## {} · {} · {}\n{}", p.id, p.kind, p.target, san(&p.diff));
+            if !yes {
+                out!("nothing written; run again with --yes to apply");
+                return Ok(0);
+            }
+            if p.kind == "skill" {
+                let o = synthesis_memory::approve_skill(&mut s, &p).map_err(e)?;
+                out!(
+                    "skill active as learned:{} ({})",
+                    p.target.trim_start_matches("skill:"),
+                    o.id
+                );
+            } else {
+                let repo = repo_of(&cwd_of(&cwd));
+                let path = match p.target.as_str() {
+                    "user" => h.synthesis.join("SYNTHESIS.md"),
+                    "project" => {
+                        let own = p
+                            .from_memory_ids
+                            .iter()
+                            .filter_map(|i| s.get(i).ok().flatten())
+                            .all(|m| m.scope_key == repo.key);
+                        if !own {
+                            return Err(
+                                "this note belongs to another repository: run from there (--cwd)"
+                                    .into(),
+                            );
+                        }
+                        project_file(&repo.root)
+                    }
+                    _ => return Err("unknown proposal target".into()),
+                };
+                synthesis_memory::apply_instructions(&mut s, &p, &path).map_err(e)?;
+                out!("appended to {}", path.display());
+            }
+        }
         MemoryCmd::Optout { state, cwd } => {
             let repo = repo_of(&cwd_of(&cwd));
             s.touch_workspace(&repo.key, &repo.root, &repo.label)
@@ -450,6 +532,8 @@ pub struct MemoryRun {
     pub sid: String,
     /// None when `synthesis.memory.reflection` is false.
     pub reflect: Option<Reflector>,
+    pub root: PathBuf,
+    pub home: PathBuf,
 }
 
 pub struct StartArgs<'a> {
@@ -488,8 +572,34 @@ pub fn start(a: &StartArgs, cancel: CancellationToken) -> (Option<Arc<MemoryRun>
         key: a.repo.key.clone(),
         sid: a.sid.to_string(),
         reflect,
+        root: a.repo.root.clone(),
+        home: a.home.synthesis.clone(),
     };
-    (Some(Arc::new(run)), block)
+    let run = Arc::new(run);
+    let for_skills = run.clone();
+    synthesis_tools::set_learned_skills(Some(Arc::new(move || learned(&for_skills))));
+    (Some(run), block)
+}
+
+/// Approved skills for the Skill tool; the stats ride in the description (`[learned, ok 7/8]`).
+fn learned(m: &MemoryRun) -> Vec<synthesis_tools::LearnedSkill> {
+    let s = m.store.lock().unwrap_or_else(|e| e.into_inner());
+    s.learned_skills(&m.key)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|k| {
+            Some(synthesis_tools::LearnedSkill {
+                name: k.name?,
+                description: format!(
+                    "[learned, ok {}/{}] {}",
+                    k.success_count,
+                    k.success_count + k.failure_count,
+                    k.title
+                ),
+                body: k.body,
+            })
+        })
+        .collect()
 }
 
 fn warn(e: impl std::fmt::Display) {
@@ -646,17 +756,48 @@ pub fn task_ended(m: &MemoryRun, request: &str, out: &synthesis_harness::TaskOut
     if let Err(e) = s.put(n) {
         warn(e);
     }
+    let d = digest_of(request, out);
+    let skills = s.learned_skills(&m.key).unwrap_or_default();
+    let used: Vec<String> = d
+        .tools
+        .iter()
+        .filter(|t| t.name == "Skill")
+        .filter_map(|t| t.arg.strip_prefix("learned:"))
+        .filter_map(|n| skills.iter().find(|k| k.name.as_deref() == Some(n)))
+        .map(|k| k.id.clone())
+        .collect();
+    if !used.is_empty()
+        && let Err(e) = s.record_uses(&used, &m.sid, None, "searched")
+    {
+        warn(e);
+    }
     if let Err(e) = s.finish_uses(&m.sid, None, ok) {
         warn(e);
     }
-    if m.reflect.is_some() {
-        let d = digest_of(request, out);
-        if d.qualifies()
-            && let Ok(payload) = serde_json::to_string(&d)
-            && let Err(e) = s.enqueue_job(&m.key, &m.sid, &out.task_id, &payload)
-        {
-            warn(e);
-        }
+    if let Ok(weak) = s.demote_weak_skills()
+        && !weak.is_empty()
+    {
+        eprintln!(
+            "synth: memory: {} learned skill(s) went back to review (low success)",
+            weak.len()
+        );
+    }
+    let project = crate::memory::project_file(&m.root);
+    let user = m.home.join("SYNTHESIS.md");
+    if let Ok(made) = synthesis_memory::propose_promotions(&mut s, &m.key, &project, &user)
+        && !made.is_empty()
+    {
+        eprintln!(
+            "synth: memory: {} proposal(s) to review: synth memory proposals",
+            made.len()
+        );
+    }
+    if m.reflect.is_some()
+        && d.qualifies()
+        && let Ok(payload) = serde_json::to_string(&d)
+        && let Err(e) = s.enqueue_job(&m.key, &m.sid, &out.task_id, &payload)
+    {
+        warn(e);
     }
 }
 

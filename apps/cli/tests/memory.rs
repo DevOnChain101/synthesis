@@ -224,3 +224,42 @@ mod reflection {
         assert!(r.ok(&["stats"]).contains("0 queued"));
     }
 }
+
+#[test]
+fn proposals_write_nothing_until_applied_with_yes() {
+    let r = Rig::new();
+    let repo = cwd(&r.repo()).to_string();
+    std::fs::write(r.repo().join("SYNTHESIS.md"), "# Project\n").unwrap();
+    // an owner note used in 5 runs is proposed for the instruction file
+    let out = r.ok(&["add", "Tests: run cargo test --workspace", "--cwd", &repo]);
+    let id = out.split_whitespace().nth(1).unwrap().to_string();
+    {
+        let mut s = synthesis_memory::Store::open(&r.dir.path().join("synthesis"), vec![]).unwrap();
+        for i in 0..5 {
+            let sid = format!("s{i}");
+            s.record_uses(std::slice::from_ref(&id), &sid, None, "injected")
+                .unwrap();
+            s.finish_uses(&sid, None, true).unwrap();
+        }
+    }
+    assert!(r.ok(&["promote", "--cwd", &repo]).contains("1 new"));
+    let list = r.ok(&["proposals"]);
+    assert!(
+        list.contains("+- Tests: run cargo test --workspace"),
+        "{list}"
+    );
+    let pid = list.split_whitespace().nth(1).unwrap().to_string();
+    let shown = r.ok(&["apply", &pid, "--cwd", &repo]);
+    assert!(shown.contains("nothing written"));
+    assert_eq!(
+        std::fs::read_to_string(r.repo().join("SYNTHESIS.md")).unwrap(),
+        "# Project\n"
+    );
+    r.ok(&["apply", &pid, "--yes", "--cwd", &repo]);
+    assert!(
+        std::fs::read_to_string(r.repo().join("SYNTHESIS.md"))
+            .unwrap()
+            .ends_with("- Tests: run cargo test --workspace\n")
+    );
+    assert!(r.ok(&["proposals"]).contains("0 pending"));
+}

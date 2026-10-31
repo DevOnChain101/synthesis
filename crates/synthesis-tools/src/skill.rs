@@ -16,8 +16,28 @@ use serde_json::{Value, json};
 use synthesis_config::Env;
 use synthesis_core::ToolContext;
 
+use std::sync::{Arc, Mutex};
+
 use crate::ToolOutput;
 use crate::util::str_field;
+
+/// A skill the owner approved from memory. `description` carries the stats (`[learned, ok 7/8] ...`).
+#[derive(Debug, Clone)]
+pub struct LearnedSkill {
+    pub name: String,
+    pub description: String,
+    pub body: String,
+}
+
+pub type LearnedProvider = Arc<dyn Fn() -> Vec<LearnedSkill> + Send + Sync>;
+
+static LEARNED: Mutex<Option<LearnedProvider>> = Mutex::new(None);
+
+/// Installs (or clears) the source of learned skills, so this crate needs no database. They are
+/// listed and loaded as `learned:<name>`, after the user skills and before project ones.
+pub fn set_learned_skills(p: Option<LearnedProvider>) {
+    *LEARNED.lock().unwrap_or_else(|e| e.into_inner()) = p;
+}
 
 const MAX_SKILL_BYTES: u64 = 64 * 1024;
 const MAX_PER_DIR: usize = 200;
@@ -32,6 +52,8 @@ const BUNDLED: &[(&str, &str)] = &[(
 pub enum SkillSource {
     Bundled,
     User,
+    /// Approved by the owner from long-term memory (memory.md §7), served by a callback.
+    Learned,
     /// Comes from the repository: untrusted.
     Project,
 }
@@ -190,6 +212,22 @@ fn load(env: &Env, project_root: &Path) -> Vec<Skill> {
     if let Some(home) = synthesis_home(env) {
         scan(&home, "skills", SkillSource::User, &mut all);
     }
+    let learned = LEARNED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    for l in learned.iter().flat_map(|p| p()) {
+        let name = format!("learned:{}", l.name);
+        if valid_name(&name) {
+            all.push(Skill {
+                info: SkillInfo {
+                    name,
+                    description: l.description,
+                    source: SkillSource::Learned,
+                    trusted: true,
+                },
+                dir: None,
+                body: l.body.trim().to_string(),
+            });
+        }
+    }
     scan(
         project_root,
         ".synthesis/skills",
@@ -228,12 +266,16 @@ pub(crate) fn run(input: &Value, ctx: &ToolContext) -> ToolOutput {
         ))
         .with_meta(json!({"error": "unknown_skill"}));
     };
-    let base = s
-        .dir
-        .as_ref()
-        .map_or("(bundled with Synthesis)".to_string(), |d| {
-            d.display().to_string()
-        });
+    let base = s.dir.as_ref().map_or_else(
+        || {
+            if s.info.source == SkillSource::Learned {
+                "(learned skill from Synthesis memory)".to_string()
+            } else {
+                "(bundled with Synthesis)".to_string()
+            }
+        },
+        |d| d.display().to_string(),
+    );
     let body = if s.info.trusted {
         s.body.clone()
     } else {
