@@ -998,6 +998,7 @@ pub fn prepare(
         0..0,
         crate::ctx::load_auto_memory(&h.synthesis, &[&ws.root, &ws.cwd]),
     );
+    instructions.extend(crate::ctx::load_rules(&ws.root));
     if c.bare {
         instructions.clear();
     }

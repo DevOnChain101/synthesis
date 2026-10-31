@@ -61,7 +61,18 @@ fn parse(file_stem: &str, raw: &str) -> AgentDef {
             .to_string(),
         description: get("description").unwrap_or("").to_string(),
         prompt: body.trim().to_string(),
-        tools: get("tools").map(tool_list),
+        tools: match (
+            get("tools").map(tool_list),
+            get("disallowedTools").map(tool_list),
+        ) {
+            (None, None) => None,
+            (t, d) => Some(
+                t.into_iter()
+                    .flatten()
+                    .chain(d.into_iter().flatten().map(|n| format!("-{n}")))
+                    .collect(),
+            ),
+        },
         // a requested mode is still capped by the parent's (`stricter`)
         mode: get("permissionMode").and_then(synthesis_permissions::Mode::parse),
     }
@@ -127,6 +138,20 @@ mod tests {
     fn write(dir: &Path, f: &str, text: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join(f), text).unwrap();
+    }
+
+    #[test]
+    fn frontmatter_reads_disallowed_tools_and_permission_mode() {
+        let d = parse(
+            "x",
+            "---\ndisallowedTools: Bash, Write\npermissionMode: plan\n---\nbody",
+        );
+        assert_eq!(
+            d.tools,
+            Some(vec!["-Bash".to_string(), "-Write".to_string()])
+        );
+        assert_eq!(d.mode, Some(synthesis_permissions::Mode::Plan));
+        assert_eq!(parse("x", "---\nname: y\n---\nb").tools, None);
     }
 
     #[test]

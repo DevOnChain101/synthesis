@@ -5,6 +5,7 @@ mod manager;
 mod naming;
 mod result;
 mod sse;
+mod ws;
 
 pub use config::*;
 pub use manager::*;

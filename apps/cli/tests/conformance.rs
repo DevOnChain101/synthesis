@@ -443,3 +443,40 @@ fn settings_flag_adds_a_layer_and_a_bad_file_is_a_usage_error() {
     let (o, _) = rig.run(text_script("x"), &args);
     assert_eq!(o.status.code(), Some(2));
 }
+
+#[test]
+fn rewind_restores_changed_files_and_removes_created_ones_only_with_apply() {
+    let rig = Rig::new();
+    let script = json!([
+        {"tools": [{"name": "Read", "input": {"file_path": "a.txt"}}]},
+        {"tools": [{"name": "Edit", "input": {"file_path": "a.txt", "old_string": "hello", "new_string": "bye"}}]},
+        {"tools": [{"name": "Write", "input": {"file_path": "b.txt", "content": "new\n"}}]},
+        {"text": "done"}
+    ]);
+    let (_, ev) = rig.run(script, &["--permission-mode", "acceptEdits"]);
+    let sid = session_id(&ev);
+    let read = |f: &str| std::fs::read_to_string(rig.ws().join(f)).unwrap();
+    assert_eq!(read("a.txt"), "bye\n");
+    let o = rig.synth(&["rewind", &sid]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(String::from_utf8_lossy(&o.stdout).contains("dry run"));
+    assert_eq!(read("a.txt"), "bye\n", "a dry run changes nothing");
+    let o = rig.synth(&["rewind", &sid, "--apply"]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert_eq!(read("a.txt"), "hello\n");
+    assert!(!rig.ws().join("b.txt").exists());
+    assert_eq!(
+        rig.synth(&["rewind", "no-such-session"]).status.code(),
+        Some(2)
+    );
+}

@@ -15,6 +15,7 @@ pub enum TransportKind {
     Stdio,
     Http,
     Sse,
+    Ws,
 }
 
 impl TransportKind {
@@ -23,6 +24,7 @@ impl TransportKind {
             Self::Stdio => "stdio",
             Self::Http => "http",
             Self::Sse => "sse",
+            Self::Ws => "ws",
         }
     }
 }
@@ -193,6 +195,7 @@ pub fn from_claude_shape(name: &str, cfg: &Value, scope: Option<&str>) -> McpSer
     let kind = match cfg.get("type").and_then(Value::as_str) {
         Some("http") => TransportKind::Http,
         Some("sse") => TransportKind::Sse,
+        Some("ws" | "websocket") => TransportKind::Ws,
         _ if non_empty_str(cfg, "url").is_some() && non_empty_str(cfg, "command").is_none() => {
             TransportKind::Http
         }

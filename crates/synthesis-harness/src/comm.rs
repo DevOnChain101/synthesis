@@ -137,10 +137,15 @@ pub(crate) fn child_parts(
         p.set_mode(mode);
         Arc::new(Mutex::new(p))
     };
+    // `-Name` entries are `disallowedTools`: removed from the list (or from every tool when no
+    // allow-list is given)
+    let (denied, listed): (Vec<&String>, Vec<&String>) =
+        def.tools.iter().flatten().partition(|n| n.starts_with('-'));
     let mut allowed: BTreeSet<String> = match &def.tools {
-        Some(t) => t.iter().cloned().collect(),
-        None => h.tools.specs().into_iter().map(|s| s.name).collect(),
+        Some(_) if !listed.is_empty() || denied.is_empty() => listed.into_iter().cloned().collect(),
+        _ => h.tools.specs().into_iter().map(|s| s.name).collect(),
     };
+    allowed.retain(|n| !denied.iter().any(|d| d[1..] == *n));
     // Never delegable, even when the definition lists them: no nesting, no questions to the
     // user from a child.
     // Sub-agents may search memory, never change it (memory.md §8).

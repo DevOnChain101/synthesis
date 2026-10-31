@@ -20,9 +20,11 @@ sha1 = "0.10"
 tokio = { version = "1.54.1", default-features = false, features = ["rt", "time", "process", "macros", "sync", "io-util", "net"] }
 tokio-util = { version = "0.7.20", default-features = false }
 which = "8"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 
 [dev-dependencies]
 rmcp = { version = "3.7.0", features = ["server", "transport-io", "transport-streamable-http-server"] }
 axum = "0.8"
 tempfile = "3.27.0"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 tokio = { version = "1.54.1", features = ["full"] }

@@ -29,7 +29,7 @@ use crate::naming::{parse_tool_name_fallback, tool_name_for, tool_name_hashed};
 use crate::result::{
     McpToolResult, normalize_with, prompt_as_result, resource_as_result, truncate,
 };
-use crate::sse;
+use crate::{sse, ws};
 
 const MAX_DESCRIPTION_LEN: usize = 1000;
 const MAX_STDERR_LINES: usize = 50;
@@ -458,6 +458,20 @@ impl Shared {
             }
             TransportKind::Sse => {
                 let t = self.sse_transport(cfg).await?;
+                (handler.serve(t).await.map_err(|e| e.to_string())?, None)
+            }
+            TransportKind::Ws => {
+                let url = cfg
+                    .url
+                    .as_deref()
+                    .filter(|u| !u.is_empty())
+                    .ok_or("ws server has no url")?;
+                let pairs = cfg
+                    .headers
+                    .iter()
+                    .map(|(k, v)| Ok((k.clone(), self.expand(cfg, v)?)))
+                    .collect::<Result<Vec<_>, String>>()?;
+                let t = ws::connect(&self.expand(cfg, url)?, &pairs).await?;
                 (handler.serve(t).await.map_err(|e| e.to_string())?, None)
             }
         };

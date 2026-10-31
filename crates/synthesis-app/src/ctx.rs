@@ -385,6 +385,144 @@ pub fn observe(state: &mut TaskState, history: &[Message]) {
     }
 }
 
+const RULE_FILE_CAP: u64 = 32 * 1024;
+const RULE_MAX_FILES: usize = 50;
+const RULE_WALK_CAP: usize = 5000;
+
+/// `paths:` of a rules file's frontmatter (inline list, scalar or `- item` lines) and its body.
+fn rule_parts(text: &str) -> (Vec<String>, &str) {
+    let Some(rest) = text.strip_prefix("---\n") else {
+        return (vec![], text);
+    };
+    let Some(end) = rest.find("\n---") else {
+        return (vec![], text);
+    };
+    let (front, body) = (
+        &rest[..end],
+        rest[end + 4..].trim_start_matches(['\r', '\n']),
+    );
+    let mut paths = vec![];
+    let mut in_paths = false;
+    for l in front.lines() {
+        if let Some(v) = l.strip_prefix("paths:") {
+            in_paths = true;
+            let v = v.trim().trim_start_matches('[').trim_end_matches(']');
+            paths.extend(
+                v.split(',')
+                    .map(|x| x.trim().trim_matches(['"', '\'']).to_string())
+                    .filter(|x| !x.is_empty()),
+            );
+        } else if in_paths && let Some(i) = l.trim_start().strip_prefix("- ") {
+            paths.push(i.trim().trim_matches(['"', '\'']).to_string());
+        } else if !l.trim().is_empty() {
+            in_paths = false;
+        }
+    }
+    (paths, body)
+}
+
+/// Does any file under `root` (bounded walk) match one of the globs?
+fn any_file_matches(root: &Path, globs: &[String]) -> bool {
+    let mut b = globset::GlobSetBuilder::new();
+    for g in globs {
+        if let Ok(g) = globset::Glob::new(g) {
+            b.add(g);
+        }
+    }
+    let Ok(set) = b.build() else { return false };
+    let (mut stack, mut seen) = (vec![root.to_path_buf()], 0);
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            seen += 1;
+            if seen > RULE_WALK_CAP {
+                return false;
+            }
+            let (p, Ok(t)) = (e.path(), e.file_type()) else {
+                continue;
+            };
+            let name = e.file_name();
+            if t.is_dir() && !matches!(name.to_str(), Some(".git" | "node_modules" | "target")) {
+                stack.push(p.clone());
+            }
+            if p.strip_prefix(root).is_ok_and(|r| set.is_match(r)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// `.synthesis/rules/*.md` and `.claude/rules/*.md` of the project. A file with `paths:` loads only
+/// when a matching file exists in the workspace.
+/// shortcut: the match is made once at start, not when the agent first touches such a file.
+pub fn load_rules(root: &Path) -> Vec<InstructionFile> {
+    let mut out = vec![];
+    for dir in [".synthesis/rules", ".claude/rules"] {
+        let Ok(rd) = std::fs::read_dir(root.join(dir)) else {
+            continue;
+        };
+        let mut files: Vec<_> = rd
+            .flatten()
+            .filter(|e| {
+                e.path().extension().is_some_and(|x| x == "md")
+                    && e.file_type().is_ok_and(|t| t.is_file())
+            })
+            .map(|e| e.path())
+            .collect();
+        files.sort();
+        for p in files.into_iter().take(RULE_MAX_FILES) {
+            let mut raw = String::new();
+            if std::fs::File::open(&p)
+                .and_then(|f| f.take(RULE_FILE_CAP).read_to_string(&mut raw))
+                .is_err()
+            {
+                continue;
+            }
+            let (paths, body) = rule_parts(&raw);
+            if body.trim().is_empty() || (!paths.is_empty() && !any_file_matches(root, &paths)) {
+                continue;
+            }
+            out.push(InstructionFile {
+                path: p,
+                scope: Scope::Project,
+                content: body.trim().to_string(),
+            });
+        }
+    }
+    out
+}
+
+const RECENT_FILES: usize = 5;
+const RECENT_FILE_CAP: usize = 8 * 1024;
+
+/// After a compaction the model lost the text of the files it changed: the newest few are read
+/// again from disk (capped), as data.
+fn recent_files_block(changed: &[String]) -> Option<String> {
+    let mut out = String::new();
+    for p in changed.iter().rev().take(RECENT_FILES) {
+        let Ok(bytes) = std::fs::read(p) else {
+            continue;
+        };
+        let cut = bytes.len().min(RECENT_FILE_CAP);
+        let text = String::from_utf8_lossy(&bytes[..cut]);
+        out.push_str(&format!(
+            "<recent_file path=\"{}\"{}>\n{text}\n</recent_file>\n",
+            p.replace('"', "'"),
+            if cut < bytes.len() {
+                " truncated=\"true\""
+            } else {
+                ""
+            }
+        ));
+    }
+    (!out.is_empty()).then(|| {
+        format!("Files you changed before the summary, re-read now (data, may be partial):\n{out}")
+    })
+}
+
 impl ContextProvider for SynthesisContext {
     fn build(&self, history: &[Message], agent_prompt: Option<&str>) -> Result<Built, String> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -475,6 +613,16 @@ impl ContextProvider for SynthesisContext {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
+            let mut messages = messages;
+            if let Some(t) = recent_files_block(&state.changed_files)
+                && let Some(Message {
+                    content: Content::Text(first),
+                    ..
+                }) = messages.first_mut()
+            {
+                first.push_str("\n\n");
+                first.push_str(&t);
+            }
             if let Some(hook) = &self.on_compact {
                 let goal = state.goal.clone().unwrap_or_default();
                 if let Some(block) = hook(&goal, &summary) {
@@ -753,6 +901,41 @@ mod tests {
                 .iter()
                 .any(|t| t.contains("main-notes") || t.contains("A-notes"))
         );
+    }
+
+    #[test]
+    fn rules_dir_with_paths_frontmatter() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path().join(".claude/rules");
+        std::fs::create_dir_all(&r).unwrap();
+        std::fs::create_dir_all(d.path().join("src")).unwrap();
+        std::fs::write(d.path().join("src/a.rs"), "").unwrap();
+        std::fs::write(r.join("always.md"), "ALWAYS").unwrap();
+        std::fs::write(
+            r.join("rust.md"),
+            "---\npaths:\n  - \"src/**/*.rs\"\n---\nRUST",
+        )
+        .unwrap();
+        std::fs::write(r.join("py.md"), "---\npaths: [\"**/*.py\"]\n---\nPY").unwrap();
+        let got: Vec<_> = load_rules(d.path())
+            .into_iter()
+            .map(|f| f.content)
+            .collect();
+        assert_eq!(got, ["ALWAYS", "RUST"]);
+    }
+
+    #[test]
+    fn recent_files_are_re_read_after_compaction() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("a.rs");
+        std::fs::write(&f, "fn main() { /* NEW-CONTENT */ }").unwrap();
+        let b = recent_files_block(&[
+            d.path().join("gone.rs").to_string_lossy().into(),
+            f.to_string_lossy().into(),
+        ])
+        .unwrap();
+        assert!(b.contains("NEW-CONTENT") && b.contains("a.rs") && !b.contains("gone.rs"));
+        assert!(recent_files_block(&[]).is_none());
     }
 
     #[tokio::test]

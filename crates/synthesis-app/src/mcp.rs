@@ -742,8 +742,8 @@ fn entry(a: &AddArgs) -> Result<Value, String> {
         }
         _ => return Err("give either --url URL or a command after `--`".into()),
     }
-    if !matches!(a.transport.as_str(), "http" | "sse") {
-        return Err("--transport must be http or sse".into());
+    if !matches!(a.transport.as_str(), "http" | "sse" | "ws") {
+        return Err("--transport must be http, sse or ws".into());
     }
     let env: Result<serde_json::Map<String, Value>, String> = a
         .env

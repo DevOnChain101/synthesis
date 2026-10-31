@@ -73,7 +73,7 @@ fn is_loopback_host(host: &str) -> bool {
 }
 
 /// `Err` = the request must not be made.
-async fn check_url(u: &Url) -> Result<(), String> {
+pub(crate) async fn check_url(u: &Url) -> Result<(), String> {
     let host = u.host_str().ok_or("URL has no host")?.to_string();
     let loopback = is_loopback_host(&host);
     match u.scheme() {

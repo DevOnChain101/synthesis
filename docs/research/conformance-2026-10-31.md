@@ -10,8 +10,8 @@ Audit of the 140 statements in `docs/research/official-conformance.md` plus the 
 
 | Status | Count | 2026-10-28 |
 |---|---|---|
-| MATCH | 72 | 60 |
-| GAP | 4 | 34 |
+| MATCH | 75 | 60 |
+| GAP | 1 | 34 |
 | DIVERGES-BY-DESIGN | 37 | 23 |
 | UNKNOWN | 10 | 19 |
 | N/A-UI | 13 | - |
@@ -229,7 +229,7 @@ All eight are statements whose official behaviour was never verified in the 2026
 | 41 | memory file locations | DIVERGES-BY-DESIGN |  | SYNTHESIS.md, AGENTS.md, CLAUDE.md, `.claude/CLAUDE.md`, `.synthesis/SYNTHESIS.md`, CLAUDE.local.md; no managed-policy path |
 | 42 | `@import` rules (4 hops, code spans, escaped spaces) | UNKNOWN |  | 2026-11-01: current limit is 5 hops, which matches the public Claude Code docs as remembered; needs-network to re-verify (code.claude.com memory page). Was: max depth 5 not 4 (F instructions.rs:33); import safety MATCH+stricter (T context `import_cycles_and_depth_are_bounded`, `project_imports_cannot_escape_or_use_home_but_user_files_may`); code-span and `\ ` handling not verified |
 | 43 | size guidance 200 lines | DIVERGES-BY-DESIGN |  | 32 KiB per file and in total (F instructions.rs:31-33) |
-| 44 | `.claude/rules/*.md` with `paths` | GAP | P2 | not done: `.claude/rules/*.md` with `paths` needs path-scoped lazy loading in the harness (design first). Was: no loader: `grep rules/` finds none in synthesis-context/harness/app |
+| 44 | `.claude/rules/*.md` with `paths` | MATCH |  | FIXED 2026-11-01: T app ctx.rs `rules_dir_with_paths_frontmatter` (`.synthesis/rules` and `.claude/rules`; a `paths:` file loads when a matching file exists at start; shortcut: not re-evaluated when the agent first touches such a file). Was: not done: `.claude/rules/*.md` with `paths` needs path-scoped lazy loading in the harness (design first). Was: no loader: `grep rules/` finds none in synthesis-context/harness/app |
 | 45 | auto memory first 200 lines / 25 KB | DIVERGES-BY-DESIGN |  | own long-term memory (ADR-013, `synth memory`, T memory 32 pass); Claude auto-memory dirs imported as untrusted data (F crates/synthesis-app/src/ctx.rs:143; T app `auto_memory_loads_capped_as_untrusted_project_data`). Memory backend is being changed by another developer: not audited in depth |
 | 46 | AGENTS.md only when no CLAUDE.md | DIVERGES-BY-DESIGN |  | owner decision D2: SYNTHESIS.md > AGENTS.md > CLAUDE.md, first non-empty per directory (E32: AGENTS.md wins over CLAUDE.md in the same directory) |
 | 47 | Codex AGENTS.md discovery | DIVERGES-BY-DESIGN |  | no AGENTS.override.md; 32 KiB cap equals Codex |
@@ -265,7 +265,7 @@ All eight are statements whose official behaviour was never verified in the 2026
 | 77 | subagent fresh context, returns final result | MATCH |  | E21 Task returns only the child's final text; T harness `m10_task_obeys_deny_rules`, `subagent_tool_list_unknown_type_depth_and_stop_hook` |
 | 78 | nesting depth 3 | DIVERGES-BY-DESIGN |  | limit 2 (F crates/synthesis-harness/src/exec.rs:1619) |
 | 79 | Explore and Plan are read-only builtins | MATCH |  | FIXED 2026-11-01: T harness agents `explore_agent_is_read_only` (Explore and Plan builtins: read tools only, plan mode). Was: only `general-purpose` exists (F crates/synthesis-harness/src/agents.rs:26-51) |
-| 80 | subagent frontmatter fields | GAP | P2 | partly fixed: `permissionMode` read (T harness agents); `model`, `disallowedTools`, `maxTurns` still ignored (per-agent model needs provider plumbing). Was: only name, description, tools (+ body) read (F crates/synthesis-app/src/agents.rs:58-64) |
+| 80 | subagent frontmatter fields | GAP | P2 | partly fixed 2026-11-01: `permissionMode` and `disallowedTools` honoured (T app agents `frontmatter_reads_disallowed_tools_and_permission_mode`; harness comm.rs `child_parts`). NOT done: `model` (one provider per harness, a per-agent model needs provider routing) and `maxTurns` (turns are one shared task budget). Was: partly fixed: `permissionMode` read (T harness agents); `model`, `disallowedTools`, `maxTurns` still ignored (per-agent model needs provider plumbing). Was: only name, description, tools (+ body) read (F crates/synthesis-app/src/agents.rs:58-64) |
 | 81 | TodoWrite tool | UNKNOWN |  | official tool name not verified; Synthesis TodoWrite works: E21 emits `todo.updated`; T tools `todo_and_task_state`. Resolve: re-fetch tools-reference needs-network: not resolvable on this Mac without a fetch (2026-11-01) |
 | 82 | WebFetch answers via a separate model call | DIVERGES-BY-DESIGN |  | returns page text plus the echoed prompt, no second model call (F crates/synthesis-tools/src/web.rs:575) |
 | 83 | sandbox domains do not limit WebFetch | MATCH |  | E21 WebFetch asks in default mode, SSRF guard blocks loopback under bypass |
@@ -277,7 +277,7 @@ All eight are statements whose official behaviour was never verified in the 2026
 | 89 | excludedCommands | DIVERGES-BY-DESIGN |  | no such setting; per-call `unconfined` only (F terminal.rs:132) |
 | 90 | sandbox covers shell commands only | MATCH |  | MCP servers and file tools run outside it (F crates/synthesis-app/src/mcp.rs:9-10); T mcp stdio `env_is_explicit_allowlisted_and_secrets_stripped` |
 | 91 | Codex sandbox backends | UNKNOWN |  | macOS Seatbelt verified (E25); bwrap/Landlock/Windows need their hosts, see section 6 needs-network: not resolvable on this Mac without a fetch (2026-11-01) |
-| 92 | MCP transports stdio/http/sse/ws | GAP | P2 | not done: a `ws` MCP transport needs a WebSocket client dependency and a spec decision. Was: stdio, streamable http, sse pass (T mcp stdio 13, http 2, sse 3); no `ws` |
+| 92 | MCP transports stdio/http/sse/ws | MATCH |  | FIXED 2026-11-01: T mcp ws.rs `ws_connects_lists_and_calls_with_a_handshake_header` (`ws://`/`wss://`, subprotocol mcp, handshake headers, same URL policy as sse; `mcp add --transport ws`). Was: not done: a `ws` MCP transport needs a WebSocket client dependency and a spec decision. Was: stdio, streamable http, sse pass (T mcp stdio 13, http 2, sse 3); no `ws` |
 | 93 | MCP scopes | DIVERGES-BY-DESIGN |  | Synthesis scope order (F crates/synthesis-app/src/mcp.rs:3-8) |
 | 94 | project .mcp.json approval | DIVERGES-BY-DESIGN |  | stricter: needs --trust-project and hash-bound approval; T cli e2e `untrusted_project_mcp_server_is_never_started`, `edited_mcp_json_invalidates_a_hash_bound_approval` |
 | 95 | `mcp__server__tool` naming | MATCH |  | T cli e2e `mcp_tool_is_callable_when_allowed_gated_otherwise_and_result_is_untrusted_data`; F crates/synthesis-mcp/src/naming.rs |
@@ -293,7 +293,7 @@ All eight are statements whose official behaviour was never verified in the 2026
 | 105 | Haiku 5.5 compaction point | UNKNOWN |  | official figure partial; Synthesis threshold is a ratio. Resolve: re-fetch model-config needs-network: not resolvable on this Mac without a fetch (2026-11-01) |
 | 106 | CLAUDE_CODE_AUTO_COMPACT_WINDOW | DIVERGES-BY-DESIGN |  | ADR-011; `synthesis.context.auto_compact_threshold` instead; T `threshold_setting_moves_the_trigger` |
 | 107 | `/compact focus text` | N/A-UI |  | slash command; manual compaction exists in the harness (T `manual_request_runs_at_the_next_safe_point_and_compact_now_between_tasks`) but no headless entry point |
-| 108 | post-compaction re-reads | GAP | P2 | not done: re-reading recently edited files after compaction needs a compaction-contract change (design first). Was: instructions rebuilt every turn, task state kept; recent files are not re-read (F crates/synthesis-context/src/compact.rs:2); not experimentally re-checked |
+| 108 | post-compaction re-reads | MATCH |  | FIXED 2026-11-01: T app ctx.rs `recent_files_are_re_read_after_compaction` (the 5 newest changed files, 8 KB each, appended to the summary message as data). Was: not done: re-reading recently edited files after compaction needs a compaction-contract change (design first). Was: instructions rebuilt every turn, task state kept; recent files are not re-read (F crates/synthesis-context/src/compact.rs:2); not experimentally re-checked |
 | 109 | model switch cache | N/A-GUIDANCE |  | provider behaviour |
 | 110 | delegate research to subagents | MATCH |  | E21 Task returns a summary |
 | 111 | Codex compaction | UNKNOWN |  | never researched. Resolve: read the Codex docs for compaction needs-network: not resolvable on this Mac without a fetch (2026-11-01) |
@@ -394,3 +394,13 @@ One commit per group on branch worktree-agent-a44f52410e6b47198. Failing-first: 
 | 44, 80 (rest), 92, 108, F-5 rest (`--fallback-model`, `--permission-prompt-tool`, `--mcp-config`) | NOT done, reasons in the rows | |
 | 42, 53, 62, 66 | re-classified (see rows) | |
 | UNKNOWN 64, 72, 81, 91, 103, 105, 111, 140 | NOT resolved: need network (official docs) or other OS hosts | |
+
+### Second round, 2026-11-01 (after merging main 7b2a406)
+
+| Gap | Result | Test |
+|---|---|---|
+| 108 re-read after compaction | fixed | app ctx.rs `recent_files_are_re_read_after_compaction` |
+| 44 `.claude/rules` | fixed (match made once at start) | app ctx.rs `rules_dir_with_paths_frontmatter` |
+| 92 `ws` MCP transport | fixed | mcp `tests/ws.rs` |
+| 80 agent frontmatter | partly: `disallowedTools`, `permissionMode`; NOT `model`, `maxTurns` (reasons in the row) | app agents.rs test |
+| F-7 `synth rewind SESSION [--checkpoint NAME] [--apply]` | fixed. Dry run by default; restores the earliest snapshot of each file; removes files the run created only with `--apply`; refuses paths outside the workspace roots and snapshots that are not the exact bytes (secrets masked); no merge with later edits | cli `rewind_restores_changed_files_and_removes_created_ones_only_with_apply` |

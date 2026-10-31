@@ -9,7 +9,7 @@ pub struct AgentDef {
     pub description: String,
     /// System prompt; empty = the generic subagent prompt.
     pub prompt: String,
-    /// Tool allow-list; `None` = every tool. `Task`, `AskUserQuestion` and `ExitPlanMode` are
+    /// Tool allow-list; `None` = every tool. A `-Name` entry removes a tool (`disallowedTools`). `Task`, `AskUserQuestion` and `ExitPlanMode` are
     /// never granted to a child, whatever is listed.
     pub tools: Option<Vec<String>>,
     /// Requested mode; the effective mode is never more permissive than the parent's.
