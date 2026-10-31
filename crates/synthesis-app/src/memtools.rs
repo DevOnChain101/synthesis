@@ -120,6 +120,17 @@ fn agent_note(m: &Memory, key: &str) -> bool {
         && matches!(m.status.as_str(), "active" | "proposed")
 }
 
+/// For the permission engine: true when `id` is a note the agent saved for this workspace.
+pub fn agent_note_oracle(run: Arc<MemoryRun>) -> Arc<dyn Fn(&str) -> bool + Send + Sync> {
+    Arc::new(move |id| {
+        let s = run.store.lock().unwrap_or_else(|e| e.into_inner());
+        s.get(id)
+            .ok()
+            .flatten()
+            .is_some_and(|m| agent_note(&m, &run.key))
+    })
+}
+
 impl MemTool {
     fn search(&self, input: &Value) -> Result<ToolOutput, String> {
         let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(5) as usize;
@@ -210,13 +221,14 @@ impl MemTool {
             .get(id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("no note {id}"))?;
-        if agent_note(&m, &self.run.key) {
+        // Reaching here means the permission engine allowed it: an agent note outright, any other
+        // note only because the person said yes. Notes of other workspaces stay out of reach.
+        let reach = (m.scope == "user" || (m.scope == "workspace" && m.scope_key == self.run.key))
+            && matches!(m.kind.as_str(), "fact" | "lesson" | "preference");
+        if reach {
             Ok(m)
         } else {
-            // the spec's "ask": only the person can decide, in a terminal
-            Err(format!(
-                "{id} was not saved by the agent for this workspace; only the person can change it (synth memory edit|forget)"
-            ))
+            Err(format!("no note {id} in this workspace"))
         }
     }
 
@@ -337,6 +349,8 @@ mod tests {
             root: repo.root.clone(),
             home: root.join("home"),
             project_trusted: trusted,
+            repo: repo.clone(),
+            prompt: "fix the flaky parser test".into(),
             sink: Some(EventSink::new(buf.clone(), "s1", [])),
             tool_written: Mutex::default(),
             retrieved: Mutex::default(),
@@ -500,21 +514,41 @@ mod tests {
                 .id;
             (owner, other)
         };
-        for id in [owner.clone(), other] {
-            for (name, input) in [
-                ("MemoryUpdate", json!({"id": id, "body": "x"})),
-                ("MemoryForget", json!({"id": id, "reason": "r"})),
-            ] {
-                let o = r.call(name, input).await;
-                assert!(
-                    o.is_error && Rig::text(&o).contains("only the person"),
-                    "{name}: {}",
-                    Rig::text(&o)
-                );
-            }
+        // another workspace's note is out of reach whatever the policy said
+        for name in ["MemoryUpdate", "MemoryForget"] {
+            let o = r
+                .call(name, json!({"id": other, "body": "x", "reason": "r"}))
+                .await;
+            assert!(o.is_error && Rig::text(&o).contains("no note"), "{name}");
         }
+        // the oracle the permission engine asks: agent notes yes, owner and foreign notes no
+        let oracle = agent_note_oracle(r.run.clone());
+        let mine = {
+            let mut s = r.run.store.lock().unwrap();
+            s.put(NewMemory::new(
+                "workspace",
+                &r.repo.key,
+                "fact",
+                "Agent",
+                "agent note",
+                Trust::Agent,
+            ))
+            .unwrap()
+            .id
+        };
+        assert!(oracle(&mine) && !oracle(&owner) && !oracle(&other) && !oracle("m-nope"));
+        // an owner note is never rewritten by the agent, even when the person said yes
+        let o = r
+            .call("MemoryUpdate", json!({"id": owner, "body": "x"}))
+            .await;
+        assert!(o.is_error, "{}", Rig::text(&o));
+        // ...but a person-approved forget archives it (the permission engine asked first)
+        let o = r
+            .call("MemoryForget", json!({"id": owner, "reason": "stale"}))
+            .await;
+        assert!(!o.is_error, "{}", Rig::text(&o));
         let s = r.run.store.lock().unwrap();
-        assert_eq!(s.get(&owner).unwrap().unwrap().status, "active");
+        assert_eq!(s.get(&owner).unwrap().unwrap().status, "archived");
     }
 
     #[tokio::test]

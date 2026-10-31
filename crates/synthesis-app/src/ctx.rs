@@ -56,10 +56,16 @@ pub struct ProviderSummarizer {
     model: String,
     cancel: CancellationToken,
     last: Mutex<String>,
+    usage: Mutex<synthesis_providers::Usage>,
     max_tokens: u32,
 }
 
 impl ProviderSummarizer {
+    /// Tokens the last call reported (fields stay `None` when the provider sent none).
+    pub fn last_usage(&self) -> synthesis_providers::Usage {
+        *self.usage.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn with_max_tokens(mut self, n: u32) -> Self {
         self.max_tokens = n;
         self
@@ -71,6 +77,7 @@ impl ProviderSummarizer {
             model,
             cancel,
             last: Mutex::default(),
+            usage: Mutex::default(),
             max_tokens: 4096,
         }
     }
@@ -93,17 +100,21 @@ impl Summarizer for ProviderSummarizer {
         };
         let mut stream = self.provider.stream(&req, self.cancel.clone());
         let mut text = String::new();
+        let mut usage = synthesis_providers::Usage::default();
         while let Some(ev) = stream.next().await {
             match ev {
                 Ok(StreamEvent::ContentBlockDelta {
                     delta: Delta::TextDelta { text: t },
                     ..
                 }) => text.push_str(&t),
+                Ok(StreamEvent::MessageStart { message }) => usage.merge(&message.usage),
+                Ok(StreamEvent::MessageDelta { usage: Some(u), .. }) => usage.merge(&u),
                 Ok(_) => {}
                 Err(e) => return Err(SummarizeError(e.message().to_string())),
             }
         }
         *self.last.lock().unwrap_or_else(|e| e.into_inner()) = text.clone();
+        *self.usage.lock().unwrap_or_else(|e| e.into_inner()) = usage;
         Ok(text)
     }
 }
@@ -114,10 +125,20 @@ pub struct SynthesisContext {
     summarizer: Arc<ProviderSummarizer>,
     put: PutArtifact,
     skills: Option<String>,
-    /// Frozen `<memory>` block for the task (memory.md §6), after the instructions.
-    memory: Option<String>,
+    /// Frozen `<memory>` block for the task (memory.md §6), before `<task_state>`; replaced by
+    /// `on_compact` after a compaction.
+    memory: Mutex<Option<String>>,
+    /// Sub-agents never see workspace memory: the pinned notes, plus the notes written for that
+    /// definition (`agent` scope), keyed by the definition's prompt (memory.md §4).
+    sub_memory: std::collections::HashMap<String, String>,
+    sub_pinned: Option<String>,
+    on_compact: Option<CompactHook>,
     transcript: Option<Arc<Transcript>>,
 }
+
+/// Called with (goal, summary) after a successful compaction: writes the checkpoint and retrieves
+/// again. `Some(block)` replaces the frozen block (`Some(None)` clears it); `None` keeps it.
+pub type CompactHook = Arc<dyn Fn(&str, &str) -> Option<Option<String>> + Send + Sync>;
 
 const AUTO_MEMORY_FILE_CAP: usize = 8 * 1024;
 const AUTO_MEMORY_TOTAL_CAP: usize = 16 * 1024;
@@ -252,11 +273,15 @@ impl SynthesisContext {
                 model,
                 cancel,
                 last: Mutex::default(),
+                usage: Mutex::default(),
                 max_tokens: 4096,
             }),
             put,
             skills: None,
-            memory: None,
+            memory: Mutex::new(None),
+            sub_memory: Default::default(),
+            sub_pinned: None,
+            on_compact: None,
             transcript: None,
         }
     }
@@ -267,7 +292,23 @@ impl SynthesisContext {
     }
 
     pub fn with_memory(mut self, block: Option<String>) -> Self {
-        self.memory = block;
+        self.memory = Mutex::new(block);
+        self
+    }
+
+    /// Pinned-only block for sub-agents without their own, and one per definition prompt.
+    pub fn with_sub_memory(
+        mut self,
+        pinned: Option<String>,
+        per_prompt: std::collections::HashMap<String, String>,
+    ) -> Self {
+        self.sub_pinned = pinned;
+        self.sub_memory = per_prompt;
+        self
+    }
+
+    pub fn with_compact_hook(mut self, hook: CompactHook) -> Self {
+        self.on_compact = Some(hook);
         self
     }
 
@@ -337,10 +378,21 @@ impl ContextProvider for SynthesisContext {
         if agent_prompt.is_none() {
             observe(&mut state, history);
         }
+        // the main agent gets the frozen block; a sub-agent only pinned notes and the notes
+        // written for its own definition (memory.md §4)
+        let memory = match agent_prompt {
+            None => self
+                .memory
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            Some(p) => self.sub_memory.get(p).or(self.sub_pinned.as_ref()).cloned(),
+        };
         let input = ContextInput {
             system_rules: RULES,
             task_instructions: agent_prompt.map(|p| if p.is_empty() { SUB_RULES } else { p }),
             instructions: &self.instructions,
+            memory: memory.as_deref(),
             task_state: &state,
             snippets: &[],
             evidence: &[],
@@ -358,16 +410,6 @@ impl ContextProvider for SynthesisContext {
         }
         assemble(&input, &unbounded, &CharsPerToken::default())
             .map(|mut a| {
-                // sub-agents get no workspace memory (memory.md §4)
-                if let (Some(m), System::Blocks(b)) = (
-                    self.memory.as_ref().filter(|_| agent_prompt.is_none()),
-                    &mut a.system,
-                ) {
-                    b.push(SystemBlock {
-                        kind: Some("text".into()),
-                        text: Some(m.clone()),
-                    });
-                }
                 if let (Some(skills), System::Blocks(b)) = (&self.skills, &mut a.system) {
                     b.push(SystemBlock {
                         kind: Some("text".into()),
@@ -411,6 +453,12 @@ impl ContextProvider for SynthesisContext {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
+            if let Some(hook) = &self.on_compact {
+                let goal = state.goal.clone().unwrap_or_default();
+                if let Some(block) = hook(&goal, &summary) {
+                    *self.memory.lock().unwrap_or_else(|e| e.into_inner()) = block;
+                }
+            }
             Ok(Compaction {
                 messages,
                 summary_ref: (self.put)(summary.as_bytes())?,
@@ -576,5 +624,111 @@ mod tests {
         let (ab, a_b) = (d.path().join("a/b"), d.path().join("a-b"));
         assert_ne!(auto_memory_key(&ab), auto_memory_key(&a_b));
         assert!(load_auto_memory(&home, &[&a_b]).is_none());
+    }
+
+    // ---- memory block placement, sub-agents, compaction (memory.md §4, §6) ----
+
+    fn ctx_for_memory(turns: Vec<synthesis_harness::testing::Turn>) -> SynthesisContext {
+        let put: PutArtifact = Box::new(|b| {
+            Ok(ArtifactRef {
+                artifact_id: "a".into(),
+                path: "a".into(),
+                size: b.len() as u64,
+                sha256: String::new(),
+                mime: "text/plain".into(),
+            })
+        });
+        SynthesisContext::new(
+            vec![],
+            "fix the parser",
+            Arc::new(synthesis_harness::testing::FakeProvider::new(turns)),
+            "m".into(),
+            CancellationToken::new(),
+            put,
+        )
+    }
+
+    fn system_texts(b: Built) -> Vec<String> {
+        let System::Blocks(v) = b.system else {
+            panic!("blocks")
+        };
+        v.into_iter().filter_map(|x| x.text).collect()
+    }
+
+    fn user(t: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: Content::Text(t.into()),
+        }
+    }
+
+    #[test]
+    fn the_memory_block_precedes_task_state_and_sub_agents_get_their_own() {
+        let per = [(
+            "PROMPT-A".to_string(),
+            "<memory>A-notes</memory>".to_string(),
+        )]
+        .into();
+        let c = ctx_for_memory(vec![])
+            .with_memory(Some("<memory>main-notes</memory>".into()))
+            .with_sub_memory(Some("<memory>pinned-only</memory>".into()), per);
+        let hist = [user("hi")];
+        let main = system_texts(c.build(&hist, None).unwrap());
+        let mem = main.iter().position(|t| t.contains("main-notes")).unwrap();
+        let st = main
+            .iter()
+            .position(|t| t.contains("<task_state>"))
+            .unwrap();
+        assert!(mem < st, "{main:?}");
+        // a sub-agent never sees the main block
+        let a = system_texts(c.build(&hist, Some("PROMPT-A")).unwrap());
+        assert!(
+            a.iter().any(|t| t.contains("A-notes")) && !a.iter().any(|t| t.contains("main-notes"))
+        );
+        let other = system_texts(c.build(&hist, Some("OTHER")).unwrap());
+        assert!(other.iter().any(|t| t.contains("pinned-only")));
+        assert!(
+            !other
+                .iter()
+                .any(|t| t.contains("main-notes") || t.contains("A-notes"))
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_runs_the_hook_and_replaces_the_frozen_block() {
+        let seen = Arc::new(Mutex::new(vec![]));
+        let s2 = seen.clone();
+        let hook: CompactHook = Arc::new(move |goal: &str, summary: &str| {
+            s2.lock()
+                .unwrap()
+                .push((goal.to_string(), summary.to_string()));
+            Some(Some("<memory>after-compaction</memory>".to_string()))
+        });
+        let c = ctx_for_memory(vec![synthesis_harness::testing::Turn::text(
+            "SUMMARY about the parser",
+        )])
+        .with_memory(Some("<memory>OLD-BLOCK</memory>".into()))
+        .with_compact_hook(hook);
+        let big = "x".repeat(8000);
+        let hist: Vec<Message> = (0..8)
+            .map(|i| {
+                if i % 2 == 0 {
+                    user(&big)
+                } else {
+                    Message {
+                        role: Role::Assistant,
+                        content: Content::Text(big.clone()),
+                    }
+                }
+            })
+            .collect();
+        c.compact(&hist, "").await.unwrap();
+        let s = seen.lock().unwrap();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].0, "fix the parser");
+        assert!(s[0].1.contains("SUMMARY"));
+        let texts = system_texts(c.build(&[user("hi")], None).unwrap());
+        assert!(texts.iter().any(|t| t.contains("after-compaction")));
+        assert!(!texts.iter().any(|t| t.contains("OLD-BLOCK")));
     }
 }

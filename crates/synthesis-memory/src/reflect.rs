@@ -224,7 +224,7 @@ fn words(s: &str) -> HashSet<String> {
         .collect()
 }
 
-fn jaccard(a: &str, b: &str) -> f64 {
+pub(crate) fn jaccard(a: &str, b: &str) -> f64 {
     let (x, y) = (words(a), words(b));
     let union = x.union(&y).count();
     if union == 0 {

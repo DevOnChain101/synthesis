@@ -206,17 +206,19 @@ impl Store {
             }
         }
         let candidates = cands.len();
-        let (lo, hi) = cands
+        // bm25() is negative and smaller is better: `lo` is the best match
+        let lo = cands
             .iter()
             .filter_map(|(_, b)| *b)
-            .fold((f64::MAX, f64::MIN), |(l, h), b| (l.min(b), h.max(b)));
+            .fold(f64::MAX, f64::min);
         let mut scored: Vec<Note> = cands
             .into_iter()
             .filter_map(|(m, b)| {
-                // bm25() is negative and smaller is better
+                // Share of the best match's strength. (Min-max scaling would give the weakest of the
+                // candidates 0 however good it is, so a second relevant note was always dropped.)
                 let norm = match b {
-                    Some(_) if hi <= lo => 1.0,
-                    Some(b) => (hi - b) / (hi - lo),
+                    Some(b) if lo < -1e-9 => (b / lo).clamp(0.0, 1.0).powi(4),
+                    Some(_) => 1.0,
                     None => 0.0,
                 };
                 // a weak match of one common word is noise, not memory (pinned notes always stay)

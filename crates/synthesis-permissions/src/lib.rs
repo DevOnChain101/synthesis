@@ -288,6 +288,17 @@ impl Default for AutoModeSettings {
     }
 }
 
+/// Answers "did the agent save this memory note itself, for this workspace?" so the `memory` class
+/// can allow `MemoryUpdate`/`MemoryForget` on those and ask for every other note.
+#[derive(Clone)]
+pub struct NoteOracle(pub std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>);
+
+impl std::fmt::Debug for NoteOracle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NoteOracle")
+    }
+}
+
 /// Everything the engine needs from the outside world, passed explicitly.
 #[derive(Debug, Clone)]
 pub struct Env {
@@ -313,6 +324,8 @@ pub struct Env {
     /// `cwd`. Rules written `/x` or `./x`, and the inside-the-workspace test, are anchored here;
     /// a bare cwd-relative path keeps `cwd`.
     pub project_root: Option<PathBuf>,
+    /// Memory authorship (see [`NoteOracle`]); `None` = no store, so every note asks.
+    pub memory_notes: Option<NoteOracle>,
 }
 
 impl Env {
@@ -329,6 +342,7 @@ impl Env {
             deny_read: vec![],
             deny_secret_reads: false,
             project_root: None,
+            memory_notes: None,
         }
     }
 
@@ -1561,8 +1575,8 @@ impl Permissions {
 
         // The `memory` class (memory.md §8). A note about this workspace is the agent's own;
         // user or agent scope reaches other repositories, so the person decides (a headless ask is
-        // denied like every ask). Update and Forget are allowed here: the tool itself refuses any
-        // record that is not an agent-written note of this workspace (it has the record, we do not).
+        // denied like every ask). Update and Forget are allowed on notes the agent saved itself
+        // (the `NoteOracle` knows) and ask for any other note.
         if tool == "MemoryWrite" {
             if input.get("scope").and_then(Value::as_str) == Some("workspace") {
                 return v(Allow, "memory: note for this workspace");
@@ -1576,9 +1590,20 @@ impl Permissions {
             );
         }
         if matches!(tool, "MemoryUpdate" | "MemoryForget") {
+            let own = input
+                .get("id")
+                .and_then(Value::as_str)
+                .zip(self.env.memory_notes.as_ref())
+                .is_some_and(|(id, o)| (o.0)(id));
+            if own {
+                return v(Allow, "memory: a note the agent saved for this workspace");
+            }
+            if mode == Mode::DontAsk {
+                return v(Deny, "dontAsk mode");
+            }
             return v(
-                Allow,
-                "memory: the tool limits itself to agent-written notes",
+                Ask,
+                format!("{tool} on a note the agent did not save requires confirmation"),
             );
         }
 

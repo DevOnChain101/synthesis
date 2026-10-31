@@ -18,6 +18,9 @@ pub struct ContextInput<'a> {
     pub system_rules: &'a str,
     pub task_instructions: Option<&'a str>,
     pub instructions: &'a [InstructionFile],
+    /// The rendered `<memory>` block (memory.md §6): after the instructions, before `<task_state>`.
+    /// Already escaped and fenced by its producer.
+    pub memory: Option<&'a str>,
     pub task_state: &'a TaskState,
     /// Relevant files / search snippets, most relevant first.
     pub snippets: &'a [ContextItem],
@@ -152,6 +155,7 @@ pub fn assemble(
     let mut blocks = vec![input.system_rules.to_string()];
     blocks.extend(input.task_instructions.map(str::to_string));
     blocks.extend(render_instructions(input.instructions));
+    blocks.extend(input.memory.map(str::to_string));
     blocks.extend(
         input
             .task_state

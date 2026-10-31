@@ -628,7 +628,7 @@ fn doctor_reports_the_memory_store_without_creating_it() {
     ]);
     let after = doctor(&r);
     assert!(
-        after.contains("schema v2") && after.contains("quick_check ok"),
+        after.contains("schema v3") && after.contains("quick_check ok"),
         "{after}"
     );
     assert!(
@@ -636,4 +636,161 @@ fn doctor_reports_the_memory_store_without_creating_it() {
         "{after}"
     );
     assert!(after.contains("masking: on"), "{after}");
+}
+
+mod round2 {
+    use super::*;
+
+    fn settings(r: &Rig, json: &str) {
+        let h = r.dir.path().join("synthesis");
+        std::fs::create_dir_all(&h).unwrap();
+        std::fs::write(h.join("settings.json"), json).unwrap();
+    }
+
+    const OPS: &str = r#"{\"ops\":[{\"op\":\"add\",\"kind\":\"fact\",\"scope\":\"workspace\",\"title\":\"a.txt\",\"body\":\"a.txt exists\",\"evidence\":[\"tool:fake_1_0\"]}]}"#;
+
+    fn reflect_script() -> String {
+        format!(
+            r#"[{{"tools":[{{"name":"Read","input":{{"file_path":"missing.txt"}}}}]}},{{"tools":[{{"name":"Read","input":{{"file_path":"a.txt"}}}}]}},{{"text":"done"}},{{"text":"{OPS}","usage":[1000,500]}}]"#
+        )
+    }
+
+    #[test]
+    fn a_reflection_reports_tokens_and_cost_and_stats_sum_them() {
+        let r = Rig::new();
+        settings(
+            &r,
+            r#"{"synthesis":{"memory":{"reflection":true},"pricing":{"fake-model":{"input_per_mtok":3.0,"output_per_mtok":15.0}}}}"#,
+        );
+        std::fs::write(r.repo().join("a.txt"), "x\n").unwrap();
+        let (events, err) = r.synth_run(&reflect_script(), &[]);
+        assert!(events.contains("\"tokens\":1500"), "{events}\n{err}");
+        assert!(events.contains("\"cost_usd\":0.0105"), "{events}");
+        let st = r.ok(&["stats"]);
+        assert!(st.contains("reflection cost: $0.0105 (7 d)"), "{st}");
+        assert!(st.contains("retrievals: 1"), "{st}");
+        let j = r.ok(&["stats", "--json"]);
+        assert!(j.contains("\"reflection_tokens_7d\":1500"), "{j}");
+    }
+
+    #[test]
+    fn the_daily_budget_keeps_the_job_queued() {
+        let r = Rig::new();
+        settings(
+            &r,
+            r#"{"synthesis":{"memory":{"reflection":true,"daily_budget_usd":0}}}"#,
+        );
+        std::fs::write(r.repo().join("a.txt"), "x\n").unwrap();
+        let (events, err) = r.synth_run(&reflect_script(), &[]);
+        assert!(!events.contains("memory.reflection"), "{events}");
+        assert!(err.contains("daily reflection budget"), "{err}");
+        assert!(r.ok(&["stats"]).contains("1 queued"));
+    }
+
+    #[test]
+    fn a_passing_verification_command_becomes_a_verified_fact() {
+        let r = Rig::new();
+        std::fs::write(r.repo().join("a.txt"), "hello\n").unwrap();
+        let crit = r.dir.path().join("criteria.json");
+        std::fs::write(
+            &crit,
+            r#"[{"id":"c1","text":"a.txt says bye","check":"grep -q bye a.txt"}]"#,
+        )
+        .unwrap();
+        let script = r#"[{"tools":[{"name":"Read","input":{"file_path":"a.txt"}}]},{"tools":[{"name":"Edit","input":{"file_path":"a.txt","old_string":"hello","new_string":"bye"}}]},{"text":"fixed"}]"#;
+        let (events, err) = r.synth_run(
+            script,
+            &[
+                "--permission-mode",
+                "acceptEdits",
+                "--criteria-file",
+                crit.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            events.contains("\"status\":\"completed\""),
+            "{events}\n{err}"
+        );
+        let facts = r.ok(&["list", "--cwd", cwd(&r.repo()), "--kind", "fact"]);
+        assert!(
+            facts.contains("grep -q bye a.txt")
+                && facts.contains(" verified ")
+                && facts.contains("slot cmd.verify."),
+            "{facts}"
+        );
+        let ep = r.ok(&["list", "--cwd", cwd(&r.repo()), "--kind", "episode"]);
+        assert!(ep.contains("verified `grep -q bye a.txt` exit 0"), "{ep}");
+        assert!(ep.contains("Cost:"), "{ep}");
+    }
+
+    #[test]
+    fn update_and_forget_of_a_note_the_agent_did_not_write_are_denied_headless() {
+        let r = Rig::new();
+        let out = r.ok(&["add", "Owner convention", "--cwd", cwd(&r.repo())]);
+        let id = out.split_whitespace().nth(1).unwrap().to_string();
+        let script = format!(
+            r#"[{{"tools":[{{"name":"MemoryForget","input":{{"id":"{id}","reason":"stale"}}}},{{"name":"MemoryUpdate","input":{{"id":"{id}","body":"changed"}}}}]}},{{"text":"done"}}]"#
+        );
+        let (events, _) = r.synth_run(&script, &[]);
+        assert!(events.contains("approval_required"), "{events}");
+        let list = r.ok(&["list", "--cwd", cwd(&r.repo())]);
+        assert!(
+            list.contains("Owner convention") && !list.contains("changed"),
+            "{list}"
+        );
+        assert!(
+            !r.ok(&["list", "--cwd", cwd(&r.repo()), "--status", "archived"])
+                .contains(&id)
+        );
+    }
+
+    #[test]
+    fn claude_auto_memory_import_goes_to_review() {
+        let r = Rig::new();
+        let repo = synthesis_app::memcmd::repo_of(&r.repo());
+        let dir = r
+            .dir
+            .path()
+            .join("synthesis/projects")
+            .join(synthesis_app::ctx::auto_memory_key(&repo.root))
+            .join("memory");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("t.md"),
+            "---\nname: Test cmd\ntype: project\n---\nRun cargo test.\n",
+        )
+        .unwrap();
+        let out = r.ok(&["import", "--claude", "--cwd", cwd(&r.repo())]);
+        assert!(out.contains("imported 1 note"), "{out}");
+        assert!(
+            r.ok(&["list", "--cwd", cwd(&r.repo())])
+                .contains("0 record")
+        );
+        let review = r.ok(&["review", "--cwd", cwd(&r.repo())]);
+        assert!(
+            review.contains("Test cmd") && review.contains("untrusted"),
+            "{review}"
+        );
+        // a pipe cannot import (the same lock as every mutating command)
+        let mut c = r.cmd(&["import", "--claude", "--cwd", cwd(&r.repo())]);
+        c.env_remove("SYNTHESIS_TEST_ATTENDED");
+        assert!(!c.output().unwrap().status.success());
+    }
+
+    #[test]
+    fn prune_merges_near_duplicates() {
+        let r = Rig::new();
+        for t in [
+            "Run parser tests with cargo test",
+            "Run parser tests with cargo test -p parser",
+        ] {
+            r.ok(&["add", t, "--cwd", cwd(&r.repo()), "--title", t]);
+        }
+        // both are `owner` notes: never merged
+        assert!(r.ok(&["prune"]).contains("merged 0"));
+        assert!(
+            r.ok(&["list", "--cwd", cwd(&r.repo())])
+                .contains("2 record")
+        );
+    }
 }

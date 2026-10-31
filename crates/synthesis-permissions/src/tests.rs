@@ -2272,8 +2272,9 @@ fn memory_class_defaults_and_scope_rules() {
             Q,
             "{mode:?}: no scope asks"
         );
-        assert_eq!(d(&p, "MemoryUpdate", json!({"id": "m-1"})), A, "{mode:?}");
-        assert_eq!(d(&p, "MemoryForget", json!({"id": "m-1"})), A, "{mode:?}");
+        // without a store (no oracle) every note is someone else's: ask
+        assert_eq!(d(&p, "MemoryUpdate", json!({"id": "m-1"})), Q, "{mode:?}");
+        assert_eq!(d(&p, "MemoryForget", json!({"id": "m-1"})), Q, "{mode:?}");
     }
     // headless / dontAsk: an ask is a deny
     assert_eq!(d(&f.perms(Mode::DontAsk), "MemoryWrite", user.clone()), D);
@@ -2289,6 +2290,32 @@ fn memory_class_defaults_and_scope_rules() {
     assert_eq!(d(&a, "MemoryWrite", json!({"scope": "agent"})), Q);
     let ask = f.with(rules(&[], &[], &["MemoryUpdate"]), Mode::Default);
     assert_eq!(d(&ask, "MemoryUpdate", json!({"id": "m-1"})), Q);
+}
+
+#[test]
+fn memory_update_and_forget_allow_agent_notes_and_ask_for_the_rest() {
+    let f = fx();
+    let oracle = crate::NoteOracle(std::sync::Arc::new(|id: &str| id == "m-agent"));
+    for mode in [Mode::Default, Mode::AcceptEdits, Mode::Plan, Mode::Auto] {
+        let mut env = f.env(mode);
+        env.memory_notes = Some(oracle.clone());
+        let p = Permissions::new(PermissionRules::default(), env);
+        for tool in ["MemoryUpdate", "MemoryForget"] {
+            assert_eq!(d(&p, tool, json!({"id": "m-agent"})), A, "{tool} {mode:?}");
+            assert_eq!(d(&p, tool, json!({"id": "m-owner"})), Q, "{tool} {mode:?}");
+            assert_eq!(d(&p, tool, json!({})), Q, "{tool} {mode:?}: no id");
+        }
+    }
+    // headless (non-interactive) and dontAsk: an ask is a deny
+    let mut env = f.env(Mode::Default).interactive(false);
+    env.memory_notes = Some(oracle.clone());
+    let p = Permissions::new(PermissionRules::default(), env);
+    assert_eq!(d(&p, "MemoryForget", json!({"id": "m-owner"})), D);
+    assert_eq!(d(&p, "MemoryForget", json!({"id": "m-agent"})), A);
+    let mut env = f.env(Mode::DontAsk);
+    env.memory_notes = Some(oracle);
+    let p = Permissions::new(PermissionRules::default(), env);
+    assert_eq!(d(&p, "MemoryUpdate", json!({"id": "m-owner"})), D);
 }
 
 #[test]
