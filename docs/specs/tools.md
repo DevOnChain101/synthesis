@@ -77,7 +77,7 @@ Rules:
 | NotebookEdit | **notebook_path**:string, cell_id:string, new_source:string, cell_type:enum[code,markdown], edit_mode:enum[replace,insert,delete] | tools/notebook.js:53-62 |
 | Glob | **pattern**:string, path:string | tools/glob.js:18-24 |
 | Grep | **pattern**:string, path, glob, type:string, output_mode:enum[files_with_matches,content,count], "-i","-n":boolean, "-A","-B","-C":number, multiline:boolean, head_limit:number | tools/grep.js:253-270 |
-| Bash | **command**:string, timeout:number (ms, default 120000, max 600000; at the timeout `synth run` kills the command, the interactive app moves it to the background and tells the model its `bash_id`, owner decision D6), description:string, run_in_background:boolean | tools/bash.js:139-148 |
+| Bash | **command**:string, timeout:number (ms, default 120000, max 600000; at the timeout `synth run` kills the command, owner decision D6), description:string, run_in_background:boolean | tools/bash.js:139-148 |
 | BashOutput | **bash_id**:string, filter:string (regex) | tools/bash.js:259-266 |
 | KillShell | **shell_id**:string | tools/bash.js:277-281 |
 | WebFetch | **url**:string, **prompt**:string | tools/webfetch.js:40-47 |

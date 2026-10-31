@@ -6,9 +6,10 @@ Owns its agent loop and tool runtime; talks to Anthropic-compatible and OpenAI-c
 ## Source of truth
 - Design: [Synthesis_Solution_Concept_and_Technical_Design.md](./docs/Synthesis_Solution_Concept_and_Technical_Design.md) (v1.1). 12 components, ADRs, roadmap, acceptance tests. Read the relevant section before designing; update the doc when a decision changes.
 - Status: Cargo workspace scaffold exists (no commits yet). Current phase: R0/R1 (contracts + eval), see §14 of the doc.
+- **UI removed 2026-10-31 (owner decision).** The TUI (all generations), the GPUI desktop app and the UI inherited from the Node CLI are gone; archived at tag `archive/ui-before-removal` (do not delete). The product is a headless CLI (`synth`) plus libraries. Build a new UI only when the owner asks, from the HTML design (`~/Vibe/synthesis-cli-ui/index.html`, `design/03-designs/desktop`).
 
 ## Naming (owner decision 2026-10-30; the product was called Nemo before)
-- Product: **Synthesis**. The ONLY short name is the command `synth` (`synth run|tui|doctor|auth|models|mcp|import`); everything else uses the long name: crates `synthesis-*`, env `SYNTHESIS_*`, home `~/.synthesis`, project dir `.synthesis/`, `synthesis.json`, `SYNTHESIS.md`, `synthesis.db`, settings key `"synthesis"`, npm `@devonchain101/synthesis`.
+- Product: **Synthesis**. The ONLY short name is the command `synth` (`synth run|doctor|auth|models|mcp|import|memory`); everything else uses the long name: crates `synthesis-*`, env `SYNTHESIS_*`, home `~/.synthesis`, project dir `.synthesis/`, `synthesis.json`, `SYNTHESIS.md`, `synthesis.db`, settings key `"synthesis"`, npm `@devonchain101/synthesis`.
 - Synthesis never reads `~/.nemo` or `NEMO_*`; `synth doctor` only detects them and prints how to migrate. `node scripts/check-no-legacy-name.mjs` (CI) fails on any new "nemo" outside `scripts/nemo-leftovers.allow`.
 - The GitHub repo slug is still `DevOnChain101/nemo-acd` (`packaging/REPO`); it changes when the new repo exists (docs/RELEASE.md). Brand kit and GUI/landing references: `design/`.
 
@@ -20,7 +21,7 @@ Owns its agent loop and tool runtime; talks to Anthropic-compatible and OpenAI-c
 
 ## Reference implementation (read-only)
 - Old Node CLI: `~/Vibe/nemo-cli` (~24k lines JS, `npm test`). It is the frozen oracle: use it to read behavior, build golden fixtures and baseline evals. Do not add features there and NEVER modify anything under it (owner instruction, 2026-10-28: the owner no longer uses that repo; reading it for behaviour/fixtures is still fine). Its two open test failures (legacyEnvWarnings, selection copy glyph) are moot.
-- Port behavior, not code shape. Faithful ports: config, permissions, parser, render (golden-tested). Reshaped on purpose: `WorkspaceContext` + `session_id` on every tool call, typed event bus emitting JSONL, session store, `TerminalRuntime`.
+- Port behavior, not code shape. Faithful ports: config, permissions, parser (golden-tested). Reshaped on purpose: `WorkspaceContext` + `session_id` on every tool call, typed event bus emitting JSONL, session store, `TerminalRuntime`.
 - Module→component map: Appendix C of the doc. Known Node weaknesses to NOT carry over: no OS sandbox, no worktrees, no browser, no verification gate, plaintext `auth.json`.
 
 ## Cross-platform is a requirement (macOS, Linux, Windows)
@@ -36,4 +37,4 @@ Owns its agent loop and tool runtime; talks to Anthropic-compatible and OpenAI-c
 - Workspace layout: `crates/synthesis-events`, `crates/synthesis-platform`, `apps/cli` (bin `synth`); other Appendix A crates are added when needed.
 
 ## Roadmap (doc §14)
-R0 Node baseline green + 3-OS CI → R1 contracts & eval → R2 core lib + TerminalRuntime → R3 providers + MCP → R4 harness + Verification + headless CLI → R5 TUI → R6 Browser → R7 policy/sandbox → R8 durable sessions/worktrees → R9 cutover (Rust eval ≥ Node baseline, golden tests green on 3 OSes).
+R0 Node baseline green + 3-OS CI → R1 contracts & eval → R2 core lib + TerminalRuntime → R3 providers + MCP → R4 harness + Verification + headless CLI → R5 TUI (removed 2026-10-31) → R6 Browser → R7 policy/sandbox → R8 durable sessions/worktrees → R9 cutover (Rust eval ≥ Node baseline, golden tests green on 3 OSes).

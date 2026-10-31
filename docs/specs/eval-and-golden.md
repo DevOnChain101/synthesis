@@ -72,7 +72,6 @@ Per task: success rate over `runs`. Per agent+model: success rate, verified-comp
 | tool schemas | `toolSchemas(builtinTools())` + `agentToolSchemas` [tools/index.js:25-31] | exact names, descriptions, schemas | 3 (Bash text) |
 | providers | `createAnthropicProvider`/`createOpenAIProvider` with `clientImpl` [providers/*.js] | normalized req → wire body; recorded SSE/chunks → normalized events | 1 |
 | hooks | `Hooks.run` [hooks.js:90] | config + payload + scripted outputs → stdin JSON + merged result | 3 (shell) |
-| render | `render.js` frames | items + width/height/theme → frame text, fixed `COLUMNS`/`LINES`, no `COLORTERM`/`TERM` dependency | 1 + Windows legacy conhost when verified |
 
 ## B.2 Layout and normalisation
 ```

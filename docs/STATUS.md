@@ -1,5 +1,7 @@
 # Synthesis status
 
+UI removed 2026-10-31: the figures below that mention the TUI, its goldens or tty-qa describe the archived state.
+
 Goal: R1–R9, hand over the full Synthesis autonomous coding agent. Not complete: see "Open".
 
 ## Verified
@@ -7,8 +9,7 @@ Goal: R1–R9, hand over the full Synthesis autonomous coding agent. Not complet
 - macOS (local, tester + developers): `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (about 884 tests, 0 failed), `cargo test -p synthesis-cli --features test-provider` (88), eval selftest 6/6, rustdoc `-D warnings`, `cargo +1.89 check`.
 - Counting method (to compare future runs): `grep -E '^test result' log | awk '{p+=$4; f+=$6; i+=$8}'`.
 - Real-model eval after the rename (2026-10-30, 40 runs, acceptEdits, sandbox enforce; docs/research/eval-baseline-rust.md): status-ok haiku 79% (19/24), luna 94% (15/16); false-success 0/40; code tasks completed without model approval haiku 44%, luna 100%. Cutover thresholds: false-success met; status-ok >= 85% not met for haiku; approvals >= 50% not met for haiku alone (pooled 67%).
-- Real provider smoke (omniroute, OpenAI-compatible gateway): `cc/claude-haiku-5-5` and `cx/gpt-5.6-luna` stream, call tools and finish a task; a TUI end-to-end coding task passed (20 s, verification passed).
-- TUI driven through a pseudo-terminal (`tests/tty-qa`, report `docs/research/tty-qa-report.md`): 34 bugs found, 29 fixed, 4 partly, 1 open (B-29).
+- Real provider smoke (omniroute, OpenAI-compatible gateway): `cc/claude-haiku-5-5` and `cx/gpt-5.6-luna` stream, call tools and finish a task.
 - Security: five review passes plus a sixth on the permission/MCP/`!cmd`/streaming changes (fixes in); residual risks in docs/SECURITY.md.
 - Golden: 717 snapshot cases from the Node prototype are regression snapshots only (the prototype is not authoritative); documented divergences are listed next to each golden test.
 
@@ -17,7 +18,7 @@ Goal: R1–R9, hand over the full Synthesis autonomous coding agent. Not complet
 - R2 core: config, terminal, hooks, tools, permissions (all six modes incl. the auto-mode LLM judge; bypass needs confirmation).
 - R3 providers (Anthropic, OpenAI-compatible) and MCP (stdio, streamable HTTP, SSE; read-before-write guard; credential propagation checks; `synth mcp test`).
 - R4 harness, verification gate (one approval per check set; edits with no check end `unverified`), headless `synth run` with `--permission-mode`, `--allow/--deny`.
-- R5 TUI: Shift+Tab modes, copy/selection, message queue, diff views, `/mcp /agents /permissions /model /resume /effort`.
+- R5 TUI: built, then removed on 2026-10-31 together with the GPUI desktop app (archive tag `archive/ui-before-removal`); the product is a headless CLI plus libraries until the owner asks for a new UI built from the HTML design.
 - R6 browser (own CDP client). R7 sandbox (Seatbelt tested; Landlock/bwrap; Windows Job Object). R8 sessions (SQLite) and worktrees. R9a CI + release pipeline.
 
 ## Decisions on record

@@ -11,7 +11,6 @@ Phase R1 deliverable (design doc §10 Phase 0, §14). Base: `../Synthesis_Soluti
 | [config.md](config.md) | files, layering, env vars, `$schema` rules, credential policy (user-managed API keys, ADR-011) | reviewed 0.1 |
 | [verification.md](verification.md) | `VerificationReport`, status rules, completion gate, self-correction, budgets | reviewed 0.1 |
 | [eval-and-golden.md](eval-and-golden.md) | eval harness, task manifest, 6+2 scenarios, scoring, golden capture plan | reviewed 0.1 |
-| [tui-design.md](tui-design.md) | TUI redesign: theme tokens, layout planner and panel registry, `/config`, logo; phases P1–P4 | accepted (owner decisions D1–D11, 2026-10-30); P1 implemented |
 
 Status values: draft → reviewed (product owner + one engineer) → frozen (changes need a `v` bump or an ADR).
 
@@ -48,7 +47,3 @@ Also open, lower stakes: thinking deltas in the stream; artifact retention defau
 
 ## R1 progress
 - `tests/agent-evals/` holds the eval harness (Node ESM, no deps), the 8 v1 scenarios, and oracle/noop/node/rust adapters; see its README. Self-test: `node tests/agent-evals/harness/selftest.js`. Open question 4 above is answered in practice: `NativeAgent` runs headless through the in-repo adapter. Windows/Linux and real-provider runs are unverified.
-
-## Branding and TUI theme (2026-10-30)
-
-The owner's brand kit is in `design/` (README there). The kit palette is silver on near-black (`design/02-design-tokens/tokens.css`); the TUI theme in `crates/synthesis-tui-render/src/theme.rs` (`ACCENT_*`, `BORDER_GRAD`, `LOGO_GRAD`) is still indigo. Not changed with the rename: switching the accents rewrites the SGR snapshots of nearly every render golden, which is a larger, reviewable change of its own. Wordmark: plain `Synthesis` in the dashboard header; the spaced uppercase `S Y N T H E S I S` of the kit is not used by the TUI.

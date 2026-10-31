@@ -42,11 +42,11 @@ fn run_without_cwd_uses_the_launch_dir() {
 }
 
 #[test]
-fn once_and_doctor_work_without_cwd_flag() {
+fn doctor_works_without_cwd_flag() {
     let h = tempfile::tempdir().unwrap();
     let ws = h.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
-    for args in [&["--once"][..], &["doctor"][..]] {
+    for args in [&["doctor"][..]] {
         let o = Command::new(env!("CARGO_BIN_EXE_synth"))
             .args(args)
             .env_clear()
@@ -185,43 +185,10 @@ fn fake_provider_is_refused_without_the_feature() {
 }
 
 #[test]
-fn no_subcommand_without_a_terminal_prints_usage_and_exits_2() {
+fn no_subcommand_prints_usage_and_exits_2() {
     let h = tempfile::tempdir().unwrap();
-    let o = synthesis(h.path(), &["--cwd", h.path().to_str().unwrap()]);
+    let o = synthesis(h.path(), &[]);
     assert_eq!(o.status.code(), Some(2));
-    assert!(text(&o.stderr).contains("needs a terminal"));
+    assert!(text(&o.stderr).contains("Usage: synth"));
     assert!(o.stdout.is_empty());
-}
-
-#[test]
-fn once_renders_one_frame_without_a_terminal() {
-    let h = tempfile::tempdir().unwrap();
-    let o = synthesis(h.path(), &["--once", "--cwd", h.path().to_str().unwrap()]);
-    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
-    assert!(!o.stdout.is_empty());
-}
-
-#[test]
-fn once_shows_the_startup_warnings() {
-    let h = tempfile::tempdir().unwrap();
-    let cwd = h.path().to_str().unwrap();
-    let o = synthesis(
-        h.path(),
-        &[
-            "--once",
-            "--cwd",
-            cwd,
-            "--sandbox",
-            "off",
-            "--network",
-            "allow",
-        ],
-    );
-    assert_eq!(o.status.code(), Some(0), "{}", text(&o.stderr));
-    let out = text(&o.stdout);
-    assert!(
-        out.contains("unsandboxed_by_request: --sandbox off"),
-        "{out}"
-    );
-    assert!(out.contains("--network allow"), "{out}");
 }
