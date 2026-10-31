@@ -254,7 +254,10 @@ fn peers_are_off_by_default_and_a_flagged_run_registers_then_cleans_up() {
         "no run dir unless peers are on"
     );
 
-    let (o, ev) = rig.run(json!([{"text": "ok"}]), &["--peers", "--name", "backend"]);
+    let (o, ev) = rig.run(
+        json!([{"text": "ok"}]),
+        &["--peers", "--name", "backend", "--about", "Backend: billing"],
+    );
     assert_eq!(
         o.status.code(),
         Some(0),
@@ -296,6 +299,12 @@ fn peers_are_off_by_default_and_a_flagged_run_registers_then_cleans_up() {
             .filter(|d| d.path().join("card.entry").is_file())
             .count();
         assert_eq!(cards, 1, "one card for the one flagged run");
+        let card = std::fs::read_dir(rig.home().join("run/mailbox"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .find_map(|d| std::fs::read_to_string(d.path().join("card.entry")).ok())
+            .unwrap();
+        assert!(card.contains("Backend: billing"), "--about is in the card: {card}");
     }
     let left: Vec<_> = std::fs::read_dir(rig.home().join("run"))
         .into_iter()

@@ -575,7 +575,8 @@ async fn list_sessions_and_list_agents_all_show_permitted_peers_only() {
             Turn::text("ok")
         })
     });
-    let (a, ea) = side("sess-a", "alpha", &run, Some(on.clone()), idle.clone(), 10);
+    let (a, mut ea) = side("sess-a", "alpha", &run, Some(on.clone()), idle.clone(), 10);
+    ea.about = Some("Alpha: payments API".into());
     let (c, ec) = side("sess-c", "secret", &run, Some(on.clone()), idle, 10);
     let (mut b, _) = side("sess-b", "beta", &run, Some(on), b_responder, 10);
     let _ra = serve(&a, &run, ea);
@@ -604,6 +605,8 @@ async fn list_sessions_and_list_agents_all_show_permitted_peers_only() {
             .unwrap()
             .contains("/sess:sess-a/agent:main")
     );
+    assert_eq!(rows[1]["session"]["about"], "Alpha: payments API");
+    assert!(rows[0]["session"]["about"].is_null());
     let (all, err) = tool_result(&reqs[2], "la").unwrap();
     assert!(
         !err && all.contains("sess-a") && !all.contains("sess-c"),

@@ -29,6 +29,35 @@ pub fn valid_name(n: &str) -> bool {
         && c.all(|x| x.is_ascii_lowercase() || x.is_ascii_digit() || x == '_' || x == '-')
 }
 
+/// What the session is for, shown to peers: `--about`, else the first non-empty line of
+/// `SYNTHESIS.md` at the workspace root (a regular file, first 4 KiB). Redacted, control
+/// characters removed, at most 120 characters.
+pub fn about_of(flag: Option<&str>, root: &Path, redact: &dyn Fn(&str) -> String) -> Option<String> {
+    let text = match flag {
+        Some(f) => f.to_string(),
+        None => {
+            use std::io::Read;
+            let p = root.join("SYNTHESIS.md");
+            if !std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_file()) {
+                return None;
+            }
+            let mut buf = Vec::new();
+            std::fs::File::open(&p).ok()?.take(4096).read_to_end(&mut buf).ok()?;
+            String::from_utf8_lossy(&buf)
+                .lines()
+                .map(|l| l.trim().trim_start_matches('#').trim())
+                .find(|l| !l.is_empty())?
+                .to_string()
+        }
+    };
+    let line: String = redact(&text)
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let line: String = line.trim().chars().take(120).collect();
+    (!line.is_empty()).then_some(line)
+}
+
 /// True when no live process holds the session's writer lock (B4 Stale). A missing lock file
 /// (`--no-session-store`) proves nothing, so it counts as alive.
 pub fn session_lock_free(home: &Path, session_id: &str) -> bool {
@@ -50,6 +79,7 @@ pub fn session_lock_free(home: &Path, session_id: &str) -> bool {
 pub fn setup(
     force_on: bool,
     name: Option<&str>,
+    about: Option<String>,
     peers: &Map<String, Value>,
     home: &Path,
     env: &Env,
@@ -123,7 +153,7 @@ pub fn setup(
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
         repo_key: ws.repo_key.clone(),
-        about: None,
+        about,
     };
     let reg = match Registration::create(&run, &entry) {
         Ok(r) => r,
@@ -223,6 +253,22 @@ mod tests {
         for bad in ["", "-a", "_a", "A", "a b", "a/b", &"a".repeat(33)] {
             assert!(!valid_name(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn about_comes_from_the_flag_or_the_first_line_of_synthesis_md() {
+        let t = tempfile::tempdir().unwrap();
+        let red = |s: &str| s.replace("sk-SECRET", "[REDACTED]");
+        assert_eq!(about_of(None, t.path(), &red), None);
+        std::fs::write(t.path().join("SYNTHESIS.md"), "\n# Billing API sk-SECRET\nmore\n").unwrap();
+        assert_eq!(
+            about_of(None, t.path(), &red).as_deref(),
+            Some("Billing API [REDACTED]")
+        );
+        assert_eq!(about_of(Some("flag\u{7}x"), t.path(), &red).as_deref(), Some("flag x"));
+        let long = "x".repeat(300);
+        assert_eq!(about_of(Some(&long), t.path(), &red).unwrap().len(), 120);
+        assert_eq!(about_of(Some("  "), t.path(), &red), None);
     }
 
     #[test]

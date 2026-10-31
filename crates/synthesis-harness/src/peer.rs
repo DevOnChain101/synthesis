@@ -824,7 +824,7 @@ impl Harness {
                     "address": ad.canonical(),
                     "display": ad.display(),
                     "workspace": {"label": entry.workspace_label, "key": entry.workspace_key, "root": entry.workspace_root},
-                    "session": {"short_id": entry.session_id.chars().take(8).collect::<String>(), "name": entry.session_name, "status": session_status},
+                    "session": {"short_id": entry.session_id.chars().take(8).collect::<String>(), "name": entry.session_name, "about": entry.about, "status": session_status},
                     "agent": {"instance": a["instance"], "kind": a["kind"], "status": a["status"], "queued": a["queued"]},
                     "task_summary": a["task_summary"],
                 })
@@ -895,7 +895,7 @@ impl Harness {
                     let ad = p.entry.addr(MAIN, MAIN);
                     rows.push(json!({"address": ad.canonical(), "display": ad.display(),
                         "workspace": {"label": p.entry.workspace_label, "key": p.entry.workspace_key, "root": p.entry.workspace_root},
-                        "session": {"short_id": p.entry.session_id.chars().take(8).collect::<String>(), "name": p.entry.session_name, "status": "unreachable"},
+                        "session": {"short_id": p.entry.session_id.chars().take(8).collect::<String>(), "name": p.entry.session_name, "about": p.entry.about, "status": "unreachable"},
                         "agent": {"instance": MAIN, "kind": MAIN, "status": "unreachable", "queued": 0}, "task_summary": ""}));
                 }
             }
