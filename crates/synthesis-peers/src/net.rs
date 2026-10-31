@@ -93,12 +93,12 @@ fn mac(key: &Key, label: &[u8], a: &[u8], b: &[u8]) -> Hmac<Sha256> {
     m
 }
 
-fn proof(key: &Key, label: &[u8], a: &[u8], b: &[u8]) -> String {
+pub(crate) fn proof(key: &Key, label: &[u8], a: &[u8], b: &[u8]) -> String {
     hex(&mac(key, label, a, b).finalize().into_bytes())
 }
 
 /// Constant-time check of a hex proof.
-fn verify(key: &Key, label: &[u8], a: &[u8], b: &[u8], got: Option<&str>) -> bool {
+pub(crate) fn verify(key: &Key, label: &[u8], a: &[u8], b: &[u8], got: Option<&str>) -> bool {
     let Some(bytes) = got.and_then(unhex) else {
         return false;
     };

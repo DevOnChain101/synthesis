@@ -984,6 +984,9 @@ pub fn prepare(
     );
     let harness = Arc::new(harness);
     if let (Some(l), Some(server)) = (peer_listener, harness.peer_server()) {
+        if let Some(w) = harness.peer_mailbox_worker(server.clone()) {
+            tokio_rt.spawn(w);
+        }
         tokio_rt.spawn(server.run(l));
     }
     Ok(Prepared {

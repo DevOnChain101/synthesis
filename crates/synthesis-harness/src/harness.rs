@@ -803,7 +803,7 @@ impl Harness {
         let (bg_tx, mut bg_rx) = tokio::sync::mpsc::unbounded_channel();
         self.hub
             .begin_task(bg_tx, task.cancel.clone(), task.task_id.clone());
-        self.peer_task_started(&req.request);
+        self.peer_task_started(&req.request, &main.name, &st.messages);
         *lock(&task.user_texts) = crate::classifier::user_texts(&st.messages, &req.request);
         st.messages.push(Message {
             role: Role::User,
