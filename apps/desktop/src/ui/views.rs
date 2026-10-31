@@ -16,8 +16,8 @@ use gpui_component::{StyledExt as _, h_flex, v_flex};
 use synthesis_permissions::Mode as Perm;
 
 use super::{
-    ActiveNav, Bottom, HEADER_H, INSPECTOR_W, Menu, Nav, READING_W, Shell, SideTab, TOP_SAFE, Tab,
-    Variant, btn, choice, drag, empty, icon, kbd, label, spaced,
+    ActiveNav, Bottom, HEADER_H, INSPECTOR_W, LIGHTS_W, MAX_TABS, Menu, Nav, READING_W, Shell,
+    SideTab, Tab, Variant, btn, choice, drag, empty, icon, kbd, label,
 };
 use crate::activity::{self, Filter};
 use crate::convo::{ApprovalState, Item, StepState, ToolState};
@@ -28,8 +28,8 @@ use crate::theme::{self, hsla};
 use crate::topology::{self, Pos, Rect};
 
 const DOT_NEEDS_YOU: u32 = theme::PENDING;
-const DOT_RUNNING: u32 = theme::ACCENT;
-const DOT_DONE: u32 = theme::SUCCESS;
+const DOT_RUNNING: u32 = theme::SUCCESS;
+const DOT_DONE: u32 = 0x6B727C;
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -48,6 +48,23 @@ fn dot(s: Status) -> gpui::Div {
             Status::Running => DOT_RUNNING,
             Status::Done => DOT_DONE,
         }))
+}
+
+/// The status dot; a running session breathes.
+fn live_dot(s: Status, id: impl Into<gpui::ElementId>) -> AnyElement {
+    if s == Status::Running {
+        dot(s)
+            .with_animation(
+                id,
+                gpui::Animation::new(std::time::Duration::from_millis(1400))
+                    .repeat()
+                    .with_easing(gpui::pulsating_between(0.35, 1.0)),
+                |d, t| d.opacity(t),
+            )
+            .into_any_element()
+    } else {
+        dot(s).into_any_element()
+    }
 }
 
 fn sid(prefix: &str, i: impl std::fmt::Display) -> SharedString {
@@ -150,20 +167,17 @@ impl Shell {
             .border_color(hsla(0x1C2127))
             .child(
                 v_flex()
-                    .child(drag("drag-rail").h(px(TOP_SAFE)).w_full())
+                    // the top bar over the rail: traffic-light safe area, then the sidebar toggle
                     .child(
                         h_flex()
-                            .gap(px(10.))
-                            .m(px(6.))
-                            .mb(px(18.))
-                            .child(img(crate::brand::mark()).size(px(30.)).flex_shrink_0())
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .font_semibold()
-                                    .child(spaced("SYNTHESIS")),
-                            ),
+                            .h(px(HEADER_H))
+                            .mx(px(-13.))
+                            .pl(px(LIGHTS_W))
+                            .pr(px(13.))
+                            .child(self.sidebar_toggle(cx))
+                            .child(drag("drag-rail").flex_1().h_full()),
                     )
+                    .child(div().h(px(8.)))
                     .child(
                         h_flex()
                             .id("new-task")
@@ -542,26 +556,69 @@ impl Shell {
 
     // ------------------------------------------------------------------------------ session
 
+    /// The sidebar fold button of the top bar (MonoCode style).
+    fn sidebar_toggle(&self, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id("sidebar-toggle")
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(28.))
+            .flex_shrink_0()
+            .rounded(px(8.))
+            .cursor_pointer()
+            .hover(|d| d.bg(hsla(0x1A1F26)))
+            .child(icon(
+                if self.settings.sidebar_collapsed {
+                    "panel-left-open"
+                } else {
+                    "panel-left-close"
+                },
+                16.,
+                theme::MUTED,
+            ))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)))
+    }
+
+    /// The top bar over the main area, on the same centre line as the rail's: one tab per open
+    /// session (label = its first message, status dot, close button on hover and on the active
+    /// one, middle click closes, at most `MAX_TABS` with an overflow menu, `+` for a new session),
+    /// then the mission progress and the Inspector toggle. When the sidebars are folded the bar
+    /// also carries the traffic-light safe area and the sidebar toggle.
     fn tab_strip(&self, cx: &mut Context<Self>) -> AnyElement {
-        let many = self.tabs.len() > 1;
-        let tabs = self.tabs.iter().enumerate().map(|(i, t)| {
+        let n = self.tabs.len();
+        let mut vis: Vec<usize> = (0..n.min(MAX_TABS)).collect();
+        if self.active >= MAX_TABS {
+            vis[MAX_TABS - 1] = self.active;
+        }
+        let hidden: Vec<usize> = (0..n).filter(|i| !vis.contains(i)).collect();
+        let width = match n {
+            1 => 420.,
+            2 => 240.,
+            _ => 170.,
+        };
+        let tabs = vis.iter().map(|&i| {
+            let t = &self.tabs[i];
             let on = i == self.active;
             let st = sessions::status_of(t.live.then_some(&t.convo));
+            let group = SharedString::from(format!("tab-{i}"));
+            let closable = !t.live || !t.convo.items.is_empty();
             h_flex()
                 .id(sid("tab", i))
+                .group(group.clone())
                 .gap(px(8.))
-                .max_w(px(if many { 220. } else { 480. }))
+                .max_w(px(width))
                 .min_w_0()
-                .px(px(if many { 10. } else { 0. }))
-                .h(px(28.))
+                .px(px(10.))
+                .h(px(30.))
                 .rounded(px(8.))
                 .text_size(px(13.))
                 .font_medium()
                 .text_color(hsla(if on { theme::TEXT } else { theme::MUTED }))
                 .cursor_pointer()
-                .when(many && on, |d| d.bg(hsla(0x1A1F26)))
+                .when(on, |d| d.bg(hsla(0x1E242B)))
                 .hover(|d| d.text_color(hsla(theme::TEXT)))
-                .child(dot(st))
+                .child(live_dot(st, sid("tabdot", i)))
                 .child(
                     div()
                         .min_w_0()
@@ -570,23 +627,98 @@ impl Shell {
                         .text_ellipsis()
                         .child(t.title.clone()),
                 )
-                .when(!t.live, |d| {
+                .when(closable, |d| {
                     d.child(
                         div()
                             .id(sid("tabx", i))
-                            .child(icon("close", 12., theme::MUTED))
+                            .flex_shrink_0()
+                            .p(px(2.))
+                            .rounded(px(5.))
+                            .opacity(if on { 1. } else { 0. })
+                            .group_hover(group, |s| s.opacity(1.))
+                            .hover(|d| d.bg(hsla(0x2A3039)))
+                            .child(icon("close", 12., theme::SILVER))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.tabs.remove(i);
-                                this.active = this.active.min(this.tabs.len() - 1);
-                                cx.notify();
+                                cx.stop_propagation();
+                                this.close_tab(i, false, cx);
                             })),
                     )
                 })
+                .on_mouse_down(
+                    gpui::MouseButton::Middle,
+                    cx.listener(move |this, _, _, cx| this.close_tab(i, false, cx)),
+                )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.active = i;
                     cx.notify();
                 }))
         });
+        let more = (!hidden.is_empty()).then(|| {
+            h_flex()
+                .id("tabs-more")
+                .h(px(28.))
+                .px(px(8.))
+                .gap(px(4.))
+                .rounded(px(8.))
+                .text_size(px(12.))
+                .text_color(hsla(theme::MUTED))
+                .cursor_pointer()
+                .hover(|d| d.bg(hsla(0x1A1F26)))
+                .child(format!("+{}", hidden.len()))
+                .child(icon("chevron-down", 12., theme::MUTED))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.tabs_open = !this.tabs_open;
+                    cx.notify();
+                }))
+        });
+        let menu = (self.tabs_open && !hidden.is_empty()).then(|| {
+            v_flex()
+                .absolute()
+                .top(px(HEADER_H - 6.))
+                .left(px(24.))
+                .w(px(260.))
+                .p(px(6.))
+                .rounded(px(12.))
+                .bg(hsla(0x181B20))
+                .shadow(vec![gpui::BoxShadow {
+                    color: hsla(0x000000).opacity(0.4),
+                    offset: gpui::point(px(0.), px(8.)),
+                    blur_radius: px(24.),
+                    spread_radius: px(0.),
+                    inset: false,
+                }])
+                .children(hidden.iter().map(|&i| {
+                    div()
+                        .id(sid("tabm", i))
+                        .px(px(10.))
+                        .py(px(8.))
+                        .rounded(px(8.))
+                        .text_size(px(13.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .cursor_pointer()
+                        .hover(|d| d.bg(hsla(0x1E242B)))
+                        .child(self.tabs[i].title.clone())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.active = i;
+                            this.tabs_open = false;
+                            cx.notify();
+                        }))
+                }))
+        });
+        let new_tab = div()
+            .id("tab-new")
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(28.))
+            .flex_shrink_0()
+            .rounded(px(8.))
+            .cursor_pointer()
+            .hover(|d| d.bg(hsla(0x1A1F26)))
+            .child(icon("plus", 15., theme::MUTED))
+            .on_click(cx.listener(|this, _, _, cx| this.new_session(cx)));
         let c = &self.tabs[self.active].convo;
         let progress = (!c.plan.is_empty()).then(|| {
             let done = c.plan.iter().filter(|s| s.state == StepState::Done).count();
@@ -597,14 +729,38 @@ impl Shell {
                 .child(icon("circle-check", 13., theme::MUTED))
                 .child(format!("{done} of {}", c.plan.len()))
         });
+        let toggle = div()
+            .id("inspector-toggle")
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(28.))
+            .rounded(px(8.))
+            .cursor_pointer()
+            .hover(|d| d.bg(hsla(0x1A1F26)))
+            .child(icon("panel-right-open", 15., theme::MUTED))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.inspector_open = !this.inspector_open;
+                cx.notify();
+            }));
+        let collapsed = self.settings.sidebar_collapsed;
         h_flex()
+            .relative()
             .h(px(HEADER_H))
             .flex_shrink_0()
-            .px(px(24.))
+            .pl(px(if collapsed { LIGHTS_W } else { 24. }))
+            .pr(px(if cfg!(target_os = "macos") { 16. } else { 140. }))
             .gap(px(4.))
+            .when(collapsed, |d| {
+                d.child(self.sidebar_toggle(cx)).child(div().w(px(8.)))
+            })
             .children(tabs)
+            .children(more)
+            .child(new_tab)
             .child(drag("drag-tabs").flex_1().h_full())
             .children(progress)
+            .child(toggle)
+            .children(menu)
             .into_any_element()
     }
 
@@ -1596,10 +1752,11 @@ impl Shell {
             }])
             .child(
                 h_flex()
+                    .h(px(HEADER_H))
+                    .flex_shrink_0()
                     .gap(px(4.))
-                    .px(px(16.))
-                    .pt(px(if cfg!(target_os = "macos") { 14. } else { 40. }))
-                    .pb(px(12.))
+                    .pl(px(16.))
+                    .pr(px(if cfg!(target_os = "macos") { 16. } else { 140. }))
                     .child(tab("b-code", "Code", Bottom::Code))
                     .child(tab("b-term", "Terminal", Bottom::Terminal))
                     .child(tab("b-browser", "Browser", Bottom::Browser))
@@ -2221,7 +2378,7 @@ fn session_row(
         .collect::<Vec<_>>();
     let has_chips = !chips.is_empty();
     v_flex()
-        .id(id)
+        .id(id.clone())
         .gap(px(5.))
         .px(px(8.))
         .py(px(7.))
@@ -2233,7 +2390,7 @@ fn session_row(
         .child(
             h_flex()
                 .gap(px(8.))
-                .child(dot(st))
+                .child(live_dot(st, SharedString::from(format!("{id}-dot"))))
                 .child(
                     div()
                         .flex_1()

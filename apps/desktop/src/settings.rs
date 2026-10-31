@@ -79,6 +79,8 @@ pub struct DesktopSettings {
     /// Mode 1 only: a plain shell with a chat bar instead of the agent TUI.
     pub plain_terminal: bool,
     pub font: FontChoice,
+    /// The Workspace rail and the Sessions panel are folded away (Cmd/Ctrl+B).
+    pub sidebar_collapsed: bool,
 }
 
 fn desktop(v: &Value) -> Option<&Map<String, Value>> {
@@ -105,6 +107,9 @@ pub fn load(home: &Path) -> DesktopSettings {
             .and_then(Value::as_str)
             .and_then(FontChoice::from_key)
             .unwrap_or_default(),
+        sidebar_collapsed: get("sidebarCollapsed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     }
 }
 
@@ -131,6 +136,10 @@ pub fn set(home: &Path, key: &str, value: Value) -> std::io::Result<()> {
 
 pub fn save_font(home: &Path, f: FontChoice) -> std::io::Result<()> {
     set(home, "font", f.key().into())
+}
+
+pub fn save_sidebar_collapsed(home: &Path, collapsed: bool) -> std::io::Result<()> {
+    set(home, "sidebarCollapsed", collapsed.into())
 }
 
 pub fn save_mode(home: &Path, m: Mode) -> std::io::Result<()> {
@@ -205,6 +214,16 @@ mod tests {
         assert_eq!(v["synthesis"]["desktop"]["plainTerminal"], true);
         assert_eq!(v["synthesis"]["tui"]["theme"], "mono");
         assert_eq!(v["permissions"], json!({"allow": ["Bash(ls)"]}));
+    }
+
+    #[test]
+    fn the_collapsed_sidebar_is_remembered() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(!load(d.path()).sidebar_collapsed);
+        save_sidebar_collapsed(d.path(), true).unwrap();
+        assert!(load(d.path()).sidebar_collapsed);
+        save_sidebar_collapsed(d.path(), false).unwrap();
+        assert!(!load(d.path()).sidebar_collapsed);
     }
 
     #[test]

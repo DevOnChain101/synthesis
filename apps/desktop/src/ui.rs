@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt as _;
+use gpui::AnimationExt as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable,
@@ -38,32 +39,51 @@ gpui::actions!(
         OpenPalette,
         OpenConfiguration,
         AllowOnce,
-        DenyPending
+        DenyPending,
+        ToggleSidebar
     ]
 );
 
 /// Cmd (macOS) / Ctrl (elsewhere) shortcuts drawn in the design.
 pub fn bindings() -> Vec<gpui::KeyBinding> {
     #[cfg(target_os = "macos")]
-    let keys = ["cmd-k", "cmd-n", "cmd-,", "cmd-enter", "cmd-backspace"];
+    let keys = [
+        "cmd-k",
+        "cmd-n",
+        "cmd-,",
+        "cmd-enter",
+        "cmd-backspace",
+        "cmd-b",
+    ];
     #[cfg(not(target_os = "macos"))]
-    let keys = ["ctrl-k", "ctrl-n", "ctrl-,", "ctrl-enter", "ctrl-backspace"];
+    let keys = [
+        "ctrl-k",
+        "ctrl-n",
+        "ctrl-,",
+        "ctrl-enter",
+        "ctrl-backspace",
+        "ctrl-b",
+    ];
     vec![
         gpui::KeyBinding::new(keys[0], OpenPalette, None),
         gpui::KeyBinding::new(keys[1], NewTask, None),
         gpui::KeyBinding::new(keys[2], OpenConfiguration, None),
         gpui::KeyBinding::new(keys[3], AllowOnce, None),
         gpui::KeyBinding::new(keys[4], DenyPending, None),
+        gpui::KeyBinding::new(keys[5], ToggleSidebar, None),
     ]
 }
 
 const FONT_SIZE: f32 = 13.0;
 
-/// Height of the top strip that holds the macOS traffic lights (inset over the rail) and the drag
-/// region; elsewhere a slim strip above the content.
-pub(super) const TOP_SAFE: f32 = if cfg!(target_os = "macos") { 44. } else { 16. };
+/// Left padding of the rail's top bar: room for the macOS traffic lights, then the brand mark.
+pub(super) const LIGHTS_W: f32 = if cfg!(target_os = "macos") { 78. } else { 16. };
+/// Most session tabs shown in the top bar before the overflow menu.
+pub(super) const MAX_TABS: usize = 4;
+/// Width of the Workspace rail plus the Sessions panel.
+const SIDE_W: f32 = 470.;
 /// The header row of every content column: session title, page drag region.
-pub(super) const HEADER_H: f32 = 44.;
+pub(super) const HEADER_H: f32 = 48.;
 /// Reading width of the conversation and width of the Inspector slide-over.
 pub(super) const READING_W: f32 = 760.;
 pub(super) const INSPECTOR_W: f32 = 560.;
@@ -127,7 +147,7 @@ fn window_controls(window: &Window) -> Option<AnyElement> {
     Some(
         h_flex()
             .absolute()
-            .top(px(4.))
+            .top(px((HEADER_H - 32.) / 2.))
             .right(px(8.))
             .gap(px(2.))
             .child(
@@ -297,6 +317,12 @@ pub struct Shell {
     file_diffs: std::collections::HashMap<String, (u32, u32, Vec<String>)>,
     /// The Inspector slide-over; `bottom` is its tab.
     inspector_open: bool,
+    /// The overflow menu of the top bar's session tabs.
+    tabs_open: bool,
+    /// A sidebar fold was toggled in this run: animate it (150 ms) instead of just applying it.
+    side_anim: bool,
+    /// A running session whose tab is being closed, waiting for the confirmation (D-1).
+    confirm_close: Option<usize>,
     focus: FocusHandle,
     /// The Cmd/Ctrl+K palette: open flag and its query input.
     palette_open: bool,
@@ -497,6 +523,9 @@ impl Shell {
             collapsed: Default::default(),
             file_diffs: Default::default(),
             inspector_open: false,
+            tabs_open: false,
+            side_anim: false,
+            confirm_close: None,
             focus: cx.focus_handle(),
             palette_open: false,
             palette_q,
@@ -504,6 +533,112 @@ impl Shell {
             fake,
             auto_send,
         }
+    }
+
+    pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.settings.sidebar_collapsed = !self.settings.sidebar_collapsed;
+        self.side_anim = true;
+        if let Err(e) =
+            settings::save_sidebar_collapsed(&self.home, self.settings.sidebar_collapsed)
+        {
+            eprintln!("synthesis-desktop: sidebar state not saved: {e}");
+        }
+        cx.notify();
+    }
+
+    /// Closes a session tab. A stored session just leaves the strip. The live session ends: when
+    /// it is running or waiting for you, that first needs a confirmation (docs/specs/desktop.md
+    /// D-1: closing cancels the task). Nothing is deleted: the history stays in the store.
+    pub(super) fn close_tab(&mut self, i: usize, confirmed: bool, cx: &mut Context<Self>) {
+        let Some(t) = self.tabs.get(i) else { return };
+        if t.live {
+            let busy = t.convo.running || t.convo.needs_you() > 0;
+            if t.convo.items.is_empty() && !busy {
+                return;
+            }
+            if busy && !confirmed {
+                self.confirm_close = Some(i);
+                cx.notify();
+                return;
+            }
+            if let Some(e) = &self.engine {
+                e.cancel();
+            }
+            self.new_session(cx);
+        } else {
+            self.tabs.remove(i);
+            self.active = self.active.min(self.tabs.len() - 1);
+        }
+        self.tabs_open = false;
+        self.confirm_close = None;
+        cx.notify();
+    }
+
+    fn confirm_overlay(&self, i: usize, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("confirm-backdrop")
+            .absolute()
+            .size_full()
+            .flex()
+            .justify_center()
+            .pt(px(160.))
+            .bg(hsla(0x000000).opacity(0.45))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.confirm_close = None;
+                cx.notify();
+            }))
+            .child(
+                v_flex()
+                    .id("confirm")
+                    .w(px(420.))
+                    .h_auto()
+                    .gap(px(16.))
+                    .p(px(24.))
+                    .rounded(px(14.))
+                    .bg(hsla(theme::PANEL))
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .font_semibold()
+                            .child("Cancel the running task?"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .line_height(px(20.))
+                            .text_color(hsla(theme::MUTED))
+                            .child(
+                                "Closing this session cancels its task. The history stays in the Sessions list.",
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap(px(8.))
+                            .child(
+                                btn("keep-open", None, "Keep open", Variant::Ghost, None).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.confirm_close = None;
+                                        cx.notify();
+                                    }),
+                                ),
+                            )
+                            .child(
+                                btn(
+                                    "cancel-close",
+                                    None,
+                                    "Cancel task and close",
+                                    Variant::Primary,
+                                    None,
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.close_tab(i, true, cx)
+                                })),
+                            ),
+                    ),
+            )
+            .into_any_element()
     }
 
     pub(super) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -931,6 +1066,22 @@ impl Shell {
             }
         }
         cx.notify();
+    }
+
+    /// Development (`--open session`): the newest stored session of this workspace as a second tab,
+    /// the live one staying in front.
+    fn open_latest_saved_in_background(&mut self, cx: &mut Context<Self>) {
+        let cwd = self.cwd.display().to_string();
+        let open: Vec<&str> = self.tabs.iter().map(|t| t.id.as_str()).collect();
+        let next = self
+            .saved
+            .iter()
+            .find(|s| s.cwd == cwd && !open.contains(&s.id.as_str()))
+            .map(|s| s.id.clone());
+        if let Some(id) = next {
+            self.open_saved(&id, cx);
+            self.active = 0;
+        }
     }
 
     fn open_file(&mut self, path: &str, diff: bool, cx: &mut Context<Self>) {
@@ -1372,15 +1523,35 @@ impl Render for Shell {
                         .child(div().flex_1().min_h_0().child(content))
                         .into_any_element()
                 };
+                let collapsed = self.settings.sidebar_collapsed;
+                let side = h_flex()
+                    .h_full()
+                    .flex_shrink_0()
+                    .overflow_hidden()
+                    .child(self.workspace_rail(cx))
+                    .child(self.sessions_panel(cx));
+                let side = if self.side_anim {
+                    side.with_animation(
+                        SharedString::from(format!("side-{collapsed}")),
+                        gpui::Animation::new(std::time::Duration::from_millis(150))
+                            .with_easing(gpui::ease_out_quint()),
+                        move |d, t| d.w(px(SIDE_W * if collapsed { 1. - t } else { t })),
+                    )
+                    .into_any_element()
+                } else if collapsed {
+                    side.w(px(0.)).into_any_element()
+                } else {
+                    side.into_any_element()
+                };
                 h_flex()
                     .size_full()
-                    .child(self.workspace_rail(cx))
-                    .child(self.sessions_panel(cx))
+                    .child(side)
                     .child(div().flex_1().min_w_0().h_full().child(content))
                     .into_any_element()
             }
         };
         let palette = self.palette_open.then(|| self.palette_overlay(cx));
+        let confirm = self.confirm_close.map(|i| self.confirm_overlay(i, cx));
         v_flex()
             .size_full()
             .relative()
@@ -1398,6 +1569,11 @@ impl Render for Shell {
             .on_action(
                 cx.listener(|this, _: &DenyPending, _, cx| this.answer_first(Choice::Deny, cx)),
             )
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                if this.screen == Screen::Main {
+                    this.toggle_sidebar(cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &OpenConfiguration, _, cx| {
                 if this.screen == Screen::Main {
                     this.nav = Nav::Configuration;
@@ -1415,6 +1591,7 @@ impl Render for Shell {
             .font_family(crate::brand::UI_FONT)
             .child(div().flex_1().min_h_0().child(body))
             .children(palette)
+            .children(confirm)
             .children(window_controls(window))
     }
 }
@@ -1528,7 +1705,7 @@ pub fn open(l: Launch, cx: &mut App) {
         titlebar: Some(gpui::TitlebarOptions {
             title: Some("Synthesis".into()),
             appears_transparent: true,
-            traffic_light_position: Some(gpui::point(px(16.), px(16.))),
+            traffic_light_position: Some(gpui::point(px(16.), px(18.))),
         }),
         app_owns_titlebar_drag: true,
         window_decorations: cfg!(target_os = "linux").then_some(gpui::WindowDecorations::Client),
@@ -1548,9 +1725,11 @@ pub fn open(l: Launch, cx: &mut App) {
         if main {
             view.update(cx, |v, cx| {
                 v.enter_main(cx);
-                if let Some(o) = &open_arg {
+                // development: comma-separated, `diff:PATH`, `session` or a file
+                for o in open_arg.iter().flat_map(|o| o.split(',')) {
                     match o.strip_prefix("diff:") {
                         Some(p) => v.open_file(p, true, cx),
+                        None if o == "session" => v.open_latest_saved_in_background(cx),
                         None => v.open_file(o, false, cx),
                     }
                 }
@@ -1603,7 +1782,7 @@ mod tests {
             .iter()
             .map(|k| k.keystrokes()[0].key().to_string())
             .collect();
-        assert_eq!(keys, ["k", "n", ",", "enter", "backspace"]);
+        assert_eq!(keys, ["k", "n", ",", "enter", "backspace", "b"]);
         assert!(b.iter().all(|k| {
             let m = k.keystrokes()[0].modifiers();
             if cfg!(target_os = "macos") {
