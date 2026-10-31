@@ -80,8 +80,15 @@ const FONT_SIZE: f32 = 13.0;
 pub(super) const LIGHTS_W: f32 = if cfg!(target_os = "macos") { 78. } else { 16. };
 /// Most session tabs shown in the top bar before the overflow menu.
 pub(super) const MAX_TABS: usize = 4;
-/// Width of the Workspace rail plus the Sessions panel.
-const SIDE_W: f32 = 470.;
+/// Width of the Workspace icon rail; the Sessions panel is `DesktopSettings::sessions_w` wide.
+pub(super) const RAIL_W: f32 = 64.;
+/// Drag payload of the Sessions panel's right edge.
+pub(super) struct SessionsResize;
+impl Render for SessionsResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
 /// The header row of every content column: session title, page drag region.
 pub(super) const HEADER_H: f32 = 48.;
 /// Reading width of the conversation and width of the Inspector slide-over.
@@ -321,6 +328,8 @@ pub struct Shell {
     tabs_open: bool,
     /// A sidebar fold was toggled in this run: animate it (150 ms) instead of just applying it.
     side_anim: bool,
+    /// The Sessions panel edge is being dragged; the width is saved on mouse up.
+    sessions_resizing: bool,
     /// A running session whose tab is being closed, waiting for the confirmation (D-1).
     confirm_close: Option<usize>,
     focus: FocusHandle,
@@ -525,6 +534,7 @@ impl Shell {
             inspector_open: false,
             tabs_open: false,
             side_anim: false,
+            sessions_resizing: false,
             confirm_close: None,
             focus: cx.focus_handle(),
             palette_open: false,
@@ -1524,6 +1534,7 @@ impl Render for Shell {
                         .into_any_element()
                 };
                 let collapsed = self.settings.sidebar_collapsed;
+                let side_w = RAIL_W + self.settings.sessions_w();
                 let side = h_flex()
                     .h_full()
                     .flex_shrink_0()
@@ -1535,7 +1546,7 @@ impl Render for Shell {
                         SharedString::from(format!("side-{collapsed}")),
                         gpui::Animation::new(std::time::Duration::from_millis(150))
                             .with_easing(gpui::ease_out_quint()),
-                        move |d, t| d.w(px(SIDE_W * if collapsed { 1. - t } else { t })),
+                        move |d, t| d.w(px(side_w * if collapsed { 1. - t } else { t })),
                     )
                     .into_any_element()
                 } else if collapsed {
@@ -1545,6 +1556,46 @@ impl Render for Shell {
                 };
                 h_flex()
                     .size_full()
+                    .relative()
+                    // landing: a soft warm wash over the whole window with the swoosh as faint
+                    // art bleeding off the right edge; the sidebars are translucent over it
+                    .when(self.nav == Nav::Session && self.is_landing(), |d| {
+                        d.bg(gpui::linear_gradient(
+                            200.,
+                            gpui::linear_color_stop(hsla(0x1F1E1D), 0.),
+                            gpui::linear_color_stop(hsla(theme::BG), 0.6),
+                        ))
+                        .child(
+                            gpui::img(crate::brand::mark())
+                                .absolute()
+                                .top(px(-90.))
+                                .right(px(-110.))
+                                .size(px(460.))
+                                .opacity(0.12),
+                        )
+                    })
+                    .on_drag_move(cx.listener(
+                        |this, e: &gpui::DragMoveEvent<SessionsResize>, _, cx| {
+                            let (_, min, max) = settings::SESSIONS_W;
+                            this.settings.sessions_width =
+                                (f32::from(e.event.position.x) - RAIL_W).clamp(min, max) as u32;
+                            this.sessions_resizing = true;
+                            cx.notify();
+                        },
+                    ))
+                    .on_mouse_up(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, _, _| {
+                            if std::mem::take(&mut this.sessions_resizing)
+                                && let Err(e) = settings::save_sessions_width(
+                                    &this.home,
+                                    this.settings.sessions_w(),
+                                )
+                            {
+                                eprintln!("synthesis-desktop: sidebar width not saved: {e}");
+                            }
+                        }),
+                    )
                     .child(side)
                     .child(div().flex_1().min_w_0().h_full().child(content))
                     .into_any_element()

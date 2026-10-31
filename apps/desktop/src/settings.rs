@@ -81,6 +81,21 @@ pub struct DesktopSettings {
     pub font: FontChoice,
     /// The Workspace rail and the Sessions panel are folded away (Cmd/Ctrl+B).
     pub sidebar_collapsed: bool,
+    /// Width of the Sessions panel in px, 0 = default (`sessions_w` clamps).
+    pub sessions_width: u32,
+}
+
+pub const SESSIONS_W: (f32, f32, f32) = (232., 200., 360.);
+
+impl DesktopSettings {
+    pub fn sessions_w(&self) -> f32 {
+        let (def, min, max) = SESSIONS_W;
+        if self.sessions_width == 0 {
+            def
+        } else {
+            (self.sessions_width as f32).clamp(min, max)
+        }
+    }
 }
 
 fn desktop(v: &Value) -> Option<&Map<String, Value>> {
@@ -110,6 +125,10 @@ pub fn load(home: &Path) -> DesktopSettings {
         sidebar_collapsed: get("sidebarCollapsed")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        sessions_width: get("sessionsWidth")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(u32::MAX as u64) as u32,
     }
 }
 
@@ -140,6 +159,10 @@ pub fn save_font(home: &Path, f: FontChoice) -> std::io::Result<()> {
 
 pub fn save_sidebar_collapsed(home: &Path, collapsed: bool) -> std::io::Result<()> {
     set(home, "sidebarCollapsed", collapsed.into())
+}
+
+pub fn save_sessions_width(home: &Path, w: f32) -> std::io::Result<()> {
+    set(home, "sessionsWidth", (w.round() as u32).into())
 }
 
 pub fn save_mode(home: &Path, m: Mode) -> std::io::Result<()> {
@@ -220,6 +243,11 @@ mod tests {
     fn the_collapsed_sidebar_is_remembered() {
         let d = tempfile::tempdir().unwrap();
         assert!(!load(d.path()).sidebar_collapsed);
+        assert_eq!(load(d.path()).sessions_w(), 232.);
+        save_sessions_width(d.path(), 999.).unwrap();
+        assert_eq!(load(d.path()).sessions_w(), 360.);
+        save_sessions_width(d.path(), 250.).unwrap();
+        assert_eq!(load(d.path()).sessions_w(), 250.);
         save_sidebar_collapsed(d.path(), true).unwrap();
         assert!(load(d.path()).sidebar_collapsed);
         save_sidebar_collapsed(d.path(), false).unwrap();
