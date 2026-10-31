@@ -1,0 +1,52 @@
+[package]
+name = "synthesis-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Harness wiring shared by `synth` and the desktop app (prepare, Common, Prepared)"
+
+[lints]
+workspace = true
+
+[features]
+# Enables `--provider fake:<script.json>` (scripted model, no network). Debug builds only.
+test-provider = ["synthesis-sandbox/test-backend"]
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+synthesis-browser = { path = "../synthesis-browser" }
+synthesis-config = { path = "../synthesis-config" }
+synthesis-context = { path = "../synthesis-context" }
+synthesis-core = { path = "../synthesis-core" }
+synthesis-events = { path = "../synthesis-events" }
+synthesis-harness = { path = "../synthesis-harness" }
+synthesis-hooks = { path = "../synthesis-hooks" }
+synthesis-mcp = { path = "../synthesis-mcp" }
+synthesis-peers = { path = "../synthesis-peers" }
+synthesis-permissions = { path = "../synthesis-permissions" }
+synthesis-providers = { path = "../synthesis-providers" }
+synthesis-sandbox = { path = "../synthesis-sandbox" }
+synthesis-session = { path = "../synthesis-session" }
+synthesis-settings = { path = "../synthesis-settings" }
+synthesis-terminal = { path = "../synthesis-terminal" }
+synthesis-tui = { path = "../synthesis-tui" }
+synthesis-tui-base = { path = "../synthesis-tui-base" }
+synthesis-tools = { path = "../synthesis-tools" }
+synthesis-verification = { path = "../synthesis-verification" }
+synthesis-workspace = { path = "../synthesis-workspace" }
+rusqlite = { version = "0.41", features = ["bundled"] }
+synthesis-memory = { path = "../synthesis-memory" }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+serde_json = "1.0.154"
+sha2 = "0.10"
+tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "signal", "time", "sync", "macros"] }
+tokio-util = { version = "0.7.20", default-features = false }
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW constant only (no unsafe): note files are never opened through a symlink.
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.27.0"

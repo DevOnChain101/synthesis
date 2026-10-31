@@ -1,0 +1,72 @@
+[package]
+name = "synthesis-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Synthesis desktop app: GPUI shell, onboarding, terminal grid (docs/specs/desktop.md)"
+publish = false
+
+[lints]
+workspace = true
+
+# App icon for packaging (macOS .icns, Windows .ico, Linux png), from design/01-brand/app-icons.
+# GPUI has no API to set a window icon at run time; the bundle (or the .desktop file) carries it.
+[package.metadata.bundle]
+name = "Synthesis"
+identifier = "dev.synthesis.desktop"
+icon = ["assets/icons/synthesis.icns", "assets/icons/synthesis.ico", "assets/icons/synthesis-512.png", "assets/icons/synthesis-256.png"]
+
+[lib]
+name = "synthesis_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "synthesis-desktop"
+path = "src/main.rs"
+
+[features]
+# Development only: `--fake <script.json>` runs a scripted model, `--send <text>` sends a first prompt.
+test-provider = ["synthesis-app/test-provider"]
+# Development only: `--shot out.png SECONDS` renders the window to a PNG (offscreen, no screen recording).
+shot = ["gpui/test-support", "gpui-pre-apple/test-support", "gpui-pre-macos/test-support", "dep:image"]
+
+[dependencies]
+# Exact pins (ADR: docs/specs/desktop.md section 3). `gpui-pre` is the maintainers' snapshot of
+# Zed's gpui, `gpui-component` pins the same one; never mix with a git `gpui`.
+gpui-component = "=0.8.1"
+gpui = { package = "gpui-pre", version = "=0.3.10" }
+# `font-kit` is what gives the window a text system; without it gpui draws no text at all.
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit"] }
+gpui-kit-assets = "=0.8.1"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+alacritty_terminal = "=0.26.0"
+synthesis-app = { path = "../../crates/synthesis-app" }
+synthesis-events = { path = "../../crates/synthesis-events" }
+synthesis-mcp = { path = "../../crates/synthesis-mcp" }
+synthesis-tui-base = { path = "../../crates/synthesis-tui-base" }
+clap = { version = "4.6.7", features = ["derive"] }
+synthesis-config = { path = "../../crates/synthesis-config" }
+synthesis-core = { path = "../../crates/synthesis-core" }
+synthesis-harness = { path = "../../crates/synthesis-harness" }
+synthesis-permissions = { path = "../../crates/synthesis-permissions" }
+synthesis-providers = { path = "../../crates/synthesis-providers" }
+synthesis-settings = { path = "../../crates/synthesis-settings" }
+synthesis-tools = { path = "../../crates/synthesis-tools" }
+synthesis-tui = { path = "../../crates/synthesis-tui" }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "time", "sync", "macros"] }
+tokio-util = { version = "0.7.20", default-features = false }
+url = "2"
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+# Command Line Tools only (no Xcode): compile Metal shaders at runtime instead of `xcrun metal`.
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui-pre-apple = { version = "=0.3.10", features = ["runtime_shaders"] }
+# only here so the dev feature `shot` can enable its test-support (offscreen render)
+gpui-pre-macos = { version = "=0.3.10" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+# scripted model for the engine test (tests only; never in a release build)
+synthesis-app = { path = "../../crates/synthesis-app", features = ["test-provider"] }

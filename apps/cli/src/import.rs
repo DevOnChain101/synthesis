@@ -1735,7 +1735,7 @@ impl Imp {
             };
             let dst = synthesis_home
                 .join("projects")
-                .join(crate::ctx::auto_memory_key(project_dir))
+                .join(synthesis_app::ctx::auto_memory_key(project_dir))
                 .join("memory")
                 .join(&f);
             self.put_file(Kind::Memory, &src.join(&f), &dst, synthesis_home, b, notes);
@@ -1909,7 +1909,7 @@ fn server_hash(name: &str, cfg: &Value, scope: &str) -> Option<String> {
     synthesis_mcp::parse_claude_servers(&json!({ name: cfg.clone() }), Some(scope))
         .0
         .first()
-        .map(|s| crate::mcp::definition_hash(s)[..24].to_string())
+        .map(|s| synthesis_app::mcp::definition_hash(s)[..24].to_string())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1922,7 +1922,7 @@ pub fn run_cmd(env: &Env, cmd: ImportCmd) -> Result<u8, String> {
 }
 
 fn claude(env: &Env, a: &ClaudeArgs) -> Result<u8, String> {
-    let h = crate::homes(env)?;
+    let h = synthesis_app::homes(env)?;
     let from = match &a.from {
         Some(f) => f.clone(),
         None if h.user.as_os_str().is_empty() => {

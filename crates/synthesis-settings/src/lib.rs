@@ -315,35 +315,55 @@ pub fn persist_allow_rules(project_root: &Path, rules: &[String]) -> std::io::Re
 }
 
 /// Writes `tui` as the `synthesis.tui` subtree of `<synthesis_home>/settings.json` (the `/config`
-/// screen, spec docs/specs/tui-design.md §7). The file is read again first, so edits made while the
-/// TUI was open survive; every other key and the key order are kept. A file that cannot be parsed
-/// (or whose `synthesis` is not an object) is never overwritten: the error (`InvalidData`) says why. The write goes
-/// through a temp file and a rename, with the permissions of the file it replaces.
+/// screen, spec docs/specs/tui-design.md §7). Every other key and the key order are kept. A file
+/// that cannot be parsed (or whose `synthesis` is not an object) is never overwritten: the error
+/// (`InvalidData`) says why. See [`edit_json_atomic`].
 pub fn persist_user_tui(synthesis_home: &Path, tui: &Value) -> std::io::Result<()> {
-    let path = synthesis_home.join("settings.json");
-    let mut v = match read_json(&path, "user settings") {
+    edit_json_atomic(
+        &synthesis_home.join("settings.json"),
+        "user settings",
+        |v| {
+            let section = v
+                .as_object_mut()
+                .map(|o| {
+                    o.entry("synthesis")
+                        .or_insert_with(|| Value::Object(Map::new()))
+                })
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "user settings: `synthesis` is not an object",
+                    )
+                })?;
+            section.insert("tui".into(), tui.clone());
+            Ok(())
+        },
+    )
+}
+
+/// Read-modify-write of one JSON file: the file is read again first (edits made meanwhile
+/// survive), `edit` changes it (a missing file starts as `{}`), every other key and the key order
+/// are kept. A file that cannot be parsed is never overwritten (`InvalidData`). The write goes
+/// through a temp file and a rename, with the permissions of the file it replaces. An `Err` from
+/// `edit` writes nothing, so `edit` is also where the caller validates the result.
+pub fn edit_json_atomic(
+    path: &Path,
+    what: &str,
+    edit: impl FnOnce(&mut Value) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut v = match read_json(path, what) {
         Ok(Some(v)) => v,
         Ok(None) => Value::Object(Map::new()),
         Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
     };
-    let section = v
-        .as_object_mut()
-        .map(|o| {
-            o.entry("synthesis")
-                .or_insert_with(|| Value::Object(Map::new()))
-        })
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "user settings: `synthesis` is not an object",
-            )
-        })?;
-    section.insert("tui".into(), tui.clone());
-    std::fs::create_dir_all(synthesis_home)?;
-    let tmp = synthesis_home.join(format!("settings.json.tmp-{}", std::process::id()));
+    edit(&mut v)?;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let tmp = dir.join(format!("{name}.tmp-{}", std::process::id()));
     std::fs::write(&tmp, serde_json::to_string_pretty(&v)? + "\n")?;
-    let done = std::fs::metadata(&path)
+    let done = std::fs::metadata(path)
         .and_then(|m| std::fs::set_permissions(&tmp, m.permissions()))
         .or_else(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -352,7 +372,7 @@ pub fn persist_user_tui(synthesis_home: &Path, tui: &Value) -> std::io::Result<(
                 Err(e)
             }
         })
-        .and_then(|()| std::fs::rename(&tmp, &path));
+        .and_then(|()| std::fs::rename(&tmp, path));
     if done.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }

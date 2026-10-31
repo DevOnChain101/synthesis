@@ -93,7 +93,7 @@ impl NetworkArg {
 
 /// `Enforce` needs a backend that confines the filesystem and accepts the policy; `Err` is
 /// the message for the exit-2 refusal.
-pub(crate) fn sandbox_preflight(
+pub fn sandbox_preflight(
     backend: &dyn SandboxBackend,
     policy: Option<&synthesis_terminal::SandboxPolicy>,
 ) -> Result<(), String> {
@@ -263,6 +263,16 @@ pub enum Front {
     },
     /// Events go to the UI; the UI approves.
     Tui,
+    /// A native front end (the desktop window): the host supplies the event writer, approver and
+    /// input provider instead of the TUI's `UiLink`. Behaves like `Tui` otherwise.
+    Native(Native),
+}
+
+/// The host side of [`Front::Native`].
+pub struct Native {
+    pub out: Box<dyn std::io::Write + Send>,
+    pub approver: Arc<dyn Approver>,
+    pub input: Arc<dyn synthesis_harness::InputProvider>,
 }
 
 /// Everything a front end needs, built once by [`prepare`].
@@ -441,7 +451,7 @@ pub fn prepare(
         rules_arg(&c.allow, "--allow")?,
         rules_arg(&c.deny, "--deny")?,
     );
-    let is_tui = matches!(front, Front::Tui);
+    let is_tui = matches!(front, Front::Tui | Front::Native(_));
     let h = homes(env)?;
     let synthesis_deny = synthesis_sandbox::synthesis_state_paths(&h.synthesis);
     // Before anything is created (worktree, store): a bad grant is a usage error.
@@ -530,7 +540,7 @@ pub fn prepare(
         Some(ModeArg::BypassPermissions) => {
             // A TUI session switches into bypass with a confirmation dialog instead (Shift+Tab
             // never reaches it); the flag is for `synth run`.
-            if matches!(front, Front::Tui) {
+            if is_tui {
                 return Err(
                     "--permission-mode bypassPermissions is only for `synth run`; in the TUI press Shift+Tab until the bypass dialog opens"
                         .into(),
@@ -754,6 +764,7 @@ pub fn prepare(
         _ => None,
     };
     let cancel = CancellationToken::new();
+    let mut native_input = None;
     let (out, tee, prompt, link, approver, closed): (
         Box<dyn std::io::Write + Send>,
         _,
@@ -762,6 +773,10 @@ pub fn prepare(
         Arc<dyn Approver>,
         _,
     ) = match front {
+        Front::Native(n) => {
+            native_input = Some(n.input);
+            (n.out, None, String::new(), None, n.approver, None)
+        }
         Front::Headless {
             prompt,
             tee,
@@ -1069,6 +1084,9 @@ pub fn prepare(
     if let Some(l) = &link {
         harness = harness.with_input(l.input());
     }
+    if let Some(i) = native_input {
+        harness = harness.with_input(i);
+    }
     if let Some(l) = peer_link {
         harness = harness.with_peers(l);
     }
@@ -1100,7 +1118,7 @@ pub fn prepare(
         ws.cwd.display(),
         mode.as_str()
     );
-    if link.is_some() {
+    if is_tui {
         // Event log / replay copy; the UI also gets `notices` as startup notes (tui.rs) and shows
         // each text once, so it no longer depends on this channel buffering.
         for n in &notices {
@@ -1386,7 +1404,7 @@ fn read_criteria(f: &Path) -> Result<Vec<Criterion>, String> {
         .collect()
 }
 
-pub(crate) struct Resolved {
+pub struct Resolved {
     pub provider: Arc<dyn ModelProvider>,
     pub model: String,
     pub label: String,
@@ -1398,7 +1416,7 @@ pub(crate) struct Resolved {
 pub const NO_MODEL: &str =
     "no model configured: pass --model provider/model or set SYNTHESIS_MODEL";
 
-pub(crate) fn resolve_provider(
+pub fn resolve_provider(
     provider_arg: Option<&str>,
     model_arg: Option<&str>,
     cfg: &Config,

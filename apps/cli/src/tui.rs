@@ -11,8 +11,8 @@ use synthesis_tui::{ExitReason, OnceOptions, Options, Tty, load_resume};
 use synthesis_tui_base::Platform;
 use synthesis_tui_base::sgr::ColorMode;
 
-use crate::homes;
-use crate::run::{
+use synthesis_app::homes;
+use synthesis_app::run::{
     Common, Front, Limits, NO_MODEL, Prepared, prepare, sandbox_default_notice, sandbox_notices,
     sandbox_status,
 };
@@ -38,7 +38,7 @@ fn start_dir(a: &TuiArgs) -> Result<PathBuf, String> {
     // `--cwd DIR`, else the directory `synth` was started in (the only place the process cwd is read).
     let d = match a.cwd.as_ref() {
         Some(d) => d.clone(),
-        None => crate::launch_dir()?,
+        None => synthesis_app::launch_dir()?,
     };
     synthesis_core::canonicalize(&d).map_err(|e| format!("--cwd {}: {e}", d.display()))
 }
@@ -327,10 +327,10 @@ fn is_first_run(e: &str) -> bool {
 pub(crate) fn setup_card(env: &Env, home: &Path, cwd: &Path, reason: &str) -> Vec<String> {
     use synthesis_config::{ProjectTrust, resolve_credential};
     let mut found = vec![];
-    let h = crate::homes(env).ok();
+    let h = synthesis_app::homes(env).ok();
     if let Some(cfg) = h
         .as_ref()
-        .and_then(|h| crate::load_config(env, h, Some(cwd), ProjectTrust::Untrusted).ok())
+        .and_then(|h| synthesis_app::load_config(env, h, Some(cwd), ProjectTrust::Untrusted).ok())
     {
         for (id, p) in &cfg.providers {
             let key = resolve_credential(id, Some(p), home, env).is_some() || p.is_no_auth();

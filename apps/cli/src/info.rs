@@ -11,7 +11,7 @@ use synthesis_providers::{NetSettings, ProviderSpec, RetryPolicy};
 use synthesis_sandbox::SandboxBackend;
 use tokio_util::sync::CancellationToken;
 
-use crate::{homes, load_config};
+use synthesis_app::{homes, load_config};
 
 pub fn auth_status(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
     let h = homes(env)?;
@@ -34,7 +34,7 @@ pub fn auth_status(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
 #[derive(Args)]
 pub struct ModelsArgs {
     #[command(flatten)]
-    pub cwd: crate::CwdArg,
+    pub cwd: synthesis_app::CwdArg,
     #[arg(long)]
     json: bool,
     /// Ask each provider with a credential for its model list (network).
@@ -170,7 +170,7 @@ pub fn doctor(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
     // this workspace (default network deny), not just "does a backend exist".
     let root = std::fs::canonicalize(cwd.unwrap_or(Path::new("."))).unwrap_or_else(|_| ".".into());
     let policy = synthesis_sandbox::SandboxPolicy::standard(&root, &std::env::temp_dir());
-    let ready = crate::run::sandbox_preflight(&*best, Some(&policy));
+    let ready = synthesis_app::run::sandbox_preflight(&*best, Some(&policy));
     out!("sandbox for tool commands (`synth run --sandbox enforce|best-effort|off`):");
     out!(
         "  default mode: enforce; `synth run` {}",
@@ -266,7 +266,7 @@ pub fn doctor(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
 
 /// Hints for people coming from the earlier "Nemo" builds, and a PATH shadowing warning. Nothing
 /// legacy is ever read: the old `~/.nemo` and `NEMO_*` are only detected (names, never values).
-fn legacy_notes(env: &Env, h: &crate::Homes, current_exe: Option<&Path>) -> Vec<String> {
+fn legacy_notes(env: &Env, h: &synthesis_app::Homes, current_exe: Option<&Path>) -> Vec<String> {
     let mut v = Vec::new();
     let mut old: Vec<&str> = env
         .iter()
@@ -320,7 +320,7 @@ fn report_config(cfg: &Config) {
 
 /// Settings, MCP, skills and agents as the next `synth run` would see them for `cwd` with an
 /// untrusted project. Counts and names only, never a value.
-fn report_discovery(env: &Env, h: &crate::Homes, cfg: &Config, cwd: Option<&Path>) {
+fn report_discovery(env: &Env, h: &synthesis_app::Homes, cfg: &Config, cwd: Option<&Path>) {
     use synthesis_settings::{LoadContext, load_settings};
     let none = h.synthesis.join("no-project");
     let cwd = cwd.unwrap_or(&none);
@@ -343,9 +343,9 @@ fn report_discovery(env: &Env, h: &crate::Homes, cfg: &Config, cwd: Option<&Path
     let enforcing = {
         let root = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
         let policy = synthesis_sandbox::SandboxPolicy::standard(&root, &std::env::temp_dir());
-        crate::run::sandbox_preflight(&*synthesis_sandbox::detect(), Some(&policy)).is_ok()
+        synthesis_app::run::sandbox_preflight(&*synthesis_sandbox::detect(), Some(&policy)).is_ok()
     };
-    for l in crate::peers::doctor_lines(&st.synthesis.peers, &h.synthesis, env, enforcing) {
+    for l in synthesis_app::peers::doctor_lines(&st.synthesis.peers, &h.synthesis, env, enforcing) {
         out!("{l}");
     }
     out!("settings.json:");
@@ -378,13 +378,13 @@ fn report_discovery(env: &Env, h: &crate::Homes, cfg: &Config, cwd: Option<&Path
             format!(": {}", san(&st.env_refused.join(", ")))
         }
     );
-    let v = crate::verify_cfg::parse(&st.synthesis.verification);
+    let v = synthesis_app::verify_cfg::parse(&st.synthesis.verification);
     out!(
         "  synthesis section: verification {} key(s), {} required check(s)",
         st.synthesis.verification.len(),
         v.checks.len()
     );
-    let (ac, ac_diag) = crate::ctx::read_auto_compact(&h.synthesis.join("settings.json"));
+    let (ac, ac_diag) = synthesis_app::ctx::read_auto_compact(&h.synthesis.join("settings.json"));
     out!(
         "  context: auto_compact {}, threshold {} of the model window (synthesis.context.auto_compact / auto_compact_threshold in the user settings.json)",
         if ac.enabled { "on" } else { "off" },
@@ -394,21 +394,21 @@ fn report_discovery(env: &Env, h: &crate::Homes, cfg: &Config, cwd: Option<&Path
         out!("  warning: {}", san(d));
     }
 
-    let plan = crate::mcp::plan(cfg, &st, &st, cwd, ProjectTrust::Untrusted, &[]);
+    let plan = synthesis_app::mcp::plan(cfg, &st, &st, cwd, ProjectTrust::Untrusted, &[]);
     out!(
         "mcp: {} server(s) would start, {} skipped (never started by doctor)",
         plan.servers.len(),
         plan.skipped.len()
     );
-    let pass = crate::mcp::read_passthrough(&h.synthesis.join("settings.json"));
+    let pass = synthesis_app::mcp::read_passthrough(&h.synthesis.join("settings.json"));
     for s in &plan.servers {
         out!(
             "  {} [{}] {}",
             san(&s.name),
             s.scope.as_deref().unwrap_or("?"),
-            san(&crate::mcp::describe(s)),
+            san(&synthesis_app::mcp::describe(s)),
         );
-        for l in crate::mcp::credentials(s, env, &pass) {
+        for l in synthesis_app::mcp::credentials(s, env, &pass) {
             out!("    {}", san(&l));
         }
     }
@@ -443,7 +443,7 @@ fn report_discovery(env: &Env, h: &crate::Homes, cfg: &Config, cwd: Option<&Path
             }
         );
     }
-    let ag = crate::agents::load(&h.synthesis, root, ProjectTrust::Untrusted);
+    let ag = synthesis_app::agents::load(&h.synthesis, root, ProjectTrust::Untrusted);
     out!(
         "agents: {} user, {} project definition(s) ({} project not loaded: project untrusted)",
         ag.user,
@@ -464,7 +464,7 @@ mod tests {
         std::fs::create_dir_all(user.join(".nemo")).unwrap();
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("synth"), "").unwrap();
-        let h = crate::Homes {
+        let h = synthesis_app::Homes {
             synthesis: user.join(".synthesis"),
             user,
         };
