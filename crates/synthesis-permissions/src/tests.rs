@@ -2685,6 +2685,51 @@ fn read_deny_blocks_bash_file_readers_and_redirects() {
 }
 
 #[test]
+fn edit_deny_blocks_bash_redirects_tee_sed_i_cp_mv_under_bypass() {
+    let f = fx();
+    fs::write(f.cwd.join(".env"), "k=v").unwrap();
+    for rule in ["Edit(.env)", "Read(.env)"] {
+        for mode in [Mode::Default, Mode::BypassPermissions] {
+            let p = f.with(rules(&[], &[rule], &[]), mode);
+            for c in [
+                "echo x > .env",
+                "echo x >> .env",
+                "echo x 2>.env",
+                "echo x | tee .env",
+                "sed -i s/k/z/ .env",
+                "cp a.txt .env",
+                "mv a.txt .env",
+                "touch .env",
+                "rm .env",
+                "cd sub && rm ../.env",
+                "echo ok && rm -f .env",
+                "dd if=a of=.env",
+            ] {
+                assert_eq!(bx(&p, c), D, "{rule} {mode:?}: {c}");
+            }
+            // other files and a plain sed read are not affected by an Edit rule
+            for c in ["echo x > other.txt", "touch a.txt", "echo .env"] {
+                assert_ne!(bx(&p, c), D, "{rule} {mode:?}: {c}");
+            }
+        }
+    }
+    assert_ne!(
+        bx(
+            &f.with(rules(&[], &["Edit(.env)"], &[]), Mode::Default),
+            "cat .env"
+        ),
+        D
+    );
+    assert_ne!(
+        bx(
+            &f.with(rules(&[], &["Edit(.env)"], &[]), Mode::Default),
+            "sed -n 1p .env"
+        ),
+        D
+    );
+}
+
+#[test]
 fn read_deny_also_denies_write_and_edit_of_that_path() {
     let f = fx();
     let p = f.with(rules(&[], &["Read(sec.txt)"], &[]), Mode::Default);

@@ -1202,6 +1202,18 @@ impl Permissions {
     /// print or scan files and `<` redirects, found with the lenient splitter. Operands that need
     /// the shell to be known (`$VAR`, braces) cannot be checked and are left to the other rules.
     fn bash_reads_denied(&self, cmd: &str) -> bool {
+        self.bash_paths_denied(cmd, false)
+    }
+
+    /// The write side: redirect targets and the operands of file-changing commands against
+    /// `Edit(..)`/`Write(..)` deny rules, and `Read(..)` ones (a file you may not read you may not
+    /// overwrite blind). Holds in every mode, bypassPermissions included.
+    fn bash_writes_denied(&self, cmd: &str) -> bool {
+        self.bash_paths_denied(cmd, true)
+    }
+
+    fn bash_paths_denied(&self, cmd: &str, write: bool) -> bool {
+        const WRITERS: &[&str] = &["tee", "install", "ln", "truncate", "dd"];
         const READERS: &[&str] = &[
             "cat", "head", "tail", "less", "more", "grep", "egrep", "fgrep", "rg", "sed", "awk",
             "gawk", "nl", "tac", "od", "xxd", "hexdump", "strings", "cut", "sort", "uniq", "wc",
@@ -1213,7 +1225,10 @@ impl Permissions {
             .iter()
             .filter_map(|r| {
                 let (rt, spec) = bash::parse_rule(r);
-                spec.filter(|_| rt == "Read")
+                spec.filter(|_| {
+                    rt == "Read"
+                        || (write && matches!(rt, "Edit" | "Write" | "MultiEdit" | "NotebookEdit"))
+                })
             })
             .collect();
         if specs.is_empty() {
@@ -1234,7 +1249,27 @@ impl Permissions {
             }
             // `< file`, `<file`, `cat<file` (here-documents and `<(..)` read no file)
             let mut ops: Vec<String> = Vec::new();
-            for (i, x) in seg.iter().enumerate() {
+            if write {
+                ops = bash::redirect_targets(&seg);
+                let in_place = |a: &String| a.starts_with("-i") || a == "--in-place";
+                if bash::FS_CMDS.contains(&name) && (name != "sed" || w.iter().any(in_place)) {
+                    ops.extend(bash::fs_operands(name, &w[1..]).unwrap_or_else(|| {
+                        w[1..]
+                            .iter()
+                            .filter(|a| !a.starts_with('-'))
+                            .cloned()
+                            .collect()
+                    }));
+                } else if WRITERS.contains(&name) {
+                    ops.extend(
+                        w[1..]
+                            .iter()
+                            .filter(|a| !a.starts_with('-'))
+                            .map(|a| a.strip_prefix("of=").unwrap_or(a).to_string()),
+                    );
+                }
+            }
+            for (i, x) in seg.iter().enumerate().filter(|_| !write) {
                 if let Some(k) = x.rfind('<').filter(|k| !x[..=*k].ends_with("<<")) {
                     match &x[k + 1..] {
                         "" => ops.extend(seg.get(i + 1).cloned()),
@@ -1243,7 +1278,7 @@ impl Permissions {
                     }
                 }
             }
-            if READERS.contains(&name) {
+            if !write && READERS.contains(&name) {
                 ops.extend(w[1..].iter().filter(|a| !a.starts_with('-')).cloned());
             }
             for o in ops {
@@ -1411,6 +1446,12 @@ impl Permissions {
             return v(
                 Deny,
                 "blocked by a Read deny rule (the command reads that path)",
+            );
+        }
+        if tool == "Bash" && self.bash_writes_denied(command_of(input)) {
+            return v(
+                Deny,
+                "blocked by an Edit/Read deny rule (the command writes that path)",
             );
         }
         // a recursive Grep/Glob would read what a `Read(..)` deny rule protects: never silent

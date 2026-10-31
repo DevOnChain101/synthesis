@@ -93,6 +93,20 @@ fn deny_with_space_star_blocks_under_bypass() {
 }
 
 #[test]
+fn edit_deny_blocks_redirect_under_bypass() {
+    let rig = Rig::new();
+    rig.settings(json!({"permissions": {"deny": ["Edit(a.txt)"]}}));
+    rig.run(
+        bash("echo x > a.txt"),
+        &["--permission-mode", "bypassPermissions"],
+    );
+    assert_eq!(
+        std::fs::read_to_string(rig.ws().join("a.txt")).unwrap(),
+        "hello\n"
+    );
+}
+
+#[test]
 fn allow_with_space_star_lets_the_command_run() {
     let rig = Rig::new();
     rig.settings(json!({"permissions": {"allow": ["Bash(touch *)"]}}));
