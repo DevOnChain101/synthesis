@@ -1,6 +1,7 @@
 {
   "predicates-read-only": "F4/L2: bare `env` is no longer read-only (it prints every secret in the environment); `env` also drops out of auto-safe",
   "rules-ask-rule-beats-allow-and-readonly": "owner decision D8 / official Claude Code: an ask rule still prompts under bypassPermissions (Node: bypass allowed it); the other five modes are unchanged",
+  "rules-allow-bash-exact-and-star": "conformance G1: `Bash(echo *)` now matches like Claude Code (Node treated ` *` as a literal); the reason is `matched an allow rule` instead of `read-only command`",
   "rules-deny-wins-everywhere": "W2: the bare `Bash` allow rule now applies, so `ls` is allowed by the rule (was: rule ignored, allowed as read-only); the deny cases are unchanged",
   "suggestions-bash-subcommand-tools": "L5: `python3 -m pytest` is suggested as the exact command, not `python3 -m:*` (an interpreter prefix rule allows arbitrary code)"
 }
