@@ -93,7 +93,7 @@ impl NetworkArg {
 
 /// `Enforce` needs a backend that confines the filesystem and accepts the policy; `Err` is
 /// the message for the exit-2 refusal.
-pub(crate) fn sandbox_preflight(
+pub fn sandbox_preflight(
     backend: &dyn SandboxBackend,
     policy: Option<&synthesis_terminal::SandboxPolicy>,
 ) -> Result<(), String> {
@@ -1386,7 +1386,7 @@ fn read_criteria(f: &Path) -> Result<Vec<Criterion>, String> {
         .collect()
 }
 
-pub(crate) struct Resolved {
+pub struct Resolved {
     pub provider: Arc<dyn ModelProvider>,
     pub model: String,
     pub label: String,
@@ -1398,7 +1398,7 @@ pub(crate) struct Resolved {
 pub const NO_MODEL: &str =
     "no model configured: pass --model provider/model or set SYNTHESIS_MODEL";
 
-pub(crate) fn resolve_provider(
+pub fn resolve_provider(
     provider_arg: Option<&str>,
     model_arg: Option<&str>,
     cfg: &Config,

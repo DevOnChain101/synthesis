@@ -51,7 +51,7 @@ pub fn read_shell_settings(user_settings: &Path) -> (ShellSettings, Vec<String>)
 
 pub type PutArtifact = Box<dyn Fn(&[u8]) -> Result<ArtifactRef, String> + Send + Sync>;
 
-pub(crate) struct ProviderSummarizer {
+pub struct ProviderSummarizer {
     provider: Arc<dyn ModelProvider>,
     model: String,
     cancel: CancellationToken,
@@ -60,16 +60,12 @@ pub(crate) struct ProviderSummarizer {
 }
 
 impl ProviderSummarizer {
-    pub(crate) fn with_max_tokens(mut self, n: u32) -> Self {
+    pub fn with_max_tokens(mut self, n: u32) -> Self {
         self.max_tokens = n;
         self
     }
 
-    pub(crate) fn new(
-        provider: Arc<dyn ModelProvider>,
-        model: String,
-        cancel: CancellationToken,
-    ) -> Self {
+    pub fn new(provider: Arc<dyn ModelProvider>, model: String, cancel: CancellationToken) -> Self {
         Self {
             provider,
             model,
