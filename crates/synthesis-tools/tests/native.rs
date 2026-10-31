@@ -57,6 +57,7 @@ fn fx_with(reg: Registry, env: &[(&str, &str)]) -> Fx {
         env: Arc::new(e),
         read_ledger: Arc::new(Mutex::new(HashMap::new())),
         permission_mode: PermissionMode::Default,
+        skip_secrets: false,
         approval_token: None,
         deadline: None,
         cancel: tokio_util::sync::CancellationToken::new(),
@@ -88,6 +89,63 @@ fn text(o: &ToolOutput) -> &str {
 
 fn json_of(o: &ToolOutput) -> Value {
     serde_json::from_str(text(o)).unwrap_or_else(|_| panic!("not json: {o:?}"))
+}
+
+#[tokio::test]
+async fn grep_for_a_responder_skips_secret_shaped_files_and_links_to_them() {
+    let mut f = fx();
+    let w = f.root.clone();
+    for (n, body) in [
+        (".env", "TOKEN=needle-env"),
+        ("tls.pem", "needle-pem"),
+        ("id_rsa", "needle-rsa"),
+        (".envrc", "needle-envrc"),
+        ("secrets.yaml", "needle-yaml"),
+        ("ok.txt", "needle-ok"),
+    ] {
+        std::fs::write(w.join(n), body).unwrap();
+    }
+    std::fs::create_dir(w.join(".ssh")).unwrap();
+    std::fs::write(w.join(".ssh/config"), "needle-ssh").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(w.join(".env"), w.join("innocent.txt")).unwrap();
+    let all = f
+        .run(
+            "Grep",
+            json!({"pattern": "needle", "path": w, "output_mode": "content"}),
+        )
+        .await;
+    assert!(
+        text(&all).contains("needle-env"),
+        "the main agent still greps everything"
+    );
+    f.ctx.skip_secrets = true;
+    let o = f
+        .run(
+            "Grep",
+            json!({"pattern": "needle", "path": w, "output_mode": "content"}),
+        )
+        .await;
+    let t = text(&o);
+    assert!(t.contains("needle-ok"), "{t}");
+    for leaked in [
+        "needle-env",
+        "needle-pem",
+        "needle-rsa",
+        "needle-envrc",
+        "needle-yaml",
+        "needle-ssh",
+    ] {
+        assert!(!t.contains(leaked), "{leaked} leaked: {t}");
+    }
+    // the file itself as the search root
+    let one = f
+        .run(
+            "Grep",
+            json!({"pattern": "needle", "path": w.join(".env"), "output_mode": "content"}),
+        )
+        .await;
+    assert!(!text(&one).contains("needle-env"));
 }
 
 fn alive(pid: u64) -> bool {

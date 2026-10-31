@@ -93,6 +93,7 @@ fn ctx(dir: &std::path::Path, session: &str) -> ToolContext {
         env: Arc::new(std::env::vars().collect::<BTreeMap<_, _>>()),
         read_ledger: Arc::new(Mutex::new(HashMap::new())),
         permission_mode: PermissionMode::Default,
+        skip_secrets: false,
         approval_token: None,
         deadline: None,
         cancel: tokio_util::sync::CancellationToken::new(),

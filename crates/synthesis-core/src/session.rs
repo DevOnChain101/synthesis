@@ -153,6 +153,8 @@ pub struct ToolContext {
     pub approval_token: Option<String>,
     pub deadline: Option<Instant>,
     pub cancel: CancellationToken,
+    /// Tree-walking readers (Grep) skip secret-shaped files and links to them (peer responder).
+    pub skip_secrets: bool,
 }
 
 #[cfg(test)]

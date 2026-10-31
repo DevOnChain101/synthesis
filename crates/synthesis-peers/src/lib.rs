@@ -155,6 +155,24 @@ pub struct Addr {
 }
 
 impl Addr {
+    /// Every string cut to 256 chars: an address from a peer is shown to a model and logged.
+    pub fn clamped(mut self) -> Self {
+        let cut = |s: &mut String| *s = s.chars().take(256).collect();
+        cut(&mut self.workspace_key);
+        cut(&mut self.workspace_label);
+        cut(&mut self.workspace_root);
+        cut(&mut self.session_id);
+        cut(&mut self.instance);
+        cut(&mut self.kind);
+        for o in [&mut self.session_name, &mut self.agent_id]
+            .into_iter()
+            .flatten()
+        {
+            cut(o);
+        }
+        self
+    }
+
     /// `ws:<key12>/sess:<session_id>/agent:<instance>`
     pub fn canonical(&self) -> String {
         let k = &self.workspace_key[..self.workspace_key.len().min(12)];

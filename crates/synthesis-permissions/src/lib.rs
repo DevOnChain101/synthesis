@@ -359,13 +359,7 @@ impl Env {
 
 /// `.ssh` / `.aws` / `.gnupg` directories and secret-shaped file names.
 fn secret_shaped(p: &Path) -> bool {
-    synthesis_core::secrets::is_secret_path(p)
-        || p.components().any(|c| {
-            matches!(
-                c.as_os_str().to_str(),
-                Some(".ssh" | ".aws" | ".gnupg" | ".git-credentials")
-            )
-        })
+    synthesis_core::secrets::is_secret_shaped(p)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -725,6 +719,14 @@ impl Permissions {
         if targets.is_empty() || !(PATH_TOOLS.contains(&tool) || tool == "LS") {
             return None;
         }
+        // the roots and their real paths: a state dir reached through a link is still the state dir
+        let roots: Vec<PathBuf> = self
+            .env
+            .deny_read
+            .iter()
+            .flat_map(|x| [Some(x.clone()), paths::real_of(x)])
+            .flatten()
+            .collect();
         for t in targets {
             let abs = paths::resolve(&self.env.cwd, &t);
             for c in [Some(paths::lexical_normalize(&abs)), paths::real_of(&abs)]
@@ -732,7 +734,7 @@ impl Permissions {
                 .flatten()
             {
                 // a target inside a denied path, or an ancestor a search would walk into it from
-                let hit = self.env.deny_read.iter().any(|x| {
+                let hit = roots.iter().any(|x| {
                     paths::within(x, &c, policy)
                         || (self.env.deny_secret_reads && paths::within(&c, x, policy))
                 });

@@ -140,7 +140,12 @@ pub fn setup(
 }
 
 /// One `synth doctor` block.
-pub fn doctor_lines(peers: &Map<String, Value>, home: &Path, env: &Env) -> Vec<String> {
+pub fn doctor_lines(
+    peers: &Map<String, Value>,
+    home: &Path,
+    env: &Env,
+    sandbox_enforcing: bool,
+) -> Vec<String> {
     let c = Config::from_settings(peers, "<workspace>");
     let mut v = vec![format!(
         "peers (cross-session messaging, `synthesis.peers.enabled` in user settings or --peers): {}",
@@ -176,6 +181,16 @@ pub fn doctor_lines(peers: &Map<String, Value>, home: &Path, env: &Env) -> Vec<S
             }
         ));
     }
+    if !sandbox_enforcing {
+        v.push(
+            "  warning: the sandbox is not enforcing here; with peers on, commands the agent runs could read the peer key (the run directory is only denied inside the sandbox)"
+                .into(),
+        );
+    }
+    v.push(
+        "  note: a session answers peers only when its model has a price (`synthesis.pricing` in user settings.json); otherwise it declines with no_price"
+            .into(),
+    );
     v.push(format!(
         "  allow: {} rule(s), deny: {} rule(s), initiate {}, answer {}, max_hops {}, max_cost_usd {}",
         c.allow.len(),

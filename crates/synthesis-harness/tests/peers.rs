@@ -108,12 +108,35 @@ fn side(
     responder: Responder,
     slow_ms: u64,
 ) -> (Side, Entry) {
+    side_with(sid, label, run, cfg, responder, slow_ms, true)
+}
+
+fn side_with(
+    sid: &'static str,
+    label: &'static str,
+    run: &std::path::Path,
+    cfg: Option<serde_json::Value>,
+    responder: Responder,
+    slow_ms: u64,
+    priced: bool,
+) -> (Side, Entry) {
     let link_cfg = cfg.map(config);
     let key = load_or_create_key(run).unwrap();
     let run = run.to_path_buf();
     let mut entry_out = None;
     let rig = Rig::build(
         Opts {
+            config: if priced {
+                |c| {
+                    // peers answer only when the session has a price (cost can then be bounded)
+                    c.pricing = Some(synthesis_harness::Pricing {
+                        input_per_mtok: 1.0,
+                        output_per_mtok: 1.0,
+                    });
+                }
+            } else {
+                |_| {}
+            },
             tools: probe_tools(slow_ms),
             allow: vec!["Slow".into(), "SlowEnv".into(), "Read".into()],
             responder: Some(responder),
@@ -436,6 +459,49 @@ async fn the_responder_cannot_read_secrets_state_or_the_peer_key() {
             "{id} leaked: {t}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_session_without_a_model_price_declines_peer_questions() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let a_responder: Responder = Arc::new(|_| Some(Turn::text("A idle")));
+    let b_responder: Responder = Arc::new(|r| {
+        Some(if tool_result(r, "ask").is_none() {
+            Turn::tool(
+                "ask",
+                "SendMessage",
+                json!({"to": "ws:alpha/sess:sess-a", "message": "hi"}),
+            )
+        } else if !texts(r).contains("<peer_reply") {
+            Turn::text("waiting")
+        } else {
+            Turn::text("B done")
+        })
+    });
+    let (a, ea) = side_with(
+        "sess-a",
+        "alpha",
+        &run,
+        Some(on.clone()),
+        a_responder,
+        10,
+        false,
+    );
+    let (mut b, _) = side("sess-b", "beta", &run, Some(on), b_responder, 10);
+    let _reg = serve(&a, &run, ea);
+    let out = go(&mut b, "ask").await;
+    assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
+    let last = texts(b.rig.requests().last().unwrap());
+    assert!(
+        last.contains("status=\"declined\"") && last.contains("no_price"),
+        "{last}"
+    );
+    assert!(
+        a.rig.requests().iter().all(|r| !is_responder(r)),
+        "no responder ran"
+    );
 }
 
 #[tokio::test]

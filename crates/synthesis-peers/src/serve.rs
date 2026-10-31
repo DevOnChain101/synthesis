@@ -408,9 +408,12 @@ impl Call {
                     }
                     Some("reply") => {
                         return Ok(ReplyFrame {
-                            status: s("status"),
+                            status: cap(s("status"), 256),
                             text: cap(s("text"), MAX_REPLY),
-                            from: f.get("from").and_then(|a| Addr::deserialize(a).ok()),
+                            from: f
+                                .get("from")
+                                .and_then(|a| Addr::deserialize(a).ok())
+                                .map(Addr::clamped),
                         });
                     }
                     _ => {}

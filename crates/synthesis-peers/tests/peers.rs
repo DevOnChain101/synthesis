@@ -392,6 +392,7 @@ async fn client_caps_a_huge_reply_and_a_partial_flood() {
         let f = c.recv().await.unwrap().unwrap();
         let id = f["id"].as_str().unwrap().to_string();
         c.send(&json!({"t":"accepted","id":id})).await.unwrap();
+        let long = "x".repeat(1000);
         for seq in 0..500 {
             let t = "p".repeat(2000);
             c.send(&json!({"t":"partial","id":id,"seq":seq,"text":t}))
@@ -399,7 +400,9 @@ async fn client_caps_a_huge_reply_and_a_partial_flood() {
                 .unwrap();
         }
         let big = "r".repeat(900 * 1024);
-        c.send(&json!({"t":"reply","id":id,"status":"answered","text":big}))
+        c.send(&json!({"t":"reply","id":id,"status":long,"text":big,
+            "from":{"workspace_key":long,"workspace_label":long,"workspace_root":long,
+                    "session_id":long,"instance":long,"kind":long}}))
             .await
             .unwrap();
     });
@@ -421,6 +424,18 @@ async fn client_caps_a_huge_reply_and_a_partial_flood() {
     .unwrap();
     assert!(n <= 64 && bytes <= 64 * 1024, "{n} partials, {bytes} bytes");
     assert_eq!(f.text.len(), 32 * 1024);
+    assert_eq!(f.status.len(), 256);
+    let from = f.from.unwrap();
+    assert!(
+        [
+            &from.kind,
+            &from.instance,
+            &from.session_id,
+            &from.workspace_label
+        ]
+        .iter()
+        .all(|s| s.len() == 256)
+    );
 }
 
 #[test]

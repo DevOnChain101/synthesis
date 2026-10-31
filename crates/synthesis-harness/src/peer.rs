@@ -32,9 +32,9 @@ use crate::sink::Scope;
 use crate::util::{lock, uuid};
 use synthesis_events::ToolStatus;
 
-/// Tools of a peer responder (B6): reads only. `git_status` / `git_diff` are listed for when they
-/// exist; only registered tools are granted.
-const RESPONDER_TOOLS: [&str; 6] = ["Read", "Glob", "Grep", "LS", "git_status", "git_diff"];
+/// Tools of a peer responder (B6): file reads only. `git_diff` would print secret-shaped files
+/// unfiltered, so no git tool is granted.
+const RESPONDER_TOOLS: [&str; 4] = ["Read", "Glob", "Grep", "LS"];
 const RESPONDER_TURNS: u32 = 8;
 const RESPONDER_TOOL_CALLS: u32 = 20;
 /// Requests this session may have in flight to peers.
@@ -782,6 +782,12 @@ impl Harness {
         let Some(link) = self.peers.clone() else {
             return declined("peers are off");
         };
+        // Cost is the only spend cap that scales with tokens; without a price it cannot be enforced.
+        if self.config.pricing.is_none() {
+            return declined(
+                "no_price: this session has no model price (synthesis.pricing), so it cannot bound what an answer costs",
+            );
+        }
         // Reserve part of what is left before running; the guard settles it (spent += actual,
         // reserved -= reserve) when the run ends, is cancelled, or the future is dropped.
         let (n, snap, reserve) = {

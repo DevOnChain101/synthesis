@@ -500,6 +500,37 @@ fn deny_read_is_a_hard_deny_in_every_mode_and_secret_reads_only_when_asked() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn deny_read_holds_through_links_to_the_state_dir_and_from_a_linked_root() {
+    let f = fx();
+    let real = f.home.join("real-state");
+    fs::create_dir_all(real.join("run")).unwrap();
+    fs::write(real.join("run/peer.key"), "k").unwrap();
+    // the configured root is itself a link to the real dir
+    let via = f.home.join("state-link");
+    std::os::unix::fs::symlink(&real, &via).unwrap();
+    // a link inside the workspace pointing into the state dir
+    std::os::unix::fs::symlink(real.join("run"), f.cwd.join("innocent")).unwrap();
+    for root in [&real, &via] {
+        let env = Env::new(&f.cwd, &f.home, Mode::Default)
+            .interactive(true)
+            .deny_reads([root.clone()]);
+        let p = Permissions::new(PermissionRules::default(), env);
+        for target in [
+            via.join("run/peer.key"),
+            real.join("run/peer.key"),
+            f.cwd.join("innocent/peer.key"),
+        ] {
+            assert_eq!(
+                d(&p, "Read", json!({ "file_path": target })),
+                D,
+                "{root:?} {target:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn extra_protected_paths_ask_for_writes_even_in_accept_edits() {
     let f = fx();

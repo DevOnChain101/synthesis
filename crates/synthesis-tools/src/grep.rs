@@ -77,8 +77,18 @@ fn glob_hits(re: &Regex, rel: &str, win: bool) -> bool {
 }
 
 fn collect_files(search: &Path, is_dir: bool, ctx: &ToolContext) -> Vec<PathBuf> {
+    let secret = |p: &Path| {
+        ctx.skip_secrets
+            && (synthesis_core::secrets::is_secret_shaped(p)
+                || std::fs::canonicalize(p)
+                    .is_ok_and(|r| synthesis_core::secrets::is_secret_shaped(&r)))
+    };
     if !is_dir {
-        return vec![search.to_path_buf()];
+        return if secret(search) {
+            vec![]
+        } else {
+            vec![search.to_path_buf()]
+        };
     }
     WalkBuilder::new(search)
         .standard_filters(false)
@@ -93,8 +103,10 @@ fn collect_files(search: &Path, is_dir: bool, ctx: &ToolContext) -> Vec<PathBuf>
         .build()
         .flatten()
         .take_while(|_| !ctx.cancel.is_cancelled())
+        // symlinks are not followed (`is_file` is false for them), so a link to a secret is skipped too
         .filter(|e| e.file_type().is_some_and(|t| t.is_file()))
         .map(ignore::DirEntry::into_path)
+        .filter(|p| !secret(p))
         .collect()
 }
 
