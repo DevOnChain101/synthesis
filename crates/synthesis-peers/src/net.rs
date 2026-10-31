@@ -208,7 +208,20 @@ mod unix {
             .recursive(true)
             .mode(0o700)
             .create(dir)?;
-        if std::fs::metadata(dir)?.permissions().mode() & 0o077 != 0 {
+        let bad = |m: &'static str| io::Error::new(io::ErrorKind::PermissionDenied, m);
+        let meta = std::fs::symlink_metadata(dir)?;
+        if !meta.is_dir() {
+            return Err(bad("the run directory is a link or not a directory"));
+        }
+        // A file we create is ours: its owner is the effective uid (no libc, no unsafe).
+        let probe = dir.join(format!(".probe{}", hex(&random::<4>()?)));
+        std::fs::File::create(&probe)?;
+        let mine = std::fs::symlink_metadata(&probe).map(|m| m.uid());
+        let _ = std::fs::remove_file(&probe);
+        if mine? != meta.uid() {
+            return Err(bad("the run directory is not owned by this user"));
+        }
+        if meta.permissions().mode() & 0o077 != 0 {
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
         }
         Ok(())

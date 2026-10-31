@@ -203,10 +203,10 @@ C→S {"t":"cancel","id"}                   closing the connection = cancel
    - Windows: remote clients rejected; mutual HMAC with a key under the user profile.
    - No TCP listener. The Windows ACL assumption needs a real-machine test.
 2. **Peer text is untrusted data,** fenced in both directions. It is never an approval, a grant or a mode change, and it is excluded from the judge's input.
-3. **Exfiltration:** the receiver decides what to share, via the read-only responder under its own policy, snapshot withholding and the outgoing `Redactor`. **Residual:** content A's user showed A can reach an allowed peer. The allow list is the trust decision.
+3. **Exfiltration:** the receiver decides what to share, via the read-only responder under its own policy, snapshot withholding and the outgoing `Redactor`. **Residual:** content A's user showed A can reach an allowed peer. The allow list is the trust decision. **Residual (shared key, 6):** every process of the same OS user can read `peer.key`, and `from` in a request is self-asserted, so the allow list is policy against honest peers, not authentication against a process that holds the key; the rate limit is therefore global per receiver, not per asserted session. **Residual (Windows, 9):** the default named-pipe DACL grants read to other local users; only the HMAC handshake and the unguessable pipe name stop them, and `platform_ok` (home under the profile, compared by path component) is the only ACL assumption. Unverified on a real machine. **Residual (no channel binding, 10):** the HMAC proves key possession per connection but is not bound to the channel; a same-user process that holds the key can relay or impersonate.
 4. **Impersonation:** a same-user process (including the agent's own Bash) could read `peer.key`. Mitigations:
-   - `$SYNTHESIS_HOME/run/` becomes a protected/secret path (file tools refuse it; Bash's protected-path scan asks);
-   - deny it in the R7 sandbox.
+   - `$SYNTHESIS_HOME/run/` (and the other Synthesis state) is a hard-denied READ path in the permission engine (`Env::deny_read`, fed from `synthesis_state_paths`): Read/Grep/Glob/LS/edit tools on it or below it are denied in every mode and for every rule, and a Bash command that names the path is denied (a command that builds the path in the shell is not caught; the sandbox deny is the second layer). It is also a protected (write-ask) path and a sandbox deny path. An earlier draft claimed "file tools refuse it" with only the protected-path write scan behind it; that was false for reads and is corrected here;
+   - the peer responder additionally runs with `deny_secret_reads` (`.env*`, keys, `.ssh`, `.aws`, `.gnupg`, `.git-credentials`, and the whole `$SYNTHESIS_HOME`) and `block_outside_reads`; the main agent keeps reading project `.env` files unless the user adds a `Read(..)` deny rule.
    A Bash-capable agent can still bypass its *own* sender policy, but never the receiver's (R2 stays read-only and redacted).
 5. **Settings are honoured only from user settings and CLI flags, never from project settings:**
    ```json
@@ -338,7 +338,7 @@ Not done (left for R10a follow-up or R10b):
 - Several agents asking for approval at once toggle the single session status (`waiting_approval`/`running`) approximately.
 - Event field is `name` (not `instance`) on `subagent.started` / `subagent.status_changed`.
 
-## G. R10b status (cross-session peers) — Built, security review pending
+## G. R10b status (cross-session peers) — Built, security-review fixes applied, re-review pending
 Built:
 - `crates/synthesis-peers` (OFF unless `synthesis.peers.enabled` or `--peers`):
   - Endpoint: unix socket `run/<rand16hex>.sock` (0700 dir, 0600 socket, `peer_cred` uid equals the `run/` owner, path over 100 B refuses to bind) or Windows pipe `\\.\pipe\synthesis-peer-<rand32hex>` (`first_pipe_instance`, `reject_remote_clients`). `run/peer.key` (32 random bytes, 0600). `platform_ok` implements the Windows "home under the user profile" rule.
@@ -351,7 +351,15 @@ Built:
   - Snapshots per agent at every drain point and at the end of each run; the responder forks the addressed agent's snapshot (`main` or an instance), with results of calls whose input names a secret or protected file replaced by `[withheld from peers]` and thinking blocks dropped.
   - Responder (`kind:"peer-responder"`, instance `peer-<n>`, visible in A's events as `subagent.started|stopped`): tools Read, Glob, Grep, LS (and `git_status` / `git_diff` once they exist); mode `stricter(A's current mode, plan)`; asks auto-denied; 8 turns, 20 tool calls; cost added to `max_cost_usd` (`Harness::peer_cost_usd`), the next request is `declined` once it is spent; a first line `DECLINED:` makes the status `declined`. The request is the first user turn as a fenced `<peer_request ... trust="peer-data">`.
   - Sender: `SendMessage` with `ws:`/`sess:` (resolve, connect, handshake, wait for `accepted` / `rejected`, then a background wait), `ListSessions` (only offered with peers on), `ListAgents{scope:"all"}`, 4 in flight, `<peer_reply>` queued and moved into history at the next drain point (never between a `tool_use` and its `tool_result`), and the task waits for outstanding replies (D3). A `SendMessage` to a permitted peer is allowed without a prompt when `initiate` is true (any other reason for ask/deny is kept: deny rules, `plan`, `dontAsk`).
-- `$SYNTHESIS_HOME/run` is in `synthesis_sandbox::synthesis_state_paths`: protected path in the permission engine and sandbox deny path.
+- `$SYNTHESIS_HOME/run` is in `synthesis_sandbox::synthesis_state_paths`: protected (write) path, hard-denied READ path (`Env::deny_read`, all agents) and sandbox deny path.
+- Security-review fixes (round 1):
+  - Responder: `deny_secret_reads`, `deny_read` of the whole synthesis home, `block_outside_reads`, wall cap 120 s.
+  - Cost: each responder reserves `min(free, max_cost_usd/2)` before it runs and a drop guard settles actual cost and refunds the rest (also on cancel); the request rate limit (10 per 10 min) is global per receiver; at most 16 connections at once; 5 s for the first frame after the handshake.
+  - Snapshots: only results of Read/Glob/Grep/LS/Edit/Write/MultiEdit/NotebookEdit/TodoWrite are inherited; every other result (Bash, Web*, MCP, Task) and every call whose input names a secret, state, `../` or an outside path is withheld together with its input; everything else goes through the session redactor; snapshots of `peer-*` are not kept, cancelled/evicted agents' snapshots are dropped, the map is capped at 17.
+  - Client: reply text capped at 32 KiB, partials at 64 frames / 64 KiB, joined timeout text at 32 KiB.
+  - Fences: `<peer_reply>` / `<peer_request>` text is fenced for both its own tag and `agent_message`.
+  - Run dir and key: link and owner checks, mode 0700 / 0600, key created through a temp file and a no-clobber hard link; registry endpoints must be a `.sock` under the run dir (unix) or a `synthesis-peer-` pipe (Windows); `platform_ok` compares path components.
+  - `SendMessage` to a peer reports side effect `external`.
 - `apps/cli`: `--peers`, `--name`, endpoint + registry entry + server at `prepare` (headless and TUI share it; no TUI file changed), `synth doctor` peers block, `docs/CLI.md`.
 - Tests: `crates/synthesis-peers/tests/peers.rs` and unit tests (C15, C20-C24 transport side, C10-C12 resolver), `crates/synthesis-harness/tests/peers.rs` (C15-C19, C23: two harnesses, real socket, fake providers, `FakeProvider.requests()` assertions), `apps/cli/tests/e2e.rs` (peers off by default, flagged run registers and cleans up, bad `--name`).
 
@@ -359,8 +367,8 @@ Not done:
 - TUI: `/name`, `/peers` panel, `/agents --all`, the `⇄` rows and the `peers on` status bar (TUI files are owned by the TUI rewrite). `peer.*` events are not rendered yet.
 - `confirm_replies` (D11: dialog before a reply leaves) and R10c offline resume (`resume_offline`, `peer-answer`).
 - Responder details: streamed `partial` frames (the responder answers in one piece), `git_status` / `git_diff` (no such tools exist yet), the snapshot is the last drain-point state (a compaction in flight keeps the earlier snapshot, which matches the spec, but there is no separate mid-approval case), `peer.reply.text` has no ArtifactRef.
-- `SendMessage` side-effect class is still reported as `read` in `tool.started` (it should be `external` for a peer target).
 - `ws:<ref>/agent:<x>` without `sess:` is ambiguous whenever the workspace has several sessions (the instance is not used to narrow the candidates).
 - Liveness for sessions started with `--no-session-store` is unknown (no writer lock): a dead one shows `unreachable`, not `offline`.
 - Windows: written against tokio's named-pipe API and linted with `cargo clippy --target x86_64-pc-windows-msvc`, never run on Windows; the pipe ACL assumption (B3) is unverified.
-- The `security-reviewer` pass required by D14 has not happened.
+- Residual risks, accepted and documented in B8.3: shared key and self-asserted `from` (6), Windows pipe ACL (9), no channel binding (10). Also: a Grep over a workspace directory can still read a secret-shaped file inside it for the responder (only named paths and ancestors of state are checked), and cost is only enforced when the model has a price in settings (the 8-turn, 20-call and 120 s caps always apply).
+- The first `security-reviewer` pass said "fix first"; the fixes above are in, a second pass is pending.

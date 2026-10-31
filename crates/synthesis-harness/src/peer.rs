@@ -39,6 +39,10 @@ const RESPONDER_TURNS: u32 = 8;
 const RESPONDER_TOOL_CALLS: u32 = 20;
 /// Requests this session may have in flight to peers.
 const MAX_IN_FLIGHT: usize = 4;
+/// Snapshots kept: `main` plus the sub-agents the hub retains (16).
+const MAX_SNAPSHOTS: usize = 17;
+/// Wall-clock cap of one responder run.
+const RESPONDER_WALL_MS: u64 = 120_000;
 const REQUEST_TIMEOUT_S: u64 = 300;
 const WITHHELD: &str = "[withheld from peers]";
 
@@ -73,6 +77,8 @@ struct PeerState {
     replies: Vec<(String, String)>,
     /// Responder cost so far (USD), against `max_cost_usd`.
     cost: f64,
+    /// Budget promised to running responders and not yet settled.
+    reserved: f64,
     seq: u32,
     snapshots: HashMap<String, Vec<Message>>,
     summary: String,
@@ -158,7 +164,7 @@ fn reply_block(id: &str, from: &Addr, kind: &str, status: &str, text: &str) -> S
         attr(&from.canonical()),
         attr(kind),
         attr(status),
-        fence("peer_reply", text)
+        fence("agent_message", &fence("peer_reply", text))
     )
 }
 
@@ -171,67 +177,145 @@ fn request_block(r: &Request) -> String {
         attr(&r.from.canonical()),
         attr(&r.from.kind),
         r.chain.len() + 1,
-        fence("peer_request", &r.text)
+        fence("agent_message", &fence("peer_request", &r.text))
     )
 }
 
-/// Snapshot copy for a responder: results of calls whose input names a secret or protected file
-/// become `[withheld from peers]` (B6 Sanitising). Tokens of any tool input are checked, so a
-/// `Bash` `cat .env` is withheld as well.
-fn sanitize(history: &[Message]) -> Vec<Message> {
+/// Tools whose results a responder may inherit; every other result (Bash, Web*, MCP, Task, ...) is
+/// withheld wholesale, because it can carry anything.
+const SHARED_RESULTS: [&str; 9] = [
+    "Read",
+    "Glob",
+    "Grep",
+    "LS",
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit",
+    "TodoWrite",
+];
+
+fn redact_value(v: &Value, redact: &dyn Fn(&str) -> String) -> Value {
+    match v {
+        Value::String(t) => Value::String(redact(t)),
+        Value::Array(a) => Value::Array(a.iter().map(|x| redact_value(x, redact)).collect()),
+        Value::Object(o) => Value::Object(
+            o.iter()
+                .map(|(k, x)| (k.clone(), redact_value(x, redact)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// A string leaf of a tool input that names a secret, Synthesis state, or a path outside the
+/// workspace.
+fn names_private_path(t: &str, root: &str, home: &str) -> bool {
+    let p = std::path::Path::new(t);
+    is_secret_path(p)
+        || t.contains(".ssh/")
+        || t.contains(".aws/")
+        || t.contains(".gnupg")
+        || (!home.is_empty() && t.contains(home))
+        || t.contains("../")
+        || ((t.starts_with('/')
+            || t.starts_with('~')
+            || p.has_root()
+            || t.get(1..3) == Some(":\\")
+            || t.get(1..3) == Some(":/"))
+            && !root.is_empty()
+            && !t.starts_with(root))
+}
+
+fn leaves(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::String(t) => {
+            out.push(t.clone());
+            out.extend(
+                t.split(|c: char| c.is_whitespace() || "\"'\\,{}[]:=;|&()<>".contains(c))
+                    .filter(|x| !x.is_empty())
+                    .map(String::from),
+            );
+        }
+        Value::Array(a) => a.iter().for_each(|x| leaves(x, out)),
+        Value::Object(o) => o.values().for_each(|x| leaves(x, out)),
+        _ => {}
+    }
+}
+
+/// Snapshot copy for a responder (B6 Sanitising). A call is withheld, input and result, when its
+/// tool is not one whose results are shared, or its input names a secret, state or an outside
+/// path; the rest goes through the session's redactor. Thinking blocks are dropped.
+fn sanitize(
+    history: &[Message],
+    root: &str,
+    home: &str,
+    redact: &dyn Fn(&str) -> String,
+) -> Vec<Message> {
     let mut hidden: BTreeSet<String> = BTreeSet::new();
     for m in history {
         if let Content::Blocks(bs) = &m.content {
             for b in bs {
-                if let Block::ToolUse {
-                    id, input: Some(i), ..
-                } = b
-                    && i.to_string()
-                        .split(|c: char| c.is_whitespace() || "\"'\\,{}[]:=;|&()<>".contains(c))
-                        .any(|t| {
-                            !t.is_empty()
-                                && (is_secret_path(std::path::Path::new(t))
-                                    || t.contains(".synthesis/run")
-                                    || t.contains(".ssh/")
-                                    || t.contains(".aws/"))
-                        })
-                {
-                    hidden.insert(id.clone());
+                if let Block::ToolUse { id, name, input } = b {
+                    let mut toks = vec![];
+                    if let Some(i) = input {
+                        leaves(i, &mut toks);
+                    }
+                    if !SHARED_RESULTS.contains(&name.as_str())
+                        || toks.iter().any(|t| names_private_path(t, root, home))
+                    {
+                        hidden.insert(id.clone());
+                    }
                 }
             }
         }
     }
+    let block = |b: &Block| -> Option<Block> {
+        Some(match b {
+            Block::ToolUse { id, name, .. } if hidden.contains(id) => Block::ToolUse {
+                id: id.clone(),
+                name: name.clone(),
+                input: Some(json!({"withheld": WITHHELD})),
+            },
+            Block::ToolUse { id, name, input } => Block::ToolUse {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.as_ref().map(|i| redact_value(i, redact)),
+            },
+            Block::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            } if hidden.contains(tool_use_id) => Block::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                content: Some(Value::String(WITHHELD.into())),
+                is_error: *is_error,
+            },
+            Block::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => Block::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                content: content.as_ref().map(|c| redact_value(c, redact)),
+                is_error: *is_error,
+            },
+            Block::Text { text } => Block::Text { text: redact(text) },
+            Block::Thinking { .. } | Block::RedactedThinking { .. } | Block::Image { .. } => {
+                return None;
+            }
+        })
+    };
     history
         .iter()
         .map(|m| match &m.content {
             Content::Blocks(bs) => Message {
                 role: m.role,
-                content: Content::Blocks(
-                    bs.iter()
-                        .map(|b| match b {
-                            Block::ToolResult {
-                                tool_use_id,
-                                is_error,
-                                ..
-                            } if hidden.contains(tool_use_id) => Block::ToolResult {
-                                tool_use_id: tool_use_id.clone(),
-                                content: Some(Value::String(WITHHELD.into())),
-                                is_error: *is_error,
-                            },
-                            Block::Thinking { .. } | Block::RedactedThinking { .. } => {
-                                Block::Text {
-                                    text: String::new(),
-                                }
-                            }
-                            other => other.clone(),
-                        })
-                        .filter(|b| !matches!(b, Block::Text { text } if text.is_empty()))
-                        .collect(),
-                ),
+                content: Content::Blocks(bs.iter().filter_map(block).collect()),
             },
             Content::Text(t) => Message {
                 role: m.role,
-                content: Content::Text(t.clone()),
+                content: Content::Text(redact(t)),
             },
         })
         .collect()
@@ -253,10 +337,26 @@ impl Harness {
     /// Last-boundary history of `name` for responders. Called at every drain point and when an
     /// agent's run ends.
     pub(crate) fn peer_snapshot(&self, name: &str, messages: &[Message]) {
+        // Responders are never addressable; the map is bounded (main + the kept instances).
+        if name.starts_with("peer-") {
+            return;
+        }
         if let Some(p) = self.peers.as_ref().filter(|p| p.on() && p.config.answer) {
-            lock(&p.state)
-                .snapshots
-                .insert(name.to_string(), messages.to_vec());
+            let mut st = lock(&p.state);
+            if !st.snapshots.contains_key(name)
+                && st.snapshots.len() > MAX_SNAPSHOTS
+                && let Some(other) = st.snapshots.keys().find(|k| *k != MAIN).cloned()
+            {
+                st.snapshots.remove(&other);
+            }
+            st.snapshots.insert(name.to_string(), messages.to_vec());
+        }
+    }
+
+    /// An agent that is cancelled or evicted keeps no snapshot.
+    pub(crate) fn peer_forget(&self, name: &str) {
+        if let Some(p) = &self.peers {
+            lock(&p.state).snapshots.remove(name);
         }
     }
 
@@ -359,6 +459,9 @@ impl Harness {
             Ok(e) => e.clone(),
             Err(e) => return fail(e.to_string()),
         };
+        if !synthesis_peers::endpoint_ok(&link.run_dir, &entry.endpoint) {
+            return fail("unreachable: the registry entry names a foreign endpoint".into());
+        }
         let id = uuid();
         let from = link.addr(
             &agent.name,
@@ -451,7 +554,10 @@ impl Harness {
                     let mut t = f.text;
                     if f.status == "timeout" {
                         let p = lock(&partials).join("\n");
-                        t = format!("incomplete (timeout)\n{p}");
+                        t = format!(
+                            "incomplete (timeout)\n{}",
+                            p.chars().take(32 * 1024).collect::<String>()
+                        );
                     }
                     (f.status, t, f.from)
                 }
@@ -676,25 +782,31 @@ impl Harness {
         let Some(link) = self.peers.clone() else {
             return declined("peers are off");
         };
-        let (spent, n, snap) = {
+        // Reserve part of what is left before running; the guard settles it (spent += actual,
+        // reserved -= reserve) when the run ends, is cancelled, or the future is dropped.
+        let (n, snap, reserve) = {
             let mut st = lock(&link.state);
             st.seq += 1;
+            let free = link.config.max_cost_usd - st.cost - st.reserved;
+            if free <= 0.0 {
+                drop(st);
+                return declined("this session's peer-answer budget is used up");
+            }
+            let reserve = free.min(link.config.max_cost_usd / 2.0);
+            st.reserved += reserve;
             (
-                st.cost,
                 st.seq,
                 st.snapshots.get(&req.to_agent).cloned().unwrap_or_default(),
+                reserve,
             )
         };
-        if spent >= link.config.max_cost_usd {
-            return declined("this session's peer-answer budget is used up");
-        }
         let started = Instant::now();
         let mut session = link.session.clone();
         session.budget = Budget {
             max_turns: RESPONDER_TURNS,
             max_tool_calls: RESPONDER_TOOL_CALLS,
-            max_cost_usd: Some(link.config.max_cost_usd - spent),
-            max_wall_ms: None,
+            max_cost_usd: Some(reserve),
+            max_wall_ms: Some(RESPONDER_WALL_MS),
             max_verify_attempts: 0,
         };
         let task_id = self.hub.task_id().unwrap_or_else(uuid);
@@ -704,11 +816,22 @@ impl Harness {
             SessionStatus::Running,
             CancellationToken::new(),
         );
+        let _settle = CostGuard {
+            link: &link,
+            task: &task,
+            reserve,
+        };
         let mode = stricter(lock(&self.permissions).mode(), Mode::Plan);
+        let home = link.run_dir.parent().map(std::path::Path::to_path_buf);
         let perms = {
             let mut p = lock(&self.permissions).clone();
             p.set_mode(mode);
             p.env.interactive = false;
+            // A stranger's question never reaches secrets, Synthesis state or the outside.
+            p.block_outside_reads = true;
+            p.env.deny_secret_reads = true;
+            p.env.deny_read.extend(home.clone());
+            p.env.deny_read.push(link.run_dir.clone());
             Arc::new(Mutex::new(p))
         };
         let have: BTreeSet<String> = self.tools.specs().into_iter().map(|s| s.name).collect();
@@ -730,7 +853,15 @@ impl Harness {
             allowed: Some(allowed),
             prompt: Some(RESPONDER_PROMPT.into()),
         };
-        let mut messages = sanitize(&snap);
+        let redact = |t: &str| self.sink.redact(t);
+        let mut messages = sanitize(
+            &snap,
+            &link.session.workspace.root.to_string_lossy(),
+            &home
+                .map(|h| h.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            &redact,
+        );
         let turn = Block::Text {
             text: request_block(&req),
         };
@@ -763,7 +894,6 @@ impl Harness {
         self.emit(&task, &ctx, None, Event::SubagentStarted(info(None)));
         let mut st = AgentState::new(messages);
         let end = self.run_agent(&task, &ctx, &mut st).await;
-        lock(&link.state).cost += lock(&task.counters).cost;
         let (status, text) = match end {
             AgentEnd::Finished(t) => match t.trim().strip_prefix("DECLINED:") {
                 Some(rest) => ("declined", rest.trim().to_string()),
@@ -818,6 +948,22 @@ impl Harness {
     }
 }
 
+/// Settles a responder's reservation whatever way its future ends (done, cancelled, dropped).
+struct CostGuard<'a> {
+    link: &'a PeerLink,
+    task: &'a TaskRun,
+    reserve: f64,
+}
+
+impl Drop for CostGuard<'_> {
+    fn drop(&mut self) {
+        let actual = lock(&self.task.counters).cost;
+        let mut st = lock(&self.link.state);
+        st.cost += actual;
+        st.reserved = (st.reserved - self.reserve).max(0.0);
+    }
+}
+
 struct HarnessResponder {
     h: Arc<Harness>,
 }
@@ -834,5 +980,85 @@ impl Responder for HarnessResponder {
     fn answer(&self, req: Request, partial: mpsc::UnboundedSender<String>) -> BoxFut<Reply> {
         let h = self.h.clone();
         Box::pin(async move { h.peer_answer(req, partial).await })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn use_(id: &str, name: &str, input: Value) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: Content::Blocks(vec![Block::ToolUse {
+                id: id.into(),
+                name: name.into(),
+                input: Some(input),
+            }]),
+        }
+    }
+
+    fn result(id: &str, text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: Content::Blocks(vec![Block::ToolResult {
+                tool_use_id: id.into(),
+                content: Some(Value::String(text.into())),
+                is_error: None,
+            }]),
+        }
+    }
+
+    fn dump(m: &[Message]) -> String {
+        serde_json::to_string(
+            &m.iter()
+                .map(|m| format!("{:?}", m.content))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn snapshots_withhold_secrets_bash_and_outside_paths_and_redact_the_rest() {
+        let hist = vec![
+            use_("a", "Read", json!({"file_path": "/w/src/lib.rs"})),
+            result("a", "fn main() {} token=sk-LEAK-1"),
+            use_("b", "Read", json!({"file_path": "/w/.env"})),
+            result("b", "DB=hunter2"),
+            use_("c", "Bash", json!({"command": "echo top-secret-output"})),
+            result("c", "top-secret-output"),
+            use_("d", "Read", json!({"file_path": "/etc/passwd"})),
+            result("d", "root:x:0:0"),
+            use_(
+                "e",
+                "Read",
+                json!({"file_path": "/h/.synthesis/run/peer.key"}),
+            ),
+            result("e", "KEYBYTES"),
+            use_("f", "Grep", json!({"pattern": "x", "path": "/w/../other"})),
+            result("f", "other-repo-line"),
+        ];
+        let red = |s: &str| s.replace("sk-LEAK-1", "[REDACTED]");
+        let out = sanitize(&hist, "/w", "/h/.synthesis", &red);
+        let t = dump(&out);
+        assert!(t.contains("fn main() {} token=[REDACTED]"), "{t}");
+        for leaked in [
+            "hunter2",
+            "top-secret-output",
+            "root:x:0:0",
+            "KEYBYTES",
+            "other-repo-line",
+            "sk-LEAK-1",
+            "/etc/passwd",
+            "peer.key",
+            "/w/.env",
+        ] {
+            assert!(!t.contains(leaked), "{leaked} survived: {t}");
+        }
+        assert_eq!(
+            t.matches(WITHHELD).count(),
+            10,
+            "five calls, input and result each"
+        );
     }
 }

@@ -38,11 +38,38 @@ pub fn run_dir(synthesis_home: &Path) -> PathBuf {
 
 /// On Windows peers stay off unless the home is under the user profile (ACL inheritance).
 pub fn platform_ok(home: &Path, user_profile: Option<&Path>) -> bool {
-    !cfg!(windows)
-        || user_profile.is_some_and(|u| {
-            fold(&home.to_string_lossy())
-                .starts_with(fold(&u.to_string_lossy()).trim_end_matches('/'))
-        })
+    !cfg!(windows) || user_profile.is_some_and(|u| components_start_with(home, u))
+}
+
+/// Component-wise prefix test, folded: `C:\Users\bob2` is not under `C:\Users\bob`.
+fn components_start_with(path: &Path, prefix: &Path) -> bool {
+    let parts = |p: &Path| -> Vec<String> {
+        fold(&p.to_string_lossy())
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect()
+    };
+    let (p, x) = (parts(path), parts(prefix));
+    !x.is_empty() && p.len() >= x.len() && p[..x.len()] == x[..]
+}
+
+/// An endpoint a registry entry names must be ours to connect to: a `.sock` under the run dir
+/// (unix) or a `synthesis-peer-` pipe (Windows). Anything else is a planted entry.
+pub fn endpoint_ok(run_dir: &Path, endpoint: &str) -> bool {
+    if cfg!(windows) {
+        endpoint.starts_with(r"\\.\pipe\synthesis-peer-")
+            && endpoint
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || r"\.-".contains(c))
+    } else {
+        let e = Path::new(endpoint);
+        e.starts_with(run_dir)
+            && e.extension().is_some_and(|x| x == "sock")
+            && !e
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+    }
 }
 
 /// Write `bytes` 0600 (unix) via temp + rename.
@@ -58,23 +85,46 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     })
 }
 
-/// Read `run/peer.key`, creating it (0600, 32 random bytes) when absent.
+/// Read `run/peer.key`, creating it when absent: 32 random bytes written to a 0600 temp file and
+/// hard-linked into place, so a reader never sees a partial key and two creators cannot clobber
+/// each other. The key must be a regular file of ours (not a link), mode 0600 on unix.
 pub fn load_or_create_key(run_dir: &Path) -> io::Result<Key> {
     net::prepare_run_dir(run_dir)?;
     let path = run_dir.join("peer.key");
-    let mut o = std::fs::OpenOptions::new();
-    o.write(true).create_new(true);
+    if std::fs::symlink_metadata(&path).is_err() {
+        let tmp = run_dir.join(format!(".key{}", net::hex(&net::random::<8>()?)));
+        write_private(&tmp, &net::random::<32>()?)?;
+        let linked = std::fs::hard_link(&tmp, &path);
+        let _ = std::fs::remove_file(&tmp);
+        match linked {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let bad = |m: &'static str| io::Error::new(io::ErrorKind::InvalidData, m);
+    let meta = std::fs::symlink_metadata(&path)?;
+    if !meta.is_file() {
+        return Err(bad("peer.key is not a regular file"));
+    }
     #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-    match o.open(&path) {
-        Ok(mut f) => f.write_all(&net::random::<32>()?)?,
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e),
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if meta.permissions().mode() & 0o077 != 0 {
+            return Err(bad(
+                "peer.key is accessible to other users (expected mode 0600)",
+            ));
+        }
+        if meta.uid() != std::fs::metadata(run_dir)?.uid() {
+            return Err(bad(
+                "peer.key is not owned by the owner of the run directory",
+            ));
+        }
     }
     std::fs::read(&path)?
         .try_into()
         .map(Key)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "peer.key is not 32 bytes"))
+        .map_err(|_| bad("peer.key is not 32 bytes"))
 }
 
 /// Case/separator folding used by workspace rules (messaging.md section 1).
@@ -326,6 +376,14 @@ mod tests {
         let c = cfg(json!({"allow":["workspace:/work/*"]}));
         assert!(c.permits(&addr("web", "/work/web", "s", None)));
         assert!(!c.permits(&addr("web", "/other/web", "s", None)));
+    }
+
+    #[test]
+    fn profile_prefix_is_by_component() {
+        let p = Path::new;
+        assert!(components_start_with(p("/u/bob/.synthesis"), p("/u/bob")));
+        assert!(!components_start_with(p("/u/bob2/.synthesis"), p("/u/bob")));
+        assert!(!components_start_with(p("/u/bob"), p("")));
     }
 
     #[test]

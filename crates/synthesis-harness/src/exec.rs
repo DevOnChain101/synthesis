@@ -1375,7 +1375,18 @@ impl Harness {
             Event::ToolStarted {
                 tool_call_id: call.id.clone(),
                 name: call.name.clone(),
-                side_effect: "read".into(),
+                // a message to a peer session leaves this one: `external`
+                side_effect: if call.name == "SendMessage"
+                    && input
+                        .get("to")
+                        .and_then(Value::as_str)
+                        .is_some_and(|t| synthesis_peers::address::parse(t).is_some())
+                {
+                    "external"
+                } else {
+                    "read"
+                }
+                .into(),
                 cwd: task.workspace.cwd.to_string_lossy().into_owned(),
             },
         );

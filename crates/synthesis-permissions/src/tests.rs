@@ -452,6 +452,55 @@ fn protected_path_decision_per_mode() {
 }
 
 #[test]
+fn deny_read_is_a_hard_deny_in_every_mode_and_secret_reads_only_when_asked() {
+    let f = fx();
+    let state = f.home.join("synthesis-home");
+    fs::create_dir_all(state.join("run")).unwrap();
+    fs::write(state.join("run/peer.key"), "k").unwrap();
+    fs::write(f.cwd.join(".env"), "A=1").unwrap();
+    let mk = |mode: Mode, secrets: bool| {
+        let mut env = Env::new(&f.cwd, &f.home, mode)
+            .interactive(true)
+            .deny_reads([state.clone()]);
+        env.deny_secret_reads = secrets;
+        Permissions::new(PermissionRules::default(), env)
+    };
+    let key = state.join("run/peer.key").to_string_lossy().into_owned();
+    for mode in Mode::ALL {
+        let p = mk(mode, false);
+        for (tool, input) in [
+            ("Read", json!({ "file_path": key })),
+            ("Grep", json!({ "pattern": "x", "path": state.join("run") })),
+            ("Glob", json!({ "pattern": "*", "path": state })),
+            ("LS", json!({ "path": state })),
+            ("Bash", json!({ "command": format!("cat {key}") })),
+        ] {
+            assert_eq!(d(&p, tool, input.clone()), D, "{mode:?} {tool}");
+        }
+    }
+    // the main agent may still read a project .env; the responder (deny_secret_reads) may not,
+    // by name or through `..`
+    let main = mk(Mode::BypassPermissions, false);
+    assert_eq!(d(&main, "Read", json!({ "file_path": f.path(".env") })), A);
+    let resp = mk(Mode::Plan, true);
+    assert_eq!(d(&resp, "Read", json!({ "file_path": f.path(".env") })), D);
+    assert_eq!(
+        d(&resp, "Read", json!({ "file_path": f.path("sub/../.env") })),
+        D
+    );
+    assert_eq!(
+        d(&resp, "Read", json!({ "file_path": f.path("sub/ok.txt") })),
+        A
+    );
+    // a search rooted above the state dir would walk into it
+    let above = state.parent().unwrap();
+    assert_eq!(
+        d(&resp, "Grep", json!({ "pattern": "x", "path": above })),
+        D
+    );
+}
+
+#[test]
 fn extra_protected_paths_ask_for_writes_even_in_accept_edits() {
     let f = fx();
     let state = f.cwd.join("synthesis-state");

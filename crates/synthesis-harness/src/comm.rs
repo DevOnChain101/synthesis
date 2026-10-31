@@ -570,6 +570,7 @@ impl Harness {
             Some(reason),
         );
         if to == CANCELLED {
+            self.peer_forget(&ctx.name);
             for m in self.hub.drain(&ctx.name) {
                 self.dropped(Some(task.task_id.clone()), &m, "recipient cancelled");
             }
@@ -758,6 +759,7 @@ impl Harness {
             self.hub
                 .register(&def.name, want, &parent.name, &agent_id, cancel.clone())?;
         if let Some(e) = evicted {
+            self.peer_forget(&e.name);
             for m in &e.lost {
                 self.dropped(Some(task.task_id.clone()), m, "recipient was evicted");
             }

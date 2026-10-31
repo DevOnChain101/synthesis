@@ -2,7 +2,7 @@
 //! The server enforces policy and limits and hands accepted requests to a [`Responder`], which the
 //! harness implements as a read-only sub-agent (B6). Nothing a peer sends is a grant.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -24,6 +24,13 @@ const RATE_WINDOW: Duration = Duration::from_secs(600);
 const PARTIAL_EVERY: Duration = Duration::from_millis(500);
 const DEFAULT_TIMEOUT_S: u64 = 300;
 const MAX_TIMEOUT_S: u64 = 1800;
+/// Connections served at once; a same-user process cannot exhaust tasks by connecting in a loop.
+const MAX_CONNECTIONS: usize = 16;
+/// Time an authenticated peer has to send its first frame.
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+/// Partial frames kept by the client per request.
+const MAX_PARTIALS: usize = 64;
+const MAX_PARTIAL_BYTES: usize = 64 * 1024;
 const STATUS_TIMEOUT: Duration = Duration::from_millis(500);
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -73,7 +80,8 @@ pub struct Server {
 #[derive(Default)]
 struct State {
     active: usize,
-    sent: HashMap<String, VecDeque<Instant>>,
+    /// Accepted requests in the window, all senders together: `from` is self-asserted.
+    sent: VecDeque<Instant>,
 }
 
 struct Slot<'a>(&'a Server);
@@ -116,9 +124,15 @@ impl Server {
 
     /// Accept loop; ends when the listener fails or the task is aborted.
     pub async fn run(self: Arc<Self>, mut l: Listener) {
+        let cap = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
         while let Ok(conn) = l.accept().await {
+            // Over the cap the connection is dropped before any byte is read.
+            let Ok(permit) = cap.clone().try_acquire_owned() else {
+                continue;
+            };
             let s = self.clone();
             tokio::spawn(async move {
+                let _permit = permit;
                 let _ = s.handle(conn).await;
             });
         }
@@ -144,9 +158,9 @@ impl Server {
         None
     }
 
-    fn admit(&self, from: &str) -> Result<Slot<'_>, &'static str> {
+    fn admit(&self) -> Result<Slot<'_>, &'static str> {
         let mut st = self.state.lock().unwrap();
-        let q = st.sent.entry(from.to_string()).or_default();
+        let q = &mut st.sent;
         let now = Instant::now();
         while q
             .front()
@@ -160,14 +174,17 @@ impl Server {
         if st.active >= MAX_RESPONDERS {
             return Err("busy");
         }
-        st.sent.get_mut(from).unwrap().push_back(now);
+        st.sent.push_back(now);
         st.active += 1;
         Ok(Slot(self))
     }
 
     async fn handle(&self, mut c: Conn) -> io::Result<()> {
         net::handshake_server(&mut c, &self.key).await?;
-        let Some(f) = c.recv().await? else {
+        let Ok(first) = tokio::time::timeout(FIRST_FRAME_TIMEOUT, c.recv()).await else {
+            return Ok(());
+        };
+        let Some(f) = first? else {
             return Ok(());
         };
         match f.get("t").and_then(Value::as_str) {
@@ -191,7 +208,7 @@ impl Server {
         let reject = |reason: &str| json!({"t":"rejected","id":id,"reason":reason});
         let slot = match self.check(&req, req.text.len()) {
             Some(reason) => Err(reason),
-            None => self.admit(&req.from.session_id),
+            None => self.admit(),
         };
         (self.observer)(&req, slot.as_ref().err().copied());
         let _slot = match slot {
@@ -366,6 +383,7 @@ impl Call {
         mut on_partial: impl FnMut(u64, &str),
     ) -> Result<ReplyFrame, PeerError> {
         let id = self.id.clone();
+        let (mut kept, mut kept_bytes) = (0usize, 0usize);
         let wait = async {
             loop {
                 let f = self.c.recv().await?.ok_or_else(eof)?;
@@ -379,14 +397,19 @@ impl Call {
                         .to_string()
                 };
                 match f.get("t").and_then(Value::as_str) {
-                    Some("partial") => on_partial(
-                        f.get("seq").and_then(Value::as_u64).unwrap_or(0),
-                        &s("text"),
-                    ),
+                    Some("partial") => {
+                        // A hostile or buggy peer cannot make us hold more than this.
+                        let t = cap(s("text"), MAX_REPLY);
+                        if kept < MAX_PARTIALS && kept_bytes + t.len() <= MAX_PARTIAL_BYTES {
+                            kept += 1;
+                            kept_bytes += t.len();
+                            on_partial(f.get("seq").and_then(Value::as_u64).unwrap_or(0), &t);
+                        }
+                    }
                     Some("reply") => {
                         return Ok(ReplyFrame {
                             status: s("status"),
-                            text: s("text"),
+                            text: cap(s("text"), MAX_REPLY),
                             from: f.get("from").and_then(|a| Addr::deserialize(a).ok()),
                         });
                     }
@@ -435,10 +458,11 @@ pub async fn discover(
     lock_free: impl Fn(&Entry) -> bool,
 ) -> Vec<Peer> {
     let mut set = tokio::task::JoinSet::new();
-    for e in crate::read_entries(run_dir)
-        .into_iter()
-        .filter(|e| e.session_id != self_session && config.permits(&e.addr("main", "")))
-    {
+    for e in crate::read_entries(run_dir).into_iter().filter(|e| {
+        e.session_id != self_session
+            && config.permits(&e.addr("main", ""))
+            && crate::endpoint_ok(run_dir, &e.endpoint)
+    }) {
         let key = key.clone();
         set.spawn(async move {
             let r = status(&e.endpoint, &key).await;

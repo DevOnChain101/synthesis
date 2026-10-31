@@ -204,8 +204,12 @@ async fn rate_limit_per_sender_session() {
         go(&r, &from, "main", "r10", &[]).await,
         Err("rate_limited".into())
     );
+    // `from` is self-asserted: a new session id does not buy a new allowance
     let other = addr("api", "/work/api", "sess-z");
-    assert!(go(&r, &other, "main", "z", &[]).await.is_ok());
+    assert_eq!(
+        go(&r, &other, "main", "z", &[]).await,
+        Err("rate_limited".into())
+    );
 }
 
 #[tokio::test]
@@ -347,7 +351,7 @@ async fn discovery_lists_permitted_live_peers_and_cleans_dead_ones() {
         endpoint: ep.into(),
         started_at: 0,
     };
-    let dead = format!("{}.nope", r.endpoint);
+    let dead = r.dir.join("dead.sock").to_string_lossy().into_owned();
     let _regs = [
         Registration::create(&r.dir, &entry("live-1", "api", "/work/api", &r.endpoint)).unwrap(),
         Registration::create(&r.dir, &entry("dead-1", "api", "/work/api", &dead)).unwrap(),
@@ -371,4 +375,87 @@ async fn discovery_lists_permitted_live_peers_and_cleans_dead_ones() {
     assert_eq!(peers[2].state.as_ref().unwrap_err(), &Down::Unreachable);
     assert!(!r.dir.join("dead-1.json").exists(), "dead entry is deleted");
     assert!(r.dir.join("stuck-1.json").exists());
+}
+
+#[tokio::test]
+async fn client_caps_a_huge_reply_and_a_partial_flood() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = run_dir(home.path());
+    let key = load_or_create_key(&dir).unwrap();
+    let mut l = Listener::bind(&dir).unwrap();
+    let ep = l.endpoint();
+    let k2 = key.clone();
+    // A server holding the key that ignores every limit.
+    tokio::spawn(async move {
+        let mut c = l.accept().await.unwrap();
+        net::handshake_server(&mut c, &k2).await.unwrap();
+        let f = c.recv().await.unwrap().unwrap();
+        let id = f["id"].as_str().unwrap().to_string();
+        c.send(&json!({"t":"accepted","id":id})).await.unwrap();
+        for seq in 0..500 {
+            let t = "p".repeat(2000);
+            c.send(&json!({"t":"partial","id":id,"seq":seq,"text":t}))
+                .await
+                .unwrap();
+        }
+        let big = "r".repeat(900 * 1024);
+        c.send(&json!({"t":"reply","id":id,"status":"answered","text":big}))
+            .await
+            .unwrap();
+    });
+    let from = addr("api", "/work/api", "sess-b");
+    let o = Outgoing {
+        id: "x",
+        from: &from,
+        to_agent: "main",
+        text: "q",
+        chain: &[],
+        timeout_s: 30,
+    };
+    let (mut n, mut bytes) = (0, 0);
+    let f = ask(&ep, &key, &o, |_, t| {
+        n += 1;
+        bytes += t.len();
+    })
+    .await
+    .unwrap();
+    assert!(n <= 64 && bytes <= 64 * 1024, "{n} partials, {bytes} bytes");
+    assert_eq!(f.text.len(), 32 * 1024);
+}
+
+#[test]
+fn endpoints_must_be_ours_and_the_key_must_be_private() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = run_dir(home.path());
+    let ok = dir.join("0123456789abcdef.sock");
+    assert!(synthesis_peers::endpoint_ok(&dir, &ok.to_string_lossy()) == cfg!(unix));
+    assert!(!synthesis_peers::endpoint_ok(&dir, "/etc/passwd"));
+    assert!(!synthesis_peers::endpoint_ok(
+        &dir,
+        &dir.join("../x.sock").to_string_lossy()
+    ));
+    assert!(!synthesis_peers::endpoint_ok(
+        &dir,
+        &dir.join("a.json").to_string_lossy()
+    ));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        load_or_create_key(&dir).unwrap();
+        let k = dir.join("peer.key");
+        std::fs::set_permissions(&k, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            load_or_create_key(&dir).is_err(),
+            "a group/world readable key is refused"
+        );
+        std::fs::remove_file(&k).unwrap();
+        std::os::unix::fs::symlink("/etc/hosts", &k).unwrap();
+        assert!(load_or_create_key(&dir).is_err(), "a linked key is refused");
+        // a run dir that is a symlink is refused
+        let real = home.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = home.path().join("linked-run");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(net::prepare_run_dir(&link).is_err());
+    }
 }

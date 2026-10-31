@@ -829,6 +829,7 @@ pub fn prepare(
         synthesis_permissions::Env::new(&ws.cwd, &h.user, mode)
             .with_project_root(&ws.root)
             .interactive(true)
+            .deny_reads(state_paths.clone())
             .protect(state_paths),
     );
     perms.env.auto_mode = synthesis_permissions::AutoModeSettings {
