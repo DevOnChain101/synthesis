@@ -120,6 +120,39 @@ fn side_with(
     slow_ms: u64,
     priced: bool,
 ) -> (Side, Entry) {
+    side_full(sid, label, run, cfg, responder, slow_ms, priced, None)
+}
+
+/// Answers every approval dialog the same way.
+struct Fixed(bool);
+impl synthesis_harness::Approver for Fixed {
+    fn approve<'a>(
+        &'a self,
+        _: synthesis_harness::ApprovalRequest,
+        _: &'a CancellationToken,
+    ) -> synthesis_harness::BoxFut<'a, synthesis_harness::Approval> {
+        let yes = self.0;
+        Box::pin(async move {
+            if yes {
+                synthesis_harness::Approval::allow()
+            } else {
+                synthesis_harness::Approval::deny("no")
+            }
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn side_full(
+    sid: &'static str,
+    label: &'static str,
+    run: &std::path::Path,
+    cfg: Option<serde_json::Value>,
+    responder: Responder,
+    slow_ms: u64,
+    priced: bool,
+    approve: Option<bool>,
+) -> (Side, Entry) {
     let link_cfg = cfg.map(config);
     let key = load_or_create_key(run).unwrap();
     let run = run.to_path_buf();
@@ -138,7 +171,12 @@ fn side_with(
                 |_| {}
             },
             tools: probe_tools(slow_ms),
-            allow: vec!["Slow".into(), "SlowEnv".into(), "Read".into()],
+            allow: vec![
+                "Slow".into(),
+                "SlowEnv".into(),
+                "Read".into(),
+                "Task".into(),
+            ],
             responder: Some(responder),
             ..Opts::default()
         },
@@ -146,6 +184,19 @@ fn side_with(
         |h, h0| {
             let e = entry(sid, sid, label, &h0.root.join("w"), "");
             entry_out = Some(e.clone());
+            let h = h.with_agents(synthesis_harness::AgentTable::new([
+                synthesis_harness::AgentDef {
+                    name: "worker".into(),
+                    description: String::new(),
+                    prompt: "WORKER-PROMPT".into(),
+                    tools: None,
+                    mode: None,
+                },
+            ]));
+            let h = match approve {
+                Some(y) => h.with_approver(Arc::new(Fixed(y))),
+                None => h,
+            };
             match link_cfg {
                 Some(c) => h.with_peers(PeerLink::new(
                     c,
@@ -153,7 +204,8 @@ fn side_with(
                     run,
                     e,
                     template(sid, &h0.ws),
-                    Arc::new(|_| false),
+                    // only a `dead-` session counts as gone (its writer lock would be free)
+                    Arc::new(|e: &Entry| e.session_id.starts_with("dead-")),
                     "unix",
                 )),
                 None => h,
@@ -554,4 +606,401 @@ async fn list_sessions_and_list_agents_all_show_permitted_peers_only() {
         "{all}"
     );
     drop(c);
+}
+
+// ---- R10c offline queue, confirm_replies, streamed partials, instance narrowing ----------------
+
+use synthesis_peers::mailbox::{Envelope, Mailbox, Queued, now_s};
+
+fn b_asks(to: &'static str) -> Responder {
+    Arc::new(move |r| {
+        Some(if tool_result(r, "ask").is_none() {
+            Turn::tool(
+                "ask",
+                "SendMessage",
+                json!({"to": to, "message": "Which env var sets the JWT TTL?"}),
+            )
+        } else {
+            Turn::text("B done")
+        })
+    })
+}
+
+fn all_text(s: &Side) -> String {
+    s.rig
+        .requests()
+        .iter()
+        .map(texts)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn sent_ids(s: &Side) -> Vec<String> {
+    s.rig.find(|e| match e {
+        Event::PeerRequestSent { request_id, .. } => Some(request_id.clone()),
+        _ => None,
+    })
+}
+
+async fn until(mut f: impl FnMut() -> bool) {
+    for _ in 0..100 {
+        if f() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("condition not reached in 5 s");
+}
+
+#[tokio::test]
+async fn a_question_to_an_offline_session_is_queued_answered_on_return_and_shown_once() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let key = load_or_create_key(&run).unwrap();
+    let mb = Mailbox::new(&run, &key);
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "resume_offline": true});
+    let idle: Responder = Arc::new(|_| Some(Turn::text("A idle")));
+
+    // A ran before and exited: only its card is left. B asks it.
+    let (a0, ea0) = side("dead-a", "alpha", &run, Some(on.clone()), idle, 10);
+    mb.write_card(&ea0).unwrap();
+    drop(a0);
+    let (mut b, _) = side(
+        "sess-b",
+        "beta",
+        &run,
+        Some(on.clone()),
+        b_asks("ws:alpha/sess:dead-a"),
+        10,
+    );
+    let out = go(&mut b, "ask").await;
+    assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
+    let (res, err) = tool_result(&b.rig.requests()[1], "ask").unwrap();
+    assert!(!err && res.contains("\"status\":\"queued\""), "{res}");
+    let ids = sent_ids(&b);
+    assert_eq!(ids.len(), 1);
+    assert_eq!(mb.pending("dead-a").len(), 1, "the question is on disk");
+    drop(b); // the asker exits too: nothing is held in memory
+
+    // A comes back as a new process. Nothing is answered until its task starts.
+    let a_resp: Responder = Arc::new(|r| {
+        Some(if is_responder(r) {
+            Turn::text("JWT_TTL sets it, default 3600")
+        } else {
+            Turn::text("A idle")
+        })
+    });
+    let (mut a, _) = side("dead-a", "alpha", &run, Some(on.clone()), a_resp, 10);
+    let server = a.h.peer_server().unwrap();
+    tokio::spawn(a.h.peer_mailbox_worker(server).unwrap());
+    assert_eq!(mb.pending("dead-a").len(), 1);
+    go(&mut a, "resumed work").await;
+    until(|| mb.pending("dead-a").is_empty() && mb.pending("sess-b").len() == 1).await;
+    assert_eq!(
+        a.rig.requests().iter().filter(|r| is_responder(r)).count(),
+        1,
+        "answered once, read-only"
+    );
+    assert!(
+        a.rig
+            .find(|e| match e {
+                Event::PeerRequestReceived {
+                    request_id,
+                    decision,
+                    ..
+                } if *request_id == ids[0] && decision == "accepted" => Some(()),
+                _ => None,
+            })
+            .len()
+            == 1
+    );
+
+    // The sender retrying (or a crash before the delete) cannot queue the same question again.
+    let again = Envelope {
+        id: ids[0].clone(),
+        kind: "request".into(),
+        from: Default::default(),
+        to_session: "dead-a".into(),
+        to_agent: "main".into(),
+        text: "again".into(),
+        chain: vec![],
+        status: String::new(),
+        created: now_s(),
+        mac: String::new(),
+    };
+    assert_eq!(mb.enqueue(again), Ok(Queued::Duplicate));
+
+    // B comes back (new process): the reply is in its first request, fenced, once.
+    let back: Responder = Arc::new(|_| Some(Turn::text("B again")));
+    let (mut b2, _) = side("sess-b", "beta", &run, Some(on.clone()), back.clone(), 10);
+    go(&mut b2, "continue").await;
+    let first = all_text(&b2);
+    assert!(
+        first.contains("<peer_reply")
+            && first.contains(&format!("id=\"{}\"", ids[0]))
+            && first.contains("trust=\"peer-data\"")
+            && first.contains("JWT_TTL sets it, default 3600"),
+        "{first}"
+    );
+    let replies = b2.rig.find(|e| match e {
+        Event::PeerReply {
+            request_id, status, ..
+        } => Some((request_id.clone(), status.clone())),
+        _ => None,
+    });
+    assert_eq!(replies, [(ids[0].clone(), "answered".to_string())]);
+    let (mut b3, _) = side("sess-b", "beta", &run, Some(on), back, 10);
+    go(&mut b3, "once more").await;
+    assert!(!all_text(&b3).contains("<peer_reply"), "shown twice");
+    assert!(mb.pending("sess-b").is_empty());
+}
+
+#[tokio::test]
+async fn offline_queueing_needs_the_opt_in_the_main_agent_and_an_allowed_workspace() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let key = load_or_create_key(&run).unwrap();
+    let mb = Mailbox::new(&run, &key);
+    let idle: Responder = Arc::new(|_| Some(Turn::text("idle")));
+    let base = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    for (sid, label) in [("dead-a", "alpha"), ("dead-s", "secret")] {
+        let (s, e) = side(sid, label, &run, Some(base.clone()), idle.clone(), 10);
+        mb.write_card(&e).unwrap();
+        drop(s);
+    }
+    let attempt = |to: &'static str, cfg: serde_json::Value| {
+        let run = run.clone();
+        async move {
+            let (mut b, _) = side("sess-b", "beta", &run, Some(cfg), b_asks(to), 10);
+            go(&mut b, "ask").await;
+            tool_result(&b.rig.requests()[1], "ask").unwrap()
+        }
+    };
+    // off unless resume_offline
+    let (r, err) = attempt("ws:alpha/sess:dead-a", base.clone()).await;
+    assert!(err && r.starts_with("offline:"), "{r}");
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "resume_offline": true});
+    // only the main agent of a dead session exists
+    let (r, err) = attempt("ws:alpha/sess:dead-a/agent:developer", on.clone()).await;
+    assert!(err && r.starts_with("offline:"), "{r}");
+    // a workspace the allow list refuses is not even addressable
+    let (r, err) = attempt("ws:secret/sess:dead-s", on.clone()).await;
+    assert!(err && r.contains("requires approval"), "{r}");
+    assert!(mb.pending("dead-a").is_empty() && mb.pending("dead-s").is_empty());
+    // with everything in place it is queued, and a full queue says busy instead of dropping
+    let (r, err) = attempt("ws:alpha/sess:dead-a", on).await;
+    assert!(!err && r.contains("queued"), "{r}");
+    assert_eq!(mb.pending("dead-a").len(), 1);
+}
+
+#[tokio::test]
+async fn a_reply_to_a_live_asker_is_pushed_and_waits_for_its_next_task() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let key = load_or_create_key(&run).unwrap();
+    let mb = Mailbox::new(&run, &key);
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "resume_offline": true});
+    let idle: Responder = Arc::new(|_| Some(Turn::text("A idle")));
+    let (a0, ea0) = side("dead-a", "alpha", &run, Some(on.clone()), idle, 10);
+    mb.write_card(&ea0).unwrap();
+    drop(a0);
+    // B asks and stays alive (registered, serving) while A is away
+    let b_resp: Responder = Arc::new(|r| {
+        Some(
+            if tool_result(r, "ask").is_none() && !texts(r).contains("continue") {
+                Turn::tool(
+                    "ask",
+                    "SendMessage",
+                    json!({"to": "ws:alpha/sess:dead-a", "message": "ttl?"}),
+                )
+            } else {
+                Turn::text("B text")
+            },
+        )
+    });
+    let (mut b, eb) = side("sess-b", "beta", &run, Some(on.clone()), b_resp, 10);
+    go(&mut b, "ask").await;
+    let _reg = serve(&b, &run, eb);
+    let a_resp: Responder = Arc::new(|r| {
+        Some(if is_responder(r) {
+            Turn::text("3600 seconds")
+        } else {
+            Turn::text("A idle")
+        })
+    });
+    let (mut a, _) = side("dead-a", "alpha", &run, Some(on), a_resp, 10);
+    let server = a.h.peer_server().unwrap();
+    tokio::spawn(a.h.peer_mailbox_worker(server).unwrap());
+    go(&mut a, "resumed").await;
+    until(|| mb.pending("dead-a").is_empty() && mb.pending("sess-b").len() == 1).await;
+    // B's next task shows it, once
+    let mut s2 = b.session.clone();
+    s2.status = SessionStatus::Created;
+    b.h.run_task(
+        &mut s2,
+        TaskRequest::new("continue"),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let last = all_text(&b);
+    assert_eq!(last.matches("<peer_reply").count(), 1, "{last}");
+    assert!(last.contains("3600 seconds"));
+    assert!(mb.pending("sess-b").is_empty());
+}
+
+async fn confirm_run(approve: Option<bool>) -> String {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "confirm_replies": true});
+    let a_resp: Responder = Arc::new(|r| {
+        Some(if is_responder(r) {
+            Turn::text("THE-ANSWER-42")
+        } else {
+            Turn::text("A idle")
+        })
+    });
+    let b_resp: Responder = Arc::new(|r| {
+        Some(if tool_result(r, "ask").is_none() {
+            Turn::tool(
+                "ask",
+                "SendMessage",
+                json!({"to": "ws:alpha/sess:sess-a", "message": "hi"}),
+            )
+        } else if !texts(r).contains("<peer_reply") {
+            Turn::text("waiting")
+        } else {
+            Turn::text("B done")
+        })
+    });
+    let (a, ea) = side_full(
+        "sess-a",
+        "alpha",
+        &run,
+        Some(on.clone()),
+        a_resp,
+        10,
+        true,
+        approve,
+    );
+    let (mut b, _) = side("sess-b", "beta", &run, Some(on), b_resp, 10);
+    let _reg = serve(&a, &run, ea);
+    let out = go(&mut b, "ask").await;
+    assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
+    texts(b.rig.requests().last().unwrap())
+}
+
+#[tokio::test]
+async fn confirm_replies_lets_the_owner_decide_and_headless_declines() {
+    let yes = confirm_run(Some(true)).await;
+    assert!(
+        yes.contains("status=\"answered\"") && yes.contains("THE-ANSWER-42"),
+        "{yes}"
+    );
+    for no in [confirm_run(Some(false)).await, confirm_run(None).await] {
+        assert!(
+            no.contains("status=\"declined\"") && !no.contains("THE-ANSWER-42"),
+            "{no}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_agent_name_without_a_session_picks_the_one_session_that_has_it() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let a1_resp: Responder = Arc::new(|r| {
+        let sys = serde_json::to_string(&r.system).unwrap();
+        Some(if sys.contains("WORKER-PROMPT") {
+            Turn::text("worker done")
+        } else if is_responder(r) {
+            Turn::text("answer from a1")
+        } else if tool_result(r, "tk").is_none() {
+            Turn::tool(
+                "tk",
+                "Task",
+                json!({"description": "d", "prompt": "p", "subagent_type": "worker", "name": "developer-2"}),
+            )
+        } else {
+            Turn::text("A1 done")
+        })
+    });
+    let a2_resp: Responder = Arc::new(|_| Some(Turn::text("A2 idle")));
+    let (mut a1, e1) = side("sess-a1", "alpha", &run, Some(on.clone()), a1_resp, 10);
+    let (a2, e2) = side("sess-a2", "alpha", &run, Some(on.clone()), a2_resp, 10);
+    let out = go(&mut a1, "start a worker").await;
+    assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
+    let _r1 = serve(&a1, &run, e1);
+    let _r2 = serve(&a2, &run, e2);
+    // two alpha sessions: `main` would be ambiguous, but only one has a developer-2
+    let (mut b, _) = side(
+        "sess-b",
+        "beta",
+        &run,
+        Some(on.clone()),
+        b_asks("ws:alpha/agent:developer-2"),
+        10,
+    );
+    go(&mut b, "ask").await;
+    let (res, err) = tool_result(&b.rig.requests()[1], "ask").unwrap();
+    assert!(
+        !err && res.contains("sess-a1") && res.contains("accepted"),
+        "{res}"
+    );
+    let (mut b2, _) = side(
+        "sess-b2",
+        "beta",
+        &run,
+        Some(on),
+        b_asks("ws:alpha/agent:main"),
+        10,
+    );
+    go(&mut b2, "ask").await;
+    let (res, err) = tool_result(&b2.rig.requests()[1], "ask").unwrap();
+    assert!(err && res.starts_with("ambiguous"), "{res}");
+}
+
+#[tokio::test]
+async fn a_responders_text_streams_to_the_asker_as_partial_events() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let a_resp: Responder = Arc::new(|r| {
+        Some(if is_responder(r) {
+            Turn::text("alpha beta gamma delta")
+        } else {
+            Turn::text("A idle")
+        })
+    });
+    let (a, ea) = side("sess-a", "alpha", &run, Some(on.clone()), a_resp, 10);
+    let (mut b, _) = side(
+        "sess-b",
+        "beta",
+        &run,
+        Some(on),
+        b_asks("ws:alpha/sess:sess-a"),
+        10,
+    );
+    let _reg = serve(&a, &run, ea);
+    go(&mut b, "ask").await;
+    let id = sent_ids(&b).remove(0);
+    until(|| {
+        !b.rig
+            .find(|e| match e {
+                Event::PeerReply { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            })
+            .is_empty()
+    })
+    .await;
+    let partials = b.rig.find(|e| match e {
+        Event::PeerReplyPartial {
+            request_id,
+            seq,
+            text,
+        } if *request_id == id => Some((*seq, text.clone())),
+        _ => None,
+    });
+    assert_eq!(partials, [(1, "alpha beta gamma ".to_string())]);
 }

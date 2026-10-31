@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+use crate::mailbox::Envelope;
 use crate::net::{self, Conn, Listener};
 use crate::{Addr, Config, Entry, Key};
 
@@ -64,6 +65,25 @@ pub trait Responder: Send + Sync + 'static {
     fn status(&self) -> Value;
     fn has_agent(&self, instance: &str) -> bool;
     fn answer(&self, req: Request, partial: mpsc::UnboundedSender<String>) -> BoxFut<Reply>;
+    /// `confirm_replies` (D11): the owner sees the request and the reply and decides. Fails
+    /// closed: a responder that cannot ask anybody (headless) declines.
+    fn confirm(&self, _req: &Request, _reply: &Reply) -> BoxFut<bool> {
+        Box::pin(async { false })
+    }
+    /// A late `reply` envelope pushed by a peer; true when it was kept (or already had).
+    fn deliver_reply(&self, _env: Envelope) -> bool {
+        false
+    }
+}
+
+/// Outcome of a queued request (mailbox, R10c).
+#[derive(Debug, PartialEq)]
+pub enum Answered {
+    Reply(Reply),
+    /// Policy refused it; the asker is told.
+    Rejected(&'static str),
+    /// `rate_limited` / `busy`: leave it queued and try again later.
+    Retry(&'static str),
 }
 
 pub struct Server {
@@ -196,6 +216,14 @@ impl Server {
                 c.send(&v).await
             }
             Some("request") => self.request(&mut c, f).await,
+            Some("deliver") => {
+                let ok = f
+                    .get("env")
+                    .and_then(|e| Envelope::deserialize(e).ok())
+                    .is_some_and(|e| self.accept_reply(e));
+                c.send(&json!({"t": if ok { "delivered" } else { "refused" }}))
+                    .await
+            }
             _ => Ok(()),
         }
     }
@@ -222,10 +250,15 @@ impl Server {
             .unwrap_or(DEFAULT_TIMEOUT_S)
             .clamp(1, MAX_TIMEOUT_S);
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut fut = self.responder.answer(req, tx);
+        let req2 = req.clone();
+        let answering = self.responder.answer(req, tx);
         let deadline = tokio::time::sleep(Duration::from_secs(secs));
         tokio::pin!(deadline);
-        let (mut seq, mut last) = (0u64, None::<Instant>);
+        let (mut seq, mut last, mut pending) = (0u64, None::<Instant>, String::new());
+        let mut fut = Box::pin(async {
+            let r = answering.await;
+            self.finish(&req2, r).await
+        });
         let reply = loop {
             tokio::select! {
                 r = &mut fut => break r,
@@ -236,18 +269,82 @@ impl Server {
                     _ => return Ok(()),
                 },
                 Some(p) = rx.recv() => {
+                    // Text arriving inside the 500 ms window is joined to the next frame, not lost.
+                    pending.push_str(&p);
                     if last.is_none_or(|t| t.elapsed() >= PARTIAL_EVERY) {
                         last = Some(Instant::now());
                         seq += 1;
-                        let text = cap((self.redact)(&p), MAX_REPLY);
+                        let text = cap((self.redact)(&std::mem::take(&mut pending)), MAX_REPLY);
                         c.send(&json!({"t":"partial","id":id,"seq":seq,"text":text})).await?;
                     }
                 }
             }
         };
-        let text = cap((self.redact)(&reply.text), MAX_REPLY);
-        c.send(&json!({"t":"reply","id":id,"status":reply.status,"text":text,"from":self.me}))
+        // Text that arrived as the answer finished still goes out as a partial (same 500 ms rule).
+        while let Ok(p) = rx.try_recv() {
+            pending.push_str(&p);
+        }
+        if !pending.is_empty() && last.is_none_or(|t| t.elapsed() >= PARTIAL_EVERY) {
+            seq += 1;
+            let text = cap((self.redact)(&pending), MAX_REPLY);
+            c.send(&json!({"t":"partial","id":id,"seq":seq,"text":text}))
+                .await?;
+        }
+        c.send(&json!({"t":"reply","id":id,"status":reply.status,"text":reply.text,"from":self.me}))
             .await
+    }
+
+    /// `confirm_replies`, then the owner's redactor and the size cap: the last gate before a
+    /// reply leaves this session.
+    async fn finish(&self, req: &Request, mut r: Reply) -> Reply {
+        if self.config.confirm_replies
+            && r.status != "timeout"
+            && !self.responder.confirm(req, &r).await
+        {
+            r = Reply {
+                status: "declined".into(),
+                text: "the owner of this session did not approve sending a reply".into(),
+            };
+        }
+        r.text = cap((self.redact)(&r.text), MAX_REPLY);
+        r
+    }
+
+    /// A request read from the mailbox: same policy, limits, responder and reply gate as a live one.
+    pub async fn answer_queued(&self, req: Request) -> Answered {
+        let slot = match self.check(&req, req.text.len()) {
+            Some(reason) => Err(reason),
+            None => self.admit(),
+        };
+        (self.observer)(&req, slot.as_ref().err().copied());
+        let _slot = match slot {
+            Ok(s) => s,
+            Err(r @ ("rate_limited" | "busy")) => return Answered::Retry(r),
+            Err(r) => return Answered::Rejected(r),
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let run = async {
+            let r = self.responder.answer(req.clone(), tx).await;
+            self.finish(&req, r).await
+        };
+        match tokio::time::timeout(Duration::from_secs(DEFAULT_TIMEOUT_S), run).await {
+            Ok(r) => Answered::Reply(r),
+            Err(_) => Answered::Reply(Reply {
+                status: "timeout".into(),
+                text: String::new(),
+            }),
+        }
+    }
+
+    /// A `deliver` frame: a reply envelope for this session, from a permitted peer.
+    fn accept_reply(&self, env: Envelope) -> bool {
+        self.config.enabled
+            && self.config.initiate
+            && env.kind == "reply"
+            && env.to_session == self.me.session_id
+            && env.verified(&self.key)
+            && self.config.permits(&env.from)
+            && self.responder.deliver_reply(env)
     }
 }
 
@@ -424,6 +521,19 @@ impl Call {
             .await
             .map_err(|_| PeerError::Io(io::ErrorKind::TimedOut.into()))?
     }
+}
+
+/// Pushes a signed reply envelope to a live session. `Ok(false)` = it refused (disabled, not
+/// permitted, not expected); the caller then stores it in that session's mailbox.
+pub async fn deliver(endpoint: &str, key: &Key, env: &Envelope) -> Result<bool, PeerError> {
+    tokio::time::timeout(ACCEPT_TIMEOUT, async {
+        let mut c = open(endpoint, key).await?;
+        c.send(&json!({"t":"deliver","env":env})).await?;
+        let f = c.recv().await?.ok_or_else(eof)?;
+        Ok(f.get("t") == Some(&json!("delivered")))
+    })
+    .await
+    .map_err(|_| PeerError::Io(io::ErrorKind::TimedOut.into()))?
 }
 
 /// Send one request and wait for its reply; `on_partial(seq, text)` sees every partial.

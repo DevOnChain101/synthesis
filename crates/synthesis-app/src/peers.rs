@@ -136,6 +136,11 @@ pub fn setup(
         listener.kind(),
     );
     link.attach(reg);
+    if let Err(e) = link.announce() {
+        notices.push(format!(
+            "peers: this session cannot be queued for while offline ({e})"
+        ));
+    }
     Ok(Some(Started { link, listener }))
 }
 

@@ -288,6 +288,14 @@ fn peers_are_off_by_default_and_a_flagged_run_registers_then_cleans_up() {
         assert!(up < down && down < t.len() - 1, "{t:?}");
         let json = ev[up].to_string();
         assert!(!json.contains(".sock") && !json.contains("pipe-"), "{json}");
+        // the session stays addressable after it exits (offline queue, R10c)
+        let cards = std::fs::read_dir(rig.home().join("run/mailbox"))
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|d| d.path().join("card.entry").is_file())
+            .count();
+        assert_eq!(cards, 1, "one card for the one flagged run");
     }
     let left: Vec<_> = std::fs::read_dir(rig.home().join("run"))
         .into_iter()

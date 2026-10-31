@@ -517,6 +517,8 @@ fn scope_match(spec: &str, tool: &str, input: &Value, any: bool) -> bool {
     match tool {
         "Task" | "Agent" => name(field("subagent_type")),
         "Skill" => name(field("skill")),
+        // `SendMessage(ws:<label>/sess:<name>)` (messaging.md B7): the address as typed
+        "SendMessage" => name(field("to")),
         "WebFetch" | "browser_navigate" => {
             let Some(d) = spec.strip_prefix("domain:") else {
                 return any;
