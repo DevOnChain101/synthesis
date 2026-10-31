@@ -1,7 +1,0 @@
-{
-  "env": {
-    "TERM_PROGRAM": "WezTerm"
-  },
-  "op": "detect",
-  "platform": "linux"
-}

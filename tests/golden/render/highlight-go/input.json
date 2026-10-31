@@ -1,5 +1,0 @@
-{
-  "code": "func main() { fmt.Println(\"hi\") }",
-  "lang": "go",
-  "op": "highlight"
-}

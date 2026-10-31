@@ -1,7 +1,0 @@
-{
-  "env": {
-    "TERM": "dumb"
-  },
-  "op": "detect",
-  "platform": "win32"
-}

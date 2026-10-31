@@ -1,8 +1,6 @@
 [workspace]
 resolver = "3"
 members = ["apps/*", "crates/*"]
-# apps/desktop (GPUI) is built by its own job: the core CI must not need GPUI system libraries.
-default-members = ["apps/cli", "crates/*"]
 
 [workspace.package]
 version = "0.1.0"

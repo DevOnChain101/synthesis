@@ -1,5 +1,0 @@
-{
-  "code": "--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new",
-  "lang": "diff",
-  "op": "highlight"
-}

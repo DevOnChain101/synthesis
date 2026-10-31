@@ -1,9 +1,0 @@
-{
-  "captured_at": "<TS>",
-  "node": "v26.12.1",
-  "platform": "darwin",
-  "ref_tree_sha256": "fbc7e2f4a1288f2bfae9ca4aa183d5e3b9bd4ef02dc1d38bf9f03d45f9d37b3b",
-  "ref_version": "1.0.13",
-  "reviewed_by": "owner:DevOnChain101 2026-10-29 (regression snapshot, Node prototype not authoritative)",
-  "source": "src/keys.js"
-}

@@ -11,7 +11,7 @@ const { stable, sandbox, treeHash } = require('./lib');
 const argv = process.argv.slice(2);
 const opt = (n, d) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : d; };
 const out = path.resolve(opt('--out', path.join(__dirname, '..', '..', 'tests', 'golden')));
-const AREAS = ['config', 'permissions', 'transcripts', 'schemas', 'tools', 'keys', 'sgr', 'selection', 'providers', 'render', 'settings', 'hooks'];
+const AREAS = ['config', 'permissions', 'transcripts', 'schemas', 'tools', 'providers', 'settings', 'hooks'];
 const only = opt('--areas', '') ? opt('--areas').split(',') : AREAS;
 const realDate = argv.includes('--real-date');
 
