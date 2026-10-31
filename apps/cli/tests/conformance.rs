@@ -358,9 +358,7 @@ fn closed_stderr_does_not_panic() {
         .env("SYNTHESIS_HOME", rig.home())
         .stdin(Stdio::null())
         .arg("-c")
-        .arg(format!(
-            "exec \"$0\" run --cwd \"$1\" --provider \"fake:$2\" --prompt hi --sandbox off 2>&-"
-        ))
+        .arg("exec \"$0\" run --cwd \"$1\" --provider \"fake:$2\" --prompt hi --sandbox off 2>&-")
         .arg(env!("CARGO_BIN_EXE_synth"))
         .arg(rig.ws())
         .arg(&s);
