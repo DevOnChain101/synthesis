@@ -199,6 +199,33 @@ fn run_continue_picks_the_latest_session_and_fork_starts_a_new_one() {
 }
 
 #[test]
+fn run_resume_by_id_is_limited_to_the_current_workspace_unless_asked() {
+    let rig = Rig::new();
+    let (_, ev1) = rig.run(text_script("first"), &[]);
+    let sid = session_id(&ev1);
+    let other = rig.dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let script = rig.dir.path().join("s2.json");
+    std::fs::write(&script, text_script("second").to_string()).unwrap();
+    let go = |extra: &[&str]| {
+        rig.base()
+            .args(["run", "--cwd"])
+            .arg(&other)
+            .arg("--provider")
+            .arg(format!("fake:{}", script.display()))
+            .args(["--sandbox", "off", "--prompt", "x", "--resume", &sid])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let o = go(&[]);
+    assert_eq!(o.status.code(), Some(2), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(messages(&rig, &sid), 2, "nothing was loaded or appended");
+    let o = go(&["--resume-any-workspace"]);
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+}
+
+#[test]
 fn run_resume_of_an_unknown_session_is_a_usage_error() {
     let rig = Rig::new();
     let (o, _) = rig.run(text_script("x"), &["--resume", "nope"]);
