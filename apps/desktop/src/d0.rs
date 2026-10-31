@@ -17,7 +17,7 @@ use synthesis_permissions::{Mode, PermissionRules, Permissions};
 use synthesis_tools::Registry;
 use synthesis_tui::{Exit, Options, Tty, UiLink, run_interactive};
 
-struct ChanReader(Receiver<Vec<u8>>, Vec<u8>);
+pub(crate) struct ChanReader(pub(crate) Receiver<Vec<u8>>, pub(crate) Vec<u8>);
 
 impl Read for ChanReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -34,7 +34,7 @@ impl Read for ChanReader {
     }
 }
 
-struct ChanWriter(UnboundedSender<Vec<u8>>);
+pub(crate) struct ChanWriter(pub(crate) UnboundedSender<Vec<u8>>);
 
 impl Write for ChanWriter {
     fn write(&mut self, b: &[u8]) -> io::Result<usize> {
@@ -54,7 +54,7 @@ pub struct Rig {
     pub bytes: UnboundedReceiver<Vec<u8>>,
     /// Cells (columns, rows); the TUI polls it for resizes.
     pub size: Arc<Mutex<(u32, u32)>>,
-    join: Option<JoinHandle<io::Result<Exit>>>,
+    pub(crate) join: Option<JoinHandle<io::Result<Exit>>>,
 }
 
 impl Rig {

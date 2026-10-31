@@ -137,6 +137,39 @@ pub fn save_mode(home: &Path, m: Mode) -> std::io::Result<()> {
     set(home, "mode", m.key().into())
 }
 
+/// The provider the person last connected: kind, id, base URL and model, never the key
+/// (`synthesis.desktop.provider` in the user settings).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Remembered {
+    /// `anthropic` or `openai` (the protocol name).
+    pub kind: String,
+    pub id: String,
+    pub base_url: String,
+    pub model: String,
+}
+
+pub fn load_remembered(home: &Path) -> Option<Remembered> {
+    let v: Value =
+        serde_json::from_str(&std::fs::read_to_string(home.join("settings.json")).ok()?).ok()?;
+    let p = desktop(&v)?.get("provider")?;
+    let text = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let r = Remembered {
+        kind: text("kind"),
+        id: text("id"),
+        base_url: text("baseURL"),
+        model: text("model"),
+    };
+    (!r.id.is_empty() && !r.base_url.is_empty()).then_some(r)
+}
+
+pub fn save_remembered(home: &Path, r: &Remembered) -> std::io::Result<()> {
+    set(
+        home,
+        "provider",
+        serde_json::json!({"kind": r.kind, "id": r.id, "baseURL": r.base_url, "model": r.model}),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +222,21 @@ mod tests {
             std::fs::read_to_string(d.path().join("settings.json")).unwrap(),
             "{ broken"
         );
+    }
+
+    #[test]
+    fn the_connected_provider_is_remembered_without_a_key() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(load_remembered(d.path()), None);
+        let r = Remembered {
+            kind: "openai".into(),
+            id: "acme".into(),
+            base_url: "https://x.example/v1".into(),
+            model: "m1".into(),
+        };
+        save_remembered(d.path(), &r).unwrap();
+        assert_eq!(load_remembered(d.path()), Some(r));
+        let raw = std::fs::read_to_string(d.path().join("settings.json")).unwrap();
+        assert!(!raw.to_lowercase().contains("key"), "{raw}");
     }
 }
