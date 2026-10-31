@@ -16,7 +16,7 @@
     "\u001b[38;2;110;168;255m│ \u001b[38;2;138;147;163mtype to filter · ↑/↓ choose · pgup/pgdn page · home/end · enter    \u001b[38;2;110;168;255m│\u001b[0m",
     "\u001b[38;2;110;168;255m│ \u001b[38;2;138;147;163mselect · esc cancel                                                \u001b[38;2;110;168;255m│\u001b[0m",
     "\u001b[38;2;110;168;255m╰────────────────────────────────────────────────────────────────────╯\u001b[0m",
-    "\u001b[38;2;181;190;205m⏸ manual mode on \u001b[38;2;138;147;163m(shift+tab to cycle)       fake-sonnet · effort: auto\u001b[0m"
+    "\u001b[38;2;181;190;205m⏸ manual mode on \u001b[38;2;138;147;163m(shift+tab to cycle)  model fake-sonnet · effort auto\u001b[0m"
   ],
   "lines": [
     "\u001b[38;2;110;168;255m│ \u001b[0m\u001b[38;2;110;168;255m  \u001b[0m\u001b[38;2;196;202;214m11.   item-10  \u001b[0m\u001b[38;2;138;147;163mdetail 10\u001b[0m\u001b[38;2;110;168;255m                                         │\u001b[0m",
@@ -34,6 +34,6 @@
     "\u001b[38;2;110;168;255m│ \u001b[0m\u001b[38;2;138;147;163mtype to filter · ↑/↓ choose · pgup/pgdn page · home/end · enter \u001b[0m\u001b[38;2;110;168;255m   │\u001b[0m",
     "\u001b[38;2;110;168;255m│ \u001b[0m\u001b[38;2;138;147;163mselect · esc cancel\u001b[0m\u001b[38;2;110;168;255m                                                │\u001b[0m",
     "\u001b[38;2;110;168;255m╰────────────────────────────────────────────────────────────────────╯\u001b[0m",
-    "\u001b[38;2;181;190;205m⏸ manual mode on\u001b[0m\u001b[38;2;138;147;163m (shift+tab to cycle)\u001b[0m\u001b[38;2;196;202;214m       \u001b[0m\u001b[38;2;138;147;163mfake-sonnet · effort: auto\u001b[0m"
+    "\u001b[38;2;181;190;205m⏸ manual mode on\u001b[0m\u001b[38;2;138;147;163m (shift+tab to cycle)\u001b[0m\u001b[38;2;196;202;214m  \u001b[0m\u001b[38;2;138;147;163mmodel fake-sonnet · effort auto\u001b[0m"
   ]
 }

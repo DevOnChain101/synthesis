@@ -2,19 +2,19 @@
   "cols": 80,
   "lines": [
     " ⢎⡱  S Y N T H E S I S   workspace proj │ model anthropic/fake-sonnet  12:00:00 ",
-    " ▍Chat     Sessions 2     Agents     Panels 7                      tab switches ",
-    " · coding  Agent explorer: find files                                           ",
+    " ▍Chat     Sessions 2     Agents     Panels 5                      tab switches ",
+    " ready · planning · · coding · verifying  Agent explorer: find files            ",
     " SYNTHESIS                                                /work/proj  · working ",
     "  ● I will check login.ts and retry():                                          ",
     "    • first                                                                     ",
     "    • second                                                                    ",
     "                                                                                ",
-    "  ● Bash(npm test)                                                              ",
+    "  ● Running npm test                                                            ",
     "    ⎿  Exit code 1                                                              ",
     "       FAIL login.test.ts                                                       ",
     "       expected 2                                                               ",
     "                                                                                ",
-    "  · Read(login.ts)                                                              ",
+    "  · Reading file login.ts                                                       ",
     "    ⎿  running                                                                  ",
     "  · Working    (4s · ↓ 0 tokens · esc to interrupt)                             ",
     "    ⎿ ☒ Read                                                                    ",
@@ -23,8 +23,8 @@
     "  ╭──────────────────────────────────────────────────────────────────────────╮  ",
     "  │ > hello                                                                  │  ",
     "  ╰──────────────────────────────────────────────────────────────────────────╯  ",
-    "  ⏸ manual mode on (shift+tab to cycle)             fake-sonnet · effort: auto  ",
-    " enter send   esc interrupt         proj │ 0 files changed  1 mission   2 chat  "
+    "  ⏸ manual mode on (shift+tab to cycle)        model fake-sonnet · effort auto  ",
+    " enter send │ esc interrupt │ ⇧tab mode │ tab agent      proj │ 0 files changed "
   ],
   "rects": {
     "chatRect": {

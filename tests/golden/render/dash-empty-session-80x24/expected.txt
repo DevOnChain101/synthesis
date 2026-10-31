@@ -1,6 +1,6 @@
  ⢎⡱  S Y N T H E S I S   ○ 0 live │ workspace proj │ session session-  12:00:00 
- ▍Chat     Sessions     Agents     Panels 7                        tab switches 
- ready                                                                          
+ ▍Chat     Sessions     Agents     Panels 5                        tab switches 
+ ready · planning · coding · verifying                                          
  SYNTHESIS                                                                      
   no conversation attached                                                      
                                                                                 
@@ -21,4 +21,4 @@
                                                                                 
                                                                                 
                                                                                 
- ↑/↓ select session                 proj │ 0 files changed  1 mission   2 chat  
+ ↑/↓ select session │ a follow newest │ u usage metric   proj │ 0 files changed 

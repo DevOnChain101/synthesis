@@ -1,6 +1,6 @@
 # Spec: TUI redesign (brand theme, panel registry, /config) — draft 0.1
 
-> **2026-10-31: §16 supersedes §14 and the P3/P4 plan.** The only visual reference is now the owner's HTML prototype, `design/tui-prototype/` (the PNG mockups of §14 are deleted). §16 holds the font rules and the remaining work list. P2 (§15) is the kept groundwork.
+> **2026-10-31: §16 supersedes everything below about the visual target.** The only design source is the owner's HTML, `~/Vibe/synthesis-cli-ui/index.html` (a copy is in `design/tui-prototype/`); it has ONE view, there are no Mission/Chat screens. Mockups, screenshots and earlier frames were deleted. §16 holds the font rules and the remaining work list. P2 (§15) is the kept groundwork.
 
 Date 2026-10-29. Status: **accepted: the owner took all recommendations D1–D11 on 2026-10-30** (see §13). P1 and P2 are implemented (P2: 2026-10-30, goldens pending owner review, see §15); P3 and P4 are not started. **Later the same day the owner supplied two reference mockups; §14 is authoritative and overrides this document where they disagree** (default theme, default panel visibility, the title, the greeting). Tags: `[fact file:line]` = read in the repo, `[assumption]` = not verified, `[derived]` = a value this spec adds that is not in the kit.
 
@@ -205,125 +205,7 @@ glyphs = user.glyphs, else ascii when TERM in {linux, vt100, vt220, cons25}, els
 
 ### 5.2 Mockups
 
-80×24 (Tabs mode, Chat view):
-
-```
- ⢎⡱  S Y N T H E S I S   proj ⎇ main                         ● 2 live  │  12:00
-  ▍Chat    Sessions 2    Agents 1    Panels 3                      tab switches
-  › fix the flaky login test
-  ∴ thought for 2s · ctrl+o to show
-  I will check login.ts and retry():
-    • first
-    • second
-  ◇ Bash   npm test                                            ✗ exit 1 · 1.2s
-    │ FAIL login.test.ts
-    │ expected 2
-  ◇ Read   src/login.ts                                                running
-
-  ⠹ Conjuring…  4s · ↓ 0 tokens · esc to interrupt
-
-
-
-
-
-
-  ╭──────────────────────────────────────────────────────────────────────────╮
-  │ › hello▏                                                                 │
-  ╰──────────────────────────────────────────────────────────────────────────╯
-  manual · ⇧tab to cycle                     sonnet-4.5 · effort auto · ctx 3%
- enter send   esc interrupt   ⇧tab mode   /config   ctrl+c ×2 quit
-```
-
-120×36 (Columns mode: L=22, chat 68, R=30; default panels):
-
-```
- ⢎⡱  S Y N T H E S I S    proj  ⎇ main                                                      ● 2 live · 1 busy  │  12:00
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- WORKSPACE         1 │  › fix the flaky login test                                        │ STATUS
- ▍proj             2 │                                                                    │ ⠹ running tool        9m54s
-                     │  ∴ thought for 2s · ctrl+o to show                                 │   explorer · find files
- RUNNING           2 │                                                                    │
- ▍⠹ proj-0       10% │  I will check login.ts and retry():                                │ CONTEXT                  3%
-    project-0        │    • first                                                         │ ▱▱▱▱▱▱▱▱▱▱▱▱  5.9k / 200k
-  ● proj-1       10% │    • second                                                        │ in 9.0k · out 1.5k · $ –
-    project-1        │                                                                    │
-                     │  ◇ Bash   npm test                                ✗ exit 1 · 1.2s  │ TASKS                   1/3
- SESSION             │    │ FAIL login.test.ts                                            │ ✓ Read
- model  sonnet-4.5   │    │ expected 2                                                    │ ⠹ Fixing
- mode   manual       │  ◇ Read   src/login.ts                                    running  │ ○ Test
- effort auto         │  ◇ Edit   src/login.ts                                      +2 −1  │
- branch main         │     12     const r = await retry(fn, {                             │ SUB-AGENTS         1 active
-                     │     13 −   tries: 2,                                               │ ▍⠹ explorer  find files  9m
- MCP               1 │     13 +   tries: 3,                                               │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
- ● github   12 tools │     14 +   backoff: 50,                                            │ › find files matching auth
-                     │     15     })                                                      │ ◇ Grep  "login"     14 hits
-                     │                                                                    │ ◇ Read  src/login.ts
-                     │  ⠹ Conjuring…  4s · ↓ 0 tokens · esc to interrupt                  │ Two candidates: login.ts,
-                     │                                                                    │ retry.ts. Checking retry…
-                     │                                                                    │
-                     │                                                                    │
-                     │                                                                    │
-                     │                                                                    │
-                     │                                                                    │
-                     │                                                                    │
-                     │                                                                    │
-                     │                                                                    │
-                     │  ╭──────────────────────────────────────────────────────────────╮  │
-                     │  │ › hello▏                                                     │  │
-                     │  ╰──────────────────────────────────────────────────────────────╯  │
-                     │  manual · ⇧tab to cycle         sonnet-4.5 · effort auto · ctx 3%  │
- enter send   esc interrupt   ⇧tab mode   /config panels   ctrl+c ×2 quit              budget 3/50 turns  ·  unverified
-```
-
-200×50 (L=32, chat 120, R=48). All left panels and Status, Context, Tasks, Activity and Usage are on. Rows 25–30 are cut.
-
-```
- ⢎⡱  S Y N T H E S I S    proj  ⎇ main                                                                                                            ● 2 live · 1 busy  │  ! 1 waiting  │  $0.42  │  12:00
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- WORKSPACE                   1 │  › fix the flaky login test                                                                                            │ STATUS
- ▍proj                       4 │                                                                                                                        │ ⠹ running tool                          9m54s
-                               │  ∴ thought for 2s · ctrl+o to show                                                                                     │   explorer · find files
- RUNNING                     4 │                                                                                                                        │ 5h quota  ▰▰▰▱▱▱▱▱▱▱▱▱  23%  ↻ 2h10m
- ▍⠹ proj-0                 10% │  I will check login.ts and retry():                                                                                    │
-    project-0 · main           │    • first                                                                                                             │ CONTEXT                                    3%
-  ● proj-1                 10% │    • second                                                                                                            │ ▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱  5.9k / 200k
-    project-1 · parser         │                                                                                                                        │ in 9.0k · out 1.5k · cache 20.0k · $0.42
-  ● proj-2                 48% │  ◇ Bash   npm test                                                                                    ✗ exit 1 · 1.2s  │
-    project-2 · main           │    │ FAIL login.test.ts                                                                                                │ TASKS                                     1/3
-  ○ proj-3                     │    │ expected 2                                                                                                        │ ✓ Read
-    project-3 · main           │  ◇ Read   src/login.ts                                                                                     ✓ 42 lines  │ ⠹ Fixing
-                               │                                                                                                                        │ ○ Test
- SESSION                       │  ◆ explorer   find files matching auth                                                             running in sidebar  │
- model   sonnet-4.5            │                                                                                                                        │ SUB-AGENTS                           1 active
- mode    manual                │                                                                                                                        │ ▍⠹ explorer   find files                   9m
- effort  auto                  │                                                                                                                        │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
- branch  main                  │                                                                                                                        │ › find files matching auth
- uptime  1m00s                 │                                                                                                                        │ ◇ Grep  "login"                       14 hits
- turns   1 prompts · 5 tools   │                                                                                                                        │ ◇ Read  src/login.ts
-                               │                                                                                                                        │ Two candidates: login.ts, retry.ts.
- MCP                         2 │                                                                                                                        │ Checking retry…
- ● github             12 tools │                                                                                                                        │
- ⠹ linear           connecting │                                                                                                                        │
-┆ body rows 25–30 cut: TOOLS & SKILLS starts on row 26 (left); the sub-agent transcript continues to row 29 (right)
- TodoWrite  ▇▇▇▇▇▇▇▇▇▇  1      │  ◇ Edit   src/login.ts                                                                                          +2 −1  │ ACTIVITY
- skills  scout ×1              │     12     const r = await retry(fn, {                                                                                 │ 11:50:00  › refactor the parser
-                               │     13 −   tries: 2,                                                                                                   │ 11:50:01  ◇ Read src/parser.rs
-                               │     13 +   tries: 3,                                                                                                   │ 11:50:04  ◇ Bash npm test
-                               │     14 +   backoff: 50,                                                                                                │ 11:50:06  ✗ exit 1
-                               │     15     })                                                                                                          │ 11:52:10  ◆ explorer started
-                               │                                                                                                                        │
-                               │  The retry now waits 50 ms between attempts; running the suite again.                                                  │
-                               │                                                                                                                        │ USAGE                         Oct 2026 · 1.0k
-                               │  ⠹ Conjuring…  4s · ↓ 0 tokens · esc to interrupt                                                                      │   M T W T F S S
-                               │                                                                                                                        │   · · · · ▪ ■ ·
-                               │                                                                                                                        │   ■ ▪ ■ ■ ■ · ·
-                               │                                                                                                                        │   ■ ■ ■ ▪ ■ · ·
-                               │  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮  │   ▪ ■ ■ ■ ■ · ·
-                               │  │ › hello▏                                                                                                         │  │   ■ ■ ▪ ■ · · ·
-                               │  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯  │
-                               │  manual · ⇧tab to cycle                                                             sonnet-4.5 · effort auto · ctx 3%  │   less ▪ ■ more
- enter send   esc interrupt   ⇧tab mode   /config panels   ctrl+r history   ctrl+o expand   ctrl+c ×2 quit                                              sandbox on  ·  budget 3/50 turns  ·  unverified
-```
+Removed (owner, 2026-10-31): the hand-drawn mockups no longer describe the target. The only design source is `~/Vibe/synthesis-cli-ui/index.html` (see §16).
 
 ### 5.3 Chat details
 
@@ -712,152 +594,9 @@ Choices made while implementing P1 that the spec left open:
 
 `synthesis.tui.theme` takes `synthesis` (default), `classic`, `graphite`, `midnight`, `high-contrast`, `pearl`, `mono` or `auto`. `auto` is the default theme on 256-colour and truecolor terminals; 16 colours and `NO_COLOR` always pick `ansi16` and `mono` whatever the value (the same rule as before), and there is no light-background detection yet. The goldens run in the default theme; the other themes have their own small fixtures in `tests/golden/render-themes/` (`<theme>__<case>`), rewritten with `SYNTHESIS_UPDATE_GOLDEN=themes`.
 
-## 14. Owner reference mockups (authoritative)
+## 14. Removed
 
-**Files (removed 2026-10-31; superseded by the HTML prototype `~/Vibe/synthesis-cli-ui`).** `design/tui-reference/mockup-A-chat.png` (A, chat-centred) and `mockup-B-dashboard.png` (B, dashboard-centred), 1672x941 each, supplied by the owner on 2026-10-30. They are the owner-approved visual reference for the TUI. Both still show the old second title after "Synthesis" in the header; the owner removed it (D14), everything else is the target. P2 and P3 acceptance means **matches mockups A/B within terminal limits** (§14.8).
-
-### 14.1 What is in mockup A (chat-centred)
-
-| Area | Elements |
-|---|---|
-| Header | Logo mark, "Synthesis". Chips: workspace (`<project>`), session (`1`), model (`claude-3.5-sonnet`), tokens (`42.1k / 200k`), health (green dot, "healthy"), clock (`23:07:05`). |
-| Left sidebar | **Workspace**: current folder with its path and a collapsible tree (`src/ tests/ docs/ package.json tsconfig.json .env`). **Session**: `<project> #1`, a green live dot, rows mode, effort, model, cwd, tokens, tools ("8 enabled"). **Tools & Skills**: filesystem, shell, search, edit, browser, mcp with a green dot and a check (browser shows a hollow circle). **Activity**: read, search, run, edit, run, verify with target and "2m ago". |
-| Centre top | Strip "Synthesis · ready | planning · coding · verifying" and, on the right, "Context: <project> | 12 files | 3.2k LOC". |
-| Centre, chat | User card (avatar, name, time, text). Synthesis card (avatar, name, time, intro text). Rich tool cards inside the answer, each with a glyph, a title, an argument and a right-hand meta: **Reading file** (path, line range `1-240`, numbered code), **Searching** (query, `12 results`, path / line / match rows), **Running** (command, elapsed `18.4s`, output lines, `14 passed`, `0 failed`), **Applying patch** (path, `+12 -8`, numbered diff with red and green rows), **Verifying** (title, `6.1s`, three check rows with per-file results `5 passed`). Then closing prose and "Next steps" list. |
-| Centre bottom | Tab strip: chat, diff, terminal, browser, tests, files (active one underlined and boxed). Prompt `> explain the fix and open the diff` with caret and `Cmd+Enter send`. |
-| Right sidebar | **Capability Topology** with an "online" status: coloured cards in two columns joined by arrows: User/Project (teal; active session, project, goal), Guards (red/orange; safety, policy, sandbox on; approvals auto), Skills (green; code, search, edit, test, browser, analyze with ticks), Sub-agents (purple; "no sub-agents, single agent mode", planner, coder, reviewer), Synthesis Core (grey; "plan > act > verify > learn", "reasoning, tool use, code, evaluation"), Execution (teal; tool calls 8, running 0, errors 0, success 100%), Hooks (amber; pre-tool, post-tool, on-error, on-done), External/MCP (blue; context, github, supabase, filesystem with state), Memory/Feedback (red; session tokens, project indexed, learned items, feedback positive). **Usage**: tokens bar `42.1k / 200k (21%)`, sessions `1 today / 7 this week`, runtime, cost `$0.12 (est)`. |
-| Footer | Key hints: Tab switch panel, up/down navigate, Cmd/Ctrl+K clear, Alt+V paste image, Ctrl+L history, /shell /memory /files /browser, Shift+Enter newline. Right side: `<project> | main | 3 files changed`. |
-
-### 14.2 What is in mockup B (dashboard-centred)
-
-| Area | Elements |
-|---|---|
-| Header | Mark, "SYNTHESIS" (spaced). Chips separated by thin rules: `1 live`, `workspace: synthesis`, `session: feature/auth-flow`, `model: claude-3.5-sonnet`, `context: 128k`; right: green "system healthy", date and clock (`Mon Oct 27 23:07:05`). |
-| Left sidebar | **Workspace** with count: `synthesis` (selected row), `platform`, `web-app`, `infra`, `+ new workspace...`. **Session** with "running": mode agent, model, context `128,000 tokens`, tools `12 enabled`, cwd, uptime. **Tools & Skills** with count: file system, shell, browser, search, git, mcp (`2 servers`, each `on`), memory, "+ 5 more...". **Recent activity**: Edited auth.ts, Ran tests, Searched codebase, Read architecture.md, Updated plan, Used browser, Committed changes, Checked diagnostics, each with age. **Session stats** (`42m`): files read 28, files edited 6, commands run 14, tokens used 48.2k, tool calls 37, success rate 100%. |
-| Centre top | **Agent Status** card: "Working on: Implementing secure authentication flow with session management", "Next: Run tests and verify edge cases"; beside it a checklist (Plan updated 2m ago, Implementing changes..., Running tests..., Verifying results...). **Context** card: tokens `48.2k / 128k 38%`, input `42.1k` with a bar, output `6.1k`, cache `12.3k (hit 92%)`. |
-| Centre tabs | Strip: TERMINAL (active), agent, workspace, diff (underlined), `+`, and a close button. |
-| Centre body | Terminal view: prompt line `synthesis ~/dev/synthesis git:(feature/auth-flow) >`, the user request, then "Synthesis" with a step list (circle, text, duration: 3.2s, 2.1s, 1.8s, 24.3s, 18.7s, 4.1s). Below, a split: **Project** tree (`src/ app/ api/ auth/ route.ts session.ts middleware.ts lib/ ... tests/ README.md package.json` with `M` and `A` markers) beside a **diff** view (`src/lib/auth.ts`, hunk header, numbered lines, green added rows), and under both a **Terminal** pane with a `test` tab (pnpm test output, green ticks, `Test Files 3 passed (3)`, `Tests 18 passed (18)`, `Duration 101ms`). |
-| Prompt | Box with `>` and placeholder "Ask Synthesis anything... (Ctrl+L for history)", a model chip (`claude-3.5-sonnet`) and a send button; under it a slash-command bar: `/tools access tools | /memory manage memory | /shell run commands | /browser web research | /diff view changes`. |
-| Right sidebar | **Synthesis Topology**: a hub diagram with the core in the middle (logo, "SYNTHESIS CORE", "Reason, Act, Verify") and cards around it joined by lines: User/Project (goals and context, requirements, feedback), Guards (safety checks, policy enforcement, risk analysis), Sub-agents (task specialists, domain experts, on-demand), Skills (tasks and capabilities, code, search, web, custom skills), External/MCP (MCP servers, external APIs, data sources), Execution (tool execution, code changes, environment access), Memory/Feedback (context storage, learn from outcomes, improve over time). **Usage and Metrics** with a "7 days" selector: bars for Tokens `48.2k / 128k`, Tool calls 37, Files modified 6, Commands run 14, Browser requests 3, MCP calls 12. **System Health**: "All systems operational"; Core agent, Tool runtime, MCP servers (`2/2 online`), Memory store, Browser sandbox, each with a status and a latency (`42ms`, `28ms`, `36ms`, `31ms`, `47ms`). |
-
-### 14.3 How the two merge (where they differ)
-
-| Point | A | B | Merged target |
-|---|---|---|---|
-| Header chips | workspace, session, model, tokens, health, clock | live, workspace, session, model, context, health, date + clock | live, workspace, session, model, context (`used / limit`), health, clock; the date only from 140 columns. Drop order from the right of the list: date, health text (dot stays), context, session, live, model, workspace; the clock stays. |
-| Left | Workspace as a folder tree, Session, Tools & Skills, Activity | Workspace as a list of workspaces, Session, Tools & Skills, Recent activity, Session stats | Workspace stays the **list of workspaces** (owner rule: it is locked and splits the column with Running). The folder tree is its own optional panel (`project_tree`). Running sessions (not drawn in either mockup, locked by the owner) sit under Workspace. |
-| Centre top | A thin "ready | planning · coding · verifying" strip with project facts | Two cards: Agent Status (+ plan checklist) and Context | The two cards of B, with A's phase words as the Agent Status headline (`ready`, `planning`, `coding`, `verifying`) and A's `files | LOC` facts in the Context card. |
-| Centre tabs | chat, diff, terminal, browser, tests, files | TERMINAL, agent, workspace, diff, + | One strip: `chat` (default, B's `agent`), `diff`, `terminal`, `browser`, `tests`, `files` (B's `workspace`), `+` for more; active tab boxed and underlined. |
-| Centre body | Chat with rich tool cards | Terminal log, project tree + diff + terminal split | The default tab is **chat with A's tool cards**. B's split is the layout of the `files` and `diff` tabs from 160 columns (tree left, diff right, terminal underneath); narrower, one pane at a time. |
-| Prompt | `> text` with `Cmd+Enter send` | box, model chip, send button, slash-command bar | B's box (rounded frame) with the model chip and `Enter send` on the right, and B's slash-command bar below it when the height allows. |
-| Right | Topology as a two-column grid with arrows, Usage | Topology as a hub around the core, Usage and Metrics, System Health | Topology as a **two-column card grid with the core row in the middle** (a terminal cannot draw the hub), cards with coloured thin borders as in A and B; Usage and Metrics bars (B) with A's cost and runtime lines; System Health (B). The sub-agent transcript is always in the right sidebar (owner rule), under the Sub-agents card of the topology or in the Sub-agents panel. |
-| Footer | key hints, plus `project | branch | files changed` | none visible (the slash bar instead) | Key hints on the left, `project | branch | n files changed` on the right (A), the slash bar above it (B). |
-
-### 14.4 Mockup element to panel id
-
-New ids are in bold. **Default** is the visibility before the user changes it in `/config`; panels that do not fit are dropped by the planner (lowest drop number first), so on a small terminal the defaults shrink to the locked panels. Locked panels (Workspace, Running sessions, Chat) are never hidden.
-
-| Mockup element | Panel id | Side | Default | Drop | Content source | Phase |
-|---|---|---|---|---|---|---|
-| Header chips, health, clock | (header, not a panel) | top | on | n/a | `header` | P2 |
-| Workspace list | `workspace` | L | on, locked | never | `workspace_panel` | P2 |
-| Running sessions | `running` | L | on, locked | never | `sessions_panel` | P2 |
-| Session | `session` | L | on | 4 | `session_info_panel` | P2 |
-| Tools & Skills (with `mcp  2 servers`) | **`tools_skills`** (replaces `tools` and absorbs `mcp`) | L | on | 3 | `tools_panel` + `mcp_summary_line` | P2 |
-| Recent activity / Activity | **`recent_activity`** (replaces `activity`, moves to the left) | L | on | 2 | `feed_panel`, one row per event with an age | P2 |
-| Session stats | **`session_stats`** | L | on | 1 | counters of the model (files read and edited, commands, tokens, tool calls, success rate) | P2 |
-| Folder tree (A) / Project (B) | **`project_tree`** | C tab `files` | off | n/a | `folders.rs` plus the git status letters | P3 |
-| Chat with tool cards | `chat` | C | on, locked | never | `agent_panel` (tool cards: P3) | P3 |
-| Agent Status card | **`agent_status`** (replaces `status`) | C top | on | 6 | `status_panel` plus the todo list (replaces `tasks`) | P2 |
-| Context card | `context` | C top | on | 5 | context bar and `token_panel`, with input, output, cache hit | P2 |
-| Diff view | **`diff`** | C tab `diff` | off | n/a | `agent/diffview.rs` over the stored file changes | P3 |
-| Terminal view and test pane | **`terminal`** | C tab `terminal` | off | n/a | the bash tool outputs of the session (read only) | P3 |
-| browser, tests tabs | (tabs of the same strip; content is the Browser and verification results) | C | off | n/a | later phases (browser: R6, tests: Verification engine) | after P3 |
-| Prompt, model chip, slash bar | part of `chat` | C | on | n/a | `agent_panel` input rows, `suggestions` | P3 |
-| Synthesis Topology | **`topology`** | R | on | 1 | `topology_panel`, two-column card grid (needs inner width 46; hidden on a narrower sidebar) | P2 |
-| Usage and Metrics | **`usage_metrics`** (replaces `usage`) | R | on | 2 | bars from the session counters, a "7 days" switch reading the usage history | P2 |
-| System Health | **`system_health`** | R | on | 3 | core agent, tool runtime, MCP servers, memory store, browser sandbox: state from the runtime, latency only where measured | P2 |
-| Sub-agent transcript | `subagents` | R | on, locked | never | sub-agent list and `transcript_rows` | P2 |
-| Footer key hints, branch, files changed | (bottom bar) | bottom | on | n/a | `status.rs` | P2 |
-
-Removed ids (merged): `status` into `agent_status`, `tasks` into `agent_status`, `tools` and `mcp` into `tools_skills`, `activity` into `recent_activity`, `usage` into `usage_metrics`. The registry of §6.1 is updated accordingly in P2; the invariants of §6.3 are unchanged. The default visibilities of D2 (Tools, Activity, Usage, Topology off) are superseded: the mockups show them all, so they are on, and the planner drops them when there is no room.
-
-### 14.5 Merged target layout
-
-Sketches are not to scale; a letter is the panel (W workspace, R running, S session, T tools & skills, A recent activity, X session stats; AS agent status, C context; TP topology, U usage and metrics, H system health, SA sub-agents, CH chat). The owner's rules hold in every size: Workspace, Running and Chat locked; left column splits equally between Workspace and Running when no optional left panel is visible; the sub-agent transcript is in the right sidebar; remaining panels reflow into freed space.
-
-**200x50** (Columns, left 32, right 56, centre 112; body 47):
-
-```
- mark SYNTHESIS  1 live | workspace | session | model | context 128k        healthy | Mon Oct 27 23:07
- WORKSPACE (locked)   | AGENT STATUS + plan checklist        | CONTEXT   | TOPOLOGY (card grid, 2 columns)
- RUNNING (locked)     |--------------------------------------+-----------| User/Project | Guards
- SESSION              | chat | diff | terminal | browser | ... | Skills       | Sub-agents
- TOOLS & SKILLS       |                                      | Synthesis Core (full width)
- RECENT ACTIVITY      |   CHAT: user card, answer, tool      | Execution    | Hooks
- SESSION STATS        |   cards (Reading, Searching,         | External/MCP | Memory/Feedback
-                      |   Running, Applying patch,           |-------------------------------
-                      |   Verifying), closing prose          | USAGE AND METRICS (bars)
-                      |                                      | SYSTEM HEALTH
-                      |  > prompt box [model chip] Enter send| SUB-AGENT TRANSCRIPT (when viewing)
-                      |  /tools /memory /shell /browser /diff|
- key hints ........................................  project | branch | n files changed
-```
-
-On the `files` and `diff` tabs at this size the centre splits as in B: project tree left, diff right, terminal underneath.
-
-**120x36** (Columns, left 22 to 34, right 30 to 56; body 33): left W, R, S, T and as many of A and X as fit (X goes first, then A, then T); centre: agent status and context as one row of two cards (3 to 4 rows), the tab strip, chat, the prompt box, the slash bar only when 4 spare rows exist; right: topology (compact: cards without their detail rows), usage and metrics, system health; sub-agents when a sub-agent is being viewed (it then takes the topology's place: drop order 1 is the topology). Header chips: live, workspace, session, model, context, health dot, clock.
-
-**80x24** (Tabs mode; below 100 columns the sidebars are a switcher): tab strip `Chat | Sessions n | Agents n | Panels n`. Chat view: one header row (live, model, context, clock), the compact agent status line, the chat with tool cards in one-line form, the prompt, key hints. Sessions view: Workspace and Running split 50/50. Panels view: the visible optional panels stacked (session, tools & skills, recent activity, session stats, then the right ones). Agents view: the sub-agent transcript.
-
-### 14.6 Out of scope for a terminal
-
-- Images and avatars: the logo is braille art (D3), the user and agent avatars are the glyphs `›` and `✻`.
-- Shadows, glow, blur, gradients on card edges, rounded 12 to 24 px corners: cards are 1-cell borders (`─ │` with square or `╭ ╮` corners), coloured by token. The hub diagram's radial lines are replaced by the two-column card grid with `│ ▾` connectors.
-- Font choice, letter-spacing outside the wordmark, per-pixel sparkline bars (bars are `█░` cells), hover states, animated caret, window chrome and the close button.
-- The terminal background is never painted (D6): the mockup's navy page is the theme's `bg_ref`, assumed, and only the header band, selected rows, diff rows and overlays are painted.
-
-### 14.7 Palette: the default theme reproduces the mockups
-
-Method: `tools/sample-mockup-palette.py` (standard library only: PNG decoder, colour histogram, vivid pixels grouped by hue). Values are dominant pixel colours of the scaled, anti-aliased PNGs, so they are approximate (hue is reliable, saturation of thin lines is lowered by the scaling):
-
-| Role | Sampled in the mockups | Classic (git 05063f4) | Decision |
-|---|---|---|---|
-| Page background | `#080E12` (43 %), `#0A0E12` | none painted | `bg_ref` of `synthesis`: `#080E12` |
-| Header band | `#0E141A` | none | `surface`: `#0E141A` |
-| Selected row | `#161E26` | `60;72;105` selection | `synthesis` selection `#1A2433` (a little lighter than sampled so it shows on 256 colours too) |
-| Diff-added row | `#122220` | none | `diff_add_bg`: `#122220` |
-| Blue (focus, links, selected) | `#6888D8` (hue 222) | accent `#818CF8` (hue 234), light `#A5B4FC` | same family; keep Classic's exact values |
-| Green (ok, checks) | `#58A878`, `#78D898` (hue 140 to 150) | `#4ADE80` (hue 142) | same family; keep Classic |
-| Teal (cards, execution) | `#489878`, `#5898A8` (hue 160 to 190) | teal `#2DD4BF`, cyan `#22D3EE` | same family; keep Classic |
-| Amber / orange (warnings, hooks) | `#B88848` (hue 38) | yellow `#FACC15`, orange `#FB923C` | same family; keep Classic |
-| Red (errors, guards, memory) | `#C86868` (hue 0 to 359) | `#F87171` | same family; keep Classic |
-| Purple (sub-agents) | `#9848A8` (hue 285) | `#C084FC` | same family; keep Classic |
-| Soft white text | `#CACED6` | body `#D7D7DC`, strong `#F5F5F5` | keep Classic |
-
-Where the mockups and Classic agree on hue (all of the above), Classic's exact value is kept; the mockups add only the navy surfaces. The theme set:
-
-| Theme | What it is |
-|---|---|
-| `synthesis` (default) | Classic's colours on the mockups' navy surfaces. |
-| `classic` | The pre-P1 palette, value for value (`theme-color-fns` golden and the unchanged colours of every other golden pin it). |
-| `graphite` | Kit silver and pearl, accent revised to `#4D8BFF` (hue 219, the hue of the kit's Muted Blue `#0B1322`: the kit itself has no saturated accent token), light accent `#A3C3FF`, body `#DADDE3`, strong `#F5F6F8`, selection `#264173`. |
-| `midnight`, `high-contrast`, `pearl`, `mono`, `ansi16` | Unchanged. |
-
-Contrast (WCAG, against each theme's `bg_ref`): Synthesis body 13.53, strong 17.80, label 7.93, **muted 3.95**, ok 11.14, warn 12.68, err 7.02, info 10.74, border 3.21. Classic (against `#0B0C0F`): body 13.64, strong 17.94, label 7.99, **muted 3.98**, ok 11.22, warn 12.77, err 7.07, info 10.82, border 3.24. Graphite: body 14.37, strong 18.09, label 6.24, muted 4.93, ok 10.52, warn 9.92, err 7.61, info 7.72, accent 6.01. **Exception:** the muted text of Classic and Synthesis is the old `#707078`, which is below the 4.5 floor (3.95 and 3.98); the test allows 3.5 for those two themes only, and Classic's colour is not changed to satisfy the floor (owner instruction).
-
-### 14.8 Acceptance criteria for P2 and P3: "matches mockups A/B within terminal limits"
-
-Checked on 80x24, 120x36 and 200x50 with `synth --once` and tty-qa, against the mockups in `design/tui-reference/`:
-
-1. **Header:** every chip of §14.3 present in the order of B, dropped by priority when narrow; no second title after "Synthesis" anywhere.
-2. **Left:** the panels of §14.4 in the order Workspace, Running, Session, Tools & Skills, Recent activity, Session stats; the 50/50 rule when the optional ones are hidden.
-3. **Centre:** Agent Status and Context cards (B), the tab strip with the tabs of §14.3, the prompt box with model chip and send hint, the slash bar when the height allows.
-4. **Chat (P3):** user and Synthesis cards; tool cards with glyph, title, argument and right-hand meta for Reading file, Searching, Running, Applying patch (`+n −m`, numbered diff rows with green and red backgrounds) and Verifying (ticks and per-file results).
-5. **Right:** Topology as the card grid with the nine cards of A and B (User/Project, Guards, Skills, Sub-agents, Synthesis Core, Execution, Hooks, External/MCP, Memory/Feedback) with thin borders in teal, orange, purple, blue; Usage and Metrics bars; System Health with states; the sub-agent transcript always in the right sidebar.
-6. **Look:** the default theme's surfaces, accents and ticks are those of §14.7; green check marks, amber and orange warnings, soft white text; the greeting of D15 on the empty chat.
-7. **Rules:** Workspace, Running sessions and Chat cannot be hidden; every other panel can be hidden in `/config`; hiding a panel gives its rows to the others with no hole (the §6.3 invariants).
-8. **Goldens and contact sheet:** frames per size per theme, reviewed by the owner against the mockups; deviations are listed with the reason (terminal limit or data not available).
+The owner mockups A/B and their element mapping were deleted on 2026-10-31. The only design source is `~/Vibe/synthesis-cli-ui/index.html`; §16 lists what the TUI takes from it.
 
 ## 15. Phase P2 status (2026-10-30): layout engine, panel registry, `/config`
 
@@ -880,34 +619,26 @@ Checked on 80x24, 120x36 and 200x50 with `synth --once` and tty-qa, against the 
 
 **Unverified.** Windows ConPTY, legacy conhost and any terminal other than the macOS pty used by tty-qa; Linux tty-qa; the clipboard and mouse paths on `/config` (unit-tested only, not run in a real terminal).
 
-## 16. New TUI (2026-10-31): the HTML prototype is the target
+## 16. New TUI (2026-10-31): `~/Vibe/synthesis-cli-ui/index.html` is the only design source
 
-**Status (2026-10-31): N1 and N2 done (N2 partial, see below), N3 and later not started.** N2 (commit "New TUI N2"): the Mission centre has a tab strip `chat | project | diff | terminal` (click, `/tab NAME`; typing returns to chat). Project is the `git ls-files` tree with `git status --porcelain` letters (M A D R ?), diff is `git diff HEAD`, both read-only, bounded (400 rows, 600 diff lines, 1 MiB) on a worker thread (`crates/synthesis-tui/src/project.rs`, `Cmd::LoadProject` / `Msg::Project`) when the tab opens; no git or no repository shows `n/a: ...`. Terminal lists the session's Bash calls with outcome and duration (the event model keeps no output text). The left column and the Agent Status / Context cards already read real session data (`n/a` when missing). Not done in N2: project tree and diff side by side, per-file diff selection, terminal output text, prompt send button and slash hint bar (the footer carries the key hints), refresh while a tab stays open; the diff comes from git, not from the harness `ChangeTracker` (which has no TUI-readable output). N1 (commit "New TUI N1"): theme `synthesis` from the HTML tokens (paints background and card surfaces), theme `system` (no `48;` SGR, tested), `/themes` picker saved in USER settings, `synthesis.tui.icons` (`glyphs` still read), thin rounded cards for every panel (label in the top border; registry heights count the bottom border row; Topology needs 48 columns), top bar for Mission and Chat, footer with clickable `1 mission` / `2 chat` chips, screens by Tab (empty prompt, no sub-agents), Esc then `1`/`2`, click, `plan_screen` (Chat swaps the cards for a one-row strip), first-run setup app (`run_setup`, `/reload`) instead of exit 2 for the interactive app, goldens re-baselined with `SYNTHESIS_UPDATE_GOLDEN=redesign-new-tui` and stamped `pending-owner-review (new TUI 2026-10-31)`. Deviations: the chat column is not inside a card (mouse and selection maps use its rectangle); no hover (needs mouse 1003); no per-panel icons yet; the status line stays a second bottom row; Mission centre still shows the conversation, not the tab strip. Visual loop: `SYNTHESIS_FRAMES_DIR=dir cargo test -p synthesis-tui-render --test golden write_visual_frames` then `node tools/frames-to-png.mjs dir out --proto design/tui-prototype/screenshots` (headless Chrome, generic `monospace`: an approximation). Remaining: N2 (left-column data providers, Mission centre tab strip, project tree, diff, terminal, prompt chrome), N3, N4, N5 as listed below.
+**Source of truth.** `~/Vibe/synthesis-cli-ui/index.html` (copy: `design/tui-prototype/index.html`, read as text, never executed). It has ONE view: there are no Mission/Chat screens, no `1`/`2` keys and no view chips in the footer (`setView` and `applyView` only redraw the footer and the topology links). Its screenshots showed an older two-view version and were deleted, as were the PNG mockups, spec §5.2 and §14, and the earlier frames. Colour tokens are the HTML `:root` (bg `#0B0C0F`, surface `#15171B`, elevated `#242830`, border `#606978`, text `#C4CAD6`, strong `#F2F4F8`, accent `#D9D9E0`, green `#4ade80`, amber `#e0b252`, red `#e5636b`, blue `#6ea8ff`, teal `#4fd1c5`, purple `#b794f6`, pink `#f472b6`, orange `#f59e42`).
 
-**Supersedes.** §14 (mockups) and the P3/P4 rows of §9 are replaced by this section; §15's registry and planner stay and are extended with the prototype's panel ids.
+**The design, element by element (what the HTML renders).**
+- Top bar: logo and `SYNTHESIS`; chips `N live`, `workspace`, `session`, `model`, `effort`, `context`; right: health and clock.
+- Left column: Workspace, Running, Session, Tools and Skills, Recent Activity, User prompt (history).
+- Centre, one panel: header strip (agent, phase, context), tab strip `chat | diff | terminal | browser | file explorer`, the pane, the input (`>` and a send button), the agent switch, and under the input `{mode} mode on (shift+tab to cycle)` on the left with `model X · effort Y` on the right.
+- Right column: Topology, Agent Status and Context side by side, Usage and Metrics.
+- Footer: LEFT keyboard hints (`key` bold, description, thin separators), RIGHT status (workspace, branch, `N files changed`).
 
-**Reference.** `design/tui-prototype/index.html` (read as text, never executed) and `screenshots/view1.png`, `view2.png`. Two views: 1 Mission and 2 Chat, switched by Tab, keys `1`/`2` and the clickable footer chips. Colour tokens are the HTML `:root` (bg `#0B0C0F`, surface `#15171B`, elevated `#242830`, border `#606978`, text `#C4CAD6`, text-strong `#F2F4F8`, accent `#D9D9E0`, green `#4ade80`, amber `#e0b252`, red `#e5636b`, blue `#6ea8ff`, teal `#4fd1c5`, purple `#b794f6`, pink `#f472b6`, orange `#f59e42`).
+**Font rules (owner, 2026-10-31).** The TUI uses the terminal's own font; it never ships, embeds, requests or assumes a font. Glyphs must exist in common monospace fonts (box drawing, blocks, braille, geometric shapes), every icon has an ASCII fallback (`SYNTHESIS_ASCII=1`, `TERM=linux|dumb`), layout never assumes a cell aspect ratio, widths come from the repo's wide-char width function, and `Icons: auto | unicode | ascii` lives in `/config` (`synthesis.tui.icons`).
 
-**Font rules (owner, 2026-10-31).** The TUI uses the terminal's own font; it never ships, embeds, requests or assumes a font (no font escape sequences, no bundled TTF).
-1. Glyphs must exist in common monospace fonts without Nerd Font: box drawing, block elements, braille, geometric shapes (`● ○ ◆ ▸ ✓ ✗ ▲ ▼`). No private-use-area icons; no emoji in layout-critical places.
-2. Every icon has an ASCII fallback (`SYNTHESIS_ASCII=1`, `TERM=linux|dumb`).
-3. Layout never assumes a cell aspect ratio or a specific font; widths always come from the repo's wide-char width function.
-4. The headless-Chrome visual loop is an approximation: it uses the generic `monospace` font stack (the prototype's fonts are not shipped).
-5. `/config` > Appearance gets `Icons: auto | unicode | ascii` (default auto), stored in USER settings `synthesis.tui.icons`.
+**Themes.** `synthesis` (default, paints background and surfaces), `classic`, `system` (no `48;` SGR, tested). `/themes` saves to USER settings `synthesis.tui.theme`; project settings can never set it.
 
-**Themes.** `synthesis` (default; paints the app background and surfaces from the tokens above), `classic` (kept), `system` (paints no background at all: every cell keeps the terminal's own background; surfaces are shown by borders, dim and underline; a test must assert no `48;` SGR in its output). `/themes` is a picker; the choice is stored in USER settings `synthesis.tui.theme` (default `synthesis`); project settings can never set it.
+**Panel rules (kept).** Workspace, Running sessions and Chat can never be hidden; the sub-agent transcript panel is locked in the right sidebar; if every optional left panel is hidden the left column splits equally; freed space reflows without holes.
 
-**Panel rules.** Workspace, Running sessions and Chat can never be hidden. If every optional left panel is hidden, the left column splits equally between Workspace and Running. The sub-agent transcript panel lives in the right sidebar and is always visible. Remaining panels reflow into freed space without holes; narrow terminals degrade to tabs or a single column. Registry ids from the prototype: workspace, running, session, tools_skills, recent_activity, session_stats, agent_status, context, project_tree, diff, terminal, topology, usage_metrics, system_health, subagents.
+**Status (2026-10-31).** Built: themes; one view; top bar; panel cards; footer with curated real shortcuts (`dialogs::FOOTER_KEYS`, a test checks each key is in `/help`) and workspace, branch, files-changed on the right; the mode row under the prompt (`... mode on (shift+tab to cycle)` and `model X · effort Y`); centre tab strip `chat | diff | terminal | browser | file explorer` (click, `/tab NAME`; typing returns to chat) with real data: diff is `git diff HEAD`, file explorer is the git tree with status letters (read-only, bounded, worker thread), terminal and browser list the session's `Bash` / `browser*` tool calls (`n/a` or an empty state when absent); `USER` / `SYNTHESIS` labels and verb tool titles (Reading file, Searching, Running, Applying patch); Agent Status and Context in the right column; the four-phase strip; first-run setup card.
+**Not built (deviations still open).** The `User prompt` history panel (Session Stats stays in the registry but is off by default); the send button in the input; bordered message and tool cards (selection and copy maps depend on the row layout); file and diff side by side; per-file diff cards and collapse; terminal output text (the event model keeps none); the browser pane's request list; `effort` chip in the top bar; the agent switch under the input and the sub-agent view inside the conversation (the sub-agent panel stays in the right column by an earlier owner rule); Topology as nine coloured cards with links; Usage and Metrics select; System Health and Sub-agents are not in the HTML (Health is off by default, Sub-agents stays locked); weekday/date in the clock; refresh of the tree while a tab stays open.
 
-**Remaining (all of it), in commit order.**
-- N1: theme `synthesis` from the tokens, theme `system`, painted background, topbar (logo, spaced SYNTHESIS wordmark, `1 live`, workspace, session, model, context, health, date/time), footer chips `1 mission` / `2 chat`, view switch (Tab, `1`, `2`, click), `/themes`, `/config` additions (Icons, theme), `synthesis.tui.theme` and `synthesis.tui.icons` in `tui_settings.rs`, ASCII/16-colour/NO_COLOR fallbacks.
-- N2: Mission view left column (Workspace, Session, Tools and Skills, Recent Activity, Session Stats) and centre (Agent Status and Context cards, tab strip Terminal/agent/workspace/diff/+, project tree, diff viewer, test terminal, prompt with model chip and send button, slash hint bar).
-- N3: Chat view (header strip ready, planning, coding, verifying; USER and SYNTHESIS cards; tool cards Reading file, Searching, Running, Applying patch with diff, Verifying; tabs chat/diff/terminal/browser/tests/files).
-- N4: right column (Synthesis Topology of 9 coloured cards, Capability Topology in Chat, Usage and Metrics with the 7-days select, System Health, sub-agent transcript view and diff file cards from the prototype keyboard handlers) and the backend providers: workspaces, session info, tools and skills on/off, activity ages, session stats, agent status from todos, context meter, project tree with `git status --porcelain` letters (read-only, bounded, off the render thread), diff from the change tracker, terminal tabs, usage counters, MCP status with latency, hooks and guards summaries, memory (`n/a` until it exists), health probes with measured latency, cached. Extend `docs/specs/events.md` additively. Never fabricate numbers: `n/a` or an empty state.
-- N5: re-baseline the render goldens with `SYNTHESIS_UPDATE_GOLDEN=redesign-new-tui`, stamp `pending-owner-review (new TUI 2026-10-31)`; property tests for planner, registry, `/config` persistence, view switching and providers; frames at 80x24, 100x30, 120x36, 160x45, 200x50 for both views and both themes; side-by-side PNGs against the screenshots in `docs/research/tui-new-visual/` (at most 3 MB); `docs/CLI.md` (views, keys, `/themes`, `/config`, settings keys).
+**Goldens.** Re-baselined with `SYNTHESIS_UPDATE_GOLDEN=redesign-new-tui`, stamped `pending-owner-review`.
 
 **Kept behaviours.** Bypass confirmation, Shift+Tab modes, mouse copy, Ctrl+click links, `!cmd`, queue, `@` routing, resume, NO_COLOR, 16-colour and ASCII fallbacks.
-
-**Suggested improvements (not built; owner pre-approved recording only).**
-- Start the interactive app with no model configured and open a first-run setup instead of exiting 2 with `no model configured`.
-- Add an npm shim smoke test to CI (`package-npm.mjs`, `npm pack`, install into a temp prefix, run `synth --version` and `synth doctor`).

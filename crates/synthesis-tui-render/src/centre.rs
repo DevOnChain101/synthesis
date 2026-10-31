@@ -1,5 +1,5 @@
-//! Mission centre tabs (spec docs/specs/tui-design.md §16, N2): the strip, the project tree with
-//! `git status` letters, the diff and the terminal (the shell commands of the session). Pure; the
+//! Centre tabs of the HTML design (chat, diff, terminal, browser, file explorer): the strip, the
+//! file tree with `git status` letters, the diff, the shell commands and the browser calls (the shell commands of the session). Pure; the
 //! host reads git and hands the result over, an absent value is "n/a" or an empty state.
 
 use crate::dash::{DashState, col_bad, col_muted, col_ok, col_text, col_warn};
@@ -10,30 +10,35 @@ use synthesis_tui_base::text::width;
 pub enum Centre {
     #[default]
     Chat,
-    Project,
     Diff,
     Terminal,
+    Browser,
+    Files,
 }
 
 impl Centre {
-    pub const ALL: [Centre; 4] = [
+    pub const ALL: [Centre; 5] = [
         Centre::Chat,
-        Centre::Project,
         Centre::Diff,
         Centre::Terminal,
+        Centre::Browser,
+        Centre::Files,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
             Centre::Chat => "chat",
-            Centre::Project => "project",
             Centre::Diff => "diff",
             Centre::Terminal => "terminal",
+            Centre::Browser => "browser",
+            Centre::Files => "file explorer",
         }
     }
 
     pub fn parse(s: &str) -> Option<Centre> {
-        Centre::ALL.into_iter().find(|c| c.label() == s)
+        Centre::ALL
+            .into_iter()
+            .find(|c| c.label() == s || (*c == Centre::Files && s == "files"))
     }
 }
 
@@ -187,15 +192,38 @@ pub fn diff(p: &ProjectData, w: i64, h: i64) -> Vec<String> {
     pad_to(out, w, h)
 }
 
+/// Browser tool calls of the session, with how each ended; no browser use is an empty state.
+pub fn browser(s: &DashState, w: i64, h: i64, now: i64) -> Vec<String> {
+    calls(
+        s,
+        w,
+        h,
+        now,
+        |n| n.starts_with("browser"),
+        "no browser activity yet",
+    )
+}
+
 /// The shell commands the session ran, newest last, with how each ended. Output text is not kept
 /// by the event model, so it is not shown.
 pub fn terminal(s: &DashState, w: i64, h: i64, now: i64) -> Vec<String> {
+    calls(s, w, h, now, |n| n == "Bash", "no shell commands yet")
+}
+
+fn calls(
+    s: &DashState,
+    w: i64,
+    h: i64,
+    now: i64,
+    pick: impl Fn(&str) -> bool,
+    none: &str,
+) -> Vec<String> {
     let runs: Vec<String> = s
         .session
         .tools
         .items
         .iter()
-        .filter(|t| t.name == "Bash")
+        .filter(|t| pick(&t.name))
         .map(|t| {
             let (mark, c) = match (t.end, t.is_error) {
                 (None, _) => ("…", col_warn()),
@@ -216,11 +244,7 @@ pub fn terminal(s: &DashState, w: i64, h: i64, now: i64) -> Vec<String> {
         })
         .collect();
     if runs.is_empty() {
-        return pad_to(
-            vec![format!(" {}", paint(col_muted(), "no shell commands yet"))],
-            w,
-            h,
-        );
+        return pad_to(vec![format!(" {}", paint(col_muted(), none))], w, h);
     }
     let skip = runs.len().saturating_sub(h.max(0) as usize);
     pad_to(runs.into_iter().skip(skip).collect(), w, h)
@@ -234,8 +258,8 @@ mod tests {
     #[test]
     fn strip_hits_cover_each_tab_once() {
         let (row, hits) = strip(Centre::Diff, 60);
-        assert_eq!(hits.len(), 4);
-        assert!(strip_ansi(&row).contains("terminal"));
+        assert_eq!(hits.len(), 5);
+        assert!(strip_ansi(&row).contains("file explorer"));
         assert!(hits.windows(2).all(|w| w[0].1 <= w[1].0));
         assert_eq!(Centre::parse("diff"), Some(Centre::Diff));
         assert_eq!(Centre::parse("nope"), None);

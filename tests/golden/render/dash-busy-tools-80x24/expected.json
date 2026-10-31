@@ -2,8 +2,8 @@
   "cols": 80,
   "lines": [
     " ⢎⡱  S Y N T H E S I S   workspace project │ model claude-opus-5.5     12:00:00 ",
-    " ▍Chat     Sessions 3     Agents     Panels 7                      tab switches ",
-    " · coding  Agent explorer: find files                                           ",
+    " ▍Chat     Sessions 3     Agents     Panels 5                      tab switches ",
+    " ready · planning · · coding · verifying  Agent explorer: find files            ",
     " SYNTHESIS                                                                      ",
     "  no conversation attached                                                      ",
     "                                                                                ",
@@ -24,7 +24,7 @@
     "                                                                                ",
     "                                                                                ",
     "                                                                                ",
-    " ↑/↓ select session     project │ ⎇ main │ 0 files changed  1 mission   2 chat  "
+    " ↑/↓ select session │ a follow newest        project │ ⎇ main │ 0 files changed "
   ],
   "rects": {},
   "rows": 24

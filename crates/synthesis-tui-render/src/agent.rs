@@ -124,6 +124,41 @@ fn r(t: impl Into<String>, c: Col) -> Run {
 fn rb(t: impl Into<String>, c: Col) -> Run {
     run_full(t, c, true, false, false)
 }
+thread_local! {
+    static CARDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Chat screen styling (spec §16, N3): `USER` / `SYNTHESIS` labels and tool titles as verbs.
+/// Set per call like the theme; the rows cache keys on it.
+pub struct CardsScope(bool);
+
+impl CardsScope {
+    pub fn new(on: bool) -> Self {
+        Self(CARDS.with(|c| c.replace(on)))
+    }
+}
+
+impl Drop for CardsScope {
+    fn drop(&mut self) {
+        CARDS.with(|c| c.set(self.0));
+    }
+}
+
+fn cards() -> bool {
+    CARDS.with(std::cell::Cell::get)
+}
+
+/// What a tool is doing, in words (Chat screen tool cards); `None`: the tool keeps its own name.
+fn tool_verb(name: &str) -> Option<&'static str> {
+    match base_name(name) {
+        "Read" => Some("Reading file"),
+        "Grep" | "Glob" | "WebSearch" => Some("Searching"),
+        "Bash" | "PowerShell" => Some("Running"),
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => Some("Applying patch"),
+        _ => None,
+    }
+}
+
 fn deco(t: &str, c: Col) -> Run {
     Run {
         copy: false,
@@ -195,6 +230,7 @@ pub struct Child {
 
 #[derive(Clone, Debug)]
 struct Cache {
+    cards: bool,
     w: usize,
     expanded: bool,
     /// Rows carry colours, so a theme change drops them.
@@ -1603,6 +1639,9 @@ fn item_rows(it: &Item, w: usize, frame: usize, now: i64, expanded: bool) -> Vec
     match it.kind.as_str() {
         "user" => {
             rows.push(vec![]);
+            if cards() {
+                rows.push(vec![deco("USER", c_light())]);
+            }
             if !it.text.is_empty() {
                 let norm = it.text.replace("\r\n", "\n").replace('\r', "\n");
                 let lines: Vec<&str> = norm.split('\n').collect();
@@ -1703,6 +1742,15 @@ fn item_rows(it: &Item, w: usize, frame: usize, now: i64, expanded: bool) -> Vec
             let (name, args) = match title.find('(').filter(|p| *p > 0) {
                 Some(p) => (&title[..p], &title[p..]),
                 None => (title.as_str(), ""),
+            };
+            let verb = tool_verb(&it.name).filter(|_| cards());
+            let spaced;
+            let (name, args) = match verb {
+                Some(v) => {
+                    spaced = format!(" {}", args.trim_start_matches('(').trim_end_matches(')'));
+                    (v, spaced.as_str())
+                }
+                None => (name, args),
             };
             rows.extend(wrap(
                 &[rb(name, c_bright()), r(args, c_dim())],
@@ -1995,6 +2043,7 @@ fn cached_item_rows(it: &Item, w: usize, frame: usize, now: i64, expanded: bool)
     }
     let fp = it.fingerprint();
     if let Some(c) = it.cache.borrow().as_ref()
+        && c.cards == cards()
         && c.w == w
         && c.expanded == expanded
         && c.cfg == config()
@@ -2004,6 +2053,7 @@ fn cached_item_rows(it: &Item, w: usize, frame: usize, now: i64, expanded: bool)
     }
     let rows = Rc::new(item_rows(it, w, frame, now, expanded));
     *it.cache.borrow_mut() = Some(Cache {
+        cards: cards(),
         w,
         expanded,
         cfg: config(),
@@ -3446,7 +3496,7 @@ pub fn render_agent(
         vec![r("? for shortcuts · shift+tab: mode", c_subtle())]
     };
     let effort_text = format!(
-        "effort: {}",
+        "effort {}",
         agent
             .effort_label
             .clone()
@@ -3462,7 +3512,7 @@ pub fn render_agent(
         if name.is_empty() {
             effort_text.clone()
         } else {
-            format!("{name} · {effort_text}")
+            format!("model {name} · {effort_text}")
         }
     };
     let right = right_for(&model_name);
@@ -3480,23 +3530,25 @@ pub fn render_agent(
     let mut shown = right.clone();
     let mut left_runs = left.clone();
     if row_w(&left) + str_w(&right) + 2 > content_w {
-        let room_for = |runs: &[Run]| {
-            content_w as i64 - row_w(runs) as i64 - 2 - str_w(&format!(" · {effort_text}")) as i64
-        };
-        let mut room = room_for(&left);
-        if room < 4 && mode.is_some() && im.is_none() {
+        if str_w(&format!(" · {effort_text}")) as i64 + 4
+            > content_w as i64 - row_w(&left) as i64 - 2
+            && mode.is_some()
+            && im.is_none()
+        {
             left_runs = left[..1].to_vec();
-            room = room_for(&left_runs);
         }
-        // Never cut a word: priority mode > model > effort; whole items only (QA B-27).
+        // Never cut a word: whole items only, the labelled pair first, then the shorter ones.
         let free = content_w as i64 - row_w(&left_runs) as i64 - 2;
-        shown = if !model_name.is_empty() && str_w(&model_name) as i64 <= room {
-            right_for(&model_name)
-        } else if !model_name.is_empty() && str_w(&model_name) as i64 <= free {
-            model_name.clone()
-        } else {
-            effort_text.clone()
-        };
+        let tries = [
+            right_for(&model_name),
+            format!("{model_name} · {effort_text}"),
+            effort_text.clone(),
+            model_name.clone(),
+        ];
+        shown = tries
+            .into_iter()
+            .find(|t| !t.is_empty() && str_w(t) as i64 <= free)
+            .unwrap_or_else(|| effort_text.clone());
     }
     let status: Vec<Run> = if row_w(&left_runs) + str_w(&shown) + 2 <= content_w {
         let mut s = left_runs.clone();
@@ -3617,6 +3669,12 @@ pub fn render_agent(
                 || focus_kinds.contains(&it.kind.as_str())
             {
                 parts.extend(note_gap(prev, it));
+                if cards()
+                    && prev == Some("user")
+                    && matches!(it.kind.as_str(), "text" | "thinking" | "tool")
+                {
+                    parts.push(Rc::new(vec![vec![deco("SYNTHESIS", c_ok())]]));
+                }
                 prev = Some(&it.kind);
                 parts.push(cached_item_rows(it, content_w, frame, now, opts.expanded));
             }
@@ -3752,4 +3810,42 @@ pub fn body_sel_rows(body: &Body, from: usize, to: usize) -> Vec<SelRow> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod cards_tests {
+    use super::*;
+
+    fn tool(name: &str, path: &str) -> Item {
+        Item {
+            kind: "tool".into(),
+            name: name.into(),
+            status: "done".into(),
+            input: serde_json::json!({ "file_path": path }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn chat_cards_label_the_turn_and_name_tools_by_verb_only_when_on() {
+        let flat = |it: &Item| -> String {
+            item_rows(it, 60, 0, 0, false)
+                .iter()
+                .flat_map(|r| r.iter().map(|x| x.t.to_string()))
+                .collect()
+        };
+        let read = tool("Read", "src/a.rs");
+        assert!(flat(&read).contains("Read"));
+        assert!(!flat(&read).contains("Reading file"));
+        let _on = CardsScope::new(true);
+        let f = flat(&read);
+        assert!(f.contains("Reading file") && f.contains("a.rs"), "{f}");
+        let user = Item {
+            kind: "user".into(),
+            text: "hi".into(),
+            ..Default::default()
+        };
+        assert!(flat(&user).contains("USER"));
+        assert_eq!(tool_verb("Weird"), None);
+    }
 }

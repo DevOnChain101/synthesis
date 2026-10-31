@@ -1046,7 +1046,10 @@ fn render_golden() {
     // `redesign-new-tui` (the new TUI of docs/specs/tui-design.md §16) is both gates in one run:
     // `frame` cases may change layout and colour (the P2 check), every other op may change colour
     // only (the P1 check). Stamp: NEW_STAMP.
-    let nt = mode == "redesign-new-tui";
+    // `redesign-html` is the same run, and additionally accepts TEXT changes of any frame-like case
+    // (the owner's HTML design replaced wording and layout; the Node oracle no longer applies).
+    let html = mode == "redesign-html";
+    let nt = mode == "redesign-new-tui" || html;
     let p1 = mode == "redesign-p1" || nt;
     let p2 = mode == "redesign-p2" || nt;
     let stamp1 = if nt { NEW_STAMP } else { P1_STAMP };
@@ -1182,6 +1185,13 @@ fn render_golden() {
                             format!("colour + header rows {hdr:?}")
                         }
                     })
+                };
+                let verdict = match verdict {
+                    Err(_) if html && !a.ansi.is_empty() => {
+                        rewrite_expected(dir, &want, &a);
+                        Ok("text (HTML design)".to_string())
+                    }
+                    v => v,
                 };
                 match verdict {
                     Ok(what) => {
@@ -1399,21 +1409,20 @@ fn write_visual_frames() {
         ("synthesis", ThemeId::Synthesis),
         ("system", ThemeId::System),
     ] {
-        for screen in synthesis_tui_render::layout::Screen::ALL {
+        {
             for (cols, rows) in [(80, 24), (100, 30), (120, 36), (160, 45), (200, 50)] {
                 let _scope = ConfigScope::new(RenderConfig {
                     theme,
                     ascii: false,
                 });
                 let mut st = hydrate_state(&input["state"]);
-                st.view.screen = screen;
                 st.view.panels = Panels::all();
                 let chars = st.editor.chars.clone();
                 let ds = st.dash(&chars, st.editor.cur);
                 let fr = render_frame(&ds, cols, rows, 0, input["now"].as_i64().unwrap());
                 let lines = paint_background(fr.lines);
                 std::fs::write(
-                    dir.join(format!("{name}-{}-{cols}x{rows}.ansi", screen.label())),
+                    dir.join(format!("{name}-{}-{cols}x{rows}.ansi", "view")),
                     lines.join("\n") + "\n",
                 )
                 .unwrap();
@@ -1430,7 +1439,7 @@ fn system_theme_emits_no_background_and_synthesis_paints_the_tokens() {
     let input = read(root().join("../../tests/golden/render/layout-100x30-all/input.json"));
     let frames = |theme: ThemeId, mode: ColorMode| -> Vec<String> {
         let mut all = vec![];
-        for screen in synthesis_tui_render::layout::Screen::ALL {
+        {
             for (cols, rows) in [
                 (40, 12),
                 (59, 20),
@@ -1445,7 +1454,6 @@ fn system_theme_emits_no_background_and_synthesis_paints_the_tokens() {
                         ascii: false,
                     });
                     let mut st = hydrate_state(&input["state"]);
-                    st.view.screen = screen;
                     st.view.panels = panels;
                     let chars = st.editor.chars.clone();
                     let ds = st.dash(&chars, st.editor.cur);
@@ -1516,11 +1524,10 @@ fn every_theme_and_glyph_set_keeps_the_grid() {
         ThemeId::Ansi16,
     ] {
         for ascii in [false, true] {
-            for screen in synthesis_tui_render::layout::Screen::ALL {
+            {
                 for (cols, rows) in [(40, 12), (60, 20), (80, 24), (100, 30), (200, 50)] {
                     let _scope = ConfigScope::new(RenderConfig { theme, ascii });
                     let mut st = hydrate_state(&input["state"]);
-                    st.view.screen = screen;
                     st.view.panels = Panels::all();
                     let chars = st.editor.chars.clone();
                     let ds = st.dash(&chars, st.editor.cur);

@@ -2,15 +2,15 @@
   "cols": 220,
   "lines": [
     " ⢎⡱  S Y N T H E S I S   ● 3 live │ workspace project │ session session- │ model claude-sonnet                                                                                     ● system healthy │ Fri Oct  2 │ 12:00:00 ",
-    " WORKSPACE                     1   ▍chat    project    diff    terminal                                                                                              ╭ USAGE & METRICS ──────────────────────────── 7 days ╮",
-    " ▌● project                    3   SYNTHESIS                                                                                                                         │ Tokens     ███████████████████████████████████ 6.0k │",
-    "                                    no conversation attached                                                                                                         │ Tool calls ███████████████████████░░░░░░░░░░░░   14 │",
-    "╭ RUNNING SESSIONS ────────── 3 ╮                                                                                                                                    │ Messages   ███████████████████████████████████   21 │",
+    " WORKSPACE                     1   ready · planning · coding · verifying                                                                                             ╭ AGENT STATUS ──────────────────────────────── ready ╮",
+    " ▌● project                    3   ▍chat    diff    terminal    browser    file explorer                                                                             │ ready · planning · coding · verifying               │",
+    "                                   SYNTHESIS                                                                                                                         │ Working on  nothing yet                             │",
+    "╭ RUNNING SESSIONS ────────── 3 ╮   no conversation attached                                                                                                         │ Next        no plan yet                             │",
     "│ ►● proj-0                 10% │                                                                                                                                    ╰─────────────────────────────────────────────────────╯",
-    "│ project-0 (D:/workspace)      │                                                                                                                                    ╭ SYSTEM HEALTH ───────────────────────────── healthy ╮",
-    "│    ↓ 2 more                   │                                                                                                                                    │ ○ Core agent                      no agent attached │",
-    "│                               │                                                                                                                                    │ ○ Tool runtime                          no data yet │",
-    "╰───────────────────────────────╯                                                                                                                                    │ ○ MCP servers                          3 configured │",
+    "│ project-0 (D:/workspace)      │                                                                                                                                    ╭ CONTEXT ────────────────────────────────────────────╮",
+    "│    ↓ 2 more                   │                                                                                                                                    │ tokens                                  no data yet │",
+    "│                               │                                                                                                                                    │ ▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │",
+    "╰───────────────────────────────╯                                                                                                                                    │ in 0 · out 0                                        │",
     "╭ SESSION ──────────────────────╮                                                                                                                                    ╰─────────────────────────────────────────────────────╯",
     "│ model  claude-sonnet          │                                                                                                                                    ╭ SUB-AGENTS ─────────────────────────────────────────╮",
     "│ cwd    project                │                                                                                                                                    │ No sub-agents yet · /agents                         │",
@@ -20,7 +20,7 @@
     "│ no tool calls yet             │                                                                                                                                    │                                                     │",
     "│ mcp                 3 servers │                                                                                                                                    │                                                     │",
     "╰───────────────────────────────╯                                                                                                                                    ╰─────────────────────────────────────────────────────╯",
-    " ↑/↓ select session   a follow newest   u usage metric   r reload   q quit                                                                                                   project │ 0 files changed  1 mission   2 chat  "
+    " ↑/↓ select session │ a follow newest │ u usage metric │ r reload │ q quit                                                                                                                        project │ 0 files changed "
   ],
   "rects": {},
   "rows": 20

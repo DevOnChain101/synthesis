@@ -1,6 +1,6 @@
 //! First run: no model configured. The app opens with the setup card, `/config`, `/themes`, `/help`
 //! and quitting work, a typed task is refused inline, and `/reload` asks the host to check again.
-//! Also the new screens (Tab, `1`/`2` after Esc, the footer chips) and `/themes` persistence.
+//! Also the single view (no screen switching) and `/themes` persistence.
 #![cfg(unix)]
 
 use std::io;
@@ -116,58 +116,20 @@ fn themes_picker_saves_the_choice_in_the_user_settings() {
 }
 
 #[test]
-fn tab_and_esc_digits_and_the_footer_chips_switch_screens() {
+fn there_is_one_view_no_chips_and_digits_type_normally() {
     let mut r = rig(140, 40, TuiSettings::default());
-    r.wait_for("1 mission");
-    r.wait_for("2 chat");
-    // the Mission screen has the Agent status and Context cards
+    // the HTML design has one view: Agent status is in the right column, the tab strip is above the chat
     r.wait_for("AGENT STATUS");
+    r.wait_for("file explorer");
+    let s = r.tty.screen_text();
+    assert!(!s.contains("1 mission") && !s.contains("2 chat"), "{s}");
+    // Tab does not switch a screen, a digit after Esc is typed
     r.tty.send("\t");
-    // the Chat screen replaces the cards by the one-row strip
-    let t0 = Instant::now();
-    while r.tty.screen_text().contains("AGENT STATUS") {
-        assert!(t0.elapsed() < Duration::from_secs(15), "Tab did not switch");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    // Esc then 1 goes back, a digit typed normally still types
     r.tty.send("\x1b");
     std::thread::sleep(Duration::from_millis(60));
     r.tty.send("1");
+    r.wait_for("> 1");
     r.wait_for("AGENT STATUS");
-    r.tty.send("2");
-    std::thread::sleep(Duration::from_millis(60));
-    r.tty.send("7");
-    r.wait_for("> 7");
     r.tty.send("\x15/exit\r");
-    r.finish();
-}
-
-#[test]
-fn a_click_on_a_footer_chip_picks_the_screen() {
-    let mut r = rig(140, 40, TuiSettings::default());
-    r.wait_for("AGENT STATUS");
-    // find the `2 chat` chip on the bottom-but-one row and click it (SGR mouse, 1-based)
-    let screen = r.tty.screen();
-    let (row, line) = screen
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, l)| l.contains("2 chat"))
-        .unwrap();
-    let col = line.find("2 chat").unwrap() + 2;
-    r.tty.send(&format!(
-        "\x1b[<0;{col};{}M\x1b[<0;{col};{}m",
-        row + 1,
-        row + 1
-    ));
-    let t0 = Instant::now();
-    while r.tty.screen_text().contains("AGENT STATUS") {
-        assert!(
-            t0.elapsed() < Duration::from_secs(15),
-            "the click did not switch"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    r.tty.send("/exit\r");
     r.finish();
 }

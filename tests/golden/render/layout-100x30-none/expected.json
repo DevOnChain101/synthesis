@@ -4,10 +4,10 @@
   "lines": [
     " ⢎⡱  S Y N T H E S I S   ● 2 live │ workspace proj │ model anthropic/fake-sonnet           12:00:00 ",
     "────────────────────────────────────────────────────────────────────────────────────────────────────",
-    "╭ WORKSPACE ───── 1 ╮  ▍chat    project    diff    terminal            ╭ SUB-AGENTS ───────────────╮",
-    "│ ▌● proj         2 │  SYNTHESIS                /work/proj  · working  │ No sub-agents yet · /agen…│",
-    "│                   │                                                  │                           │",
-    "│                   │   > fix the flaky login test                     │                           │",
+    "╭ WORKSPACE ───── 1 ╮  ready · planning · · coding · verifying  Agent… ╭ SUB-AGENTS ───────────────╮",
+    "│ ▌● proj         2 │  ▍chat    diff    terminal    browser    file e… │ No sub-agents yet · /agen…│",
+    "│                   │  SYNTHESIS                /work/proj  · working  │                           │",
+    "│                   │   SYNTHESIS                                      │                           │",
     "│                   │                                                  │                           │",
     "│                   │   ✻ Thinking · 2.0s                              │                           │",
     "│                   │   │ look                                         │                           │",
@@ -16,12 +16,12 @@
     "│                   │     • first                                      │                           │",
     "│                   │     • second                                     │                           │",
     "│                   │                                                  │                           │",
-    "╰───────────────────╯   ● Bash(npm test)                               │                           │",
+    "╰───────────────────╯   ● Running npm test                             │                           │",
     "                          ⎿  Exit code 1                               │                           │",
     "╭ RUNNING SESSIONS  ╮        FAIL login.test.ts                        │                           │",
     "│ ►● proj-0     10% │        expected 2                                │                           │",
     "│ project-0         │                                                  │                           │",
-    "│  ● proj-1     10% │   · Read(login.ts)                               │                           │",
+    "│  ● proj-1     10% │   · Reading file login.ts                        │                           │",
     "│ project-1         │     ⎿  running                                   │                           │",
     "│                   │   · Working    (4s · ↓ 0 tokens · esc to interr… │                           │",
     "│                   │     ⎿ ☒ Read                                     │                           │",
@@ -30,15 +30,15 @@
     "│                   │   ╭──────────────────────────────────────────╮   │                           │",
     "│                   │   │ > hello                                  │   │                           │",
     "│                   │   ╰──────────────────────────────────────────╯   │                           │",
-    "╰───────────────────╯   ⏸ manual mode on  fake-sonnet · effort: auto   ╰───────────────────────────╯",
-    " enter send   esc interrupt   ⇧tab mode                 proj │ 0 files changed  1 mission   2 chat  "
+    "╰───────────────────╯   ⏸ manual mode on   fake-sonnet · effort auto   ╰───────────────────────────╯",
+    " enter send │ esc interrupt │ ⇧tab mode │ tab agent │ / commands │ ! shell   proj │ 0 files changed "
   ],
   "rects": {
     "chatRect": {
       "x": 22,
-      "y": 3,
+      "y": 4,
       "w": 48,
-      "h": 26
+      "h": 25
     },
     "sidebarRect": {
       "x": 0,

@@ -20,7 +20,7 @@
     "\u001b[38;2;224;178;82m│                                                                    │\u001b[0m",
     "\u001b[38;2;224;178;82m│ \u001b[38;2;247;248;250menter \u001b[38;2;181;190;205menable bypass permissions   \u001b[38;2;247;248;250mesc \u001b[38;2;181;190;205mkeep auto mode               \u001b[38;2;224;178;82m│\u001b[0m",
     "\u001b[38;2;224;178;82m╰────────────────────────────────────────────────────────────────────╯\u001b[0m",
-    "\u001b[38;2;224;178;82m⏵⏵ auto mode on \u001b[38;2;138;147;163m(shift+tab to cycle)        fake-sonnet · effort: auto\u001b[0m"
+    "\u001b[38;2;224;178;82m⏵⏵ auto mode on \u001b[38;2;138;147;163m(shift+tab to cycle)   model fake-sonnet · effort auto\u001b[0m"
   ],
   "lines": [
     "",
@@ -42,6 +42,6 @@
     "\u001b[38;2;224;178;82m│ \u001b[0m\u001b[38;2;224;178;82m                                                                   │\u001b[0m",
     "\u001b[38;2;224;178;82m│ \u001b[0m\u001b[38;2;247;248;250menter\u001b[0m\u001b[38;2;181;190;205m enable bypass permissions   \u001b[0m\u001b[38;2;247;248;250mesc\u001b[0m\u001b[38;2;181;190;205m keep auto mode\u001b[0m\u001b[38;2;224;178;82m               │\u001b[0m",
     "\u001b[38;2;224;178;82m╰────────────────────────────────────────────────────────────────────╯\u001b[0m",
-    "\u001b[38;2;224;178;82m⏵⏵ auto mode on\u001b[0m\u001b[38;2;138;147;163m (shift+tab to cycle)\u001b[0m\u001b[38;2;196;202;214m        \u001b[0m\u001b[38;2;138;147;163mfake-sonnet · effort: auto\u001b[0m"
+    "\u001b[38;2;224;178;82m⏵⏵ auto mode on\u001b[0m\u001b[38;2;138;147;163m (shift+tab to cycle)\u001b[0m\u001b[38;2;196;202;214m   \u001b[0m\u001b[38;2;138;147;163mmodel fake-sonnet · effort auto\u001b[0m"
   ]
 }

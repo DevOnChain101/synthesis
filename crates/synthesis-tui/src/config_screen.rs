@@ -41,7 +41,7 @@ pub(crate) fn rows(s: &TuiSettings, no_color: bool) -> Vec<Row> {
     let mut out = vec![];
     let sections = [
         ("Left sidebar", [Side::Left].as_slice()),
-        ("Centre", &[Side::Chat, Side::CentreTop, Side::CentreTab]),
+        ("Centre", &[Side::Chat, Side::CentreTab]),
         ("Right sidebar", &[Side::Right]),
     ];
     for (name, sides) in sections {

@@ -2,8 +2,8 @@
   "cols": 60,
   "lines": [
     " ⢎⡱  SYNTHESIS   workspace segment                 12:00:00 ",
-    " ▍Chat     Sessions 3     Agents     Panels 7  tab switches ",
-    " · coding  Agent explorer: find files                       ",
+    " ▍Chat     Sessions 3     Agents     Panels 5  tab switches ",
+    " ready · planning · · coding · verifying  Agent explorer: f…",
     " SYNTHESIS                                                  ",
     "  no conversation attached                                  ",
     "                                                            ",
@@ -24,7 +24,7 @@
     "                                                            ",
     "                                                            ",
     "                                                            ",
-    " ↑/↓ select session            segment  1 mission   2 chat  "
+    " ↑/↓ select session               segment │ 0 files changed "
   ],
   "rects": {},
   "rows": 24

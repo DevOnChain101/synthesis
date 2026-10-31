@@ -17,4 +17,4 @@
 │                                                                    │
 │ enter enable bypass permissions   esc keep auto mode               │
 ╰────────────────────────────────────────────────────────────────────╯
-⏵⏵ auto mode on (shift+tab to cycle)        fake-sonnet · effort: auto
+⏵⏵ auto mode on (shift+tab to cycle)   model fake-sonnet · effort auto

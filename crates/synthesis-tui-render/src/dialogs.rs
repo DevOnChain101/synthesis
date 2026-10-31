@@ -178,11 +178,30 @@ pub const LOCAL_COMMANDS: &[(&str, &str, Option<&str>)] = &[
 pub const HELP: &[&str] = &[
     "enter send (while a task runs it is queued: ↑ edits it, esc drops it) · alt+enter / shift+enter / \\+enter newline · alt+backspace delete word back · alt+d delete word forward · ctrl+w delete back to whitespace · ctrl+u clear to line start",
     "esc interrupt the task (partial output is kept) · esc esc on an empty prompt edits the last prompt · shift+tab cycle the permission mode",
-    "! run a shell command (!! only records it) · / commands and skills · @ mention a file · tab Mission/Chat",
+    "! run a shell command (!! only records it) · / commands and skills · @ mention a file · tab on an empty prompt picks the agent you talk to (the next view in a narrow terminal)",
     "/model /mcp /agents /permissions /status /compact /clear /new /resume /focus /config /themes /exit",
     "↑/↓ prompt history · ctrl+r search history · ctrl+o show all of long tasks, bash output and code (6 lines by default) · right-click in the prompt pastes the clipboard · drag, double or triple click copies · pgup/pgdn scroll · ctrl+l redraw a garbled screen",
+    "ctrl+c clears the prompt, then cancels the task, then (pressed twice) quits · ctrl+d on an empty prompt quits · / opens commands (ctrl+p too)",
     "ctrl+n or /new open a session in another folder · /resume continues a saved one (this folder first)",
     "dialogs: ↑/↓ or 1-9 choose · click an option · space toggles · ←/→ switch question · enter confirm · esc reject · x shows the whole input",
+];
+
+/// The footer hints of the chat prompt, most important first (the narrower the terminal, the more
+/// of the tail is dropped). Every key here must be described in `HELP` (a test checks it).
+pub const FOOTER_KEYS: &[(&str, &str)] = &[
+    ("enter", "send"),
+    ("esc", "interrupt"),
+    ("⇧tab", "mode"),
+    ("tab", "agent"),
+    ("/", "commands"),
+    ("!", "shell"),
+    ("@", "files"),
+    ("ctrl+c", "cancel/quit"),
+    ("ctrl+r", "history"),
+    ("ctrl+o", "expand"),
+    ("ctrl+n", "new session"),
+    ("pgup/pgdn", "scroll"),
+    ("ctrl+l", "redraw"),
 ];
 
 /// (key, label, mode)
@@ -286,4 +305,22 @@ pub fn permission_options(suggestions: &[Value], offer_auto: bool) -> Vec<(Strin
         "No, and tell Synthesis what to do differently (esc)".into(),
     ));
     o
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_footer_key_is_described_in_help() {
+        let help = HELP.join("\n");
+        for (k, _) in FOOTER_KEYS {
+            let k = k.replace('⇧', "shift+");
+            // `pgup/pgdn`, `⇧tab`: each part must appear
+            for part in k.split('/') {
+                let part = if part == "pgdn" { "pgdn" } else { part };
+                assert!(help.contains(part), "footer key {k:?} is not in HELP");
+            }
+        }
+    }
 }

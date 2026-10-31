@@ -29,7 +29,7 @@ use synthesis_tui_render::dash::{
     Tap, Usage, Workspace, render_frame, workspace_key,
 };
 use synthesis_tui_render::dialogs::HELP;
-use synthesis_tui_render::layout::{Mode as LayoutMode, Screen, View};
+use synthesis_tui_render::layout::{Mode as LayoutMode, View};
 use synthesis_tui_render::model::{
     self, Session, apply_event, parse_ts, session_from_events, session_phase,
 };
@@ -337,15 +337,11 @@ pub(crate) struct App {
     config: Option<ConfigScreen>,
     /// The view of Tabs mode (terminals under 100 columns).
     tab: View,
-    /// Mission or Chat (Tab, `1` / `2` after Esc, the footer chips).
-    screen: Screen,
     /// Mission centre tab and what the host last read of the working tree.
     centre: Centre,
     project: ProjectData,
     /// First run: no model is configured yet. The app shows the setup card and refuses to start a task.
     setup: bool,
-    /// Esc on an empty prompt: `1` and `2` pick a screen instead of typing a digit, until a key types.
-    nav: bool,
     /// Live MCP server state, asked for at each frame.
     pub mcp_status: Option<Box<dyn Fn() -> Vec<McpLive>>>,
 }
@@ -404,7 +400,7 @@ fn local_commands() -> Vec<CmdDef> {
         c("themes", "pick a colour theme", "[name]"),
         c(
             "tab",
-            "Mission centre: chat, project, diff, terminal",
+            "centre tab: chat, diff, terminal, browser, files",
             "<name>",
         ),
         c("exit", "quit", ""),
@@ -540,11 +536,9 @@ impl App {
             env: synthesis_config::Env::default(),
             config: None,
             tab: View::Chat,
-            screen: Screen::Mission,
             centre: Centre::Chat,
             project: ProjectData::default(),
             setup: false,
-            nav: false,
             mcp_status: None,
         }
     }
@@ -1057,15 +1051,7 @@ impl App {
 
     fn agent_key(&mut self, k: &Key, now: i64, out: &mut Vec<Cmd>) {
         match k {
-            Key::Text(t) if self.nav && self.editor.chars.is_empty() && (t == "1" || t == "2") => {
-                self.screen = if t == "1" {
-                    Screen::Mission
-                } else {
-                    Screen::Chat
-                };
-            }
             Key::Text(t) => {
-                self.nav = false;
                 self.centre = Centre::Chat; // typing goes to the prompt, which lives in the chat tab
                 self.scroll = 0; // typing brings the view back to the prompt
                 if t == "?" && self.editor.chars.is_empty() {
@@ -1082,7 +1068,6 @@ impl App {
                 }
             }
             Key::Paste(t) => {
-                self.nav = false;
                 // pasted text never becomes a shell command (or an agent message) by itself: type
                 // the `!` / `@` yourself
                 let t = if self.editor.cur == 0 && t.starts_with(['!', '#', '@']) {
@@ -1111,11 +1096,9 @@ impl App {
         use Named::*;
         let recall_queue = self.editor.chars.is_empty() && !self.queue.is_empty();
         let tab_cycles = self.editor.chars.is_empty() && self.dialogs.is_empty();
-        let tab_screen = self.chat.agents.is_empty() && self.tab_columns();
         let e = &mut self.editor;
         match n {
             Enter => {
-                self.nav = false;
                 if e.chars.last() == Some(&'\\') {
                     e.backspace();
                     e.insert("\n");
@@ -1173,10 +1156,8 @@ impl App {
                     }
                 } else {
                     self.esc_at = Some(now);
-                    self.nav = true;
                 }
             }
-            Tab if tab_cycles && tab_screen => self.screen = self.screen.other(),
             Tab if tab_cycles
                 && self
                     .frame
@@ -1256,13 +1237,6 @@ impl App {
         } else {
             e.down();
         }
-    }
-
-    /// The last frame was drawn in Columns mode (Mission and Chat differ there).
-    fn tab_columns(&self) -> bool {
-        self.frame
-            .as_ref()
-            .is_none_or(|f| f.mode == LayoutMode::Columns)
     }
 
     /// Tab in Tabs mode: the next view of the strip.
@@ -1581,7 +1555,7 @@ impl App {
             "themes" => self.themes(arg, out),
             "tab" => match Centre::parse(arg) {
                 Some(c) => self.set_centre(c, out),
-                None => self.out_item("/tab chat|project|diff|terminal", true),
+                None => self.out_item("/tab chat|diff|terminal|browser|files", true),
             },
 
             "clear" => {
@@ -1867,8 +1841,7 @@ impl App {
     /// Picks the Mission centre tab; project and diff re-read the working tree.
     fn set_centre(&mut self, c: Centre, out: &mut Vec<Cmd>) {
         self.centre = c;
-        self.screen = Screen::Mission;
-        if matches!(c, Centre::Project | Centre::Diff) {
+        if matches!(c, Centre::Files | Centre::Diff) {
             out.push(Cmd::LoadProject(self.cfg.cwd.clone()));
         }
     }
@@ -2687,27 +2660,6 @@ impl App {
             }
             return;
         }
-        // a click on a footer chip picks the screen
-        if let Key::Mouse {
-            x,
-            y,
-            button: 0,
-            action: MouseAction::Down,
-            ..
-        } = *k
-            && self.dialogs.is_empty()
-            && let Some(f) = self.frame.as_ref()
-            && f.rects.footer_row == Some(i64::from(y) - 1)
-            && let Some(sc) = f
-                .rects
-                .chip_hits
-                .iter()
-                .find(|(a, b, _)| (*a..*b).contains(&(i64::from(x) - 1)))
-                .map(|h| h.2)
-        {
-            self.screen = sc;
-            return;
-        }
         // a click on a Mission centre tab
         if let Key::Mouse {
             x,
@@ -3332,7 +3284,6 @@ impl App {
             opts,
             panels: self.tui.panels,
             tab: self.tab,
-            screen: self.screen,
             centre: self.centre,
             project: self.project.clone(),
             // a dialog (an approval) is answered in the chat: /config waits behind it

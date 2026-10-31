@@ -1,38 +1,44 @@
  ⢎⡱  S Y N T H E S I S   ● 40 live │ workspace project │ session session- │ model claude-sonnet                                                                ● system healthy │ Fri Oct  2 │ 12:00:00 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- WORKSPACE                   1  ╭ AGENT STATUS ─────────────────────────────────────────── ready ╮  ╭ CONTEXT ─────────────────────────────────╮ ╭ TOPOLOGY ───────────────────────────────────── idle ╮
- ▌● project                 40  │ ready · planning · coding · verifying                          │  │ tokens                       no data yet │ │ ╭─ USER / PROJECT ──────╮ ╭─ GUARDS ──────────────╮ │
-                                │ Working on  nothing yet                                        │  │ ▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │ │ │ ● no session          │ │ sandbox no data yet   │ │
-                                │ Next        no plan yet                                        │  │ in 0 · out 0                             │ │ │ project               │ │ approvals –           │ │
-╭ RUNNING SESSIONS ─────── 40 ╮ │                                                                │  │ cache 0 · $ –                            │ │ │ no prompt yet         │ │ blocked 0 by hooks    │ │
-│    ↑ 14 more                │ ╰────────────────────────────────────────────────────────────────╯  ╰──────────────────────────────────────────╯ │ │                       │ │                       │ │
-│  ● proj-14              10% │                                                                                                                  │ ╰───────────────────────╯ ╰───────────────────────╯ │
-│ project-14 (…/workspace)    │  ▍chat    project    diff    terminal                                                                            │             │                         │             │
-│  ● proj-15              10% │  SYNTHESIS                                                                                                       │ ╭─ SKILLS ──────────────╮ ╭─ SUB-AGENTS ──────────╮ │
-│ project-15 (…/workspace)    │   no conversation attached                                                                                       │ │ no skills used yet    │ │ no sub-agents         │ │
-│  ● proj-16              10% │                                                                                                                  │ │                       │ │ single agent mode     │ │
-│ project-16 (…/workspace)    │                                                                                                                  │ │                       │ │                       │ │
-│  ● proj-17              10% │                                                                                                                  │ │                       │ │                       │ │
-│ project-17 (…/workspace)    │                                                                                                                  │ ╰───────────────────────╯ ╰───────────────────────╯ │
-│  ● proj-18              10% │                                                                                                                  │             │                         │             │
-│ project-18 (…/workspace)    │                                                                                                                  │ ╭─ SYNTHESIS CORE ────────────────────────────────╮ │
-│  ● proj-19              10% │                                                                                                                  │ │ plan → act → verify → learn                     │ │
-│ project-19 (…/workspace)    │                                                                                                                  │ ╰─────────────────────────────────────────────────╯ │
-│ ►● proj-20              10% │                                                                                                                  │             │                         │             │
-│ project-20 (…/workspace)    │                                                                                                                  │ ╭─ EXECUTION ───────────╮ ╭─ HOOKS ───────────────╮ │
-│  ● proj-21              10% │                                                                                                                  │ │ tool calls 0          │ │ no hook events yet    │ │
-│ project-21 (…/workspace)    │                                                                                                                  │ │ running 0             │ │                       │ │
-│  ● proj-22              10% │                                                                                                                  │ │ errors 0              │ │                       │ │
-│ project-22 (…/workspace)    │                                                                                                                  │ │ success no data yet   │ │                       │ │
-│  ● proj-23              10% │                                                                                                                  │ ╰───────────────────────╯ ╰───────────────────────╯ │
-│ project-23 (…/workspace)    │                                                                                                                  │             │                         │             │
-│  ● proj-24              10% │                                                                                                                  │ ╭─ EXTERNAL / MCP ──────╮ ╭─ MEMORY / FEEDBACK ───╮ │
-│ project-24 (…/workspace)    │                                                                                                                  │ │ no servers            │ │ writes 0              │ │
-│  ● proj-25              10% │                                                                                                                  │ │                       │ │ last verify none yet  │ │
-│ project-25 (…/workspace)    │                                                                                                                  │ │                       │ │ store no data yet     │ │
-│  ● proj-26              10% │                                                                                                                  │ │                       │ │                       │ │
-│ project-26 (…/workspace)    │                                                                                                                  │ ╰───────────────────────╯ ╰───────────────────────╯ │
-│    ↓ 13 more                │                                                                                                                  ╰─────────────────────────────────────────────────────╯
+ WORKSPACE                   1   ready · planning · coding · verifying                                                                           ╭ TOPOLOGY ───────────────────────────────────── idle ╮
+ ▌● project                 40   ▍chat    diff    terminal    browser    file explorer                                                           │ ╭─ USER / PROJECT ──────╮ ╭─ GUARDS ──────────────╮ │
+                                 SYNTHESIS                                                                                                       │ │ ● no session          │ │ sandbox no data yet   │ │
+                                  no conversation attached                                                                                       │ │ project               │ │ approvals –           │ │
+╭ RUNNING SESSIONS ─────── 40 ╮                                                                                                                  │ ╰───────────────────────╯ ╰───────────────────────╯ │
+│    ↑ 12 more                │                                                                                                                  │             │                         │             │
+│  ● proj-12              10% │                                                                                                                  │ ╭─ SKILLS ──────────────╮ ╭─ SUB-AGENTS ──────────╮ │
+│ project-12 (…/workspace)    │                                                                                                                  │ │ no skills used yet    │ │ no sub-agents         │ │
+│  ● proj-13              10% │                                                                                                                  │ │                       │ │ single agent mode     │ │
+│ project-13 (…/workspace)    │                                                                                                                  │ ╰───────────────────────╯ ╰───────────────────────╯ │
+│  ● proj-14              10% │                                                                                                                  │             │                         │             │
+│ project-14 (…/workspace)    │                                                                                                                  │ ╭─ SYNTHESIS CORE ────────────────────────────────╮ │
+│  ● proj-15              10% │                                                                                                                  │ │ plan → act → verify → learn                     │ │
+│ project-15 (…/workspace)    │                                                                                                                  │ ╰─────────────────────────────────────────────────╯ │
+│  ● proj-16              10% │                                                                                                                  │             │                         │             │
+│ project-16 (…/workspace)    │                                                                                                                  │ ╭─ EXECUTION ───────────╮ ╭─ HOOKS ───────────────╮ │
+│  ● proj-17              10% │                                                                                                                  │ │ tool calls 0          │ │ no hook events yet    │ │
+│ project-17 (…/workspace)    │                                                                                                                  │ │ running 0             │ │                       │ │
+│  ● proj-18              10% │                                                                                                                  │ ╰───────────────────────╯ ╰───────────────────────╯ │
+│ project-18 (…/workspace)    │                                                                                                                  │             │                         │             │
+│  ● proj-19              10% │                                                                                                                  │ ╭─ EXTERNAL / MCP ──────╮ ╭─ MEMORY / FEEDBACK ───╮ │
+│ project-19 (…/workspace)    │                                                                                                                  │ │ no servers            │ │ writes 0              │ │
+│ ►● proj-20              10% │                                                                                                                  │ │                       │ │ last verify none yet  │ │
+│ project-20 (…/workspace)    │                                                                                                                  │ ╰───────────────────────╯ ╰───────────────────────╯ │
+│  ● proj-21              10% │                                                                                                                  │                                                     │
+│ project-21 (…/workspace)    │                                                                                                                  │                                                     │
+│  ● proj-22              10% │                                                                                                                  ╰─────────────────────────────────────────────────────╯
+│ project-22 (…/workspace)    │                                                                                                                                                                         
+│  ● proj-23              10% │                                                                                                                  ╭ AGENT STATUS ──────────────────────────────── ready ╮
+│ project-23 (…/workspace)    │                                                                                                                  │ ready · planning · coding · verifying               │
+│  ● proj-24              10% │                                                                                                                  │ Working on  nothing yet                             │
+│ project-24 (…/workspace)    │                                                                                                                  │ Next        no plan yet                             │
+│  ● proj-25              10% │                                                                                                                  ╰─────────────────────────────────────────────────────╯
+│ project-25 (…/workspace)    │                                                                                                                                                                         
+│  ● proj-26              10% │                                                                                                                  ╭ CONTEXT ────────────────────────────────────────────╮
+│ project-26 (…/workspace)    │                                                                                                                  │ tokens                                  no data yet │
+│  ● proj-27              10% │                                                                                                                  │ ▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │
+│ project-27 (…/workspace)    │                                                                                                                  │ in 0 · out 0                                        │
+│    ↓ 12 more                │                                                                                                                  ╰─────────────────────────────────────────────────────╯
 ╰─────────────────────────────╯                                                                                                                                                                         
                                                                                                                                                  ╭ USAGE & METRICS ──────────────────────────── 7 days ╮
 ╭ SESSION ────────────────────╮                                                                                                                  │ Tokens     ███████████████████████████████████ 6.0k │
@@ -40,21 +46,15 @@
 │ cwd    project              │                                                                                                                  │ Messages   ███████████████████████████████████   21 │
 │ uptime 1m00s                │                                                                                                                  ╰─────────────────────────────────────────────────────╯
 ╰─────────────────────────────╯                                                                                                                                                                         
-                                                                                                                                                 ╭ SYSTEM HEALTH ───────────────────────────── healthy ╮
-╭ TOOLS & SKILLS ────────── 0 ╮                                                                                                                  │ ○ Core agent                      no agent attached │
-│ no tool calls yet           │                                                                                                                  │ ○ Tool runtime                          no data yet │
-│                             │                                                                                                                  │ ○ MCP servers                       none configured │
-╰─────────────────────────────╯                                                                                                                  ╰─────────────────────────────────────────────────────╯
-                                                                                                                                                                                                        
-╭ RECENT ACTIVITY ────────────╮                                                                                                                  ╭ SUB-AGENTS ─────────────────────────────────────────╮
-│ no events yet               │                                                                                                                  │ No sub-agents yet · /agents                         │
-│                             │                                                                                                                  │                                                     │
+                                                                                                                                                 ╭ SUB-AGENTS ─────────────────────────────────────────╮
+╭ TOOLS & SKILLS ────────── 0 ╮                                                                                                                  │ No sub-agents yet · /agents                         │
+│ no tool calls yet           │                                                                                                                  │                                                     │
 │                             │                                                                                                                  │                                                     │
 ╰─────────────────────────────╯                                                                                                                  │                                                     │
                                                                                                                                                  │                                                     │
-╭ SESSION STATS ─────── 1m00s ╮                                                                                                                  │                                                     │
-│ files read                0 │                                                                                                                  │                                                     │
-│ files edited              0 │                                                                                                                  │                                                     │
-│ commands run              0 │                                                                                                                  │                                                     │
+╭ RECENT ACTIVITY ────────────╮                                                                                                                  │                                                     │
+│ no events yet               │                                                                                                                  │                                                     │
+│                             │                                                                                                                  │                                                     │
+│                             │                                                                                                                  │                                                     │
 ╰─────────────────────────────╯                                                                                                                  ╰─────────────────────────────────────────────────────╯
- ↑/↓ select session   a follow newest   u usage metric   r reload   q quit                                                                               project │ 0 files changed  1 mission   2 chat  
+ ↑/↓ select session │ a follow newest │ u usage metric │ r reload │ q quit                                                                                                    project │ 0 files changed 

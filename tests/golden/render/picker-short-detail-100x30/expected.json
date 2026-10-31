@@ -30,7 +30,7 @@
     "│ filter: ▍                                                                                        │",
     "│ type to filter · ↑/↓ choose · pgup/pgdn page · home/end · enter select · esc cancel              │",
     "╰──────────────────────────────────────────────────────────────────────────────────────────────────╯",
-    "⏸ manual mode on (shift+tab to cycle)                                     fake-sonnet · effort: auto"
+    "⏸ manual mode on (shift+tab to cycle)                                model fake-sonnet · effort auto"
   ],
   "maxScroll": 0,
   "w": 100

@@ -149,7 +149,7 @@ fn bang_command_runs_enters_the_conversation_and_the_model_analyses_it() {
     r.wait_for("> !echo hi"); // what the user typed
     r.wait_for("The command printed hi and exited 0."); // the model turn's reply
     let s = r.tty.screen_text();
-    assert!(s.contains("Bash(") && s.contains("echo hi"), "{s}");
+    assert!(s.contains("Running") && s.contains("echo hi"), "{s}");
     assert!(
         !s.contains("Synthesis note") && !s.contains("not typed by the user"),
         "the implicit prompt is not shown as user text: {s}"
@@ -303,12 +303,12 @@ fn running_command_shows_the_live_tail_of_its_output() {
     assert!(s.contains("+4 more lines (ctrl+o to expand)"), "{s}");
     r.tty.send("\x0f"); // ctrl+o: everything
     r.wait_for("(ctrl+o to collapse)");
-    // (rows are read back without trailing blanks: `line1` ends its row)
     assert!(
         r.tty
             .screen()
             .iter()
-            .any(|l| l.trim_end().ends_with("⎿  line1")),
+            // (the right column shares the row: `line1` is followed by blanks, never by `0`)
+            .any(|l| l.contains("⎿  line1 ")),
         "{}",
         r.tty.screen_text()
     );

@@ -20,7 +20,7 @@
     "\u001b[38;2;242;244;248mConversations  \u001b[38;2;138;147;163m↑/↓ switch · Enter view · @name message\u001b[0m",
     "  \u001b[38;2;196;202;214mmain agent · ready\u001b[0m",
     "\u001b[38;2;217;217;224m▶ \u001b[38;2;242;244;248m@coordinator · running  \u001b[38;2;138;147;163mfocused task\u001b[0m",
-    "\u001b[38;2;181;190;205m⏸ manual mode on \u001b[38;2;138;147;163m(shift+tab to cycle)       fake-sonnet · effort: auto\u001b[0m"
+    "\u001b[38;2;181;190;205m⏸ manual mode on \u001b[38;2;138;147;163m(shift+tab to cycle)  model fake-sonnet · effort auto\u001b[0m"
   ],
   "lines": [
     "",
@@ -42,6 +42,6 @@
     "\u001b[38;2;242;244;248mConversations  \u001b[0m\u001b[38;2;138;147;163m↑/↓ switch · Enter view · @name message\u001b[0m",
     "\u001b[38;2;138;147;163m  \u001b[0m\u001b[38;2;196;202;214mmain agent · ready\u001b[0m\u001b[38;2;217;217;224m\u001b[0m\u001b[38;2;138;147;163m\u001b[0m",
     "\u001b[38;2;217;217;224m▶ \u001b[0m\u001b[38;2;242;244;248m@coordinator · running\u001b[0m\u001b[38;2;217;217;224m\u001b[0m\u001b[38;2;138;147;163m  focused task\u001b[0m",
-    "\u001b[38;2;181;190;205m⏸ manual mode on\u001b[0m\u001b[38;2;138;147;163m (shift+tab to cycle)\u001b[0m\u001b[38;2;196;202;214m       \u001b[0m\u001b[38;2;138;147;163mfake-sonnet · effort: auto\u001b[0m"
+    "\u001b[38;2;181;190;205m⏸ manual mode on\u001b[0m\u001b[38;2;138;147;163m (shift+tab to cycle)\u001b[0m\u001b[38;2;196;202;214m  \u001b[0m\u001b[38;2;138;147;163mmodel fake-sonnet · effort auto\u001b[0m"
   ]
 }

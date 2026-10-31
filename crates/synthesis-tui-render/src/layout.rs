@@ -67,8 +67,6 @@ pub const PANEL_COUNT: usize = 16;
 pub enum Side {
     Left,
     Right,
-    /// The cards above the chat (agent status, context).
-    CentreTop,
     Chat,
     /// A tab of the centre strip (content arrives in P3; the planner does not place it).
     CentreTab,
@@ -219,7 +217,7 @@ pub static REGISTRY: [PanelSpec; PANEL_COUNT] = [
         "Session stats",
         "files, commands, tokens, tool calls, success rate",
         Left,
-        true,
+        false,
         None,
         4,
         7,
@@ -250,7 +248,7 @@ pub static REGISTRY: [PanelSpec; PANEL_COUNT] = [
         "agent_status",
         "Agent status",
         "phase, working on, next, plan",
-        CentreTop,
+        Right,
         true,
         None,
         4,
@@ -266,7 +264,7 @@ pub static REGISTRY: [PanelSpec; PANEL_COUNT] = [
         "context",
         "Context",
         "window meter, input, output, cache",
-        CentreTop,
+        Right,
         true,
         None,
         4,
@@ -363,7 +361,7 @@ pub static REGISTRY: [PanelSpec; PANEL_COUNT] = [
         "System health",
         "core agent, tool runtime, MCP, memory, browser",
         Right,
-        true,
+        false,
         None,
         4,
         8,
@@ -496,38 +494,6 @@ pub enum Mode {
     TooSmall,
 }
 
-/// The two screens of the app (prototype views 1 and 2): Mission shows the agent status and
-/// context cards above the conversation, Chat gives the conversation the whole centre column behind
-/// a one-row phase strip. Switched by Tab, `1`/`2` and the footer chips.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Hash)]
-pub enum Screen {
-    #[default]
-    Mission,
-    Chat,
-}
-
-impl Screen {
-    pub const ALL: [Screen; 2] = [Screen::Mission, Screen::Chat];
-    pub fn label(self) -> &'static str {
-        match self {
-            Screen::Mission => "mission",
-            Screen::Chat => "chat",
-        }
-    }
-    pub fn key(self) -> char {
-        match self {
-            Screen::Mission => '1',
-            Screen::Chat => '2',
-        }
-    }
-    pub fn other(self) -> Screen {
-        match self {
-            Screen::Mission => Screen::Chat,
-            Screen::Chat => Screen::Mission,
-        }
-    }
-}
-
 /// The views of Tabs mode (Tab cycles them).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum View {
@@ -574,6 +540,8 @@ pub struct Plan {
     pub left: Rect,
     pub right: Rect,
     pub chat: Option<Rect>,
+    /// Columns mode: the one-row phase strip above the chat (the header strip of the HTML design).
+    pub strip: Option<Rect>,
     /// Every placed panel except the chat.
     pub panels: Vec<Placed>,
     /// On, but with no room in this size (shown as "no room at this size" in `/config`).
@@ -788,13 +756,14 @@ const LEFT_OPTIONAL: [PanelId; 6] = [
     PanelId::RecentActivity,
     PanelId::SessionStats,
 ];
-const RIGHT: [PanelId; 4] = [
+const RIGHT: [PanelId; 6] = [
     PanelId::Topology,
+    PanelId::AgentStatus,
+    PanelId::Context,
     PanelId::UsageMetrics,
     PanelId::SystemHealth,
     PanelId::Subagents,
 ];
-const CARDS: [PanelId; 2] = [PanelId::AgentStatus, PanelId::Context];
 
 /// The optional panels the Panels view stacks: the left ones, then the right ones.
 fn panels_view_ids() -> Vec<PanelId> {
@@ -805,95 +774,12 @@ fn panels_view_ids() -> Vec<PanelId> {
         .collect()
 }
 
-/// Cards above the chat in a centre column of `w` x `h` at (`x`, `y`): returns the placed cards
-/// and the chat rectangle.
-fn centre(
-    x: i64,
-    y: i64,
-    w: i64,
-    h: i64,
-    on: &Panels,
-    out: &mut Vec<Placed>,
-    starved: &mut Vec<PanelId>,
-) -> Rect {
-    let want: Vec<PanelId> = CARDS.iter().copied().filter(|id| on.is_on(*id)).collect();
-    let top_h = if h >= 30 {
-        6
-    } else if h >= 20 {
-        5
-    } else {
-        0
-    };
-    if want.is_empty() || top_h == 0 || top_h + 1 + CHAT_MIN_H > h {
-        starved.extend(want);
-        return Rect { x, y, w, h };
-    }
-    // side by side; below 60 columns only the more important card (higher drop number) stays
-    let mut shown = want.clone();
-    if w < 60 && shown.len() == 2 {
-        starved.push(PanelId::Context);
-        shown.retain(|i| *i != PanelId::Context);
-    }
-    let gap = 2;
-    if shown.len() == 2 {
-        let cw = clamp(w * 40 / 100, 26, 44);
-        let aw = w - cw - gap;
-        out.push(Placed {
-            id: PanelId::AgentStatus,
-            rect: Rect {
-                x,
-                y,
-                w: aw,
-                h: top_h,
-            },
-        });
-        out.push(Placed {
-            id: PanelId::Context,
-            rect: Rect {
-                x: x + aw + gap,
-                y,
-                w: cw,
-                h: top_h,
-            },
-        });
-    } else {
-        out.push(Placed {
-            id: shown[0],
-            rect: Rect { x, y, w, h: top_h },
-        });
-    }
-    Rect {
-        x,
-        y: y + top_h + 1,
-        w,
-        h: h - top_h - 1,
-    }
-}
-
-/// The Chat screen's centre column: the compact phase strip (one row), then the conversation.
-fn strip_centre(
-    x: i64,
-    y: i64,
-    w: i64,
-    h: i64,
-    on: &Panels,
-    out: &mut Vec<Placed>,
-    starved: &mut Vec<PanelId>,
-) -> Rect {
-    if on.is_on(PanelId::Context) {
-        starved.push(PanelId::Context); // its numbers are in the top bar
-    }
-    if !on.is_on(PanelId::AgentStatus) {
-        return Rect { x, y, w, h };
-    }
+/// The centre column: the one-row phase strip, then the conversation.
+fn strip_centre(x: i64, y: i64, w: i64, h: i64, strip: &mut Option<Rect>) -> Rect {
     if h < CHAT_MIN_H + 2 {
-        starved.push(PanelId::AgentStatus);
         return Rect { x, y, w, h };
     }
-    out.push(Placed {
-        id: PanelId::AgentStatus,
-        rect: Rect { x, y, w, h: 1 },
-    });
+    *strip = Some(Rect { x, y, w, h: 1 });
     Rect {
         x,
         y: y + 1,
@@ -902,20 +788,8 @@ fn strip_centre(
     }
 }
 
-/// The layout of a `w` x `h` frame on the Mission screen. `view` only matters in Tabs mode.
+/// The layout of a `w` x `h` frame. `view` only matters in Tabs mode.
 pub fn plan(w: i64, h: i64, on: &Panels, view: View, demand: &Demand) -> Plan {
-    plan_screen(w, h, on, view, demand, Screen::Mission)
-}
-
-/// `plan` for a screen: on Chat the cards above the conversation give way to the one-row strip.
-pub fn plan_screen(
-    w: i64,
-    h: i64,
-    on: &Panels,
-    view: View,
-    demand: &Demand,
-    screen: Screen,
-) -> Plan {
     let mut pl = Plan {
         w,
         h,
@@ -929,6 +803,7 @@ pub fn plan_screen(
         left: Rect::default(),
         right: Rect::default(),
         chat: None,
+        strip: None,
         panels: vec![],
         starved: vec![],
     };
@@ -975,27 +850,7 @@ pub fn plan_screen(
             let right = fit(&RIGHT, r - 1, body_h, on, demand);
             place(&right, w - r + 1, body_y, r - 1, &mut pl.panels);
             starved.extend(right.starved);
-            pl.chat = Some(if screen == Screen::Chat {
-                strip_centre(
-                    l,
-                    body_y,
-                    w - l - r,
-                    body_h,
-                    on,
-                    &mut pl.panels,
-                    &mut starved,
-                )
-            } else {
-                centre(
-                    l,
-                    body_y,
-                    w - l - r,
-                    body_h,
-                    on,
-                    &mut pl.panels,
-                    &mut starved,
-                )
-            });
+            pl.chat = Some(strip_centre(l, body_y, w - l - r, body_h, &mut pl.strip));
         }
         Mode::Tabs => {
             let ids = panels_view_ids();
@@ -1110,7 +965,10 @@ mod tests {
         }
         // sidebars and the full-width views: panels sharing an x stack from the top of the body to its
         // bottom with at most one gap row between them
-        let is_card = |id: PanelId| matches!(id, PanelId::AgentStatus | PanelId::Context);
+        // the one-row status line of the Tabs-mode chat view is not a column panel
+        let is_card = |id: PanelId| {
+            id == PanelId::AgentStatus && pl.mode == Mode::Tabs && pl.view == View::Chat
+        };
         let mut xs: Vec<i64> = pl
             .panels
             .iter()
@@ -1147,11 +1005,13 @@ mod tests {
         if let Some(c) = pl.chat {
             assert_eq!(c.bottom(), pl.body.bottom(), "{tag}: chat ends early");
             let cards: Vec<&Placed> = pl.panels.iter().filter(|p| is_card(p.id)).collect();
-            if cards.is_empty() {
+            if let Some(st) = pl.strip {
+                assert_eq!((st.y, c.y), (pl.body.y, st.bottom()), "{tag}: strip");
+            } else if cards.is_empty() {
                 assert_eq!(c.y, pl.body.y, "{tag}: hole above the chat");
             } else {
                 assert_eq!(cards[0].rect.y, pl.body.y, "{tag}: cards start late");
-                let want = cards[0].rect.bottom() + i64::from(pl.mode == Mode::Columns);
+                let want = cards[0].rect.bottom();
                 assert_eq!(c.y, want, "{tag}: gap above the chat");
             }
             if pl.mode == Mode::Columns {
@@ -1405,31 +1265,6 @@ mod tests {
         for (i, s) in REGISTRY.iter().enumerate() {
             assert_eq!(s.id as usize, i);
             assert_eq!(PanelId::parse(s.key), Some(s.id));
-        }
-    }
-
-    #[test]
-    fn chat_screen_swaps_the_cards_for_a_strip_and_still_tiles() {
-        for (w, h) in [(100, 30), (120, 36), (160, 45), (200, 50), (100, 14)] {
-            for mask in [Panels::default(), Panels::all(), Panels::none()] {
-                let m = plan_screen(w, h, &mask, View::Chat, &Demand::default(), Screen::Mission);
-                let c = plan_screen(w, h, &mask, View::Chat, &Demand::default(), Screen::Chat);
-                assert_eq!(m.left, c.left, "{w}x{h}: the sidebars do not move");
-                assert_eq!(m.right, c.right);
-                assert!(
-                    c.rect(PanelId::Context).is_none(),
-                    "{w}x{h}: no Context card on Chat"
-                );
-                if let Some(s) = c.rect(PanelId::AgentStatus) {
-                    let chat = c.chat.unwrap();
-                    assert_eq!((s.h, chat.y), (1, s.y + 1), "{w}x{h}");
-                    assert_eq!(chat.bottom(), c.body.bottom());
-                }
-                // the locked panels are on both screens
-                for id in [PanelId::Workspace, PanelId::Running, PanelId::Subagents] {
-                    assert_eq!(m.rect(id).is_some(), c.rect(id).is_some(), "{w}x{h} {id:?}");
-                }
-            }
         }
     }
 }

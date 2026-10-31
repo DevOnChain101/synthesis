@@ -1,5 +1,5 @@
  ⢎⡱  S Y N T H E S I S   workspace project │ model claude-sonnet       12:00:00 
- ▍Chat     Sessions 3     Agents     Panels 7                      tab switches 
+ ▍Chat     Sessions 3     Agents     Panels 5                      tab switches 
  SYNTHESIS                                                                      
   no conversation attached                                                      
                                                                                 
@@ -13,4 +13,4 @@
                                                                                 
                                                                                 
                                                                                 
- ↑/↓ select session              project │ 0 files changed  1 mission   2 chat  
+ ↑/↓ select session │ a follow newest │ u usage metric project │ 0 files changed

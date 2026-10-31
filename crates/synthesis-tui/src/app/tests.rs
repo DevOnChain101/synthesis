@@ -802,7 +802,10 @@ fn events_become_conversation_rows_and_failed_tasks_are_not_success() {
     streamed(&mut a);
     let s = screen(&mut a);
     assert!(s.contains("> hi") && s.contains("The answer is 42"), "{s}");
-    assert!(s.contains("Read(") && s.contains("read 1 lines"), "{s}");
+    assert!(
+        s.contains("Reading file") && s.contains("read 1 lines"),
+        "{s}"
+    );
     assert!(a.chat.agent.status == "running");
     a.on_event(
         &env(
@@ -1868,13 +1871,14 @@ fn bypass_confirmation_has_no_filter_line() {
 #[test]
 fn effort_cycles_with_alt_t_and_shows_in_the_footer() {
     let mut a = app();
-    assert!(screen(&mut a).contains("effort: auto"));
+    assert!(screen(&mut a).contains("effort auto"));
     for want in ["low", "medium", "high"] {
         let cmds = keys(&mut a, "\x1bt");
         assert!(
             matches!(&cmds[..], [Cmd::SetEffort(Some(e))] if e == want),
             "{cmds:?}"
         );
+        // the note under the conversation (the footer chip follows the host's `set_effort`)
         assert!(screen(&mut a).contains(&format!("effort: {want}")));
     }
     let cmds = keys(&mut a, "\x1bt");
@@ -2221,7 +2225,7 @@ fn mouse_debug_shows_what_the_terminal_sent() {
 #[test]
 fn config_toggles_a_panel_with_a_live_preview_and_saves_once_on_close() {
     let mut a = app();
-    assert!(screen_size(&mut a, 160, 40, T0).contains("SESSION STATS"));
+    assert!(!screen_size(&mut a, 160, 40, T0).contains("SESSION STATS")); // off by default
     assert!(keys(&mut a, "/config\r").is_empty());
     let s = screen_size(&mut a, 160, 40, T0);
     assert!(
@@ -2234,12 +2238,12 @@ fn config_toggles_a_panel_with_a_live_preview_and_saves_once_on_close() {
         screen_size(&mut a, 160, 40, T0)
             .contains("Workspace is always visible: it switches workspaces.")
     );
-    // Down x5 = Session stats: space hides it and the sidebar reflows at once
+    // Down x5 = Session stats: space shows it and the sidebar reflows at once
     keys(&mut a, "\x1b[B\x1b[B\x1b[B\x1b[B\x1b[B ");
     let s = screen_size(&mut a, 160, 40, T0);
-    assert!(!s.contains("SESSION STATS\n"), "{s}");
+    assert!(s.contains("SESSION STATS"), "{s}");
     assert!(
-        !a.tui
+        a.tui
             .panels
             .is_on(synthesis_tui_render::layout::PanelId::SessionStats)
     );
@@ -2248,7 +2252,7 @@ fn config_toggles_a_panel_with_a_live_preview_and_saves_once_on_close() {
     let [Cmd::SaveTui(v)] = &cmds[..] else {
         panic!("{cmds:?}")
     };
-    assert_eq!(v["panels"]["session_stats"], false);
+    assert_eq!(v["panels"]["session_stats"], true);
     assert_eq!(v["panels"]["session"], true);
     assert!(a.config.is_none());
     // opened and closed without a change: nothing to write

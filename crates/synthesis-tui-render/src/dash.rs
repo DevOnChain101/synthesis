@@ -7,7 +7,7 @@ use crate::agent::{self, Agent, AgentOpts, EditorView};
 use crate::centre::{self, Centre, ProjectData};
 use crate::dialogs::mode_name;
 use crate::folders::{folder_with_parent, shorten_left};
-use crate::layout::{self, Mode, PanelId, Panels, Plan, Screen, View};
+use crate::layout::{self, Mode, PanelId, Panels, Plan, View};
 use crate::model::{Phase, Session};
 use crate::modelname::model_label;
 use crate::panels;
@@ -119,8 +119,6 @@ pub struct DashView {
     pub panels: Panels,
     /// The view of Tabs mode (terminals under 100 columns).
     pub tab: View,
-    /// Mission or Chat (footer chips, Tab, `1` and `2`).
-    pub screen: Screen,
     /// `/config` is open: it takes the place of the chat pane.
     pub config: Option<crate::config_view::ConfigView>,
     /// Mission centre tab (chat, project, diff, terminal).
@@ -187,9 +185,6 @@ pub struct Rects {
     /// Tabs mode: the strip row and the columns `[x0, x1)` of each tab, for clicks.
     pub tab_row: Option<i64>,
     pub tab_hits: Vec<(i64, i64, View)>,
-    /// The footer row and the columns `[x0, x1)` of each screen chip, for clicks.
-    pub footer_row: Option<i64>,
-    pub chip_hits: Vec<(i64, i64, Screen)>,
     /// Mission centre strip row and the columns `[x0, x1)` of each tab, for clicks.
     pub centre_row: Option<i64>,
     pub centre_hits: Vec<(i64, i64, Centre)>,
@@ -1309,13 +1304,6 @@ fn header(s: &DashState, w: i64, _frame: usize, now: i64) -> String {
     );
     let c = civil(now, s.tz_offset_min);
     let clock = fmt_time(now, s.tz_offset_min);
-    // the Chat screen's bar (prototype view 2): `Synthesis`, then everything flush right
-    let chat = s.view.screen == Screen::Chat;
-    let health_full = if chat {
-        format!("{} {}", paint(hc, g.live), paint(hc, hw))
-    } else {
-        health_full
-    };
     let mut chips: Vec<Chip> = vec![];
     let mut add = |drop: u8, left: bool, full: String, short: Option<String>| {
         if !full.is_empty() {
@@ -1330,24 +1318,20 @@ fn header(s: &DashState, w: i64, _frame: usize, now: i64) -> String {
     add(
         4,
         true,
-        if chat {
-            String::new()
-        } else {
-            format!(
-                "{} {}{}",
-                if live > 0 {
-                    paint(th.ok, g.live)
-                } else {
-                    paint(th.muted, g.idle)
-                },
-                paint(th.strong, &format!("{live} live")),
-                if busy > 0 {
-                    paint(th.muted, &format!(" {} {busy} busy", g.dot))
-                } else {
-                    String::new()
-                }
-            )
-        },
+        format!(
+            "{} {}{}",
+            if live > 0 {
+                paint(th.ok, g.live)
+            } else {
+                paint(th.muted, g.idle)
+            },
+            paint(th.strong, &format!("{live} live")),
+            if busy > 0 {
+                paint(th.muted, &format!(" {} {busy} busy", g.dot))
+            } else {
+                String::new()
+            }
+        ),
         None,
     );
     add(
@@ -1362,7 +1346,7 @@ fn header(s: &DashState, w: i64, _frame: usize, now: i64) -> String {
     );
     add(
         2,
-        !chat,
+        true,
         if project.is_empty() {
             String::new()
         } else {
@@ -1372,7 +1356,7 @@ fn header(s: &DashState, w: i64, _frame: usize, now: i64) -> String {
     );
     add(
         5,
-        !chat,
+        true,
         if sid.is_empty() {
             String::new()
         } else {
@@ -1382,16 +1366,14 @@ fn header(s: &DashState, w: i64, _frame: usize, now: i64) -> String {
     );
     add(
         3,
-        !chat,
+        true,
         panels::model_chip(s).map_or(String::new(), |m| labelled("model", &m)),
         None,
     );
     add(
         6,
-        !chat,
-        ctx.map_or(String::new(), |c| {
-            labelled(if chat { "tokens" } else { "context" }, &c)
-        }),
+        true,
+        ctx.map_or(String::new(), |c| labelled("context", &c)),
         None,
     );
     add(
@@ -1407,7 +1389,7 @@ fn header(s: &DashState, w: i64, _frame: usize, now: i64) -> String {
         None,
     );
     add(8, false, health_full, Some(paint(hc, g.live)));
-    if w >= 140 && !chat {
+    if w >= 140 {
         add(
             9,
             false,
@@ -1419,11 +1401,7 @@ fn header(s: &DashState, w: i64, _frame: usize, now: i64) -> String {
         );
     }
     add(0, false, paint(th.body, &clock), None);
-    let words = if chat && w >= 60 {
-        vec!["Synthesis", ""]
-    } else {
-        wordmarks(w)
-    };
+    let words = wordmarks(w);
     for (li, word) in words.iter().enumerate() {
         let is_last = li == words.len() - 1;
         let brand = {
@@ -1494,46 +1472,14 @@ fn header(s: &DashState, w: i64, _frame: usize, now: i64) -> String {
     fit("", u(w))
 }
 
-/// A footer chip: `1 mission` / `2 chat`, the shown screen lifted (surface colour, bright text; in a
-/// theme that paints nothing, brackets and underline). Always `text + 2` cells wide.
-fn screen_chip(sc: Screen, active: bool) -> String {
-    let th = t();
-    let text = format!("{} {}", sc.key(), sc.label());
-    match (active, th.flat) {
-        (true, true) => format!("[{}{}{}]", "\x1b[4m", paint(th.strong, &text), "\x1b[24m"),
-        (true, false) => format!(
-            "{}{}",
-            bg(th.elevated),
-            paint(th.strong, &format!(" {text} "))
-        ),
-        (false, _) => paint(th.label, &format!(" {text} ")),
-    }
-}
-
 fn header_rule(w: i64) -> String {
     paint(t().border, &"─".repeat(u(w)))
 }
 
 /// Key hints on the left (whole hints, the later ones dropped first), `project | branch | n files
 /// changed` on the right (spec §14.3), as many of its parts as fit.
-fn footer(s: &DashState, w: i64) -> (String, Vec<(i64, i64, Screen)>) {
-    let agent_keys: Vec<(&str, &str)> = vec![
-        ("enter", "send"),
-        ("esc", "interrupt"),
-        ("⇧tab", "mode"),
-        ("tab", "switch view"),
-        ("/config", "panels"),
-        ("/themes", "theme"),
-        ("alt+v", "paste image"),
-        ("!", "shell"),
-        ("ctrl+o", "expand"),
-        ("ctrl+r", "search history"),
-        ("ctrl+l", "redraw"),
-        ("ctrl+n", "new workspace"),
-        ("/new", "new session"),
-        ("pgup/pgdn", "scroll"),
-        ("ctrl+c ×2", "quit"),
-    ];
+fn footer(s: &DashState, w: i64) -> String {
+    let agent_keys: Vec<(&str, &str)> = crate::dialogs::FOOTER_KEYS.to_vec();
     let mut dash_keys: Vec<(&str, &str)> = vec![("↑/↓", "select session")];
     if s.workspaces.is_some() {
         dash_keys.push(("←/→", "switch workspace"));
@@ -1578,7 +1524,7 @@ fn footer(s: &DashState, w: i64) -> (String, Vec<(i64, i64, Screen)>) {
         .map(|(i, (k, d))| {
             (
                 (i as u8).saturating_add(1).min(200),
-                format!("{} {}", paint(col_accent(), k), paint(col_muted(), d)),
+                format!("{} {}", paint(col_white(), k), paint(col_muted(), d)),
             )
         })
         .collect();
@@ -1626,19 +1572,7 @@ fn footer(s: &DashState, w: i64) -> (String, Vec<(i64, i64, Screen)>) {
             .collect::<Vec<_>>()
             .join(&sep)
     };
-    // the screen chips sit at the far right; the rest gets what they leave
-    let with_chips = w >= 60;
-    let chips: Vec<String> = Screen::ALL
-        .iter()
-        .map(|sc| screen_chip(*sc, *sc == s.view.screen))
-        .collect();
-    let chips_str = chips.join(" ");
-    let cw = if with_chips {
-        width(&chips_str) as i64 + 1
-    } else {
-        0
-    };
-    let wr = w - cw;
+    let wr = w;
     // the right block gets what the hints leave: at least 20 cells for them
     while !parts.is_empty() && width(&right_for(&parts)) as i64 + 22 > wr {
         let drop = (0..parts.len()).max_by_key(|i| (parts[*i].0, *i)).unwrap();
@@ -1646,21 +1580,10 @@ fn footer(s: &DashState, w: i64) -> (String, Vec<(i64, i64, Screen)>) {
     }
     let right = right_for(&parts);
     let rw = width(&right) as i64;
-    let left = fit_items(&items, "   ", u((wr - rw - 2).max(1)));
+    let left = fit_items(&items, &sep, u((wr - rw - 2).max(1)));
     let left = format!(" {}", left.trim_end());
     let pad = u(wr - width(&left) as i64 - rw - 1).max(1);
-    let mut row = fit(&format!("{left}{}{right}", " ".repeat(pad)), u(wr));
-    let mut hits = vec![];
-    if with_chips {
-        let mut x = wr;
-        for (sc, c) in Screen::ALL.iter().zip(&chips) {
-            hits.push((x, x + width(c) as i64, *sc));
-            x += width(c) as i64 + 1;
-        }
-        row.push_str(&chips_str);
-        row = fit(&row, u(w));
-    }
-    (row, hits)
+    fit(&format!("{left}{}{right}", " ".repeat(pad)), u(wr))
 }
 
 /// Tabs mode: `Chat · Sessions n · Agents n · Panels n`, the shown view marked with the focus bar.
@@ -1890,14 +1813,7 @@ pub fn render_frame(
 ) -> Frame {
     let w = MIN_COLS.max(cols as i64);
     let h = MIN_ROWS.max(rows_total as i64);
-    let pl = layout::plan_screen(
-        w,
-        h,
-        &s.view.panels,
-        s.view.tab,
-        &panels::demand(s),
-        s.view.screen,
-    );
+    let pl = layout::plan(w, h, &s.view.panels, s.view.tab, &panels::demand(s));
     let mut canvas = Canvas::new(w, h);
     let mut rects = Rects::default();
     let mut hits = Hits::default();
@@ -1923,6 +1839,9 @@ pub fn render_frame(
         waiting: false,
         busy: false,
     }];
+    if let Some(r) = pl.strip {
+        canvas.put(r.y, r.x, r.w, panels::status_line(s, r.w, frame, now));
+    }
     for p in &pl.panels {
         let r = p.rect;
         // a panel of 4+ rows and 12+ columns is a card: drawn 2 columns and 1 row smaller, its
@@ -2007,7 +1926,7 @@ pub fn render_frame(
         rects.config_hits = out.hits.into_iter().map(|(y, k)| (c.y + y, k)).collect();
     } else if let Some(c) = pl.chat {
         // Mission in columns: a one-row tab strip tops the centre; the other tabs replace the chat
-        let c = if pl.mode == Mode::Columns && s.view.screen == Screen::Mission && c.h > 4 {
+        let c = if pl.mode == Mode::Columns && c.h > 4 {
             let (row, hits) = centre::strip(s.view.centre, c.w);
             canvas.put(c.y, c.x, c.w, row);
             rects.centre_row = Some(c.y);
@@ -2026,13 +1945,15 @@ pub fn render_frame(
         let other = rects.centre_row.is_some() && s.view.centre != Centre::Chat;
         if other {
             let lines = match s.view.centre {
-                Centre::Project => centre::project(&s.view.project, c.w, c.h),
+                Centre::Files => centre::project(&s.view.project, c.w, c.h),
                 Centre::Diff => centre::diff(&s.view.project, c.w, c.h),
+                Centre::Browser => centre::browser(s, c.w, c.h, now),
                 _ => centre::terminal(s, c.w, c.h, now),
             };
             canvas.paste(c, lines);
         } else {
             let docked = pl.mode == Mode::Columns && viewed_subagent(s).is_some();
+            let _cards = agent::CardsScope::new(true);
             let lines = agent_panel(s, c.w, c.h, frame, now, docked, &mut rects, &mut chat_body);
             canvas.paste(c, lines);
             rects.chat_rect = Some(c);
@@ -2040,10 +1961,7 @@ pub fn render_frame(
             rects.caret = rects.caret.map(|(x, y)| (u(c.x) + 2 + x, u(c.y) + 1 + y));
         }
     }
-    let (foot, chips) = footer(s, w);
-    canvas.put(pl.bottom_row, 0, w, foot);
-    rects.footer_row = Some(pl.bottom_row);
-    rects.chip_hits = chips;
+    canvas.put(pl.bottom_row, 0, w, footer(s, w));
     Frame {
         lines: canvas.into_lines(),
         cols: u(w),

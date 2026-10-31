@@ -1125,16 +1125,22 @@ pub fn demand(s: &DashState) -> crate::layout::Demand {
 pub fn status_line(s: &DashState, w: i64, frame: usize, now: i64) -> String {
     let idx = phase_index(s, now);
     let ph = session_phase(s.session, now);
-    let (word, c) = if idx == 0 {
-        ("ready", col_muted())
+    let c = if idx == 0 {
+        col_muted()
     } else {
-        (PHASES[idx], phase_label(&ph.phase).1)
+        phase_label(&ph.phase).1
     };
-    let head = if idx == 0 {
-        paint(c, word)
-    } else {
-        format!("{} {}", paint(c, spin(frame)), paint(c, word))
-    };
+    // the four phases of the prototype header strip; the current one is lit
+    let head = PHASES
+        .iter()
+        .enumerate()
+        .map(|(i, p)| match (i == idx, i) {
+            (true, 0) => paint(c, p),
+            (true, _) => format!("{} {}", paint(c, spin(frame)), paint(c, p)),
+            _ => paint(col_subtle(), p),
+        })
+        .collect::<Vec<_>>()
+        .join(&paint(col_subtle(), " · "));
     let working = ph
         .running
         .last()

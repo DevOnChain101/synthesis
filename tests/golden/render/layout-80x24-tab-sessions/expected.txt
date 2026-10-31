@@ -1,5 +1,5 @@
  ⢎⡱  S Y N T H E S I S   workspace proj │ model anthropic/fake-sonnet  12:00:00 
-  Chat    ▍Sessions 2     Agents     Panels 7                      tab switches 
+  Chat    ▍Sessions 2     Agents     Panels 5                      tab switches 
 ╭ WORKSPACE ──────────────────────────────────────────────────────────────── 1 ╮
 │ ▌● proj                                                                    2 │
 │                                                                              │
@@ -21,4 +21,4 @@
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- enter send   esc interrupt         proj │ 0 files changed  1 mission   2 chat  
+ enter send │ esc interrupt │ ⇧tab mode │ tab agent      proj │ 0 files changed 
