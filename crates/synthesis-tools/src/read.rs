@@ -216,6 +216,13 @@ pub(crate) fn run(input: &Value, ctx: &ToolContext) -> ToolOutput {
         .collect::<Vec<_>>()
         .join("\n");
 
+    if out.is_empty() {
+        ledger_set(ctx, &abs, mtime(&md));
+        return ToolOutput::text(format!(
+            "Note: offset {offset} is past the end of the file ({} lines).",
+            text.split('\n').count()
+        ));
+    }
     let tokens = out.chars().count().div_ceil(4);
     if tokens > MAX_RESULT_TOKENS {
         return ToolOutput::error(format!(

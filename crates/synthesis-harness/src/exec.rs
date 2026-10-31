@@ -1761,7 +1761,7 @@ fn bash_hint(tool: &str, input: &Value) -> &'static str {
         || cmd.contains("sed -i")
         || inline.iter().any(|i| cmd.contains(i))
     {
-        " Use the Write/Edit/MultiEdit tool for file changes instead of redirects, heredocs, tee, sed -i or inline interpreters; report blocked only if no dedicated tool can do it."
+        " Use the Write/Edit tool for file changes instead of redirects, heredocs, tee, sed -i or inline interpreters; report blocked only if no dedicated tool can do it."
     } else if cmd.contains("-exec")
         || cmd.trim_start().starts_with("for ")
         || cmd.contains("| xargs")

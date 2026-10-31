@@ -367,8 +367,19 @@ fn run_schema_case(reg: &Registry, dir: &Path) -> Vec<String> {
         }
         _ => {
             let name = input["name"].as_str().unwrap();
+            let extra = divergences()["schema_extra_properties"][name].clone();
             let got = reg.specs().find(|s| s.name == name).map(|s| {
-                json!({"name": s.name, "description": s.description, "input_schema": s.input_schema})
+                let mut schema = s.input_schema.clone();
+                // properties added on purpose (see golden-divergences.json); the rest must match
+                for p in extra
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                {
+                    schema["properties"].as_object_mut().map(|m| m.remove(p));
+                }
+                json!({"name": s.name, "description": s.description, "input_schema": schema})
             });
             if got.as_ref() == Some(&expected) {
                 vec![]

@@ -601,6 +601,13 @@ mod tests {
     }
 
     #[test]
+    fn system_prompt_names_only_existing_tools() {
+        // F-4: MultiEdit was named but never existed (Edit takes one replacement per call)
+        assert!(!RULES.contains("MultiEdit"));
+        assert!(RULES.contains("Write/Edit"));
+    }
+
+    #[test]
     fn append_system_prompt_reaches_the_request_and_system_prompt_replaces_the_rules() {
         let provider: Arc<dyn ModelProvider> =
             Arc::new(synthesis_harness::testing::FakeProvider::new(vec![]));

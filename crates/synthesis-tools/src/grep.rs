@@ -92,6 +92,10 @@ fn collect_files(search: &Path, is_dir: bool, ctx: &ToolContext) -> Vec<PathBuf>
     }
     WalkBuilder::new(search)
         .standard_filters(false)
+        // .gitignore applies (like Claude Code's Grep) even outside a git checkout; hidden files stay
+        .git_ignore(true)
+        .git_exclude(true)
+        .require_git(false)
         .follow_links(false)
         .sort_by_file_name(|a, b| a.cmp(b))
         .filter_entry(|e| {
@@ -310,10 +314,12 @@ pub(crate) fn run(input: &Value, ctx: &ToolContext) -> ToolOutput {
         .get("head_limit")
         .and_then(Value::as_f64)
         .filter(|&n| n > 0.0);
-    if let Some(n) = head {
+    let offset = input.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+    if head.is_some() || offset > 0 {
         out = out
             .split('\n')
-            .take(n as usize)
+            .skip(offset)
+            .take(head.map_or(usize::MAX, |n| n as usize))
             .collect::<Vec<_>>()
             .join("\n");
     }
