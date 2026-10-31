@@ -480,3 +480,45 @@ fn rewind_restores_changed_files_and_removes_created_ones_only_with_apply() {
         Some(2)
     );
 }
+
+#[test]
+fn rewind_refuses_files_changed_since_the_run_and_symlinks() {
+    let rig = Rig::new();
+    let script = json!([
+        {"tools": [{"name": "Read", "input": {"file_path": "a.txt"}}]},
+        {"tools": [{"name": "Edit", "input": {"file_path": "a.txt", "old_string": "hello", "new_string": "bye"}}]},
+        {"tools": [{"name": "Write", "input": {"file_path": "b.txt", "content": "new\n"}}]},
+        {"text": "done"}
+    ]);
+    let (_, ev) = rig.run(script, &["--permission-mode", "acceptEdits"]);
+    let sid = session_id(&ev);
+    let (a, b) = (rig.ws().join("a.txt"), rig.ws().join("b.txt"));
+    std::fs::write(&a, "later edit\n").unwrap();
+    std::fs::write(&b, "later edit\n").unwrap();
+    let text = |o: &Output| String::from_utf8_lossy(&o.stdout).into_owned();
+    // the dry run lists them; --apply leaves both alone
+    let o = rig.synth(&["rewind", &sid]);
+    assert!(text(&o).contains("changed since the run"), "{}", text(&o));
+    assert_eq!(o.status.code(), Some(1));
+    let o = rig.synth(&["rewind", &sid, "--apply"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(std::fs::read_to_string(&a).unwrap(), "later edit\n");
+    assert!(b.exists());
+    // a symlink at the final component is never followed, even with --force
+    let outside = rig.ws().join("..").join("outside.txt");
+    std::fs::write(&outside, "keep").unwrap();
+    std::fs::remove_file(&a).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside, &a).unwrap();
+        let o = rig.synth(&["rewind", &sid, "--apply", "--force"]);
+        assert!(text(&o).contains("symlink"), "{}", text(&o));
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+        std::fs::remove_file(&a).unwrap();
+    }
+    // --force restores the rest
+    let o = rig.synth(&["rewind", &sid, "--apply", "--force"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert_eq!(std::fs::read_to_string(&a).unwrap(), "hello\n");
+    assert!(!b.exists());
+}

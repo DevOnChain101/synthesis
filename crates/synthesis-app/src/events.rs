@@ -29,6 +29,8 @@ pub struct Persist {
     base: u64,
     /// Files that already have a "before first write" checkpoint in this run.
     checkpointed: std::collections::HashSet<String>,
+    /// File-changing tool calls in flight: their path, hashed when the call completes.
+    writing: std::collections::HashMap<String, String>,
     /// Set when the stdout reader went away: the run is cancelled, the store keeps recording.
     closed: Option<(Arc<AtomicBool>, CancellationToken)>,
 }
@@ -50,6 +52,7 @@ impl Persist {
             derived,
             base,
             checkpointed: std::collections::HashSet::new(),
+            writing: std::collections::HashMap::new(),
             closed,
         }
     }
@@ -76,8 +79,19 @@ impl Persist {
                         .seq
                 }
             };
+            if let Event::ToolCompleted { tool_call_id, .. } = &env.event
+                && let Some(p) = self.writing.remove(tool_call_id)
+                && let Err(e) = w.record_post_run_hash(std::path::Path::new(&p))
+            {
+                eprintln!("synth: warning: rewind hash: {e}");
+            }
             // restore point before the first write to a file (docs: checkpoints); best effort
-            if let Event::ToolRequested { name, input, .. } = &env.event
+            if let Event::ToolRequested {
+                tool_call_id,
+                name,
+                input,
+                ..
+            } = &env.event
                 && matches!(
                     name.as_str(),
                     "Write" | "Edit" | "MultiEdit" | "NotebookEdit"
@@ -85,6 +99,7 @@ impl Persist {
                 && let Some(p) = ["file_path", "notebook_path"]
                     .iter()
                     .find_map(|k| input.get(k).and_then(|v| v.as_str()))
+                && self.writing.insert(tool_call_id.clone(), p.to_string()).is_none()
                 && self.checkpointed.insert(p.to_string())
                 && let Err(e) = w.create_checkpoint(
                     &format!("before-first-write-{}", self.checkpointed.len()),
