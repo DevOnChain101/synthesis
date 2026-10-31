@@ -5,7 +5,7 @@
       ■ Fixing                          
       ☐ Test                            
   ╭──────────────────────────────────╮  
-  │ > hello                          │  
+  │ > hello                        ➤ │  
   ╰──────────────────────────────────╯  
   ⏸ manual mode on         effort auto  
  enter send │ esc interrupt        proj 

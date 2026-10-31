@@ -1,56 +1,56 @@
- ⢎⡱  S Y N T H E S I S   ● 1 live │ workspace project │ session session- │ model claude-sonnet                                             ● system healthy │ Fri Oct  2 │ 12:00:00 
+ ⢎⡱  S Y N T H E S I S   ● 1 live │ workspace project │ session session- │ model claude-sonnet                                             ● system healthy │ Fri Oct 02 │ 12:00:00 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- WORKSPACE               1   ready · planning · coding · verifying                                                                 ╭ TOPOLOGY ─────────────────────────────── idle ╮
- ▌● project              1   ▍chat    diff    terminal    browser    file explorer                                                 │ ╭─ USER / PROJECT ───╮ ╭─ GUARDS ───────────╮ │
-                             SYNTHESIS                                                                                             │ │ ● no session       │ │ sandbox no data y… │ │
-                              no conversation attached                                                                             │ │ project            │ │ approvals –        │ │
-╭ RUNNING SESSIONS ──── 1 ╮                                                                                                        │ ╰────────────────────╯ ╰────────────────────╯ │
-│ ►● proj-0          100% │                                                                                                        │            │                      │           │
-│ project-0 (…rkspace)    │                                                                                                        │ ╭─ SKILLS ───────────╮ ╭─ SUB-AGENTS ───────╮ │
-╰─────────────────────────╯                                                                                                        │ │ no skills used yet │ │ no sub-agents      │ │
-                                                                                                                                   │ │                    │ │ single agent mode  │ │
-╭ SESSION ────────────────╮                                                                                                        │ ╰────────────────────╯ ╰────────────────────╯ │
-│ model  claude-sonnet    │                                                                                                        │            │                      │           │
-│ cwd    project          │                                                                                                        │ ╭─ SYNTHESIS CORE ──────────────────────────╮ │
-│ uptime 1m00s            │                                                                                                        │ │ plan → act → verify → learn               │ │
-│ turns  0 prompts · 0 t… │                                                                                                        │ ╰───────────────────────────────────────────╯ │
-│                         │                                                                                                        │            │                      │           │
-│                         │                                                                                                        │ ╭─ EXECUTION ────────╮ ╭─ HOOKS ────────────╮ │
-│                         │                                                                                                        │ │ tool calls 0       │ │ no hook events yet │ │
-│                         │                                                                                                        │ │ running 0          │ │                    │ │
-╰─────────────────────────╯                                                                                                        │ ╰────────────────────╯ ╰────────────────────╯ │
-                                                                                                                                   │            │                      │           │
-╭ TOOLS & SKILLS ────── 0 ╮                                                                                                        │ ╭─ EXTERNAL / MCP ───╮ ╭─ MEMORY / FEEDBACK ╮ │
-│ no tool calls yet       │                                                                                                        │ │ no servers         │ │ writes 0           │ │
-│                         │                                                                                                        │ │                    │ │ last verify none … │ │
-╰─────────────────────────╯                                                                                                        │ ╰────────────────────╯ ╰────────────────────╯ │
-                                                                                                                                   │                                               │
-╭ RECENT ACTIVITY ────────╮                                                                                                        │                                               │
-│ no events yet           │                                                                                                        ╰───────────────────────────────────────────────╯
-│                         │                                                                                                                                                         
-│                         │                                                                                                        ╭ AGENT STATUS ────────────────────────── ready ╮
-│                         │                                                                                                        │ ready · planning · coding · verifying         │
-│                         │                                                                                                        │ Working on  nothing yet                       │
-│                         │                                                                                                        │ Next        no plan yet                       │
+ ▤ WORKSPACE             1   ready · planning · coding · verifying                                                                 ╭ ◈ TOPOLOGY ───────────────────────────── idle ╮
+ ▌● project              1   ▍chat    diff    terminal    browser    file explorer                                                 │ ╭─ ◉ USER & …╮ ╭─ ↯ HOOKS ───╮ ╭─ ▣ GUARDS ─╮ │
+                             SYNTHESIS                                                                                             │ │ ● project  │ │ no hook ev… │ │ sandbox n… │ │
+                              no conversation attached                                                                             │ │ session-   │ │             │ │ approval – │ │
+╭ ▶ RUNNING SESSIONS ── 1 ╮                                                                                                        │ │ no prompt… │ │             │ │ blocked 0… │ │
+│ ►● proj-0          100% │                                                                                                        │ ╰────────────╯ ╰─────────────╯ ╰────────────╯ │
+│ project-0 (…rkspace)    │                                                                                                        │        ╰───────────╮  │  ╭────────────╯       │
+╰─────────────────────────╯                                                                                                        │ ╭─ ∷ SUBAGEN…╮ ╔═ ✦ CORE ════╗ ╭─ ≡ SKILLS ─╮ │
+                                                                                                                                   │ │ no sub-ag… │ ║  SYNTHESIS  ║ │ no skills… │ │
+╭ ▭ SESSION ──────────────╮                                                                                                        │ │ single ag… │─║   C O R E   ║─│            │ │
+│ model  claude-sonnet    │                                                                                                        │ │            │ ║ Reason • A… ║ │            │ │
+│ cwd    project          │                                                                                                        │ ╰────────────╯ ╚═════════════╝ ╰────────────╯ │
+│ uptime 1m00s            │                                                                                                        │        ╭───────────╯  │  ╰────────────╮       │
+│ turns  0 prompts · 0 t… │                                                                                                        │ ╭─ ⊕ MCP ────╮ ╭─ ◆ TOOLS ───╮ ╭─ ≣ MEMORY ─╮ │
+│                         │                                                                                                        │ │ no servers │ │ no tool ca… │ │ store no … │ │
+│                         │                                                                                                        │ │            │ │             │ │ writes 0   │ │
+│                         │                                                                                                        │ │            │ │             │ │ verify no… │ │
+│                         │                                                                                                        │ ╰────────────╯ ╰─────────────╯ ╰────────────╯ │
 │                         │                                                                                                        ╰───────────────────────────────────────────────╯
-│                         │                                                                                                                                                         
-│                         │                                                                                                        ╭ CONTEXT ──────────────────────────────────────╮
-│                         │                                                                                                        │ tokens                            no data yet │
+╰─────────────────────────╯                                                                                                                                                         
+                                                                                                                                   ╭ ✦ AGENT STATUS ──────────────────────── ready ╮
+╭ ◆ TOOLS & SKILLS ──── 0 ╮                                                                                                        │ ready · planning · coding · verifying         │
+│ no tool calls yet       │                                                                                                        │ Working on  nothing yet                       │
+│                         │                                                                                                        │ Next        no plan yet                       │
+╰─────────────────────────╯                                                                                                        ╰───────────────────────────────────────────────╯
+                                                                                                                                                                                    
+╭ ≈ RECENT ACTIVITY ──────╮                                                                                                        ╭ ▦ CONTEXT ────────────────────────────────────╮
+│ no events yet           │                                                                                                        │ tokens                            no data yet │
 │                         │                                                                                                        │ ▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │
 │                         │                                                                                                        │ in 0 · out 0                                  │
+│                         │                                                                                                        │ cache 0 · $ –                                 │
 │                         │                                                                                                        ╰───────────────────────────────────────────────╯
 │                         │                                                                                                                                                         
-│                         │                                                                                                        ╭ USAGE & METRICS ────────────────────── 7 days ╮
+│                         │                                                                                                        ╭ ▥ USAGE & METRICS ────────────────── 7 days ▾ ╮
 │                         │                                                                                                        │ Tokens     █████████████████████████████ 6.0k │
 │                         │                                                                                                        │ Tool calls ███████████████████░░░░░░░░░░   14 │
 │                         │                                                                                                        │ Messages   █████████████████████████████   21 │
+│                         │                                                                                                        │ Agents     ████░░░░░░░░░░░░░░░░░░░░░░░░░    3 │
+│                         │                                                                                                        │ Sessions   ██████████░░░░░░░░░░░░░░░░░░░    7 │
+│                         │                                                                                                        │                                               │
+│                         │                                                                                                        │                                               │
+│                         │                                                                                                        │                                               │
 │                         │                                                                                                        ╰───────────────────────────────────────────────╯
 │                         │                                                                                                                                                         
 │                         │                                                                                                        ╭ SUB-AGENTS ───────────────────────────────────╮
 │                         │                                                                                                        │ No sub-agents yet · /agents                   │
 │                         │                                                                                                        │                                               │
-│                         │                                                                                                        │                                               │
-│                         │                                                                                                        │                                               │
+╰─────────────────────────╯                                                                                                        │                                               │
+                                                                                                                                   │                                               │
+╭ ◷ USER PROMPT ──────────╮                                                                                                        │                                               │
+│ No messages yet         │                                                                                                        │                                               │
 │                         │                                                                                                        │                                               │
 │                         │                                                                                                        │                                               │
 │                         │                                                                                                        │                                               │

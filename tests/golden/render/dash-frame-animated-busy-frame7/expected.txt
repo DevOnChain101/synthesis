@@ -1,38 +1,38 @@
  ⢎⡱  S Y N T H E S I S   ● 1 live · 1 busy │ workspace proj │ session session- │ model claude-opus-5.5         12:00:00 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- WORKSPACE         1   ready · planning · ✢ coding · verifying  Agent explorer: find f… ╭ AGENT STATUS ────── ✢ coding ╮
+ ▤ WORKSPACE       1   ready · planning · ✢ coding · verifying  Agent explorer: find f… ╭ ✦ AGENT STATUS ──── ✢ coding ╮
  ▌● proj           1   ▍chat    diff    terminal    browser    file explorer            │ ready · planning · coding ·… │
                        SYNTHESIS                                                        │ Working on  Agent explorer:… │
                         no conversation attached                                        │ Next        Test             │
-╭ RUNNING SESSIONS  ╮                                                                   ╰──────────────────────────────╯
+╭ ▶ RUNNING SESSI…  ╮                                                                   ╰──────────────────────────────╯
 │ ►✢ proj-0     33% │                                                                                                   
-│ proj (/work)      │                                                                   ╭ CONTEXT ───────────────── 3% ╮
+│ proj (/work)      │                                                                   ╭ ▦ CONTEXT ─────────────── 3% ╮
 ╰───────────────────╯                                                                   │ tokens         5.9k / 200.0k │
                                                                                         │ ▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │
-╭ SESSION ──────────╮                                                                   │ in 9.0k · out 1.5k           │
+╭ ▭ SESSION ────────╮                                                                   │ in 9.0k · out 1.5k           │
 │ model  claude-op… │                                                                   │ cache 20.0k (hit 69%) · $ –  │
 │ cwd    proj       │                                                                   ╰──────────────────────────────╯
 │ uptime 10m00s     │                                                                                                   
-│ turns  1 prompts… │                                                                   ╭ USAGE & METRICS ───── 7 days ╮
+│ turns  1 prompts… │                                                                   ╭ ▥ USAGE & METRICS ─ 7 days ▾ ╮
 │ errors 1          │                                                                   │ Tokens     ████████████ 6.0k │
 │                   │                                                                   │ Tool calls ████████░░░░   14 │
-│                   │                                                                   │ Messages   ████████████   21 │
-│                   │                                                                   │ Agents     ██░░░░░░░░░░    3 │
-╰───────────────────╯                                                                   │ Sessions   ████░░░░░░░░    7 │
-                                                                                        │                              │
-╭ TOOLS & SKILLS  5 ╮                                                                   │                              │
+╰───────────────────╯                                                                   │ Messages   ████████████   21 │
+                                                                                        │ Agents     ██░░░░░░░░░░    3 │
+╭ ◆ TOOLS & SKILLS  ╮                                                                   │ Sessions   ████░░░░░░░░    7 │
 │ ● Read   ▇▇▇ 1    │                                                                   │                              │
-│ ● Bash   ▇▇▇ 1    │                                                                   ╰──────────────────────────────╯
-│ ● Skill  ▇▇▇ 1    │                                                                                                   
-│ ● Agent  ▇▇▇ 1    │                                                                   ╭ SUB-AGENTS ──────────────────╮
-│ skills scout ×1   │                                                                   │ No sub-agents yet · /agents  │
-│ mcp     0 servers │                                                                   │                              │
-│ configured · synt…│                                                                   │                              │
+│ skills scout ×1   │                                                                   │                              │
+╰───────────────────╯                                                                   │                              │
+                                                                                        ╰──────────────────────────────╯
+╭ ≈ RECENT ACTIVI…  ╮                                                                                                   
+│ · Look… 9m59s ago │                                                                   ╭ SUB-AGENTS ──────────────────╮
+│ › ref… 10m00s ago │                                                                   │ No sub-agents yet · /agents  │
+│                   │                                                                   │                              │
 ╰───────────────────╯                                                                   │                              │
                                                                                         │                              │
-╭ RECENT ACTIVI…  2 ╮                                                                   │                              │
-│ · Look… 9m59s ago │                                                                   │                              │
-│ › ref… 10m00s ago │                                                                   │                              │
+╭ ◷ USER PROMPT ─ 1 ╮                                                                   │                              │
+│ 11:50:00 refacto… │                                                                   │                              │
+│                   │                                                                   │                              │
+│                   │                                                                   │                              │
 │                   │                                                                   │                              │
 │                   │                                                                   │                              │
 │                   │                                                                   │                              │

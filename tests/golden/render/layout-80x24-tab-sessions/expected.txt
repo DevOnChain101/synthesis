@@ -1,6 +1,6 @@
  ⢎⡱  S Y N T H E S I S   workspace proj │ model anthropic/fake-sonnet  12:00:00 
-  Chat    ▍Sessions 2     Agents     Panels 5                      tab switches 
-╭ WORKSPACE ──────────────────────────────────────────────────────────────── 1 ╮
+  Chat    ▍Sessions 2     Agents     Panels 6                      tab switches 
+╭ ▤ WORKSPACE ────────────────────────────────────────────────────────────── 1 ╮
 │ ▌● proj                                                                    2 │
 │                                                                              │
 │                                                                              │
@@ -11,7 +11,7 @@
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
                                                                                 
-╭ RUNNING SESSIONS ───────────────────────────────────────────────────────── 2 ╮
+╭ ▶ RUNNING SESSIONS ─────────────────────────────────────────────────────── 2 ╮
 │ ►● proj-0                                                                10% │
 │ project-0 (D:/workspace)                                                     │
 │  ● proj-1                                                                10% │

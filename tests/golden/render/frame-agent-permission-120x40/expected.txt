@@ -1,40 +1,40 @@
  ⢎⡱  S Y N T H E S I S   ● 2 live │ ◆ 1 waiting │ workspace proj │ model anthropic/fake-sonnet                 12:00:00 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- WORKSPACE         1   ready · planning · · coding · verifying  Agent explorer: find f… ╭ AGENT STATUS ────── · coding ╮
+ ▤ WORKSPACE       1   ready · planning · · coding · verifying  Agent explorer: find f… ╭ ✦ AGENT STATUS ──── · coding ╮
  ▌● proj           2   ▍chat    diff    terminal    browser    file explorer            │ ready · planning · coding ·… │
                        SYNTHESIS                       /work/proj  ◆ permission needed  │ Working on  Agent explorer:… │
                                                                                         │ Next        Test             │
-╭ RUNNING SESSIONS  ╮                                                                   ╰──────────────────────────────╯
+╭ ▶ RUNNING SESSI…  ╮                                                                   ╰──────────────────────────────╯
 │ ►● proj-0     10% │                                                                                                   
-│ project-0         │                                                                   ╭ CONTEXT ───────────────── 3% ╮
+│ project-0         │                                                                   ╭ ▦ CONTEXT ─────────────── 3% ╮
 │  ● proj-1     10% │                                                                   │ tokens         5.9k / 200.0k │
 │ project-1         │                                                                   │ ▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │
 ╰───────────────────╯                                                                   │ in 9.0k · out 1.5k           │
                                                                                         │ cache 20.0k (hit 69%) · $ –  │
-╭ SESSION ──────────╮                                                                   ╰──────────────────────────────╯
+╭ ▭ SESSION ────────╮                                                                   ╰──────────────────────────────╯
 │ model  anthropic… │                                                                                                   
-│ mode   manual     │                                                                   ╭ USAGE & METRICS ───── 7 days ╮
+│ mode   manual     │                                                                   ╭ ▥ USAGE & METRICS ─ 7 days ▾ ╮
 │ effort auto       │                                                                   │ Tokens     ████████████ 6.0k │
 │ window 200.0k to… │                                                                   │ Tool calls ████████░░░░   14 │
-│ cwd    proj       │                                                                   │ Messages   ████████████   21 │
-│ uptime 1m00s      │                                                                   │ Agents     ██░░░░░░░░░░    3 │
-│ turns  1 prompts… │                                                                   │ Sessions   ████░░░░░░░░    7 │
-│ errors 1          │   USER                                                            │                              │
-╰───────────────────╯   > fix the flaky login test                                      │                              │
-                        SYNTHESIS                                                       │                              │
-╭ TOOLS & SKILLS  5 ╮                                                                   ╰──────────────────────────────╯
-│ ● Read   ▇▇▇ 1    │   ✻ Thinking · 2.0s                                                                               
-│ ● Bash   ▇▇▇ 1    │   │ look                                                          ╭ SUB-AGENTS ──────────────────╮
-│ ● Skill  ▇▇▇ 1    │   ◆ Synthesis needs your permission  ↑/↓ choose · enter confirm … │ No sub-agents yet · /agents  │
-│ ● Agent  ▇▇▇ 1    │     ⎿ ☒ Read                                                      │                              │
-│ skills scout ×1   │       ■ Fixing                                                    │                              │
-│ mcp     0 servers │       ☐ Test                                                      │                              │
-│ configured · synt…│   ╭─ Bash command ────────────────────────────────────────────╮   │                              │
-╰───────────────────╯   │   ls                                                      │   │                              │
-                        │                                                           │   │                              │
-╭ RECENT ACTIVI…  2 ╮   │ Do you want to proceed?                                   │   │                              │
-│ · Look… 9m59s ago │   │ ❯ 1. Yes                                                  │   │                              │
-│ › ref… 10m00s ago │   │   2. No, and tell Synthesis what to do differently (esc)  │   │                              │
+╰───────────────────╯                                                                   │ Messages   ████████████   21 │
+                                                                                        │ Agents     ██░░░░░░░░░░    3 │
+╭ ◆ TOOLS & SKILLS  ╮   ╭ USER ─────────────────────────────────────────────────────╮   │ Sessions   ████░░░░░░░░    7 │
+│ ● Read   ▇▇▇ 1    │   │ > fix the flaky login test                                │   │                              │
+│ skills scout ×1   │   ╰───────────────────────────────────────────────────────────╯   │                              │
+╰───────────────────╯   SYNTHESIS                                                       │                              │
+                                                                                        ╰──────────────────────────────╯
+╭ ≈ RECENT ACTIVI…  ╮   ✻ Thinking · 2.0s                                                                               
+│ · Look… 9m59s ago │   │ look                                                          ╭ SUB-AGENTS ──────────────────╮
+│ › ref… 10m00s ago │   ◆ Synthesis needs your permission  ↑/↓ choose · enter confirm … │ No sub-agents yet · /agents  │
+│                   │     ⎿ ☒ Read                                                      │                              │
+╰───────────────────╯       ■ Fixing                                                    │                              │
+                            ☐ Test                                                      │                              │
+╭ ◷ USER PROMPT ─ 1 ╮   ╭─ Bash command ────────────────────────────────────────────╮   │                              │
+│ 11:50:00 refacto… │   │   ls                                                      │   │                              │
+│                   │   │                                                           │   │                              │
+│                   │   │ Do you want to proceed?                                   │   │                              │
+│                   │   │ ❯ 1. Yes                                                  │   │                              │
+│                   │   │   2. No, and tell Synthesis what to do differently (esc)  │   │                              │
 │                   │   ╰───────────────────────────────────────────────────────────╯   │                              │
 ╰───────────────────╯   ⏸ manual mode on (shift+tab to cycle)             effort auto   ╰──────────────────────────────╯
  ↑/↓ 1-3 choose │ enter confirm │ esc reject │ tab dashboard                                     proj │ 0 files changed 

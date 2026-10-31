@@ -1,40 +1,40 @@
  ⢎⡱  S Y N T H E S I S   ● 3 live │ workspace project │ session session- │ model claude-opus-5.5               12:00:00 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- WORKSPACE         1   ready · planning · · coding · verifying  Agent explorer: find f… ╭ AGENT STATUS ────── · coding ╮
+ ▤ WORKSPACE       1   ready · planning · · coding · verifying  Agent explorer: find f… ╭ ✦ AGENT STATUS ──── · coding ╮
  ▌● project        3   ▍chat    diff    terminal    browser    file explorer            │ ready · planning · coding ·… │
                        SYNTHESIS                                                        │ Working on  Agent explorer:… │
                         no conversation attached                                        │ Next        Test             │
-╭ RUNNING SESSIONS  ╮                                                                   ╰──────────────────────────────╯
+╭ ▶ RUNNING SESSI…  ╮                                                                   ╰──────────────────────────────╯
 │ ►● proj-0     10% │                                                                                                   
-│ project-0         │                                                                   ╭ CONTEXT ───────────────── 3% ╮
+│ project-0         │                                                                   ╭ ▦ CONTEXT ─────────────── 3% ╮
 │  ● proj-1     10% │                                                                   │ tokens         5.9k / 200.0k │
 │ project-1         │                                                                   │ ▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │
-│  ● proj-2     10% │                                                                   │ in 9.0k · out 1.5k           │
-│ project-2         │                                                                   │ cache 20.0k (hit 69%) · $ –  │
-╰───────────────────╯                                                                   ╰──────────────────────────────╯
-                                                                                                                        
-╭ SESSION ──────────╮                                                                   ╭ USAGE & METRICS ───── 7 days ╮
-│ model  claude-op… │                                                                   │ Tokens     ████████████ 6.0k │
-│ branch main       │                                                                   │ Tool calls ████████░░░░   14 │
-│ cwd    project    │                                                                   │ Messages   ████████████   21 │
-│ uptime 10m00s     │                                                                   │ Agents     ██░░░░░░░░░░    3 │
-│ turns  1 prompts… │                                                                   │ Sessions   ████░░░░░░░░    7 │
-│ errors 1          │                                                                   │                              │
-│                   │                                                                   │                              │
-│                   │                                                                   │                              │
-╰───────────────────╯                                                                   ╰──────────────────────────────╯
-                                                                                                                        
-╭ TOOLS & SKILLS  5 ╮                                                                   ╭ SUB-AGENTS ──────────────────╮
-│ skills scout ×1   │                                                                   │ No sub-agents yet · /agents  │
+│    ↓ 1 more       │                                                                   │ in 9.0k · out 1.5k           │
+╰───────────────────╯                                                                   │ cache 20.0k (hit 69%) · $ –  │
+                                                                                        ╰──────────────────────────────╯
+╭ ▭ SESSION ────────╮                                                                                                   
+│ model  claude-op… │                                                                   ╭ ▥ USAGE & METRICS ─ 7 days ▾ ╮
+│ branch main       │                                                                   │ Tokens     ████████████ 6.0k │
+│ cwd    project    │                                                                   │ Tool calls ████████░░░░   14 │
+╰───────────────────╯                                                                   │ Messages   ████████████   21 │
+                                                                                        │ Agents     ██░░░░░░░░░░    3 │
+╭ ◆ TOOLS & SKILLS  ╮                                                                   │ Sessions   ████░░░░░░░░    7 │
+│ skills scout ×1   │                                                                   │                              │
 │ mcp      1 server │                                                                   │                              │
-│ ● alpha     stdio │                                                                   │                              │
-│ ○ pending  not a… │                                                                   │                              │
-│ configured · synt…│                                                                   │                              │
+╰───────────────────╯                                                                   │                              │
+                                                                                        ╰──────────────────────────────╯
+╭ ≈ RECENT ACTIVI…  ╮                                                                                                   
+│ · Look… 9m59s ago │                                                                   ╭ SUB-AGENTS ──────────────────╮
+│ › ref… 10m00s ago │                                                                   │ No sub-agents yet · /agents  │
+│                   │                                                                   │                              │
 ╰───────────────────╯                                                                   │                              │
                                                                                         │                              │
-╭ RECENT ACTIVI…  2 ╮                                                                   │                              │
-│ · Look… 9m59s ago │                                                                   │                              │
-│ › ref… 10m00s ago │                                                                   │                              │
+╭ ◷ USER PROMPT ─ 1 ╮                                                                   │                              │
+│ 11:50:00 refacto… │                                                                   │                              │
+│                   │                                                                   │                              │
+│                   │                                                                   │                              │
+│                   │                                                                   │                              │
+│                   │                                                                   │                              │
 │                   │                                                                   │                              │
 ╰───────────────────╯                                                                   ╰──────────────────────────────╯
  ↑/↓ select session │ a follow newest │ u usage metric │ r reload │ q quit           project │ ⎇ main │ 0 files changed 

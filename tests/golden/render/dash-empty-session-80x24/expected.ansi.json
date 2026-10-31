@@ -2,7 +2,7 @@
   "color_mode": "truecolor",
   "encoded_truecolor": [
     " \u001b[38;2;217;217;224m⢎\u001b[38;2;215;206;199m⡱  \u001b[38;2;247;248;250mS Y N T H E S I S   \u001b[38;2;138;147;163m○ \u001b[38;2;242;244;248m0 live \u001b[38;2;96;105;120m│ \u001b[38;2;138;147;163mworkspace \u001b[38;2;196;202;214mproj \u001b[38;2;96;105;120m│ \u001b[38;2;138;147;163msession \u001b[38;2;196;202;214msession-  12:00:00 \u001b[0m",
-    " \u001b[38;2;215;206;199m▍\u001b[38;2;242;244;248mChat     \u001b[38;2;181;190;205mSessions     Agents     Panels 5                        \u001b[38;2;138;147;163mtab switches \u001b[0m",
+    " \u001b[38;2;215;206;199m▍\u001b[38;2;242;244;248mChat     \u001b[38;2;181;190;205mSessions     Agents     Panels 6                        \u001b[38;2;138;147;163mtab switches \u001b[0m",
     " \u001b[38;2;181;190;205mready \u001b[38;2;138;147;163m· planning · coding · verifying                                          \u001b[0m",
     " \u001b[38;2;181;190;205mSYNTHESIS                                                                      \u001b[0m",
     "  \u001b[38;2;181;190;205mno conversation attached                                                      \u001b[0m",
@@ -28,7 +28,7 @@
   ],
   "lines": [
     " \u001b[38;2;217;217;224m⢎\u001b[0m\u001b[38;2;215;206;199m⡱\u001b[0m  \u001b[38;2;247;248;250mS Y N T H E S I S\u001b[0m   \u001b[38;2;138;147;163m○\u001b[0m \u001b[38;2;242;244;248m0 live\u001b[0m \u001b[38;2;96;105;120m│\u001b[0m \u001b[38;2;138;147;163mworkspace\u001b[0m \u001b[38;2;196;202;214mproj\u001b[0m \u001b[38;2;96;105;120m│\u001b[0m \u001b[38;2;138;147;163msession\u001b[0m \u001b[38;2;196;202;214msession-\u001b[0m  \u001b[38;2;196;202;214m12:00:00\u001b[0m ",
-    " \u001b[38;2;215;206;199m▍\u001b[0m\u001b[38;2;242;244;248mChat\u001b[0m     \u001b[38;2;181;190;205mSessions\u001b[0m     \u001b[38;2;181;190;205mAgents\u001b[0m     \u001b[38;2;181;190;205mPanels 5\u001b[0m                        \u001b[38;2;138;147;163mtab switches\u001b[0m ",
+    " \u001b[38;2;215;206;199m▍\u001b[0m\u001b[38;2;242;244;248mChat\u001b[0m     \u001b[38;2;181;190;205mSessions\u001b[0m     \u001b[38;2;181;190;205mAgents\u001b[0m     \u001b[38;2;181;190;205mPanels 6\u001b[0m                        \u001b[38;2;138;147;163mtab switches\u001b[0m ",
     " \u001b[38;2;181;190;205mready\u001b[0m\u001b[38;2;138;147;163m · \u001b[0m\u001b[38;2;138;147;163mplanning\u001b[0m\u001b[38;2;138;147;163m · \u001b[0m\u001b[38;2;138;147;163mcoding\u001b[0m\u001b[38;2;138;147;163m · \u001b[0m\u001b[38;2;138;147;163mverifying\u001b[0m                                          ",
     " \u001b[38;2;181;190;205mSYNTHESIS\u001b[0m                                                                      ",
     "  \u001b[38;2;181;190;205mno conversation attached\u001b[0m                                                      ",

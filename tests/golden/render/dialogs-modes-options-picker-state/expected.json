@@ -41,8 +41,18 @@
       "name": "effort"
     },
     {
+      "argumentHint": "[--all]",
       "description": "list configured agents and show their file",
       "name": "agents"
+    },
+    {
+      "description": "sessions of other workspaces that can talk to this one",
+      "name": "peers"
+    },
+    {
+      "argumentHint": "[name]",
+      "description": "this session's name for peers (set with --name)",
+      "name": "name"
     },
     {
       "description": "session, model, version, tools and MCP servers",

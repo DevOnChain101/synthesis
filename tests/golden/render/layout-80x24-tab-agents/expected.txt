@@ -1,5 +1,5 @@
  ⢎⡱  S Y N T H E S I S   workspace proj │ model anthropic/fake-sonnet  12:00:00 
-  Chat     Sessions 2    ▍Agents     Panels 5                      tab switches 
+  Chat     Sessions 2    ▍Agents     Panels 6                      tab switches 
 ╭ SUB-AGENTS ──────────────────────────────────────────────────────────────────╮
 │ No sub-agents yet · /agents                                                  │
 │                                                                              │

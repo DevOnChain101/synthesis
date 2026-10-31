@@ -2,7 +2,7 @@
   "color_mode": "truecolor",
   "encoded_truecolor": [
     " \u001b[38;2;217;217;224m⢎\u001b[38;2;215;206;199m⡱  \u001b[38;2;247;248;250mS Y N T H E S I S   \u001b[38;2;138;147;163mworkspace \u001b[38;2;196;202;214mproject \u001b[38;2;96;105;120m│ \u001b[38;2;138;147;163mmodel \u001b[38;2;196;202;214mclaude-sonnet       12:00:00 \u001b[0m",
-    " \u001b[38;2;215;206;199m▍\u001b[38;2;242;244;248mChat     \u001b[38;2;181;190;205mSessions 3     Agents     Panels 5                      \u001b[38;2;138;147;163mtab switches \u001b[0m",
+    " \u001b[38;2;215;206;199m▍\u001b[38;2;242;244;248mChat     \u001b[38;2;181;190;205mSessions 3     Agents     Panels 6                      \u001b[38;2;138;147;163mtab switches \u001b[0m",
     " \u001b[38;2;181;190;205mSYNTHESIS                                                                      \u001b[0m",
     "  \u001b[38;2;181;190;205mno conversation attached                                                      \u001b[0m",
     "                                                                                ",
@@ -20,7 +20,7 @@
   ],
   "lines": [
     " \u001b[38;2;217;217;224m⢎\u001b[0m\u001b[38;2;215;206;199m⡱\u001b[0m  \u001b[38;2;247;248;250mS Y N T H E S I S\u001b[0m   \u001b[38;2;138;147;163mworkspace\u001b[0m \u001b[38;2;196;202;214mproject\u001b[0m \u001b[38;2;96;105;120m│\u001b[0m \u001b[38;2;138;147;163mmodel\u001b[0m \u001b[38;2;196;202;214mclaude-sonnet\u001b[0m       \u001b[38;2;196;202;214m12:00:00\u001b[0m ",
-    " \u001b[38;2;215;206;199m▍\u001b[0m\u001b[38;2;242;244;248mChat\u001b[0m     \u001b[38;2;181;190;205mSessions 3\u001b[0m     \u001b[38;2;181;190;205mAgents\u001b[0m     \u001b[38;2;181;190;205mPanels 5\u001b[0m                      \u001b[38;2;138;147;163mtab switches\u001b[0m ",
+    " \u001b[38;2;215;206;199m▍\u001b[0m\u001b[38;2;242;244;248mChat\u001b[0m     \u001b[38;2;181;190;205mSessions 3\u001b[0m     \u001b[38;2;181;190;205mAgents\u001b[0m     \u001b[38;2;181;190;205mPanels 6\u001b[0m                      \u001b[38;2;138;147;163mtab switches\u001b[0m ",
     " \u001b[38;2;181;190;205mSYNTHESIS\u001b[0m                                                                      ",
     "  \u001b[38;2;181;190;205mno conversation attached\u001b[0m                                                      ",
     "                                                                                ",

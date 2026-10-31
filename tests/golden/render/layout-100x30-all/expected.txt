@@ -1,30 +1,30 @@
  ⢎⡱  S Y N T H E S I S   ● 2 live │ workspace proj │ model anthropic/fake-sonnet           12:00:00 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
- WORKSPACE         1   ready · planning · · coding · verifying  Agent… ╭ AGENT STATUS ─── · coding ╮
+ ▤ WORKSPACE       1   ready · planning · · coding · verifying  Agent… ╭ ✦ AGENT STATUS ─ · coding ╮
  ▌● proj           2   ▍chat    diff    terminal    browser    file e… │ ready · planning · codin… │
                        SYNTHESIS                /work/proj  · working  │ Working on  Agent explor… │
-╭ RUNNING SESSIONS  ╮   SYNTHESIS                                      │ Next        Test          │
-│ ►● proj-0     10% │                                                  ╰───────────────────────────╯
-│ project-0         │   ✻ Thinking · 2.0s                              ╭ CONTEXT ────────────── 3% ╮
-│    ↓ 1 more       │   │ look                                         │ tokens      5.9k / 200.0k │
+╭ ▶ RUNNING SESSI…  ╮   │ ● I will check login.ts and retry():     │   │ Next        Test          │
+│ ►● proj-0     10% │   │   • first                                │   ╰───────────────────────────╯
+│ project-0         │   │   • second                               │   ╭ ▦ CONTEXT ──────────── 3% ╮
+│    ↓ 1 more       │   ╰──────────────────────────────────────────╯   │ tokens      5.9k / 200.0k │
 ╰───────────────────╯                                                  │ ▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ │
-╭ SESSION ─ running ╮   ● I will check login.ts and retry():           │ in 9.0k · out 1.5k        │
-│ model  anthropic… │     • first                                      ╰───────────────────────────╯
-│ mode   manual     │     • second                                     ╭ USAGE & METRICS ── 7 days ╮
-│ effort auto       │                                                  │ Tokens     █████████ 6.0k │
-╰───────────────────╯   ● Running npm test                             │ Tool calls ██████░░░   14 │
-╭ TOOLS & SKILLS  5 ╮     ⎿  Exit code 1                               │ Messages   █████████   21 │
-│ ● Read   ▇▇▇ 1    │        FAIL login.test.ts                        ╰───────────────────────────╯
-│ skills scout ×1   │        expected 2                                ╭ SYSTEM HEALTH ─── healthy ╮
-╰───────────────────╯                                                  │ ● Core agent      working │
-╭ RECENT ACTIVI…  2 ╮   · Reading file login.ts                        │ ● Tool runtime    sandbo… │
-│ · Look… 9m59s ago │     ⎿  running                                   │ ○ MCP servers     none c… │
+╭ ▭ SESSI…  running ╮   ╭──────────────────────────────────────────╮   │ in 9.0k · out 1.5k        │
+│ model  anthropic… │   │ ● Running npm test                       │   ╰───────────────────────────╯
+│ mode   manual     │   │   ⎿  Exit code 1                         │   ╭ ▥ USAGE & METRICS ────────╮
+│ effort auto       │   │      FAIL login.test.ts                  │   │ Tokens     █████████ 6.0k │
+╰───────────────────╯   │      expected 2                          │   │ Tool calls ██████░░░   14 │
+╭ ◆ TOOLS & SKILLS  ╮   ╰──────────────────────────────────────────╯   │ Messages   █████████   21 │
+│ ● Read   ▇▇▇ 1    │                                                  ╰───────────────────────────╯
+│ skills scout ×1   │   ╭──────────────────────────────────────────╮   ╭ SYSTEM HEALTH ─── healthy ╮
+╰───────────────────╯   │ · Reading file login.ts                  │   │ ● Core agent      working │
+╭ ≈ RECENT ACTIVI…  ╮   │   ⎿  running                             │   │ ● Tool runtime    sandbo… │
+│ · Look… 9m59s ago │   ╰──────────────────────────────────────────╯   │ ○ MCP servers     none c… │
 │ › ref… 10m00s ago │   · Working    (4s · ↓ 0 tokens · esc to interr… ╰───────────────────────────╯
 │                   │     ⎿ ☒ Read                                     ╭ SUB-AGENTS ───────────────╮
 ╰───────────────────╯       ■ Fixing                                   │ No sub-agents yet · /agen…│
 ╭ SESSION STATS ────╮       ☐ Test                                     │                           │
 │ files read      1 │   ╭──────────────────────────────────────────╮   │                           │
-│ files edited    0 │   │ > hello                                  │   │                           │
+│ files edited    0 │   │ > hello                                ➤ │   │                           │
 │ commands run    1 │   ╰──────────────────────────────────────────╯   │                           │
 ╰───────────────────╯   ⏸ manual mode on   fake-sonnet · effort auto   ╰───────────────────────────╯
  enter send │ esc interrupt │ ⇧tab mode │ tab agent │ / commands │ ! shell   proj │ 0 files changed 

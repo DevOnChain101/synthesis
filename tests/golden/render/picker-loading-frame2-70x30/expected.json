@@ -17,7 +17,7 @@
     "╭────────────────────────────────────────────────────────────────────╮",
     "│ ✻ Good afternoon.  · 1.0.0                                         │",
     "│ What shall we build?                                               │",
-    "│ /help for commands · alt+v pastes an image                         │",
+    "│ /help for commands · shift+tab cycles the mode                     │",
     "│ cwd: /work/proj                                                    │",
     "╰────────────────────────────────────────────────────────────────────╯",
     "",
