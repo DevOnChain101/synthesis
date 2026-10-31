@@ -222,6 +222,44 @@ async fn m11_child_never_gets_task_or_interface_tools() {
     assert_eq!(child_tools, ["Read"]);
 }
 
+#[tokio::test]
+async fn a_sub_agent_may_search_memory_but_never_change_it() {
+    let mut tools = ToolBox::new(Registry::builtin());
+    for n in [
+        "MemorySearch",
+        "MemoryWrite",
+        "MemoryUpdate",
+        "MemoryForget",
+    ] {
+        tools = tools.with_tool(Probe::new(n, SideEffectClass::Read, 0, "r"));
+    }
+    let any_tools = AgentTable::new([AgentDef {
+        name: "reader".into(),
+        description: "".into(),
+        prompt: "".into(),
+        tools: None,
+        mode: None,
+    }]);
+    let mut rig = Rig::build(
+        Opts {
+            tools,
+            ..Opts::default()
+        },
+        vec![task_call(), Turn::text("child done"), Turn::text("ok")],
+        |h, _| h.with_agents(any_tools),
+    );
+    rig.run("x").await;
+    let child: Vec<String> = rig.requests()[1]
+        .tools
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    assert!(child.contains(&"MemorySearch".to_string()), "{child:?}");
+    for n in ["MemoryWrite", "MemoryUpdate", "MemoryForget"] {
+        assert!(!child.contains(&n.to_string()), "{n} reached a child");
+    }
+}
+
 // ---- M12 ------------------------------------------------------------------------------------
 
 #[tokio::test]

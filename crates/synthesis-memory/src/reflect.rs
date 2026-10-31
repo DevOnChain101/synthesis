@@ -224,7 +224,7 @@ fn words(s: &str) -> HashSet<String> {
         .collect()
 }
 
-fn jaccard(a: &str, b: &str) -> f64 {
+pub(crate) fn jaccard(a: &str, b: &str) -> f64 {
     let (x, y) = (words(a), words(b));
     let union = x.union(&y).count();
     if union == 0 {
@@ -242,6 +242,33 @@ pub struct Applied {
     pub quarantined: usize,
     pub deduped: usize,
     pub dropped: usize,
+    /// One row per record the ops wrote, for the `memory.written` events.
+    pub written: Vec<Written>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Written {
+    pub id: String,
+    pub op: &'static str,
+    pub kind: String,
+    pub scope: String,
+    pub trust: Trust,
+    pub status: String,
+    pub rule: Option<&'static str>,
+}
+
+impl Written {
+    pub fn new(o: crate::PutOutcome, kind: &str, scope: &str, trust: Trust) -> Self {
+        Self {
+            id: o.id,
+            op: o.op,
+            kind: kind.into(),
+            scope: scope.into(),
+            trust,
+            status: o.status,
+            rule: o.rule,
+        }
+    }
 }
 
 pub struct Ctx<'a> {
@@ -265,13 +292,14 @@ pub fn apply(store: &mut Store, d: &Digest, ops: Vec<Op>, c: &Ctx) -> Result<App
             continue;
         }
         let user = op.scope == "user";
+        let trust = trust_from_evidence(&op.evidence, d);
         let mut n = NewMemory::new(
             &op.scope,
             if user { "" } else { c.workspace_key },
             &op.kind,
             &op.title,
             &op.body,
-            trust_from_evidence(&op.evidence, d),
+            trust,
         );
         n.slot = op.slot.clone().filter(|s| !s.trim().is_empty());
         n.confidence = op.confidence.unwrap_or(0.5);
@@ -296,13 +324,16 @@ pub fn apply(store: &mut Store, d: &Digest, ops: Vec<Op>, c: &Ctx) -> Result<App
             None => store.put(n),
         };
         match out {
-            Ok(o) => match o.op {
-                "deduped" => r.deduped += 1,
-                "proposed" => r.proposed += 1,
-                "quarantined" => r.quarantined += 1,
-                _ if target.is_some() => r.updated += 1,
-                _ => r.added += 1,
-            },
+            Ok(o) => {
+                match o.op {
+                    "deduped" => r.deduped += 1,
+                    "proposed" => r.proposed += 1,
+                    "quarantined" => r.quarantined += 1,
+                    _ if target.is_some() => r.updated += 1,
+                    _ => r.added += 1,
+                }
+                r.written.push(Written::new(o, &op.kind, &op.scope, trust));
+            }
             Err(_) => r.dropped += 1,
         }
     }
@@ -464,15 +495,20 @@ mod tests {
         ];
         let r = apply(&mut s, &d, ops, &c).unwrap();
         assert_eq!(
-            r,
-            Applied {
-                added: 1,
-                updated: 0,
-                proposed: 1,
-                quarantined: 1,
-                deduped: 0,
-                dropped: 3
-            }
+            (
+                r.added,
+                r.updated,
+                r.proposed,
+                r.quarantined,
+                r.deduped,
+                r.dropped
+            ),
+            (1, 0, 1, 1, 0, 3)
+        );
+        let ops: Vec<_> = r.written.iter().map(|w| (w.op, w.rule.is_some())).collect();
+        assert_eq!(
+            ops,
+            [("added", false), ("proposed", false), ("quarantined", true)]
         );
         let q = crate::Query::new(
             "parser tests web",

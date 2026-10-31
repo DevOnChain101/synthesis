@@ -264,6 +264,13 @@ impl TaskRequest {
     }
 }
 
+/// A gate check that passed, as the harness observed it (memory.md §7 `cmd.verify.<hash>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedCommand {
+    pub command: String,
+    pub exit_code: Option<i32>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TaskOutcome {
     pub task_id: String,
@@ -435,9 +442,17 @@ pub struct Harness {
     pub(crate) hub: crate::hub::Hub,
     /// Cross-session peers (messaging.md Part B); `None` = off.
     pub(crate) peers: Option<Arc<crate::peer::PeerLink>>,
+    /// Passed commands of each task's latest verification report; taken by `verified_commands`.
+    pub(crate) verified: Mutex<HashMap<String, Vec<VerifiedCommand>>>,
 }
 
 impl Harness {
+    /// The commands that passed in the task's latest verification report (empty when none ran).
+    /// Removes them: ask once, after the task.
+    pub fn verified_commands(&self, task_id: &str) -> Vec<VerifiedCommand> {
+        lock(&self.verified).remove(task_id).unwrap_or_default()
+    }
+
     /// Headless defaults: asks are auto-denied, user questions are unanswerable, no hooks, no
     /// verification gate (a task that changed something then ends `unverified`).
     pub fn new(
@@ -473,6 +488,7 @@ impl Harness {
             rule_store: None,
             hub: crate::hub::Hub::default(),
             peers: None,
+            verified: Mutex::default(),
         }
     }
 
@@ -1246,6 +1262,19 @@ impl Harness {
         r: Option<&synthesis_verification::VerificationReport>,
     ) -> Option<String> {
         let r = r?;
+        lock(&self.verified).insert(
+            task.task_id.clone(),
+            r.checks
+                .iter()
+                .filter(|c| c.status == synthesis_verification::VerificationStatus::Passed)
+                .filter_map(|c| {
+                    Some(VerifiedCommand {
+                        command: c.command.clone()?,
+                        exit_code: c.exit_code,
+                    })
+                })
+                .collect(),
+        );
         lock(&task.counters).verify_attempts += 1;
         self.emit(task, agent, None, r.to_event());
         Some(r.id.clone())

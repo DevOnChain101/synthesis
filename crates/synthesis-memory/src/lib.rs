@@ -3,6 +3,7 @@
 //! permission or reaches the permission engine. The crate reads no environment variables; the
 //! caller passes the home directory and the exact secret values to mask.
 
+mod consolidate;
 mod jobs;
 mod reflect;
 mod retrieve;
@@ -10,6 +11,7 @@ mod scan;
 mod skills;
 mod store;
 
+pub use consolidate::*;
 pub use jobs::*;
 pub use reflect::*;
 pub use retrieve::*;

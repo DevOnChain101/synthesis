@@ -34,6 +34,7 @@ synthesis-tools = { path = "../synthesis-tools" }
 synthesis-verification = { path = "../synthesis-verification" }
 synthesis-workspace = { path = "../synthesis-workspace" }
 rusqlite = { version = "0.41", features = ["bundled"] }
+globset = "0.4"
 synthesis-memory = { path = "../synthesis-memory" }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 serde_json = "1.0.154"
