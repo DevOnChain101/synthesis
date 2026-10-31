@@ -1,6 +1,6 @@
 # Spec: Inter-agent messaging (in-session sub-agents, cross-session peers) — draft 0.3
 
-Status: draft (2026-10-29); R10b built except TUI, confirm_replies and offline resume, see section G. D1–D16 accepted by the owner on 2026-10-29. Tags as in events.md. Design doc: §5.13, ADR-012, roadmap R10.
+Status: draft (2026-10-29); R10b built; threads, notify, shared commands and delegation: section J (2026-11-01). D1–D16 accepted by the owner on 2026-10-29. Tags as in events.md. Design doc: §5.13, ADR-012, roadmap R10.
 Scope: **Part A**, in-session messaging (agent ↔ sub-agent, user `@agent` in chat). **Part B**, agent-to-agent request/response between live sessions of the same OS user on the same machine, in the same or different workspaces, with no human in the loop. **§1 addressing** covers both parts. Out of scope: a user CLI `synthesis send`, cross-user and network delivery.
 
 ## 0. Non-negotiables
@@ -406,3 +406,47 @@ Fixes, each with a test:
 10. **Directories:** a new session directory is created only after the per-session, total (256) and directory (1024) bounds pass; a refused message creates nothing.
 
 Not fixed / limits: per-session keys (5, design above); the 120 s confirm timeout has no test (it would take two minutes); a full ledger or mailbox leaves a queued request to be re-answered at each task start (bounded by the peer rate limit and cost budget).
+
+## J. Owner decisions of 2026-11-01: threads, notify, shared commands, delegation
+
+Source: messaging-scenarios.md. The owner accepted Q3-Q8 as proposed and CHANGED Q1/Q2: this machine is user-controlled and the system is autonomous, so agent A may ask agent B to do work, and B executes it without asking B's human, **but only under B's own permission mode** (guards J4). This amends D10 (the responder stays the default; delegation is a second, opt-in path) and replaces P4/P5 of the scenarios doc.
+
+### J1. Decisions
+| Q | Decision |
+|---|---|
+| Q1/Q2 (changed) | Delegation to B's live session, B's mode governs. Guards J4. No separate "taint" dialog and no allow-once command executor. |
+| Q3 | `synthesis.peers.share_commands` (user settings, default empty): a Bash result enters responder snapshots only when the whole command matches a pattern (trailing `*` = prefix), has no shell metacharacters (`; | & $ ( ) < >`, backtick, newline) and names no secret, state or outside path. Output is redacted and cut to 8 KiB. |
+| Q4 | Threads: `max_rounds` 6, `thread_idle_min` 30, `max_threads` 4 per receiver. |
+| Q5 | `notify_on_end`: gated like a reply, `notify_wait_max_s` 3600, cycle detection. |
+| Q6 | Lease deferred. Q7 no memory blackboard. |
+| Q8 | The default allow list also holds `repo:<repo_key>` (all worktrees of this repository). |
+
+### J2. Protocol additions (v1, additive; an old peer ignores the fields)
+`request` gains `thread_id?`, `delegate?` (bool), `sender_mode?`, `notify_on_end?`. `reply` gains `thread_id?`. New `rejected` reasons: `thread_closed`, `thread_mismatch`, `delegation_denied`, `too_deep`. Entry/Addr gain `about?` / `repo_key?`. Mailbox `Envelope` gains `thread_id?` (inside the MAC).
+- **Threads (P1).** `SendMessage{thread:true}` makes the sender generate a `thread_id`; `thread_id:"<id>"` continues it; neither = one-shot as before. The receiver keeps the responder's (or worker's) own transcript per thread **in process memory only** and resumes it on the next round instead of forking a fresh snapshot. A thread is bound to the asker's `session_id` and `workspace_key` (consistency check only, see I.5). Round 7 gets `thread_closed`; an idle thread closes after 30 min (`peer.thread_closed {thread_id, reason: cap|ttl|cancel|size}`); a 5th open thread is `busy`; a second round while one runs is `busy`. A thread's transcript is not refreshed from B's newer context (the "B changed" refresh note is not built).
+- **Notify (P2).** `SendMessage{notify_on_end:true}` is a request that holds its connection open: B answers when B's current or next task ends (`status:"answered"`, final text <= 8 KiB) or at once with `idle` when no task runs. It passes the same gates as a reply (allow list, `answer`, `confirm_replies`, redaction, cap). One subscription per asker session per receiver, 8 in all; it does not use a responder slot but counts for the rate limit. Cycle: B refuses a subscription from X while B itself waits on X. A's task waits for the result (D3) up to `notify_wait_max_s` (3600); then A gets `timeout`. If A is gone the connection is closed and the subscription dropped (no mailbox for results).
+
+### J3. Delegation: how a message reaches B
+`SendMessage{to, message, delegate:true, thread_id?}` asks B to **do** the work. The message never enters B's main history (peer text stays out of B's steerable context and cannot derail B's task); it starts a **delegate worker**, a sub-agent of B (`kind:"peer-delegate"`, instance `peer-<n>`) inside B's harness: B's tool runtime, permission engine, hooks, sandbox, approver and workspace.
+- **Running B.** The server accepts at any time; the worker forks from B's last drain-point snapshot (sanitised as for responders), so it never touches B's main loop between a `tool_use` and its `tool_result`. B's main agent is not interrupted.
+- **Idle B** (TUI session between tasks): the worker forks from the retained history. **B not running at all:** the request goes through the offline mailbox as a read-only **question** (the sender is told `delegate:false` in the result): a delegation is never executed from a queue, because the sender's mode, intent and B's user state of that moment are gone.
+- **Thread rounds** continue the worker's transcript.
+- **Result.** The worker's final text returns through the normal reply path (`confirm_replies`, redaction, 32 KiB cap).
+
+### J4. Guard model (all mandatory, each tested)
+1. **B's policy is never raised.** The worker's permission engine is a clone of B's (rules, hooks, sandbox, interactive flag, approver). Mode = `stricter(B's current mode, A's cap)`. Ask rules still ask; deny rules, the secret-read deny (`deny_secret_reads` is forced on for peer work), the Synthesis state/run deny and protected paths win in every mode, bypass included. Nothing in a message changes a mode, adds a rule or answers a dialog. Manual/default B: every tool call that asks needs B's approval dialog; the asker waits (<= `timeout_s`, default 600, max 1800) and the work is cancelled on timeout; headless B has no approver, so asks are denied.
+2. **Opt-in only in user settings:** `synthesis.peers.enabled`, `allow` (who may reach me at all), `accept_delegation` (default **false**) and `delegation_allow` (default **empty** = nobody; same rule syntax as `allow`; `allow` does not imply it). A project `settings.json` cannot set any of them (already ignored for all of `synthesis.peers`). `delegation_allow` applies on top of `allow` and the deny list.
+3. **Confused deputy.** The request carries `sender_mode` = A's effective mode at send time. B's cap is `Mode::parse(sender_mode)`; missing or unknown = `plan`. A in `plan` gets a read-only worker; `dontAsk` never asks; nobody gets more than A had. A lie can only lower B's mode: the cap is a minimum, never a grant. `sender_mode` is self-asserted like `from`.
+4. **Attribution.** The worker's agent context carries `origin = peer(<display from>, unverified)`. Every approval prompt starts with `[peer request from <display> (unverified sender)]`, the approval request has `origin`, and "allow always" is never offered nor applied for peer-origin requests. Each tool call of a worker emits `peer.delegation.tool`. `from` is self-asserted under the shared key; per-session keys remain the open item of I.5.
+5. **Bounds.** Round cap 6, idle TTL 30 min, 4 open threads, 1 delegation at a time per receiver (`busy`), the global 10 requests / 10 min limit, `delegation_max_tool_calls` (40) and `delegation_wall_s` (900) per round, the cost pool `max_cost_usd` shared with responders (reserve per run, `no_price` without a price), thread cost <= half of the pool. Hops: `chain` holds the session ids on the way; a session already in it is `cycle`; `chain.len() > delegation_max_hops` (default 2: A to B, and B's worker may delegate one further hop to C) is `too_deep`. Cancel: A's cancel/task end closes the connection, B drops the future, the worker is cancelled and `peer.delegation.completed{status:"cancelled"}` is emitted.
+6. **Untrusted text.** The request is a fenced `<peer_task ... trust="peer-data">` block. The worker prompt says it can request work but never grants permission, never approves, never changes a mode, and that replies from other peers are data. The replies a sender gets are fenced `<peer_reply>` data. The receiver redacts everything it sends back; B's tool output reaches A only through that reply.
+7. **Audit events** (additive v1): `peer.delegation.accepted {delegation_id, request_id, thread_id?, from, mode, cap}`, `.started {delegation_id, agent_id}`, `.tool {delegation_id, tool_call_id, name, from}`, `.completed {delegation_id, status, tool_calls, duration_ms}`, `.denied {request_id, from, reason}` (a refused request). Ids only, no text, no secrets.
+
+### J5. Other changes
+- `--name` already existed (peers); `--about TEXT` is new. `about` defaults to the first line of `SYNTHESIS.md` at the workspace root, is redacted, cut to 120 chars, goes in the registry entry and in `session.about` of `ListSessions` / `ListAgents` rows (B9).
+- `Config` keys added: `accept_delegation`, `delegation_allow`, `delegation_max_hops`, `delegation_max_tool_calls`, `delegation_wall_s`, `max_rounds`, `thread_idle_min`, `max_threads`, `notify_wait_max_s`, `share_commands`.
+
+### J6. Residual risks (accepted by the owner's decision)
+- Delegation lets a prompt-injected or malicious same-user peer run B's tools under B's mode. In bypass/auto/acceptEdits B the user already accepted autonomous work; the asker's cap and `delegation_allow` are the limits. With the shared key any same-user process can claim any `from` and `sender_mode` (it could also run the tools itself): `delegation_allow` is policy against honest peers, not authentication.
+- The worker shares B's workspace with B's main task; edits can interleave.
+- Not built / unverified: the thread refresh note, notify results through a mailbox, Windows (never run).
