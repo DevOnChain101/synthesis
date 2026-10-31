@@ -1,11 +1,12 @@
-//! `synthesis-desktop`: the desktop app. First run shows onboarding; `--screen workspace|settings`
-//! opens that screen directly (development and screenshots).
+//! `synthesis-desktop`: the desktop app. First run shows onboarding; `--screen NAME` opens that
+//! screen directly (development and screenshots): workspace, settings, inbox, activity, tools,
+//! topology. With the `test-provider` feature: `--fake script.json`, `--send "text"`.
 
 use std::sync::Arc;
 
 use synthesis_config::Env;
 use synthesis_desktop::credentials::InMemoryStore;
-use synthesis_desktop::ui::{self, Nav, Screen};
+use synthesis_desktop::ui::{self, Launch, Nav, Screen};
 use synthesis_desktop::{settings, theme};
 
 fn main() {
@@ -18,14 +19,46 @@ fn main() {
         }
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (screen, nav) = match args
-        .iter()
-        .position(|a| a == "--screen")
-        .and_then(|i| args.get(i + 1))
-    {
-        Some(s) if s == "workspace" => (Screen::Main, Nav::Session),
-        Some(s) if s == "settings" => (Screen::Main, Nav::Configuration),
+    let arg = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    let (screen, nav) = match arg("--screen").as_deref() {
+        Some("workspace") => (Screen::Main, Nav::Session),
+        Some("settings") => (Screen::Main, Nav::Configuration),
+        Some("inbox") => (Screen::Main, Nav::Inbox),
+        Some("activity") => (Screen::Main, Nav::Activity),
+        Some("tools") => (Screen::Main, Nav::Tools),
+        Some("topology") => (Screen::Main, Nav::Topology),
         _ => (Screen::Onboarding, Nav::Session),
+    };
+    let (fake, auto_send) = if cfg!(feature = "test-provider") {
+        (arg("--fake").map(|f| format!("fake:{f}")), arg("--send"))
+    } else {
+        (None, None)
+    };
+    let launch = Launch {
+        screen,
+        nav,
+        home: home.clone(),
+        project,
+        env,
+        store: Arc::new(InMemoryStore::default()),
+        fake,
+        auto_send,
+        side: arg("--side"),
+        open: arg("--open"),
+        shot: arg("--shot").map(|p| {
+            let secs = args
+                .iter()
+                .position(|a| a == "--shot")
+                .and_then(|i| args.get(i + 2))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(6);
+            (std::path::PathBuf::from(p), secs)
+        }),
     };
     gpui_platform::application()
         .with_assets(gpui_kit_assets::Assets)
@@ -33,15 +66,7 @@ fn main() {
             gpui_component::init(cx);
             ui::register_fonts(cx);
             theme::apply(settings::load(&home).font.family(), cx);
-            ui::open(
-                screen,
-                nav,
-                home,
-                project,
-                env,
-                Arc::new(InMemoryStore::default()),
-                cx,
-            );
+            ui::open(launch, cx);
             cx.activate(true);
         });
 }

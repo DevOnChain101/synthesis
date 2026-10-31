@@ -7,11 +7,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt as _;
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px,
+    SharedString, Styled as _, Window, canvas, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
@@ -20,11 +19,18 @@ use gpui_component::{
 };
 use synthesis_config::Env;
 
+use crate::activity;
+use crate::convo::Convo;
 use crate::credentials::CredentialStore;
+use crate::engine::{self, Choice, Engine, UiMsg};
 use crate::onboarding::{self, Kind, Outcome};
+use crate::project::{self, Project};
+use crate::pty::PtyShell;
 use crate::settings::{self, DesktopSettings, FontChoice, Mode};
 use crate::theme::{self, hsla};
 use crate::vt;
+
+mod views;
 
 const FONT_SIZE: f32 = 13.0;
 
@@ -55,6 +61,7 @@ pub enum Screen {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Nav {
     Session,
+    Inbox,
     Activity,
     Tools,
     Topology,
@@ -80,18 +87,98 @@ struct Form {
     busy: bool,
 }
 
+/// One open session in the tab strip. The live one is fed by the engine; saved ones are replays
+/// of the stored event log (read-only: resuming into the window is not wired yet).
+struct Tab {
+    id: String,
+    title: String,
+    convo: Convo,
+    events: Vec<synthesis_events::Envelope>,
+    live: bool,
+}
+
+impl Tab {
+    fn new_live() -> Self {
+        Self {
+            id: String::new(),
+            title: "New session".into(),
+            convo: Convo::default(),
+            events: vec![],
+            live: true,
+        }
+    }
+}
+
+/// The file/diff viewer on the right.
+struct Viewer {
+    title: String,
+    lines: Vec<String>,
+    diff: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Menu {
+    Model,
+    Effort,
+    Perm,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum EngineState {
+    Idle,
+    Starting,
+    Ready,
+    Failed(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bottom {
+    Terminal,
+    Browser,
+    Verification,
+}
+
 pub struct Shell {
     screen: Screen,
     nav: Nav,
     side_tab: SideTab,
     settings: DesktopSettings,
     home: PathBuf,
-    project: String,
+    /// The workspace (project directory) of the second sidebar and the engine.
+    cwd: PathBuf,
     env: Env,
     store: Arc<dyn CredentialStore>,
     rt: Arc<tokio::runtime::Runtime>,
     form: Form,
-    term: Entity<TermPane>,
+    /// Provider whose key the engine reads from the store.
+    provider: Option<String>,
+    saved: Vec<synthesis_tui::SavedSession>,
+    tabs: Vec<Tab>,
+    active: usize,
+    engine: Option<Arc<Engine>>,
+    engine_state: EngineState,
+    composer: Entity<InputState>,
+    search: Entity<InputState>,
+    model: Option<String>,
+    effort: Option<String>,
+    perm: synthesis_permissions::Mode,
+    menu: Option<Menu>,
+    proj: Project,
+    branch: String,
+    viewer: Option<Viewer>,
+    convo_scroll: gpui::ScrollHandle,
+    bottom: Bottom,
+    bottom_term: Option<Entity<TermPane>>,
+    filter: activity::Filter,
+    /// Mode 1: the TUI with the real engine / the plain shell, created on first use.
+    agent_term: Option<Entity<TermPane>>,
+    shell_term: Option<Entity<TermPane>>,
+    agent_on: bool,
+    sheet: bool,
+    clip: futures::channel::mpsc::UnboundedSender<String>,
+    /// Development: scripted model and an automatic first prompt (feature `test-provider`).
+    fake: Option<String>,
+    auto_send: Option<String>,
 }
 
 fn input(
@@ -111,23 +198,63 @@ fn input(
     })
 }
 
+/// How the window starts (`main.rs`).
+pub struct Launch {
+    pub screen: Screen,
+    pub nav: Nav,
+    pub home: PathBuf,
+    pub project: PathBuf,
+    pub env: Env,
+    pub store: Arc<dyn CredentialStore>,
+    pub fake: Option<String>,
+    pub auto_send: Option<String>,
+    /// Development: write the window to this PNG after this many seconds, then quit.
+    pub shot: Option<(PathBuf, u64)>,
+    /// Development: start on this sidebar tab (`explorer`, `changes`) and open this file
+    /// (`diff:PATH` opens its diff).
+    pub side: Option<String>,
+    pub open: Option<String>,
+}
+
+/// Where a terminal pane gets its bytes and where its keys go.
+pub struct TermSource {
+    bytes: futures::channel::mpsc::UnboundedReceiver<Vec<u8>>,
+    input: Box<dyn Fn(Vec<u8>)>,
+    resize: Box<dyn Fn(u32, u32)>,
+    initial: (u32, u32),
+    /// Dropped with the pane: ends the shell or the TUI thread.
+    _hold: Box<dyn std::any::Any>,
+}
+
 impl Shell {
-    #[allow(clippy::too_many_arguments)] // one construction site; a params struct adds nothing
-    pub fn new(
-        screen: Screen,
-        nav: Nav,
-        home: PathBuf,
-        project: PathBuf,
-        env: Env,
-        store: Arc<dyn CredentialStore>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let kind = Kind::Anthropic;
+    pub fn new(l: Launch, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let Launch {
+            screen,
+            nav,
+            home,
+            project,
+            env,
+            store,
+            fake,
+            auto_send,
+            shot: _,
+            side,
+            open: _,
+        } = l;
+        let remembered = settings::load_remembered(&home);
+        let kind = match remembered.as_ref().map(|r| r.kind.as_str()) {
+            Some("openai") => Kind::OpenAi,
+            _ => Kind::Anthropic,
+        };
+        let (rid, rurl, rmodel) = remembered
+            .as_ref()
+            .map_or((kind.default_id(), kind.default_url(), ""), |r| {
+                (r.id.as_str(), r.base_url.as_str(), r.model.as_str())
+            });
         let form = Form {
             kind,
-            id: input(window, cx, "provider id", kind.default_id(), false),
-            url: input(window, cx, "https://…", kind.default_url(), false),
+            id: input(window, cx, "provider id", rid, false),
+            url: input(window, cx, "https://…", rurl, false),
             key: input(
                 window,
                 cx,
@@ -139,36 +266,422 @@ impl Shell {
                 window,
                 cx,
                 "model (optional, filled after the test)",
-                "",
+                rmodel,
                 false,
             ),
             status: None,
             busy: false,
         };
+        let provider = remembered.as_ref().map(|r| r.id.clone());
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
             .build()
             .map(Arc::new)
             .expect("tokio runtime");
-        let term = cx.new(TermPane::new);
-        let project = project.file_name().map_or_else(
-            || project.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
+        let composer = input(
+            window,
+            cx,
+            "Ask Synthesis or add acceptance criteria…",
+            "",
+            false,
         );
+        cx.subscribe_in(
+            &composer,
+            window,
+            |this, _, ev: &gpui_component::input::InputEvent, window, cx| {
+                if matches!(ev, gpui_component::input::InputEvent::PressEnter { .. }) {
+                    this.send_composer(window, cx);
+                }
+            },
+        )
+        .detach();
+        let search = input(window, cx, "Search sessions…", "", false);
+        cx.observe(&search, |_, _, cx| cx.notify()).detach();
+        let (clip, mut clip_rx) = futures::channel::mpsc::unbounded::<String>();
+        cx.spawn(async move |this, cx| {
+            while let Some(t) = clip_rx.next().await {
+                if this
+                    .update(cx, |_, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(t));
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let cwd = synthesis_app::run::workspace_root(&project, &home);
+        let saved = synthesis_tui::list_saved(&home, None).unwrap_or_default();
+        let st = settings::load(&home);
         Self {
             screen,
             nav,
-            side_tab: SideTab::Sessions,
-            settings: settings::load(&home),
+            side_tab: match side.as_deref() {
+                Some("explorer") => SideTab::Explorer,
+                Some("changes") => SideTab::Changes,
+                _ => SideTab::Sessions,
+            },
+            settings: st,
+            proj: project::scan(&cwd),
+            branch: project::branch(&cwd),
+            cwd,
             home,
-            project,
             env,
             store,
             rt,
             form,
-            term,
+            provider,
+            saved,
+            tabs: vec![Tab::new_live()],
+            active: 0,
+            engine: None,
+            engine_state: EngineState::Idle,
+            composer,
+            search,
+            model: None,
+            effort: None,
+            perm: synthesis_permissions::Mode::Default,
+            menu: None,
+            viewer: None,
+            convo_scroll: gpui::ScrollHandle::new(),
+            bottom: Bottom::Terminal,
+            bottom_term: None,
+            filter: activity::Filter::All,
+            agent_term: None,
+            shell_term: None,
+            agent_on: !st.plain_terminal,
+            sheet: false,
+            clip,
+            fake,
+            auto_send,
         }
+    }
+
+    fn project_name(&self) -> String {
+        self.cwd.file_name().map_or_else(
+            || self.cwd.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
+    }
+
+    /// Called when the main screen is shown: starts the engine and the terminal panel.
+    pub fn enter_main(&mut self, cx: &mut Context<Self>) {
+        if self.settings.mode == Mode::Gpui {
+            self.ensure_bottom_term(cx);
+            self.start_engine(cx);
+        } else if self.settings.plain_terminal {
+            self.start_engine(cx);
+        }
+    }
+
+    fn make_term(&self, source: TermSource, cx: &mut Context<Self>) -> Entity<TermPane> {
+        cx.new(|cx| TermPane::new(source, cx))
+    }
+
+    fn ensure_bottom_term(&mut self, cx: &mut Context<Self>) {
+        if self.bottom_term.is_none() {
+            self.bottom_term = self.shell_source(100, 10).map(|s| self.make_term(s, cx));
+        }
+    }
+
+    /// A real shell in the workspace folder (Unix; see `pty`).
+    fn shell_source(&self, cols: u32, rows: u32) -> Option<TermSource> {
+        match PtyShell::spawn(
+            self.env.get_nonempty("SHELL").unwrap_or("/bin/sh"),
+            &self.cwd,
+            cols as u16,
+            rows as u16,
+        ) {
+            Ok((sh, bytes)) => {
+                let sh = Arc::new(Mutex::new(sh));
+                let (w, r) = (sh.clone(), sh.clone());
+                Some(TermSource {
+                    bytes,
+                    input: Box::new(move |b| {
+                        w.lock().unwrap_or_else(|e| e.into_inner()).write(&b);
+                    }),
+                    resize: Box::new(move |c, ro| {
+                        r.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .resize(c as u16, ro as u16);
+                    }),
+                    initial: (cols, rows),
+                    _hold: Box::new(sh),
+                })
+            }
+            Err(e) => {
+                eprintln!("synthesis-desktop: no shell panel: {e}");
+                None
+            }
+        }
+    }
+
+    fn ensure_agent_term(&mut self, cx: &mut Context<Self>) {
+        if self.agent_term.is_some() {
+            return;
+        }
+        let mut rig = crate::agent_tui::start(
+            100,
+            30,
+            self.cwd.clone(),
+            self.engine_env(),
+            self.clip.clone(),
+            self.fake.clone(),
+        );
+        let bytes = std::mem::replace(&mut rig.bytes, futures::channel::mpsc::unbounded().1);
+        let keys = rig.keys.clone();
+        let size = rig.size.clone();
+        let src = TermSource {
+            bytes,
+            input: Box::new(move |b| {
+                let _ = keys.send(b);
+            }),
+            resize: Box::new(move |c, r| {
+                *size.lock().unwrap_or_else(|e| e.into_inner()) = (c, r);
+            }),
+            initial: (100, 30),
+            _hold: Box::new(rig),
+        };
+        self.agent_term = Some(self.make_term(src, cx));
+    }
+
+    fn ensure_shell_term(&mut self, cx: &mut Context<Self>) {
+        if self.shell_term.is_none() {
+            self.shell_term = self.shell_source(100, 30).map(|s| self.make_term(s, cx));
+        }
+    }
+
+    /// `env` with the key from the store (memory only) for the engine's `prepare`.
+    fn engine_env(&self) -> Env {
+        match self
+            .provider
+            .as_deref()
+            .and_then(|p| self.store.get(p).ok().flatten().map(|k| (p, k)))
+        {
+            Some((p, k)) => engine::env_with_key(&self.env, p, &k),
+            None => self.env.clone(),
+        }
+    }
+
+    fn close_engine(&mut self) {
+        if let Some(a) = self.engine.take()
+            && let Ok(e) = Arc::try_unwrap(a)
+        {
+            std::thread::spawn(move || e.close());
+        }
+    }
+
+    fn start_engine(&mut self, cx: &mut Context<Self>) {
+        if self.engine_state == EngineState::Starting {
+            return;
+        }
+        self.close_engine();
+        self.engine_state = EngineState::Starting;
+        let (project, env, model, fake) = (
+            self.cwd.clone(),
+            self.engine_env(),
+            self.model.clone(),
+            self.fake.clone(),
+        );
+        let (tx, rx) = futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(Engine::start(
+                &project,
+                &env,
+                model.as_deref(),
+                fake.as_deref(),
+            ));
+        });
+        cx.spawn(async move |this, cx| {
+            let r = rx.await;
+            let _ = this.update(cx, |this, cx| match r {
+                Ok(Ok((e, mut events))) => {
+                    if this.model.is_none() {
+                        this.model = Some(e.label.clone());
+                    }
+                    this.engine = Some(Arc::new(e));
+                    this.engine_state = EngineState::Ready;
+                    cx.spawn(async move |this, cx| {
+                        while let Some(m) = events.next().await {
+                            if this.update(cx, |this, cx| this.on_msg(m, cx)).is_err() {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+                    if let Some(t) = this.auto_send.take() {
+                        this.send_text(t, cx);
+                    }
+                    cx.notify();
+                }
+                Ok(Err(e)) => {
+                    this.engine_state = EngineState::Failed(e);
+                    cx.notify();
+                }
+                Err(_) => {
+                    this.engine_state = EngineState::Failed("the engine thread ended".into());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn live_tab(&mut self) -> &mut Tab {
+        &mut self.tabs[0]
+    }
+
+    fn on_msg(&mut self, m: UiMsg, cx: &mut Context<Self>) {
+        match m {
+            UiMsg::Event(e) => {
+                let t = self.live_tab();
+                t.convo.apply(&e);
+                if t.title == "New session"
+                    && let synthesis_events::Event::UserMessage { text, .. } = &e.event
+                {
+                    t.title = text.lines().next().unwrap_or("").chars().take(28).collect();
+                }
+                t.events.push(*e);
+            }
+            UiMsg::TaskDone(r) => {
+                if let Err(e) = r {
+                    self.live_tab()
+                        .convo
+                        .items
+                        .push(crate::convo::Item::Notice {
+                            warning: true,
+                            text: e,
+                        });
+                }
+                self.live_tab().convo.running = false;
+                self.refresh_project();
+            }
+        }
+        cx.notify();
+    }
+
+    fn refresh_project(&mut self) {
+        self.proj = project::scan(&self.cwd);
+        self.branch = project::branch(&self.cwd);
+        self.saved = synthesis_tui::list_saved(&self.home, None).unwrap_or_default();
+    }
+
+    fn send_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.composer.read(cx).value().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.composer
+            .update(cx, |s, cx| s.set_value("", window, cx));
+        self.send_text(text, cx);
+    }
+
+    fn send_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.active = 0;
+        let note = |this: &mut Self, t: &str| {
+            this.live_tab()
+                .convo
+                .items
+                .push(crate::convo::Item::Notice {
+                    warning: true,
+                    text: t.into(),
+                });
+        };
+        match self.engine.clone() {
+            Some(e) => {
+                e.set_mode(self.perm);
+                e.set_effort(self.effort.clone());
+                if let Err(m) = e.send(text) {
+                    note(self, m);
+                }
+            }
+            None => note(
+                self,
+                "The engine is not running yet: finish Configuration first.",
+            ),
+        }
+        self.sheet = true;
+        cx.notify();
+    }
+
+    fn answer(&mut self, id: &str, c: Choice, cx: &mut Context<Self>) {
+        if let Some(e) = &self.engine {
+            e.answer(id, c);
+        }
+        cx.notify();
+    }
+
+    fn set_model(&mut self, m: String, cx: &mut Context<Self>) {
+        if self.model.as_deref() != Some(&m) {
+            self.model = Some(m);
+            self.tabs[0] = Tab::new_live();
+            self.start_engine(cx);
+        }
+        self.menu = None;
+        cx.notify();
+    }
+
+    fn select_workspace(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
+        if cwd != self.cwd {
+            self.cwd = cwd;
+            self.tabs = vec![Tab::new_live()];
+            self.active = 0;
+            self.viewer = None;
+            self.bottom_term = None;
+            self.refresh_project();
+            self.ensure_bottom_term(cx);
+            self.start_engine(cx);
+        }
+        self.nav = Nav::Session;
+        cx.notify();
+    }
+
+    fn open_saved(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.nav = Nav::Session;
+        if let Some(i) = self.tabs.iter().position(|t| t.id == id) {
+            self.active = i;
+        } else {
+            match synthesis_tui::load_resume(&self.home, id) {
+                Ok(r) => {
+                    let title = self
+                        .saved
+                        .iter()
+                        .find(|s| s.id == id)
+                        .map_or_else(|| id.to_string(), |s| s.title.chars().take(28).collect());
+                    self.tabs.push(Tab {
+                        id: id.into(),
+                        title,
+                        convo: Convo::from_events(&r.events),
+                        events: r.events,
+                        live: false,
+                    });
+                    self.active = self.tabs.len() - 1;
+                }
+                Err(e) => eprintln!("synthesis-desktop: cannot open session: {e}"),
+            }
+        }
+        cx.notify();
+    }
+
+    fn open_file(&mut self, path: &str, diff: bool, cx: &mut Context<Self>) {
+        let lines = if diff {
+            project::diff_of(&self.cwd, path)
+        } else {
+            project::read_head(&self.cwd, path)
+        };
+        self.viewer = Some(Viewer {
+            title: path.rsplit('/').next().unwrap_or(path).to_string(),
+            lines,
+            diff,
+        });
+        self.nav = Nav::Session;
+        cx.notify();
+    }
+
+    fn pending_total(&self) -> usize {
+        self.tabs.iter().map(|t| t.convo.needs_you()).sum()
     }
 
     fn font(&self) -> SharedString {
@@ -220,7 +733,7 @@ impl Shell {
         )
     }
 
-    fn test_connection(&mut self, cx: &mut Context<Self>) {
+    fn test_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let valid = match self.typed(cx) {
             Ok(v) => v,
             Err(p) => {
@@ -236,21 +749,19 @@ impl Shell {
         self.rt.spawn(async move {
             let _ = tx.send(onboarding::test_connection(&env, &valid).await);
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let outcome = rx.await.unwrap_or(Outcome::Unreachable);
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.form.busy = false;
+                this.form.status = Some((!matches!(outcome, Outcome::Ok { .. }), outcome.text()));
                 if let Outcome::Ok { models } = &outcome
                     && let Some(m) = models.first()
                     && this.form.model.read(cx).value().is_empty()
                 {
                     let m = m.clone();
-                    // set_value needs a window; the model field is filled on the next click instead
-                    this.form.status =
-                        Some((false, format!("{} First model: {m}", outcome.text())));
-                } else {
-                    this.form.status =
-                        Some((!matches!(outcome, Outcome::Ok { .. }), outcome.text()));
+                    this.form
+                        .model
+                        .update(cx, |s, cx| s.set_value(m, window, cx));
                 }
                 cx.notify();
             });
@@ -279,7 +790,7 @@ impl Shell {
             self.form.status = Some((true, format!("Could not write synthesis.json: {e}")));
             return cx.notify();
         }
-        if let Err(e) = self.store.set(&valid.id, valid.key) {
+        if let Err(e) = self.store.set(&valid.id, valid.key.clone()) {
             self.form.status = Some((true, e.to_string()));
             return cx.notify();
         }
@@ -287,7 +798,19 @@ impl Shell {
             .key
             .update(cx, |s, cx| s.set_value("", window, cx));
         self.form.status = None;
+        let remembered = settings::Remembered {
+            kind: valid.kind.protocol().as_str().into(),
+            id: valid.id.clone(),
+            base_url: valid.url.url.to_string(),
+            model: model.clone().unwrap_or_default(),
+        };
+        if let Err(e) = settings::save_remembered(&self.home, &remembered) {
+            eprintln!("synthesis-desktop: provider not remembered: {e}");
+        }
+        self.provider = Some(valid.id);
+        self.model = None;
         self.screen = Screen::Main;
+        self.enter_main(cx);
         cx.notify();
     }
 }
@@ -394,7 +917,7 @@ impl Shell {
                                     .label("Test connection")
                                     .outline()
                                     .loading(f.busy)
-                                    .on_click(cx.listener(|this, _, _, cx| this.test_connection(cx))),
+                                    .on_click(cx.listener(|this, _, w, cx| this.test_connection(w, cx))),
                             )
                             .child(
                                 Button::new("save")
@@ -404,298 +927,6 @@ impl Shell {
                             ),
                     ),
             )
-            .into_any_element()
-    }
-
-    /// Sidebar 1, `Workspace`: the rail of workspaces (projects). One row today: the folder the
-    /// app was started in.
-    fn workspace_rail(&self, cx: &mut Context<Self>) -> AnyElement {
-        let rule = || div().h(px(1.)).my(px(8.)).bg(hsla(0x30333A));
-        let row = |id: &'static str, glyph: &str, text: String, active: bool| {
-            let r = h_flex()
-                .id(id)
-                .gap(px(12.))
-                .p(px(10.))
-                .my(px(2.))
-                .rounded(px(9.))
-                .text_size(px(13.))
-                .text_color(hsla(if active { 0xFFFFFF } else { 0xAAB0BA }))
-                .child(
-                    div()
-                        .w(px(16.))
-                        .text_color(hsla(0xB6BDC6))
-                        .child(glyph.to_string()),
-                )
-                .child(text);
-            r.when_active(active).cursor_pointer()
-        };
-        v_flex()
-            .w(px(210.))
-            .flex_shrink_0()
-            .h_full()
-            .justify_between()
-            .p(px(13.))
-            .bg(hsla(theme::SIDEBAR))
-            .border_r_1()
-            .border_color(hsla(0x2C3139))
-            .child(
-                v_flex()
-                    .child(
-                        div()
-                            .m(px(9.))
-                            .mb(px(16.))
-                            .text_size(px(12.))
-                            .child("SYNTHESIS"),
-                    )
-                    .child(
-                        Button::new("new-task")
-                            .label("New Task        ⌘N")
-                            .outline()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.nav = Nav::Session;
-                                cx.notify();
-                            })),
-                    )
-                    .child(rule())
-                    .child(row("search", "⌕", "Search        ⌘K".into(), false))
-                    .child(row("inbox", "▤", "Inbox".into(), false))
-                    .child(rule())
-                    .child(
-                        h_flex()
-                            .justify_between()
-                            .px(px(10.))
-                            .child(label("Workspace"))
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .text_color(hsla(theme::MUTED))
-                                    .child("+"),
-                            ),
-                    )
-                    .child(row("ws-current", "▣", self.project.clone(), true).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            this.nav = Nav::Session;
-                            cx.notify();
-                        }),
-                    )),
-            )
-            .child(
-                v_flex()
-                    .child(
-                        row(
-                            "config",
-                            "⚙",
-                            "Configuration".into(),
-                            self.nav == Nav::Configuration,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.nav = Nav::Configuration;
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        div()
-                            .px(px(10.))
-                            .pt(px(6.))
-                            .text_size(px(11.))
-                            .text_color(hsla(theme::MUTED))
-                            .child(format!(
-                                "v{} · {}",
-                                env!("CARGO_PKG_VERSION"),
-                                match (self.settings.mode, self.settings.plain_terminal) {
-                                    (Mode::Gpui, _) => "GPUI",
-                                    (Mode::Tui, false) => "TUI",
-                                    (Mode::Tui, true) => "TUI · plain terminal",
-                                }
-                            )),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    /// Sidebar 2, `Sessions`, for the selected workspace: tabs Sessions | Explorer | Changes.
-    fn sessions_panel(&self, cx: &mut Context<Self>) -> AnyElement {
-        let tab = |id: &'static str, text: &'static str, t: SideTab| {
-            let on = self.side_tab == t;
-            div()
-                .id(id)
-                .flex_1()
-                .py(px(6.))
-                .text_center()
-                .rounded(px(7.))
-                .text_size(px(12.))
-                .text_color(hsla(if on { 0xFFFFFF } else { theme::MUTED }))
-                .cursor_pointer()
-                .when(on, |d| d.bg(hsla(theme::NAV_ACTIVE)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.side_tab = t;
-                    cx.notify();
-                }))
-                .child(text)
-        };
-        let page = |id: &'static str, text: &'static str, n: Nav| {
-            div()
-                .id(id)
-                .text_size(px(12.))
-                .text_color(hsla(if self.nav == n {
-                    0xFFFFFF
-                } else {
-                    theme::MUTED
-                }))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.nav = n;
-                    cx.notify();
-                }))
-                .child(text)
-        };
-        let body = match self.side_tab {
-            SideTab::Sessions => v_flex()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .p(px(9.))
-                        .rounded(px(9.))
-                        .border_1()
-                        .border_color(hsla(0x30333A))
-                        .text_size(px(12.))
-                        .text_color(hsla(theme::MUTED))
-                        .child("⌕  Search sessions…"),
-                )
-                .child(label("Sessions"))
-                .child(empty("No sessions yet."))
-                .child(
-                    Button::new("new-session")
-                        .label("+ New session")
-                        .ghost()
-                        .small()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.nav = Nav::Session;
-                            cx.notify();
-                        })),
-                ),
-            SideTab::Explorer => v_flex().child(empty("The project file tree appears here.")),
-            SideTab::Changes => v_flex().child(empty("Changed files appear here.")),
-        };
-        v_flex()
-            .w(px(260.))
-            .flex_shrink_0()
-            .h_full()
-            .gap(px(10.))
-            .p(px(13.))
-            .bg(hsla(theme::SURFACE))
-            .border_r_1()
-            .border_color(hsla(0x2C3139))
-            .child(
-                h_flex()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(14.))
-                            .font_semibold()
-                            .child(self.project.clone()),
-                    )
-                    .child(div().text_color(hsla(theme::MUTED)).child("+")),
-            )
-            .child(
-                h_flex()
-                    .p(px(3.))
-                    .rounded(px(9.))
-                    .bg(hsla(theme::BG))
-                    .child(tab("t-sessions", "Sessions", SideTab::Sessions))
-                    .child(tab("t-explorer", "Explorer", SideTab::Explorer))
-                    .child(tab("t-changes", "Changes", SideTab::Changes)),
-            )
-            .child(
-                h_flex()
-                    .gap(px(12.))
-                    .child(page("p-activity", "Activity", Nav::Activity))
-                    .child(page("p-tools", "Tools", Nav::Tools))
-                    .child(page("p-topology", "Agent Topology", Nav::Topology)),
-            )
-            .child(body)
-            .into_any_element()
-    }
-
-    /// Main area: session tab, conversation, composer, file/diff viewer on the right, terminal
-    /// panel at the bottom, status line.
-    fn session(&self) -> AnyElement {
-        let tab = |t: &str, on: bool| {
-            div()
-                .px(px(14.))
-                .py(px(8.))
-                .text_size(px(12.))
-                .text_color(hsla(if on { 0xFFFFFF } else { theme::MUTED }))
-                .when(on, |d| d.border_b_1().border_color(hsla(theme::PEARL)))
-                .child(t.to_string())
-        };
-        v_flex()
-            .size_full()
-            .child(
-                h_flex()
-                    .border_b_1()
-                    .border_color(hsla(0x2D333B))
-                    .child(tab("New session", true)),
-            )
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        panel("Session", "No task running")
-                            .flex_1()
-                            .m(px(12.))
-                            .child(empty("Describe a goal in the composer to start a task."))
-                            .child(
-                                div()
-                                    .mt_auto()
-                                    .m(px(12.))
-                                    .p(px(15.))
-                                    .border_1()
-                                    .border_color(hsla(theme::INPUT_BORDER))
-                                    .rounded(px(11.))
-                                    .bg(hsla(0x232831))
-                                    .text_size(px(13.))
-                                    .text_color(hsla(0x9DA6B2))
-                                    .child("Ask Synthesis or add acceptance criteria…  ↗"),
-                            ),
-                    )
-                    .child(
-                        panel("File / Diff", "Code · Diff")
-                            .w(px(380.))
-                            .my(px(12.))
-                            .mr(px(12.))
-                            .child(empty("Open a file or a change to see it here.")),
-                    ),
-            )
-            .child(
-                panel("Terminal", "Terminal · Browser · Verification")
-                    .h(px(200.))
-                    .mx(px(12.))
-                    .child(empty("No terminal yet.")),
-            )
-            .child(
-                h_flex()
-                    .px(px(16.))
-                    .py(px(6.))
-                    .justify_between()
-                    .text_size(px(11.))
-                    .text_color(hsla(theme::MUTED))
-                    .child("0 tokens")
-                    .child("needs you: 0"),
-            )
-            .into_any_element()
-    }
-
-    fn page(&self, title: &str) -> AnyElement {
-        v_flex()
-            .size_full()
-            .p(px(24.))
-            .gap(px(12.))
-            .child(div().text_size(px(22.)).child(title.to_string()))
-            .child(empty(
-                "This page arrives in a later phase (docs/specs/desktop.md section 7).",
-            ))
             .into_any_element()
     }
 
@@ -756,19 +987,22 @@ impl Render for Shell {
         let body = match self.screen {
             Screen::Onboarding => self.onboarding(cx),
             Screen::Main => {
-                let content = match (self.nav, self.settings.mode) {
-                    (Nav::Configuration, _) => self.settings_page(cx),
-                    (Nav::Activity, _) => self.page("Activity"),
-                    (Nav::Tools, _) => self.page("Tools"),
-                    (Nav::Topology, _) => self.page("Agent Topology"),
-                    (Nav::Session, Mode::Tui) => self.term.clone().into_any_element(),
-                    (Nav::Session, Mode::Gpui) => self.session(),
+                let content = match self.nav {
+                    Nav::Configuration => self.settings_page(cx),
+                    Nav::Activity => self.activity_page(cx),
+                    Nav::Tools => self.tools_page(),
+                    Nav::Topology => self.topology_page(),
+                    Nav::Inbox => self.inbox_page(cx),
+                    Nav::Session => match self.settings.mode {
+                        Mode::Gpui => self.session_view(cx),
+                        Mode::Tui => self.mode1(cx),
+                    },
                 };
                 h_flex()
                     .size_full()
                     .child(self.workspace_rail(cx))
                     .child(self.sessions_panel(cx))
-                    .child(div().flex_1().h_full().child(content))
+                    .child(div().flex_1().min_w_0().h_full().child(content))
                     .into_any_element()
             }
         };
@@ -784,41 +1018,40 @@ impl Render for Shell {
                         .text_center()
                         .text_size(px(12.))
                         .text_color(hsla(theme::MUTED))
-                        .child(format!("Synthesis — {}", self.project)),
+                        .child(format!("Synthesis — {}", self.project_name())),
                 ),
             )
             .child(div().flex_1().min_h_0().child(body))
     }
 }
 
-// ------------------------------------------------------------------------- Mode 1 terminal pane
+// ------------------------------------------------------------------------- terminal pane
 
-/// The TUI in a terminal grid. D0: the TUI runs in this process against an in-memory terminal with
-/// a scripted model; D2 replaces the model with the real engine.
+/// A terminal grid fed by a [`TermSource`]: the TUI (agent mode), a shell on a PTY, or both in
+/// turn. The pane owns the source for its lifetime.
 pub struct TermPane {
     grid: vt::Grid,
-    rig: Option<crate::d0::Rig>,
+    source: TermSource,
     cells: Arc<Mutex<(u32, u32)>>,
+    sent: (u32, u32),
     focus: FocusHandle,
+    /// Take keyboard focus on first paint (the main terminal), not for side panels.
+    grab_focus: bool,
 }
 
 impl TermPane {
-    fn new(cx: &mut Context<Self>) -> Self {
-        let rig = crate::d0::start(
-            100,
-            30,
-            "D0 demo: this answer comes from a scripted model; the TUI runs inside this window.",
-        );
-        let cells = rig.size.clone();
-        let mut pane = Self {
-            grid: vt::Grid::new(100, 30),
-            rig: None,
-            cells,
+    fn new(mut source: TermSource, cx: &mut Context<Self>) -> Self {
+        let (c, r) = source.initial;
+        let bytes = std::mem::replace(&mut source.bytes, futures::channel::mpsc::unbounded().1);
+        let pane = Self {
+            grid: vt::Grid::new(c as usize, r as usize),
+            source,
+            cells: Arc::new(Mutex::new((c, r))),
+            sent: (c, r),
             focus: cx.focus_handle(),
+            grab_focus: false,
         };
-        let mut rig = rig;
-        let mut bytes = std::mem::replace(&mut rig.bytes, futures::channel::mpsc::unbounded().1);
-        pane.rig = Some(rig);
+        let mut bytes = bytes;
         cx.spawn(async move |this, cx| {
             while let Some(b) = bytes.next().await {
                 if this
@@ -847,11 +1080,15 @@ impl Render for TermPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (c, r) = *self.cells.lock().unwrap_or_else(|e| e.into_inner());
         self.grid.resize(c as usize, r as usize);
+        if (c, r) != self.sent {
+            self.sent = (c, r);
+            (self.source.resize)(c, r);
+        }
         let rows: Vec<_> = (0..self.grid.size().1).map(|i| self.grid.runs(i)).collect();
         let cursor = self.grid.cursor();
         let family = cx.theme().mono_font_family.clone();
         let cells = self.cells.clone();
-        if !self.focus.is_focused(window) {
+        if self.grab_focus && !self.focus.is_focused(window) {
             window.focus(&self.focus, cx);
         }
         let fam = family.clone();
@@ -865,11 +1102,10 @@ impl Render for TermPane {
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, _| {
                 let k = &ev.keystroke;
                 let m = k.modifiers;
-                if let (Some(bytes), Some(rig)) = (
-                    vt::encode_key(&k.key, k.key_char.as_deref(), m.control, m.alt, m.shift),
-                    &this.rig,
-                ) {
-                    let _ = rig.keys.send(bytes);
+                if let Some(bytes) =
+                    vt::encode_key(&k.key, k.key_char.as_deref(), m.control, m.alt, m.shift)
+                {
+                    (this.source.input)(bytes);
                 }
             }))
             .child(
@@ -878,7 +1114,7 @@ impl Render for TermPane {
                         let m = vt::metrics(&fam, px(FONT_SIZE), window);
                         let size = (
                             ((bounds.size.width / m.cell_w) as u32).max(20),
-                            ((bounds.size.height / m.line_h) as u32).max(5),
+                            ((bounds.size.height / m.line_h) as u32).max(3),
                         );
                         *cells.lock().unwrap_or_else(|e| e.into_inner()) = size;
                     },
@@ -892,15 +1128,7 @@ impl Render for TermPane {
 }
 
 /// Opens the main window.
-pub fn open(
-    screen: Screen,
-    nav: Nav,
-    home: PathBuf,
-    project: PathBuf,
-    env: Env,
-    store: Arc<dyn CredentialStore>,
-    cx: &mut App,
-) {
+pub fn open(l: Launch, cx: &mut App) {
     let opts = gpui::WindowOptions {
         titlebar: Some(TitleBar::title_bar_options()),
         window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::centered(
@@ -910,12 +1138,55 @@ pub fn open(
         ))),
         ..Default::default()
     };
+    let main = l.screen == Screen::Main;
+    #[cfg(feature = "shot")]
+    let shot = l.shot.clone();
+    let open_arg = l.open.clone();
     let r = cx.open_window(opts, move |window, cx| {
-        let view = cx.new(|cx| Shell::new(screen, nav, home, project, env, store, window, cx));
+        let view = cx.new(|cx| Shell::new(l, window, cx));
+        if main {
+            view.update(cx, |v, cx| {
+                v.enter_main(cx);
+                if let Some(o) = &open_arg {
+                    match o.strip_prefix("diff:") {
+                        Some(p) => v.open_file(p, true, cx),
+                        None => v.open_file(o, false, cx),
+                    }
+                }
+            });
+        }
         cx.new(|cx| Root::new(view, window, cx))
     });
-    if let Err(e) = r {
-        eprintln!("synthesis-desktop: cannot open the window: {e}");
-        cx.quit();
+    match r {
+        Err(e) => {
+            eprintln!("synthesis-desktop: cannot open the window: {e}");
+            cx.quit();
+        }
+        #[cfg(feature = "shot")]
+        Ok(handle) => {
+            if let Some((path, secs)) = shot {
+                cx.spawn(async move |cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(secs))
+                        .await;
+                    let _ = cx.update_window(handle.into(), |_, window, cx| {
+                        // a hidden window gets no frames: draw the latest state before the capture
+                        window.refresh();
+                        let needed = window.draw(cx);
+                        needed.clear(cx);
+                        let _ = window.render_to_image();
+                        match window.render_to_image().map(|i| i.save(&path)) {
+                            Ok(Ok(())) => eprintln!("synthesis-desktop: wrote {}", path.display()),
+                            Ok(Err(e)) => eprintln!("synthesis-desktop: png: {e}"),
+                            Err(e) => eprintln!("synthesis-desktop: render: {e}"),
+                        }
+                        cx.quit();
+                    });
+                })
+                .detach();
+            }
+        }
+        #[cfg(not(feature = "shot"))]
+        Ok(_) => {}
     }
 }
