@@ -961,3 +961,27 @@ async fn session_state_machine_is_enforced() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn bare_deny_hides_the_tool() {
+    let mut rig = Rig::new(
+        Opts {
+            tools: ToolBox::new(Registry::builtin()),
+            deny: vec!["Bash".into(), "Write(secret.txt)".into()],
+            ..Opts::default()
+        },
+        vec![Turn::text("done")],
+    );
+    rig.run("hi").await;
+    let names: Vec<_> = rig.requests()[0]
+        .tools
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    assert!(!names.contains(&"Bash".to_string()), "{names:?}");
+    assert!(
+        names.contains(&"Write".to_string()),
+        "a scoped deny keeps the tool: {names:?}"
+    );
+    assert!(names.contains(&"Read".to_string()));
+}

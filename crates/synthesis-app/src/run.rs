@@ -245,6 +245,9 @@ pub struct Common {
     /// Extra working directory the agent may access (repeatable).
     #[arg(long, value_name = "DIR")]
     pub add_dir: Vec<PathBuf>,
+    /// Fail (exit 2) unless this MCP server starts (repeatable).
+    #[arg(long, value_name = "NAME")]
+    pub require_mcp: Vec<String>,
     /// Minimal run: no hooks, no instruction files, no long-term memory.
     #[arg(long)]
     pub bare: bool,
@@ -1095,11 +1098,33 @@ pub fn prepare(
         (None, None)
     } else {
         let (m, t, warns) = tokio_rt.block_on(crate::mcp::start(&mplan, env, &ws.root));
-        for w in warns {
-            eprintln!("synth: warning: {}", sanitize_for_display(&w));
+        for w in &warns {
+            let w = sanitize_for_display(w);
+            eprintln!("synth: warning: {w}");
+            notices.push(w); // also a `notice` event, so a script sees the failure
+        }
+        // `--require-mcp NAME`: a server that did not come up ends the run before the model starts
+        for n in &c.require_mcp {
+            let quoted = format!("\"{}\"", sanitize_for_display(n));
+            if !mplan.servers.iter().any(|s| &s.name == n)
+                || warns.iter().any(|w| w.contains(&quoted))
+            {
+                tokio_rt.block_on(m.close());
+                return Err(format!("--require-mcp: MCP server {quoted} is not running"));
+            }
         }
         (Some(m), Some(t))
     };
+    if let Some(n) = c
+        .require_mcp
+        .iter()
+        .find(|n| mcp.is_none() || !mplan.servers.iter().any(|s| &s.name == *n))
+    {
+        return Err(format!(
+            "--require-mcp: MCP server \"{}\" is not configured or was not started",
+            sanitize_for_display(n)
+        ));
+    }
 
     // headless: a Bash call that times out is killed (D6)
     let mut toolbox = ToolBox::new(

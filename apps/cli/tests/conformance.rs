@@ -325,3 +325,23 @@ fn stdin_over_10mb_is_a_usage_error() {
     assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&o.stderr).contains("10 MB"));
 }
+
+#[test]
+fn failed_mcp_server_is_a_notice_event_and_required_mcp_exits_2() {
+    let rig = Rig::new();
+    let o = rig.synth(&["mcp", "add", "bad", "--", "/nonexistent/mcp-server"]);
+    assert!(o.status.success());
+    let (o, ev) = rig.run(text_script("ok"), &[]);
+    assert_eq!(o.status.code(), Some(0));
+    assert!(
+        ev.iter().any(|e| e["type"] == "notice"
+            && e["payload"]["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("failed to start"))),
+        "no notice event for the failed server"
+    );
+    let (o, _) = rig.run(text_script("ok"), &["--require-mcp", "bad"]);
+    assert_eq!(o.status.code(), Some(2));
+    let (o, _) = rig.run(text_script("ok"), &["--require-mcp", "missing"]);
+    assert_eq!(o.status.code(), Some(2));
+}

@@ -71,6 +71,9 @@ pub struct HookCommand {
     /// Failures of this hook do not block `PreToolUse` / `UserPromptSubmit` (default false).
     #[serde(default)]
     pub fail_open: bool,
+    /// Permission-rule filter (`Bash(git *)`): the hook runs only for a matching tool call.
+    #[serde(default, rename = "if")]
+    pub condition: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -146,12 +149,59 @@ pub struct Hooks {
     pub disabled: bool,
 }
 
-/// Full-match like Node's `^(?:pattern)$`; an invalid pattern matches nothing.
+/// Claude Code semantics: letters, digits, `_` and `|` are an exact list of names; anything else
+/// is an unanchored regex. An invalid pattern matches nothing.
 pub fn matcher_matches(pattern: Option<&str>, value: Option<&str>) -> bool {
     let Some(p) = pattern.filter(|p| !p.is_empty() && *p != "*") else {
         return true;
     };
-    Regex::new(&format!("^(?:{p})$")).is_ok_and(|re| re.is_match(value.unwrap_or("")))
+    if p.chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '|')
+    {
+        return p.split('|').any(|n| Some(n) == value);
+    }
+    Regex::new(p).is_ok_and(|re| re.is_match(value.unwrap_or("")))
+}
+
+/// `*` matches any run of characters.
+fn glob(pat: &str, s: &str) -> bool {
+    match pat.split_once('*') {
+        None => pat == s,
+        Some((head, rest)) => s.strip_prefix(head).is_some_and(|t| {
+            (0..=t.len())
+                .filter(|&i| t.is_char_boundary(i))
+                .any(|i| glob(rest, &t[i..]))
+        }),
+    }
+}
+
+/// The per-hook `if` field: `Tool` or `Tool(spec)` against the call in `payload`. A hook with
+/// an `if` never runs for an event that has no tool call.
+fn condition_holds(cond: &str, payload: &Value) -> bool {
+    let Some(tool) = payload.get("tool_name").and_then(Value::as_str) else {
+        return false;
+    };
+    let (name, spec) = match cond.strip_suffix(')').and_then(|c| c.split_once('(')) {
+        Some((n, s)) => (n, Some(s)),
+        None => (cond, None),
+    };
+    if name != tool {
+        return false;
+    }
+    let Some(spec) = spec else { return true };
+    let input = payload.get("tool_input");
+    let arg = ["command", "file_path", "path", "pattern", "url"]
+        .iter()
+        .find_map(|k| input.and_then(|i| i.get(k)).and_then(Value::as_str))
+        .unwrap_or("");
+    // `git:*` and `git *` are the prefix rule `git`
+    let spec = spec
+        .strip_suffix(":*")
+        .map_or(spec.to_string(), |p| format!("{p}*"));
+    if let Some(p) = spec.strip_suffix(" *").filter(|p| !p.contains('*')) {
+        return arg == p || arg.starts_with(&format!("{p} "));
+    }
+    glob(&spec, arg)
 }
 
 impl Hooks {
@@ -196,11 +246,19 @@ impl Hooks {
         // Dedupe by (matcher, command): the same entry merged in twice runs once.
         let mut seen = std::collections::HashSet::new();
         let mut commands = Vec::new();
+        // the matcher does not apply to events that have no tool or source to match
+        let matchless = matches!(event, HookEvent::UserPromptSubmit | HookEvent::Stop);
         for g in groups {
-            if !matcher_matches(g.matcher.as_deref(), matcher_target) {
+            if !matchless && !matcher_matches(g.matcher.as_deref(), matcher_target) {
                 continue;
             }
             for h in &g.hooks {
+                if h.condition
+                    .as_deref()
+                    .is_some_and(|c| !condition_holds(c, &payload))
+                {
+                    continue;
+                }
                 if h.kind == "command"
                     && !h.command.is_empty()
                     && seen.insert((g.matcher.clone().unwrap_or_default(), h.command.clone()))

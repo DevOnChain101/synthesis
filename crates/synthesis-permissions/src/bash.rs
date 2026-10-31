@@ -147,6 +147,12 @@ fn redirect_ok(s: &[char]) -> Option<usize> {
 /// reason about it: substitution, backticks, process substitution, here-docs, unbalanced quotes,
 /// output redirection other than /dev/null and 2>&1. Port of `parseSimpleCommands`.
 pub fn parse_simple_commands(cmd: &str) -> Option<Vec<Words>> {
+    // a compound that ends in an operator is incomplete, and a very long command is never
+    // auto-allowed (Claude Code: 10,000 characters)
+    let t = cmd.trim_end();
+    if t.ends_with("&&") || t.ends_with('|') || cmd.len() > 10_000 {
+        return None;
+    }
     let chars: Vec<char> = cmd.chars().collect();
     let mut segs: Vec<Words> = Vec::new();
     let mut words: Words = Vec::new();
@@ -974,8 +980,13 @@ pub fn unwrap_words(words: &[String], loose: bool) -> Words {
             } else if loose && w.front().is_some_and(|n| NICE_L.is_match(n)) {
                 w.pop_front();
             }
-        } else if a == "nohup" {
+        } else if a == "nohup" || a == "time" || a == "command" {
             w.pop_front();
+        } else if a == "stdbuf" && w.get(1).is_some_and(|x| x.starts_with('-')) {
+            w.pop_front();
+            while w.front().is_some_and(|x| x.starts_with('-')) {
+                w.pop_front();
+            }
         } else if loose
             && matches!(
                 a.as_str(),
@@ -1539,13 +1550,15 @@ pub fn bash_all_match_or(
         && !specs.is_empty()
         && segs.iter().all(|w| {
             let j = w.join(" ");
+            // `time`, `timeout 5`, `nohup`, `stdbuf -oL`, `command` do not change what runs
+            let unwrapped = unwrap_words(w, false).join(" ");
             let inline = runs_inline_code(w, true);
             // `also` runs for every segment so it can track state such as `cd`
             let safe = also(w);
-            specs
-                .iter()
-                .any(|sp| !(inline && sp.contains('*')) && spec_matches(sp, &j, true))
-                || safe
+            specs.iter().any(|sp| {
+                !(inline && sp.contains('*'))
+                    && (spec_matches(sp, &j, true) || spec_matches(sp, &unwrapped, true))
+            }) || safe
         })
 }
 
@@ -1615,6 +1628,23 @@ mod space_star_tests {
         assert!(!bash_all_match(
             &r(&["Bash(python *)"]),
             "python -c 'print(1)'"
+        ));
+        // wrappers are stripped for allow; a trailing operator or a huge command is unparseable
+        let git = r(&["Bash(git status:*)"]);
+        for c in [
+            "time git status",
+            "timeout 5 git status",
+            "nohup git status",
+            "stdbuf -oL git status",
+            "command git status",
+        ] {
+            assert!(bash_all_match(&git, c), "{c}");
+        }
+        assert!(!bash_all_match(&git, "git status &&"));
+        assert!(!bash_all_match(&git, "git status |"));
+        assert!(!bash_all_match(
+            &git,
+            &format!("git status {}", "a ".repeat(6000))
         ));
     }
 }
