@@ -742,8 +742,8 @@ fn entry(a: &AddArgs) -> Result<Value, String> {
         }
         _ => return Err("give either --url URL or a command after `--`".into()),
     }
-    if !matches!(a.transport.as_str(), "http" | "sse") {
-        return Err("--transport must be http or sse".into());
+    if !matches!(a.transport.as_str(), "http" | "sse" | "ws") {
+        return Err("--transport must be http, sse or ws".into());
     }
     let env: Result<serde_json::Map<String, Value>, String> = a
         .env
@@ -776,7 +776,14 @@ fn edit_file(path: &Path, name: &str, value: Option<Value>) -> Result<bool, Stri
                 "{} is not a JSON object; fix it by hand first",
                 path.display()
             ))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
+        // a fresh synthesis.json needs `$schema` or every command rejects it; `.mcp.json` has none
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if path.file_name().is_some_and(|n| n == "synthesis.json") {
+                json!({"$schema": synthesis_config::SCHEMA_V1})
+            } else {
+                json!({})
+            }
+        }
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
     let servers = root
@@ -1447,6 +1454,13 @@ mod tests {
         assert_eq!(v["mcpServers"]["s"]["args"][1], "https://h/sse");
         assert_eq!(v["mcpServers"]["s"]["env"]["API_TOKEN"], "${ATL_TOKEN}");
         assert!(edit_file(&f, "s", None).unwrap() && !edit_file(&f, "s", None).unwrap());
+
+        // F-1: a fresh home gets a config the real loader accepts
+        let fresh = d.path().join("fresh").join("synthesis.json");
+        let e = entry(&add("s", |a| a.command = vec!["echo".into(), "hi".into()])).unwrap();
+        assert!(edit_file(&fresh, "s", Some(e)).unwrap());
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&fresh).unwrap()).unwrap();
+        assert!(synthesis_config::validate_versioned_config(&v, "synthesis.json").is_ok());
 
         let literal = entry(&add("s", |a| {
             a.url = Some("https://h/mcp".into());

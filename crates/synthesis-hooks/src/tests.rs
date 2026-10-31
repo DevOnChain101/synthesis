@@ -449,3 +449,55 @@ fn default_timeout_is_60s_for_gating_events_and_600s_for_the_rest() {
         assert_eq!(default_timeout_secs(e), 600, "{e:?}");
     }
 }
+
+#[test]
+fn matcher_is_an_exact_list_or_an_unanchored_regex() {
+    assert!(matcher_matches(Some("Edit|Write"), Some("Write")));
+    assert!(
+        !matcher_matches(Some("Writ"), Some("Write")),
+        "a plain list is exact"
+    );
+    assert!(matcher_matches(Some("Wri.*"), Some("Write")));
+    assert!(
+        !matcher_matches(Some("rit"), Some("Write")),
+        "plain names are exact"
+    );
+    assert!(matcher_matches(Some("^W.*e$|zzz"), Some("Write")));
+    assert!(matcher_matches(Some("mcp__.*"), Some("mcp__a__b")));
+    assert!(
+        matcher_matches(Some("rit."), Some("Write")),
+        "regex is unanchored"
+    );
+}
+
+#[tokio::test]
+async fn matcher_is_ignored_on_stop_and_user_prompt_submit() {
+    let f = fx();
+    let h = f.hooks(cfg("Stop", Some("zzz"), &["exit 0"]));
+    let r = run(&h, HookEvent::Stop, None).await;
+    assert_eq!(r.results.len(), 1, "a Stop hook with any matcher fires");
+}
+
+#[tokio::test]
+async fn per_hook_if_filters_by_tool_call() {
+    let f = fx();
+    let c = json!({"PreToolUse": [{"hooks": [
+        {"type": "command", "command": "exit 0", "if": "Bash(ls *)"},
+        {"type": "command", "command": "true", "if": "Bash(git *)"},
+        {"type": "command", "command": "echo any", "if": "Bash"},
+        {"type": "command", "command": "echo edit", "if": "Edit"}
+    ]}]});
+    let h = f.hooks(c);
+    // `run` sends {"tool_name":"Bash","tool_input":{"command":"ls"}}
+    let r = run(&h, HookEvent::PreToolUse, Some("Bash")).await;
+    let cmds: Vec<_> = r.results.iter().map(|x| x.command.as_str()).collect();
+    assert_eq!(cmds, ["exit 0", "echo any"], "{cmds:?}");
+}
+
+#[tokio::test]
+async fn pre_compact_exit_2_is_reported_as_blocked() {
+    let f = fx();
+    let h = f.hooks(cfg("PreCompact", None, &["echo no >&2; exit 2"]));
+    let r = run(&h, HookEvent::PreCompact, None).await;
+    assert!(r.blocked);
+}

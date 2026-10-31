@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use clap::{Args, ValueEnum};
 use serde_json::Value;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use synthesis_config::{Config, Env, LoadContext, ProjectTrust, parse_model, resolve_credential};
 use synthesis_core::{AgentSession, BudgetUsage, SessionStatus, WorkspaceContext};
@@ -15,13 +16,15 @@ use synthesis_harness::{
     Approval, ApprovalRequest, Approver, BoxFut, EventSink, Harness, HarnessConfig, Pricing, Scope,
     TaskOutcome, TaskRequest, ToolBox, budget_from_settings, from_mode, sanitize_for_display,
 };
-use synthesis_hooks::Hooks;
+use synthesis_hooks::{HookEvent, Hooks};
 use synthesis_mcp::McpManager;
 use synthesis_permissions::{Mode, PermissionRules, Permissions};
-use synthesis_providers::{ModelProvider, NetSettings, ProviderSpec, RetryPolicy};
+use synthesis_providers::{
+    Content, Message, ModelProvider, NetSettings, ProviderSpec, RetryPolicy, Role,
+};
 use synthesis_sandbox::{NetworkPolicy, SandboxBackend, SandboxPolicy, SandboxedCommand};
 use synthesis_session::{NewSession, Retention, Store as SessionStore, StoreOptions};
-use synthesis_settings::load_settings;
+use synthesis_settings::load_settings_with_file;
 use synthesis_terminal::{Guarantee, SandboxMode, TerminalRuntime};
 use synthesis_tools::{Registry, standard_policy_git};
 use synthesis_verification::{CompletionGate, Criterion, VerifyRunner};
@@ -36,6 +39,7 @@ use crate::{homes, load_config};
 
 #[derive(Clone, Copy, ValueEnum)]
 pub enum ModeArg {
+    #[value(alias = "manual")]
     Default,
     #[value(name = "acceptEdits")]
     AcceptEdits,
@@ -195,11 +199,11 @@ pub struct Common {
     /// Allow a tool call without asking, e.g. `--allow 'Bash(cargo test:*)'` (settings rule
     /// syntax; repeatable). Typed by you, so trusted; it cannot lift critical-path or
     /// protected-path protections.
-    #[arg(long, value_name = "RULE")]
+    #[arg(long, alias = "allowedTools", value_name = "RULE")]
     pub allow: Vec<String>,
     /// Deny a tool call, e.g. `--deny 'Bash(git push:*)'` (settings rule syntax; repeatable).
     /// Deny wins over every allow.
-    #[arg(long, value_name = "RULE")]
+    #[arg(long, alias = "disallowedTools", value_name = "RULE")]
     pub deny: Vec<String>,
     /// Work in an isolated git worktree on branch `synthesis/<session>`; left in place for review.
     #[arg(long)]
@@ -215,6 +219,52 @@ pub struct Common {
     /// among live sessions of the workspace. Only used with peers on.
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
+    /// Continue a stored session by id (or unique id prefix) with the new prompt.
+    #[arg(long, value_name = "ID", conflicts_with = "continue_session")]
+    pub resume: Option<String>,
+    /// Continue the most recent session of this workspace.
+    #[arg(long = "continue", short = 'c')]
+    pub continue_session: bool,
+    /// With --resume/--continue: start a new session seeded with the stored conversation.
+    #[arg(long)]
+    pub fork_session: bool,
+    /// Replace the default system rules (the untrusted-data rule stays).
+    #[arg(long, value_name = "TEXT", conflicts_with = "system_prompt_file")]
+    pub system_prompt: Option<String>,
+    #[arg(long, value_name = "FILE")]
+    pub system_prompt_file: Option<PathBuf>,
+    /// Add text after the system rules.
+    #[arg(
+        long,
+        value_name = "TEXT",
+        conflicts_with = "append_system_prompt_file"
+    )]
+    pub append_system_prompt: Option<String>,
+    #[arg(long, value_name = "FILE")]
+    pub append_system_prompt_file: Option<PathBuf>,
+    /// Extra working directory the agent may access (repeatable).
+    #[arg(long, value_name = "DIR")]
+    pub add_dir: Vec<PathBuf>,
+    /// Extra settings.json layered above local settings (managed settings still win).
+    #[arg(long, value_name = "FILE")]
+    pub settings: Option<PathBuf>,
+    /// Fail (exit 2) unless this MCP server starts (repeatable).
+    #[arg(long, value_name = "NAME")]
+    pub require_mcp: Vec<String>,
+    /// Minimal run: no hooks, no instruction files, no long-term memory.
+    #[arg(long)]
+    pub bare: bool,
+}
+
+/// `--output-format`: what `synth run` prints on stdout.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// The final assistant message only.
+    Text,
+    /// One JSON object (result, session id, usage, status, exit code).
+    Json,
+    /// The JSONL event stream (default; docs/specs/events.md).
+    StreamJson,
 }
 
 #[derive(Args)]
@@ -222,7 +272,7 @@ pub struct RunArgs {
     /// Workspace directory (default: the current directory).
     #[arg(long)]
     cwd: Option<PathBuf>,
-    #[arg(long, conflicts_with = "prompt_file")]
+    #[arg(long, short = 'p', conflicts_with = "prompt_file")]
     prompt: Option<String>,
     #[arg(long)]
     prompt_file: Option<PathBuf>,
@@ -241,6 +291,12 @@ pub struct RunArgs {
     /// Also write the event stream to this file.
     #[arg(long)]
     events_out: Option<PathBuf>,
+    /// What stdout carries: text (final message), json (one result object) or stream-json (events).
+    #[arg(long, value_enum, default_value = "stream-json")]
+    output_format: OutputFormat,
+    /// JSON Schema (inline JSON or a file) the final answer must satisfy; exit 1 when it does not.
+    #[arg(long, value_name = "SCHEMA")]
+    json_schema: Option<String>,
     #[command(flatten)]
     common: Common,
 }
@@ -258,6 +314,8 @@ pub enum Front {
     Headless {
         prompt: String,
         tee: Option<std::fs::File>,
+        /// False for `--output-format text|json`: events go to the store and `--events-out` only.
+        stdout_events: bool,
         /// Set (and the run cancelled) when stdout is closed by the reader.
         closed: Arc<std::sync::atomic::AtomicBool>,
     },
@@ -284,6 +342,69 @@ pub struct Prepared {
     pub homes: crate::Homes,
     /// Open long-term memory store (None with --no-memory, a failure, or `synthesis.memory.enabled: false`).
     pub memory: Option<Arc<crate::memcmd::MemoryRun>>,
+    /// Stored conversation of `--resume/--continue/--fork-session` (the next task's history).
+    pub history: Vec<Message>,
+    /// Set when the stored session itself continues: the last event seq it had.
+    pub resumed_from_seq: Option<u64>,
+}
+
+/// The stored session `--resume ID` / `--continue` names and its live (non-compacted) messages.
+fn resolve_resume(
+    c: &Common,
+    h: &crate::Homes,
+    cwd: &Path,
+) -> Result<Option<(String, Vec<Message>)>, String> {
+    if c.resume.is_none() && !c.continue_session {
+        if c.fork_session {
+            return Err("--fork-session needs --resume ID or --continue".into());
+        }
+        return Ok(None);
+    }
+    let r = synthesis_session::Reader::open(&h.synthesis).map_err(|e| e.to_string())?;
+    let id = match &c.resume {
+        Some(p) if !p.trim().is_empty() => {
+            let all = r.list_sessions(None).map_err(|e| e.to_string())?;
+            let hits: Vec<_> = all
+                .iter()
+                .filter(|s| s.id.starts_with(p.as_str()))
+                .collect();
+            match hits.as_slice() {
+                [one] => one.id.clone(),
+                [] => return Err(format!("--resume: no saved session matches \"{p}\"")),
+                many => many
+                    .iter()
+                    .find(|s| s.id == *p)
+                    .map(|s| s.id.clone())
+                    .ok_or(format!(
+                        "--resume: \"{p}\" matches {} sessions; use a longer id",
+                        many.len()
+                    ))?,
+            }
+        }
+        Some(_) => return Err("--resume: empty session id".into()),
+        None => r
+            .list_sessions(Some(&cwd.to_string_lossy()))
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|s| s.parent.is_none())
+            .map(|s| s.id)
+            .ok_or("--continue: no saved session for this directory")?,
+    };
+    let mut history = Vec::new();
+    for m in r.read_messages(&id).map_err(|e| e.to_string())? {
+        let role = match m.role.as_str() {
+            "user" => Role::User,
+            "assistant" => Role::Assistant,
+            _ => continue,
+        };
+        if m.compacted {
+            continue;
+        }
+        let content: Content = serde_json::from_value(m.content)
+            .map_err(|e| format!("message {} of {id}: {e}", m.idx))?;
+        history.push(Message { role, content });
+    }
+    Ok(Some((id, history)))
 }
 
 /// Rows of `{"synthesis":{"pricing":{"<provider/model>"|"<model>": {input_per_mtok, output_per_mtok}}}}`
@@ -445,7 +566,7 @@ pub fn prepare(
     } else {
         cfg.clone()
     };
-    let settings = load_settings(&lc, trust);
+    let settings = load_settings_with_file(&lc, trust, c.settings.as_deref());
     // A settings file we cannot read would silently drop its deny rules: stop before anything runs
     // (`synth run` exits 2).
     if !settings.errors.is_empty() {
@@ -455,7 +576,7 @@ pub fn prepare(
         ));
     }
     let user_settings = if c.trust_project {
-        load_settings(&lc, ProjectTrust::Untrusted)
+        load_settings_with_file(&lc, ProjectTrust::Untrusted, c.settings.as_deref())
     } else {
         settings.clone()
     };
@@ -544,7 +665,28 @@ pub fn prepare(
         })
         .collect();
 
-    let sid = uuid::Uuid::new_v4().to_string();
+    for d in &c.add_dir {
+        match std::fs::canonicalize(d) {
+            Ok(p) if p.is_dir() => extra_dirs.push(p),
+            _ => {
+                return Err(format!(
+                    "--add-dir {}: not an existing directory",
+                    d.display()
+                ));
+            }
+        }
+    }
+    let resume = resolve_resume(c, &h, cwd)?;
+    if resume.is_some() && (c.worktree || c.no_session_store) {
+        return Err(
+            "--resume/--continue cannot be combined with --worktree or --no-session-store".into(),
+        );
+    }
+    let in_place = resume.is_some() && !c.fork_session;
+    let sid = match &resume {
+        Some((id, _)) if in_place => id.clone(),
+        _ => uuid::Uuid::new_v4().to_string(),
+    };
     let artifact_root = h.synthesis.join("sessions").join(&sid);
     let (ws, worktree) = if c.worktree {
         if !extra_dirs.is_empty() {
@@ -567,7 +709,7 @@ pub fn prepare(
             None,
         )
     };
-    let session = AgentSession {
+    let mut session = AgentSession {
         id: sid.clone(),
         task_id: None,
         status: SessionStatus::Created,
@@ -637,6 +779,7 @@ pub fn prepare(
         eprintln!("synth: WARNING: {n}");
     }
 
+    let mut resumed_from_seq = None;
     let store: Option<Store> = if c.no_session_store {
         None
     } else {
@@ -651,6 +794,9 @@ pub fn prepare(
         };
         let w = SessionStore::open(&h.synthesis, opts)
             .and_then(|s| {
+                if in_place {
+                    return s.resume_session(&sid, true);
+                }
                 s.create_session(NewSession {
                     id: Some(sid.clone()),
                     workspace: &ws,
@@ -665,9 +811,30 @@ pub fn prepare(
             .map_err(|e| {
                 format!("session store: {e} (use --no-session-store to run without it)")
             })?;
+        let mut w = w;
+        if in_place {
+            // terminal -> idle, interrupted -> recovering: the states the harness continues from
+            let to = match w.get_session(&sid).map_err(|e| e.to_string())?.status {
+                SessionStatus::Interrupted => Some(SessionStatus::Recovering),
+                SessionStatus::Idle => None,
+                s if s.is_task_terminal() => Some(SessionStatus::Idle),
+                s => return Err(format!("session {sid} is {s:?} and cannot be resumed")),
+            };
+            if let Some(to) = to {
+                w.update_status(to, Some("resumed"))
+                    .map_err(|e| e.to_string())?;
+                session.status = to;
+            } else {
+                session.status = SessionStatus::Idle;
+            }
+            resumed_from_seq = Some(w.get_session(&sid).map_err(|e| e.to_string())?.event_cursor);
+        }
         Some(Arc::new(Mutex::new(w)))
     };
     let transcript = store.clone().map(|s| Arc::new(Transcript::new(s)));
+    if let (true, Some(t), Some((_, hist))) = (in_place, &transcript, &resume) {
+        t.skip(hist.len());
+    }
     let derived = match (&store, &transcript) {
         (Some(_), Some(t)) => match TaskDb::open(&h.synthesis, &sid, res.secrets.clone()) {
             Ok(db) => Some((db, t.clone())),
@@ -682,13 +849,25 @@ pub fn prepare(
     let Front::Headless {
         prompt,
         tee,
+        stdout_events,
         closed,
     } = front;
-    let out: Box<dyn std::io::Write + Send> = Box::new(std::io::stdout());
+    let out: Box<dyn std::io::Write + Send> = if stdout_events {
+        Box::new(std::io::stdout())
+    } else {
+        Box::new(std::io::sink())
+    };
     let approver: Arc<dyn Approver> = Arc::new(AuditDeny);
     let closed = Some((closed, cancel.clone()));
     let sink = EventSink::new(
-        Persist::new(out, tee, store.clone(), derived, 0, closed),
+        Persist::new(
+            out,
+            tee,
+            store.clone(),
+            derived,
+            resumed_from_seq.unwrap_or(0),
+            closed,
+        ),
         sid.clone(),
         res.secrets.clone(),
     );
@@ -819,11 +998,15 @@ pub fn prepare(
         0..0,
         crate::ctx::load_auto_memory(&h.synthesis, &[&ws.root, &ws.cwd]),
     );
+    instructions.extend(crate::ctx::load_rules(&ws.root));
+    if c.bare {
+        instructions.clear();
+    }
     let repo = crate::memcmd::repo_of(&ws.root);
     let small = crate::memcmd::small_model(&cfg, &res.label, &res.model);
     let (memory, memory_block) = crate::memcmd::start(
         &crate::memcmd::StartArgs {
-            enabled: !c.no_memory,
+            enabled: !c.no_memory && !c.bare,
             home: &h,
             repo: &repo,
             prompt: &prompt,
@@ -857,7 +1040,19 @@ pub fn prepare(
         put,
     )
     .with_skills(&skills)
-    .with_memory(memory_block);
+    .with_memory(memory_block)
+    .with_system_prompt(
+        text_or_file(
+            &c.system_prompt,
+            &c.system_prompt_file,
+            "--system-prompt-file",
+        )?,
+        text_or_file(
+            &c.append_system_prompt,
+            &c.append_system_prompt_file,
+            "--append-system-prompt-file",
+        )?,
+    );
     if let Some(t) = &transcript {
         context = context.with_transcript(t.clone());
     }
@@ -928,11 +1123,33 @@ pub fn prepare(
         (None, None)
     } else {
         let (m, t, warns) = tokio_rt.block_on(crate::mcp::start(&mplan, env, &ws.root));
-        for w in warns {
-            eprintln!("synth: warning: {}", sanitize_for_display(&w));
+        for w in &warns {
+            let w = sanitize_for_display(w);
+            eprintln!("synth: warning: {w}");
+            notices.push(w); // also a `notice` event, so a script sees the failure
+        }
+        // `--require-mcp NAME`: a server that did not come up ends the run before the model starts
+        for n in &c.require_mcp {
+            let quoted = format!("\"{}\"", sanitize_for_display(n));
+            if !mplan.servers.iter().any(|s| &s.name == n)
+                || warns.iter().any(|w| w.contains(&quoted))
+            {
+                tokio_rt.block_on(m.close());
+                return Err(format!("--require-mcp: MCP server {quoted} is not running"));
+            }
         }
         (Some(m), Some(t))
     };
+    if let Some(n) = c
+        .require_mcp
+        .iter()
+        .find(|n| mcp.is_none() || !mplan.servers.iter().any(|s| &s.name == *n))
+    {
+        return Err(format!(
+            "--require-mcp: MCP server \"{}\" is not configured or was not started",
+            sanitize_for_display(n)
+        ));
+    }
 
     // headless: a Bash call that times out is killed (D6)
     let mut toolbox = ToolBox::new(
@@ -994,7 +1211,7 @@ pub fn prepare(
             }
         }));
     }
-    if !settings.disable_all_hooks && !settings.hooks.is_empty() {
+    if !c.bare && !settings.disable_all_hooks && !settings.hooks.is_empty() {
         harness = harness.with_hooks(Arc::new(Hooks::new(
             rt.clone(),
             sid.clone(),
@@ -1034,11 +1251,25 @@ pub fn prepare(
         label: res.label,
         homes: h,
         memory,
+        history: resume.map(|(_, hist)| hist).unwrap_or_default(),
+        resumed_from_seq,
     })
 }
 
 pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
     let prompt = read_prompt(&a)?;
+    let schema = a.json_schema.as_deref().map(parse_schema).transpose()?;
+    let mut common = a.common.clone();
+    if let Some((raw, _)) = &schema {
+        let note = format!(
+            "Your final answer must be only a JSON value that conforms to this JSON Schema, with no other text:\n{raw}"
+        );
+        common.append_system_prompt = Some(match common.append_system_prompt.take() {
+            Some(t) => format!("{t}\n\n{note}"),
+            None => note,
+        });
+    }
+    let format = a.output_format;
     let mut criteria = a
         .criteria_file
         .as_deref()
@@ -1070,13 +1301,14 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
     };
     let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let p = prepare(
-        &a.common,
+        &common,
         &cwd,
         &env,
         &limits,
         Front::Headless {
             prompt: prompt.clone(),
             tee,
+            stdout_events: format == OutputFormat::StreamJson,
             closed: closed.clone(),
         },
     )?;
@@ -1096,6 +1328,8 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
         worktree,
         artifact_root,
         memory,
+        history,
+        resumed_from_seq,
         ..
     } = p;
     let cleanup = a.common.cleanup_worktree;
@@ -1106,11 +1340,26 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
         let task = tokio::spawn(async move {
             let mut session = session;
             let r = async {
-                h2.start_session(&mut session, "startup")?;
+                match resumed_from_seq {
+                    Some(seq) => h2.resume_session(&session, seq),
+                    None => h2.start_session(&mut session, "startup")?,
+                }
+                h2.session_hook(
+                    HookEvent::SessionStart,
+                    json!({"source": if resumed_from_seq.is_some() { "resume" } else { "startup" }}),
+                    Some(if resumed_from_seq.is_some() { "resume" } else { "startup" }),
+                )
+                .await;
                 if let Some(m) = &memory2 {
                     crate::memcmd::announce(m);
                 }
                 for n in notices {
+                    h2.session_hook(
+                        HookEvent::Notification,
+                        json!({"message": n, "notification_type": "notice"}),
+                        Some("notice"),
+                    )
+                    .await;
                     sink2.emit(
                         &Scope::default(),
                         Event::Notice {
@@ -1125,7 +1374,7 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
                         TaskRequest {
                             request: prompt,
                             criteria,
-                            history: vec![],
+                            history,
                             display_text: None,
                         },
                         cancel,
@@ -1143,6 +1392,12 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
                         },
                     );
                 }
+                h2.session_hook(
+                    HookEvent::SessionEnd,
+                    json!({"reason": out.reason}),
+                    Some(&out.reason),
+                )
+                .await;
                 // before the terminal session event, so the stream still ends with it
                 if let Some(m) = &memory2 {
                     let verified = h2.verified_commands(&out.task_id);
@@ -1169,7 +1424,18 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
                 if let Some(h) = blocked_hint(&out) {
                     eprintln!("{h}");
                 }
-                exit_code(out.status)
+                let mut code = exit_code(out.status);
+                let structured = match schema.as_ref().map(|(_, v)| check_schema(v, &out.final_text)) {
+                    Some(Err(e)) => {
+                        eprintln!("synth: --json-schema: {e}");
+                        code = code.max(1);
+                        None
+                    }
+                    Some(Ok(v)) => Some(v),
+                    None => None,
+                };
+                print_result(format, &out, &sid, code, structured);
+                code
             }
             Ok(Err(e)) => {
                 eprintln!("synth: internal error: {e}");
@@ -1205,6 +1471,71 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
     Ok(code)
 }
 
+/// `--json-schema`: inline JSON or a file; returns the text shown to the model and the schema.
+fn parse_schema(arg: &str) -> Result<(String, Value), String> {
+    let raw = if arg.trim_start().starts_with('{') || arg.trim() == "true" {
+        arg.to_string()
+    } else {
+        std::fs::read_to_string(arg).map_err(|e| format!("--json-schema {arg}: {e}"))?
+    };
+    let v: Value = serde_json::from_str(&raw).map_err(|e| format!("--json-schema: {e}"))?;
+    jsonschema::validator_for(&v).map_err(|e| format!("--json-schema: {e}"))?;
+    Ok((raw, v))
+}
+
+/// The final answer (optionally in a code fence) parsed and validated against `schema`.
+fn check_schema(schema: &Value, text: &str) -> Result<Value, String> {
+    let t = text.trim();
+    let t = t
+        .strip_prefix("```json")
+        .or_else(|| t.strip_prefix("```"))
+        .and_then(|r| r.strip_suffix("```"))
+        .unwrap_or(t);
+    let v: Value =
+        serde_json::from_str(t.trim()).map_err(|e| format!("the answer is not JSON: {e}"))?;
+    let validator = jsonschema::validator_for(schema).map_err(|e| e.to_string())?;
+    let first = validator.iter_errors(&v).next().map(|e| e.to_string());
+    match first {
+        None => Ok(v),
+        Some(e) => Err(format!("the answer does not match the schema: {e}")),
+    }
+}
+
+/// stdout for `--output-format text|json` (stream-json already printed the events).
+fn print_result(
+    f: OutputFormat,
+    out: &TaskOutcome,
+    sid: &str,
+    code: u8,
+    structured: Option<Value>,
+) {
+    match f {
+        OutputFormat::StreamJson => {}
+        OutputFormat::Text => match structured {
+            Some(v) => println!("{v}"),
+            None => println!("{}", out.final_text),
+        },
+        OutputFormat::Json => {
+            let mut r = json!({
+                "type": "result",
+                "status": out.status,
+                "is_error": code != 0,
+                "exit_code": code,
+                "reason": out.reason,
+                "result": out.final_text,
+                "session_id": sid,
+                "task_id": out.task_id,
+                "usage": out.usage,
+                "changed_files": out.changed_files,
+            });
+            if let Some(v) = structured {
+                r["structured_output"] = v;
+            }
+            println!("{r}");
+        }
+    }
+}
+
 /// Flushes the conversation tail and the usage to the store.
 pub fn finish_store(
     store: &Store,
@@ -1224,6 +1555,9 @@ pub fn finish_store(
     }
 }
 
+/// Largest prompt read from stdin (Claude Code: 10 MB).
+const MAX_STDIN_PROMPT: u64 = 10 << 20;
+
 fn read_prompt(a: &RunArgs) -> Result<String, String> {
     let p = match (&a.prompt, &a.prompt_file) {
         (Some(p), _) => p.clone(),
@@ -1236,8 +1570,15 @@ fn read_prompt(a: &RunArgs) -> Result<String, String> {
             }
             let mut s = String::new();
             std::io::stdin()
+                .take(MAX_STDIN_PROMPT + 1)
                 .read_to_string(&mut s)
                 .map_err(|e| format!("stdin: {e}"))?;
+            if s.len() as u64 > MAX_STDIN_PROMPT {
+                return Err(format!(
+                    "the prompt on stdin is over the {} MB limit; use --prompt-file or shorten it",
+                    MAX_STDIN_PROMPT >> 20
+                ));
+            }
             s
         }
     };
@@ -1245,6 +1586,20 @@ fn read_prompt(a: &RunArgs) -> Result<String, String> {
         return Err("empty prompt".into());
     }
     Ok(p)
+}
+
+fn text_or_file(
+    t: &Option<String>,
+    f: &Option<PathBuf>,
+    flag: &str,
+) -> Result<Option<String>, String> {
+    match (t, f) {
+        (Some(t), _) => Ok(Some(t.clone())),
+        (_, Some(f)) => std::fs::read_to_string(f)
+            .map(Some)
+            .map_err(|e| format!("{flag} {}: {e}", f.display())),
+        _ => Ok(None),
+    }
 }
 
 fn read_criteria(f: &Path) -> Result<Vec<Criterion>, String> {

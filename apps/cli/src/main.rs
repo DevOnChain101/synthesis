@@ -16,7 +16,7 @@ mod info;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use synthesis_app::{CwdArg, mcp, memcmd, run};
+use synthesis_app::{CwdArg, mcp, memcmd, rewind, run};
 use synthesis_config::Env;
 
 #[derive(Parser)]
@@ -54,6 +54,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: import::ImportCmd,
     },
+    /// Put the files a run changed back to their state before its first write (dry run unless --apply).
+    Rewind(rewind::RewindArgs),
     /// Long-term memory: list, search, add, review, export (data only; never permissions).
     Memory {
         #[command(subcommand)]
@@ -79,6 +81,7 @@ fn main() -> ExitCode {
         Cmd::Mcp { cmd } => mcp::run_cmd(&env, cmd),
         Cmd::Import { cmd } => import::run_cmd(&env, cmd),
         Cmd::Memory { cmd } => memcmd::run_cmd(&env, cmd),
+        Cmd::Rewind(a) => rewind::run_cmd(&env, a),
     };
     match r {
         Ok(code) => ExitCode::from(code),

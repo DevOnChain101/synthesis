@@ -4,6 +4,10 @@
     "tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "BashOutput", "KillShell", "terminal_spawn", "terminal_logs", "terminal_signal", "terminal_status"],
     "reason": "Security review F11: the registry validator rejects unknown properties for the fs and shell tools as if additionalProperties were false (e.g. Glob {pattern, path: '.env', file_path: 'ok.txt'} is invalid_input instead of silently ignoring file_path). The schema text in schemas.json stays verbatim; Node ignored extra keys. Covered by tests/registry.rs fs_tools_reject_unknown_properties."
   },
+  "schema_extra_properties": {
+    "Grep": ["offset"],
+    "_reason": "Conformance 71: Grep takes `offset` (skip the first N lines before head_limit), as in Claude Code; Node has no such property."
+  },
   "mtime_order": {
     "glob-recursive-sorted-by-mtime-newest-first": [
       "src/a.js",
@@ -67,6 +71,14 @@
     ]
   },
   "cases": {
+    "read-offset-beyond-end-is-empty": {
+      "reason": "Conformance 60: an offset past the end of the file returns a note instead of an empty string.",
+      "steps": {
+        "0": {
+          "content_prefix": "Note: offset"
+        }
+      }
+    },
     "grep-invalid-regex": {
       "reason": "Error text comes from the Rust regex crate, not V8 ('Invalid regular expression: /(unclosed/m: Unterminated group'). Regex dialect also differs from JS RegExp (no lookaround/backrefs; \\d, \\w, \\b are Unicode-aware).",
       "steps": {

@@ -27,6 +27,8 @@ pub struct Persist {
     /// Events already in the store when this writer started (resumed session): the stream's
     /// `seq` counts from 1 again, the store's does not.
     base: u64,
+    /// Files that already have a "before first write" checkpoint in this run.
+    checkpointed: std::collections::HashSet<String>,
     /// Set when the stdout reader went away: the run is cancelled, the store keeps recording.
     closed: Option<(Arc<AtomicBool>, CancellationToken)>,
 }
@@ -47,6 +49,7 @@ impl Persist {
             store,
             derived,
             base,
+            checkpointed: std::collections::HashSet::new(),
             closed,
         }
     }
@@ -73,6 +76,23 @@ impl Persist {
                         .seq
                 }
             };
+            // restore point before the first write to a file (docs: checkpoints); best effort
+            if let Event::ToolRequested { name, input, .. } = &env.event
+                && matches!(
+                    name.as_str(),
+                    "Write" | "Edit" | "MultiEdit" | "NotebookEdit"
+                )
+                && let Some(p) = ["file_path", "notebook_path"]
+                    .iter()
+                    .find_map(|k| input.get(k).and_then(|v| v.as_str()))
+                && self.checkpointed.insert(p.to_string())
+                && let Err(e) = w.create_checkpoint(
+                    &format!("before-first-write-{}", self.checkpointed.len()),
+                    &[std::path::PathBuf::from(p)],
+                )
+            {
+                eprintln!("synth: warning: checkpoint: {e}");
+            }
             drop(w);
             if seq != env.seq + self.base {
                 return Err(bad(format!("store seq {seq} != stream seq {}", env.seq)));

@@ -235,6 +235,10 @@
      "description": "Limit output to the first N lines/entries.",
      "type": "number"
     },
+    "offset": {
+     "description": "Skip the first N lines/entries before applying head_limit.",
+     "type": "number"
+    },
     "multiline": {
      "description": "Allow the pattern to match across multiple lines.",
      "type": "boolean"

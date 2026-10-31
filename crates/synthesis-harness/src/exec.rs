@@ -1023,6 +1023,17 @@ impl Harness {
                 deadline: None,
             },
         );
+        // Claude Code's `permission_prompt` notification: the run is waiting on an approval
+        let _ = self
+            .run_hook(
+                task,
+                agent,
+                turn,
+                HookEvent::Notification,
+                json!({"message": prompt, "notification_type": "permission_prompt"}),
+                Some("permission_prompt"),
+            )
+            .await;
         // An approval during verification returns to `verifying`, not `running`.
         let before = *lock(&task.status);
         self.set_status(
@@ -1753,7 +1764,7 @@ fn bash_hint(tool: &str, input: &Value) -> &'static str {
         || cmd.contains("sed -i")
         || inline.iter().any(|i| cmd.contains(i))
     {
-        " Use the Write/Edit/MultiEdit tool for file changes instead of redirects, heredocs, tee, sed -i or inline interpreters; report blocked only if no dedicated tool can do it."
+        " Use the Write/Edit tool for file changes instead of redirects, heredocs, tee, sed -i or inline interpreters; report blocked only if no dedicated tool can do it."
     } else if cmd.contains("-exec")
         || cmd.trim_start().starts_with("for ")
         || cmd.contains("| xargs")

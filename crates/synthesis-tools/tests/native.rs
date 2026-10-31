@@ -735,3 +735,50 @@ async fn interface_tools_return_needs_user() {
     );
     assert!(f.run("ExitPlanMode", json!({"plan": "  "})).await.is_error);
 }
+
+#[tokio::test]
+async fn grep_skips_gitignored_and_takes_offset() {
+    let f = fx();
+    let w = f.root.clone();
+    std::fs::write(w.join(".gitignore"), "ignored.txt\nbuild/\n").unwrap();
+    std::fs::write(w.join("ignored.txt"), "needle\n").unwrap();
+    std::fs::create_dir(w.join("build")).unwrap();
+    std::fs::write(w.join("build/out.txt"), "needle\n").unwrap();
+    std::fs::write(w.join("kept.txt"), "needle 1\nneedle 2\nneedle 3\n").unwrap();
+    let all = f
+        .run(
+            "Grep",
+            json!({"pattern": "needle", "path": w, "output_mode": "content"}),
+        )
+        .await;
+    let t = text(&all);
+    assert!(t.contains("kept.txt") && !t.contains("ignored.txt") && !t.contains("out.txt"));
+    let page = f
+        .run(
+            "Grep",
+            json!({"pattern": "needle", "path": w.join("kept.txt"), "output_mode": "content", "offset": 1, "head_limit": 1}),
+        )
+        .await;
+    assert!(
+        text(&page).contains("needle 2")
+            && !text(&page).contains("needle 1")
+            && !text(&page).contains("needle 3")
+    );
+}
+
+#[tokio::test]
+async fn read_offset_past_eof_notice() {
+    let f = fx();
+    std::fs::write(f.root.join("a.txt"), "one\ntwo\n").unwrap();
+    let o = f
+        .run(
+            "Read",
+            json!({"file_path": f.root.join("a.txt"), "offset": 50}),
+        )
+        .await;
+    assert!(
+        text(&o).contains("past the end of the file"),
+        "{}",
+        text(&o)
+    );
+}

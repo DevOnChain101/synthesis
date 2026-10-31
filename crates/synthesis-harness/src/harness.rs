@@ -664,10 +664,56 @@ impl Harness {
         let (from, to) = session
             .transition(SessionStatus::Preparing)
             .map_err(HarnessError::Transition)?;
-        let ws = &session.workspace;
-        let scope = Scope::default();
+        self.emit_started(session, source, None);
         self.sink.emit(
-            &scope,
+            &Scope::default(),
+            Event::SessionStatusChanged {
+                from: status_str(from),
+                to: status_str(to),
+                reason: None,
+            },
+        );
+        self.peer_endpoint_event(true);
+        Ok(())
+    }
+
+    /// Continues a stored session: the caller already moved the store and `session.status` to
+    /// `idle` (or `recovering`); only `session.started` (source `resume`) is emitted.
+    pub fn resume_session(&self, session: &AgentSession, resumed_from_seq: u64) {
+        self.emit_started(session, "resume", Some(resumed_from_seq));
+        self.peer_endpoint_event(true);
+    }
+
+    /// Runs the `SessionStart` / `SessionEnd` / `Notification` hooks (outside any task) and
+    /// records `hook.ran`. Returns the hook output text meant for the model (`SessionStart`).
+    pub async fn session_hook(&self, event: HookEvent, payload: Value, target: Option<&str>) {
+        let Some(hooks) = &self.hooks else { return };
+        let out = hooks
+            .run(event, payload, target, &CancellationToken::new())
+            .await;
+        for r in &out.results {
+            let outcome = if r.exit_code == Some(0) {
+                "success"
+            } else {
+                "non_blocking_error"
+            };
+            self.sink.emit(
+                &Scope::default(),
+                Event::HookRan {
+                    event: event.as_str().into(),
+                    hook_name: r.command.chars().take(80).collect(),
+                    exit_code: r.exit_code.map(i64::from),
+                    outcome: outcome.into(),
+                    duration_ms: r.ms,
+                },
+            );
+        }
+    }
+
+    fn emit_started(&self, session: &AgentSession, source: &str, resumed_from_seq: Option<u64>) {
+        let ws = &session.workspace;
+        self.sink.emit(
+            &Scope::default(),
             Event::SessionStarted {
                 workspace: WorkspaceInfo {
                     workspace_id: ws.workspace_id.clone(),
@@ -691,19 +737,9 @@ impl Harness {
                     .and_then(|v| v.as_str().map(String::from))
                     .unwrap_or_default(),
                 source: source.into(),
-                resumed_from_seq: None,
+                resumed_from_seq,
             },
         );
-        self.sink.emit(
-            &scope,
-            Event::SessionStatusChanged {
-                from: status_str(from),
-                to: status_str(to),
-                reason: None,
-            },
-        );
-        self.peer_endpoint_event(true);
-        Ok(())
     }
 
     /// Last event of the stream: `session.completed|failed|cancelled` from the task outcome.

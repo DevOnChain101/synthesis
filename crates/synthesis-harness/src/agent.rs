@@ -228,9 +228,17 @@ impl Harness {
     }
 
     fn tool_defs(&self, agent: &AgentCtx) -> Vec<ToolDef> {
+        // a bare deny rule (`Bash`, `mcp__server`) hides the tool: the model never sees it
+        let denied = lock(&agent.perms).rules.deny.clone();
+        let hidden = |n: &str| {
+            denied
+                .iter()
+                .any(|r| r == n || (r.starts_with("mcp__") && n.starts_with(&format!("{r}__"))))
+        };
         self.tools
             .specs()
             .into_iter()
+            .filter(|s| !hidden(&s.name))
             .filter(|s| agent.allowed.as_ref().is_none_or(|a| a.contains(&s.name)))
             .filter(|s| s.name != "ListSessions" || self.peers_on())
             .map(|s| ToolDef {
@@ -325,8 +333,8 @@ impl Harness {
 
     /// Compacts `st.messages` and emits `context.compacting`, then `context.compacted` and
     /// `context.usage` (post-compaction estimate), or `context.compaction_failed`. A PreCompact
-    /// hook runs first; its output is added to the summary instructions. Hooks cannot cancel a
-    /// compaction (PreCompact fails open in synthesis-hooks), so `blocked` is ignored. Returns the
+    /// hook runs first; its output is added to the summary instructions, and exit 2 (`blocked`)
+    /// cancels the compaction like Claude Code. Returns the
     /// estimated tokens `(before, after)`. History is untouched on error.
     pub(crate) async fn compact_history(
         &self,
@@ -353,6 +361,19 @@ impl Harness {
                 None,
             )
             .await;
+        if hook.as_ref().is_some_and(|h| h.blocked) {
+            let why = "blocked by a PreCompact hook".to_string();
+            self.emit(
+                task,
+                agent,
+                None,
+                Event::ContextCompactionFailed {
+                    reason: reason.into(),
+                    error: why.clone(),
+                },
+            );
+            return Err(why);
+        }
         let mut instr = instructions.to_string();
         for extra in hook.iter().flat_map(|h| &h.additional_context) {
             instr.push('\n');

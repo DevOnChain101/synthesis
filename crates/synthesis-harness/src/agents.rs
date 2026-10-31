@@ -9,7 +9,7 @@ pub struct AgentDef {
     pub description: String,
     /// System prompt; empty = the generic subagent prompt.
     pub prompt: String,
-    /// Tool allow-list; `None` = every tool. `Task`, `AskUserQuestion` and `ExitPlanMode` are
+    /// Tool allow-list; `None` = every tool. A `-Name` entry removes a tool (`disallowedTools`). `Task`, `AskUserQuestion` and `ExitPlanMode` are
     /// never granted to a child, whatever is listed.
     pub tools: Option<Vec<String>>,
     /// Requested mode; the effective mode is never more permissive than the parent's.
@@ -37,13 +37,37 @@ impl Default for AgentTable {
 impl AgentTable {
     /// `general-purpose` is always present; a definition with the same name replaces it.
     pub fn new(defs: impl IntoIterator<Item = AgentDef>) -> Self {
-        let mut all = vec![AgentDef {
-            name: GENERAL_PURPOSE.into(),
-            description: "General-purpose agent for multi-step research and edits.".into(),
-            prompt: String::new(),
-            tools: None,
-            mode: None,
-        }];
+        // Explore and Plan are read-only builtins: no write tools, and plan mode on top
+        let read_only = |name: &str, description: &str, prompt: &str| AgentDef {
+            name: name.into(),
+            description: description.into(),
+            prompt: prompt.into(),
+            tools: Some(
+                ["Read", "Grep", "Glob", "WebFetch", "WebSearch"]
+                    .map(String::from)
+                    .to_vec(),
+            ),
+            mode: Some(Mode::Plan),
+        };
+        let mut all = vec![
+            AgentDef {
+                name: GENERAL_PURPOSE.into(),
+                description: "General-purpose agent for multi-step research and edits.".into(),
+                prompt: String::new(),
+                tools: None,
+                mode: None,
+            },
+            read_only(
+                "Explore",
+                "Fast read-only agent for searching and understanding a codebase; it cannot change anything.",
+                "You are a read-only exploration agent. Search and read files to answer the question and report what you found with file paths. You cannot modify anything.",
+            ),
+            read_only(
+                "Plan",
+                "Read-only agent that researches the code and returns a step-by-step implementation plan.",
+                "You are a planning agent. Read the code you need, then return a concrete step-by-step implementation plan with file paths. You cannot modify anything.",
+            ),
+        ];
         for d in defs {
             all.retain(|x| x.name != d.name);
             all.push(d);
@@ -132,6 +156,23 @@ impl crate::Harness {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explore_agent_is_read_only() {
+        let t = AgentTable::default();
+        for n in ["Explore", "Plan"] {
+            let d = t.get(n).unwrap();
+            assert_eq!(d.mode, Some(Mode::Plan));
+            let tools = d.tools.as_ref().unwrap();
+            assert!(
+                tools
+                    .iter()
+                    .all(|x| !matches!(x.as_str(), "Bash" | "Write" | "Edit" | "NotebookEdit"))
+            );
+            assert!(tools.contains(&"Read".to_string()));
+        }
+        assert!(t.get(GENERAL_PURPOSE).unwrap().tools.is_none());
+    }
 
     #[test]
     fn project_agents_load_only_for_a_trusted_project() {
