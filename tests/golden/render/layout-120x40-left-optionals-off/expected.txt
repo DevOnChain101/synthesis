@@ -7,8 +7,8 @@
 │                   │ │                                   │  │ cache 20.0k (hit 69%) …│ │ Agents     ██░░░░░░░░░░    3 │
 │                   │ ╰───────────────────────────────────╯  ╰────────────────────────╯ │ Sessions   ████░░░░░░░░    7 │
 │                   │                                                                   │                              │
+│                   │  ▍chat    project    diff    terminal                             │                              │
 │                   │  SYNTHESIS                                 /work/proj  · working  │                              │
-│                   │                                                                   │                              │
 │                   │                                                                   ╰──────────────────────────────╯
 │                   │                                                                                                   
 │                   │                                                                   ╭ SYSTEM HEALTH ────── healthy ╮

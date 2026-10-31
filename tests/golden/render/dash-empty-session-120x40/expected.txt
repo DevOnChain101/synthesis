@@ -7,9 +7,9 @@
 ╭ RUNNING SESSIONS  ╮ │                                   │  │ cache 0 · $ –          │ │ Agents     ██░░░░░░░░░░    3 │
 │ no running sessio…│ ╰───────────────────────────────────╯  ╰────────────────────────╯ │ Sessions   ████░░░░░░░░    7 │
 │                   │                                                                   │                              │
-╰───────────────────╯  SYNTHESIS                                                        │                              │
-                        no conversation attached                                        │                              │
-╭ SESSION ──────────╮                                                                   ╰──────────────────────────────╯
+╰───────────────────╯  ▍chat    project    diff    terminal                             │                              │
+                       SYNTHESIS                                                        │                              │
+╭ SESSION ──────────╮   no conversation attached                                        ╰──────────────────────────────╯
 │ model  loading m… │                                                                                                   
 │ cwd    proj       │                                                                   ╭ SYSTEM HEALTH ────── healthy ╮
 │ turns  0 prompts… │                                                                   │ ○ Core agent      no agent … │

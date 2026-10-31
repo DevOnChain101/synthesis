@@ -7,8 +7,8 @@
 ╭ RUNNING SESSIONS  ╮ │                                   │  │ cache 20.0k (hit 69%) …│ │ Agents     ██░░░░░░░░░░    3 │
 │ ►● proj-0     10% │ ╰───────────────────────────────────╯  ╰────────────────────────╯ │ Sessions   ████░░░░░░░░    7 │
 │ project-0         │                                                                   │                              │
-│  ● proj-1     10% │  SYNTHESIS                                 /work/proj  · working  │                              │
-│ project-1         │                                                                   │                              │
+│  ● proj-1     10% │  ▍chat    project    diff    terminal                             │                              │
+│ project-1         │  SYNTHESIS                                 /work/proj  · working  │                              │
 ╰───────────────────╯   > fix the flaky login test                                      ╰──────────────────────────────╯
                                                                                                                         
 ╭ SESSION ─ running ╮   ✻ Thinking · 2.0s                                               ╭ SYSTEM HEALTH ────── healthy ╮

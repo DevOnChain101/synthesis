@@ -11,8 +11,8 @@
     "╭ RUNNING SESSIONS  ╮ │                                            │  │ cache 20.0k (hit 69%) · $ – │ │ Agents     ███░░░░░░░░░░░░░░░    3 │",
     "│ ►● proj-0     10% │ ╰────────────────────────────────────────────╯  ╰─────────────────────────────╯ │ Sessions   ██████░░░░░░░░░░░░    7 │",
     "│ project-0         │                                                                                 │                                    │",
-    "│  ● proj-1     10% │  SYNTHESIS                                               /work/proj  · working  │                                    │",
-    "│ project-1         │                                                                                 │                                    │",
+    "│  ● proj-1     10% │  ▍chat    project    diff    terminal                                           │                                    │",
+    "│ project-1         │  SYNTHESIS                                               /work/proj  · working  │                                    │",
     "╰───────────────────╯                                                                                 ╰────────────────────────────────────╯",
     "                                                                                                                                            ",
     "╭ SESSION ─ running ╮                                                                                 ╭ SYSTEM HEALTH ──────────── healthy ╮",
@@ -46,9 +46,9 @@
   "rects": {
     "chatRect": {
       "x": 22,
-      "y": 9,
+      "y": 10,
       "w": 79,
-      "h": 30
+      "h": 29
     },
     "sidebarRect": {
       "x": 0,

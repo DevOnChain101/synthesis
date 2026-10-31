@@ -4,6 +4,7 @@
 //! and `now` (ms) and returns the painted rows. Where the rectangles go is `layout::plan`.
 
 use crate::agent::{self, Agent, AgentOpts, EditorView};
+use crate::centre::{self, Centre, ProjectData};
 use crate::dialogs::mode_name;
 use crate::folders::{folder_with_parent, shorten_left};
 use crate::layout::{self, Mode, PanelId, Panels, Plan, Screen, View};
@@ -122,6 +123,9 @@ pub struct DashView {
     pub screen: Screen,
     /// `/config` is open: it takes the place of the chat pane.
     pub config: Option<crate::config_view::ConfigView>,
+    /// Mission centre tab (chat, project, diff, terminal).
+    pub centre: Centre,
+    pub project: ProjectData,
 }
 
 /// What the host knows that the event stream does not say. `None` / empty means "not told": the
@@ -186,6 +190,9 @@ pub struct Rects {
     /// The footer row and the columns `[x0, x1)` of each screen chip, for clicks.
     pub footer_row: Option<i64>,
     pub chip_hits: Vec<(i64, i64, Screen)>,
+    /// Mission centre strip row and the columns `[x0, x1)` of each tab, for clicks.
+    pub centre_row: Option<i64>,
+    pub centre_hits: Vec<(i64, i64, Centre)>,
 }
 
 pub struct Frame {
@@ -1999,12 +2006,39 @@ pub fn render_frame(
         rects.config_rect = Some(c);
         rects.config_hits = out.hits.into_iter().map(|(y, k)| (c.y + y, k)).collect();
     } else if let Some(c) = pl.chat {
-        let docked = pl.mode == Mode::Columns && viewed_subagent(s).is_some();
-        let lines = agent_panel(s, c.w, c.h, frame, now, docked, &mut rects, &mut chat_body);
-        canvas.paste(c, lines);
-        rects.chat_rect = Some(c);
-        // gutter of 2 columns + the label row above the conversation
-        rects.caret = rects.caret.map(|(x, y)| (u(c.x) + 2 + x, u(c.y) + 1 + y));
+        // Mission in columns: a one-row tab strip tops the centre; the other tabs replace the chat
+        let c = if pl.mode == Mode::Columns && s.view.screen == Screen::Mission && c.h > 4 {
+            let (row, hits) = centre::strip(s.view.centre, c.w);
+            canvas.put(c.y, c.x, c.w, row);
+            rects.centre_row = Some(c.y);
+            rects.centre_hits = hits
+                .into_iter()
+                .map(|(a, b, k)| (a + c.x, b + c.x, k))
+                .collect();
+            Rect {
+                y: c.y + 1,
+                h: c.h - 1,
+                ..c
+            }
+        } else {
+            c
+        };
+        let other = rects.centre_row.is_some() && s.view.centre != Centre::Chat;
+        if other {
+            let lines = match s.view.centre {
+                Centre::Project => centre::project(&s.view.project, c.w, c.h),
+                Centre::Diff => centre::diff(&s.view.project, c.w, c.h),
+                _ => centre::terminal(s, c.w, c.h, now),
+            };
+            canvas.paste(c, lines);
+        } else {
+            let docked = pl.mode == Mode::Columns && viewed_subagent(s).is_some();
+            let lines = agent_panel(s, c.w, c.h, frame, now, docked, &mut rects, &mut chat_body);
+            canvas.paste(c, lines);
+            rects.chat_rect = Some(c);
+            // gutter of 2 columns + the label row above the conversation
+            rects.caret = rects.caret.map(|(x, y)| (u(c.x) + 2 + x, u(c.y) + 1 + y));
+        }
     }
     let (foot, chips) = footer(s, w);
     canvas.put(pl.bottom_row, 0, w, foot);

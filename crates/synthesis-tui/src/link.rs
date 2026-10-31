@@ -70,6 +70,8 @@ pub(crate) enum Msg {
     /// A line typed to an agent was refused (text, why).
     SendFailed(String, String),
     /// `/compact` between tasks finished: the compacted history, or why not.
+    /// The working tree read for the project / diff tabs.
+    Project(Box<synthesis_tui_render::centre::ProjectData>),
     Compacted(Result<Vec<synthesis_providers::Message>, String>),
 }
 

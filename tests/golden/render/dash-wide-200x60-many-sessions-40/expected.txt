@@ -7,9 +7,9 @@
 ╭ RUNNING SESSIONS ─────── 40 ╮ │                                                                │  │ cache 0 · $ –                            │ │ │ no prompt yet         │ │ blocked 0 by hooks    │ │
 │    ↑ 14 more                │ ╰────────────────────────────────────────────────────────────────╯  ╰──────────────────────────────────────────╯ │ │                       │ │                       │ │
 │  ● proj-14              10% │                                                                                                                  │ ╰───────────────────────╯ ╰───────────────────────╯ │
-│ project-14 (…/workspace)    │  SYNTHESIS                                                                                                       │             │                         │             │
-│  ● proj-15              10% │   no conversation attached                                                                                       │ ╭─ SKILLS ──────────────╮ ╭─ SUB-AGENTS ──────────╮ │
-│ project-15 (…/workspace)    │                                                                                                                  │ │ no skills used yet    │ │ no sub-agents         │ │
+│ project-14 (…/workspace)    │  ▍chat    project    diff    terminal                                                                            │             │                         │             │
+│  ● proj-15              10% │  SYNTHESIS                                                                                                       │ ╭─ SKILLS ──────────────╮ ╭─ SUB-AGENTS ──────────╮ │
+│ project-15 (…/workspace)    │   no conversation attached                                                                                       │ │ no skills used yet    │ │ no sub-agents         │ │
 │  ● proj-16              10% │                                                                                                                  │ │                       │ │ single agent mode     │ │
 │ project-16 (…/workspace)    │                                                                                                                  │ │                       │ │                       │ │
 │  ● proj-17              10% │                                                                                                                  │ │                       │ │                       │ │

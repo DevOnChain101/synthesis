@@ -11,8 +11,8 @@
     "╭ RUNNING SESSIONS ──────── 2 ╮ │                                                                │  │ cache 20.0k (hit 69%) · $ –              │ │             │                         │             │",
     "│ ►● proj-0               10% │ ╰────────────────────────────────────────────────────────────────╯  ╰──────────────────────────────────────────╯ │ ╭─ SKILLS ──────────────╮ ╭─ SUB-AGENTS ──────────╮ │",
     "│ project-0 (D:/workspace)    │                                                                                                                  │ │ ● scout ×1            │ │ no sub-agents         │ │",
-    "│  ● proj-1               10% │  SYNTHESIS                                                                                /work/proj  · working  │ ╰───────────────────────╯ ╰───────────────────────╯ │",
-    "│ project-1 (D:/workspace)    │                                                                                                                  │             │                         │             │",
+    "│  ● proj-1               10% │  ▍chat    project    diff    terminal                                                                            │ ╰───────────────────────╯ ╰───────────────────────╯ │",
+    "│ project-1 (D:/workspace)    │  SYNTHESIS                                                                                /work/proj  · working  │             │                         │             │",
     "╰─────────────────────────────╯                                                                                                                  │ ╭─ SYNTHESIS CORE ────────────────────────────────╮ │",
     "                                                                                                                                                 │ │ plan → act → verify → learn                     │ │",
     "╭ SESSION ─────────── running ╮                                                                                                                  │ ╰─────────────────────────────────────────────────╯ │",
@@ -56,9 +56,9 @@
   "rects": {
     "chatRect": {
       "x": 32,
-      "y": 9,
+      "y": 10,
       "w": 112,
-      "h": 40
+      "h": 39
     },
     "sidebarRect": {
       "x": 0,

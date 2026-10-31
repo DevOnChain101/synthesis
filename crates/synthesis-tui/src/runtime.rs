@@ -725,6 +725,10 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                     app.on_withdraw(&id, now);
                     dirty = true;
                 }
+                Msg::Project(p) => {
+                    app.set_project(*p);
+                    dirty = true;
+                }
                 Msg::Compacted(r) => {
                     match r {
                         Ok(history) => runner.history = history,
@@ -914,6 +918,14 @@ fn exec(
             None => app.output("# notes are not available in this session".into(), true),
         },
         Cmd::Compact { instructions } => runner.compact(app, instructions, now),
+        Cmd::LoadProject(cwd) => {
+            let tx = runner.tx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(Msg::Project(Box::new(crate::project::scan(
+                    std::path::Path::new(&cwd),
+                ))));
+            });
+        }
         Cmd::SaveTui(v) => {
             let (text, bad) = save_tui(runner.settings_home.as_deref(), &v);
             app.toast(text, now, bad);

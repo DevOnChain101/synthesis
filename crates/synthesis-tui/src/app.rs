@@ -23,6 +23,7 @@ use synthesis_tui_render::agent::{
     INPUT_VIEW_ROWS, Opt, Pending, QOption, QState, Question as RQuestion, Search, Sug,
     Suggestions as RSug, body_sel_rows,
 };
+use synthesis_tui_render::centre::{Centre, ProjectData};
 use synthesis_tui_render::dash::{
     DashState, DashView, Focus, Frame, HostInfo, Live, MIN_COLS, MIN_ROWS, McpLive, SessionRow,
     Tap, Usage, Workspace, render_frame, workspace_key,
@@ -137,6 +138,9 @@ pub(crate) enum Cmd {
     },
     /// Leave and re-enter the alternate screen (ctrl+l).
     ResetScreen,
+    /// The project / diff tab opened: the host reads git off the UI thread and answers with
+    /// [`App::set_project`].
+    LoadProject(String),
     /// Right click in the prompt: the host reads the system clipboard and hands the text back
     /// through [`App::paste_clipboard`] (or reports the failure with [`App::toast`]).
     PasteClipboard,
@@ -335,6 +339,9 @@ pub(crate) struct App {
     tab: View,
     /// Mission or Chat (Tab, `1` / `2` after Esc, the footer chips).
     screen: Screen,
+    /// Mission centre tab and what the host last read of the working tree.
+    centre: Centre,
+    project: ProjectData,
     /// First run: no model is configured yet. The app shows the setup card and refuses to start a task.
     setup: bool,
     /// Esc on an empty prompt: `1` and `2` pick a screen instead of typing a digit, until a key types.
@@ -395,6 +402,11 @@ fn local_commands() -> Vec<CmdDef> {
         ),
         c("config", "panels, theme and options", ""),
         c("themes", "pick a colour theme", "[name]"),
+        c(
+            "tab",
+            "Mission centre: chat, project, diff, terminal",
+            "<name>",
+        ),
         c("exit", "quit", ""),
     ]
 }
@@ -529,6 +541,8 @@ impl App {
             config: None,
             tab: View::Chat,
             screen: Screen::Mission,
+            centre: Centre::Chat,
+            project: ProjectData::default(),
             setup: false,
             nav: false,
             mcp_status: None,
@@ -1052,6 +1066,7 @@ impl App {
             }
             Key::Text(t) => {
                 self.nav = false;
+                self.centre = Centre::Chat; // typing goes to the prompt, which lives in the chat tab
                 self.scroll = 0; // typing brings the view back to the prompt
                 if t == "?" && self.editor.chars.is_empty() {
                     self.run_slash("help", "", now, out);
@@ -1564,6 +1579,10 @@ impl App {
             "exit" | "quit" => self.quit = Some(ExitReason::Quit),
             "config" => self.open_config(0),
             "themes" => self.themes(arg, out),
+            "tab" => match Centre::parse(arg) {
+                Some(c) => self.set_centre(c, out),
+                None => self.out_item("/tab chat|project|diff|terminal", true),
+            },
 
             "clear" => {
                 if self.running() {
@@ -1843,6 +1862,20 @@ impl App {
                 PathBuf::new(),
             );
         }
+    }
+
+    /// Picks the Mission centre tab; project and diff re-read the working tree.
+    fn set_centre(&mut self, c: Centre, out: &mut Vec<Cmd>) {
+        self.centre = c;
+        self.screen = Screen::Mission;
+        if matches!(c, Centre::Project | Centre::Diff) {
+            out.push(Cmd::LoadProject(self.cfg.cwd.clone()));
+        }
+    }
+
+    /// The host's answer to [`Cmd::LoadProject`].
+    pub(crate) fn set_project(&mut self, p: ProjectData) {
+        self.project = p;
     }
 
     /// `/themes`: the picker, or `/themes NAME` to set one. The choice is saved in the USER settings.
@@ -2675,6 +2708,27 @@ impl App {
             self.screen = sc;
             return;
         }
+        // a click on a Mission centre tab
+        if let Key::Mouse {
+            x,
+            y,
+            button: 0,
+            action: MouseAction::Down,
+            ..
+        } = *k
+            && self.dialogs.is_empty()
+            && let Some(f) = self.frame.as_ref()
+            && f.rects.centre_row == Some(i64::from(y) - 1)
+            && let Some(c) = f
+                .rects
+                .centre_hits
+                .iter()
+                .find(|(a, b, _)| (*a..*b).contains(&(i64::from(x) - 1)))
+                .map(|h| h.2)
+        {
+            self.set_centre(c, out);
+            return;
+        }
         // a click on a tab of the Tabs-mode strip selects that view
         if let Key::Mouse {
             x,
@@ -3279,6 +3333,8 @@ impl App {
             panels: self.tui.panels,
             tab: self.tab,
             screen: self.screen,
+            centre: self.centre,
+            project: self.project.clone(),
             // a dialog (an approval) is answered in the chat: /config waits behind it
             config: self
                 .config

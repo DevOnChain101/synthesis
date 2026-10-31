@@ -6,8 +6,8 @@
 ╭ RUNNING SESSIONS  ╮ │ Next        Test                             │ │ Messages   █████████   21 │
 │ ►● proj-0     10% │ ╰──────────────────────────────────────────────╯ │ Agents     █░░░░░░░░    3 │
 │ project-0         │                                                  │ Sessions   ███░░░░░░    7 │
-│    ↓ 1 more       │  SYNTHESIS                /work/proj  · working  │                           │
-╰───────────────────╯                                                  │                           │
+│    ↓ 1 more       │  ▍chat    project    diff    terminal            │                           │
+╰───────────────────╯  SYNTHESIS                /work/proj  · working  │                           │
 ╭ SESSION ─ running ╮   ● I will check login.ts and retry():           ╰───────────────────────────╯
 │ model  anthropic… │     • first                                                                   
 │ mode   manual     │     • second                                     ╭ SYSTEM HEALTH ─── healthy ╮

@@ -3,6 +3,7 @@
 #![allow(clippy::too_many_arguments)] // render entry points mirror the Node signatures
 
 pub mod agent;
+pub mod centre;
 pub mod config_view;
 pub mod dash;
 pub mod dialogs;

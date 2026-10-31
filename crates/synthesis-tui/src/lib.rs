@@ -14,6 +14,7 @@ mod config_screen;
 mod link;
 pub mod links;
 mod preview;
+mod project;
 mod resume;
 mod route;
 mod runtime;

@@ -7,9 +7,9 @@
 ╭ RUNNING SESSIONS  ╮ │                                   │  │ cache 20.0k (hit 69%) …│ │ Agents     ██░░░░░░░░░░    3 │
 │ ►✢ proj-0     33% │ ╰───────────────────────────────────╯  ╰────────────────────────╯ │ Sessions   ████░░░░░░░░    7 │
 │ proj (/work)      │                                                                   │                              │
-╰───────────────────╯  SYNTHESIS                                                        │                              │
-                        no conversation attached                                        │                              │
-╭ SESSION ──────────╮                                                                   ╰──────────────────────────────╯
+╰───────────────────╯  ▍chat    project    diff    terminal                             │                              │
+                       SYNTHESIS                                                        │                              │
+╭ SESSION ──────────╮   no conversation attached                                        ╰──────────────────────────────╯
 │ model  claude-op… │                                                                                                   
 │ cwd    proj       │                                                                   ╭ SYSTEM HEALTH ────── healthy ╮
 │ uptime 10m00s     │                                                                   │ ○ Core agent      no agent … │

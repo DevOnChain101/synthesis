@@ -4,8 +4,8 @@
   "lines": [
     " ⢎⡱  S Y N T H E S I S   ● 2 live │ workspace proj │ session session- │ model anthropic/fake-sonnet │ context 5.9k/200.0k                                      ● system healthy │ Fri Oct  2 │ 12:00:00 ",
     "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
-    "╭ WORKSPACE ─────────────── 1 ╮  SYNTHESIS                                                                                /work/proj  · working  ╭ SUB-AGENTS ─────────────────────────────────────────╮",
-    "│ ▌● proj                   2 │                                                                                                                  │ No sub-agents yet · /agents                         │",
+    "╭ WORKSPACE ─────────────── 1 ╮  ▍chat    project    diff    terminal                                                                            ╭ SUB-AGENTS ─────────────────────────────────────────╮",
+    "│ ▌● proj                   2 │  SYNTHESIS                                                                                /work/proj  · working  │ No sub-agents yet · /agents                         │",
     "│                             │                                                                                                                  │                                                     │",
     "│                             │                                                                                                                  │                                                     │",
     "│                             │                                                                                                                  │                                                     │",
@@ -56,9 +56,9 @@
   "rects": {
     "chatRect": {
       "x": 32,
-      "y": 2,
+      "y": 3,
       "w": 112,
-      "h": 47
+      "h": 46
     },
     "sidebarRect": {
       "x": 0,

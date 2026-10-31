@@ -1,7 +1,7 @@
  ⢎⡱  S Y N T H E S I S   ● 2 live │ workspace proj │ session session- │ model anthropic/fake-sonnet            12:00:00 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-╭ WORKSPACE ───── 1 ╮  SYNTHESIS                                 /work/proj  · working  ╭ SUB-AGENTS ──────────────────╮
-│ ▌● proj         2 │                                                                   │ No sub-agents yet · /agents  │
+╭ WORKSPACE ───── 1 ╮  ▍chat    project    diff    terminal                             ╭ SUB-AGENTS ──────────────────╮
+│ ▌● proj         2 │  SYNTHESIS                                 /work/proj  · working  │ No sub-agents yet · /agents  │
 │                   │                                                                   │                              │
 │                   │                                                                   │                              │
 │                   │                                                                   │                              │

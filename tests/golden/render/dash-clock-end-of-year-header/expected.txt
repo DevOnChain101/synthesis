@@ -7,9 +7,9 @@
 ╭ RUNNING SESSIONS  ╮ │                                   │  │ cache 0 · $ –          │ │ Agents     ██░░░░░░░░░░    3 │
 │ ►● proj-0     10% │ ╰───────────────────────────────────╯  ╰────────────────────────╯ │ Sessions   ████░░░░░░░░    7 │
 │ project-0         │                                                                   │                              │
-│  ● proj-1     10% │  SYNTHESIS                                                        │                              │
-│ project-1         │   no conversation attached                                        │                              │
-│  ● proj-2     10% │                                                                   ╰──────────────────────────────╯
+│  ● proj-1     10% │  ▍chat    project    diff    terminal                             │                              │
+│ project-1         │  SYNTHESIS                                                        │                              │
+│  ● proj-2     10% │   no conversation attached                                        ╰──────────────────────────────╯
 │ project-2         │                                                                                                   
 ╰───────────────────╯                                                                   ╭ SYSTEM HEALTH ────── healthy ╮
                                                                                         │ ○ Core agent      no agent … │

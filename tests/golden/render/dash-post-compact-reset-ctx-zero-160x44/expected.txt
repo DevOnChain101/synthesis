@@ -7,9 +7,9 @@
 ╭ RUNNING SESSIONS ─ 0 ╮ │                                                │  │ cache 0 · $ –                  │ │ ╭─ SKILLS ──────────╮ ╭─ SUB-AGENTS ───────╮ │
 │ no running sessions  │ ╰────────────────────────────────────────────────╯  ╰────────────────────────────────╯ │ ╰───────────────────╯ ╰────────────────────╯ │
 │                      │                                                                                        │           │                      │           │
-╰──────────────────────╯  SYNTHESIS                                                                             │ ╭─ SYNTHESIS CORE ─────────────────────────╮ │
-                           no conversation attached                                                             │ │ plan → act → verify → learn              │ │
-╭ SESSION ─────────────╮                                                                                        │ ╰──────────────────────────────────────────╯ │
+╰──────────────────────╯  ▍chat    project    diff    terminal                                                  │ ╭─ SYNTHESIS CORE ─────────────────────────╮ │
+                          SYNTHESIS                                                                             │ │ plan → act → verify → learn              │ │
+╭ SESSION ─────────────╮   no conversation attached                                                             │ ╰──────────────────────────────────────────╯ │
 │ model  loading model │                                                                                        │           │                      │           │
 │ cwd    proj          │                                                                                        │ ╭─ EXECUTION ───────╮ ╭─ HOOKS ────────────╮ │
 │ turns  0 prompts · … │                                                                                        │ ╰───────────────────╯ ╰────────────────────╯ │

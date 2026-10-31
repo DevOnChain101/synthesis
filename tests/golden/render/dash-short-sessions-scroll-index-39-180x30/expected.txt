@@ -6,9 +6,9 @@
 ╭ RUNNING SESSIONS ─── 40 ╮ │ Next        no plan yet                                  │  │ in 0 · out 0                         │ │ Messages   █████████████████████████████   21 │
 │    ↑ 39 more            │ ╰──────────────────────────────────────────────────────────╯  ╰──────────────────────────────────────╯ │ Agents     ████░░░░░░░░░░░░░░░░░░░░░░░░░    3 │
 │ ►● proj-39          10% │                                                                                                        │ Sessions   ██████████░░░░░░░░░░░░░░░░░░░    7 │
-│ project-39 (…kspace)    │  SYNTHESIS                                                                                             │                                               │
-╰─────────────────────────╯   no conversation attached                                                                             │                                               │
-╭ SESSION ────────────────╮                                                                                                        ╰───────────────────────────────────────────────╯
+│ project-39 (…kspace)    │  ▍chat    project    diff    terminal                                                                  │                                               │
+╰─────────────────────────╯  SYNTHESIS                                                                                             │                                               │
+╭ SESSION ────────────────╮   no conversation attached                                                                             ╰───────────────────────────────────────────────╯
 │ model  claude-sonnet    │                                                                                                                                                         
 │ cwd    project          │                                                                                                        ╭ SYSTEM HEALTH ─────────────────────── healthy ╮
 │ uptime 1m00s            │                                                                                                        │ ○ Core agent                no agent attached │
