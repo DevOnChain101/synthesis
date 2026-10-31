@@ -3004,3 +3004,89 @@ fn memory_mutations_are_denied_whatever_the_rules_or_mode() {
         }
     }
 }
+
+#[test]
+fn unparsable_bash_is_denied_when_a_path_deny_rule_exists() {
+    let f = fx();
+    let deep = format!("{}echo x > .env{}", "eval \"".repeat(6), "\"".repeat(6));
+    let cmds = [
+        "echo x > .env '",
+        "echo x > .env $(",
+        "echo x > .env # don't",
+        "echo x > .env # (",
+        &deep,
+    ];
+    for rule in ["Edit(.env)", "Read(.env)"] {
+        for mode in [Mode::Default, Mode::BypassPermissions] {
+            let p = f.with(rules(&[], &[rule], &[]), mode);
+            for c in cmds {
+                assert_eq!(bx(&p, c), D, "{rule} {mode:?}: {c}");
+            }
+            // a comment is not code: harmless text after `#` stays allowed to parse
+            assert_ne!(bx(&p, "echo hi # don't"), D, "{rule} {mode:?}");
+        }
+    }
+    // no path deny rule: unparsable commands are not this check's business
+    assert_ne!(bx(&f.perms(Mode::BypassPermissions), "echo x '"), D);
+}
+
+#[test]
+fn bash_writers_beyond_the_fs_list_are_denied_on_a_denied_path() {
+    let f = fx();
+    for mode in [Mode::Default, Mode::BypassPermissions] {
+        let p = f.with(rules(&[], &["Edit(.env)"], &[]), mode);
+        for c in [
+            "sed -ni s/a/b/p .env",
+            "sed -Ei s/a/b/ .env",
+            "sed -si s/a/b/ .env",
+            "sed --in-place=.bak s/a/b/ .env",
+            "sed --in-place s/a/b/ .env",
+            "curl -o .env http://x",
+            "curl --output=.env http://x",
+            "wget -O .env http://x",
+            "rsync a.txt .env",
+            "tar -xf a.tar .env",
+            "unzip a.zip .env",
+            "patch .env fix.diff",
+            "git checkout -- .env",
+            "git restore .env",
+            "git apply .env",
+            "perl -pi -e s/a/b/ .env",
+            "awk -i inplace 1 .env",
+            "echo x >| .env",
+            "(cd sub; true); echo x > .env",
+            "(cd sub; true); rsync a .env",
+        ] {
+            assert_eq!(bx(&p, c), D, "{mode:?}: {c}");
+        }
+        for c in [
+            "sed -n 1p .env",
+            "echo .env",
+            "ls .env",
+            "git status",
+            "git add .env",
+            "curl -o other.txt http://x",
+            "(cd sub; true); echo x > other.txt",
+        ] {
+            assert_ne!(bx(&p, c), D, "{mode:?}: {c}");
+        }
+    }
+}
+
+#[test]
+fn glob_deny_rules_are_prefix_matches_and_cheap() {
+    use crate::bash::bash_any_match;
+    let r = |s: &str| vec![s.to_string()];
+    assert!(bash_any_match(&r("Bash(git push * main)"), "git push origin main --force"));
+    assert!(bash_any_match(&r("Bash(git push * main)"), "git push origin main"));
+    assert!(!bash_any_match(&r("Bash(git push * main)"), "git push origin dev"));
+    let t = std::time::Instant::now();
+    let long = "a".repeat(50_000);
+    assert!(!bash_any_match(&r("Bash(*a*a*a*a*a*b)"), &long));
+    assert!(bash_any_match(&r("Bash(*a*a*a*a*a*)"), &long));
+    // too many stars or too long a command: fail closed for deny, never for allow
+    let many = format!("Bash({})", "a*".repeat(40));
+    assert!(bash_any_match(&r(&many), "ls"));
+    assert!(!crate::bash::bash_all_match(&r(&many), "ls"));
+    assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+}

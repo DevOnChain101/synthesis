@@ -1203,15 +1203,13 @@ impl Permissions {
         let Some(segs) = bash::deep_segments(cmd, 0) else {
             return true;
         };
-        let mut base = self.env.cwd.clone();
+        let mut bases = vec![self.env.cwd.clone()];
         for seg in segs {
             let w = bash::unwrap_words(&seg, true);
             let name = paths::basename(w.first().map_or("", String::as_str), self.policy());
             let mut ops = bash::redirect_targets(&seg);
             if name == "cd" {
-                if let Some((p, _)) = w.get(1).and_then(|d| self.resolve_operand(d, &base)) {
-                    base = p;
-                }
+                self.widen_bases(&mut bases, w.get(1));
             } else if bash::FS_CMDS.contains(&name) {
                 ops.extend(bash::fs_operands(name, &w[1..]).unwrap_or_else(|| {
                     w[1..]
@@ -1229,8 +1227,10 @@ impl Permissions {
                 );
             }
             if ops.iter().any(|o| {
-                self.resolve_operand(o, &base)
-                    .is_some_and(|(p, _)| self.is_protected(&p))
+                bases.iter().any(|base| {
+                    self.resolve_operand(o, base)
+                        .is_some_and(|(p, _)| self.is_protected(&p))
+                })
             }) {
                 return true;
             }
@@ -1252,12 +1252,28 @@ impl Permissions {
         self.bash_paths_denied(cmd, true)
     }
 
+    /// Best effort (the sandbox is the real boundary): unparsable commands count as a hit, a
+    /// `cd` widens the set of base directories instead of replacing it (so a subshell `(cd d; ..)`
+    /// cannot hide a later operand), and on the write side any program not known to be harmless
+    /// that names a denied path among its operands counts as a writer (`curl -o`, `rsync`, `tar`,
+    /// `patch`, `git checkout`, `perl -pi` ...).
     fn bash_paths_denied(&self, cmd: &str, write: bool) -> bool {
         const WRITERS: &[&str] = &["tee", "install", "ln", "truncate", "dd"];
         const READERS: &[&str] = &[
             "cat", "head", "tail", "less", "more", "grep", "egrep", "fgrep", "rg", "sed", "awk",
             "gawk", "nl", "tac", "od", "xxd", "hexdump", "strings", "cut", "sort", "uniq", "wc",
             "diff", "cmp", "bat", "cp", "mv", "tee", "source", ".", "base64", "paste", "fold",
+        ];
+        // programs that never write their operands (`sort -o`, `awk -i inplace` are checked apart)
+        const HARMLESS: &[&str] = &[
+            "echo", "printf", "ls", "pwd", "true", "false", "test", "[", "[[", "stat", "file",
+            "which", "type", "realpath", "readlink", "dirname", "basename", "find", "tree", "du",
+            "date", "id", "whoami", "uname", "export", "set", "unset", "alias", "read", "wait",
+            "sleep", "exit", "return", "break", "continue", "cd",
+        ];
+        const GIT_WRITERS: &[&str] = &[
+            "checkout", "restore", "apply", "reset", "clean", "stash", "am", "mv", "rm", "merge",
+            "pull", "switch", "cherry-pick", "rebase", "revert", "read-tree", "checkout-index",
         ];
         let specs: Vec<&str> = self
             .rules
@@ -1274,24 +1290,43 @@ impl Permissions {
         if specs.is_empty() {
             return false;
         }
+        // cannot tell what it touches: fail closed, like `bash_any_match`
         let Some(segs) = bash::deep_segments(cmd, 0) else {
-            return false;
+            return true;
         };
-        let mut base = self.env.cwd.clone();
+        let mut bases = vec![self.env.cwd.clone()];
         for seg in segs {
             let w = bash::unwrap_words(&seg, true);
             let name = paths::basename(w.first().map_or("", String::as_str), self.policy());
             if name == "cd" {
-                if let Some((p, _)) = w.get(1).and_then(|d| self.resolve_operand(d, &base)) {
-                    base = p;
-                }
+                self.widen_bases(&mut bases, w.get(1));
                 continue;
             }
             // `< file`, `<file`, `cat<file` (here-documents and `<(..)` read no file)
             let mut ops: Vec<String> = Vec::new();
             if write {
                 ops = bash::redirect_targets(&seg);
-                let in_place = |a: &String| a.starts_with("-i") || a == "--in-place";
+                let in_place = |a: &String| {
+                    (a.starts_with('-')
+                        && !a.starts_with("--")
+                        && a[1..].chars().take_while(char::is_ascii_alphabetic).any(|c| c == 'i'))
+                        || a.starts_with("--in-place")
+                };
+                let flagless = || -> Vec<String> {
+                    // also the value of `--out=f`, `of=f` and `-of`
+                    w[1..]
+                        .iter()
+                        .filter_map(|a| match a.strip_prefix('-') {
+                            None => Some(a.strip_prefix("of=").unwrap_or(a).to_string()),
+                            Some(f) => f
+                                .split_once('=')
+                                .map(|(_, v)| v.to_string())
+                                .or_else(|| {
+                                    (!f.starts_with('-') && f.len() > 1).then(|| f[1..].to_string())
+                                }),
+                        })
+                        .collect()
+                };
                 if bash::FS_CMDS.contains(&name) && (name != "sed" || w.iter().any(in_place)) {
                     ops.extend(bash::fs_operands(name, &w[1..]).unwrap_or_else(|| {
                         w[1..]
@@ -1300,6 +1335,8 @@ impl Permissions {
                             .cloned()
                             .collect()
                     }));
+                } else if name == "sed" {
+                    // read-only sed
                 } else if WRITERS.contains(&name) {
                     ops.extend(
                         w[1..]
@@ -1307,6 +1344,20 @@ impl Permissions {
                             .filter(|a| !a.starts_with('-'))
                             .map(|a| a.strip_prefix("of=").unwrap_or(a).to_string()),
                     );
+                } else if name == "git" {
+                    // any word: `git -C d checkout f`
+                    if w[1..].iter().any(|s| GIT_WRITERS.contains(&s.as_str())) {
+                        ops.extend(flagless());
+                    }
+                } else if name == "awk" || name == "gawk" || name == "sort" {
+                    if w.iter().any(|a| a == "inplace" || a.starts_with("-o") || a == "--output") {
+                        ops.extend(flagless());
+                    }
+                } else if !HARMLESS.contains(&name)
+                    && !READERS.contains(&name)
+                    && !name.is_empty()
+                {
+                    ops.extend(flagless());
                 }
             }
             for (i, x) in seg.iter().enumerate().filter(|_| !write) {
@@ -1322,28 +1373,45 @@ impl Permissions {
                 ops.extend(w[1..].iter().filter(|a| !a.starts_with('-')).cloned());
             }
             for o in ops {
-                let Some((p, wild)) = self.resolve_operand(&o, &base) else {
-                    continue;
-                };
-                // a wildcard resolves to its directory: test a file in it too
-                let hit = |p: &Path| {
-                    specs.iter().any(|sp| {
-                        paths::match_path_rule_real(
-                            sp,
-                            &p.to_string_lossy(),
-                            &self.env.cwd,
-                            &self.env.home,
-                            self.policy(),
-                            true,
-                        )
-                    })
-                };
-                if hit(&p) || (wild && hit(&p.join("x"))) {
-                    return true;
+                for base in &bases {
+                    let Some((p, wild)) = self.resolve_operand(&o, base) else {
+                        continue;
+                    };
+                    // a wildcard resolves to its directory: test a file in it too
+                    let hit = |p: &Path| {
+                        specs.iter().any(|sp| {
+                            paths::match_path_rule_real(
+                                sp,
+                                &p.to_string_lossy(),
+                                &self.env.cwd,
+                                &self.env.home,
+                                self.policy(),
+                                true,
+                            )
+                        })
+                    };
+                    if hit(&p) || (wild && hit(&p.join("x"))) {
+                        return true;
+                    }
                 }
             }
         }
         false
+    }
+
+    /// After `cd d`: every base may now be `base/d` or still the old one (the `cd` may sit in a
+    /// subshell); bounded so a long chain of `cd`s stays cheap.
+    fn widen_bases(&self, bases: &mut Vec<PathBuf>, dir: Option<&String>) {
+        let Some(d) = dir else { return };
+        let next: Vec<PathBuf> = bases
+            .iter()
+            .filter_map(|b| self.resolve_operand(d, b).map(|(p, _)| p))
+            .collect();
+        for p in next {
+            if bases.len() < 16 && !bases.contains(&p) {
+                bases.push(p);
+            }
+        }
     }
 
     /// acceptEdits view of a Bash command: `ok` = every segment is allowed by `seg_safe` or is an
