@@ -29,6 +29,7 @@ pub mod fake;
 pub mod mcp;
 pub mod memcmd;
 pub mod memory;
+mod memtools;
 pub mod peers;
 pub mod run;
 pub mod taskdb;

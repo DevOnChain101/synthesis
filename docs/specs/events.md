@@ -70,6 +70,12 @@ Doc §5.12 types are kept verbatim; additions are marked. Payload field types: `
 | `permission.auto_verdict` | `tool_call_id:str, name:str, verdict:"allow"\|"deny"\|"ask", reason:str, source:"model"\|"cache"\|"fail_closed"` | [new] auto mode: the judge's decision on one call before it runs (audit trail; `fail_closed` = judge unavailable, unparseable, timed out or over the per-task cap, so the call is an ask) |
 | `model.changed` | `model:str, effort:str?` | [from-node agent.js:1539 'model-changed'] |
 | `budget.exceeded` | `budget:str, limit:number, used:number` | [new] |
+| `memory.retrieved` | `ids:[str], tokens:u64, candidates:u64` | [new] the notes injected at task start (ids only, never text); memory.md §11 |
+| `memory.written` | `id:str, op:"added"\|"deduped"\|"superseded"\|"proposed"\|"quarantined"\|"updated"\|"archived", kind:str, scope:str, trust:str, status:str` | [new] a record was written by the episode writer, a `Memory*` tool or a reflection |
+| `memory.quarantined` | `id:str, rule:str` | [new] the poisoning scanner parked a record (also sent as `memory.written` with `op:"quarantined"`) |
+| `memory.reflection.started` / `memory.reflection.failed` | `job_id:str` / `job_id:str, error:str` | [new] one reflection job (a capped model call) began / failed (`error` redacted) |
+| `memory.reflection.completed` | `job_id:str, ops:u64, tokens:u64?, cost_usd:f64?` | [new] `ops` = records saved or queued for review; tokens and cost are absent while the summarizer reports no usage |
+| `memory.proposal.created` | `id:str` | [new] a skill or instruction-file proposal was written (nothing is applied without the person) |
 | `notice` | `level:"info"\|"warn"\|"error", text:str` | [from-node agent.js:919-925 note()/toast()] |
 
 `origin:"user"` marks a command the person typed (`!cmd`); absent = the model's call. `tool.completed.output` is the model-facing result text, whole up to 64 KiB (redacted); when the result is longer (or the tool cut it) `output` holds head and tail, `output_truncated:true`, `output_bytes` the whole size and `result_ref` the artifact with the whole (the command's own log for Bash). Lines of `tool.completed`/`tool.output` may exceed the 64 KiB line guideline. All additions are optional fields/new types (v1 unchanged).

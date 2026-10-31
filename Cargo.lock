@@ -6959,6 +6959,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "futures-util",
+ "globset",
  "libc",
  "rusqlite",
  "serde_json",

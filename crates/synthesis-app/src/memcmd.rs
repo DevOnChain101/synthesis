@@ -8,8 +8,12 @@ use std::sync::{Arc, Mutex};
 use clap::{Args, Subcommand};
 use synthesis_config::{Env, ProjectTrust};
 use synthesis_core::{PathPolicy, repo_key, workspace_label};
+use synthesis_events::Event;
 use synthesis_harness::sanitize_for_display as san;
-use synthesis_memory::{Digest, Filter, Memory, NewMemory, Store, ToolRow, Trust, now_iso};
+use synthesis_harness::{EventSink, Scope as EvScope};
+use synthesis_memory::{
+    Digest, Filter, Memory, NewMemory, Store, ToolRow, Trust, Written, now_iso,
+};
 use synthesis_providers::{Block, Content, ModelProvider, Role};
 use synthesis_settings::find_project_root;
 use tokio_util::sync::CancellationToken;
@@ -35,17 +39,24 @@ pub fn repo_of(cwd: &Path) -> Repo {
 
 /// `synthesis.memory.enabled` of the USER settings.json (default on). A repository cannot turn it on.
 pub fn enabled(user_settings: &Path) -> bool {
-    flag(user_settings, "enabled")
+    flag(user_settings, "enabled", true)
 }
 
-/// `synthesis.memory.<key>` of the user settings.json as a bool; default on.
-fn flag(user_settings: &Path, key: &str) -> bool {
+/// Reflection sends the task's digest (request, tool calls, user turns) to the model provider, so it
+/// is opt-in: `synthesis.memory.reflection: true` in the USER settings.json (the owner has not
+/// confirmed a default policy; a repository cannot turn it on).
+pub fn reflection_enabled(user_settings: &Path) -> bool {
+    flag(user_settings, "reflection", false)
+}
+
+/// `synthesis.memory.<key>` of the user settings.json as a bool.
+fn flag(user_settings: &Path, key: &str, default: bool) -> bool {
     std::fs::read(user_settings)
         .ok()
         .filter(|b| b.len() <= 1 << 20)
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
         .and_then(|v| v.pointer(&format!("/synthesis/memory/{key}"))?.as_bool())
-        .unwrap_or(true)
+        .unwrap_or(default)
 }
 
 /// Opens the store for the run; any failure turns memory off with one warning (it never changes a
@@ -125,6 +136,8 @@ pub enum MemoryCmd {
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
+    /// Edit a record in $VISUAL/$EDITOR (title on the first line, then the body); saves a new `owner` version.
+    Edit { id: String },
     /// Archive a wrong record (keeps provenance).
     Forget {
         id: String,
@@ -359,6 +372,7 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
             }
             _ => return Err("pass a record id or --workspace".into()),
         },
+        MemoryCmd::Edit { id } => edit(env, &mut s, &id)?,
         MemoryCmd::Forget { id, reason } => {
             if !s.set_status(&id, "archived").map_err(e)? {
                 return Err(format!("no record {id}"));
@@ -467,6 +481,7 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
                 provider: res.provider,
                 model: res.model,
                 cancel: CancellationToken::new(),
+                sink: None,
             };
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -554,6 +569,207 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
     Ok(0)
 }
 
+/// First line = title, then a blank line, then the body.
+fn edit_text(m: &Memory) -> String {
+    format!("{}\n\n{}\n", m.title, m.body)
+}
+
+fn parse_edit(text: &str) -> Option<(String, String)> {
+    let (title, body) = text.split_once('\n').unwrap_or((text, ""));
+    let (title, body) = (title.trim(), body.trim());
+    (!title.is_empty() && !body.is_empty()).then(|| (title.to_string(), body.to_string()))
+}
+
+/// `synth memory edit ID`: the markdown form in `$VISUAL`/`$EDITOR`, saved as a new `owner` version
+/// through the normal write path (secrets masked, caps, scanner), so a bad edit is refused and the
+/// old record stays. `run_cmd` has already required a terminal. shortcut: the editor command is
+/// split on spaces (no shell quoting); use a wrapper script for a command that needs quotes.
+fn edit(env: &Env, s: &mut Store, id: &str) -> Result<(), String> {
+    let editor = env
+        .get_nonempty("VISUAL")
+        .or_else(|| env.get_nonempty("EDITOR"))
+        .ok_or("set $VISUAL or $EDITOR to edit a note")?;
+    let old = s
+        .get(id)
+        .map_err(|x| x.to_string())?
+        .ok_or_else(|| format!("no record {id}"))?;
+    if matches!(old.kind.as_str(), "episode")
+        || matches!(old.status.as_str(), "superseded" | "archived")
+    {
+        return Err(format!(
+            "{id} ({}, {}) cannot be edited",
+            old.kind, old.status
+        ));
+    }
+    let path = std::env::temp_dir().join(format!("synthesis-memory-{}.md", uuid::Uuid::new_v4()));
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    std::io::Write::write_all(
+        &mut o
+            .open(&path)
+            .map_err(|x| format!("{}: {x}", path.display()))?,
+        edit_text(&old).as_bytes(),
+    )
+    .map_err(|x| x.to_string())?;
+    let result = (|| {
+        let mut parts = editor.split_whitespace();
+        let status = std::process::Command::new(parts.next().ok_or("empty $EDITOR")?)
+            .args(parts)
+            .arg(&path)
+            .status()
+            .map_err(|x| format!("cannot start the editor `{editor}`: {x}"))?;
+        if !status.success() {
+            return Err(format!("the editor exited with {status}; nothing saved"));
+        }
+        let bytes = std::fs::read(&path).map_err(|x| x.to_string())?;
+        let text = String::from_utf8(bytes).map_err(|_| "the edited file is not UTF-8")?;
+        let (title, body) =
+            parse_edit(&text).ok_or("the title (first line) and the body are both required")?;
+        if (title.as_str(), body.as_str()) == (old.title.trim(), old.body.trim()) {
+            out!("no changes");
+            return Ok(());
+        }
+        let mut n = NewMemory::new(
+            &old.scope,
+            &old.scope_key,
+            &old.kind,
+            &title,
+            &body,
+            Trust::Owner,
+        );
+        n.slot = old.slot.clone();
+        n.pinned = old.pinned;
+        n.tags = old.tags.clone();
+        n.anchors = old.anchors.clone();
+        n.confidence = 1.0;
+        n.source = serde_json::json!({"origin": "cli_edit", "edits": id});
+        let r = s.revise(id, n).map_err(|x| x.to_string())?;
+        match (r.op, r.rule) {
+            ("quarantined", rule) => out!(
+                "not applied: {} was quarantined by rule {} (structure that could steer the model); {id} is unchanged",
+                r.id,
+                rule.unwrap_or("?")
+            ),
+            ("deduped", _) => out!("no changes (identical to {})", r.id),
+            _ => out!("edited {id}: new owner version {} ({})", r.id, r.status),
+        }
+        Ok(())
+    })();
+    // on a refused save the person's text is the only copy: keep it and say where
+    match &result {
+        Err(e) if !e.starts_with("the editor") && !e.starts_with("cannot start") => {
+            Err(format!("{e}; your text is kept at {}", path.display()))
+        }
+        _ => {
+            let _ = std::fs::remove_file(&path);
+            result
+        }
+    }
+}
+
+/// `synth doctor` rows for memory: where the store is, how big, whether it is healthy, what trust the
+/// records have, and whether anything leaves the machine. Read-only: nothing is created or migrated.
+pub fn doctor_lines(h: &Homes) -> Vec<String> {
+    let settings = h.synthesis.join("settings.json");
+    let path = h.synthesis.join("memory").join("memory.db");
+    let mut v = vec![format!(
+        "memory: {} ({})",
+        path.display(),
+        if enabled(&settings) {
+            "enabled"
+        } else {
+            "disabled by synthesis.memory.enabled"
+        }
+    )];
+    match store_facts(&path) {
+        None => v.push(
+            "  store: not created yet (the first `synth run` or `synth memory add` creates it)"
+                .into(),
+        ),
+        Some(Err(e)) => v.push(format!(
+            "  store: UNUSABLE ({}); runs continue without memory",
+            san(&e)
+        )),
+        Some(Ok(f)) => v.extend(f),
+    }
+    v.push(
+        "  masking: on (every field passes the secret redactor; a note over 20% masked is dropped)"
+            .into(),
+    );
+    v.push(format!(
+        "  reflection: {} (sends the task digest to the model provider; opt in with synthesis.memory.reflection: true)",
+        if reflection_enabled(&settings) { "ON" } else { "off" }
+    ));
+    v
+}
+
+fn store_facts(path: &Path) -> Option<Result<Vec<String>, String>> {
+    let size = std::fs::metadata(path).ok()?.len();
+    let facts = || -> rusqlite::Result<Vec<String>> {
+        let c = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        c.busy_timeout(std::time::Duration::from_millis(1000))?;
+        let one = |sql: &str| c.query_row(sql, [], |r| r.get::<_, i64>(0));
+        let ver = one("SELECT coalesce(max(version), 0) FROM schema_migrations")?;
+        let check: String = c.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+        let mut trust =
+            c.prepare("SELECT trust, count(*) FROM memories GROUP BY trust ORDER BY trust")?;
+        let by_trust: Vec<String> = trust
+            .query_map([], |r| {
+                Ok(format!(
+                    "{} {}",
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let oldest: Option<String> = c.query_row(
+            "SELECT min(created_at) FROM reflection_jobs WHERE status='queued'",
+            [],
+            |r| r.get(0),
+        )?;
+        let last_err: Option<String> = rusqlite::OptionalExtension::optional(c.query_row(
+            "SELECT error FROM reflection_jobs WHERE error IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+            [],
+            |r| r.get::<_, Option<String>>(0),
+        ))?
+        .flatten();
+        Ok(vec![
+            format!(
+                "  store: schema v{ver}, {size} bytes, quick_check {}",
+                san(&check)
+            ),
+            format!(
+                "  records: {} ({} quarantined, {} proposed); trust: {}",
+                one("SELECT count(*) FROM memories")?,
+                one("SELECT count(*) FROM memories WHERE status='quarantined'")?,
+                one("SELECT count(*) FROM memories WHERE status='proposed'")?,
+                if by_trust.is_empty() {
+                    "none".into()
+                } else {
+                    by_trust.join(", ")
+                }
+            ),
+            format!(
+                "  jobs: {} queued{}, {} failed{} · proposals pending: {}",
+                one("SELECT count(*) FROM reflection_jobs WHERE status='queued'")?,
+                oldest.map_or(String::new(), |t| format!(" (oldest {t})")),
+                one("SELECT count(*) FROM reflection_jobs WHERE status='failed'")?,
+                last_err.map_or(String::new(), |e| format!(
+                    " (last error: {})",
+                    san(&e.chars().take(120).collect::<String>())
+                )),
+                one("SELECT count(*) FROM proposals WHERE status='pending'")?
+            ),
+        ])
+    };
+    Some(facts().map_err(|e| e.to_string()))
+}
+
 /// Model used for reflection (memory.md D5): `smallModel` when it names the run's provider, else
 /// the run's own model.
 pub fn small_model(cfg: &synthesis_config::Config, label: &str, fallback: &str) -> String {
@@ -571,6 +787,8 @@ pub struct Reflector {
     pub provider: Arc<dyn ModelProvider>,
     pub model: String,
     pub cancel: CancellationToken,
+    /// `memory.reflection.*` and `memory.written` go here (None for `synth memory reflect`).
+    pub sink: Option<EventSink>,
 }
 
 /// The run's open store (a Mutex: the task runs on another thread).
@@ -583,6 +801,57 @@ pub struct MemoryRun {
     pub root: PathBuf,
     pub home: PathBuf,
     pub project_trusted: bool,
+    /// `memory.*` events of this run.
+    pub sink: Option<EventSink>,
+    /// Ids the `Memory*` tools wrote this run (lowered to `untrusted` if the task turns out tainted).
+    pub tool_written: Mutex<Vec<String>>,
+    /// The `memory.retrieved` event, held until the session has started (`announce`).
+    pub retrieved: Mutex<Option<Event>>,
+}
+
+/// Emits `memory.retrieved` once; call it right after `session.started`.
+pub fn announce(m: &MemoryRun) {
+    if let Some(ev) = m.retrieved.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        emit(m.sink.as_ref(), None, ev);
+    }
+}
+
+fn emit(sink: Option<&EventSink>, task: Option<&str>, ev: Event) {
+    if let Some(s) = sink {
+        s.emit(
+            &EvScope {
+                task_id: task.map(String::from),
+                ..EvScope::default()
+            },
+            ev,
+        );
+    }
+}
+
+/// `memory.written`, plus `memory.quarantined` when the scanner parked the record.
+pub fn emit_written(sink: Option<&EventSink>, task: Option<&str>, w: &Written) {
+    emit(
+        sink,
+        task,
+        Event::MemoryWritten {
+            id: w.id.clone(),
+            op: w.op.into(),
+            kind: w.kind.clone(),
+            scope: w.scope.clone(),
+            trust: w.trust.as_str().into(),
+            status: w.status.clone(),
+        },
+    );
+    if let Some(rule) = w.rule {
+        emit(
+            sink,
+            task,
+            Event::MemoryQuarantined {
+                id: w.id.clone(),
+                rule: rule.into(),
+            },
+        );
+    }
 }
 
 pub struct StartArgs<'a> {
@@ -595,6 +864,7 @@ pub struct StartArgs<'a> {
     pub secrets: &'a [String],
     pub provider: Arc<dyn ModelProvider>,
     pub model: String,
+    pub sink: Option<EventSink>,
 }
 
 /// Opens memory for a run and retrieves the block. No store, an opted-out repository or a disabled
@@ -603,7 +873,7 @@ pub fn start(a: &StartArgs, cancel: CancellationToken) -> (Option<Arc<MemoryRun>
     // a hook left by an earlier session in this process must not outlive its store
     synthesis_tools::set_learned_skills(None);
     let settings = a.home.synthesis.join("settings.json");
-    if !a.enabled || !enabled(&settings) {
+    if !a.enabled || !enabled(&settings) || disabled_here(&settings, a.repo) {
         return (None, None);
     }
     let Some(mut s) = open_for_run(a.home, a.secrets, a.repo) else {
@@ -612,11 +882,20 @@ pub fn start(a: &StartArgs, cancel: CancellationToken) -> (Option<Arc<MemoryRun>
     if s.opted_out(&a.repo.key) {
         return (None, None);
     }
-    let block = inject(&mut s, a.repo, a.prompt, a.sid, a.project_trusted);
-    let reflect = flag(&settings, "reflection").then(|| Reflector {
+    let mut retrieved = None;
+    let block = inject(
+        &mut s,
+        a.repo,
+        a.prompt,
+        a.sid,
+        a.project_trusted,
+        &mut retrieved,
+    );
+    let reflect = reflection_enabled(&settings).then(|| Reflector {
         provider: a.provider.clone(),
         model: a.model.clone(),
         cancel,
+        sink: a.sink.clone(),
     });
     let run = MemoryRun {
         store: Mutex::new(s),
@@ -626,6 +905,9 @@ pub fn start(a: &StartArgs, cancel: CancellationToken) -> (Option<Arc<MemoryRun>
         root: a.repo.root.clone(),
         home: a.home.synthesis.clone(),
         project_trusted: a.project_trusted,
+        sink: a.sink.clone(),
+        tool_written: Mutex::default(),
+        retrieved: Mutex::new(retrieved),
     };
     let run = Arc::new(run);
     let for_skills = run.clone();
@@ -666,6 +948,7 @@ pub fn inject(
     text: &str,
     sid: &str,
     project_trusted: bool,
+    retrieved: &mut Option<Event>,
 ) -> Option<String> {
     let now = synthesis_memory::OffsetDateTime::now_utc();
     let mut q = synthesis_memory::Query::new(text, Some(&repo.key), now);
@@ -676,6 +959,11 @@ pub fn inject(
             .retain(|n| n.memory.scope == "user" && n.memory.trust == Trust::Owner);
     }
     let ids: Vec<String> = r.notes.iter().map(|n| n.memory.id.clone()).collect();
+    *retrieved = Some(Event::MemoryRetrieved {
+        ids: ids.clone(),
+        tokens: r.tokens as u64,
+        candidates: r.candidates as u64,
+    });
     if !ids.is_empty() {
         store
             .record_uses(&ids, sid, None, "injected")
@@ -832,8 +1120,14 @@ pub fn task_ended(m: &MemoryRun, request: &str, out: &synthesis_harness::TaskOut
     );
     n.source =
         serde_json::json!({"origin": "task_end", "session_id": m.sid, "task_id": out.task_id});
-    if let Err(e) = s.put(n) {
-        warn(e);
+    let trust = n.trust;
+    match s.put(n) {
+        Ok(o) => emit_written(
+            m.sink.as_ref(),
+            Some(&out.task_id),
+            &Written::new(o, "episode", "workspace", trust),
+        ),
+        Err(e) => warn(e),
     }
     let mut d = digest_of(request, out);
     d.untrusted_project = !m.project_trusted;
@@ -850,6 +1144,15 @@ pub fn task_ended(m: &MemoryRun, request: &str, out: &synthesis_harness::TaskOut
         && let Err(e) = s.record_uses(&used, &m.sid, None, "searched")
     {
         warn(e);
+    }
+    // what the model saved with MemoryWrite in a task that touched the network is untrusted too
+    if d.tainted() {
+        let ids = std::mem::take(&mut *m.tool_written.lock().unwrap_or_else(|e| e.into_inner()));
+        for id in ids {
+            if let Err(e) = s.demote(&id) {
+                warn(e);
+            }
+        }
     }
     // only notes the task used count for or against them, and never from a tainted task
     let counted = if d.tainted() {
@@ -875,6 +1178,13 @@ pub fn task_ended(m: &MemoryRun, request: &str, out: &synthesis_harness::TaskOut
     if let Ok(made) = synthesis_memory::propose_promotions(&mut s, &m.key, &project, &user)
         && !made.is_empty()
     {
+        for id in &made {
+            emit(
+                m.sink.as_ref(),
+                Some(&out.task_id),
+                Event::MemoryProposalCreated { id: id.clone() },
+            );
+        }
         eprintln!(
             "synth: memory: {} proposal(s) to review: synth memory proposals",
             made.len()
@@ -908,12 +1218,33 @@ pub async fn reflect_jobs(store: &Mutex<Store>, r: &Reflector, max: usize) -> (u
                 _ => break,
             }
         };
+        let task = Some(job.task_id.as_str());
+        emit(
+            r.sink.as_ref(),
+            task,
+            Event::MemoryReflectionStarted {
+                job_id: job.id.clone(),
+            },
+        );
         let result = reflect_one(store, r, &job).await;
         let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
         match result {
             Ok(a) => {
                 let _ = s.finish_job(&job.id, None);
                 done += 1;
+                for w in &a.written {
+                    emit_written(r.sink.as_ref(), task, w);
+                }
+                emit(
+                    r.sink.as_ref(),
+                    task,
+                    Event::MemoryReflectionCompleted {
+                        job_id: job.id.clone(),
+                        ops: a.written.len() as u64,
+                        tokens: None,
+                        cost_usd: None,
+                    },
+                );
                 eprintln!(
                     "synth: memory: reflection saved {} new, {} updated, {} to review, {} quarantined, {} dropped",
                     a.added, a.updated, a.proposed, a.quarantined, a.dropped
@@ -922,6 +1253,14 @@ pub async fn reflect_jobs(store: &Mutex<Store>, r: &Reflector, max: usize) -> (u
             Err(e) => {
                 let _ = s.finish_job(&job.id, Some(&e));
                 failed += 1;
+                emit(
+                    r.sink.as_ref(),
+                    task,
+                    Event::MemoryReflectionFailed {
+                        job_id: job.id.clone(),
+                        error: san(&e).chars().take(500).collect(),
+                    },
+                );
                 warn(format!("reflection failed: {e}"));
             }
         }
@@ -965,4 +1304,89 @@ async fn reflect_one(
     let mut a = synthesis_memory::apply(&mut s, &d, ops, &c).map_err(|e| e.to_string())?;
     a.dropped += bad;
     Ok(a)
+}
+
+/// D7 (memory.md §15): a repository's `.synthesis/settings.json` may only turn memory OFF
+/// (`synthesis.memory.enabled: false`); the user's `synthesis.memory.disabled_workspaces` globs
+/// match the repository root.
+pub fn disabled_here(user_settings: &Path, repo: &Repo) -> bool {
+    let read = |p: &Path| {
+        std::fs::read(p)
+            .ok()
+            .filter(|b| b.len() <= 1 << 20)
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+    };
+    let off = read(&repo.root.join(".synthesis").join("settings.json"))
+        .and_then(|v| v.pointer("/synthesis/memory/enabled")?.as_bool())
+        == Some(false);
+    let root = repo.root.to_string_lossy().replace('\\', "/");
+    let listed = read(user_settings)
+        .and_then(|v| v.pointer("/synthesis/memory/disabled_workspaces").cloned())
+        .and_then(|v| v.as_array().cloned())
+        .is_some_and(|globs| {
+            globs
+                .iter()
+                .filter_map(|g| g.as_str())
+                .filter_map(|g| globset::Glob::new(g).ok())
+                .any(|g| g.compile_matcher().is_match(&root))
+        });
+    off || listed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo(root: &Path) -> Repo {
+        Repo {
+            root: root.to_path_buf(),
+            key: "k".into(),
+            label: "l".into(),
+        }
+    }
+
+    #[test]
+    fn a_project_can_only_turn_memory_off_and_the_user_can_list_roots() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("repo");
+        std::fs::create_dir_all(root.join(".synthesis")).unwrap();
+        let user = d.path().join("settings.json");
+        assert!(!disabled_here(&user, &repo(&root)));
+        // `enabled: true` in a project changes nothing; it cannot switch memory on
+        let proj = root.join(".synthesis/settings.json");
+        std::fs::write(&proj, r#"{"synthesis":{"memory":{"enabled":true}}}"#).unwrap();
+        assert!(!disabled_here(&user, &repo(&root)));
+        std::fs::write(&proj, r#"{"synthesis":{"memory":{"enabled":false}}}"#).unwrap();
+        assert!(disabled_here(&user, &repo(&root)));
+        std::fs::remove_file(&proj).unwrap();
+        std::fs::write(
+            &user,
+            r#"{"synthesis":{"memory":{"disabled_workspaces":["**/secret-*","/nope/**"]}}}"#,
+        )
+        .unwrap();
+        assert!(!disabled_here(&user, &repo(&root)));
+        assert!(disabled_here(&user, &repo(&d.path().join("secret-client"))));
+    }
+
+    #[test]
+    fn reflection_is_off_unless_the_user_settings_say_true() {
+        let d = tempfile::tempdir().unwrap();
+        let s = d.path().join("settings.json");
+        assert!(!reflection_enabled(&s), "no file");
+        std::fs::write(&s, r#"{"synthesis":{"memory":{"enabled":true}}}"#).unwrap();
+        assert!(!reflection_enabled(&s), "key absent");
+        std::fs::write(&s, r#"{"synthesis":{"memory":{"reflection":true}}}"#).unwrap();
+        assert!(reflection_enabled(&s));
+        assert!(enabled(&s), "memory itself stays default-on");
+    }
+
+    #[test]
+    fn edit_text_round_trips_and_needs_title_and_body() {
+        assert_eq!(
+            parse_edit("T\n\nbody line\nmore\n"),
+            Some(("T".into(), "body line\nmore".into()))
+        );
+        assert_eq!(parse_edit("only title\n"), None);
+        assert_eq!(parse_edit("\n\nbody"), None);
+    }
 }

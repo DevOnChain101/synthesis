@@ -92,6 +92,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "TaskList",
     "TaskGet",
     "Skill",
+    "MemorySearch",
     "Task",
     "Agent",
     "ListAgents",
@@ -517,6 +518,11 @@ fn scope_match(spec: &str, tool: &str, input: &Value, any: bool) -> bool {
     match tool {
         "Task" | "Agent" => name(field("subagent_type")),
         "Skill" => name(field("skill")),
+        // `MemoryWrite(scope:user)`
+        "MemoryWrite" => match spec.strip_prefix("scope:") {
+            Some(s) => field("scope").map_or(any, |v| v == s),
+            None => any,
+        },
         "WebFetch" | "browser_navigate" => {
             let Some(d) = spec.strip_prefix("domain:") else {
                 return any;
@@ -1551,6 +1557,29 @@ impl Permissions {
                 Mode::AcceptEdits | Mode::Auto => v(Allow, format!("{} mode", mode.as_str())),
                 _ => v(Ask, "SendMessage requires confirmation"),
             };
+        }
+
+        // The `memory` class (memory.md §8). A note about this workspace is the agent's own;
+        // user or agent scope reaches other repositories, so the person decides (a headless ask is
+        // denied like every ask). Update and Forget are allowed here: the tool itself refuses any
+        // record that is not an agent-written note of this workspace (it has the record, we do not).
+        if tool == "MemoryWrite" {
+            if input.get("scope").and_then(Value::as_str) == Some("workspace") {
+                return v(Allow, "memory: note for this workspace");
+            }
+            if mode == Mode::DontAsk {
+                return v(Deny, "dontAsk mode");
+            }
+            return v(
+                Ask,
+                "MemoryWrite outside this workspace requires confirmation",
+            );
+        }
+        if matches!(tool, "MemoryUpdate" | "MemoryForget") {
+            return v(
+                Allow,
+                "memory: the tool limits itself to agent-written notes",
+            );
         }
 
         // both send text (a URL, a query) to a third party, so they ask first

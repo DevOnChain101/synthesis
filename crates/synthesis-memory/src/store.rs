@@ -622,6 +622,15 @@ impl Store {
         Ok(true)
     }
 
+    /// Lowers an `agent` or `verified` record to `untrusted` (never raises, never touches `owner`):
+    /// a task that touched the network taints what the model saved during it.
+    pub fn demote(&mut self, id: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE memories SET trust='untrusted', updated_at=?2 WHERE id=?1 AND trust IN ('agent','verified')",
+            params![id, now_iso()],
+        )? > 0)
+    }
+
     pub fn set_pinned(&mut self, id: &str, pinned: bool) -> Result<bool> {
         Ok(self.conn.execute(
             "UPDATE memories SET pinned=?2 WHERE id=?1",
@@ -632,10 +641,20 @@ impl Store {
     /// A new version of `old` (a reflection `update`): `old` is superseded once the new record is in.
     /// `owner` records are never replaced automatically.
     pub fn replace(&mut self, old: &str, n: NewMemory) -> Result<PutOutcome> {
+        self.replace_with(old, n, false)
+    }
+
+    /// Like [`Store::replace`] for the owner's own edit (`synth memory edit`): an `owner` record
+    /// may be replaced because the person asked.
+    pub fn revise(&mut self, old: &str, n: NewMemory) -> Result<PutOutcome> {
+        self.replace_with(old, n, true)
+    }
+
+    fn replace_with(&mut self, old: &str, n: NewMemory, by_owner: bool) -> Result<PutOutcome> {
         let Some(prev) = self.get(old)? else {
             return bad("no such record");
         };
-        if prev.trust == Trust::Owner {
+        if prev.trust == Trust::Owner && !by_owner {
             return bad("owner records are never replaced automatically");
         }
         let out = self.put(n)?;

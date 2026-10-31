@@ -567,6 +567,43 @@ pub enum Event {
         limit: f64,
         used: f64,
     },
+    /// Long-term memory (memory.md §11): the notes injected at task start. No text, ids only.
+    #[serde(rename = "memory.retrieved")]
+    MemoryRetrieved {
+        ids: Vec<String>,
+        tokens: u64,
+        candidates: u64,
+    },
+    /// A record was written; `op` = `added | deduped | superseded | proposed | quarantined |
+    /// updated | archived`.
+    #[serde(rename = "memory.written")]
+    MemoryWritten {
+        id: String,
+        op: String,
+        kind: String,
+        scope: String,
+        trust: String,
+        status: String,
+    },
+    #[serde(rename = "memory.quarantined")]
+    MemoryQuarantined { id: String, rule: String },
+    #[serde(rename = "memory.reflection.started")]
+    MemoryReflectionStarted { job_id: String },
+    /// `ops` = records the reflection saved or queued for review; tokens and cost are absent while
+    /// the summarizer path reports no usage.
+    #[serde(rename = "memory.reflection.completed")]
+    MemoryReflectionCompleted {
+        job_id: String,
+        ops: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<f64>,
+    },
+    #[serde(rename = "memory.reflection.failed")]
+    MemoryReflectionFailed { job_id: String, error: String },
+    #[serde(rename = "memory.proposal.created")]
+    MemoryProposalCreated { id: String },
     #[serde(rename = "notice")]
     Notice { level: String, text: String },
 }

@@ -2254,6 +2254,44 @@ fn scoping_task_and_skill_specifiers() {
 }
 
 #[test]
+fn memory_class_defaults_and_scope_rules() {
+    let f = fx();
+    let ws = json!({"scope": "workspace", "kind": "fact"});
+    let user = json!({"scope": "user", "kind": "preference"});
+    for mode in [Mode::Default, Mode::AcceptEdits, Mode::Plan, Mode::Auto] {
+        let p = f.perms(mode);
+        assert_eq!(d(&p, "MemorySearch", json!({"query": "x"})), A, "{mode:?}");
+        assert_eq!(d(&p, "MemoryWrite", ws.clone()), A, "{mode:?}");
+        assert_eq!(
+            d(&p, "MemoryWrite", user.clone()),
+            Q,
+            "{mode:?}: user scope asks"
+        );
+        assert_eq!(
+            d(&p, "MemoryWrite", json!({})),
+            Q,
+            "{mode:?}: no scope asks"
+        );
+        assert_eq!(d(&p, "MemoryUpdate", json!({"id": "m-1"})), A, "{mode:?}");
+        assert_eq!(d(&p, "MemoryForget", json!({"id": "m-1"})), A, "{mode:?}");
+    }
+    // headless / dontAsk: an ask is a deny
+    assert_eq!(d(&f.perms(Mode::DontAsk), "MemoryWrite", user.clone()), D);
+    // rule specifier `scope:`
+    let p = f.with(
+        rules(&[], &["MemoryWrite(scope:workspace)"], &[]),
+        Mode::Default,
+    );
+    assert_eq!(d(&p, "MemoryWrite", ws.clone()), D);
+    assert_eq!(d(&p, "MemoryWrite", user.clone()), Q);
+    let a = f.with(rules(&["MemoryWrite(scope:user)"], &[], &[]), Mode::Default);
+    assert_eq!(d(&a, "MemoryWrite", user), A);
+    assert_eq!(d(&a, "MemoryWrite", json!({"scope": "agent"})), Q);
+    let ask = f.with(rules(&[], &[], &["MemoryUpdate"]), Mode::Default);
+    assert_eq!(d(&ask, "MemoryUpdate", json!({"id": "m-1"})), Q);
+}
+
+#[test]
 fn scoping_domain_specifiers_normalised() {
     let f = fx();
     let p = f.with(

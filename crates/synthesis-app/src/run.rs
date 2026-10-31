@@ -960,6 +960,7 @@ pub fn prepare(
             secrets: &res.secrets,
             provider: res.provider.clone(),
             model: crate::memcmd::small_model(&cfg, &res.label, &res.model),
+            sink: Some(sink.clone()),
         },
         cancel.clone(),
     );
@@ -1051,6 +1052,12 @@ pub fn prepare(
     );
     if let Some(a) = mcp_attach {
         toolbox = a.apply(toolbox);
+    }
+    // the four Memory* tools exist only while the run has an open store
+    if let Some(m) = &memory {
+        for t in crate::memtools::tools(m.clone()) {
+            toolbox = toolbox.with_tool(t);
+        }
     }
     let gate_cfg = vs.gate(budget.max_verify_attempts);
     let rt_gate = rt.clone();
@@ -1247,6 +1254,9 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
             let mut session = session;
             let r = async {
                 h2.start_session(&mut session, "startup")?;
+                if let Some(m) = &memory2 {
+                    crate::memcmd::announce(m);
+                }
                 for n in notices {
                     sink2.emit(
                         &Scope::default(),
@@ -1280,6 +1290,10 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
                         },
                     );
                 }
+                // before the terminal session event, so the stream still ends with it
+                if let Some(m) = &memory2 {
+                    crate::memcmd::task_ended(m, &request2, &out);
+                }
                 h2.end_session(&out);
                 Ok::<_, synthesis_harness::HarnessError>(out)
             }
@@ -1287,11 +1301,11 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
             if let (Some(s), Ok(out)) = (&store2, &r) {
                 finish_store(s, transcript.as_deref(), out, &session.usage);
             }
-            if let (Some(m), Ok(out)) = (&memory2, &r) {
-                crate::memcmd::task_ended(m, &request2, out);
-                if let Some(rf) = &m.reflect {
-                    crate::memcmd::reflect_jobs(&m.store, rf, 2).await;
-                }
+            // reflection (a model call, opt-in) runs after the result and the session end are final
+            if let (Some(m), Ok(_)) = (&memory2, &r)
+                && let Some(rf) = &m.reflect
+            {
+                crate::memcmd::reflect_jobs(&m.store, rf, 2).await;
             }
             r
         });
