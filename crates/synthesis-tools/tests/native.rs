@@ -560,7 +560,7 @@ async fn invalid_shell_inputs_stay_strict() {
         .map(|s| s.name.clone())
         .collect();
     assert_eq!(names.len(), 20);
-    assert_eq!(f.reg.specs().count(), 39);
+    assert_eq!(f.reg.specs().count(), 40);
 }
 
 #[tokio::test]
