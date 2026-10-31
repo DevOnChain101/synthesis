@@ -241,6 +241,10 @@
           "type": "string",
           "description": "Peer sessions only: continue the thread with this id (from an earlier result or <peer_reply>)."
         },
+        "delegate": {
+          "type": "boolean",
+          "description": "Peer sessions only: ask that session to DO the task (not just answer). It only works if its user enabled delegation for you; it runs under ITS permission mode, capped by yours, and every call it needs approval for waits for its user (a headless session denies them). Use for work only that session can do."
+        },
         "notify_on_end": {
           "type": "boolean",
           "description": "Peer sessions only: do not ask a question; get that session's final summary when its current task ends (at once, as idle, if none runs). Your task waits for it, up to an hour."

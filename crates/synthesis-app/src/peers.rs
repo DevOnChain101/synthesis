@@ -230,6 +230,12 @@ pub fn doctor_lines(
             .into(),
     );
     v.push(format!(
+        "  delegation: {} (delegation_allow: {} rule(s), max hops {}); a delegated task runs in this session's own permission mode, capped by the sender's",
+        if c.accept_delegation { "ON" } else { "off" },
+        c.delegation_allow.len(),
+        c.delegation_max_hops
+    ));
+    v.push(format!(
         "  allow: {} rule(s), deny: {} rule(s), initiate {}, answer {}, max_hops {}, max_cost_usd {}",
         c.allow.len(),
         c.deny.len(),

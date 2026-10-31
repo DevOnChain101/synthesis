@@ -363,6 +363,8 @@ pub(crate) struct AgentCtx {
     /// `None` = all tools.
     pub allowed: Option<BTreeSet<String>>,
     pub prompt: Option<String>,
+    /// Set for a delegate worker: whose work this is (messaging.md J4.4).
+    pub origin: Option<crate::peer::Origin>,
 }
 
 pub(crate) struct AgentState {
@@ -822,6 +824,7 @@ impl Harness {
                     perms: r.perms,
                     allowed: r.allowed,
                     prompt: r.prompt,
+                    origin: None,
                 };
                 parked_kind = Some(kind);
                 AgentState::new(r.messages)
@@ -1049,6 +1052,7 @@ impl Harness {
             perms: self.permissions.clone(),
             allowed: None,
             prompt: None,
+            origin: None,
         };
         (task, main)
     }
