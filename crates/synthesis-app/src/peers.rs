@@ -64,7 +64,8 @@ pub fn setup(
         ));
     }
     let ws = &session.workspace;
-    let mut config = Config::from_settings(peers, &ws.root.to_string_lossy());
+    let mut config =
+        Config::from_settings(peers, &ws.root.to_string_lossy()).with_repo(&ws.repo_key);
     config.enabled |= force_on;
     if !config.enabled {
         return Ok(None);
@@ -121,6 +122,8 @@ pub fn setup(
         started_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
+        repo_key: ws.repo_key.clone(),
+        about: None,
     };
     let reg = match Registration::create(&run, &entry) {
         Ok(r) => r,

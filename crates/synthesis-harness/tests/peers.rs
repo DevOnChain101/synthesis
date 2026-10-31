@@ -34,6 +34,8 @@ fn entry(sid: &str, name: &str, label: &str, root: &std::path::Path, endpoint: &
         cwd: root.to_string_lossy().into_owned(),
         pid: 1,
         pid_start: None,
+        repo_key: String::new(),
+        about: None,
         endpoint: endpoint.into(),
         started_at: 0,
     }

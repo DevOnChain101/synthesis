@@ -369,6 +369,8 @@ async fn discovery_lists_permitted_live_peers_and_cleans_dead_ones() {
         cwd: root.into(),
         pid: 1,
         pid_start: None,
+        repo_key: String::new(),
+        about: None,
         endpoint: ep.into(),
         started_at: 0,
     };

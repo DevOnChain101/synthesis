@@ -216,7 +216,7 @@ C→S {"t":"cancel","id"}                   closing the connection = cancel
    ```
    - Rules are `workspace:<path glob>` (matched folded, per `PathPolicy`), `ws:<label|key>`, `sess:<name|id>`. Deny beats allow.
    - The same list governs whom I may ask (and see in listings) and who may ask me.
-   - Enabled ⇒ the default allow list is the same workspace only. Recommended `enabled:false` (D9).
+   - Enabled ⇒ the default allow list is the same workspace plus `repo:<repo_key>`, i.e. the other worktrees of the same repository (J1 Q8); an `allow` list written by the user is never widened. Recommended `enabled:false` (D9).
 
 ### B9. Listings (tools; the TUI `/agents --all` and `/peers` use the same rows)
 ```json

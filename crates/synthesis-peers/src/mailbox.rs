@@ -519,6 +519,8 @@ mod tests {
             cwd: "/r".into(),
             pid: 1,
             pid_start: None,
+            repo_key: String::new(),
+            about: None,
             endpoint: "ep".into(),
             started_at: 0,
         }
