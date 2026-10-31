@@ -7,10 +7,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use futures::StreamExt as _;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Render,
-    SharedString, Styled as _, Window, canvas, div, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
@@ -24,6 +25,7 @@ use crate::convo::Convo;
 use crate::credentials::CredentialStore;
 use crate::engine::{self, Choice, Engine, UiMsg};
 use crate::onboarding::{self, Kind, Outcome};
+use crate::palette::{self, Command};
 use crate::project::{self, Project};
 use crate::pty::PtyShell;
 use crate::settings::{self, DesktopSettings, FontChoice, Mode};
@@ -32,19 +34,37 @@ use crate::vt;
 
 mod views;
 
+gpui::actions!(synthesis, [NewTask, OpenPalette, OpenConfiguration]);
+
+/// Cmd (macOS) / Ctrl (elsewhere) shortcuts drawn in the design.
+pub fn bindings() -> Vec<gpui::KeyBinding> {
+    #[cfg(target_os = "macos")]
+    let keys = ["cmd-k", "cmd-n", "cmd-,"];
+    #[cfg(not(target_os = "macos"))]
+    let keys = ["ctrl-k", "ctrl-n", "ctrl-,"];
+    vec![
+        gpui::KeyBinding::new(keys[0], OpenPalette, None),
+        gpui::KeyBinding::new(keys[1], NewTask, None),
+        gpui::KeyBinding::new(keys[2], OpenConfiguration, None),
+    ]
+}
+
 const FONT_SIZE: f32 = 13.0;
 
-/// Registers the bundled OFL fonts (apps/desktop/assets/fonts) with GPUI.
+/// Registers the bundled OFL fonts (apps/desktop/assets/fonts: the code fonts and Inter) with GPUI.
 pub fn register_fonts(cx: &App) {
     let fonts: [&'static [u8]; 3] = [
         include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
         include_bytes!("../assets/fonts/FiraCode-Regular.ttf"),
         include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf"),
     ];
-    if let Err(e) = cx
-        .text_system()
-        .add_fonts(fonts.into_iter().map(Cow::Borrowed).collect())
-    {
+    if let Err(e) = cx.text_system().add_fonts(
+        fonts
+            .into_iter()
+            .chain(crate::brand::UI_FONT_FILES)
+            .map(Cow::Borrowed)
+            .collect(),
+    ) {
         eprintln!("synthesis-desktop: bundled fonts not loaded: {e}");
     }
 }
@@ -133,6 +153,7 @@ enum EngineState {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Bottom {
+    Code,
     Terminal,
     Browser,
     Verification,
@@ -175,6 +196,10 @@ pub struct Shell {
     shell_term: Option<Entity<TermPane>>,
     agent_on: bool,
     sheet: bool,
+    focus: FocusHandle,
+    /// The Cmd/Ctrl+K palette: open flag and its query input.
+    palette_open: bool,
+    palette_q: Entity<InputState>,
     clip: futures::channel::mpsc::UnboundedSender<String>,
     /// Development: scripted model and an automatic first prompt (feature `test-provider`).
     fake: Option<String>,
@@ -282,7 +307,7 @@ impl Shell {
         let composer = input(
             window,
             cx,
-            "Ask Synthesis or add acceptance criteria…",
+            "Describe your goal, or paste a task…",
             "",
             false,
         );
@@ -292,6 +317,21 @@ impl Shell {
             |this, _, ev: &gpui_component::input::InputEvent, window, cx| {
                 if matches!(ev, gpui_component::input::InputEvent::PressEnter { .. }) {
                     this.send_composer(window, cx);
+                }
+            },
+        )
+        .detach();
+        let palette_q = input(window, cx, "Search pages and actions…", "", false);
+        cx.observe(&palette_q, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(
+            &palette_q,
+            window,
+            |this, state, ev: &gpui_component::input::InputEvent, window, cx| {
+                if matches!(ev, gpui_component::input::InputEvent::PressEnter { .. }) {
+                    let q = state.read(cx).value().to_string();
+                    if let Some((_, c)) = palette::filter(&q).first() {
+                        this.run_command(*c, window, cx);
+                    }
                 }
             },
         )
@@ -353,10 +393,98 @@ impl Shell {
             shell_term: None,
             agent_on: !st.plain_terminal,
             sheet: false,
+            focus: cx.focus_handle(),
+            palette_open: false,
+            palette_q,
             clip,
             fake,
             auto_send,
         }
+    }
+
+    pub(super) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen != Screen::Main {
+            return;
+        }
+        self.palette_open = true;
+        self.palette_q
+            .update(cx, |q, cx| q.set_value("", window, cx));
+        window.focus(&self.palette_q.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette_open = false;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    fn run_command(&mut self, c: Command, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
+        match c {
+            Command::NewTask => self.new_session(cx),
+            Command::Sessions => {
+                self.nav = Nav::Session;
+                self.side_tab = SideTab::Sessions;
+            }
+            Command::Inbox => self.nav = Nav::Inbox,
+            Command::Activity => self.nav = Nav::Activity,
+            Command::Tools => self.nav = Nav::Tools,
+            Command::Topology => self.nav = Nav::Topology,
+            Command::Configuration => self.nav = Nav::Configuration,
+        }
+        cx.notify();
+    }
+
+    fn palette_overlay(&self, cx: &mut Context<Self>) -> AnyElement {
+        let q = self.palette_q.read(cx).value().to_string();
+        let rows = palette::filter(&q)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (text, c))| {
+                div()
+                    .id(SharedString::from(format!("pal-{i}")))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(px(8.))
+                    .text_size(px(13.))
+                    .cursor_pointer()
+                    .when(i == 0, |d| d.bg(hsla(theme::NAV_ACTIVE)))
+                    .child(text)
+                    .on_click(cx.listener(move |this, _, w, cx| this.run_command(c, w, cx)))
+            });
+        div()
+            .id("palette-backdrop")
+            .absolute()
+            .size_full()
+            .flex()
+            .justify_center()
+            .pt(px(110.))
+            .bg(hsla(0x000000).opacity(0.45))
+            .on_click(cx.listener(|this, _, w, cx| this.close_palette(w, cx)))
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, w, cx| {
+                if ev.keystroke.key == "escape" {
+                    this.close_palette(w, cx);
+                }
+            }))
+            .child(
+                v_flex()
+                    .id("palette")
+                    .w(px(480.))
+                    .h_auto()
+                    .max_h(px(380.))
+                    .gap(px(6.))
+                    .p(px(8.))
+                    .rounded(px(14.))
+                    .border_1()
+                    .border_color(hsla(theme::INPUT_BORDER))
+                    .bg(hsla(theme::PANEL))
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(Input::new(&self.palette_q).appearance(false))
+                    .child(div().h(px(1.)).bg(hsla(theme::LINE)))
+                    .children(rows),
+            )
+            .into_any_element()
     }
 
     fn project_name(&self) -> String {
@@ -824,29 +952,66 @@ fn label(text: impl Into<SharedString>) -> gpui::Div {
         .child(text.into().to_uppercase())
 }
 
-fn panel(title: &str, sub: &str) -> gpui::Div {
-    v_flex()
-        .overflow_hidden()
+/// Panel surface of desktop.html: `linear-gradient(150deg,#191d23,#111419)` with a 1px hairline.
+pub(super) fn surface() -> gpui::Div {
+    div()
         .border_1()
-        .border_color(hsla(0x303640))
-        .rounded(px(14.))
-        .bg(hsla(0x15191E))
-        .child(
-            h_flex()
-                .h(px(45.))
-                .px(px(16.))
-                .justify_between()
-                .border_b_1()
-                .border_color(hsla(0x2D333B))
-                .text_size(px(13.))
-                .child(div().font_semibold().child(title.to_string()))
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(hsla(0x9DA4AE))
-                        .child(sub.to_string()),
-                ),
-        )
+        .border_color(hsla(theme::LINE))
+        .rounded(px(16.))
+        .bg(gpui::linear_gradient(
+            160.,
+            gpui::linear_color_stop(hsla(0x191D23), 0.),
+            gpui::linear_color_stop(hsla(0x111419), 1.),
+        ))
+}
+
+/// A Lucide icon from the bundled set (one set, one stroke weight), `size` px.
+pub(super) fn icon(name: &str, size: f32, rgb: u32) -> gpui_component::Icon {
+    use gpui::Styled as _;
+    use gpui_component::{Icon, Sizable as _};
+    Icon::default()
+        .path(format!("icons/{name}.svg"))
+        .with_size(px(size))
+        .text_color(hsla(rgb))
+}
+
+/// Letter-spaced caps for the wordmark (GPUI has no letter-spacing style).
+pub(super) fn spaced(text: &str) -> String {
+    text.chars()
+        .map(String::from)
+        .collect::<Vec<_>>()
+        .join("\u{200A}\u{2009}")
+}
+
+/// The shortcut text drawn next to an action: Cmd on macOS, Ctrl elsewhere.
+pub(super) fn kbd(key: &str) -> String {
+    format!(
+        "{} {key}",
+        if cfg!(target_os = "macos") {
+            "⌘"
+        } else {
+            "Ctrl"
+        }
+    )
+}
+
+fn panel(title: &str, sub: &str) -> gpui::Div {
+    surface().flex().flex_col().overflow_hidden().child(
+        h_flex()
+            .h(px(45.))
+            .px(px(16.))
+            .justify_between()
+            .border_b_1()
+            .border_color(hsla(0x2D333B))
+            .text_size(px(13.))
+            .child(div().font_semibold().child(title.to_string()))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(hsla(0x9DA4AE))
+                    .child(sub.to_string()),
+            ),
+    )
 }
 
 fn empty(text: &str) -> gpui::Div {
@@ -884,6 +1049,17 @@ impl Shell {
                     .border_color(hsla(theme::LINE))
                     .rounded(px(16.))
                     .bg(hsla(theme::PANEL))
+                    .child(
+                        h_flex()
+                            .gap(px(10.))
+                            .child(gpui::img(crate::brand::mark()).size(px(34.)))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .font_semibold()
+                                    .child(spaced("SYNTHESIS")),
+                            ),
+                    )
                     .child(div().text_size(px(20.)).child("Connect a model provider"))
                     .child(div().text_size(px(12.)).text_color(hsla(theme::MUTED)).child(
                         "Your key stays in memory for this session. It is never written to disk, logs or events.",
@@ -959,7 +1135,7 @@ impl Shell {
             .child(h_flex().gap(px(8.)).children(modes))
             .child(section("Appearance"))
             .child(div().text_size(px(12.)).text_color(hsla(theme::MUTED)).child(
-                "Font for code, terminal and chat. Monospace is the default; fonts are bundled (SIL OFL).",
+                "Font for code, diff and terminal. The interface itself uses Inter. Fonts are bundled (SIL OFL).",
             ))
             .child(h_flex().gap(px(8.)).children(fonts))
             .into_any_element()
@@ -1006,11 +1182,27 @@ impl Render for Shell {
                     .into_any_element()
             }
         };
+        let palette = self.palette_open.then(|| self.palette_overlay(cx));
         v_flex()
             .size_full()
+            .relative()
+            .track_focus(&self.focus)
+            .key_context("Shell")
+            .on_action(cx.listener(|this, _: &OpenPalette, w, cx| this.open_palette(w, cx)))
+            .on_action(cx.listener(|this, _: &NewTask, _, cx| {
+                if this.screen == Screen::Main {
+                    this.new_session(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &OpenConfiguration, _, cx| {
+                if this.screen == Screen::Main {
+                    this.nav = Nav::Configuration;
+                    cx.notify();
+                }
+            }))
             .bg(hsla(theme::BG))
             .text_color(hsla(theme::TEXT))
-            .font_family(self.font())
+            .font_family(crate::brand::UI_FONT)
             .child(
                 TitleBar::new().child(
                     div()
@@ -1022,6 +1214,7 @@ impl Render for Shell {
                 ),
             )
             .child(div().flex_1().min_h_0().child(body))
+            .children(palette)
     }
 }
 
@@ -1155,6 +1348,8 @@ pub fn open(l: Launch, cx: &mut App) {
                 }
             });
         }
+        let focus = view.read(cx).focus.clone();
+        window.focus(&focus, cx);
         cx.new(|cx| Root::new(view, window, cx))
     });
     match r {
@@ -1188,5 +1383,26 @@ pub fn open(l: Launch, cx: &mut App) {
         }
         #[cfg(not(feature = "shot"))]
         Ok(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_three_drawn_shortcuts_are_bound_to_distinct_actions() {
+        let b = super::bindings();
+        let keys: Vec<String> = b
+            .iter()
+            .map(|k| k.keystrokes()[0].key().to_string())
+            .collect();
+        assert_eq!(keys, ["k", "n", ","]);
+        assert!(b.iter().all(|k| {
+            let m = k.keystrokes()[0].modifiers();
+            if cfg!(target_os = "macos") {
+                m.platform
+            } else {
+                m.control
+            }
+        }));
     }
 }

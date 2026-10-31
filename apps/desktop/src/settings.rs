@@ -6,7 +6,7 @@ use std::path::Path;
 use serde_json::{Map, Value};
 
 /// Bundled OFL fonts (apps/desktop/assets/fonts) plus the system font. The default is monospace
-/// for code, terminal and chat (owner decision D-3).
+/// for code, diff and terminal only; the interface uses Inter (`brand`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FontChoice {
     #[default]

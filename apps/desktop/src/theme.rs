@@ -26,12 +26,16 @@ pub const BUTTON_WHITE: u32 = 0xEBE9E6;
 pub const BUTTON_WHITE_TEXT: u32 = 0x151619;
 pub const INPUT_BORDER: u32 = 0x414852;
 
+// Code viewer colours (muted, after the code panel of desktop-preview.png).
+pub const SYNTAX_KEYWORD: u32 = 0xA9B4E8;
+pub const SYNTAX_COMMENT: u32 = 0x6E7681;
+
 pub fn hsla(rgb: u32) -> Hsla {
     gpui::rgb(rgb).into()
 }
 
-/// Dark mode with the Synthesis tokens, and `font` (a family name) for UI and code alike: the
-/// default is monospace (owner decision D-3, docs/specs/desktop.md section 8).
+/// Dark mode with the Synthesis tokens. Chrome uses the UI sans (`brand::UI_FONT`); `font` (a
+/// family name, the Settings > Appearance choice) is the monospace for code and terminal only.
 pub fn apply(font: &str, cx: &mut App) {
     Theme::change(ThemeMode::Dark, None, cx);
     let t = Theme::global_mut(cx);
@@ -66,7 +70,7 @@ pub fn apply(font: &str, cx: &mut App) {
     c.danger = hsla(ERROR);
     c.ring = hsla(ACCENT);
     c.caret = hsla(PEARL);
-    t.font_family = SharedString::from(font.to_string());
+    t.font_family = SharedString::from(crate::brand::UI_FONT);
     t.mono_font_family = SharedString::from(font.to_string());
 }
 

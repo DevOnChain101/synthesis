@@ -61,9 +61,10 @@ fn main() {
         }),
     };
     gpui_platform::application()
-        .with_assets(gpui_kit_assets::Assets)
+        .with_assets(synthesis_desktop::brand::Assets)
         .run(move |cx| {
             gpui_component::init(cx);
+            cx.bind_keys(ui::bindings());
             ui::register_fonts(cx);
             theme::apply(settings::load(&home).font.family(), cx);
             ui::open(launch, cx);

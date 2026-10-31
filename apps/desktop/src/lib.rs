@@ -3,15 +3,18 @@
 
 pub mod activity;
 pub mod agent_tui;
+pub mod brand;
 pub mod convo;
 pub mod credentials;
 pub mod d0;
 pub mod engine;
 pub mod onboarding;
+pub mod palette;
 pub mod project;
 pub mod pty;
 pub mod sessions;
 pub mod settings;
+pub mod syntax;
 pub mod theme;
 pub mod topology;
 pub mod ui;

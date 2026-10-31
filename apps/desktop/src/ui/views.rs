@@ -7,19 +7,23 @@ use std::path::PathBuf;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, canvas, div, px,
+    AnyElement, Context, HighlightStyle, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, StyledText, canvas, div, img, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::{Sizable as _, StyledExt as _, h_flex, v_flex};
 use synthesis_permissions::Mode as Perm;
 
-use super::{ActiveNav, Bottom, Menu, Nav, Shell, SideTab, Tab, choice, empty, label, panel};
+use super::{
+    ActiveNav, Bottom, Menu, Nav, Shell, SideTab, Tab, choice, empty, icon, kbd, label, panel,
+    spaced, surface,
+};
 use crate::activity::{self, Filter};
 use crate::convo::{ApprovalState, Item, ToolState};
 use crate::engine::Choice;
 use crate::sessions::{self, Status};
+use crate::syntax;
 use crate::theme::{self, hsla};
 use crate::topology::{self, Pos, Rect};
 
@@ -55,7 +59,7 @@ fn rule() -> gpui::Div {
 
 fn nav_row(
     id: impl Into<gpui::ElementId>,
-    glyph: &str,
+    icon_name: &str,
     text: String,
     active: bool,
 ) -> gpui::Stateful<gpui::Div> {
@@ -67,12 +71,7 @@ fn nav_row(
         .rounded(px(9.))
         .text_size(px(13.))
         .text_color(hsla(if active { 0xFFFFFF } else { 0xAAB0BA }))
-        .child(
-            div()
-                .w(px(16.))
-                .text_color(hsla(0xB6BDC6))
-                .child(glyph.to_string()),
-        )
+        .child(icon(icon_name, 16., 0xB6BDC6))
         .child(div().flex_1().child(text))
         .cursor_pointer()
         .when_active(active)
@@ -121,51 +120,73 @@ impl Shell {
                     )
             });
             let path = PathBuf::from(&w.cwd);
-            nav_row(sid("ws", i), "▣", w.name, active)
+            nav_row(sid("ws", i), "folder", w.name, active)
                 .children(stat)
                 .on_click(
                     cx.listener(move |this, _, _, cx| this.select_workspace(path.clone(), cx)),
                 )
         });
+        let hint = |t: String| {
+            div()
+                .text_size(px(11.))
+                .text_color(hsla(theme::MUTED))
+                .child(t)
+        };
         v_flex()
             .w(px(210.))
             .flex_shrink_0()
             .h_full()
             .justify_between()
             .p(px(13.))
-            .bg(hsla(theme::SIDEBAR))
+            .bg(gpui::linear_gradient(
+                160.,
+                gpui::linear_color_stop(hsla(0x151A20), 0.),
+                gpui::linear_color_stop(hsla(theme::SIDEBAR), 1.),
+            ))
             .border_r_1()
             .border_color(hsla(0x2C3139))
             .child(
                 v_flex()
                     .child(
-                        div()
-                            .m(px(9.))
-                            .mb(px(16.))
-                            .text_size(px(12.))
-                            .child("SYNTHESIS"),
+                        h_flex()
+                            .gap(px(10.))
+                            .m(px(6.))
+                            .mb(px(18.))
+                            .child(img(crate::brand::mark()).size(px(30.)).flex_shrink_0())
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .font_semibold()
+                                    .child(spaced("SYNTHESIS")),
+                            ),
                     )
                     .child(
-                        Button::new("new-task")
-                            .label("New Task        ⌘N")
-                            .outline()
+                        h_flex()
+                            .id("new-task")
+                            .gap(px(10.))
+                            .px(px(12.))
+                            .py(px(9.))
+                            .rounded(px(10.))
+                            .border_1()
+                            .border_color(hsla(theme::INPUT_BORDER))
+                            .bg(hsla(0x1B2027))
+                            .text_size(px(13.))
+                            .cursor_pointer()
+                            .child(icon("plus", 16., 0xD4D9DF))
+                            .child(div().flex_1().child("New Task"))
+                            .child(hint(kbd("N")))
                             .on_click(cx.listener(|this, _, _, cx| this.new_session(cx))),
                     )
                     .child(rule())
                     .child(
-                        nav_row("search", "⌕", "Search        ⌘K".into(), false).on_click(
-                            cx.listener(|this, _, w, cx| {
-                                this.side_tab = SideTab::Sessions;
-                                this.nav = Nav::Session;
-                                w.focus(&gpui::Focusable::focus_handle(&this.search, cx), cx);
-                                cx.notify();
-                            }),
-                        ),
+                        nav_row("search", "search", "Search".into(), false)
+                            .child(hint(kbd("K")))
+                            .on_click(cx.listener(|this, _, w, cx| this.open_palette(w, cx))),
                     )
                     .child(
                         nav_row(
                             "inbox",
-                            "▤",
+                            "inbox",
                             if pending > 0 {
                                 format!("Inbox  ({pending})")
                             } else {
@@ -184,12 +205,7 @@ impl Shell {
                             .justify_between()
                             .px(px(10.))
                             .child(label("Workspace"))
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .text_color(hsla(theme::MUTED))
-                                    .child("+"),
-                            ),
+                            .child(icon("plus", 14., theme::MUTED)),
                     )
                     .children(rows),
             )
@@ -198,31 +214,53 @@ impl Shell {
                     .child(
                         nav_row(
                             "config",
-                            "⚙",
+                            "settings",
                             "Configuration".into(),
                             self.nav == Nav::Configuration,
                         )
+                        .child(hint(kbd(",")))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.nav = Nav::Configuration;
                             cx.notify();
                         })),
                     )
                     .child(
-                        div()
-                            .px(px(10.))
-                            .pt(px(6.))
-                            .text_size(px(11.))
-                            .text_color(hsla(theme::MUTED))
-                            .child(format!(
-                                "v{} · {}",
-                                env!("CARGO_PKG_VERSION"),
-                                match (self.settings.mode, self.settings.plain_terminal) {
-                                    (crate::settings::Mode::Gpui, _) => "GPUI",
-                                    (crate::settings::Mode::Tui, false) => "TUI",
-                                    (crate::settings::Mode::Tui, true) => "TUI · plain terminal",
-                                }
-                            )),
-                    ),
+                        v_flex()
+                            .mt(px(8.))
+                            .gap(px(4.))
+                            .p(px(10.))
+                            .rounded(px(11.))
+                            .border_1()
+                            .border_color(hsla(0x2C3139))
+                            .bg(hsla(0x151A20))
+                            .child(
+                                h_flex()
+                                    .gap(px(8.))
+                                    .text_size(px(12.))
+                                    .child(icon("folder-open", 15., 0xB6BDC6))
+                                    .child(div().flex_1().child(self.project_name()))
+                                    .child(icon("chevron-down", 14., theme::MUTED)),
+                            )
+                            .when(!self.branch.is_empty(), |d| {
+                                d.child(
+                                    h_flex()
+                                        .gap(px(8.))
+                                        .text_size(px(11.))
+                                        .text_color(hsla(theme::MUTED))
+                                        .child(icon("git-branch", 14., theme::MUTED))
+                                        .child(self.branch.clone()),
+                                )
+                            }),
+                    )
+                    .child(div().px(px(10.)).pt(px(8.)).child(hint(format!(
+                        "v{} · {}",
+                        env!("CARGO_PKG_VERSION"),
+                        match (self.settings.mode, self.settings.plain_terminal) {
+                            (crate::settings::Mode::Gpui, _) => "GPUI",
+                            (crate::settings::Mode::Tui, false) => "TUI",
+                            (crate::settings::Mode::Tui, true) => "TUI · plain terminal",
+                        }
+                    )))),
             )
             .into_any_element()
     }
@@ -260,7 +298,7 @@ impl Shell {
                 }))
                 .child(text)
         };
-        let page = |id: &'static str, text: &'static str, n: Nav| {
+        let page = |id: &'static str, ic: &'static str, text: &'static str, n: Nav| {
             div()
                 .id(id)
                 .text_size(px(12.))
@@ -274,7 +312,12 @@ impl Shell {
                     this.nav = n;
                     cx.notify();
                 }))
-                .child(text)
+                .child(
+                    h_flex()
+                        .gap(px(6.))
+                        .child(icon(ic, 13., theme::MUTED))
+                        .child(text),
+                )
         };
         v_flex()
             .w(px(260.))
@@ -298,8 +341,7 @@ impl Shell {
                         div()
                             .id("side-plus")
                             .cursor_pointer()
-                            .text_color(hsla(theme::MUTED))
-                            .child("+")
+                            .child(icon("plus", 16., theme::MUTED))
                             .on_click(cx.listener(|this, _, _, cx| this.new_session(cx))),
                     ),
             )
@@ -315,9 +357,9 @@ impl Shell {
             .child(
                 h_flex()
                     .gap(px(12.))
-                    .child(page("p-activity", "Activity", Nav::Activity))
-                    .child(page("p-tools", "Tools", Nav::Tools))
-                    .child(page("p-topology", "Agent Topology", Nav::Topology)),
+                    .child(page("p-activity", "activity", "Activity", Nav::Activity))
+                    .child(page("p-tools", "wrench", "Tools", Nav::Tools))
+                    .child(page("p-topology", "network", "Topology", Nav::Topology)),
             )
             .child(body)
             .into_any_element()
@@ -335,6 +377,13 @@ impl Shell {
                 "now".into(),
                 st,
                 self.active == 0,
+                [
+                    ("cpu", self.model.clone().unwrap_or_default()),
+                    ("git-branch", self.branch.clone()),
+                ]
+                .into_iter()
+                .filter(|(_, t)| !t.is_empty())
+                .collect(),
             )
             .on_click(cx.listener(|this, _, _, cx| {
                 this.active = 0;
@@ -366,6 +415,7 @@ impl Shell {
                     sessions::age_text(now_ms() - s.mtime),
                     Status::Done,
                     open,
+                    vec![],
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.open_saved(&id, cx)))
             });
@@ -389,15 +439,21 @@ impl Shell {
                     .rounded(px(9.))
                     .border_1()
                     .border_color(hsla(0x30333A))
-                    .px(px(4.))
-                    .child(Input::new(&self.search).appearance(false)),
+                    .px(px(8.))
+                    .child(
+                        h_flex()
+                            .gap(px(4.))
+                            .child(icon("search", 14., theme::MUTED))
+                            .child(Input::new(&self.search).appearance(false)),
+                    ),
             )
             .children(live_row)
             .children(groups)
             .when(none, |d| d.child(empty("No sessions yet.")))
             .child(
                 Button::new("new-session")
-                    .label("+ New session")
+                    .icon(icon("plus", 14., theme::MUTED))
+                    .label("New session")
                     .ghost()
                     .small()
                     .on_click(cx.listener(|this, _, _, cx| this.new_session(cx))),
@@ -411,8 +467,9 @@ impl Shell {
         }
         let rows = self.proj.tree.iter().enumerate().map(|(i, r)| {
             let path = r.path.clone();
-            div()
+            h_flex()
                 .id(sid("f", i))
+                .gap(px(6.))
                 .pl(px(6. + 12. * r.depth as f32))
                 .py(px(2.))
                 .text_size(px(12.))
@@ -422,7 +479,12 @@ impl Shell {
                         cx.listener(move |this, _, _, cx| this.open_file(&path, false, cx)),
                     )
                 })
-                .child(format!("{}{}", if r.dir { "▸ " } else { "  " }, r.name))
+                .child(icon(
+                    if r.dir { "folder" } else { "file" },
+                    13.,
+                    theme::MUTED,
+                ))
+                .child(r.name.clone())
         });
         v_flex()
             .id("explorer-scroll")
@@ -554,6 +616,7 @@ impl Shell {
                     .border_1()
                     .border_color(hsla(0x2D333B))
                     .bg(hsla(0x15191E))
+                    .font_family(self.font())
                     .text_size(px(12.))
                     .child(
                         h_flex()
@@ -632,7 +695,12 @@ impl Shell {
                     .bg(hsla(0x1B1F26))
                     .text_size(px(12.))
                     .child(label("Needs your approval"))
-                    .child(div().text_size(px(13.)).child(prompt.clone()))
+                    .child(
+                        div()
+                            .font_family(self.font())
+                            .text_size(px(12.))
+                            .child(prompt.clone()),
+                    )
                     .child(body)
                     .into_any_element()
             }
@@ -674,7 +742,12 @@ impl Shell {
             .text_size(px(11.))
             .text_color(hsla(theme::SILVER))
             .cursor_pointer()
-            .child(format!("{text}  ▾"))
+            .child(
+                h_flex()
+                    .gap(px(5.))
+                    .child(text)
+                    .child(icon("chevron-down", 12., theme::MUTED)),
+            )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.menu = if this.menu == Some(menu) {
                     None
@@ -747,10 +820,7 @@ impl Shell {
                 .map(|(i, p)| {
                     opt(sid("pm", i), perm_label(p).into(), self.perm == p)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.perm = p;
-                            if let Some(e) = &this.engine {
-                                e.set_mode(p);
-                            }
+                            this.set_perm(p);
                             this.menu = None;
                             cx.notify();
                         }))
@@ -770,21 +840,43 @@ impl Shell {
         )
     }
 
-    fn composer_box(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn set_perm(&mut self, p: Perm) {
+        self.perm = p;
+        if let Some(e) = &self.engine {
+            e.set_mode(p);
+        }
+    }
+
+    /// The composer. On the landing it also carries the attach chips (visual only: attachments are
+    /// not built yet) and the larger hero look.
+    fn composer_box(&self, landing: bool, cx: &mut Context<Self>) -> AnyElement {
         let running = self.tabs[0].convo.running;
         let model = self.model.clone().unwrap_or_else(|| "model".into());
         let has_effort = self
             .engine
             .as_ref()
             .is_some_and(|e| !e.effort_tiers.is_empty());
+        let attach = |t: &'static str| {
+            h_flex()
+                .gap(px(5.))
+                .px(px(9.))
+                .py(px(5.))
+                .rounded(px(8.))
+                .bg(hsla(0x1E242B))
+                .text_size(px(11.))
+                .text_color(hsla(theme::SILVER))
+                .child(icon("plus", 12., theme::MUTED))
+                .child(t)
+        };
+        let auto = self.perm == Perm::Auto;
         v_flex()
             .gap(px(8.))
             .m(px(12.))
             .children(self.menu_list(cx))
             .child(
                 v_flex()
-                    .p(px(12.))
-                    .gap(px(8.))
+                    .p(px(if landing { 16. } else { 12. }))
+                    .gap(px(if landing { 22. } else { 8. }))
                     .border_1()
                     .border_color(hsla(theme::INPUT_BORDER))
                     .rounded(px(11.))
@@ -793,12 +885,12 @@ impl Shell {
                     .child(
                         h_flex()
                             .gap(px(8.))
-                            .child(
-                                div()
-                                    .text_color(hsla(theme::MUTED))
-                                    .text_size(px(13.))
-                                    .child("+"),
-                            )
+                            .when(landing, |d| {
+                                d.child(attach("Codebase"))
+                                    .child(attach("Image"))
+                                    .child(attach("Document"))
+                            })
+                            .when(!landing, |d| d.child(icon("plus", 14., theme::MUTED)))
                             .child(self.chip("chip-model", model, Menu::Model, cx))
                             .when(has_effort, |d| {
                                 d.child(self.chip(
@@ -815,6 +907,32 @@ impl Shell {
                                 cx,
                             ))
                             .child(div().flex_1())
+                            .child(
+                                h_flex()
+                                    .id("auto")
+                                    .gap(px(5.))
+                                    .text_size(px(12.))
+                                    .text_color(hsla(if auto {
+                                        theme::PEARL
+                                    } else {
+                                        theme::MUTED
+                                    }))
+                                    .cursor_pointer()
+                                    .child(icon(
+                                        "zap",
+                                        14.,
+                                        if auto { theme::PEARL } else { theme::MUTED },
+                                    ))
+                                    .child("Auto")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.set_perm(if auto {
+                                            Perm::Default
+                                        } else {
+                                            Perm::Auto
+                                        });
+                                        cx.notify();
+                                    })),
+                            )
                             .child(if running {
                                 Button::new("stop")
                                     .label("Stop")
@@ -826,14 +944,19 @@ impl Shell {
                                         }
                                         cx.notify();
                                     }))
+                                    .into_any_element()
                             } else {
-                                Button::new("send")
-                                    .label("Send ↑")
-                                    .primary()
-                                    .small()
+                                div()
+                                    .id("send")
+                                    .p(px(7.))
+                                    .rounded(px(9.))
+                                    .bg(hsla(0x363C45))
+                                    .cursor_pointer()
+                                    .child(icon("arrow-up", 16., theme::TEXT))
                                     .on_click(
                                         cx.listener(|this, _, w, cx| this.send_composer(w, cx)),
                                     )
+                                    .into_any_element()
                             }),
                     ),
             )
@@ -874,9 +997,12 @@ impl Shell {
             Status::Done => "done".into(),
         };
         let items = self.items(self.active, live, cx);
-        let landing = items.is_empty();
+        let landing = self.is_landing();
         if live && (tab.convo.running || tab.convo.needs_you() > 0) {
             self.convo_scroll.scroll_to_bottom();
+        }
+        if landing && live {
+            return self.landing(cx);
         }
         panel("Session", &sub)
             .flex_1()
@@ -891,26 +1017,93 @@ impl Shell {
                     .min_h_0()
                     .gap(px(12.))
                     .p(px(16.))
-                    .children(items)
-                    .when(landing, |d| {
-                        d.child(
-                            v_flex()
-                                .gap(px(8.))
-                                .child(
-                                    div()
-                                        .text_size(px(20.))
-                                        .child("What shall we build today?"),
-                                )
-                                .children(self.engine_note()),
-                        )
-                    }),
+                    .children(items),
             )
             .child(if live {
-                self.composer_box(cx)
+                self.composer_box(false, cx)
             } else {
                 empty("Read-only replay of a stored session. Resuming it in the window is not built yet.")
                     .into_any_element()
             })
+            .into_any_element()
+    }
+
+    /// The first screen of a session: greeting over a soft hero gradient, the composer and four
+    /// starting points (docs/specs/desktop.md section 8, `desktop-preview.png`).
+    fn landing(&self, cx: &mut Context<Self>) -> AnyElement {
+        let composer = self.composer_box(true, cx);
+        let card = |i: usize, text: &'static str| {
+            div()
+                .id(sid("sugg", i))
+                .flex_1()
+                .min_w_0()
+                .p(px(14.))
+                .rounded(px(11.))
+                .border_1()
+                .border_color(hsla(0x2D333B))
+                .bg(hsla(0x14181D))
+                .text_size(px(12.))
+                .line_height(px(17.))
+                .text_color(hsla(theme::SILVER))
+                .cursor_pointer()
+                .child(text)
+                .on_click(cx.listener(move |this, _, w, cx| {
+                    this.composer.update(cx, |c, cx| c.set_value(text, w, cx));
+                }))
+        };
+        div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .m(px(12.))
+            .rounded(px(16.))
+            .border_1()
+            .border_color(hsla(theme::LINE))
+            .overflow_hidden()
+            .bg(gpui::linear_gradient(
+                215.,
+                gpui::linear_color_stop(hsla(0x2A2826), 0.),
+                gpui::linear_color_stop(hsla(0x0E1115), 0.55),
+            ))
+            .child(
+                img(crate::brand::mark())
+                    .absolute()
+                    .top(px(-40.))
+                    .right(px(-30.))
+                    .size(px(300.))
+                    .opacity(0.22),
+            )
+            .child(
+                v_flex().size_full().items_center().justify_center().child(
+                    v_flex()
+                        .w_full()
+                        .max_w(px(680.))
+                        .px(px(24.))
+                        .gap(px(18.))
+                        .child(
+                            v_flex()
+                                .text_size(px(28.))
+                                .line_height(px(36.))
+                                .child(div().child("Welcome back."))
+                                .child(
+                                    div()
+                                        .text_color(hsla(theme::SILVER))
+                                        .child("What shall we build today?"),
+                                ),
+                        )
+                        .children(self.engine_note())
+                        .child(div().mx(px(-12.)).child(composer))
+                        .child(
+                            h_flex()
+                                .gap(px(12.))
+                                .items_stretch()
+                                .child(card(0, "Implement feature with tests"))
+                                .child(card(1, "Refactor this module"))
+                                .child(card(2, "Investigate and fix an issue"))
+                                .child(card(3, "Add monitoring and alerts")),
+                        ),
+                ),
+            )
             .into_any_element()
     }
 
@@ -919,7 +1112,18 @@ impl Shell {
             .viewer
             .as_ref()
             .map_or("Code · Diff", |v| if v.diff { "Diff" } else { "Code" });
-        let body = match &self.viewer {
+        panel("File / Diff", sub)
+            .w(px(380.))
+            .flex_shrink_0()
+            .my(px(12.))
+            .mr(px(12.))
+            .child(self.viewer_body())
+            .into_any_element()
+    }
+
+    fn viewer_body(&self) -> AnyElement {
+        let mono = self.font();
+        match &self.viewer {
             None => empty("Open a file or a change to see it here.").into_any_element(),
             Some(v) => {
                 let lines = v.lines.iter().enumerate().map(|(i, l)| {
@@ -936,6 +1140,7 @@ impl Shell {
                     };
                     h_flex()
                         .gap(px(10.))
+                        .font_family(mono.clone())
                         .text_size(px(12.))
                         .when(!v.diff, |d| {
                             d.child(
@@ -950,7 +1155,27 @@ impl Shell {
                             div()
                                 .text_color(hsla(c))
                                 .whitespace_nowrap()
-                                .child(l.clone()),
+                                .child(if v.diff {
+                                    StyledText::new(l.clone())
+                                } else {
+                                    StyledText::new(l.clone()).with_highlights(
+                                        syntax::tokens(l).into_iter().map(|(r, k)| {
+                                            let c = match k {
+                                                syntax::Kind::Keyword => theme::SYNTAX_KEYWORD,
+                                                syntax::Kind::Str => theme::SUCCESS,
+                                                syntax::Kind::Number => theme::PENDING,
+                                                syntax::Kind::Comment => theme::SYNTAX_COMMENT,
+                                            };
+                                            (
+                                                r,
+                                                HighlightStyle {
+                                                    color: Some(hsla(c)),
+                                                    ..Default::default()
+                                                },
+                                            )
+                                        }),
+                                    )
+                                }),
                         )
                 });
                 v_flex()
@@ -962,6 +1187,7 @@ impl Shell {
                     .child(
                         div()
                             .pb(px(8.))
+                            .font_family(mono.clone())
                             .text_size(px(12.))
                             .text_color(hsla(0xFFFFFF))
                             .child(v.title.clone()),
@@ -969,14 +1195,7 @@ impl Shell {
                     .children(lines)
                     .into_any_element()
             }
-        };
-        panel("File / Diff", sub)
-            .w(px(380.))
-            .flex_shrink_0()
-            .my(px(12.))
-            .mr(px(12.))
-            .child(body)
-            .into_any_element()
+        }
     }
 
     fn bottom_panel(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -985,9 +1204,12 @@ impl Shell {
             div()
                 .id(id)
                 .cursor_pointer()
-                .text_size(px(11.))
+                .px(px(10.))
+                .py(px(4.))
+                .rounded(px(7.))
+                .text_size(px(12.))
                 .text_color(hsla(if on { 0xFFFFFF } else { theme::MUTED }))
-                .when(on, |d| d.border_b_1().border_color(hsla(theme::PEARL)))
+                .when(on, |d| d.bg(hsla(theme::NAV_ACTIVE)))
                 .child(text)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.bottom = b;
@@ -995,7 +1217,12 @@ impl Shell {
                 }))
         };
         let body = match (self.bottom, &self.bottom_term) {
-            (Bottom::Terminal, Some(t)) => div().size_full().child(t.clone()).into_any_element(),
+            (Bottom::Code, _) => self.viewer_body(),
+            (Bottom::Terminal, Some(t)) => div()
+                .size_full()
+                .p(px(10.))
+                .child(t.clone())
+                .into_any_element(),
             (Bottom::Terminal, None) => {
                 empty("No shell: this build has no PTY for this platform.").into_any_element()
             }
@@ -1012,23 +1239,22 @@ impl Shell {
                 empty(&format!("{n} verification reports in this session.")).into_any_element()
             }
         };
-        v_flex()
+        surface()
+            .flex()
+            .flex_col()
             .h(px(200.))
             .flex_shrink_0()
             .mx(px(12.))
             .mb(px(8.))
-            .border_1()
-            .border_color(hsla(0x303640))
-            .rounded(px(14.))
-            .bg(hsla(0x15191E))
             .overflow_hidden()
             .child(
                 h_flex()
-                    .gap(px(16.))
-                    .px(px(16.))
+                    .gap(px(6.))
+                    .px(px(12.))
                     .py(px(8.))
                     .border_b_1()
                     .border_color(hsla(0x2D333B))
+                    .child(tab("b-code", "Code", Bottom::Code))
                     .child(tab("b-term", "Terminal", Bottom::Terminal))
                     .child(tab("b-browser", "Browser", Bottom::Browser))
                     .child(tab("b-verify", "Verification", Bottom::Verification)),
@@ -1043,25 +1269,23 @@ impl Shell {
             .engine
             .as_ref()
             .map_or(String::new(), |e| format!("sandbox {}", e.sandbox.mode));
-        let parts: Vec<String> = [
-            self.model.clone().unwrap_or_default(),
-            sandbox,
-            if self.branch.is_empty() {
-                String::new()
-            } else {
-                format!("⎇ {}", self.branch)
-            },
-        ]
-        .into_iter()
-        .filter(|p| !p.is_empty())
-        .collect();
+        let parts: Vec<String> = [self.model.clone().unwrap_or_default(), sandbox]
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .collect();
         h_flex()
             .px(px(16.))
             .py(px(6.))
             .justify_between()
             .text_size(px(11.))
             .text_color(hsla(theme::MUTED))
-            .child(parts.join("  ·  "))
+            .child(h_flex().gap(px(6.)).child(parts.join("  ·  ")).when(
+                !self.branch.is_empty(),
+                |d| {
+                    d.child(icon("git-branch", 12., theme::MUTED))
+                        .child(self.branch.clone())
+                },
+            ))
             .child(format!(
                 "{} tokens   ·   needs you: {}",
                 t.convo.tokens,
@@ -1070,7 +1294,14 @@ impl Shell {
             .into_any_element()
     }
 
+    /// The first screen: a live session with nothing said yet and no file opened.
+    fn is_landing(&self) -> bool {
+        let t = &self.tabs[self.active];
+        t.live && t.convo.items.is_empty() && self.viewer.is_none()
+    }
+
     pub(super) fn session_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let landing = self.is_landing();
         v_flex()
             .size_full()
             .child(self.tab_strip(cx))
@@ -1080,7 +1311,7 @@ impl Shell {
                     .min_h_0()
                     .items_stretch()
                     .child(self.conversation(cx))
-                    .child(self.viewer_panel()),
+                    .when(!landing, |d| d.child(self.viewer_panel())),
             )
             .child(self.bottom_panel(cx))
             .child(self.status_line())
@@ -1426,16 +1657,29 @@ impl Shell {
             .h(px(H_CORE))
             .items_center()
             .justify_center()
+            .gap(px(2.))
             .rounded(px(16.))
-            .border_2()
-            .border_color(hsla(theme::PEARL).opacity(0.5))
-            .bg(hsla(0x101217))
-            .child(div().text_size(px(13.)).child("SYNTHESIS"))
+            .border_1()
+            .border_color(hsla(0xB2A7A0))
+            .bg(gpui::linear_gradient(
+                135.,
+                gpui::linear_color_stop(hsla(0x363338), 0.),
+                gpui::linear_color_stop(hsla(0x1C2027), 1.),
+            ))
+            .shadow(vec![gpui::BoxShadow {
+                color: hsla(0xB1A6A0).opacity(0.10),
+                offset: gpui::point(px(0.), px(0.)),
+                blur_radius: px(32.),
+                spread_radius: px(2.),
+                inset: false,
+            }])
+            .child(img(crate::brand::mark()).size(px(44.)))
+            .child(div().text_size(px(13.)).font_semibold().child("Synthesis"))
             .child(
                 div()
                     .text_size(px(12.))
                     .text_color(hsla(theme::SILVER))
-                    .child("CORE"),
+                    .child("Core"),
             )
             .child(
                 div()
@@ -1567,30 +1811,54 @@ fn session_row(
     age: String,
     st: Status,
     on: bool,
+    chips: Vec<(&'static str, String)>,
 ) -> gpui::Stateful<gpui::Div> {
-    h_flex()
+    let chips = chips
+        .into_iter()
+        .map(|(ic, t)| {
+            h_flex()
+                .gap(px(4.))
+                .px(px(6.))
+                .py(px(2.))
+                .rounded(px(6.))
+                .bg(hsla(0x1E242B))
+                .text_size(px(10.))
+                .text_color(hsla(theme::SILVER))
+                .child(icon(ic, 11., theme::SUCCESS))
+                .child(t)
+        })
+        .collect::<Vec<_>>();
+    let has_chips = !chips.is_empty();
+    v_flex()
         .id(id)
-        .gap(px(8.))
+        .gap(px(5.))
         .px(px(8.))
         .py(px(7.))
         .rounded(px(8.))
         .text_size(px(12.))
         .cursor_pointer()
         .when(on, |d| d.bg(hsla(theme::NAV_ACTIVE)))
-        .child(dot(st))
         .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_color(hsla(theme::SILVER))
-                .child(title),
+            h_flex()
+                .gap(px(8.))
+                .child(dot(st))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_color(hsla(theme::SILVER))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(hsla(theme::MUTED))
+                        .child(age),
+                ),
         )
-        .child(
-            div()
-                .text_size(px(10.))
-                .text_color(hsla(theme::MUTED))
-                .child(age),
-        )
+        .when(has_chips, |d| {
+            d.child(h_flex().gap(px(6.)).pl(px(15.)).children(chips))
+        })
 }
