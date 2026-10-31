@@ -212,6 +212,22 @@ pub struct Config {
     pub max_hops: usize,
     pub max_cost_usd: f64,
     pub resume_offline: bool,
+    /// Threads (P1): rounds per thread, idle minutes before one closes, open threads.
+    pub max_rounds: u32,
+    pub thread_idle_min: u64,
+    pub max_threads: usize,
+    /// `notify_on_end` (P2): longest a subscription waits.
+    pub notify_wait_max_s: u64,
+    /// Delegation (J): off unless the user turns it on in USER settings; nobody is in
+    /// `delegation_allow` by default.
+    pub accept_delegation: bool,
+    pub delegation_allow: Vec<String>,
+    /// `chain.len()` a delegated request may have: 2 = A to B and one further hop.
+    pub delegation_max_hops: usize,
+    pub delegation_max_tool_calls: u32,
+    pub delegation_wall_s: u64,
+    /// Bash commands whose output responders may see (P3). Empty = none.
+    pub share_commands: Vec<String>,
     /// The `allow` list is the default one (see [`Config::with_repo`]).
     allow_default: bool,
 }
@@ -220,6 +236,7 @@ impl Config {
     /// Defaults: off; once on, the allow list is this workspace only (D9).
     pub fn from_settings(peers: &Map<String, Value>, workspace_root: &str) -> Self {
         let flag = |k, d| peers.get(k).and_then(Value::as_bool).unwrap_or(d);
+        let num = |k, d| peers.get(k).and_then(Value::as_u64).unwrap_or(d);
         let list = |k: &str| -> Option<Vec<String>> {
             peers.get(k)?.as_array().map(|a| {
                 a.iter()
@@ -244,6 +261,16 @@ impl Config {
                 .and_then(Value::as_f64)
                 .unwrap_or(1.0),
             resume_offline: flag("resume_offline", false),
+            max_rounds: num("max_rounds", 6) as u32,
+            thread_idle_min: num("thread_idle_min", 30),
+            max_threads: num("max_threads", 4) as usize,
+            notify_wait_max_s: num("notify_wait_max_s", 3600),
+            accept_delegation: flag("accept_delegation", false),
+            delegation_allow: list("delegation_allow").unwrap_or_default(),
+            delegation_max_hops: num("delegation_max_hops", 2) as usize,
+            delegation_max_tool_calls: num("delegation_max_tool_calls", 40) as u32,
+            delegation_wall_s: num("delegation_wall_s", 900),
+            share_commands: list("share_commands").unwrap_or_default(),
         }
     }
 
@@ -254,6 +281,14 @@ impl Config {
             self.allow.push(format!("repo:{repo_key}"));
         }
         self
+    }
+
+    /// Who may ask this session to do work: delegation is on, the sender is permitted at all
+    /// (`allow`, `deny`) and is named by `delegation_allow` (empty = nobody).
+    pub fn delegation_permits(&self, p: &Addr) -> bool {
+        self.accept_delegation
+            && self.permits(p)
+            && self.delegation_allow.iter().any(|r| rule_matches(r, p))
     }
 
     /// Deny beats allow. The same list governs whom I may ask and who may ask me.

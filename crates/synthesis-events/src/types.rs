@@ -536,6 +536,51 @@ pub enum Event {
         bytes: u64,
         duration_ms: u64,
     },
+    /// A thread of peer rounds ended: `reason` = `cap | ttl | cancel | size | budget`.
+    #[serde(rename = "peer.thread_closed")]
+    PeerThreadClosed { thread_id: String, reason: String },
+    /// This session accepted a delegated request (messaging.md J). `from` is self-asserted;
+    /// `mode` is the mode the worker runs in, `cap` the sender's mode it was capped by.
+    #[serde(rename = "peer.delegation.accepted")]
+    PeerDelegationAccepted {
+        delegation_id: String,
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        from: PeerAddr,
+        mode: String,
+        cap: String,
+    },
+    #[serde(rename = "peer.delegation.started")]
+    PeerDelegationStarted {
+        delegation_id: String,
+        agent_id: String,
+    },
+    /// One tool call made for a peer. `origin` is always `peer`; `from` is the canonical sender
+    /// address (unverified).
+    #[serde(rename = "peer.delegation.tool")]
+    PeerDelegationTool {
+        delegation_id: String,
+        tool_call_id: String,
+        name: String,
+        origin: String,
+        from: String,
+    },
+    /// `status` = `answered | declined | failed | cancelled | timeout`.
+    #[serde(rename = "peer.delegation.completed")]
+    PeerDelegationCompleted {
+        delegation_id: String,
+        status: String,
+        tool_calls: u64,
+        duration_ms: u64,
+    },
+    /// A delegated request was refused before any work (`reason` as `peer.request_received`).
+    #[serde(rename = "peer.delegation.denied")]
+    PeerDelegationDenied {
+        request_id: String,
+        from: PeerAddr,
+        reason: String,
+    },
     /// The permission mode changed (front-end switch). Never emitted for the mode a session starts in.
     #[serde(rename = "session.mode_changed")]
     SessionModeChanged {

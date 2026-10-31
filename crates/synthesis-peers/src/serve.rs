@@ -25,6 +25,10 @@ const RATE_WINDOW: Duration = Duration::from_secs(600);
 const PARTIAL_EVERY: Duration = Duration::from_millis(500);
 const DEFAULT_TIMEOUT_S: u64 = 300;
 const MAX_TIMEOUT_S: u64 = 1800;
+/// A `notify_on_end` subscription is capped by `Config::notify_wait_max_s`, at most this.
+const MAX_NOTIFY_S: u64 = 3600;
+/// Subscriptions held at once (`notify_on_end`), all askers together.
+const MAX_SUBS: usize = 8;
 /// Connections served at once; a same-user process cannot exhaust tasks by connecting in a loop.
 const MAX_CONNECTIONS: usize = 16;
 /// Time an authenticated peer has to send its first frame.
@@ -51,6 +55,19 @@ pub struct Request {
     pub to_agent: String,
     pub text: String,
     pub chain: Vec<String>,
+    /// A thread this request continues or starts (P1).
+    pub thread_id: Option<String>,
+    /// Asks the receiver to do the work, not only to answer (J3).
+    pub delegate: bool,
+    /// The sender's permission mode when it sent this (J4.3). Self-asserted; only ever lowers.
+    pub sender_mode: String,
+    /// Hold the connection and reply when the receiver's task ends (P2).
+    pub notify_on_end: bool,
+}
+
+/// A thread id is a file-name-safe token.
+pub fn valid_thread_id(t: &str) -> bool {
+    !t.is_empty() && t.len() <= 64 && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +88,16 @@ pub trait Responder: Send + Sync + 'static {
     /// closed: a responder that cannot ask anybody (headless) declines.
     fn confirm(&self, _req: &Request, _reply: &Reply) -> BoxFut<bool> {
         Box::pin(async { false })
+    }
+    /// Reserves what a request needs beyond the server's slot (a thread round, a delegation) and
+    /// is held until the request ends; `Err` is a `rejected` reason. Called after the slot.
+    fn claim(&self, _req: &Request) -> Result<Box<dyn Send>, &'static str> {
+        Ok(Box::new(()))
+    }
+    /// `notify_on_end`: resolves when the receiver's current (or next) task ends, at once with
+    /// `idle` when none runs; `Err` is a `rejected` reason (`cycle`).
+    fn subscribe(&self, _req: &Request) -> Result<BoxFut<Reply>, &'static str> {
+        Err("disabled")
     }
     /// A late `reply` envelope pushed by a peer; true when it was kept (or already had).
     fn deliver_reply(&self, _env: Envelope) -> bool {
@@ -102,8 +129,20 @@ pub struct Server {
 #[derive(Default)]
 struct State {
     active: usize,
+    /// Sessions with a `notify_on_end` subscription held here.
+    subs: Vec<String>,
     /// Accepted requests in the window, all senders together: `from` is self-asserted.
     sent: VecDeque<Instant>,
+}
+
+struct SubSlot<'a>(&'a Server, String);
+impl Drop for SubSlot<'_> {
+    fn drop(&mut self) {
+        let mut st = self.0.state.lock().unwrap();
+        if let Some(i) = st.subs.iter().position(|s| *s == self.1) {
+            st.subs.swap_remove(i);
+        }
+    }
 }
 
 struct Slot<'a>(&'a Server);
@@ -247,7 +286,24 @@ impl Server {
         if !self.config.permits(&r.from) {
             return Some("denied");
         }
-        if r.chain.contains(&self.me.session_id) || r.chain.len() >= self.config.max_hops {
+        if r.thread_id.as_deref().is_some_and(|t| !valid_thread_id(t)) {
+            return Some("thread_mismatch");
+        }
+        if r.delegate && r.notify_on_end {
+            return Some("denied");
+        }
+        if r.delegate && !self.config.delegation_permits(&r.from) {
+            return Some("delegation_denied");
+        }
+        if r.chain.contains(&self.me.session_id) {
+            return Some("cycle");
+        }
+        if r.delegate {
+            // A to B is chain [A]; B's worker may delegate one further hop (chain [A, B]).
+            if r.chain.len() > self.config.delegation_max_hops {
+                return Some("too_deep");
+            }
+        } else if r.chain.len() >= self.config.max_hops {
             return Some("cycle");
         }
         if !self.responder.has_agent(&r.to_agent) {
@@ -320,21 +376,23 @@ impl Server {
         };
         let id = req.id.clone();
         let reject = |reason: &str| json!({"t":"rejected","id":id,"reason":reason});
-        let slot = match self.check(&req, req.text.len()) {
+        let secs = f.get("timeout_s").and_then(Value::as_u64);
+        if req.notify_on_end {
+            return self.notify(c, req, secs).await;
+        }
+        let gate = match self.check(&req, req.text.len()) {
             Some(reason) => Err(reason),
-            None => self.admit(),
+            None => self
+                .admit()
+                .and_then(|slot| self.responder.claim(&req).map(|claim| (slot, claim))),
         };
-        (self.observer)(&req, slot.as_ref().err().copied());
-        let _slot = match slot {
-            Ok(s) => s,
+        (self.observer)(&req, gate.as_ref().err().copied());
+        let (_slot, _claim) = match gate {
+            Ok(g) => g,
             Err(reason) => return c.send(&reject(reason)).await,
         };
         c.send(&json!({"t":"accepted","id":id})).await?;
-        let secs = f
-            .get("timeout_s")
-            .and_then(Value::as_u64)
-            .unwrap_or(DEFAULT_TIMEOUT_S)
-            .clamp(1, MAX_TIMEOUT_S);
+        let secs = secs.unwrap_or(DEFAULT_TIMEOUT_S).clamp(1, MAX_TIMEOUT_S);
         let (tx, mut rx) = mpsc::unbounded_channel();
         let req2 = req.clone();
         let answering = self.responder.answer(req, tx);
@@ -380,8 +438,76 @@ impl Server {
             c.send(&json!({"t":"partial","id":id,"seq":seq,"text":text}))
                 .await?;
         }
-        c.send(&json!({"t":"reply","id":id,"status":reply.status,"text":reply.text,"from":self.me}))
+        c.send(&json!({"t":"reply","id":id,"status":reply.status,"text":reply.text,"from":self.me,
+            "thread_id":req2.thread_id}))
             .await
+    }
+
+    /// `notify_on_end` (P2): same gates as a reply (list, `answer`, size, hops, `finish`), no
+    /// responder slot. The connection stays open until the receiver's task ends; closing it drops
+    /// the subscription.
+    async fn notify(&self, c: &mut Conn, req: Request, secs: Option<u64>) -> io::Result<()> {
+        let id = req.id.clone();
+        let gate = match self.check(&req, req.text.len()) {
+            Some(reason) => Err(reason),
+            None if req.to_agent != "main" => Err("no_agent"),
+            None => self
+                .sub_slot(&req)
+                .and_then(|slot| self.responder.subscribe(&req).map(|f| (slot, f))),
+        };
+        (self.observer)(&req, gate.as_ref().err().copied());
+        let (_slot, ended) = match gate {
+            Ok(g) => g,
+            Err(reason) => {
+                return c
+                    .send(&json!({"t":"rejected","id":id,"reason":reason}))
+                    .await;
+            }
+        };
+        c.send(&json!({"t":"accepted","id":id})).await?;
+        let max = self.config.notify_wait_max_s.clamp(1, MAX_NOTIFY_S);
+        let deadline = tokio::time::sleep(Duration::from_secs(secs.unwrap_or(max).clamp(1, max)));
+        tokio::pin!(deadline);
+        let mut fut = Box::pin(async {
+            let r = ended.await;
+            self.finish(&req, r).await
+        });
+        let reply = loop {
+            tokio::select! {
+                r = &mut fut => break r,
+                () = &mut deadline => break Reply { status: "timeout".into(), text: String::new() },
+                f = c.recv() => match f {
+                    Ok(Some(f)) if f.get("t") != Some(&json!("cancel")) => {}
+                    _ => return Ok(()),
+                },
+            }
+        };
+        c.send(&json!({"t":"reply","id":id,"status":reply.status,"text":reply.text,"from":self.me,
+            "kind":"result"}))
+            .await
+    }
+
+    /// One subscription per asker session, `MAX_SUBS` in all; counts for the request rate limit.
+    fn sub_slot(&self, req: &Request) -> Result<SubSlot<'_>, &'static str> {
+        let mut st = self.state.lock().unwrap();
+        let now = Instant::now();
+        while st
+            .sent
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > RATE_WINDOW)
+        {
+            st.sent.pop_front();
+        }
+        if st.sent.len() >= RATE_LIMIT {
+            return Err("rate_limited");
+        }
+        let sid = &req.from.session_id;
+        if st.subs.len() >= MAX_SUBS || st.subs.contains(sid) {
+            return Err("busy");
+        }
+        st.sent.push_back(now);
+        st.subs.push(sid.clone());
+        Ok(SubSlot(self, sid.clone()))
     }
 
     /// `confirm_replies`, then the owner's redactor and the size cap: the last gate before a
@@ -403,13 +529,15 @@ impl Server {
 
     /// A request read from the mailbox: same policy, limits, responder and reply gate as a live one.
     pub async fn answer_queued(&self, req: Request) -> Answered {
-        let slot = match self.check(&req, req.text.len()) {
+        let gate = match self.check(&req, req.text.len()) {
             Some(reason) => Err(reason),
-            None => self.admit(),
+            None => self
+                .admit()
+                .and_then(|slot| self.responder.claim(&req).map(|claim| (slot, claim))),
         };
-        (self.observer)(&req, slot.as_ref().err().copied());
-        let _slot = match slot {
-            Ok(s) => s,
+        (self.observer)(&req, gate.as_ref().err().copied());
+        let (_slot, _claim) = match gate {
+            Ok(g) => g,
             Err(r @ ("rate_limited" | "busy")) => return Answered::Retry(r),
             Err(r) => return Answered::Rejected(r),
         };
@@ -455,6 +583,17 @@ fn parse_request(f: &Value) -> Option<Request> {
                     .collect()
             })
             .unwrap_or_default(),
+        thread_id: s("thread_id"),
+        delegate: f.get("delegate").and_then(Value::as_bool).unwrap_or(false),
+        sender_mode: s("sender_mode")
+            .unwrap_or_default()
+            .chars()
+            .take(32)
+            .collect(),
+        notify_on_end: f
+            .get("notify_on_end")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -523,6 +662,16 @@ pub struct Outgoing<'a> {
     pub text: &'a str,
     pub chain: &'a [String],
     pub timeout_s: u64,
+    pub extra: Extra<'a>,
+}
+
+/// Optional parts of a request (threads, delegation, notify).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Extra<'a> {
+    pub thread_id: Option<&'a str>,
+    pub delegate: bool,
+    pub sender_mode: &'a str,
+    pub notify_on_end: bool,
 }
 
 /// A request the receiver accepted. Dropping it closes the connection, which cancels the request.
@@ -539,12 +688,29 @@ fn eof() -> PeerError {
 /// Connect, authenticate, send the request and wait for `accepted` / `rejected`.
 pub async fn begin(endpoint: &str, key: &Key, o: &Outgoing<'_>) -> Result<Call, PeerError> {
     let mut c = open(endpoint, key).await?;
-    let timeout_s = o.timeout_s.clamp(1, MAX_TIMEOUT_S);
-    c.send(
-        &json!({"t":"request","id":o.id,"from":o.from,"to_agent":o.to_agent,
-        "text":o.text,"chain":o.chain,"timeout_s":timeout_s}),
-    )
-    .await?;
+    let x = o.extra;
+    let max = if x.notify_on_end {
+        MAX_NOTIFY_S
+    } else {
+        MAX_TIMEOUT_S
+    };
+    let timeout_s = o.timeout_s.clamp(1, max);
+    let mut frame = json!({"t":"request","id":o.id,"from":o.from,"to_agent":o.to_agent,
+        "text":o.text,"chain":o.chain,"timeout_s":timeout_s});
+    if let Some(m) = frame.as_object_mut() {
+        if let Some(t) = x.thread_id {
+            m.insert("thread_id".into(), json!(t));
+        }
+        for (k, on) in [("delegate", x.delegate), ("notify_on_end", x.notify_on_end)] {
+            if on {
+                m.insert(k.into(), json!(true));
+            }
+        }
+        if !x.sender_mode.is_empty() {
+            m.insert("sender_mode".into(), json!(x.sender_mode));
+        }
+    }
+    c.send(&frame).await?;
     let first = async {
         loop {
             let f = c.recv().await?.ok_or_else(eof)?;

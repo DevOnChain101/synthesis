@@ -1212,3 +1212,223 @@ async fn a_late_reply_must_come_from_who_was_asked_and_stays_until_shown() {
         "retired when the task ended"
     );
 }
+
+// ---- P1 threads (messaging.md J2) ---------------------------------------------------------------
+
+use synthesis_peers::serve::{Extra, Outgoing, PeerError, ask};
+
+/// Like `serve`, and the endpoint a client can connect to.
+fn serve_ep(s: &Side, run: &std::path::Path, mut e: Entry) -> (Registration, String) {
+    let server = s.h.peer_server().expect("server");
+    let l = Listener::bind(run).unwrap();
+    e.endpoint = l.endpoint();
+    let ep = e.endpoint.clone();
+    let reg = Registration::create(run, &e).unwrap();
+    tokio::spawn(server.run(l));
+    (reg, ep)
+}
+
+fn asker(label: &str, sid: &str) -> synthesis_peers::Addr {
+    synthesis_peers::Addr {
+        workspace_key: format!("{label:0<24}"),
+        workspace_label: label.into(),
+        workspace_root: format!("/{label}"),
+        session_id: sid.into(),
+        instance: "main".into(),
+        kind: "main".into(),
+        ..Default::default()
+    }
+}
+
+async fn ask_thread(
+    ep: &str,
+    key: &synthesis_peers::Key,
+    from: &synthesis_peers::Addr,
+    text: &str,
+    thread: Option<&str>,
+) -> Result<synthesis_peers::serve::ReplyFrame, PeerError> {
+    let o = Outgoing {
+        id: &synthesis_harness_uuid(),
+        from,
+        to_agent: "main",
+        text,
+        chain: &[from.session_id.clone()],
+        timeout_s: 30,
+        extra: Extra {
+            thread_id: thread,
+            ..Default::default()
+        },
+    };
+    ask(ep, key, &o, |_, _| {}).await
+}
+
+fn synthesis_harness_uuid() -> String {
+    format!("req-{}", COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+}
+static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The responder answers `answer <n>` where n counts the `<peer_request` blocks it can see.
+fn counting_responder() -> Responder {
+    Arc::new(|r| {
+        Some(if is_responder(r) {
+            Turn::text(&format!("answer {}", texts(r).matches("<peer_request").count()))
+        } else {
+            Turn::text("idle")
+        })
+    })
+}
+
+#[tokio::test]
+async fn a_thread_resumes_one_transcript_and_the_seventh_round_is_closed() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let key = load_or_create_key(&run).unwrap();
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let (a, ea) = side("sess-a", "alpha", &run, Some(on), counting_responder(), 10);
+    let (_reg, ep) = serve_ep(&a, &run, ea);
+    let from = asker("beta", "sess-b");
+
+    for n in 1..=6 {
+        let r = ask_thread(&ep, &key, &from, &format!("Q-{n}"), Some("t-1"))
+            .await
+            .unwrap();
+        assert_eq!(r.status, "answered");
+        assert_eq!(r.text, format!("answer {n}"), "round {n} sees all earlier requests");
+    }
+    let reqs: Vec<_> = a.rig.requests().into_iter().filter(is_responder).collect();
+    assert_eq!(reqs.len(), 6);
+    let last = texts(&reqs[5]);
+    for n in 1..=6 {
+        assert!(last.contains(&format!("Q-{n}")), "{last}");
+    }
+    assert!(
+        reqs[5].messages.iter().any(|m| m.role == Role::Assistant
+            && format!("{:?}", m.content).contains("answer 5")),
+        "the earlier answers are in the transcript"
+    );
+    match ask_thread(&ep, &key, &from, "Q-7", Some("t-1")).await {
+        Err(PeerError::Rejected(r)) => assert_eq!(r, "thread_closed"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        a.rig.requests().into_iter().filter(is_responder).count(),
+        6,
+        "no responder ran for round 7"
+    );
+    let closed = a.rig.find(|e| match e {
+        Event::PeerThreadClosed { thread_id, reason } => Some((thread_id.clone(), reason.clone())),
+        _ => None,
+    });
+    assert_eq!(closed, [("t-1".to_string(), "cap".to_string())]);
+    // a request without a thread is still a fresh fork
+    let r = ask_thread(&ep, &key, &from, "Q-x", None).await.unwrap();
+    assert_eq!(r.text, "answer 1");
+}
+
+#[tokio::test]
+async fn a_thread_is_bound_to_its_asker_and_capped_by_threads_ttl_and_rounds() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let key = load_or_create_key(&run).unwrap();
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "max_threads": 2, "max_rounds": 2});
+    let (a, ea) = side("sess-a", "alpha", &run, Some(on), counting_responder(), 10);
+    let (_reg, ep) = serve_ep(&a, &run, ea);
+    let b = asker("beta", "sess-b");
+    let b2 = asker("beta", "sess-b2");
+    let rej = |r: Result<_, PeerError>| match r {
+        Err(PeerError::Rejected(x)) => x,
+        Ok(_) => "ok".into(),
+        Err(e) => format!("{e:?}"),
+    };
+
+    assert_eq!(rej(ask_thread(&ep, &key, &b, "1", Some("t-a")).await), "ok");
+    // another asker (session) cannot continue it
+    assert_eq!(
+        rej(ask_thread(&ep, &key, &b2, "x", Some("t-a")).await),
+        "thread_mismatch"
+    );
+    // a bad id
+    assert_eq!(
+        rej(ask_thread(&ep, &key, &b, "x", Some("../x")).await),
+        "thread_mismatch"
+    );
+    assert_eq!(rej(ask_thread(&ep, &key, &b, "1", Some("t-b")).await), "ok");
+    // two open threads: a third is refused
+    assert_eq!(rej(ask_thread(&ep, &key, &b, "1", Some("t-c")).await), "busy");
+    // round cap 2: the second round answers and closes the thread, the third is closed
+    assert_eq!(rej(ask_thread(&ep, &key, &b, "2", Some("t-a")).await), "ok");
+    assert_eq!(
+        rej(ask_thread(&ep, &key, &b, "3", Some("t-a")).await),
+        "thread_closed"
+    );
+    // the closed thread no longer counts as open
+    assert_eq!(rej(ask_thread(&ep, &key, &b, "1", Some("t-c")).await), "ok");
+}
+
+#[tokio::test]
+async fn an_idle_thread_closes_after_its_ttl() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let key = load_or_create_key(&run).unwrap();
+    // a zero-minute TTL: every thread is idle by the next request
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "thread_idle_min": 0});
+    let (a, ea) = side("sess-a", "alpha", &run, Some(on), counting_responder(), 10);
+    let (_reg, ep) = serve_ep(&a, &run, ea);
+    let b = asker("beta", "sess-b");
+    ask_thread(&ep, &key, &b, "1", Some("t-a")).await.unwrap();
+    match ask_thread(&ep, &key, &b, "2", Some("t-a")).await {
+        Err(PeerError::Rejected(r)) => assert_eq!(r, "thread_closed"),
+        other => panic!("{other:?}"),
+    }
+    let closed = a.rig.find(|e| match e {
+        Event::PeerThreadClosed { reason, .. } => Some(reason.clone()),
+        _ => None,
+    });
+    assert_eq!(closed, ["ttl"]);
+}
+
+#[tokio::test]
+async fn sendmessage_thread_continues_one_conversation_through_the_model() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let b_responder: Responder = Arc::new(|r| {
+        let all = texts(r);
+        let replies = all.matches("<peer_reply").count();
+        Some(if tool_result(r, "ask1").is_none() {
+            Turn::tool(
+                "ask1",
+                "SendMessage",
+                json!({"to": "ws:alpha/sess:sess-a", "message": "Q-ONE", "thread": true}),
+            )
+        } else if replies == 0 {
+            Turn::text("waiting")
+        } else if tool_result(r, "ask2").is_none() {
+            let tid = all
+                .split("thread_id=\"")
+                .nth(1)
+                .and_then(|s| s.split('"').next())
+                .expect("the reply names its thread")
+                .to_string();
+            Turn::tool(
+                "ask2",
+                "SendMessage",
+                json!({"to": "ws:alpha/sess:sess-a", "message": "Q-TWO", "thread_id": tid}),
+            )
+        } else if replies < 2 {
+            Turn::text("waiting")
+        } else {
+            Turn::text("B done")
+        })
+    });
+    let (a, ea) = side("sess-a", "alpha", &run, Some(on.clone()), counting_responder(), 10);
+    let (mut b, _) = side("sess-b", "beta", &run, Some(on), b_responder, 10);
+    let _reg = serve(&a, &run, ea);
+    let out = go(&mut b, "ask twice").await;
+    assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
+    assert_eq!(out.final_text, "B done");
+    let last = texts(b.rig.requests().last().unwrap());
+    assert!(last.contains("answer 1") && last.contains("answer 2"), "{last}");
+    let (first, _) = tool_result(&b.rig.requests()[1], "ask1").unwrap();
+    assert!(first.contains("\"thread_id\":\""), "{first}");
+}

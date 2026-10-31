@@ -66,6 +66,12 @@ Doc §5.12 types are kept verbatim; additions are marked. Payload field types: `
 | `peer.request_received` | `request_id:str, from:PeerAddr, to:PeerAddr, summary:str, bytes:u64, decision:"accepted"\|"rejected", reason:str?` | [new] a peer asked this session (`from` is self-asserted); `reason` = `disabled\|denied\|busy\|rate_limited\|cycle\|too_large\|no_agent` |
 | `peer.reply_partial` | `request_id:str, seq:u64, text:str` | [new] a partial reply received (redacted by the sender's session) |
 | `peer.reply` | `request_id:str, status:"answered"\|"declined"\|"failed"\|"timeout"\|"cancelled"\|"offline", text:str (<= 4 KiB preview), bytes:u64, duration_ms:u64` | [new] emitted in both sessions with the same `request_id`; no ArtifactRef yet |
+| `peer.thread_closed` | `thread_id:str, reason:"cap"\|"ttl"\|"cancel"\|"size"\|"budget"` | [new] a multi-round peer thread ended (messaging.md J2) |
+| `peer.delegation.accepted` | `delegation_id:str, request_id:str, thread_id:str?, from:PeerAddr, mode:str, cap:str` | [new] this session accepted a delegated request (J3); `from` is self-asserted, `mode` the worker's mode = stricter(own, sender's `cap`) |
+| `peer.delegation.started` | `delegation_id:str, agent_id:str` | [new] the delegate worker started; its own events carry `agent_id` |
+| `peer.delegation.tool` | `delegation_id:str, tool_call_id:str, name:str, origin:"peer", from:str` | [new] a tool call made for a peer (J4.4); `from` = canonical sender address, unverified |
+| `peer.delegation.completed` | `delegation_id:str, status:"answered"\|"declined"\|"failed"\|"cancelled"\|"timeout", tool_calls:u64, duration_ms:u64` | [new] ids and counts only |
+| `peer.delegation.denied` | `request_id:str, from:PeerAddr, reason:str` | [new] a delegated request was refused (`delegation_denied\|too_deep\|cycle\|busy\|...`) |
 | `session.mode_changed` | `from:str, to:str, reason:str?` | [new] permission mode switched while the session runs (TUI Shift+Tab, a future GUI via `Harness::set_mode`); not emitted for the starting mode. Entering `bypassPermissions` also emits a `notice` |
 | `permission.auto_verdict` | `tool_call_id:str, name:str, verdict:"allow"\|"deny"\|"ask", reason:str, source:"model"\|"cache"\|"fail_closed"` | [new] auto mode: the judge's decision on one call before it runs (audit trail; `fail_closed` = judge unavailable, unparseable, timed out or over the per-task cap, so the call is an ask) |
 | `model.changed` | `model:str, effort:str?` | [from-node agent.js:1539 'model-changed'] |
