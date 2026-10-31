@@ -192,6 +192,9 @@ impl Harness {
                 StreamEvent::ContentBlockDelta { index, delta } => {
                     let hide =
                         masked.contains(index) && matches!(delta, Delta::InputJsonDelta { .. });
+                    if let Delta::TextDelta { text } = delta {
+                        self.peer_partial(&agent.name, text);
+                    }
                     if let Some(e) = delta_event(*index, delta).filter(|_| !hide) {
                         self.emit(task, agent, Some(turn), e);
                     }

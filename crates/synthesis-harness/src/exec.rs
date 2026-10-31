@@ -634,12 +634,15 @@ impl Harness {
     ) -> Result<(), Denial> {
         for round in 0..4 {
             let mode = *lock(&agent.mode);
+            // SendMessage: deny/ask rules also see every spelling of the session `to` resolves to.
+            let hinted = (call.name == "SendMessage").then(|| self.peer_check_input(input));
+            let checked = hinted.as_ref().unwrap_or(&*input);
             let mut verdict = {
                 let p = lock(&agent.perms);
                 if recheck || round > 0 {
-                    p.recheck(&call.name, input, mode)
+                    p.recheck(&call.name, checked, mode)
                 } else {
-                    p.check(&call.name, input, mode)
+                    p.check(&call.name, checked, mode)
                 }
             };
             if verdict.decision == Decision::Classify {

@@ -49,7 +49,7 @@ pub use comm::{AgentInfo, TaskAgent};
 pub use context::{RULES, StaticContext, wrap_tool_output};
 pub use harness::{
     AutoCompact, GateFactory, Harness, HarnessConfig, HarnessError, ModeError, Pricing,
-    ShellSettings, TaskOutcome, TaskRequest, browser_config, budget_from_settings,
+    ShellSettings, TaskOutcome, TaskRequest, VerifiedCommand, browser_config, budget_from_settings,
 };
 pub use mcp_guard::{Check, GuardConfig, McpCatalog, McpGuard, McpToolInfo, ServerRules};
 pub use peer::PeerLink;

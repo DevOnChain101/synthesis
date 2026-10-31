@@ -92,6 +92,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "TaskList",
     "TaskGet",
     "Skill",
+    "MemorySearch",
     "Task",
     "Agent",
     "ListAgents",
@@ -287,6 +288,17 @@ impl Default for AutoModeSettings {
     }
 }
 
+/// Answers "did the agent save this memory note itself, for this workspace?" so the `memory` class
+/// can allow `MemoryUpdate`/`MemoryForget` on those and ask for every other note.
+#[derive(Clone)]
+pub struct NoteOracle(pub std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>);
+
+impl std::fmt::Debug for NoteOracle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NoteOracle")
+    }
+}
+
 /// Everything the engine needs from the outside world, passed explicitly.
 #[derive(Debug, Clone)]
 pub struct Env {
@@ -312,6 +324,8 @@ pub struct Env {
     /// `cwd`. Rules written `/x` or `./x`, and the inside-the-workspace test, are anchored here;
     /// a bare cwd-relative path keeps `cwd`.
     pub project_root: Option<PathBuf>,
+    /// Memory authorship (see [`NoteOracle`]); `None` = no store, so every note asks.
+    pub memory_notes: Option<NoteOracle>,
 }
 
 impl Env {
@@ -328,6 +342,7 @@ impl Env {
             deny_read: vec![],
             deny_secret_reads: false,
             project_root: None,
+            memory_notes: None,
         }
     }
 
@@ -517,6 +532,31 @@ fn scope_match(spec: &str, tool: &str, input: &Value, any: bool) -> bool {
     match tool {
         "Task" | "Agent" => name(field("subagent_type")),
         "Skill" => name(field("skill")),
+        // `SendMessage(ws:<label>/sess:<name>)` (messaging.md B7): the address as typed, trimmed
+        // (the sender trims too). Deny/ask also meet every spelling the harness resolved the
+        // target to (`_resolved_targets`, set by the harness only); allow never uses them.
+        "SendMessage" => {
+            let hit = |v: &str| {
+                spec.strip_suffix('*')
+                    .map_or(v == spec, |p| v.starts_with(p))
+            };
+            match field("to") {
+                Some(v) => {
+                    hit(v.trim())
+                        || (any
+                            && input
+                                .get("_resolved_targets")
+                                .and_then(Value::as_array)
+                                .is_some_and(|a| a.iter().filter_map(Value::as_str).any(hit)))
+                }
+                None => any,
+            }
+        }
+        // `MemoryWrite(scope:user)`
+        "MemoryWrite" => match spec.strip_prefix("scope:") {
+            Some(s) => field("scope").map_or(any, |v| v == s),
+            None => any,
+        },
         "WebFetch" | "browser_navigate" => {
             let Some(d) = spec.strip_prefix("domain:") else {
                 return any;
@@ -1586,12 +1626,48 @@ impl Permissions {
         }
 
         // A message can wake another agent and steer it: not read-only, never in plan/dontAsk.
+        // acceptEdits and auto allow it here; for a peer session the gate is `synthesis.peers`
+        // (the sender resolves only allowed, non-denied sessions), not this mode (messaging.md H).
         if tool == "SendMessage" {
             return match mode {
                 Mode::Plan | Mode::DontAsk => v(Deny, format!("{} mode", mode.as_str())),
                 Mode::AcceptEdits | Mode::Auto => v(Allow, format!("{} mode", mode.as_str())),
                 _ => v(Ask, "SendMessage requires confirmation"),
             };
+        }
+
+        // The `memory` class (memory.md §8). A note about this workspace is the agent's own;
+        // user or agent scope reaches other repositories, so the person decides (a headless ask is
+        // denied like every ask). Update and Forget are allowed on notes the agent saved itself
+        // (the `NoteOracle` knows) and ask for any other note.
+        if tool == "MemoryWrite" {
+            if input.get("scope").and_then(Value::as_str) == Some("workspace") {
+                return v(Allow, "memory: note for this workspace");
+            }
+            if mode == Mode::DontAsk {
+                return v(Deny, "dontAsk mode");
+            }
+            return v(
+                Ask,
+                "MemoryWrite outside this workspace requires confirmation",
+            );
+        }
+        if matches!(tool, "MemoryUpdate" | "MemoryForget") {
+            let own = input
+                .get("id")
+                .and_then(Value::as_str)
+                .zip(self.env.memory_notes.as_ref())
+                .is_some_and(|(id, o)| (o.0)(id));
+            if own {
+                return v(Allow, "memory: a note the agent saved for this workspace");
+            }
+            if mode == Mode::DontAsk {
+                return v(Deny, "dontAsk mode");
+            }
+            return v(
+                Ask,
+                format!("{tool} on a note the agent did not save requires confirmation"),
+            );
         }
 
         // both send text (a URL, a query) to a third party, so they ask first

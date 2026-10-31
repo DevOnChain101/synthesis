@@ -523,6 +523,35 @@ mod tests {
                 limit: 50.0,
                 used: 51.0,
             },
+            Event::MemoryRetrieved {
+                ids: vec![s("m-1")],
+                tokens: 12,
+                candidates: 3,
+            },
+            Event::MemoryWritten {
+                id: s("m-1"),
+                op: s("added"),
+                kind: s("fact"),
+                scope: s("workspace"),
+                trust: s("agent"),
+                status: s("active"),
+            },
+            Event::MemoryQuarantined {
+                id: s("m-1"),
+                rule: s("fence_tag"),
+            },
+            Event::MemoryReflectionStarted { job_id: s("j") },
+            Event::MemoryReflectionCompleted {
+                job_id: s("j"),
+                ops: 2,
+                tokens: Some(10),
+                cost_usd: Some(0.01),
+            },
+            Event::MemoryReflectionFailed {
+                job_id: s("j"),
+                error: s("timed out"),
+            },
+            Event::MemoryProposalCreated { id: s("p-1") },
             Event::Notice {
                 level: s("info"),
                 text: s("t"),

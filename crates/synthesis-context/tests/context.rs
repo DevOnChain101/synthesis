@@ -329,11 +329,40 @@ fn summary_prompt_carries_state_and_clips_blocks() {
 
 // ---------- assembly / budget ----------
 
+#[test]
+fn the_memory_block_sits_between_instructions_and_task_state() {
+    let mut state = TaskState::default();
+    state.add_constraint("keep it small");
+    let hist = [text(Role::User, "hi")];
+    let inp = ContextInput {
+        memory: Some("<memory trust=\"data\">M</memory>"),
+        ..input(&state, &hist)
+    };
+    let a = assemble(
+        &inp,
+        &ContextBudget {
+            window: 100_000,
+            max_output: 1000,
+            tool_schema_tokens: 0,
+        },
+        &CharsPerToken::default(),
+    )
+    .unwrap();
+    let System::Blocks(b) = a.system else {
+        panic!("blocks")
+    };
+    let t: Vec<String> = b.iter().filter_map(|x| x.text.clone()).collect();
+    let mem = t.iter().position(|x| x.contains("<memory")).unwrap();
+    let st = t.iter().position(|x| x.contains("<task_state>")).unwrap();
+    assert!(mem < st, "{t:?}");
+}
+
 fn input<'a>(state: &'a TaskState, history: &'a [Message]) -> ContextInput<'a> {
     ContextInput {
         system_rules: "RULES",
         task_instructions: Some("TASK"),
         instructions: &[],
+        memory: None,
         task_state: state,
         snippets: &[],
         evidence: &[],

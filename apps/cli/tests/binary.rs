@@ -46,8 +46,8 @@ fn doctor_works_without_cwd_flag() {
     let h = tempfile::tempdir().unwrap();
     let ws = h.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
-    #[allow(clippy::single_element_loop)] // newer clippy; the list is meant to grow
-    for args in [&["doctor"][..]] {
+    {
+        let args = &["doctor"][..];
         let o = Command::new(env!("CARGO_BIN_EXE_synth"))
             .args(args)
             .env_clear()

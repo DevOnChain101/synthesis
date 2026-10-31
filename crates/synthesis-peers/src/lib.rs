@@ -5,6 +5,7 @@
 //! read-only responder, `SendMessage`, inbox) plug in through [`serve::Responder`].
 
 pub mod address;
+pub mod mailbox;
 pub mod net;
 pub mod serve;
 
@@ -79,7 +80,10 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     o.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-    o.open(&tmp)?.write_all(bytes)?;
+    let mut f = o.open(&tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    drop(f);
     std::fs::rename(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })

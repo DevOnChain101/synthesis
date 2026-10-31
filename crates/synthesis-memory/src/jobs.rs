@@ -165,14 +165,19 @@ mod tests {
             let s = Store::open(d.path(), vec![]).unwrap();
             // simulate a build that only knew v1
             s.conn
-                .execute("DELETE FROM schema_migrations WHERE version = 2", [])
+                .execute("DELETE FROM schema_migrations WHERE version >= 2", [])
                 .unwrap();
-            s.conn
-                .execute("ALTER TABLE reflection_jobs DROP COLUMN payload", [])
-                .unwrap();
+            for sql in [
+                "ALTER TABLE reflection_jobs DROP COLUMN payload",
+                "ALTER TABLE reflection_jobs DROP COLUMN tokens",
+                "ALTER TABLE reflection_jobs DROP COLUMN cost_usd",
+                "DROP TABLE memory_retrievals",
+            ] {
+                s.conn.execute(sql, []).unwrap();
+            }
         }
         let s = Store::open(d.path(), vec![]).unwrap();
-        assert_eq!(s.schema_version().unwrap(), 2);
+        assert_eq!(s.schema_version().unwrap(), 3);
         assert!(d.path().join("memory/memory.v1.bak.db").is_file());
     }
 

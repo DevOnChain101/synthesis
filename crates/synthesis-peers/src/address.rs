@@ -70,6 +70,28 @@ fn hit(token: &str, name: &str, id: &str, min: usize) -> bool {
     token == name || (token.len() >= min && is_hex(token) && id.starts_with(&token.to_lowercase()))
 }
 
+/// Sessions `a` names (ws/sess components) among the permitted `entries`, before the
+/// exactly-one rule; never `self_session`.
+pub fn candidates<'a>(
+    entries: &'a [Entry],
+    config: &Config,
+    self_session: &str,
+    a: &Address,
+) -> Vec<&'a Entry> {
+    let ok = |e: &&Entry| e.session_id != self_session && config.permits(&e.addr("main", ""));
+    entries
+        .iter()
+        .filter(ok)
+        .filter(|e| {
+            a.ws.as_deref()
+                .is_none_or(|w| hit(w, &e.workspace_label, &e.workspace_key, 6))
+                && a.sess.as_deref().is_none_or(|s| {
+                    hit(s, e.session_name.as_deref().unwrap_or(""), &e.session_id, 8)
+                })
+        })
+        .collect()
+}
+
 /// The one live session `a` names among `entries` that `config` permits, never `self_session`.
 pub fn resolve<'a>(
     entries: &'a [Entry],
@@ -81,17 +103,7 @@ pub fn resolve<'a>(
         .iter()
         .filter(|e| e.session_id != self_session && config.permits(&e.addr("main", "")))
         .collect();
-    let hits: Vec<&Entry> = all
-        .iter()
-        .copied()
-        .filter(|e| {
-            a.ws.as_deref()
-                .is_none_or(|w| hit(w, &e.workspace_label, &e.workspace_key, 6))
-                && a.sess.as_deref().is_none_or(|s| {
-                    hit(s, e.session_name.as_deref().unwrap_or(""), &e.session_id, 8)
-                })
-        })
-        .collect();
+    let hits = candidates(entries, config, self_session, a);
     let list = |v: &[&Entry]| {
         v.iter()
             .take(10)

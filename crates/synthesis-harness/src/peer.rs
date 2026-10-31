@@ -13,9 +13,11 @@ use std::time::Instant;
 use serde_json::{Value, json};
 use synthesis_core::{AgentSession, Budget, SessionStatus, secrets::is_secret_path};
 use synthesis_events::{Event, PeerAddr, SubagentInfo};
-use synthesis_peers::address::{parse, resolve};
+use synthesis_peers::address::{candidates, parse, resolve};
+use synthesis_peers::mailbox::{Envelope, MailError, Mailbox, now_s};
 use synthesis_peers::serve::{
-    BoxFut, Down, Outgoing, PeerError, Reply, Request, Responder, Server, begin, discover,
+    Answered, BoxFut, Down, Outgoing, PeerError, Reply, Request, Responder, Server, begin, deliver,
+    discover,
 };
 use synthesis_peers::{Addr, Config, Entry, Key, Registration, read_entries, remove_entry};
 use synthesis_permissions::Mode;
@@ -29,6 +31,7 @@ use crate::exec::Res;
 use crate::harness::{AgentCtx, AgentEnd, AgentState, Harness, TaskRun};
 use crate::hub::{MAIN, MAX_BYTES};
 use crate::sink::Scope;
+use crate::traits::{ApprovalDecision, ApprovalRequest};
 use crate::util::{lock, uuid};
 use synthesis_events::ToolStatus;
 
@@ -68,6 +71,10 @@ pub struct PeerLink {
     registration: Mutex<Option<Registration>>,
     state: Mutex<PeerState>,
     changed: watch::Sender<u64>,
+    /// Durable queue for offline sessions (R10c).
+    mailbox: Mailbox,
+    /// Wakes the mailbox worker (a task started: queued requests may be answered now).
+    kick: tokio::sync::Notify,
 }
 
 #[derive(Default)]
@@ -83,6 +90,13 @@ struct PeerState {
     snapshots: HashMap<String, Vec<Message>>,
     summary: String,
     cancel: CancellationToken,
+    /// A reply may be waiting in the mailbox (set by a delivery, cleared by a scan).
+    late: bool,
+    /// Late replies shown to the model but not yet retired from the mailbox (at-least-once:
+    /// they are retired at the next drain point or task end, so a crash re-shows, never loses).
+    surfaced: Vec<String>,
+    /// Running responders: where their streamed text goes, and the unsent tail of a word.
+    partials: HashMap<String, (mpsc::UnboundedSender<String>, String)>,
 }
 
 impl PeerLink {
@@ -96,6 +110,8 @@ impl PeerLink {
         kind: &'static str,
     ) -> Arc<Self> {
         Arc::new(Self {
+            mailbox: Mailbox::new(&run_dir, &key),
+            kick: tokio::sync::Notify::new(),
             config,
             key,
             run_dir,
@@ -104,7 +120,10 @@ impl PeerLink {
             lock_free,
             kind,
             registration: Mutex::default(),
-            state: Mutex::default(),
+            state: Mutex::new(PeerState {
+                late: true,
+                ..Default::default()
+            }),
             changed: watch::channel(0).0,
         })
     }
@@ -112,6 +131,19 @@ impl PeerLink {
     /// Ties the registry entry to the link's life.
     pub fn attach(&self, r: Registration) {
         *lock(&self.registration) = Some(r);
+    }
+
+    /// Makes this session addressable after it exits, for `resume_offline` senders.
+    pub fn announce(&self) -> std::io::Result<()> {
+        self.mailbox.write_card(&self.me)
+    }
+
+    /// Live registry entries plus the cards of sessions that ended (endpoint empty).
+    fn entries(&self) -> Vec<Entry> {
+        let mut all = read_entries(&self.run_dir);
+        let cards = self.mailbox.offline_cards(&all);
+        all.extend(cards);
+        all
     }
 
     fn bump(&self) {
@@ -360,11 +392,21 @@ impl Harness {
         }
     }
 
-    pub(crate) fn peer_task_started(&self, request: &str) {
+    /// `history` is the conversation the task starts from (a resumed session's): it is the
+    /// snapshot a queued question is answered from, until the first drain point refreshes it.
+    pub(crate) fn peer_task_started(&self, request: &str, agent: &str, history: &[Message]) {
         if let Some(p) = self.peers.as_ref().filter(|p| p.on()) {
-            let mut st = lock(&p.state);
-            st.summary = self.sink.redact(&one_line(request, 120));
-            st.cancel = CancellationToken::new();
+            {
+                let mut st = lock(&p.state);
+                st.summary = self.sink.redact(&one_line(request, 120));
+                st.cancel = CancellationToken::new();
+                st.late = true;
+            }
+            let seeded = lock(&p.state).snapshots.contains_key(MAIN);
+            if agent == MAIN && !seeded && !history.is_empty() {
+                self.peer_snapshot(MAIN, history);
+            }
+            p.kick.notify_one();
         }
     }
 
@@ -375,6 +417,16 @@ impl Harness {
             st.summary.clear();
             st.cancel.cancel();
             st.replies.clear();
+            drop(st);
+            self.peer_retire(p);
+        }
+    }
+
+    /// Retires the late replies that were already handed to the model.
+    fn peer_retire(&self, p: &PeerLink) {
+        let ids = std::mem::take(&mut lock(&p.state).surfaced);
+        for id in ids {
+            p.mailbox.done(&p.me.session_id, "reply", &id);
         }
     }
 
@@ -383,18 +435,69 @@ impl Harness {
         let Some(p) = &self.peers else {
             return vec![];
         };
-        let mut st = lock(&p.state);
-        let (mine, rest) = std::mem::take(&mut st.replies)
+        let (mine, scan) = {
+            let mut st = lock(&p.state);
+            let (mine, rest) = std::mem::take(&mut st.replies)
+                .into_iter()
+                .partition::<Vec<_>, _>(|(to, _)| to == name);
+            st.replies = rest;
+            // Replies that came while this session was away go to the main agent only.
+            let scan = name == MAIN && std::mem::take(&mut st.late);
+            (mine, scan)
+        };
+        if name == MAIN {
+            self.peer_retire(p);
+        }
+        let mut out: Vec<String> = mine.into_iter().map(|(_, b)| b).collect();
+        if scan {
+            out.extend(self.peer_take_late(p));
+        }
+        out
+    }
+
+    /// Replies of requests this session queued for an offline peer. Only an id this session
+    /// asked for, from the session it asked, is accepted. A reply is retired only after the model
+    /// has had it for a drain point (`peer_retire`), so a crash shows it again rather than never.
+    fn peer_take_late(&self, p: &PeerLink) -> Vec<String> {
+        let sid = &p.me.session_id;
+        let mut out = vec![];
+        for env in p
+            .mailbox
+            .pending(sid)
             .into_iter()
-            .partition::<Vec<_>, _>(|(to, _)| to == name);
-        st.replies = rest;
-        mine.into_iter().map(|(_, b)| b).collect()
+            .filter(|e| e.kind == "reply")
+        {
+            if lock(&p.state).surfaced.contains(&env.id) {
+                continue;
+            }
+            if !p.mailbox.expected(sid, &env.id, &env.from) {
+                p.mailbox.discard(sid, "reply", &env.id);
+                continue;
+            }
+            let from = env.from.clone().clamped();
+            let status: String = env.status.chars().take(256).collect();
+            let text: String = env.text.chars().take(32 * 1024).collect();
+            self.sink.emit(
+                &Scope::default(),
+                Event::PeerReply {
+                    request_id: env.id.clone(),
+                    status: status.clone(),
+                    text: text.chars().take(4096).collect(),
+                    bytes: text.len() as u64,
+                    duration_ms: now_s().saturating_sub(env.created) * 1000,
+                },
+            );
+            out.push(reply_block(&env.id, &from, &from.kind, &status, &text));
+            lock(&p.state).surfaced.push(env.id.clone());
+        }
+        out
     }
 
     pub(crate) fn peer_has_mail(&self, name: &str) -> bool {
-        self.peers
-            .as_ref()
-            .is_some_and(|p| lock(&p.state).replies.iter().any(|(to, _)| to == name))
+        self.peers.as_ref().is_some_and(|p| {
+            let st = lock(&p.state);
+            st.replies.iter().any(|(to, _)| to == name) || (name == MAIN && st.late)
+        })
     }
 
     /// Requests of this session still waiting for a peer's answer (the task waits for them, D3).
@@ -415,7 +518,50 @@ impl Harness {
         let Some(a) = input.get("to").and_then(Value::as_str).and_then(parse) else {
             return false;
         };
-        resolve(&read_entries(&p.run_dir), &p.config, &p.me.session_id, &a).is_ok()
+        // every candidate is on the allow list; an ambiguous or narrowed address is settled when sent
+        !candidates(&p.entries(), &p.config, &p.me.session_id, &a).is_empty()
+    }
+
+    /// The `SendMessage` input as the permission rules see it: any model-supplied
+    /// `_resolved_targets` removed, and every spelling (label, key prefix, session name, id,
+    /// `sess:` alone, with or without the agent) of each allowed session `to` can resolve to
+    /// attached, so a deny/ask rule cannot be dodged by spelling the same target differently.
+    pub(crate) fn peer_check_input(&self, input: &Value) -> Value {
+        let mut v = input.clone();
+        let Some(o) = v.as_object_mut() else {
+            return v;
+        };
+        o.remove("_resolved_targets");
+        let Some(p) = self.peers.as_ref().filter(|p| p.on()) else {
+            return v;
+        };
+        let Some(a) = input.get("to").and_then(Value::as_str).and_then(parse) else {
+            return v;
+        };
+        let mut t = vec![];
+        for e in candidates(&p.entries(), &p.config, &p.me.session_id, &a) {
+            let key = &e.workspace_key;
+            let ws = [
+                e.workspace_label.clone(),
+                key.chars().take(12).collect(),
+                key.chars().take(6).collect(),
+            ];
+            let sess: Vec<String> = e
+                .session_name
+                .iter()
+                .cloned()
+                .chain([e.session_id.clone(), e.session_id.chars().take(8).collect()])
+                .collect();
+            let i = &a.instance;
+            for s in &sess {
+                for tail in [String::new(), format!("/agent:{i}"), format!("/{i}")] {
+                    t.push(format!("sess:{s}{tail}"));
+                    t.extend(ws.iter().map(|w| format!("ws:{w}/sess:{s}{tail}")));
+                }
+            }
+        }
+        o.insert("_resolved_targets".into(), json!(t));
+        v
     }
 
     // ---- sender ----------------------------------------------------------------------------
@@ -450,16 +596,15 @@ impl Harness {
                 "busy: at most {MAX_IN_FLIGHT} peer requests in flight; wait for a reply"
             ));
         }
-        let entry = match resolve(
-            &read_entries(&link.run_dir),
-            &link.config,
-            &link.me.session_id,
-            &addr,
-        ) {
+        // Several sessions match: the caller picks one. An agent name a peer reports about itself
+        // is never used to choose (section 1, rule 4).
+        let all = link.entries();
+        let entry = match resolve(&all, &link.config, &link.me.session_id, &addr) {
             Ok(e) => e.clone(),
             Err(e) => return fail(e.to_string()),
         };
-        if !synthesis_peers::endpoint_ok(&link.run_dir, &entry.endpoint) {
+        let offline_card = entry.endpoint.is_empty();
+        if !offline_card && !synthesis_peers::endpoint_ok(&link.run_dir, &entry.endpoint) {
             return fail("unreachable: the registry entry names a foreign endpoint".into());
         }
         let id = uuid();
@@ -503,13 +648,26 @@ impl Harness {
             chain: &chain,
             timeout_s: REQUEST_TIMEOUT_S,
         };
-        let call = match begin(&entry.endpoint, &link.key, &out).await {
+        let call = if offline_card {
+            Err(PeerError::Connect)
+        } else {
+            begin(&entry.endpoint, &link.key, &out).await
+        };
+        let call = match call {
             Ok(c) => c,
             Err(e) => {
                 let (status, why) = match e {
                     PeerError::Connect if (link.lock_free)(&entry) => {
                         remove_entry(&link.run_dir, &entry.session_id);
-                        ("offline", "offline: that session has ended".to_string())
+                        if link.config.resume_offline && addr.instance == MAIN {
+                            return self.queue_offline(&link, &entry, &from, &id, text, &chain);
+                        }
+                        let hint = if addr.instance == MAIN {
+                            " (synthesis.peers.resume_offline queues messages for it)"
+                        } else {
+                            ""
+                        };
+                        ("offline", format!("offline: that session has ended{hint}"))
                     }
                     PeerError::Connect | PeerError::Io(_) | PeerError::Auth => (
                         "failed",
@@ -605,6 +763,50 @@ impl Harness {
         )
     }
 
+    /// R10c: the target is dead. Store the question in its mailbox; it is answered when the
+    /// session starts again, and the reply comes back to this session (or its mailbox).
+    fn queue_offline(
+        &self,
+        link: &PeerLink,
+        target: &Entry,
+        from: &Addr,
+        id: &str,
+        text: &str,
+        chain: &[String],
+    ) -> Res {
+        let env = Envelope {
+            id: id.into(),
+            kind: "request".into(),
+            from: from.clone(),
+            to_session: target.session_id.clone(),
+            to_agent: MAIN.into(),
+            text: text.into(),
+            chain: chain.to_vec(),
+            status: String::new(),
+            created: now_s(),
+            mac: String::new(),
+        };
+        // The id is recorded first, so the reply can never arrive as an id nobody asked for.
+        let stored = link
+            .mailbox
+            .expect(&link.me.session_id, id, target)
+            .map_err(|e| format!("{e:?}"))
+            .and_then(|()| link.mailbox.enqueue(env).map_err(|e| format!("{e:?}")));
+        match stored {
+            Ok(_) => self.plain(
+                json!({"request_id": id, "to": target.addr(MAIN, MAIN).canonical(), "status": "queued"})
+                    .to_string(),
+                false,
+                ToolStatus::Ok,
+            ),
+            Err(e) => self.plain(
+                format!("busy: could not queue the message for the offline session ({e})"),
+                true,
+                ToolStatus::SoftError,
+            ),
+        }
+    }
+
     // ---- listings (B9) ---------------------------------------------------------------------
 
     fn rows_of(
@@ -673,7 +875,7 @@ impl Harness {
             &link.run_dir,
             &link.key,
             &link.config,
-            &link.me.session_id,
+            &link.addr(MAIN, MAIN, None),
             move |e| lf(e),
         )
         .await;
@@ -786,7 +988,7 @@ impl Harness {
 
     /// The read-only responder (R2): a sub-agent forked from the addressed agent's last-boundary
     /// snapshot, with reads only, `stricter(mode, plan)`, asks auto-denied, 8 turns / 20 calls.
-    async fn peer_answer(&self, req: Request, _partial: mpsc::UnboundedSender<String>) -> Reply {
+    async fn peer_answer(&self, req: Request, partial: mpsc::UnboundedSender<String>) -> Reply {
         let declined = |t: &str| Reply {
             status: "declined".into(),
             text: t.into(),
@@ -834,10 +1036,15 @@ impl Harness {
             SessionStatus::Running,
             CancellationToken::new(),
         );
+        let name = format!("peer-{n}");
+        lock(&link.state)
+            .partials
+            .insert(name.clone(), (partial, String::new()));
         let _settle = CostGuard {
             link: &link,
             task: &task,
             reserve,
+            name: &name,
         };
         let mode = stricter(lock(&self.permissions).mode(), Mode::Plan);
         let home = link.run_dir.parent().map(std::path::Path::to_path_buf);
@@ -860,7 +1067,6 @@ impl Harness {
             .collect();
         let cancel = CancellationToken::new();
         let _guard = cancel.clone().drop_guard();
-        let name = format!("peer-{n}");
         let ctx = AgentCtx {
             agent_id: Some(uuid()),
             name: name.clone(),
@@ -950,6 +1156,159 @@ impl Harness {
         }
     }
 
+    /// Streamed text of a responder: forwarded up to its last whitespace, so a word (and a secret
+    /// the redactor matches by shape) is never cut between two frames.
+    pub(crate) fn peer_partial(&self, agent: &str, text: &str) {
+        let Some(p) = self.peers.as_ref().filter(|_| agent.starts_with("peer-")) else {
+            return;
+        };
+        let mut st = lock(&p.state);
+        if let Some((tx, buf)) = st.partials.get_mut(agent) {
+            buf.push_str(text);
+            if let Some((i, c)) = buf.char_indices().rev().find(|(_, c)| c.is_whitespace()) {
+                let head: String = buf.drain(..i + c.len_utf8()).collect();
+                let _ = tx.send(head);
+            }
+        }
+    }
+
+    /// `confirm_replies` (D11): the owner is asked through the normal approver (a dialog in an
+    /// interactive front end; headless is auto-denied, so nothing leaves). The text shown is
+    /// redacted and cut.
+    async fn peer_confirm(&self, req: &Request, reply: &Reply) -> bool {
+        // The reply is shown whole (it is already the redacted text that would be sent); only the
+        // asker's request, which is context, is cut.
+        let show = |t: &str| -> String { self.sink.redact(t).chars().take(2000).collect() };
+        let a = ApprovalRequest {
+            approval_id: uuid(),
+            agent_id: None,
+            tool_call_id: req.id.clone(),
+            tool: "PeerReply".into(),
+            input: json!({"request_id": req.id, "from": req.from.display(),
+                "request": show(&req.text), "status": reply.status, "reply": reply.text}),
+            dialog: "permission",
+            prompt: format!("Send this reply to {}?", attr(&req.from.display())),
+            reason: "synthesis.peers.confirm_replies is on".into(),
+            suggestions: vec![],
+        };
+        // Dropping this future (the asker went away, the request timed out) closes the dialog.
+        let cancel = CancellationToken::new();
+        let _close = cancel.clone().drop_guard();
+        let d = self.approver.approve(a, &cancel).await;
+        d.decision == ApprovalDecision::Allow
+    }
+
+    /// A reply envelope pushed by a peer for a request this session queued while it was away.
+    fn peer_receive_reply(&self, env: Envelope) -> bool {
+        let Some(p) = self.peers.as_ref().filter(|p| p.on()) else {
+            return false;
+        };
+        let sid = &p.me.session_id;
+        if p.mailbox.delivered(sid, "reply", &env.id) {
+            return true; // already surfaced once: acknowledge, show nothing
+        }
+        if !p.mailbox.expected(sid, &env.id, &env.from) {
+            return false;
+        }
+        let ok = p.mailbox.enqueue(env).is_ok();
+        if ok {
+            lock(&p.state).late = true;
+            p.bump();
+        }
+        ok
+    }
+
+    /// Future that answers requests queued for this session (R10c), woken by each task start.
+    /// Spawn it next to `Server::run`; the answer goes back to the asker live, else to its mailbox.
+    pub fn peer_mailbox_worker(
+        self: &Arc<Self>,
+        server: Arc<Server>,
+    ) -> Option<impl std::future::Future<Output = ()> + Send + 'static> {
+        let link = self.peers.clone().filter(|p| p.on() && p.config.answer)?;
+        let h = self.clone();
+        Some(async move {
+            loop {
+                link.kick.notified().await;
+                h.peer_drain_mailbox(&link, &server).await;
+            }
+        })
+    }
+
+    async fn peer_drain_mailbox(&self, link: &PeerLink, server: &Server) {
+        let sid = &link.me.session_id;
+        for env in link
+            .mailbox
+            .pending(sid)
+            .into_iter()
+            .filter(|e| e.kind == "request")
+        {
+            let req = Request {
+                id: env.id.clone(),
+                from: env.from.clone().clamped(),
+                to_agent: env.to_agent.clone(),
+                text: env.text.clone(),
+                chain: env.chain.clone(),
+            };
+            let (status, text) = match server.answer_queued(req).await {
+                Answered::Retry(_) => break, // stays queued; the next task start tries again
+                Answered::Reply(r) => (r.status, r.text),
+                Answered::Rejected(why) => ("declined".to_string(), format!("rejected: {why}")),
+            };
+            let mut reply = Envelope {
+                id: env.id.clone(),
+                kind: "reply".into(),
+                from: link.addr(MAIN, MAIN, None),
+                to_session: env.from.session_id.clone(),
+                to_agent: env.from.instance.clone(),
+                text,
+                chain: vec![],
+                status,
+                created: now_s(),
+                mac: String::new(),
+            };
+            reply.sign(&link.key);
+            let live = read_entries(&link.run_dir)
+                .into_iter()
+                .find(|e| e.session_id == reply.to_session)
+                .filter(|e| synthesis_peers::endpoint_ok(&link.run_dir, &e.endpoint));
+            let pushed = match live {
+                Some(e) => matches!(deliver(&e.endpoint, &link.key, &reply).await, Ok(true)),
+                None => false,
+            };
+            // The reply is stored before the request is retired: a crash in between answers the
+            // question again, and the same id cannot be stored or shown twice. If it cannot be
+            // stored the request stays queued (it is answered again at the next task start).
+            let stored = pushed
+                || match link.mailbox.enqueue(reply.clone()) {
+                    Ok(_) => true,
+                    // permanently unstorable as it is: tell the asker it failed
+                    Err(MailError::TooLarge | MailError::Invalid) => {
+                        let mut f = Envelope {
+                            text: "the reply could not be stored (too large)".into(),
+                            status: "failed".into(),
+                            ..reply
+                        };
+                        f.mac.clear();
+                        link.mailbox.enqueue(f).is_ok()
+                    }
+                    Err(_) => false,
+                };
+            if stored {
+                link.mailbox.done(sid, "request", &env.id);
+            } else {
+                self.sink.emit(
+                    &Scope::default(),
+                    Event::Notice {
+                        level: "warning".into(),
+                        text: "a reply to a queued peer request could not be stored; the request stays queued"
+                            .into(),
+                    },
+                );
+                break;
+            }
+        }
+    }
+
     /// Cost the peer responders spent so far (USD), for `/cost`.
     pub fn peer_cost_usd(&self) -> f64 {
         self.peers.as_ref().map_or(0.0, |p| lock(&p.state).cost)
@@ -971,6 +1330,7 @@ struct CostGuard<'a> {
     link: &'a PeerLink,
     task: &'a TaskRun,
     reserve: f64,
+    name: &'a str,
 }
 
 impl Drop for CostGuard<'_> {
@@ -979,6 +1339,7 @@ impl Drop for CostGuard<'_> {
         let mut st = lock(&self.link.state);
         st.cost += actual;
         st.reserved = (st.reserved - self.reserve).max(0.0);
+        st.partials.remove(self.name);
     }
 }
 
@@ -998,6 +1359,15 @@ impl Responder for HarnessResponder {
     fn answer(&self, req: Request, partial: mpsc::UnboundedSender<String>) -> BoxFut<Reply> {
         let h = self.h.clone();
         Box::pin(async move { h.peer_answer(req, partial).await })
+    }
+
+    fn confirm(&self, req: &Request, reply: &Reply) -> BoxFut<bool> {
+        let (h, req, reply) = (self.h.clone(), req.clone(), reply.clone());
+        Box::pin(async move { h.peer_confirm(&req, &reply).await })
+    }
+
+    fn deliver_reply(&self, env: Envelope) -> bool {
+        self.h.peer_receive_reply(env)
     }
 }
 

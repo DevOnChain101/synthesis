@@ -143,7 +143,18 @@ pub(crate) fn child_parts(
     };
     // Never delegable, even when the definition lists them: no nesting, no questions to the
     // user from a child.
-    allowed.retain(|n| !matches!(n.as_str(), "Task" | "AskUserQuestion" | "ExitPlanMode"));
+    // Sub-agents may search memory, never change it (memory.md §8).
+    allowed.retain(|n| {
+        !matches!(
+            n.as_str(),
+            "Task"
+                | "AskUserQuestion"
+                | "ExitPlanMode"
+                | "MemoryWrite"
+                | "MemoryUpdate"
+                | "MemoryForget"
+        )
+    });
     allowed.extend(["SendMessage", "ListAgents", "ListSessions"].map(String::from));
     if let Some(pa) = &parent.allowed {
         allowed.retain(|n| pa.contains(n));

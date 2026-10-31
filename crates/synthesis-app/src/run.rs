@@ -409,7 +409,7 @@ fn resolve_resume(
 
 /// Rows of `{"synthesis":{"pricing":{"<provider/model>"|"<model>": {input_per_mtok, output_per_mtok}}}}`
 /// from the USER settings file only (a repository must not be able to price a model at zero).
-fn pricing(user_settings: &Path, label: &str, model: &str) -> Option<Pricing> {
+pub(crate) fn pricing(user_settings: &Path, label: &str, model: &str) -> Option<Pricing> {
     let raw = std::fs::read(user_settings)
         .ok()
         .filter(|b| b.len() <= 1 << 20)?;
@@ -1002,6 +1002,7 @@ pub fn prepare(
         instructions.clear();
     }
     let repo = crate::memcmd::repo_of(&ws.root);
+    let small = crate::memcmd::small_model(&cfg, &res.label, &res.model);
     let (memory, memory_block) = crate::memcmd::start(
         &crate::memcmd::StartArgs {
             enabled: !c.no_memory && !c.bare,
@@ -1012,10 +1013,18 @@ pub fn prepare(
             project_trusted: trust == ProjectTrust::Trusted,
             secrets: &res.secrets,
             provider: res.provider.clone(),
-            model: crate::memcmd::small_model(&cfg, &res.label, &res.model),
+            model: small.clone(),
+            sink: Some(sink.clone()),
+            pricing: pricing(&h.synthesis.join("settings.json"), &small, &small),
         },
         cancel.clone(),
     );
+    if let Some(m) = &memory {
+        // MemoryUpdate/MemoryForget on a note the agent did not save ask the person
+        perms.env.memory_notes = Some(synthesis_permissions::NoteOracle(
+            crate::memtools::agent_note_oracle(m.clone()),
+        ));
+    }
     // after memory starts: learned skills are installed by `start`
     let skills = crate::ctx::visible_skills(
         synthesis_tools::discover_skills(env, &ws.root),
@@ -1047,6 +1056,18 @@ pub fn prepare(
         context = context.with_transcript(t.clone());
     }
     let agents = crate::agents::load(&h.synthesis, &settings.project_root, trust);
+    if let Some(m) = &memory {
+        let (pinned, per) = crate::memcmd::sub_agent_blocks(
+            m,
+            agents
+                .table
+                .iter()
+                .map(|d| (d.name.as_str(), d.prompt.as_str())),
+        );
+        context = context
+            .with_sub_memory(pinned, per)
+            .with_compact_hook(crate::memcmd::compaction_hook(m.clone()));
+    }
     if !agents.skipped.is_empty() {
         let w = format!(
             "{} project agent definition(s) not loaded (project not trusted)",
@@ -1138,6 +1159,12 @@ pub fn prepare(
     if let Some(a) = mcp_attach {
         toolbox = a.apply(toolbox);
     }
+    // the four Memory* tools exist only while the run has an open store
+    if let Some(m) = &memory {
+        for t in crate::memtools::tools(m.clone()) {
+            toolbox = toolbox.with_tool(t);
+        }
+    }
     let gate_cfg = vs.gate(budget.max_verify_attempts);
     let rt_gate = rt.clone();
     // Peer endpoint (off by default). Bound here, inside the runtime; the server starts below.
@@ -1200,6 +1227,9 @@ pub fn prepare(
     );
     let harness = Arc::new(harness);
     if let (Some(l), Some(server)) = (peer_listener, harness.peer_server()) {
+        if let Some(w) = harness.peer_mailbox_worker(server.clone()) {
+            tokio_rt.spawn(w);
+        }
         tokio_rt.spawn(server.run(l));
     }
     Ok(Prepared {
@@ -1319,6 +1349,9 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
                     Some(if resumed_from_seq.is_some() { "resume" } else { "startup" }),
                 )
                 .await;
+                if let Some(m) = &memory2 {
+                    crate::memcmd::announce(m);
+                }
                 for n in notices {
                     h2.session_hook(
                         HookEvent::Notification,
@@ -1364,6 +1397,11 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
                     Some(&out.reason),
                 )
                 .await;
+                // before the terminal session event, so the stream still ends with it
+                if let Some(m) = &memory2 {
+                    let verified = h2.verified_commands(&out.task_id);
+                    crate::memcmd::task_ended(m, &request2, &out, &verified);
+                }
                 h2.end_session(&out);
                 Ok::<_, synthesis_harness::HarnessError>(out)
             }
@@ -1371,11 +1409,11 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
             if let (Some(s), Ok(out)) = (&store2, &r) {
                 finish_store(s, transcript.as_deref(), out, &session.usage);
             }
-            if let (Some(m), Ok(out)) = (&memory2, &r) {
-                crate::memcmd::task_ended(m, &request2, out);
-                if let Some(rf) = &m.reflect {
-                    crate::memcmd::reflect_jobs(&m.store, rf, 2).await;
-                }
+            // reflection (a model call, opt-in) runs after the result and the session end are final
+            if let (Some(m), Ok(_)) = (&memory2, &r)
+                && let Some(rf) = &m.reflect
+            {
+                crate::memcmd::reflect_jobs(&m.store, rf, 2).await;
             }
             r
         });

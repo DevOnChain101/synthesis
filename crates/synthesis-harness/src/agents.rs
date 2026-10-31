@@ -93,6 +93,10 @@ impl AgentTable {
         (Self::new(keep), skipped)
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = &AgentDef> {
+        self.0.iter()
+    }
+
     pub fn get(&self, name: &str) -> Option<&AgentDef> {
         self.0.iter().find(|d| d.name == name)
     }

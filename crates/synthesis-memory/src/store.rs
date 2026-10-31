@@ -69,7 +69,16 @@ CREATE TABLE proposals(id TEXT PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT 
 /// v2 (M2): the digest a reflection job works from (redacted, capped), so a job can run later.
 const V2: &str = "ALTER TABLE reflection_jobs ADD COLUMN payload TEXT NOT NULL DEFAULT '';";
 
-const MIGRATIONS: &[&str] = &[V1, V2];
+/// v3: what a reflection call used (tokens, USD) and one row per retrieval, for `stats` and the
+/// daily USD cap.
+const V3: &str = "
+ALTER TABLE reflection_jobs ADD COLUMN tokens INTEGER;
+ALTER TABLE reflection_jobs ADD COLUMN cost_usd REAL;
+CREATE TABLE memory_retrievals(session_id TEXT NOT NULL, tokens INTEGER NOT NULL,
+  notes INTEGER NOT NULL, candidates INTEGER NOT NULL, at TEXT NOT NULL);
+";
+
+const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 const MAX_IMPORT_BYTES: usize = 5 << 20;
 const MAX_IMPORT_LINES: usize = 5000;
@@ -240,6 +249,17 @@ pub struct Stats {
     pub failed_jobs: i64,
     pub pending_proposals: i64,
     pub quarantined: i64,
+    /// Tokens injected per retrieval (nearest rank over the last 1000).
+    pub injected_tokens_p50: Option<i64>,
+    pub injected_tokens_p95: Option<i64>,
+    pub retrievals: i64,
+    /// Share of retrievals that returned at least one note.
+    pub hit_rate: Option<f64>,
+    /// Share of finished injected uses whose task succeeded.
+    pub ok_rate: Option<f64>,
+    pub reflection_cost_usd_7d: f64,
+    pub reflection_cost_usd_30d: f64,
+    pub reflection_tokens_7d: i64,
 }
 
 pub struct Store {
@@ -256,6 +276,12 @@ fn private_dir(p: &Path) -> Result<()> {
     b.create(p)?;
     if fs::symlink_metadata(p)?.file_type().is_symlink() {
         return Err(Error(format!("{} is a symlink", p.display())));
+    }
+    // an existing directory made with a looser mask is tightened too (spec §9: 0700)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(p, fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
 }
@@ -333,9 +359,27 @@ impl Store {
         let conn = Connection::open(&path)?;
         conn.busy_timeout(Duration::from_millis(5000))?;
         conn.pragma_update(None, "foreign_keys", true)?;
-        let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
-        if !mode.eq_ignore_ascii_case("wal") {
-            conn.pragma_update(None, "journal_mode", "WAL")?;
+        // Switching a fresh file to WAL while another process does the same fails at once with
+        // SQLITE_IOERR/BUSY (the busy timeout does not apply), so retry briefly.
+        let mut tries = 0;
+        loop {
+            let r = conn
+                .query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))
+                .and_then(|mode| {
+                    if mode.eq_ignore_ascii_case("wal") {
+                        Ok(())
+                    } else {
+                        conn.pragma_update(None, "journal_mode", "WAL")
+                    }
+                });
+            match r {
+                Ok(()) => break,
+                Err(_) if tries < 40 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
         let mut s = Self {
             conn,
@@ -367,6 +411,10 @@ impl Store {
             let tx = self
                 .conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // another process may have migrated between our read of `have` and the writer lock
+            if current_version(&tx)? > i {
+                continue;
+            }
             if i == 0 {
                 tx.execute_batch(
                     "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
@@ -622,6 +670,27 @@ impl Store {
         Ok(true)
     }
 
+    /// Lowers an `agent` or `verified` record to `untrusted` (never raises, never touches `owner`):
+    /// a task that touched the network taints what the model saved during it.
+    pub fn demote(&mut self, id: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE memories SET trust='untrusted', updated_at=?2 WHERE id=?1 AND trust IN ('agent','verified')",
+            params![id, now_iso()],
+        )? > 0)
+    }
+
+    /// Active notes written for one sub-agent definition (`agent` scope, key `<name>@<workspace>`),
+    /// never `untrusted`, newest first. Read only by that definition (memory.md §4).
+    pub fn agent_notes(&self, scope_key: &str, limit: usize) -> Result<Vec<Memory>> {
+        let sql = format!(
+            "SELECT {COLS} FROM memories m WHERE m.scope='agent' AND m.scope_key=?1 AND m.status='active'
+             AND m.trust<>'untrusted' AND m.kind<>'skill' ORDER BY m.updated_at DESC, m.rid DESC LIMIT ?2"
+        );
+        let mut st = self.conn.prepare(&sql)?;
+        let rows = st.query_map(params![scope_key, limit as i64], row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn set_pinned(&mut self, id: &str, pinned: bool) -> Result<bool> {
         Ok(self.conn.execute(
             "UPDATE memories SET pinned=?2 WHERE id=?1",
@@ -632,10 +701,20 @@ impl Store {
     /// A new version of `old` (a reflection `update`): `old` is superseded once the new record is in.
     /// `owner` records are never replaced automatically.
     pub fn replace(&mut self, old: &str, n: NewMemory) -> Result<PutOutcome> {
+        self.replace_with(old, n, false)
+    }
+
+    /// Like [`Store::replace`] for the owner's own edit (`synth memory edit`): an `owner` record
+    /// may be replaced because the person asked.
+    pub fn revise(&mut self, old: &str, n: NewMemory) -> Result<PutOutcome> {
+        self.replace_with(old, n, true)
+    }
+
+    fn replace_with(&mut self, old: &str, n: NewMemory, by_owner: bool) -> Result<PutOutcome> {
         let Some(prev) = self.get(old)? else {
             return bad("no such record");
         };
-        if prev.trust == Trust::Owner {
+        if prev.trust == Trust::Owner && !by_owner {
             return bad("owner records are never replaced automatically");
         }
         let out = self.put(n)?;
@@ -777,6 +856,34 @@ impl Store {
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         };
         let n = |sql: &str| -> Result<i64> { Ok(self.conn.query_row(sql, [], |r| r.get(0))?) };
+        let since = |days: i64| {
+            (OffsetDateTime::now_utc() - time::Duration::days(days))
+                .format(&Rfc3339)
+                .unwrap_or_default()
+        };
+        let cost_since = |days: i64| -> Result<f64> {
+            Ok(self.conn.query_row(
+                "SELECT coalesce(sum(cost_usd),0) FROM reflection_jobs WHERE finished_at >= ?1",
+                [since(days)],
+                |r| r.get(0),
+            )?)
+        };
+        let mut tokens: Vec<i64> = {
+            let mut st = self
+                .conn
+                .prepare("SELECT tokens FROM (SELECT rowid, tokens FROM memory_retrievals ORDER BY rowid DESC LIMIT 1000)")?;
+            let rows = st.query_map([], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        tokens.sort_unstable();
+        let pct = |v: &[i64], p: usize| -> Option<i64> {
+            (!v.is_empty()).then(|| {
+                v[(v.len() * p)
+                    .div_ceil(100)
+                    .saturating_sub(1)
+                    .min(v.len() - 1)]
+            })
+        };
         Ok(Stats {
             total: n("SELECT count(*) FROM memories")?,
             by_kind: group("kind")?,
@@ -787,7 +894,72 @@ impl Store {
             failed_jobs: n("SELECT count(*) FROM reflection_jobs WHERE status='failed'")?,
             pending_proposals: n("SELECT count(*) FROM proposals WHERE status='pending'")?,
             quarantined: n("SELECT count(*) FROM memories WHERE status='quarantined'")?,
+            injected_tokens_p50: pct(&tokens, 50),
+            injected_tokens_p95: pct(&tokens, 95),
+            retrievals: n("SELECT count(*) FROM memory_retrievals")?,
+            hit_rate: {
+                let t = n("SELECT count(*) FROM memory_retrievals")?;
+                (t > 0).then(|| {
+                    n("SELECT count(*) FROM memory_retrievals WHERE notes>0").unwrap_or(0) as f64
+                        / t as f64
+                })
+            },
+            ok_rate: {
+                let t = n(
+                    "SELECT count(*) FROM memory_uses WHERE via='injected' AND outcome IS NOT NULL",
+                )?;
+                (t > 0).then(|| {
+                    n("SELECT count(*) FROM memory_uses WHERE via='injected' AND outcome='success'")
+                        .unwrap_or(0) as f64
+                        / t as f64
+                })
+            },
+            reflection_cost_usd_7d: cost_since(7)?,
+            reflection_cost_usd_30d: cost_since(30)?,
+            reflection_tokens_7d: self.conn.query_row(
+                "SELECT coalesce(sum(tokens),0) FROM reflection_jobs WHERE finished_at >= ?1",
+                [since(7)],
+                |r| r.get(0),
+            )?,
         })
+    }
+
+    /// One row per retrieval (task start or after a compaction), for `stats`.
+    pub fn record_retrieval(
+        &mut self,
+        session_id: &str,
+        tokens: usize,
+        notes: usize,
+        candidates: usize,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO memory_retrievals(session_id, tokens, notes, candidates, at) VALUES (?1,?2,?3,?4,?5)",
+            params![session_id, tokens as i64, notes as i64, candidates as i64, now_iso()],
+        )?;
+        Ok(())
+    }
+
+    /// What a reflection call used; cost is `None` when the model has no price configured.
+    pub fn record_job_usage(
+        &mut self,
+        job_id: &str,
+        tokens: u64,
+        cost_usd: Option<f64>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE reflection_jobs SET tokens = coalesce(tokens,0) + ?2, cost_usd = coalesce(cost_usd,0) + coalesce(?3,0) WHERE id = ?1",
+            params![job_id, tokens as i64, cost_usd],
+        )?;
+        Ok(())
+    }
+
+    /// USD spent by reflection calls today (UTC).
+    pub fn reflection_cost_today(&self, now: OffsetDateTime) -> Result<f64> {
+        Ok(self.conn.query_row(
+            "SELECT coalesce(sum(cost_usd),0) FROM reflection_jobs WHERE substr(coalesce(finished_at, claimed_at, created_at),1,10) = ?1",
+            [now.date().to_string()],
+            |r| r.get(0),
+        )?)
     }
 
     /// Episodes older than `retention_days` are deleted; other non-owner, unpinned records whose
