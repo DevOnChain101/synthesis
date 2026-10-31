@@ -1488,7 +1488,7 @@ fn candidates(seg: &[String]) -> Vec<String> {
 
 /// `Bash(x:*)`: prefix test for deny/ask (over-matching is the safe side); for allow
 /// (`boundary`) the prefix must end at a word boundary: `ls:*` matches `ls -l`, not `lsblk`.
-pub fn spec_matches(spec: &str, cand: &str, boundary: bool) -> bool {
+fn spec_matches(spec: &str, cand: &str, boundary: bool) -> bool {
     if spec == "*" {
         return true;
     }
