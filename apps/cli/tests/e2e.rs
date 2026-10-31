@@ -1120,7 +1120,7 @@ fn edited_mcp_json_invalidates_a_hash_bound_approval() {
     let none = json!([{"text": "ok"}]);
     let (o, ev) = rig.run(none.clone(), &["--trust-project", "--approve-mcp", "proj"]);
     assert!(marker.exists());
-    // the approval stays in the record (and in the TUI's startup notes), not only on stderr
+    // the approval stays in the record, not only on stderr
     assert!(
         ev.iter().any(|e| e["type"] == "notice"
             && e["payload"]["text"].as_str().unwrap().contains("approved:")),

@@ -1,7 +1,7 @@
 //! Golden transcripts (tests/golden/transcripts, captured from the Node reference).
 //!
 //! The Node fixtures also pin parser.js's dashboard model (`session`, `phase`, `total_tokens`,
-//! classifyTool/summarizeTool, activity). That is TUI/dashboard logic, not session storage,
+//! classifyTool/summarizeTool, activity). That is dashboard logic, not session storage,
 //! and is not ported here: see `DIVERGENCES`.
 
 use std::fs;

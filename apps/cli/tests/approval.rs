@@ -95,7 +95,7 @@ fn headless_run_prints_what_permission_is_needed_and_how_to_grant_it() {
     let e = stderr(&o);
     assert!(
         e.contains("synth: blocked: approval needed for Bash(cargo test:*)")
-            && e.contains("rerun with --allow 'Bash(cargo test:*)' or in the TUI"),
+            && e.contains("rerun with --allow 'Bash(cargo test:*)'"),
         "{e}"
     );
     assert_eq!(o.status.code(), Some(4), "{e}");

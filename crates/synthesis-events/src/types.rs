@@ -536,7 +536,7 @@ pub enum Event {
         bytes: u64,
         duration_ms: u64,
     },
-    /// The permission mode changed (TUI/GUI switch). Never emitted for the mode a session starts in.
+    /// The permission mode changed (front-end switch). Never emitted for the mode a session starts in.
     #[serde(rename = "session.mode_changed")]
     SessionModeChanged {
         from: String,
