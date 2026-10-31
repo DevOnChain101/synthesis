@@ -11,14 +11,13 @@ use gpui::{
     AnyElement, Context, HighlightStyle, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, StyledText, canvas, div, img, px,
 };
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
-use gpui_component::{Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_component::{StyledExt as _, h_flex, v_flex};
 use synthesis_permissions::Mode as Perm;
 
 use super::{
-    ActiveNav, Bottom, INSPECTOR_W, Menu, Nav, READING_W, Shell, SideTab, TOP_SAFE, Tab, choice,
-    drag, empty, icon, kbd, label, spaced,
+    ActiveNav, Bottom, HEADER_H, INSPECTOR_W, Menu, Nav, READING_W, Shell, SideTab, TOP_SAFE, Tab,
+    Variant, btn, choice, drag, empty, icon, kbd, label, spaced,
 };
 use crate::activity::{self, Filter};
 use crate::convo::{ApprovalState, Item, StepState, ToolState};
@@ -28,8 +27,8 @@ use crate::syntax;
 use crate::theme::{self, hsla};
 use crate::topology::{self, Pos, Rect};
 
-const DOT_NEEDS_YOU: u32 = theme::ERROR;
-const DOT_RUNNING: u32 = theme::PENDING;
+const DOT_NEEDS_YOU: u32 = theme::PENDING;
+const DOT_RUNNING: u32 = theme::ACCENT;
 const DOT_DONE: u32 = theme::SUCCESS;
 
 fn now_ms() -> i64 {
@@ -40,9 +39,10 @@ fn now_ms() -> i64 {
 
 fn dot(s: Status) -> gpui::Div {
     div()
-        .size(px(7.))
+        .size(px(6.))
         .flex_shrink_0()
         .rounded_full()
+        .opacity(0.85)
         .bg(hsla(match s {
             Status::NeedsYou => DOT_NEEDS_YOU,
             Status::Running => DOT_RUNNING,
@@ -55,7 +55,7 @@ fn sid(prefix: &str, i: impl std::fmt::Display) -> SharedString {
 }
 
 fn rule() -> gpui::Div {
-    div().h(px(1.)).my(px(8.)).bg(hsla(0x30333A))
+    div().h(px(8.))
 }
 
 fn nav_row(
@@ -147,7 +147,7 @@ impl Shell {
                 gpui::linear_color_stop(hsla(theme::SIDEBAR), 1.),
             ))
             .border_r_1()
-            .border_color(hsla(0x2C3139))
+            .border_color(hsla(0x1C2127))
             .child(
                 v_flex()
                     .child(drag("drag-rail").h(px(TOP_SAFE)).w_full())
@@ -171,11 +171,11 @@ impl Shell {
                             .px(px(12.))
                             .py(px(9.))
                             .rounded(px(10.))
-                            .border_1()
-                            .border_color(hsla(theme::INPUT_BORDER))
                             .bg(hsla(0x1B2027))
                             .text_size(px(13.))
+                            .font_medium()
                             .cursor_pointer()
+                            .hover(|d| d.bg(hsla(0x222831)))
                             .child(icon("plus", 16., 0xD4D9DF))
                             .child(div().flex_1().child("New Task"))
                             .child(hint(kbd("N")))
@@ -233,9 +233,7 @@ impl Shell {
                             .mt(px(8.))
                             .gap(px(4.))
                             .p(px(10.))
-                            .rounded(px(11.))
-                            .border_1()
-                            .border_color(hsla(0x2C3139))
+                            .rounded(px(12.))
                             .bg(hsla(0x151A20))
                             .child(
                                 h_flex()
@@ -289,13 +287,21 @@ impl Shell {
             div()
                 .id(id)
                 .flex_1()
-                .py(px(6.))
+                .py(px(8.))
                 .text_center()
-                .rounded(px(7.))
                 .text_size(px(12.))
-                .text_color(hsla(if on { 0xFFFFFF } else { theme::MUTED }))
+                .font_medium()
+                .text_color(hsla(if on { theme::TEXT } else { theme::MUTED }))
                 .cursor_pointer()
-                .when(on, |d| d.bg(hsla(theme::NAV_ACTIVE)))
+                .border_b_1()
+                .border_color(
+                    hsla(if on { theme::PEARL } else { 0x1E2329 }).opacity(if on {
+                        0.7
+                    } else {
+                        1.
+                    }),
+                )
+                .hover(|d| d.text_color(hsla(theme::TEXT)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.side_tab = t;
                     cx.notify();
@@ -307,10 +313,11 @@ impl Shell {
                 .id(id)
                 .text_size(px(12.))
                 .text_color(hsla(if self.nav == n {
-                    0xFFFFFF
+                    theme::TEXT
                 } else {
                     theme::MUTED
                 }))
+                .hover(|d| d.text_color(hsla(theme::TEXT)))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.nav = n;
@@ -318,8 +325,8 @@ impl Shell {
                 }))
                 .child(
                     h_flex()
-                        .gap(px(6.))
-                        .child(icon(ic, 13., theme::MUTED))
+                        .gap(px(8.))
+                        .child(icon(ic, 14., theme::MUTED))
                         .child(text),
                 )
         };
@@ -327,20 +334,21 @@ impl Shell {
             .w(px(260.))
             .flex_shrink_0()
             .h_full()
-            .gap(px(10.))
-            .px(px(13.))
-            .pb(px(13.))
+            .gap(px(16.))
+            .px(px(16.))
+            .pb(px(16.))
             .bg(hsla(theme::SURFACE))
-            .child(drag("drag-side").h(px(TOP_SAFE - 10.)).w_full())
             .child(
                 h_flex()
-                    .justify_between()
+                    .h(px(HEADER_H))
+                    .flex_shrink_0()
                     .child(
                         div()
-                            .text_size(px(14.))
+                            .text_size(px(15.))
                             .font_semibold()
                             .child(self.project_name()),
                     )
+                    .child(drag("drag-side").flex_1().h_full())
                     .child(
                         div()
                             .id("side-plus")
@@ -351,16 +359,13 @@ impl Shell {
             )
             .child(
                 h_flex()
-                    .p(px(3.))
-                    .rounded(px(9.))
-                    .bg(hsla(theme::BG))
                     .child(tab("t-sessions", "Sessions", SideTab::Sessions))
                     .child(tab("t-explorer", "Explorer", SideTab::Explorer))
                     .child(tab("t-changes", "Changes", SideTab::Changes)),
             )
             .child(
                 h_flex()
-                    .gap(px(12.))
+                    .gap(px(14.))
                     .child(page("p-activity", "activity", "Activity", Nav::Activity))
                     .child(page("p-tools", "wrench", "Tools", Nav::Tools))
                     .child(page("p-topology", "network", "Topology", Nav::Topology)),
@@ -455,12 +460,14 @@ impl Shell {
             .children(groups)
             .when(none, |d| d.child(empty("No sessions yet.")))
             .child(
-                Button::new("new-session")
-                    .icon(icon("plus", 14., theme::MUTED))
-                    .label("New session")
-                    .ghost()
-                    .small()
-                    .on_click(cx.listener(|this, _, _, cx| this.new_session(cx))),
+                btn(
+                    "new-session",
+                    Some("plus"),
+                    "New session",
+                    Variant::Ghost,
+                    None,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.new_session(cx))),
             )
             .into_any_element()
     }
@@ -536,22 +543,33 @@ impl Shell {
     // ------------------------------------------------------------------------------ session
 
     fn tab_strip(&self, cx: &mut Context<Self>) -> AnyElement {
+        let many = self.tabs.len() > 1;
         let tabs = self.tabs.iter().enumerate().map(|(i, t)| {
             let on = i == self.active;
             let st = sessions::status_of(t.live.then_some(&t.convo));
             h_flex()
                 .id(sid("tab", i))
                 .gap(px(8.))
-                .px(px(12.))
-                .py(px(6.))
+                .max_w(px(if many { 220. } else { 480. }))
+                .min_w_0()
+                .px(px(if many { 10. } else { 0. }))
+                .h(px(28.))
                 .rounded(px(8.))
-                .text_size(px(12.))
-                .text_color(hsla(if on { 0xFFFFFF } else { theme::MUTED }))
+                .text_size(px(13.))
+                .font_medium()
+                .text_color(hsla(if on { theme::TEXT } else { theme::MUTED }))
                 .cursor_pointer()
-                .when(on, |d| d.bg(hsla(0x1A1F26)))
-                .hover(|d| d.text_color(hsla(0xFFFFFF)))
+                .when(many && on, |d| d.bg(hsla(0x1A1F26)))
+                .hover(|d| d.text_color(hsla(theme::TEXT)))
                 .child(dot(st))
-                .child(t.title.clone())
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(t.title.clone()),
+                )
                 .when(!t.live, |d| {
                     d.child(
                         div()
@@ -569,13 +587,24 @@ impl Shell {
                     cx.notify();
                 }))
         });
+        let c = &self.tabs[self.active].convo;
+        let progress = (!c.plan.is_empty()).then(|| {
+            let done = c.plan.iter().filter(|s| s.state == StepState::Done).count();
+            h_flex()
+                .gap(px(6.))
+                .text_size(px(12.))
+                .text_color(hsla(theme::MUTED))
+                .child(icon("circle-check", 13., theme::MUTED))
+                .child(format!("{done} of {}", c.plan.len()))
+        });
         h_flex()
-            .h(px(TOP_SAFE))
+            .h(px(HEADER_H))
             .flex_shrink_0()
-            .px(px(16.))
+            .px(px(24.))
             .gap(px(4.))
             .children(tabs)
             .child(drag("drag-tabs").flex_1().h_full())
+            .children(progress)
             .into_any_element()
     }
 
@@ -585,14 +614,14 @@ impl Shell {
             Item::User(t) => div()
                 .px(px(16.))
                 .py(px(12.))
-                .rounded(px(14.))
+                .rounded(px(12.))
                 .bg(hsla(0x1A1F26))
                 .text_size(px(13.))
-                .line_height(px(20.))
+                .line_height(px(21.))
                 .child(t.clone())
                 .into_any_element(),
             Item::Assistant { text, streaming } => div()
-                .text_size(px(14.))
+                .text_size(px(13.))
                 .line_height(px(22.))
                 .text_color(hsla(theme::TEXT))
                 .child(format!("{text}{}", if *streaming { " ▍" } else { "" }))
@@ -615,7 +644,7 @@ impl Shell {
                 v_flex()
                     .gap(px(8.))
                     .p(px(16.))
-                    .rounded(px(14.))
+                    .rounded(px(12.))
                     .bg(hsla(0x14181D))
                     .child(
                         h_flex()
@@ -643,24 +672,56 @@ impl Shell {
             Item::Approval {
                 id, prompt, state, ..
             } => {
+                let key = |k: &str| {
+                    if cfg!(target_os = "macos") {
+                        format!("⌘{k}")
+                    } else {
+                        format!("Ctrl+{k}")
+                    }
+                };
                 let body = match state {
                     ApprovalState::Pending if interactive => {
-                        let btn = |tag: &'static str,
-                                   text: &'static str,
-                                   c: Choice,
-                                   primary: bool| {
-                            let id = id.clone();
-                            let b = Button::new(sid(tag, format!("{i}-{id}")))
-                                .label(text)
-                                .small();
-                            let b = if primary { b.primary() } else { b.outline() };
-                            b.on_click(cx.listener(move |this, _, _, cx| this.answer(&id, c, cx)))
-                        };
+                        let (d, o, a) = (id.clone(), id.clone(), id.clone());
                         h_flex()
                             .gap(px(8.))
-                            .child(btn("deny", "Deny", Choice::Deny, false))
-                            .child(btn("once", "Allow once", Choice::Once, false))
-                            .child(btn("always", "Always for project", Choice::Always, false))
+                            .pt(px(4.))
+                            .child(
+                                btn(
+                                    sid("deny", format!("{i}-{id}")),
+                                    None,
+                                    "Deny",
+                                    Variant::Ghost,
+                                    Some(key("⌫")),
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| this.answer(&d, Choice::Deny, cx),
+                                )),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                btn(
+                                    sid("always", format!("{i}-{id}")),
+                                    None,
+                                    "Always for project",
+                                    Variant::Secondary,
+                                    None,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| this.answer(&a, Choice::Always, cx),
+                                )),
+                            )
+                            .child(
+                                btn(
+                                    sid("once", format!("{i}-{id}")),
+                                    None,
+                                    "Allow once",
+                                    Variant::Primary,
+                                    Some(key("↵")),
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| this.answer(&o, Choice::Once, cx),
+                                )),
+                            )
                             .into_any_element()
                     }
                     ApprovalState::Pending => div()
@@ -676,23 +737,27 @@ impl Shell {
                         .child("Denied")
                         .into_any_element(),
                 };
+                let pending = *state == ApprovalState::Pending;
                 v_flex()
-                    .gap(px(8.))
+                    .gap(px(12.))
                     .p(px(16.))
-                    .rounded(px(14.))
+                    .rounded(px(12.))
                     .border_1()
-                    .border_color(hsla(if *state == ApprovalState::Pending {
-                        theme::PEARL
-                    } else {
-                        0x1B1F26
-                    }))
-                    .bg(hsla(0x1B1F26))
+                    .border_color(hsla(theme::PENDING).opacity(if pending { 0.28 } else { 0. }))
+                    .bg(hsla(0x181B20))
                     .text_size(px(12.))
-                    .child(label("Needs your approval"))
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .child(icon("triangle-alert", 14., theme::PENDING))
+                            .child(label("Needs your approval")),
+                    )
                     .child(
                         div()
                             .font_family(self.font())
                             .text_size(px(12.))
+                            .line_height(px(19.))
+                            .text_color(hsla(theme::SILVER))
                             .child(prompt.clone()),
                     )
                     .child(body)
@@ -769,8 +834,8 @@ impl Shell {
             Evidence::Diff(_) => diff.filter(|d| !d.2.is_empty()).map(|(_, _, lines)| {
                 v_flex()
                     .p(px(12.))
-                    .rounded(px(10.))
-                    .bg(hsla(0x0F1216))
+                    .rounded(px(8.))
+                    .bg(hsla(0x0B0E11))
                     .font_family(mono.clone())
                     .text_size(px(11.))
                     .line_height(px(17.))
@@ -794,8 +859,8 @@ impl Shell {
             Evidence::Terminal => (!preview.is_empty()).then(|| {
                 div()
                     .p(px(12.))
-                    .rounded(px(10.))
-                    .bg(hsla(0x0F1216))
+                    .rounded(px(8.))
+                    .bg(hsla(0x0B0E11))
                     .font_family(mono.clone())
                     .text_size(px(11.))
                     .line_height(px(17.))
@@ -816,16 +881,18 @@ impl Shell {
         let toggle_id = id.to_string();
         let ev2 = ev.clone();
         v_flex()
-            .gap(px(8.))
-            .p(px(12.))
-            .rounded(px(14.))
+            .rounded(px(12.))
             .bg(hsla(0x14181D))
+            .overflow_hidden()
             .child(
                 h_flex()
                     .id(sid("ev", i))
+                    .h(px(36.))
+                    .px(px(12.))
                     .gap(px(8.))
                     .text_size(px(12.))
                     .cursor_pointer()
+                    .hover(|d| d.bg(hsla(0x181C22)))
                     .child(icon(state_icon, 14., c))
                     .child(icon(kind_icon, 14., 0x6B727C))
                     .child(
@@ -864,8 +931,8 @@ impl Shell {
                     )
                     .child(icon(
                         if open { "chevron-up" } else { "chevron-down" },
-                        14.,
-                        0x6B727C,
+                        15.,
+                        0x9096A0,
                     ))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.collapsed.remove(&toggle_id) {
@@ -874,7 +941,9 @@ impl Shell {
                         cx.notify();
                     })),
             )
-            .when(open, |d| d.children(body))
+            .when(open, |d| {
+                d.children(body.map(|b| div().px(px(12.)).pb(px(12.)).child(b)))
+            })
             .into_any_element()
     }
 
@@ -959,9 +1028,9 @@ impl Shell {
             .id(id)
             .px(px(10.))
             .py(px(4.))
-            .rounded(px(7.))
-            .border_1()
-            .border_color(hsla(theme::INPUT_BORDER))
+            .rounded(px(8.))
+            .bg(hsla(0x232830))
+            .hover(|d| d.bg(hsla(0x2A3039)))
             .text_size(px(11.))
             .text_color(hsla(theme::SILVER))
             .cursor_pointer()
@@ -1101,9 +1170,9 @@ impl Shell {
                     .p(px(if landing { 16. } else { 12. }))
                     .gap(px(if landing { 22. } else { 8. }))
                     .border_1()
-                    .border_color(hsla(theme::INPUT_BORDER))
-                    .rounded(px(11.))
-                    .bg(hsla(0x232831))
+                    .border_color(hsla(0x2A3038))
+                    .rounded(px(16.))
+                    .bg(hsla(0x1B2027))
                     .child(Input::new(&self.composer).appearance(false))
                     .child(
                         h_flex()
@@ -1157,10 +1226,8 @@ impl Shell {
                                     })),
                             )
                             .child(if running {
-                                Button::new("stop")
-                                    .label("Stop")
-                                    .outline()
-                                    .small()
+                                btn("stop", Some("square"), "Stop", Variant::Secondary, None)
+                                    .h(px(30.))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         if let Some(e) = &this.engine {
                                             e.cancel();
@@ -1186,25 +1253,61 @@ impl Shell {
             .into_any_element()
     }
 
-    fn engine_note(&self) -> Option<AnyElement> {
+    fn engine_note(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         use super::EngineState::{Failed, Idle, Starting};
-        let (text, colour) = match &self.engine_state {
-            Starting => ("Starting the engine…".to_string(), theme::MUTED),
+        let (title, sub, connect) = match &self.engine_state {
+            Starting => ("Starting the engine…".to_string(), String::new(), false),
             Failed(e) => (
-                format!("The engine did not start: {e}. Connect a provider in Configuration."),
-                theme::ERROR,
+                "No model provider connected".to_string(),
+                format!("The engine did not start: {e}"),
+                true,
             ),
             Idle => (
-                "The engine starts after you connect a provider in Configuration.".into(),
-                theme::MUTED,
+                "No model provider connected".to_string(),
+                "Connect one to start the engine.".into(),
+                true,
             ),
             _ => return None,
         };
         Some(
-            div()
-                .text_size(px(12.))
-                .text_color(hsla(colour))
-                .child(text)
+            h_flex()
+                .w_full()
+                .gap(px(12.))
+                .px(px(16.))
+                .py(px(12.))
+                .rounded(px(12.))
+                .bg(hsla(0x181B20))
+                .child(icon("info", 16., theme::PENDING))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(2.))
+                        .child(div().text_size(px(13.)).font_medium().child(title))
+                        .when(!sub.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(hsla(theme::MUTED))
+                                    .child(sub),
+                            )
+                        }),
+                )
+                .when(connect, |d| {
+                    d.child(
+                        btn(
+                            "connect",
+                            None,
+                            "Connect provider",
+                            Variant::Secondary,
+                            None,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.nav = Nav::Configuration;
+                            cx.notify();
+                        })),
+                    )
+                })
                 .into_any_element(),
         )
     }
@@ -1225,38 +1328,44 @@ impl Shell {
             .flex_1()
             .min_h_0()
             .items_center()
-            .children(self.mission_card().map(|m| {
-                div()
-                    .flex_shrink_0()
-                    .w_full()
-                    .max_w(px(READING_W))
-                    .px(px(24.))
-                    .pt(px(8.))
-                    .child(m)
-            }))
             .child(
                 div()
-                    .id("convo-scroll")
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.convo_scroll)
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .w_full()
                     .child(
-                        v_flex()
-                            .w_full()
-                            .max_w(px(READING_W))
-                            .gap(px(16.))
-                            .px(px(24.))
-                            .py(px(24.))
-                            .children(items)
-                            .when(!live, |d| {
-                                d.child(empty("Read-only replay of a stored session."))
-                            }),
-                    ),
+                        div()
+                            .id("convo-scroll")
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.convo_scroll)
+                            .size_full()
+                            .child(
+                                v_flex()
+                                    .w_full()
+                                    .max_w(px(READING_W))
+                                    .gap(px(16.))
+                                    .px(px(24.))
+                                    .pt(px(8.))
+                                    .pb(px(24.))
+                                    .children(self.mission_card())
+                                    .children(items)
+                                    .when(!live, |d| {
+                                        d.child(empty("Read-only replay of a stored session."))
+                                    }),
+                            ),
+                    )
+                    // soft fade where the content slides under the header: nothing is cut hard
+                    .child(div().absolute().top_0().left_0().right_0().h(px(20.)).bg(
+                        gpui::linear_gradient(
+                            180.,
+                            gpui::linear_color_stop(hsla(theme::BG), 1.),
+                            gpui::linear_color_stop(hsla(theme::BG).opacity(0.), 1.),
+                        ),
+                    )),
             )
             .child(
                 v_flex()
@@ -1283,81 +1392,66 @@ impl Shell {
             .into_any_element()
     }
 
-    /// The first screen of a session: greeting over a soft hero gradient, the composer and four
-    /// starting points (docs/specs/desktop.md section 8, `desktop-preview.png`).
+    /// The first screen of a session: the greeting, the composer and four starting points on one
+    /// centred axis (docs/specs/desktop.md section 8). The soft background is `session_view`'s.
     fn landing(&self, cx: &mut Context<Self>) -> AnyElement {
         let composer = self.composer_box(true, cx);
+        let note = self.engine_note(cx);
         let card = |i: usize, text: &'static str| {
             div()
                 .id(sid("sugg", i))
                 .flex_1()
                 .min_w_0()
-                .p(px(14.))
-                .rounded(px(11.))
-                .border_1()
-                .border_color(hsla(0x2D333B))
+                .p(px(16.))
+                .rounded(px(12.))
                 .bg(hsla(0x14181D))
                 .text_size(px(12.))
-                .line_height(px(17.))
+                .line_height(px(18.))
                 .text_color(hsla(theme::SILVER))
                 .cursor_pointer()
+                .hover(|d| d.bg(hsla(0x1A1F26)).text_color(hsla(theme::TEXT)))
                 .child(text)
                 .on_click(cx.listener(move |this, _, w, cx| {
                     this.composer.update(cx, |c, cx| c.set_value(text, w, cx));
                 }))
         };
-        div()
-            .relative()
+        v_flex()
             .flex_1()
-            .min_w_0()
-            .m(px(12.))
-            .rounded(px(16.))
-            .border_1()
-            .border_color(hsla(theme::LINE))
-            .overflow_hidden()
-            .bg(gpui::linear_gradient(
-                215.,
-                gpui::linear_color_stop(hsla(0x2A2826), 0.),
-                gpui::linear_color_stop(hsla(0x0E1115), 0.55),
-            ))
+            .min_h_0()
+            .items_center()
+            .justify_center()
             .child(
-                img(crate::brand::mark())
-                    .absolute()
-                    .top(px(-40.))
-                    .right(px(-30.))
-                    .size(px(300.))
-                    .opacity(0.22),
-            )
-            .child(
-                v_flex().size_full().items_center().justify_center().child(
-                    v_flex()
-                        .w_full()
-                        .max_w(px(680.))
-                        .px(px(24.))
-                        .gap(px(18.))
-                        .child(
-                            v_flex()
-                                .text_size(px(28.))
-                                .line_height(px(36.))
-                                .child(div().child("Welcome back."))
-                                .child(
-                                    div()
-                                        .text_color(hsla(theme::SILVER))
-                                        .child("What shall we build today?"),
-                                ),
-                        )
-                        .children(self.engine_note())
-                        .child(div().mx(px(-12.)).child(composer))
-                        .child(
-                            h_flex()
-                                .gap(px(12.))
-                                .items_stretch()
-                                .child(card(0, "Implement feature with tests"))
-                                .child(card(1, "Refactor this module"))
-                                .child(card(2, "Investigate and fix an issue"))
-                                .child(card(3, "Add monitoring and alerts")),
-                        ),
-                ),
+                v_flex()
+                    .w_full()
+                    .max_w(px(680.))
+                    .px(px(24.))
+                    .gap(px(24.))
+                    .pb(px(48.))
+                    .child(
+                        v_flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .text_size(px(22.))
+                            .line_height(px(30.))
+                            .font_medium()
+                            .child(div().child("Welcome back."))
+                            .child(
+                                div()
+                                    .text_color(hsla(theme::SILVER))
+                                    .child("What shall we build today?"),
+                            ),
+                    )
+                    .children(note)
+                    .child(div().mx(px(-12.)).child(composer))
+                    .child(
+                        h_flex()
+                            .gap(px(12.))
+                            .items_stretch()
+                            .child(card(0, "Implement feature with tests"))
+                            .child(card(1, "Refactor this module"))
+                            .child(card(2, "Investigate and fix an issue"))
+                            .child(card(3, "Add monitoring and alerts")),
+                    ),
             )
             .into_any_element()
     }
@@ -1581,9 +1675,27 @@ impl Shell {
     }
 
     pub(super) fn session_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let landing = self.is_landing();
         v_flex()
             .size_full()
             .relative()
+            .overflow_hidden()
+            // landing: a soft warm wash with the swoosh as faint art bleeding off the edge
+            .when(landing, |d| {
+                d.bg(gpui::linear_gradient(
+                    200.,
+                    gpui::linear_color_stop(hsla(0x1F1E1D), 0.),
+                    gpui::linear_color_stop(hsla(theme::BG), 0.6),
+                ))
+                .child(
+                    img(crate::brand::mark())
+                        .absolute()
+                        .top(px(-90.))
+                        .right(px(-110.))
+                        .size(px(460.))
+                        .opacity(0.12),
+                )
+            })
             .child(self.tab_strip(cx))
             .child(self.conversation(cx))
             .child(self.status_line())
@@ -1680,18 +1792,18 @@ impl Shell {
                     .child(format!("workspace: {}", self.project_name())),
             )
             .child(
-                Button::new("agent-toggle")
-                    .label(if self.agent_on {
-                        "shell ⇄"
-                    } else {
-                        "agent ⇄"
-                    })
-                    .outline()
-                    .small()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.agent_on = !this.agent_on;
-                        cx.notify();
-                    })),
+                btn(
+                    "agent-toggle",
+                    None,
+                    if self.agent_on { "Shell" } else { "Agent" },
+                    Variant::Secondary,
+                    None,
+                )
+                .h(px(28.))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.agent_on = !this.agent_on;
+                    cx.notify();
+                })),
             )
             .into_any_element()
     }
@@ -1701,9 +1813,15 @@ impl Shell {
     fn page_frame(title: &str) -> gpui::Div {
         v_flex()
             .size_full()
-            .p(px(24.))
-            .gap(px(12.))
-            .child(div().text_size(px(22.)).child(title.to_string()))
+            .px(px(24.))
+            .pb(px(24.))
+            .gap(px(16.))
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .font_semibold()
+                    .child(title.to_string()),
+            )
     }
 
     pub(super) fn activity_page(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1893,7 +2011,7 @@ impl Shell {
     pub(super) fn topology_page(&self) -> AnyElement {
         const GAP_X: f32 = 40.0;
         const GAP_Y: f32 = 48.0;
-        const H_OUT: f32 = 100.0;
+        const H_OUT: f32 = 112.0;
         const H_CORE: f32 = 150.0;
         let cards = topology::cards(&self.topology_snapshot());
         let card = |pos: Pos| {
@@ -2123,6 +2241,7 @@ fn session_row(
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_color(hsla(theme::SILVER))
+                        .text_ellipsis()
                         .child(title),
                 )
                 .child(

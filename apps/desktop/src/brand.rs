@@ -13,8 +13,9 @@ pub const MARK_PNG: &[u8] =
 /// Family name of the bundled UI sans.
 pub const UI_FONT: &str = "Inter";
 
-pub const UI_FONT_FILES: [&[u8]; 2] = [
+pub const UI_FONT_FILES: [&[u8]; 3] = [
     include_bytes!("../assets/fonts/Inter-Regular.otf"),
+    include_bytes!("../assets/fonts/Inter-Medium.otf"),
     include_bytes!("../assets/fonts/Inter-SemiBold.otf"),
 ];
 

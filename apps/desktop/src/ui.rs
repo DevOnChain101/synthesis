@@ -13,9 +13,8 @@ use gpui::{
     InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Render,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px,
 };
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
-use gpui_component::{ActiveTheme as _, Root, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Root, StyledExt as _, h_flex, v_flex};
 use synthesis_config::Env;
 
 use crate::activity;
@@ -32,18 +31,29 @@ use crate::vt;
 
 mod views;
 
-gpui::actions!(synthesis, [NewTask, OpenPalette, OpenConfiguration]);
+gpui::actions!(
+    synthesis,
+    [
+        NewTask,
+        OpenPalette,
+        OpenConfiguration,
+        AllowOnce,
+        DenyPending
+    ]
+);
 
 /// Cmd (macOS) / Ctrl (elsewhere) shortcuts drawn in the design.
 pub fn bindings() -> Vec<gpui::KeyBinding> {
     #[cfg(target_os = "macos")]
-    let keys = ["cmd-k", "cmd-n", "cmd-,"];
+    let keys = ["cmd-k", "cmd-n", "cmd-,", "cmd-enter", "cmd-backspace"];
     #[cfg(not(target_os = "macos"))]
-    let keys = ["ctrl-k", "ctrl-n", "ctrl-,"];
+    let keys = ["ctrl-k", "ctrl-n", "ctrl-,", "ctrl-enter", "ctrl-backspace"];
     vec![
         gpui::KeyBinding::new(keys[0], OpenPalette, None),
         gpui::KeyBinding::new(keys[1], NewTask, None),
         gpui::KeyBinding::new(keys[2], OpenConfiguration, None),
+        gpui::KeyBinding::new(keys[3], AllowOnce, None),
+        gpui::KeyBinding::new(keys[4], DenyPending, None),
     ]
 }
 
@@ -51,7 +61,9 @@ const FONT_SIZE: f32 = 13.0;
 
 /// Height of the top strip that holds the macOS traffic lights (inset over the rail) and the drag
 /// region; elsewhere a slim strip above the content.
-pub(super) const TOP_SAFE: f32 = if cfg!(target_os = "macos") { 38. } else { 12. };
+pub(super) const TOP_SAFE: f32 = if cfg!(target_os = "macos") { 44. } else { 16. };
+/// The header row of every content column: session title, page drag region.
+pub(super) const HEADER_H: f32 = 44.;
 /// Reading width of the conversation and width of the Inspector slide-over.
 pub(super) const READING_W: f32 = 760.;
 pub(super) const INSPECTOR_W: f32 = 560.;
@@ -761,7 +773,7 @@ impl Shell {
                 if t.title == "New session"
                     && let synthesis_events::Event::UserMessage { text, .. } = &e.event
                 {
-                    t.title = text.lines().next().unwrap_or("").chars().take(28).collect();
+                    t.title = text.lines().next().unwrap_or("").chars().take(64).collect();
                 }
                 t.events.push(*e);
                 self.record_file_diff();
@@ -846,6 +858,22 @@ impl Shell {
         cx.notify();
     }
 
+    /// The keyboard answer (Cmd/Ctrl+Enter, Cmd/Ctrl+Backspace) to the oldest pending approval of
+    /// the live session. Never the default of a plain Enter.
+    fn answer_first(&mut self, c: Choice, cx: &mut Context<Self>) {
+        let id = self.tabs[0].convo.items.iter().find_map(|i| match i {
+            crate::convo::Item::Approval {
+                id,
+                state: crate::convo::ApprovalState::Pending,
+                ..
+            } => Some(id.clone()),
+            _ => None,
+        });
+        if let Some(id) = id {
+            self.answer(&id, c, cx);
+        }
+    }
+
     fn answer(&mut self, id: &str, c: Choice, cx: &mut Context<Self>) {
         if let Some(e) = &self.engine {
             e.answer(id, c);
@@ -889,7 +917,7 @@ impl Shell {
                         .saved
                         .iter()
                         .find(|s| s.id == id)
-                        .map_or_else(|| id.to_string(), |s| s.title.chars().take(28).collect());
+                        .map_or_else(|| id.to_string(), |s| s.title.chars().take(64).collect());
                     self.tabs.push(Tab {
                         id: id.into(),
                         title,
@@ -1059,11 +1087,84 @@ impl Shell {
 
 // ---------------------------------------------------------------------------------- drawing
 
+/// Type scale (Inter): 11 caps labels with tracking (medium, muted), 12 small, 13 body, 15 titles
+/// (semibold), 22 greeting (medium). Labels are tracked caps in the muted colour.
 fn label(text: impl Into<SharedString>) -> gpui::Div {
     div()
-        .text_size(px(10.))
+        .text_size(px(11.))
+        .font_medium()
         .text_color(hsla(theme::MUTED))
-        .child(text.into().to_uppercase())
+        .child(
+            text.into()
+                .to_uppercase()
+                .chars()
+                .map(String::from)
+                .collect::<Vec<_>>()
+                .join("\u{200A}"),
+        )
+}
+
+/// The three button variants of the app. Height 32, radius 10, hover and pressed states.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Variant {
+    /// One per view: the action to take (pearl fill).
+    Primary,
+    Secondary,
+    /// Quiet, text only until hovered.
+    Ghost,
+}
+
+pub(super) fn btn(
+    id: impl Into<gpui::ElementId>,
+    lead: Option<&str>,
+    text: &str,
+    v: Variant,
+    hint: Option<String>,
+) -> gpui::Stateful<gpui::Div> {
+    let (bg, fg, hover, press) = match v {
+        Variant::Primary => (0xEBE9E6, 0x151619, 0xF7F5F2, 0xD6D2CD),
+        Variant::Secondary => (0x20252C, theme::TEXT, 0x282E37, 0x1A1F26),
+        Variant::Ghost => (0x0B0D10, theme::SILVER, 0x1A1F26, 0x14181D),
+    };
+    h_flex()
+        .id(id)
+        .h(px(32.))
+        .px(px(14.))
+        .gap(px(8.))
+        .rounded(px(10.))
+        .text_size(px(13.))
+        .font_medium()
+        .text_color(hsla(fg))
+        .cursor_pointer()
+        .when(v == Variant::Ghost, |d| d.bg(hsla(bg).opacity(0.)))
+        .when(v != Variant::Ghost, |d| d.bg(hsla(bg)))
+        .hover(move |d| d.bg(hsla(hover)))
+        .active(move |d| d.bg(hsla(press)))
+        .children(lead.map(|l| icon(l, 14., fg)))
+        .child(text.to_string())
+        .children(hint.map(|h| {
+            div()
+                .text_size(px(11.))
+                .font_normal()
+                .text_color(hsla(fg).opacity(0.55))
+                .child(h)
+        }))
+}
+
+/// A selectable option: the primary look when selected, secondary otherwise.
+fn choice(id: impl Into<gpui::ElementId>, text: &str, selected: bool) -> gpui::Stateful<gpui::Div> {
+    btn(
+        id,
+        None,
+        text,
+        if selected {
+            Variant::Primary
+        } else {
+            Variant::Secondary
+        },
+        None,
+    )
+    .h(px(30.))
 }
 
 /// A Lucide icon from the bundled set (one set, one stroke weight), `size` px.
@@ -1102,11 +1203,6 @@ fn empty(text: &str) -> gpui::Div {
         .text_size(px(12.))
         .text_color(hsla(theme::MUTED))
         .child(text.to_string())
-}
-
-fn choice(id: impl Into<gpui::ElementId>, text: &str, selected: bool) -> Button {
-    let b = Button::new(id).label(text.to_string()).small();
-    if selected { b.primary() } else { b.outline() }
 }
 
 impl Shell {
@@ -1171,16 +1267,17 @@ impl Shell {
                             .gap(px(8.))
                             .justify_end()
                             .child(
-                                Button::new("test")
-                                    .label("Test connection")
-                                    .outline()
-                                    .loading(f.busy)
-                                    .on_click(cx.listener(|this, _, w, cx| this.test_connection(w, cx))),
+                                btn(
+                                    "test",
+                                    None,
+                                    if f.busy { "Testing…" } else { "Test connection" },
+                                    Variant::Secondary,
+                                    None,
+                                )
+                                .on_click(cx.listener(|this, _, w, cx| this.test_connection(w, cx))),
                             )
                             .child(
-                                Button::new("save")
-                                    .label("Save and continue")
-                                    .primary()
+                                btn("save", None, "Save and continue", Variant::Primary, None)
                                     .on_click(cx.listener(|this, _, w, cx| this.save(w, cx))),
                             ),
                     ),
@@ -1190,7 +1287,13 @@ impl Shell {
 
     fn settings_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let s = self.settings;
-        let section = |t: &str| div().mt(px(8.)).text_size(px(15.)).child(t.to_string());
+        let section = |t: &str| {
+            div()
+                .mt(px(8.))
+                .text_size(px(13.))
+                .font_semibold()
+                .child(t.to_string())
+        };
         let fonts = FontChoice::ALL.into_iter().map(|f| {
             choice(f.key(), f.label(), s.font == f)
                 .on_click(cx.listener(move |this, _, _, cx| this.set_font(f, cx)))
@@ -1207,9 +1310,10 @@ impl Shell {
         });
         v_flex()
             .size_full()
-            .p(px(24.))
+            .px(px(24.))
+            .pb(px(24.))
             .gap(px(12.))
-            .child(div().text_size(px(22.)).child("Configuration"))
+            .child(div().text_size(px(15.)).font_semibold().child("Configuration"))
             .child(section("Interface"))
             .child(div().text_size(px(12.)).text_color(hsla(theme::MUTED)).child(
                 "TUI draws the terminal interface in this window; GPUI is the native interface.",
@@ -1232,8 +1336,6 @@ impl ActiveNav for gpui::Stateful<gpui::Div> {
     fn when_active(self, active: bool) -> Self {
         if active {
             self.bg(hsla(theme::NAV_ACTIVE))
-                .border_1()
-                .border_color(hsla(0x45474B))
         } else {
             self
         }
@@ -1245,7 +1347,7 @@ impl Render for Shell {
         let body = match self.screen {
             Screen::Onboarding => v_flex()
                 .size_full()
-                .child(drag("drag-onb").h(px(TOP_SAFE)).w_full())
+                .child(drag("drag-onb").h(px(HEADER_H)).w_full())
                 .child(div().flex_1().min_h_0().child(self.onboarding(cx)))
                 .into_any_element(),
             Screen::Main => {
@@ -1266,7 +1368,7 @@ impl Render for Shell {
                 } else {
                     v_flex()
                         .size_full()
-                        .child(drag("drag-page").h(px(TOP_SAFE.max(30.))).w_full())
+                        .child(drag("drag-page").h(px(HEADER_H)).w_full())
                         .child(div().flex_1().min_h_0().child(content))
                         .into_any_element()
                 };
@@ -1290,6 +1392,12 @@ impl Render for Shell {
                     this.new_session(cx);
                 }
             }))
+            .on_action(
+                cx.listener(|this, _: &AllowOnce, _, cx| this.answer_first(Choice::Once, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &DenyPending, _, cx| this.answer_first(Choice::Deny, cx)),
+            )
             .on_action(cx.listener(|this, _: &OpenConfiguration, _, cx| {
                 if this.screen == Screen::Main {
                     this.nav = Nav::Configuration;
@@ -1420,7 +1528,7 @@ pub fn open(l: Launch, cx: &mut App) {
         titlebar: Some(gpui::TitlebarOptions {
             title: Some("Synthesis".into()),
             appears_transparent: true,
-            traffic_light_position: Some(gpui::point(px(16.), px(14.))),
+            traffic_light_position: Some(gpui::point(px(16.), px(16.))),
         }),
         app_owns_titlebar_drag: true,
         window_decorations: cfg!(target_os = "linux").then_some(gpui::WindowDecorations::Client),
@@ -1489,13 +1597,13 @@ pub fn open(l: Launch, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_three_drawn_shortcuts_are_bound_to_distinct_actions() {
+    fn the_drawn_shortcuts_and_the_approval_keys_are_bound() {
         let b = super::bindings();
         let keys: Vec<String> = b
             .iter()
             .map(|k| k.keystrokes()[0].key().to_string())
             .collect();
-        assert_eq!(keys, ["k", "n", ","]);
+        assert_eq!(keys, ["k", "n", ",", "enter", "backspace"]);
         assert!(b.iter().all(|k| {
             let m = k.keystrokes()[0].modifiers();
             if cfg!(target_os = "macos") {
