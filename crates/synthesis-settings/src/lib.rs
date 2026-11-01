@@ -390,7 +390,8 @@ fn read_json(path: &Path, what: &str) -> Result<Option<Value>, String> {
     std::fs::File::open(path)
         .and_then(|f| f.take(MAX_FILE_BYTES).read_to_string(&mut text))
         .map_err(|e| format!("{what} {}: unreadable ({e})", path.display()))?;
-    match serde_json::from_str::<Value>(&text) {
+    // A UTF-8 BOM (Windows editors) is not part of the JSON.
+    match serde_json::from_str::<Value>(text.trim_start_matches('\u{feff}')) {
         Ok(v @ Value::Object(_)) => Ok(Some(v)),
         Ok(_) => Err(format!(
             "{what} {}: the top level must be a JSON object",

@@ -151,6 +151,20 @@ fn malformed_json_is_an_error_not_a_silent_skip() {
 }
 
 #[test]
+fn a_utf8_bom_in_settings_json_is_ignored() {
+    let f = fx();
+    fs::create_dir_all(f.proj.path().join(".synthesis")).unwrap();
+    fs::write(
+        f.proj.path().join(".synthesis/settings.json"),
+        "\u{feff}{\"permissions\":{\"deny\":[\"Bash(rm:*)\"]}}",
+    )
+    .unwrap();
+    let s = f.load(ProjectTrust::Trusted);
+    assert!(s.errors.is_empty(), "{:?}", s.errors);
+    assert_eq!(s.permissions.deny, ["Bash(rm:*)"]);
+}
+
+#[test]
 fn a_trailing_comma_in_the_user_file_does_not_drop_deny_rules_silently() {
     let f = fx();
     fs::write(

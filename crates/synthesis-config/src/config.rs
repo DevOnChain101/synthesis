@@ -200,7 +200,8 @@ fn read_json(file: &Path) -> Result<Option<Value>, ConfigError> {
         )));
     }
     // Never forward the parser's message: it can quote file contents (inline credentials).
-    serde_json::from_str(&text)
+    // A UTF-8 BOM (Windows PowerShell 5.1 `Set-Content -Encoding UTF8`, older Notepad) is not part of the JSON.
+    serde_json::from_str(text.trim_start_matches('\u{feff}'))
         .map(Some)
         .map_err(|_| too_large("malformed JSON".into()))
 }
