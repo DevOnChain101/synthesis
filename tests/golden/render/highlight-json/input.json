@@ -1,0 +1,5 @@
+{
+  "code": "{\"a\": [1, true, null], \"b\": \"s\"}",
+  "lang": "json",
+  "op": "highlight"
+}

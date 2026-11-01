@@ -1,0 +1,9 @@
+{
+  "events": [
+    {
+      "type": "drag"
+    }
+  ],
+  "mode": "idle",
+  "op": "transition"
+}

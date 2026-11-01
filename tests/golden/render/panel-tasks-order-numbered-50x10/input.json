@@ -1,0 +1,33 @@
+{
+  "h": 10,
+  "op": "tasks",
+  "state": {
+    "history_gen": {
+      "days": 371,
+      "end": "2026-10-02T12:00:00.000Z"
+    },
+    "session": {
+      "set": {
+        "todos": [
+          {
+            "activeForm": "Upgrade LoginService",
+            "content": "Upgrade LoginService",
+            "status": "completed"
+          },
+          {
+            "activeForm": "Refactor auth",
+            "content": "Refactor auth",
+            "status": "pending"
+          },
+          {
+            "activeForm": "Write tests",
+            "content": "Write tests",
+            "status": "in_progress"
+          }
+        ]
+      }
+    },
+    "usageMetric": "tokens"
+  },
+  "w": 50
+}

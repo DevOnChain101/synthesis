@@ -1,0 +1,20 @@
+> message number 0 
+
+● message number 1 x
+
+> message number 2 xx
+
+● message number 3 xxx
+
+> message number 4 xxxx
+
+● message number 5 xxxxx
+
+> message number 6 xxxxxx
+
+● message number 7 xxxxxxx
+↓ 223 more rows · pgdn
+╭────────────────────────────────────────────────╮
+│ >  Try "explain this repo" · / commands · @ fi │
+╰────────────────────────────────────────────────╯
+⏸ manual mode on        fake-sonnet · effort: auto

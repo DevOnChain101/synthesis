@@ -1,0 +1,21 @@
+{
+  "chunks": [
+    {
+      "events": [
+        {
+          "name": "text",
+          "text": "a"
+        },
+        {
+          "name": "text",
+          "text": "b"
+        },
+        {
+          "name": "text",
+          "text": "c"
+        }
+      ],
+      "pending": ""
+    }
+  ]
+}

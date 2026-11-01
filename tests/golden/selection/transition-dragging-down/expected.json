@@ -1,0 +1,210 @@
+[
+  {
+    "event": {
+      "alt": false,
+      "body": false,
+      "shift": false,
+      "text": false,
+      "type": "down"
+    },
+    "result": {
+      "act": "clear",
+      "mode": "idle"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "body": false,
+      "shift": false,
+      "text": false,
+      "type": "down"
+    },
+    "result": {
+      "act": "clear",
+      "mode": "idle"
+    }
+  },
+  {
+    "event": {
+      "alt": false,
+      "body": false,
+      "shift": true,
+      "text": false,
+      "type": "down"
+    },
+    "result": {
+      "act": "clear",
+      "mode": "idle"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "body": false,
+      "shift": true,
+      "text": false,
+      "type": "down"
+    },
+    "result": {
+      "act": "clear",
+      "mode": "idle"
+    }
+  },
+  {
+    "event": {
+      "alt": false,
+      "body": true,
+      "shift": false,
+      "text": false,
+      "type": "down"
+    },
+    "result": {
+      "act": "clear",
+      "mode": "idle"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "body": true,
+      "shift": false,
+      "text": false,
+      "type": "down"
+    },
+    "result": {
+      "act": "clear",
+      "mode": "idle"
+    }
+  },
+  {
+    "event": {
+      "alt": false,
+      "body": true,
+      "shift": true,
+      "text": false,
+      "type": "down"
+    },
+    "result": {
+      "act": "clear",
+      "mode": "idle"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "body": true,
+      "shift": true,
+      "text": false,
+      "type": "down"
+    },
+    "result": {
+      "act": "clear",
+      "mode": "idle"
+    }
+  },
+  {
+    "event": {
+      "alt": false,
+      "body": false,
+      "shift": false,
+      "text": true,
+      "type": "down"
+    },
+    "result": {
+      "act": "start",
+      "mode": "dragging"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "body": false,
+      "shift": false,
+      "text": true,
+      "type": "down"
+    },
+    "result": {
+      "act": "start",
+      "mode": "dragging"
+    }
+  },
+  {
+    "event": {
+      "alt": false,
+      "body": false,
+      "shift": true,
+      "text": true,
+      "type": "down"
+    },
+    "result": {
+      "act": "start",
+      "mode": "dragging"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "body": false,
+      "shift": true,
+      "text": true,
+      "type": "down"
+    },
+    "result": {
+      "act": "start",
+      "mode": "dragging"
+    }
+  },
+  {
+    "event": {
+      "alt": false,
+      "body": true,
+      "shift": false,
+      "text": true,
+      "type": "down"
+    },
+    "result": {
+      "act": "start",
+      "mode": "dragging"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "body": true,
+      "shift": false,
+      "text": true,
+      "type": "down"
+    },
+    "result": {
+      "act": "start",
+      "mode": "dragging"
+    }
+  },
+  {
+    "event": {
+      "alt": false,
+      "body": true,
+      "shift": true,
+      "text": true,
+      "type": "down"
+    },
+    "result": {
+      "act": "start",
+      "mode": "dragging"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "body": true,
+      "shift": true,
+      "text": true,
+      "type": "down"
+    },
+    "result": {
+      "act": "start",
+      "mode": "dragging"
+    }
+  }
+]

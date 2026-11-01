@@ -1,0 +1,24 @@
+{
+  "chunks": [
+    {
+      "events": [
+        {
+          "name": "enter"
+        },
+        {
+          "name": "tab"
+        },
+        {
+          "name": "backspace"
+        },
+        {
+          "name": "backspace"
+        },
+        {
+          "name": "ctrl-j"
+        }
+      ],
+      "pending": ""
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "bounds": {
+    "x0": 2,
+    "x1": 12,
+    "y0": 1,
+    "y1": 3
+  },
+  "lines": [
+    "border",
+    "  hello wor",
+    "  second row",
+    "  third"
+  ],
+  "op": "applySelection",
+  "sel": null
+}

@@ -1,0 +1,16 @@
+{
+  "chunks": [
+    {
+      "events": [],
+      "pending": "\u001b[1;"
+    },
+    {
+      "events": [
+        {
+          "name": "ctrl-right"
+        }
+      ],
+      "pending": ""
+    }
+  ]
+}

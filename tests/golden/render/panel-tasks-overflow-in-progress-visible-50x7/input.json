@@ -1,0 +1,53 @@
+{
+  "h": 7,
+  "op": "tasks",
+  "state": {
+    "history_gen": {
+      "days": 371,
+      "end": "2026-10-02T12:00:00.000Z"
+    },
+    "session": {
+      "set": {
+        "todos": [
+          {
+            "activeForm": "done-1",
+            "content": "done-1",
+            "status": "completed"
+          },
+          {
+            "activeForm": "done-2",
+            "content": "done-2",
+            "status": "completed"
+          },
+          {
+            "activeForm": "done-3",
+            "content": "done-3",
+            "status": "completed"
+          },
+          {
+            "activeForm": "doing",
+            "content": "doing",
+            "status": "in_progress"
+          },
+          {
+            "activeForm": "next-1",
+            "content": "next-1",
+            "status": "pending"
+          },
+          {
+            "activeForm": "next-2",
+            "content": "next-2",
+            "status": "pending"
+          },
+          {
+            "activeForm": "next-3",
+            "content": "next-3",
+            "status": "pending"
+          }
+        ]
+      }
+    },
+    "usageMetric": "tokens"
+  },
+  "w": 50
+}

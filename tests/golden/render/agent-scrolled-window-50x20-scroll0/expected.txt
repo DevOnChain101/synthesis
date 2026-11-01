@@ -1,0 +1,20 @@
+
+> message number 76 
+  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+● message number 77 
+  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+> message number 78 
+  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+● message number 79 
+  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+╭────────────────────────────────────────────────╮
+│ >  Try "explain this repo" · / commands · @ fi │
+╰────────────────────────────────────────────────╯
+⏸ manual mode on        fake-sonnet · effort: auto

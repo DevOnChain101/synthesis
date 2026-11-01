@@ -1,0 +1,12 @@
+{
+  "events": [
+    {
+      "type": "bogus"
+    },
+    {
+      "type": "resize"
+    }
+  ],
+  "mode": "idle",
+  "op": "transition"
+}

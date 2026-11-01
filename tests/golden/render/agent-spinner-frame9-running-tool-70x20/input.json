@@ -1,0 +1,20 @@
+{
+  "agent": {
+    "items": [
+      {
+        "input": {
+          "command": "sleep 9"
+        },
+        "kind": "tool",
+        "name": "Bash",
+        "status": "running"
+      }
+    ]
+  },
+  "frame": 9,
+  "h": 20,
+  "now": 1790942400000,
+  "op": "agent",
+  "opts": {},
+  "w": 70
+}

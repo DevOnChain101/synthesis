@@ -31,6 +31,7 @@ in tests/golden/README.md Nemo|NEMO[_.*]\S*|\.nemo|nemo\.json|nemocode-config|\b
 # The checker itself, this list, and the rename test harness wording.
 file scripts/check-no-legacy-name.mjs
 file scripts/nemo-leftovers.allow
+in crates/synthesis-tui-render/tests/golden.rs (Nemo -> Synthesis|"nemo")
 
 # History: past entries describe what was true then.
 file CHANGELOG.md

@@ -1,0 +1,11 @@
+[
+  {
+    "event": {
+      "type": "cancel"
+    },
+    "result": {
+      "act": "clear",
+      "mode": "idle"
+    }
+  }
+]

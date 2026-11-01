@@ -1,0 +1,26 @@
+{
+  "events": [
+    {
+      "alt": false,
+      "shift": false,
+      "type": "wheel"
+    },
+    {
+      "alt": true,
+      "shift": false,
+      "type": "wheel"
+    },
+    {
+      "alt": false,
+      "shift": true,
+      "type": "wheel"
+    },
+    {
+      "alt": true,
+      "shift": true,
+      "type": "wheel"
+    }
+  ],
+  "mode": "dragging",
+  "op": "transition"
+}

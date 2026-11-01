@@ -1,0 +1,16 @@
+{
+  "agent": {
+    "items": [
+      {
+        "kind": "text",
+        "text": "A | B | C\n:---:|---|---:\nx | supercalifragilisticexpialidocious | z"
+      }
+    ]
+  },
+  "frame": 0,
+  "h": 40,
+  "now": 1790942400000,
+  "op": "agent",
+  "opts": {},
+  "w": 14
+}

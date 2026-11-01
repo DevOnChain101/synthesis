@@ -1,0 +1,24 @@
+▐ ✻ Synthesis  ·  MISSION CONTROL ▌ │ ● 3 live           12:00:00
+┏━ ◆ Running 3 ━━━━━━┓┏━ ◆ Status ━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ ►● proj-0       10%┃┃                                    ┃
+│ project-0 (…ace)   ││                                    │
+│  ● proj-1       10%││                                    │
+│ project-1 (…ace)   ││ · RUNNING TOOL  last activity 9m54…│
+│  ● proj-2       10%││   ✻ Agent explorer: find files 9m5…│
+│ project-2 (…ace)   ││ Context  ░░░░░░░░   3% 5.9k/200.0k │
+┃                    ┃│                                    │
+┗━━━━━━━━━━━━━━━━━━━━┛│                                    │
+┏━ ◆ Session ━━━━━━━━┓│                                    │
+┃                    ┃┃                                    ┃
+│ model  claude-opus…│┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+│ branch feature/xxx…│┏━ ◆ Activity ━━━━━━━━━━━━━━━━━━━━━━━┓
+│ cwd    segment     │┃ 11:50:00 ❯ refactor the parser     ┃
+│ uptime 10m00s      ││ 11:50:01 ✎ Looking.                │
+│ turns  1 prompts ·…││                                    │
+│ errors 1           ││                                    │
+│                    ││                                    │
+┃                    ┃│                                    │
+┗━━━━━━━━━━━━━━━━━━━━┛│                                    │
+                      ┃                                    ┃
+                      ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+↑/↓ select session   a follow newest   u usage metric   r r…

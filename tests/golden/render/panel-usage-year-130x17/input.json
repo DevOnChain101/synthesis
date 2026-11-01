@@ -1,0 +1,23 @@
+{
+  "h": 17,
+  "op": "usage",
+  "state": {
+    "history_gen": {
+      "days": 371,
+      "end": "2026-10-02T12:00:00.000Z"
+    },
+    "session": {
+      "set": {
+        "todos": [
+          {
+            "activeForm": "x",
+            "content": "x",
+            "status": "completed"
+          }
+        ]
+      }
+    },
+    "usageMetric": "tokens"
+  },
+  "w": 130
+}

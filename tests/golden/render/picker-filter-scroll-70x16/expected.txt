@@ -1,0 +1,16 @@
+│   11.   item-10  detail 10                                         │
+│   12.   item-11  detail 11                                         │
+│   13.   item-12  detail 12                                         │
+│   14.   item-13  detail 13                                         │
+│   15.   item-14  detail 14                                         │
+│ ❯ 16.   item-15  detail 15                                         │
+│   17.   item-16  detail 16                                         │
+│   18.   item-17  detail 17                                         │
+│   19.   item-18  detail 18                                         │
+│ ↓ 11 more                                                          │
+│                                                                    │
+│ filter: item-▍                                                     │
+│ type to filter · ↑/↓ choose · pgup/pgdn page · home/end · enter    │
+│ select · esc cancel                                                │
+╰────────────────────────────────────────────────────────────────────╯
+⏸ manual mode on (shift+tab to cycle)       fake-sonnet · effort: auto

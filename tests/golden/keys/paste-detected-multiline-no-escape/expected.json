@@ -1,0 +1,13 @@
+{
+  "chunks": [
+    {
+      "events": [
+        {
+          "name": "paste",
+          "text": "line one\nline two"
+        }
+      ],
+      "pending": ""
+    }
+  ]
+}

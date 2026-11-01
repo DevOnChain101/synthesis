@@ -1,0 +1,5 @@
+{
+  "code": "const a = 1; // c\nfunction f(x) { return `t${x}` + \"s\" + 'q'; }\n/* block\nspans */ let y = null;",
+  "lang": "js",
+  "op": "highlight"
+}

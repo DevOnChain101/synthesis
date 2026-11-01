@@ -1,0 +1,7 @@
+{
+  "env": {
+    "COLORTERM": "24BIT"
+  },
+  "op": "detect",
+  "platform": "linux"
+}

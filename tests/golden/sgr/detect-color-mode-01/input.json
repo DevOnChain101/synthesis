@@ -1,0 +1,7 @@
+{
+  "env": {
+    "TERM_PROGRAM": "iTerm.app"
+  },
+  "op": "detect",
+  "platform": "darwin"
+}

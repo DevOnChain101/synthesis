@@ -1,0 +1,46 @@
+[
+  {
+    "hasText": true,
+    "x": 0
+  },
+  {
+    "hasText": true,
+    "x": 1
+  },
+  {
+    "hasText": false,
+    "x": 2
+  },
+  {
+    "hasText": true,
+    "x": 3
+  },
+  {
+    "hasText": true,
+    "x": 4
+  },
+  {
+    "hasText": true,
+    "x": 5
+  },
+  {
+    "hasText": true,
+    "x": 6
+  },
+  {
+    "hasText": true,
+    "x": 7
+  },
+  {
+    "hasText": false,
+    "x": 8
+  },
+  {
+    "hasText": false,
+    "x": 99
+  },
+  {
+    "hasText": false,
+    "x": -1
+  }
+]

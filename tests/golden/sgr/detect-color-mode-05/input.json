@@ -1,0 +1,8 @@
+{
+  "env": {
+    "CLAUDE_MONITOR_COLOR": "256",
+    "COLORTERM": "truecolor"
+  },
+  "op": "detect",
+  "platform": "linux"
+}

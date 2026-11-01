@@ -1,0 +1,20 @@
+[
+  {
+    "event": {
+      "type": "bogus"
+    },
+    "result": {
+      "act": "none",
+      "mode": "idle"
+    }
+  },
+  {
+    "event": {
+      "type": "resize"
+    },
+    "result": {
+      "act": "none",
+      "mode": "idle"
+    }
+  }
+]

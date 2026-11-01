@@ -1,0 +1,68 @@
+[
+  {
+    "cap": 5,
+    "count": 0,
+    "index": 0,
+    "win": {
+      "above": 0,
+      "below": 0,
+      "end": 0,
+      "start": 0
+    }
+  },
+  {
+    "cap": 6,
+    "count": 3,
+    "index": 0,
+    "win": {
+      "above": 0,
+      "below": 0,
+      "end": 3,
+      "start": 0
+    }
+  },
+  {
+    "cap": 8,
+    "count": 40,
+    "index": 20,
+    "win": {
+      "above": 18,
+      "below": 18,
+      "end": 22,
+      "start": 18
+    }
+  },
+  {
+    "cap": 8,
+    "count": 40,
+    "index": 39,
+    "win": {
+      "above": 36,
+      "below": 0,
+      "end": 40,
+      "start": 36
+    }
+  },
+  {
+    "cap": 1,
+    "count": 40,
+    "index": 0,
+    "win": {
+      "above": 0,
+      "below": 39,
+      "end": 1,
+      "start": 0
+    }
+  },
+  {
+    "cap": 100,
+    "count": 5,
+    "index": 4,
+    "win": {
+      "above": 0,
+      "below": 0,
+      "end": 5,
+      "start": 0
+    }
+  }
+]

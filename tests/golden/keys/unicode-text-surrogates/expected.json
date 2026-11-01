@@ -1,0 +1,13 @@
+{
+  "chunks": [
+    {
+      "events": [
+        {
+          "name": "text",
+          "text": "héllo 日本 😀 x"
+        }
+      ],
+      "pending": ""
+    }
+  ]
+}

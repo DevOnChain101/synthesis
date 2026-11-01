@@ -1,0 +1,25 @@
+{
+  "agent": {
+    "items": [
+      {
+        "kind": "text",
+        "text": "hi"
+      },
+      {
+        "kind": "thinking",
+        "start": 5000000,
+        "streaming": true,
+        "text": "hmm"
+      }
+    ],
+    "status": "running",
+    "turnStart": 5000000,
+    "turnTokens": 12500
+  },
+  "frame": 0,
+  "h": 20,
+  "now": 5490000,
+  "op": "agent",
+  "opts": {},
+  "w": 90
+}

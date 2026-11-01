@@ -1,0 +1,8 @@
+{
+  "env": {
+    "CLAUDE_MONITOR_COLOR": "truecolor",
+    "TERM_PROGRAM": "Apple_Terminal"
+  },
+  "op": "detect",
+  "platform": "darwin"
+}

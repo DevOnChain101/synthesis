@@ -1,0 +1,21 @@
+{
+  "chunks": [
+    {
+      "events": [
+        {
+          "name": "ctrl-w"
+        },
+        {
+          "name": "ctrl-w"
+        },
+        {
+          "name": "ctrl-w"
+        },
+        {
+          "name": "ctrl-w"
+        }
+      ],
+      "pending": ""
+    }
+  ]
+}

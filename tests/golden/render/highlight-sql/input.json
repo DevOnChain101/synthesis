@@ -1,0 +1,5 @@
+{
+  "code": "SELECT count(*) FROM t WHERE a = 1 -- c",
+  "lang": "sql",
+  "op": "highlight"
+}

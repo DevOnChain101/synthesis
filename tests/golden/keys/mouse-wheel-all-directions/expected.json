@@ -1,0 +1,41 @@
+{
+  "chunks": [
+    {
+      "events": [
+        {
+          "alt": false,
+          "ctrl": false,
+          "name": "wheel-up",
+          "shift": false,
+          "x": 3,
+          "y": 4
+        },
+        {
+          "alt": false,
+          "ctrl": false,
+          "name": "wheel-down",
+          "shift": false,
+          "x": 3,
+          "y": 4
+        },
+        {
+          "alt": false,
+          "ctrl": false,
+          "name": "wheel-left",
+          "shift": false,
+          "x": 3,
+          "y": 4
+        },
+        {
+          "alt": false,
+          "ctrl": false,
+          "name": "wheel-right",
+          "shift": false,
+          "x": 3,
+          "y": 4
+        }
+      ],
+      "pending": ""
+    }
+  ]
+}

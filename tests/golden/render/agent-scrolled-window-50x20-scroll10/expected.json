@@ -1,0 +1,27 @@
+{
+  "h": 20,
+  "lines": [
+    "  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "  xxxxxxxxxxxxxxxxxxxxxxxxx",
+    "",
+    "> message number 74 ",
+    "  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "  xxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "",
+    "● message number 75 ",
+    "  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "  xxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "",
+    "> message number 76 ",
+    "  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "  xxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "",
+    "↓ 10 more rows · pgdn",
+    "╭────────────────────────────────────────────────╮",
+    "│ >  Try \"explain this repo\" · / commands · @ fi │",
+    "╰────────────────────────────────────────────────╯",
+    "⏸ manual mode on        fake-sonnet · effort: auto"
+  ],
+  "maxScroll": 223,
+  "w": 50
+}

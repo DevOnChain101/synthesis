@@ -1,0 +1,30 @@
+
+
+
+
+╭───────────────────────────────────╮
+│ ✻ Hello there! I'm Synthesis.  · 1.0.0 │
+│                                   │
+│ /help for commands · alt+v pastes │
+│ cwd: /work/proj                   │
+╰───────────────────────────────────╯
+
+ Tips for getting started:
+  1. Ask Synthesis to explain, fix or
+     build something in this 
+     folder
+  2. Type / for commands and 
+     skills, @ to mention a file
+  3. Drop or paste an image path
+     to attach a screenshot
+╭─ Select model ────────────────────╮
+│ pick a model to use               │
+│ ❯ 1. ✓ Opus (fake)  most capable  │
+│   2.   Sonnet (fa…  balanced      │
+│                                   │
+│ filter: ▍                         │
+│ type to filter · ↑/↓ choose ·     │
+│ pgup/pgdn page · home/end · enter │
+│ select · esc cancel               │
+╰───────────────────────────────────╯
+⏸ manual mode on  fak… · effort: auto

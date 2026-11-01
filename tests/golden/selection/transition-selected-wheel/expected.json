@@ -1,0 +1,46 @@
+[
+  {
+    "event": {
+      "alt": false,
+      "shift": false,
+      "type": "wheel"
+    },
+    "result": {
+      "act": "clear",
+      "mode": "idle"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "shift": false,
+      "type": "wheel"
+    },
+    "result": {
+      "act": "none",
+      "mode": "selected"
+    }
+  },
+  {
+    "event": {
+      "alt": false,
+      "shift": true,
+      "type": "wheel"
+    },
+    "result": {
+      "act": "none",
+      "mode": "selected"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "shift": true,
+      "type": "wheel"
+    },
+    "result": {
+      "act": "none",
+      "mode": "selected"
+    }
+  }
+]

@@ -1,0 +1,21 @@
+{
+  "agent": {
+    "items": [
+      {
+        "input": {
+          "command": "cat big"
+        },
+        "kind": "tool",
+        "name": "Bash",
+        "result": "line 0 \nline 1 wwww\nline 2 wwwwwwww\nline 3 wwwwwwwwwwww\nline 4 wwwwwwwwwwwwwwww\nline 5 wwwwwwwwwwwwwwwwwwww\nline 6 wwwwwwwwwwwwwwwwwwwwwwww\nline 7 wwwwwwwwwwwwwwwwwwwwwwwwwwww\nline 8 wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww\nline 9 wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww\nline 10 wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww\nline 11 wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww\nline 12 wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww\nline 13 wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww\nline 14 wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww\nline 15 wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww\nline 16 wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww\nline 17 wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww\nline 18 wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww\nline 19 wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww",
+        "status": "done"
+      }
+    ]
+  },
+  "frame": 0,
+  "h": 30,
+  "now": 1790942400000,
+  "op": "agent",
+  "opts": {},
+  "w": 60
+}
