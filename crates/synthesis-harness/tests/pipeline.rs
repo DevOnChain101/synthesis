@@ -202,6 +202,29 @@ async fn write_denial_without_approver_ends_blocked() {
 }
 
 #[tokio::test]
+async fn denied_verify_run_leaves_the_task_unverified_not_blocked() {
+    // The edit was allowed; only the model's own check needs an approval nobody can give.
+    let w = Probe::new("Mutate", SideEffectClass::Write, 0, "changed");
+    let v = Probe::new("verify_run", SideEffectClass::Execute, 0, "ran");
+    let mut rig = Rig::new(
+        Opts {
+            tools: ToolBox::empty().with_tool(w.clone()).with_tool(v.clone()),
+            allow: vec!["Mutate".into()],
+            ..Opts::default()
+        },
+        vec![
+            Turn::tool("m1", "Mutate", json!({})),
+            Turn::tool("v1", "verify_run", json!({"command": "test -f x"})),
+            Turn::text("done, not verified"),
+        ],
+    );
+    let out = rig.run("mutate").await;
+    assert_eq!((w.runs(), v.runs()), (1, 0));
+    assert_eq!(out.status, TaskStatus::Unverified, "{}", out.reason);
+    assert_eq!(out.reason, "no_verification_gate");
+}
+
+#[tokio::test]
 async fn approval_granted_and_denied() {
     let w = Probe::new("Mutate", SideEffectClass::Write, 0, "changed");
     let approver = ScriptedApprover::new(vec![Approval::allow(), Approval::deny("not now")]);

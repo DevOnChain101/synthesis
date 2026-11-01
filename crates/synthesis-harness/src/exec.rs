@@ -832,9 +832,11 @@ impl Harness {
             &lock(&agent.perms).suggestions(&call.name, input),
         );
         // A denied change (write, command, MCP write tool) is what the task cannot go on
-        // without; a denied read stays evidence the model may work around.
-        if spec.side_effect != SideEffectClass::Read
-            || matches!(call.name.as_str(), "Bash" | "verify_run" | "terminal_spawn")
+        // without; a denied read stays evidence the model may work around. A denied
+        // `verify_run` only leaves the work unverified (exit 3), the edits were authorised.
+        if call.name != "verify_run"
+            && (spec.side_effect != SideEffectClass::Read
+                || matches!(call.name.as_str(), "Bash" | "terminal_spawn"))
         {
             task.pending_approval.store(true, Ordering::SeqCst);
         }
