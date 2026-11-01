@@ -497,6 +497,13 @@ pub struct AgentOpts {
     pub agent_rows: Vec<String>,
     /// Where the next line goes when it is not the main agent: `@worker · running · 2 queued`.
     pub route: Option<String>,
+    /// The welcome of an empty conversation: brand art, wordmark and a greeting by the local hour
+    /// (off keeps the plain welcome box).
+    pub hero: bool,
+    /// Minutes east of UTC, for the greeting.
+    pub tz_offset_min: i32,
+    /// 16-colour or colourless terminal: the art is drawn in one colour.
+    pub plain_logo: bool,
     #[serde(skip)]
     pub config: Option<ModelConfig>,
 }
@@ -2002,7 +2009,84 @@ fn tail_fit(s: &str, w: usize) -> String {
     out.into_iter().collect()
 }
 
-fn welcome_rows(agent: &Agent, w: usize) -> Vec<Row> {
+const WORDMARK: &str = "S Y N T H E S I S";
+const TAGLINE: &str = "Autonomous development environment";
+
+/// Brand art, wordmark (and tagline) centred in `w`; `art` off is the one-line wordmark.
+fn hero_rows(w: usize, art: bool, tagline: bool, plain: bool) -> Vec<Row> {
+    let centre = |text: &str, c: Col| -> Row {
+        vec![
+            r(" ".repeat(w.saturating_sub(str_w(text)) / 2), c),
+            r(text, c),
+        ]
+    };
+    let mut rows: Vec<Row> = vec![];
+    if art {
+        let pad = r(
+            " ".repeat(w.saturating_sub(crate::logo::ART_COLS) / 2),
+            C_TEXT,
+        );
+        for line in crate::logo::art_cells(plain) {
+            let mut row = vec![pad.clone()];
+            row.extend(
+                line.into_iter()
+                    .map(|(ch, rgb)| r(ch.to_string(), col(rgb))),
+            );
+            rows.push(row);
+        }
+        rows.push(vec![]);
+    }
+    rows.push(centre(WORDMARK, col(ACCENT_LIGHT)));
+    if tagline {
+        rows.push(centre(TAGLINE, C_DIM));
+    }
+    rows.push(vec![]);
+    rows
+}
+
+/// The empty-conversation welcome with the brand hero: the biggest of art + box + tips, art + box,
+/// wordmark + box, wordmark + prompt line, wordmark that fits `h` rows. Narrower than 40 columns
+/// the art is never drawn.
+fn hero_welcome(agent: &Agent, w: usize, h: usize, now: i64, tz: i32, plain: bool) -> Vec<Row> {
+    let hero = Some((now, tz));
+    let with_tips = welcome_rows(agent, w, hero, true);
+    let boxed = welcome_rows(agent, w, hero, false);
+    let join = |mut a: Vec<Row>, b: &[Row]| {
+        a.extend(b.iter().cloned());
+        a
+    };
+    let mut candidates: Vec<Vec<Row>> = vec![];
+    if w >= 40 {
+        candidates.push(join(hero_rows(w, true, true, plain), &with_tips));
+        candidates.push(join(hero_rows(w, true, false, plain), &boxed));
+    }
+    candidates.push(join(hero_rows(w, false, false, plain), &with_tips));
+    candidates.push(join(hero_rows(w, false, false, plain), &boxed));
+    let prompt = crate::greeting::GREETING.at(now, tz).1;
+    let mut small = hero_rows(w, false, false, plain);
+    small.pop();
+    small.push(vec![r(
+        format!(
+            "{}{prompt}",
+            " ".repeat(w.saturating_sub(str_w(prompt)) / 2)
+        ),
+        C_DIM,
+    )]);
+    candidates.push(small);
+    let mut one = hero_rows(w, false, false, plain);
+    one.truncate(1);
+    candidates.push(one);
+    let last = candidates.len() - 1;
+    candidates
+        .into_iter()
+        .enumerate()
+        .find(|(i, c)| c.len() <= h || *i == last)
+        .map(|(_, c)| c)
+        .unwrap_or_default()
+}
+
+fn welcome_rows(agent: &Agent, w: usize, hero: Option<(i64, i32)>, tips: bool) -> Vec<Row> {
+    let greeting = hero.map(|(now, tz)| crate::greeting::GREETING.at(now, tz));
     let inner = w.saturating_sub(4).max(10);
     let line = |runs: Vec<Run>| -> Row {
         let rw = wrap(&runs, inner, &[], &[]).into_iter().next().unwrap();
@@ -2016,7 +2100,10 @@ fn welcome_rows(agent: &Agent, w: usize) -> Vec<Row> {
         vec![r(format!("╭{}╮", "─".repeat(inner + 2)), C_BORDER)],
         line(vec![
             rb("✻ ", C_ACCENT),
-            rb("Hello there! I'm Synthesis.", C_BRIGHT),
+            rb(
+                greeting.map_or("Hello there! I'm Synthesis.", |g| g.0),
+                C_BRIGHT,
+            ),
             r(
                 if agent.version.is_empty() {
                     String::new()
@@ -2026,7 +2113,7 @@ fn welcome_rows(agent: &Agent, w: usize) -> Vec<Row> {
                 C_SUBTLE,
             ),
         ]),
-        line(vec![]),
+        line(greeting.map_or_else(Vec::new, |g| vec![r(g.1, C_DIM)])),
         line(vec![r(
             "/help for commands · alt+v pastes an image",
             C_SUBTLE,
@@ -2036,9 +2123,12 @@ fn welcome_rows(agent: &Agent, w: usize) -> Vec<Row> {
             r(tail_fit(&agent.cwd, inner.saturating_sub(5)), C_DIM),
         ]),
         vec![r(format!("╰{}╯", "─".repeat(inner + 2)), C_BORDER)],
-        vec![],
-        vec![r(" Tips for getting started:", C_DIM)],
     ];
+    if !tips {
+        return v;
+    }
+    v.push(vec![]);
+    v.push(vec![r(" Tips for getting started:", C_DIM)]);
     let tips = [
         "Ask Synthesis to explain, fix or build something in this folder",
         "Type / for commands and skills, @ to mention a file",
@@ -3476,7 +3566,18 @@ pub fn render_agent(
             C_SUBTLE,
         )]]));
     } else if items.is_empty() {
-        parts.push(Rc::new(welcome_rows(agent, content_w)));
+        parts.push(Rc::new(if opts.hero {
+            hero_welcome(
+                agent,
+                content_w,
+                msg_h,
+                now,
+                opts.tz_offset_min,
+                opts.plain_logo,
+            )
+        } else {
+            welcome_rows(agent, content_w, None, true)
+        }));
     } else {
         let mut prev: Option<&str> = None;
         for it in items {

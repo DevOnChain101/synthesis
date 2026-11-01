@@ -1,0 +1,10 @@
+
+
+
+
+           S Y N T H E S I S
+          What shall we build?
+╭──────────────────────────────────────╮
+│ >  Enter send · Shift+Enter newline  │
+╰──────────────────────────────────────╯
+⏸ manual mode on    model · effort: auto

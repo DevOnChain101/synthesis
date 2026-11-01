@@ -102,6 +102,8 @@ pub struct Options {
     /// Right-click paste. Default: the OS tool(s) for the platform.
     pub paste_source: Option<Vec<Box<dyn ClipboardSource>>>,
     pub opener: Option<Box<dyn Opener>>,
+    /// Minutes east of UTC (the greeting follows the local hour); the host knows the zone.
+    pub tz_offset_min: i32,
     pub clock: fn() -> i64,
     /// Timer period while something animates / while idle (idle only polls the terminal size).
     pub tick: Duration,
@@ -143,6 +145,7 @@ impl Options {
             clipboard: None,
             paste_source: None,
             opener: None,
+            tz_offset_min: 0,
             clock: crate::wall_clock_ms,
             tick: Duration::from_millis(80),
             idle_tick: Duration::from_millis(500),
@@ -187,7 +190,11 @@ fn cfg_for(o: &Options) -> AppConfig {
             .get_nonempty(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
             .map(Into::into),
         mouse_debug: o.env.get("SYNTHESIS_MOUSE_DEBUG") == Some("1"),
-        tz_offset_min: 0,
+        tz_offset_min: o.tz_offset_min,
+        plain_logo: matches!(
+            ColorMode::detect(&o.env, o.platform),
+            ColorMode::Ansi16 | ColorMode::Mono
+        ),
         agent_defs: o.harness.agent_defs().into_iter().map(|(n, _)| n).collect(),
     }
 }
@@ -982,6 +989,7 @@ pub fn render_once(o: &OnceOptions, out: &mut impl Write) -> io::Result<()> {
         home: None,
         mouse_debug: false,
         tz_offset_min: 0,
+        plain_logo: matches!(o.color, ColorMode::Ansi16 | ColorMode::Mono),
         agent_defs: vec![],
     };
     let mut app = App::new(cfg, &o.events, o.now);

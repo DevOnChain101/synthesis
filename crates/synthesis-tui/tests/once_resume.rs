@@ -98,7 +98,9 @@ fn once_is_render_frame_plus_the_status_line() {
         waiting: false,
         busy: false,
     }];
-    let view = DashView::default();
+    // the app turns the welcome hero on (and `--once` is UTC with a colour terminal)
+    let mut view = DashView::default();
+    view.opts.hero = true;
     let usage = Usage::default();
     let editor: [char; 0] = [];
     let state = DashState {

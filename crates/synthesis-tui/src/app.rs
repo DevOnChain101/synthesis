@@ -90,6 +90,8 @@ pub(crate) struct AppConfig {
     /// `SYNTHESIS_MOUSE_DEBUG=1`: every mouse report is shown in the footer.
     pub mouse_debug: bool,
     pub tz_offset_min: i32,
+    /// 16-colour or colourless terminal: the welcome art is one colour.
+    pub plain_logo: bool,
     /// Agent definitions `@agent:<name>` can start.
     pub agent_defs: Vec<String>,
 }
@@ -2970,6 +2972,9 @@ impl App {
             suggestions: (!self.sug_view.is_empty()).then(|| RSug {
                 items: self.sug_view.clone(),
             }),
+            hero: true,
+            tz_offset_min: self.cfg.tz_offset_min,
+            plain_logo: self.cfg.plain_logo,
             ..AgentOpts::default()
         };
         if let Some(ps) = &self.picker {

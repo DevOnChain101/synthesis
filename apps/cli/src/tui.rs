@@ -83,6 +83,29 @@ fn requested_resume(a: &TuiArgs, h: &synthesis_app::Homes) -> Result<Option<Resu
     load_resume(&h.synthesis, &id).map(Some)
 }
 
+/// Minutes east of UTC for the greeting ("Good morning"); 0 when the zone cannot be read. No
+/// std or dependency gives the local zone safely, so unix asks `date`; Windows greets by UTC.
+fn local_offset_min() -> i32 {
+    if !cfg!(unix) {
+        return 0;
+    }
+    std::process::Command::new("/bin/date")
+        .arg("+%z")
+        .output()
+        .map_or(0, |o| zone_minutes(&String::from_utf8_lossy(&o.stdout)))
+}
+
+/// `+0530` / `-0800` (what `date +%z` prints) as minutes east of UTC.
+fn zone_minutes(t: &str) -> i32 {
+    let t = t.trim();
+    let (sign, d) = t.split_at(t.len().min(1));
+    match (sign, d.len() == 4, d.parse::<i32>()) {
+        ("+", true, Ok(n)) => n / 100 * 60 + n % 100,
+        ("-", true, Ok(n)) => -(n / 100 * 60 + n % 100),
+        _ => 0,
+    }
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -240,6 +263,7 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
             env.clone(),
         );
         o.version = env!("CARGO_PKG_VERSION").into();
+        o.tz_offset_min = local_offset_min();
         o.model = Some(label);
         o.models = models;
         o.effort_tiers = effort_tiers;
@@ -360,6 +384,17 @@ fn mcp_lines(m: &synthesis_mcp::McpManager) -> Vec<String> {
         }
     }
     v
+}
+
+#[cfg(test)]
+mod zone_tests {
+    #[test]
+    fn date_offsets_parse() {
+        assert_eq!(super::zone_minutes("+0700\n"), 420);
+        assert_eq!(super::zone_minutes("-0530"), -330);
+        assert_eq!(super::zone_minutes("garbage"), 0);
+        assert_eq!(super::zone_minutes(""), 0);
+    }
 }
 
 #[cfg(all(test, unix, feature = "test-provider"))]
