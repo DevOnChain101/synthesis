@@ -664,8 +664,10 @@ impl Harness {
                     .await;
             }
             // A peer session the allow list permits may be asked without a prompt (B7); plan and
-            // dontAsk, deny rules and every other reason stay as decided.
+            // dontAsk, deny rules and every other reason stay as decided. A delegate worker is a
+            // peer's: its messages follow B's normal approval (J4.1).
             if call.name == "SendMessage"
+                && agent.origin.is_none()
                 && matches!(verdict.decision, Decision::Ask | Decision::Deny)
                 && verdict.reason.contains("SendMessage requires confirmation")
                 && self.peer_preapproved(input)

@@ -1526,7 +1526,9 @@ impl Harness {
                 p.env.interactive = false;
                 p.block_outside_reads = true;
             }
+            // peer work is held stricter than B's own agent (J4.1)
             p.env.deny_secret_reads = true;
+            p.env.protected_hard = true;
             p.env.deny_read.extend(home.clone());
             p.env.deny_read.push(link.run_dir.clone());
             Arc::new(Mutex::new(p))

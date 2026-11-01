@@ -319,7 +319,14 @@ pub struct Env {
     pub deny_read: Vec<PathBuf>,
     /// Also deny reads of secret-shaped files (`.env*`, keys, `.ssh`, `.aws`, `.git-credentials`).
     /// Set for the peer responder, which answers a stranger.
+    ///
+    /// Also makes Bash fail closed for that session (see `peer_bash_scan`): a command that names
+    /// a secret or a denied path is denied, one that could build such a path (`$`, backtick, glob,
+    /// `~user`, unparsable) is a hard ask.
     pub deny_secret_reads: bool,
+    /// Protected paths ask (headless: deny) in every mode, bypassPermissions included. Set for
+    /// work done for a peer, which is held stricter than the session's own agent (messaging.md J4.1).
+    pub protected_hard: bool,
     /// The repository / project root when the session started in a subdirectory of it. `None` =
     /// `cwd`. Rules written `/x` or `./x`, and the inside-the-workspace test, are anchored here;
     /// a bare cwd-relative path keeps `cwd`.
@@ -341,6 +348,7 @@ impl Env {
             protected: vec![],
             deny_read: vec![],
             deny_secret_reads: false,
+            protected_hard: false,
             project_root: None,
             memory_notes: None,
         }
@@ -370,6 +378,13 @@ impl Env {
         self.deny_read.extend(paths);
         self
     }
+}
+
+/// Result of `peer_bash_scan`.
+enum Scan {
+    Clear,
+    Named,
+    Unclear,
 }
 
 /// `.ssh` / `.aws` / `.gnupg` directories and secret-shaped file names.
@@ -964,6 +979,11 @@ impl Permissions {
 
     /// Per-mode answer for a write to a protected path. `Classify` = ask the auto mode classifier.
     pub fn protected_path_decision(&self, mode: Mode) -> Verdict {
+        if self.env.protected_hard && mode != Mode::DontAsk {
+            let mut v = Verdict::new(Decision::Ask, "protected path requires confirmation");
+            v.hard = true;
+            return v;
+        }
         if self.classifies(mode) {
             return Verdict::new(Decision::Classify, "protected path: classifier review");
         }
@@ -1250,6 +1270,59 @@ impl Permissions {
     /// overwrite blind). Holds in every mode, bypassPermissions included.
     fn bash_writes_denied(&self, cmd: &str) -> bool {
         self.bash_paths_denied(cmd, true)
+    }
+
+    /// Peer-origin Bash (`deny_secret_reads`), fail closed on words, not on what the shell would do:
+    /// `Named` = some word resolves (against cwd and every `cd` target, `~` expanded) to a denied
+    /// root or a secret-shaped path; `Unclear` = a word has `$`, a backtick, a glob character or
+    /// `~user`, or the command does not parse. Covers reads and writes alike.
+    fn peer_bash_scan(&self, cmd: &str) -> Scan {
+        let Some(segs) = bash::deep_segments(cmd, 0) else {
+            return Scan::Unclear;
+        };
+        let policy = self.policy();
+        let roots: Vec<PathBuf> = self
+            .env
+            .deny_read
+            .iter()
+            .flat_map(|x| [Some(x.clone()), paths::real_of(x)])
+            .flatten()
+            .collect();
+        let named = |p: &Path| {
+            [Some(paths::lexical_normalize(p)), paths::real_of(p)]
+                .into_iter()
+                .flatten()
+                .any(|c| secret_shaped(&c) || roots.iter().any(|x| paths::within(x, &c, policy)))
+        };
+        let mut bases = vec![self.env.cwd.clone()];
+        let mut unclear = false;
+        for seg in segs {
+            let w = bash::unwrap_words(&seg, true);
+            if paths::basename(w.first().map_or("", String::as_str), policy) == "cd" {
+                self.widen_bases(&mut bases, w.get(1));
+            }
+            for word in &seg {
+                // the word, what follows its last redirect (`x>>f`) and the value of `--opt=v` / `of=v`
+                let bare = word.rsplit(['<', '>']).next().unwrap_or(word);
+                let val = bare.rsplit_once('=').map(|(_, v)| v);
+                for t in [word.as_str(), bare].into_iter().chain(val) {
+                    if t.contains(['$', '`', '*', '?'])
+                        || (t.contains('[') && t != "[" && t != "[[")
+                    {
+                        unclear = true;
+                        continue;
+                    }
+                    for b in &bases {
+                        match self.resolve_operand(t, b) {
+                            None => unclear = true,
+                            Some((p, _)) if named(&p) => return Scan::Named,
+                            Some(_) => {}
+                        }
+                    }
+                }
+            }
+        }
+        if unclear { Scan::Unclear } else { Scan::Clear }
     }
 
     /// Best effort (the sandbox is the real boundary): unparsable commands count as a hit, a
@@ -1571,6 +1644,28 @@ impl Permissions {
         if let Some(why) = self.hard_read_denied(tool, input) {
             return v(Deny, why);
         }
+        if tool == "Bash" && self.env.deny_secret_reads {
+            match self.peer_bash_scan(command_of(input)) {
+                Scan::Clear => {}
+                Scan::Named => {
+                    return v(
+                        Deny,
+                        "blocked: the command names a secret or Synthesis state",
+                    );
+                }
+                Scan::Unclear if mode == Mode::DontAsk => {
+                    return v(Deny, "dontAsk mode: the command could name a secret path");
+                }
+                Scan::Unclear => {
+                    let mut r = v(
+                        Ask,
+                        "the command could build a secret or Synthesis state path ($, backtick, glob or ~user)",
+                    );
+                    r.hard = true;
+                    return r;
+                }
+            }
+        }
         if tool == "Bash" && self.bash_reads_denied(command_of(input)) {
             return v(
                 Deny,
@@ -1656,8 +1751,21 @@ impl Permissions {
 
         let asked = self.some_match(&self.rules.ask, tool, input);
 
-        // an ask rule is a tripwire the user set on purpose: it prompts in every mode but dontAsk
-        if mode == Mode::BypassPermissions && !asked {
+        let fs_info = (tool == "Bash").then(|| self.bash_fs(bash_cmd, auto));
+        let fp = if EDIT_TOOLS.contains(&tool) {
+            path_of(tool, input)
+        } else {
+            None
+        };
+        let protected = fp.is_some_and(|f| self.is_protected(&paths::resolve(&self.env.cwd, f)))
+            || fs_info
+                .as_ref()
+                .is_some_and(|i| i.targets.iter().any(|t| self.is_protected(t)))
+            || (tool == "Bash" && self.bash_hits_protected(bash_cmd));
+
+        // an ask rule is a tripwire the user set on purpose: it prompts in every mode but dontAsk;
+        // work for a peer (`protected_hard`) also never skips the protected-path check
+        if mode == Mode::BypassPermissions && !asked && !(protected && self.env.protected_hard) {
             return v(Allow, "bypassPermissions mode");
         }
 
@@ -1680,18 +1788,7 @@ impl Permissions {
         }
 
         // protected paths: checked before allow rules, so neither a mode nor a rule approves them
-        let fs_info = (tool == "Bash").then(|| self.bash_fs(bash_cmd, auto));
-        let fp = if EDIT_TOOLS.contains(&tool) {
-            path_of(tool, input)
-        } else {
-            None
-        };
-        if fp.is_some_and(|f| self.is_protected(&paths::resolve(&self.env.cwd, f)))
-            || fs_info
-                .as_ref()
-                .is_some_and(|i| i.targets.iter().any(|t| self.is_protected(t)))
-            || (tool == "Bash" && self.bash_hits_protected(bash_cmd))
-        {
+        if protected {
             return self.protected_path_decision(mode);
         }
 
