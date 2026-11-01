@@ -175,10 +175,14 @@ fn private_dir(p: &Path, parent: &Path) -> io::Result<()> {
         Ok(m) if m.is_dir() => {}
         Ok(_) => return Err(io::Error::other("mailbox path is not a directory")),
         Err(_) => {
-            let mut b = std::fs::DirBuilder::new();
             #[cfg(unix)]
-            std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
-            b.create(p)?;
+            {
+                let mut b = std::fs::DirBuilder::new();
+                std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+                b.create(p)?;
+            }
+            #[cfg(not(unix))]
+            std::fs::DirBuilder::new().create(p)?;
         }
     }
     #[cfg(unix)]
