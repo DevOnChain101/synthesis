@@ -309,6 +309,7 @@ mod tests {
                 prompt: String::new(),
                 reason: String::new(),
                 suggestions: vec![],
+                origin: None,
             },
             &cancel,
         ));

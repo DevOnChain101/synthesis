@@ -569,7 +569,11 @@ impl App {
                 .map_or(Value::Null, |d| crate::chat::clean_diff(&d)),
             suggestions,
             status: "pending".into(),
-            prompt: clean_line(&req.reason),
+            // work done for another session (peers) says so in the dialog
+            prompt: match &req.origin {
+                Some(o) => format!("for {}: {}", clean_line(o), clean_line(&req.reason)),
+                None => clean_line(&req.reason),
+            },
             display_name: req.agent_id.clone().unwrap_or_default(),
             ..Pending::default()
         };

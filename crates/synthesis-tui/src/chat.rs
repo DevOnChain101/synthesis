@@ -145,6 +145,56 @@ pub(crate) fn friendly_compact_error(e: &str) -> (String, &'static str) {
     }
 }
 
+/// Events with no row of their own on purpose: the pane, header, todo list or a dialog already
+/// shows them, or they are only bookkeeping. Every other event kind (peers, memory, processes,
+/// mode changes, ...) and every kind added to the core later gets [`generic_row`].
+fn quiet(e: &Event) -> bool {
+    match e {
+        Event::HookRan { outcome, .. } => outcome == "success",
+        e => matches!(
+            e,
+            Event::ToolStarted { .. }
+                | Event::ToolApprovalRequired { .. }
+                | Event::SessionStarted { .. }
+                | Event::SessionStatusChanged { .. }
+                | Event::SessionCompleted(_)
+                | Event::SessionFailed(_)
+                | Event::SessionCancelled(_)
+                | Event::TodoUpdated { .. }
+                | Event::ArtifactCreated { .. }
+                | Event::TaskStarted { .. }
+                | Event::TurnStarted { .. }
+                | Event::TurnCompleted { .. }
+                | Event::ModelDelta { .. }
+                | Event::AssistantMessage { .. }
+                | Event::ContextUsage { .. }
+                | Event::ContextCompacting { .. }
+                | Event::ToolOutput { .. }
+        ),
+    }
+}
+
+/// `type: key=value ...` from the event's own fields: scalars only, each cut short, everything
+/// sanitised (peer and memory text came from other sessions or a model, so it is data).
+fn generic_row(e: &Event) -> Option<String> {
+    let v = serde_json::to_value(e).ok()?;
+    let kind = v.get("type")?.as_str()?.to_string();
+    let mut out = clean_line(&kind);
+    if let Some(Value::Object(p)) = v.get("payload") {
+        for (k, val) in p {
+            let t = match val {
+                Value::String(s) => s.clone(),
+                Value::Number(n) => n.to_string(),
+                Value::Bool(b) => b.to_string(),
+                _ => continue,
+            };
+            let t: String = clean_line(&t).chars().take(60).collect();
+            out.push_str(&format!(" {}={t}", clean_line(k)));
+        }
+    }
+    Some(out.chars().take(240).collect())
+}
+
 fn note(text: impl Into<String>, tone: &str) -> Item {
     item! {
         kind: "note".into(),
@@ -695,6 +745,12 @@ impl Chat {
                 self.agent.interrupting = false;
                 self.tools.clear();
             }
+            e if !quiet(e) => {
+                if let Some(t) = generic_row(e) {
+                    let who = sub.map_or(String::new(), |a| format!("[{}] ", clean_line(&a)));
+                    self.note(format!("{who}{t}"), "");
+                }
+            }
             _ => {}
         }
     }
@@ -737,6 +793,62 @@ mod tests {
         };
         assert!(sent("x", "system").starts_with('⚠'));
         assert!(!sent("system", "agent").starts_with('⚠'));
+    }
+
+    #[test]
+    fn events_without_a_view_become_one_safe_row_and_bookkeeping_stays_quiet() {
+        let mut chat = Chat::default();
+        let mut apply = |event: Event| {
+            let env = Envelope {
+                v: 1,
+                seq: 1,
+                ts: "2026-01-01T00:00:00.000Z".into(),
+                session_id: "s".into(),
+                task_id: None,
+                turn_id: None,
+                agent_id: None,
+                event,
+            };
+            chat.apply(&env, 0);
+            chat.agent.items.len()
+        };
+        assert_eq!(
+            apply(Event::PeerListening {
+                endpoint_kind: "unix".into()
+            }),
+            1
+        );
+        let n = apply(Event::MemoryWritten {
+            id: "m1\x1b[2J".into(),
+            op: "add".into(),
+            kind: "fact".into(),
+            scope: "repo".into(),
+            trust: "trusted".into(),
+            status: "active".into(),
+        });
+        assert_eq!(n, 2);
+        let row = chat.agent.items.last().unwrap().text.clone();
+        assert!(
+            row.starts_with("memory.written ") && row.contains("op=add"),
+            "{row}"
+        );
+        assert!(!row.contains('\x1b'), "{row:?}");
+        // already shown elsewhere: no extra row
+        let n = chat.agent.items.len();
+        chat.apply(
+            &Envelope {
+                v: 1,
+                seq: 2,
+                ts: "2026-01-01T00:00:00.000Z".into(),
+                session_id: "s".into(),
+                task_id: None,
+                turn_id: None,
+                agent_id: None,
+                event: Event::TodoUpdated { todos: vec![] },
+            },
+            0,
+        );
+        assert_eq!(chat.agent.items.len(), n);
     }
 
     #[test]
