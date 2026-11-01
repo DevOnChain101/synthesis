@@ -26,7 +26,7 @@ The agent runs tests itself. A call that needs permission is denied unless a rul
 
 **Inferred verification checks.** In `default` and `acceptEdits` the checks the harness infers from the repo (`cargo test`, `npm run test`, `pytest`, `go test`, `make test`, ... see `docs/specs/verification.md` section 4) run without an `--allow`, so `synth run --permission-mode acceptEdits` no longer ends `blocked` only because such a check asked. They stay sandboxed and deny rules still win; any other check command (user-declared or model-registered, or not a recognised test/lint/build invocation) still needs an allow.
 
-A denied write or command (Write, Edit, Bash, MCP write tools, ...) makes the task end `blocked` / `approval_unavailable` with `needed_permissions`, never `completed`. Typical CI use:
+A denied write or command (Write, Edit, Bash, MCP write tools, ...) makes the task end `blocked` / `approval_unavailable` with `needed_permissions`, never `completed`. Exception: a denied model-registered `verify_run` check (a command the model chose, not one the harness inferred) does not block the task: the edits were authorised, so the task ends `unverified` (exit 3) and `needed_permissions` still names the rule. Typical CI use:
 
     synth run --permission-mode acceptEdits --allow 'Bash(cargo test:*)' --prompt "fix the failing test"
 

@@ -3031,3 +3031,54 @@ async fn notify_result_leaves_out_private_changed_files() {
     assert!(r.text.contains("ok-notes.txt"), "{}", r.text);
     assert!(!r.text.contains(".env"), "{}", r.text);
 }
+
+#[tokio::test]
+async fn the_responder_looks_up_workspace_facts_with_read_grep_glob() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let root = Arc::new(std::sync::OnceLock::<std::path::PathBuf>::new());
+    let root2 = root.clone();
+    let a_responder: Responder = Arc::new(move |r| {
+        if !is_responder(r) {
+            return Some(Turn::text("A idle"));
+        }
+        let w = root2.get().unwrap().join("w");
+        Some(if tool_result(r, "g").is_none() {
+            Turn::tool("g", "Grep", json!({"pattern": "PORT", "path": w}))
+        } else if tool_result(r, "f").is_none() {
+            Turn::tool("f", "Glob", json!({"pattern": "*.txt", "path": w}))
+        } else if tool_result(r, "r").is_none() {
+            Turn::tool("r", "Read", json!({"file_path": w.join("facts.txt")}))
+        } else {
+            Turn::text("the port is 4821")
+        })
+    });
+    let b_responder: Responder = Arc::new(|r| {
+        Some(if tool_result(r, "ask").is_none() {
+            Turn::tool(
+                "ask",
+                "SendMessage",
+                json!({"to": "ws:alpha/sess:sess-a", "message": "which port?"}),
+            )
+        } else if !texts(r).contains("<peer_reply") {
+            Turn::text("waiting")
+        } else {
+            Turn::text("B done")
+        })
+    });
+    let (a, ea) = side("sess-a", "alpha", &run, Some(on.clone()), a_responder, 10);
+    let (mut b, _) = side("sess-b", "beta", &run, Some(on), b_responder, 10);
+    let _reg = serve(&a, &run, ea);
+    root.set(a.rig.root.clone()).unwrap();
+    std::fs::write(a.rig.root.join("w/facts.txt"), "PORT=4821\n").unwrap();
+    let out = go(&mut b, "ask").await;
+    assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
+    let reqs = a.rig.requests();
+    let last = reqs.iter().rfind(|r| is_responder(r)).unwrap();
+    for id in ["g", "f", "r"] {
+        let (t, err) = tool_result(last, id).unwrap_or_else(|| panic!("no result for {id}"));
+        assert!(!err, "{id} failed: {t}");
+    }
+    assert!(tool_result(last, "r").unwrap().0.contains("4821"));
+}
