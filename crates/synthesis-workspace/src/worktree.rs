@@ -590,6 +590,23 @@ impl WorktreeManager {
                     dirty.len()
                 )));
             }
+            // `git worktree remove` deletes gitignored files (.env, build output) without --force
+            let ignored = nul_split(&wg.out(
+                &info.worktree,
+                &[
+                    "ls-files",
+                    "--others",
+                    "--ignored",
+                    "--exclude-standard",
+                    "-z",
+                ],
+            )?)
+            .count();
+            if ignored > 0 {
+                return Err(Error::Refused(format!(
+                    "{ignored} gitignored file(s) in worktree (they would be deleted)"
+                )));
+            }
             let tip = wg.out_str(&info.worktree, &["rev-parse", "HEAD"])?;
             let merged = tip == info.baseline
                 || g.run(

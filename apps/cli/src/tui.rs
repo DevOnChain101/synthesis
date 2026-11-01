@@ -678,11 +678,23 @@ mod start_failure_tests {
     /// closed and its worktree reported / cleaned: `return Err` used to skip all of it.
     #[test]
     fn a_session_that_cannot_start_is_still_ended_and_its_worktree_cleaned() {
+        failed_start(false);
+    }
+
+    /// `--cleanup-worktree` must not delete gitignored files (.env, build output): `git worktree
+    /// remove` would, so the worktree is kept and its path reported.
+    #[test]
+    fn a_failed_start_keeps_a_worktree_with_gitignored_files() {
+        failed_start(true);
+    }
+
+    fn failed_start(with_ignored: bool) {
         let d = tempfile::tempdir().unwrap();
         let root = synthesis_core::canonicalize(d.path()).unwrap();
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::write(repo.join("f"), "x").unwrap();
+        std::fs::write(repo.join(".gitignore"), ".env\n").unwrap();
         if !(git(&repo, &["init", "-q"])
             && git(&repo, &["add", "."])
             && git(&repo, &["commit", "-qm", "c"]))
@@ -713,12 +725,19 @@ mod start_failure_tests {
         let mut p = prepare(&w.c, &repo, &env, &Limits::default(), Front::Tui).unwrap();
         let wt = p.worktree.as_ref().unwrap().info.worktree.clone();
         assert!(wt.exists());
+        if with_ignored {
+            std::fs::write(wt.join(".env"), "TOKEN=1").unwrap();
+        }
         p.harness.start_session(&mut p.session, "startup").unwrap(); // the app's own start now fails
         let (exit, _sid, home) = round(p, true, &env, None, None, &mut |_| {
             panic!("the UI must not run for a session that did not start")
         });
         assert!(exit.is_err());
-        assert!(!wt.exists(), "worktree cleanup was skipped");
+        if with_ignored {
+            assert_eq!(std::fs::read_to_string(wt.join(".env")).unwrap(), "TOKEN=1");
+        } else {
+            assert!(!wt.exists(), "worktree cleanup was skipped");
+        }
         let c = rusqlite::Connection::open(home.join("synthesis.db")).unwrap();
         let ended: i64 = c
             .query_row(

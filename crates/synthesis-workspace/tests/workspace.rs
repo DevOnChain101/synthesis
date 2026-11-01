@@ -196,6 +196,34 @@ fn clean_cleanup_without_force() {
 }
 
 #[test]
+fn cleanup_without_force_keeps_a_worktree_that_holds_gitignored_files() {
+    need_git!();
+    let f = fx();
+    std::fs::write(f.repo.join(".gitignore"), "*.secret\ntarget/\n").unwrap();
+    g(&f.repo, &["add", ".gitignore"]);
+    g(&f.repo, &["commit", "-qm", "ignore"]);
+    let (_, info) = alloc(&f, "s-ignored", false);
+    std::fs::write(info.worktree.join("a.secret"), "token").unwrap();
+    assert!(
+        matches!(f.mgr.cleanup(&info, false), Err(Error::Refused(m)) if m.contains("gitignored")),
+        "ignored content must stop a non-forced removal"
+    );
+    assert_eq!(
+        std::fs::read_to_string(info.worktree.join("a.secret")).unwrap(),
+        "token"
+    );
+    // build output in an ignored directory too
+    std::fs::remove_file(info.worktree.join("a.secret")).unwrap();
+    std::fs::create_dir_all(info.worktree.join("target")).unwrap();
+    std::fs::write(info.worktree.join("target/out"), "x").unwrap();
+    assert!(f.mgr.cleanup(&info, false).is_err());
+    assert!(info.worktree.join("target/out").exists());
+    // nothing ignored left: removable again
+    std::fs::remove_dir_all(info.worktree.join("target")).unwrap();
+    f.mgr.cleanup(&info, false).unwrap();
+}
+
+#[test]
 fn include_uncommitted_snapshot_is_baseline_not_agent_work() {
     need_git!();
     let f = fx();
