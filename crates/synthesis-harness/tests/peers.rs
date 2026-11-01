@@ -1557,7 +1557,7 @@ fn b_notifies(to: &'static str) -> Responder {
 async fn notify_on_end_delivers_the_result_when_the_peers_task_ends() {
     let home = tempfile::tempdir().unwrap();
     let run = run_dir(home.path());
-    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "accept_notify": true});
     let (mut a, ea) = side(
         "sess-a",
         "alpha",
@@ -1610,7 +1610,7 @@ async fn notify_on_end_delivers_the_result_when_the_peers_task_ends() {
 async fn notify_on_end_of_an_idle_session_answers_idle_at_once() {
     let home = tempfile::tempdir().unwrap();
     let run = run_dir(home.path());
-    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "accept_notify": true});
     let idle: Responder = Arc::new(|_| Some(Turn::text("A idle")));
     let (a, ea) = side("sess-a", "alpha", &run, Some(on.clone()), idle, 10);
     let (mut b, _) = side(
@@ -1636,7 +1636,7 @@ async fn a_subscription_is_gated_one_per_asker_and_refused_in_a_cycle() {
     let home = tempfile::tempdir().unwrap();
     let run = run_dir(home.path());
     let key = load_or_create_key(&run).unwrap();
-    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "accept_notify": true});
     let (mut a, ea) = side(
         "sess-a",
         "alpha",
@@ -1683,6 +1683,18 @@ async fn a_subscription_is_gated_one_per_asker_and_refused_in_a_cycle() {
         Err(PeerError::Rejected(r)) => assert_eq!(r, "denied"),
         other => panic!("{:?}", other.err()),
     }
+    // one asker workspace cannot fill the table: its third session is turned away, another
+    // workspace is not
+    let mut b2 = asker("beta", "sess-b2");
+    b2.workspace_key = from.workspace_key.clone();
+    let mut b3 = asker("beta", "sess-b3");
+    b3.workspace_key = from.workspace_key.clone();
+    let second = sub(b2).await.expect("a second session of that workspace");
+    match sub(b3).await {
+        Err(PeerError::Rejected(r)) => assert_eq!(r, "busy"),
+        other => panic!("{:?}", other.err()),
+    }
+    drop(second);
     let r = first.wait(|_, _| {}).await.unwrap();
     assert_eq!(r.status, "answered");
     assert!(r.text.contains("A done"), "{}", r.text);
@@ -1693,7 +1705,7 @@ async fn a_subscription_is_gated_one_per_asker_and_refused_in_a_cycle() {
 async fn a_session_waiting_on_x_refuses_a_subscription_from_x() {
     let home = tempfile::tempdir().unwrap();
     let run = run_dir(home.path());
-    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "accept_notify": true});
     // A waits for B (B stays busy for 1.4 s); B, still busy, then tries to wait for A.
     let a_resp: Responder = Arc::new(|r| {
         let all = texts(r);
@@ -1806,7 +1818,11 @@ async fn bash_output_reaches_the_responder_only_for_a_listed_command_without_met
     );
 
     let mut on = base;
-    on["share_commands"] = json!(["echo SHARED*", "echo CHAIN*", "echo ENVLIKE*"]);
+    on["share_commands"] = json!([
+        "echo SHARED_MARK_1*",
+        "echo CHAIN_MARK_2*",
+        "echo ENVLIKE_MARK_3*"
+    ]);
     let some = bash_visibility(on).await;
     assert!(
         some.contains("shared=true chained=false private=false"),
@@ -2916,4 +2932,102 @@ async fn cancelling_a_delegation_kills_the_workers_bash_process_tree() {
     drop(call); // A cancelled
     until(|| !alive()).await;
     assert!(!alive(), "the child of the cancelled worker is gone");
+}
+
+#[tokio::test]
+async fn notify_on_end_is_off_by_default() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let key = load_or_create_key(&run).unwrap();
+    // allowed peer, answers on, but `accept_notify` never set
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let idle: Responder = Arc::new(|_| Some(Turn::text("A idle")));
+    let (a, ea) = side("sess-a", "alpha", &run, Some(on), idle, 10);
+    let (_ra, ep) = serve_ep(&a, &run, ea);
+    let from = asker("beta", "sess-b");
+    let o = Outgoing {
+        id: "req-notify-off",
+        from: &from,
+        to_agent: "main",
+        text: "notify me",
+        chain: std::slice::from_ref(&from.session_id),
+        timeout_s: 30,
+        extra: Extra {
+            notify_on_end: true,
+            ..Default::default()
+        },
+    };
+    match synthesis_peers::serve::begin(&ep, &key, &o).await {
+        Err(PeerError::Rejected(r)) => assert_eq!(r, "notify_off"),
+        other => panic!("{:?}", other.err()),
+    }
+}
+
+#[tokio::test]
+async fn notify_result_leaves_out_private_changed_files() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let key = load_or_create_key(&run).unwrap();
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "accept_notify": true});
+    let writes: Responder = Arc::new(|r| {
+        Some(if tool_result(r, "s1").is_none() {
+            Turn::tool("s1", "Slow", json!({}))
+        } else if tool_result(r, "w1").is_none() {
+            Turn::tool(
+                "w1",
+                "Write",
+                json!({"file_path": "ok-notes.txt", "content": "n"}),
+            )
+        } else if tool_result(r, "w2").is_none() {
+            Turn::tool(
+                "w2",
+                "Write",
+                json!({"file_path": ".env", "content": "DB=1"}),
+            )
+        } else {
+            Turn::text("A done")
+        })
+    });
+    let x = SideX {
+        mode: PermissionMode::BypassPermissions,
+        interactive: false,
+        hooks: None,
+    };
+    let (mut a, ea) = side_x(
+        "sess-a",
+        "alpha",
+        &run,
+        Some(on),
+        writes,
+        900,
+        true,
+        None,
+        &[],
+        x,
+    );
+    let (_ra, ep) = serve_ep(&a, &run, ea);
+    let a_task = tokio::spawn(async move {
+        let out = run_a(&mut a).await;
+        (a, out)
+    });
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let from = asker("beta", "sess-b");
+    let o = Outgoing {
+        id: "req-notify-files",
+        from: &from,
+        to_agent: "main",
+        text: "notify me",
+        chain: std::slice::from_ref(&from.session_id),
+        timeout_s: 30,
+        extra: Extra {
+            notify_on_end: true,
+            ..Default::default()
+        },
+    };
+    let call = synthesis_peers::serve::begin(&ep, &key, &o).await.unwrap();
+    let r = call.wait(|_, _| {}).await.unwrap();
+    let _ = a_task.await.unwrap();
+    assert!(r.text.contains("A done"), "{}", r.text);
+    assert!(r.text.contains("ok-notes.txt"), "{}", r.text);
+    assert!(!r.text.contains(".env"), "{}", r.text);
 }

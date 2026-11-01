@@ -218,6 +218,9 @@ pub struct Config {
     pub max_threads: usize,
     /// `notify_on_end` (P2): longest a subscription waits.
     pub notify_wait_max_s: u64,
+    /// Whether this session hands its task result (final text, changed files) to an allowed peer
+    /// that subscribes with `notify_on_end`. Off by default: a result is more than an answer.
+    pub accept_notify: bool,
     /// Delegation (J): off unless the user turns it on in USER settings; nobody is in
     /// `delegation_allow` by default.
     pub accept_delegation: bool,
@@ -265,6 +268,7 @@ impl Config {
             thread_idle_min: num("thread_idle_min", 30),
             max_threads: num("max_threads", 4) as usize,
             notify_wait_max_s: num("notify_wait_max_s", 3600),
+            accept_notify: flag("accept_notify", false),
             accept_delegation: flag("accept_delegation", false),
             delegation_allow: list("delegation_allow").unwrap_or_default(),
             delegation_max_hops: num("delegation_max_hops", 2) as usize,
@@ -284,11 +288,30 @@ impl Config {
     }
 
     /// Who may ask this session to do work: delegation is on, the sender is permitted at all
-    /// (`allow`, `deny`) and is named by `delegation_allow` (empty = nobody).
+    /// (`allow`, `deny`) and is named by `delegation_allow` (empty = nobody). A bare `sess:` rule
+    /// never counts there: a session name is only unique within one workspace, so write
+    /// `ws:<label>/sess:<name>`. This is policy against honest peers, not authentication: `from`
+    /// is self-asserted under the shared key (messaging.md J6).
     pub fn delegation_permits(&self, p: &Addr) -> bool {
         self.accept_delegation
             && self.permits(p)
-            && self.delegation_allow.iter().any(|r| rule_matches(r, p))
+            && self
+                .delegation_allow
+                .iter()
+                .any(|r| !r.starts_with("sess:") && rule_matches(r, p))
+    }
+
+    /// Problems in the user's settings that make a rule inert, for `synth doctor`.
+    pub fn delegation_warnings(&self) -> Vec<String> {
+        self.delegation_allow
+            .iter()
+            .filter(|r| r.starts_with("sess:"))
+            .map(|r| {
+                format!(
+                    "delegation_allow \"{r}\" is ignored: a session name is not unique across workspaces; write \"ws:<label>/{r}\""
+                )
+            })
+            .collect()
     }
 
     /// Deny beats allow. The same list governs whom I may ask and who may ask me.
@@ -298,23 +321,43 @@ impl Config {
     }
 }
 
+fn ws_matches(x: &str, p: &Addr) -> bool {
+    x == p.workspace_label || (x.len() >= 6 && p.workspace_key.starts_with(x))
+}
+
+fn sess_matches(x: &str, p: &Addr) -> bool {
+    p.session_name.as_deref() == Some(x) || (x.len() >= 8 && p.session_id.starts_with(x))
+}
+
 fn rule_matches(rule: &str, p: &Addr) -> bool {
     if let Some(x) = rule.strip_prefix("ws:") {
-        x == p.workspace_label || (x.len() >= 6 && p.workspace_key.starts_with(x))
+        // `ws:<label>/sess:<name>`: the session name counts only inside that workspace
+        match x.split_once("/sess:") {
+            Some((w, s)) => ws_matches(w, p) && sess_matches(s, p),
+            None => ws_matches(x, p),
+        }
     } else if let Some(x) = rule.strip_prefix("repo:") {
         !x.is_empty() && p.repo_key == x
     } else if let Some(x) = rule.strip_prefix("sess:") {
-        p.session_name.as_deref() == Some(x) || (x.len() >= 8 && p.session_id.starts_with(x))
+        sess_matches(x, p)
     } else if let Some(g) = rule.strip_prefix("workspace:") {
-        // shortcut: only a trailing `*` is a wildcard; upgrade to full globs when a rule needs one.
+        // shortcut: only a trailing `*` is a wildcard, and it matches on a path boundary
+        // (`/work/api*` is `/work/api` and below, never `/work/api-evil`); upgrade to full globs
+        // when a rule needs one.
         let (root, g) = (fold(&p.workspace_root), fold(g));
         match g.strip_suffix('*') {
-            Some(prefix) => root.starts_with(prefix),
+            Some(prefix) if prefix.ends_with('/') => root.starts_with(prefix),
+            Some(prefix) => root == prefix || root.starts_with(&format!("{prefix}/")),
             None => root.trim_end_matches('/') == g.trim_end_matches('/'),
         }
     } else {
         false
     }
+}
+
+/// An entry's free text as shown to others: control characters dropped, at most 120 characters.
+fn clean(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).take(120).collect()
 }
 
 /// `run/<session_id>.json` (B4).
@@ -394,6 +437,12 @@ pub fn read_entries(run_dir: &Path) -> Vec<Entry> {
         .filter(|f| f.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|f| serde_json::from_slice::<Entry>(&std::fs::read(f.path()).ok()?).ok())
         .filter(|e| e.v == 1)
+        .map(|mut e| {
+            // a registry file is written by any same-user process: bound what is shown from it
+            e.about = e.about.as_deref().map(clean);
+            e.session_name = e.session_name.as_deref().map(clean);
+            e
+        })
         .collect();
     v.sort_by(|a, b| a.session_id.cmp(&b.session_id));
     v
@@ -481,6 +530,77 @@ mod tests {
         let c = cfg(json!({"allow":["workspace:/work/*"]}));
         assert!(c.permits(&addr("web", "/work/web", "s", None)));
         assert!(!c.permits(&addr("web", "/other/web", "s", None)));
+    }
+
+    #[test]
+    fn workspace_wildcard_stops_at_a_path_boundary() {
+        let c = cfg(json!({"allow":["workspace:/work/api*","workspace:/proj/*"]}));
+        for (root, want) in [
+            ("/work/api", true),
+            ("/work/api/", true),
+            ("/work/api/sub", true),
+            ("/work/api-evil", false),
+            ("/work/apix/y", false),
+            ("/proj/web", true),
+            ("/proj", false),
+            ("/proj-evil/web", false),
+        ] {
+            assert_eq!(c.permits(&addr("x", root, "s", None)), want, "{root}");
+        }
+    }
+
+    #[test]
+    fn delegation_needs_a_workspace_scoped_session_rule() {
+        let mut c = cfg(
+            json!({"allow":["ws:alpha","ws:beta"],"accept_delegation":true,
+            "delegation_allow":["sess:backend"]}),
+        );
+        let mut a = addr("alpha", "/w/a", "s1", Some("backend"));
+        assert!(c.permits(&a));
+        // a bare name is only unique inside one workspace: it grants nothing and is reported
+        assert!(!c.delegation_permits(&a));
+        assert_eq!(c.delegation_warnings().len(), 1);
+        c.delegation_allow = vec!["ws:alpha/sess:backend".into()];
+        assert!(c.delegation_warnings().is_empty());
+        assert!(c.delegation_permits(&a));
+        // the same name in another workspace is not that session
+        a = addr("beta", "/w/b", "s2", Some("backend"));
+        assert!(c.permits(&a) && !c.delegation_permits(&a));
+        assert!(!c.delegation_permits(&addr("alpha", "/w/a", "s3", Some("other"))));
+    }
+
+    #[test]
+    fn entries_are_cut_and_cleaned_when_read_back() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = run_dir(t.path());
+        net::prepare_run_dir(&dir).unwrap();
+        let e = Entry {
+            v: 1,
+            session_id: "aaaa-cccc".into(),
+            session_name: Some(format!("x\u{1b}[31m{}", "n".repeat(300))),
+            workspace_key: "k".into(),
+            workspace_label: "api".into(),
+            workspace_root: "/r".into(),
+            cwd: "/r".into(),
+            pid: 1,
+            pid_start: None,
+            endpoint: String::new(),
+            started_at: 0,
+            repo_key: String::new(),
+            about: Some(format!("line1\nline2\u{7}{}", "a".repeat(300))),
+        };
+        let _r = Registration::create(&dir, &e).unwrap();
+        let got = &read_entries(&dir)[0];
+        for s in [
+            got.about.as_deref().unwrap(),
+            got.session_name.as_deref().unwrap(),
+        ] {
+            assert!(
+                s.chars().count() <= 120 && !s.chars().any(char::is_control),
+                "{s:?}"
+            );
+        }
+        assert!(got.about.as_deref().unwrap().starts_with("line1line2"));
     }
 
     #[test]

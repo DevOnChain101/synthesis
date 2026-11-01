@@ -243,6 +243,19 @@ pub fn doctor_lines(
         c.delegation_allow.len(),
         c.delegation_max_hops
     ));
+    v.extend(
+        c.delegation_warnings()
+            .into_iter()
+            .map(|w| format!("  warning: {w}")),
+    );
+    v.push(format!(
+        "  notify_on_end results: {}",
+        if c.accept_notify {
+            "ON (accept_notify)"
+        } else {
+            "off"
+        }
+    ));
     v.push(format!(
         "  allow: {} rule(s), deny: {} rule(s), initiate {}, answer {}, max_hops {}, max_cost_usd {}",
         c.allow.len(),

@@ -358,7 +358,12 @@ fn shares(patterns: &[String], name: &str, input: Option<&Value>) -> bool {
                 !c.is_empty()
                     && !c.contains(|ch| ";|&$`<>()\n\r".contains(ch))
                     && patterns.iter().any(|p| match p.strip_suffix('*') {
-                        Some(pre) => c.starts_with(pre),
+                        // a word boundary: `cargo test*` is not `cargo testx`, `ls*` not `lsof`
+                        Some(pre) => c.strip_prefix(pre).is_some_and(|rest| {
+                            rest.is_empty()
+                                || pre.ends_with(char::is_whitespace)
+                                || rest.starts_with(char::is_whitespace)
+                        }),
                         None => c == p,
                     })
             })
@@ -579,8 +584,11 @@ impl Harness {
         if let Some(p) = self.peers.as_ref().filter(|p| p.on()) {
             let mut st = lock(&p.state);
             st.summary.clear();
+            let root = p.session.workspace.root.to_string_lossy();
+            let home = p.run_dir.parent().map(|h| h.to_string_lossy().into_owned());
             let files = changed
                 .iter()
+                .filter(|f| !names_private_path(f, &root, home.as_deref().unwrap_or("")))
                 .take(50)
                 .map(String::as_str)
                 .collect::<Vec<_>>()
@@ -845,6 +853,10 @@ impl Harness {
     /// the asker; answers `idle` at once when no task runs, else when the task ends.
     fn peer_subscribe_end(&self, req: &Request) -> Result<BoxFut<Reply>, &'static str> {
         let link = self.peers.clone().ok_or("disabled")?;
+        // the result is the main task's final text and changed files: the user opts in (J2)
+        if !link.config.accept_notify {
+            return Err("notify_off");
+        }
         if lock(&link.state)
             .waiting_on
             .values()
@@ -1972,6 +1984,35 @@ impl Responder for HarnessResponder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn share_commands_prefix_stops_at_a_word_boundary() {
+        let pats = [
+            "cargo test*".to_string(),
+            "ls*".to_string(),
+            "make".to_string(),
+        ];
+        let hit = |c: &str| shares(&pats, "Bash", Some(&json!({ "command": c })));
+        for c in [
+            "cargo test",
+            "cargo test -p x --no-fail-fast",
+            "ls",
+            "ls -la",
+            "make",
+        ] {
+            assert!(hit(c), "{c}");
+        }
+        for c in [
+            "cargo testx",
+            "cargo tests",
+            "lsof",
+            "lsof -i",
+            "make all",
+            "cargo test; id",
+        ] {
+            assert!(!hit(c), "{c}");
+        }
+    }
 
     fn use_(id: &str, name: &str, input: Value) -> Message {
         Message {
