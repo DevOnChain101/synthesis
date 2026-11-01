@@ -1,6 +1,6 @@
 //! One agent's model loop (main agent or sub-agent): build context, stream, fold, run tools.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use futures_util::StreamExt;
 use serde_json::{Value, json};
@@ -10,7 +10,7 @@ use synthesis_events::{Event, ToolStatus};
 use synthesis_hooks::HookEvent;
 use synthesis_providers::{
     Block, Content, Delta, ErrorKind, Message, MessageBuilder, ProviderError, Request, Role,
-    StartBlock, StopReason, StreamEvent, ToolDef,
+    StartBlock, StopReason, StreamEvent, System, SystemBlock, ToolDef,
 };
 
 use crate::harness::{AgentCtx, AgentEnd, AgentState, Harness, TaskRun};
@@ -227,26 +227,40 @@ impl Harness {
         event_usage(u, cost)
     }
 
-    fn tool_defs(&self, agent: &AgentCtx) -> Vec<ToolDef> {
-        // a bare deny rule (`Bash`, `mcp__server`) hides the tool: the model never sees it
+    /// The tools `agent` may see: a bare deny rule (`Bash`, `mcp__server`) hides the tool, the
+    /// model never sees it. `ToolSearch` is listed here; `tool_defs` drops it when unused.
+    pub(crate) fn visible_specs(&self, agent: &AgentCtx) -> Vec<synthesis_tools::ToolSpec> {
         let denied = lock(&agent.perms).rules.deny.clone();
         let hidden = |n: &str| {
             denied
                 .iter()
                 .any(|r| r == n || (r.starts_with("mcp__") && n.starts_with(&format!("{r}__"))))
         };
-        self.tools
-            .specs()
-            .into_iter()
+        let mut all = self.tools.specs();
+        all.push(crate::toolsearch::spec());
+        all.into_iter()
             .filter(|s| !hidden(&s.name))
             .filter(|s| agent.allowed.as_ref().is_none_or(|a| a.contains(&s.name)))
             .filter(|s| s.name != "ListSessions" || self.peers_on())
+            .collect()
+    }
+
+    /// Tool definitions of the next request and the names of the deferred MCP tools (listed in
+    /// the system prompt instead of their schemas).
+    fn tool_defs(&self, task: &TaskRun, agent: &AgentCtx) -> (Vec<ToolDef>, BTreeSet<String>) {
+        let visible = self.visible_specs(agent);
+        let (active, deferred) = self.deferred(task, &visible);
+        let defs = visible
+            .into_iter()
+            .filter(|s| !deferred.contains(&s.name))
+            .filter(|s| s.name != crate::toolsearch::NAME || active)
             .map(|s| ToolDef {
                 name: s.name,
                 description: Some(s.description),
                 input_schema: s.input_schema,
             })
-            .collect()
+            .collect();
+        (defs, deferred)
     }
 
     /// Builds the next request from `st.messages` and refreshes `st.fixed_raw`.
@@ -265,12 +279,28 @@ impl Harness {
                     .max_output_tokens
                     .min(m.min(u64::from(u32::MAX)) as u32)
             });
+        let (tools, deferred) = self.tool_defs(task, agent);
+        let mut system = built.system;
+        if !deferred.is_empty() {
+            let note = format!(
+                "\n\nThese MCP tools are listed by name only. Before calling one, load its \
+                 definition with the ToolSearch tool (query \"select:<name>\" or keywords): {}",
+                deferred.iter().cloned().collect::<Vec<_>>().join(", ")
+            );
+            match &mut system {
+                System::Text(t) => t.push_str(&note),
+                System::Blocks(b) => b.push(SystemBlock {
+                    kind: Some("text".into()),
+                    text: Some(note.trim_start().into()),
+                }),
+            }
+        }
         let req = Request {
             model: self.model_of(agent),
             max_tokens: max_output,
-            system: Some(built.system),
+            system: Some(system),
             messages: built.messages,
-            tools: self.tool_defs(agent),
+            tools,
             temperature: None,
             thinking: None,
             reasoning_effort: lock(&self.reasoning_effort).clone(),
@@ -292,7 +322,7 @@ impl Harness {
         messages_tokens(&CharsPerToken::default(), &st.messages)
     }
 
-    fn window(task: &TaskRun) -> u64 {
+    pub(crate) fn window(task: &TaskRun) -> u64 {
         task.caps.context_window.unwrap_or(DEFAULT_WINDOW).max(1)
     }
 

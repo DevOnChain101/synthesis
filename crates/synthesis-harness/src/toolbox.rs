@@ -76,6 +76,9 @@ impl ToolBox {
     }
 
     pub fn spec(&self, name: &str) -> Option<ToolSpec> {
+        if name == crate::toolsearch::NAME {
+            return Some(crate::toolsearch::spec());
+        }
         self.specs().into_iter().find(|s| s.name == name)
     }
 

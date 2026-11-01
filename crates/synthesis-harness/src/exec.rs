@@ -486,6 +486,12 @@ impl Harness {
         let Some(spec) = self.agent_spec(agent, &call.name) else {
             return err(format!("Unknown tool \"{}\"", call.name));
         };
+        if self.is_deferred(task, agent, &call.name) {
+            return err(format!(
+                "{0} is a deferred MCP tool: its definition is not loaded yet. Call ToolSearch with query \"select:{0}\" first, then call it again.",
+                call.name
+            ));
+        }
         if let Err(e) = validate(&spec, &input) {
             // Schema messages quote the offending value.
             return err(if self.tools.is_sensitive(&call.name, &input) {
@@ -1453,6 +1459,8 @@ impl Harness {
                 && input.get("scope").and_then(Value::as_str) == Some("all"))
         {
             self.run_peer_list(call.name == "ListSessions").await
+        } else if call.name == crate::toolsearch::NAME {
+            self.run_tool_search(task, agent, &input)
         } else if matches!(call.name.as_str(), "SendMessage" | "ListAgents") {
             self.run_comm(task, agent, &call.name, &input)
         } else {

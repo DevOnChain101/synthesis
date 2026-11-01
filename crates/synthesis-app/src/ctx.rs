@@ -14,7 +14,7 @@ use synthesis_context::{
 };
 use synthesis_events::ArtifactRef;
 use synthesis_harness::{
-    AutoCompact, BoxFut, Built, Compaction, ContextProvider, RULES, ShellSettings,
+    AutoCompact, BoxFut, Built, Compaction, ContextProvider, RULES, ShellSettings, ToolSearchMode,
 };
 use synthesis_providers::{
     Block, Content, Delta, Message, ModelProvider, Request, Role, StreamEvent, System, SystemBlock,
@@ -47,6 +47,17 @@ pub fn read_shell_settings(user_settings: &Path) -> (ShellSettings, Vec<String>)
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or(serde_json::Value::Null);
     ShellSettings::from_settings(&v)
+}
+
+/// `synthesis.mcp.toolSearch` of the USER settings.json (a repository must not change how MCP
+/// schemas are sent). Missing or unreadable file = `auto`; diagnostics name keys only.
+pub fn read_tool_search(user_settings: &Path) -> (ToolSearchMode, Vec<String>) {
+    let v = std::fs::read(user_settings)
+        .ok()
+        .filter(|b| b.len() <= 1 << 20)
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(serde_json::Value::Null);
+    ToolSearchMode::from_settings(&v)
 }
 
 pub type PutArtifact = Box<dyn Fn(&[u8]) -> Result<ArtifactRef, String> + Send + Sync>;
@@ -642,6 +653,22 @@ impl ContextProvider for SynthesisContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_search_setting_parses_and_defaults() {
+        let p = |j: serde_json::Value| ToolSearchMode::from_settings(&j);
+        assert_eq!(p(serde_json::json!({})), (ToolSearchMode::Auto, vec![]));
+        let on = serde_json::json!({"synthesis":{"mcp":{"toolSearch":"on"}}});
+        assert_eq!(p(on), (ToolSearchMode::On, vec![]));
+        let off = serde_json::json!({"synthesis":{"mcp":{"toolSearch":"off"}}});
+        assert_eq!(p(off).0, ToolSearchMode::Off);
+        let (m, d) = p(serde_json::json!({"synthesis":{"mcp":{"toolSearch":"maybe"}}}));
+        assert_eq!((m, d.len()), (ToolSearchMode::Auto, 1));
+        assert_eq!(
+            read_tool_search(Path::new("/nonexistent/settings.json")).0,
+            ToolSearchMode::Auto
+        );
+    }
 
     #[test]
     fn auto_compact_settings_parse_clamp_and_default() {
