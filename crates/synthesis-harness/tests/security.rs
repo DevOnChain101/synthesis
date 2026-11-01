@@ -142,6 +142,8 @@ fn sub_agents() -> AgentTable {
             "Read".into(),
         ]),
         mode: None,
+        model: None,
+        max_turns: None,
     }])
 }
 
@@ -239,6 +241,8 @@ async fn a_sub_agent_may_search_memory_but_never_change_it() {
         prompt: "".into(),
         tools: None,
         mode: None,
+        model: None,
+        max_turns: None,
     }]);
     let mut rig = Rig::build(
         Opts {

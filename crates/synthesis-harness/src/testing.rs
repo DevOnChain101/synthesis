@@ -197,6 +197,19 @@ impl Turn {
         self
     }
 
+    /// A provider that sends no usage at all.
+    pub fn without_usage(mut self) -> Self {
+        for s in &mut self.steps {
+            if let Step::Event(StreamEvent::MessageStart { message }) = s {
+                message.usage = Usage::default();
+            }
+            if let Step::Event(StreamEvent::MessageDelta { usage, .. }) = s {
+                *usage = None;
+            }
+        }
+        self
+    }
+
     pub fn with_usage(mut self, input: u64, output: u64) -> Self {
         for s in &mut self.steps {
             if let Step::Event(StreamEvent::MessageStart { message }) = s {

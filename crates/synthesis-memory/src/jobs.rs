@@ -182,13 +182,15 @@ mod tests {
     }
 
     #[test]
-    fn newer_schema_refuses() {
+    fn newer_schema_opens_read_only() {
         let d = tempfile::tempdir().unwrap();
         let s = Store::open(d.path(), vec![]).unwrap();
         s.conn
             .execute("INSERT INTO schema_migrations VALUES (99, 'x')", [])
             .unwrap();
         drop(s);
-        assert!(Store::open(d.path(), vec![]).is_err());
+        let mut s = Store::open(d.path(), vec![]).unwrap();
+        assert!(s.read_only());
+        assert!(s.enqueue_job("w", "s", "t", "{}").is_err());
     }
 }

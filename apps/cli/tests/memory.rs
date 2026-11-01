@@ -794,3 +794,176 @@ mod round2 {
         );
     }
 }
+
+/// Backend gaps closed on 2026-11-01 (docs/specs/memory.md §11 runbook, budgets, agent scope).
+mod gaps {
+    use super::*;
+
+    fn doctor(r: &Rig) -> String {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_synth"));
+        c.arg("doctor").env_clear();
+        for k in ["PATH", "SystemRoot", "PATHEXT", "ComSpec", "TEMP", "TMP"] {
+            if let Some(v) = std::env::var_os(k) {
+                c.env(k, v);
+            }
+        }
+        c.env("HOME", r.dir.path())
+            .env("USERPROFILE", r.dir.path())
+            .env("SYNTHESIS_HOME", r.dir.path().join("synthesis"));
+        String::from_utf8_lossy(&c.output().unwrap().stdout).into_owned()
+    }
+
+    fn db(r: &Rig) -> PathBuf {
+        r.dir.path().join("synthesis/memory/memory.db")
+    }
+
+    const ONE_TURN: &str = r#"[{"text":"done"}]"#;
+
+    #[test]
+    fn a_newer_schema_is_read_only_for_the_run_and_the_cli() {
+        let r = Rig::new();
+        let repo = cwd(&r.repo()).to_string();
+        r.ok(&["add", "Tests: run cargo test --workspace", "--cwd", &repo]);
+        rusqlite::Connection::open(db(&r))
+            .unwrap()
+            .execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (99, 'x')",
+                [],
+            )
+            .unwrap();
+        // retrieval still works, writes refuse with a clear message
+        assert!(r.ok(&["list", "--cwd", &repo]).contains("cargo test"));
+        let o = r
+            .cmd(&["add", "another note", "--cwd", &repo])
+            .output()
+            .unwrap();
+        assert!(!o.status.success());
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains("read-only"),
+            "{}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        let (events, err) = r.synth_run(ONE_TURN, &[]);
+        assert!(err.contains("memory is read-only"), "{err}");
+        assert!(events.contains("memory.retrieved"), "{events}");
+        assert!(!events.contains("memory.written"), "{events}");
+        let d = doctor(&r);
+        assert!(d.contains("READ-ONLY"), "{d}");
+    }
+
+    #[test]
+    fn a_store_that_fails_quick_check_is_off_for_the_run_and_doctor_says_why() {
+        let r = Rig::new();
+        let repo = cwd(&r.repo()).to_string();
+        for i in 0..40 {
+            r.ok(&[
+                "add",
+                &format!("note {i} {}", "padding ".repeat(60)),
+                "--cwd",
+                &repo,
+            ]);
+        }
+        // damage a page near the end of the file (the WAL was checkpointed when the last process exited)
+        let mut bytes = std::fs::read(db(&r)).unwrap();
+        assert!(bytes.len() > 4096 * 6, "{}", bytes.len());
+        let at = bytes.len() - 4096 * 2;
+        bytes[at..at + 4096].fill(0xA5);
+        std::fs::write(db(&r), bytes).unwrap();
+        let (events, err) = r.synth_run(ONE_TURN, &[]);
+        assert!(
+            err.contains("memory is off for this run: quick_check failed"),
+            "{err}"
+        );
+        assert!(!events.contains("memory.retrieved"), "{events}");
+        assert!(events.contains("task.ended"), "{events}");
+        let d = doctor(&r);
+        assert!(d.contains("UNUSABLE") || d.contains("OFF for runs"), "{d}");
+    }
+
+    #[test]
+    fn agent_scope_notes_are_written_for_one_definition() {
+        let r = Rig::new();
+        let repo = cwd(&r.repo()).to_string();
+        let out = r.ok(&[
+            "add",
+            "Always run clippy before replying",
+            "--scope",
+            "agent",
+            "--agent",
+            "reviewer",
+            "--cwd",
+            &repo,
+        ]);
+        assert!(out.contains("added"), "{out}");
+        // --agent alone implies the scope
+        r.ok(&[
+            "add",
+            "Check the changelog",
+            "--agent",
+            "docs",
+            "--cwd",
+            &repo,
+        ]);
+        let c = rusqlite::Connection::open(db(&r)).unwrap();
+        let keys: Vec<String> = c
+            .prepare("SELECT scope_key FROM memories WHERE scope='agent' ORDER BY title")
+            .unwrap()
+            .query_map([], |x| x.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(
+            keys[0].starts_with("reviewer@") && keys[1].starts_with("docs@"),
+            "{keys:?}"
+        );
+        // it needs a definition, and the flag is refused for other scopes
+        let o = r
+            .cmd(&["add", "x note", "--scope", "agent", "--cwd", &repo])
+            .output()
+            .unwrap();
+        assert!(!o.status.success());
+        let o = r
+            .cmd(&["add", "x note", "--user", "--agent", "docs", "--cwd", &repo])
+            .output()
+            .unwrap();
+        assert!(!o.status.success());
+        // the main agent's retrieval does not include agent-scope notes
+        let (events, _) = r.synth_run(ONE_TURN, &[]);
+        assert!(!events.contains("clippy"), "{events}");
+    }
+
+    #[test]
+    fn stats_stay_quiet_within_the_budgets() {
+        let r = Rig::new();
+        let repo = cwd(&r.repo()).to_string();
+        r.ok(&["add", "one note", "--cwd", &repo]);
+        let st = r.ok(&["stats"]);
+        assert!(!st.contains("warning:"), "{st}");
+        assert!(r.ok(&["prune"]).contains("archived 0"));
+    }
+
+    #[test]
+    fn a_reflection_without_provider_usage_is_estimated_and_marked() {
+        let r = Rig::new();
+        r.opt_in_reflection();
+        std::fs::write(r.repo().join("a.txt"), "x\n").unwrap();
+        let ops = r#"{\"ops\":[{\"op\":\"add\",\"kind\":\"fact\",\"scope\":\"workspace\",\"title\":\"a.txt\",\"body\":\"a.txt exists\",\"evidence\":[\"tool:fake_1_0\"]}]}"#;
+        let script = format!(
+            r#"[{{"tools":[{{"name":"Read","input":{{"file_path":"missing.txt"}}}}]}},{{"tools":[{{"name":"Read","input":{{"file_path":"a.txt"}}}}]}},{{"text":"done"}},{{"text":"{ops}","usage":null}}]"#
+        );
+        let (events, err) = r.synth_run(&script, &[]);
+        let line = events
+            .lines()
+            .find(|l| l.contains("memory.reflection.completed"))
+            .unwrap_or_else(|| panic!("{events}\n{err}"));
+        assert!(line.contains("\"estimated\":true"), "{line}");
+        let tokens: u64 = line
+            .split("\"tokens\":")
+            .nth(1)
+            .and_then(|t| t.split([',', '}']).next())
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(0);
+        assert!(tokens > 0, "{line}");
+    }
+}

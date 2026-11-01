@@ -623,6 +623,8 @@ fn agents() -> AgentTable {
             prompt: "You write files.".into(),
             tools: Some(vec!["Write".into(), "Grep".into()]),
             mode: Some(Mode::BypassPermissions),
+            model: None,
+            max_turns: None,
         },
         AgentDef {
             name: "planner".into(),
@@ -630,6 +632,8 @@ fn agents() -> AgentTable {
             prompt: "".into(),
             tools: Some(vec!["Grep".into()]),
             mode: Some(Mode::Plan),
+            model: None,
+            max_turns: None,
         },
         AgentDef {
             name: "reader".into(),
@@ -637,6 +641,8 @@ fn agents() -> AgentTable {
             prompt: "".into(),
             tools: Some(vec!["Read".into()]),
             mode: None,
+            model: None,
+            max_turns: None,
         },
         AgentDef {
             name: "nest".into(),
@@ -644,6 +650,8 @@ fn agents() -> AgentTable {
             prompt: "".into(),
             tools: Some(vec!["Task".into()]),
             mode: None,
+            model: None,
+            max_turns: None,
         },
     ])
 }
@@ -984,4 +992,94 @@ async fn bare_deny_hides_the_tool() {
         "a scoped deny keeps the tool: {names:?}"
     );
     assert!(names.contains(&"Read".to_string()));
+}
+
+// ---- sub-agent frontmatter `model` and `maxTurns` -----------------------------------------
+
+fn limited_agents() -> AgentTable {
+    let def = |name: &str, model: Option<&str>, max_turns: Option<u32>| AgentDef {
+        name: name.into(),
+        description: "".into(),
+        prompt: "".into(),
+        tools: Some(vec!["Grep".into()]),
+        mode: None,
+        model: model.map(String::from),
+        max_turns,
+    };
+    AgentTable::new([
+        def("cheap", Some("small-model"), None),
+        def("alien", Some("other/huge"), None),
+        def("brief", None, Some(1)),
+    ])
+}
+
+fn resolver() -> synthesis_harness::ModelResolver {
+    Arc::new(|m| match m.split_once('/') {
+        Some((p, _)) => Err(format!("it belongs to provider \"{p}\"")),
+        None => Ok(m.to_string()),
+    })
+}
+
+fn limited_rig(script: Vec<Turn>) -> Rig {
+    let probe = Probe::new("Grep", SideEffectClass::Read, 0, "g");
+    Rig::build(
+        Opts {
+            tools: ToolBox::new(Registry::builtin()).with_tool(probe),
+            ..Opts::default()
+        },
+        script,
+        |h, _| {
+            h.with_agents(limited_agents())
+                .with_model_resolver(resolver())
+        },
+    )
+}
+
+#[tokio::test]
+async fn subagent_model_is_used_when_the_provider_resolves_it() {
+    let mut rig = limited_rig(vec![
+        task_call("tk", "cheap"),
+        Turn::text("child done"),
+        Turn::text("parent done"),
+    ]);
+    let out = rig.run("delegate").await;
+    assert_eq!(out.final_text, "parent done");
+    let reqs = rig.requests();
+    assert_eq!(reqs[0].model, "fake-model");
+    assert_eq!(reqs[1].model, "small-model", "the child's own model");
+    assert_eq!(reqs[2].model, "fake-model", "the parent is unchanged");
+}
+
+#[tokio::test]
+async fn subagent_model_of_another_provider_is_refused_with_a_notice() {
+    let mut rig = limited_rig(vec![
+        task_call("tk", "alien"),
+        Turn::text("child done"),
+        Turn::text("parent done"),
+    ]);
+    rig.run("delegate").await;
+    let reqs = rig.requests();
+    assert_eq!(reqs[1].model, "fake-model");
+    assert!(
+        rig.events().iter().any(|e| matches!(&e.event,
+            Event::Notice { text, .. } if text.contains("other/huge") && text.contains("ignored"))),
+        "a notice names the refused model"
+    );
+}
+
+#[tokio::test]
+async fn subagent_max_turns_stops_that_agent_only() {
+    // the child would make a second request after its tool round; maxTurns 1 ends it first
+    let mut rig = limited_rig(vec![
+        task_call("tk", "brief"),
+        Turn::tool("g1", "Grep", json!({"pattern": "x"})),
+        Turn::text("never reached by the child"),
+        Turn::text("parent done"),
+    ]);
+    let out = rig.run("delegate").await;
+    let reqs = rig.requests();
+    assert_eq!(reqs.len(), 3, "parent, one child request, parent again");
+    let (task_res, _) = tool_result(&reqs[2], "tk").unwrap();
+    assert!(task_res.contains("agent_max_turns"), "{task_res}");
+    assert_eq!(out.status, TaskStatus::Completed, "the task itself goes on");
 }

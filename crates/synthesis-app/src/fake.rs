@@ -1,6 +1,7 @@
 //! `--provider fake:<script.json>` (feature `test-provider`): replays a scripted conversation.
 //! Script = JSON array of turns: `{"text"?: str, "tools"?: [{"id"?: str, "name": str, "input": obj}],
-//! "delay_ms"?: u64, "usage"?: [input, output]}`.
+//! "delay_ms"?: u64, "usage"?: [input, output] | null}`
+//! (`null` = the provider reports no usage).
 //!
 //! Test-only extras for scripts that drive several agents of one process (cross-session peers):
 //! - `"for": "responder" | "delegate"`: the turn is served to the peer responder / the peer
@@ -60,6 +61,9 @@ fn turn_of(i: usize, t: &Value, req: Option<&Request>) -> Turn {
     };
     if let Some(ms) = t.get("delay_ms").and_then(Value::as_u64) {
         turn = turn.delayed(ms);
+    }
+    if t.get("usage").is_some_and(Value::is_null) {
+        turn = turn.without_usage();
     }
     if let Some([a, b]) = t.get("usage").and_then(Value::as_array).map(Vec::as_slice) {
         turn = turn.with_usage(a.as_u64().unwrap_or(0), b.as_u64().unwrap_or(0));

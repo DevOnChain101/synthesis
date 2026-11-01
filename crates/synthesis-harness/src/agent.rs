@@ -266,7 +266,7 @@ impl Harness {
                     .min(m.min(u64::from(u32::MAX)) as u32)
             });
         let req = Request {
-            model: self.config.model.clone(),
+            model: self.model_of(agent),
             max_tokens: max_output,
             system: Some(built.system),
             messages: built.messages,
@@ -277,6 +277,15 @@ impl Harness {
         };
         st.fixed_raw = fixed_tokens(&req);
         Ok(req)
+    }
+
+    /// The model of the next request: the sub-agent's own (frontmatter `model`) or the session's.
+    fn model_of(&self, agent: &AgentCtx) -> String {
+        agent
+            .limits
+            .model
+            .clone()
+            .unwrap_or_else(|| self.config.model.clone())
     }
 
     fn messages_raw(&self, st: &AgentState) -> u64 {
@@ -457,6 +466,14 @@ impl Harness {
             if let Some(kind) = self.budget_hit(task, agent) {
                 return AgentEnd::Budget(kind);
             }
+            // frontmatter `maxTurns`: ends this agent only; the task budget above stays the outer bound
+            if agent
+                .limits
+                .max_turns
+                .is_some_and(|n| iteration >= i64::from(n))
+            {
+                return AgentEnd::Budget("agent_max_turns");
+            }
             st.requests += 1;
             let mut req = match self.make_request(task, agent, st) {
                 Ok(r) => r,
@@ -525,7 +542,7 @@ impl Harness {
                 agent,
                 Some(&turn),
                 Event::TurnStarted {
-                    model: self.config.model.clone(),
+                    model: self.model_of(agent),
                     provider: self.provider.id().to_string(),
                     iteration,
                 },

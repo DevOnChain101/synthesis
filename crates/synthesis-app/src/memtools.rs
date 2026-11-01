@@ -96,7 +96,7 @@ impl Tool for MemTool {
     fn execute<'a>(&'a self, input: Value, ctx: &'a ToolContext) -> BoxFuture<'a, ToolOutput> {
         Box::pin(async move {
             let r = match self.op {
-                Op::Search => self.search(&input),
+                Op::Search => self.search(&input, ctx),
                 Op::Write => self.write(&input, ctx),
                 Op::Update => self.update(&input, ctx),
                 Op::Forget => self.forget(&input, ctx),
@@ -133,7 +133,7 @@ pub fn agent_note_oracle(run: Arc<MemoryRun>) -> Arc<dyn Fn(&str) -> bool + Send
 }
 
 impl MemTool {
-    fn search(&self, input: &Value) -> Result<ToolOutput, String> {
+    fn search(&self, input: &Value, ctx: &ToolContext) -> Result<ToolOutput, String> {
         let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(5) as usize;
         let want = str_of(input, "scope");
         let f = Filter {
@@ -148,6 +148,8 @@ impl MemTool {
             .map_err(|e| e.to_string())?
             .into_iter()
             .filter(|m| want.is_none_or(|w| m.scope == w))
+            // a sub-agent sees pinned notes only (§4); its own `agent` notes are in its block
+            .filter(|m| !ctx.sub_agent || m.pinned)
             .take(limit)
             .collect();
         if found.is_empty() {
@@ -379,6 +381,7 @@ mod tests {
             deadline: None,
             cancel: tokio_util::sync::CancellationToken::new(),
             skip_secrets: false,
+            sub_agent: false,
         };
         Rig {
             tools: tools(run.clone()),
@@ -667,5 +670,38 @@ mod tests {
             })
             .unwrap();
         assert!(active.iter().all(|m| m.body != "edited text"), "not active");
+    }
+
+    #[tokio::test]
+    async fn memory_search_in_a_sub_agent_returns_pinned_notes_only() {
+        let mut r = rig(true);
+        let key = r.repo.key.clone();
+        {
+            let mut s = r.run.store.lock().unwrap();
+            for (title, pinned) in [("Plain build note", false), ("Pinned build rule", true)] {
+                let mut n = NewMemory::new(
+                    "workspace",
+                    &key,
+                    "fact",
+                    title,
+                    "the build command is cargo build",
+                    Trust::Owner,
+                );
+                n.pinned = pinned;
+                s.put(n).unwrap();
+            }
+        }
+        let q = json!({"query": "build command"});
+        let main = Rig::text(&r.call("MemorySearch", q.clone()).await);
+        assert!(
+            main.contains("Plain build note") && main.contains("Pinned build rule"),
+            "{main}"
+        );
+        r.ctx.sub_agent = true;
+        let sub = Rig::text(&r.call("MemorySearch", q).await);
+        assert!(
+            sub.contains("Pinned build rule") && !sub.contains("Plain build note"),
+            "{sub}"
+        );
     }
 }

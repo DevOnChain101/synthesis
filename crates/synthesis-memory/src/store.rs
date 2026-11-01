@@ -79,6 +79,8 @@ CREATE TABLE memory_retrievals(session_id TEXT NOT NULL, tokens INTEGER NOT NULL
 ";
 
 const MIGRATIONS: &[&str] = &[V1, V2, V3];
+/// The schema version this build writes.
+pub const SCHEMA_VERSION: usize = MIGRATIONS.len();
 
 const MAX_IMPORT_BYTES: usize = 5 << 20;
 const MAX_IMPORT_LINES: usize = 5000;
@@ -249,6 +251,8 @@ pub struct Stats {
     pub failed_jobs: i64,
     pub pending_proposals: i64,
     pub quarantined: i64,
+    /// Budgets that are exceeded (empty when within them).
+    pub over_budget: Vec<String>,
     /// Tokens injected per retrieval (nearest rank over the last 1000).
     pub injected_tokens_p50: Option<i64>,
     pub injected_tokens_p95: Option<i64>,
@@ -266,6 +270,72 @@ pub struct Store {
     pub(crate) conn: Connection,
     pub(crate) redactor: Redactor,
     path: PathBuf,
+    read_only: bool,
+}
+
+/// Soft budgets (memory.md §11): active records per workspace / for the user scope, and the file size.
+pub const WORKSPACE_CAP: i64 = 5000;
+pub const USER_CAP: i64 = 2000;
+pub const DB_SOFT_CAP: u64 = 256 * 1024 * 1024;
+
+/// Budgets `prune` enforces; `Default` is the spec's numbers (a test passes small ones).
+#[derive(Clone, Copy)]
+pub struct Caps {
+    pub workspace: i64,
+    pub user: i64,
+    pub db_bytes: u64,
+}
+
+impl Default for Caps {
+    fn default() -> Self {
+        Self {
+            workspace: WORKSPACE_CAP,
+            user: USER_CAP,
+            db_bytes: DB_SOFT_CAP,
+        }
+    }
+}
+
+/// Active-record counts over their cap, as `(scope, scope_key, count, cap)`.
+fn over_cap(conn: &Connection, caps: &Caps) -> rusqlite::Result<Vec<(String, String, i64, i64)>> {
+    let mut st = conn.prepare(
+        "SELECT scope, scope_key, count(*) FROM memories WHERE status='active' AND scope IN ('user','workspace') GROUP BY scope, scope_key",
+    )?;
+    let rows: Vec<(String, String, i64)> = st
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows
+        .into_iter()
+        .map(|(sc, k, n)| {
+            let cap = if sc == "user" {
+                caps.user
+            } else {
+                caps.workspace
+            };
+            (sc, k, n, cap)
+        })
+        .filter(|r| r.2 > r.3)
+        .collect())
+}
+
+/// One line per exceeded budget, for `memory stats` and `synth doctor`.
+pub fn budget_warnings(conn: &Connection, db_bytes: u64) -> rusqlite::Result<Vec<String>> {
+    let caps = Caps::default();
+    let mut v: Vec<String> = over_cap(conn, &caps)?
+        .into_iter()
+        .map(|(sc, k, n, cap)| {
+            let who = if sc == "user" { "user scope".into() } else { format!("workspace {k}") };
+            format!("{who} has {n} active records (soft cap {cap}); `synth memory prune` archives the oldest episodes")
+        })
+        .collect();
+    if db_bytes > caps.db_bytes {
+        v.push(format!(
+            "memory.db is {} MiB (soft cap {} MiB); `synth memory prune` archives the oldest episodes",
+            db_bytes >> 20,
+            caps.db_bytes >> 20
+        ));
+    }
+    Ok(v)
 }
 
 fn private_dir(p: &Path) -> Result<()> {
@@ -350,7 +420,8 @@ pub(crate) fn new_id(prefix: &str) -> String {
 
 impl Store {
     /// Opens (creating, migrating) `<synthesis_home>/memory/memory.db`. A schema newer than this
-    /// build is an error: the caller runs without memory. `secrets` are exact values to mask.
+    /// build opens READ-ONLY (`read_only()`; retrieval works, every write fails with a clear
+    /// message). `secrets` are exact values to mask.
     pub fn open(synthesis_home: &Path, secrets: Vec<String>) -> Result<Self> {
         let dir = synthesis_home.join("memory");
         private_dir(&dir)?;
@@ -365,6 +436,15 @@ impl Store {
         let conn = Connection::open(&path)?;
         conn.busy_timeout(Duration::from_millis(5000))?;
         conn.pragma_update(None, "foreign_keys", true)?;
+        if current_version(&conn)? > MIGRATIONS.len() {
+            conn.pragma_update(None, "query_only", true)?;
+            return Ok(Self {
+                conn,
+                redactor: Redactor::new(secrets),
+                path,
+                read_only: true,
+            });
+        }
         // Switching a fresh file to WAL while another process does the same fails at once with
         // SQLITE_IOERR/BUSY (the busy timeout does not apply), so retry briefly.
         let mut tries = 0;
@@ -391,6 +471,7 @@ impl Store {
             conn,
             redactor: Redactor::new(secrets),
             path,
+            read_only: false,
         };
         s.migrate(&dir)?;
         drop(lock);
@@ -399,12 +480,6 @@ impl Store {
 
     fn migrate(&mut self, dir: &Path) -> Result<()> {
         let have = current_version(&self.conn)?;
-        if have > MIGRATIONS.len() {
-            return Err(Error(format!(
-                "memory schema v{have} is newer than this build (v{}); memory is off for this run",
-                MIGRATIONS.len()
-            )));
-        }
         if have == MIGRATIONS.len() {
             return Ok(());
         }
@@ -439,6 +514,11 @@ impl Store {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// True when the store's schema is newer than this build: reads work, writes fail.
+    pub fn read_only(&self) -> bool {
+        self.read_only
     }
 
     pub fn schema_version(&self) -> Result<usize> {
@@ -901,6 +981,10 @@ impl Store {
             failed_jobs: n("SELECT count(*) FROM reflection_jobs WHERE status='failed'")?,
             pending_proposals: n("SELECT count(*) FROM proposals WHERE status='pending'")?,
             quarantined: n("SELECT count(*) FROM memories WHERE status='quarantined'")?,
+            over_budget: budget_warnings(
+                &self.conn,
+                fs::metadata(&self.path).map_or(0, |m| m.len()),
+            )?,
             injected_tokens_p50: pct(&tokens, 50),
             injected_tokens_p95: pct(&tokens, 95),
             retrievals: n("SELECT count(*) FROM memory_retrievals")?,
@@ -973,6 +1057,17 @@ impl Store {
     /// confidence has decayed below 0.2 and that were unused for 90 days are archived (spec §7).
     /// Facts, lessons and skills are never deleted automatically. Returns (deleted, archived).
     pub fn prune(&mut self, retention_days: i64, now: OffsetDateTime) -> Result<(usize, usize)> {
+        self.prune_capped(retention_days, now, &Caps::default())
+    }
+
+    /// `prune` plus the budgets: a scope over its active-record cap, or a file over the soft size
+    /// cap, has its oldest unpinned non-owner episodes archived (never notes the person wrote).
+    pub fn prune_capped(
+        &mut self,
+        retention_days: i64,
+        now: OffsetDateTime,
+        caps: &Caps,
+    ) -> Result<(usize, usize)> {
         let cut = |d: i64| {
             (now - time::Duration::days(d))
                 .format(&Rfc3339)
@@ -1002,6 +1097,24 @@ impl Store {
                 )?;
                 archived += 1;
             }
+        }
+        let oldest_episodes = "UPDATE memories SET status='archived', updated_at=?1 WHERE id IN (
+            SELECT id FROM memories WHERE scope=?2 AND scope_key=?3 AND status='active' AND kind='episode'
+            AND pinned=0 AND trust<>'owner' ORDER BY coalesce(last_used_at, created_at), rid LIMIT ?4)";
+        for (sc, k, n, cap) in over_cap(&tx, caps)? {
+            archived += tx.execute(oldest_episodes, params![now_iso(), sc, k, n - cap])?;
+        }
+        let size = fs::metadata(&self.path).map_or(0, |m| m.len());
+        if size > caps.db_bytes {
+            // shortcut: the file does not shrink until the archived episodes age out (retention) and
+            // the DB is vacuumed; a quarter of the active episodes per run is a fixed step.
+            archived += tx.execute(
+                "UPDATE memories SET status='archived', updated_at=?1 WHERE id IN (
+                 SELECT id FROM memories WHERE status='active' AND kind='episode' AND pinned=0 AND trust<>'owner'
+                 ORDER BY coalesce(last_used_at, created_at), rid
+                 LIMIT (SELECT (count(*) + 3) / 4 FROM memories WHERE status='active' AND kind='episode' AND pinned=0 AND trust<>'owner'))",
+                [now_iso()],
+            )?;
         }
         tx.commit()?;
         Ok((deleted, archived))

@@ -80,7 +80,7 @@ Doc §5.12 types are kept verbatim; additions are marked. Payload field types: `
 | `memory.written` | `id:str, op:"added"\|"deduped"\|"superseded"\|"proposed"\|"quarantined"\|"updated"\|"archived", kind:str, scope:str, trust:str, status:str` | [new] a record was written by the episode writer, a `Memory*` tool or a reflection |
 | `memory.quarantined` | `id:str, rule:str` | [new] the poisoning scanner parked a record (also sent as `memory.written` with `op:"quarantined"`) |
 | `memory.reflection.started` / `memory.reflection.failed` | `job_id:str` / `job_id:str, error:str` | [new] one reflection job (a capped model call) began / failed (`error` redacted) |
-| `memory.reflection.completed` | `job_id:str, ops:u64, tokens:u64?, cost_usd:f64?` | [new] `ops` = records saved or queued for review; tokens and cost are absent while the summarizer reports no usage |
+| `memory.reflection.completed` | `job_id:str, ops:u64, tokens:u64?, cost_usd:f64?, estimated:bool?` | [new] `ops` = records saved or queued for review; `estimated:true` (omitted otherwise) = the provider sent no usage, so tokens and cost come from the chars/4 estimator |
 | `memory.proposal.created` | `id:str` | [new] a skill or instruction-file proposal was written (nothing is applied without the person) |
 | `notice` | `level:"info"\|"warn"\|"error", text:str` | [from-node agent.js:919-925 note()/toast()] |
 

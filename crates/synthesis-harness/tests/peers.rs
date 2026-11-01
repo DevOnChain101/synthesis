@@ -248,6 +248,8 @@ fn side_x(
                     prompt: "WORKER-PROMPT".into(),
                     tools: None,
                     mode: None,
+                    model: None,
+                    max_turns: None,
                 },
             ]));
             let h = match approve {

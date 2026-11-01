@@ -187,6 +187,7 @@ mod tests {
             read_ledger: Arc::new(Mutex::new(HashMap::new())),
             permission_mode: PermissionMode::Default,
             skip_secrets: false,
+            sub_agent: false,
             approval_token: None,
             deadline: None,
             cancel: tokio_util::sync::CancellationToken::new(),

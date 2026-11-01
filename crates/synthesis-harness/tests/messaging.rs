@@ -24,6 +24,8 @@ fn agents() -> AgentTable {
         prompt: "WORKER-PROMPT".into(),
         tools: None,
         mode: None,
+        model: None,
+        max_turns: None,
     }])
 }
 
@@ -605,6 +607,8 @@ async fn a_read_only_sender_cannot_wake_a_writer_into_unprompted_edits() {
             prompt: "WORKER-PROMPT".into(),
             tools: None,
             mode: None,
+            model: None,
+            max_turns: None,
         },
         AgentDef {
             name: "reader".into(),
@@ -612,6 +616,8 @@ async fn a_read_only_sender_cannot_wake_a_writer_into_unprompted_edits() {
             prompt: "READER-PROMPT".into(),
             tools: Some(vec!["Read".into()]),
             mode: None,
+            model: None,
+            max_turns: None,
         },
     ]);
     let task = |id: &str, ty: &str, name: &str| {

@@ -198,6 +198,10 @@ pub fn doctor_lines(
         if c.enabled { "enabled" } else { "off" }
     )];
     if !c.enabled {
+        v.push(
+            "  hint: turn on with `synthesis.peers.enabled: true` in user settings.json or --peers; then set accept_delegation, accept_notify and share_commands (docs/CLI.md)"
+                .into(),
+        );
         return v;
     }
     let profile = env
@@ -238,7 +242,7 @@ pub fn doctor_lines(
             .into(),
     );
     v.push(format!(
-        "  delegation: {} (delegation_allow: {} rule(s), max hops {}); a delegated task runs in this session's own permission mode, capped by the sender's",
+        "  accept_delegation: {} (delegation_allow: {} rule(s), max hops {}); a delegated task runs in this session's own permission mode, capped by the sender's",
         if c.accept_delegation { "ON" } else { "off" },
         c.delegation_allow.len(),
         c.delegation_max_hops
@@ -249,12 +253,12 @@ pub fn doctor_lines(
             .map(|w| format!("  warning: {w}")),
     );
     v.push(format!(
-        "  notify_on_end results: {}",
-        if c.accept_notify {
-            "ON (accept_notify)"
-        } else {
-            "off"
-        }
+        "  accept_notify: {} (notify_on_end results from peers)",
+        if c.accept_notify { "ON" } else { "off" }
+    ));
+    v.push(format!(
+        "  share_commands: {} command(s) peers may ask this session to run",
+        c.share_commands.len()
     ));
     v.push(format!(
         "  allow: {} rule(s), deny: {} rule(s), initiate {}, answer {}, max_hops {}, max_cost_usd {}",
@@ -271,6 +275,29 @@ pub fn doctor_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctor_names_the_peer_settings_and_hints_when_off() {
+        let home = tempfile::tempdir().unwrap();
+        let env = Env::default();
+        let off = doctor_lines(&Map::new(), home.path(), &env, true).join("\n");
+        assert!(
+            off.contains("off") && off.contains("accept_delegation"),
+            "{off}"
+        );
+        let on: Map<String, Value> = serde_json::from_str(
+            r#"{"enabled":true,"accept_notify":true,"share_commands":["cargo test"]}"#,
+        )
+        .unwrap();
+        let on = doctor_lines(&on, home.path(), &env, true).join("\n");
+        for want in [
+            "accept_delegation: off",
+            "accept_notify: ON",
+            "share_commands: 1 command(s)",
+        ] {
+            assert!(on.contains(want), "{want}\n{on}");
+        }
+    }
 
     #[test]
     fn names() {

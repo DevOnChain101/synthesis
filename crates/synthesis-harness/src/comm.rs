@@ -481,6 +481,7 @@ impl Harness {
             perms: retained.perms.clone(),
             allowed: retained.allowed.clone(),
             prompt: retained.prompt.clone(),
+            limits: retained.limits.clone(),
             origin: None,
         };
         let mut st = AgentState::new(retained.messages);
@@ -574,6 +575,7 @@ impl Harness {
             perms: ctx.perms.clone(),
             allowed: ctx.allowed.clone(),
             prompt: ctx.prompt.clone(),
+            limits: ctx.limits.clone(),
             messages,
         };
         let mut notify = self.hub.finish(&ctx.name, retained, to);
@@ -770,6 +772,32 @@ impl Harness {
         prompt: String,
     ) -> Result<(AgentCtx, AgentState), String> {
         let (mode, perms, allowed) = child_parts(self, parent, def);
+        let mut limits = crate::agents::AgentLimits {
+            model: None,
+            max_turns: def.max_turns.filter(|n| *n > 0),
+        };
+        let wanted = def
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty() && !m.eq_ignore_ascii_case("inherit"));
+        if let Some(m) = wanted {
+            let routed = match &self.model_resolver {
+                Some(r) => r(m),
+                None => Err("this harness has no model routing".to_string()),
+            };
+            match routed {
+                Ok(id) => limits.model = Some(id),
+                Err(why) => self.notice(
+                    task,
+                    "warn",
+                    format!(
+                        "agent \"{}\": model \"{m}\" ignored ({why}); it runs on the session's model",
+                        def.name
+                    ),
+                ),
+            }
+        }
         let agent_id = uuid();
         let cancel: CancellationToken = parent.cancel.child_token();
         let (name, evicted) =
@@ -798,6 +826,7 @@ impl Harness {
             perms,
             allowed: Some(allowed),
             prompt: Some(def.prompt.clone()),
+            limits,
             origin: parent.origin.clone(),
         };
         let st = AgentState::new(vec![Message {
