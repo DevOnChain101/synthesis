@@ -1,4 +1,4 @@
-//! `synth`: headless run, `auth status`, `models`, `doctor`.
+//! `synth`: the interactive app (no subcommand / `tui`), headless run, `auth status`, `models`, `doctor`.
 //!
 //! The process environment is read once (`Env::from_process`) and passed down. The binary never
 //! asks for the process cwd: `run` requires `--cwd`; other commands take an optional `--cwd`.
@@ -12,6 +12,7 @@ extern crate synthesis_app;
 
 mod import;
 mod info;
+mod tui;
 
 use std::process::ExitCode;
 
@@ -24,11 +25,14 @@ use synthesis_config::Env;
     name = "synth",
     version,
     about = "Synthesis autonomous coding agent",
-    arg_required_else_help = true
+    args_conflicts_with_subcommands = true
 )]
 struct Cli {
+    /// No subcommand: the interactive app (needs a terminal).
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
+    #[command(flatten)]
+    tui: tui::TuiArgs,
 }
 
 #[derive(Subcommand)]
@@ -42,6 +46,8 @@ enum Cmd {
     },
     /// List configured models.
     Models(info::ModelsArgs),
+    /// The interactive app (same as running `synth` with no subcommand).
+    Tui(Box<tui::TuiArgs>),
     /// Diagnose the installation.
     Doctor(CwdArg),
     /// Manage MCP server entries in your own config files (never credentials).
@@ -72,16 +78,18 @@ fn main() -> ExitCode {
     let cli = Cli::parse(); // usage errors exit 2, --version/--help exit 0
     let env = Env::from_process();
     let r = match cli.cmd {
-        Cmd::Run(a) => run::run(*a, env),
-        Cmd::Auth {
+        None => tui::launch(cli.tui, env),
+        Some(Cmd::Tui(a)) => tui::launch(*a, env),
+        Some(Cmd::Run(a)) => run::run(*a, env),
+        Some(Cmd::Auth {
             cmd: AuthCmd::Status(a),
-        } => info::auth_status(&env, a.cwd.as_deref()),
-        Cmd::Models(a) => info::models(&env, &a),
-        Cmd::Doctor(a) => info::doctor(&env, a.cwd.as_deref()),
-        Cmd::Mcp { cmd } => mcp::run_cmd(&env, cmd),
-        Cmd::Import { cmd } => import::run_cmd(&env, cmd),
-        Cmd::Memory { cmd } => memcmd::run_cmd(&env, cmd),
-        Cmd::Rewind(a) => rewind::run_cmd(&env, a),
+        }) => info::auth_status(&env, a.cwd.as_deref()),
+        Some(Cmd::Models(a)) => info::models(&env, &a),
+        Some(Cmd::Doctor(a)) => info::doctor(&env, a.cwd.as_deref()),
+        Some(Cmd::Mcp { cmd }) => mcp::run_cmd(&env, cmd),
+        Some(Cmd::Import { cmd }) => import::run_cmd(&env, cmd),
+        Some(Cmd::Memory { cmd }) => memcmd::run_cmd(&env, cmd),
+        Some(Cmd::Rewind(a)) => rewind::run_cmd(&env, a),
     };
     match r {
         Ok(code) => ExitCode::from(code),
