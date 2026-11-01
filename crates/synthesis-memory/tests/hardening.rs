@@ -7,7 +7,7 @@ use synthesis_memory::{OffsetDateTime, Store};
 fn many_processes_opening_a_fresh_store_at_once_all_succeed() {
     let d = tempfile::tempdir().unwrap();
     let home = d.path().to_path_buf();
-    let threads: Vec<_> = (0..8)
+    let threads: Vec<_> = (0..16)
         .map(|_| {
             let h = home.clone();
             std::thread::spawn(move || Store::open(&h, vec![]).map(|s| s.schema_version().unwrap()))
