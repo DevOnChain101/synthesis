@@ -959,6 +959,11 @@ pub fn prepare(
         eprintln!("synth: warning: {d}");
     }
     hcfg.shell = shell;
+    let (tool_search, diag) = crate::ctx::read_tool_search(&h.synthesis.join("settings.json"));
+    for d in &diag {
+        eprintln!("synth: warning: {d}");
+    }
+    hcfg.tool_search = tool_search;
     let am = &user_settings.auto_mode;
     hcfg.auto.model = am.model.clone();
     hcfg.auto.rules = synthesis_permissions::automode::effective_rules(

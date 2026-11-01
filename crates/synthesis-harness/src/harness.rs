@@ -92,6 +92,38 @@ impl AutoCompact {
     }
 }
 
+/// `synthesis.mcp.toolSearch` of the USER settings.json: whether MCP tool schemas are deferred
+/// behind the `ToolSearch` tool (Claude Code's MCP tool search; its `ENABLE_TOOL_SEARCH`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolSearchMode {
+    /// Defer when the MCP tool definitions take 10% or more of the context window.
+    #[default]
+    Auto,
+    /// Always defer MCP tools.
+    On,
+    /// Send every MCP tool schema upfront.
+    Off,
+}
+
+impl ToolSearchMode {
+    /// Reads `{"synthesis":{"mcp":{"toolSearch":"auto"|"on"|"off"}}}`; anything else keeps the
+    /// default and names the key only.
+    pub fn from_settings(v: &Value) -> (Self, Vec<String>) {
+        match v.pointer("/synthesis/mcp/toolSearch") {
+            None => (Self::Auto, vec![]),
+            Some(Value::String(s)) => match s.as_str() {
+                "auto" => (Self::Auto, vec![]),
+                "on" => (Self::On, vec![]),
+                "off" => (Self::Off, vec![]),
+                _ => (Self::Auto, vec![BAD_TOOL_SEARCH.into()]),
+            },
+            Some(_) => (Self::Auto, vec![BAD_TOOL_SEARCH.into()]),
+        }
+    }
+}
+
+const BAD_TOOL_SEARCH: &str = "synthesis.mcp.toolSearch must be \"auto\", \"on\" or \"off\"";
+
 /// `synthesis.shell.*` of the USER settings.json: commands the person types with `!`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShellSettings {
@@ -158,6 +190,7 @@ pub struct HarnessConfig {
     pub env: BTreeMap<String, String>,
     pub auto_compact: AutoCompact,
     pub shell: ShellSettings,
+    pub tool_search: ToolSearchMode,
     /// The judge of auto mode.
     pub auto: crate::classifier::AutoJudge,
 }
@@ -188,6 +221,7 @@ impl std::fmt::Debug for HarnessConfig {
             .field("max_tool_result_chars", &self.max_tool_result_chars)
             .field("auto_compact", &self.auto_compact)
             .field("shell", &self.shell)
+            .field("tool_search", &self.tool_search)
             .field("auto", &self.auto)
             .field("env_keys", &self.env.keys().collect::<Vec<_>>())
             .finish()
@@ -220,6 +254,7 @@ impl HarnessConfig {
             env: BTreeMap::new(),
             auto_compact: AutoCompact::default(),
             shell: ShellSettings::default(),
+            tool_search: ToolSearchMode::default(),
             auto: crate::classifier::AutoJudge::default(),
         }
     }
@@ -348,6 +383,8 @@ pub(crate) struct TaskRun {
     /// Recent user messages, the task last: what the auto-mode judge is told the task is.
     pub user_texts: Mutex<Vec<String>>,
     pub auto: Mutex<crate::classifier::AutoState>,
+    /// MCP tool search: deferral is on, and the deferred tools `ToolSearch` has loaded.
+    pub tool_search: Mutex<crate::toolsearch::Loaded>,
 }
 
 pub(crate) struct AgentCtx {
@@ -1052,6 +1089,7 @@ impl Harness {
             gate_blocked: AtomicBool::new(false),
             user_texts: Mutex::default(),
             auto: Mutex::default(),
+            tool_search: Mutex::default(),
         };
         let main = AgentCtx {
             agent_id: None,
