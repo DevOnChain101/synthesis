@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 
 use synthesis_config::Env;
 use synthesis_tui_base::Platform;
+use synthesis_tui_base::hints;
 use synthesis_tui_base::keys::{Key, Mods};
 use synthesis_tui_base::selection::{SelRow, slice_cells};
 use synthesis_tui_base::text::{char_width, csi_len, strip_ansi, width};
@@ -319,19 +320,69 @@ pub fn hyperlinks_enabled(env: &Env) -> bool {
         _ => {}
     }
     matches!(
-        env.get("TERM_PROGRAM"),
+        hints::term_program(env),
         Some("iTerm.app" | "WezTerm" | "vscode" | "ghostty")
-    ) || env.get_nonempty("WT_SESSION").is_some()
-        || env.get_nonempty("KITTY_WINDOW_ID").is_some()
-        || env
-            .get("VTE_VERSION")
-            .and_then(|v| v.parse::<u32>().ok())
-            .is_some_and(|v| v >= 5000)
+    ) || hints::windows_terminal(env)
+        || hints::kitty(env)
+        || hints::vte_version(env).is_some_and(|v| v >= 5000)
 }
 
 /// `line` (already encoded: only SGR escapes) with OSC 8 around its urls and existing paths. Width
 /// is untouched (OSC 8 has none) and the plain line, which the row cache compares, is not changed.
 pub fn hyperlink_line(line: &str, base: Option<&Path>, home: Option<&Path>) -> String {
+    hyperlink_line_cached(line, base, home, &mut LinkCache::default())
+}
+
+/// Path candidates looked up (statted) per row.
+const MAX_PATH_CHECKS: usize = 16;
+/// How long a lookup is remembered: about one frame's worth of rows, not long enough to hide a
+/// file that appears.
+const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Results of path lookups while drawing, so the same token on many rows (or the same row on
+/// every frame) is statted once per second at most.
+#[derive(Default)]
+pub struct LinkCache {
+    at: Option<std::time::Instant>,
+    seen: std::collections::HashMap<String, Option<PathTarget>>,
+}
+
+impl LinkCache {
+    fn lookup(
+        &mut self,
+        raw: &str,
+        home: Option<&Path>,
+        base: Option<&Path>,
+        fresh: &mut usize,
+    ) -> Option<PathTarget> {
+        let now = std::time::Instant::now();
+        if self.at.is_none_or(|t| now.duration_since(t) > CACHE_TTL) || self.seen.len() > 1024 {
+            self.seen.clear();
+            self.at = Some(now);
+        }
+        if let Some(t) = self.seen.get(raw) {
+            return t.clone();
+        }
+        if *fresh >= MAX_PATH_CHECKS {
+            return None;
+        }
+        *fresh += 1;
+        let t = existing_path(raw, home, base);
+        self.seen.insert(raw.to_string(), t.clone());
+        t
+    }
+}
+
+/// [`hyperlink_line`] for the screen: `cache` lives as long as the app. Launchable files (see
+/// [`launchable`]) never get a link, nor do files with an execute bit: a click in the terminal
+/// would run them.
+pub fn hyperlink_line_cached(
+    line: &str,
+    base: Option<&Path>,
+    home: Option<&Path>,
+    cache: &mut LinkCache,
+) -> String {
+    let mut fresh = 0;
     let chars: Vec<char> = strip_ansi(line).chars().collect();
     let mut spans: Vec<(usize, usize, String)> = url_spans(&chars)
         .into_iter()
@@ -342,7 +393,9 @@ pub fn hyperlink_line(line: &str, base: Option<&Path>, home: Option<&Path>) -> S
         if spans.iter().any(|s| a < s.1 && s.0 < b) {
             continue;
         }
-        if let Some(t) = existing_path(&raw, home, base) {
+        if let Some(t) = cache.lookup(&raw, home, base, &mut fresh)
+            && !launchable_file(&t.path)
+        {
             spans.push((a, b, file_uri(&t.path)));
         }
     }
@@ -398,6 +451,25 @@ pub struct PathTarget {
     pub dir: bool,
 }
 
+/// UNC (`\\host\share`, `//host/x`, `\\?\UNC\...`, `file:////host/x`) and device (`\\.\`) paths,
+/// on any host: pure string logic. `\\?\C:\x` is a local drive and is not one of them.
+pub fn non_local(p: &str) -> bool {
+    let q = p.replace('\\', "/");
+    if let Some(r) = q.strip_prefix("//?/") {
+        let b = r.as_bytes();
+        return !(b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':');
+    }
+    q.starts_with("//")
+}
+
+/// `p` is under the workspace root `base`, compared as text with `/` separators.
+fn inside(p: &str, base: Option<&Path>) -> bool {
+    let Some(base) = base else { return false };
+    let norm = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_string();
+    let (p, b) = (norm(p), norm(&base.to_string_lossy()));
+    !b.is_empty() && p.strip_prefix(&b).is_some_and(|r| r.starts_with('/'))
+}
+
 /// What a path from the screen points at right now. `file.rs:12:3` / `file.rs(12)` lose their line
 /// numbers, `~` is `home`, relative paths are taken from `base` (the session cwd), `file://` urls
 /// are decoded. The result is canonical (symlinks followed), `None` when it does not exist.
@@ -413,6 +485,11 @@ pub fn existing_path(raw: &str, home: Option<&Path>, base: Option<&Path>) -> Opt
         && rest.starts_with(['/', '\\'])
     {
         p = format!("{}{rest}", home?.display());
+    }
+    // Before anything touches the file system: a UNC / device path would make the OS contact
+    // another machine just because it was drawn on the screen.
+    if non_local(&p) && !inside(&p, base) {
+        return None;
     }
     let mut cut = p.len();
     // "name(12)" / "name(12,3)"
@@ -437,6 +514,11 @@ pub fn existing_path(raw: &str, home: Option<&Path>, base: Option<&Path>) -> Opt
         path = base?.join(path);
     }
     let path = plain(std::fs::canonicalize(&path).ok()?);
+    // a symlink may lead off the machine too
+    let shown = path.to_string_lossy();
+    if non_local(&shown) && !inside(&shown, base) {
+        return None;
+    }
     let dir = std::fs::metadata(&path).ok()?.is_dir();
     Some(PathTarget { path, dir })
 }
@@ -471,20 +553,41 @@ pub trait Opener {
     fn open(&self, target: &OpenTarget) -> io::Result<()>;
 }
 
-/// Extensions the desktop would run or install when opened.
-fn launchable(p: &Path) -> bool {
+/// THE list of extensions the desktop would run or install when opened (macOS bundles and
+/// scripts, freedesktop launchers, Windows programs and scripts, shell scripts). Used by the
+/// opener and by the hyperlinks.
+const LAUNCHABLE: [&str; 17] = [
+    "app", "command", "workflow", "terminal", "tool", "pkg", "desktop", "exe", "bat", "cmd", "com",
+    "lnk", "ps1", "msi", "scr", "sh", "jar",
+];
+
+/// By name only (no file system access).
+pub fn launchable(p: &Path) -> bool {
     let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase());
-    matches!(
-        ext.as_deref(),
-        Some("app" | "command" | "workflow" | "terminal" | "tool" | "pkg" | "desktop")
-    )
+    ext.as_deref().is_some_and(|e| LAUNCHABLE.contains(&e))
+}
+
+/// [`launchable`], or a file with an execute bit (unix).
+pub fn launchable_file(p: &Path) -> bool {
+    if launchable(p) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 /// `(program, args)` per platform. No shell is involved, so an address can never run as a
 /// command. Windows tools are spawned by absolute path under `SystemRoot`.
 pub fn command_for(
     platform: Platform,
-    env: &Env,
+    _env: &Env,
     target: &OpenTarget,
 ) -> io::Result<(PathBuf, Vec<String>)> {
     if let OpenTarget::Url(u) = target {
@@ -512,15 +615,18 @@ pub fn command_for(
             ));
         }
     }
-    let root = PathBuf::from(env.get_nonempty("SystemRoot").unwrap_or(r"C:\Windows"));
     Ok(match (platform, target) {
         (Platform::Windows, OpenTarget::Url(u)) => (
-            root.join("System32").join("rundll32.exe"),
+            synthesis_platform::system32("rundll32.exe"),
             vec!["url.dll,FileProtocolHandler".into(), u.clone()],
         ),
         // Never ShellExecute a path: `/select,` only shows it in its folder.
         (Platform::Windows, OpenTarget::Folder(p) | OpenTarget::RevealFile(p)) => {
-            (root.join("explorer.exe"), vec![format!("/select,{}", s(p))])
+            // fixed location: explorer.exe is not in System32, and the environment is not trusted
+            (
+                PathBuf::from(r"C:\Windows\explorer.exe"),
+                vec![format!("/select,{}", s(p))],
+            )
         }
         (Platform::MacOs, OpenTarget::Url(u)) => ("/usr/bin/open".into(), vec![u.clone()]),
         // `open <dir>` would launch a directory named x.app: always reveal.
@@ -704,12 +810,7 @@ mod tests {
         let env = Env::from_pairs([("SystemRoot", r"D:\Win")]);
         let u = OpenTarget::Url("https://x.y/z".into());
         let (p, a) = command_for(Platform::Windows, &env, &u).unwrap();
-        assert_eq!(
-            p,
-            PathBuf::from(r"D:\Win")
-                .join("System32")
-                .join("rundll32.exe")
-        );
+        assert_eq!(p, synthesis_platform::system32("rundll32.exe"));
         assert_eq!(a, ["url.dll,FileProtocolHandler", "https://x.y/z"]);
         let f = OpenTarget::RevealFile("/a/b.txt".into());
         assert_eq!(
@@ -722,7 +823,7 @@ mod tests {
         let wf = OpenTarget::RevealFile(r"C:\a\b.txt".into());
         assert!(command_for(Platform::Linux, &env, &wf).is_err());
         let (p, a) = command_for(Platform::Windows, &env, &wf).unwrap();
-        assert_eq!(p, PathBuf::from(r"D:\Win").join("explorer.exe"));
+        assert_eq!(p, PathBuf::from(r"C:\Windows\explorer.exe"));
         assert_eq!(a, [r"/select,C:\a\b.txt"]);
         let unc = OpenTarget::Folder(r"\\srv\share\d".into());
         assert_eq!(
@@ -921,5 +1022,136 @@ mod tests {
         assert!(out.ends_with("\x1b]8;;\x1b\\"), "{out:?}");
         // lines without links are returned as they are
         assert_eq!(hyperlink_line("plain", None, None), "plain");
+    }
+
+    #[test]
+    fn unc_and_device_paths_are_non_local_on_every_host() {
+        for p in [
+            r"\\host\share\x",
+            "//host/share/x",
+            r"\\?\UNC\host\share\x",
+            r"\\.\pipe\x",
+            "/\\host\\x",
+        ] {
+            assert!(non_local(p), "{p}");
+        }
+        for p in [r"C:\x", "C:/x", r"\\?\C:\x", "/usr/x", "src/a.rs", "~/x"] {
+            assert!(!non_local(p), "{p}");
+        }
+        // file://// is a UNC host; file:///C:/x and file:///a/b are local
+        assert!(non_local(&file_url_path("//host/x").unwrap()));
+        assert!(non_local(&file_url_path("/%5C%5Chost/x").unwrap()));
+        assert!(!non_local(&file_url_path("/a/b").unwrap()));
+        assert_eq!(file_url_path("remote/x"), None);
+    }
+
+    #[test]
+    fn a_non_local_path_is_refused_unless_it_is_inside_the_workspace() {
+        let none = None::<&Path>;
+        for raw in [
+            r"\\no-such-host\share\f.txt",
+            "//no-such-host/share/f.txt",
+            "file:////no-such-host/share/f.txt",
+            r"\\?\UNC\no-such-host\share\f.txt",
+        ] {
+            assert_eq!(existing_path(raw, none, none), None, "{raw}");
+        }
+        assert!(inside(
+            r"\\srv\share\proj\a.rs",
+            Some(Path::new(r"\\srv\share\proj"))
+        ));
+        assert!(!inside(
+            r"\\srv\share\projX\a.rs",
+            Some(Path::new(r"\\srv\share\proj"))
+        ));
+        assert!(!inside(r"\\srv\share\a.rs", None));
+        // the gate runs before any lookup: a UNC token costs no stat and gets no link
+        assert_eq!(
+            hyperlink_line(r"see \\no-such-host\share\f.txt now", None, None),
+            r"see \\no-such-host\share\f.txt now"
+        );
+    }
+
+    #[test]
+    fn launchable_files_and_bundles_get_no_link_but_folders_and_plain_files_do() {
+        let td = tempfile::tempdir().unwrap();
+        let root = plain(std::fs::canonicalize(td.path()).unwrap());
+        for f in [
+            "run.command",
+            "x.desktop",
+            "y.exe",
+            "z.bat",
+            "c.cmd",
+            "d.com",
+            "e.lnk",
+            "p.ps1",
+            "i.msi",
+            "s.scr",
+            "t.sh",
+            "ok.rs",
+        ] {
+            std::fs::write(root.join(f), "x").unwrap();
+        }
+        for d in ["Tool.app", "Safe.terminal", "plain"] {
+            std::fs::create_dir(root.join(d)).unwrap();
+        }
+        let link = |name: &str| {
+            let out = hyperlink_line(name, Some(&root), None);
+            out.contains("\x1b]8;;file://")
+        };
+        for blocked in [
+            "run.command",
+            "x.desktop",
+            "y.exe",
+            "z.bat",
+            "c.cmd",
+            "d.com",
+            "e.lnk",
+            "p.ps1",
+            "i.msi",
+            "s.scr",
+            "t.sh",
+            "Tool.app/",
+            "Safe.terminal/",
+        ] {
+            assert!(!link(blocked), "{blocked} must not be a link");
+        }
+        assert!(link("ok.rs") && link("plain/"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(root.join("tool"), "#!/bin/sh\n").unwrap();
+            std::fs::write(root.join("data.txt"), "x").unwrap();
+            std::fs::set_permissions(root.join("tool"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            assert!(!link("tool/"), "dir-looking token for an executable file");
+            assert!(!hyperlink_line("a ./tool b", Some(&root), None).contains("file://"));
+            assert!(link("./data.txt"));
+        }
+        // the opener and the links share the one list
+        assert!(launchable(Path::new("/a/B.EXE")) && launchable(Path::new("/a/x.app")));
+        assert!(!launchable(Path::new("/a/x.rs")));
+    }
+
+    #[test]
+    fn path_lookups_per_row_are_capped_and_cached() {
+        let td = tempfile::tempdir().unwrap();
+        let root = plain(std::fs::canonicalize(td.path()).unwrap());
+        let names: Vec<String> = (0..30).map(|i| format!("f{i}.rs")).collect();
+        for n in &names {
+            std::fs::write(root.join(n), "x").unwrap();
+        }
+        let count = |s: &str| s.matches("\x1b]8;;file://").count();
+        let line = names.join(" ");
+        let mut cache = LinkCache::default();
+        let out = hyperlink_line_cached(&line, Some(&root), None, &mut cache);
+        assert_eq!(count(&out), MAX_PATH_CHECKS, "at most 16 lookups per row");
+        // the same row again: the 16 are remembered, the next 16 are looked up
+        let out = hyperlink_line_cached(&line, Some(&root), None, &mut cache);
+        assert_eq!(count(&out), names.len());
+        // a repeated token costs one lookup
+        let rep = vec!["f1.rs"; 40].join(" ");
+        let out = hyperlink_line_cached(&rep, Some(&root), None, &mut LinkCache::default());
+        assert_eq!(count(&out), 40);
     }
 }

@@ -2983,6 +2983,7 @@ dependencies = [
  "synthesis-events",
  "synthesis-harness",
  "synthesis-permissions",
+ "synthesis-platform",
  "synthesis-providers",
  "synthesis-session",
  "synthesis-terminal",

@@ -15,6 +15,7 @@ synthesis-core = { path = "../synthesis-core" }
 synthesis-events = { path = "../synthesis-events" }
 synthesis-harness = { path = "../synthesis-harness" }
 synthesis-permissions = { path = "../synthesis-permissions" }
+synthesis-platform = { path = "../synthesis-platform" }
 synthesis-providers = { path = "../synthesis-providers" }
 synthesis-session = { path = "../synthesis-session" }
 synthesis-tools = { path = "../synthesis-tools" }

@@ -24,7 +24,9 @@ use synthesis_tui_base::terminal::{GuardOptions, TerminalGuard};
 use crate::SavedSession;
 use crate::app::{App, AppConfig, Cmd, Info, PermAction};
 use crate::link::{Msg, TaskDone, UiLink, UserDone};
-use crate::links::{OpenTarget, Opener, SystemOpener, hyperlink_line, hyperlinks_enabled};
+use crate::links::{
+    LinkCache, OpenTarget, Opener, SystemOpener, hyperlink_line_cached, hyperlinks_enabled,
+};
 use crate::resume::Resume;
 use crate::status::SandboxStatus;
 use crate::tty::{SharedOut, Tty};
@@ -582,8 +584,9 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                 .get_nonempty(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
                 .map(std::path::PathBuf::from),
         );
+        let cache = std::cell::RefCell::new(LinkCache::default());
         screen.set_linker(Some(Box::new(move |l| {
-            hyperlink_line(l, base.as_deref(), home.as_deref())
+            hyperlink_line_cached(l, base.as_deref(), home.as_deref(), &mut cache.borrow_mut())
         })));
     }
     screen.enter()?;

@@ -2270,3 +2270,29 @@ fn skills_and_mcp_prompts_are_listed_in_help_and_never_shadow_a_built_in() {
     let s = screen(&mut a);
     assert!(s.contains("/ship") && s.contains("Ship the release"), "{s}");
 }
+
+#[test]
+fn allow_always_never_carries_a_switch_into_bypass_and_the_agent_name_is_sanitised() {
+    let mut a = app();
+    let sugg = vec![
+        Suggestion::SetMode(Mode::BypassPermissions),
+        Suggestion::SetMode(Mode::AcceptEdits),
+    ];
+    let (mut q, mut rx) = ask("Bash", json!({"command": "ls"}), sugg);
+    q.req.agent_id = Some("evil\x1b]0;pwn\x07".into());
+    a.on_approval(q, T0 - ARM_MS);
+    let raw = a.render(COLS, ROWS, T0 - ARM_MS).join("\n");
+    assert!(
+        !raw.contains("\x1b]0;"),
+        "agent name reached the terminal raw"
+    );
+    assert!(
+        !screen(&mut a).contains("bypass"),
+        "bypass must not be offered"
+    );
+    keys(&mut a, "\x1b[B\r"); // allow always
+    assert_eq!(
+        rx.try_recv().unwrap().accepted,
+        [Suggestion::SetMode(Mode::AcceptEdits)]
+    );
+}

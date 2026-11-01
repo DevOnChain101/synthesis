@@ -561,7 +561,14 @@ impl App {
             reply,
             deadline_ms,
         } = ask;
-        let suggestions: Vec<Value> = req.suggestions.iter().map(suggestion_view).collect();
+        // "allow always" can never switch into bypassPermissions: that takes the confirmation
+        // dialog. What is shown and what is sent back are the same filtered list.
+        let offered: Vec<Suggestion> = req
+            .suggestions
+            .into_iter()
+            .filter(|s| !matches!(s, Suggestion::SetMode(Mode::BypassPermissions)))
+            .collect();
+        let suggestions: Vec<Value> = offered.iter().map(suggestion_view).collect();
         let mut pending = Pending {
             kind: "permission".into(),
             dialog: "permission".into(),
@@ -581,14 +588,14 @@ impl App {
                 Some(o) => format!("for {}: {}", clean_line(o), clean_line(&req.reason)),
                 None => clean_line(&req.reason),
             },
-            display_name: req.agent_id.clone().unwrap_or_default(),
+            display_name: req.agent_id.as_deref().map(clean_line).unwrap_or_default(),
             ..Pending::default()
         };
         pending.hydrate();
         self.dialogs.push(Dialog {
             kind: DialogKind::Approval {
                 id: req.approval_id,
-                suggestions: req.suggestions,
+                suggestions: offered,
                 reply: Some(reply),
             },
             pending,
