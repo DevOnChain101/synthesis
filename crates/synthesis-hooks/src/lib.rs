@@ -136,6 +136,8 @@ pub struct HookOutcome {
     pub stop: bool,
     pub stop_reason: Option<String>,
     pub results: Vec<HookRun>,
+    /// Config problems found while matching (an invalid matcher regex).
+    pub warnings: Vec<String>,
 }
 
 pub struct Hooks {
@@ -150,7 +152,8 @@ pub struct Hooks {
 }
 
 /// Claude Code semantics: letters, digits, `_` and `|` are an exact list of names; anything else
-/// is an unanchored regex. An invalid pattern matches nothing.
+/// is an unanchored regex. An invalid pattern MATCHES (fail closed: a guard hook with a typo in
+/// its matcher must still run); `run` reports it in `HookOutcome::warnings`.
 pub fn matcher_matches(pattern: Option<&str>, value: Option<&str>) -> bool {
     let Some(p) = pattern.filter(|p| !p.is_empty() && *p != "*") else {
         return true;
@@ -160,19 +163,16 @@ pub fn matcher_matches(pattern: Option<&str>, value: Option<&str>) -> bool {
     {
         return p.split('|').any(|n| Some(n) == value);
     }
-    Regex::new(p).is_ok_and(|re| re.is_match(value.unwrap_or("")))
+    Regex::new(p).map_or(true, |re| re.is_match(value.unwrap_or("")))
 }
 
-/// `*` matches any run of characters.
-fn glob(pat: &str, s: &str) -> bool {
-    match pat.split_once('*') {
-        None => pat == s,
-        Some((head, rest)) => s.strip_prefix(head).is_some_and(|t| {
-            (0..=t.len())
-                .filter(|&i| t.is_char_boundary(i))
-                .any(|i| glob(rest, &t[i..]))
-        }),
-    }
+/// A matcher that is a regex but does not compile.
+pub fn matcher_invalid(pattern: Option<&str>) -> bool {
+    pattern.is_some_and(|p| {
+        !p.chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '|')
+            && Regex::new(p).is_err()
+    })
 }
 
 /// The per-hook `if` field: `Tool` or `Tool(spec)` against the call in `payload`. A hook with
@@ -194,6 +194,11 @@ fn condition_holds(cond: &str, payload: &Value) -> bool {
         .iter()
         .find_map(|k| input.and_then(|i| i.get(k)).and_then(Value::as_str))
         .unwrap_or("");
+    if tool == "Bash" {
+        // the permission engine's matcher: every segment, wrappers unwrapped (`cd r && git push`,
+        // `time git push`, `FOO=1 git push`, `sh -c 'git push'`); unparsable counts as a match
+        return synthesis_permissions::bash::bash_any_match(&[format!("Bash({spec})")], arg);
+    }
     // `git:*` and `git *` are the prefix rule `git`
     let spec = spec
         .strip_suffix(":*")
@@ -201,7 +206,7 @@ fn condition_holds(cond: &str, payload: &Value) -> bool {
     if let Some(p) = spec.strip_suffix(" *").filter(|p| !p.contains('*')) {
         return arg == p || arg.starts_with(&format!("{p} "));
     }
-    glob(&spec, arg)
+    synthesis_permissions::bash::glob_match(&spec, arg, false)
 }
 
 impl Hooks {
@@ -249,6 +254,12 @@ impl Hooks {
         // the matcher does not apply to events that have no tool or source to match
         let matchless = matches!(event, HookEvent::UserPromptSubmit | HookEvent::Stop);
         for g in groups {
+            if !matchless && matcher_invalid(g.matcher.as_deref()) {
+                out.warnings.push(format!(
+                    "hook matcher {:?} is not a valid regex: treated as matching",
+                    g.matcher.as_deref().unwrap_or("")
+                ));
+            }
             if !matchless && !matcher_matches(g.matcher.as_deref(), matcher_target) {
                 continue;
             }

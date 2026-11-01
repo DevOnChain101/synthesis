@@ -1187,6 +1187,13 @@ pub fn lenient_segments(cmd: &str) -> Vec<Words> {
         } else if c == '\'' || c == '"' {
             quote = Some(c);
             has = true;
+        } else if c == '#' && !has {
+            // a comment runs to the end of the line (`#` inside a word is just a character)
+            while i + 1 < chars.len() && chars[i + 1] != '\n' {
+                i += 1;
+            }
+        } else if c == '|' && cur.ends_with('>') {
+            // `>|` is a clobbering redirect, not a pipe
         } else if matches!(c, ';' | '|' | '&' | '\n' | '(' | ')')
             || ((c == '{' || c == '}') && !has && next.is_none_or(|n| is_ws(n) || n == ';'))
         {
@@ -1233,9 +1240,22 @@ pub fn is_dash_c(x: &str) -> bool {
 /// Quotes closed, `(`/`$(` balanced, backticks paired, no trailing backslash.
 fn balanced(cmd: &str) -> bool {
     let (mut quote, mut depth, mut ticks) = (None, 0i32, 0);
-    let mut it = cmd.chars().peekable();
+    let (mut it, mut word_start) = (cmd.chars().peekable(), true);
     while let Some(c) = it.next() {
+        let at_start = std::mem::replace(
+            &mut word_start,
+            c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')'),
+        );
         match (quote, c) {
+            // `# ...` at the start of a word is a comment: quotes and parens in it mean nothing
+            (None, '#') if at_start => {
+                for n in it.by_ref() {
+                    if n == '\n' {
+                        break;
+                    }
+                }
+                word_start = true;
+            }
             (Some('\''), '\'') | (Some('"'), '"') => quote = None,
             (Some('\''), _) => {}
             (_, '\\') => {
@@ -1477,20 +1497,40 @@ fn spec_matches(spec: &str, cand: &str, boundary: bool) -> bool {
             cand == p || (!p.is_empty() && cand.strip_prefix(p).is_some_and(|r| r.starts_with(' ')))
         }
         Some(p) => cand.starts_with(p),
-        None if spec.contains('*') => glob_match(spec, cand),
+        None if spec.contains('*') => glob_match(spec, cand, !boundary),
         None => cand == spec,
     }
 }
 
-/// `*` matches any run of characters (official `Bash(git * main)`, `Bash(ls*)`).
-fn glob_match(pat: &str, s: &str) -> bool {
-    match pat.split_once('*') {
-        None => pat == s,
-        Some((head, rest)) => s.strip_prefix(head).is_some_and(|t| {
-            (0..=t.len())
-                .filter(|&i| t.is_char_boundary(i))
-                .any(|i| glob_match(rest, &t[i..]))
-        }),
+/// Most `*` in a rule and bytes of command that `glob_match` works through; past either, the
+/// answer is the fail-closed one for the caller (deny/ask: match, allow: no match).
+const GLOB_MAX_STARS: usize = 16;
+const GLOB_MAX_LEN: usize = 64 * 1024;
+
+/// `*` matches any run of characters (official `Bash(git * main)`, `Bash(ls*)`). `prefix`: the
+/// pattern need only match the start of `s` (deny/ask: `git push * main` hits
+/// `git push origin main --force`). Iterative with one backtrack point: O(len(pat) * len(s)).
+pub fn glob_match(pat: &str, s: &str, prefix: bool) -> bool {
+    if pat.matches('*').count() > GLOB_MAX_STARS || s.len() > GLOB_MAX_LEN {
+        return prefix;
+    }
+    let (p, s) = (pat.as_bytes(), s.as_bytes());
+    let (mut pi, mut si, mut star, mut mark) = (0, 0, None, 0);
+    loop {
+        if pi == p.len() && (prefix || si == s.len()) {
+            return true;
+        }
+        if pi < p.len() && p[pi] == b'*' {
+            (star, mark) = (Some(pi), si);
+            pi += 1;
+        } else if pi < p.len() && si < s.len() && p[pi] == s[si] {
+            (pi, si) = (pi + 1, si + 1);
+        } else if let Some(sp) = star.filter(|_| mark < s.len()) {
+            mark += 1;
+            (pi, si) = (sp + 1, mark);
+        } else {
+            return false;
+        }
     }
 }
 

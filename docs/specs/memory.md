@@ -161,6 +161,8 @@ flowchart LR
 | `MemoryUpdate` | `id, title?, body?` | agent-authored workspace record: allow; else ask |
 | `MemoryForget` | `id, reason` | agent-authored: allow; owner record: ask. Archives, keeps provenance |
 
+Plan mode denies all three write tools whatever the rules. Once the task has requested a web, browser, MCP or network-Bash call (live flag), a note it saves is `untrusted` at once. A `proposed` note is not the agent's: update asks, and an edit keeps it `proposed`.
+
 Rules use the existing syntax (`MemoryWrite(scope:user)`). In headless runs an ask is denied, as for every ask. Sub-agents get `MemorySearch` only. The tools are absent when memory is off.
 
 ## 9. Safety

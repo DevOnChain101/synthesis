@@ -223,9 +223,12 @@ pub struct Common {
     /// first line of SYNTHESIS.md. Only used with peers on.
     #[arg(long, value_name = "TEXT")]
     pub about: Option<String>,
-    /// Continue a stored session by id (or unique id prefix) with the new prompt.
+    /// Continue a stored session of this workspace by id (or unique id prefix) with the new prompt.
     #[arg(long, value_name = "ID", conflicts_with = "continue_session")]
     pub resume: Option<String>,
+    /// With --resume: also accept a session of another workspace (default: only this one).
+    #[arg(long, requires = "resume")]
+    pub resume_any_workspace: bool,
     /// Continue the most recent session of this workspace.
     #[arg(long = "continue", short = 'c')]
     pub continue_session: bool,
@@ -367,14 +370,22 @@ fn resolve_resume(
     let r = synthesis_session::Reader::open(&h.synthesis).map_err(|e| e.to_string())?;
     let id = match &c.resume {
         Some(p) if !p.trim().is_empty() => {
-            let all = r.list_sessions(None).map_err(|e| e.to_string())?;
+            // another workspace's conversation would enter this one's context: opt-in only
+            let here = cwd.to_string_lossy();
+            let all = r
+                .list_sessions((!c.resume_any_workspace).then_some(&*here))
+                .map_err(|e| e.to_string())?;
             let hits: Vec<_> = all
                 .iter()
                 .filter(|s| s.id.starts_with(p.as_str()))
                 .collect();
             match hits.as_slice() {
                 [one] => one.id.clone(),
-                [] => return Err(format!("--resume: no saved session matches \"{p}\"")),
+                [] => {
+                    return Err(format!(
+                        "--resume: no saved session of this directory matches \"{p}\" (--resume-any-workspace for another workspace)"
+                    ));
+                }
                 many => many
                     .iter()
                     .find(|s| s.id == *p)
@@ -863,6 +874,7 @@ pub fn prepare(
     };
     let approver: Arc<dyn Approver> = Arc::new(AuditDeny);
     let closed = Some((closed, cancel.clone()));
+    let taint = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sink = EventSink::new(
         Persist::new(
             out,
@@ -871,7 +883,8 @@ pub fn prepare(
             derived,
             resumed_from_seq.unwrap_or(0),
             closed,
-        ),
+        )
+        .with_taint(taint.clone()),
         sid.clone(),
         res.secrets.clone(),
     );
@@ -1021,6 +1034,7 @@ pub fn prepare(
             model: small.clone(),
             sink: Some(sink.clone()),
             pricing: pricing(&h.synthesis.join("settings.json"), &small, &small),
+            taint,
         },
         cancel.clone(),
     );

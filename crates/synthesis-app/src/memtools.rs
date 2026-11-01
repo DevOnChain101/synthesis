@@ -117,7 +117,8 @@ fn agent_note(m: &Memory, key: &str) -> bool {
         && m.scope_key == key
         && m.trust <= Trust::Agent
         && matches!(m.kind.as_str(), "fact" | "lesson" | "preference")
-        && matches!(m.status.as_str(), "active" | "proposed")
+        // a `proposed` (imported, awaiting review) note is not the agent's: the person decides
+        && m.status == "active"
 }
 
 /// For the permission engine: true when `id` is a note the agent saved for this workspace.
@@ -172,9 +173,10 @@ impl MemTool {
         Ok(ToolOutput::text(lines.join("\n\n")))
     }
 
-    /// Trust is never above `agent`, and `untrusted` in a project that is not trusted.
+    /// Trust is never above `agent`, and `untrusted` in a project that is not trusted or once the
+    /// task has requested a web, browser, MCP or network call (live flag, not the end-of-task scan).
     fn trust(&self) -> Trust {
-        if self.run.project_trusted {
+        if self.run.project_trusted && !self.run.taint.load(std::sync::atomic::Ordering::SeqCst) {
             Trust::Agent
         } else {
             Trust::Untrusted
@@ -252,11 +254,17 @@ impl MemTool {
         );
         n.slot = old.slot.clone();
         n.confidence = old.confidence;
+        // an edit never activates a note that is still waiting for review
+        let parked = old.status == "proposed";
+        n.status = parked.then(|| "proposed".to_string());
         n.source = json!({"origin": "memory_tool", "session_id": ctx.session_id,
             "task_id": ctx.task_id, "tool_call_id": ctx.tool_call_id, "updates": id});
         let mut o = s.replace(id, n).map_err(|e| e.to_string())?;
         if matches!(o.op, "added" | "superseded") {
             o.op = "updated";
+            if parked {
+                s.set_status(id, "superseded").map_err(|e| e.to_string())?;
+            }
         }
         self.written(ctx, &Written::new(o.clone(), &old.kind, &old.scope, trust));
         Ok(ToolOutput::text(outcome_text("updated", &o)))
@@ -353,6 +361,7 @@ mod tests {
             prompt: "fix the flaky parser test".into(),
             sink: Some(EventSink::new(buf.clone(), "s1", [])),
             tool_written: Mutex::default(),
+            taint: Arc::default(),
             retrieved: Mutex::default(),
         });
         let ws = WorkspaceContext::open("w", &repo.root, &repo.root, &[], root.join("art"), "pg")
@@ -601,5 +610,62 @@ mod tests {
             })
             .unwrap()[0];
         assert_eq!((m.scope.as_str(), m.scope_key.as_str()), ("user", ""));
+    }
+    #[tokio::test]
+    async fn a_note_saved_after_a_web_call_is_untrusted_at_once() {
+        let r = rig(true);
+        r.run.taint.store(true, std::sync::atomic::Ordering::SeqCst);
+        let o = r
+            .call("MemoryWrite", w("workspace", "Late", "Run make check"))
+            .await;
+        assert!(!o.is_error, "{}", Rig::text(&o));
+        let s = r.run.store.lock().unwrap();
+        let all = s
+            .list(&Filter {
+                limit: 5,
+                ..Filter::default()
+            })
+            .unwrap();
+        assert_eq!(all[0].trust, Trust::Untrusted, "no end-of-task step needed");
+    }
+
+    #[tokio::test]
+    async fn a_proposed_note_is_not_the_agents_and_an_edit_keeps_it_proposed() {
+        let r = rig(true);
+        let id = {
+            let mut s = r.run.store.lock().unwrap();
+            let mut n = NewMemory::new(
+                "workspace",
+                &r.repo.key,
+                "fact",
+                "Imported",
+                "imported text",
+                Trust::Agent,
+            );
+            n.status = Some("proposed".into());
+            s.put(n).unwrap().id
+        };
+        assert!(!agent_note_oracle(r.run.clone())(&id));
+        let o = r
+            .call("MemoryUpdate", json!({"id": id, "body": "edited text"}))
+            .await;
+        assert!(!o.is_error, "{}", Rig::text(&o));
+        let s = r.run.store.lock().unwrap();
+        let all = s
+            .list(&Filter {
+                limit: 10,
+                status: Some("proposed".into()),
+                ..Filter::default()
+            })
+            .unwrap();
+        assert!(all.iter().any(|m| m.body == "edited text"), "{all:?}");
+        let active = s
+            .list(&Filter {
+                limit: 10,
+                status: Some("active".into()),
+                ..Filter::default()
+            })
+            .unwrap();
+        assert!(active.iter().all(|m| m.body != "edited text"), "not active");
     }
 }

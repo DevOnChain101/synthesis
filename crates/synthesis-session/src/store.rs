@@ -404,6 +404,10 @@ pub struct FileSnapshot {
     /// placeholder): the sha256 of the real content. Restore must not write such an artifact back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lossy_sha256: Option<String>,
+    /// [`file_state_hash`] of the file after the run's last write to it (set when that write
+    /// completed). `synth rewind` refuses a file whose state differs, unless forced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1103,6 +1107,16 @@ fn insert_message(
     Ok(idx as u64)
 }
 
+/// sha256 of a regular file's bytes; `absent`, `not-a-regular-file` (symlink, directory ...) or
+/// `unreadable` otherwise. Compared, never trusted as a digest.
+pub fn file_state_hash(p: &Path) -> String {
+    match fs::symlink_metadata(p) {
+        Ok(m) if m.is_file() => fs::read(p).map_or_else(|_| "unreadable".into(), |b| sha_hex(&b)),
+        Ok(_) => "not-a-regular-file".into(),
+        Err(_) => "absent".into(),
+    }
+}
+
 fn sha_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -1715,6 +1729,36 @@ impl SessionWriter {
         }
     }
 
+    /// Notes the state of `p` after a write of the run on every checkpoint entry that names it.
+    pub fn record_post_run_hash(&mut self, p: &Path) -> Result<()> {
+        let abs = lexical_normalize(&if p.is_relative() {
+            Path::new(&self.cwd).join(p)
+        } else {
+            p.to_path_buf()
+        });
+        let (path, sha) = (utf8(&abs)?, file_state_hash(&abs));
+        let conn = &self.reader.conn;
+        let rows: Vec<(String, String)> = conn
+            .prepare("SELECT id,files FROM checkpoints WHERE session_id=?1")?
+            .query_map([&self.id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (id, files) in rows {
+            let mut files: Vec<FileSnapshot> = serde_json::from_str(&files)?;
+            let mut hit = false;
+            for f in files.iter_mut().filter(|f| f.path == path) {
+                f.post_sha256 = Some(sha.clone());
+                hit = true;
+            }
+            if hit {
+                conn.execute(
+                    "UPDATE checkpoints SET files=?2 WHERE id=?1",
+                    params![id, serde_json::to_string(&files)?],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     /// Named restore point: current event seq + message count + a snapshot artifact per changed
     /// file. Files must lie inside the session's workspace roots (checked on realpaths).
     pub fn create_checkpoint(
@@ -1769,6 +1813,7 @@ impl SessionWriter {
                 path: utf8(&abs)?,
                 artifact_id,
                 lossy_sha256: lossy_sha,
+                post_sha256: None,
             });
         }
         let id = uuid::Uuid::new_v4().to_string();

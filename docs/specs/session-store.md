@@ -94,6 +94,9 @@ Requirement: session formats read/write compatible both ways during the parallel
 4. **Golden gate.** For each fixture in `tests/golden/transcripts/`: Node JSONL → Rust import → Rust mirror export → Node `itemsFromEntries` must equal the original Node `itemsFromEntries` output (timestamps/ids normalised).
 5. **Cutover (R9).** The mirror is switched off by default; import stays forever. Schema changes go through numbered `schema_migrations`; the binary refuses to open a DB newer than it knows, and a downgrade needs an explicit export.
 
+## Checkpoints and `synth rewind`
+Each file entry of a checkpoint may carry `post_sha256`: the state of the file after the run's last write to it (`file_state_hash`: sha256, or `absent` / `not-a-regular-file`). `synth rewind` refuses a file whose state differs or has no recorded hash unless `--force`, never touches symlinks or non-regular files, restores through a temp file and rename, and removes a file the run created only while it still has the recorded hash. `synth run --resume ID` only finds sessions of the current directory unless `--resume-any-workspace`.
+
 ## Open
 - Artifact retention default and size cap (proposal: keep for the session's lifetime, `synth gc --older-than 30d`).
 - Store full raw provider responses for debugging? Not in v1 (cost, secrets).

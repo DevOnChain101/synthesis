@@ -77,8 +77,8 @@ fn matcher_semantics() {
     );
     assert!(matcher_matches(Some("mcp__.*"), Some("mcp__srv__tool")));
     assert!(
-        !matcher_matches(Some("("), Some("x")),
-        "invalid regex matches nothing"
+        matcher_matches(Some("("), Some("x")),
+        "invalid regex fails closed: matches"
     );
     assert!(!matcher_matches(Some("Bash"), None));
 }
@@ -492,6 +492,42 @@ async fn per_hook_if_filters_by_tool_call() {
     let r = run(&h, HookEvent::PreToolUse, Some("Bash")).await;
     let cmds: Vec<_> = r.results.iter().map(|x| x.command.as_str()).collect();
     assert_eq!(cmds, ["exit 0", "echo any"], "{cmds:?}");
+}
+
+#[tokio::test]
+async fn bash_if_sees_through_wrappers_and_unparsable_commands() {
+    let f = fx();
+    let h = f.hooks(json!({"PreToolUse": [{"hooks": [
+        {"type": "command", "command": "exit 0", "if": "Bash(git push *)"}
+    ]}]}));
+    for cmd in [
+        "cd r && git push -f",
+        "time git push",
+        "FOO=1 git push",
+        "sh -c 'git push'",
+        "git push '",
+    ] {
+        let r = h
+            .run(
+                HookEvent::PreToolUse,
+                json!({"tool_name": "Bash", "tool_input": {"command": cmd}}),
+                Some("Bash"),
+                &CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(r.results.len(), 1, "{cmd}");
+    }
+    let r = run(&h, HookEvent::PreToolUse, Some("Bash")).await;
+    assert!(r.results.is_empty(), "ls does not trigger it");
+}
+
+#[tokio::test]
+async fn invalid_matcher_runs_the_hook_and_warns() {
+    let f = fx();
+    let h = f.hooks(cfg("PreToolUse", Some("("), &["exit 0"]));
+    let r = run(&h, HookEvent::PreToolUse, Some("Bash")).await;
+    assert_eq!(r.results.len(), 1);
+    assert_eq!(r.warnings.len(), 1);
 }
 
 #[tokio::test]
