@@ -9,6 +9,7 @@
 //! accepted the text (OSC 52 on a non-TTY writes nothing and reports failure).
 
 use crate::Platform;
+use crate::hints;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -120,17 +121,19 @@ impl PipeClipboard {
         }
     }
 
-    pub fn wl_copy() -> Self {
+    /// `program` is a path found in a standard system directory ([`find_tool`]), never a bare
+    /// name that PATH or the cwd could resolve.
+    pub fn wl_copy(program: PathBuf) -> Self {
         Self {
-            program: "wl-copy".into(),
+            program,
             args: vec![],
             encoding: Encoding::Utf8,
         }
     }
 
-    pub fn xclip() -> Self {
+    pub fn xclip(program: PathBuf) -> Self {
         Self {
-            program: "xclip".into(),
+            program,
             args: vec!["-selection".into(), "clipboard".into()],
             encoding: Encoding::Utf8,
         }
@@ -181,16 +184,29 @@ impl ClipboardSink for PipeClipboard {
 /// OS tool(s) for `platform`, then OSC 52 on stdout. Linux uses wl-copy under Wayland
 /// (`WAYLAND_DISPLAY`) and xclip under X11 (`DISPLAY`), both read from the injected `env`.
 pub fn default_chain(platform: Platform, env: &Env) -> Vec<Box<dyn ClipboardSink>> {
+    default_chain_with(platform, env, &find_tool)
+}
+
+/// [`default_chain`] with the tool lookup given (tests): a tool that is not found is not listed.
+pub fn default_chain_with(
+    platform: Platform,
+    env: &Env,
+    find: &dyn Fn(&str) -> Option<PathBuf>,
+) -> Vec<Box<dyn ClipboardSink>> {
     let mut chain: Vec<Box<dyn ClipboardSink>> = Vec::new();
     match platform {
         Platform::Windows => chain.push(Box::new(PipeClipboard::clip_exe())),
         Platform::MacOs => chain.push(Box::new(PipeClipboard::pbcopy())),
         Platform::Linux => {
-            if env.get_nonempty("WAYLAND_DISPLAY").is_some() {
-                chain.push(Box::new(PipeClipboard::wl_copy()));
+            if hints::wayland(env)
+                && let Some(p) = find("wl-copy")
+            {
+                chain.push(Box::new(PipeClipboard::wl_copy(p)));
             }
-            if env.get_nonempty("DISPLAY").is_some() {
-                chain.push(Box::new(PipeClipboard::xclip()));
+            if hints::x11(env)
+                && let Some(p) = find("xclip")
+            {
+                chain.push(Box::new(PipeClipboard::xclip(p)));
             }
         }
         Platform::Other => {}
@@ -303,11 +319,10 @@ pub fn paste_chain(platform: Platform, env: &Env) -> Vec<Box<dyn ClipboardSource
                 synthesis_platform::system32(r"WindowsPowerShell\v1.0\powershell.exe"),
                 &args,
             )));
-            if let Some(pf) = env.get_nonempty("ProgramFiles") {
-                let pwsh = Path::new(pf).join(r"PowerShell\7\pwsh.exe");
-                if pwsh.is_file() {
-                    chain.push(Box::new(PasteCommand::new(pwsh, &args)));
-                }
+            // a fixed location, not `%ProgramFiles%` (an environment variable can point anywhere)
+            let pwsh = Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe");
+            if pwsh.is_file() {
+                chain.push(Box::new(PasteCommand::new(pwsh.to_path_buf(), &args)));
             }
         }
         Platform::Linux => {
@@ -316,10 +331,10 @@ pub fn paste_chain(platform: Platform, env: &Env) -> Vec<Box<dyn ClipboardSource
                     chain.push(Box::new(PasteCommand::new(p, args)));
                 }
             };
-            if env.get_nonempty("WAYLAND_DISPLAY").is_some() {
+            if hints::wayland(env) {
                 add("wl-paste", &["-n"]);
             }
-            if env.get_nonempty("DISPLAY").is_some() {
+            if hints::x11(env) {
                 add("xclip", &["-selection", "clipboard", "-o"]);
                 add("xsel", &["-b", "-o"]);
             }
@@ -364,12 +379,41 @@ mod tests {
 
     #[test]
     fn linux_tool_follows_injected_env() {
+        let found = |n: &str| Some(PathBuf::from("/usr/bin").join(n));
         let n = |pairs: &[(&str, &str)]| {
-            default_chain(Platform::Linux, &Env::from_pairs(pairs.iter().copied())).len()
+            let env = Env::from_pairs(pairs.iter().copied());
+            default_chain_with(Platform::Linux, &env, &found).len()
         };
         assert_eq!(n(&[]), 1);
         assert_eq!(n(&[("WAYLAND_DISPLAY", "wayland-0")]), 2);
         assert_eq!(n(&[("WAYLAND_DISPLAY", "w"), ("DISPLAY", ":0")]), 3);
+    }
+
+    #[test]
+    fn copy_tools_come_from_system_directories_only() {
+        let env = Env::from_pairs([("WAYLAND_DISPLAY", "w"), ("DISPLAY", ":0")]);
+        // not installed in a standard directory (a PATH or cwd lookalike does not count)
+        assert_eq!(
+            default_chain_with(Platform::Linux, &env, &|_| None).len(),
+            1
+        );
+        let seen = std::cell::RefCell::new(vec![]);
+        default_chain_with(Platform::Linux, &env, &|n| {
+            seen.borrow_mut().push(n.to_string());
+            Some(PathBuf::from("/usr/bin").join(n))
+        });
+        assert_eq!(*seen.borrow(), ["wl-copy", "xclip"]);
+        assert!(
+            PipeClipboard::xclip("/usr/bin/xclip".into())
+                .program
+                .is_absolute()
+        );
+        // the real lookup only ever returns paths under the fixed list
+        for n in ["wl-copy", "xclip"] {
+            if let Some(p) = find_tool(n) {
+                assert!(p.is_absolute() && p.is_file(), "{p:?}");
+            }
+        }
     }
 
     struct Fake(io::Result<&'static str>);

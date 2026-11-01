@@ -39,11 +39,11 @@ impl ColorMode {
         if matches!(lower("COLORTERM").as_deref(), Some("truecolor" | "24bit")) {
             return Self::TrueColor;
         }
-        let program = env.get("TERM_PROGRAM");
+        let program = crate::hints::term_program(env);
         if program == Some("Apple_Terminal") {
             return Self::Ansi256;
         }
-        if env.get_nonempty("WT_SESSION").is_some() // Windows Terminal
+        if crate::hints::windows_terminal(env)
             || matches!(
                 program,
                 Some("iTerm.app" | "vscode" | "WezTerm" | "ghostty" | "Hyper" | "Tabby" | "rio")

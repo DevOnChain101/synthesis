@@ -6,6 +6,7 @@
 pub mod clipboard;
 pub mod complete;
 pub mod editor;
+pub mod hints;
 pub mod keys;
 pub mod screen;
 pub mod selection;
