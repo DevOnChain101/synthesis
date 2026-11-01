@@ -70,6 +70,30 @@ pub fn open_for_run(h: &Homes, secrets: &[String], repo: &Repo) -> Option<Store>
             return None;
         }
     };
+    // memory.md §11: a store that fails its integrity check is off for the run
+    match s.quick_check() {
+        Ok(c) if c == "ok" => {}
+        Ok(c) => {
+            eprintln!(
+                "synth: warning: memory is off for this run: quick_check failed ({}); move memory.db aside and import the last export",
+                san(&c)
+            );
+            return None;
+        }
+        Err(e) => {
+            eprintln!(
+                "synth: warning: memory is off for this run: {}",
+                san(&e.to_string())
+            );
+            return None;
+        }
+    }
+    if s.read_only() {
+        eprintln!(
+            "synth: warning: memory is read-only for this run (its schema is newer than this build)"
+        );
+        return Some(s);
+    }
     if let Err(e) = s.touch_workspace(&repo.key, &repo.root, &repo.label) {
         eprintln!("synth: warning: {}", san(&e.to_string()));
         return None;
@@ -126,6 +150,12 @@ pub enum MemoryCmd {
         slot: Option<String>,
         #[arg(long)]
         pin: bool,
+        /// workspace (default), user, or agent (needs --agent).
+        #[arg(long, value_parser = ["workspace", "user", "agent"], conflicts_with = "user")]
+        scope: Option<String>,
+        /// Sub-agent definition the note is for; only that definition reads it (implies --scope agent).
+        #[arg(long)]
+        agent: Option<String>,
         #[arg(long)]
         cwd: Option<PathBuf>,
     },
@@ -341,13 +371,29 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
             title,
             slot,
             pin,
+            scope,
+            agent,
             cwd,
         } => {
             let repo = repo_of(&cwd_of(&cwd));
-            let (scope, key) = if user {
-                ("user", "")
-            } else {
-                ("workspace", repo.key.as_str())
+            let scope = match (user, scope.as_deref(), &agent) {
+                (true, ..) => "user",
+                (_, Some(s), _) => s,
+                (_, None, Some(_)) => "agent",
+                _ => "workspace",
+            };
+            let agent_key = match (scope, agent.as_deref().map(str::trim)) {
+                ("agent", Some(a)) if !a.is_empty() && !a.contains('@') => {
+                    format!("{a}@{}", repo.key)
+                }
+                ("agent", _) => return Err("--scope agent needs --agent <definition name>".into()),
+                (_, Some(_)) => return Err("--agent only goes with --scope agent".into()),
+                _ => String::new(),
+            };
+            let key = match scope {
+                "user" => "",
+                "agent" => agent_key.as_str(),
+                _ => repo.key.as_str(),
             };
             let title = title.unwrap_or_else(|| text.chars().take(80).collect());
             let mut n = NewMemory::new(scope, key, &kind, &title, &text, Trust::Owner);
@@ -355,7 +401,7 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
             n.pinned = pin;
             n.confidence = 1.0;
             n.source = serde_json::json!({"origin": "cli"});
-            if !user {
+            if scope != "user" {
                 s.touch_workspace(&repo.key, &repo.root, &repo.label)
                     .map_err(e)?;
             }
@@ -466,6 +512,9 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
                     out!("{title}: {}", v.join(", "));
                 }
                 out!("size: {} bytes", st.db_bytes);
+                for w in &st.over_budget {
+                    out!("warning: {w}");
+                }
                 out!(
                     "jobs: {} queued, {} failed · proposals pending: {}",
                     st.queued_jobs,
@@ -764,6 +813,18 @@ fn store_facts(path: &Path) -> Option<Result<Vec<String>, String>> {
         let one = |sql: &str| c.query_row(sql, [], |r| r.get::<_, i64>(0));
         let ver = one("SELECT coalesce(max(version), 0) FROM schema_migrations")?;
         let check: String = c.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+        let mut notes = vec![];
+        if check != "ok" {
+            notes.push("  memory is OFF for runs: quick_check failed; move memory.db aside and import the last export".to_string());
+        }
+        if ver as usize > synthesis_memory::SCHEMA_VERSION {
+            notes.push(format!("  memory is READ-ONLY for runs: schema v{ver} is newer than this build (v{}); upgrade synth", synthesis_memory::SCHEMA_VERSION));
+        }
+        notes.extend(
+            synthesis_memory::budget_warnings(&c, size)?
+                .into_iter()
+                .map(|w| format!("  warning: {w}")),
+        );
         let mut trust =
             c.prepare("SELECT trust, count(*) FROM memories GROUP BY trust ORDER BY trust")?;
         let by_trust: Vec<String> = trust
@@ -786,7 +847,7 @@ fn store_facts(path: &Path) -> Option<Result<Vec<String>, String>> {
             |r| r.get::<_, Option<String>>(0),
         ))?
         .flatten();
-        Ok(vec![
+        let mut lines = vec![
             format!(
                 "  store: schema v{ver}, {size} bytes, quick_check {}",
                 san(&check)
@@ -813,7 +874,9 @@ fn store_facts(path: &Path) -> Option<Result<Vec<String>, String>> {
                 )),
                 one("SELECT count(*) FROM proposals WHERE status='pending'")?
             ),
-        ])
+        ];
+        lines.extend(notes);
+        Ok(lines)
     };
     Some(facts().map_err(|e| e.to_string()))
 }
@@ -953,12 +1016,13 @@ pub fn start(a: &StartArgs, cancel: CancellationToken) -> (Option<Arc<MemoryRun>
     if s.opted_out(&a.repo.key) {
         return (None, None);
     }
+    let read_only = s.read_only();
     let got = inject(&mut s, a.repo, a.prompt, a.sid, a.project_trusted, &[]);
     let (block, retrieved) = match got {
         Some(r) => (r.block, Some(r.event)),
         None => (None, None),
     };
-    let reflect = reflection_enabled(&settings).then(|| Reflector {
+    let reflect = (reflection_enabled(&settings) && !read_only).then(|| Reflector {
         provider: a.provider.clone(),
         model: a.model.clone(),
         cancel,
@@ -1044,11 +1108,13 @@ pub fn inject(
         tokens: r.tokens as u64,
         candidates: r.candidates as u64,
     };
-    if let Err(e) = store.record_retrieval(sid, r.tokens, ids.len(), r.candidates) {
+    if !store.read_only()
+        && let Err(e) = store.record_retrieval(sid, r.tokens, ids.len(), r.candidates)
+    {
         warn(e);
     }
     let fresh: Vec<String> = ids.into_iter().filter(|i| !already.contains(i)).collect();
-    if !fresh.is_empty() {
+    if !fresh.is_empty() && !store.read_only() {
         store
             .record_uses(&fresh, sid, None, "injected")
             .map_err(warn)
@@ -1136,7 +1202,10 @@ pub fn compaction_hook(m: Arc<MemoryRun>) -> crate::ctx::CompactHook {
         let open = s.open_use_ids(&m.sid, None).unwrap_or_default();
         let r = inject(&mut s, &m.repo, &query, &m.sid, m.project_trusted, &open);
         let body = clip_bytes(summary, 1800);
-        if !body.trim().is_empty() && synthesis_memory::scan(&body, trust).is_none() {
+        if !s.read_only()
+            && !body.trim().is_empty()
+            && synthesis_memory::scan(&body, trust).is_none()
+        {
             let title = format!(
                 "Checkpoint: {}",
                 clip(m.prompt.lines().next().unwrap_or(""), 90)
@@ -1275,6 +1344,9 @@ pub fn task_ended(
     verified: &[synthesis_harness::VerifiedCommand],
 ) {
     let mut s = m.store.lock().unwrap_or_else(|e| e.into_inner());
+    if s.read_only() {
+        return;
+    }
     let status = format!("{:?}", out.status);
     let ok = out.status == synthesis_events::TaskStatus::Completed;
     let mut d = digest_of(request, out);
@@ -1507,18 +1579,23 @@ pub async fn reflect_jobs(store: &Mutex<Store>, r: &Reflector, max: usize) -> (u
         let result = reflect_one(store, r, &job).await;
         let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
         match result {
-            Ok((a, usage)) => {
-                // tokens as the provider reported them; USD only with a configured price
-                let (inp, out) = (
-                    usage.input_tokens.unwrap_or(0),
-                    usage.output_tokens.unwrap_or(0),
-                );
-                let reported = usage.input_tokens.is_some() || usage.output_tokens.is_some();
+            Ok((a, usage, guess)) => {
+                // tokens as the provider reported them, else the estimator's (`estimated`); USD only
+                // with a configured price
+                let estimated = usage.input_tokens.is_none() && usage.output_tokens.is_none();
+                let (inp, out) = if estimated {
+                    guess
+                } else {
+                    (
+                        usage.input_tokens.unwrap_or(0),
+                        usage.output_tokens.unwrap_or(0),
+                    )
+                };
                 let tokens = inp + out;
-                let cost = r.pricing.filter(|_| reported).map(|p| {
+                let cost = r.pricing.map(|p| {
                     (inp as f64 * p.input_per_mtok + out as f64 * p.output_per_mtok) / 1e6
                 });
-                if reported && let Err(e) = s.record_job_usage(&job.id, tokens, cost) {
+                if let Err(e) = s.record_job_usage(&job.id, tokens, cost) {
                     warn(e);
                 }
                 let _ = s.finish_job(&job.id, None);
@@ -1532,8 +1609,9 @@ pub async fn reflect_jobs(store: &Mutex<Store>, r: &Reflector, max: usize) -> (u
                     Event::MemoryReflectionCompleted {
                         job_id: job.id.clone(),
                         ops: a.written.len() as u64,
-                        tokens: reported.then_some(tokens),
+                        tokens: Some(tokens),
                         cost_usd: cost,
+                        estimated,
                     },
                 );
                 eprintln!(
@@ -1563,8 +1641,16 @@ async fn reflect_one(
     store: &Mutex<Store>,
     r: &Reflector,
     job: &synthesis_memory::Job,
-) -> Result<(synthesis_memory::Applied, synthesis_providers::Usage), String> {
+) -> Result<
+    (
+        synthesis_memory::Applied,
+        synthesis_providers::Usage,
+        (u64, u64),
+    ),
+    String,
+> {
     use synthesis_context::Summarizer;
+    use synthesis_context::TokenEstimator;
     let d: Digest = serde_json::from_str(&job.payload).map_err(|e| format!("bad payload: {e}"))?;
     let (system, user) = {
         let s = store.lock().unwrap_or_else(|e| e.into_inner());
@@ -1585,6 +1671,11 @@ async fn reflect_one(
         .map_err(|_| "timed out after 60 s".to_string())?
         .map_err(|e| e.to_string())?;
     let usage = sum.last_usage();
+    let est = synthesis_context::CharsPerToken::default();
+    let guess = (
+        est.estimate(&system) + est.estimate(&user),
+        est.estimate(&reply),
+    );
     let (ops, bad) = synthesis_memory::parse_ops(&reply);
     let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
     let c = synthesis_memory::Ctx {
@@ -1595,7 +1686,7 @@ async fn reflect_one(
     };
     let mut a = synthesis_memory::apply(&mut s, &d, ops, &c).map_err(|e| e.to_string())?;
     a.dropped += bad;
-    Ok((a, usage))
+    Ok((a, usage, guess))
 }
 
 /// `name`/`description`/`type` of a Claude auto-memory file's front matter and the text after it.

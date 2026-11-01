@@ -1398,6 +1398,7 @@ impl Harness {
             deadline: task.deadline,
             cancel: task.cancel.child_token(),
             skip_secrets: lock(&agent.perms).env.deny_secret_reads,
+            sub_agent: agent.agent_id.is_some(),
         }
     }
 

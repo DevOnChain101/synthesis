@@ -155,6 +155,8 @@ pub struct ToolContext {
     pub cancel: CancellationToken,
     /// Tree-walking readers (Grep) skip secret-shaped files and links to them (peer responder).
     pub skip_secrets: bool,
+    /// A sub-agent made the call (memory.md §4: it sees pinned and its own notes, not the workspace).
+    pub sub_agent: bool,
 }
 
 #[cfg(test)]

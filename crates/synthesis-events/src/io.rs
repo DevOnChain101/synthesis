@@ -598,6 +598,7 @@ mod tests {
                 ops: 2,
                 tokens: Some(10),
                 cost_usd: Some(0.01),
+                estimated: true,
             },
             Event::MemoryReflectionFailed {
                 job_id: s("j"),

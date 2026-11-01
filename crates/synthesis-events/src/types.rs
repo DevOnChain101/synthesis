@@ -634,8 +634,8 @@ pub enum Event {
     MemoryQuarantined { id: String, rule: String },
     #[serde(rename = "memory.reflection.started")]
     MemoryReflectionStarted { job_id: String },
-    /// `ops` = records the reflection saved or queued for review; tokens and cost are absent while
-    /// the summarizer path reports no usage.
+    /// `ops` = records the reflection saved or queued for review. `estimated` is true when the
+    /// provider sent no usage and `tokens` (and `cost_usd`) come from the token estimator.
     #[serde(rename = "memory.reflection.completed")]
     MemoryReflectionCompleted {
         job_id: String,
@@ -644,6 +644,8 @@ pub enum Event {
         tokens: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_usd: Option<f64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        estimated: bool,
     },
     #[serde(rename = "memory.reflection.failed")]
     MemoryReflectionFailed { job_id: String, error: String },
