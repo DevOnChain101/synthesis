@@ -31,6 +31,9 @@ pub struct ApprovalRequest {
     pub prompt: String,
     pub reason: String,
     pub suggestions: Vec<Suggestion>,
+    /// `Some` when the call is work done for another session (messaging.md J4.4): the dialog says
+    /// so. Such a request carries no "allow always" suggestions.
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

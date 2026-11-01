@@ -609,6 +609,20 @@ impl Harness {
                 from_hook: false,
             });
         }
+        if let Some(o) = &agent.origin {
+            self.emit(
+                task,
+                agent,
+                Some(turn),
+                Event::PeerDelegationTool {
+                    delegation_id: o.delegation_id.clone(),
+                    tool_call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    origin: "peer".into(),
+                    from: o.from.canonical(),
+                },
+            );
+        }
         if spec.runtime == ToolRuntime::Harness {
             return Plan::Special { input };
         }
@@ -945,7 +959,8 @@ impl Harness {
 
     /// Applies "allow always" options, but only ones that were offered for this call.
     fn apply_accepted(&self, agent: &AgentCtx, tool: &str, input: &Value, a: &Approval) {
-        if a.accepted.is_empty() {
+        // Work done for a peer never creates a rule or changes a mode (messaging.md J4.4).
+        if a.accepted.is_empty() || agent.origin.is_some() {
             return;
         }
         let mut p = lock(&agent.perms);
@@ -989,7 +1004,18 @@ impl Harness {
         input: &Value,
         verdict: &Verdict,
     ) -> Approval {
-        let suggestions = lock(&agent.perms).suggestions(&call.name, input);
+        let origin = agent.origin.as_ref().map(|o| {
+            format!(
+                "peer request from {} (unverified sender)",
+                sanitize_for_display(&o.from.display())
+            )
+        });
+        // No "allow always" for work done on a peer's behalf.
+        let suggestions = if origin.is_some() {
+            vec![]
+        } else {
+            lock(&agent.perms).suggestions(&call.name, input)
+        };
         let approval_id = uuid();
         let dialog = if verdict.outside_read.is_some() {
             "outside_read"
@@ -999,7 +1025,8 @@ impl Harness {
         let shown = self.tools.redact_input(&call.name, input);
         let reason = sanitize_for_display(&verdict.reason);
         let prompt = format!(
-            "{} wants to run {}: {}",
+            "{}{} wants to run {}: {}",
+            origin.as_ref().map_or(String::new(), |o| format!("[{o}] ")),
             sanitize_for_display(&call.name),
             summarize(&shown),
             reason
@@ -1051,6 +1078,7 @@ impl Harness {
             prompt,
             reason,
             suggestions,
+            origin,
         };
         self.waiting(task, agent, true);
         let a = tokio::select! {

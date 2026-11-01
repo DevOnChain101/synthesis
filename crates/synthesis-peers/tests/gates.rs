@@ -128,6 +128,10 @@ fn request(id: &str, from: &Addr) -> Request {
         to_agent: "main".into(),
         text: "q".into(),
         chain: vec![],
+        thread_id: None,
+        delegate: false,
+        sender_mode: String::new(),
+        notify_on_end: false,
     }
 }
 
@@ -140,6 +144,7 @@ async fn live(r: &Rig, id: &str) -> String {
         text: "q",
         chain: &[],
         timeout_s: 30,
+        extra: Default::default(),
     };
     let f = ask(&r.endpoint, &r.key, &o, |_, _| {}).await.unwrap();
     format!("{}|{}", f.status, f.text)
@@ -189,6 +194,7 @@ async fn partials_are_coalesced_without_losing_text_and_redacted() {
         text: "q",
         chain: &[],
         timeout_s: 30,
+        extra: Default::default(),
     };
     ask(&r.endpoint, &r.key, &o, |s, t| {
         seen.push((s, t.to_string()))
@@ -333,6 +339,7 @@ async fn partials(r: &Rig) -> (Vec<(u64, String)>, String) {
         text: "q",
         chain: &[],
         timeout_s: 30,
+        extra: Default::default(),
     };
     let mut seen = Vec::new();
     let f = ask(&r.endpoint, &r.key, &o, |s, t| {

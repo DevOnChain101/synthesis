@@ -141,6 +141,8 @@ mod tests {
             cwd: String::new(),
             pid: 1,
             pid_start: None,
+            repo_key: String::new(),
+            about: None,
             endpoint: String::new(),
             started_at: 0,
         }

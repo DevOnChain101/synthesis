@@ -153,6 +153,9 @@ pub struct Addr {
     pub session_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// Groups the worktrees of one repository (`repo:<key>` rules). Empty = unknown.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo_key: String,
     pub instance: String,
     #[serde(default)]
     pub kind: String,
@@ -165,6 +168,7 @@ impl Addr {
         cut(&mut self.workspace_key);
         cut(&mut self.workspace_label);
         cut(&mut self.workspace_root);
+        cut(&mut self.repo_key);
         cut(&mut self.session_id);
         cut(&mut self.instance);
         cut(&mut self.kind);
@@ -208,12 +212,31 @@ pub struct Config {
     pub max_hops: usize,
     pub max_cost_usd: f64,
     pub resume_offline: bool,
+    /// Threads (P1): rounds per thread, idle minutes before one closes, open threads.
+    pub max_rounds: u32,
+    pub thread_idle_min: u64,
+    pub max_threads: usize,
+    /// `notify_on_end` (P2): longest a subscription waits.
+    pub notify_wait_max_s: u64,
+    /// Delegation (J): off unless the user turns it on in USER settings; nobody is in
+    /// `delegation_allow` by default.
+    pub accept_delegation: bool,
+    pub delegation_allow: Vec<String>,
+    /// `chain.len()` a delegated request may have: 2 = A to B and one further hop.
+    pub delegation_max_hops: usize,
+    pub delegation_max_tool_calls: u32,
+    pub delegation_wall_s: u64,
+    /// Bash commands whose output responders may see (P3). Empty = none.
+    pub share_commands: Vec<String>,
+    /// The `allow` list is the default one (see [`Config::with_repo`]).
+    allow_default: bool,
 }
 
 impl Config {
     /// Defaults: off; once on, the allow list is this workspace only (D9).
     pub fn from_settings(peers: &Map<String, Value>, workspace_root: &str) -> Self {
         let flag = |k, d| peers.get(k).and_then(Value::as_bool).unwrap_or(d);
+        let num = |k, d| peers.get(k).and_then(Value::as_u64).unwrap_or(d);
         let list = |k: &str| -> Option<Vec<String>> {
             peers.get(k)?.as_array().map(|a| {
                 a.iter()
@@ -223,6 +246,7 @@ impl Config {
         };
         Self {
             enabled: flag("enabled", false),
+            allow_default: !peers.get("allow").is_some_and(Value::is_array),
             allow: list("allow").unwrap_or_else(|| vec![format!("workspace:{workspace_root}")]),
             deny: list("deny").unwrap_or_default(),
             initiate: flag("initiate", true),
@@ -237,7 +261,34 @@ impl Config {
                 .and_then(Value::as_f64)
                 .unwrap_or(1.0),
             resume_offline: flag("resume_offline", false),
+            max_rounds: num("max_rounds", 6) as u32,
+            thread_idle_min: num("thread_idle_min", 30),
+            max_threads: num("max_threads", 4) as usize,
+            notify_wait_max_s: num("notify_wait_max_s", 3600),
+            accept_delegation: flag("accept_delegation", false),
+            delegation_allow: list("delegation_allow").unwrap_or_default(),
+            delegation_max_hops: num("delegation_max_hops", 2) as usize,
+            delegation_max_tool_calls: num("delegation_max_tool_calls", 40) as u32,
+            delegation_wall_s: num("delegation_wall_s", 900),
+            share_commands: list("share_commands").unwrap_or_default(),
         }
+    }
+
+    /// P0: the default allow list also admits the other worktrees of this repository. An allow
+    /// list the user wrote is never widened.
+    pub fn with_repo(mut self, repo_key: &str) -> Self {
+        if self.allow_default && !repo_key.is_empty() {
+            self.allow.push(format!("repo:{repo_key}"));
+        }
+        self
+    }
+
+    /// Who may ask this session to do work: delegation is on, the sender is permitted at all
+    /// (`allow`, `deny`) and is named by `delegation_allow` (empty = nobody).
+    pub fn delegation_permits(&self, p: &Addr) -> bool {
+        self.accept_delegation
+            && self.permits(p)
+            && self.delegation_allow.iter().any(|r| rule_matches(r, p))
     }
 
     /// Deny beats allow. The same list governs whom I may ask and who may ask me.
@@ -250,6 +301,8 @@ impl Config {
 fn rule_matches(rule: &str, p: &Addr) -> bool {
     if let Some(x) = rule.strip_prefix("ws:") {
         x == p.workspace_label || (x.len() >= 6 && p.workspace_key.starts_with(x))
+    } else if let Some(x) = rule.strip_prefix("repo:") {
+        !x.is_empty() && p.repo_key == x
     } else if let Some(x) = rule.strip_prefix("sess:") {
         p.session_name.as_deref() == Some(x) || (x.len() >= 8 && p.session_id.starts_with(x))
     } else if let Some(g) = rule.strip_prefix("workspace:") {
@@ -280,6 +333,11 @@ pub struct Entry {
     pub pid_start: Option<u64>,
     pub endpoint: String,
     pub started_at: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo_key: String,
+    /// What this session is for (`--about`, else the first line of SYNTHESIS.md), <= 120 chars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
 }
 
 impl Entry {
@@ -291,6 +349,7 @@ impl Entry {
             session_id: self.session_id.clone(),
             session_name: self.session_name.clone(),
             agent_id: None,
+            repo_key: self.repo_key.clone(),
             instance: instance.into(),
             kind: kind.into(),
         }
@@ -389,6 +448,30 @@ mod tests {
     }
 
     #[test]
+    fn sibling_worktrees_join_only_the_default_allow_list() {
+        let mut sib = addr("api-wt", "/work/api-wt", "s2", None);
+        sib.repo_key = "repo1".into();
+        let own = cfg(json!({}));
+        assert!(!own.permits(&sib), "other worktree: not without the repo");
+        let c = own.with_repo("repo1");
+        assert!(c.permits(&sib));
+        assert!(
+            !c.permits(&addr("web", "/work/web", "s3", None)),
+            "other repository"
+        );
+        let mut other = sib.clone();
+        other.repo_key = "repo2".into();
+        assert!(!c.permits(&other));
+        // a list the user wrote is never widened
+        let mine = cfg(json!({"allow":["ws:web"]})).with_repo("repo1");
+        assert!(!mine.permits(&sib));
+        // deny still wins
+        let d = cfg(json!({"deny":["sess:s2"]})).with_repo("repo1");
+        sib.session_name = Some("s2".into());
+        assert!(!d.permits(&sib));
+    }
+
+    #[test]
     fn deny_beats_allow_and_rules_match() {
         let c = cfg(json!({"allow":["ws:web","sess:backend","ws:012345"],"deny":["sess:secret"]}));
         assert!(c.permits(&addr("web", "/w", "s", None)));
@@ -437,6 +520,8 @@ mod tests {
             cwd: "/r".into(),
             pid: 1,
             pid_start: None,
+            repo_key: String::new(),
+            about: None,
             endpoint: "ep".into(),
             started_at: 0,
         };

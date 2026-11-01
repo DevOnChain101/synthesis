@@ -111,6 +111,7 @@ async fn go(r: &Rig, from: &Addr, to: &str, id: &str, chain: &[String]) -> Resul
         text: "which env sets TTL?",
         chain,
         timeout_s: 30,
+        extra: Default::default(),
     };
     match ask(&r.endpoint, &r.key, &o, |_, _| {}).await {
         Ok(f) => Ok(format!("{}|{}", f.status, f.text)),
@@ -133,6 +134,7 @@ async fn answers_with_partial_redaction_and_same_id() {
         text: "hi",
         chain: &[],
         timeout_s: 30,
+        extra: Default::default(),
     };
     let f = ask(&r.endpoint, &r.key, &o, |s, t| {
         seen.push((s, t.to_string()))
@@ -181,6 +183,7 @@ async fn off_by_default_and_policy_rejections() {
         text: &big,
         chain: &[],
         timeout_s: 30,
+        extra: Default::default(),
     };
     assert!(matches!(
         ask(&r.endpoint, &r.key, &o, |_, _| {}).await,
@@ -234,6 +237,7 @@ async fn busy_timeout_and_cancel() {
                 text: "t",
                 chain: &[],
                 timeout_s: 30,
+                extra: Default::default(),
             };
             ask(&e, &k, &o, |_, _| {}).await
         }));
@@ -264,6 +268,7 @@ async fn busy_timeout_and_cancel() {
         text: "t",
         chain: &[],
         timeout_s: 1,
+        extra: Default::default(),
     };
     let f = ask(&r.endpoint, &r.key, &o, |_, _| {}).await.unwrap();
     assert_eq!((f.status.as_str(), f.text.as_str()), ("timeout", ""));
@@ -302,6 +307,7 @@ async fn wrong_key_and_impostor_leak_nothing() {
         text: "secret question",
         chain: &[],
         timeout_s: 5,
+        extra: Default::default(),
     };
     assert!(matches!(
         ask(&r.endpoint, &bad, &o, |_, _| {}).await,
@@ -369,6 +375,8 @@ async fn discovery_lists_permitted_live_peers_and_cleans_dead_ones() {
         cwd: root.into(),
         pid: 1,
         pid_start: None,
+        repo_key: String::new(),
+        about: None,
         endpoint: ep.into(),
         started_at: 0,
     };
@@ -442,6 +450,7 @@ async fn client_caps_a_huge_reply_and_a_partial_flood() {
         text: "q",
         chain: &[],
         timeout_s: 30,
+        extra: Default::default(),
     };
     let (mut n, mut bytes) = (0, 0);
     let f = ask(&ep, &key, &o, |_, t| {

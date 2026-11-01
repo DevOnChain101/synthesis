@@ -481,6 +481,7 @@ impl Harness {
             perms: retained.perms.clone(),
             allowed: retained.allowed.clone(),
             prompt: retained.prompt.clone(),
+            origin: None,
         };
         let mut st = AgentState::new(retained.messages);
         if first.is_none() {
@@ -797,6 +798,7 @@ impl Harness {
             perms,
             allowed: Some(allowed),
             prompt: Some(def.prompt.clone()),
+            origin: parent.origin.clone(),
         };
         let st = AgentState::new(vec![Message {
             role: Role::User,

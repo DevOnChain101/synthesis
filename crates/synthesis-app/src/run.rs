@@ -219,6 +219,10 @@ pub struct Common {
     /// among live sessions of the workspace. Only used with peers on.
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
+    /// What this session is for, shown to peers in `ListSessions` (<= 120 chars). Default: the
+    /// first line of SYNTHESIS.md. Only used with peers on.
+    #[arg(long, value_name = "TEXT")]
+    pub about: Option<String>,
     /// Continue a stored session of this workspace by id (or unique id prefix) with the new prompt.
     #[arg(long, value_name = "ID", conflicts_with = "continue_session")]
     pub resume: Option<String>,
@@ -1188,6 +1192,9 @@ pub fn prepare(
         crate::peers::setup(
             c.peers,
             c.name.as_deref(),
+            crate::peers::about_of(c.about.as_deref(), &session.workspace.root, &|t| {
+                sink.redact(t)
+            }),
             &user_settings.synthesis.peers,
             &h.synthesis,
             env,

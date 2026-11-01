@@ -1,6 +1,6 @@
 # Spec: Cross-session messaging, judged by hard scenarios — draft 0.1
 
-Status: draft (2026-11-01), for owner review. Nothing here is implemented. Inputs: messaging.md (incl. G, H, I as on `main`), `crates/synthesis-peers`, `crates/synthesis-harness/src/peer.rs`, memory.md.
+Status: owner decisions recorded 2026-11-01 (section 5). What was built is messaging.md section J; where it differs from section 3 (P4, P5), J wins. Inputs: messaging.md (incl. G, H, I as on `main`), `crates/synthesis-peers`, `crates/synthesis-harness/src/peer.rs`, memory.md.
 
 **Bar (owner, 2026-11-01).** A trivial lookup ("list the docs in folder B") is cheaper and safer done by the asking agent itself. Cross-session messaging must earn its risk on tasks that **only another live session can unblock**: the other session holds context, intent, environment or authority the asker cannot get alone. Every scenario below is judged by that bar.
 
@@ -184,7 +184,10 @@ With peers enabled, the default allow list becomes "same `repo_key`" (all worktr
 
 E1, E3, E4 and E6 run against today's code. E2 and E5 pin current gaps. E7 and E8 are acceptance tests for proposals and land with them. All run on macOS, Linux and Windows. Windows needs the named pipe and is unverified until CI runs it.
 
-## 5. Owner decisions (Q1–Q8 in the report; recommendations)
+## 5. Owner decisions (final, 2026-11-01)
+Q3, Q4, Q5, Q6, Q7, Q8 were accepted as proposed below. **Q1 and Q2 were changed by the owner:** the machine is user-controlled and the system autonomous, so messages MAY reach B's own live session and agent A may ask agent B to do work that B executes without asking B's human, but only under B's own permission mode (manual/default: B's normal approval for every call, headless: denied; bypass/auto/acceptEdits: B acts), capped by A's mode, with B's rules/hooks/sandbox/hard denies unchanged, opt-in in USER settings only (`accept_delegation`, default off), attribution, bounds and audit events. The full guard model is messaging.md J; P4 (per-thread dialog, taint rule) and P5 (allow-once command executor) are replaced by it. E8 of section 4 becomes the delegation tests E8a-E8f (manual wait/approve/deny, bypass autonomous run, mode cap, deny rule under bypass, injection in a reply, cycle and round caps).
+
+Original recommendations (kept for the record):
 1. **Q1 P4 live delivery** (amends D10): build it opt-in (`peers.live:"ask"`, default `off`), interactive only, per-thread consent and the taint rule. Recommended: yes, after P1 and P2.
 2. **Q2 P5 delegated command**: only after per-session signatures (I.5), interactive only, allow-once. Recommended: defer.
 3. **Q3 P3 shared commands**: yes, user-settings list, default empty.
