@@ -394,7 +394,7 @@ pub fn hyperlink_line_cached(
             continue;
         }
         if let Some(t) = cache.lookup(&raw, home, base, &mut fresh)
-            && !launchable_file(&t.path)
+            && linkable(&t.path, t.dir)
         {
             spans.push((a, b, file_uri(&t.path)));
         }
@@ -455,7 +455,8 @@ pub struct PathTarget {
 /// on any host: pure string logic. `\\?\C:\x` is a local drive and is not one of them.
 pub fn non_local(p: &str) -> bool {
     let q = p.replace('\\', "/");
-    if let Some(r) = q.strip_prefix("//?/") {
+    // `\\?\` (Win32 file namespace) and `\??\` (NT namespace): only a drive letter is local
+    if let Some(r) = q.strip_prefix("//?/").or_else(|| q.strip_prefix("/??/")) {
         let b = r.as_bytes();
         return !(b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':');
     }
@@ -467,8 +468,47 @@ fn inside(p: &str, base: Option<&Path>) -> bool {
     let Some(base) = base else { return false };
     let norm = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_string();
     let (p, b) = (norm(p), norm(&base.to_string_lossy()));
-    !b.is_empty() && p.strip_prefix(&b).is_some_and(|r| r.starts_with('/'))
+    // `..` could climb out of the root after the prefix check
+    let dotdot = |s: &str| s.split('/').any(|c| c == "..");
+    !b.is_empty()
+        && !dotdot(&p)
+        && !dotdot(&b)
+        && (p == b || p.strip_prefix(&b).is_some_and(|r| r.starts_with('/')))
 }
+
+/// Follows the symlinks of `path` one component at a time (at most 16 hops) WITHOUT resolving
+/// them, so a link to `//host/share/x` is seen before `canonicalize` would contact the host.
+/// False: too many hops, an unreadable link, or a hop to a non-local target outside the workspace.
+fn symlinks_stay_local(path: &Path, base: Option<&Path>) -> bool {
+    let mut todo: Vec<std::ffi::OsString> = path
+        .components()
+        .rev()
+        .map(|c| c.as_os_str().to_owned())
+        .collect();
+    let (mut cur, mut hops) = (PathBuf::new(), 0);
+    while let Some(c) = todo.pop() {
+        cur.push(&c);
+        if !std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink()) {
+            continue;
+        }
+        hops += 1;
+        let Ok(target) = std::fs::read_link(&cur) else {
+            return false;
+        };
+        let t = target.to_string_lossy();
+        if hops > MAX_HOPS || (non_local(&t) && !inside(&t, base)) {
+            return false;
+        }
+        cur.pop();
+        if target.is_absolute() {
+            cur = PathBuf::new();
+        }
+        todo.extend(target.components().rev().map(|c| c.as_os_str().to_owned()));
+    }
+    true
+}
+
+const MAX_HOPS: usize = 16;
 
 /// What a path from the screen points at right now. `file.rs:12:3` / `file.rs(12)` lose their line
 /// numbers, `~` is `home`, relative paths are taken from `base` (the session cwd), `file://` urls
@@ -512,6 +552,9 @@ pub fn existing_path(raw: &str, home: Option<&Path>, base: Option<&Path>) -> Opt
     let mut path = PathBuf::from(&p[..cut]);
     if !path.is_absolute() {
         path = base?.join(path);
+    }
+    if !symlinks_stay_local(&path, base) {
+        return None;
     }
     let path = plain(std::fs::canonicalize(&path).ok()?);
     // a symlink may lead off the machine too
@@ -567,20 +610,62 @@ pub fn launchable(p: &Path) -> bool {
     ext.as_deref().is_some_and(|e| LAUNCHABLE.contains(&e))
 }
 
-/// [`launchable`], or a file with an execute bit (unix).
-pub fn launchable_file(p: &Path) -> bool {
+/// Plain data, text and source: a click on a link to one of these cannot start a program. Script
+/// languages with a registered handler (py pl rb js sh ps1 ...) and everything else are not here.
+const LINKABLE_FILES: &[&str] = &[
+    "txt", "md", "rs", "toml", "json", "yaml", "yml", "lock", "log", "csv", "tsv", "png", "jpg",
+    "jpeg", "gif", "svg", "pdf", "html", "css", "ts", "tsx", "jsx", "c", "h", "cpp", "hpp", "cc",
+    "go", "java", "kt", "swift", "xml", "ini", "cfg", "conf", "diff", "patch", "webp", "bmp",
+];
+
+/// Directory extensions that are bundles / packages the desktop launches or installs.
+const BUNDLE_DIRS: &[&str] = &[
+    "app",
+    "saver",
+    "prefpane",
+    "framework",
+    "bundle",
+    "xcodeproj",
+    "xcworkspace",
+    "plugin",
+    "kext",
+    "qlgenerator",
+    "mdimporter",
+    "component",
+    "wdgt",
+    "action",
+    "workflow",
+    "terminal",
+    "pkg",
+    "mpkg",
+    "appex",
+    "xpc",
+    "scptd",
+    "service",
+];
+
+/// May OSC 8 make this (canonical) path clickable in the terminal? An ALLOW-list: directories
+/// that are not bundles, files of a known data/text/source type, and extension-less files; never
+/// anything with an execute bit, and an unknown extension is not linked.
+pub fn linkable(p: &Path, dir: bool) -> bool {
+    let ext = p
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
     if launchable(p) {
-        return true;
+        return false;
+    }
+    if dir {
+        return !BUNDLE_DIRS.contains(&ext.as_str());
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        if std::fs::metadata(p).is_ok_and(|m| m.permissions().mode() & 0o111 != 0) {
+            return false;
+        }
     }
-    #[cfg(not(unix))]
-    {
-        false
-    }
+    ext.is_empty() || LINKABLE_FILES.contains(&ext.as_str())
 }
 
 /// `(program, args)` per platform. No shell is involved, so an address can never run as a
@@ -1073,64 +1158,136 @@ mod tests {
     }
 
     #[test]
-    fn launchable_files_and_bundles_get_no_link_but_folders_and_plain_files_do() {
+    fn only_known_data_files_and_plain_folders_get_a_link() {
         let td = tempfile::tempdir().unwrap();
         let root = plain(std::fs::canonicalize(td.path()).unwrap());
-        for f in [
-            "run.command",
-            "x.desktop",
-            "y.exe",
-            "z.bat",
-            "c.cmd",
-            "d.com",
-            "e.lnk",
-            "p.ps1",
-            "i.msi",
-            "s.scr",
-            "t.sh",
-            "ok.rs",
-        ] {
-            std::fs::write(root.join(f), "x").unwrap();
+        let blocked = [
+            "a.url",
+            "a.hta",
+            "a.vbs",
+            "a.js",
+            "a.reg",
+            "a.cpl",
+            "a.msc",
+            "a.scpt",
+            "a.action",
+            "a.webloc",
+            "a.dmg",
+            "a.jnlp",
+            "a.py",
+            "a.command",
+            "a.desktop",
+            "a.exe",
+            "a.bat",
+            "a.cmd",
+            "a.com",
+            "a.lnk",
+            "a.ps1",
+            "a.msi",
+            "a.scr",
+            "a.sh",
+            "a.pl",
+            "a.rb",
+            "a.unknownext",
+        ];
+        let allowed = [
+            "a.txt", "a.md", "a.rs", "a.toml", "a.json", "a.png", "a.pdf", "./README",
+        ];
+        for f in blocked.iter().chain(&allowed) {
+            std::fs::write(root.join(f.trim_start_matches("./")), "x").unwrap();
         }
-        for d in ["Tool.app", "Safe.terminal", "plain"] {
+        for d in [
+            "Tool.app",
+            "S.saver",
+            "P.prefPane",
+            "F.framework",
+            "B.bundle",
+            "X.xcodeproj",
+            "plain",
+        ] {
             std::fs::create_dir(root.join(d)).unwrap();
         }
-        let link = |name: &str| {
-            let out = hyperlink_line(name, Some(&root), None);
-            out.contains("\x1b]8;;file://")
-        };
-        for blocked in [
-            "run.command",
-            "x.desktop",
-            "y.exe",
-            "z.bat",
-            "c.cmd",
-            "d.com",
-            "e.lnk",
-            "p.ps1",
-            "i.msi",
-            "s.scr",
-            "t.sh",
-            "Tool.app/",
-            "Safe.terminal/",
-        ] {
-            assert!(!link(blocked), "{blocked} must not be a link");
+        let link = |name: &str| hyperlink_line(name, Some(&root), None).contains("\x1b]8;;file://");
+        for f in blocked {
+            assert!(!link(f), "{f} must not be a link");
         }
-        assert!(link("ok.rs") && link("plain/"));
+        for d in [
+            "Tool.app",
+            "S.saver",
+            "P.prefPane",
+            "F.framework",
+            "B.bundle",
+            "X.xcodeproj",
+        ] {
+            assert!(!link(&format!("{d}/")), "{d} bundle must not be a link");
+        }
+        for f in allowed {
+            assert!(link(f), "{f} should be a link");
+        }
+        assert!(link("plain/"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::write(root.join("tool"), "#!/bin/sh\n").unwrap();
-            std::fs::write(root.join("data.txt"), "x").unwrap();
-            std::fs::set_permissions(root.join("tool"), std::fs::Permissions::from_mode(0o755))
-                .unwrap();
-            assert!(!link("tool/"), "dir-looking token for an executable file");
-            assert!(!hyperlink_line("a ./tool b", Some(&root), None).contains("file://"));
-            assert!(link("./data.txt"));
+            let exec = |n: &str| {
+                std::fs::write(root.join(n), "#!/bin/sh\n").unwrap();
+                std::fs::set_permissions(root.join(n), std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            };
+            exec("tool");
+            exec("script.txt"); // a data extension does not excuse an execute bit
+            assert!(!link("./tool") && !link("script.txt"));
+            // the canonical file decides: a .txt symlink to a script is not linked
+            std::os::unix::fs::symlink(root.join("a.sh"), root.join("looks.txt")).unwrap();
+            assert!(!link("looks.txt"));
         }
-        // the opener and the links share the one list
+        // the opener keeps its own (deny) list
         assert!(launchable(Path::new("/a/B.EXE")) && launchable(Path::new("/a/x.app")));
         assert!(!launchable(Path::new("/a/x.rs")));
+    }
+
+    #[test]
+    fn symlinks_to_other_machines_are_refused_before_canonicalize() {
+        for p in [
+            r"\??\UNC\host\share\x",
+            r"\\.\pipe\x",
+            "//host/share/x",
+            r"\\?\UNC\h\s",
+        ] {
+            assert!(non_local(p), "{p}");
+        }
+        assert!(!non_local(r"\??\C:\x"));
+        // `..` never counts as inside
+        assert!(!inside("/ws/../etc/x", Some(Path::new("/ws"))));
+        assert!(!inside("//host/ws/a/../../x", Some(Path::new("//host/ws"))));
+        assert!(inside("/ws/a/b", Some(Path::new("/ws"))));
+        #[cfg(unix)]
+        {
+            let td = tempfile::tempdir().unwrap();
+            let root = plain(std::fs::canonicalize(td.path()).unwrap());
+            std::fs::create_dir(root.join("real")).unwrap();
+            std::fs::write(root.join("real/f.txt"), "x").unwrap();
+            let ln = |t: &str, name: &str| std::os::unix::fs::symlink(t, root.join(name)).unwrap();
+            ln("//no-such-host/share/x", "unc_file");
+            ln("//no-such-host/share", "unc_dir");
+            ln("real", "ok_dir");
+            ln("ok_dir", "hop1");
+            for raw in ["unc_file", "unc_dir/f.txt"] {
+                assert!(!symlinks_stay_local(&root.join(raw), Some(&root)), "{raw}");
+                assert_eq!(existing_path(raw, None, Some(&root)), None, "{raw}");
+            }
+            // a link to a local directory, also through a chain, still resolves
+            assert!(symlinks_stay_local(&root.join("hop1/f.txt"), Some(&root)));
+            assert!(existing_path("hop1/f.txt", None, Some(&root)).is_some());
+            // a loop is bounded
+            ln("loop2", "loop1");
+            ln("loop1", "loop2");
+            assert!(!symlinks_stay_local(&root.join("loop1"), Some(&root)));
+            // the same UNC target inside a UNC workspace is the workspace's own business
+            assert!(symlinks_stay_local(
+                &root.join("unc_dir"),
+                Some(Path::new("//no-such-host/share"))
+            ));
+        }
     }
 
     #[test]
