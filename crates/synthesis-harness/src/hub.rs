@@ -83,6 +83,7 @@ pub(crate) struct Retained {
     pub perms: Arc<Mutex<Permissions>>,
     pub allowed: Option<BTreeSet<String>>,
     pub prompt: Option<String>,
+    pub limits: crate::agents::AgentLimits,
     pub messages: Vec<ChatMessage>,
 }
 
@@ -714,6 +715,7 @@ mod tests {
             ))),
             allowed: None,
             prompt: None,
+            limits: Default::default(),
             messages: vec![],
         };
         h.finish("w3", r(), IDLE);
@@ -745,6 +747,7 @@ mod tests {
             ))),
             allowed: None,
             prompt: None,
+            limits: Default::default(),
             messages: vec![],
         };
         h.finish("w", r, IDLE);

@@ -363,6 +363,7 @@ pub(crate) struct AgentCtx {
     /// `None` = all tools.
     pub allowed: Option<BTreeSet<String>>,
     pub prompt: Option<String>,
+    pub limits: crate::agents::AgentLimits,
     /// Set for a delegate worker: whose work this is (messaging.md J4.4).
     pub origin: Option<crate::peer::Origin>,
 }
@@ -427,6 +428,7 @@ pub struct Harness {
     pub(crate) context: Arc<dyn ContextProvider>,
     pub(crate) sink: EventSink,
     pub(crate) agents: AgentTable,
+    pub(crate) model_resolver: Option<crate::agents::ModelResolver>,
     pub(crate) tracker: Arc<dyn ChangeTracker>,
     pub(crate) gate: Option<GateFactory>,
     pub(crate) config: HarnessConfig,
@@ -479,6 +481,7 @@ impl Harness {
             context: Arc::new(StaticContext::default()),
             sink,
             agents: AgentTable::default(),
+            model_resolver: None,
             tracker: Arc::new(NoChangeTracker),
             gate: None,
             config,
@@ -512,6 +515,12 @@ impl Harness {
     }
     pub fn with_agents(mut self, a: AgentTable) -> Self {
         self.agents = a;
+        self
+    }
+    /// How a sub-agent definition's `model` becomes a model id of this run's provider; without it
+    /// the field is ignored with a notice (the harness talks to one provider per run).
+    pub fn with_model_resolver(mut self, r: crate::agents::ModelResolver) -> Self {
+        self.model_resolver = Some(r);
         self
     }
     pub fn with_rule_store(mut self, f: RuleStore) -> Self {
@@ -824,6 +833,7 @@ impl Harness {
                     perms: r.perms,
                     allowed: r.allowed,
                     prompt: r.prompt,
+                    limits: r.limits,
                     origin: None,
                 };
                 parked_kind = Some(kind);
@@ -1052,6 +1062,7 @@ impl Harness {
             perms: self.permissions.clone(),
             allowed: None,
             prompt: None,
+            limits: Default::default(),
             origin: None,
         };
         (task, main)

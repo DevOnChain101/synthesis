@@ -14,7 +14,22 @@ pub struct AgentDef {
     pub tools: Option<Vec<String>>,
     /// Requested mode; the effective mode is never more permissive than the parent's.
     pub mode: Option<Mode>,
+    /// Frontmatter `model`: a model of the SAME provider as the run (resolved by the harness's
+    /// `ModelResolver`); `None` or `inherit` = the session's model.
+    pub model: Option<String>,
+    /// Frontmatter `maxTurns`: model requests this agent may make per run, inside the task budget.
+    pub max_turns: Option<u32>,
 }
+
+/// What a running sub-agent carries from its definition (resolved, ready to use).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AgentLimits {
+    pub model: Option<String>,
+    pub max_turns: Option<u32>,
+}
+
+/// Maps a frontmatter `model` to a model id of the run's provider, or says why it cannot.
+pub type ModelResolver = std::sync::Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
 
 /// Where a definition was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +63,8 @@ impl AgentTable {
                     .to_vec(),
             ),
             mode: Some(Mode::Plan),
+            model: None,
+            max_turns: None,
         };
         let mut all = vec![
             AgentDef {
@@ -56,6 +73,8 @@ impl AgentTable {
                 prompt: String::new(),
                 tools: None,
                 mode: None,
+                model: None,
+                max_turns: None,
             },
             read_only(
                 "Explore",
@@ -183,6 +202,8 @@ mod tests {
             prompt: String::new(),
             tools: None,
             mode: None,
+            model: None,
+            max_turns: None,
         };
         let defs = || {
             [

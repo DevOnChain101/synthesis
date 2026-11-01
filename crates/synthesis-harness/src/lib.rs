@@ -42,7 +42,7 @@ mod user_cmd;
 mod util;
 
 pub use agents::{
-    AgentDef, AgentSource, AgentTable, GENERAL_PURPOSE, from_mode, stricter, to_mode,
+    AgentDef, AgentSource, AgentTable, GENERAL_PURPOSE, ModelResolver, from_mode, stricter, to_mode,
 };
 pub use classifier::AutoJudge;
 pub use comm::{AgentInfo, TaskAgent};

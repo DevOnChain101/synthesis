@@ -2,7 +2,8 @@
 //! `<project_root>/.synthesis/agents/*.md` (project, repository content: only for a trusted project,
 //! enforced by `AgentTable::from_sources`). Format as Node `loadAgentsDir`: Markdown with a
 //! `---` frontmatter (`name`, `description`, `tools`); the body is the system prompt.
-//! `model`/`profile`/`reasoning` of the Node format are not supported by the Rust harness.
+//! `model` is honoured when it names a model of the run's provider (`run.rs agent_model_resolver`);
+//! `maxTurns` caps the agent's requests per run. `profile`/`reasoning` of the Node format are not supported.
 
 use std::io::Read;
 use std::path::Path;
@@ -75,6 +76,8 @@ fn parse(file_stem: &str, raw: &str) -> AgentDef {
         },
         // a requested mode is still capped by the parent's (`stricter`)
         mode: get("permissionMode").and_then(synthesis_permissions::Mode::parse),
+        model: get("model").filter(|m| !m.is_empty()).map(String::from),
+        max_turns: get("maxTurns").and_then(|n| n.parse().ok()),
     }
 }
 
@@ -152,6 +155,17 @@ mod tests {
         );
         assert_eq!(d.mode, Some(synthesis_permissions::Mode::Plan));
         assert_eq!(parse("x", "---\nname: y\n---\nb").tools, None);
+    }
+
+    #[test]
+    fn frontmatter_reads_model_and_max_turns() {
+        let d = parse("x", "---\nmodel: haiku-x\nmaxTurns: 3\n---\nbody");
+        assert_eq!(
+            (d.model.as_deref(), d.max_turns),
+            (Some("haiku-x"), Some(3))
+        );
+        let d = parse("x", "---\nmaxTurns: lots\n---\nbody");
+        assert_eq!((d.model, d.max_turns), (None, None));
     }
 
     #[test]

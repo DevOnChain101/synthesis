@@ -1732,6 +1732,7 @@ impl Harness {
                         perms: child.perms.clone(),
                         allowed: child.allowed.clone(),
                         prompt: child.prompt.clone(),
+                        limits: child.limits.clone(),
                         messages: std::mem::take(&mut st.messages),
                     },
                     cancel: child.cancel.clone(),

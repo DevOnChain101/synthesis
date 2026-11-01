@@ -1592,6 +1592,7 @@ impl Harness {
                 }
                 .into(),
             ),
+            limits: Default::default(),
             origin: delegate.then(|| Origin {
                 from: req.from.clone(),
                 delegation_id: delegation_id.clone(),

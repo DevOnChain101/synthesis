@@ -1209,6 +1209,7 @@ pub fn prepare(
     let mut harness = Harness::new(res.provider.clone(), toolbox, perms, sink.clone(), hcfg)
         .with_approver(approver)
         .with_agents(agents.table)
+        .with_model_resolver(agent_model_resolver(&cfg, &res.label))
         .with_context(Arc::new(context))
         .with_gate(Box::new(move |s| {
             CompletionGate::new(
@@ -1648,6 +1649,38 @@ fn read_criteria(f: &Path) -> Result<Vec<Criterion>, String> {
         .collect()
 }
 
+/// Frontmatter `model` of a sub-agent definition: the harness has one provider per run, so only a
+/// model of that provider is accepted (alias, `provider/model` or a bare id); anything else is
+/// refused with the reason, and the agent runs on the session's model.
+fn agent_model_resolver(cfg: &Config, label: &str) -> synthesis_harness::ModelResolver {
+    let cfg = cfg.clone();
+    let run = label.split_once('/').map_or("", |(p, _)| p).to_string();
+    Arc::new(move |m| {
+        let resolved = synthesis_config::resolve_alias(m, &cfg);
+        if let Some((p, model)) = resolved.split_once('/') {
+            return if p == run {
+                Ok(model.to_string())
+            } else {
+                Err(format!(
+                    "it belongs to provider \"{p}\" and this run uses \"{run}\" (one provider per run)"
+                ))
+            };
+        }
+        let lists = |id: &str| {
+            cfg.providers
+                .get(id)
+                .and_then(|p| p.models.as_ref())
+                .is_some_and(|l| l.contains(&resolved))
+        };
+        match cfg.providers.keys().find(|id| lists(id)) {
+            Some(other) if *other != run => Err(format!(
+                "it belongs to provider \"{other}\" and this run uses \"{run}\" (one provider per run)"
+            )),
+            _ => Ok(resolved),
+        }
+    })
+}
+
 pub struct Resolved {
     pub provider: Arc<dyn ModelProvider>,
     pub model: String,
@@ -1843,6 +1876,23 @@ fn artifact_to_dir(dir: PathBuf) -> PutArtifact {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_models_resolve_only_within_the_runs_provider() {
+        let mut cfg = Config::default();
+        cfg.aliases
+            .insert("fast".into(), Some("anthropic/haiku-x".into()));
+        cfg.aliases
+            .insert("alien".into(), Some("openai/gpt-x".into()));
+        let r = agent_model_resolver(&cfg, "anthropic/sonnet-x");
+        assert_eq!(r("fast").unwrap(), "haiku-x");
+        assert_eq!(r("anthropic/opus-x").unwrap(), "opus-x");
+        assert_eq!(r("some-id").unwrap(), "some-id");
+        for bad in ["alien", "openai/gpt-y"] {
+            let e = r(bad).unwrap_err();
+            assert!(e.contains("one provider per run"), "{e}");
+        }
+    }
 
     #[test]
     fn sandbox_defaults_to_enforce_except_where_nothing_can_confine() {
