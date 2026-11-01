@@ -2,6 +2,7 @@
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clap::Args;
 use synthesis_config::Env;
@@ -17,7 +18,12 @@ use synthesis_app::run::{
     sandbox_notices, sandbox_status,
 };
 use synthesis_app::{homes, launch_dir};
+use synthesis_core::AgentSession;
+use synthesis_events::Event;
+use synthesis_harness::{EventSink, Harness, Scope, sanitize_for_display};
 use synthesis_hooks::HookEvent;
+use synthesis_tui::{BoxFut, TaskHost};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Args)]
 pub struct TuiArgs {
@@ -210,6 +216,9 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
         };
         let Prepared {
             harness,
+            context,
+            skills,
+            sink,
             mut session,
             sid,
             link,
@@ -262,6 +271,49 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
             tokio.handle().clone(),
             env.clone(),
         );
+        o.extra_commands = skills
+            .iter()
+            .map(|s| {
+                (
+                    s.name.clone(),
+                    s.description.clone(),
+                    "skill",
+                    String::new(),
+                )
+            })
+            .chain(mcp.iter().flat_map(|m| m.prompts()).map(|p| {
+                let name = format!(
+                    "mcp__{}__{}",
+                    synthesis_app::mcpinput::sanitize_server(&p.server),
+                    p.name
+                );
+                let hint = p
+                    .arguments
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect::<Vec<_>>();
+                (name, p.description, "MCP prompt", hint.join(" "))
+            }))
+            .map(
+                |(name, desc, kind, hint)| synthesis_tui_base::complete::Command {
+                    name: sanitize_for_display(&name),
+                    aliases: vec![],
+                    description: sanitize_for_display(&format!("{kind}: {desc}")),
+                    argument_hint: sanitize_for_display(&hint),
+                    local: false,
+                },
+            )
+            .collect();
+        o.host = Some(Arc::new(Host {
+            mcp: mcp.clone(),
+            memory: memory.clone(),
+            context,
+            harness: harness.clone(),
+            sink,
+            store: store.clone(),
+            transcript: transcript.clone(),
+            skills: skills.iter().map(|s| s.name.clone()).collect(),
+        }));
         o.version = env!("CARGO_PKG_VERSION").into();
         o.tz_offset_min = local_offset_min();
         o.model = Some(label);
@@ -327,6 +379,9 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
             eprintln!("synth: {}", w.finish(a.common.cleanup_worktree));
         }
         drop(harness);
+        // the global hook holds the memory run, and with it the event sink and the session
+        // store's write lock: the restarted session (model switch, resume) must be able to open it
+        synthesis_tools::set_learned_skills(None);
         match exit?.reason {
             ExitReason::OpenFolder(p) => {
                 cwd = synthesis_core::canonicalize(&p)
@@ -339,6 +394,93 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
             }
             ExitReason::Quit | ExitReason::InputClosed => return Ok(0),
         }
+    }
+}
+
+/// What `synth run` does around its task, for every task the person starts in the app:
+/// MCP mentions and prompts, skills, the memory block for the typed prompt, the memory episode
+/// afterwards and the stored usage.
+struct Host {
+    mcp: Option<Arc<synthesis_mcp::McpManager>>,
+    memory: Option<Arc<synthesis_app::memcmd::MemoryRun>>,
+    context: Arc<synthesis_app::ctx::SynthesisContext>,
+    harness: Arc<Harness>,
+    sink: EventSink,
+    store: Option<synthesis_app::events::Store>,
+    transcript: Option<Arc<synthesis_app::transcript::Transcript>>,
+    skills: Vec<String>,
+}
+
+impl Host {
+    /// `/skill-name args` runs that skill: the model is told to load it (it is not typed text it
+    /// could mistake for a command).
+    fn skill_request(&self, typed: &str) -> Option<String> {
+        let rest = typed.trim_start().strip_prefix('/')?;
+        let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        self.skills.iter().any(|s| s == name).then(|| {
+            let args = args.trim();
+            if args.is_empty() {
+                format!("Run the skill \"{name}\" with the Skill tool.")
+            } else {
+                format!("Run the skill \"{name}\" with the Skill tool. Arguments: {args}")
+            }
+        })
+    }
+}
+
+impl TaskHost for Host {
+    fn before<'a>(
+        &'a self,
+        typed: &'a str,
+        cancel: &'a CancellationToken,
+    ) -> BoxFut<'a, Result<String, String>> {
+        Box::pin(async move {
+            if let Some(r) = self.skill_request(typed) {
+                return Ok(r);
+            }
+            let (request, notes) =
+                synthesis_app::mcpinput::expand(self.mcp.as_ref(), typed, cancel).await?;
+            for n in notes {
+                self.sink.emit(
+                    &Scope::default(),
+                    Event::Notice {
+                        level: "warning".into(),
+                        text: sanitize_for_display(&n),
+                    },
+                );
+            }
+            if let Some(m) = &self.memory {
+                self.context
+                    .set_memory(synthesis_app::memcmd::retrieve_for_task(m, typed));
+            }
+            Ok(request)
+        })
+    }
+
+    fn after<'a>(
+        &'a self,
+        typed: &'a str,
+        out: &'a synthesis_harness::TaskOutcome,
+        session: &'a AgentSession,
+    ) -> BoxFut<'a, ()> {
+        Box::pin(async move {
+            if let Some(m) = &self.memory {
+                let verified = self.harness.verified_commands(&out.task_id);
+                synthesis_app::memcmd::task_ended(m, typed, out, &verified);
+                // reflection is a model call (opt-in): the screen does not wait for it
+                if m.reflect.is_some() {
+                    let m = m.clone();
+                    tokio::spawn(async move {
+                        if let Some(rf) = &m.reflect {
+                            synthesis_app::memcmd::reflect_jobs(&m.store, rf, 2).await;
+                        }
+                    });
+                }
+            }
+            if let Some(s) = &self.store {
+                finish_store(s, self.transcript.as_deref(), out, &session.usage);
+            }
+        })
     }
 }
 

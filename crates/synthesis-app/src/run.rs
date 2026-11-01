@@ -337,6 +337,10 @@ pub enum Front {
 /// Everything a front end needs, built once by [`prepare`].
 pub struct Prepared {
     pub harness: Arc<Harness>,
+    /// The context the harness uses (interactive sessions refresh its memory block per task).
+    pub context: Arc<SynthesisContext>,
+    /// Skills the Skill tool serves (project skills only in a trusted project).
+    pub skills: Vec<synthesis_tools::SkillInfo>,
     pub session: AgentSession,
     pub sid: String,
     pub cancel: CancellationToken,
@@ -1289,11 +1293,12 @@ pub fn prepare(
         Some(s) => (Some(s.link), Some(s.listener)),
         None => (None, None),
     };
+    let context = Arc::new(context);
     let mut harness = Harness::new(res.provider.clone(), toolbox, perms, sink.clone(), hcfg)
         .with_approver(approver)
         .with_agents(agents.table)
         .with_model_resolver(agent_model_resolver(&cfg, &res.label))
-        .with_context(Arc::new(context))
+        .with_context(context.clone())
         .with_gate(Box::new(move |s| {
             CompletionGate::new(
                 VerifyRunner::new(rt_gate.clone(), &s.id, Arc::new(s.workspace.clone())),
@@ -1371,6 +1376,8 @@ pub fn prepare(
     }
     Ok(Prepared {
         harness,
+        context,
+        skills,
         session,
         sid,
         cancel,

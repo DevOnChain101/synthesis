@@ -1051,6 +1051,16 @@ pub fn start(a: &StartArgs, cancel: CancellationToken) -> (Option<Arc<MemoryRun>
     (Some(run), block)
 }
 
+/// Interactive sessions: retrieval for the prompt the person just typed (the session started
+/// before it existed). Announces `memory.retrieved` and returns the block for this task.
+pub fn retrieve_for_task(m: &MemoryRun, request: &str) -> Option<String> {
+    let mut s = m.store.lock().unwrap_or_else(|e| e.into_inner());
+    let open = s.open_use_ids(&m.sid, None).unwrap_or_default();
+    let r = inject(&mut s, &m.repo, request, &m.sid, m.project_trusted, &open)?;
+    emit(m.sink.as_ref(), None, r.event);
+    r.block
+}
+
 /// Approved skills for the Skill tool; the stats ride in the description (`[learned, ok 7/8]`).
 fn learned(m: &MemoryRun) -> Vec<synthesis_tools::LearnedSkill> {
     let s = m.store.lock().unwrap_or_else(|e| e.into_inner());

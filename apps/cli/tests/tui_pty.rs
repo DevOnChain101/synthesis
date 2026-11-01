@@ -1,0 +1,306 @@
+//! The interactive app end to end: the real `synth` binary on a pseudo-terminal (a small python3
+//! driver, `tui_pty_driver.py`), a scripted model and, where needed, a stdio MCP server. Each
+//! scenario types into the app and then checks the screen and the session store.
+#![cfg(all(feature = "test-provider", unix))]
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use serde_json::{Value, json};
+
+struct Rig {
+    dir: tempfile::TempDir,
+}
+
+impl Rig {
+    fn new(script: Value) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let r = Rig { dir };
+        for d in ["home", "ws/.git", "ws/sub/.git"] {
+            std::fs::create_dir_all(r.root().join(d)).unwrap();
+        }
+        std::fs::write(r.root().join("script.json"), script.to_string()).unwrap();
+        r
+    }
+
+    fn root(&self) -> PathBuf {
+        // the app canonicalises: /var -> /private/var on macOS
+        std::fs::canonicalize(self.dir.path()).unwrap()
+    }
+    fn home(&self) -> PathBuf {
+        self.root().join("home")
+    }
+    fn ws(&self) -> PathBuf {
+        self.root().join("ws")
+    }
+    fn write(&self, rel: &str, text: &str) {
+        let p = self.home().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+
+    /// Runs the app with `steps`; returns the screen text. Fails on a step that did not happen.
+    fn drive(&self, steps: Value) -> String {
+        let scenario = json!({
+            "argv": [env!("CARGO_BIN_EXE_synth"), "--cwd", self.ws(), "--provider",
+                     format!("fake:{}", self.root().join("script.json").display()),
+                     "--sandbox", "off"],
+            "env": {"HOME": self.root(), "SYNTHESIS_HOME": self.home()},
+            "steps": steps,
+        });
+        let (sc, out) = (
+            self.root().join("scenario.json"),
+            self.root().join("out.txt"),
+        );
+        std::fs::write(&sc, scenario.to_string()).unwrap();
+        let driver = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/tui_pty_driver.py");
+        let st = Command::new("python3")
+            .arg("-I")
+            .arg(driver)
+            .arg(&sc)
+            .arg(&out)
+            .stdin(Stdio::null())
+            .status()
+            .expect("python3 is needed for the pty tests");
+        assert!(st.success());
+        let text = std::fs::read_to_string(out).unwrap();
+        assert!(
+            text.lines().last().unwrap_or("").starts_with("STATE ok"),
+            "a step failed:\n{}",
+            squash(&text)
+        );
+        text
+    }
+
+    /// `(type, payload)` of every stored event of the sessions in the store.
+    fn events(&self) -> Vec<(String, Value)> {
+        let c = rusqlite::Connection::open(self.home().join("synthesis.db")).unwrap();
+        let mut q = c
+            .prepare("SELECT type, COALESCE(payload, '{}') FROM events ORDER BY session_id, seq")
+            .unwrap();
+        q.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                serde_json::from_str(&r.get::<_, String>(1)?).unwrap(),
+            ))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    }
+}
+
+fn squash(t: &str) -> String {
+    t.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn send(s: &str) -> Value {
+    json!(["send", s])
+}
+fn expect(s: &str) -> Value {
+    json!(["expect", s, 15])
+}
+fn expect_new(s: &str) -> Value {
+    json!(["expect_new", s, 15])
+}
+
+/// Approval, sub-agent, memory row, model switch and a new folder, in one app run.
+#[test]
+fn approval_subagent_model_switch_and_new_folder() {
+    let rig = Rig::new(json!([
+        {"text": "first reply"},
+        {"tools": [{"name": "Write", "input": {"file_path": "NEW.txt", "content": "x"}}]},
+        {"text": "wrote it"},
+        {"tools": [{"name": "Task", "input": {"description": "look", "prompt": "say hi",
+                                              "subagent_type": "general-purpose"}}]},
+        {"text": "sub says hi"},
+        {"text": "all done"}
+    ]));
+    let text = rig.drive(json!([
+        ["wait", 2],
+        send("hi\r"),
+        expect("first reply"),
+        // a Write asks; Enter answers the first option (allow once)
+        send("write a file\r"),
+        expect("Write"),
+        ["wait", 1],
+        send("\r"),
+        expect("wrote it"),
+        send("use a subagent\r"),
+        expect("all done"),
+        // /model restarts on the same session; the scripted model starts over
+        send("/model fake/other\r"),
+        ["wait", 2],
+        send("again\r"),
+        expect_new("first reply"),
+        // /new -> sub/ -> use this folder: a fresh session in that folder
+        send("/new\r"),
+        expect("use this folder"),
+        send("sub"),
+        ["wait", 0.5],
+        send("\r"),
+        ["wait", 1],
+        send("\r"),
+        ["wait", 3],
+        send("hello\r"),
+        expect_new("first reply")
+    ]));
+    let flat = squash(&text);
+    assert!(flat.contains("memory.written"), "no memory row");
+    assert!(!flat.contains("synth: error"), "{flat}");
+    let ev = rig.events();
+    let n = |t: &str| ev.iter().filter(|e| e.0 == t).count();
+    assert!(n("tool.approval_required") >= 1, "no approval event");
+    assert!(n("subagent.started") >= 1 && n("subagent.stopped") >= 1);
+    // the model switch resumed the first session (session.started with source resume), and the
+    // new folder is another session
+    let sources: Vec<&str> = ev
+        .iter()
+        .filter(|e| e.0 == "session.started")
+        .filter_map(|e| e.1["source"].as_str())
+        .collect();
+    assert!(sources.contains(&"resume"), "{sources:?}");
+    let roots: std::collections::BTreeSet<&str> = ev
+        .iter()
+        .filter(|e| e.0 == "session.started")
+        .filter_map(|e| e.1["workspace"]["cwd"].as_str())
+        .collect();
+    assert!(roots.len() >= 2, "{roots:?}");
+    // the usage of finished tasks reached the store before the app ended (it is killed, not quit)
+    let c = rusqlite::Connection::open(rig.home().join("synthesis.db")).unwrap();
+    let used: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE json_extract(usage, '$.turns') >= 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(used >= 2, "usage not persisted per task: {used} session(s)");
+}
+
+const MCP_SERVER: &str = r#"
+import sys, json
+log = sys.argv[1]
+for line in sys.stdin:
+    try:
+        m = json.loads(line)
+    except Exception:
+        continue
+    if "id" not in m:
+        continue
+    method, p = m.get("method"), m.get("params") or {}
+    if method == "initialize":
+        r = {"protocolVersion": p["protocolVersion"],
+             "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
+             "serverInfo": {"name": "doc", "version": "1"}}
+    elif method == "tools/list":
+        r = {"tools": []}
+    elif method == "resources/list":
+        r = {"resources": [{"uri": "doc://1", "name": "One"}]}
+    elif method == "resources/read":
+        open(log, "a").write(p["uri"] + "\n")
+        r = {"contents": [{"uri": p["uri"], "text": "doc body"}]}
+    elif method == "prompts/list":
+        r = {"prompts": [{"name": "greet", "description": "Greets",
+                          "arguments": [{"name": "who", "required": True}, {"name": "how"}]}]}
+    elif method == "prompts/get":
+        a = p.get("arguments") or {}
+        r = {"messages": [{"role": "user", "content": {"type": "text",
+             "text": "Hello %s (%s)" % (a.get("who"), a.get("how"))}}]}
+    else:
+        r = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": r}), flush=True)
+"#;
+
+/// `@server:uri`, `/mcp__server__prompt`, a skill command, and /help listing the last two.
+#[test]
+fn mcp_mentions_prompts_skills_and_help() {
+    let rig = Rig::new(json!([{"text": "ok one"}, {"text": "ok two"}, {"text": "ok three"}]));
+    let srv = rig.root().join("server.py");
+    std::fs::write(&srv, MCP_SERVER).unwrap();
+    let reads = rig.root().join("reads.log");
+    rig.write(
+        "synthesis.json",
+        &json!({"$schema": "config.json/v1", "mcpServers": {
+            "doc": {"command": "python3", "args": [srv, reads]}}})
+        .to_string(),
+    );
+    rig.write(
+        "skills/ship/SKILL.md",
+        "---\nname: ship\ndescription: Ship the release\n---\nDo the shipping.\n",
+    );
+    rig.drive(json!([
+        ["wait", 2],
+        send("/help\r"),
+        expect("mcp__doc__greet"),
+        expect("Ship the release"),
+        send("/mcp__doc__greet Ann loudly\r"),
+        expect("ok one"),
+        send("read @doc:doc://1 please\r"),
+        expect("ok two"),
+        send("/ship now\r"),
+        expect("ok three")
+    ]));
+    let users: Vec<String> = rig
+        .events()
+        .into_iter()
+        .filter(|e| e.0 == "user.message")
+        .filter_map(|e| e.1["text"].as_str().map(String::from))
+        .collect();
+    let has = |s: &str| users.iter().any(|u| u.contains(s));
+    assert!(
+        has("Hello Ann (loudly)"),
+        "MCP prompt not expanded: {users:?}"
+    );
+    assert!(has("doc body"), "MCP resource not attached: {users:?}");
+    assert!(has("Run the skill \"ship\""), "{users:?}");
+    assert!(std::fs::read_to_string(reads).unwrap().contains("doc://1"));
+}
+
+fn atlassian_like_server() -> PathBuf {
+    let exe = Path::new(env!("CARGO_BIN_EXE_synth"));
+    let profile = exe.parent().unwrap();
+    let mut c = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+    c.args([
+        "build",
+        "-p",
+        "synthesis-mcp",
+        "--example",
+        "atlassian_like_server",
+    ]);
+    if profile.file_name().is_some_and(|n| n == "release") {
+        c.arg("--release");
+    }
+    assert!(c.status().unwrap().success(), "cannot build the example");
+    profile.join("examples").join("atlassian_like_server")
+}
+
+/// ToolSearch and the deferred MCP tool it loads show up as tool rows.
+#[test]
+fn tool_search_rows() {
+    let rig = Rig::new(json!([
+        {"tools": [{"name": "ToolSearch", "input": {"query": "select:mcp__atl__whoami"}}]},
+        {"tools": [{"name": "mcp__atl__whoami", "input": {}}]},
+        {"text": "searched"}
+    ]));
+    rig.write(
+        "synthesis.json",
+        &json!({"$schema": "config.json/v1", "mcpServers": {"atl": {"command": atlassian_like_server()}}})
+            .to_string(),
+    );
+    rig.write(
+        "settings.json",
+        &json!({"permissions": {"allow": ["mcp__atl"]}, "synthesis": {"mcp": {"toolSearch": "on"}}})
+            .to_string(),
+    );
+    let text = rig.drive(json!([["wait", 3], send("who am i\r"), expect("searched")]));
+    let flat = squash(&text);
+    assert!(flat.contains("ToolSearch"), "no ToolSearch row: {flat}");
+    let done: Vec<String> = rig
+        .events()
+        .into_iter()
+        .filter(|e| e.0 == "tool.completed")
+        .map(|e| e.1["status"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert_eq!(done, ["ok", "ok"], "{done:?}");
+}

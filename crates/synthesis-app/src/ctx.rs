@@ -321,6 +321,12 @@ impl SynthesisContext {
         self
     }
 
+    /// Interactive sessions: the block retrieved for the prompt just typed replaces the one of
+    /// the previous task.
+    pub fn set_memory(&self, block: Option<String>) {
+        *self.memory.lock().unwrap_or_else(|e| e.into_inner()) = block;
+    }
+
     /// Pinned-only block for sub-agents without their own, and one per definition prompt.
     pub fn with_sub_memory(
         mut self,
