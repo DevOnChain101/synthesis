@@ -214,42 +214,80 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
                 continue;
             }
         };
-        let Prepared {
-            harness,
-            context,
-            skills,
-            sink,
-            mut session,
-            sid,
-            link,
-            tokio,
-            rt,
-            store,
-            transcript,
-            mcp,
-            memory,
-            resumed_from_seq,
-            worktree,
-            label,
-            models,
-            effort_tiers,
-            sandbox,
-            notices,
-            homes: ph,
-            notes,
-            ..
-        } = p;
-        // Started here (not by the app) so the session hooks and `memory.retrieved` follow
-        // `session.started`, as in `synth run`.
-        let started = match resumed_from_seq {
-            Some(seq) => {
-                harness.resume_session(&session, seq);
-                Ok(())
+        let (exit, sid, ph_synthesis) = round(
+            p,
+            a.common.cleanup_worktree,
+            &env,
+            switch_note.take(),
+            resume.take(),
+            &mut |o| synthesis_tui::run_interactive(o, Tty::stdio(&env)),
+        );
+        switch_from = None;
+        match exit?.reason {
+            ExitReason::OpenFolder(p) => {
+                cwd = synthesis_core::canonicalize(&p)
+                    .map_err(|e| format!("{}: {e}", p.display()))?;
             }
-            None => harness.start_session(&mut session, "startup"),
-        };
+            ExitReason::Resume(id) => resume = Some(load_resume(&ph_synthesis, &id)?),
+            ExitReason::SwitchModel(m) => {
+                switch_from = Some((model.replace(m), sid.clone()));
+                resume = load_resume(&ph_synthesis, &sid).ok();
+            }
+            ExitReason::Quit | ExitReason::InputClosed => return Ok(0),
+        }
+    }
+}
+
+/// One run of the app on a prepared session: start it, run the UI, then end it whatever
+/// happened (also when it could not start): `session.completed`, MCP servers closed, worktree
+/// reported. Returns the UI's result, the session id and the synthesis home.
+fn round(
+    p: Prepared,
+    cleanup_worktree: bool,
+    env: &Env,
+    switch_note: Option<String>,
+    resume: Option<Resume>,
+    ui: &mut dyn FnMut(Options) -> std::io::Result<Exit>,
+) -> (Result<Exit, String>, String, PathBuf) {
+    let Prepared {
+        harness,
+        context,
+        skills,
+        sink,
+        mut session,
+        sid,
+        link,
+        tokio,
+        rt,
+        store,
+        transcript,
+        mcp,
+        memory,
+        resumed_from_seq,
+        worktree,
+        label,
+        models,
+        effort_tiers,
+        sandbox,
+        notices,
+        homes: ph,
+        notes,
+        ..
+    } = p;
+    // Started here (not by the app) so the session hooks and `memory.retrieved` follow
+    // `session.started`, as in `synth run`.
+    let started = match resumed_from_seq {
+        Some(seq) => {
+            harness.resume_session(&session, seq);
+            Ok(())
+        }
+        None => harness.start_session(&mut session, "startup"),
+    };
+    let began = started.is_ok();
+    // a start that failed skips the UI but not the shutdown below
+    let exit = 'ui: {
         if let Err(e) = started {
-            return Err(e.to_string());
+            break 'ui Err(e.to_string());
         }
         let source = if resumed_from_seq.is_some() {
             "resume"
@@ -322,79 +360,74 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
         o.sandbox = sandbox;
         o.startup_notes = notices;
         o.memory = Some(notes.hook());
-        o.startup_notes.extend(switch_note.take());
-        switch_from = None;
+        o.startup_notes.extend(switch_note);
         if let Some(m) = &mcp {
             let m = m.clone();
             o.mcp_report = Some(Box::new(move || mcp_lines(&m)));
         }
         o.saved = synthesis_tui::list_saved(&ph.synthesis, None).unwrap_or_default();
-        o.resume = resume.take();
-        let exit = synthesis_tui::run_interactive(o, Tty::stdio(&env)).map_err(|e| e.to_string());
-        // The harness ends the session whatever the UI returned.
-        let outcome = exit
-            .as_ref()
-            .ok()
-            .and_then(|e| e.last_outcome.clone())
-            .unwrap_or(TaskOutcome {
-                task_id: String::new(),
-                status: TaskStatus::Completed,
-                reason: "closed".into(),
-                verification_report_id: None,
-                final_text: String::new(),
-                usage: synthesis_events::Usage {
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    cache_read_input_tokens: None,
-                    cache_creation_input_tokens: None,
-                    cost_usd: None,
-                },
-                changed_files: vec![],
-                needed_permissions: vec![],
-                messages: vec![],
-            });
+        o.resume = resume;
+        ui(o).map_err(|e| e.to_string())
+    };
+    // The harness ends the session whatever the UI returned.
+    let outcome = exit
+        .as_ref()
+        .ok()
+        .and_then(|e| e.last_outcome.clone())
+        .unwrap_or(TaskOutcome {
+            task_id: String::new(),
+            status: TaskStatus::Completed,
+            reason: "closed".into(),
+            verification_report_id: None,
+            final_text: String::new(),
+            usage: synthesis_events::Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+                cost_usd: None,
+            },
+            changed_files: vec![],
+            needed_permissions: vec![],
+            messages: vec![],
+        });
+    let mut outcome = outcome;
+    if !began {
+        outcome.status = TaskStatus::Failed;
+        outcome.reason = "session_start_failed".into();
+    }
+    if began {
         tokio.block_on(harness.session_hook(
             HookEvent::SessionEnd,
             json!({"reason": outcome.reason}),
             Some(&outcome.reason),
         ));
-        // the usage of the tasks that ran (the app returns the session unless a task outlived it)
-        if let (
-            Some(s),
-            Ok(Exit {
-                session: Some(sess),
-                last_outcome: Some(out),
-                ..
-            }),
-        ) = (&store, &exit)
-        {
-            finish_store(s, transcript.as_deref(), out, &sess.usage);
-        }
-        harness.end_session(&outcome);
-        rt.close_session(&sid);
-        if let Some(m) = &mcp {
-            tokio.block_on(m.close());
-        }
-        if let Some(w) = &worktree {
-            eprintln!("synth: {}", w.finish(a.common.cleanup_worktree));
-        }
-        drop(harness);
-        // the global hook holds the memory run, and with it the event sink and the session
-        // store's write lock: the restarted session (model switch, resume) must be able to open it
-        synthesis_tools::set_learned_skills(None);
-        match exit?.reason {
-            ExitReason::OpenFolder(p) => {
-                cwd = synthesis_core::canonicalize(&p)
-                    .map_err(|e| format!("{}: {e}", p.display()))?;
-            }
-            ExitReason::Resume(id) => resume = Some(load_resume(&ph.synthesis, &id)?),
-            ExitReason::SwitchModel(m) => {
-                switch_from = Some((model.replace(m), sid.clone()));
-                resume = load_resume(&ph.synthesis, &sid).ok();
-            }
-            ExitReason::Quit | ExitReason::InputClosed => return Ok(0),
-        }
     }
+    // the usage of the tasks that ran (the app returns the session unless a task outlived it)
+    if let (
+        Some(s),
+        Ok(Exit {
+            session: Some(sess),
+            last_outcome: Some(out),
+            ..
+        }),
+    ) = (&store, &exit)
+    {
+        finish_store(s, transcript.as_deref(), out, &sess.usage);
+    }
+    harness.end_session(&outcome);
+    rt.close_session(&sid);
+    if let Some(m) = &mcp {
+        tokio.block_on(m.close());
+    }
+    if let Some(w) = &worktree {
+        eprintln!("synth: {}", w.finish(cleanup_worktree));
+    }
+    drop(harness);
+    // the global hook holds the memory run, and with it the event sink and the session
+    // store's write lock: the restarted session (model switch, resume) must be able to open it
+    synthesis_tools::set_learned_skills(None);
+    (exit, sid, ph.synthesis)
 }
 
 /// What `synth run` does around its task, for every task the person starts in the app:
@@ -617,5 +650,83 @@ mod tests {
         // OpenFolder/Resume to a second hostile repo: untrusted, nothing of it is used
         assert_eq!(run(&b), (false, false));
         assert!(!mb.exists(), "hostile repo must not run anything");
+    }
+}
+
+#[cfg(all(test, unix, feature = "test-provider"))]
+mod start_failure_tests {
+    use super::*;
+    use clap::Parser;
+    use std::process::Command;
+
+    #[derive(Parser)]
+    struct W {
+        #[command(flatten)]
+        c: Common,
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> bool {
+        Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    /// A session that cannot start (here: already started) must still be ended, its servers
+    /// closed and its worktree reported / cleaned: `return Err` used to skip all of it.
+    #[test]
+    fn a_session_that_cannot_start_is_still_ended_and_its_worktree_cleaned() {
+        let d = tempfile::tempdir().unwrap();
+        let root = synthesis_core::canonicalize(d.path()).unwrap();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("f"), "x").unwrap();
+        if !(git(&repo, &["init", "-q"])
+            && git(&repo, &["add", "."])
+            && git(&repo, &["commit", "-qm", "c"]))
+        {
+            return; // no git here: nothing to test
+        }
+        let script = root.join("s.json");
+        std::fs::write(&script, "[{\"text\":\"ok\"}]").unwrap();
+        let provider = format!("fake:{}", script.display());
+        let w = W::parse_from([
+            "t",
+            "--provider",
+            &provider,
+            "--sandbox",
+            "off",
+            "--no-memory",
+            "--worktree",
+            "--cleanup-worktree",
+        ]);
+        let env = Env::from_pairs([
+            ("HOME", root.to_string_lossy().into_owned()),
+            (
+                "SYNTHESIS_HOME",
+                root.join("synthesis").to_string_lossy().into_owned(),
+            ),
+            ("PATH", std::env::var("PATH").unwrap_or_default()),
+        ]);
+        let mut p = prepare(&w.c, &repo, &env, &Limits::default(), Front::Tui).unwrap();
+        let wt = p.worktree.as_ref().unwrap().info.worktree.clone();
+        assert!(wt.exists());
+        p.harness.start_session(&mut p.session, "startup").unwrap(); // the app's own start now fails
+        let (exit, _sid, home) = round(p, true, &env, None, None, &mut |_| {
+            panic!("the UI must not run for a session that did not start")
+        });
+        assert!(exit.is_err());
+        assert!(!wt.exists(), "worktree cleanup was skipped");
+        let c = rusqlite::Connection::open(home.join("synthesis.db")).unwrap();
+        let ended: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE type = 'session.failed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ended, 1, "end_session was skipped");
     }
 }
