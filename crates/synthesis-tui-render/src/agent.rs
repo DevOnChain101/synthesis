@@ -29,9 +29,9 @@ const C_TEXT: Col = col(T_BODY);
 const C_BRIGHT: Col = col(T_TEXT);
 const C_DIM: Col = col(T_INACTIVE);
 const C_SUBTLE: Col = col(T_SUBTLE);
-const C_ACCENT: Col = col(ACCENT_CORE);
+const C_ACCENT: Col = col(ACCENT);
 const C_LIGHT: Col = col(ACCENT_LIGHT);
-const C_CODE: Col = col([125, 211, 252]);
+const C_CODE: Col = col(CODE);
 const C_HEADING: Col = col(GREEN);
 const C_STRONG: Col = col(ACCENT_LIGHT);
 const C_LINK: Col = col(ACCENT_LIGHT);
@@ -42,12 +42,12 @@ const C_BORDER: Col = col(WARM_DIM);
 const C_PERM: Col = col(BLUE);
 /// Same value as GREEN, a different object in Node (see `highlight::Col`).
 const C_ADD: Col = Col {
-    rgb: [74, 222, 128],
+    rgb: DIFF_ADD,
     tag: 1,
 };
 const C_BANG: Col = col(CYAN);
 const C_TEAL: Col = col(TEAL);
-const C_PURPLE: Col = col(PURPLE);
+const C_EDIT: Col = col(T_AUTO_ACCEPT);
 
 // ---------------------------------------------------------------- runs
 
@@ -1421,7 +1421,7 @@ fn handoff_title(ln: &str) -> Option<(usize, &'static str)> {
     ))
 }
 
-const CTX_COLORS: [Rgb; 8] = [BLUE, PURPLE, TEAL, YELLOW, PINK, CYAN, GREEN, RED];
+const CTX_COLORS: [Rgb; 8] = AGENT_COLORS;
 
 fn context_rows(d: &Value, w: usize) -> Vec<Row> {
     let mut rows: Vec<Row> = vec![];
@@ -1835,7 +1835,7 @@ fn item_rows(it: &Item, w: usize, frame: usize, now: i64, expanded: bool) -> Vec
             rows.extend(wrap(
                 &[r(&it.text, C_BRIGHT)],
                 w,
-                &[rb("# ", C_PURPLE)],
+                &[rb("# ", C_EDIT)],
                 &[r("  ", C_TEXT)],
             ));
             rows.push(vec![r(format!("  ⎿  saved to {}", it.file), C_SUBTLE)]);
@@ -2731,7 +2731,7 @@ fn input_mode(m: Option<&str>) -> Option<InputMode> {
         }),
         Some("memory") => Some(InputMode {
             lead: "# ",
-            col: C_PURPLE,
+            col: C_EDIT,
             lead_col: None,
             hint: "remember this in ./AGENTS.md · backspace to leave memory mode",
             label: "# memory mode",
@@ -2742,12 +2742,12 @@ fn input_mode(m: Option<&str>) -> Option<InputMode> {
 
 fn vivid(name: &str) -> Option<Rgb> {
     Some(match name {
-        "purple" => PURPLE,
+        "purple" => ACCENT_LIGHT, // a user-written colour name; the palette has no violet
         "blue" => BLUE,
         "green" => GREEN,
         "yellow" => YELLOW,
         "orange" => ORANGE,
-        "pink" => PINK,
+        "pink" => BEIGE,
         "cyan" => CYAN,
         "teal" => TEAL,
         "red" => RED,
@@ -2772,7 +2772,7 @@ fn input_rows(
     } else if let Some(c) = prompt_color.and_then(vivid) {
         col(c)
     } else if focused {
-        col(ACCENT_CORE)
+        col(ACCENT)
     } else {
         C_BORDER
     };
@@ -3212,7 +3212,7 @@ pub struct AgentOut {
 fn mode_label(mode: &str) -> Option<(&'static str, Col)> {
     Some(match mode {
         "default" => ("⏸ manual mode on", C_DIM),
-        "acceptEdits" => ("⏵⏵ accept edits on", C_PURPLE),
+        "acceptEdits" => ("⏵⏵ accept edits on", C_EDIT),
         "plan" => ("⏸ plan mode on", C_TEAL),
         "auto" => ("⏵⏵ auto mode on", col(YELLOW)),
         "bypassPermissions" => ("⏵⏵ bypass permissions on", col(RED)),
@@ -3385,7 +3385,7 @@ pub fn render_agent(
         let secs = fmt_dur(now - agent.turn_start);
         let glyph = spin(frame);
         let shimmer = col(lerp(
-            ACCENT_CORE,
+            ACCENT,
             ACCENT_GLOW,
             ((frame as f64 / 3.0).sin() + 1.0) / 2.0,
         ));

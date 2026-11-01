@@ -2616,7 +2616,7 @@ fn header(s: &DashState, w: i64, frame: usize, now: i64) -> String {
 }
 
 fn header_rule(w: i64) -> String {
-    paint(lerp(ACCENT_CORE, COL_TRACK, 0.55), &"━".repeat(u(w)))
+    paint(lerp(ACCENT, COL_TRACK, 0.55), &"━".repeat(u(w)))
 }
 
 fn topology_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> Lines {
@@ -2634,7 +2634,7 @@ fn topology_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> Line
     let rows = render_flow(s.session, u(w - 3), u(h - 2), frame, now, opts);
     let (active, total) = node_counts(s.session, now);
     let count = if active > 0 {
-        paint(PURPLE, &format!("{active} active"))
+        paint(ACCENT, &format!("{active} active"))
     } else {
         paint(COL_MUTED, &format!("{total} nodes"))
     };

@@ -9,7 +9,18 @@ use crate::keys::Key;
 use crate::text::{char_width, csi_len, is_js_space, strip_ansi};
 use std::borrow::Cow;
 
-const SELECT_ON: &str = "\x1b[38;2;245;245;245m\x1b[48;2;60;72;105m";
+/// Selected text: the palette tokens of `synthesis-tui-render::theme` (re-exported there; this
+/// crate cannot depend on it). `SELECT_FG` is the brand `accent-light`, `SELECT_BG` a deep teal.
+pub const SELECT_FG: [u8; 3] = [247, 248, 250];
+pub const SELECT_BG: [u8; 3] = [31, 77, 73];
+
+fn select_on() -> String {
+    let (f, b) = (SELECT_FG, SELECT_BG);
+    format!(
+        "\x1b[38;2;{};{};{}m\x1b[48;2;{};{};{}m",
+        f[0], f[1], f[2], b[0], b[1], b[2]
+    )
+}
 const SELECT_OFF: &str = "\x1b[39m\x1b[49m";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -316,7 +327,7 @@ pub fn highlight_cells(line: &str, from: i64, to: i64) -> String {
                 cur.push_str(tok);
             }
             if on {
-                out.push_str(SELECT_ON);
+                out.push_str(&select_on());
             }
             continue;
         }
@@ -327,7 +338,7 @@ pub fn highlight_cells(line: &str, from: i64, to: i64) -> String {
         }
         let inside = cell >= from && cell < to;
         if inside && !on {
-            out.push_str(SELECT_ON);
+            out.push_str(&select_on());
             on = true;
         } else if !inside && on {
             out.push_str(SELECT_OFF);

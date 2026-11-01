@@ -1,4 +1,4 @@
-//! Palette, gradient helpers and width-aware `fit` (port of `theme.js`; widths come from
+//! Palette tokens, gradient helpers and width-aware `fit` (port of `theme.js`; widths come from
 //! `synthesis_tui_base::text`). Every colour is 24-bit: like Node, the renderers never consult the
 //! colour mode, `synthesis_tui_base::sgr::encode` downgrades at output time.
 
@@ -7,62 +7,96 @@ use unicode_segmentation::UnicodeSegmentation;
 
 pub type Rgb = [u8; 3];
 
-pub const PURPLE: Rgb = [192, 132, 252];
-pub const BLUE: Rgb = [96, 165, 250];
-pub const GREEN: Rgb = [74, 222, 128];
-pub const YELLOW: Rgb = [250, 204, 21];
-pub const ORANGE: Rgb = [251, 146, 60];
-pub const PINK: Rgb = [244, 114, 182];
-pub const CYAN: Rgb = [34, 211, 238];
-pub const TEAL: Rgb = [45, 212, 191];
-pub const RED: Rgb = [248, 113, 113];
+// ---- The Synthesis palette: graphite/silver neutrals (design/02-design-tokens/color-schema.md)
+// plus ONE accent family (teal) and distinct semantic colours. No violet, magenta or indigo
+// anywhere: `palette_tests` checks the hue of every token and the contrast of every text token.
+// Every colour the renderers use is a token here (the selection pair lives in `tui-base`, which
+// cannot depend on this crate, and is re-exported below).
 
-pub const ACCENT_CORE: Rgb = [129, 140, 248];
-pub const ACCENT_LIGHT: Rgb = [165, 180, 252];
-pub const ACCENT_GLOW: Rgb = [199, 210, 254];
-pub const ACCENT_DEEP: Rgb = [79, 70, 229];
-pub const ACCENT_CYAN: Rgb = [103, 232, 249];
-pub const ACCENT_INK: Rgb = [17, 19, 38];
+// Neutrals. BG/SURFACE/ELEVATED are the brand grounds; the terminal's own background shows.
+pub const BG: Rgb = [11, 12, 15];
+pub const SURFACE: Rgb = [21, 23, 27];
+pub const ELEVATED: Rgb = [36, 40, 48];
+/// Brand border; decorative (rules, tracks), never text.
+pub const BORDER: Rgb = [58, 63, 74];
+/// A lighter rule for frames that should read on a dark ground; decorative.
+pub const RULE: Rgb = [75, 82, 96];
+/// Brand `text`.
+pub const TEXT: Rgb = [156, 163, 175];
+/// Dimmest readable text (hints, placeholders).
+pub const MUTED: Rgb = [127, 135, 151];
+pub const TEXT_STRONG: Rgb = [229, 231, 235];
+/// Brand `accent` (a neutral silver).
+pub const SILVER: Rgb = [217, 217, 224];
+/// Brand `accent-light`.
+pub const PEARL: Rgb = [247, 248, 250];
+/// Brand `soft-beige`; also the thinking colour.
+pub const BEIGE: Rgb = [215, 206, 199];
 
-pub const WARM_CREAM: Rgb = [250, 250, 250];
-pub const WARM_DIM: Rgb = [98, 98, 106];
-pub const WARM_DEEP: Rgb = [58, 58, 64];
+// The one accent: teal.
+pub const ACCENT: Rgb = [94, 200, 184];
+pub const ACCENT_LIGHT: Rgb = [154, 227, 214];
+pub const ACCENT_GLOW: Rgb = [205, 243, 236];
+pub const ACCENT_DEEP: Rgb = [46, 139, 126];
+/// Text on an accent-coloured ground.
+pub const ACCENT_INK: Rgb = BG;
 
-pub const T_CLAUDE: Rgb = ACCENT_CORE;
+// Semantic colours, each distinct from the others and from the accent.
+pub const SUCCESS: Rgb = [123, 216, 143];
+pub const WARN: Rgb = [229, 181, 103];
+pub const ERROR: Rgb = [242, 109, 109];
+pub const DIFF_ADD: Rgb = [158, 206, 106];
+pub const DIFF_REMOVE: Rgb = [232, 144, 106];
+pub const THINKING: Rgb = BEIGE;
+pub const INFO: Rgb = [125, 180, 230];
+pub const CYAN: Rgb = [108, 207, 224];
+
+// Names the renderers already use.
+pub const GREEN: Rgb = SUCCESS;
+pub const YELLOW: Rgb = WARN;
+pub const RED: Rgb = ERROR;
+pub const ORANGE: Rgb = DIFF_REMOVE;
+pub const BLUE: Rgb = INFO;
+pub const TEAL: Rgb = ACCENT;
+
+pub const WARM_CREAM: Rgb = PEARL;
+pub const WARM_DIM: Rgb = RULE;
+pub const WARM_DEEP: Rgb = BORDER;
+
+pub const T_CLAUDE: Rgb = ACCENT;
 pub const T_SHIMMER: Rgb = ACCENT_LIGHT;
-pub const T_TEXT: Rgb = [245, 245, 245];
-pub const T_BODY: Rgb = [215, 215, 220];
-pub const T_INACTIVE: Rgb = [165, 165, 172];
-pub const T_SUBTLE: Rgb = [112, 112, 120];
-pub const T_BORDER: Rgb = WARM_DIM;
+pub const T_TEXT: Rgb = TEXT_STRONG;
+pub const T_BODY: Rgb = SILVER;
+pub const T_INACTIVE: Rgb = TEXT;
+pub const T_SUBTLE: Rgb = MUTED;
+pub const T_BORDER: Rgb = RULE;
 pub const T_PERMISSION: Rgb = CYAN;
-pub const T_AUTO_ACCEPT: Rgb = PURPLE;
-pub const T_PLAN_MODE: Rgb = GREEN;
-pub const T_MCP: Rgb = BLUE;
-pub const T_BASH: Rgb = PINK;
-pub const T_SUCCESS: Rgb = GREEN;
-pub const T_ERROR: Rgb = RED;
-pub const T_WARNING: Rgb = YELLOW;
-pub const T_TRACK: Rgb = WARM_DEEP;
+pub const T_AUTO_ACCEPT: Rgb = BEIGE;
+pub const T_PLAN_MODE: Rgb = SUCCESS;
+pub const T_MCP: Rgb = INFO;
+pub const T_BASH: Rgb = DIFF_REMOVE;
+pub const T_SUCCESS: Rgb = SUCCESS;
+pub const T_ERROR: Rgb = ERROR;
+pub const T_WARNING: Rgb = WARN;
+pub const T_TRACK: Rgb = BORDER;
 
-pub const HEAT: [Rgb; 5] = [
-    [22, 27, 34],
-    [14, 68, 41],
-    [0, 109, 50],
-    [38, 166, 65],
-    [57, 211, 83],
-];
-pub const SELECT_BG: Rgb = [60, 72, 105];
-pub const SELECT_FG: Rgb = [245, 245, 245];
-pub const BORDER_GRAD: [Rgb; 5] = [
-    ACCENT_DEEP,
-    ACCENT_CORE,
-    ACCENT_CYAN,
-    ACCENT_CORE,
-    ACCENT_DEEP,
-];
-pub const LOGO_GRAD: [Rgb; 4] = [ACCENT_LIGHT, ACCENT_CYAN, [196, 181, 253], ACCENT_LIGHT];
-pub const AGENT_COLORS: [Rgb; 8] = [PURPLE, BLUE, GREEN, YELLOW, TEAL, PINK, CYAN, RED];
+pub const HEAT: [Rgb; 5] = [SURFACE, [20, 64, 59], [30, 107, 97], [58, 158, 144], ACCENT];
+pub use synthesis_tui_base::selection::{SELECT_BG, SELECT_FG};
+pub const BORDER_GRAD: [Rgb; 5] = [ACCENT_DEEP, ACCENT, CYAN, ACCENT, ACCENT_DEEP];
+pub const LOGO_GRAD: [Rgb; 4] = [ACCENT_LIGHT, CYAN, ACCENT_GLOW, ACCENT_LIGHT];
+/// Sub-agent and context-segment colours (no violet).
+pub const AGENT_COLORS: [Rgb; 8] = [BLUE, BEIGE, TEAL, YELLOW, DIFF_REMOVE, CYAN, GREEN, RED];
+
+// Syntax highlighting and inline code.
+pub const SYN_FG: Rgb = TEXT_STRONG;
+pub const SYN_KEYWORD: Rgb = ACCENT;
+pub const SYN_STORAGE: Rgb = CYAN;
+pub const SYN_BUILTIN: Rgb = DIFF_ADD;
+pub const SYN_LITERAL: Rgb = DIFF_REMOVE;
+pub const SYN_STRING: Rgb = WARN;
+pub const SYN_COMMENT: Rgb = MUTED;
+pub const SYN_VARIABLE: Rgb = PEARL;
+pub const CODE: Rgb = CYAN;
 
 pub const RESET: &str = "\x1b[0m";
 pub const ITALIC: &str = "\x1b[3m";
@@ -249,5 +283,208 @@ mod fit_items_tests {
         );
         assert_eq!(fit_items(&items, " · ", 20).trim_end(), "mode on · model-x");
         assert_eq!(fit_items(&items, " · ", 9).trim_end(), "mode on");
+    }
+}
+
+/// Name of the one built-in palette (there is no theme switch: Mono and 16-colour terminals are
+/// handled by `synthesis_tui_base::sgr::encode`, which downgrades these 24-bit tokens).
+pub const THEME_NAME: &str = "synthesis";
+
+/// WCAG relative luminance and contrast ratio, hue/saturation in degrees / 0..1 (for the tests and
+/// `docs/tui-palette.md`).
+pub mod measure {
+    use super::Rgb;
+
+    fn lin(c: u8) -> f64 {
+        let c = f64::from(c) / 255.0;
+        if c <= 0.03928 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    pub fn luminance(c: Rgb) -> f64 {
+        0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2])
+    }
+
+    pub fn contrast(a: Rgb, b: Rgb) -> f64 {
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// `(hue in degrees, saturation)`, HSV.
+    pub fn hue_sat(c: Rgb) -> (f64, f64) {
+        let [r, g, b] = c.map(|v| f64::from(v) / 255.0);
+        let (mx, mn) = (r.max(g).max(b), r.min(g).min(b));
+        let d = mx - mn;
+        if d == 0.0 {
+            return (0.0, 0.0);
+        }
+        let h = if mx == r {
+            ((g - b) / d).rem_euclid(6.0)
+        } else if mx == g {
+            (b - r) / d + 2.0
+        } else {
+            (r - g) / d + 4.0
+        };
+        (h * 60.0, d / mx)
+    }
+
+    /// Violet, indigo or magenta: a hue in 250..=345 that is not a near-grey.
+    pub fn is_purple(c: Rgb) -> bool {
+        let (h, s) = hue_sat(c);
+        s >= 0.12 && (250.0..=345.0).contains(&h)
+    }
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::measure::*;
+    use super::*;
+
+    /// (name, token, readable text on BG/SURFACE)
+    fn tokens() -> Vec<(&'static str, Rgb, bool)> {
+        vec![
+            ("BG", BG, false),
+            ("SURFACE", SURFACE, false),
+            ("ELEVATED", ELEVATED, false),
+            ("BORDER", BORDER, false),
+            ("RULE", RULE, false),
+            ("TEXT", TEXT, true),
+            ("MUTED", MUTED, true),
+            ("TEXT_STRONG", TEXT_STRONG, true),
+            ("SILVER", SILVER, true),
+            ("PEARL", PEARL, true),
+            ("BEIGE / THINKING", BEIGE, true),
+            ("ACCENT", ACCENT, true),
+            ("ACCENT_LIGHT", ACCENT_LIGHT, true),
+            ("ACCENT_GLOW", ACCENT_GLOW, true),
+            ("ACCENT_DEEP", ACCENT_DEEP, false),
+            ("SUCCESS", SUCCESS, true),
+            ("WARN", WARN, true),
+            ("ERROR", ERROR, true),
+            ("DIFF_ADD", DIFF_ADD, true),
+            ("DIFF_REMOVE", DIFF_REMOVE, true),
+            ("INFO", INFO, true),
+            ("CYAN", CYAN, true),
+            ("SELECT_BG", SELECT_BG, false),
+        ]
+    }
+
+    #[test]
+    fn no_token_is_violet_indigo_or_magenta() {
+        for (n, c, _) in tokens() {
+            assert!(!is_purple(c), "{n} {c:?} hue {:?}", hue_sat(c));
+        }
+        for c in HEAT
+            .iter()
+            .chain(&BORDER_GRAD)
+            .chain(&LOGO_GRAD)
+            .chain(&AGENT_COLORS)
+        {
+            assert!(!is_purple(*c), "{c:?}");
+        }
+        for c in [
+            SYN_FG,
+            SYN_KEYWORD,
+            SYN_STORAGE,
+            SYN_BUILTIN,
+            SYN_LITERAL,
+            SYN_STRING,
+            SYN_COMMENT,
+            SYN_VARIABLE,
+            CODE,
+            T_AUTO_ACCEPT,
+            T_BASH,
+            T_MCP,
+            T_PERMISSION,
+            T_PLAN_MODE,
+        ] {
+            assert!(!is_purple(c), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn text_tokens_reach_4_5_to_1_on_the_brand_grounds() {
+        for (n, c, text) in tokens() {
+            if text {
+                for (gn, g) in [("BG", BG), ("SURFACE", SURFACE)] {
+                    let r = contrast(c, g);
+                    assert!(r >= 4.5, "{n} on {gn}: {r:.2}");
+                }
+            }
+        }
+        // selected text and text on an accent ground
+        assert!(contrast(SELECT_FG, SELECT_BG) >= 4.5);
+        assert!(contrast(ACCENT_INK, ACCENT) >= 4.5);
+        assert!(contrast(ACCENT_INK, ACCENT_LIGHT) >= 4.5);
+        // the strong text also holds on the elevated ground
+        assert!(contrast(TEXT_STRONG, ELEVATED) >= 4.5);
+        assert!(contrast(ACCENT, ELEVATED) >= 4.5);
+    }
+
+    #[test]
+    fn semantic_colours_are_distinct_from_each_other_and_the_accent() {
+        let sem = [
+            ("SUCCESS", SUCCESS),
+            ("WARN", WARN),
+            ("ERROR", ERROR),
+            ("DIFF_ADD", DIFF_ADD),
+            ("DIFF_REMOVE", DIFF_REMOVE),
+            ("THINKING", THINKING),
+            ("ACCENT", ACCENT),
+        ];
+        for (i, (a, x)) in sem.iter().enumerate() {
+            for (b, y) in &sem[i + 1..] {
+                assert_ne!(x, y, "{a} == {b}");
+            }
+        }
+    }
+
+    /// The 256- and 16-colour downgrade must not turn a token violet or magenta either.
+    #[test]
+    fn downgrades_stay_out_of_violet() {
+        use synthesis_tui_base::sgr::{ColorMode, encode};
+        let cube = [0u8, 95, 135, 175, 215, 255];
+        let mut all: Vec<Rgb> = tokens().into_iter().map(|(_, c, _)| c).collect();
+        all.extend(HEAT.iter().chain(&AGENT_COLORS).chain(&LOGO_GRAD));
+        for c in all {
+            let s = encode(&paint(c, "x"), ColorMode::Ansi256);
+            let n: usize = s
+                .split("38;5;")
+                .nth(1)
+                .and_then(|r| r.split('m').next())
+                .and_then(|r| r.parse().ok())
+                .unwrap_or_else(|| panic!("{s:?}"));
+            let rgb = if (16..232).contains(&n) {
+                let k = n - 16;
+                [cube[k / 36], cube[k / 6 % 6], cube[k % 6]]
+            } else {
+                [8 + 10 * (n.saturating_sub(232)) as u8; 3]
+            };
+            assert!(n >= 16 && !is_purple(rgb), "{c:?} -> 256 index {n} {rgb:?}");
+            let s16 = encode(&paint(c, "x"), ColorMode::Ansi16);
+            assert!(
+                !s16.contains("35m") && !s16.contains("95m"),
+                "{c:?} -> {s16:?}"
+            );
+        }
+    }
+
+    /// Prints the table `docs/tui-palette.md` quotes: `cargo test -p synthesis-tui-render palette_table -- --nocapture`.
+    #[test]
+    fn palette_table() {
+        for (n, c, _) in tokens() {
+            let (h, s) = hue_sat(c);
+            println!(
+                "| {n} | #{:02X}{:02X}{:02X} | {h:.0} | {s:.2} | {:.2} | {:.2} |",
+                c[0],
+                c[1],
+                c[2],
+                contrast(c, BG),
+                contrast(c, SURFACE)
+            );
+        }
     }
 }

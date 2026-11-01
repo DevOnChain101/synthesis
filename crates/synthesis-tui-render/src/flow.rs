@@ -11,7 +11,7 @@ const RETURN_HOLD_MS: i64 = 6000;
 const COMP_DISPATCH_MS: i64 = 600;
 const COMP_HOLD_MS: i64 = 2500;
 const CONVEYOR_MS: i64 = 50;
-const SLATE: Rgb = [176, 190, 210];
+const SLATE: Rgb = SILVER;
 const DIM: Rgb = WARM_DIM;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -352,7 +352,7 @@ const PHASES: [Phase_; 6] = [
         label: "Learn",
         short: "Learn",
         desc: "update memory",
-        col: PURPLE,
+        col: BEIGE,
     },
 ];
 
@@ -520,7 +520,7 @@ fn card_meta(id: &str) -> (&'static str, &'static str, Rgb) {
         "hooks" => ("HOOKS", "HOOKS", kind_col("hook")),
         "mcp" => ("EXTERNAL · MCP", "MCP", kind_col("mcp")),
         "exec" => ("EXECUTION", "EXEC", kind_col("tool")),
-        _ => ("MEMORY · FEEDBACK", "MEMORY", PINK),
+        _ => ("MEMORY · FEEDBACK", "MEMORY", ORANGE),
     }
 }
 

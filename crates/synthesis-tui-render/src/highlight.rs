@@ -4,7 +4,7 @@
 //! colour *object*, and `keyword` / `operator` have equal values but are different objects, so
 //! [`Col`] carries a tag next to the RGB value.
 
-use crate::theme::Rgb;
+use crate::theme::*;
 use regex::Regex;
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -27,21 +27,21 @@ pub const fn col(rgb: Rgb) -> Col {
     Col { rgb, tag: 0 }
 }
 
-pub const FG: Col = col([248, 248, 242]);
-pub const KEYWORD: Col = col([249, 38, 114]);
-pub const STORAGE: Col = col([102, 217, 239]);
-pub const BUILTIN: Col = col([166, 226, 46]);
-pub const LITERAL: Col = col([190, 132, 255]);
-pub const STRING: Col = col([230, 219, 116]);
-pub const COMMENT: Col = col([117, 113, 94]);
-pub const VARIABLE: Col = col([255, 255, 255]);
+pub const FG: Col = col(SYN_FG);
+pub const KEYWORD: Col = col(SYN_KEYWORD);
+pub const STORAGE: Col = col(SYN_STORAGE);
+pub const BUILTIN: Col = col(SYN_BUILTIN);
+pub const LITERAL: Col = col(SYN_LITERAL);
+pub const STRING: Col = col(SYN_STRING);
+pub const COMMENT: Col = col(SYN_COMMENT);
+pub const VARIABLE: Col = col(SYN_VARIABLE);
 /// Same value as [`KEYWORD`], a different object in Node.
 pub const OPERATOR: Col = Col {
-    rgb: [249, 38, 114],
+    rgb: SYN_KEYWORD,
     tag: 2,
 };
-pub const ADD: Col = col([80, 200, 80]);
-pub const DEL: Col = col([220, 90, 90]);
+pub const ADD: Col = col(DIFF_ADD);
+pub const DEL: Col = col(DIFF_REMOVE);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tok {

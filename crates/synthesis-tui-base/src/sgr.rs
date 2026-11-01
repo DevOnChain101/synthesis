@@ -21,13 +21,13 @@ pub enum ColorMode {
 impl ColorMode {
     /// Terminal colour depth from the environment.
     ///
-    /// Order: `CLAUDE_MONITOR_COLOR` (truecolor|24bit|256|16, the Node override) beats
+    /// Order: `SYNTHESIS_COLOR` (truecolor|24bit|256|16) beats
     /// `NO_COLOR` (non-empty value, <https://no-color.org>) beats `COLORTERM`
     /// (truecolor|24bit), `TERM_PROGRAM`, `WT_SESSION`, `TERM`; a basic `TERM` (linux, ansi,
     /// vt100, xterm, screen, ...) gives 16 colours; otherwise truecolor on Windows, 256 elsewhere.
     pub fn detect(env: &Env, platform: Platform) -> Self {
         let lower = |name| env.get_nonempty(name).map(str::to_lowercase);
-        match lower("CLAUDE_MONITOR_COLOR").as_deref() {
+        match lower("SYNTHESIS_COLOR").as_deref() {
             Some("truecolor" | "24bit") => return Self::TrueColor,
             Some("256") => return Self::Ansi256,
             Some("16") => return Self::Ansi16,
@@ -419,7 +419,7 @@ mod tests {
         assert_eq!(d(&[("NO_COLOR", "1")]), ColorMode::Mono);
         assert_eq!(d(&[("NO_COLOR", "")]), ColorMode::Ansi256); // empty counts as unset
         assert_eq!(
-            d(&[("NO_COLOR", "1"), ("CLAUDE_MONITOR_COLOR", "256")]),
+            d(&[("NO_COLOR", "1"), ("SYNTHESIS_COLOR", "256")]),
             ColorMode::Ansi256
         );
         assert_eq!(
@@ -428,7 +428,7 @@ mod tests {
         );
         assert_eq!(d(&[("TERM", "linux")]), ColorMode::Ansi16);
         assert_eq!(d(&[("TERM", "xterm-256color")]), ColorMode::Ansi256);
-        assert_eq!(d(&[("CLAUDE_MONITOR_COLOR", "16")]), ColorMode::Ansi16);
+        assert_eq!(d(&[("SYNTHESIS_COLOR", "16")]), ColorMode::Ansi16);
     }
 
     #[test]

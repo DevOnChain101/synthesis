@@ -904,12 +904,12 @@ fn selection_drag_copies_chat_text() {
     }
     // the highlight is painted until something clears it
     let hl = a.render(COLS, ROWS, T0).join("\n");
-    assert!(hl.contains("\x1b[48;2;60;72;105m"));
+    assert!(hl.contains("\x1b[48;2;31;77;73m"));
     keys(&mut a, "x");
     assert!(
         !a.render(COLS, ROWS, T0)
             .join("\n")
-            .contains("\x1b[48;2;60;72;105m")
+            .contains("\x1b[48;2;31;77;73m")
     );
     // a click without a drag copies nothing
     let click_up = Key::Mouse {
