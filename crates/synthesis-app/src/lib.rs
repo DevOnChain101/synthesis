@@ -35,6 +35,7 @@ pub mod events;
 #[cfg(feature = "test-provider")]
 pub mod fake;
 pub mod mcp;
+pub mod mcpinput;
 pub mod memcmd;
 pub mod memory;
 mod memtools;

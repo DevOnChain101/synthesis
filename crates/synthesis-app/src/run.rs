@@ -283,6 +283,10 @@ pub struct RunArgs {
     prompt: Option<String>,
     #[arg(long)]
     prompt_file: Option<PathBuf>,
+    /// An MCP prompt to run as the task: `"/mcp__<server>__<prompt> arg1 arg2"` (`synth mcp prompts`
+    /// lists them). The same form works as the first token of any prompt.
+    #[arg(long, value_name = "COMMAND", conflicts_with_all = ["prompt", "prompt_file"])]
+    prompt_command: Option<String>,
     #[arg(long)]
     max_turns: Option<u32>,
     #[arg(long)]
@@ -1354,6 +1358,23 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
         resumed_from_seq,
         ..
     } = p;
+    // `@server:uri` mentions and `/mcp__server__prompt` commands; memory below sees what was typed
+    let (request, more) =
+        match tokio_rt.block_on(crate::mcpinput::expand(mcp.as_ref(), &prompt, &cancel)) {
+            Ok(r) => r,
+            Err(e) => {
+                if let Some(m) = &mcp {
+                    tokio_rt.block_on(m.close());
+                }
+                return Err(e);
+            }
+        };
+    let mut notices = notices;
+    for n in more {
+        let n = sanitize_for_display(&n);
+        eprintln!("synth: warning: {n}");
+        notices.push(n);
+    }
     let cleanup = a.common.cleanup_worktree;
     let code = tokio_rt.block_on(async {
         on_signals(cancel.clone()).map_err(|e| format!("signal handlers: {e}"))?;
@@ -1394,7 +1415,7 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
                     .run_task(
                         &mut session,
                         TaskRequest {
-                            request: prompt,
+                            request,
                             criteria,
                             history,
                             display_text: None,
@@ -1582,6 +1603,15 @@ const MAX_STDIN_PROMPT: u64 = 10 << 20;
 
 fn read_prompt(a: &RunArgs) -> Result<String, String> {
     let p = match (&a.prompt, &a.prompt_file) {
+        _ if a.prompt_command.is_some() => {
+            let c = a.prompt_command.clone().unwrap_or_default();
+            if !crate::mcpinput::is_command(&c) {
+                return Err(
+                    "--prompt-command: expected \"/mcp__<server>__<prompt> [args...]\"".into(),
+                );
+            }
+            c
+        }
         (Some(p), _) => p.clone(),
         (_, Some(f)) => {
             std::fs::read_to_string(f).map_err(|e| format!("--prompt-file {}: {e}", f.display()))?
