@@ -120,241 +120,269 @@ async fn go(r: &Rig, from: &Addr, to: &str, id: &str, chain: &[String]) -> Resul
     }
 }
 
+/// A hang (e.g. a Windows pipe that never connects) must fail the test, not stall CI.
+async fn hard_limit(f: impl std::future::Future<Output = ()>) {
+    tokio::time::timeout(Duration::from_secs(60), f)
+        .await
+        .expect("test exceeded 60 s");
+}
+
 const ON: fn() -> Value = || json!({"enabled": true});
 
 #[tokio::test]
 async fn answers_with_partial_redaction_and_same_id() {
-    let r = rig(ON(), Fake::default()).await;
-    let from = addr("api", "/work/api", "sess-b");
-    let mut seen = Vec::new();
-    let o = Outgoing {
-        id: "req-1",
-        from: &from,
-        to_agent: "developer-2",
-        text: "hi",
-        chain: &[],
-        timeout_s: 30,
-        extra: Default::default(),
-    };
-    let f = ask(&r.endpoint, &r.key, &o, |s, t| {
-        seen.push((s, t.to_string()))
+    hard_limit(async {
+        let r = rig(ON(), Fake::default()).await;
+        let from = addr("api", "/work/api", "sess-b");
+        let mut seen = Vec::new();
+        let o = Outgoing {
+            id: "req-1",
+            from: &from,
+            to_agent: "developer-2",
+            text: "hi",
+            chain: &[],
+            timeout_s: 30,
+            extra: Default::default(),
+        };
+        let f = ask(&r.endpoint, &r.key, &o, |s, t| {
+            seen.push((s, t.to_string()))
+        })
+        .await
+        .unwrap();
+        assert_eq!(f.status, "answered");
+        assert_eq!(f.text, "developer-2: hi key=[REDACTED]");
+        assert_eq!(f.from.unwrap().session_id, "sess-a");
+        assert_eq!(seen, vec![(1, "thinking".to_string())]);
+        let st = status(&r.endpoint, &r.key, &from).await.unwrap();
+        assert_eq!(st["t"], "status");
+        assert_eq!(st["task_summary"], "fixing auth");
     })
     .await
-    .unwrap();
-    assert_eq!(f.status, "answered");
-    assert_eq!(f.text, "developer-2: hi key=[REDACTED]");
-    assert_eq!(f.from.unwrap().session_id, "sess-a");
-    assert_eq!(seen, vec![(1, "thinking".to_string())]);
-    let st = status(&r.endpoint, &r.key, &from).await.unwrap();
-    assert_eq!(st["t"], "status");
-    assert_eq!(st["task_summary"], "fixing auth");
 }
 
 #[tokio::test]
 async fn off_by_default_and_policy_rejections() {
-    let from = addr("api", "/work/api", "sess-b");
-    let r = rig(json!({}), Fake::default()).await;
-    assert_eq!(
-        go(&r, &from, "main", "1", &[]).await,
-        Err("disabled".into())
-    );
+    hard_limit(async {
+        let from = addr("api", "/work/api", "sess-b");
+        let r = rig(json!({}), Fake::default()).await;
+        assert_eq!(
+            go(&r, &from, "main", "1", &[]).await,
+            Err("disabled".into())
+        );
 
-    let r = rig(ON(), Fake::default()).await;
-    let other = addr("web", "/work/web", "sess-c");
-    assert_eq!(go(&r, &other, "main", "1", &[]).await, Err("denied".into()));
-    assert_eq!(
-        go(&r, &from, "nobody", "2", &[]).await,
-        Err("no_agent".into())
-    );
-    assert_eq!(
-        go(&r, &from, "main", "3", &["sess-a".into()]).await,
-        Err("cycle".into())
-    );
-    let chain = vec!["x".to_string(), "y".to_string()];
-    assert_eq!(
-        go(&r, &from, "main", "4", &chain).await,
-        Err("cycle".into())
-    );
-    let big = "a".repeat(40 * 1024);
-    let o = Outgoing {
-        id: "5",
-        from: &from,
-        to_agent: "main",
-        text: &big,
-        chain: &[],
-        timeout_s: 30,
-        extra: Default::default(),
-    };
-    assert!(matches!(
-        ask(&r.endpoint, &r.key, &o, |_, _| {}).await,
-        Err(PeerError::Rejected(x)) if x == "too_large"
-    ));
-    assert_eq!(
-        r.fake.calls.load(Ordering::SeqCst),
-        0,
-        "rejected requests never reach the responder"
-    );
+        let r = rig(ON(), Fake::default()).await;
+        let other = addr("web", "/work/web", "sess-c");
+        assert_eq!(go(&r, &other, "main", "1", &[]).await, Err("denied".into()));
+        assert_eq!(
+            go(&r, &from, "nobody", "2", &[]).await,
+            Err("no_agent".into())
+        );
+        assert_eq!(
+            go(&r, &from, "main", "3", &["sess-a".into()]).await,
+            Err("cycle".into())
+        );
+        let chain = vec!["x".to_string(), "y".to_string()];
+        assert_eq!(
+            go(&r, &from, "main", "4", &chain).await,
+            Err("cycle".into())
+        );
+        let big = "a".repeat(40 * 1024);
+        let o = Outgoing {
+            id: "5",
+            from: &from,
+            to_agent: "main",
+            text: &big,
+            chain: &[],
+            timeout_s: 30,
+            extra: Default::default(),
+        };
+        assert!(matches!(
+            ask(&r.endpoint, &r.key, &o, |_, _| {}).await,
+            Err(PeerError::Rejected(x)) if x == "too_large"
+        ));
+        assert_eq!(
+            r.fake.calls.load(Ordering::SeqCst),
+            0,
+            "rejected requests never reach the responder"
+        );
+    })
+    .await
 }
 
 #[tokio::test]
 async fn rate_limit_per_sender_session() {
-    let r = rig(ON(), Fake::default()).await;
-    let from = addr("api", "/work/api", "sess-b");
-    for i in 0..10 {
-        assert!(go(&r, &from, "main", &format!("r{i}"), &[]).await.is_ok());
-    }
-    assert_eq!(
-        go(&r, &from, "main", "r10", &[]).await,
-        Err("rate_limited".into())
-    );
-    // `from` is self-asserted: a new session id does not buy a new allowance
-    let other = addr("api", "/work/api", "sess-z");
-    assert_eq!(
-        go(&r, &other, "main", "z", &[]).await,
-        Err("rate_limited".into())
-    );
+    hard_limit(async {
+        let r = rig(ON(), Fake::default()).await;
+        let from = addr("api", "/work/api", "sess-b");
+        for i in 0..10 {
+            assert!(go(&r, &from, "main", &format!("r{i}"), &[]).await.is_ok());
+        }
+        assert_eq!(
+            go(&r, &from, "main", "r10", &[]).await,
+            Err("rate_limited".into())
+        );
+        // `from` is self-asserted: a new session id does not buy a new allowance
+        let other = addr("api", "/work/api", "sess-z");
+        assert_eq!(
+            go(&r, &other, "main", "z", &[]).await,
+            Err("rate_limited".into())
+        );
+    })
+    .await
 }
 
 #[tokio::test]
 async fn busy_timeout_and_cancel() {
-    let r = rig(
-        ON(),
-        Fake {
-            delay_ms: 60_000,
-            ..Default::default()
-        },
-    )
-    .await;
-    let from = addr("api", "/work/api", "sess-b");
-    let mut held = Vec::new();
-    for i in 0..2 {
-        let (e, k, f) = (r.endpoint.clone(), r.key.clone(), from.clone());
-        held.push(tokio::spawn(async move {
-            let o = Outgoing {
-                id: &format!("h{i}"),
-                from: &f,
-                to_agent: "main",
-                text: "t",
-                chain: &[],
-                timeout_s: 30,
-                extra: Default::default(),
-            };
-            ask(&e, &k, &o, |_, _| {}).await
-        }));
-    }
-    while r.fake.calls.load(Ordering::SeqCst) < 2 {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert_eq!(
-        go(&r, &from, "main", "third", &[]).await,
-        Err("busy".into())
-    );
-    // Cancel: aborting the client closes the connection; the responder future is dropped.
-    for h in &held {
-        h.abort();
-    }
-    for _ in 0..200 {
-        if r.fake.dropped.load(Ordering::SeqCst) == 2 {
-            break;
+    hard_limit(async {
+        let r = rig(
+            ON(),
+            Fake {
+                delay_ms: 60_000,
+                ..Default::default()
+            },
+        )
+        .await;
+        let from = addr("api", "/work/api", "sess-b");
+        let mut held = Vec::new();
+        for i in 0..2 {
+            let (e, k, f) = (r.endpoint.clone(), r.key.clone(), from.clone());
+            held.push(tokio::spawn(async move {
+                let o = Outgoing {
+                    id: &format!("h{i}"),
+                    from: &f,
+                    to_agent: "main",
+                    text: "t",
+                    chain: &[],
+                    timeout_s: 30,
+                    extra: Default::default(),
+                };
+                ask(&e, &k, &o, |_, _| {}).await
+            }));
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert_eq!(r.fake.dropped.load(Ordering::SeqCst), 2);
+        while r.fake.calls.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            go(&r, &from, "main", "third", &[]).await,
+            Err("busy".into())
+        );
+        // Cancel: aborting the client closes the connection; the responder future is dropped.
+        for h in &held {
+            h.abort();
+        }
+        for _ in 0..200 {
+            if r.fake.dropped.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(r.fake.dropped.load(Ordering::SeqCst), 2);
 
-    let o = Outgoing {
-        id: "t",
-        from: &from,
-        to_agent: "main",
-        text: "t",
-        chain: &[],
-        timeout_s: 1,
-        extra: Default::default(),
-    };
-    let f = ask(&r.endpoint, &r.key, &o, |_, _| {}).await.unwrap();
-    assert_eq!((f.status.as_str(), f.text.as_str()), ("timeout", ""));
+        let o = Outgoing {
+            id: "t",
+            from: &from,
+            to_agent: "main",
+            text: "t",
+            chain: &[],
+            timeout_s: 1,
+            extra: Default::default(),
+        };
+        let f = ask(&r.endpoint, &r.key, &o, |_, _| {}).await.unwrap();
+        assert_eq!((f.status.as_str(), f.text.as_str()), ("timeout", ""));
+    })
+    .await
 }
 
 #[tokio::test]
 async fn status_applies_the_allow_and_deny_lists() {
-    let r = rig(
-        json!({"enabled": true, "deny": ["ws:web"]}),
-        Fake::default(),
-    )
-    .await;
-    let ok = addr("api", "/work/api", "sess-b");
-    assert!(status(&r.endpoint, &r.key, &ok).await.is_ok());
-    let denied = addr("web", "/work/web", "sess-c");
-    assert!(matches!(
-        status(&r.endpoint, &r.key, &denied).await,
-        Err(PeerError::Rejected(x)) if x == "denied"
-    ));
-    let off = rig(json!({"enabled": false}), Fake::default()).await;
-    assert!(matches!(
-        status(&off.endpoint, &off.key, &ok).await,
-        Err(PeerError::Rejected(_))
-    ));
+    hard_limit(async {
+        let r = rig(
+            json!({"enabled": true, "deny": ["ws:web"]}),
+            Fake::default(),
+        )
+        .await;
+        let ok = addr("api", "/work/api", "sess-b");
+        assert!(status(&r.endpoint, &r.key, &ok).await.is_ok());
+        let denied = addr("web", "/work/web", "sess-c");
+        assert!(matches!(
+            status(&r.endpoint, &r.key, &denied).await,
+            Err(PeerError::Rejected(x)) if x == "denied"
+        ));
+        let off = rig(json!({"enabled": false}), Fake::default()).await;
+        assert!(matches!(
+            status(&off.endpoint, &off.key, &ok).await,
+            Err(PeerError::Rejected(_))
+        ));
+    })
+    .await
 }
 
 #[tokio::test]
 async fn wrong_key_and_impostor_leak_nothing() {
-    let r = rig(ON(), Fake::default()).await;
-    let from = addr("api", "/work/api", "sess-b");
-    let bad = Key::from_bytes_for_test([7; 32]);
-    let o = Outgoing {
-        id: "w",
-        from: &from,
-        to_agent: "main",
-        text: "secret question",
-        chain: &[],
-        timeout_s: 5,
-        extra: Default::default(),
-    };
-    assert!(matches!(
-        ask(&r.endpoint, &bad, &o, |_, _| {}).await,
-        Err(PeerError::Auth)
-    ));
-    assert!(matches!(
-        status(&r.endpoint, &bad, &from).await,
-        Err(PeerError::Auth)
-    ));
-    assert_eq!(r.fake.calls.load(Ordering::SeqCst), 0);
+    hard_limit(async {
+        let r = rig(ON(), Fake::default()).await;
+        let from = addr("api", "/work/api", "sess-b");
+        let bad = Key::from_bytes_for_test([7; 32]);
+        let o = Outgoing {
+            id: "w",
+            from: &from,
+            to_agent: "main",
+            text: "secret question",
+            chain: &[],
+            timeout_s: 5,
+            extra: Default::default(),
+        };
+        assert!(matches!(
+            ask(&r.endpoint, &bad, &o, |_, _| {}).await,
+            Err(PeerError::Auth)
+        ));
+        assert!(matches!(
+            status(&r.endpoint, &bad, &from).await,
+            Err(PeerError::Auth)
+        ));
+        assert_eq!(r.fake.calls.load(Ordering::SeqCst), 0);
 
-    // An impostor listener holding another key: the client must abort before sending text.
-    let dir = r.dir.clone();
-    let mut l = Listener::bind(&dir).unwrap();
-    let ep = l.endpoint();
-    let imp = tokio::spawn(async move {
-        let mut c = l.accept().await.unwrap();
-        let hs = net::handshake_server(&mut c, &Key::from_bytes_for_test([9; 32])).await;
-        (hs.is_err(), c.recv().await.ok().flatten())
-    });
-    assert!(matches!(
-        ask(&ep, &r.key, &o, |_, _| {}).await,
-        Err(PeerError::Auth)
-    ));
-    let (failed, extra) = imp.await.unwrap();
-    assert!(
-        failed && extra.is_none(),
-        "impostor must receive no request text"
-    );
+        // An impostor listener holding another key: the client must abort before sending text.
+        let dir = r.dir.clone();
+        let mut l = Listener::bind(&dir).unwrap();
+        let ep = l.endpoint();
+        let imp = tokio::spawn(async move {
+            let mut c = l.accept().await.unwrap();
+            let hs = net::handshake_server(&mut c, &Key::from_bytes_for_test([9; 32])).await;
+            (hs.is_err(), c.recv().await.ok().flatten())
+        });
+        assert!(matches!(
+            ask(&ep, &r.key, &o, |_, _| {}).await,
+            Err(PeerError::Auth)
+        ));
+        let (failed, extra) = imp.await.unwrap();
+        assert!(
+            failed && extra.is_none(),
+            "impostor must receive no request text"
+        );
+    })
+    .await
 }
 
 #[tokio::test]
 async fn oversized_frame_is_refused() {
-    use tokio::io::AsyncWriteExt;
-    let (mut a, b) = tokio::io::duplex(1 << 22);
-    let mut c = Conn::new(b);
-    let w = tokio::spawn(async move {
-        a.write_all(&vec![b'a'; net::MAX_FRAME + 10]).await.unwrap();
-        a.write_all(b"\n").await.unwrap();
-        a
-    });
-    assert!(c.recv().await.is_err());
-    drop(w.await.unwrap());
+    hard_limit(async {
+        use tokio::io::AsyncWriteExt;
+        let (mut a, b) = tokio::io::duplex(1 << 22);
+        let mut c = Conn::new(b);
+        let w = tokio::spawn(async move {
+            a.write_all(&vec![b'a'; net::MAX_FRAME + 10]).await.unwrap();
+            a.write_all(b"\n").await.unwrap();
+            a
+        });
+        assert!(c.recv().await.is_err());
+        drop(w.await.unwrap());
+    })
+    .await
 }
 
-#[test]
-fn long_socket_path_disables_peers() {
+#[tokio::test] // a named pipe needs a reactor to bind
+async fn long_socket_path_disables_peers() {
     let home = tempfile::tempdir().unwrap();
     let dir = home.path().join("x".repeat(120)).join("run");
     net::prepare_run_dir(&dir).unwrap();
@@ -364,115 +392,129 @@ fn long_socket_path_disables_peers() {
 
 #[tokio::test]
 async fn discovery_lists_permitted_live_peers_and_cleans_dead_ones() {
-    let r = rig(ON(), Fake::default()).await;
-    let entry = |sid: &str, label: &str, root: &str, ep: &str| Entry {
-        v: 1,
-        session_id: sid.into(),
-        session_name: None,
-        workspace_key: format!("{label:0<24}"),
-        workspace_label: label.into(),
-        workspace_root: root.into(),
-        cwd: root.into(),
-        pid: 1,
-        pid_start: None,
-        repo_key: String::new(),
-        about: None,
-        endpoint: ep.into(),
-        started_at: 0,
-    };
-    let dead = r.dir.join("dead.sock").to_string_lossy().into_owned();
-    let _regs = [
-        Registration::create(&r.dir, &entry("live-1", "api", "/work/api", &r.endpoint)).unwrap(),
-        Registration::create(&r.dir, &entry("dead-1", "api", "/work/api", &dead)).unwrap(),
-        Registration::create(&r.dir, &entry("stuck-1", "api", "/work/api", &dead)).unwrap(),
-        Registration::create(&r.dir, &entry("self-1", "api", "/work/api", &r.endpoint)).unwrap(),
-        Registration::create(&r.dir, &entry("other-1", "web", "/work/web", &r.endpoint)).unwrap(),
-    ];
-    let cfg = config(ON());
-    let peers = discover(
-        &r.dir,
-        &r.key,
-        &cfg,
-        &addr("api", "/work/api", "self-1"),
-        |e| e.session_id == "dead-1",
-    )
-    .await;
-    let got: Vec<_> = peers
-        .iter()
-        .map(|p| (p.entry.session_id.as_str(), p.state.is_ok()))
-        .collect();
-    assert_eq!(
-        got.len(),
-        3,
-        "self and not-permitted sessions are not listed: {got:?}"
-    );
-    assert_eq!(peers[0].state.as_ref().unwrap_err(), &Down::Offline);
-    assert!(peers[1].state.is_ok());
-    assert_eq!(peers[2].state.as_ref().unwrap_err(), &Down::Unreachable);
-    assert!(!r.dir.join("dead-1.json").exists(), "dead entry is deleted");
-    assert!(r.dir.join("stuck-1.json").exists());
+    hard_limit(async {
+        let r = rig(ON(), Fake::default()).await;
+        let entry = |sid: &str, label: &str, root: &str, ep: &str| Entry {
+            v: 1,
+            session_id: sid.into(),
+            session_name: None,
+            workspace_key: format!("{label:0<24}"),
+            workspace_label: label.into(),
+            workspace_root: root.into(),
+            cwd: root.into(),
+            pid: 1,
+            pid_start: None,
+            repo_key: String::new(),
+            about: None,
+            endpoint: ep.into(),
+            started_at: 0,
+        };
+        // Only a unix socket under the run dir or a synthesis-peer pipe passes `endpoint_ok`.
+        let dead = if cfg!(windows) {
+            r"\\.\pipe\synthesis-peer-00000000000000000000000000000000".to_string()
+        } else {
+            r.dir.join("dead.sock").to_string_lossy().into_owned()
+        };
+        let _regs = [
+            Registration::create(&r.dir, &entry("live-1", "api", "/work/api", &r.endpoint))
+                .unwrap(),
+            Registration::create(&r.dir, &entry("dead-1", "api", "/work/api", &dead)).unwrap(),
+            Registration::create(&r.dir, &entry("stuck-1", "api", "/work/api", &dead)).unwrap(),
+            Registration::create(&r.dir, &entry("self-1", "api", "/work/api", &r.endpoint))
+                .unwrap(),
+            Registration::create(&r.dir, &entry("other-1", "web", "/work/web", &r.endpoint))
+                .unwrap(),
+        ];
+        let cfg = config(ON());
+        let peers = discover(
+            &r.dir,
+            &r.key,
+            &cfg,
+            &addr("api", "/work/api", "self-1"),
+            |e| e.session_id == "dead-1",
+        )
+        .await;
+        let got: Vec<_> = peers
+            .iter()
+            .map(|p| (p.entry.session_id.as_str(), p.state.is_ok()))
+            .collect();
+        assert_eq!(
+            got.len(),
+            3,
+            "self and not-permitted sessions are not listed: {got:?}"
+        );
+        assert_eq!(peers[0].state.as_ref().unwrap_err(), &Down::Offline);
+        assert!(peers[1].state.is_ok());
+        assert_eq!(peers[2].state.as_ref().unwrap_err(), &Down::Unreachable);
+        assert!(!r.dir.join("dead-1.json").exists(), "dead entry is deleted");
+        assert!(r.dir.join("stuck-1.json").exists());
+    })
+    .await
 }
 
 #[tokio::test]
 async fn client_caps_a_huge_reply_and_a_partial_flood() {
-    let home = tempfile::tempdir().unwrap();
-    let dir = run_dir(home.path());
-    let key = load_or_create_key(&dir).unwrap();
-    let mut l = Listener::bind(&dir).unwrap();
-    let ep = l.endpoint();
-    let k2 = key.clone();
-    // A server holding the key that ignores every limit.
-    tokio::spawn(async move {
-        let mut c = l.accept().await.unwrap();
-        net::handshake_server(&mut c, &k2).await.unwrap();
-        let f = c.recv().await.unwrap().unwrap();
-        let id = f["id"].as_str().unwrap().to_string();
-        c.send(&json!({"t":"accepted","id":id})).await.unwrap();
-        let long = "x".repeat(1000);
-        for seq in 0..500 {
-            let t = "p".repeat(2000);
-            c.send(&json!({"t":"partial","id":id,"seq":seq,"text":t}))
-                .await
-                .unwrap();
-        }
-        let big = "r".repeat(900 * 1024);
-        c.send(&json!({"t":"reply","id":id,"status":long,"text":big,
+    hard_limit(async {
+        let home = tempfile::tempdir().unwrap();
+        let dir = run_dir(home.path());
+        let key = load_or_create_key(&dir).unwrap();
+        let mut l = Listener::bind(&dir).unwrap();
+        let ep = l.endpoint();
+        let k2 = key.clone();
+        // A server holding the key that ignores every limit.
+        tokio::spawn(async move {
+            let mut c = l.accept().await.unwrap();
+            net::handshake_server(&mut c, &k2).await.unwrap();
+            let f = c.recv().await.unwrap().unwrap();
+            let id = f["id"].as_str().unwrap().to_string();
+            c.send(&json!({"t":"accepted","id":id})).await.unwrap();
+            let long = "x".repeat(1000);
+            for seq in 0..500 {
+                let t = "p".repeat(2000);
+                c.send(&json!({"t":"partial","id":id,"seq":seq,"text":t}))
+                    .await
+                    .unwrap();
+            }
+            let big = "r".repeat(900 * 1024);
+            c.send(&json!({"t":"reply","id":id,"status":long,"text":big,
             "from":{"workspace_key":long,"workspace_label":long,"workspace_root":long,
                     "session_id":long,"instance":long,"kind":long}}))
-            .await
-            .unwrap();
-    });
-    let from = addr("api", "/work/api", "sess-b");
-    let o = Outgoing {
-        id: "x",
-        from: &from,
-        to_agent: "main",
-        text: "q",
-        chain: &[],
-        timeout_s: 30,
-        extra: Default::default(),
-    };
-    let (mut n, mut bytes) = (0, 0);
-    let f = ask(&ep, &key, &o, |_, t| {
-        n += 1;
-        bytes += t.len();
+                .await
+                .unwrap();
+        });
+        let from = addr("api", "/work/api", "sess-b");
+        let o = Outgoing {
+            id: "x",
+            from: &from,
+            to_agent: "main",
+            text: "q",
+            chain: &[],
+            timeout_s: 30,
+            extra: Default::default(),
+        };
+        let (mut n, mut bytes) = (0, 0);
+        let f = ask(&ep, &key, &o, |_, t| {
+            n += 1;
+            bytes += t.len();
+        })
+        .await
+        .unwrap();
+        assert!(n <= 64 && bytes <= 64 * 1024, "{n} partials, {bytes} bytes");
+        assert_eq!(f.text.len(), 32 * 1024);
+        assert_eq!(f.status.len(), 256);
+        let from = f.from.unwrap();
+        assert!(
+            [
+                &from.kind,
+                &from.instance,
+                &from.session_id,
+                &from.workspace_label
+            ]
+            .iter()
+            .all(|s| s.len() == 256)
+        );
     })
     .await
-    .unwrap();
-    assert!(n <= 64 && bytes <= 64 * 1024, "{n} partials, {bytes} bytes");
-    assert_eq!(f.text.len(), 32 * 1024);
-    assert_eq!(f.status.len(), 256);
-    let from = f.from.unwrap();
-    assert!(
-        [
-            &from.kind,
-            &from.instance,
-            &from.session_id,
-            &from.workspace_label
-        ]
-        .iter()
-        .all(|s| s.len() == 256)
-    );
 }
 
 #[test]

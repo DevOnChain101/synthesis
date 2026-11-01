@@ -31,7 +31,7 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -76,7 +76,7 @@ jobs:
   evals-selftest:
     name: eval selftest (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -210,7 +210,7 @@ jobs:
     # namespaces via AppArmor, which breaks bwrap; relax it for this job only.
     name: sandbox (linux)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -238,7 +238,7 @@ jobs:
   msrv:
     name: msrv (1.89)
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 20
     env:
       RUSTUP_TOOLCHAIN: "1.89" # overrides rust-toolchain.toml
     steps:
@@ -251,7 +251,7 @@ jobs:
 
   docs:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     env:
       RUSTDOCFLAGS: "-D warnings"
     steps:

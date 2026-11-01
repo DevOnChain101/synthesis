@@ -343,7 +343,19 @@ mod windows {
         }
     }
 
+    /// Between two accepts every instance is taken and `open` fails with ERROR_PIPE_BUSY (231);
+    /// that is a moment, not a refusal, so retry briefly (as the tokio docs advise).
     pub async fn connect(endpoint: &str) -> io::Result<Conn> {
-        Ok(Conn::new(ClientOptions::new().open(endpoint)?))
+        let mut tries = 0;
+        loop {
+            match ClientOptions::new().open(endpoint) {
+                Ok(c) => return Ok(Conn::new(c)),
+                Err(e) if e.raw_os_error() == Some(231) && tries < 100 => {
+                    tries += 1;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 }
