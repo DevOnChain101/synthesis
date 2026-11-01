@@ -6,7 +6,13 @@
   },
   "schema_extra_properties": {
     "Grep": ["offset"],
-    "_reason": "Conformance 71: Grep takes `offset` (skip the first N lines before head_limit), as in Claude Code; Node has no such property."
+    "TaskCreate": ["metadata"],
+    "TaskUpdate": ["addBlocks", "addBlockedBy", "owner", "metadata"],
+    "_reason": "Conformance 71: Grep takes `offset` (skip the first N lines before head_limit), as in Claude Code; Node has no such property. Conformance 81: TaskCreate/TaskUpdate take the extra properties of the Agent SDK reference (metadata, addBlocks, addBlockedBy, owner)."
+  },
+  "schema_enum_extra": {
+    "TaskUpdate": {"status": ["deleted"]},
+    "_reason": "Conformance 81: TaskUpdate status accepts `deleted` (removes the task), as in the Agent SDK reference."
   },
   "mtime_order": {
     "glob-recursive-sorted-by-mtime-newest-first": [

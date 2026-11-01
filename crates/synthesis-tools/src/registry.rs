@@ -253,11 +253,27 @@ impl Registry {
     }
 
     /// Pipeline steps 0-1 and 5 (tools.md §3): unknown tool, schema validation, execute.
-    pub async fn execute(&self, name: &str, input: Value, ctx: &ToolContext) -> ToolOutput {
+    pub async fn execute(&self, name: &str, mut input: Value, ctx: &ToolContext) -> ToolOutput {
         let Some(entry) = self.entries.iter().find(|e| e.tool.spec().name == name) else {
             return ToolOutput::error(format!("Unknown tool \"{name}\""))
                 .with_meta(json!({"error": "unknown_tool"}));
         };
+        // Claude Code repairs these close-but-wrong key names of the Task tools before running them
+        if matches!(name, "TaskGet" | "TaskUpdate")
+            && let Some(o) = input.as_object_mut()
+        {
+            for (from, to) in [
+                ("id", "taskId"),
+                ("task_id", "taskId"),
+                ("active_form", "activeForm"),
+            ] {
+                if !o.contains_key(to)
+                    && let Some(v) = o.remove(from)
+                {
+                    o.insert(to.into(), v);
+                }
+            }
+        }
         let violations: Vec<Value> = entry
             .validator
             .iter_errors(&input)

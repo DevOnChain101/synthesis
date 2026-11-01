@@ -10,7 +10,9 @@ use crate::ToolOutput;
 use crate::native::{Shared, lock};
 use crate::util::str_field;
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// One entry of the session list, shared by `TodoWrite` and the Task* tools. Only the first five
+/// fields reach `meta` (and so the `todo.updated` event); the rest is Task* state.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub(crate) struct Todo {
     pub id: String,
     pub content: String,
@@ -18,6 +20,14 @@ pub(crate) struct Todo {
     #[serde(rename = "activeForm")]
     pub active_form: String,
     pub description: String,
+    #[serde(skip)]
+    pub blocks: Vec<String>,
+    #[serde(skip)]
+    pub blocked_by: Vec<String>,
+    #[serde(skip)]
+    pub owner: Option<String>,
+    #[serde(skip)]
+    pub metadata: serde_json::Map<String, Value>,
 }
 
 fn with_todos(
@@ -54,7 +64,7 @@ pub(crate) fn todo_write(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolO
                     .or(t["content"].as_str())
                     .unwrap_or_default()
                     .into(),
-                description: String::new(),
+                ..Todo::default()
             })
             .collect();
         ToolOutput::text(
@@ -63,6 +73,18 @@ pub(crate) fn todo_write(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolO
              applicable.",
         )
     })
+}
+
+// Task* shapes follow the Agent SDK reference (code.claude.com/docs/en/agent-sdk/typescript,
+// "Tool Input Types" / "Tool Output Types"); `description` stays optional on TaskCreate and
+// TaskGet adds `activeForm` (both lenient supersets).
+
+fn task_id(input: &Value) -> &str {
+    input["taskId"].as_str().unwrap_or_default()
+}
+
+fn metadata(input: &Value) -> serde_json::Map<String, Value> {
+    input["metadata"].as_object().cloned().unwrap_or_default()
 }
 
 pub(crate) fn task_create(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutput {
@@ -83,22 +105,29 @@ pub(crate) fn task_create(sh: &Shared, input: &Value, ctx: &ToolContext) -> Tool
             status: "pending".into(),
             active_form: str_field(input, "activeForm").unwrap_or(subject).into(),
             description: str_field(input, "description").unwrap_or_default().into(),
+            metadata: metadata(input),
+            ..Todo::default()
         });
-        ToolOutput::text(
-            json!({"task": {"id": id, "subject": subject, "status": "pending"}}).to_string(),
-        )
+        ToolOutput::text(json!({"task": {"id": id, "subject": subject}}).to_string())
     })
 }
 
 pub(crate) fn task_get(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutput {
-    let id = input["taskId"].as_str().unwrap_or_default();
+    let id = task_id(input);
     with_todos(sh, ctx, |todos| {
-        match todos.iter().find(|t| t.id == id) {
-        Some(t) => ToolOutput::text(
-            json!({"task": {"id": t.id, "subject": t.content, "status": t.status, "activeForm": t.active_form, "description": t.description}}).to_string(),
-        ),
-        None => ToolOutput::error(format!("TaskGet: no task with id \"{id}\".")),
-    }
+        let task = todos.iter().find(|t| t.id == id).map(|t| {
+            let mut v = json!({"id": t.id, "subject": t.content, "description": t.description,
+                "status": t.status, "blocks": t.blocks, "blockedBy": t.blocked_by,
+                "activeForm": t.active_form});
+            if let Some(o) = &t.owner {
+                v["owner"] = json!(o);
+            }
+            if !t.metadata.is_empty() {
+                v["metadata"] = json!(t.metadata);
+            }
+            v
+        });
+        ToolOutput::text(json!({"task": task}).to_string())
     })
 }
 
@@ -106,33 +135,132 @@ pub(crate) fn task_list(sh: &Shared, _input: &Value, ctx: &ToolContext) -> ToolO
     with_todos(sh, ctx, |todos| {
         let tasks: Vec<Value> = todos
             .iter()
-            .map(|t| json!({"id": t.id, "subject": t.content, "status": t.status}))
+            .map(|t| {
+                let mut v = json!({"id": t.id, "subject": t.content, "status": t.status,
+                    "blockedBy": t.blocked_by});
+                if let Some(o) = &t.owner {
+                    v["owner"] = json!(o);
+                }
+                v
+            })
             .collect();
         ToolOutput::text(json!({"tasks": tasks}).to_string())
     })
 }
 
+fn update_failed(id: &str, error: String) -> ToolOutput {
+    ToolOutput::error(
+        json!({"success": false, "taskId": id, "updatedFields": [], "error": error}).to_string(),
+    )
+}
+
 pub(crate) fn task_update(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutput {
-    let id = input["taskId"].as_str().unwrap_or_default();
+    let id = task_id(input);
     with_todos(sh, ctx, |todos| {
-        let Some(t) = todos.iter_mut().find(|t| t.id == id) else {
-            return ToolOutput::error(format!("TaskUpdate: no task with id \"{id}\"."));
+        let Some(at) = todos.iter().position(|t| t.id == id) else {
+            return update_failed(id, format!("Task #{id} not found"));
         };
-        if let Some(v) = str_field(input, "status") {
-            t.status = v.into();
+        let ids = |k: &str| -> Vec<String> {
+            input[k]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        };
+        let (add_blocks, add_blocked_by) = (ids("addBlocks"), ids("addBlockedBy"));
+        if let Some(bad) = add_blocks
+            .iter()
+            .chain(&add_blocked_by)
+            .find(|o| o.as_str() == id || !todos.iter().any(|t| &t.id == *o))
+        {
+            return update_failed(id, format!("Task #{bad} not found or is the task itself"));
         }
-        if let Some(v) = str_field(input, "subject") {
-            t.content = v.into();
+        let from = todos[at].status.clone();
+        if input["status"] == "deleted" {
+            todos.remove(at);
+            for t in todos.iter_mut() {
+                t.blocks.retain(|b| b != id);
+                t.blocked_by.retain(|b| b != id);
+            }
+            return ToolOutput::text(
+                json!({"success": true, "taskId": id, "updatedFields": ["status"],
+                    "statusChange": {"from": from, "to": "deleted"}})
+                .to_string(),
+            );
         }
-        if let Some(v) = str_field(input, "activeForm") {
-            t.active_form = v.into();
+        let mut fields: Vec<&str> = vec![];
+        let t = &mut todos[at];
+        let mut set = |name: &'static str, cur: &mut String, v: Option<&str>| {
+            if let Some(v) = v.filter(|v| *v != cur) {
+                *cur = v.into();
+                fields.push(name);
+            }
+        };
+        set("status", &mut t.status, str_field(input, "status"));
+        set("subject", &mut t.content, str_field(input, "subject"));
+        set(
+            "activeForm",
+            &mut t.active_form,
+            str_field(input, "activeForm"),
+        );
+        set(
+            "description",
+            &mut t.description,
+            input["description"].as_str(),
+        );
+        if let Some(o) = str_field(input, "owner").filter(|o| t.owner.as_deref() != Some(o)) {
+            t.owner = Some(o.into());
+            fields.push("owner");
         }
-        if let Some(v) = input["description"].as_str() {
-            t.description = v.into();
+        // a null value removes the key, as in Claude Code
+        for (k, v) in metadata(input) {
+            if v.is_null() {
+                t.metadata.remove(&k);
+            } else {
+                t.metadata.insert(k, v);
+            }
+            if !fields.contains(&"metadata") {
+                fields.push("metadata");
+            }
         }
-        ToolOutput::text(
-            json!({"task": {"id": t.id, "subject": t.content, "status": t.status}}).to_string(),
-        )
+        let status_change = fields
+            .contains(&"status")
+            .then(|| json!({"from": from, "to": t.status}));
+        // blocks and blockedBy are two views of one edge
+        for (list, mine_blocks) in [(&add_blocks, true), (&add_blocked_by, false)] {
+            for o in list {
+                let mine = if mine_blocks {
+                    &mut todos[at].blocks
+                } else {
+                    &mut todos[at].blocked_by
+                };
+                if !mine.contains(o) {
+                    mine.push(o.clone());
+                }
+                if let Some(x) = todos.iter_mut().find(|x| &x.id == o) {
+                    let theirs = if mine_blocks {
+                        &mut x.blocked_by
+                    } else {
+                        &mut x.blocks
+                    };
+                    if !theirs.iter().any(|s| s == id) {
+                        theirs.push(id.into());
+                    }
+                }
+            }
+        }
+        if !add_blocks.is_empty() {
+            fields.push("blocks");
+        }
+        if !add_blocked_by.is_empty() {
+            fields.push("blockedBy");
+        }
+        let mut out = json!({"success": true, "taskId": id, "updatedFields": fields});
+        if let Some(c) = status_change {
+            out["statusChange"] = c;
+        }
+        ToolOutput::text(out.to_string())
     })
 }
 
