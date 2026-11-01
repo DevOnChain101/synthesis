@@ -1324,6 +1324,24 @@ fn spawn_live(mut c: Command) -> Live {
     live
 }
 
+/// A failing test must not leave `synth` (and its children) alive: on Windows an orphan keeps the
+/// test binary's pipes open and `cargo test` hangs. `taskkill /T` takes the whole tree.
+impl Drop for Live {
+    fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            if cfg!(windows) {
+                let _ = Command::new("taskkill")
+                    .args(["/T", "/F", "/PID", &self.child.id().to_string()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
 impl Live {
     fn finish(mut self) -> Done {
         let start = Instant::now();
@@ -1332,7 +1350,6 @@ impl Live {
                 break s;
             }
             if start.elapsed() > Duration::from_secs(60) {
-                let _ = self.child.kill();
                 panic!(
                     "process did not end in 60 s; stderr: {}",
                     self.err.lock().unwrap()
@@ -1340,7 +1357,7 @@ impl Live {
             }
             std::thread::sleep(Duration::from_millis(50));
         };
-        for t in self.threads {
+        for t in self.threads.drain(..) {
             let _ = t.join();
         }
         let ev = self

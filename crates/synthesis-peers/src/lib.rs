@@ -39,7 +39,15 @@ pub fn run_dir(synthesis_home: &Path) -> PathBuf {
 
 /// On Windows peers stay off unless the home is under the user profile (ACL inheritance).
 pub fn platform_ok(home: &Path, user_profile: Option<&Path>) -> bool {
-    !cfg!(windows) || user_profile.is_some_and(|u| components_start_with(home, u))
+    !cfg!(windows) || user_profile.is_some_and(|u| components_start_with(&canon(home), &canon(u)))
+}
+
+/// Resolves 8.3 short names (`RUNNER~1`) and drops the `\\?\` prefix so a profile and a temp
+/// path spelled differently still compare; an unresolvable (not yet created) path is kept as is.
+fn canon(p: &Path) -> PathBuf {
+    let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let s = c.to_string_lossy();
+    s.strip_prefix(r"\\?\").map_or(c.clone(), PathBuf::from)
 }
 
 /// Component-wise prefix test, folded: `C:\Users\bob2` is not under `C:\Users\bob`.
