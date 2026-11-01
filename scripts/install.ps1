@@ -57,7 +57,10 @@ try {
   Copy-Item (Join-Path $src 'synth.exe') (Join-Path $dir "$name.exe") -Force
   Write-Host "Installed $(Join-Path $dir "$name.exe") ($version, $target)"
   & (Join-Path $dir "$name.exe") doctor
-  if (($env:PATH -split ';') -notcontains $dir) { Write-Host "Add $dir to PATH (user environment variables)." }
+  if (($env:PATH -split ';') -notcontains $dir) {
+    Write-Host "Add $dir to your user PATH (then open a new terminal), for example:"
+    Write-Host "  [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';$dir', 'User')"
+  }
   $other = Get-Command $name -ErrorAction SilentlyContinue
   if ($other -and $other.Source -ne (Join-Path $dir "$name.exe")) { Write-Warning "'$name' on PATH resolves to $($other.Source) (Node CLI?). Put $dir first or set SYNTHESIS_BIN_NAME." }
 } finally { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }

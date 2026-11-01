@@ -29,7 +29,7 @@ synth models                         # configured models
 synth run --cwd . --model provider/model --prompt "fix the failing test in src/parser"
 ```
 
-`synth run` is headless: events are JSON lines on stdout (schema in `docs/specs/events.md`). `--cwd` is required; Synthesis never uses an implicit working directory. Budgets: `--max-turns`, `--max-tool-calls`, `--max-cost-usd`, `--max-wall-secs`. `--permission-mode default|acceptEdits|plan|dontAsk`.
+`synth run` is headless: events are JSON lines on stdout (schema in `docs/specs/events.md`). `--cwd DIR` picks the workspace (default: the directory you start `synth` in). Budgets: `--max-turns`, `--max-tool-calls`, `--max-cost-usd`, `--max-wall-secs`. `--permission-mode default|acceptEdits|plan|dontAsk|auto|bypassPermissions` (docs/CLI.md; with nobody to ask, `synth run` denies what the mode would ask and ends `blocked`, exit 4).
 
 ## Sandbox and network
 
