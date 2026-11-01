@@ -161,6 +161,8 @@ fn perm_mode(m: PermissionMode) -> synthesis_permissions::Mode {
 struct SideX {
     mode: PermissionMode,
     interactive: bool,
+    /// PreToolUse hook config (JSON) installed on the side
+    hooks: Option<&'static str>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -178,6 +180,7 @@ fn side_full(
     let x = SideX {
         mode: PermissionMode::Default,
         interactive: false,
+        hooks: None,
     };
     side_x(
         sid, label, run, cfg, responder, slow_ms, priced, approve, deny, x,
@@ -249,6 +252,15 @@ fn side_x(
             ]));
             let h = match approve {
                 Some(a) => h.with_approver(a),
+                None => h,
+            };
+            let h = match x.hooks {
+                Some(cfg) => h.with_hooks(Arc::new(synthesis_hooks::Hooks::new(
+                    h0.rt.clone(),
+                    sid,
+                    h0.ws.clone(),
+                    serde_json::from_str(cfg).unwrap(),
+                ))),
                 None => h,
             };
             let _ = h.set_mode(perm_mode(x.mode), true);
@@ -1545,7 +1557,7 @@ fn b_notifies(to: &'static str) -> Responder {
 async fn notify_on_end_delivers_the_result_when_the_peers_task_ends() {
     let home = tempfile::tempdir().unwrap();
     let run = run_dir(home.path());
-    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "accept_notify": true});
     let (mut a, ea) = side(
         "sess-a",
         "alpha",
@@ -1598,7 +1610,7 @@ async fn notify_on_end_delivers_the_result_when_the_peers_task_ends() {
 async fn notify_on_end_of_an_idle_session_answers_idle_at_once() {
     let home = tempfile::tempdir().unwrap();
     let run = run_dir(home.path());
-    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "accept_notify": true});
     let idle: Responder = Arc::new(|_| Some(Turn::text("A idle")));
     let (a, ea) = side("sess-a", "alpha", &run, Some(on.clone()), idle, 10);
     let (mut b, _) = side(
@@ -1624,7 +1636,7 @@ async fn a_subscription_is_gated_one_per_asker_and_refused_in_a_cycle() {
     let home = tempfile::tempdir().unwrap();
     let run = run_dir(home.path());
     let key = load_or_create_key(&run).unwrap();
-    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "accept_notify": true});
     let (mut a, ea) = side(
         "sess-a",
         "alpha",
@@ -1671,6 +1683,18 @@ async fn a_subscription_is_gated_one_per_asker_and_refused_in_a_cycle() {
         Err(PeerError::Rejected(r)) => assert_eq!(r, "denied"),
         other => panic!("{:?}", other.err()),
     }
+    // one asker workspace cannot fill the table: its third session is turned away, another
+    // workspace is not
+    let mut b2 = asker("beta", "sess-b2");
+    b2.workspace_key = from.workspace_key.clone();
+    let mut b3 = asker("beta", "sess-b3");
+    b3.workspace_key = from.workspace_key.clone();
+    let second = sub(b2).await.expect("a second session of that workspace");
+    match sub(b3).await {
+        Err(PeerError::Rejected(r)) => assert_eq!(r, "busy"),
+        other => panic!("{:?}", other.err()),
+    }
+    drop(second);
     let r = first.wait(|_, _| {}).await.unwrap();
     assert_eq!(r.status, "answered");
     assert!(r.text.contains("A done"), "{}", r.text);
@@ -1681,7 +1705,7 @@ async fn a_subscription_is_gated_one_per_asker_and_refused_in_a_cycle() {
 async fn a_session_waiting_on_x_refuses_a_subscription_from_x() {
     let home = tempfile::tempdir().unwrap();
     let run = run_dir(home.path());
-    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "accept_notify": true});
     // A waits for B (B stays busy for 1.4 s); B, still busy, then tries to wait for A.
     let a_resp: Responder = Arc::new(|r| {
         let all = texts(r);
@@ -1794,7 +1818,11 @@ async fn bash_output_reaches_the_responder_only_for_a_listed_command_without_met
     );
 
     let mut on = base;
-    on["share_commands"] = json!(["echo SHARED*", "echo CHAIN*", "echo ENVLIKE*"]);
+    on["share_commands"] = json!([
+        "echo SHARED_MARK_1*",
+        "echo CHAIN_MARK_2*",
+        "echo ENVLIKE_MARK_3*"
+    ]);
     let some = bash_visibility(on).await;
     assert!(
         some.contains("shared=true chained=false private=false"),
@@ -1902,7 +1930,11 @@ fn deleg(
     let home = tempfile::tempdir().unwrap();
     let run = run_dir(home.path());
     let key = load_or_create_key(&run).unwrap();
-    let x = SideX { mode, interactive };
+    let x = SideX {
+        mode,
+        interactive,
+        hooks: None,
+    };
     let (b, eb) = side_x(
         "sess-b",
         "beta",
@@ -2547,6 +2579,7 @@ async fn a_delegates(
         SideX {
             mode: b_mode,
             interactive: false,
+            hooks: None,
         },
     );
     let (reg, ep) = serve_ep(&b, &run, eb);
@@ -2584,6 +2617,7 @@ async fn a_delegates(
         SideX {
             mode: a_mode,
             interactive: a_interactive,
+            hooks: None,
         },
     );
     // a denied call may leave the task `blocked`; the tests look at what ran
@@ -2666,4 +2700,334 @@ async fn text_in_a_reply_cannot_grant_anything_to_the_asker() {
         _ => None,
     });
     assert!(modes.is_empty() || modes == ["acceptEdits"], "{modes:?}");
+}
+
+// ---- review findings: peer-origin work is stricter than B's own agent (messaging.md J4.1) -------------
+
+/// The delegate worker makes one call (`w1`) and reports.
+fn one_call(tool: &'static str, input: serde_json::Value) -> Responder {
+    Arc::new(move |r| {
+        Some(if !is_delegate(r) {
+            Turn::text("B idle")
+        } else if tool_result(r, "w1").is_none() {
+            Turn::tool("w1", tool, input.clone())
+        } else {
+            Turn::text("worker done")
+        })
+    })
+}
+
+#[tokio::test]
+async fn peer_work_under_bypass_still_asks_for_protected_paths_and_unclear_bash() {
+    // (tool, input, the marker that must not appear, B's user is asked)
+    let cases = [
+        (
+            "Write",
+            json!({"file_path": ".git/hooks/pre-push", "content": "x"}),
+            Some(".git/hooks/pre-push"),
+            true,
+        ),
+        (
+            "Bash",
+            json!({"command": "echo x > .git/hooks/pre-push"}),
+            Some(".git/hooks/pre-push"),
+            true,
+        ),
+        (
+            "Bash",
+            json!({"command": "echo hi > $HOME/pwned.txt"}),
+            None,
+            true,
+        ),
+        ("Bash", json!({"command": "cat .env"}), None, false),
+        (
+            "Bash",
+            json!({"command": "cat ~/.synthesis/run/peer.key"}),
+            None,
+            false,
+        ),
+    ];
+    for (tool, input, marker, asked) in cases {
+        for interactive in [false, true] {
+            let ask = Asked::new(Some(false), 0);
+            let d = deleg(
+                PermissionMode::BypassPermissions,
+                interactive,
+                Some(ask.clone()),
+                &[],
+                deleg_cfg(json!({"_test_allow_bash": true})),
+                one_call(tool, input.clone()),
+            );
+            std::fs::create_dir_all(d.b.rig.root.join("w/.git/hooks")).unwrap();
+            std::fs::write(d.b.rig.root.join("w/.env"), "DB=1").unwrap();
+            delegate_to(&d, "go", "bypassPermissions", &["sess-a"], None)
+                .await
+                .unwrap();
+            let (res, err) = tool_result(d.b.rig.requests().last().unwrap(), "w1").unwrap();
+            assert!(err, "{tool} {input} interactive={interactive}: {res}");
+            if let Some(m) = marker {
+                assert!(!d.b.rig.root.join("w").join(m).exists(), "{input}");
+            }
+            assert!(!d.b.rig.root.join("w/pwned.txt").exists());
+            let n = ask.seen.lock().unwrap().len();
+            assert_eq!(
+                n,
+                usize::from(asked && interactive),
+                "{input} {interactive}"
+            );
+        }
+    }
+    // B's own agent keeps its bypass (CLI.md: protected paths are not stopped by plain writes)
+    let d = deleg(
+        PermissionMode::BypassPermissions,
+        false,
+        None,
+        &[],
+        deleg_cfg(json!({})),
+        writer(),
+    );
+    delegate_to(&d, "go", "bypassPermissions", &["sess-a"], None)
+        .await
+        .unwrap();
+    assert!(d.made());
+}
+
+#[tokio::test]
+async fn a_delegate_workers_sendmessage_follows_bs_approval_not_the_peer_allow_list() {
+    // A is a live, allowed peer of B, so a question to it would be pre-approved for B's own agent
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let key = load_or_create_key(&run).unwrap();
+    let x = |interactive| SideX {
+        mode: PermissionMode::Default,
+        interactive,
+        hooks: None,
+    };
+    let (a, ea) = side_x(
+        "sess-a",
+        "alpha",
+        &run,
+        Some(deleg_cfg(json!({}))),
+        Arc::new(|_| Some(Turn::text("a"))),
+        10,
+        true,
+        None,
+        &[],
+        x(false),
+    );
+    let (_ra, _) = serve_ep(&a, &run, ea);
+    let ask = Asked::new(Some(false), 0);
+    let (b, eb) = side_x(
+        "sess-b",
+        "beta",
+        &run,
+        Some(deleg_cfg(json!({}))),
+        one_call(
+            "SendMessage",
+            json!({"to": "ws:alpha/sess:sess-a", "message": "hello"}),
+        ),
+        700,
+        true,
+        Some(ask.clone()),
+        &[],
+        x(true),
+    );
+    let (reg, ep) = serve_ep(&b, &run, eb);
+    let d = Deleg {
+        b,
+        ep,
+        key,
+        _reg: reg,
+        _home: home,
+    };
+    delegate_to(&d, "go", "bypassPermissions", &["sess-a"], None)
+        .await
+        .unwrap();
+    let seen = ask.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "B's user is asked");
+    assert_eq!(seen[0].tool, "SendMessage");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_pre_tool_hook_cannot_turn_a_peer_origin_ask_into_allow() {
+    // headless default B: a Write asks, so it is denied; the hook "allows" and changes nothing
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let key = load_or_create_key(&run).unwrap();
+    let (b, eb) = side_x(
+        "sess-b",
+        "beta",
+        &run,
+        Some(deleg_cfg(json!({}))),
+        writer(),
+        700,
+        true,
+        None,
+        &[],
+        SideX {
+            mode: PermissionMode::Default,
+            interactive: false,
+            hooks: Some(
+                r#"{"PreToolUse": [{"hooks": [{"type": "command", "command": "printf '{\"hookSpecificOutput\":{\"permissionDecision\":\"allow\"}}'"}]}]}"#,
+            ),
+        },
+    );
+    let (reg, ep) = serve_ep(&b, &run, eb);
+    let d = Deleg {
+        b,
+        ep,
+        key,
+        _reg: reg,
+        _home: home,
+    };
+    delegate_to(&d, "go", "bypassPermissions", &["sess-a"], None)
+        .await
+        .unwrap();
+    assert!(!d.made(), "a hook allow is advisory");
+    let (res, err) = tool_result(d.b.rig.requests().last().unwrap(), "w1").unwrap();
+    assert!(err && res.contains("requires approval"), "{res}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_a_delegation_kills_the_workers_bash_process_tree() {
+    // a marker only this test uses, so `pgrep -f` finds the shell and its sleeping child
+    let cmd = "sleep 6173; echo done";
+    let alive = || {
+        std::process::Command::new("pgrep")
+            .args(["-f", "sleep 6173"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    let d = deleg(
+        PermissionMode::BypassPermissions,
+        false,
+        None,
+        &[],
+        deleg_cfg(json!({"_test_allow_bash": true})),
+        one_call("Bash", json!({"command": cmd})),
+    );
+    let from = asker("alpha", "sess-a");
+    let chain = vec!["sess-a".to_string()];
+    let o = Outgoing {
+        id: "req-bash-cancel",
+        from: &from,
+        to_agent: "main",
+        text: "sleep",
+        chain: &chain,
+        timeout_s: 30,
+        extra: Extra {
+            delegate: true,
+            sender_mode: "bypassPermissions",
+            ..Default::default()
+        },
+    };
+    let call = synthesis_peers::serve::begin(&d.ep, &d.key, &o)
+        .await
+        .unwrap();
+    until(alive).await;
+    drop(call); // A cancelled
+    until(|| !alive()).await;
+    assert!(!alive(), "the child of the cancelled worker is gone");
+}
+
+#[tokio::test]
+async fn notify_on_end_is_off_by_default() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let key = load_or_create_key(&run).unwrap();
+    // allowed peer, answers on, but `accept_notify` never set
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]});
+    let idle: Responder = Arc::new(|_| Some(Turn::text("A idle")));
+    let (a, ea) = side("sess-a", "alpha", &run, Some(on), idle, 10);
+    let (_ra, ep) = serve_ep(&a, &run, ea);
+    let from = asker("beta", "sess-b");
+    let o = Outgoing {
+        id: "req-notify-off",
+        from: &from,
+        to_agent: "main",
+        text: "notify me",
+        chain: std::slice::from_ref(&from.session_id),
+        timeout_s: 30,
+        extra: Extra {
+            notify_on_end: true,
+            ..Default::default()
+        },
+    };
+    match synthesis_peers::serve::begin(&ep, &key, &o).await {
+        Err(PeerError::Rejected(r)) => assert_eq!(r, "notify_off"),
+        other => panic!("{:?}", other.err()),
+    }
+}
+
+#[tokio::test]
+async fn notify_result_leaves_out_private_changed_files() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let key = load_or_create_key(&run).unwrap();
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "accept_notify": true});
+    let writes: Responder = Arc::new(|r| {
+        Some(if tool_result(r, "s1").is_none() {
+            Turn::tool("s1", "Slow", json!({}))
+        } else if tool_result(r, "w1").is_none() {
+            Turn::tool(
+                "w1",
+                "Write",
+                json!({"file_path": "ok-notes.txt", "content": "n"}),
+            )
+        } else if tool_result(r, "w2").is_none() {
+            Turn::tool(
+                "w2",
+                "Write",
+                json!({"file_path": ".env", "content": "DB=1"}),
+            )
+        } else {
+            Turn::text("A done")
+        })
+    });
+    let x = SideX {
+        mode: PermissionMode::BypassPermissions,
+        interactive: false,
+        hooks: None,
+    };
+    let (mut a, ea) = side_x(
+        "sess-a",
+        "alpha",
+        &run,
+        Some(on),
+        writes,
+        900,
+        true,
+        None,
+        &[],
+        x,
+    );
+    let (_ra, ep) = serve_ep(&a, &run, ea);
+    let a_task = tokio::spawn(async move {
+        let out = run_a(&mut a).await;
+        (a, out)
+    });
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let from = asker("beta", "sess-b");
+    let o = Outgoing {
+        id: "req-notify-files",
+        from: &from,
+        to_agent: "main",
+        text: "notify me",
+        chain: std::slice::from_ref(&from.session_id),
+        timeout_s: 30,
+        extra: Extra {
+            notify_on_end: true,
+            ..Default::default()
+        },
+    };
+    let call = synthesis_peers::serve::begin(&ep, &key, &o).await.unwrap();
+    let r = call.wait(|_, _| {}).await.unwrap();
+    let _ = a_task.await.unwrap();
+    assert!(r.text.contains("A done"), "{}", r.text);
+    assert!(r.text.contains("ok-notes.txt"), "{}", r.text);
+    assert!(!r.text.contains(".env"), "{}", r.text);
 }

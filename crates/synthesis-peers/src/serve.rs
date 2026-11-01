@@ -29,6 +29,9 @@ const MAX_TIMEOUT_S: u64 = 1800;
 const MAX_NOTIFY_S: u64 = 3600;
 /// Subscriptions held at once (`notify_on_end`), all askers together.
 const MAX_SUBS: usize = 8;
+/// ... and from one asker workspace, so one workspace's sessions cannot fill all of them. `from` is
+/// self-asserted, so a key holder who varies it still can: that is same-user DoS (messaging.md J6).
+const MAX_SUBS_PER_WORKSPACE: usize = 2;
 /// Connections served at once; a same-user process cannot exhaust tasks by connecting in a loop.
 const MAX_CONNECTIONS: usize = 16;
 /// Time an authenticated peer has to send its first frame.
@@ -129,8 +132,8 @@ pub struct Server {
 #[derive(Default)]
 struct State {
     active: usize,
-    /// Sessions with a `notify_on_end` subscription held here.
-    subs: Vec<String>,
+    /// `notify_on_end` subscriptions held here: (asker session id, asker workspace key).
+    subs: Vec<(String, String)>,
     /// Accepted requests in the window, all senders together: `from` is self-asserted.
     sent: VecDeque<Instant>,
 }
@@ -139,7 +142,7 @@ struct SubSlot<'a>(&'a Server, String);
 impl Drop for SubSlot<'_> {
     fn drop(&mut self) {
         let mut st = self.0.state.lock().unwrap();
-        if let Some(i) = st.subs.iter().position(|s| *s == self.1) {
+        if let Some(i) = st.subs.iter().position(|s| s.0 == self.1) {
             st.subs.swap_remove(i);
         }
     }
@@ -505,12 +508,15 @@ impl Server {
         if st.sent.len() >= RATE_LIMIT {
             return Err("rate_limited");
         }
-        let sid = &req.from.session_id;
-        if st.subs.len() >= MAX_SUBS || st.subs.contains(sid) {
+        let (sid, ws) = (&req.from.session_id, &req.from.workspace_key);
+        if st.subs.len() >= MAX_SUBS
+            || st.subs.iter().any(|s| s.0 == *sid)
+            || st.subs.iter().filter(|s| s.1 == *ws).count() >= MAX_SUBS_PER_WORKSPACE
+        {
             return Err("busy");
         }
         st.sent.push_back(now);
-        st.subs.push(sid.clone());
+        st.subs.push((sid.clone(), ws.clone()));
         Ok(SubSlot(self, sid.clone()))
     }
 

@@ -1394,7 +1394,7 @@ fn user_settings(rig: &Rig, peers: Value) {
 }
 
 fn std_peers() -> Value {
-    json!({"enabled": true, "allow": ["ws:ws", "ws:ws_b"]})
+    json!({"enabled": true, "allow": ["ws:ws", "ws:ws_b"], "accept_notify": true})
 }
 
 impl Rig {
@@ -1572,7 +1572,7 @@ fn e3_bash_output_is_withheld_unless_the_command_is_listed() {
     }
     assert_eq!(bash_marker_reply(None), "NOT SEEN");
     assert_eq!(
-        bash_marker_reply(Some(json!(["echo FAIL*"]))),
+        bash_marker_reply(Some(json!(["echo FAIL_MARKER_7*"]))),
         "SAW the marker"
     );
 }

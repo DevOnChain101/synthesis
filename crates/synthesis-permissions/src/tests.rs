@@ -500,6 +500,104 @@ fn deny_read_is_a_hard_deny_in_every_mode_and_secret_reads_only_when_asked() {
     );
 }
 
+/// Peer-origin Bash (J4.1): `deny_secret_reads` makes Bash fail closed on anything that names or
+/// could build a secret or Synthesis-state path, reads and writes, in every mode.
+#[test]
+fn peer_bash_fails_closed_on_secrets_state_and_unresolvable_words() {
+    let f = fx();
+    let state = f.home.join(".synthesis");
+    fs::create_dir_all(state.join("run")).unwrap();
+    let mk = |mode: Mode, interactive: bool, secrets: bool| {
+        let mut env = Env::new(&f.cwd, &f.home, mode)
+            .interactive(interactive)
+            .deny_reads([state.clone(), state.join("run")]);
+        env.deny_secret_reads = secrets;
+        Permissions::new(PermissionRules::default(), env)
+    };
+    // named: always a deny
+    let named = [
+        "cat ~/.synthesis/run/peer.key",
+        "cd ~/.synthesis && cat settings.json",
+        "cat .env",
+        "cat `cat .env`",
+        "cat sub/../.env",
+        "cat ~/.ssh/id_rsa",
+        "echo x >> ~/.synthesis/settings.json",
+        "echo x>>~/.synthesis/settings.json",
+        "tee ~/.synthesis/settings.json",
+        "cp x server.pem",
+    ];
+    // could build one: a hard ask (a deny when nobody can answer)
+    let unclear = [
+        "cat $HOME/.ssh/id_rsa",
+        "cat ${HOME}/x",
+        "cat `date`/x",
+        "cat .e*",
+        "cat *.pem",
+        "cat ~root/x",
+        "cat \"unterminated",
+    ];
+    for mode in Mode::ALL {
+        let (live, headless) = (mk(mode, true, true), mk(mode, false, true));
+        for c in named {
+            let i = json!({ "command": c });
+            assert_eq!(d(&live, "Bash", i.clone()), D, "{mode:?} {c}");
+            assert_eq!(d(&headless, "Bash", i), D, "{mode:?} {c}");
+        }
+        for c in unclear {
+            let i = json!({ "command": c });
+            let want = if mode == Mode::DontAsk { D } else { Q };
+            assert_eq!(d(&live, "Bash", i.clone()), want, "{mode:?} {c}");
+            assert_eq!(d(&headless, "Bash", i), D, "{mode:?} {c}");
+        }
+        for ok in ["ls", "cat a.txt", "cat sub/ok.txt"] {
+            assert_ne!(
+                d(&live, "Bash", json!({ "command": ok })),
+                D,
+                "{mode:?} {ok}"
+            );
+        }
+    }
+    // the main agent (no deny_secret_reads) keeps `$HOME` and globs
+    let main = mk(Mode::BypassPermissions, true, false);
+    assert_eq!(
+        d(&main, "Bash", json!({ "command": "cat $HOME/x *.pem" })),
+        A
+    );
+}
+
+#[test]
+fn protected_hard_asks_even_in_bypass_and_denies_headless() {
+    let f = fx();
+    let mk = |mode: Mode, interactive: bool, hard: bool| {
+        let mut env = Env::new(&f.cwd, &f.home, mode).interactive(interactive);
+        env.protected_hard = hard;
+        Permissions::new(PermissionRules::default(), env)
+    };
+    let edit = json!({ "file_path": f.path(".git/hooks/pre-commit"), "content": "x" });
+    let bash = json!({ "command": "echo x > .git/config" });
+    for (tool, input) in [("Write", edit), ("Bash", bash)] {
+        for mode in Mode::ALL {
+            let hard = mk(mode, true, true).check_current(tool, &input);
+            // plan and dontAsk deny a write anyway
+            let want = if matches!(mode, Mode::DontAsk) || (mode == Mode::Plan && tool == "Write") {
+                D
+            } else {
+                Q
+            };
+            assert_eq!(hard.decision, want, "{mode:?} {tool}");
+            assert!(want == D || hard.hard, "{mode:?} {tool}");
+            assert_eq!(
+                mk(mode, false, true).check_current(tool, &input).decision,
+                D
+            );
+        }
+        // the flag off keeps today's behaviour for the session's own agent
+        let own = mk(Mode::BypassPermissions, true, false).check_current(tool, &input);
+        assert_eq!(own.decision, A, "{tool}");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn deny_read_holds_through_links_to_the_state_dir_and_from_a_linked_root() {
