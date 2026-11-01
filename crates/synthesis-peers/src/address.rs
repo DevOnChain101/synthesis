@@ -61,8 +61,9 @@ impl std::fmt::Display for ResolveError {
     }
 }
 
+/// Hex digits, plus `-` so a full session UUID (what `ListSessions` prints) is a valid id token.
 fn is_hex(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit())
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
 /// `name` matches exactly, or `token` is a hex prefix (at least `min`) of `id`.
@@ -189,6 +190,8 @@ mod tests {
         assert_eq!(amb.candidates.len(), 2);
         assert!(amb.candidates[0].starts_with("ws:111111111111/sess:aaaaaaaa-1/agent:developer ("));
         assert_eq!(r("sess:cccccccc").unwrap().session_id, "cccccccc-3");
+        // the full id with dashes, as printed by ListSessions, resolves too
+        assert_eq!(r("sess:cccccccc-3").unwrap().session_id, "cccccccc-3");
         assert_eq!(r("sess:nobody").unwrap_err().kind, "not_found");
         // not permitted by the allow list: not even a candidate
         assert_eq!(r("ws:secret").unwrap_err().kind, "not_found");

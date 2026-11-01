@@ -621,6 +621,17 @@ fn home_and_cwd_layers_merge_per_provider_key() {
 // --- schema ---------------------------------------------------------------------
 
 #[test]
+fn a_utf8_bom_in_synthesis_json_is_ignored() {
+    let h = tmp();
+    fs::write(
+        h.path().join("synthesis.json"),
+        "\u{feff}{\"$schema\":\"config.json/v1\"}",
+    )
+    .unwrap();
+    load(h.path(), &env(&[]));
+}
+
+#[test]
 fn schema_errors_do_not_echo_contents() {
     let h = tmp();
     fs::write(

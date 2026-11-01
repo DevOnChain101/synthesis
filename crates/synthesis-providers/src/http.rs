@@ -74,8 +74,17 @@ pub fn build_client(env: &Env, s: &NetSettings) -> Result<reqwest::Client, Provi
     for cert in extra_roots(env) {
         b = b.add_root_certificate(cert);
     }
-    b.build()
-        .map_err(|e| bad(format!("cannot build HTTP client: {}", e.without_url())))
+    b.build().map_err(|e| {
+        // reqwest's own text is just "builder error"; the cause (e.g. no CA certificates) is in the chain.
+        let e = e.without_url();
+        let mut m = format!("cannot build HTTP client: {e}");
+        let mut src = std::error::Error::source(&e);
+        while let Some(c) = src {
+            m += &format!(": {c}");
+            src = c.source();
+        }
+        bad(m)
+    })
 }
 
 fn extra_roots(env: &Env) -> Vec<reqwest::Certificate> {
