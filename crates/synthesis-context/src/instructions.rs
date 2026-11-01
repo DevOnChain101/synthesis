@@ -38,7 +38,8 @@ impl Default for InstructionLimits {
         Self {
             file_cap: 32 * 1024,
             total_cap: 32 * 1024,
-            max_depth: 5,
+            // code.claude.com/docs/en/memory: "a maximum depth of four hops"
+            max_depth: 4,
         }
     }
 }
@@ -143,8 +144,13 @@ fn expand_imports(
             let mut out = String::new();
             let mut rest = line;
             let mut prev_ws = true;
+            let mut in_span = false;
             while let Some(c) = rest.chars().next() {
-                if c == '@' && prev_ws {
+                if c == '`' {
+                    // import parsing skips inline code spans (official memory docs)
+                    in_span = !in_span;
+                }
+                if c == '@' && prev_ws && !in_span {
                     let tok_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
                     let tok = &rest[1..tok_end];
                     if let Some(text) = import_one(tok, base, scope, depth, chain, ctx) {

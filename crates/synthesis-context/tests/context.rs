@@ -778,6 +778,26 @@ fn import_cycles_and_depth_are_bounded() {
     };
     let f = load_instructions(&ws(root), &[], None, &names(), &lim);
     assert_eq!(f[0].content, "D0 D1 D2 @d3.md");
+    // the default is the official four hops
+    let f = load_instructions(
+        &ws(root),
+        &[],
+        None,
+        &names(),
+        &InstructionLimits::default(),
+    );
+    assert_eq!(f[0].content, "D0 D1 D2 D3 @d4.md");
+    // an import inside an inline code span stays literal
+    fs::write(root.join("CLAUDE.md"), "see `@d0.md` but @d9.md").unwrap();
+    fs::write(root.join("d9.md"), "NINE").unwrap();
+    let f = load_instructions(
+        &ws(root),
+        &[],
+        None,
+        &names(),
+        &InstructionLimits::default(),
+    );
+    assert_eq!(f[0].content, "see `@d0.md` but NINE");
 }
 
 #[test]
