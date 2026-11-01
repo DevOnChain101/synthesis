@@ -66,6 +66,28 @@ pub struct MemoryHook {
     pub save: SaveNote,
 }
 
+pub type BoxFut<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// What the host does around each task the person starts (not for sub-agent tasks): the same
+/// steps `synth run` takes, kept out of this crate because they need the MCP, memory and session
+/// store wiring.
+pub trait TaskHost: Send + Sync {
+    /// The typed line -> the request the model gets (MCP `@server:uri` and `/mcp__server__prompt`,
+    /// skills, the memory block for this prompt). `Err` ends the task with that message.
+    fn before<'a>(
+        &'a self,
+        typed: &'a str,
+        cancel: &'a tokio_util::sync::CancellationToken,
+    ) -> BoxFut<'a, Result<String, String>>;
+    /// After a task ended, before the screen shows it as done: memory episode, stored usage.
+    fn after<'a>(
+        &'a self,
+        typed: &'a str,
+        out: &'a TaskOutcome,
+        session: &'a AgentSession,
+    ) -> BoxFut<'a, ()>;
+}
+
 type ModelSwitch = Box<dyn FnMut(&str) -> Result<(Arc<Harness>, String), String>>;
 
 pub struct Options {
@@ -92,6 +114,7 @@ pub struct Options {
     /// Lines for `/mcp`: servers, state, tools, errors (called each time the command runs).
     pub mcp_report: Option<Box<dyn Fn() -> Vec<String>>>,
     pub memory: Option<MemoryHook>,
+    pub host: Option<Arc<dyn TaskHost>>,
     pub saved: Vec<SavedSession>,
     pub resume: Option<Resume>,
     /// Shown as warnings in the pane from the first frame (sanitised on ingest); the matching
@@ -139,6 +162,7 @@ impl Options {
             extra_commands: vec![],
             mcp_report: None,
             memory: None,
+            host: None,
             saved: vec![],
             resume: None,
             startup_notes: vec![],
@@ -183,7 +207,12 @@ fn cfg_for(o: &Options) -> AppConfig {
         },
         models: o.models.clone(),
         effort_tiers: o.effort_tiers.clone(),
-        extra_commands: o.extra_commands.clone(),
+        extra_commands: o
+            .extra_commands
+            .iter()
+            .filter(|c| !crate::app::is_local_command(&c.name))
+            .cloned()
+            .collect(),
         saved: o.saved.clone(),
         home: o
             .env
@@ -200,6 +229,7 @@ fn cfg_for(o: &Options) -> AppConfig {
 }
 
 struct Runner {
+    host: Option<Arc<dyn TaskHost>>,
     mcp_report: Option<Box<dyn Fn() -> Vec<String>>>,
     memory: Option<MemoryHook>,
     harness: Arc<Harness>,
@@ -385,7 +415,14 @@ impl Runner {
             m
         };
         session.permission_mode = from_mode(mode);
-        let req = TaskRequest {
+        // the host's steps are for what the person typed (an empty display text marks the
+        // harness's own follow-up note) and for the main agent
+        let host = self
+            .host
+            .clone()
+            .filter(|_| agent.is_none() && display_text.as_deref() != Some(""));
+        let typed = text.clone();
+        let mut req = TaskRequest {
             request: text,
             criteria: vec![],
             history: self.history.clone(),
@@ -394,11 +431,25 @@ impl Runner {
         let (h, tx) = (self.harness.clone(), self.tx.clone());
         self.agent_task = agent.is_some();
         let inner = self.runtime.spawn(async move {
+            if let Some(host) = &host {
+                match host.before(&typed, &cancel).await {
+                    Ok(request) => {
+                        if request != typed && req.display_text.is_none() {
+                            req.display_text = Some(typed.clone());
+                        }
+                        req.request = request;
+                    }
+                    Err(e) => return (Err(e), None, session),
+                }
+            }
             let r = match agent {
                 Some(a) => h.run_agent_task(&mut session, a, req, cancel).await,
                 None => h.run_task(&mut session, req, cancel).await,
             }
             .map_err(|e| e.to_string());
+            if let (Some(host), Ok(out)) = (&host, &r) {
+                host.after(&typed, out, &session).await;
+            }
             let warn = match &r {
                 Ok(_) => h.to_idle(&mut session).err().map(|e| e.to_string()),
                 Err(_) => None,
@@ -511,7 +562,16 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
         size,
         raw_mode,
         signals: watch_signals,
+        stop,
     } = tty;
+    // however this function returns, its reader thread lets go of the terminal input
+    struct StopReading(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for StopReading {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let _stop_reading = StopReading(stop);
     let out = SharedOut::new(output);
     let guard = TerminalGuard::enter(out.clone(), GuardOptions { raw_mode })?;
     let mut screen = Screen::new(out.clone(), color);
@@ -541,6 +601,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
     };
 
     let mut runner = Runner {
+        host: o.host.take(),
         mcp_report: o.mcp_report.take(),
         memory: o.memory.take(),
         harness: o.harness.clone(),

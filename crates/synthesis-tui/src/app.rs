@@ -372,6 +372,11 @@ fn local_commands() -> Vec<CmdDef> {
     ]
 }
 
+/// A built-in command name (or alias): a skill or MCP prompt of the same name never shadows it.
+pub(crate) fn is_local_command(name: &str) -> bool {
+    matches!(name, "quit" | "perms") || local_commands().iter().any(|c| c.name == name)
+}
+
 /// Canonical, case-folded where the file system folds case (macOS, Windows): the key of a folder.
 fn fold_dir(p: &str) -> String {
     let c = std::fs::canonicalize(p)
@@ -1389,9 +1394,31 @@ impl App {
     fn run_slash(&mut self, name: &str, arg: &str, now: i64, out: &mut Vec<Cmd>) {
         match name {
             "help" => {
+                let mut lines: Vec<String> = HELP.iter().map(|s| (*s).to_string()).collect();
+                let extra = &self.cfg.extra_commands;
+                if !extra.is_empty() {
+                    lines.push("skills and MCP prompts (sent to the model; an MCP prompt is fetched first):".into());
+                    for c in extra.iter().take(40) {
+                        let hint = if c.argument_hint.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {}", c.argument_hint)
+                        };
+                        lines.push(clean_line(&format!(
+                            "  /{}{hint}  {}",
+                            c.name, c.description
+                        )));
+                    }
+                    if extra.len() > 40 {
+                        lines.push(format!(
+                            "  … and {} more (type / to search)",
+                            extra.len() - 40
+                        ));
+                    }
+                }
                 self.chat.push(item! {
                     kind: "help".into(),
-                    lines: HELP.iter().map(|s| (*s).to_string()).collect(),
+                    lines,
                 });
             }
             "compact" if self.compacting => self.out_item("/compact: already compacting", true),

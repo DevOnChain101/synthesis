@@ -2,9 +2,12 @@
 //! function, so the whole app runs against a scripted TTY in tests. [`Tty::stdio`] is the real
 //! one; [`ScriptedTty`] is the test double.
 
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::Duration;
 
 use synthesis_config::Env;
 
@@ -16,6 +19,83 @@ pub struct Tty {
     pub raw_mode: bool,
     /// Watch SIGINT (an external interrupt) and SIGWINCH (resize wake-up).
     pub signals: bool,
+    /// Set when the app stops reading (it returned, e.g. to restart on another model or folder):
+    /// the reader thread of this run must not take the next run's keystrokes.
+    pub stop: Arc<AtomicBool>,
+}
+
+/// Process stdin, read by ONE thread for the life of the process: a run of the app that ended
+/// leaves its reader blocked in `read`, and that reader would eat the first keys of the next run.
+struct StdinPump {
+    queue: Mutex<VecDeque<Vec<u8>>>,
+    wake: Condvar,
+    eof: AtomicBool,
+}
+
+fn stdin_pump() -> &'static Arc<StdinPump> {
+    static PUMP: OnceLock<Arc<StdinPump>> = OnceLock::new();
+    PUMP.get_or_init(|| {
+        let p = Arc::new(StdinPump {
+            queue: Mutex::default(),
+            wake: Condvar::new(),
+            eof: AtomicBool::new(false),
+        });
+        let q = p.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match io::stdin().read(&mut buf) {
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Ok(0) | Err(_) => {
+                        q.eof.store(true, Ordering::SeqCst);
+                        q.wake.notify_all();
+                        return;
+                    }
+                    Ok(n) => {
+                        q.queue
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push_back(buf[..n].to_vec());
+                        q.wake.notify_all();
+                    }
+                }
+            }
+        });
+        p
+    })
+}
+
+/// One run's view of the pump; `Ok(0)` once `stop` is set or stdin ended.
+struct StdinReader {
+    stop: Arc<AtomicBool>,
+}
+
+impl Read for StdinReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let p = stdin_pump();
+        let mut q = p.queue.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if self.stop.load(Ordering::SeqCst) {
+                return Ok(0);
+            }
+            if let Some(mut chunk) = q.pop_front() {
+                let n = buf.len().min(chunk.len());
+                buf[..n].copy_from_slice(&chunk[..n]);
+                if n < chunk.len() {
+                    q.push_front(chunk.split_off(n));
+                }
+                return Ok(n);
+            }
+            if p.eof.load(Ordering::SeqCst) {
+                return Ok(0);
+            }
+            q = p
+                .wake
+                .wait_timeout(q, Duration::from_millis(50))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
 }
 
 /// `COLUMNS` / `LINES` (when set and plausible), else 80x24.
@@ -34,8 +114,10 @@ impl Tty {
     /// when the terminal cannot report one.
     pub fn stdio(env: &Env) -> Self {
         let env = env.clone();
+        let stop = Arc::new(AtomicBool::new(false));
         Self {
-            input: Box::new(io::stdin()),
+            input: Box::new(StdinReader { stop: stop.clone() }),
+            stop,
             output: Box::new(io::stdout()),
             size: Box::new(move || {
                 synthesis_tui_base::terminal::size()
@@ -121,6 +203,7 @@ impl ScriptedTty {
             size: Box::new(move || *s2.lock().unwrap_or_else(|e| e.into_inner())),
             raw_mode: false,
             signals: false,
+            stop: Arc::default(),
         };
         (
             Self {

@@ -23,7 +23,8 @@ pub use link::{EventWriter, UiLink};
 pub use links::{OpenTarget, Opener, PathTarget, SystemOpener};
 pub use resume::{Resume, list_saved, load_resume};
 pub use runtime::{
-    Exit, ExitReason, MemoryHook, OnceOptions, Options, render_once, run_interactive, size_from_env,
+    BoxFut, Exit, ExitReason, MemoryHook, OnceOptions, Options, TaskHost, render_once,
+    run_interactive, size_from_env,
 };
 pub use status::{SandboxStatus, status_line};
 pub use tty::{ScriptedTty, Tty, replay};

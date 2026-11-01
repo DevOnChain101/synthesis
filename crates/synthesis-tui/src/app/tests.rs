@@ -281,6 +281,16 @@ fn key_at(app: &mut App, bytes: &str, now: i64) -> Vec<Cmd> {
 }
 
 #[test]
+fn an_approval_for_another_session_says_whose_work_it_is() {
+    let mut a = app();
+    let (mut q, _rx) = ask("Bash", json!({"command": "ls"}), vec![]);
+    q.req.origin = Some("sess:other".into());
+    a.on_approval(q, T0);
+    let s = screen(&mut a);
+    assert!(s.contains("for sess:other: needs approval"), "{s}");
+}
+
+#[test]
 fn approval_ignores_enter_and_digits_while_arming_but_esc_cancels() {
     let mut a = app();
     let (q, mut rx) = ask("Bash", json!({"command": "ls"}), vec![]);
@@ -2198,4 +2208,65 @@ fn mouse_debug_shows_what_the_terminal_sent() {
         "{}",
         screen(&mut a)
     );
+}
+
+#[test]
+fn a_resumed_notice_is_not_shown_again_as_a_startup_note() {
+    let text = "unsandboxed_by_request: --sandbox off";
+    let replay = [env(
+        1,
+        Ev::Notice {
+            level: "warning".into(),
+            text: text.into(),
+        },
+    )];
+    let mut a = App::new(cfg("/tmp/proj"), &replay, T0);
+    a.startup_notes(&[text.to_string(), "another note".to_string()]);
+    let notes: Vec<&str> = a
+        .chat
+        .agent
+        .items
+        .iter()
+        .filter(|i| i.kind == "note")
+        .map(|i| i.text.as_str())
+        .collect();
+    assert_eq!(notes, [text, "another note"]);
+    // the live Notice that follows is still swallowed once
+    a.on_event(
+        &env(
+            2,
+            Ev::Notice {
+                level: "warning".into(),
+                text: text.into(),
+            },
+        ),
+        T0,
+    );
+    assert_eq!(
+        a.chat
+            .agent
+            .items
+            .iter()
+            .filter(|i| i.kind == "note")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn skills_and_mcp_prompts_are_listed_in_help_and_never_shadow_a_built_in() {
+    use synthesis_tui_base::complete::Command;
+    assert!(is_local_command("help") && is_local_command("quit") && !is_local_command("ship"));
+    let mut c = cfg("/tmp/proj");
+    c.extra_commands = vec![Command {
+        name: "ship".into(),
+        aliases: vec![],
+        description: "skill: Ship the release".into(),
+        argument_hint: String::new(),
+        local: false,
+    }];
+    let mut a = App::new(c, &[], T0);
+    keys(&mut a, "/help\r");
+    let s = screen(&mut a);
+    assert!(s.contains("/ship") && s.contains("Ship the release"), "{s}");
 }

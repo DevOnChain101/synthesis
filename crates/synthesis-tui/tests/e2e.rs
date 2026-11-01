@@ -707,6 +707,7 @@ mod signals {
             size: Box::new(|| (100, 30)),
             raw_mode: false,
             signals: mode == "int",
+            stop: Default::default(),
         };
         let exit = run_interactive(o, tty).unwrap();
         println!("EXIT {:?}", exit.reason);

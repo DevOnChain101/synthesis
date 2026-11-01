@@ -236,7 +236,16 @@ impl Chat {
     pub fn startup_note(&mut self, text: &str) {
         let t = clean_line(text);
         self.startup.push(("warn".into(), t.clone()));
-        self.note(t, "warn");
+        // a resumed conversation already shows the same notice from its replayed events
+        let shown = clean_text(&t);
+        if !self
+            .agent
+            .items
+            .iter()
+            .any(|i| i.kind == "note" && i.text == shown)
+        {
+            self.note(t, "warn");
+        }
     }
 
     fn take_startup(&mut self, tone: &str, text: &str) -> bool {
