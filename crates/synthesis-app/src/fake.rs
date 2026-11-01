@@ -19,7 +19,11 @@ use synthesis_harness::testing::{FakeProvider, Turn};
 use synthesis_providers::{ModelProvider, Request};
 
 fn turn_of(i: usize, t: &Value, req: Option<&Request>) -> Turn {
-    let mut text = t.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+    let mut text = t
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     if let (Some(s), Some(r)) = (t.get("seen"), req) {
         let get = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or("");
         let seen = format!("{:?}", r.messages).contains(get("needle"));

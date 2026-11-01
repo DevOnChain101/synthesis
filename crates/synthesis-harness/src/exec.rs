@@ -1026,9 +1026,7 @@ impl Harness {
         let reason = sanitize_for_display(&verdict.reason);
         let prompt = format!(
             "{}{} wants to run {}: {}",
-            origin
-                .as_ref()
-                .map_or(String::new(), |o| format!("[{o}] ")),
+            origin.as_ref().map_or(String::new(), |o| format!("[{o}] ")),
             sanitize_for_display(&call.name),
             summarize(&shown),
             reason

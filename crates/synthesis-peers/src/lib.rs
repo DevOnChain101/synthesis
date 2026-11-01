@@ -455,7 +455,10 @@ mod tests {
         assert!(!own.permits(&sib), "other worktree: not without the repo");
         let c = own.with_repo("repo1");
         assert!(c.permits(&sib));
-        assert!(!c.permits(&addr("web", "/work/web", "s3", None)), "other repository");
+        assert!(
+            !c.permits(&addr("web", "/work/web", "s3", None)),
+            "other repository"
+        );
         let mut other = sib.clone();
         other.repo_key = "repo2".into();
         assert!(!c.permits(&other));

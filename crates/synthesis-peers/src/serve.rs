@@ -438,9 +438,11 @@ impl Server {
             c.send(&json!({"t":"partial","id":id,"seq":seq,"text":text}))
                 .await?;
         }
-        c.send(&json!({"t":"reply","id":id,"status":reply.status,"text":reply.text,"from":self.me,
-            "thread_id":req2.thread_id}))
-            .await
+        c.send(
+            &json!({"t":"reply","id":id,"status":reply.status,"text":reply.text,"from":self.me,
+            "thread_id":req2.thread_id}),
+        )
+        .await
     }
 
     /// `notify_on_end` (P2): same gates as a reply (list, `answer`, size, hops, `finish`), no
@@ -482,9 +484,11 @@ impl Server {
                 },
             }
         };
-        c.send(&json!({"t":"reply","id":id,"status":reply.status,"text":reply.text,"from":self.me,
-            "kind":"result"}))
-            .await
+        c.send(
+            &json!({"t":"reply","id":id,"status":reply.status,"text":reply.text,"from":self.me,
+            "kind":"result"}),
+        )
+        .await
     }
 
     /// One subscription per asker session, `MAX_SUBS` in all; counts for the request rate limit.

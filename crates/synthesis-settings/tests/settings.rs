@@ -296,7 +296,10 @@ fn peers_settings_come_from_user_settings_only() {
     f.project(json!({"synthesis":{"peers":{"accept_delegation":true,"delegation_allow":["ws:*"],"share_commands":["*"]}}}));
     let s = f.load(ProjectTrust::Trusted);
     for k in ["accept_delegation", "delegation_allow", "share_commands"] {
-        assert!(s.synthesis.peers.get(k).is_none(), "{k} came from a project");
+        assert!(
+            s.synthesis.peers.get(k).is_none(),
+            "{k} came from a project"
+        );
     }
 }
 

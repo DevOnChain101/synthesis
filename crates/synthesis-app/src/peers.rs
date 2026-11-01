@@ -32,7 +32,11 @@ pub fn valid_name(n: &str) -> bool {
 /// What the session is for, shown to peers: `--about`, else the first non-empty line of
 /// `SYNTHESIS.md` at the workspace root (a regular file, first 4 KiB). Redacted, control
 /// characters removed, at most 120 characters.
-pub fn about_of(flag: Option<&str>, root: &Path, redact: &dyn Fn(&str) -> String) -> Option<String> {
+pub fn about_of(
+    flag: Option<&str>,
+    root: &Path,
+    redact: &dyn Fn(&str) -> String,
+) -> Option<String> {
     let text = match flag {
         Some(f) => f.to_string(),
         None => {
@@ -42,7 +46,11 @@ pub fn about_of(flag: Option<&str>, root: &Path, redact: &dyn Fn(&str) -> String
                 return None;
             }
             let mut buf = Vec::new();
-            std::fs::File::open(&p).ok()?.take(4096).read_to_end(&mut buf).ok()?;
+            std::fs::File::open(&p)
+                .ok()?
+                .take(4096)
+                .read_to_end(&mut buf)
+                .ok()?;
             String::from_utf8_lossy(&buf)
                 .lines()
                 .map(|l| l.trim().trim_start_matches('#').trim())
@@ -266,12 +274,19 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let red = |s: &str| s.replace("sk-SECRET", "[REDACTED]");
         assert_eq!(about_of(None, t.path(), &red), None);
-        std::fs::write(t.path().join("SYNTHESIS.md"), "\n# Billing API sk-SECRET\nmore\n").unwrap();
+        std::fs::write(
+            t.path().join("SYNTHESIS.md"),
+            "\n# Billing API sk-SECRET\nmore\n",
+        )
+        .unwrap();
         assert_eq!(
             about_of(None, t.path(), &red).as_deref(),
             Some("Billing API [REDACTED]")
         );
-        assert_eq!(about_of(Some("flag\u{7}x"), t.path(), &red).as_deref(), Some("flag x"));
+        assert_eq!(
+            about_of(Some("flag\u{7}x"), t.path(), &red).as_deref(),
+            Some("flag x")
+        );
         let long = "x".repeat(300);
         assert_eq!(about_of(Some(&long), t.path(), &red).unwrap().len(), 120);
         assert_eq!(about_of(Some("  "), t.path(), &red), None);

@@ -16,8 +16,8 @@ use synthesis_events::{Event, PeerAddr, SubagentInfo, TaskStatus};
 use synthesis_peers::address::{candidates, parse, resolve};
 use synthesis_peers::mailbox::{Envelope, MailError, Mailbox, now_s};
 use synthesis_peers::serve::{
-    Answered, BoxFut, Down, Extra, Outgoing, PeerError, Reply, Request, Responder, Server, begin, deliver,
-    discover,
+    Answered, BoxFut, Down, Extra, Outgoing, PeerError, Reply, Request, Responder, Server, begin,
+    deliver, discover,
 };
 use synthesis_peers::{Addr, Config, Entry, Key, Registration, read_entries, remove_entry};
 use synthesis_permissions::Mode;
@@ -368,7 +368,11 @@ fn cut_value(v: &Value, n: usize) -> Value {
     match v {
         Value::String(t) => Value::String(t.chars().take(n).collect()),
         Value::Array(a) => Value::Array(a.iter().map(|x| cut_value(x, n)).collect()),
-        Value::Object(o) => Value::Object(o.iter().map(|(k, x)| (k.clone(), cut_value(x, n))).collect()),
+        Value::Object(o) => Value::Object(
+            o.iter()
+                .map(|(k, x)| (k.clone(), cut_value(x, n)))
+                .collect(),
+        ),
         other => other.clone(),
     }
 }
@@ -657,7 +661,9 @@ impl Harness {
                     duration_ms: now_s().saturating_sub(env.created) * 1000,
                 },
             );
-            out.push(reply_block(&env.id, None, &from, &from.kind, &status, &text));
+            out.push(reply_block(
+                &env.id, None, &from, &from.kind, &status, &text,
+            ));
             lock(&p.state).surfaced.push(env.id.clone());
         }
         out
@@ -790,7 +796,14 @@ impl Harness {
 
     /// A round ended: keep the transcript for the next one, charge the thread, close it at the
     /// round cap, its size cap (2 MiB) or half the cost pool.
-    fn peer_finish_round(&self, link: &PeerLink, tid: &str, messages: &[Message], cost: f64, ok: bool) {
+    fn peer_finish_round(
+        &self,
+        link: &PeerLink,
+        tid: &str,
+        messages: &[Message],
+        cost: f64,
+        ok: bool,
+    ) {
         let mut reason = None;
         {
             let mut st = lock(&link.state);
@@ -949,7 +962,9 @@ impl Harness {
         let thread_id = match input.get("thread_id").and_then(Value::as_str) {
             Some(t) if synthesis_peers::serve::valid_thread_id(t) => Some(t.to_string()),
             Some(_) => {
-                return fail("thread_mismatch: thread_id is at most 64 characters of [A-Za-z0-9-]".into());
+                return fail(
+                    "thread_mismatch: thread_id is at most 64 characters of [A-Za-z0-9-]".into(),
+                );
             }
             None => input
                 .get("thread")
@@ -1060,9 +1075,8 @@ impl Harness {
                     PeerError::Connect if (link.lock_free)(&entry) => {
                         remove_entry(&link.run_dir, &entry.session_id);
                         if link.config.resume_offline && addr.instance == MAIN {
-                            return self.queue_offline(
-                                &link, &entry, &from, &id, text, &chain, delegate,
-                            );
+                            return self
+                                .queue_offline(&link, &entry, &from, &id, text, &chain, delegate);
                         }
                         let hint = if addr.instance == MAIN {
                             " (synthesis.peers.resume_offline queues messages for it)"
@@ -1183,6 +1197,7 @@ impl Harness {
 
     /// R10c: the target is dead. Store the question in its mailbox; it is answered when the
     /// session starts again, and the reply comes back to this session (or its mailbox).
+    #[allow(clippy::too_many_arguments)]
     fn queue_offline(
         &self,
         link: &PeerLink,
@@ -1462,7 +1477,11 @@ impl Harness {
         let delegation_id = uuid();
         let mut session = link.session.clone();
         session.budget = Budget {
-            max_turns: if delegate { DELEGATE_TURNS } else { RESPONDER_TURNS },
+            max_turns: if delegate {
+                DELEGATE_TURNS
+            } else {
+                RESPONDER_TURNS
+            },
             max_tool_calls: if delegate {
                 link.config.delegation_max_tool_calls
             } else {
@@ -1549,7 +1568,14 @@ impl Harness {
             mode: Mutex::new(mode),
             perms,
             allowed: Some(allowed),
-            prompt: Some(if delegate { DELEGATE_PROMPT } else { RESPONDER_PROMPT }.into()),
+            prompt: Some(
+                if delegate {
+                    DELEGATE_PROMPT
+                } else {
+                    RESPONDER_PROMPT
+                }
+                .into(),
+            ),
             origin: delegate.then(|| Origin {
                 from: req.from.clone(),
                 delegation_id: delegation_id.clone(),
@@ -1596,7 +1622,12 @@ impl Harness {
         }
         let info = |reason: Option<&str>| SubagentInfo {
             agent_id: ctx.agent_id.clone().unwrap_or_default(),
-            agent_type: if delegate { "peer-delegate" } else { "peer-responder" }.into(),
+            agent_type: if delegate {
+                "peer-delegate"
+            } else {
+                "peer-responder"
+            }
+            .into(),
             tool_call_id: None,
             reason: reason.map(Into::into),
             name: Some(name.clone()),
@@ -1977,7 +2008,10 @@ mod tests {
         let bash = |c: &str| shares(&pats, "Bash", Some(&json!({"command": c})));
         assert!(bash("cargo test -p api"));
         assert!(bash("ls"));
-        assert!(!bash("ls -la"), "no wildcard, so the whole command must match");
+        assert!(
+            !bash("ls -la"),
+            "no wildcard, so the whole command must match"
+        );
         assert!(!bash("cargo build"));
         for chained in [
             "cargo test; cat .env",
@@ -1992,7 +2026,10 @@ mod tests {
             assert!(!bash(chained), "{chained}");
         }
         assert!(!shares(&pats, "Read", Some(&json!({"command": "ls"}))));
-        assert!(!shares(&[], "Bash", Some(&json!({"command": "ls"}))), "empty list shares nothing");
+        assert!(
+            !shares(&[], "Bash", Some(&json!({"command": "ls"}))),
+            "empty list shares nothing"
+        );
     }
 
     #[test]
@@ -2008,10 +2045,16 @@ mod tests {
         let red = |s: &str| s.replace("sk-LEAK-1", "[REDACTED]");
         let share = vec!["cargo test*".to_string()];
         let t = dump(&sanitize(&hist, "/w", "/h/.synthesis", &share, &red));
-        assert!(t.contains("FAIL token=[REDACTED]") && !t.contains("sk-LEAK-1"), "{t}");
+        assert!(
+            t.contains("FAIL token=[REDACTED]") && !t.contains("sk-LEAK-1"),
+            "{t}"
+        );
         assert!(!t.contains(&"x".repeat(9_000)), "cut to 8 KiB");
         assert!(t.contains(&"x".repeat(8_000)));
-        assert!(!t.contains("outside-output") && !t.contains("chained-output"), "{t}");
+        assert!(
+            !t.contains("outside-output") && !t.contains("chained-output"),
+            "{t}"
+        );
     }
 
     #[test]
