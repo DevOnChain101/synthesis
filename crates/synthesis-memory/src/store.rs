@@ -356,6 +356,12 @@ impl Store {
         private_dir(&dir)?;
         let path = dir.join("memory.db");
         private_file(&path)?;
+        // First-time init (create, WAL switch, migrate) is serialised across processes; SQLite's
+        // own locking returns IOERR/BUSY variants for it on Linux that no timeout covers.
+        let lock_path = dir.join("memory.init.lock");
+        private_file(&lock_path)?;
+        let lock = fs::OpenOptions::new().write(true).open(&lock_path)?;
+        lock.lock()?;
         let conn = Connection::open(&path)?;
         conn.busy_timeout(Duration::from_millis(5000))?;
         conn.pragma_update(None, "foreign_keys", true)?;
@@ -387,6 +393,7 @@ impl Store {
             path,
         };
         s.migrate(&dir)?;
+        drop(lock);
         Ok(s)
     }
 
