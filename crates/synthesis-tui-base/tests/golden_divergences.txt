@@ -1,0 +1,11 @@
+# 2026-10-30: snapshots follow the product rename (tests/golden/README.md); cases that show the product name also differ by the rename.
+# Golden cases the Rust port is KNOWN to differ on: "<area>/<case_id> | <reason>".
+# tests/golden.rs fails on any mismatch not listed here, and on a listed case that now passes.
+selection/copy-to-clipboard-not-tty-writes-nothing | Node returns true although nothing was written; copy_to_clipboard returns whether any sink accepted the text (false here)
+sgr/encode-non-colour-csi-passthrough-256 | security: encode emits only SGR; any other escape (CSI/OSC/DCS, C1) in item text is shown as a control picture, never passed to the terminal
+sgr/encode-non-colour-csi-passthrough-truecolor | security: same as -256 (Node passes non-colour CSI through)
+keys/bracketed-paste | security: bytes in the same read after the end marker are dropped (a paste that forges its end must not become keys or text); Node emits them as "after"
+keys/bracketed-paste-split-across-reads | security: paste state lives in KeyState (pending() stays empty, payload is held as paste data) and the bytes after the end marker are dropped
+keys/bracketed-paste-runaway-over-4096-no-end | security: a paste with no end marker stays in paste mode (1 MiB cap, 2 s idle limit, 10 s absolute limit from paste start, a lone ^C after 100 ms of quiet breaks it) instead of emitting a partial Paste after 4096 units and replaying the rest as keys
+keys/seq-alt-backspace | intentional: Alt/Option+Backspace (ESC DEL, ESC BS, CSI 127;3u) is its own key "alt-backspace" (readline backward-kill-word: word/punctuation runs); Node reported ctrl-w (whitespace-delimited). CSI 127;5u (ctrl+backspace) still maps to ctrl-w
+selection/slice-cells | intentional: a wide glyph is included when either of its two cells is in the range (a drag ending or starting on its right half keeps it); Node tests only the start cell
