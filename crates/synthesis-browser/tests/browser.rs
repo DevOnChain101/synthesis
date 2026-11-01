@@ -464,11 +464,19 @@ async fn console_network_exceptions_redirect_slow_and_denied_redirect_body() {
     let _ = rt
         .navigate(&format!("{base}/redir-denied"), WaitUntil::Load)
         .await;
-    let (all, _) = rt.network_requests(0, false);
-    let denied = all
-        .iter()
-        .find(|r| r.url.expose().contains("denied.invalid"))
-        .expect("denied hop recorded");
+    // `Network.loadingFailed` can reach the log after `navigate` returned (slow on Windows): poll.
+    let mut denied = None;
+    for _ in 0..50 {
+        let (all, _) = rt.network_requests(0, false);
+        denied = all
+            .into_iter()
+            .find(|r| r.url.expose().contains("denied.invalid"));
+        if denied.as_ref().is_some_and(|d| d.error.is_some()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let denied = denied.expect("denied hop recorded");
     assert!(
         denied
             .error
