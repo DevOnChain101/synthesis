@@ -380,6 +380,16 @@ fn run_schema_case(reg: &Registry, dir: &Path) -> Vec<String> {
                 {
                     schema["properties"].as_object_mut().map(|m| m.remove(p));
                 }
+                // enum values added on purpose
+                for (p, vals) in divergences()["schema_enum_extra"][name]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(e) = schema["properties"][p]["enum"].as_array_mut() {
+                        e.retain(|v| !vals.as_array().is_some_and(|a| a.contains(v)));
+                    }
+                }
                 json!({"name": s.name, "description": s.description, "input_schema": schema})
             });
             if got.as_ref() == Some(&expected) {

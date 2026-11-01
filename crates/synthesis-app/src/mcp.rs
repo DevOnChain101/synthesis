@@ -627,6 +627,8 @@ pub enum McpCmd {
     /// `me`, `get_current_user`, `atlassianUserInfo`, `getAccessibleAtlassianResources`), call it
     /// and print who the server thinks you are. Run it before the first write.
     Test(TestArgs),
+    /// Prompts the servers offer, as the `/mcp__<server>__<prompt> args` commands that run them.
+    Prompts(PromptsArgs),
     /// Add a server: `synth mcp add NAME --url URL` or `synth mcp add NAME -- COMMAND ARGS...`.
     Add(AddArgs),
     Remove {
@@ -644,6 +646,20 @@ pub struct TestArgs {
     #[command(flatten)]
     cwd: crate::CwdArg,
     /// Needed to test a server defined in the project's `.mcp.json`.
+    #[arg(long)]
+    trust_project: bool,
+    /// `NAME@HASH` of a project-scope server (see `synth mcp get`).
+    #[arg(long, value_name = "NAME")]
+    approve_mcp: Vec<String>,
+}
+
+#[derive(clap::Args)]
+pub struct PromptsArgs {
+    /// Only this server (default: every server `synth run` would start).
+    name: Option<String>,
+    #[command(flatten)]
+    cwd: crate::CwdArg,
+    /// Needed for servers defined in the project's `.mcp.json`.
     #[arg(long)]
     trust_project: bool,
     /// `NAME@HASH` of a project-scope server (see `synth mcp get`).
@@ -966,6 +982,71 @@ fn test_server(env: &Env, h: &crate::Homes, a: &TestArgs) -> Result<u8, String> 
     })
 }
 
+fn list_prompts(env: &Env, h: &crate::Homes, a: &PromptsArgs) -> Result<u8, String> {
+    use synthesis_settings::{LoadContext, load_settings};
+    let cwd = a.cwd.cwd.as_deref().unwrap_or(Path::new("."));
+    let trust = if a.trust_project {
+        ProjectTrust::Trusted
+    } else {
+        ProjectTrust::Untrusted
+    };
+    let lc = LoadContext {
+        cwd,
+        synthesis_home: &h.synthesis,
+        user_home: &h.user,
+        env,
+    };
+    let cfg = crate::load_config(env, h, Some(cwd), ProjectTrust::Untrusted)?;
+    let mut p = plan(
+        &cfg,
+        &load_settings(&lc, trust),
+        &load_settings(&lc, ProjectTrust::Untrusted),
+        cwd,
+        trust,
+        &a.approve_mcp,
+    );
+    p.env_passthrough = read_passthrough(&h.synthesis.join("settings.json"));
+    p.servers
+        .retain(|s| a.name.as_ref().is_none_or(|n| *n == s.name));
+    if p.servers.is_empty() {
+        return Err(match &a.name {
+            Some(n) => format!("no server {} to start (see `synth mcp list`)", san(n)),
+            None => "no MCP server to start".into(),
+        });
+    }
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    rt.block_on(async {
+        let (mgr, _attach, warns) = start(&p, env, cwd).await;
+        for w in warns {
+            out!("{}", san(&w));
+        }
+        for q in mgr.prompts() {
+            let args: String = q
+                .arguments
+                .iter()
+                .map(|(n, req)| {
+                    if *req {
+                        format!(" <{n}>")
+                    } else {
+                        format!(" [{n}]")
+                    }
+                })
+                .collect();
+            let server = crate::mcpinput::sanitize_server(&q.server);
+            out!(
+                "/mcp__{server}__{}{args}  {}",
+                san(&q.name),
+                san(&q.description)
+            );
+        }
+        mgr.close().await;
+        Ok(0)
+    })
+}
+
 pub fn run_cmd(env: &Env, cmd: McpCmd) -> Result<u8, String> {
     let h = crate::homes(env)?;
     // `.` is the process directory; project scope writes `./.mcp.json`
@@ -976,6 +1057,7 @@ pub fn run_cmd(env: &Env, cmd: McpCmd) -> Result<u8, String> {
         McpCmd::List(a) => show(env, &h, a.cwd.as_deref(), None),
         McpCmd::Get { name, cwd } => show(env, &h, cwd.cwd.as_deref(), Some(&name)),
         McpCmd::Test(a) => test_server(env, &h, &a),
+        McpCmd::Prompts(a) => list_prompts(env, &h, &a),
         McpCmd::Add(a) => {
             let cwd = cwd_of(&a.cwd)?;
             if !synthesis_mcp::valid_server_name(&a.name) {

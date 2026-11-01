@@ -78,19 +78,19 @@ Every third-party `uses:` in `ci.yml` and `release.yml` is pinned to a full comm
 
 | Action | Tag | Pinned SHA |
 |---|---|---|
-| actions/checkout | v4 | 11d5960a326750d5838078e36cf38b85af677262 |
-| actions/setup-node | v4 | 49933ea5288caeca8642d1e84afbd3f7d6820020 |
-| actions/setup-python | v5 | a26af69be951a213d495a4c3e4e4022e16d87065 |
-| actions/upload-artifact | v4 | ea165f8d65b6e75b540449e92b4886f43607fa02 |
-| actions/download-artifact | v4 | d3f86a106a0bac45b974a628896c90dbdf5c8093 |
+| actions/checkout | v7.0.1 | 3d3c42e5aac5ba805825da76410c181273ba90b1 |
+| actions/setup-node | v7.1.0 | 949feb2413d6458794dcd2491c4babbbce0c15c1 |
+| actions/setup-python | v7.1.0 | 6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 |
+| actions/upload-artifact | v7.0.2 | cf430e030ddbb5b0abf93d22962f4752f3646cd9 |
+| actions/download-artifact | v8.0.2 | 9000827ccba6bdab643e8b6fd33ac0654aef8333 |
 | actions/attest-build-provenance | v2 | e8998f949152b193b063cb0ec769d69d929409be |
 | Swatinem/rust-cache | v2 | d1527c8f67ef9af357290475d4af4b0fab8f12e0 (CI only; removed from release builds) |
-| browser-actions/setup-chrome | v1 | c785b87e244131f27c9f19c1a33e2ead956ab7ce (`chrome-version: stable`; pin a concrete version for reproducibility) |
+| browser-actions/setup-chrome | v2.2.0 | 48ad923757ca74d66703209fe939badbdf80f2f4 (`chrome-version: stable`; pin a concrete version for reproducibility) |
 | EmbarkStudios/cargo-deny-action | v2 | 3c6349835b2b7b196a839186cb8b78e02f7b5f25 |
 | taiki-e/install-action | v2 | 5488ac5a951645ce95062214902ac4b6bc1a1037 |
 | raven-actions/actionlint | v2 | 3d39aea434753780c3b3d4a1a31c854b4dbf49d7 |
 
-TODO (Node 20 deprecation warnings, checked 2026-11-01, NOT bumped): the pinned `actions/checkout` v4, `actions/setup-node` v4 and `actions/setup-python` v5 run on Node 20. Release notes on github.com/actions show Node 24 support in `setup-node` v5.0.0 ("Upgrade action to use node24", a breaking major) and `setup-python` v6.0.0 ("Upgrade to node 24"); the latest tags are `checkout` v7.0.1, `setup-node` v7.1.0, `setup-python` v7.1.0, but the `checkout` notes I could read did not mention Node 24, and this session had no `gh` or API access to resolve full SHAs (they must not be written from memory) nor a way to run CI on the new majors. To do: resolve each new major's SHA with the `gh api` command below, bump the three actions together in `ci.yml` and `release.yml` (also `download-artifact`/`upload-artifact` if they warn), run `node scripts/check-action-pins.mjs`, and watch one CI run on all three OSes. Majors can need a newer runner version.
+Node 20 deprecation (bumped 2026-11-01): `checkout`, `setup-node`, `setup-python`, `upload-artifact`, `download-artifact` and `setup-chrome` were bumped to the latest release (see the table); the SHAs came from `releases/latest` and `git/ref/tags/<tag>` (annotated tags dereferenced) of the public GitHub API, and for each the `action.yml` at that SHA says `using: node24` (checked; the inputs the workflows pass exist there). `Swatinem/rust-cache` v2.9.3 was already pinned and is node24; `cargo-deny-action` (docker), `install-action` and `actionlint` (composite) run no Node. NOT bumped, still open: `actions/attest-build-provenance` v2 is composite but calls `actions/attest` v2.4.0, whose `action.yml` says `using: node20`; v4.2.2 (`4d101475d8b20a2381f78447822ac1eab6504dd8`) calls `actions/attest` v4.2.1 on node24, but it was left alone because bumping it touches the release attestation step (decide, then bump together with a dry-run of Release). Not verified: no CI run on the new majors yet and `actionlint` was not run locally (not installed; the CI `actionlint` job covers it). Watch one CI run on all three OSes and one Release dry run; majors can need a newer runner version.
 
 None are left unpinned. If one ever is (a new action, a manual edit), `release.yml` fails in `gate` via `scripts/check-action-pins.mjs`; ordinary CI does not. To resolve: `gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object` (if `.type` is `tag`, follow `.url` and take `.object.sha`), put `@<sha> # <tag>` in the workflow, rerun the script. `.github/dependabot.yml` (github-actions, cargo) proposes bumps weekly; review each. Dependabot has no npm entry because no npm manifest with dependencies exists.
 

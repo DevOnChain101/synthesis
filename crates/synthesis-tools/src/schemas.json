@@ -235,13 +235,13 @@
      "description": "Limit output to the first N lines/entries.",
      "type": "number"
     },
-    "offset": {
-     "description": "Skip the first N lines/entries before applying head_limit.",
-     "type": "number"
-    },
     "multiline": {
      "description": "Allow the pattern to match across multiple lines.",
      "type": "boolean"
+    },
+    "offset": {
+     "description": "Skip the first N lines/entries before applying head_limit.",
+     "type": "number"
     },
     "output_mode": {
      "description": "What to return. Defaults to files_with_matches.",
@@ -392,6 +392,10 @@
     "description": {
      "type": "string"
     },
+    "metadata": {
+     "description": "Free-form key/value data kept with the task.",
+     "type": "object"
+    },
     "subject": {
      "type": "string"
     }
@@ -410,14 +414,36 @@
     "activeForm": {
      "type": "string"
     },
+    "addBlockedBy": {
+     "description": "Ids of tasks that block this task.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "addBlocks": {
+     "description": "Ids of tasks this task blocks.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
     "description": {
+     "type": "string"
+    },
+    "metadata": {
+     "description": "Keys to merge into the task's metadata; a null value removes the key.",
+     "type": "object"
+    },
+    "owner": {
      "type": "string"
     },
     "status": {
      "enum": [
       "pending",
       "in_progress",
-      "completed"
+      "completed",
+      "deleted"
      ],
      "type": "string"
     },

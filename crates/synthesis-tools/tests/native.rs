@@ -655,17 +655,14 @@ async fn todo_and_task_state() {
     let o = f
         .run("TaskCreate", json!({"subject": "C", "description": "d"}))
         .await;
-    assert_eq!(
-        json_of(&o)["task"],
-        json!({"id": "3", "subject": "C", "status": "pending"})
-    );
+    assert_eq!(json_of(&o)["task"], json!({"id": "3", "subject": "C"}));
     let o = f
         .run(
             "TaskUpdate",
             json!({"taskId": "3", "status": "completed", "activeForm": "Doing C"}),
         )
         .await;
-    assert_eq!(json_of(&o)["task"]["status"], "completed");
+    assert_eq!(json_of(&o)["statusChange"]["to"], "completed");
     let o = f.run("TaskGet", json!({"taskId": "3"})).await;
     let t = &json_of(&o)["task"];
     assert_eq!(
@@ -674,7 +671,10 @@ async fn todo_and_task_state() {
     );
     let l = json_of(&f.run("TaskList", json!({})).await);
     assert_eq!(l["tasks"].as_array().unwrap().len(), 3);
-    assert!(f.run("TaskGet", json!({"taskId": "99"})).await.is_error);
+    assert_eq!(
+        json_of(&f.run("TaskGet", json!({"taskId": "99"})).await),
+        json!({"task": null})
+    );
     assert!(f.run("TaskUpdate", json!({"taskId": "99"})).await.is_error);
     assert!(
         f.run("TaskUpdate", json!({"taskId": "1", "status": "done"}))
@@ -697,6 +697,78 @@ async fn todo_and_task_state() {
         json_of(&f.run("TaskList", json!({})).await)["tasks"],
         json!([])
     );
+}
+
+#[tokio::test]
+async fn task_tools_follow_the_sdk_shapes() {
+    let f = fx();
+    for (s, m) in [("A", json!({"k": 1})), ("B", json!({})), ("C", json!({}))] {
+        f.run(
+            "TaskCreate",
+            json!({"subject": s, "description": "d", "metadata": m}),
+        )
+        .await;
+    }
+    // edges: 1 blocks 2; 3 is blocked by 2; owner and metadata (null removes a key)
+    let u = json_of(
+        &f.run(
+            "TaskUpdate",
+            json!({"taskId": "1", "status": "in_progress", "addBlocks": ["2"], "owner": "me",
+                "metadata": {"k": null, "j": 2}}),
+        )
+        .await,
+    );
+    assert_eq!(
+        u,
+        json!({"success": true, "taskId": "1", "updatedFields": ["status", "owner", "metadata", "blocks"],
+            "statusChange": {"from": "pending", "to": "in_progress"}})
+    );
+    f.run("TaskUpdate", json!({"taskId": "3", "addBlockedBy": ["2"]}))
+        .await;
+    let g = json_of(&f.run("TaskGet", json!({"taskId": "2"})).await);
+    assert_eq!(
+        (&g["task"]["blocks"], &g["task"]["blockedBy"]),
+        (&json!(["3"]), &json!(["1"]))
+    );
+    let g = json_of(&f.run("TaskGet", json!({"taskId": "1"})).await);
+    assert_eq!(g["task"]["metadata"], json!({"j": 2}));
+    let l = json_of(&f.run("TaskList", json!({})).await);
+    assert_eq!(
+        l["tasks"][0],
+        json!({"id": "1", "subject": "A", "status": "in_progress", "blockedBy": [], "owner": "me"})
+    );
+    // repaired key names, as Claude Code does
+    let u = json_of(
+        &f.run(
+            "TaskUpdate",
+            json!({"task_id": "2", "active_form": "Doing B"}),
+        )
+        .await,
+    );
+    assert_eq!(u["updatedFields"], json!(["activeForm"]));
+    // unknown edge targets change nothing
+    let o = f
+        .run(
+            "TaskUpdate",
+            json!({"taskId": "1", "addBlocks": ["9"], "subject": "Z"}),
+        )
+        .await;
+    assert!(o.is_error && json_of(&o)["success"] == false);
+    assert_eq!(
+        json_of(&f.run("TaskGet", json!({"taskId": "1"})).await)["task"]["subject"],
+        "A"
+    );
+    // deleted removes the task and its edges; the todo.updated payload (meta) shrinks too
+    let o = f
+        .run("TaskUpdate", json!({"taskId": "2", "status": "deleted"}))
+        .await;
+    assert_eq!(
+        json_of(&o)["statusChange"],
+        json!({"from": "pending", "to": "deleted"})
+    );
+    assert_eq!(o.meta["todos"].as_array().unwrap().len(), 2);
+    let g = json_of(&f.run("TaskGet", json!({"taskId": "3"})).await);
+    assert_eq!(g["task"]["blockedBy"], json!([]));
 }
 
 #[tokio::test]

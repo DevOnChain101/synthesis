@@ -84,13 +84,15 @@ Rules:
 | WebSearch | **query**:string, allowed_domains:string[], blocked_domains:string[] | tools/websearch.js:77-85 |
 | Skill | **skill**:string, args:string | tools/skill.js:11-18 |
 | TodoWrite | **todos**:[{**content**:string, **status**:enum[pending,in_progress,completed], **activeForm**:string}] | tools/todowrite.js:14-31 |
-| TaskCreate | **subject**:string, description:string, activeForm:string | tools/taskcreate.js:23-31 |
+| TaskCreate | **subject**:string, description:string, activeForm:string, metadata:object [new: metadata] | tools/taskcreate.js:23-31 |
 | TaskGet | **taskId**:string | tools/taskget.js:6-10 |
 | TaskList | (none) | tools/tasklist.js:6 |
-| TaskUpdate | **taskId**:string, status:enum[pending,in_progress,completed], subject, activeForm, description:string | tools/taskupdate.js:9-18 |
+| TaskUpdate | **taskId**:string, status:enum[pending,in_progress,completed,deleted], subject, activeForm, description, owner:string, addBlocks:string[], addBlockedBy:string[], metadata:object [new: deleted, owner, addBlocks, addBlockedBy, metadata] | tools/taskupdate.js:9-18 |
 | Task | **description**:string, **prompt**:string, **subagent_type**:string, model, profile, effort:string | tools/index.js:41-59 |
 | AskUserQuestion | **questions**:[{**question**:string, header:string, multiSelect:boolean, **options**:[{**label**:string, description:string}]}] | tools/index.js:60-94 |
 | ExitPlanMode | **plan**:string (markdown) | tools/index.js:95-107 |
+
+Task* results [new, conformance 81; shapes from the Agent SDK reference, code.claude.com/docs/en/agent-sdk/typescript "Tool Output Types"]: `TaskCreate` -> `{task:{id,subject}}`; `TaskGet` -> `{task:{id,subject,description,status,blocks,blockedBy,activeForm,owner?,metadata?}}` or `{task:null}` for an unknown id; `TaskList` -> `{tasks:[{id,subject,status,blockedBy,owner?}]}`; `TaskUpdate` -> `{success,taskId,updatedFields,statusChange?:{from,to}}`, or `is_error` with `{success:false,error}` for an unknown id or edge target (nothing is changed). `status:"deleted"` removes the task and its edges; `addBlocks`/`addBlockedBy` set both sides of an edge; a `null` metadata value removes the key. `id`/`task_id`/`active_form` are repaired to `taskId`/`activeForm` before validation. `description` stays optional on TaskCreate (the SDK type requires it). All five tools share the session list, are Read class, and emit the unchanged `todo.updated` event. Schema additions are allow-listed in `tests/golden-divergences.json` (`schema_extra_properties`, `schema_enum_extra`).
 
 Behaviour that is part of the contract [from-node]: Read output is `cat -n` style `%6d\t<line>`, lines over 2000 chars truncated [read.js:9-114]; Read records `path → mtime` and Edit/Write refuse unless the file was read and has not changed since [edit.js:86-89, write.js:41-44]; Edit keeps CRLF files CRLF [edit.js:91-105]; Bash merges stdout+stderr, appends `[exit code N]`, `is_error` on non-zero or timeout [bash.js:225-231], strips secret env [bash.js:160-163], kills the whole process tree on timeout/abort [bash.js:204-242].
 
@@ -142,7 +144,7 @@ Spec revision 2025-06-18. Crate `synthesis-mcp` (client manager), `apps/cli/src/
 - **Live registry**: `ToolBox::with_source` re-reads the MCP tools every turn; `tools/list_changed`, reconnects and losses change what the model sees (the old list is kept if a refresh fails). Pagination is followed.
 - **Tool metadata kept**: `annotations` (hints only: they never relax a rule), `outputSchema` verbatim, `structuredContent` verbatim in `McpToolResult.structured` and in the tool output `meta`, the text form is what the model reads.
 - **Results**: text capped at 28 000 chars; the MIDDLE is cut with an explicit `[… N chars omitted …]` marker (JSON keeps every key and short value such as `id`/`version`, only its longest strings are shortened); the full text is saved under `<session artifacts>/mcp/` and named in the result. Images pass through; audio, resource links and unknown blocks become one-line placeholders.
-- **Resources and prompts**: servers that declare them get two synthetic read-only tools, `mcp__<server>__resource_read {uri}` and `mcp__<server>__prompt_get {name, arguments}`, whose description lists what the server offers. A real tool of that name wins.
+- **Resources and prompts**: servers that declare them get two synthetic read-only tools, `mcp__<server>__resource_read {uri}` and `mcp__<server>__prompt_get {name, arguments}`, whose description lists what the server offers. A real tool of that name wins. The user can also reach them without the model: `@server:protocol://path` in the prompt appends the resource as an untrusted-data block, and `/mcp__<server>__<prompt> args` (or `--prompt-command`) runs a prompt; `synth mcp prompts` lists them (`crates/synthesis-app/src/mcpinput.rs`).
 - **Server `instructions`** are appended to the first tool's description inside a label that marks them as untrusted data.
 - **Timeouts**: per call 60 s, connect 30 s (`tool_timeout_sec|tool_timeout_ms|timeout`, `startup_timeout_sec|startup_timeout_ms` per server). Cancelling a call sends `notifications/cancelled`. A lost connection is re-established with a bounded backoff (1 s, 4 s, 15 s); the failed call is never retried (it may have been a write).
 - **Filters**: `enabled_tools` / `disabled_tools` per server (disabled wins; also enforced at call time).
@@ -155,5 +157,5 @@ Spec revision 2025-06-18. Crate `synthesis-mcp` (client manager), `apps/cli/src/
 - **CLI**: `synth mcp list|get|add|remove` edit `<SYNTHESIS_HOME>/synthesis.json` (user) or `<cwd>/.mcp.json` (project, still needs approval); secret-looking env/header values must be `${VAR}` references.
 
 ## Open
-- `TodoWrite` vs `TaskCreate/Update` share one store in Node [from-node taskcreate.js:3-7]; keep both on the wire?
+- `TodoWrite` vs `TaskCreate/Update` share one store in Node [from-node taskcreate.js:3-7]; both stay on the wire (decided 2026-11-01, conformance 81: Claude Code offers the four Task tools by default and `TodoWrite` only with `CLAUDE_CODE_ENABLE_TASKS=0`).
 - Should `verify_run` be callable by the model, or only by the harness at the completion gate?

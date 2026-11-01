@@ -136,6 +136,16 @@ pub struct McpTool {
     pub synthetic: bool,
 }
 
+/// A prompt a connected server offers (`prompts/list`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptInfo {
+    pub server: String,
+    pub name: String,
+    pub description: String,
+    /// Declared arguments in order: `(name, required)`.
+    pub arguments: Vec<(String, bool)>,
+}
+
 /// The call was cancelled by the caller's token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Aborted;
@@ -168,6 +178,8 @@ struct Entry {
     /// capability at all.
     resources: Vec<(String, String)>,
     prompts: Vec<(String, String)>,
+    /// Declared `(argument name, required)` per prompt name.
+    prompt_args: HashMap<String, Vec<(String, bool)>>,
     has_resources: bool,
     has_prompts: bool,
     instructions: Option<String>,
@@ -217,6 +229,7 @@ impl Entry {
         self.tools.clear();
         self.resources.clear();
         self.prompts.clear();
+        self.prompt_args.clear();
         self.has_resources = false;
         self.has_prompts = false;
         self.instructions = None;
@@ -343,19 +356,31 @@ impl Shared {
             });
         }
         if caps.prompts.is_some() {
-            let list: Vec<(String, String)> = peer
+            let all: Vec<Value> = peer
                 .list_all_prompts()
                 .await
                 .map(|r| {
                     r.iter()
                         .filter_map(|x| serde_json::to_value(x).ok())
-                        .map(|v| (field(&v, "name"), field(&v, "description")))
                         .collect()
                 })
                 .unwrap_or_default();
+            let list = all
+                .iter()
+                .map(|v| (field(v, "name"), field(v, "description")))
+                .collect();
+            let args = all
+                .iter()
+                .map(|v| {
+                    let a = v["arguments"].as_array().into_iter().flatten();
+                    let a = a.map(|a| (field(a, "name"), a["required"].as_bool().unwrap_or(false)));
+                    (field(v, "name"), a.collect())
+                })
+                .collect();
             self.with(name, generation, |e| {
                 e.has_prompts = true;
                 e.prompts = list;
+                e.prompt_args = args;
             });
         }
     }
@@ -800,6 +825,7 @@ impl McpManager {
                 tools: vec![],
                 resources: vec![],
                 prompts: vec![],
+                prompt_args: HashMap::new(),
                 has_resources: false,
                 has_prompts: false,
                 instructions: None,
@@ -974,6 +1000,37 @@ impl McpManager {
         }
         *lock(&self.inner.names) = table;
         out
+    }
+
+    /// Prompts of connected servers that `call_tool(server, PROMPT_GET, ..)` can fetch (a server
+    /// with a real tool of that name is skipped, as in `tools()`).
+    pub fn prompts(&self) -> Vec<PromptInfo> {
+        lock(&self.inner.entries)
+            .iter()
+            .filter(|e| {
+                e.state == ServerState::Connected
+                    && e.has_prompts
+                    && !e.tools.iter().any(|t| t.name == PROMPT_GET)
+            })
+            .flat_map(|e| {
+                e.prompts.iter().map(|(n, d)| PromptInfo {
+                    server: e.cfg.name.clone(),
+                    name: n.clone(),
+                    description: d.clone(),
+                    arguments: e.prompt_args.get(n).cloned().unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+
+    /// Whether `call_tool(server, RESOURCE_READ, ..)` would read a resource (not a real tool).
+    pub fn can_read_resources(&self, server: &str) -> bool {
+        lock(&self.inner.entries).iter().any(|e| {
+            e.cfg.name == server
+                && e.state == ServerState::Connected
+                && e.has_resources
+                && !e.tools.iter().any(|t| t.name == RESOURCE_READ)
+        })
     }
 
     /// Reverse of the wire name: the table filled by `tools()` (exact, survives truncation), else
