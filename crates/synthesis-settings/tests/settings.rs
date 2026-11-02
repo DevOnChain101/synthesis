@@ -420,3 +420,128 @@ fn persisting_keeps_the_permissions_of_the_file_it_replaces() {
         0o600
     );
 }
+
+#[test]
+fn synthesis_tui_parses_validates_and_names_the_key_not_the_value() {
+    let (d, diag) = TuiSettings::from_settings(&json!({}));
+    assert_eq!((d, diag), (TuiSettings::default(), vec![]));
+    let (s, diag) = TuiSettings::from_settings(&json!({"synthesis": {"tui": {
+        "panels": {"tools": false, "activity": false},
+        "logo": "off", "show_thinking": false, "diffs_expanded": true,
+        "queue_indicators": false, "motion": false, "mouse_capture": false, "copy_on_select": false}}}));
+    assert_eq!(diag, Vec::<String>::new());
+    assert_eq!(s.panels, [true, true, false, false]);
+    assert!(!s.logo && !s.show_thinking && s.diffs_expanded);
+    assert!(!s.queue_indicators && !s.motion && !s.mouse_capture && !s.copy_on_select);
+    // wrong types and unknown names keep the defaults and say which key
+    let (s, diag) = TuiSettings::from_settings(&json!({"synthesis": {"tui": {
+        "motion": "yes", "logo": "SECRET-VALUE", "panels": {"chat": false, "mcp": 3}, "colour": 1}}}));
+    assert_eq!(s, TuiSettings::default());
+    let all = diag.join("\n");
+    for key in [
+        "tui.motion",
+        "tui.logo",
+        "tui.panels.chat",
+        "tui.panels.mcp",
+        "tui.colour",
+    ] {
+        assert!(all.contains(key), "{key}: {all}");
+    }
+    assert!(!all.contains("SECRET-VALUE"));
+    assert!(
+        TuiSettings::from_settings(&json!({"synthesis": {"tui": 5}})).1[0]
+            .contains("not an object")
+    );
+}
+
+#[test]
+fn synthesis_tui_is_read_from_the_user_file_only_and_the_others_are_named() {
+    let f = fx();
+    f.user(json!({"synthesis": {"tui": {"motion": false}}}));
+    f.project(json!({"synthesis": {"tui": {"motion": true}}}));
+    write(
+        f.proj.path(),
+        ".synthesis/settings.local.json",
+        json!({"synthesis": {"tui": {"logo": "off"}}}),
+    );
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"synthesis": {"tui": {"logo": "off"}}}),
+    );
+    let s = f.load(ProjectTrust::Trusted);
+    let warned = |what: &str| {
+        s.diagnostics.iter().any(|d| {
+            d.starts_with(what) && d.contains("synthesis.tui is read from user settings only")
+        })
+    };
+    assert!(warned("project settings") && warned("local settings") && warned("managed settings"));
+    assert!(!warned("user settings"), "{:?}", s.diagnostics);
+    assert!(
+        !read_user_tui(f.home.path()).0.motion,
+        "the user file's value is the one in force"
+    );
+}
+
+#[test]
+fn persisting_tui_keeps_everything_else_never_overwrites_a_bad_file_and_writes_no_credentials() {
+    let f = fx();
+    let home = f.home.path();
+    let t = TuiSettings {
+        panels: [true, true, false, true],
+        motion: false,
+        ..TuiSettings::default()
+    };
+    persist_user_tui(home, &t).unwrap();
+    assert_eq!(read_user_tui(home), (t, vec![]));
+    fs::write(
+        home.join("settings.json"),
+        r#"{"zeta":1,"permissions":{"deny":["x"]},"synthesis":{"budget":{"max_turns":3},"tui":{"old":1}},"alpha":2,"env":{"API_KEY":"sk-keep"}}"#,
+    )
+    .unwrap();
+    persist_user_tui(home, &t).unwrap();
+    let text = fs::read_to_string(home.join("settings.json")).unwrap();
+    assert!(text.find("zeta").unwrap() < text.find("permissions").unwrap());
+    assert!(
+        text.find("permissions").unwrap() < text.find("alpha").unwrap(),
+        "{text}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["synthesis"]["budget"]["max_turns"], 3);
+    assert!(v["synthesis"]["tui"].get("old").is_none());
+    assert_eq!(v["env"]["API_KEY"], "sk-keep", "other keys are untouched");
+    // the subtree is exactly the tui keys: nothing else (no key, no env) is added by this writer
+    let mut keys: Vec<_> = v["synthesis"]["tui"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "copy_on_select",
+            "diffs_expanded",
+            "logo",
+            "motion",
+            "mouse_capture",
+            "panels",
+            "queue_indicators",
+            "show_thinking"
+        ]
+    );
+    for bad in ["{not json", r#"{"synthesis": 5}"#, "[1]"] {
+        fs::write(home.join("settings.json"), bad).unwrap();
+        assert!(persist_user_tui(home, &t).is_err(), "{bad}");
+        assert_eq!(fs::read_to_string(home.join("settings.json")).unwrap(), bad);
+    }
+    assert!(
+        fs::read_dir(home).unwrap().all(|e| !e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("tmp")),
+        "no temp file is left behind"
+    );
+}

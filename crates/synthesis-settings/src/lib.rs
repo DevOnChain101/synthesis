@@ -473,6 +473,13 @@ impl Settings {
             }
             self.apply_env(raw);
             self.apply_synthesis(raw, what, user);
+            // `user` is also true for the managed file: only the user settings file may set tui
+            if what != "user settings" && raw.get("synthesis").and_then(|n| n.get("tui")).is_some()
+            {
+                self.diagnostics.push(format!(
+                    "{what}: synthesis.tui is read from user settings only, ignored"
+                ));
+            }
             if !user && raw.get("synthesis").and_then(|n| n.get("peers")).is_some() {
                 self.diagnostics.push(format!(
                     "{what}: synthesis.peers is read from user settings only, ignored"
@@ -608,4 +615,179 @@ impl Settings {
             self.synthesis.compat.write_node_transcripts = Some(w);
         }
     }
+}
+
+// ---------------------------------------------------------------- synthesis.tui (USER file only)
+
+/// Panels of the dash sidebar that can be switched off (Workspace, Running sessions and the chat
+/// are always on).
+pub const TUI_PANELS: [(&str, &str); 4] = [
+    ("session", "Session info (model, mode, effort, cwd, uptime)"),
+    ("mcp", "MCP servers"),
+    ("tools", "Tools & Skills used in this session"),
+    ("activity", "Activity feed"),
+];
+
+/// `synthesis.tui` of the USER settings.json: what the interactive app shows and how it behaves.
+/// Defined here once; `/config` edits it, the app reads it. Project, local and managed files never
+/// set it (a diagnostic says so).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TuiSettings {
+    /// `[session, mcp, tools, activity]`: shown.
+    pub panels: [bool; 4],
+    /// `logo`: `art` (the braille symbol on the welcome) or `off`.
+    pub logo: bool,
+    pub show_thinking: bool,
+    /// Long tool output, code and diffs start expanded (what ctrl+o toggles).
+    pub diffs_expanded: bool,
+    /// The `queued: ...` lines above the prompt while a task runs.
+    pub queue_indicators: bool,
+    /// Spinners and animations; off draws them still and idles the redraw timer.
+    pub motion: bool,
+    /// Mouse reporting (click, drag-select, wheel). Off leaves the terminal's own selection.
+    pub mouse_capture: bool,
+    /// Drag-select copies when the button is released.
+    pub copy_on_select: bool,
+}
+
+impl Default for TuiSettings {
+    fn default() -> Self {
+        Self {
+            panels: [true; 4],
+            logo: true,
+            show_thinking: true,
+            diffs_expanded: false,
+            queue_indicators: true,
+            motion: true,
+            mouse_capture: true,
+            copy_on_select: true,
+        }
+    }
+}
+
+impl TuiSettings {
+    /// Reads `synthesis.tui` of a parsed settings file. A wrong type or an unknown value keeps the
+    /// default and yields a diagnostic that names the key, never the value.
+    pub fn from_settings(v: &Value) -> (Self, Vec<String>) {
+        let mut s = Self::default();
+        let mut diags = vec![];
+        let Some(tui) = v.get("synthesis").and_then(|n| n.get("tui")) else {
+            return (s, diags);
+        };
+        let Some(tui) = tui.as_object() else {
+            diags.push("synthesis.tui is not an object, ignored".into());
+            return (s, diags);
+        };
+        let mut flag = |key: &str, slot: &mut bool| match tui.get(key) {
+            None => {}
+            Some(Value::Bool(b)) => *slot = *b,
+            Some(_) => diags.push(format!("synthesis.tui.{key} must be true or false, kept")),
+        };
+        flag("show_thinking", &mut s.show_thinking);
+        flag("diffs_expanded", &mut s.diffs_expanded);
+        flag("queue_indicators", &mut s.queue_indicators);
+        flag("motion", &mut s.motion);
+        flag("mouse_capture", &mut s.mouse_capture);
+        flag("copy_on_select", &mut s.copy_on_select);
+        match tui.get("logo").map(Value::as_str) {
+            None => {}
+            Some(Some("art")) => s.logo = true,
+            Some(Some("off")) => s.logo = false,
+            Some(_) => diags.push("synthesis.tui.logo must be art or off, using art".into()),
+        }
+        match tui.get("panels") {
+            None => {}
+            Some(Value::Object(p)) => {
+                for (k, v) in p {
+                    let Some(i) = TUI_PANELS.iter().position(|(n, _)| n == k) else {
+                        diags.push(format!("synthesis.tui.panels.{k} is not a panel, ignored"));
+                        continue;
+                    };
+                    match v {
+                        Value::Bool(b) => s.panels[i] = *b,
+                        _ => diags.push(format!(
+                            "synthesis.tui.panels.{k} must be true or false, kept"
+                        )),
+                    }
+                }
+            }
+            Some(_) => diags.push("synthesis.tui.panels is not an object, ignored".into()),
+        }
+        for k in tui.keys() {
+            if ![
+                "panels",
+                "logo",
+                "show_thinking",
+                "diffs_expanded",
+                "queue_indicators",
+                "motion",
+                "mouse_capture",
+                "copy_on_select",
+            ]
+            .contains(&k.as_str())
+            {
+                diags.push(format!("synthesis.tui.{k} is not a setting, ignored"));
+            }
+        }
+        (s, diags)
+    }
+
+    /// The subtree to write back: every key, so the file shows what is in force.
+    pub fn to_value(&self) -> Value {
+        let panels: Map<String, Value> = TUI_PANELS
+            .iter()
+            .zip(self.panels)
+            .map(|((n, _), on)| ((*n).to_string(), Value::Bool(on)))
+            .collect();
+        serde_json::json!({
+            "panels": panels,
+            "logo": if self.logo { "art" } else { "off" },
+            "show_thinking": self.show_thinking,
+            "diffs_expanded": self.diffs_expanded,
+            "queue_indicators": self.queue_indicators,
+            "motion": self.motion,
+            "mouse_capture": self.mouse_capture,
+            "copy_on_select": self.copy_on_select,
+        })
+    }
+}
+
+/// `synthesis.tui` of `<synthesis_home>/settings.json`; a missing or unreadable file is the
+/// defaults.
+pub fn read_user_tui(synthesis_home: &Path) -> (TuiSettings, Vec<String>) {
+    let v = std::fs::read(synthesis_home.join("settings.json"))
+        .ok()
+        .filter(|b| b.len() <= 1 << 20)
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Value::Null);
+    TuiSettings::from_settings(&v)
+}
+
+/// Writes `tui` as the `synthesis.tui` subtree of `<synthesis_home>/settings.json` (the `/config`
+/// screen). Every other key and the key order are kept; a file that cannot be parsed, or whose
+/// `synthesis` is not an object, is never overwritten (`InvalidData`). Never writes a credential:
+/// only the keys of [`TuiSettings`] go into the subtree. See [`edit_json_atomic`].
+pub fn persist_user_tui(synthesis_home: &Path, tui: &TuiSettings) -> std::io::Result<()> {
+    let tui = tui.to_value();
+    edit_json_atomic(
+        &synthesis_home.join("settings.json"),
+        "user settings",
+        |v| {
+            let section = v
+                .as_object_mut()
+                .map(|o| {
+                    o.entry("synthesis")
+                        .or_insert_with(|| Value::Object(Map::new()))
+                })
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "user settings: `synthesis` is not an object",
+                    )
+                })?;
+            section.insert("tui".into(), tui.clone());
+            Ok(())
+        },
+    )
 }
