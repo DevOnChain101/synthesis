@@ -1,8 +1,8 @@
 # Synthesis conformance gaps vs the official checklist
 
-Audit date 2026-10-28. Input: `docs/research/official-conformance.md` (140 numbered statements). Code audited: working tree of `<repo>` (uncommitted edits by other developers included) and `target/debug/synth`. No `.rs`/`.js`/`.yml` file was changed. Items tagged `not verified` in the checklist are UNKNOWN, never requirements. Codex statements (23-29, 37, 47, 59, 91, 128-131) are treated as secondary references, since Synthesis follows the Claude Code model.
+Audit date 2026-10-28. Input: `docs/research/official-conformance.md` (140 numbered statements). Code audited: working tree of `<repo>` (uncommitted edits by other developers included) and `target/debug/synt`. No `.rs`/`.js`/`.yml` file was changed. Items tagged `not verified` in the checklist are UNKNOWN, never requirements. Codex statements (23-29, 37, 47, 59, 91, 128-131) are treated as secondary references, since Synthesis follows the Claude Code model.
 
-Evidence kinds: **experiment** = I ran a scratch program (outside the repo) against `synthesis-permissions` or ran `target/debug/synth`; **golden** = repo golden case; **code** = file:line read, not executed. Paths are relative to the repo root; `P` = `crates/synthesis-permissions/src/`.
+Evidence kinds: **experiment** = I ran a scratch program (outside the repo) against `synthesis-permissions` or ran `target/debug/synt`; **golden** = repo golden case; **code** = file:line read, not executed. Paths are relative to the repo root; `P` = `crates/synthesis-permissions/src/`.
 
 ## 1. Summary counts (140 items)
 
@@ -42,9 +42,9 @@ Note: several items are partly MATCH and partly GAP (e.g. 8, 42, 54, 69); they a
 - Minimal fix: in `matches_rule`, treat a trailing `*` on an `mcp__` rule as a prefix glob (`tool.starts_with(prefix)`) before the exact/`__` test; keep `mcp__*` out of allow (is_broad_allow). Crate `synthesis-permissions`, tests.rs.
 
 **P0-3. Malformed settings.json silently drops deny rules (item 33).**
-- Now: experiment, `SYNTHESIS_HOME/settings.json` = `{"permissions":{"deny":["Bash(rm:*)"],}}` (trailing comma): `synth run` prints only `synth: warning: malformed JSON in user settings` and carries on with no deny rules (`crates/synthesis-settings/src/lib.rs:196-199`, `apps/cli/src/run.rs:405-411`).
+- Now: experiment, `SYNTHESIS_HOME/settings.json` = `{"permissions":{"deny":["Bash(rm:*)"],}}` (trailing comma): `synt run` prints only `synt: warning: malformed JSON in user settings` and carries on with no deny rules (`crates/synthesis-settings/src/lib.rs:196-199`, `apps/cli/src/run.rs:405-411`).
 - Official: a syntax error is a Settings Error at startup.
-- Minimal fix: make a malformed or unreadable existing user/project settings file a hard error for `synth run` (exit 2) and the TUI start, or at minimum fail closed to `dontAsk` plus a visible notice. Crate `synthesis-settings` (return an error flag) and `apps/cli/src/run.rs`; test in `crates/synthesis-settings` and `apps/cli/tests`. Owner decision D5.
+- Minimal fix: make a malformed or unreadable existing user/project settings file a hard error for `synt run` (exit 2) and the TUI start, or at minimum fail closed to `dontAsk` plus a visible notice. Crate `synthesis-settings` (return an error flag) and `apps/cli/src/run.rs`; test in `crates/synthesis-settings` and `apps/cli/tests`. Owner decision D5.
 
 ### P1 (behaviour users will notice)
 
@@ -85,11 +85,11 @@ D1. **Read-before-edit enforcement.** Synthesis enforces for every model, mtime-
 D2. **AGENTS.md vs CLAUDE.md.** Options: (a) official Claude: CLAUDE.md, AGENTS.md only when none; (b) Codex: AGENTS.md first, one file per dir; (c) status quo, both. Recommended: SYNTHESIS.md > AGENTS.md > CLAUDE.md, first non-empty per directory, 32 KiB combined cap, since Synthesis is model-agnostic.
 D3. **Hook timeout / fail-closed.** Keep fail-closed for PreToolUse and UserPromptSubmit (documented deviation, safer). Choose the default timeout: 60 s (now) or 600 s (official). Recommended: raise to 600 s for PostToolUse and other fail-open events, keep 60 s for gating events with per-hook override.
 D4. **Read limits.** Adopt 25k-token and 256 KB caps (official) or keep 2000 lines? The 2000-line default is `not verified` as an official number (item 64). Recommended: byte/token cap.
-D5. **Settings parse errors.** Hard error (official) vs warning. Recommended: hard error in `synth run`, visible blocking dialog in the TUI.
+D5. **Settings parse errors.** Hard error (official) vs warning. Recommended: hard error in `synt run`, visible blocking dialog in the TUI.
 D6. **Bash timeouts/background.** Keep 120 s/600 s; decide on auto-background at timeout (official) vs kill (now, deterministic for headless). Recommended: kill in headless, background in the TUI.
 D7. **MCP output cap.** 28,000 chars with the full text saved as artifact (now) vs 25k tokens / 50k chars. Recommended: keep (equivalent intent, already saves the full result).
 D8. **Ask rules in bypassPermissions.** Official: ask rules still prompt. Synthesis says bypass skips them. Recommended: follow official (P1-1) so `ask: ["Bash(git push:*)"]` stays a real tripwire.
-D9. **Protected paths list.** Synthesis's list is a superset (adds `.synthesis`, `.ssh`, `.aws`); protection under bypass is "Allow" (matches official 18), but `synth run --help` says bypass keeps protected paths as hard stops, which is wrong for plain writes (experiment: bypass + Write `.git/config` -> Allow). Decide: keep official behaviour and fix the help text, or make protected paths ask even in bypass (Codex-like, safer). Recommended: ask even in bypass.
+D9. **Protected paths list.** Synthesis's list is a superset (adds `.synthesis`, `.ssh`, `.aws`); protection under bypass is "Allow" (matches official 18), but `synt run --help` says bypass keeps protected paths as hard stops, which is wrong for plain writes (experiment: bypass + Write `.git/config` -> Allow). Decide: keep official behaviour and fix the help text, or make protected paths ask even in bypass (Codex-like, safer). Recommended: ask even in bypass.
 D10. **Sandbox failure.** Fail-closed Enforce by default (better than official). On Windows nothing is confined, so the default refuses all commands there. Decide the Windows default (BestEffort with loud notice vs refuse).
 D11. **Settings location / ADR-011.** `.synthesis/` and `SYNTHESIS_HOME` only, `.claude/settings.json` never read. Stay (ADR-011) but document it as a conscious difference from items 30, 34, 41.
 D12. **Subagent depth, auto compaction at 80%, sandbox on by default, JSONL-only headless output.** All stricter or different by design; confirm they stay.
@@ -150,7 +150,7 @@ Legend: M = MATCH, G = GAP, D = DIVERGES-BY-DESIGN, U = UNKNOWN, N = N/A.
 | 25 | M |  | --network deny default, apps/cli --help; NetworkPolicy::Deny, sandbox lib.rs:42 |
 | 26 | D |  | sandbox readonly_paths = .git/hooks, .git/config (sandbox lib.rs:160-161); ~/.ssh, ~/.aws credentials denied outright (lib.rs:404). Less than Codex's whole `.git`, deliberate so commits work |
 | 27 | D |  | no Codex presets; equivalent is `--permission-mode bypassPermissions --sandbox off` |
-| 28 | M |  | `synth run` default mode with asks auto-denied (events.md:90) plus enforce sandbox is effectively read-only |
+| 28 | M |  | `synt run` default mode with asks auto-denied (events.md:90) plus enforce sandbox is effectively read-only |
 | 29 | M |  | ProjectTrust::Untrusted strips project config/hooks/allow rules, synthesis-config config.rs:35-80, settings lib.rs:315-335 |
 | 30 | G | P1 | Synthesis files: `<synthesis_home>/settings.json` and `<root>/.synthesis/settings.json` (DIVERGES-BY-DESIGN, ADR-011). Missing: a gitignored local layer and a managed layer (settings lib.rs:3-6) |
 | 31 | G | P1 | only user < project; no managed layer, no `--settings` override |

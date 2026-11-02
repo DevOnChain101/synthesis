@@ -1087,7 +1087,7 @@ impl Permissions {
         false
     }
 
-    /// `synth memory <subcommand>` that changes long-term memory, also inside (...), `bash -c` and
+    /// `synt memory <subcommand>` that changes long-term memory, also inside (...), `bash -c` and
     /// eval. Memory is the person's: the agent may read it, never approve, delete, import or opt out.
     fn memory_mutation(&self, cmd: &str, depth: u32) -> bool {
         const MUTATING: [&str; 11] = [
@@ -1117,7 +1117,7 @@ impl Permissions {
             }
             let mut rest = w.iter().skip_while(|x| {
                 let b = paths::basename(x, self.policy());
-                b != "synth" && b != "synth.exe"
+                b != "synt" && b != "synt.exe"
             });
             if rest.next().is_some() {
                 let mut args = rest.filter(|x| !x.starts_with('-'));
@@ -1730,7 +1730,7 @@ impl Permissions {
         if tool == "Bash" && self.memory_mutation(bash_cmd, 0) {
             return v(
                 Deny,
-                "changes long-term memory: only the person may run `synth memory` approve, apply, delete, import, optout or similar",
+                "changes long-term memory: only the person may run `synt memory` approve, apply, delete, import, optout or similar",
             );
         }
 

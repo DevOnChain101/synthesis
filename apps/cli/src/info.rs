@@ -75,7 +75,7 @@ pub fn models(env: &Env, a: &ModelsArgs) -> Result<u8, String> {
                     }
                 }
                 Ok(Err(e)) | Err(e) => {
-                    eprintln!("synth: {id}: model discovery failed: {}", e.message())
+                    eprintln!("synt: {id}: model discovery failed: {}", e.message())
                 }
             }
         }
@@ -150,7 +150,7 @@ fn git_version(env: &Env) -> Option<String> {
 pub fn doctor(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
     let mut code = 0;
     out!(
-        "synth {} on {} {}",
+        "synt {} on {} {}",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH
@@ -166,14 +166,14 @@ pub fn doctor(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
     );
 
     let best = synthesis_sandbox::detect();
-    // The exact preflight `synth run` does under --sandbox enforce, on the standard policy for
+    // The exact preflight `synt run` does under --sandbox enforce, on the standard policy for
     // this workspace (default network deny), not just "does a backend exist".
     let root = std::fs::canonicalize(cwd.unwrap_or(Path::new("."))).unwrap_or_else(|_| ".".into());
     let policy = synthesis_sandbox::SandboxPolicy::standard(&root, &std::env::temp_dir());
     let ready = synthesis_app::run::sandbox_preflight(&*best, Some(&policy));
-    out!("sandbox for tool commands (`synth run --sandbox enforce|best-effort|off`):");
+    out!("sandbox for tool commands (`synt run --sandbox enforce|best-effort|off`):");
     out!(
-        "  default mode: enforce; `synth run` {}",
+        "  default mode: enforce; `synt run` {}",
         if ready.is_ok() {
             "will confine commands"
         } else {
@@ -191,7 +191,7 @@ pub fn doctor(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
     }
     out!("  selected {}", guarantees(&*synthesis_sandbox::detect()));
     out!(
-        "  network (`synth run --network deny|loopback|allow`, default deny): {}",
+        "  network (`synt run --network deny|loopback|allow`, default deny): {}",
         network_support(&*best)
     );
     #[cfg(target_os = "macos")]
@@ -295,14 +295,14 @@ fn legacy_notes(env: &Env, h: &synthesis_app::Homes, current_exe: Option<&Path>)
     }
     let first = env.get_nonempty("PATH").and_then(|p| {
         std::env::split_paths(p)
-            .flat_map(|d| [d.join("synth"), d.join("synth.exe")])
+            .flat_map(|d| [d.join("synt"), d.join("synt.exe")])
             .find(|c| c.is_file())
     });
     if let (Some(first), Some(me)) = (first, current_exe)
         && std::fs::canonicalize(&first).ok() != std::fs::canonicalize(me).ok()
     {
         v.push(format!(
-            "warning: `synth` on PATH resolves to {}, not this executable ({})",
+            "warning: `synt` on PATH resolves to {}, not this executable ({})",
             first.display(),
             me.display()
         ));
@@ -321,7 +321,7 @@ fn report_config(cfg: &Config) {
     }
 }
 
-/// Settings, MCP, skills and agents as the next `synth run` would see them for `cwd` with an
+/// Settings, MCP, skills and agents as the next `synt run` would see them for `cwd` with an
 /// untrusted project. Counts and names only, never a value.
 fn report_discovery(env: &Env, h: &synthesis_app::Homes, cfg: &Config, cwd: Option<&Path>) {
     use synthesis_settings::{LoadContext, load_settings};
@@ -466,7 +466,7 @@ mod tests {
         let (user, bin) = (d.path().join("u"), d.path().join("bin"));
         std::fs::create_dir_all(user.join(".nemo")).unwrap();
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("synth"), "").unwrap();
+        std::fs::write(bin.join("synt"), "").unwrap();
         let h = synthesis_app::Homes {
             synthesis: user.join(".synthesis"),
             user,
@@ -482,7 +482,7 @@ mod tests {
         // this executable is the first on PATH, the new home exists, no legacy variables: silent
         std::fs::create_dir_all(&h.synthesis).unwrap();
         let env = Env::from_pairs([("PATH", path)]);
-        assert!(legacy_notes(&env, &h, Some(&bin.join("synth"))).is_empty());
+        assert!(legacy_notes(&env, &h, Some(&bin.join("synt"))).is_empty());
     }
 
     #[test]

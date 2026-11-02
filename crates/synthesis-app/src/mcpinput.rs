@@ -95,7 +95,7 @@ pub async fn expand(
             .find(|p| format!("{}__{}", sanitize_server(&p.server), p.name) == name)
         else {
             return Err(format!(
-                "/mcp__{sn}: no such MCP prompt (see `synth mcp prompts`)"
+                "/mcp__{sn}: no such MCP prompt (see `synt mcp prompts`)"
             ));
         };
         if args.len() > p.arguments.len() {

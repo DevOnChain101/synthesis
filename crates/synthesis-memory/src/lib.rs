@@ -34,7 +34,7 @@ impl std::error::Error for Error {}
 impl From<rusqlite::Error> for Error {
     fn from(e: rusqlite::Error) -> Self {
         if e.sqlite_error_code() == Some(rusqlite::ErrorCode::ReadOnly) {
-            return Self("memory is read-only: its schema is newer than this build; upgrade synth to change it".into());
+            return Self("memory is read-only: its schema is newer than this build; upgrade synt to change it".into());
         }
         Self(format!("memory store: {e}"))
     }

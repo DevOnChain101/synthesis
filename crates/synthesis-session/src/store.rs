@@ -343,7 +343,7 @@ pub struct MessageRow {
 pub enum Retention {
     Session,
     Keep,
-    /// RFC 3339 expiry for a future `synth gc`.
+    /// RFC 3339 expiry for a future `synt gc`.
     Until(String),
 }
 
@@ -405,7 +405,7 @@ pub struct FileSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lossy_sha256: Option<String>,
     /// [`file_state_hash`] of the file after the run's last write to it (set when that write
-    /// completed). `synth rewind` refuses a file whose state differs, unless forced.
+    /// completed). `synt rewind` refuses a file whose state differs, unless forced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_sha256: Option<String>,
 }
@@ -1720,7 +1720,7 @@ impl SessionWriter {
         }
         let sha = sha_hex(&bytes);
         if synthesis_core::secrets::is_secret_path(real) {
-            let note = format!("[synth: secret file withheld from snapshot; sha256={sha}]");
+            let note = format!("[synt: secret file withheld from snapshot; sha256={sha}]");
             return (note.into_bytes(), Some(sha));
         }
         match std::str::from_utf8(&bytes).map(|t| self.redactor.redact_str(t)) {

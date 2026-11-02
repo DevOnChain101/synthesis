@@ -1,11 +1,11 @@
-//! The harness wiring behind `synth`: `run::prepare` builds the harness, session, sandbox, MCP,
+//! The harness wiring behind `synt`: `run::prepare` builds the harness, session, sandbox, MCP,
 //! memory and peers from the config files; the headless run takes the `Prepared` it returns.
 
 #[cfg(all(feature = "test-provider", not(debug_assertions)))]
 compile_error!("feature `test-provider` must never be enabled in release builds");
 
 /// `eprintln!` that ignores a dead stderr (the reader closed the pipe) instead of panicking;
-/// shadows std's macro in this crate and, through `#[macro_use]`, in `synth`.
+/// shadows std's macro in this crate and, through `#[macro_use]`, in `synt`.
 #[macro_export]
 macro_rules! eprintln {
     ($($a:tt)*) => {{
@@ -14,7 +14,7 @@ macro_rules! eprintln {
     }};
 }
 
-/// `println!` that exits quietly when the reader went away (`synth doctor | head`).
+/// `println!` that exits quietly when the reader went away (`synt doctor | head`).
 #[macro_export]
 macro_rules! out {
     ($($a:tt)*) => {{
@@ -23,7 +23,7 @@ macro_rules! out {
             if e.kind() == std::io::ErrorKind::BrokenPipe {
                 std::process::exit(0);
             }
-            eprintln!("synth: error: stdout: {e}");
+            eprintln!("synt: error: stdout: {e}");
             std::process::exit(1);
         }
     }};
@@ -61,7 +61,7 @@ pub struct CwdArg {
     pub cwd: Option<PathBuf>,
 }
 
-/// The directory `synth` was started in. This is the ONE place the process cwd is read (the CLI
+/// The directory `synt` was started in. This is the ONE place the process cwd is read (the CLI
 /// boundary): the libraries still take an explicit cwd, `--cwd DIR` always wins.
 #[allow(clippy::disallowed_methods)]
 pub fn launch_dir() -> Result<PathBuf, String> {

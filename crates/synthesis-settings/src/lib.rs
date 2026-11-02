@@ -11,7 +11,7 @@
 //! SECURITY (deviation from Node): the project file comes from a possibly hostile repository.
 //! Unless the caller passes [`ProjectTrust::Trusted`], it can only TIGHTEN: `deny`/`ask` rules, the
 //! modes `default|manual|plan|dontAsk` and `mcp` disables are kept; `allow` rules, hooks,
-//! `additionalDirectories`, `disableAllHooks`, `env`, MCP approvals and the `synth` section are
+//! `additionalDirectories`, `disableAllHooks`, `env`, MCP approvals and the `synt` section are
 //! dropped with a diagnostic (counts and key names only, never values). `auto` and
 //! `bypassPermissions` are refused from the project even when trusted (as Node).
 //!
@@ -123,7 +123,7 @@ pub struct Settings {
     /// Non-secret notes: malformed files, ignored/refused items. Never contains setting values.
     pub diagnostics: Vec<String>,
     /// A settings file that exists but cannot be used (malformed JSON, not an object, unreadable,
-    /// oversized): its deny/ask rules are NOT in force, so callers must refuse to start (`synth run`
+    /// oversized): its deny/ask rules are NOT in force, so callers must refuse to start (`synt run`
     /// exits 2) instead of running without them. Also in `diagnostics`.
     pub errors: Vec<String>,
 }

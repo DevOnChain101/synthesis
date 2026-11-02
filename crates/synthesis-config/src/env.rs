@@ -75,7 +75,7 @@ impl Env {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect());
         // Output only (never read as a setting): commands the agent starts can tell they are not
-        // the person, so `synth memory` refuses to approve or delete from there.
+        // the person, so `synt memory` refuses to approve or delete from there.
         env.0.insert(AGENT_SESSION_VAR.into(), "1".into());
         env
     }

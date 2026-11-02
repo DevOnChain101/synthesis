@@ -30,7 +30,7 @@ impl Rig {
         std::fs::write(self.home().join("settings.json"), v.to_string()).unwrap();
     }
     fn base(&self) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_synth"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", self.dir.path())
@@ -38,7 +38,7 @@ impl Rig {
             .stdin(Stdio::null());
         c
     }
-    fn synth(&self, args: &[&str]) -> Output {
+    fn synt(&self, args: &[&str]) -> Output {
         self.base().args(args).output().unwrap()
     }
     fn run_cmd(&self, script: Value, args: &[&str]) -> Command {
@@ -117,10 +117,10 @@ fn allow_with_space_star_lets_the_command_run() {
 #[test]
 fn mcp_add_then_run_works_on_a_fresh_home() {
     let rig = Rig::new();
-    let o = rig.synth(&["mcp", "add", "demo", "--", "echo", "hi"]);
+    let o = rig.synt(&["mcp", "add", "demo", "--", "echo", "hi"]);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     for args in [&["mcp", "list"][..], &["models"], &["doctor"]] {
-        let o = rig.synth(args);
+        let o = rig.synt(args);
         assert_ne!(
             o.status.code(),
             Some(2),
@@ -366,7 +366,7 @@ fn stdin_over_10mb_is_a_usage_error() {
 #[test]
 fn failed_mcp_server_is_a_notice_event_and_required_mcp_exits_2() {
     let rig = Rig::new();
-    let o = rig.synth(&["mcp", "add", "bad", "--", "/nonexistent/mcp-server"]);
+    let o = rig.synt(&["mcp", "add", "bad", "--", "/nonexistent/mcp-server"]);
     assert!(o.status.success());
     let (o, ev) = rig.run(text_script("ok"), &[]);
     assert_eq!(o.status.code(), Some(0));
@@ -396,7 +396,7 @@ fn closed_stderr_does_not_panic() {
         .stdin(Stdio::null())
         .arg("-c")
         .arg("exec \"$0\" run --cwd \"$1\" --provider \"fake:$2\" --prompt hi --sandbox off 2>&-")
-        .arg(env!("CARGO_BIN_EXE_synth"))
+        .arg(env!("CARGO_BIN_EXE_synt"))
         .arg(rig.ws())
         .arg(&s);
     let out = c.output().unwrap();
@@ -494,7 +494,7 @@ fn rewind_restores_changed_files_and_removes_created_ones_only_with_apply() {
     let sid = session_id(&ev);
     let read = |f: &str| std::fs::read_to_string(rig.ws().join(f)).unwrap();
     assert_eq!(read("a.txt"), "bye\n");
-    let o = rig.synth(&["rewind", &sid]);
+    let o = rig.synt(&["rewind", &sid]);
     assert_eq!(
         o.status.code(),
         Some(0),
@@ -503,7 +503,7 @@ fn rewind_restores_changed_files_and_removes_created_ones_only_with_apply() {
     );
     assert!(String::from_utf8_lossy(&o.stdout).contains("dry run"));
     assert_eq!(read("a.txt"), "bye\n", "a dry run changes nothing");
-    let o = rig.synth(&["rewind", &sid, "--apply"]);
+    let o = rig.synt(&["rewind", &sid, "--apply"]);
     assert_eq!(
         o.status.code(),
         Some(0),
@@ -513,7 +513,7 @@ fn rewind_restores_changed_files_and_removes_created_ones_only_with_apply() {
     assert_eq!(read("a.txt"), "hello\n");
     assert!(!rig.ws().join("b.txt").exists());
     assert_eq!(
-        rig.synth(&["rewind", "no-such-session"]).status.code(),
+        rig.synt(&["rewind", "no-such-session"]).status.code(),
         Some(2)
     );
 }
@@ -534,10 +534,10 @@ fn rewind_refuses_files_changed_since_the_run_and_symlinks() {
     std::fs::write(&b, "later edit\n").unwrap();
     let text = |o: &Output| String::from_utf8_lossy(&o.stdout).into_owned();
     // the dry run lists them; --apply leaves both alone
-    let o = rig.synth(&["rewind", &sid]);
+    let o = rig.synt(&["rewind", &sid]);
     assert!(text(&o).contains("changed since the run"), "{}", text(&o));
     assert_eq!(o.status.code(), Some(1));
-    let o = rig.synth(&["rewind", &sid, "--apply"]);
+    let o = rig.synt(&["rewind", &sid, "--apply"]);
     assert_eq!(o.status.code(), Some(1));
     assert_eq!(std::fs::read_to_string(&a).unwrap(), "later edit\n");
     assert!(b.exists());
@@ -548,13 +548,13 @@ fn rewind_refuses_files_changed_since_the_run_and_symlinks() {
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(&outside, &a).unwrap();
-        let o = rig.synth(&["rewind", &sid, "--apply", "--force"]);
+        let o = rig.synt(&["rewind", &sid, "--apply", "--force"]);
         assert!(text(&o).contains("symlink"), "{}", text(&o));
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
         std::fs::remove_file(&a).unwrap();
     }
     // --force restores the rest
-    let o = rig.synth(&["rewind", &sid, "--apply", "--force"]);
+    let o = rig.synt(&["rewind", &sid, "--apply", "--force"]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     assert_eq!(std::fs::read_to_string(&a).unwrap(), "hello\n");
     assert!(!b.exists());

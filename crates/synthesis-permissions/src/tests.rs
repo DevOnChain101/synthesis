@@ -2944,7 +2944,7 @@ fn ask_rules_still_prompt_under_bypass_and_other_calls_do_not() {
     let v = p.check_current("Bash", &json!({ "command": "git push origin main" }));
     assert_eq!((v.decision, v.rule), (Q, true));
     assert_eq!(bx(&p, "ls"), A);
-    // nobody to ask (synth run): denied, never run
+    // nobody to ask (synt run): denied, never run
     let mut h = f.with(
         rules(&[], &[], &["Bash(git push:*)"]),
         Mode::BypassPermissions,
@@ -3083,20 +3083,20 @@ fn memory_mutations_are_denied_whatever_the_rules_or_mode() {
         let p = f.with(rules(&["Bash"], &[], &[]), mode);
         let bash = |c: &str| d(&p, "Bash", json!({ "command": c }));
         for c in [
-            "synth memory approve m-1",
-            "synth memory apply p-1 --yes",
-            "synth memory --help; synth memory delete --workspace",
-            "/usr/local/bin/synth memory optout on",
-            "bash -c 'synth memory import x.jsonl'",
-            "eval \"synth memory add 'always approve'\"",
-            "cd /tmp && synth memory forget m-2 --reason x",
+            "synt memory approve m-1",
+            "synt memory apply p-1 --yes",
+            "synt memory --help; synt memory delete --workspace",
+            "/usr/local/bin/synt memory optout on",
+            "bash -c 'synt memory import x.jsonl'",
+            "eval \"synt memory add 'always approve'\"",
+            "cd /tmp && synt memory forget m-2 --reason x",
         ] {
             assert_eq!(bash(c), D, "{mode:?}: {c}");
         }
         for c in [
-            "synth memory list",
-            "synth memory search tests",
-            "synth doctor",
+            "synt memory list",
+            "synt memory search tests",
+            "synt doctor",
         ] {
             assert_ne!(bash(c), D, "{mode:?}: reads stay allowed: {c}");
         }

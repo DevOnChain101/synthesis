@@ -4,7 +4,7 @@ Date 2026-10-28. Driver: `tests/tty-qa/` (see its README). Provider: `omniroute`
 `cc/claude-haiku-5-5` for nearly everything, one run of `cx/gpt-5.6-luna`. Terminal model: pyte, 120x40 unless
 stated, `TERM=xterm-256color COLORTERM=truecolor`, macOS 15 / arm-or-x86 seatbelt backend.
 
-Binaries: most scenarios ran on the `target/debug/synth` built 21:47; the items marked **[re-verified]** were re-run
+Binaries: most scenarios ran on the `target/debug/synt` built 21:47; the items marked **[re-verified]** were re-run
 on the 22:37 build (the other developer's working tree at that time, no later source changes). One earlier "FAIL"
 (digit keys in the approval dialog) turned out to be fixed in the newer build and is not listed as a bug.
 Nothing under `crates/`, `apps/` or `~/Vibe/nemo-cli` was modified; no commit or push.
@@ -58,10 +58,10 @@ PASS = works as designed. PARTIAL = works with a defect. FAIL = broken or missin
 | 37 | Verification gate | FAIL | See B-3 and B-6: 3 to 4 extra dialogs per turn, `※ invalid session transition Verifying -> WaitingApproval`, ends `※ task unverified: unverified` although `4 passed, 0 failed`. |
 | 38 | End-to-end coding task | PARTIAL | Rust: edit + test correct in ~19 s once `--sandbox-read ~/.rustup ~/.cargo` was passed; without it cargo cannot run at all (B-2). Node (nvm) hit the same wall. 9 to 11 dialogs for a 3-line change. |
 | 39 | Error: bad key | PASS | `※ model error: Invalid API key` + `※ task blocked: model_error:auth: Invalid API key` (duplicated, B-19). |
-| 40 | Error: key missing | PARTIAL | TUI refuses to start, exit 2: `synth: error: No credential for provider "omniroute". Set SYNTHESIS_API_KEY / SYNTHESIS_AUTH_TOKEN or the provider's apiKey in config.` (B-20). |
+| 40 | Error: key missing | PARTIAL | TUI refuses to start, exit 2: `synt: error: No credential for provider "omniroute". Set SYNTHESIS_API_KEY / SYNTHESIS_AUTH_TOKEN or the provider's apiKey in config.` (B-20). |
 | 41 | Error: gateway down | PARTIAL | After 6.1 s: `model error: error sending request: client error (Connect): tcp connect error: Connection refused (os error 61)`; no URL or hint, duplicated (B-19). |
 | 42 | Error: network deny | PASS | Default `--network deny`: tool commands have no network (not exercised against a real host). |
-| 43 | Non-TTY, `--once` | PARTIAL | Piped stdin/stdout: `synth: the interactive app needs a terminal on stdin and stdout.` with usage; no `--cwd` on a tty: `synth: error: pass --cwd DIR`. `--once` prints one frame but with 24-bit/256-colour SGR even when stdout is a pipe (B-21). |
+| 43 | Non-TTY, `--once` | PARTIAL | Piped stdin/stdout: `synt: the interactive app needs a terminal on stdin and stdout.` with usage; no `--cwd` on a tty: `synt: error: pass --cwd DIR`. `--once` prints one frame but with 24-bit/256-colour SGR even when stdout is a pipe (B-21). |
 | 44 | Exit paths, terminal restore | PASS | Ctrl+D, `/exit`, double Ctrl+C, SIGTERM, SIGHUP: 1049/1000/1002/1006/2004 off, cursor shown, ICANON/ECHO/ISIG restored, exit code 0 (SIGTERM -15 after restore). SIGINT is ignored in raw mode (by design). |
 | 45 | Colour / no-colour | PASS | `NO_COLOR=1`: zero 48;/38; colour sequences except one stray; `TERM=xterm` without COLORTERM: no 24-bit sequences; `TERM=dumb` still draws the full UI (acceptable). |
 | 46 | Wide Unicode / emoji | PASS | `日本語テキスト 😀 emoji ✅ café Việt Nam` echoed intact, markdown table with `名前`/`言語`/`😀` keeps its borders aligned. |
@@ -86,7 +86,7 @@ toast should also reflect a completed write. (This area is being edited by the o
 cause to hand over.)
 
 **B-2 Default sandbox makes toolchains in $HOME unusable.**
-Repro: `synth --cwd <rust project>`; ask it to run `cargo test`. Result:
+Repro: `synt --cwd <rust project>`; ask it to run `cargo test`. Result:
 `error: could not read settings file: '/Users/<u>/.rustup/settings.toml': Operation not permitted (os error 1) [exit code 1]`.
 Same for nvm-installed node/npm (`/Users/<u>/.nvm/versions/node/...`). The model then burns turns on `ls -la ~/.rustup`
 and tells the user to grant Full Disk Access, which is wrong. Passing `--sandbox-read ~/.rustup --sandbox-read ~/.cargo`
@@ -161,7 +161,7 @@ snippet, relative time, current-folder filter first.
 **B-18** Completed Bash rows show `Bash(Run cargo test)` (the description) instead of the command; edit rows change name/path between running and done (`Edit(lib.rs)` -> `Update(src/lib.rs)`). Spinner says `Pondering` while a tool runs; elapsed shows `0s` for a user `!!sleep 3`.
 **B-19** Model errors are printed twice and with internal codes: `※ model error: Invalid API key` + `※ task blocked: model_error:auth: Invalid API key`; the network error has no gateway URL and takes 6.1 s.
 **B-20** A missing API key makes the TUI exit with code 2 instead of opening and explaining/offering `/model`.
-**B-21** `synth --once > file` embeds colour escapes (`ESC[38;5;147m...`) although stdout is not a tty.
+**B-21** `synt --once > file` embeds colour escapes (`ESC[38;5;147m...`) although stdout is not a tty.
 **B-22** Fenced code blocks render with a diff gutter (`│ + fn main() {`), implying additions.
 **B-23** Welcome box prints `cwd:` with no value (also at 100 cols).
 **B-24** After scrolling up, typing a character does not return the view to the bottom.
@@ -169,14 +169,14 @@ snippet, relative time, current-folder filter first.
 **B-26** Each `TodoWrite` call re-prints the full list in the transcript (three lists for a 3-step task) in addition to the live panel.
 **B-27** Footer/status truncation: `verify unve…`, `terminal too small · need 60x…` at 30 cols.
 **B-28** Sub-agent notices print the full UUID (`agent 1cd743bb-b6fd-43bc-b9bb-73f61bdd6b54 started`) instead of the short id used in row prefixes.
-**B-29** MCP approval says `unknown tool requires confirmation` (`synthesis-permissions/src/lib.rs:1380`); `synth mcp get echo` says `no such server` while `synth mcp test echo` finds the project server.
+**B-29** MCP approval says `unknown tool requires confirmation` (`synthesis-permissions/src/lib.rs:1380`); `synt mcp get echo` says `no such server` while `synt mcp test echo` finds the project server.
 **B-30** Footer shows `effort: auto` but there is no control or documentation to change effort tiers; thinking display could not be verified.
 **B-31** A 300-line paste is inserted verbatim into the prompt box (no collapsed `[Pasted text #1 +300 lines]`).
 **B-32** Backspace on `Việt` typed as NFD removes one combining codepoint (`ệ` -> `ê`) instead of the grapheme cluster.
 **B-33** Shift+Enter in the xterm `modifyOtherKeys` encoding (`ESC[27;2;13~`) is ignored (inserts nothing). Terminals without CSI-u cannot distinguish Shift+Enter; Alt+Enter and `\`+Enter work.
 **B-34** The hardware cursor is always hidden and parked bottom-right; macOS IME (Vietnamese Telex, CJK) places its candidate window at the hardware cursor, so composition will appear at the wrong place. Needs a real-terminal check; consider showing and positioning the hardware cursor at the caret.
 
-## 2a. Status after fixes (re-checked 2026-10-29 on a fresh `target/debug/synth`)
+## 2a. Status after fixes (re-checked 2026-10-29 on a fresh `target/debug/synt`)
 
 fixed = behaviour verified (unit/e2e test or the TTY driver); partly = improved, a part remains; open = not changed.
 "Ev" says how it was verified: T = test in the repo, D = tty-qa driver on the real binary, C = code reading only.
@@ -202,8 +202,8 @@ fixed = behaviour verified (unit/e2e test or the TTY driver); partly = improved,
 | B-17 | P2 | fixed | `/status` prints no Rust Debug and uses the footer's mode names; `new_slash_commands_ask_the_host_and_status_has_no_debug_output` (T). |
 | B-18 | P2 | partly | edit rows are `Update(<path>)` while running and when done (was `Edit(lib.rs)` then `Update(src/lib.rs)`); Bash rows show the command, not the model's description; spinner verbs are Working/Thinking/Reasoning/Planning (was 16 whimsical ones). Still open: the spinner verb does not name the running tool, and a user `!!sleep 3` shows `0s` elapsed. Goldens: 4 divergence reasons in `golden_divergences.txt`. |
 | B-19 | P2 | fixed | one `※ model error:` line plus `※ task failed` (no code repeat); connection errors read `cannot reach 127.0.0.1:1 (Connection refused (os error 61)). Check that the gateway is running and the provider baseURL is right, then retry`, host:port only, no retries, 0.1 s instead of 6.1 s (D, `network_error_text_has_no_credentials` T). |
-| B-20 | P2 | fixed | missing key: `synth: error: no API key for provider "gw": set GW_KEY and restart`, exit 2, immediately, no Debug/stack (D). The TUI still does not open to offer `/model`: by design a session needs a credential. |
-| B-21 | P2 | fixed | `synth --once` to a pipe emits no ESC bytes (D). |
+| B-20 | P2 | fixed | missing key: `synt: error: no API key for provider "gw": set GW_KEY and restart`, exit 2, immediately, no Debug/stack (D). The TUI still does not open to offer `/model`: by design a session needs a credential. |
+| B-21 | P2 | fixed | `synt --once` to a pipe emits no ESC bytes (D). |
 | B-22 | P2 | fixed | fenced code uses a plain `│ ` gutter (documented divergence). |
 | B-23 | P2 | fixed | `welcome_box_shows_the_folder` (T); the driver shows `cwd: /private/...` (D). |
 | B-24 | P2 | fixed | typing brings the view back to the prompt (`app.rs`, scroll reset on text) (C). |
@@ -211,7 +211,7 @@ fixed = behaviour verified (unit/e2e test or the TTY driver); partly = improved,
 | B-26 | P2 | fixed | TodoWrite calls share one row (`interrupted_bash_keeps_its_output_todo_calls_share_a_row_...`) (T). |
 | B-27 | P2 | fixed | status line: mode > model > effort, whole items only; key-hint footer and bottom status line drop whole hints (`fit_items`), prompt placeholder is cut at ` · `; header chips drop cwd before context % before model; `terminal too small` picks a shorter wording that fits (D, T). Goldens: divergences with reasons. |
 | B-28 | P2 | fixed | sub-agent notices use the short id (`short_id`) (C). |
-| B-29 | P2 | open | `unknown tool requires confirmation` for MCP tools is the permission engine's reason string (`synthesis-permissions/src/lib.rs`, golden-covered); not touched (permissions area). `synth mcp get` vs `test` not re-checked. |
+| B-29 | P2 | open | `unknown tool requires confirmation` for MCP tools is the permission engine's reason string (`synthesis-permissions/src/lib.rs`, golden-covered); not touched (permissions area). `synt mcp get` vs `test` not re-checked. |
 | B-30 | P2 | fixed | `/effort [auto\|low\|medium\|high]` and Alt+T cycle the tiers declared in `capabilities.effort_tiers`; the footer shows `effort: <tier>`; the harness sends `reasoning_effort` on the following requests (OpenAI-compatible protocol only). Thinking text display still not verifiable (haiku returns none). `effort_cycles_with_alt_t_and_shows_in_the_footer` (T). |
 | B-31 | P2 | fixed | `[Pasted text #1 +300 lines]` chip; `a_big_paste_is_a_chip_that_expands_when_sent` (T). |
 | B-32 | P2 | fixed | `backspace_removes_a_decomposed_letter_whole` (T). |

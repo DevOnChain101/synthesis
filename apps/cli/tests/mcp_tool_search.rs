@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 fn server() -> PathBuf {
     static P: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     P.get_or_init(|| {
-        let exe = Path::new(env!("CARGO_BIN_EXE_synth"));
+        let exe = Path::new(env!("CARGO_BIN_EXE_synt"));
         let profile = exe.parent().unwrap();
         let p = profile.join("examples").join("atlassian_like_server");
         let mut c = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
@@ -46,7 +46,7 @@ fn run(script: Value, project_settings: Option<Value>) -> Vec<(String, String)> 
     }
     let s = dir.path().join("script.json");
     std::fs::write(&s, script.to_string()).unwrap();
-    let o = Command::new(env!("CARGO_BIN_EXE_synth"))
+    let o = Command::new(env!("CARGO_BIN_EXE_synt"))
         .args(["run", "--cwd"])
         .arg(&ws)
         .arg("--provider")

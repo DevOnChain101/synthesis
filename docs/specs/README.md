@@ -19,8 +19,8 @@ Review record: all seven specs were reviewed and approved by the product owner o
 ## Decisions taken in these drafts (challenge them here)
 1. Ported tools keep their Node/Claude names (`Read`, `Bash`, …). Doc §5.6 ids map onto them; new tools use `_` instead of `.` on the wire (dots are not valid in provider tool names). tools.md §1.
 2. `Idle` and `Recovering` are added to `SessionStatus`; terminal statuses are per task, and the session ends with `session.completed|failed|cancelled`. workspace-context.md §3.
-3. `--cwd DIR` is optional: without it the CLI boundary (`launch_dir()` in `apps/cli/src/main.rs`) reads the launch directory once; the libraries never read the process cwd (clippy bars `std::env::current_dir`) and always take an explicit cwd. Owner fix 2026-10-31 (plain `synth` used to fail with `pass --cwd DIR`). workspace-context.md §4.1.
-4. Headless `ask` is never prompted (no stdin approval). What happens depends on the permission MODE (`synth run --permission-mode`, tools.md §3) plus a pre-declared allowlist (`--allow` / settings); an ask nobody can answer is auto-denied, and a denied write/execute call ends the task `blocked` / `approval_unavailable`. Node's "outside read is allowed when nobody can answer" is not carried over. Owner decision 2026-10-28. tools.md §3.
+3. `--cwd DIR` is optional: without it the CLI boundary (`launch_dir()` in `apps/cli/src/main.rs`) reads the launch directory once; the libraries never read the process cwd (clippy bars `std::env::current_dir`) and always take an explicit cwd. Owner fix 2026-10-31 (plain `synt` used to fail with `pass --cwd DIR`). workspace-context.md §4.1.
+4. Headless `ask` is never prompted (no stdin approval). What happens depends on the permission MODE (`synt run --permission-mode`, tools.md §3) plus a pre-declared allowlist (`--allow` / settings); an ask nobody can answer is auto-denied, and a denied write/execute call ends the task `blocked` / `approval_unavailable`. Node's "outside read is allowed when nobody can answer" is not carried over. Owner decision 2026-10-28. tools.md §3.
 5. Policy is re-checked after a hook or approver rewrites tool input (Node does not). tools.md §3.
 6. Rust adds nothing to `config.json/v1` during the parallel run; Rust-only settings live under `"synthesis"` in `settings.json`. config.md §6.
 7. Rust mirror-writes Node-shaped transcript JSONL until cutover; SQLite is the source of truth. session-store.md §C.
@@ -36,7 +36,7 @@ Also open, lower stakes: thinking deltas in the stream; artifact retention defau
 
 ## Found in the Node reference that the doc or the task brief do not reflect
 - Node transcripts live in `$SYNTHESIS_HOME/projects/…` (`~/.synthesis`), not `~/.claude/projects` (transcript.js:32, watcher.js:11-12); the `~/.claude/projects` comment in history.js:3 is stale. Claude Code's tree is only read to import memory.
-- Node has no headless/JSONL mode and no exit-code contract (bin/synth.js uses 1 for every error, 130 for SIGINT).
+- Node has no headless/JSONL mode and no exit-code contract (bin/synt.js uses 1 for every error, 130 for SIGINT).
 - Node has no JSON Schema validation of tool input; each tool checks fields by hand.
 - Node tool paths have no containment: `resolvePath` accepts any absolute path (tools/util.js:10). Containment exists only in the permission layer (ask/deny), with realpath and case folding (permissions.js:323-353, 380-386).
 - Node agent cwd defaults to `process.cwd()` (agent.js:303): the implicit inheritance the doc forbids.

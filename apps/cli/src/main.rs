@@ -1,4 +1,4 @@
-//! `synth`: headless run, `auth status`, `models`, `doctor`.
+//! `synt`: headless run, `auth status`, `models`, `doctor`.
 //!
 //! The process environment is read once (`Env::from_process`) and passed down. The binary never
 //! asks for the process cwd: `run` requires `--cwd`; other commands take an optional `--cwd`.
@@ -21,7 +21,7 @@ use synthesis_config::Env;
 
 #[derive(Parser)]
 #[command(
-    name = "synth",
+    name = "synt",
     version,
     about = "Synthesis autonomous coding agent",
     arg_required_else_help = true
@@ -86,7 +86,7 @@ fn main() -> ExitCode {
     match r {
         Ok(code) => ExitCode::from(code),
         Err(msg) => {
-            eprintln!("synth: error: {msg}");
+            eprintln!("synt: error: {msg}");
             ExitCode::from(2)
         }
     }

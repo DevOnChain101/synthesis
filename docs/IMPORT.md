@@ -1,11 +1,11 @@
-# Importing a Claude Code setup (`synth import claude`)
+# Importing a Claude Code setup (`synt import claude`)
 
-`synth import claude` COPIES and CONVERTS your Claude Code configuration into Synthesis-owned files so
+`synt import claude` COPIES and CONVERTS your Claude Code configuration into Synthesis-owned files so
 Synthesis runs in an equivalent environment. Synthesis never reads `~/.claude` at runtime (ADR-011, only
 `SYNTHESIS_*` settings); after the import the Synthesis files are yours and the Claude ones are untouched.
 
 ```
-synth import claude [--scope user|project|all] [--project-dir DIR] [--from DIR]
+synt import claude [--scope user|project|all] [--project-dir DIR] [--from DIR]
                    [--dry-run | --apply] [--only LIST]
                    [--merge | --overwrite | --skip-existing]
                    [--accept-broad-allow] [--accept-hooks]
@@ -16,7 +16,7 @@ synth import claude [--scope user|project|all] [--project-dir DIR] [--from DIR]
 - `--from` defaults to `$HOME/.claude`; `~/.claude.json` is read from its parent directory.
   `--project-dir` is required for the project scope (`all` without it imports the user scope only).
   Targets are `$SYNTHESIS_HOME` (default `~/.synthesis`) and `<project>/.synthesis`. All paths derive from the
-  injected environment, so `HOME=/tmp/x SYNTHESIS_HOME=/tmp/x/.synthesis synth import claude --from /tmp/x/.claude`
+  injected environment, so `HOME=/tmp/x SYNTHESIS_HOME=/tmp/x/.synthesis synt import claude --from /tmp/x/.claude`
   never touches the real home.
 - `--only` takes `instructions,permissions,hooks,env,agents,skills,commands,mcp,memory`
   (default: all but `memory`).
@@ -25,7 +25,7 @@ synth import claude [--scope user|project|all] [--project-dir DIR] [--from DIR]
 
 | Claude source | Synthesis target | Notes |
 |---|---|---|
-| `~/.claude/CLAUDE.md`, `~/.claude/rules/*.md` | `$SYNTHESIS_HOME/SYNTHESIS.md`, `rules/` | header `<!-- imported from ... on DATE by synth import claude -->`, content verbatim; relative `@imports` are copied to `imports/` and rewritten; path-scoped rules (`paths:`) load for every task (warned) |
+| `~/.claude/CLAUDE.md`, `~/.claude/rules/*.md` | `$SYNTHESIS_HOME/SYNTHESIS.md`, `rules/` | header `<!-- imported from ... on DATE by synt import claude -->`, content verbatim; relative `@imports` are copied to `imports/` and rewritten; path-scoped rules (`paths:`) load for every task (warned) |
 | project `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md` | nothing | Synthesis already loads them from the project. Only when `.claude/rules/*.md` exist: `.synthesis/rules/*` plus a project `SYNTHESIS.md` (base text + `@.synthesis/rules/..` lines). A project `SYNTHESIS.md`/`AGENTS.md` wins over `CLAUDE.md` (reported) |
 | `settings.json` (`.claude/settings.local.json` for the project) | `settings.json` (`.synthesis/settings.local.json`, listed in `.synthesis/.gitignore`) | `permissions.allow/ask/deny/additionalDirectories/defaultMode`, `hooks`, `env` |
 | `agents/*.md`, `skills/*/` (whole directory), `commands/**/*.md` | `agents/`, `skills/`, `commands/` | frontmatter kept; tool names translated; unsupported fields listed. Synthesis has no slash-command loader yet: commands are staged only |
@@ -45,7 +45,7 @@ warning; an agent whose tools all vanish gets an empty `tools:` (no tools), neve
 - **`defaultMode: bypassPermissions` or `auto`**: mapped to `default` with a warning.
 - **Broad allow rules** (`Bash`, `Bash(*)`, `Write`, `Edit`, `WebFetch`, `*`): skipped unless `--accept-broad-allow`.
 - **Rules Synthesis cannot represent** (unknown tool, malformed): dropped with a warning. A dropped `deny` rule is flagged loudly: that restriction is NOT carried over.
-- **User-scope hooks**: printed (credential-looking words masked) and written only with `--accept-hooks`. Unsupported events (e.g. `SubagentStart`) are skipped. Project hooks are written but stay inert until the project is trusted (`--trust-project`). Treat imported hooks as unreviewed; `synth doctor` shows the count.
+- **User-scope hooks**: printed (credential-looking words masked) and written only with `--accept-hooks`. Unsupported events (e.g. `SubagentStart`) are skipped. Project hooks are written but stay inert until the project is trusted (`--trust-project`). Treat imported hooks as unreviewed; `synt doctor` shows the count.
 - **`env`**: secret-shaped names (`*KEY*`, `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, ...) and `ANTHROPIC_/OPENAI_/CLAUDE_/CODEX_` prefixes are skipped; only names are listed.
 - `model` (noted only; use `SYNTHESIS_MODEL`), `statusLine`, `enabledPlugins`, theme and other keys (listed by name).
 
@@ -72,14 +72,14 @@ your own `synthesis.json` start without it (it is your file, and you just review
 - `--merge` (default): lists are unioned, scalars and existing servers keep your value, files
   Synthesis did not write itself are kept (reported). `--overwrite` replaces what the import manages.
   `--skip-existing` never touches an existing file.
-- Copied files are tracked in `<root>/imports/claude.json`; `synth doctor` prints its counts and which instruction files apply.
+- Copied files are tracked in `<root>/imports/claude.json`; `synt doctor` prints its counts and which instruction files apply.
 
 ## Example
 
 ```
-$ synth import claude --project-dir ~/code/app            # plan only
-$ synth import claude --project-dir ~/code/app --apply    # write
-$ synth import claude --apply --accept-hooks --only hooks # after reviewing the hooks
+$ synt import claude --project-dir ~/code/app            # plan only
+$ synt import claude --project-dir ~/code/app --apply    # write
+$ synt import claude --apply --accept-hooks --only hooks # after reviewing the hooks
 ```
 
 ## Undo

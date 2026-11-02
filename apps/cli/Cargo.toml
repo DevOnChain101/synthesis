@@ -9,7 +9,7 @@ license.workspace = true
 workspace = true
 
 [[bin]]
-name = "synth"
+name = "synt"
 path = "src/main.rs"
 
 [features]

@@ -5,7 +5,7 @@ use std::process::{Command, Output};
 const KEY: &str = "sk-planted-SECRETKEY0123456789abcdef";
 
 fn synthesis(home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_synth"))
+    Command::new(env!("CARGO_BIN_EXE_synt"))
         .args(args)
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -26,7 +26,7 @@ fn text(b: &[u8]) -> String {
 fn run_without_cwd_uses_the_launch_dir() {
     // no --cwd: the launch directory is the workspace, so the failure is the missing model, not the cwd
     let h = tempfile::tempdir().unwrap();
-    let o = Command::new(env!("CARGO_BIN_EXE_synth"))
+    let o = Command::new(env!("CARGO_BIN_EXE_synt"))
         .args(["run", "--prompt", "x"])
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -48,7 +48,7 @@ fn doctor_works_without_cwd_flag() {
     std::fs::create_dir(&ws).unwrap();
     {
         let args = &["doctor"][..];
-        let o = Command::new(env!("CARGO_BIN_EXE_synth"))
+        let o = Command::new(env!("CARGO_BIN_EXE_synt"))
             .args(args)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -146,7 +146,7 @@ fn doctor_names_the_invalid_config_file() {
 #[test]
 fn models_json_comes_from_config_without_network() {
     let h = tempfile::tempdir().unwrap();
-    let o = Command::new(env!("CARGO_BIN_EXE_synth"))
+    let o = Command::new(env!("CARGO_BIN_EXE_synt"))
         .args(["models", "--json"])
         .env_clear()
         .env("HOME", h.path())
@@ -190,6 +190,6 @@ fn no_subcommand_prints_usage_and_exits_2() {
     let h = tempfile::tempdir().unwrap();
     let o = synthesis(h.path(), &[]);
     assert_eq!(o.status.code(), Some(2));
-    assert!(text(&o.stderr).contains("Usage: synth"));
+    assert!(text(&o.stderr).contains("Usage: synt"));
     assert!(o.stdout.is_empty());
 }

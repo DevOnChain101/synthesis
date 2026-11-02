@@ -127,21 +127,21 @@ jobs:
       - name: Build
         run: |
           pkgs=(-p synthesis-cli)
-          # Landlock backend looks for synthesis-sandbox-exec next to synth (crates/synthesis-sandbox/src/linux.rs).
+          # Landlock backend looks for synthesis-sandbox-exec next to synt (crates/synthesis-sandbox/src/linux.rs).
           case "$TARGET" in *linux*) pkgs+=(-p synthesis-sandbox);; esac
           cargo build --release --locked --target "$TARGET" "${pkgs[@]}"
       - name: Locate artifacts
         run: |
           d="target/$TARGET/release"
           exe=""; case "$TARGET" in *windows*) exe=".exe";; esac
-          echo "BIN=$d/synth$exe" >>"$GITHUB_ENV"
+          echo "BIN=$d/synt$exe" >>"$GITHUB_ENV"
           case "$TARGET" in *linux*) echo "HELPER=$d/synthesis-sandbox-exec" >>"$GITHUB_ENV";; esac
       - name: Prove the scripted test provider is absent
         run: bash scripts/check-no-test-provider.sh "$BIN"
       - name: Smoke test
         run: |
           "$BIN" --version | tee version.txt
-          grep -q "synth $VERSION" version.txt
+          grep -q "synt $VERSION" version.txt
           "$BIN" doctor --cwd "$RUNNER_TEMP"
 
       - name: Package

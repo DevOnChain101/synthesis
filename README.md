@@ -12,7 +12,7 @@ Pick one (details in [docs/INSTALL.md](docs/INSTALL.md)):
 # macOS / Linux: checksum + provenance verified (provenance needs gh, else checksum only with a warning), no sudo, installs to ~/.local/bin
 curl --proto '=https' --tlsv1.2 -fsSL https://github.com/DevOnChain101/nemo-acd/releases/latest/download/install.sh | sh
 # any OS with Node >= 18: native binary via platform packages
-npm install -g @devonchain101/synthesis   # installs the command `synth`
+npm install -g @devonchain101/synthesis   # installs the command `synt`
 ```
 
 Windows (PowerShell 7+): `irm https://github.com/DevOnChain101/nemo-acd/releases/latest/download/install.ps1 | iex`. Release archives, SHA256SUMS and build provenance are on the GitHub Releases page. License: Apache-2.0.
@@ -24,12 +24,12 @@ Synthesis uses API keys only (ADR-011): no subscription login, no keychain, noth
 ```sh
 export SYNTHESIS_API_KEY=...             # see docs/specs/config.md for the full list
                                     # (SYNTHESIS_ANTHROPIC_API_KEY, SYNTHESIS_AUTH_TOKEN, SYNTHESIS_BASE_URL, SYNTHESIS_MODEL, ...)
-synth doctor --cwd .                 # sandbox backend, shell, browser, git, config, proxy, legacy-name and PATH-shadowing hints
-synth models                         # configured models
-synth run --cwd . --model provider/model --prompt "fix the failing test in src/parser"
+synt doctor --cwd .                 # sandbox backend, shell, browser, git, config, proxy, legacy-name and PATH-shadowing hints
+synt models                         # configured models
+synt run --cwd . --model provider/model --prompt "fix the failing test in src/parser"
 ```
 
-`synth run` is headless: events are JSON lines on stdout (schema in `docs/specs/events.md`). `--cwd DIR` picks the workspace (default: the directory you start `synth` in). Budgets: `--max-turns`, `--max-tool-calls`, `--max-cost-usd`, `--max-wall-secs`. `--permission-mode default|acceptEdits|plan|dontAsk|auto|bypassPermissions` (docs/CLI.md; with nobody to ask, `synth run` denies what the mode would ask and ends `blocked`, exit 4).
+`synt run` is headless: events are JSON lines on stdout (schema in `docs/specs/events.md`). `--cwd DIR` picks the workspace (default: the directory you start `synt` in). Budgets: `--max-turns`, `--max-tool-calls`, `--max-cost-usd`, `--max-wall-secs`. `--permission-mode default|acceptEdits|plan|dontAsk|auto|bypassPermissions` (docs/CLI.md; with nobody to ask, `synt run` denies what the mode would ask and ends `blocked`, exit 4).
 
 ## Sandbox and network
 
@@ -56,7 +56,7 @@ During the parallel run both CLIs can be installed. See [docs/MIGRATION.md](docs
 - Not yet run end to end on GitHub CI, Linux or Windows by the maintainers; release pipeline and signing are unverified until the first tag.
 - Windows has no filesystem or network sandbox; macOS Seatbelt is deprecated by Apple and best-effort.
 - Eval parity with the Node CLI against real models is not yet measured (cutover gate).
-- There is no interactive UI: the terminal app and the desktop app were removed on 2026-10-31 (archived at tag `archive/ui-before-removal`; to be rebuilt later from the HTML design). `synth` is headless. Durable sessions and worktrees are incomplete; see `docs/STATUS.md`.
+- There is no interactive UI: the terminal app and the desktop app were removed on 2026-10-31 (archived at tag `archive/ui-before-removal`; to be rebuilt later from the HTML design). `synt` is headless. Durable sessions and worktrees are incomplete; see `docs/STATUS.md`.
 
 ## Development
 

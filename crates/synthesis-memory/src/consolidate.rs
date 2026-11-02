@@ -22,7 +22,7 @@ impl Store {
         Ok(n > 0 && n % EVERY_N_TASKS == 0)
     }
 
-    /// [`Store::consolidate`] for every workspace (`synth memory prune`).
+    /// [`Store::consolidate`] for every workspace (`synt memory prune`).
     pub fn consolidate_all(&mut self) -> Result<usize> {
         let keys: Vec<String> = {
             let mut st = self

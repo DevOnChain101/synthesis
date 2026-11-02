@@ -1,4 +1,4 @@
-//! `synth import claude` against the synthetic fixture in tests/fixtures/import (no real data).
+//! `synt import claude` against the synthetic fixture in tests/fixtures/import (no real data).
 //! Every run has an empty environment except PATH/HOME/SYNTHESIS_HOME pointing into a temp dir.
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -62,7 +62,7 @@ fn fixture() -> Fx {
 }
 
 fn synthesis(fx: &Fx, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_synth"))
+    Command::new(env!("CARGO_BIN_EXE_synt"))
         .args(args)
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -136,7 +136,7 @@ fn apply_is_idempotent_and_makes_no_second_backup() {
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert!(fx.home.join(".synthesis/SYNTHESIS.md").is_file());
     let first = fs::read_to_string(fx.home.join(".synthesis/SYNTHESIS.md")).unwrap();
-    assert!(first.starts_with("<!-- imported from ") && first.contains("by synth import claude"));
+    assert!(first.starts_with("<!-- imported from ") && first.contains("by synt import claude"));
     assert!(first.contains("@imports/notes_md.md") && first.contains("@rules/style.md"));
     let o = import(&fx, &["--apply", "--accept-hooks"]);
     let s = out(&o);

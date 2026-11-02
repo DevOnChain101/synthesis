@@ -309,7 +309,7 @@ impl Config {
                 .any(|r| !r.starts_with("sess:") && rule_matches(r, p))
     }
 
-    /// Problems in the user's settings that make a rule inert, for `synth doctor`.
+    /// Problems in the user's settings that make a rule inert, for `synt doctor`.
     pub fn delegation_warnings(&self) -> Vec<String> {
         self.delegation_allow
             .iter()

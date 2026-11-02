@@ -318,19 +318,19 @@ fn over_cap(conn: &Connection, caps: &Caps) -> rusqlite::Result<Vec<(String, Str
         .collect())
 }
 
-/// One line per exceeded budget, for `memory stats` and `synth doctor`.
+/// One line per exceeded budget, for `memory stats` and `synt doctor`.
 pub fn budget_warnings(conn: &Connection, db_bytes: u64) -> rusqlite::Result<Vec<String>> {
     let caps = Caps::default();
     let mut v: Vec<String> = over_cap(conn, &caps)?
         .into_iter()
         .map(|(sc, k, n, cap)| {
             let who = if sc == "user" { "user scope".into() } else { format!("workspace {k}") };
-            format!("{who} has {n} active records (soft cap {cap}); `synth memory prune` archives the oldest episodes")
+            format!("{who} has {n} active records (soft cap {cap}); `synt memory prune` archives the oldest episodes")
         })
         .collect();
     if db_bytes > caps.db_bytes {
         v.push(format!(
-            "memory.db is {} MiB (soft cap {} MiB); `synth memory prune` archives the oldest episodes",
+            "memory.db is {} MiB (soft cap {} MiB); `synt memory prune` archives the oldest episodes",
             db_bytes >> 20,
             caps.db_bytes >> 20
         ));
@@ -791,7 +791,7 @@ impl Store {
         self.replace_with(old, n, false)
     }
 
-    /// Like [`Store::replace`] for the owner's own edit (`synth memory edit`): an `owner` record
+    /// Like [`Store::replace`] for the owner's own edit (`synt memory edit`): an `owner` record
     /// may be replaced because the person asked.
     pub fn revise(&mut self, old: &str, n: NewMemory) -> Result<PutOutcome> {
         self.replace_with(old, n, true)
@@ -828,7 +828,7 @@ impl Store {
             > 0)
     }
 
-    /// Purges one workspace's records and its row (`synth memory delete --workspace`).
+    /// Purges one workspace's records and its row (`synt memory delete --workspace`).
     pub fn delete_workspace(&mut self, key: &str) -> Result<usize> {
         let tx = self
             .conn

@@ -11,7 +11,7 @@ title=${2:-$log}
 max=${DIGEST_MAX:-60}
 
 env_dump() {
-  local py chrome synth=target/debug/synth
+  local py chrome synt=target/debug/synt
   py=$(python3 --version 2>&1 || python --version 2>&1 || echo none)
   echo "env: os=$(uname -s) arch=$(uname -m) runner=${RUNNER_OS:-local} node=$(node --version 2>/dev/null || echo none) python=${py%%$'\n'*} git=$(git --version 2>/dev/null || echo none)"
   if [ -n "${SYNTHESIS_BROWSER_PATH:-}" ]; then
@@ -28,10 +28,10 @@ env_dump() {
       "max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo n/a)" \
       "lsm=$(cat /sys/kernel/security/lsm 2>/dev/null || echo n/a)" "bwrap=$(command -v bwrap || echo none)"
   fi
-  if [ ! -x "$synth" ] && [ -x "$synth.exe" ]; then synth=$synth.exe; fi
-  if [ -x "$synth" ]; then
-    echo "synth doctor (sandbox):"
-    "$synth" doctor --cwd "${RUNNER_TEMP:-${TMPDIR:-/tmp}}" 2>&1 | grep -E 'default mode: enforce|enforce_ready|^  selected |available:' | sed 's/^/  /'
+  if [ ! -x "$synt" ] && [ -x "$synt.exe" ]; then synt=$synt.exe; fi
+  if [ -x "$synt" ]; then
+    echo "synt doctor (sandbox):"
+    "$synt" doctor --cwd "${RUNNER_TEMP:-${TMPDIR:-/tmp}}" 2>&1 | grep -E 'default mode: enforce|enforce_ready|^  selected |available:' | sed 's/^/  /'
   fi
 }
 

@@ -282,7 +282,7 @@ Normative spec: `docs/specs/memory.md` (it includes the audit of today's memory)
   - Consolidation merges, decays and archives records. It promotes repeated lessons into **skill proposals** and stable facts into **`SYNTHESIS.md` diff proposals**; only the owner applies a proposal.
 - **Interfaces:**
   - Tools: `MemorySearch`, `MemoryWrite`, `MemoryUpdate`, `MemoryForget`, under permission rules.
-  - CLI: `synth memory list|search|show|add|edit|delete|review|apply|export|import|stats|prune|reflect`.
+  - CLI: `synt memory list|search|show|add|edit|delete|review|apply|export|import|stats|prune|reflect`.
   - TUI: `/memory` and `#`.
 - **Safety:**
   - Memory is data: it never grants permissions and never edits instruction files.
@@ -686,7 +686,7 @@ Indicative effort is about 9-11 months for one engineer (low confidence).
 
 ### Phase 7 — Long-term memory (P1; roadmap R11)
 
-**Deliverables:** M0 fixes of today's memory gaps (instruction and skill discovery from the project root, the read-deny predicate on instruction files, `TaskState` updates, a stable `workspace_key`, sandbox deny for the stores); the `synthesis-memory` crate (schema, FTS5 retrieval, scanner, redaction, export/import); deterministic episodes; memory tools, `synth memory` CLI and TUI `/memory`/`#`; the reflection loop with skill and `SYNTHESIS.md` proposals; consolidation and decay; optional embeddings behind a feature flag; the memory evaluation (specs/memory.md §12).
+**Deliverables:** M0 fixes of today's memory gaps (instruction and skill discovery from the project root, the read-deny predicate on instruction files, `TaskState` updates, a stable `workspace_key`, sandbox deny for the stores); the `synthesis-memory` crate (schema, FTS5 retrieval, scanner, redaction, export/import); deterministic episodes; memory tools, `synt memory` CLI and TUI `/memory`/`#`; the reflection loop with skill and `SYNTHESIS.md` proposals; consolidation and decay; optional embeddings behind a feature flag; the memory evaluation (specs/memory.md §12).
 
 **Exit criteria:** the memory acceptance scenarios in §11.1 pass on macOS, Linux and Windows CI; the memory crate passes a security review; on paired repeat tasks warm runs meet the targets in specs/memory.md §12 (otherwise injection defaults to off).
 
@@ -717,7 +717,7 @@ Indicative effort is about 9-11 months for one engineer (low confidence).
 | Secret in tool output | No memory record or export contains the secret (redacted or dropped) |
 | Memory opt-out | With memory off for the workspace or `--no-memory`, no record is read or written and no memory tool is offered |
 | Two sessions finishing tasks in one repository | Both episodes are stored with no lost write or duplicate; one reflection job runs per task |
-| Learned skill or `SYNTHESIS.md` change | Appears only as a proposal; no instruction or skill file changes until `synth memory apply` |
+| Learned skill or `SYNTHESIS.md` change | Appears only as a proposal; no instruction or skill file changes until `synt memory apply` |
 
 ### 11.2 Quality metrics
 

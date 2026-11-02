@@ -46,3 +46,18 @@ if (bad.length) {
   process.exit(1);
 }
 console.log(`check-no-legacy-name: ${files.length} tracked files ok`);
+
+// The command is `synt` (2026-11-02); a whole-word `synth` is the retired command name. Allowed: history and recorded oracle data.
+const synthOk = (f) => f === "CHANGELOG.md" || f === "CLAUDE.md" || f === "scripts/check-no-legacy-name.mjs" || f.startsWith("tests/golden/");
+const old = [];
+for (const f of files) {
+  if (synthOk(f)) continue;
+  let buf;
+  try { buf = readFileSync(join(root, f)); } catch { continue; }
+  if (buf.includes(0)) continue;
+  buf.toString("utf8").split("\n").forEach((line, i) => { if (/(?<![A-Za-z0-9])synth(?![A-Za-z])|CARGO_BIN_EXE_synth\b/.test(line)) old.push(`${f}:${i + 1}: ${line.trim().slice(0, 140)}`); });
+}
+if (old.length) {
+  console.error(`check-no-legacy-name: ${old.length} reference(s) to the retired command \`synth\` (now \`synt\`):\n${old.join("\n")}`);
+  process.exit(1);
+}

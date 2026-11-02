@@ -172,7 +172,7 @@ pub fn auto_memory_key(dir: &Path) -> String {
     format!("{}-{hex}", synthesis_session::node::sanitize_path(&real))
 }
 
-/// Notes staged by `synth import claude` under `$SYNTHESIS_HOME/projects/<sanitized dir>/memory/*.md`,
+/// Notes staged by `synt import claude` under `$SYNTHESIS_HOME/projects/<sanitized dir>/memory/*.md`,
 /// for any of `dirs` (workspace root, launch dir). One low-priority block: `MEMORY.md` first, then
 /// the other files by name, size-capped. It travels as a project-scope (untrusted data) file, so
 /// it is fenced and defanged like repository text and never overrides real instructions.

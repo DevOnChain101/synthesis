@@ -162,7 +162,7 @@ Memory is long-lived, trust-scored, scanner-filtered and retrieved **once at tas
 ### P0. Default allow list includes sibling worktrees
 With peers enabled, the default allow list becomes "same `repo_key`" (all worktrees of this repository) instead of "same worktree root". Addressing keeps `workspace_key` per worktree (D16 unchanged).
 
-## 4. End-to-end tests (two real `synth run` processes)
+## 4. End-to-end tests (two real `synt run` processes)
 **Rig.** Extends `apps/cli/tests/e2e.rs` `Rig`:
 - One temp `SYNTHESIS_HOME` is shared by both processes. User `settings.json`: `synthesis.peers.enabled: true`, an allow list naming both workspaces, and `synthesis.pricing` for `fake-model` (else `no_price`).
 - Each process gets `--provider fake:<script>`, `--peers --name <n>`, `--permission-mode acceptEdits`, `--sandbox off` where the host does not confine.

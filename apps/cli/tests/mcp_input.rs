@@ -79,7 +79,7 @@ impl Rig {
     }
 
     fn base(&self, sub: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_synth"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.args(sub)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -89,7 +89,7 @@ impl Rig {
         c
     }
 
-    /// `synth run` with the prompt flag and extra args; returns the output and the user message.
+    /// `synt run` with the prompt flag and extra args; returns the output and the user message.
     fn run(&self, prompt_args: &[&str], extra: &[&str]) -> (Output, Option<String>) {
         let script = self.dir.path().join("synthesis/script.json");
         let mut c = self.base(&["run", "--cwd"]);

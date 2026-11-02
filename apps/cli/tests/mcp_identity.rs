@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 fn server() -> PathBuf {
     static P: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     P.get_or_init(|| {
-        let exe = Path::new(env!("CARGO_BIN_EXE_synth"));
+        let exe = Path::new(env!("CARGO_BIN_EXE_synt"));
         let profile = exe.parent().unwrap();
         let p = profile.join("examples").join("atlassian_like_server");
         let mut c = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
@@ -61,7 +61,7 @@ impl Rig {
     }
 
     fn cmd(&self, extra_env: &[(&str, &str)]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_synth"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", self.dir.path())
@@ -194,7 +194,7 @@ fn an_anonymous_write_is_flagged_next_to_the_result() {
     );
     assert!(mirror.contains(r#""author":"anonymous""#), "{mirror}");
     assert!(
-        mirror.contains("reports an anonymous principal") && mirror.contains("synth mcp test atl"),
+        mirror.contains("reports an anonymous principal") && mirror.contains("synt mcp test atl"),
         "{mirror}"
     );
 }

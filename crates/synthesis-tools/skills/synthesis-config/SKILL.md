@@ -15,7 +15,7 @@ Use these native locations:
 - `skills/<name>/SKILL.md`: YAML frontmatter with `name` and a discriminating `description`, followed by concise instructions.
 - `agents/<name>.md`: frontmatter may contain `name`, `description`, `tools`, `model`, `profile`, `reasoning`, and `required-capabilities`; the body is the system prompt.
 - `settings.json`: `hooks` and permission guards. Preserve Synthesis event names and validate every command/path.
-- `synthesis.json` (user scope) or `.synthesis/config.json` (project scope): providers, profiles, MCP, and routing. Keep credentials as `{env:NAME}` references or use `synth auth login`.
+- `synthesis.json` (user scope) or `.synthesis/config.json` (project scope): providers, profiles, MCP, and routing. Keep credentials as `{env:NAME}` references or use `synt auth login`.
 
 Agents should normally use `profile: inherit`. Use `fast`, `balanced`, or `deep` profiles for portable intent and a concrete `model` only when the user explicitly requires one. Named agents use their own `model`/`profile`; there is no global sub-agent profile. Direct `@agent` flags may override that definition, while model-generated Task fields cannot. A provider describes transport separately from the advertised model:
 

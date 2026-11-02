@@ -15,7 +15,7 @@ fn host_confines() -> bool {
     static C: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *C.get_or_init(|| {
         let d = tempfile::tempdir().unwrap();
-        let o = Command::new(env!("CARGO_BIN_EXE_synth"))
+        let o = Command::new(env!("CARGO_BIN_EXE_synt"))
             .args(["doctor", "--cwd"])
             .arg(d.path())
             .env("SYNTHESIS_HOME", d.path())
@@ -37,7 +37,7 @@ impl Rig {
     fn run(&self, script: Value, args: &[&str]) -> (Output, Vec<Value>) {
         let s = self.dir.path().join("script.json");
         std::fs::write(&s, script.to_string()).unwrap();
-        let mut c = Command::new(env!("CARGO_BIN_EXE_synth"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.args(["run", "--cwd"])
             .arg(self.ws())
             .arg("--provider")
@@ -94,7 +94,7 @@ fn headless_run_prints_what_permission_is_needed_and_how_to_grant_it() {
     let (o, ev) = r.run(bash("cargo test"), &[]);
     let e = stderr(&o);
     assert!(
-        e.contains("synth: blocked: approval needed for Bash(cargo test:*)")
+        e.contains("synt: blocked: approval needed for Bash(cargo test:*)")
             && e.contains("rerun with --allow 'Bash(cargo test:*)'"),
         "{e}"
     );

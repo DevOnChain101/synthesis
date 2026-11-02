@@ -1,4 +1,4 @@
-//! `synth import claude`: COPY/CONVERT a Claude Code setup into Synthesis-owned files.
+//! `synt import claude`: COPY/CONVERT a Claude Code setup into Synthesis-owned files.
 //!
 //! Claude files are only read here, never at runtime (docs/IMPORT.md). Every path derives from
 //! the injected `Env` (HOME / SYNTHESIS_HOME) or from `--from` / `--project-dir`; nothing else is
@@ -1206,7 +1206,7 @@ impl Imp {
             return Ok(());
         }
         let header = format!(
-            "{HEADER_PREFIX}{} on {} by synth import claude -->\n",
+            "{HEADER_PREFIX}{} on {} by synt import claude -->\n",
             clean(&src.to_string_lossy()),
             self.date
         );
@@ -2087,7 +2087,7 @@ fn claude(env: &Env, a: &ClaudeArgs) -> Result<u8, String> {
     let changes = imp.changes();
 
     out!(
-        "synth import claude: {} from {}",
+        "synt import claude: {} from {}",
         if a.apply { "APPLY" } else { "DRY RUN" },
         clean(&from.to_string_lossy())
     );
@@ -2152,7 +2152,7 @@ fn claude(env: &Env, a: &ClaudeArgs) -> Result<u8, String> {
     Ok(0)
 }
 
-/// `synth doctor`: what imports left behind (counts and paths only).
+/// `synt doctor`: what imports left behind (counts and paths only).
 pub fn doctor_report(synthesis_home: &Path, project_root: &Path) {
     let mut any = false;
     for (label, root) in [

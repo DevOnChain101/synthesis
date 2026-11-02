@@ -88,15 +88,15 @@ CREATE TABLE approvals(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES 
 
 ## C. Compatibility and migration plan [new]
 Requirement: session formats read/write compatible both ways during the parallel run (doc §10 Phase 3).
-1. **Node → Rust (import on demand).** Resuming a Node session id, or `synth import node-sessions`, parses A.3 into `sessions`/`messages`/`tasks` and one synthetic `legacy.imported` event `{source_path, lines, skipped}`; `legacy_transcript_path` is set. The original JSONL is never modified.
+1. **Node → Rust (import on demand).** Resuming a Node session id, or `synt import node-sessions`, parses A.3 into `sessions`/`messages`/`tasks` and one synthetic `legacy.imported` event `{source_path, lines, skipped}`; `legacy_transcript_path` is set. The original JSONL is never modified.
 2. **Rust → Node (mirror).** While `compat.write_node_transcripts` is on (default ON until R9 cutover), Rust also appends A.3-shaped lines to `legacy_transcript_path` (created at A.1's path): `user`, `assistant`, tool-result `user`, `system/compact_boundary`, `summary`, `permission-mode`, hook `attachment`. Rust-only facts (verification, processes, approvals) are not mirrored. Mirror writes are best-effort, as in Node [transcript.js:39].
 3. **Concurrency.** Node takes no lock, so the same session must not be open in both binaries at once. Rust refuses to resume a session whose JSONL changed after its last mirror write (size+mtime recorded) until it re-imports it.
 4. **Golden gate.** For each fixture in `tests/golden/transcripts/`: Node JSONL → Rust import → Rust mirror export → Node `itemsFromEntries` must equal the original Node `itemsFromEntries` output (timestamps/ids normalised).
 5. **Cutover (R9).** The mirror is switched off by default; import stays forever. Schema changes go through numbered `schema_migrations`; the binary refuses to open a DB newer than it knows, and a downgrade needs an explicit export.
 
-## Checkpoints and `synth rewind`
-Each file entry of a checkpoint may carry `post_sha256`: the state of the file after the run's last write to it (`file_state_hash`: sha256, or `absent` / `not-a-regular-file`). `synth rewind` refuses a file whose state differs or has no recorded hash unless `--force`, never touches symlinks or non-regular files, restores through a temp file and rename, and removes a file the run created only while it still has the recorded hash. `synth run --resume ID` only finds sessions of the current directory unless `--resume-any-workspace`.
+## Checkpoints and `synt rewind`
+Each file entry of a checkpoint may carry `post_sha256`: the state of the file after the run's last write to it (`file_state_hash`: sha256, or `absent` / `not-a-regular-file`). `synt rewind` refuses a file whose state differs or has no recorded hash unless `--force`, never touches symlinks or non-regular files, restores through a temp file and rename, and removes a file the run created only while it still has the recorded hash. `synt run --resume ID` only finds sessions of the current directory unless `--resume-any-workspace`.
 
 ## Open
-- Artifact retention default and size cap (proposal: keep for the session's lifetime, `synth gc --older-than 30d`).
+- Artifact retention default and size cap (proposal: keep for the session's lifetime, `synt gc --older-than 30d`).
 - Store full raw provider responses for debugging? Not in v1 (cost, secrets).

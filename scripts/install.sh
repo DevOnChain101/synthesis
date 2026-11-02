@@ -3,7 +3,7 @@
 #   SYNTHESIS_VERSION=0.1.0        version to install (default: latest release)
 #   SYNTHESIS_REPO=owner/repo      GitHub repository (default DevOnChain101/nemo-acd; scripts/check-placeholders.mjs keeps it equal to packaging/REPO)
 #   SYNTHESIS_INSTALL_DIR=DIR      default $HOME/.local/bin
-#   SYNTHESIS_BIN_NAME=synth       name of the installed command (e.g. synth-rs to coexist with the Node CLI)
+#   SYNTHESIS_BIN_NAME=synt       name of the installed command (e.g. synt-rs to coexist with the Node CLI)
 #   (default)                 with `gh` present, a failing `gh attestation verify` of SHA256SUMS (signer workflow + source ref v$version) aborts;
 #                             without `gh` only the checksum is checked and a warning says so
 #   SYNTHESIS_SKIP_ATTESTATION=1   skip the attestation check even when gh exists (warning printed)
@@ -13,7 +13,7 @@ set -eu
 
 REPO=${SYNTHESIS_REPO:-DevOnChain101/nemo-acd}
 DIR=${SYNTHESIS_INSTALL_DIR:-$HOME/.local/bin}
-NAME=${SYNTHESIS_BIN_NAME:-synth}
+NAME=${SYNTHESIS_BIN_NAME:-synt}
 
 die() { echo "install.sh: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
@@ -89,9 +89,9 @@ fi
 
 tar -xzf "$tmp/$archive" -C "$tmp"
 src="$tmp/synthesis-$version-$target"
-[ -f "$src/synth" ] || die "archive layout unexpected (no synth)"
+[ -f "$src/synt" ] || die "archive layout unexpected (no synt)"
 mkdir -p "$DIR"
-install -m 0755 "$src/synth" "$DIR/$NAME"
+install -m 0755 "$src/synt" "$DIR/$NAME"
 # Landlock backend looks for this helper next to the executable.
 [ -f "$src/synthesis-sandbox-exec" ] && install -m 0755 "$src/synthesis-sandbox-exec" "$DIR/synthesis-sandbox-exec"
 echo "Installed $DIR/$NAME ($version, $target)"

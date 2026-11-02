@@ -19,7 +19,7 @@ function candidates() {
 }
 
 function resolveBinary() {
-  const exe = process.platform === "win32" ? "synth.exe" : "synth";
+  const exe = process.platform === "win32" ? "synt.exe" : "synt";
   for (const pkg of candidates()) {
     try {
       return path.join(path.dirname(require.resolve(`${pkg}/package.json`)), "bin", exe);
@@ -29,7 +29,7 @@ function resolveBinary() {
   }
   const tried = candidates().join(", ");
   console.error(
-    `synth: no native binary for ${process.platform}-${process.arch} (looked for: ${tried}).\n` +
+    `synt: no native binary for ${process.platform}-${process.arch} (looked for: ${tried}).\n` +
       `Supported: darwin-arm64, darwin-x64, linux-x64, linux-arm64, win32-x64, win32-arm64.\n` +
       `If your platform is supported, reinstall without --no-optional / --omit=optional.\n` +
       `Otherwise see https://github.com/DevOnChain101/nemo-acd/releases for other install methods.`,
@@ -39,7 +39,7 @@ function resolveBinary() {
 
 const child = spawn(resolveBinary(), process.argv.slice(2), { stdio: "inherit", windowsHide: true });
 child.on("error", (e) => {
-  console.error(`synth: failed to start native binary: ${e.message}`);
+  console.error(`synt: failed to start native binary: ${e.message}`);
   process.exit(126);
 });
 

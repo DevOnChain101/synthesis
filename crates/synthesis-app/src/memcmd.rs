@@ -1,4 +1,4 @@
-//! `synth memory ...`: the person's view of the long-term store (docs/specs/memory.md §10), and the
+//! `synt memory ...`: the person's view of the long-term store (docs/specs/memory.md §10), and the
 //! glue the run uses to read and write it. Memory text is data: it is printed sanitized and never
 //! reaches the permission engine.
 
@@ -66,7 +66,7 @@ pub fn open_for_run(h: &Homes, secrets: &[String], repo: &Repo) -> Option<Store>
     let mut s = match Store::open(&h.synthesis, secrets.to_vec()) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("synth: warning: {}", san(&e.to_string()));
+            eprintln!("synt: warning: {}", san(&e.to_string()));
             return None;
         }
     };
@@ -75,14 +75,14 @@ pub fn open_for_run(h: &Homes, secrets: &[String], repo: &Repo) -> Option<Store>
         Ok(c) if c == "ok" => {}
         Ok(c) => {
             eprintln!(
-                "synth: warning: memory is off for this run: quick_check failed ({}); move memory.db aside and import the last export",
+                "synt: warning: memory is off for this run: quick_check failed ({}); move memory.db aside and import the last export",
                 san(&c)
             );
             return None;
         }
         Err(e) => {
             eprintln!(
-                "synth: warning: memory is off for this run: {}",
+                "synt: warning: memory is off for this run: {}",
                 san(&e.to_string())
             );
             return None;
@@ -90,12 +90,12 @@ pub fn open_for_run(h: &Homes, secrets: &[String], repo: &Repo) -> Option<Store>
     }
     if s.read_only() {
         eprintln!(
-            "synth: warning: memory is read-only for this run (its schema is newer than this build)"
+            "synt: warning: memory is read-only for this run (its schema is newer than this build)"
         );
         return Some(s);
     }
     if let Err(e) = s.touch_workspace(&repo.key, &repo.root, &repo.label) {
-        eprintln!("synth: warning: {}", san(&e.to_string()));
+        eprintln!("synt: warning: {}", san(&e.to_string()));
         return None;
     }
     Some(s)
@@ -189,7 +189,7 @@ pub enum MemoryCmd {
         #[command(flatten)]
         scope: Scope,
     },
-    /// Import jsonl from `export`, or with --claude the auto-memory staged by `synth import claude`
+    /// Import jsonl from `export`, or with --claude the auto-memory staged by `synt import claude`
     /// for this repository; imported records never keep owner or verified trust.
     Import {
         file: Option<PathBuf>,
@@ -409,7 +409,7 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
             out!("{} {} ({})", o.op, o.id, o.status);
             if let Some(r) = o.rule {
                 out!(
-                    "quarantined by rule {r}: structure that could steer the model; see `synth memory review`"
+                    "quarantined by rule {r}: structure that could steer the model; see `synt memory review`"
                 );
             }
         }
@@ -447,9 +447,7 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
                     n += 1;
                 }
             }
-            out!(
-                "{n} item(s) to review; `synth memory approve <id>` or `forget <id> --reason ...`"
-            );
+            out!("{n} item(s) to review; `synt memory approve <id>` or `forget <id> --reason ...`");
         }
         MemoryCmd::Export { format, scope } => {
             let key = (!scope.all).then(|| repo_of(&cwd_of(&scope.cwd)).key);
@@ -475,9 +473,7 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
             s.touch_workspace(&repo.key, &repo.root, &repo.label)
                 .map_err(e)?;
             let (done, skipped) = import_claude(&mut s, &h.synthesis, &repo);
-            out!(
-                "imported {done} note(s) for review, skipped {skipped}; see `synth memory review`"
-            );
+            out!("imported {done} note(s) for review, skipped {skipped}; see `synt memory review`");
         }
         MemoryCmd::Import { file: None, .. } => {
             return Err("pass a jsonl file or --claude".into());
@@ -677,7 +673,7 @@ fn parse_edit(text: &str) -> Option<(String, String)> {
     (!title.is_empty() && !body.is_empty()).then(|| (title.to_string(), body.to_string()))
 }
 
-/// `synth memory edit ID`: the markdown form in `$VISUAL`/`$EDITOR`, saved as a new `owner` version
+/// `synt memory edit ID`: the markdown form in `$VISUAL`/`$EDITOR`, saved as a new `owner` version
 /// through the normal write path (secrets masked, caps, scanner), so a bad edit is refused and the
 /// old record stays. `run_cmd` has already required a terminal. shortcut: the editor command is
 /// split on spaces (no shell quoting); use a wrapper script for a command that needs quotes.
@@ -766,7 +762,7 @@ fn edit(env: &Env, s: &mut Store, id: &str) -> Result<(), String> {
     }
 }
 
-/// `synth doctor` rows for memory: where the store is, how big, whether it is healthy, what trust the
+/// `synt doctor` rows for memory: where the store is, how big, whether it is healthy, what trust the
 /// records have, and whether anything leaves the machine. Read-only: nothing is created or migrated.
 pub fn doctor_lines(h: &Homes) -> Vec<String> {
     let settings = h.synthesis.join("settings.json");
@@ -782,7 +778,7 @@ pub fn doctor_lines(h: &Homes) -> Vec<String> {
     )];
     match store_facts(&path) {
         None => v.push(
-            "  store: not created yet (the first `synth run` or `synth memory add` creates it)"
+            "  store: not created yet (the first `synt run` or `synt memory add` creates it)"
                 .into(),
         ),
         Some(Err(e)) => v.push(format!(
@@ -818,7 +814,7 @@ fn store_facts(path: &Path) -> Option<Result<Vec<String>, String>> {
             notes.push("  memory is OFF for runs: quick_check failed; move memory.db aside and import the last export".to_string());
         }
         if ver as usize > synthesis_memory::SCHEMA_VERSION {
-            notes.push(format!("  memory is READ-ONLY for runs: schema v{ver} is newer than this build (v{}); upgrade synth", synthesis_memory::SCHEMA_VERSION));
+            notes.push(format!("  memory is READ-ONLY for runs: schema v{ver} is newer than this build (v{}); upgrade synt", synthesis_memory::SCHEMA_VERSION));
         }
         notes.extend(
             synthesis_memory::budget_warnings(&c, size)?
@@ -898,7 +894,7 @@ pub struct Reflector {
     pub provider: Arc<dyn ModelProvider>,
     pub model: String,
     pub cancel: CancellationToken,
-    /// `memory.reflection.*` and `memory.written` go here (None for `synth memory reflect`).
+    /// `memory.reflection.*` and `memory.written` go here (None for `synt memory reflect`).
     pub sink: Option<EventSink>,
     /// Price of `model`, from the user's `synthesis.pricing`; without it cost is unknown and only
     /// the call cap applies.
@@ -1073,7 +1069,7 @@ fn learned(m: &MemoryRun) -> Vec<synthesis_tools::LearnedSkill> {
 }
 
 fn warn(e: impl std::fmt::Display) {
-    eprintln!("synth: warning: memory: {}", san(&e.to_string()));
+    eprintln!("synt: warning: memory: {}", san(&e.to_string()));
 }
 
 /// Retrieval at task start: the frozen `<memory>` block. In a repository that is not trusted only
@@ -1469,7 +1465,7 @@ pub fn task_ended(
     }
     if s.consolidation_due(&m.key).unwrap_or(false) {
         match s.consolidate(&m.key) {
-            Ok(n) if n > 0 => eprintln!("synth: memory: merged {n} near-duplicate note(s)"),
+            Ok(n) if n > 0 => eprintln!("synt: memory: merged {n} near-duplicate note(s)"),
             Ok(_) => {}
             Err(e) => warn(e),
         }
@@ -1512,7 +1508,7 @@ pub fn task_ended(
         && !weak.is_empty()
     {
         eprintln!(
-            "synth: memory: {} learned skill(s) went back to review (low success)",
+            "synt: memory: {} learned skill(s) went back to review (low success)",
             weak.len()
         );
     }
@@ -1529,7 +1525,7 @@ pub fn task_ended(
             );
         }
         eprintln!(
-            "synth: memory: {} proposal(s) to review: synth memory proposals",
+            "synt: memory: {} proposal(s) to review: synt memory proposals",
             made.len()
         );
     }
@@ -1553,17 +1549,17 @@ pub async fn reflect_jobs(store: &Mutex<Store>, r: &Reflector, max: usize) -> (u
         let job = {
             let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
             if s.reflections_today(now).unwrap_or(i64::MAX) >= synthesis_memory::MAX_CALLS_PER_DAY {
-                eprintln!("synth: memory: daily reflection cap reached; jobs stay queued");
+                eprintln!("synt: memory: daily reflection cap reached; jobs stay queued");
                 break;
             }
             if s.reflection_cost_today(now).unwrap_or(f64::MAX) >= r.budget_usd {
                 eprintln!(
-                    "synth: memory: daily reflection budget (${:.2}) reached; jobs stay queued",
+                    "synt: memory: daily reflection budget (${:.2}) reached; jobs stay queued",
                     r.budget_usd
                 );
                 break;
             }
-            match s.claim_job("synth", now) {
+            match s.claim_job("synt", now) {
                 Ok(Some(j)) => j,
                 _ => break,
             }
@@ -1615,7 +1611,7 @@ pub async fn reflect_jobs(store: &Mutex<Store>, r: &Reflector, max: usize) -> (u
                     },
                 );
                 eprintln!(
-                    "synth: memory: reflection saved {} new, {} updated, {} to review, {} quarantined, {} dropped",
+                    "synt: memory: reflection saved {} new, {} updated, {} to review, {} quarantined, {} dropped",
                     a.added, a.updated, a.proposed, a.quarantined, a.dropped
                 );
             }
@@ -1705,9 +1701,9 @@ fn claude_note(text: &str) -> (Vec<(String, String)>, &str) {
     (kv, body.trim().trim_start_matches('-').trim())
 }
 
-/// Claude Code auto-memory staged by `synth import claude`
+/// Claude Code auto-memory staged by `synt import claude`
 /// (`$SYNTHESIS_HOME/projects/<key>/memory/*.md`, memory.md §10). A file can say anything, so every
-/// note arrives `untrusted` and `proposed` for `synth memory review` (the security-review rule for
+/// note arrives `untrusted` and `proposed` for `synt memory review` (the security-review rule for
 /// imports; the first spec text said `agent`). `user`-type notes go to user scope, the rest to this
 /// repository. `MEMORY.md` is only an index and is skipped. Returns (imported, skipped).
 pub fn import_claude(s: &mut Store, home: &Path, repo: &Repo) -> (usize, usize) {

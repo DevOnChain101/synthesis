@@ -66,7 +66,7 @@ lines sorted (`sort_lines`); compare as a set. Glob order depends on mtimes, so 
 - Live Bash tool / background jobs / BashOutput / KillShell (processes, timing, platform shells, process-tree kill).
 - WebFetch / WebSearch (network), PDF text extraction, NotebookEdit (not yet), Skill/Task* tools' state (need agent runtime).
 - Subagents, the transcript watcher (`SessionWatcher`, timers, fs events; `loadTranscriptSession` is captured with `agents:false`).
-- Hooks: timeouts/kill-tree, spawn failures, `Hooks` wired into the agent loop (`native-hook-events`), `import-claude-hooks` conversion. Settings: `synth import claude` writers, `agents`/`skills` edge parsing beyond the cases listed, `~/.codex`.
+- Hooks: timeouts/kill-tree, spawn failures, `Hooks` wired into the agent loop (`native-hook-events`), `import-claude-hooks` conversion. Settings: `synt import claude` writers, `agents`/`skills` edge parsing beyond the cases listed, `~/.codex`.
 - Real SDK transport, SSE parsing, retries, auth/credential resolution (`auth.js`, keychain/plaintext `auth.json`).
 - Windows/Linux outputs: everything here was captured on one platform (see `meta.json.platform`). Path-sensitive areas (config paths,
   permissions case-fold/`\`/UNC, Bash tool text in schemas) must be re-captured on win32/linux before being treated as the 3-OS spec.

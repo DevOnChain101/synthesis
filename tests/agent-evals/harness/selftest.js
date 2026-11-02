@@ -83,7 +83,7 @@ test('node adapter drives NativeAgent with the fake provider', async (t) => {
 });
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..', '..');
-const synthesisBin = path.join(process.env.CARGO_TARGET_DIR || path.join(repoRoot, 'target'), 'debug', process.platform === 'win32' ? 'synth.exe' : 'synth');
+const synthesisBin = path.join(process.env.CARGO_TARGET_DIR || path.join(repoRoot, 'target'), 'debug', process.platform === 'win32' ? 'synt.exe' : 'synt');
 
 test('rust adapter is skipped, not failed, when the binary is missing', async () => {
   process.env.SYNTHESIS_BIN = path.join(out, 'no-such-synthesis');
@@ -94,7 +94,7 @@ test('rust adapter is skipped, not failed, when the binary is missing', async ()
 
 test('rust adapter fixes be-node-pagination through the real binary (scripted model)', async (t) => {
   const b = spawnSync('cargo', ['build', '-q', '-p', 'synthesis-cli', '--features', 'test-provider'], { cwd: repoRoot, encoding: 'utf8' });
-  if (b.error || b.status !== 0) return t.skip('cannot build synth with --features test-provider: ' + (b.error || b.stderr).toString().slice(0, 300));
+  if (b.error || b.status !== 0) return t.skip('cannot build synt with --features test-provider: ' + (b.error || b.stderr).toString().slice(0, 300));
   process.env.SYNTHESIS_BIN = synthesisBin;
   process.env.EVAL_FAKE_SCRIPT = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'adapters', 'rust', 'scripts', 'be-node-pagination.json');
   const rs = await runEval({ agent: 'rust', taskIds: ['be-node-pagination'], runs: 1, out });

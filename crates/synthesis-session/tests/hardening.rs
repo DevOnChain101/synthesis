@@ -215,7 +215,7 @@ fn snapshots_withhold_secret_files_and_redact_text_by_default() {
     };
     for i in [0, 1] {
         assert!(
-            bytes(i).starts_with("[synth: secret file withheld"),
+            bytes(i).starts_with("[synt: secret file withheld"),
             "{}",
             bytes(i)
         );

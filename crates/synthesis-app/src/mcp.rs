@@ -151,7 +151,7 @@ fn refs(v: &str) -> Vec<(String, bool)> {
     out
 }
 
-/// Which credentials `synth run` will apply to `s`, WITHOUT any value: names, whether each is
+/// Which credentials `synt run` will apply to `s`, WITHOUT any value: names, whether each is
 /// resolvable right now (`${VAR}` against the same allowlist the manager uses), lengths only for
 /// names that are not secret-shaped, the scheme of `Authorization`.
 pub fn credentials(s: &McpServerConfig, env: &Env, passthrough: &[String]) -> Vec<String> {
@@ -270,7 +270,7 @@ pub fn reports_anonymous(r: &McpToolResult) -> bool {
         || serde_json::from_str::<Value>(&r.text()).is_ok_and(|v| walk(&v))
 }
 
-/// Masks token-looking words (long opaque strings) so `synth mcp test` never prints a credential.
+/// Masks token-looking words (long opaque strings) so `synt mcp test` never prints a credential.
 fn mask_tokens(text: &str) -> String {
     let tokeny =
         |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '=' | '+' | '/');
@@ -607,7 +607,7 @@ pub async fn start(plan: &Plan, env: &Env, cwd: &Path) -> (Arc<McpManager>, Atta
     (mgr, attach, warnings)
 }
 
-// ---- `synth mcp list|get|add|remove` ----------------------------------------------------------
+// ---- `synt mcp list|get|add|remove` ----------------------------------------------------------
 // Edits only the user's own config files: `<SYNTHESIS_HOME>/synthesis.json` (scope user) or
 // `<cwd>/.mcp.json` (scope project; still needs --approve-mcp to start). No credential is ever
 // written: secret-looking env/header values must be `${VAR}` references, and OAuth tokens are not
@@ -615,7 +615,7 @@ pub async fn start(plan: &Plan, env: &Env, cwd: &Path) -> (Arc<McpManager>, Atta
 
 #[derive(clap::Subcommand)]
 pub enum McpCmd {
-    /// Servers that `synth run` would see (nothing is started).
+    /// Servers that `synt run` would see (nothing is started).
     List(crate::CwdArg),
     /// One server's definition (header and env VALUES are never shown).
     Get {
@@ -629,7 +629,7 @@ pub enum McpCmd {
     Test(TestArgs),
     /// Prompts the servers offer, as the `/mcp__<server>__<prompt> args` commands that run them.
     Prompts(PromptsArgs),
-    /// Add a server: `synth mcp add NAME --url URL` or `synth mcp add NAME -- COMMAND ARGS...`.
+    /// Add a server: `synt mcp add NAME --url URL` or `synt mcp add NAME -- COMMAND ARGS...`.
     Add(AddArgs),
     Remove {
         name: String,
@@ -648,21 +648,21 @@ pub struct TestArgs {
     /// Needed to test a server defined in the project's `.mcp.json`.
     #[arg(long)]
     trust_project: bool,
-    /// `NAME@HASH` of a project-scope server (see `synth mcp get`).
+    /// `NAME@HASH` of a project-scope server (see `synt mcp get`).
     #[arg(long, value_name = "NAME")]
     approve_mcp: Vec<String>,
 }
 
 #[derive(clap::Args)]
 pub struct PromptsArgs {
-    /// Only this server (default: every server `synth run` would start).
+    /// Only this server (default: every server `synt run` would start).
     name: Option<String>,
     #[command(flatten)]
     cwd: crate::CwdArg,
     /// Needed for servers defined in the project's `.mcp.json`.
     #[arg(long)]
     trust_project: bool,
-    /// `NAME@HASH` of a project-scope server (see `synth mcp get`).
+    /// `NAME@HASH` of a project-scope server (see `synt mcp get`).
     #[arg(long, value_name = "NAME")]
     approve_mcp: Vec<String>,
 }
@@ -1010,7 +1010,7 @@ fn list_prompts(env: &Env, h: &crate::Homes, a: &PromptsArgs) -> Result<u8, Stri
         .retain(|s| a.name.as_ref().is_none_or(|n| *n == s.name));
     if p.servers.is_empty() {
         return Err(match &a.name {
-            Some(n) => format!("no server {} to start (see `synth mcp list`)", san(n)),
+            Some(n) => format!("no server {} to start (see `synt mcp list`)", san(n)),
             None => "no MCP server to start".into(),
         });
     }
@@ -1068,7 +1068,7 @@ pub fn run_cmd(env: &Env, cmd: McpCmd) -> Result<u8, String> {
             out!("added {} to {}", a.name, f.display());
             if matches!(a.scope, ScopeArg::Project) {
                 out!(
-                    "a project server starts only with --trust-project and --approve-mcp NAME@HASH (see `synth mcp get`)"
+                    "a project server starts only with --trust-project and --approve-mcp NAME@HASH (see `synt mcp get`)"
                 );
             }
             Ok(0)
@@ -1115,7 +1115,7 @@ impl Tool for McpTool {
             };
             let warn = (!r.is_error && reports_anonymous(&r)).then(|| {
                 format!(
-                    "\n[synth warning: MCP server \"{server}\" reports an anonymous principal. Its configured credentials were probably not applied, so changes are attributed to 'anonymous'. Tell the user; they can check with `synth mcp test {server}`.]"
+                    "\n[synt warning: MCP server \"{server}\" reports an anonymous principal. Its configured credentials were probably not applied, so changes are attributed to 'anonymous'. Tell the user; they can check with `synt mcp test {server}`.]"
                 )
             });
             let content = if r.content.iter().all(|c| matches!(c, McpContent::Text(_))) {

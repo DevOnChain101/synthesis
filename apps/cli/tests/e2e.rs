@@ -8,13 +8,13 @@ use std::process::{Child, Command, Output, Stdio};
 use serde_json::{Value, json};
 
 /// Whether `--sandbox enforce` (the default) would start here with the standard policy, as
-/// `synth doctor` reports it (`enforce_ready: yes`). False e.g. on CI runners with userns blocked
+/// `synt doctor` reports it (`enforce_ready: yes`). False e.g. on CI runners with userns blocked
 /// (bubblewrap unusable) where Landlock alone cannot express the standard policy.
 fn host_confines() -> bool {
     static C: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *C.get_or_init(|| {
         let d = tempfile::tempdir().unwrap();
-        let o = Command::new(env!("CARGO_BIN_EXE_synth"))
+        let o = Command::new(env!("CARGO_BIN_EXE_synt"))
             .args(["doctor", "--cwd"])
             .arg(d.path())
             .env("SYNTHESIS_HOME", d.path())
@@ -28,7 +28,7 @@ fn host_confines() -> bool {
 fn skip_without_sandbox() -> bool {
     let skip = !host_confines();
     if skip {
-        eprintln!("SKIP: `synth doctor` reports enforce_ready: no on this host");
+        eprintln!("SKIP: `synt doctor` reports enforce_ready: no on this host");
     }
     skip
 }
@@ -79,7 +79,7 @@ impl Rig {
     fn cmd_for(&self, ws: &Path, script_name: &str, script: Value, args: &[&str]) -> Command {
         let s = self.dir.path().join(script_name);
         std::fs::write(&s, script.to_string()).unwrap();
-        let mut c = Command::new(env!("CARGO_BIN_EXE_synth"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.args(["run", "--cwd"])
             .arg(ws)
             .arg("--provider")
@@ -726,7 +726,7 @@ fn skill_body_is_served_and_listed_for_doctor() {
     );
     check_stream(&ev);
     assert!(rig.mirror().contains("RUN THE DEPLOY STEPS"));
-    let o = Command::new(env!("CARGO_BIN_EXE_synth"))
+    let o = Command::new(env!("CARGO_BIN_EXE_synt"))
         .args(["doctor", "--cwd"])
         .arg(rig.ws())
         .env_clear()
@@ -1041,7 +1041,7 @@ fn closed_stdout_cancels_the_run_exit_141_and_still_persists_the_end() {
 #[test]
 fn doctor_reports_enforce_readiness() {
     let d = tempfile::tempdir().unwrap();
-    let o = Command::new(env!("CARGO_BIN_EXE_synth"))
+    let o = Command::new(env!("CARGO_BIN_EXE_synt"))
         .args(["doctor", "--cwd"])
         .arg(d.path())
         .env("SYNTHESIS_HOME", d.path())
@@ -1057,7 +1057,7 @@ fn doctor_reports_enforce_readiness() {
 #[test]
 fn doctor_into_a_closed_pipe_exits_quietly() {
     let rig = Rig::new();
-    let mut c = Command::new(env!("CARGO_BIN_EXE_synth"))
+    let mut c = Command::new(env!("CARGO_BIN_EXE_synt"))
         .arg("doctor")
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -1203,7 +1203,7 @@ fn terminal_escapes_in_untrusted_text_are_not_printed() {
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(err.contains("invalid MCP server name"), "{err}");
     assert!(!err.contains(['\u{1b}', '\u{7}']), "{err:?}");
-    let d = Command::new(env!("CARGO_BIN_EXE_synth"))
+    let d = Command::new(env!("CARGO_BIN_EXE_synt"))
         .args(["doctor", "--cwd"])
         .arg(rig.ws())
         .env_clear()
@@ -1324,7 +1324,7 @@ fn spawn_live(mut c: Command) -> Live {
     live
 }
 
-/// A failing test must not leave `synth` (and its children) alive: on Windows an orphan keeps the
+/// A failing test must not leave `synt` (and its children) alive: on Windows an orphan keeps the
 /// test binary's pipes open and `cargo test` hangs. `taskkill /T` takes the whole tree.
 impl Drop for Live {
     fn drop(&mut self) {

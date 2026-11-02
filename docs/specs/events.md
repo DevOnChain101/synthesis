@@ -105,21 +105,21 @@ Applied by the producer before persistence AND before streaming; an unredacted c
 4. Redaction is lossy by design; tool results seen by the model are NOT redacted (the model must see real output), only their persisted/streamed copies.
 
 ## 6. Headless CLI contract [new]
-`synth run --headless --cwd <dir> [--model <provider/model>] [--mode <permission-mode>] [--criteria <file.json>] [--max-turns N] [--max-tool-calls N] [--max-wall-ms N] (--prompt <text> | --prompt-file <f> | stdin)`
+`synt run --headless --cwd <dir> [--model <provider/model>] [--mode <permission-mode>] [--criteria <file.json>] [--max-turns N] [--max-tool-calls N] [--max-wall-ms N] (--prompt <text> | --prompt-file <f> | stdin)`
 - `--cwd` is REQUIRED (no implicit cwd, workspace-context.md §4).
 - stdout: events only, one per line. stderr: human diagnostics, unstructured.
-- No interactive approver: every `ask` resolves `auto_denied` (`reviewer:"policy:non-interactive"` in `synth run`, which emits `tool.approval_required` + `tool.approval_resolved` for the audit trail; was `"headless"`) and the denial text goes back to the model as a tool error.
+- No interactive approver: every `ask` resolves `auto_denied` (`reviewer:"policy:non-interactive"` in `synt run`, which emits `tool.approval_required` + `tool.approval_resolved` for the audit trail; was `"headless"`) and the denial text goes back to the model as a tool error.
 
 | Exit | Meaning (`task.ended.status`) |
 |---|---|
 | 0 | `completed` (verification passed, or not applicable — verification.md §4) |
 | 1 | `failed` |
-| 2 | usage or config error, no session started (Node uses 1 for this [from-node bin/synth.js:269-685]; deliberately changed) |
+| 2 | usage or config error, no session started (Node uses 1 for this [from-node bin/synt.js:269-685]; deliberately changed) |
 | 3 | `unverified` |
 | 4 | `blocked` |
 | 70 | internal error (crash after the session started; `session.failed` emitted if possible) |
-| 130 | `cancelled` by SIGINT/Ctrl-C [from-node bin/synth.js:116] |
-| 141 | stdout was closed by the reader (EPIPE, e.g. `synth run ... \| head`): the task is cancelled cleanly, every event including the final ones is still persisted in the session store; `synth doctor/models/auth` just exit 0 quietly [new] |
+| 130 | `cancelled` by SIGINT/Ctrl-C [from-node bin/synt.js:116] |
+| 141 | stdout was closed by the reader (EPIPE, e.g. `synt run ... \| head`): the task is cancelled cleanly, every event including the final ones is still persisted in the session store; `synt doctor/models/auth` just exit 0 quietly [new] |
 
 ## 7. Versioning and compatibility [new]
 - Additive changes (new `type`, new optional payload field, new enum value in a field documented as open) keep `v`. Consumers MUST ignore unknown types and unknown fields, and MUST treat unknown enum values as "other".

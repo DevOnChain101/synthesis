@@ -1,5 +1,5 @@
 # Synthesis installer for Windows (PowerShell 7+; Windows PowerShell 5.1 is not supported). No admin rights: installs to %LOCALAPPDATA%\Programs\Synthesis.
-#   $env:SYNTHESIS_VERSION, $env:SYNTHESIS_INSTALL_DIR, $env:SYNTHESIS_BIN_NAME (default synth),
+#   $env:SYNTHESIS_VERSION, $env:SYNTHESIS_INSTALL_DIR, $env:SYNTHESIS_BIN_NAME (default synt),
 #   $env:SYNTHESIS_REPO (owner/repo; default DevOnChain101/nemo-acd, kept equal to packaging/REPO by scripts/check-placeholders.mjs),
 #   (default) with gh present a failing `gh attestation verify` of SHA256SUMS (signer workflow + source ref v$version) aborts; without gh only the checksum is checked (warning),
 #   $env:SYNTHESIS_SKIP_ATTESTATION=1 (skip the attestation check even when gh exists; prints a warning),
@@ -13,7 +13,7 @@ if ($env:SYNTHESIS_DOWNLOAD_BASE -and $env:SYNTHESIS_DOWNLOAD_BASE -notmatch '^h
   throw "SYNTHESIS_DOWNLOAD_BASE must be https:// (got '$($env:SYNTHESIS_DOWNLOAD_BASE)')"
 }
 $dir = if ($env:SYNTHESIS_INSTALL_DIR) { $env:SYNTHESIS_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\Synthesis' }
-$name = if ($env:SYNTHESIS_BIN_NAME) { $env:SYNTHESIS_BIN_NAME } else { 'synth' }
+$name = if ($env:SYNTHESIS_BIN_NAME) { $env:SYNTHESIS_BIN_NAME } else { 'synt' }
 
 $arch = switch ($env:PROCESSOR_ARCHITECTURE) { 'AMD64' { 'x86_64' } 'ARM64' { 'aarch64' } default { throw "unsupported CPU $($env:PROCESSOR_ARCHITECTURE)" } }
 $target = "$arch-pc-windows-msvc"
@@ -54,7 +54,7 @@ try {
   Expand-Archive (Join-Path $tmp $archive) -DestinationPath $tmp
   $src = Join-Path $tmp "synthesis-$version-$target"
   New-Item -ItemType Directory -Force $dir | Out-Null
-  Copy-Item (Join-Path $src 'synth.exe') (Join-Path $dir "$name.exe") -Force
+  Copy-Item (Join-Path $src 'synt.exe') (Join-Path $dir "$name.exe") -Force
   Write-Host "Installed $(Join-Path $dir "$name.exe") ($version, $target)"
   & (Join-Path $dir "$name.exe") doctor
   if (($env:PATH -split ';') -notcontains $dir) {

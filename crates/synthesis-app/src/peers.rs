@@ -185,7 +185,7 @@ pub fn setup(
     Ok(Some(Started { link, listener }))
 }
 
-/// One `synth doctor` block.
+/// One `synt doctor` block.
 pub fn doctor_lines(
     peers: &Map<String, Value>,
     home: &Path,

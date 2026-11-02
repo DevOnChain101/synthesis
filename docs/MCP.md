@@ -4,7 +4,7 @@ Synthesis is an MCP client (spec 2025-06-18). It never advertises sampling, root
 
 ## Configure
 
-User scope lives in `<SYNTHESIS_HOME>/synthesis.json` under `mcpServers`; project scope in `<project>/.mcp.json` (needs `--trust-project` plus `--approve-mcp NAME@HASH`; `synth mcp get NAME` prints the hash). `synth mcp add|list|get|remove` edit these files.
+User scope lives in `<SYNTHESIS_HOME>/synthesis.json` under `mcpServers`; project scope in `<project>/.mcp.json` (needs `--trust-project` plus `--approve-mcp NAME@HASH`; `synt mcp get NAME` prints the hash). `synt mcp add|list|get|remove` edit these files.
 
 ```json
 { "mcpServers": {
@@ -37,7 +37,7 @@ Synthesis has one generic MCP client; authentication is configuration, not provi
 { "synthesis": { "mcp": { "env_passthrough": ["JENKINS_BASIC", "GITLAB_PAT", "ATLASSIAN_BASIC", "MCP_TOKEN"] } } }
 ```
 
-An unset or empty variable makes the server fail to start with a message naming it; it never starts unauthenticated. `synth mcp test NAME` shows which headers/env apply (names only) and which principal the server reports.
+An unset or empty variable makes the server fail to start with a message naming it; it never starts unauthenticated. `synt mcp test NAME` shows which headers/env apply (names only) and which principal the server reports.
 
 **OAuth is not implemented by Synthesis (ADR-011).** For a server that only offers an OAuth login, use the provider's own package as a stdio server (for example `mcp-remote`); it opens the browser and keeps its own tokens.
 
@@ -90,16 +90,16 @@ Tune it in your own `settings.json` (a project file can only add `write_tools`):
 
 ### Writes show up as `anonymous`
 
-First run `synth mcp test NAME` (and `synth mcp get NAME`, `synth doctor`): they show per server which `env` / `headers` will be applied (names and state only, never values) and call the server's `whoami`-style tool. Synthesis also appends a warning to any tool result that names `anonymous` as author/user. If Synthesis applies the credentials and the server still says anonymous, check:
+First run `synt mcp test NAME` (and `synt mcp get NAME`, `synt doctor`): they show per server which `env` / `headers` will be applied (names and state only, never values) and call the server's `whoami`-style tool. Synthesis also appends a warning to any tool result that names `anonymous` as author/user. If Synthesis applies the credentials and the server still says anonymous, check:
 
 * The OAuth consent / token belongs to the app, not to you (remote Atlassian MCP): re-run the login as the right account (`rm -r ~/.mcp-auth`, then retry).
 * The API token is tied to a service account or to another email than `JIRA_USERNAME`/`CONFLUENCE_USERNAME`.
 * Wrong site or `cloudId`: the token is valid on a different Atlassian site than the one written to.
-* `mcp-remote` could not read its cache because `HOME`/`USERPROFILE` was missing or unwritable (sandbox, container): `synth mcp get` shows `inherited profile dirs`.
+* `mcp-remote` could not read its cache because `HOME`/`USERPROFILE` was missing or unwritable (sandbox, container): `synt mcp get` shows `inherited profile dirs`.
 * The token is read-only or lacks the write scope: the server falls back to anonymous or rejects.
 * A project `.mcp.json` entry of the same name is shadowed by (or shadows) your user entry: the user entry wins completely, credentials are never merged.
 
-* `synth doctor --cwd .` lists servers and why one was skipped; `synth mcp list` shows the same.
+* `synt doctor --cwd .` lists servers and why one was skipped; `synt mcp list` shows the same.
 * "not started: not approved": pass the `--approve-mcp NAME@HASH` it prints.
 * "connect timed out": raise `startup_timeout_sec` (first `npx` runs download packages).
 * Results marked "omitted" or "full result saved to": the server returned more than 28 000 characters; read the saved file for everything.

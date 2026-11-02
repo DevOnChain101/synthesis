@@ -30,11 +30,11 @@ class Synthesis < Formula
 
   def install
     # Archive root is synthesis-<version>-<target>/ (Homebrew strips one level).
-    bin.install "synth"
-    bin.install "synthesis-sandbox-exec" if OS.linux? # must sit next to synth (Landlock backend)
+    bin.install "synt"
+    bin.install "synthesis-sandbox-exec" if OS.linux? # must sit next to synt (Landlock backend)
   end
 
   test do
-    assert_match "synth #{version}", shell_output("#{bin}/synth --version")
+    assert_match "synt #{version}", shell_output("#{bin}/synt --version")
   end
 end
