@@ -289,6 +289,51 @@ fn user_only_keys_ignore_the_project() {
 }
 
 #[test]
+fn browser_secrets_come_from_user_settings_only() {
+    let secrets = json!({"browser":{"secrets":{"x":{"source":"{env:SYNTHESIS_X_TOKEN}","origins":["https://a.com"]}}}});
+    let f = fx();
+    f.user(json!({"synthesis": secrets}));
+    f.project(json!({"synthesis":{"browser":{"secrets":{"evil":{}}}}}));
+    write(
+        f.proj.path(),
+        ".synthesis/settings.local.json",
+        json!({"synthesis":{"browser":{"secrets":{"evil2":{}}}}}),
+    );
+    let s = f.load(ProjectTrust::Trusted);
+    let names: Vec<_> = s.synthesis.browser["secrets"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .collect();
+    assert_eq!(names, ["x"]);
+    for what in ["project settings", "local settings"] {
+        let want = format!("{what}: synthesis.browser is read from user settings only");
+        assert!(s.diagnostics.iter().any(|d| d.contains(&want)), "{what}");
+    }
+    // project/local alone, trusted or not, define nothing
+    for trust in [ProjectTrust::Trusted, ProjectTrust::Untrusted] {
+        let f = fx();
+        f.project(json!({"synthesis": secrets}));
+        write(
+            f.proj.path(),
+            ".synthesis/settings.local.json",
+            json!({"synthesis": secrets}),
+        );
+        assert!(f.load(trust).synthesis.browser.is_empty());
+    }
+    // the managed file is refused too
+    let f = fx();
+    write(f.home.path(), "managed.json", json!({"synthesis": secrets}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert!(s.synthesis.browser.is_empty());
+    assert!(
+        s.diagnostics
+            .iter()
+            .any(|d| d.contains("managed settings: synthesis.browser"))
+    );
+}
+
+#[test]
 fn peers_settings_come_from_user_settings_only() {
     let f = fx();
     f.user(json!({"synthesis":{"peers":{"enabled":true,"max_hops":3}}}));

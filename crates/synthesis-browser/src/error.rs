@@ -18,6 +18,8 @@ pub enum BrowserError {
     /// The ref is unknown or its element no longer exists; take a new snapshot.
     StaleRef(String),
     Page(String),
+    /// A secret or login request refused by its own checks (origin binding, field type, ...).
+    Refused(String),
     /// Events were lost under load, so the URL policy could not be enforced: the pages were
     /// destroyed. Launch a new browser.
     Compromised,
@@ -35,6 +37,7 @@ impl fmt::Display for BrowserError {
             Self::Policy(m) => write!(f, "blocked by URL policy: {m}"),
             Self::StaleRef(r) => write!(f, "ref {r} is unknown or stale; take a new snapshot"),
             Self::Page(m) => write!(f, "page error: {m}"),
+            Self::Refused(m) => write!(f, "refused: {m}"),
             Self::Compromised => f.write_str(
                 "browser session was torn down after event loss (policy could not be enforced); launch a new browser",
             ),

@@ -27,8 +27,30 @@ fn patterns() -> &'static [(&'static str, Regex)] {
     })
 }
 
+/// Exact secret values (and their form-encoded spelling) registered by `mask_secret`.
+static MASKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// From now on `redact_text` (and so every snapshot, console, network and tab text) replaces
+/// this value. Process-wide: a value typed with `browser_fill_secret` must not come back from
+/// any page capture.
+pub fn mask_secret(value: &str) {
+    if value.is_empty() {
+        return;
+    }
+    let mut m = MASKED.lock().unwrap_or_else(|e| e.into_inner());
+    let enc: String = url::form_urlencoded::byte_serialize(value.as_bytes()).collect();
+    for v in [value.to_owned(), enc] {
+        if !m.contains(&v) {
+            m.push(v);
+        }
+    }
+}
+
 pub fn redact_text(s: &str) -> String {
     let mut out = s.to_owned();
+    for v in MASKED.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        out = out.replace(v.as_str(), "[REDACTED:secret]");
+    }
     for (kind, re) in patterns() {
         out = re
             .replace_all(&out, format!("[REDACTED:{kind}]").as_str())
@@ -103,6 +125,15 @@ mod tests {
         assert!(s.contains("[REDACTED:bearer]"));
         assert!(s.contains("[REDACTED:aws-key]"));
         assert_eq!(redact_text("plain text"), "plain text");
+    }
+
+    #[test]
+    fn masked_secret_values_disappear_everywhere() {
+        mask_secret("Zq9 pass&word!");
+        let t = redact_text("value=Zq9 pass&word! enc=Zq9+pass%26word%21");
+        assert!(!t.contains("Zq9") && !t.contains("pass"), "{t}");
+        let u = redact_url("https://h/p?note=Zq9+pass%26word%21");
+        assert!(!u.contains("Zq9"), "{u}");
     }
 
     #[test]

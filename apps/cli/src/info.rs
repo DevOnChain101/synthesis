@@ -251,6 +251,9 @@ pub fn doctor(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
     for l in legacy_notes(env, &h, std::env::current_exe().ok().as_deref()) {
         out!("{l}");
     }
+    for l in synthesis_app::login::doctor_lines(env, &h) {
+        out!("{l}");
+    }
     for l in synthesis_app::memcmd::doctor_lines(&h) {
         out!("{l}");
     }

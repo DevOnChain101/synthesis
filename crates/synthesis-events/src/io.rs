@@ -261,6 +261,10 @@ mod tests {
                 source: s("startup"),
                 resumed_from_seq: Some(4),
             },
+            Event::BrowserLoginRequired {
+                origin: s("https://app.example.com"),
+                profile: s("app-example-com"),
+            },
             Event::SessionStatusChanged {
                 from: s("idle"),
                 to: s("running"),
@@ -655,6 +659,22 @@ mod tests {
         assert!(v["task_id"].is_null() && v["agent_id"].is_null());
         let ts = v["ts"].as_str().unwrap();
         assert!(ts.ends_with('Z') && ts.len() == 24, "{ts}");
+    }
+
+    #[test]
+    fn browser_login_required_wire_shape() {
+        let mut w = writer();
+        w.emit(Event::BrowserLoginRequired {
+            origin: s("https://app.example.com"),
+            profile: s("acme"),
+        })
+        .unwrap();
+        let v: Value = serde_json::from_slice(&w.into_inner()).unwrap();
+        assert_eq!(v["type"], "browser.login_required");
+        assert_eq!(
+            v["payload"],
+            json!({"origin":"https://app.example.com","profile":"acme"})
+        );
     }
 
     #[test]

@@ -103,6 +103,9 @@ pub struct SynthesisSettings {
     pub verification: Map<String, Value>,
     /// `peers` (messaging.md B8.5), user settings only; interpreted by `synthesis-peers`.
     pub peers: Map<String, Value>,
+    /// `browser` (docs/BROWSER-LOGIN.md): secrets, login timeout, profile domains. The user's own
+    /// settings file only; interpreted by `synthesis-browser` / `synthesis-app`.
+    pub browser: Map<String, Value>,
     pub compat: Compat,
 }
 
@@ -590,6 +593,17 @@ impl Settings {
         }
         if user && let Some(p) = n.get("peers").and_then(Value::as_object) {
             self.synthesis.peers.extend(p.clone());
+        }
+        // Secrets and the domains a login may browse are the person's alone: not a repository's,
+        // not even the organisation's managed file.
+        if let Some(b) = n.get("browser").and_then(Value::as_object) {
+            if what == "user settings" {
+                self.synthesis.browser.extend(b.clone());
+            } else {
+                self.diagnostics.push(format!(
+                    "{what}: synthesis.browser is read from user settings only, ignored"
+                ));
+            }
         }
         let num = |o: Option<&Value>, k: &str| o.and_then(|b| b.get(k)).and_then(Value::as_u64);
         let b = n.get("budget").filter(|b| b.is_object());

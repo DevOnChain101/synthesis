@@ -34,6 +34,7 @@ pub mod ctx;
 pub mod events;
 #[cfg(feature = "test-provider")]
 pub mod fake;
+pub mod login;
 pub mod mcp;
 pub mod mcpinput;
 pub mod memcmd;

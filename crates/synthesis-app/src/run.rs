@@ -485,8 +485,23 @@ fn env_pair_ok(k: &str, v: &str) -> bool {
 struct AuditDeny;
 
 impl Approver for AuditDeny {
-    fn approve<'a>(&'a self, _: ApprovalRequest, _: &'a CancellationToken) -> BoxFut<'a, Approval> {
-        Box::pin(async {
+    fn approve<'a>(
+        &'a self,
+        req: ApprovalRequest,
+        cancel: &'a CancellationToken,
+    ) -> BoxFut<'a, Approval> {
+        Box::pin(async move {
+            // A person at the terminal can approve a login hand-off (it needs them anyway).
+            // Nothing else is ever approved here, and no terminal means no.
+            if req.tool == "browser_login" {
+                let q = format!(
+                    "Open a visible browser at {} so you can log in?",
+                    sanitize_for_display(req.input["origin"].as_str().unwrap_or("?"))
+                );
+                if crate::login::ask_yes(&q, cancel).await {
+                    return Approval::allow();
+                }
+            }
             Approval {
                 reviewer: "policy:non-interactive",
                 ..Approval::auto_denied()
@@ -621,6 +636,15 @@ pub fn prepare(
         &h.synthesis,
         env,
     )?;
+
+    // `synthesis.browser` comes from the user's own settings file only (the loader enforces it)
+    let browser = crate::login::parse_settings(&settings.synthesis.browser);
+    for w in &browser.warnings {
+        eprintln!("synth: warning: {}", sanitize_for_display(w));
+    }
+    // exact values of the stored browser secrets are masked in events, transcript and database
+    let mut res = res;
+    res.secrets.extend(browser.values(env));
 
     let price = pricing(&h.synthesis.join("settings.json"), &res.label, &res.model);
     if limits.max_cost_usd.is_some() && price.is_none() {
@@ -1182,6 +1206,12 @@ pub fn prepare(
     let mut toolbox = ToolBox::new(
         Registry::with_terminal_policy(rt.clone(), make_policy)
             .with_new_tools()
+            .with_browser(browser.config(
+                synthesis_tools::BrowserConfig::default(),
+                &h.synthesis,
+                env,
+                Arc::new(crate::login::CliHost { sink: sink.clone() }),
+            ))
             .with_background_on_timeout(false),
     );
     if let Some(a) = mcp_attach {

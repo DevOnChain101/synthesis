@@ -121,6 +121,18 @@ async fn serve() -> String {
                     "/form" => ("200 OK", "", "text/html", FORM.to_owned()),
                     "/login" => ("200 OK", "", "text/html", LOGIN.to_owned()),
                     "/console" => ("200 OK", "", "text/html", console),
+                    "/setcookie" => (
+                        "200 OK",
+                        "",
+                        "text/html",
+                        "<title>Set</title><script>document.cookie='sid=persisted-by-login; max-age=3600; path=/'</script>ok".to_owned(),
+                    ),
+                    "/readcookie" => (
+                        "200 OK",
+                        "",
+                        "text/html",
+                        "<title>Read</title><p id=b></p><script>document.getElementById('b').textContent='cookies:'+document.cookie</script>".to_owned(),
+                    ),
                     "/flood" => ("200 OK", "", "text/html", FLOOD.to_owned()),
                     "/api/login" => (
                         "422 Unprocessable Entity",
@@ -917,4 +929,70 @@ async fn event_flood_fails_closed_body() {
         );
     }
     rt.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn persistent_profile_keeps_cookies_is_exclusive_and_survives_close() {
+    traced(
+        "persistent_profile_keeps_cookies_is_exclusive_and_survives_close",
+        persistent_profile_body(),
+    )
+    .await;
+}
+
+async fn persistent_profile_body() {
+    let Some(env) = browser_env() else { return };
+    let base = serve().await;
+    let home = tempfile::tempdir().unwrap();
+    let art = tempfile::tempdir().unwrap();
+    let dir = synthesis_browser::profile::create(home.path(), "acme").unwrap();
+    let mut opts = local_opts(art.path());
+    opts.profile = Some(dir.clone());
+
+    let rt = launch(opts.clone(), &env).await;
+    // a second browser on the same profile fails cleanly, before another process starts
+    let err = BrowserRuntime::launch(opts.clone(), &env)
+        .await
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("already open"), "{err}");
+    rt.navigate(&format!("{base}/setcookie"), WaitUntil::Load)
+        .await
+        .unwrap();
+    assert_eq!(rt.cookie_count(&base).await.unwrap(), 1);
+    assert_eq!(rt.page_origin().await.unwrap(), base);
+    #[cfg(unix)]
+    let pid = rt.pid();
+    rt.close_graceful().await.unwrap(); // flushes the cookie jar
+    #[cfg(unix)]
+    assert_eq!(
+        group_members(pid),
+        Vec::<String>::new(),
+        "no live processes after close"
+    );
+    assert!(dir.is_dir(), "a persistent profile is never deleted");
+
+    let rt = launch(opts.clone(), &env).await;
+    rt.navigate(&format!("{base}/readcookie"), WaitUntil::Load)
+        .await
+        .unwrap();
+    let s = rt.snapshot(50).await.unwrap();
+    assert!(
+        s.tree.expose().contains("cookies:sid=persisted-by-login"),
+        "{}",
+        s.tree.expose()
+    );
+    // a cancel/timeout kill (plain close) takes the whole tree down and keeps the profile
+    #[cfg(unix)]
+    let pid = rt.pid();
+    rt.close().await.unwrap();
+    #[cfg(unix)]
+    assert_eq!(
+        group_members(pid),
+        Vec::<String>::new(),
+        "kill leaves no process"
+    );
+    assert!(dir.is_dir());
+    // the lock is free again
+    launch(opts, &env).await.close().await.unwrap();
 }

@@ -36,7 +36,7 @@ Rules:
 | Read | Read, Glob, Grep, BashOutput, TodoWrite, TaskCreate/Get/List/Update, Skill, Task¹, AskUserQuestion, ExitPlanMode, terminal_logs, terminal_status, git_status, git_diff, artifact_read, browser_snapshot, browser_screenshot, browser_console, browser_network |
 | Write | Write, Edit, NotebookEdit, git_apply_patch |
 | Execute | Bash, KillShell, terminal_spawn, terminal_signal, verify_run, git_revert |
-| External | WebFetch, WebSearch, browser_navigate, browser_click, browser_fill, mcp__* |
+| External | WebFetch, WebSearch, browser_navigate, browser_click, browser_fill, browser_login, browser_fill_secret, mcp__* |
 
 ¹ Task runs a sub-agent whose own calls are gated one by one. The class drives defaults; permission rules still decide (Node's READ_ONLY_TOOLS/EDIT_TOOLS sets [from-node permissions.js:11-12] are ported verbatim for the `Permissions::check` port).
 
@@ -117,15 +117,17 @@ The model-facing text and schemas are unchanged. Where the whole file is known t
  "git_revert":{"properties":{"paths":{"type":"array","items":{"type":"string"}}},"required":["paths"]},
  "verify_run":{"properties":{"check_ids":{"type":"array","items":{"type":"string"}},"command":{"type":"string"},"criteria_ids":{"type":"array","items":{"type":"string"}},"timeout_ms":{"type":"integer"}}},
  "artifact_read":{"properties":{"artifact_id":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"},"filter":{"type":"string"}},"required":["artifact_id"]},
- "browser_navigate":{"properties":{"url":{"type":"string"},"wait_until":{"enum":["load","domcontentloaded","networkidle"]},"timeout_ms":{"type":"integer"}},"required":["url"]},
+ "browser_navigate":{"properties":{"url":{"type":"string"},"profile":{"type":"string"},"wait_until":{"enum":["load","domcontentloaded","networkidle"]},"timeout_ms":{"type":"integer"}},"required":["url"]},
  "browser_snapshot":{"properties":{"ref":{"type":"string"},"max_nodes":{"type":"integer"}}},
  "browser_click":{"properties":{"ref":{"type":"string"},"role":{"type":"string"},"name":{"type":"string"},"selector":{"type":"string"}}},
+ "browser_login":{"properties":{"origin":{"type":"string"},"profile":{"type":"string"}},"required":["origin"]},
+ "browser_fill_secret":{"properties":{"ref":{"type":"string"},"secret":{"type":"string"}},"required":["ref","secret"]},
  "browser_fill":{"properties":{"ref":{"type":"string"},"selector":{"type":"string"},"value":{"type":"string"},"sensitive":{"type":"boolean"}},"required":["value"]},
  "browser_screenshot":{"properties":{"full_page":{"type":"boolean"},"ref":{"type":"string"}}},
  "browser_console":{"properties":{"cursor":{"type":"string"},"level":{"enum":["error","warning","info","debug"]}}},
  "browser_network":{"properties":{"cursor":{"type":"string"},"failed_only":{"type":"boolean"}}}}
 ```
-Semantics: `terminal_spawn` returns `{process_id, pid, status, ready:bool, log_cursor}` and outlives the tool call but not the session (doc §5.8). `terminal_status` without id lists the session's processes only. `git_revert` restores paths to the session baseline (agent edits only), never runs `git reset`/`checkout` on user changes, and is always `ask` (doc §5.10). `browser_*` use accessibility refs first, selectors as fallback, no coordinates (doc §5.9); backend decided by the R6 spike. Permission rule syntax for new tools follows Node: `terminal_spawn(<cmd prefix>:*)` like Bash, `browser_navigate(domain:<host>)` like WebFetch [from-node permissions.js:442-507].
+Semantics: `terminal_spawn` returns `{process_id, pid, status, ready:bool, log_cursor}` and outlives the tool call but not the session (doc §5.8). `terminal_status` without id lists the session's processes only. `git_revert` restores paths to the session baseline (agent edits only), never runs `git reset`/`checkout` on user changes, and is always `ask` (doc §5.10). `browser_*` use accessibility refs first, selectors as fallback, no coordinates (doc §5.9); backend decided by the R6 spike. `browser_login` asks in every mode and no allow rule applies; `browser_login` and `browser_fill_secret` are refused for peer-delegated work and sub-agents; see docs/BROWSER-LOGIN.md. Permission rule syntax for new tools follows Node: `terminal_spawn(<cmd prefix>:*)` like Bash, `browser_navigate(domain:<host>)` like WebFetch [from-node permissions.js:442-507].
 
 ### 5a. Agent tools [new, R10a; harness-run, `with_new_tools`]
 - `Task` gains `name?` (`[a-z0-9_-]{1,32}`, a taken name gets `-2`, `-3`) and `run_in_background?`. Background returns `{agent_id, name, kind, status:"running"}` and the final text arrives later as an `<agent_message type="result">`. The main task does not finish while background agents run (one gate, one budget). The schema replaces the ported one only in `with_new_tools`, so the Node golden is untouched.

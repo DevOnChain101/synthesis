@@ -7,7 +7,9 @@ mod cdp;
 mod discover;
 mod error;
 mod policy;
+pub mod profile;
 mod redact;
+pub mod secret;
 mod snapshot;
 mod untrusted;
 
@@ -15,7 +17,7 @@ pub use capture::{ConsoleMessage, JsException, NetworkRequest};
 pub use discover::{Os, candidates, discover};
 pub use error::{BrowserError, Result};
 pub use policy::{Resolver, UrlPolicy};
-pub use redact::{redact_text, redact_url};
+pub use redact::{mask_secret, redact_text, redact_url};
 pub use untrusted::UntrustedText;
 
 use base64::Engine;
@@ -57,6 +59,12 @@ pub struct BrowserOptions {
     /// Capacity of the CDP event broadcast. If a page floods events past it, the session is
     /// torn down (fail closed); lowering it is for tests.
     pub event_capacity: usize,
+    /// `false` opens a visible window (the login hand-off to a person). Default: headless.
+    pub headless: bool,
+    /// A persistent user-data-dir from `profile::create`/`existing` instead of a temp profile.
+    /// The default browser context is used (cookies survive), the directory is locked while the
+    /// browser runs and is never deleted.
+    pub profile: Option<PathBuf>,
 }
 
 /// How the CDP connection is made.
@@ -87,6 +95,8 @@ impl BrowserOptions {
             navigation_timeout: Duration::from_secs(30),
             chrome_args: vec![],
             event_capacity: 8192,
+            headless: true,
+            profile: None,
         }
     }
 }
@@ -161,6 +171,8 @@ pub struct BrowserRuntime {
     compromised: Arc<AtomicBool>,
     pid: u32,
     shots: AtomicU32,
+    /// Held while a persistent profile is in use (released on drop or close).
+    profile_lock: Mutex<Option<profile::ProfileLock>>,
 }
 
 impl Drop for BrowserRuntime {
@@ -482,15 +494,41 @@ fn windows_chrome_env(env: &Env) -> Vec<(String, String)> {
     .collect()
 }
 
+/// The default browser context and its first page (a persistent profile's cookie jar).
+async fn default_context(cdp: &Cdp) -> Result<(String, Option<String>)> {
+    for _ in 0..100 {
+        let r = cdp.send(None, "Target.getTargets", json!({})).await?;
+        let first = r["targetInfos"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|t| t["type"] == "page");
+        if let Some(t) = first {
+            let ctx = t["browserContextId"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            return Ok((ctx, t["targetId"].as_str().map(str::to_owned)));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Err(BrowserError::Launch("the browser opened no page".into()))
+}
+
 impl BrowserRuntime {
     /// Discovers a browser (`SYNTHESIS_BROWSER_PATH` first), launches it headless with an isolated
     /// temp profile and opens one tab in a fresh browser context.
     pub async fn launch(opts: BrowserOptions, env: &Env) -> Result<Self> {
         let exe = discover(env, Os::current(), &|p| p.is_file())?;
+        let profile_lock = opts.profile.as_deref().map(profile::lock).transpose()?;
         let profile = tempfile::Builder::new()
             .prefix("synthesis-browser-")
             .tempdir()?;
-        let data_dir = profile.path().join("data");
+        let data_dir = opts
+            .profile
+            .clone()
+            .unwrap_or_else(|| profile.path().join("data"));
+        let _ = std::fs::remove_file(data_dir.join("DevToolsActivePort")); // a stale port of an earlier run
         let stderr_path = profile.path().join("stderr.log");
         let stderr = std::fs::File::create(&stderr_path)?;
         let (w, h) = opts.viewport;
@@ -503,14 +541,14 @@ impl BrowserRuntime {
             .to_owned();
 
         let pipe = opts.transport == Transport::Pipe;
-        let mut chrome_args = vec![
-            "--headless=new".to_owned(),
-            if pipe {
-                "--remote-debugging-pipe".to_owned()
-            } else {
-                "--remote-debugging-port=0".to_owned()
-            },
-        ];
+        let mut chrome_args = vec![if pipe {
+            "--remote-debugging-pipe".to_owned()
+        } else {
+            "--remote-debugging-port=0".to_owned()
+        }];
+        if opts.headless {
+            chrome_args.push("--headless=new".to_owned());
+        }
         chrome_args.extend(
             [
                 "--no-first-run",
@@ -623,23 +661,33 @@ impl BrowserRuntime {
                 }
             }
         };
-        let ctx = match cdp
-            .send(
+        // A persistent profile keeps its cookies in the DEFAULT context; temp profiles get a
+        // fresh isolated one.
+        let ctx = if opts.profile.is_some() {
+            default_context(&cdp).await
+        } else {
+            cdp.send(
                 None,
                 "Target.createBrowserContext",
                 json!({"disposeOnDetach": true}),
             )
             .await
-        {
+            .map(|c| {
+                (
+                    c["browserContextId"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    None,
+                )
+            })
+        };
+        let (context_id, first_tab) = match ctx {
             Ok(c) => c,
             Err(e) => {
                 return Err(launch_failure(&mut *child, &stderr_path, &exe, &e.to_string()).await);
             }
         };
-        let context_id = ctx["browserContextId"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
         // Downloads are denied outright; there is no download size limit to enforce.
         cdp.send(
             None,
@@ -678,14 +726,28 @@ impl BrowserRuntime {
             compromised,
             pid,
             shots: AtomicU32::new(0),
+            profile_lock: Mutex::new(profile_lock),
         };
-        if let Err(e) = rt.new_tab(None).await {
+        let first = match first_tab {
+            Some(id) => rt.adopt(&id).await,
+            None => rt.new_tab(None).await.map(|_| ()),
+        };
+        if let Err(e) = first {
             if let Some(c) = rt.child.lock().await.as_mut() {
                 return Err(launch_failure(&mut **c, &stderr_path, &exe, &e.to_string()).await);
             }
             return Err(e);
         }
         Ok(rt)
+    }
+
+    /// Makes an existing page target (the default context's first tab) the current tab.
+    async fn adopt(&self, id: &str) -> Result<()> {
+        self.attach(id).await?;
+        let mut t = lock(&self.tabs);
+        t.order.push(id.to_owned());
+        t.current = Some(id.to_owned());
+        Ok(())
     }
 
     /// The temp profile directory; `None` after `close`.
@@ -748,10 +810,12 @@ impl BrowserRuntime {
             self.call(&tab, m, json!({})).await?;
         }
         enable_policy(&self.cdp, &tab.session).await?;
-        let (w, h) = self.opts.viewport;
-        let m = json!({"width": w, "height": h, "deviceScaleFactor": 1, "mobile": false});
-        self.call(&tab, "Emulation.setDeviceMetricsOverride", m)
-            .await?;
+        if self.opts.headless {
+            let (w, h) = self.opts.viewport;
+            let m = json!({"width": w, "height": h, "deviceScaleFactor": 1, "mobile": false});
+            self.call(&tab, "Emulation.setDeviceMetricsOverride", m)
+                .await?;
+        }
         lock(&self.tabs)
             .attached
             .insert(target_id.to_owned(), tab.clone());
@@ -1078,6 +1142,60 @@ impl BrowserRuntime {
         Ok(())
     }
 
+    /// Types a secret into the element behind `r` and nothing else: the page origin (checked now,
+    /// after any redirect) and the element's own frame must both be bound to the secret, and the
+    /// element must be a visible, enabled, editable text field of the right kind. The value is
+    /// registered for masking first and never returned.
+    pub async fn fill_secret(&self, r: &str, spec: &secret::SecretSpec, value: &str) -> Result<()> {
+        mask_secret(value);
+        let tab = self.current()?;
+        let top = self.eval(&tab, "location.origin").await?;
+        let oid = self.object_for(&tab, r).await?;
+        let facts = "function(){const e=this,w=e.ownerDocument.defaultView,b=e.getBoundingClientRect(),c=w.getComputedStyle(e);return{tag:e.tagName.toLowerCase(),type:String(e.type||'').toLowerCase(),visible:b.width>0&&b.height>0&&c.visibility!=='hidden'&&c.display!=='none'&&Number(c.opacity)>0,enabled:!e.disabled,readonly:!!e.readOnly,frame_origin:String(w.origin)}}";
+        let v = self
+            .call(
+                &tab,
+                "Runtime.callFunctionOn",
+                json!({"objectId": oid, "functionDeclaration": facts, "returnByValue": true}),
+            )
+            .await?;
+        let f = secret::Facts::from_json(&v["result"]["value"], top.as_str().unwrap_or(""));
+        secret::check_target(&f, spec)?;
+        let focus = "function(){this.focus();if(typeof this.select==='function')this.select();return this.ownerDocument.activeElement===this}";
+        let v = self
+            .call(
+                &tab,
+                "Runtime.callFunctionOn",
+                json!({"objectId": oid, "functionDeclaration": focus, "returnByValue": true}),
+            )
+            .await?;
+        // the page can navigate between the check and the keystrokes: look once more
+        if v["result"]["value"] != true || self.eval(&tab, "location.origin").await? != top {
+            return Err(BrowserError::Refused(
+                "the field lost focus or the page changed while filling; nothing was typed".into(),
+            ));
+        }
+        self.call(&tab, "Input.insertText", json!({"text": value}))
+            .await?;
+        Ok(())
+    }
+
+    /// `scheme://host[:port]` of the current page, as the page itself reports it.
+    pub async fn page_origin(&self) -> Result<String> {
+        let tab = self.current()?;
+        let o = self.eval(&tab, "location.origin").await?;
+        Ok(o.as_str().unwrap_or_default().to_owned())
+    }
+
+    /// How many cookies the browser holds for `origin`. Only the count leaves this function.
+    pub async fn cookie_count(&self, origin: &str) -> Result<usize> {
+        let tab = self.current()?;
+        let r = self
+            .call(&tab, "Network.getCookies", json!({"urls": [origin]}))
+            .await?;
+        Ok(r["cookies"].as_array().map_or(0, Vec::len))
+    }
+
     pub async fn press_key(&self, key: &str) -> Result<()> {
         let (k, code, vk, text) =
             key_def(key).ok_or_else(|| BrowserError::Page(format!("unsupported key `{key}`")))?;
@@ -1181,6 +1299,19 @@ impl BrowserRuntime {
     }
 
     /// Kills the whole browser process tree and removes the profile. Idempotent.
+    /// `Browser.close` first, so Chrome flushes the profile's cookies to disk; then `close`.
+    pub async fn close_graceful(&self) -> Result<()> {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(3),
+            self.cdp.send(None, "Browser.close", json!({})),
+        )
+        .await;
+        if let Some(child) = self.child.lock().await.as_mut() {
+            let _ = tokio::time::timeout(Duration::from_secs(8), child.wait()).await;
+        }
+        self.close().await
+    }
+
     pub async fn close(&self) -> Result<()> {
         self.events.abort();
         if let Some(mut child) = self.child.lock().await.take() {
@@ -1188,6 +1319,7 @@ impl BrowserRuntime {
             // Bounded: a Windows job-object wait must never hang a caller (CI sat 15 min).
             let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
         }
+        lock(&self.profile_lock).take(); // the profile is free only once the browser is gone
         let profile = lock(&self.profile).take();
         if let Some(p) = profile {
             // Windows keeps files locked until every process of the job has exited: retry with a

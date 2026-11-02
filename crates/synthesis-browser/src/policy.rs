@@ -160,6 +160,9 @@ pub struct UrlPolicy {
     /// When non-empty only these domains (and subdomains) are allowed.
     pub allow_domains: Vec<String>,
     pub deny_domains: Vec<String>,
+    /// When non-empty, top-level navigations (not subresources) are limited to these domains and
+    /// their subdomains: a login profile only browses the sites it was logged in to.
+    pub document_allow_domains: Vec<String>,
     /// Loopback, RFC1918, link-local (cloud metadata 169.254.169.254) and `localhost` are
     /// blocked unless this is set. Needed to test a local dev server.
     pub allow_private_network: bool,
@@ -247,7 +250,21 @@ impl UrlPolicy {
         if raw == "about:blank" {
             return Ok(());
         }
-        self.check(raw, &["http", "https"])
+        self.check(raw, &["http", "https"])?;
+        let host = Url::parse(raw)
+            .ok()
+            .and_then(|u| u.host().map(|h| normalise(&h.to_string())));
+        match host {
+            Some(h)
+                if !self.document_allow_domains.is_empty()
+                    && !matches_domain(&h, &self.document_allow_domains) =>
+            {
+                Err(format!(
+                    "domain `{h}` is not one of this browser profile's domains"
+                ))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Subresource requests: http(s) plus data/about.
@@ -346,6 +363,20 @@ mod tests {
         assert!(p.check_navigation("about:blank").is_ok());
         assert!(p.check_request("data:image/png;base64,AA").is_ok());
         assert!(p.check_request("file:///x").is_err());
+    }
+
+    #[test]
+    fn profile_domains_limit_navigation_but_not_subresources() {
+        let p = UrlPolicy {
+            document_allow_domains: vec!["example.com".into()],
+            ..Default::default()
+        };
+        assert!(p.check_navigation("https://app.example.com/x").is_ok());
+        assert!(p.check_navigation("about:blank").is_ok());
+        let e = p.check_navigation("https://evil.io/").unwrap_err();
+        assert!(e.contains("profile's domains"), "{e}");
+        assert!(p.check_navigation("https://example.com.evil.io/").is_err());
+        assert!(p.check_request("https://cdn.other.net/a.js").is_ok());
     }
 
     #[test]

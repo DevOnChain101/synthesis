@@ -651,6 +651,10 @@ pub enum Event {
     MemoryReflectionFailed { job_id: String, error: String },
     #[serde(rename = "memory.proposal.created")]
     MemoryProposalCreated { id: String },
+    /// `browser_login` opened a visible browser on `origin` and waits for the person to log in and
+    /// confirm. Names only: no cookie, token or page content ever appears in an event.
+    #[serde(rename = "browser.login_required")]
+    BrowserLoginRequired { origin: String, profile: String },
     #[serde(rename = "notice")]
     Notice { level: String, text: String },
 }

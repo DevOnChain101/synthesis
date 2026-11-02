@@ -3217,3 +3217,27 @@ fn plan_mode_denies_every_memory_write() {
     let p = f.with(rules(&[], &[], &[]), Mode::Default);
     assert_ne!(d(&p, "MemoryWrite", json!({"scope": "workspace"})), D);
 }
+
+#[test]
+fn browser_login_asks_in_every_mode_whatever_the_allow_rules_say() {
+    let f = fx();
+    let input = json!({ "origin": "https://app.example.com" });
+    for mode in Mode::ALL {
+        let p = f.with(
+            rules(
+                &["browser_login", "browser_*", "browser_login(*)"],
+                &[],
+                &[],
+            ),
+            mode,
+        );
+        let want = if mode == Mode::DontAsk { D } else { Q };
+        assert_eq!(d(&p, "browser_login", input.clone()), want, "{mode:?}");
+        assert!(
+            p.suggestions("browser_login", &input).is_empty(),
+            "no allow-always for a login"
+        );
+    }
+    let p = f.with(rules(&[], &["browser_login"], &[]), Mode::BypassPermissions);
+    assert_eq!(d(&p, "browser_login", input), D, "a deny rule still wins");
+}

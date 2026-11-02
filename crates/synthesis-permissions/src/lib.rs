@@ -1695,6 +1695,19 @@ impl Permissions {
         if DIALOG_TOOLS.contains(&tool) {
             return v(Ask, "dialog tool");
         }
+        // Hands the browser to the person: asks in every mode (auto and bypass included) and no
+        // allow rule can pre-approve it; only a deny rule or dontAsk can stop it earlier.
+        if tool == "browser_login" {
+            if mode == Mode::DontAsk {
+                return v(
+                    Deny,
+                    "dontAsk mode: browser_login needs the person's approval",
+                );
+            }
+            let mut r = v(Ask, "opens a visible browser for the person to log in");
+            r.hard = true;
+            return r;
+        }
         // which path the tool touches is unclear: never decided by a rule or a mode (not even bypass)
         if ambiguous_paths(tool, input) {
             if mode == Mode::DontAsk {

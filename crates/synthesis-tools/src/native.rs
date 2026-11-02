@@ -23,6 +23,10 @@ pub(crate) struct SessionState {
     pub cursors: Mutex<HashMap<String, String>>,
     /// Launched on the first browser_* call; dropping it (session end) kills the browser.
     pub browser: tokio::sync::OnceCell<Arc<BrowserRuntime>>,
+    /// Login profile the browser was started with.
+    pub browser_profile: Mutex<Option<String>>,
+    /// (secret, origin) pairs the person already approved in this session.
+    pub secret_ok: Mutex<std::collections::HashSet<(String, String)>>,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -110,6 +114,8 @@ pub(crate) fn lookup(name: &str) -> Option<Run> {
         "browser_snapshot" => Run::Async(browser::snapshot),
         "browser_click" => Run::Async(browser::click),
         "browser_fill" => Run::Async(browser::fill),
+        "browser_login" => Run::Async(browser::login),
+        "browser_fill_secret" => Run::Async(browser::fill_secret),
         "browser_press_key" => Run::Async(browser::press_key),
         "browser_wait_for" => Run::Async(browser::wait_for),
         "browser_screenshot" => Run::Async(browser::screenshot),

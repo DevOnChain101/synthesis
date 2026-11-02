@@ -22,6 +22,7 @@ Out of scope: a malicious local user or root, a compromised model provider, a ho
 - Child process environments (shell, hooks, MCP stdio) are an **allowlist** (PATH, HOME, locale, TERM, proxy and `SSL_CERT_*` variables, non-secret-shaped `SYNTHESIS_*`). API keys and tokens are never passed on. Only `{env:NAME}` references you write yourself, or explicit per-server env maps, add variables.
 - Only `SYNTHESIS_*` variables are read for Synthesis's own settings (`ANTHROPIC_*`/`OPENAI_*` are never read). Secrets are redacted from events, logs, transcripts and artifacts, and Debug output lists names only.
 - Browser: isolated profile, URL policy, Chrome sandbox on unless a test hook disables it.
+- Browser logins (docs/BROWSER-LOGIN.md): `browser_login` opens a visible browser on a dedicated profile under `$SYNTHESIS_HOME/browser-profiles` and always needs the person (every mode, no allow rule, never for peers or sub-agents); `browser_fill_secret` types a secret declared in USER settings only into the exact origins it is bound to, and the value never reaches the model, events, transcript, database or tool output. Neither tool returns cookies or page content.
 
 ## Sandbox guarantees (commands run by the agent)
 
