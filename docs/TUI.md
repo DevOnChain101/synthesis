@@ -23,7 +23,7 @@ session continues in place), `--once` (print one frame and exit), plus the `synt
 | /mcp | MCP servers: state, tools, last error |
 | /images [clear] | the attached images, or drop them |
 | /config | the `synthesis.tui` settings as a list; enter flips a row, applies it and saves it |
-| /files | the project tree with git status letters (read-only git; only in a trusted folder: `--trust-project`) |
+| /files | the project tree with git status letters (read-only git, only in a trusted folder: `--trust-project`; see "Git in `/files` and `/diff`" below) |
 | /diff [file] | uncommitted changes: a line per file, then the diff (of one file); trusted folder only |
 | /terminal | the shell commands this session ran, with their status |
 | /browser | the browser and web calls this session made |
@@ -73,6 +73,16 @@ is ignored with a diagnostic; a wrong value keeps the default and the diagnostic
 nothing else, so never a credential. First run without a configured model shows a setup card
 (`r` checks again, `q` quits) instead of an error. What came from the removed new TUI and what did
 not: `docs/tui-feature-port.md`.
+
+## Git in `/files` and `/diff`
+
+Only in a folder started with `--trust-project`, one scan at a time, 5 s limit, output bounded and cut
+on a line. `git` is the one found by absolute path on PATH; it gets a minimal environment, `core.hooksPath`
+at the null device, no network protocols, no submodules. For each call these programs named by the
+repository's own config are switched off: `core.fsmonitor`, textconv and external diff drivers, and
+every `filter.<name>.clean|smudge|process` found in the config (a filter whose name cannot be passed
+safely makes the scan refuse to run git). Not guaranteed: other config keys git might honour; that
+is why the folder must be trusted.
 
 ## Events
 

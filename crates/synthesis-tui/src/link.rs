@@ -72,6 +72,8 @@ pub(crate) enum Msg {
     },
     /// A command that ran on a worker (`/files`, `/diff`): text for the pane.
     Output(String),
+    /// The scan ended, any way: `/files` and `/diff` may start again.
+    ProjectDone,
     TaskDone(Box<TaskDone>),
     /// A `!cmd` finished (the model turn that follows is started by the runtime).
     UserCommandDone(Box<UserDone>),

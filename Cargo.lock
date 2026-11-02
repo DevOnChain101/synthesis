@@ -2992,6 +2992,7 @@ dependencies = [
  "synthesis-tools",
  "synthesis-tui-base",
  "synthesis-tui-render",
+ "synthesis-workspace",
  "tempfile",
  "tokio",
  "tokio-util",

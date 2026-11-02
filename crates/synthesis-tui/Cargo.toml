@@ -19,6 +19,7 @@ synthesis-platform = { path = "../synthesis-platform" }
 synthesis-providers = { path = "../synthesis-providers" }
 synthesis-session = { path = "../synthesis-session" }
 synthesis-settings = { path = "../synthesis-settings" }
+synthesis-workspace = { path = "../synthesis-workspace" }
 synthesis-tools = { path = "../synthesis-tools" }
 synthesis-tui-base = { path = "../synthesis-tui-base" }
 synthesis-tui-render = { path = "../synthesis-tui-render" }

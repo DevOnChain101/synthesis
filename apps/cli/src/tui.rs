@@ -128,8 +128,18 @@ fn purge_old_images(synthesis_home: &Path) {
     let store =
         synthesis_session::Store::open(synthesis_home, synthesis_session::StoreOptions::default());
     match store.and_then(|s| s.purge_images(days, time::OffsetDateTime::now_utc())) {
-        Ok(0) => {}
-        Ok(n) => eprintln!("synth: removed {n} stored image(s) older than {days} days"),
+        Ok(r) if r.images == 0 => {}
+        Ok(r) => {
+            eprintln!(
+                "synth: rewrote {} stored image(s) older than {days} days to text",
+                r.images
+            );
+            if !r.wal_truncated {
+                eprintln!(
+                    "synth: warning: another process holds the database log, so old copies of those images stay in it until the next checkpoint"
+                );
+            }
+        }
         Err(e) => eprintln!("synth: warning: image retention: {e}"),
     }
 }
@@ -700,7 +710,13 @@ mod tests {
                 "SYNTHESIS_HOME",
                 root.join("synthesis").to_string_lossy().into_owned(),
             ),
-            ("PATH", std::env::var("PATH").unwrap_or_default()),
+            (
+                "PATH",
+                Env::from_process()
+                    .get("PATH")
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
         ]);
         let granted = root_of(&a);
         let run = |cwd: &Path| {
@@ -784,7 +800,13 @@ mod start_failure_tests {
                 "SYNTHESIS_HOME",
                 root.join("synthesis").to_string_lossy().into_owned(),
             ),
-            ("PATH", std::env::var("PATH").unwrap_or_default()),
+            (
+                "PATH",
+                Env::from_process()
+                    .get("PATH")
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
         ]);
         let mut p = prepare(&w.c, &repo, &env, &Limits::default(), Front::Tui).unwrap();
         let wt = p.worktree.as_ref().unwrap().info.worktree.clone();

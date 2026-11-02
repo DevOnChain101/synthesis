@@ -535,6 +535,24 @@ impl Runner {
     }
 }
 
+/// Runs a `/files` / `/diff` scan off the UI thread: its text goes back as [`Msg::Output`], and
+/// [`Msg::ProjectDone`] ALWAYS follows (a drop guard: also when the scan panics, which is turned
+/// into a message), so one failed scan never leaves `/files` and `/diff` locked.
+fn spawn_scan(tx: crate::link::Tx, work: impl FnOnce() -> String + Send + 'static) {
+    struct Done(crate::link::Tx);
+    impl Drop for Done {
+        fn drop(&mut self) {
+            let _ = self.0.send(Msg::ProjectDone);
+        }
+    }
+    std::thread::spawn(move || {
+        let _done = Done(tx.clone());
+        let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+            .unwrap_or_else(|_| "the scan failed unexpectedly; nothing is shown".to_string());
+        let _ = tx.send(Msg::Output(text));
+    });
+}
+
 fn spawn_reader(mut input: Box<dyn Read + Send>, tx: crate::link::Tx) {
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -843,10 +861,10 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                     urgent = true;
                 }
                 Msg::Output(text) => {
-                    app.project_done();
                     app.output(text, false);
                     dirty = true;
                 }
+                Msg::ProjectDone => app.project_done(),
                 Msg::Wake => {}
                 Msg::Event(e) => {
                     app.on_event(&e, now);
@@ -1010,14 +1028,14 @@ fn exec(
             agent,
         } => runner.start(app, text, images, display_text, cancel, agent),
         Cmd::Project { cwd, diff } => {
-            let (tx, env) = (runner.tx.clone(), runner.env.clone());
-            std::thread::spawn(move || {
+            let env = runner.env.clone();
+            spawn_scan(runner.tx.clone(), move || {
                 let p = crate::project::scan(&cwd, &env);
-                let lines = match &diff {
+                match &diff {
                     None => crate::project::tree_lines(&p),
                     Some(f) => crate::project::diff_lines(&p, f.trim()),
-                };
-                let _ = tx.send(Msg::Output(lines.join("\n")));
+                }
+                .join("\n")
             });
         }
         Cmd::SaveTui(t) => match &runner.settings_home {
@@ -1206,4 +1224,38 @@ pub fn render_once(o: &OnceOptions, out: &mut impl Write) -> io::Result<()> {
         writeln!(out, "{}", encode(l, o.color))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    fn got(rx: &std::sync::mpsc::Receiver<Msg>) -> (Option<String>, bool) {
+        let (mut out, mut done) = (None, false);
+        while let Ok(m) = rx.recv_timeout(Duration::from_secs(5)) {
+            match m {
+                Msg::Output(t) => out = Some(t),
+                Msg::ProjectDone => {
+                    done = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        (out, done)
+    }
+
+    #[test]
+    fn a_scan_always_ends_with_project_done_also_when_it_panics() {
+        let (tx, rx) = channel();
+        spawn_scan(tx, || "tree".into());
+        assert_eq!(got(&rx), (Some("tree".into()), true));
+        let (tx, rx) = channel();
+        spawn_scan(tx, || panic!("boom"));
+        let (out, done) = got(&rx);
+        assert!(done, "ProjectDone must follow a panicking scan");
+        assert!(out.is_some_and(|t| t.contains("failed")));
+    }
 }

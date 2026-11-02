@@ -1,6 +1,14 @@
 //! Reads the working tree for `/files` and `/diff`: read-only `git`, bounded, run on a worker
 //! thread (never the render thread). Nothing is invented: no git, or not a repository, is a note.
 //! (From the removed new TUI's Mission centre tabs, as data and text only.)
+//!
+//! What is guaranteed about the programs a repository's config can name: `core.fsmonitor`, the
+//! textconv and external diff drivers, and every `filter.<name>.clean|smudge|process` found in the
+//! config are switched off for each call (`required=false`, so git does not fail on the missing
+//! program); submodules are not entered; `git` is the one found by absolute path on the injected
+//! PATH; the process gets a minimal environment, `core.hooksPath` points at the null device, and
+//! network protocols are refused. NOT guaranteed: other config keys git may honour that this list does not
+//! name. The scan runs only in a trusted folder (`--trust-project`), which is the real gate.
 
 use crate::sanitize::clean_line;
 use std::collections::HashMap;
@@ -115,6 +123,8 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// limit with a process-group kill, and a bounded read. `safe.directory` is left alone: git's own
 /// refusal to read another user's repository stays.
 struct Git {
+    /// Absolute path of `git` on the injected PATH (never a bare name, never the cwd).
+    exe: Option<std::path::PathBuf>,
     env: Vec<(String, String)>,
     exec: RealExec,
 }
@@ -146,10 +156,13 @@ impl Git {
                 ("GIT_CONFIG_NOSYSTEM", "1"),
                 ("GIT_OPTIONAL_LOCKS", "0"),
                 ("GIT_TERMINAL_PROMPT", "0"),
+                ("GIT_ATTR_NOSYSTEM", "1"),
+                ("GIT_EXTERNAL_DIFF", ""),
             ]
             .map(|(k, v)| (k.to_string(), v.to_string())),
         );
         Self {
+            exe: synthesis_workspace::find_git(env),
             env: keep,
             exec: RealExec {
                 timeout: GIT_TIMEOUT,
@@ -160,6 +173,61 @@ impl Git {
 
     /// Stdout (cut at the last `cut_at` byte when the bound was hit) and whether it was cut.
     fn run(&self, cwd: &Path, args: &[&str], cut_at: u8) -> Option<(Vec<u8>, bool)> {
+        self.run_with(cwd, &[], args, cut_at)
+    }
+
+    /// `git config --name-only --get-regexp ^filter\.` runs nothing: from its names, the
+    /// `-c` overrides that switch off every filter driver. `Err`: a name that cannot be passed
+    /// on a command line safely (so git is not run at all).
+    fn filter_guards(&self, cwd: &Path) -> Result<Vec<String>, String> {
+        let Some((out, _)) = self.run(
+            cwd,
+            &["config", "--name-only", "-z", "--get-regexp", r"^filter\."],
+            0,
+        ) else {
+            return Ok(vec![]); // none defined (exit 1) or no config
+        };
+        let mut names: Vec<String> = vec![];
+        for key in out.split(|b| *b == 0).filter(|k| !k.is_empty()) {
+            let key = String::from_utf8_lossy(key);
+            // `filter.<name>.<variable>`; the name may itself contain dots
+            let Some((name, _var)) = key.strip_prefix("filter.").and_then(|r| r.rsplit_once('.'))
+            else {
+                continue;
+            };
+            if name.is_empty()
+                || name.contains(['=', '\n', '\0'])
+                || name.chars().any(char::is_control)
+            {
+                return Err("a git filter in this repository's config has a name that cannot be switched off safely".into());
+            }
+            if !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+        }
+        if names.len() > 100 {
+            return Err(
+                "this repository's config defines too many git filters to switch off".into(),
+            );
+        }
+        Ok(names
+            .iter()
+            .flat_map(|n| {
+                ["clean=", "smudge=", "process=", "required=false"]
+                    .map(|v| ["-c".to_string(), format!("filter.{n}.{v}")])
+            })
+            .flatten()
+            .collect())
+    }
+
+    fn run_with(
+        &self,
+        cwd: &Path,
+        extra: &[String],
+        args: &[&str],
+        cut_at: u8,
+    ) -> Option<(Vec<u8>, bool)> {
+        let exe = self.exe.as_ref()?;
         let mut argv: Vec<String> = [
             "-c",
             "core.fsmonitor=false",
@@ -171,10 +239,19 @@ impl Git {
         .iter()
         .map(|s| (*s).to_string())
         .collect();
+        argv.extend(["-c".to_string(), "diff.external=".to_string()]);
+        argv.extend([
+            "-c".to_string(),
+            format!(
+                "core.hooksPath={}",
+                if cfg!(windows) { "NUL" } else { "/dev/null" }
+            ),
+        ]);
+        argv.extend(extra.iter().cloned());
         argv.extend(args.iter().map(|s| (*s).to_string()));
         let o = self
             .exec
-            .run_with(Path::new("git"), &argv, Some(cwd), Some(&self.env))
+            .run_with(exe, &argv, Some(cwd), Some(&self.env))
             .ok()?;
         if o.timed_out {
             return None;
@@ -239,7 +316,7 @@ pub fn scan(cwd: &Path, env: &Env) -> ProjectData {
         ],
         0,
     ) else {
-        let note = if git.run(cwd, &["--version"], b'\n').is_some() {
+        let note = if git.exe.is_some() {
             "not a git repository"
         } else {
             "git was not found"
@@ -254,9 +331,21 @@ pub fn scan(cwd: &Path, env: &Env) -> ProjectData {
     paths.sort();
     paths.dedup();
     let mut status: HashMap<String, char> = HashMap::new();
+    // filter drivers run during status and diff (to compare content): off, every one
+    let guards = match git.filter_guards(cwd) {
+        Ok(g) => g,
+        Err(why) => {
+            return ProjectData {
+                loaded: true,
+                note: Some(format!("{why}; git was not run")),
+                ..Default::default()
+            };
+        }
+    };
     // submodules are not looked into (their own config could name programs too)
-    if let Some((st, _)) = git.run(
+    if let Some((st, _)) = git.run_with(
         cwd,
+        &guards,
         &["status", "--porcelain=v1", "-z", "--ignore-submodules=all"],
         0,
     ) {
@@ -304,7 +393,7 @@ pub fn scan(cwd: &Path, env: &Env) -> ProjectData {
             "--ignore-submodules=all",
         ];
         a.extend(extra);
-        git.run(cwd, &a, b'\n')
+        git.run_with(cwd, &guards, &a, b'\n')
     };
     let (raw, diff_cut) = diff(&["HEAD"]).or_else(|| diff(&[])).unwrap_or_default();
     truncated |= diff_cut;
@@ -328,7 +417,13 @@ mod tests {
     use std::process::Command;
 
     fn env() -> Env {
-        Env::from_pairs([("PATH", std::env::var("PATH").unwrap_or_default())])
+        Env::from_pairs([(
+            "PATH",
+            Env::from_process()
+                .get("PATH")
+                .unwrap_or_default()
+                .to_string(),
+        )])
     }
 
     fn run(dir: &Path, args: &[&str]) {
@@ -465,6 +560,86 @@ mod tests {
             &repo,
             &["config", "diff.external", &ext.display().to_string()],
         );
+        // clean / smudge / process filters, one of them with dots in its name
+        let fclean = script(
+            "fclean.sh",
+            format!("touch {}\ncat", marker("filter-clean").display()),
+        );
+        let fproc = script(
+            "fproc.sh",
+            format!("touch {}\nexit 1", marker("filter-process").display()),
+        );
+        let fdots = script(
+            "fdots.sh",
+            format!("touch {}\ncat", marker("filter-dots").display()),
+        );
+        std::fs::write(
+            repo.join(".gitattributes"),
+            "*.x diff=x\n*.c filter=c\n*.p filter=p\n*.d filter=a.b\n",
+        )
+        .unwrap();
+        run(
+            &repo,
+            &["config", "filter.c.clean", &fclean.display().to_string()],
+        );
+        run(
+            &repo,
+            &["config", "filter.c.smudge", &fclean.display().to_string()],
+        );
+        run(
+            &repo,
+            &["config", "filter.p.process", &fproc.display().to_string()],
+        );
+        run(
+            &repo,
+            &["config", "filter.a.b.clean", &fdots.display().to_string()],
+        );
+        for f in ["a.c", "b.p", "c.d"] {
+            std::fs::write(repo.join(f), "old\n").unwrap();
+        }
+        run(
+            &repo,
+            &[
+                "-c",
+                "filter.c.clean=",
+                "-c",
+                "filter.a.b.clean=",
+                "-c",
+                "filter.p.process=",
+                "-c",
+                "filter.c.smudge=",
+                "-c",
+                "core.fsmonitor=false",
+                "add",
+                "-f",
+                ".",
+            ],
+        );
+        run(
+            &repo,
+            &[
+                "-c",
+                "filter.c.clean=",
+                "-c",
+                "filter.a.b.clean=",
+                "-c",
+                "filter.p.process=",
+                "-c",
+                "filter.c.smudge=",
+                "-c",
+                "core.fsmonitor=false",
+                "commit",
+                "-qam",
+                "more",
+            ],
+        );
+        for f in ["a.c", "b.p", "c.d"] {
+            std::fs::write(repo.join(f), "new content\n").unwrap();
+        }
+        std::fs::write(repo.join("a.x"), "three\n").unwrap();
+        for n in ["filter-clean", "filter-process", "filter-dots"] {
+            let _ = std::fs::remove_file(marker(n));
+        }
         // positive control: plain git DOES run them here (otherwise this test proves nothing)
         let plain = |args: &[&str]| {
             Command::new("git")
@@ -475,10 +650,17 @@ mod tests {
         };
         plain(&["status"]);
         plain(&["diff"]);
-        let ran: Vec<&str> = ["fsmonitor", "textconv", "extdiff"]
-            .into_iter()
-            .filter(|n| marker(n).exists())
-            .collect();
+        let ran: Vec<&str> = [
+            "fsmonitor",
+            "textconv",
+            "extdiff",
+            "filter-clean",
+            "filter-process",
+            "filter-dots",
+        ]
+        .into_iter()
+        .filter(|n| marker(n).exists())
+        .collect();
         assert!(
             !ran.is_empty(),
             "plain git ran none of the configured programs: the control failed"
@@ -496,10 +678,45 @@ mod tests {
             "{:?}",
             p.rows
         );
-        assert!(p.diff.iter().any(|l| l == "+two"), "{:?}", p.diff);
-        for n in ["fsmonitor", "textconv", "extdiff"] {
+        assert!(p.diff.iter().any(|l| l == "+three"), "{:?}", p.diff);
+        for n in [
+            "fsmonitor",
+            "textconv",
+            "extdiff",
+            "filter-clean",
+            "filter-process",
+            "filter-dots",
+        ] {
             assert!(!marker(n).exists(), "{n} ran from the repository's config");
         }
+        // the control must have run a filter, or the filter cases prove nothing
+        assert!(
+            ran.iter().any(|n| n.starts_with("filter")),
+            "plain git ran no filter ({ran:?}): the filter cases proved nothing"
+        );
+        assert!(
+            p.rows
+                .iter()
+                .any(|r| r.name == "a.c" && r.status == Some('M')),
+            "{:?}",
+            p.rows
+        );
+
+        // a filter name that cannot be passed on a command line safely: git is not run at all
+        run(
+            &repo,
+            &["config", "filter.x=y.clean", &fclean.display().to_string()],
+        );
+        let refused = scan(&repo, &env());
+        assert!(
+            refused
+                .note
+                .as_deref()
+                .is_some_and(|n| n.contains("cannot be switched off safely")),
+            "{:?}",
+            refused.note
+        );
+        assert!(refused.rows.is_empty() && !marker("filter-clean").exists());
     }
 
     #[test]
