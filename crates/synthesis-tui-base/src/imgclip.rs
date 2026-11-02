@@ -19,10 +19,12 @@ use std::time::{Duration, Instant};
 
 /// Longest wait for the helper process; it is killed after this.
 pub const TIMEOUT: Duration = Duration::from_secs(5);
-/// Largest stdout taken from the helper (base64 of about 10 MB of PNG).
-pub const MAX_STDOUT: usize = 14 << 20;
-/// Largest decoded PNG.
-pub const MAX_PNG: usize = 10 << 20;
+/// Largest decoded PNG. The session store refuses a message over 8 MiB, and an image travels as
+/// base64 inside it: 4 MB of PNG is 5.4 MB of base64, which leaves room for the text and for a
+/// second small image (the per-message total is checked where images are attached).
+pub const MAX_PNG: usize = 4 << 20;
+/// Largest stdout taken from the helper: the base64 of [`MAX_PNG`].
+pub const MAX_STDOUT: usize = MAX_PNG / 3 * 4 + 16;
 /// Largest width and height in pixels.
 pub const MAX_DIM: u32 = 8000;
 const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
@@ -34,6 +36,8 @@ pub struct ClipImage {
     pub png: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// base64 of `png`, made on the worker thread (not on the UI thread that attaches it).
+    pub base64: String,
 }
 
 /// A one-line, user-facing reason.
@@ -57,17 +61,14 @@ pub trait ImageSource: Send + Sync {
 
 // ---------------------------------------------------------------- WSL probing (pure)
 
-/// WSL from the kernel's own words (`/proc/sys/kernel/osrelease`, `/proc/version`): both contain
-/// "microsoft" (WSL2: `...-microsoft-standard-WSL2`; WSL1: `...-Microsoft`). `read` returns a
+/// WSL from the kernel's own words (`/proc/sys/kernel/osrelease`, `/proc/version`): both WSL1
+/// (`...-Microsoft`) and WSL2 (`...-microsoft-standard-WSL2`) contain "microsoft". `read` returns a
 /// file's text.
 pub fn is_wsl(read: &dyn Fn(&str) -> Option<String>) -> bool {
     ["/proc/sys/kernel/osrelease", "/proc/version"]
         .iter()
         .filter_map(|p| read(p))
-        .any(|t| {
-            let t = t.to_lowercase();
-            t.contains("microsoft") || t.contains("wsl")
-        })
+        .any(|t| t.to_lowercase().contains("microsoft"))
 }
 
 /// Where the Windows C: drive is mounted, from `/proc/mounts` (`C: /mnt/c drvfs ...`, or the
@@ -76,8 +77,10 @@ pub fn windows_c_mount(proc_mounts: &str) -> Option<PathBuf> {
     proc_mounts.lines().find_map(|l| {
         let mut f = l.split_whitespace();
         let (dev, mnt, fstype) = (f.next()?, f.next()?, f.next()?);
-        let drive = dev.len() >= 2 && dev[..2].eq_ignore_ascii_case("c:");
-        let rest_ok = dev.len() == 2 || matches!(dev.as_bytes()[2], b'\\' | b'/');
+        // bytes, not `dev[..2]`: a non-ASCII device name must not panic on a char boundary
+        let d = dev.as_bytes();
+        let drive = d.len() >= 2 && d[0].eq_ignore_ascii_case(&b'c') && d[1] == b':';
+        let rest_ok = d.len() == 2 || matches!(d.get(2), Some(b'\\' | b'/'));
         // /proc/mounts escapes spaces as \040
         (drive && rest_ok && matches!(fstype, "drvfs" | "9p"))
             .then(|| PathBuf::from(mnt.replace("\\040", " ")))
@@ -171,7 +174,7 @@ pub fn validate_png(png: Vec<u8>) -> Result<ClipImage, ImageError> {
         )))
     };
     if png.len() > MAX_PNG {
-        return bad("larger than 10 MB");
+        return bad("larger than 4 MB");
     }
     if png.len() < 24 || png[..8] != PNG_MAGIC || &png[12..16] != b"IHDR" {
         return bad("not a PNG");
@@ -183,7 +186,13 @@ pub fn validate_png(png: Vec<u8>) -> Result<ClipImage, ImageError> {
             "{width}x{height} pixels (the limit is {MAX_DIM}x{MAX_DIM})"
         ));
     }
-    Ok(ClipImage { png, width, height })
+    let base64 = crate::clipboard::base64(&png);
+    Ok(ClipImage {
+        png,
+        width,
+        height,
+        base64,
+    })
 }
 
 /// Stdout of the script: base64 of a PNG.
@@ -225,6 +234,42 @@ impl Default for RealExec {
     }
 }
 
+/// Kills the child AND what it started (powershell.exe starts helpers; a script can fork): unix
+/// kills the process group (the child leads its own), Windows uses `taskkill /T`. Then reaps it.
+fn kill_tree(child: &mut std::process::Child) {
+    let pid = child.id();
+    #[cfg(unix)]
+    {
+        let group = format!("-{pid}");
+        for kill in ["/bin/kill", "/usr/bin/kill"] {
+            let ok = Command::new(kill)
+                .args(["-KILL", "--", &group])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if ok {
+                break;
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = Command::new(synthesis_platform::system32("taskkill.exe"))
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill(); // the child itself, if the group kill was not possible
+    let _ = child.wait();
+}
+
+/// How long to wait for the reader thread once the child is gone (its pipe is closed by then).
+const READER_GRACE: Duration = Duration::from_millis(500);
+
 impl Exec for RealExec {
     fn run(&self, program: &Path, args: &[String]) -> io::Result<Output> {
         let mut cmd = Command::new(program);
@@ -232,42 +277,57 @@ impl Exec for RealExec {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
         #[cfg(windows)]
         std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000);
         let mut child = cmd.spawn()?;
         let mut out = child.stdout.take().expect("stdout was piped");
         let max = self.max;
-        let reader = std::thread::spawn(move || {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
             let mut buf = Vec::new();
             let _ = (&mut out).take(max as u64 + 1).read_to_end(&mut buf);
             let truncated = buf.len() > max;
             buf.truncate(max);
-            (buf, truncated)
+            let _ = tx.send((buf, truncated));
         });
         let deadline = Instant::now() + self.timeout;
+        let mut got: Option<(Vec<u8>, bool)> = None;
         let (mut code, mut timed_out) = (None, false);
         loop {
-            match child.try_wait()? {
-                Some(s) => {
+            if got.is_none() {
+                got = rx.try_recv().ok();
+            }
+            match child.try_wait() {
+                Ok(Some(s)) => {
                     code = s.code();
                     break;
                 }
-                None if Instant::now() >= deadline => {
-                    timed_out = true;
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break;
+                Ok(None) => {}
+                Err(e) => {
+                    kill_tree(&mut child);
+                    return Err(e);
                 }
-                None if reader.is_finished() => {
-                    // output limit hit: the reader stopped, the child is still writing
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break;
-                }
-                None => std::thread::sleep(Duration::from_millis(10)),
             }
+            // the limit was hit: more output is coming that nobody reads, so stop the child;
+            // a reader that finished normally only means the output is complete (wait for the
+            // exit code)
+            if got.as_ref().is_some_and(|g| g.1) {
+                kill_tree(&mut child);
+                break;
+            }
+            if Instant::now() >= deadline {
+                timed_out = true;
+                kill_tree(&mut child);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
-        let (stdout, truncated) = reader.join().unwrap_or_default();
+        let (stdout, truncated) = match got {
+            Some(g) => g,
+            None => rx.recv_timeout(READER_GRACE).unwrap_or_default(),
+        };
         Ok(Output {
             code,
             stdout,
@@ -289,7 +349,7 @@ fn via_powershell(exec: &dyn Exec, exe: &Path) -> Result<ClipImage, ImageError> 
     }
     if o.truncated {
         return Err(ImageError::Failed(
-            "the clipboard image was refused: larger than 10 MB".into(),
+            "the clipboard image was refused: larger than 4 MB".into(),
         ));
     }
     match o.code {
@@ -418,7 +478,15 @@ mod tests {
         };
         assert!(r(Some("5.15.153.1-microsoft-standard-WSL2\n"), None));
         assert!(r(Some("4.4.0-19041-Microsoft"), None));
-        assert!(r(None, Some("Linux version 5.15 (root@x) #1 SMP ... WSL2")));
+        assert!(r(
+            None,
+            Some("Linux version 5.15.0 (root@x) Microsoft-standard #1 SMP")
+        ));
+        // "wsl" alone is not enough: only the word the kernel of both WSL versions carries
+        assert!(!r(
+            Some("6.1.0-custom-wsl-lookalike"),
+            Some("Linux version 6.1 wsl2")
+        ));
         assert!(!r(
             Some("6.8.0-45-generic"),
             Some("Linux version 6.8.0-45-generic (buildd@lcy02)")
@@ -448,6 +516,18 @@ mod tests {
             None,
             "only drvfs/9p are Windows drives"
         );
+        // non-ASCII device names: no panic on a char boundary, and no match
+        for l in [
+            "aé: /mnt/x drvfs rw 0 0",
+            "é:\\ /mnt/x 9p rw 0 0",
+            "Cé /mnt/x drvfs rw 0 0",
+            "日本 /x 9p rw 0 0",
+            "c /x 9p rw 0 0",
+            "é",
+            "C:é /mnt/x drvfs rw 0 0",
+        ] {
+            assert_eq!(windows_c_mount(l), None, "{l}");
+        }
         let want = |m: &str| {
             PathBuf::from(m).join("Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
         };
@@ -512,7 +592,7 @@ mod tests {
         assert!(validate_png(png(8000, 8000)).is_ok());
         let mut big = png(10, 10);
         big.resize(MAX_PNG + 1, 0);
-        refused(validate_png(big), "10 MB");
+        refused(validate_png(big), "4 MB");
         let mut bad_ihdr = png(10, 10);
         bad_ihdr[12] = b'X';
         refused(validate_png(bad_ihdr), "not a PNG");
@@ -586,7 +666,7 @@ mod tests {
                 .to_string()
         };
         assert!(one((vec![], None, false, true)).contains("5 s"));
-        assert!(one((vec![b'A'; 10], Some(0), true, false)).contains("10 MB"));
+        assert!(one((vec![b'A'; 10], Some(0), true, false)).contains("4 MB"));
         assert!(one((b"!!!".to_vec(), Some(0), false, false)).contains("base64"));
         assert!(
             one((b64(&png(9000, 9000)).into_bytes(), Some(0), false, false)).contains("9000x9000")
@@ -662,5 +742,72 @@ mod tests {
             (Some(2), &b"hi"[..], false)
         );
         assert!(q.run(Path::new("/no/such/powershell.exe"), &[]).is_err());
+    }
+
+    #[cfg(unix)]
+    fn alive(pid: &str) -> bool {
+        Command::new("/bin/kill")
+            .args(["-0", pid])
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_timeout_kills_the_whole_process_group_not_just_the_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let script = format!("sleep 30 & echo $! > {}; wait", pidfile.display());
+        let q = RealExec {
+            timeout: Duration::from_millis(500),
+            max: 100,
+        };
+        let o = q.run(Path::new("/bin/sh"), &["-c".into(), script]).unwrap();
+        assert!(o.timed_out);
+        let pid = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .to_string();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!alive(&pid), "the grandchild survived the timeout");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_closed_stdout_is_not_a_reason_to_kill_the_exit_code_is_still_read() {
+        let q = RealExec {
+            timeout: Duration::from_secs(5),
+            max: 100,
+        };
+        let o = q
+            .run(
+                Path::new("/bin/sh"),
+                &["-c".into(), "echo hi; exec 1>&-; sleep 0.4; exit 7".into()],
+            )
+            .unwrap();
+        assert_eq!(
+            (o.code, o.stdout.as_slice(), o.timed_out),
+            (Some(7), &b"hi\n"[..], false)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_held_open_by_a_grandchild_cannot_stall_the_worker() {
+        let q = RealExec {
+            timeout: Duration::from_millis(500),
+            max: 100,
+        };
+        let t = Instant::now();
+        // the shell exits at once, a background sleep keeps the pipe open for 3 s
+        let o = q
+            .run(
+                Path::new("/bin/sh"),
+                &["-c".into(), "sleep 3 & exit 0".into()],
+            )
+            .unwrap();
+        assert_eq!(o.code, Some(0));
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
     }
 }

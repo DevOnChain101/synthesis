@@ -1008,6 +1008,7 @@ impl synthesis_tui_base::imgclip::ImageSource for FakeImages {
         self.0
             .clone()
             .map(|png| synthesis_tui_base::imgclip::ClipImage {
+                base64: synthesis_tui_base::clipboard::base64(&png),
                 png,
                 width: 4,
                 height: 3,
@@ -1071,11 +1072,38 @@ fn a_clipboard_without_an_image_says_so_and_ctrl_v_falls_back_to_text() {
     r.wait_for("Enter send");
     r.tty.send("\x1bv");
     r.wait_for("no image on the Windows clipboard");
-    r.wait_for("alt+v attaches an image");
+    r.wait_for("ctrl+v / alt+v pastes an image");
     assert_eq!(paste.reads(), 0, "alt+v never pastes text");
     r.tty.send("\x16"); // ctrl+v
     r.wait_for("plain text");
     assert_eq!(paste.reads(), 1);
     r.tty.send("\x15\x04"); // ctrl+u clears the pasted text, ctrl+d quits on an empty prompt
+    r.finish();
+}
+
+#[test]
+fn an_empty_bracketed_paste_is_the_image_paste_and_backspace_drops_the_chip() {
+    let png = png_bytes();
+    let mut r = rig(
+        vec![Turn::text("x")],
+        Knobs {
+            images: Some(Arc::new(FakeImages(Ok(png)))),
+            ..Knobs::default()
+        },
+    );
+    r.wait_for("Enter send");
+    // what Windows Terminal / WSL deliver when the clipboard holds only an image
+    r.tty.send("\x1b[200~\x1b[201~");
+    r.wait_for("image 1.png");
+    std::thread::sleep(Duration::from_millis(400)); // Enter is ignored right after paste activity
+    r.tty.send("\x7f"); // backspace on the empty prompt drops the chip
+    r.tty.send("hi\r");
+    r.wait_for("Done");
+    let dump = format!("{:?}", r.provider.requests()[0].messages);
+    assert!(
+        dump.contains("hi") && !dump.contains("Image"),
+        "the dropped image was sent: {dump}"
+    );
+    r.tty.send("\x04");
     r.finish();
 }

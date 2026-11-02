@@ -89,6 +89,26 @@ fn requested_resume(a: &TuiArgs, h: &synthesis_app::Homes) -> Result<Option<Resu
     load_resume(&h.synthesis, &id).map(Some)
 }
 
+/// Retention of stored images (`synthesis.images.retentionDays`, default 30): done once at start,
+/// before the screen is taken over. Failures are a warning, never a reason not to start.
+fn purge_old_images(synthesis_home: &Path) {
+    let (days, diag) =
+        synthesis_app::ctx::read_image_retention(&synthesis_home.join("settings.json"));
+    for d in diag {
+        eprintln!("synth: warning: {d}");
+    }
+    if days == 0 {
+        return;
+    }
+    let store =
+        synthesis_session::Store::open(synthesis_home, synthesis_session::StoreOptions::default());
+    match store.and_then(|s| s.purge_images(days, time::OffsetDateTime::now_utc())) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("synth: removed {n} stored image(s) older than {days} days"),
+        Err(e) => eprintln!("synth: warning: image retention: {e}"),
+    }
+}
+
 /// Minutes east of UTC for the greeting ("Good morning"); 0 when the zone cannot be read. No
 /// std or dependency gives the local zone safely, so unix asks `date`; Windows greets by UTC.
 fn local_offset_min() -> i32 {
@@ -179,6 +199,7 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
         return Ok(2);
     }
     let h = homes(&env)?;
+    purge_old_images(&h.synthesis);
     let mut cwd = start_dir(&a)?;
     let granted = root_of(&cwd);
     let mut resume = requested_resume(&a, &h)?;
@@ -416,6 +437,9 @@ fn round(
         finish_store(s, transcript.as_deref(), out, &sess.usage);
     }
     harness.end_session(&outcome);
+    if let Some(t) = &transcript {
+        t.clear_notifier(); // break the sink <-> transcript cycle: the next session needs the store lock
+    }
     rt.close_session(&sid);
     if let Some(m) = &mcp {
         tokio.block_on(m.close());

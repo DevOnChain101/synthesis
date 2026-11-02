@@ -2296,3 +2296,108 @@ fn allow_always_never_carries_a_switch_into_bypass_and_the_agent_name_is_sanitis
         [Suggestion::SetMode(Mode::AcceptEdits)]
     );
 }
+
+fn clip(base64_len: usize) -> synthesis_tui_base::imgclip::ClipImage {
+    synthesis_tui_base::imgclip::ClipImage {
+        png: vec![0; 10],
+        width: 2,
+        height: 2,
+        base64: "A".repeat(base64_len),
+    }
+}
+
+fn pastes(cmds: &[Cmd]) -> usize {
+    cmds.iter()
+        .filter(|c| matches!(c, Cmd::PasteImage { .. }))
+        .count()
+}
+
+#[test]
+fn key_repeat_starts_one_clipboard_read_and_the_cap_is_checked_before_spawning() {
+    let mut a = app();
+    // alt+v held down: one read until its answer comes back
+    assert_eq!(pastes(&keys(&mut a, "\x1bv")), 1);
+    assert_eq!(pastes(&keys(&mut a, "\x1bv")), 0);
+    assert_eq!(pastes(&keys(&mut a, "\x1bv")), 0);
+    a.attach_image(clip(100), T0);
+    for _ in 0..4 {
+        assert_eq!(pastes(&keys(&mut a, "\x1bv")), 1);
+        a.attach_image(clip(100), T0);
+    }
+    // five are attached: no sixth read is started at all
+    assert_eq!(pastes(&keys(&mut a, "\x1bv")), 0);
+    assert!(
+        screen(&mut a).contains("at most 5 images"),
+        "{}",
+        screen(&mut a)
+    );
+    // ctrl+v (text fallback) is guarded the same way, and a finished read frees the key
+    let mut b = app();
+    assert_eq!(pastes(&keys(&mut b, "\x16")), 1);
+    assert_eq!(pastes(&keys(&mut b, "\x16")), 0);
+    b.image_done();
+    assert_eq!(pastes(&keys(&mut b, "\x16")), 1);
+}
+
+#[test]
+fn images_of_one_message_stay_under_the_stores_message_limit() {
+    let mut a = app();
+    a.attach_image(clip(4 << 20), T0);
+    assert_eq!(a.attachments.len(), 1);
+    // 4 + 3 MB of base64 would be over the 6 MB total (the store refuses 8 MiB per message)
+    a.attach_image(clip(3 << 20), T0);
+    assert_eq!(a.attachments.len(), 1, "the second image was not attached");
+    let note = a.chat.agent.items.last().unwrap().text.clone();
+    assert!(
+        note.contains("image not attached") && note.contains("4.0 MB") && note.contains("6.0 MB"),
+        "{note}"
+    );
+    a.attach_image(clip(1 << 20), T0);
+    assert_eq!(a.attachments.len(), 2);
+}
+
+#[test]
+fn an_empty_paste_starts_the_image_read_text_does_not_and_images_can_be_removed() {
+    let mut a = app();
+    let paste = |a: &mut App, t: &str| {
+        a.on_key(Key::Paste(t.into()), T0)
+            .into_iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Cmd::PasteImage {
+                        fallback_text: false
+                    }
+                )
+            })
+            .count()
+    };
+    assert_eq!(
+        paste(&mut a, ""),
+        1,
+        "an empty paste event is the image paste"
+    );
+    a.image_done();
+    assert_eq!(paste(&mut a, "some text"), 0);
+    assert_eq!(a.editor.chars.iter().collect::<String>(), "some text");
+    for _ in 0.."some text".len() {
+        keys(&mut a, "\x7f");
+    }
+    a.attach_image(clip(10), T0);
+    a.attach_image(clip(10), T0);
+    assert_eq!(a.attachments.len(), 2);
+    keys(&mut a, "\x7f"); // empty prompt: drops the last chip
+    assert_eq!(a.attachments.len(), 1);
+    keys(&mut a, "x");
+    keys(&mut a, "\x7f"); // text in the prompt: backspace edits the text
+    assert_eq!(a.attachments.len(), 1);
+    keys(&mut a, "/images\r");
+    assert!(
+        screen(&mut a).contains("attached: image 1.png"),
+        "{}",
+        screen(&mut a)
+    );
+    keys(&mut a, "/images clear\r");
+    assert!(a.attachments.is_empty());
+    assert!(screen(&mut a).contains("1 attached image(s) dropped"));
+}

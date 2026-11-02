@@ -62,6 +62,14 @@ const TOAST_MS: i64 = 1800;
 /// Most images attached to one message.
 const MAX_ATTACHMENTS: usize = 5;
 
+/// Largest total of base64 for the images of one message: under the session store's 8 MiB limit
+/// for a message (`MAX_MESSAGE_BYTES`, which is NOT raised), with room for the text.
+const MAX_ATTACHED_BYTES: usize = 6 << 20;
+
+fn mb(bytes: usize) -> String {
+    format!("{:.1} MB", bytes as f64 / (1 << 20) as f64)
+}
+
 /// A pasted image, held until the next request.
 struct Attached {
     name: String,
@@ -322,6 +330,8 @@ pub(crate) struct App {
     pastes: Vec<(String, String)>,
     /// Images pasted with Alt+V, sent with the next request to the main agent.
     attachments: Vec<Attached>,
+    /// A clipboard read is running: key repeat cannot start another.
+    image_busy: bool,
     /// Time of an Esc on an idle empty prompt: a second one soon after edits the last prompt.
     esc_at: Option<i64>,
     /// A `/compact` between tasks is running: a new task would race with its history swap.
@@ -366,6 +376,11 @@ fn local_commands() -> Vec<CmdDef> {
             "[auto|low|medium|high]",
         ),
         c("mcp", "MCP servers: state, tools, errors", ""),
+        c(
+            "images",
+            "attached images: list, or `clear` to drop them (backspace on an empty prompt drops the last)",
+            "[clear]",
+        ),
         c(
             "memory",
             "loaded instruction files, and where # notes are saved",
@@ -510,6 +525,7 @@ impl App {
             queue: vec![],
             pastes: vec![],
             attachments: vec![],
+            image_busy: false,
             esc_at: None,
             compacting: false,
             ran_task,
@@ -861,9 +877,7 @@ impl App {
             && self.picker.is_none()
             && self.search.is_none()
         {
-            out.push(Cmd::PasteImage {
-                fallback_text: is_key(&k, Named::CtrlV),
-            });
+            self.request_image(is_key(&k, Named::CtrlV), now, &mut out);
             return out;
         }
         if is_key(&k, Named::CtrlO) {
@@ -997,6 +1011,9 @@ impl App {
                     self.editor.insert(t);
                 }
             }
+            // Windows Terminal and WSL deliver an empty paste when the clipboard holds only an
+            // image: that is the image paste
+            Key::Paste(t) if t.is_empty() => self.request_image(false, now, out),
             Key::Paste(t) => {
                 // pasted text never becomes a shell command (or an agent message) by itself: type
                 // the `!` / `@` yourself
@@ -1038,6 +1055,11 @@ impl App {
             }
             AltEnter | ShiftEnter | CtrlJ => {
                 e.insert("\n");
+            }
+            Backspace if e.chars.is_empty() && !self.attachments.is_empty() => {
+                if let Some(a) = self.attachments.pop() {
+                    self.toast(format!("{} removed", a.name), now, false);
+                }
             }
             Backspace => e.backspace(),
             Delete => e.del(),
@@ -1510,6 +1532,36 @@ impl App {
                 }
             }
             "effort" => self.set_effort(arg, out),
+            "images" => match arg {
+                "clear" => {
+                    let n = std::mem::take(&mut self.attachments).len();
+                    self.out_item(format!("{n} attached image(s) dropped"), false);
+                }
+                "" if self.attachments.is_empty() => self.out_item(
+                    "no images attached · ctrl+v / alt+v pastes one from the clipboard",
+                    false,
+                ),
+                "" => {
+                    let list: Vec<String> = self
+                        .attachments
+                        .iter()
+                        .map(|a| {
+                            format!(
+                                "{} ({}x{}, {})",
+                                a.name,
+                                a.width,
+                                a.height,
+                                mb(a.base64.len())
+                            )
+                        })
+                        .collect();
+                    self.out_item(
+                        format!("attached: {} · /images clear drops them", list.join(", ")),
+                        false,
+                    );
+                }
+                _ => self.out_item("usage: /images [clear]", true),
+            },
             "mcp" => out.push(Cmd::Info(Info::Mcp)),
             "memory" => out.push(Cmd::Info(Info::Memory)),
             "agents" => out.push(Cmd::Info(Info::Agents)),
@@ -2468,14 +2520,46 @@ impl App {
             })
     }
 
+    /// Alt+V / Ctrl+V / an empty bracketed paste: start ONE clipboard image read (key repeat
+    /// cannot start another) unless the message already holds the most images.
+    fn request_image(&mut self, fallback_text: bool, now: i64, out: &mut Vec<Cmd>) {
+        if self.image_busy {
+            self.toast("still reading the clipboard", now, false);
+        } else if self.attachments.len() >= MAX_ATTACHMENTS {
+            self.toast(
+                format!("at most {MAX_ATTACHMENTS} images per message"),
+                now,
+                true,
+            );
+        } else {
+            self.image_busy = true;
+            out.push(Cmd::PasteImage { fallback_text });
+        }
+    }
+
     /// An image from [`Cmd::PasteImage`]: shown as a chip above the prompt, sent with the next
     /// request.
     pub fn attach_image(&mut self, img: synthesis_tui_base::imgclip::ClipImage, now: i64) {
+        self.image_busy = false;
         if self.attachments.len() >= MAX_ATTACHMENTS {
             self.toast(
                 format!("at most {MAX_ATTACHMENTS} images per message"),
                 now,
                 true,
+            );
+            return;
+        }
+        // The session store refuses a message over 8 MiB; the images travel as base64 inside it.
+        let held: usize = self.attachments.iter().map(|a| a.base64.len()).sum();
+        if held + img.base64.len() > MAX_ATTACHED_BYTES {
+            self.chat.note(
+                format!(
+                    "image not attached: it is {} and {} are already attached; a message holds at most {} of images",
+                    mb(img.base64.len()),
+                    mb(held),
+                    mb(MAX_ATTACHED_BYTES)
+                ),
+                "warn",
             );
             return;
         }
@@ -2485,7 +2569,7 @@ impl App {
             bytes: img.png.len(),
             width: img.width,
             height: img.height,
-            base64: synthesis_tui_base::clipboard::base64(&img.png),
+            base64: img.base64,
         });
         self.toast(
             format!("image {n} attached ({}x{})", img.width, img.height),
@@ -2494,11 +2578,17 @@ impl App {
         );
     }
 
+    /// The clipboard read ended (whatever it found): Alt+V may start another.
+    pub fn image_done(&mut self) {
+        self.image_busy = false;
+    }
+
     /// Why Alt+V brought no image.
     pub fn image_failed(&mut self, why: &str) {
+        self.image_busy = false;
         self.chat.note(why, "warn");
         self.chat
-            .note("alt+v attaches an image from the clipboard", "");
+            .note("ctrl+v / alt+v pastes an image from the clipboard", "");
     }
 
     /// Clipboard text from [`Cmd::PasteClipboard`]: sanitised like a bracketed paste and

@@ -230,7 +230,7 @@ fn mcp_mentions_prompts_skills_and_help() {
         "---\nname: ship\ndescription: Ship the release\n---\nDo the shipping.\n",
     );
     rig.drive(json!([
-        ["wait", 2],
+        ["wait", 4],
         send("/help\r"),
         expect("mcp__doc__greet"),
         expect("Ship the release"),

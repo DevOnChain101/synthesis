@@ -2135,7 +2135,11 @@ fn welcome_rows(agent: &Agent, w: usize, hero: Option<(i64, i32)>, tips: usize) 
         ]),
         line(greeting.map_or_else(Vec::new, |g| vec![r(g.1, C_DIM)])),
         line(vec![r(
-            "/help for commands · alt+v pastes an image",
+            if hero.is_some() {
+                "/help for commands · ctrl+v / alt+v pastes an image"
+            } else {
+                "/help for commands · alt+v pastes an image"
+            },
             C_SUBTLE,
         )]),
         line(vec![

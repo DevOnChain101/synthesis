@@ -32,6 +32,7 @@ synthesis-permissions = { path = "../../crates/synthesis-permissions" }
 synthesis-providers = { path = "../../crates/synthesis-providers" }
 synthesis-sandbox = { path = "../../crates/synthesis-sandbox" }
 synthesis-session = { path = "../../crates/synthesis-session" }
+time = "0.3"
 synthesis-settings = { path = "../../crates/synthesis-settings" }
 synthesis-terminal = { path = "../../crates/synthesis-terminal" }
 synthesis-tools = { path = "../../crates/synthesis-tools" }

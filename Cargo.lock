@@ -2711,6 +2711,7 @@ dependencies = [
  "synthesis-verification",
  "synthesis-workspace",
  "tempfile",
+ "time",
  "tokio",
  "tokio-util",
  "uuid",

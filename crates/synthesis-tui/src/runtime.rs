@@ -764,6 +764,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                     result,
                     fallback_text,
                 } => {
+                    app.image_done();
                     match result {
                         Ok(img) => app.attach_image(img, now),
                         Err(synthesis_tui_base::imgclip::ImageError::NoImage(_))
@@ -954,10 +955,13 @@ fn exec(
                     });
                 });
             }
-            None if fallback_text => match read_clipboard(paste) {
-                Ok(text) => app.paste_clipboard(&text, now),
-                Err(e) => app.toast(format!("clipboard unavailable: {e}"), now, true),
-            },
+            None if fallback_text => {
+                app.image_done();
+                match read_clipboard(paste) {
+                    Ok(text) => app.paste_clipboard(&text, now),
+                    Err(e) => app.toast(format!("clipboard unavailable: {e}"), now, true),
+                }
+            }
             None => app.image_failed(synthesis_tui_base::imgclip::unavailable()),
         },
         Cmd::SendTo { to, text } => {

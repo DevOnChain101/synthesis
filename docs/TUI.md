@@ -21,6 +21,7 @@ session continues in place), `--once` (print one frame and exit), plus the `synt
 | /model [name] | pick or set a model; restarts on the same session |
 | /effort [auto\|low\|...] | reasoning effort, only when the model declares `effort_tiers` |
 | /mcp | MCP servers: state, tools, last error |
+| /images [clear] | the attached images, or drop them |
 | /memory | instruction files loaded, long-term memory on/off, where `#` notes go |
 | /agents | agents of this session and the definitions `@agent:name` can start |
 | /permissions [allow\|remove RULE] | mode and rules; allow / remove a rule |
@@ -33,12 +34,25 @@ session continues in place), `--once` (print one frame and exit), plus the `synt
 Input: `!cmd` runs a shell command (`!!` only records it), `#note` saves a note to an instruction
 file (you pick the file), `@file`, `@agent:name`, `@server:scheme://uri` (an MCP resource),
 Shift+Tab cycles the permission mode.
-Alt+V attaches the clipboard image (up to 5; sent as image blocks with the next message to the main
-agent, dropped with a notice for a model without vision); Ctrl+V tries an image and falls back to
-text. Works on WSL (the Windows clipboard, read with `powershell.exe` by absolute path; Linux
-`wl-paste`/`xclip` as the fallback; interop off gives a one-line notice) and on Windows; not on
-macOS/Linux yet. WSL is detected from `/proc`, not from environment variables. Limits: 5 s, 10 MB
-PNG, 8000x8000 px.
+Ctrl+V and Alt+V paste a clipboard image: Ctrl+V tries an image first and falls back to the text
+(an EMPTY bracketed paste, which is what Windows Terminal and WSL send when the clipboard holds only
+an image, is the same attempt); Alt+V is image only. Up to 5 images per message, shown as chips above
+the prompt; `/images` lists them, `/images clear` or Backspace on an empty prompt drops them. They go
+with the next message to the main agent as image blocks (a model without vision gets `[image]` in
+its request instead, with a notice; the history keeps the image). Works on WSL (the Windows
+clipboard, read with `powershell.exe` by absolute path; Linux `wl-paste`/`xclip` as the fallback;
+interop off gives a one-line notice) and on Windows; not on macOS/Linux yet. WSL is detected from
+`/proc`, not from environment variables. Limits: 5 s (the helper and its children are killed), 4 MB
+PNG per image, 6 MB of base64 per message (the session store refuses a message over 8 MiB and that
+limit is not raised), 8000x8000 px.
+
+Stored images: a pasted screenshot is kept UNREDACTED in `synthesis.db` (mode 0600, like the rest
+of the session) and in the Node-format transcript mirror. `synthesis.images.retentionDays` (user
+settings, default 30, `0` = forever) rewrites images of sessions untouched for that long to
+`[image removed after N days]` when the app starts; the mirror files are not rewritten (turn
+`synthesis.compat.write_node_transcripts` off to avoid them). A persistence problem (a message the
+store refuses, a failing store) is a visible `notice`, and a message over the limit is stored with
+its images replaced by `[image]` instead of stopping the later messages.
 
 ## Events
 
