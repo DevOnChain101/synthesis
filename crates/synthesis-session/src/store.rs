@@ -454,6 +454,67 @@ impl Store {
         &self.home
     }
 
+    /// Retention of attached images: in every session not touched for `days` days (`updated_at`
+    /// before `now - days`; messages carry no time of their own), each image block of a stored
+    /// message becomes the text `[image removed after N days]`. Rows keep their `idx` and order;
+    /// nothing else changes. One immediate transaction; a database that is locked by another
+    /// process is skipped (`Ok(0)`), never an error. Returns the images removed. `days == 0`
+    /// keeps everything.
+    pub fn purge_images(&self, days: u32, now: OffsetDateTime) -> Result<usize> {
+        if days == 0 {
+            return Ok(0);
+        }
+        let fmt = time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+        );
+        let cutoff = (now - time::Duration::days(i64::from(days)))
+            .format(&fmt)
+            .expect("format utc timestamp");
+        let mut conn = connect(&self.home, false)?;
+        conn.busy_timeout(Duration::from_millis(200))?;
+        let busy = |e: &rusqlite::Error| {
+            matches!(
+                e,
+                rusqlite::Error::SqliteFailure(f, _)
+                    if matches!(f.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+            )
+        };
+        let tx = match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+            Ok(t) => t,
+            Err(e) if busy(&e) => return Ok(0),
+            Err(e) => return Err(e.into()),
+        };
+        let rows: Vec<(String, i64, String)> = {
+            let mut st = tx.prepare(
+                "SELECT m.session_id, m.idx, m.content FROM messages m \
+                 JOIN sessions s ON s.id = m.session_id \
+                 WHERE s.updated_at < ?1 AND m.content LIKE '%\"image\"%'",
+            )?;
+            st.query_map([&cutoff], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        let text = format!("[image removed after {days} days]");
+        let mut removed = 0;
+        for (sid, idx, content) in rows {
+            let Ok(mut v) = serde_json::from_str::<Value>(&content) else {
+                continue;
+            };
+            let n = replace_images(&mut v, &text);
+            if n > 0 {
+                tx.execute(
+                    "UPDATE messages SET content = ?1 WHERE session_id = ?2 AND idx = ?3",
+                    rusqlite::params![v.to_string(), sid, idx],
+                )?;
+                removed += n;
+            }
+        }
+        match tx.commit() {
+            Ok(()) => Ok(removed),
+            Err(e) if busy(&e) => Ok(0),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// A read-only connection; any number may exist next to the single writer.
     pub fn reader(&self) -> Result<Reader> {
         Reader::open(&self.home)
@@ -2011,4 +2072,17 @@ fn set_payload(tx: &Transaction<'_>, sid: &str, seq: i64, body: &str) -> Result<
         "UPDATE events SET payload=?3 WHERE session_id=?1 AND seq=?2 AND payload<>?3",
         params![sid, seq, body],
     )? as u64)
+}
+
+/// Replaces every `{"type":"image",...}` object, at any depth, by a text block; returns how many.
+fn replace_images(v: &mut Value, text: &str) -> usize {
+    match v {
+        Value::Object(o) if o.get("type").and_then(Value::as_str) == Some("image") => {
+            *v = serde_json::json!({"type": "text", "text": text});
+            1
+        }
+        Value::Object(o) => o.values_mut().map(|x| replace_images(x, text)).sum(),
+        Value::Array(a) => a.iter_mut().map(|x| replace_images(x, text)).sum(),
+        _ => 0,
+    }
 }

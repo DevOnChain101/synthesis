@@ -60,6 +60,30 @@ pub fn read_tool_search(user_settings: &Path) -> (ToolSearchMode, Vec<String>) {
     ToolSearchMode::from_settings(&v)
 }
 
+/// Days a stored image is kept: `synthesis.images.retentionDays` of the USER settings.json (a
+/// repository must not keep images longer). Default 30, `0` = forever, at most 3650; anything
+/// else keeps the default with a diagnostic naming the key.
+pub fn read_image_retention(user_settings: &Path) -> (u32, Vec<String>) {
+    const DEFAULT: u32 = 30;
+    let v: serde_json::Value = std::fs::read(user_settings)
+        .ok()
+        .filter(|b| b.len() <= 1 << 20)
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(serde_json::Value::Null);
+    match v.pointer("/synthesis/images/retentionDays") {
+        None => (DEFAULT, vec![]),
+        Some(n) => match n.as_u64().filter(|d| *d <= 3650) {
+            Some(d) => (d as u32, vec![]),
+            None => (
+                DEFAULT,
+                vec![format!(
+                    "synthesis.images.retentionDays must be a whole number of days from 0 to 3650; using {DEFAULT}"
+                )],
+            ),
+        },
+    }
+}
+
 pub type PutArtifact = Box<dyn Fn(&[u8]) -> Result<ArtifactRef, String> + Send + Sync>;
 
 pub struct ProviderSummarizer {
@@ -659,6 +683,36 @@ impl ContextProvider for SynthesisContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_retention_defaults_to_30_days_and_validates() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("settings.json");
+        let read = |t: &str| {
+            std::fs::write(&f, t).unwrap();
+            read_image_retention(&f)
+        };
+        assert_eq!(
+            read_image_retention(&d.path().join("none.json")),
+            (30, vec![])
+        );
+        assert_eq!(read("{}"), (30, vec![]));
+        assert_eq!(
+            read(r#"{"synthesis":{"images":{"retentionDays":7}}}"#),
+            (7, vec![])
+        );
+        assert_eq!(
+            read(r#"{"synthesis":{"images":{"retentionDays":0}}}"#),
+            (0, vec![])
+        );
+        for bad in ["-1", "1.5", "\"7\"", "99999", "null"] {
+            let (n, diag) = read(&format!(
+                r#"{{"synthesis":{{"images":{{"retentionDays":{bad}}}}}}}"#
+            ));
+            assert_eq!(n, 30, "{bad}");
+            assert!(diag[0].contains("synthesis.images.retentionDays"), "{bad}");
+        }
+    }
 
     #[test]
     fn tool_search_setting_parses_and_defaults() {

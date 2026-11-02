@@ -1001,3 +1001,103 @@ fn reopen_after_drop_survives_concurrent_spawns() {
         s.join().unwrap();
     }
 }
+
+fn image_message(text: &str) -> Value {
+    json!([
+        {"type": "text", "text": text},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "SECRETPIXELS"}}
+    ])
+}
+
+fn contents(home: &Path, sid: &str) -> Vec<(i64, String)> {
+    let c = rusqlite::Connection::open(home.join("synthesis.db")).unwrap();
+    let mut q = c
+        .prepare("SELECT idx, content FROM messages WHERE session_id = ?1 ORDER BY idx")
+        .unwrap();
+    q.query_map([sid], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn age(home: &Path, sid: &str, updated_at: &str) {
+    rusqlite::Connection::open(home.join("synthesis.db"))
+        .unwrap()
+        .execute(
+            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+            [updated_at, sid],
+        )
+        .unwrap();
+}
+
+#[test]
+fn images_of_old_sessions_are_replaced_in_place_and_recent_ones_are_kept() {
+    let e = env();
+    let store = e.store();
+    for id in ["old", "new"] {
+        let mut w = create(&e, id, &e.dir(id));
+        w.append_message(NewMessage::user(image_message("see")))
+            .unwrap();
+        w.append_message(NewMessage::assistant(
+            json!([{"type": "text", "text": "a cat"}]),
+        ))
+        .unwrap();
+        w.append_message(NewMessage::user(
+            json!([{"type": "tool_result", "tool_use_id": "t",
+            "content": [{"type": "image", "source": {"data": "NESTEDPIXELS"}}]}]),
+        ))
+        .unwrap();
+        drop(w);
+    }
+    // "now" is a fixed instant; the old session was last touched 40 days before it
+    let now = time::macros::datetime!(2026-11-10 12:00 UTC);
+    age(&e.home, "old", "2026-10-01T00:00:00.000Z");
+    age(&e.home, "new", "2026-11-09T00:00:00.000Z");
+    assert_eq!(
+        store.purge_images(0, now).unwrap(),
+        0,
+        "0 days keeps everything"
+    );
+    assert!(contents(&e.home, "old")[0].1.contains("SECRETPIXELS"));
+    assert_eq!(
+        store.purge_images(30, now).unwrap(),
+        2,
+        "the message image and the nested one"
+    );
+    let old = contents(&e.home, "old");
+    assert_eq!(
+        old.iter().map(|r| r.0).collect::<Vec<_>>(),
+        [0, 1, 2],
+        "ids and order kept"
+    );
+    assert!(old[0].1.contains("[image removed after 30 days]") && old[0].1.contains("see"));
+    assert!(!old.iter().any(|r| r.1.contains("PIXELS")));
+    assert!(old[1].1.contains("a cat"));
+    assert!(
+        contents(&e.home, "new")[0].1.contains("SECRETPIXELS"),
+        "recent session untouched"
+    );
+    // idempotent
+    assert_eq!(store.purge_images(30, now).unwrap(), 0);
+}
+
+#[test]
+fn a_locked_database_is_skipped_not_an_error() {
+    let e = env();
+    let store = e.store();
+    let mut w = create(&e, "s", &e.dir("s"));
+    w.append_message(NewMessage::user(image_message("x")))
+        .unwrap();
+    drop(w);
+    age(&e.home, "s", "2020-01-01T00:00:00.000Z");
+    let other = rusqlite::Connection::open(e.home.join("synthesis.db")).unwrap();
+    other.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let now = time::macros::datetime!(2026-11-10 12:00 UTC);
+    assert_eq!(store.purge_images(30, now).unwrap(), 0);
+    other.execute_batch("COMMIT").unwrap();
+    assert!(
+        contents(&e.home, "s")[0].1.contains("SECRETPIXELS"),
+        "nothing changed while locked"
+    );
+    assert_eq!(store.purge_images(30, now).unwrap(), 1, "next time it runs");
+}
