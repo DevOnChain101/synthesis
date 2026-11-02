@@ -7,7 +7,7 @@ Tags as in events.md. Eval and golden tooling may be non-Rust (ADR-010). Nothing
 ## A.1 Principle
 Black-box: the harness starts an agent command, lets it work on a throwaway copy of a fixture repo, then grades the **repository end state** with hidden checks. The JSONL stream (events.md) is used for metrics and for the claimed status, never for pass/fail. That keeps grading agent-agnostic.
 
-Node has no headless/JSONL mode (no such flag in bin/synth.js) and must not get one. The Node baseline therefore runs through an adapter in this repo: `tests/agent-evals/adapters/node/run.js` builds `NativeAgent` [from-node agent.js:297-303] with `interactive=false`, explicit `cwd`, sandbox `SYNTHESIS_HOME`, sends the prompt, waits for `status === 'idle'`, then converts the transcript (session-store.md §A.3) into a minimal events.md stream (`task.ended.status` = `completed`, or `failed` on model error, since Node has no gate). Feasibility to be probed (does `NativeAgent` run cleanly without the TUI?).
+Node has no headless/JSONL mode (no such flag in bin/synt.js) and must not get one. The Node baseline therefore runs through an adapter in this repo: `tests/agent-evals/adapters/node/run.js` builds `NativeAgent` [from-node agent.js:297-303] with `interactive=false`, explicit `cwd`, sandbox `SYNT_HOME`, sends the prompt, waits for `status === 'idle'`, then converts the transcript (session-store.md §A.3) into a minimal events.md stream (`task.ended.status` = `completed`, or `failed` on model error, since Node has no gate). Feasibility to be probed (does `NativeAgent` run cleanly without the TUI?).
 
 ## A.2 Layout
 ```
@@ -78,7 +78,7 @@ Per task: success rate over `runs`. Per agent+model: success rate, verified-comp
 tests/golden/<area>/<case_id>/{input.*, expected.*, meta.json}
 meta.json = {"source":"src/native/permissions.js","ref_commit":"<sha>","node":"v22.x","platform":"darwin|linux|win32","captured_at":"…","reviewed_by":null}
 ```
-Before writing, replace volatile values with placeholders: `<TS>`, `<UUID>`, `<TMP>` (the realpath of the sandbox root), `<HOME>`, `<SYNTHESIS_HOME>`. Every capture uses a fresh temp `SYNTHESIS_HOME` and fake home; the real `~/.synthesis` is never read. Cases are regression snapshots of the Node prototype, not an oracle: the owner approved them on 2026-10-29 (`reviewed_by` = "owner:DevOnChain101 2026-10-29 (regression snapshot, Node prototype not authoritative)"), and re-capture preserves an existing `reviewed_by` (new cases start `null` until reviewed). Rust golden tests load the same files; a deliberate divergence is recorded in the allow-list with a reason.
+Before writing, replace volatile values with placeholders: `<TS>`, `<UUID>`, `<TMP>` (the realpath of the sandbox root), `<HOME>`, `<SYNT_HOME>`. Every capture uses a fresh temp `SYNT_HOME` and fake home; the real `~/.synt` is never read. Cases are regression snapshots of the Node prototype, not an oracle: the owner approved them on 2026-10-29 (`reviewed_by` = "owner:DevOnChain101 2026-10-29 (regression snapshot, Node prototype not authoritative)"), and re-capture preserves an existing `reviewed_by` (new cases start `null` until reviewed). Rust golden tests load the same files; a deliberate divergence is recorded in the allow-list with a reason.
 
 ## Open
 - Harness language (Python stdlib vs a Rust bin): either works; the doc says "language-agnostic".

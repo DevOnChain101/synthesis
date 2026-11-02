@@ -1,8 +1,8 @@
 //! MCP servers for a run: which configs to load, which may start, and the tool adapter.
 //!
 //! Sources (later wins, Node `buildMcpServers` order minus Claude Code's files, which Rust does
-//! not read): user `mcpServers` of synthesis.json, project `.mcp.json` (gated), user `projects.<path>`
-//! local scope, user `mcp`, project `.synthesis/config.json` `mcp`/`mcpServers` (gated).
+//! not read): user `mcpServers` of synt.json, project `.mcp.json` (gated), user `projects.<path>`
+//! local scope, user `mcp`, project `.synt/config.json` `mcp`/`mcpServers` (gated).
 //! SECURITY: a project-scope server is repository content that would run a command. It starts
 //! only with `--trust-project` AND an explicit approval (`--approve-mcp NAME`, or the USER's
 //! settings `enabledMcpjsonServers` / `enableAllProjectMcpServers`; a project settings file
@@ -15,7 +15,7 @@
 //! matches and the server is not started. A bare `NAME` in settings and
 //! `enableAllProjectMcpServers` no longer approve project servers (they would survive an edit).
 //! `${VAR}` in env/url/headers reads `Env::child_env` plus the names in the USER's
-//! `synthesis.mcp.env_passthrough` (user settings.json only), and the latter only for user-owned
+//! `synt.mcp.env_passthrough` (user settings.json only), and the latter only for user-owned
 //! scopes; see `synthesis_mcp::McpOptions::env_passthrough`.
 
 use std::io::Read;
@@ -48,9 +48,9 @@ pub struct Plan {
     pub skipped: Vec<(String, String)>,
     /// One line per project server approved for this run, with its exact definition. Raw too.
     pub notices: Vec<String>,
-    /// `synthesis.mcp.env_passthrough` of the user settings file (see [`read_passthrough`]).
+    /// `synt.mcp.env_passthrough` of the user settings file (see [`read_passthrough`]).
     pub env_passthrough: Vec<String>,
-    /// `synthesis.mcp.servers.<name>.write_tools|read_tools` (see [`read_guard`]).
+    /// `synt.mcp.servers.<name>.write_tools|read_tools` (see [`read_guard`]).
     pub guard: GuardConfig,
     /// Where oversized MCP results are saved in full.
     pub artifact_dir: Option<std::path::PathBuf>,
@@ -151,7 +151,7 @@ fn refs(v: &str) -> Vec<(String, bool)> {
     out
 }
 
-/// Which credentials `synth run` will apply to `s`, WITHOUT any value: names, whether each is
+/// Which credentials `synt run` will apply to `s`, WITHOUT any value: names, whether each is
 /// resolvable right now (`${VAR}` against the same allowlist the manager uses), lengths only for
 /// names that are not secret-shaped, the scheme of `Authorization`.
 pub fn credentials(s: &McpServerConfig, env: &Env, passthrough: &[String]) -> Vec<String> {
@@ -208,10 +208,10 @@ pub fn credentials(s: &McpServerConfig, env: &Env, passthrough: &[String]) -> Ve
         } else if has_default {
             format!("env passthrough: {n} -> unset, the default is used")
         } else if user_owned {
-            format!("env passthrough: {n} -> NOT AVAILABLE (export it and add it to synthesis.mcp.env_passthrough in the user settings.json)")
+            format!("env passthrough: {n} -> NOT AVAILABLE (export it and add it to synt.mcp.env_passthrough in the user settings.json)")
         } else {
             format!(
-                "env passthrough: {n} -> NOT AVAILABLE ({} servers can only read the child-env allowlist; move the server to the user synthesis.json)",
+                "env passthrough: {n} -> NOT AVAILABLE ({} servers can only read the child-env allowlist; move the server to the user synt.json)",
                 s.scope.as_deref().unwrap_or("project")
             )
         });
@@ -270,7 +270,7 @@ pub fn reports_anonymous(r: &McpToolResult) -> bool {
         || serde_json::from_str::<Value>(&r.text()).is_ok_and(|v| walk(&v))
 }
 
-/// Masks token-looking words (long opaque strings) so `synth mcp test` never prints a credential.
+/// Masks token-looking words (long opaque strings) so `synt mcp test` never prints a credential.
 fn mask_tokens(text: &str) -> String {
     let tokeny =
         |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '=' | '+' | '/');
@@ -321,10 +321,10 @@ fn check(entry: &str, name: &str, hash: &str, bare_ok: bool) -> Appr {
     }
 }
 
-/// `synthesis.mcp.env_passthrough` from the USER settings file only (a repository must not widen it).
+/// `synt.mcp.env_passthrough` from the USER settings file only (a repository must not widen it).
 pub fn read_passthrough(user_settings: &Path) -> Vec<String> {
     read_obj(user_settings)
-        .and_then(|v| v.pointer("/synthesis/mcp/env_passthrough").cloned())
+        .and_then(|v| v.pointer("/synt/mcp/env_passthrough").cloned())
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default()
 }
@@ -349,7 +349,7 @@ fn put(all: &mut Vec<McpServerConfig>, add: Vec<McpServerConfig>) {
     }
 }
 
-/// `synthesis.mcp.servers.<name>.{write_tools,read_tools}` for the read-before-write guard. The USER
+/// `synt.mcp.servers.<name>.{write_tools,read_tools}` for the read-before-write guard. The USER
 /// file may list both; a project file (pass `None` when the project is not trusted) may only ADD
 /// `write_tools`, since a repository must not be able to switch the guard off for a tool.
 pub fn read_guard(user_settings: &Path, project_settings: Option<&Path>) -> GuardConfig {
@@ -357,7 +357,7 @@ pub fn read_guard(user_settings: &Path, project_settings: Option<&Path>) -> Guar
     for (path, user) in [(Some(user_settings), true), (project_settings, false)] {
         let Some(servers) = path
             .and_then(read_obj)
-            .and_then(|v| v.pointer("/synthesis/mcp/servers").cloned())
+            .and_then(|v| v.pointer("/synt/mcp/servers").cloned())
             .and_then(|v| v.as_object().cloned())
         else {
             continue;
@@ -421,7 +421,7 @@ pub fn plan(
     if let Some(m) = x.get("mcp") {
         add(&mut all, parse_synthesis_mcp_servers(m, Some("synthesis")));
     }
-    if let Some(c) = read_obj(&root.join(".synthesis").join("config.json")) {
+    if let Some(c) = read_obj(&root.join(".synt").join("config.json")) {
         for k in ["mcp", "mcpServers"] {
             if let Some(m) = c.get(k) {
                 add(
@@ -607,15 +607,15 @@ pub async fn start(plan: &Plan, env: &Env, cwd: &Path) -> (Arc<McpManager>, Atta
     (mgr, attach, warnings)
 }
 
-// ---- `synth mcp list|get|add|remove` ----------------------------------------------------------
-// Edits only the user's own config files: `<SYNTHESIS_HOME>/synthesis.json` (scope user) or
+// ---- `synt mcp list|get|add|remove` ----------------------------------------------------------
+// Edits only the user's own config files: `<SYNT_HOME>/synt.json` (scope user) or
 // `<cwd>/.mcp.json` (scope project; still needs --approve-mcp to start). No credential is ever
 // written: secret-looking env/header values must be `${VAR}` references, and OAuth tokens are not
 // stored anywhere (use `npx mcp-remote <url>` as a stdio server, or a Bearer header from `${VAR}`).
 
 #[derive(clap::Subcommand)]
 pub enum McpCmd {
-    /// Servers that `synth run` would see (nothing is started).
+    /// Servers that `synt run` would see (nothing is started).
     List(crate::CwdArg),
     /// One server's definition (header and env VALUES are never shown).
     Get {
@@ -629,7 +629,7 @@ pub enum McpCmd {
     Test(TestArgs),
     /// Prompts the servers offer, as the `/mcp__<server>__<prompt> args` commands that run them.
     Prompts(PromptsArgs),
-    /// Add a server: `synth mcp add NAME --url URL` or `synth mcp add NAME -- COMMAND ARGS...`.
+    /// Add a server: `synt mcp add NAME --url URL` or `synt mcp add NAME -- COMMAND ARGS...`.
     Add(AddArgs),
     Remove {
         name: String,
@@ -648,21 +648,21 @@ pub struct TestArgs {
     /// Needed to test a server defined in the project's `.mcp.json`.
     #[arg(long)]
     trust_project: bool,
-    /// `NAME@HASH` of a project-scope server (see `synth mcp get`).
+    /// `NAME@HASH` of a project-scope server (see `synt mcp get`).
     #[arg(long, value_name = "NAME")]
     approve_mcp: Vec<String>,
 }
 
 #[derive(clap::Args)]
 pub struct PromptsArgs {
-    /// Only this server (default: every server `synth run` would start).
+    /// Only this server (default: every server `synt run` would start).
     name: Option<String>,
     #[command(flatten)]
     cwd: crate::CwdArg,
     /// Needed for servers defined in the project's `.mcp.json`.
     #[arg(long)]
     trust_project: bool,
-    /// `NAME@HASH` of a project-scope server (see `synth mcp get`).
+    /// `NAME@HASH` of a project-scope server (see `synt mcp get`).
     #[arg(long, value_name = "NAME")]
     approve_mcp: Vec<String>,
 }
@@ -792,9 +792,9 @@ fn edit_file(path: &Path, name: &str, value: Option<Value>) -> Result<bool, Stri
                 "{} is not a JSON object; fix it by hand first",
                 path.display()
             ))?,
-        // a fresh synthesis.json needs `$schema` or every command rejects it; `.mcp.json` has none
+        // a fresh synt.json needs `$schema` or every command rejects it; `.mcp.json` has none
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if path.file_name().is_some_and(|n| n == "synthesis.json") {
+            if path.file_name().is_some_and(|n| n == "synt.json") {
                 json!({"$schema": synthesis_config::SCHEMA_V1})
             } else {
                 json!({})
@@ -831,7 +831,7 @@ fn edit_file(path: &Path, name: &str, value: Option<Value>) -> Result<bool, Stri
 
 fn scope_file(scope: ScopeArg, synthesis_home: &Path, cwd: &Path) -> std::path::PathBuf {
     match scope {
-        ScopeArg::User => synthesis_home.join("synthesis.json"),
+        ScopeArg::User => synthesis_home.join("synt.json"),
         ScopeArg::Project => cwd.join(".mcp.json"),
     }
 }
@@ -1010,7 +1010,7 @@ fn list_prompts(env: &Env, h: &crate::Homes, a: &PromptsArgs) -> Result<u8, Stri
         .retain(|s| a.name.as_ref().is_none_or(|n| *n == s.name));
     if p.servers.is_empty() {
         return Err(match &a.name {
-            Some(n) => format!("no server {} to start (see `synth mcp list`)", san(n)),
+            Some(n) => format!("no server {} to start (see `synt mcp list`)", san(n)),
             None => "no MCP server to start".into(),
         });
     }
@@ -1068,7 +1068,7 @@ pub fn run_cmd(env: &Env, cmd: McpCmd) -> Result<u8, String> {
             out!("added {} to {}", a.name, f.display());
             if matches!(a.scope, ScopeArg::Project) {
                 out!(
-                    "a project server starts only with --trust-project and --approve-mcp NAME@HASH (see `synth mcp get`)"
+                    "a project server starts only with --trust-project and --approve-mcp NAME@HASH (see `synt mcp get`)"
                 );
             }
             Ok(0)
@@ -1115,7 +1115,7 @@ impl Tool for McpTool {
             };
             let warn = (!r.is_error && reports_anonymous(&r)).then(|| {
                 format!(
-                    "\n[synth warning: MCP server \"{server}\" reports an anonymous principal. Its configured credentials were probably not applied, so changes are attributed to 'anonymous'. Tell the user; they can check with `synth mcp test {server}`.]"
+                    "\n[synt warning: MCP server \"{server}\" reports an anonymous principal. Its configured credentials were probably not applied, so changes are attributed to 'anonymous'. Tell the user; they can check with `synt mcp test {server}`.]"
                 )
             });
             let content = if r.content.iter().all(|c| matches!(c, McpContent::Text(_))) {
@@ -1322,7 +1322,7 @@ mod tests {
         assert!(text.contains("Authorization=Basic ****(set)"), "{text}");
         assert!(text.contains("X-Api-Key=set"), "{text}");
         assert!(
-            text.contains("CONFLUENCE_TOKEN -> NOT AVAILABLE (export it and add it to synthesis.mcp.env_passthrough"),
+            text.contains("CONFLUENCE_TOKEN -> NOT AVAILABLE (export it and add it to synt.mcp.env_passthrough"),
             "{text}"
         );
         assert!(text.contains("ATL_TOKEN -> available"), "{text}");
@@ -1464,7 +1464,7 @@ mod tests {
         let f = d.path().join("settings.json");
         std::fs::write(
             &f,
-            json!({"synthesis":{"mcp":{"env_passthrough":["A","B"]}}}).to_string(),
+            json!({"synt":{"mcp":{"env_passthrough":["A","B"]}}}).to_string(),
         )
         .unwrap();
         assert_eq!(read_passthrough(&f), ["A", "B"]);
@@ -1477,13 +1477,13 @@ mod tests {
         let (u, p) = (d.path().join("u.json"), d.path().join("p.json"));
         std::fs::write(
             &u,
-            json!({"synthesis":{"mcp":{"servers":{"a":{"write_tools":["w1"],"read_tools":["r1"]}}}}})
+            json!({"synt":{"mcp":{"servers":{"a":{"write_tools":["w1"],"read_tools":["r1"]}}}}})
                 .to_string(),
         )
         .unwrap();
         std::fs::write(
             &p,
-            json!({"synthesis":{"mcp":{"servers":{"a":{"write_tools":["w2"],"read_tools":["r2"]},"b":{"write_tools":["x"]}}}}}).to_string(),
+            json!({"synt":{"mcp":{"servers":{"a":{"write_tools":["w2"],"read_tools":["r2"]},"b":{"write_tools":["x"]}}}}}).to_string(),
         )
         .unwrap();
         let g = read_guard(&u, Some(&p));
@@ -1518,7 +1518,7 @@ mod tests {
     #[test]
     fn add_and_remove_keep_other_keys_and_refuse_literal_credentials() {
         let d = tempfile::tempdir().unwrap();
-        let f = d.path().join("synthesis.json");
+        let f = d.path().join("synt.json");
         std::fs::write(
             &f,
             json!({"model": "m", "mcpServers": {"old": {"command": "x"}}}).to_string(),
@@ -1538,11 +1538,11 @@ mod tests {
         assert!(edit_file(&f, "s", None).unwrap() && !edit_file(&f, "s", None).unwrap());
 
         // F-1: a fresh home gets a config the real loader accepts
-        let fresh = d.path().join("fresh").join("synthesis.json");
+        let fresh = d.path().join("fresh").join("synt.json");
         let e = entry(&add("s", |a| a.command = vec!["echo".into(), "hi".into()])).unwrap();
         assert!(edit_file(&fresh, "s", Some(e)).unwrap());
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&fresh).unwrap()).unwrap();
-        assert!(synthesis_config::validate_versioned_config(&v, "synthesis.json").is_ok());
+        assert!(synthesis_config::validate_versioned_config(&v, "synt.json").is_ok());
 
         let literal = entry(&add("s", |a| {
             a.url = Some("https://h/mcp".into());

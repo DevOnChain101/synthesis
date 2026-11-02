@@ -1,4 +1,4 @@
-//! `synth run`: one headless task. Exit codes follow docs/specs/events.md §6.
+//! `synt run`: one headless task. Exit codes follow docs/specs/events.md §6.
 
 use std::collections::BTreeMap;
 use std::io::{IsTerminal, Read};
@@ -49,7 +49,7 @@ pub enum ModeArg {
     /// Headless: no classifier is wired, so asks the classifier would review are denied.
     Auto,
     /// Skips approval prompts. Still stops: deny rules, ask rules, critical rm, destructive MCP asks.
-    /// Does NOT stop plain writes to protected paths (.git, .synthesis, .ssh ...), as in Claude Code. CLI only.
+    /// Does NOT stop plain writes to protected paths (.git, .synt, .ssh ...), as in Claude Code. CLI only.
     #[value(name = "bypassPermissions")]
     BypassPermissions,
 }
@@ -101,7 +101,7 @@ pub fn sandbox_preflight(
     backend: &dyn SandboxBackend,
     policy: Option<&synthesis_terminal::SandboxPolicy>,
 ) -> Result<(), String> {
-    let hint = "run `synth doctor` to see the sandbox backends, or pass --sandbox best-effort|off to run unconfined";
+    let hint = "run `synt doctor` to see the sandbox backends, or pass --sandbox best-effort|off to run unconfined";
     let skipped = synthesis_sandbox::skipped_backends();
     let skipped = if skipped.is_empty() {
         String::new()
@@ -163,7 +163,7 @@ impl Common {
     }
 }
 
-/// Flags of `synth run`.
+/// Flags of `synt run`.
 #[derive(Args, Clone)]
 pub struct Common {
     /// Command confinement: enforce (default), best-effort, or off (loud warning). On Windows,
@@ -185,7 +185,7 @@ pub struct Common {
     pub model: Option<String>,
     #[arg(long, value_enum)]
     pub permission_mode: Option<ModeArg>,
-    /// Trust `<cwd>/.synthesis/config.json`, `.synthesis/settings.json`, agents and (with approval) MCP servers.
+    /// Trust `<cwd>/.synt/config.json`, `.synt/settings.json`, agents and (with approval) MCP servers.
     #[arg(long)]
     pub trust_project: bool,
     /// Start this project-scope MCP server (needs --trust-project; repeatable).
@@ -212,7 +212,7 @@ pub struct Common {
     #[arg(long, requires = "worktree")]
     pub cleanup_worktree: bool,
     /// Let other live sessions of this user message this one, and this one message them (turns
-    /// `synthesis.peers.enabled` on for this run; the allow list still applies).
+    /// `synt.peers.enabled` on for this run; the allow list still applies).
     #[arg(long)]
     pub peers: bool,
     /// Session name other sessions can address (`sess:<name>`): `[a-z0-9_-]`, at most 32; unique
@@ -220,7 +220,7 @@ pub struct Common {
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
     /// What this session is for, shown to peers in `ListSessions` (<= 120 chars). Default: the
-    /// first line of SYNTHESIS.md. Only used with peers on.
+    /// first line of AGENTS.md. Only used with peers on.
     #[arg(long, value_name = "TEXT")]
     pub about: Option<String>,
     /// Continue a stored session of this workspace by id (or unique id prefix) with the new prompt.
@@ -263,7 +263,7 @@ pub struct Common {
     pub bare: bool,
 }
 
-/// `--output-format`: what `synth run` prints on stdout.
+/// `--output-format`: what `synt run` prints on stdout.
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
     /// The final assistant message only.
@@ -283,7 +283,7 @@ pub struct RunArgs {
     prompt: Option<String>,
     #[arg(long)]
     prompt_file: Option<PathBuf>,
-    /// An MCP prompt to run as the task: `"/mcp__<server>__<prompt> arg1 arg2"` (`synth mcp prompts`
+    /// An MCP prompt to run as the task: `"/mcp__<server>__<prompt> arg1 arg2"` (`synt mcp prompts`
     /// lists them). The same form works as the first token of any prompt.
     #[arg(long, value_name = "COMMAND", conflicts_with_all = ["prompt", "prompt_file"])]
     prompt_command: Option<String>,
@@ -291,7 +291,7 @@ pub struct RunArgs {
     max_turns: Option<u32>,
     #[arg(long)]
     max_tool_calls: Option<u32>,
-    /// Needs a price for the model: `synthesis.pricing` in the user settings.json (config.md §6).
+    /// Needs a price for the model: `synt.pricing` in the user settings.json (config.md §6).
     #[arg(long)]
     max_cost_usd: Option<f64>,
     #[arg(long)]
@@ -346,12 +346,12 @@ pub struct Prepared {
     pub mcp: Option<Arc<McpManager>>,
     pub notices: Vec<String>,
     pub worktree: Option<Worktree>,
-    /// Required checks from `synthesis.verification.checks`.
+    /// Required checks from `synt.verification.checks`.
     pub criteria: Vec<Criterion>,
     pub artifact_root: PathBuf,
     pub label: String,
     pub homes: crate::Homes,
-    /// Open long-term memory store (None with --no-memory, a failure, or `synthesis.memory.enabled: false`).
+    /// Open long-term memory store (None with --no-memory, a failure, or `synt.memory.enabled: false`).
     pub memory: Option<Arc<crate::memcmd::MemoryRun>>,
     /// Stored conversation of `--resume/--continue/--fork-session` (the next task's history).
     pub history: Vec<Message>,
@@ -426,7 +426,7 @@ fn resolve_resume(
     Ok(Some((id, history)))
 }
 
-/// Rows of `{"synthesis":{"pricing":{"<provider/model>"|"<model>": {input_per_mtok, output_per_mtok}}}}`
+/// Rows of `{"synt":{"pricing":{"<provider/model>"|"<model>": {input_per_mtok, output_per_mtok}}}}`
 /// from the USER settings file only (a repository must not be able to price a model at zero).
 pub(crate) fn pricing(user_settings: &Path, label: &str, model: &str) -> Option<Pricing> {
     let raw = std::fs::read(user_settings)
@@ -437,7 +437,7 @@ pub(crate) fn pricing(user_settings: &Path, label: &str, model: &str) -> Option<
 }
 
 fn parse_pricing(v: &Value, label: &str, model: &str) -> Option<Pricing> {
-    let table = v.get("synthesis")?.get("pricing")?;
+    let table = v.get("synt")?.get("pricing")?;
     let e = table.get(label).or_else(|| table.get(model))?;
     let num = |k: &str| {
         e.get(k)
@@ -526,13 +526,13 @@ fn read_denied(perms: &Permissions, p: &Path) -> bool {
         == synthesis_permissions::Decision::Deny
 }
 
-/// Default `--max-wall-secs` of a headless `synth run` (one hour). Turns (50) and tool calls (200)
+/// Default `--max-wall-secs` of a headless `synt run` (one hour). Turns (50) and tool calls (200)
 /// are bounded by default already; a cost cap needs a configured price, so it has no default.
 const HEADLESS_WALL_SECS: u64 = 3600;
 
-/// The repository root (nearest trusted ancestor with `.git` or `.synthesis`, see
+/// The repository root (nearest trusted ancestor with `.git` or `.synt`, see
 /// `synthesis_settings::find_project_root`), else the launch dir. The home directory and anything above
-/// it never count: `~/.synthesis` or a stray `/Users/.git` would otherwise make `$HOME` the workspace
+/// it never count: `~/.synt` or a stray `/Users/.git` would otherwise make `$HOME` the workspace
 /// (and writable).
 pub fn workspace_root(cwd: &Path, home: &Path) -> PathBuf {
     let real = synthesis_core::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
@@ -587,7 +587,7 @@ pub fn prepare(
     };
     let settings = load_settings_with_file(&lc, trust, c.settings.as_deref());
     // A settings file we cannot read would silently drop its deny rules: stop before anything runs
-    // (`synth run` exits 2).
+    // (`synt run` exits 2).
     if !settings.errors.is_empty() {
         return Err(format!(
             "settings error: {}\nsynth: fix or remove the file; nothing was started because its deny/ask rules would not apply",
@@ -606,11 +606,11 @@ pub fn prepare(
         .chain(&settings.diagnostics)
         .chain(&vs.diagnostics)
     {
-        eprintln!("synth: warning: {}", sanitize_for_display(w));
+        eprintln!("synt: warning: {}", sanitize_for_display(w));
     }
     if !settings.env_refused.is_empty() {
         eprintln!(
-            "synth: warning: settings env: refused secret-shaped name(s): {}",
+            "synt: warning: settings env: refused secret-shaped name(s): {}",
             sanitize_for_display(&settings.env_refused.join(", "))
         );
     }
@@ -625,7 +625,7 @@ pub fn prepare(
     let price = pricing(&h.synthesis.join("settings.json"), &res.label, &res.model);
     if limits.max_cost_usd.is_some() && price.is_none() {
         return Err(format!(
-            "--max-cost-usd needs a price for {}: add synthesis.pricing[\"{}\"] = {{\"input_per_mtok\": N, \"output_per_mtok\": N}} to {} (see docs/specs/config.md §6)",
+            "--max-cost-usd needs a price for {}: add synt.pricing[\"{}\"] = {{\"input_per_mtok\": N, \"output_per_mtok\": N}} to {} (see docs/specs/config.md §6)",
             res.label,
             res.label,
             h.synthesis.join("settings.json").display()
@@ -678,7 +678,7 @@ pub fn prepare(
         .filter_map(|d| match std::fs::canonicalize(d) {
             Ok(p) if Path::new(d).is_absolute() && p.is_dir() => Some(p),
             _ => {
-                eprintln!("synth: warning: ignored additional directory (not an existing absolute directory)");
+                eprintln!("synt: warning: ignored additional directory (not an existing absolute directory)");
                 None
             }
         })
@@ -709,7 +709,7 @@ pub fn prepare(
     let artifact_root = h.synthesis.join("sessions").join(&sid);
     let (ws, worktree) = if c.worktree {
         if !extra_dirs.is_empty() {
-            eprintln!("synth: warning: additionalDirectories are ignored with --worktree");
+            eprintln!("synt: warning: additionalDirectories are ignored with --worktree");
             extra_dirs.clear();
         }
         let (w, ctx) = crate::wt::create(env, &h.synthesis, cwd, &sid, artifact_root.clone())?;
@@ -767,7 +767,7 @@ pub fn prepare(
             return Err(format!("cannot build the sandbox policy: {e}"));
         }
         (Err(e), SandboxMode::BestEffort) => eprintln!(
-            "synth: warning: cannot build the sandbox policy ({e}); commands run unconfined"
+            "synt: warning: cannot build the sandbox policy ({e}); commands run unconfined"
         ),
         _ => {}
     }
@@ -795,7 +795,7 @@ pub fn prepare(
         _ => {}
     }
     for n in &notices {
-        eprintln!("synth: WARNING: {n}");
+        eprintln!("synt: WARNING: {n}");
     }
 
     let mut resumed_from_seq = None;
@@ -858,7 +858,7 @@ pub fn prepare(
         (Some(_), Some(t)) => match TaskDb::open(&h.synthesis, &sid, res.secrets.clone()) {
             Ok(db) => Some((db, t.clone())),
             Err(e) => {
-                eprintln!("synth: warning: task rows disabled: {e}");
+                eprintln!("synt: warning: task rows disabled: {e}");
                 None
             }
         },
@@ -951,17 +951,17 @@ pub fn prepare(
     hcfg.pricing = price;
     let (auto_compact, diag) = crate::ctx::read_auto_compact(&h.synthesis.join("settings.json"));
     for d in &diag {
-        eprintln!("synth: warning: {d}");
+        eprintln!("synt: warning: {d}");
     }
     hcfg.auto_compact = auto_compact;
     let (shell, diag) = crate::ctx::read_shell_settings(&h.synthesis.join("settings.json"));
     for d in &diag {
-        eprintln!("synth: warning: {d}");
+        eprintln!("synt: warning: {d}");
     }
     hcfg.shell = shell;
     let (tool_search, diag) = crate::ctx::read_tool_search(&h.synthesis.join("settings.json"));
     for d in &diag {
-        eprintln!("synth: warning: {d}");
+        eprintln!("synt: warning: {d}");
     }
     hcfg.tool_search = tool_search;
     let am = &user_settings.auto_mode;
@@ -987,7 +987,7 @@ pub fn prepare(
         }
         None => artifact_to_dir(artifact_root.clone()),
     };
-    let user_files = [h.synthesis.join("SYNTHESIS.md")];
+    let user_files = [h.synthesis.join("AGENTS.md")];
     // Read-deny rules apply to instruction files and their imports; a denied file is reported.
     let denied = Mutex::new(Vec::<PathBuf>::new());
     let deny = |p: &Path| {
@@ -1016,7 +1016,7 @@ pub fn prepare(
             "instruction file not loaded (blocked by a Read deny rule): {}",
             p.display()
         );
-        eprintln!("synth: warning: {}", sanitize_for_display(&w));
+        eprintln!("synt: warning: {}", sanitize_for_display(&w));
         notices.push(w);
     }
     // lowest priority: before the user and repository files
@@ -1101,7 +1101,7 @@ pub fn prepare(
             "{} project agent definition(s) not loaded (project not trusted)",
             agents.skipped.len()
         );
-        eprintln!("synth: warning: {w}");
+        eprintln!("synt: warning: {w}");
         notices.push(w);
     }
 
@@ -1122,19 +1122,14 @@ pub fn prepare(
     mplan.guard = crate::mcp::read_guard(
         &h.synthesis.join("settings.json"),
         (trust == ProjectTrust::Trusted)
-            .then(|| {
-                settings
-                    .project_root
-                    .join(".synthesis")
-                    .join("settings.json")
-            })
+            .then(|| settings.project_root.join(".synt").join("settings.json"))
             .as_deref(),
     );
     mplan.artifact_dir = Some(artifact_root.join("mcp"));
     // Printed now and kept in `notices`, which become `notice` events.
     for n in &mplan.notices {
         let n = sanitize_for_display(n);
-        eprintln!("synth: {n}");
+        eprintln!("synt: {n}");
         notices.push(n);
     }
     for (n, why) in &mplan.skipped {
@@ -1143,7 +1138,7 @@ pub fn prepare(
             sanitize_for_display(n),
             sanitize_for_display(why)
         );
-        eprintln!("synth: warning: {w}");
+        eprintln!("synt: warning: {w}");
         notices.push(w);
     }
     let (mcp, mcp_attach) = if mplan.servers.is_empty() {
@@ -1152,7 +1147,7 @@ pub fn prepare(
         let (m, t, warns) = tokio_rt.block_on(crate::mcp::start(&mplan, env, &ws.root));
         for w in &warns {
             let w = sanitize_for_display(w);
-            eprintln!("synth: warning: {w}");
+            eprintln!("synt: warning: {w}");
             notices.push(w); // also a `notice` event, so a script sees the failure
         }
         // `--require-mcp NAME`: a server that did not come up ends the run before the model starts
@@ -1229,14 +1224,14 @@ pub fn prepare(
     if let Some(l) = peer_link {
         harness = harness.with_peers(l);
     }
-    // "Allow always" persists to .synthesis/settings.local.json, but only in a trusted project: an
+    // "Allow always" persists to .synt/settings.local.json, but only in a trusted project: an
     // untrusted project's allow rules are ignored on load, so writing them would be misleading.
     if trust == ProjectTrust::Trusted {
         let root = settings.project_root.clone();
         harness = harness.with_rule_store(Arc::new(move |rules| {
             if let Err(e) = synthesis_settings::persist_allow_rules(&root, rules) {
                 eprintln!(
-                    "synth: warning: could not save the rule: {}",
+                    "synt: warning: could not save the rule: {}",
                     sanitize_for_display(&e.to_string())
                 );
             }
@@ -1252,7 +1247,7 @@ pub fn prepare(
     }
 
     eprintln!(
-        "synth: session {sid} model {} cwd {} mode {}",
+        "synt: session {sid} model {} cwd {} mode {}",
         res.label,
         ws.cwd.display(),
         mode.as_str()
@@ -1377,7 +1372,7 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
     let mut notices = notices;
     for n in more {
         let n = sanitize_for_display(&n);
-        eprintln!("synth: warning: {n}");
+        eprintln!("synt: warning: {n}");
         notices.push(n);
     }
     let cleanup = a.common.cleanup_worktree;
@@ -1468,14 +1463,14 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
         });
         let code = match task.await {
             Ok(Ok(out)) => {
-                eprintln!("synth: task {:?}: {}", out.status, out.reason);
+                eprintln!("synt: task {:?}: {}", out.status, out.reason);
                 if let Some(h) = blocked_hint(&out) {
                     eprintln!("{h}");
                 }
                 let mut code = exit_code(out.status);
                 let structured = match schema.as_ref().map(|(_, v)| check_schema(v, &out.final_text)) {
                     Some(Err(e)) => {
-                        eprintln!("synth: --json-schema: {e}");
+                        eprintln!("synt: --json-schema: {e}");
                         code = code.max(1);
                         None
                     }
@@ -1486,11 +1481,11 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
                 code
             }
             Ok(Err(e)) => {
-                eprintln!("synth: internal error: {e}");
+                eprintln!("synt: internal error: {e}");
                 70
             }
             Err(e) => {
-                eprintln!("synth: internal error: {e}");
+                eprintln!("synt: internal error: {e}");
                 sink.emit(
                     &Scope::default(),
                     Event::SessionFailed(SessionEnd {
@@ -1599,7 +1594,7 @@ pub fn finish_store(
         .unwrap_or_else(|e| e.into_inner())
         .update_usage(usage)
     {
-        eprintln!("synth: warning: session store: {e}");
+        eprintln!("synt: warning: session store: {e}");
     }
 }
 
@@ -1723,9 +1718,8 @@ pub struct Resolved {
     pub secrets: Vec<String>,
 }
 
-/// The error `synth run` exits 2 with when no model is configured.
-pub const NO_MODEL: &str =
-    "no model configured: pass --model provider/model or set SYNTHESIS_MODEL";
+/// The error `synt run` exits 2 with when no model is configured.
+pub const NO_MODEL: &str = "no model configured: pass --model provider/model or set SYNT_MODEL";
 
 pub fn resolve_provider(
     provider_arg: Option<&str>,
@@ -1784,7 +1778,7 @@ pub fn resolve_provider(
         return Err(match var {
             Some(v) => format!("no API key for provider \"{id}\": set {v} and restart"),
             None => format!(
-                "no API key for provider \"{id}\": set SYNTHESIS_API_KEY (when SYNTHESIS_PROVIDER={id}) or add apiKey to its config"
+                "no API key for provider \"{id}\": set SYNT_API_KEY (when SYNT_PROVIDER={id}) or add apiKey to its config"
             ),
         });
     }
@@ -1802,16 +1796,16 @@ pub fn resolve_provider(
 /// stdout was closed by the reader; the task was cancelled and its events are in the store.
 pub const EXIT_STDOUT_CLOSED: u8 = 141;
 
-/// `synth: blocked: approval needed for ... - rerun with --allow ...`.
+/// `synt: blocked: approval needed for ... - rerun with --allow ...`.
 fn blocked_hint(out: &TaskOutcome) -> Option<String> {
     if out.needed_permissions.is_empty() {
         return None;
     }
     // Blocked is the usual outcome; a model that worked around the denial still gets told.
     let lead = if out.status == TaskStatus::Blocked {
-        "synth: blocked: approval needed for"
+        "synt: blocked: approval needed for"
     } else {
-        "synth: note: approval was needed but unavailable for"
+        "synt: note: approval was needed but unavailable for"
     };
     let rules = &out.needed_permissions;
     // The rule text derives from the model's command: never offer it paste-ready unless it is inert
@@ -2026,7 +2020,7 @@ mod tests {
         p.network = NetworkPolicy::Loopback;
         let e = sandbox_preflight(&NoLoopback, Some(&p)).unwrap_err();
         assert!(
-            e.contains("--network loopback") && e.contains("synth doctor"),
+            e.contains("--network loopback") && e.contains("synt doctor"),
             "{e}"
         );
     }
@@ -2035,7 +2029,7 @@ mod tests {
     fn preflight_refuses_a_backend_that_cannot_confine() {
         let e = sandbox_preflight(&synthesis_sandbox::NullSandbox, None).unwrap_err();
         assert!(
-            e.contains("synth doctor") && e.contains("no OS sandbox"),
+            e.contains("synt doctor") && e.contains("no OS sandbox"),
             "{e}"
         );
     }
@@ -2049,20 +2043,20 @@ mod tests {
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         assert_eq!(workspace_root(&sub, &base), repo);
         assert_eq!(workspace_root(&repo, &base), repo);
-        // `.synthesis` also marks a root
+        // `.synt` also marks a root
         let proj = base.join("proj");
-        std::fs::create_dir_all(proj.join(".synthesis")).unwrap();
+        std::fs::create_dir_all(proj.join(".synt")).unwrap();
         std::fs::create_dir_all(proj.join("a")).unwrap();
         assert_eq!(workspace_root(&proj.join("a"), &base), proj);
         // no marker: the launch dir
         let lone = base.join("lone/x");
         std::fs::create_dir_all(&lone).unwrap();
         assert_eq!(workspace_root(&lone, &base), lone);
-        // `$HOME/.synthesis` must not turn the home directory into the workspace
-        std::fs::create_dir_all(base.join(".synthesis")).unwrap();
+        // `$HOME/.synt` must not turn the home directory into the workspace
+        std::fs::create_dir_all(base.join(".synt")).unwrap();
         assert_eq!(workspace_root(&lone, &base), lone);
         // ... nor may a marker ABOVE home (`/Users/.git`)
-        std::fs::remove_dir(base.join(".synthesis")).unwrap();
+        std::fs::remove_dir(base.join(".synt")).unwrap();
         std::fs::create_dir_all(base.join(".git")).unwrap();
         let home = base.join("users/me");
         std::fs::create_dir_all(home.join("proj")).unwrap();
@@ -2100,7 +2094,7 @@ mod tests {
         std::fs::create_dir_all(sub.clone()).unwrap();
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         std::fs::write(repo.join("AGENTS.md"), "root rules").unwrap();
-        std::fs::write(sub.join("SYNTHESIS.md"), "pkg rules").unwrap();
+        std::fs::write(sub.join("AGENTS.md"), "pkg rules").unwrap();
         let root = workspace_root(&sub, &base.join("home"));
         let ws = WorkspaceContext::open("w", &root, &sub, &[], base.join("art"), "pg").unwrap();
         assert_eq!(ws.cwd, sub);
@@ -2122,7 +2116,7 @@ mod tests {
         std::fs::write(base.join("AGENTS.md"), "secret plan").unwrap();
         std::fs::write(base.join("docs.md"), "imported").unwrap();
         std::fs::create_dir_all(base.join("sub")).unwrap();
-        std::fs::write(base.join("sub/SYNTHESIS.md"), "see @../docs.md").unwrap();
+        std::fs::write(base.join("sub/AGENTS.md"), "see @../docs.md").unwrap();
         let rules = PermissionRules {
             // `/x` is anchored at the cwd (= base)
             deny: vec!["Read(/AGENTS.md)".into(), "Read(/docs.md)".into()],
@@ -2133,7 +2127,7 @@ mod tests {
             synthesis_permissions::Env::new(&base, &base, Mode::Default),
         );
         assert!(read_denied(&perms, &base.join("AGENTS.md")));
-        assert!(!read_denied(&perms, &base.join("sub/SYNTHESIS.md")));
+        assert!(!read_denied(&perms, &base.join("sub/AGENTS.md")));
         let ws = WorkspaceContext::open("w", &base, &base.join("sub"), &[], base.join("art"), "pg")
             .unwrap();
         let deny = |p: &Path| read_denied(&perms, p);

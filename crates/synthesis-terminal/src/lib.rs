@@ -776,7 +776,7 @@ impl TerminalRuntime {
             // Flagged on every result (`sandbox: None`, `unsandboxed_by_request`), loud once.
             if !why.is_empty() && !self.degraded_noted.swap(true, Ordering::Relaxed) {
                 eprintln!(
-                    "synth: WARNING: no OS sandbox could be set up, commands run UNCONFINED (unsandboxed_by_request): {}",
+                    "synt: WARNING: no OS sandbox could be set up, commands run UNCONFINED (unsandboxed_by_request): {}",
                     why.join("; ")
                 );
             }

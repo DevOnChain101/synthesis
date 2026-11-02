@@ -81,7 +81,7 @@ Research date: 2026-10-28. Scope: quick facts plus a per-area checklist, with a 
 35. **documented.** Edits to permissions, hooks, and `apiKeyHelper` apply to the running session without restart. Source: CC-SET.
 36. **documented.** Environment variables are not a precedence level. Each shell variable and settings key pair is decided separately. An `env` block in a settings file follows the normal levels. Source: CC-SET.
 37. **documented.** Codex: user config is `~/.codex/config.toml`, project config is `.codex/config.toml` (trusted projects only). Project-local config cannot set `model_provider`, `notify`, `profile`, `otel`, and similar keys. Source: CX-CFG.
-38. **inferred.** Synthesis should read only `SYNTHESIS_*` for its own settings and API keys, plus the standard variables listed in the design doc. This is an ADR-011 choice, not an official rule. No official page covers it.
+38. **inferred.** Synthesis should read only `SYNT_*` for its own settings and API keys, plus the standard variables listed in the design doc. This is an ADR-011 choice, not an official rule. No official page covers it.
 
 ## 3. Memory files
 

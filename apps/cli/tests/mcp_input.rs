@@ -65,7 +65,7 @@ impl Rig {
         std::fs::write(&srv, SERVER).unwrap();
         let cfg = json!({"$schema": "config.json/v1", "mcpServers": {
             "doc": {"command": "python3", "args": [srv, dir.path().join("reads.log")]}}});
-        std::fs::write(home.join("synthesis.json"), cfg.to_string()).unwrap();
+        std::fs::write(home.join("synt.json"), cfg.to_string()).unwrap();
         std::fs::write(
             home.join("script.json"),
             json!([{"text": "ok"}]).to_string(),
@@ -79,17 +79,17 @@ impl Rig {
     }
 
     fn base(&self, sub: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_synth"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.args(sub)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", self.dir.path())
-            .env("SYNTHESIS_HOME", self.dir.path().join("synthesis"))
+            .env("SYNT_HOME", self.dir.path().join("synthesis"))
             .stdin(Stdio::null());
         c
     }
 
-    /// `synth run` with the prompt flag and extra args; returns the output and the user message.
+    /// `synt run` with the prompt flag and extra args; returns the output and the user message.
     fn run(&self, prompt_args: &[&str], extra: &[&str]) -> (Output, Option<String>) {
         let script = self.dir.path().join("synthesis/script.json");
         let mut c = self.base(&["run", "--cwd"]);

@@ -1,6 +1,6 @@
 {
   "agents": [],
-  "autoMemoryDir": "<HOME>/.synthesis/projects/<SANITIZED_CWD>/memory",
+  "autoMemoryDir": "<HOME>/.synt/projects/<SANITIZED_CWD>/memory",
   "claudeDir": "<HOME>/.claude",
   "commands": [],
   "mcpServers": [
@@ -13,7 +13,7 @@
       "enabled": true,
       "name": "oc",
       "scope": "synthesis",
-      "source": "<TMP>/ws/.synthesis/config.json",
+      "source": "<TMP>/ws/.synt/config.json",
       "type": "stdio"
     },
     {
@@ -22,14 +22,14 @@
       "enabled": false,
       "name": "off",
       "scope": "synthesis",
-      "source": "<TMP>/ws/.synthesis/config.json",
+      "source": "<TMP>/ws/.synt/config.json",
       "type": "stdio"
     },
     {
       "enabled": true,
       "name": "rem",
       "scope": "synthesis",
-      "source": "<TMP>/ws/.synthesis/config.json",
+      "source": "<TMP>/ws/.synt/config.json",
       "type": "http",
       "url": "https://r.example.test/m"
     },
@@ -38,14 +38,14 @@
       "enabled": true,
       "name": "flat",
       "scope": "synthesis",
-      "source": "<TMP>/ws/.synthesis/config.json",
+      "source": "<TMP>/ws/.synt/config.json",
       "type": "stdio"
     },
     {
       "enabled": true,
       "name": "extra",
       "scope": "synthesis",
-      "source": "<TMP>/ws/.synthesis/config.json",
+      "source": "<TMP>/ws/.synt/config.json",
       "type": "sse",
       "url": "https://s.example.test/sse"
     }

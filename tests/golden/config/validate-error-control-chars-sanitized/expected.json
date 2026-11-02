@@ -1,6 +1,6 @@
 {
   "error": {
-    "code": "SYNTHESIS_INVALID_CONFIG",
+    "code": "SYNT_INVALID_CONFIG",
     "message": "invalid config we\\x07ird.json: $.bad\\x01key is not allowed by config.json/v1",
     "name": "ConfigValidationError"
   }

@@ -1,7 +1,7 @@
 {
   "error": {
-    "code": "SYNTHESIS_INVALID_CONFIG",
-    "message": "invalid config <SYNTHESIS_HOME>/synthesis.json: $ must be an object, got array",
+    "code": "SYNT_INVALID_CONFIG",
+    "message": "invalid config <SYNT_HOME>/synt.json: $ must be an object, got array",
     "name": "ConfigValidationError"
   }
 }

@@ -1,11 +1,11 @@
 {
   "files": {
-    "<SYNTHESIS_HOME>/settings.json": {
+    "<SYNT_HOME>/settings.json": {
       "permissions": {
         "blockReadsOutsideWorkingDirectories": "true"
       }
     },
-    "<TMP>/ws/.synthesis/settings.json": {
+    "<TMP>/ws/.synt/settings.json": {
       "permissions": {
         "blockReadsOutsideWorkingDirectories": true
       }

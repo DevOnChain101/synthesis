@@ -3,7 +3,7 @@
   "env": {},
   "files": {
     "<HOME>/.claude/agents/cl.md": "---\ndescription: from claude\n---\nbody",
-    "<HOME>/.synthesis/synthesis.json": {
+    "<HOME>/.synt/synt.json": {
       "claude": {
         "readUserConfig": true
       }

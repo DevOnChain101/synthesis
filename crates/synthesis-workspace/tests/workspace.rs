@@ -107,7 +107,7 @@ fn create_diff_cleanup_leaves_user_tree_untouched() {
     assert_eq!(*wt, synthesis_core::canonicalize(wt).unwrap());
     assert_eq!(
         wt,
-        &synthesis_core::canonicalize(f.base.join(".synthesis-worktrees/s1")).unwrap()
+        &synthesis_core::canonicalize(f.base.join(".synt-worktrees/s1")).unwrap()
     );
     assert_eq!(info.branch, "synthesis/s1");
     // Worktree starts from HEAD: no user edits visible there.

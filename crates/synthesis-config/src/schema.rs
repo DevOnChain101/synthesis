@@ -63,7 +63,7 @@ pub fn sanitize_diagnostic(value: &str) -> String {
     out
 }
 
-/// Node `ConfigValidationError` (code `SYNTHESIS_INVALID_CONFIG`). Never carries file contents.
+/// Node `ConfigValidationError` (code `SYNT_INVALID_CONFIG`). Never carries file contents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigError {
     pub file: String,
@@ -71,7 +71,7 @@ pub struct ConfigError {
 }
 
 impl ConfigError {
-    pub const CODE: &'static str = "SYNTHESIS_INVALID_CONFIG";
+    pub const CODE: &'static str = "SYNT_INVALID_CONFIG";
 
     pub fn new(file: &str, problems: impl IntoIterator<Item = String>) -> Self {
         Self {

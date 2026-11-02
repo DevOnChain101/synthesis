@@ -6,7 +6,7 @@
 //!   process-tree kill). The payload goes to the child's stdin (`ExecSpec::stdin`) and stderr is
 //!   captured apart from stdout (`StderrMode::Separate`): exit 2 uses stderr, JSON uses stdout.
 //! - The crate reads no process env: the child env is the injected map (the session env of the
-//!   runtime) plus `SYNTHESIS_PROJECT_DIR` / `CLAUDE_PROJECT_DIR` = cwd.
+//!   runtime) plus `SYNT_PROJECT_DIR` / `CLAUDE_PROJECT_DIR` = cwd.
 //! - Fail closed (deviation from Node, which fails open everywhere): for `PreToolUse` and
 //!   `UserPromptSubmit` a hook that times out, fails to start, exits with anything but 0 or 2, is
 //!   killed, or prints malformed JSON BLOCKS with the reason (`HookOutcome::failed_closed`).
@@ -145,7 +145,7 @@ pub struct Hooks {
     session_id: String,
     workspace: Arc<WorkspaceContext>,
     config: HooksConfig,
-    /// Added to the runtime session env for hook children (SYNTHESIS_* names only; see crate docs).
+    /// Added to the runtime session env for hook children (SYNT_* names only; see crate docs).
     env: BTreeMap<String, String>,
     pub transcript_path: String,
     pub disabled: bool,
@@ -228,11 +228,11 @@ impl Hooks {
         }
     }
 
-    /// Extra child env; names outside `SYNTHESIS_*` are dropped.
+    /// Extra child env; names outside `SYNT_*` are dropped.
     pub fn with_env(mut self, env: BTreeMap<String, String>) -> Self {
         self.env = env
             .into_iter()
-            .filter(|(k, _)| k.starts_with("SYNTHESIS_"))
+            .filter(|(k, _)| k.starts_with("SYNT_"))
             .collect();
         self
     }
@@ -295,7 +295,7 @@ impl Hooks {
 
         let mut env = self.env.clone();
         env.insert("CLAUDE_PROJECT_DIR".into(), cwd.clone());
-        env.insert("SYNTHESIS_PROJECT_DIR".into(), cwd);
+        env.insert("SYNT_PROJECT_DIR".into(), cwd);
 
         let mut set = JoinSet::new();
         for (i, h) in commands.iter().enumerate() {

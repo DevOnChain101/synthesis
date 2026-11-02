@@ -1,6 +1,6 @@
 {
   "agents": [],
-  "autoMemoryDir": "<HOME>/.synthesis/projects/<SANITIZED_CWD>/memory",
+  "autoMemoryDir": "<HOME>/.synt/projects/<SANITIZED_CWD>/memory",
   "claudeDir": "<HOME>/.claude",
   "commands": [],
   "mcpServers": [],
@@ -13,11 +13,11 @@
         {
           "hooks": "bad",
           "matcher": "x",
-          "source": "<HOME>/.synthesis/settings.json"
+          "source": "<HOME>/.synt/settings.json"
         },
         {
           "matcher": "y",
-          "source": "<HOME>/.synthesis/settings.json"
+          "source": "<HOME>/.synt/settings.json"
         }
       ],
       "Stop": []

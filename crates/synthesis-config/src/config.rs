@@ -1,7 +1,7 @@
 //! Layered config + model/alias resolution. Port of Node `src/native/config.js`.
 //!
-//! Precedence (low to high): built-in defaults < `<synthesis_home>/synthesis.json` <
-//! `state.json` model < `<cwd>/.synthesis/config.json` < `SYNTHESIS_*` env. Only `SYNTHESIS_*`
+//! Precedence (low to high): built-in defaults < `<synthesis_home>/synt.json` <
+//! `state.json` model < `<cwd>/.synt/config.json` < `SYNT_*` env. Only `SYNT_*`
 //! names are read for layering.
 
 use crate::env::Env;
@@ -18,20 +18,20 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy)]
 pub struct LoadContext<'a> {
     pub cwd: &'a Path,
-    /// `$SYNTHESIS_HOME` (see [`default_synthesis_home`]).
+    /// `$SYNT_HOME` (see [`default_synthesis_home`]).
     pub synthesis_home: &'a Path,
     /// Real user home, only for `~` expansion in `{file:}`.
     pub user_home: &'a Path,
     pub env: &'a Env,
 }
 
-/// `$SYNTHESIS_HOME` or `<user_home>/.synthesis`.
+/// `$SYNT_HOME` or `<user_home>/.synt`.
 pub fn default_synthesis_home(env: &Env, user_home: &Path) -> PathBuf {
-    env.get_nonempty("SYNTHESIS_HOME")
-        .map_or_else(|| user_home.join(".synthesis"), PathBuf::from)
+    env.get_nonempty("SYNT_HOME")
+        .map_or_else(|| user_home.join(".synt"), PathBuf::from)
 }
 
-/// Trust in `<cwd>/.synthesis/config.json`, which comes from the repository and may be hostile.
+/// Trust in `<cwd>/.synt/config.json`, which comes from the repository and may be hostile.
 /// `Untrusted` (the default) keeps only the safe subset: `$schema`, `model`, `smallModel`,
 /// `aliases`, `maxTokens`, `profiles`, and providers' `npm`/`name`/`type`/`models`/`discover`/
 /// `noAuth`. Provider connection and credential fields (`baseURL`, `apiKey`, `authToken`,
@@ -339,19 +339,18 @@ fn canonical_provider_id(providers: &IndexMap<String, Provider>, id: &str) -> St
         .unwrap_or_else(|| id.to_string())
 }
 
-/// `SYNTHESIS_BASE_URL` / `SYNTHESIS_CUSTOM_HEADERS` onto the `SYNTHESIS_PROVIDER` entry (default `anthropic`).
+/// `SYNT_BASE_URL` / `SYNT_CUSTOM_HEADERS` onto the `SYNT_PROVIDER` entry (default `anthropic`).
 pub fn apply_flat_provider_env(providers: &mut IndexMap<String, Provider>, env: &Env) {
     let id = canonical_provider_id(
         providers,
-        env.get_nonempty("SYNTHESIS_PROVIDER")
-            .unwrap_or("anthropic"),
+        env.get_nonempty("SYNT_PROVIDER").unwrap_or("anthropic"),
     );
-    let base_url = env.get_nonempty("SYNTHESIS_BASE_URL");
-    let header_text = env.get_nonempty("SYNTHESIS_CUSTOM_HEADERS");
+    let base_url = env.get_nonempty("SYNT_BASE_URL");
+    let header_text = env.get_nonempty("SYNT_CUSTOM_HEADERS");
     let has_target = base_url.is_some()
         || header_text.is_some()
-        || env.get_nonempty("SYNTHESIS_AUTH_TOKEN").is_some()
-        || env.get_nonempty("SYNTHESIS_API_KEY").is_some();
+        || env.get_nonempty("SYNT_AUTH_TOKEN").is_some()
+        || env.get_nonempty("SYNT_API_KEY").is_some();
     if !has_target {
         return;
     }
@@ -361,8 +360,8 @@ pub fn apply_flat_provider_env(providers: &mut IndexMap<String, Provider>, env: 
             id: Some(&id),
             base_url: Some(url),
             credential: env
-                .get_nonempty("SYNTHESIS_API_KEY")
-                .or(env.get_nonempty("SYNTHESIS_AUTH_TOKEN")),
+                .get_nonempty("SYNT_API_KEY")
+                .or(env.get_nonempty("SYNT_AUTH_TOKEN")),
             ..Default::default()
         });
         providers.insert(
@@ -400,7 +399,7 @@ pub fn parse_header_lines(text: &str) -> IndexMap<String, String> {
     out
 }
 
-/// Moves the model's provider to `SYNTHESIS_PROVIDER` when flat env vars are in play.
+/// Moves the model's provider to `SYNT_PROVIDER` when flat env vars are in play.
 pub fn apply_env_default_model(
     model: Option<&str>,
     env: &Env,
@@ -409,16 +408,11 @@ pub fn apply_env_default_model(
     let model = model.filter(|m| !m.is_empty())?;
     let id = canonical_provider_id(
         providers,
-        env.get_nonempty("SYNTHESIS_PROVIDER")
-            .unwrap_or("anthropic"),
+        env.get_nonempty("SYNT_PROVIDER").unwrap_or("anthropic"),
     );
-    let has_target = [
-        "SYNTHESIS_BASE_URL",
-        "SYNTHESIS_AUTH_TOKEN",
-        "SYNTHESIS_API_KEY",
-    ]
-    .iter()
-    .any(|k| env.get_nonempty(k).is_some());
+    let has_target = ["SYNT_BASE_URL", "SYNT_AUTH_TOKEN", "SYNT_API_KEY"]
+        .iter()
+        .any(|k| env.get_nonempty(k).is_some());
     if !has_target {
         return Some(model.to_string());
     }
@@ -426,11 +420,9 @@ pub fn apply_env_default_model(
     Some(format!("{id}/{bare}"))
 }
 
-/// `SYNTHESIS_DEFAULT_<NAME>_MODEL` -> lowercase `<name>`.
+/// `SYNT_DEFAULT_<NAME>_MODEL` -> lowercase `<name>`.
 fn alias_env_name(key: &str) -> Option<String> {
-    let mid = key
-        .strip_prefix("SYNTHESIS_DEFAULT_")?
-        .strip_suffix("_MODEL")?;
+    let mid = key.strip_prefix("SYNT_DEFAULT_")?.strip_suffix("_MODEL")?;
     (!mid.is_empty()).then(|| mid.to_lowercase())
 }
 
@@ -447,18 +439,15 @@ pub fn load_config_with_trust(
     let mut config = Config::default();
     let mut model_explicit = false;
 
-    if let Some(f) = load_config_file(&ctx.synthesis_home.join("synthesis.json"), ctx, None)? {
+    if let Some(f) = load_config_file(&ctx.synthesis_home.join("synt.json"), ctx, None)? {
         model_explicit |= config.merge(f);
     }
     if let Some(m) = load_state(ctx.synthesis_home).model {
         config.model = Some(m);
         model_explicit = false;
     }
-    if let Some(f) = load_config_file(
-        &ctx.cwd.join(".synthesis").join("config.json"),
-        ctx,
-        Some(trust),
-    )? {
+    if let Some(f) = load_config_file(&ctx.cwd.join(".synt").join("config.json"), ctx, Some(trust))?
+    {
         model_explicit |= config.merge(f);
     }
 
@@ -470,7 +459,7 @@ pub fn load_config_with_trust(
         }
     }
 
-    let env_model = env.get_nonempty("SYNTHESIS_MODEL");
+    let env_model = env.get_nonempty("SYNT_MODEL");
     if env_model.is_none() {
         config.model = apply_env_default_model(config.model.as_deref(), env, &config.providers);
     }
@@ -478,7 +467,7 @@ pub fn load_config_with_trust(
         config.model = Some(m.to_string());
         model_explicit = true;
     }
-    if let Some(m) = env.get_nonempty("SYNTHESIS_SMALL_MODEL") {
+    if let Some(m) = env.get_nonempty("SYNT_SMALL_MODEL") {
         config.small_model = Some(m.to_string());
     }
     config.model_explicit = model_explicit;

@@ -43,7 +43,7 @@ impl Transcript {
             .unwrap_or_else(|e| e.into_inner())
             .append_message(msg);
         if let Err(e) = &r {
-            eprintln!("synth: warning: session store: {e}");
+            eprintln!("synt: warning: session store: {e}");
         }
         r.is_ok()
     }

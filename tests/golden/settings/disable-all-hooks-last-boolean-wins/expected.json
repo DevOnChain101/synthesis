@@ -1,6 +1,6 @@
 {
   "agents": [],
-  "autoMemoryDir": "<HOME>/.synthesis/projects/<SANITIZED_CWD>/memory",
+  "autoMemoryDir": "<HOME>/.synt/projects/<SANITIZED_CWD>/memory",
   "claudeDir": "<HOME>/.claude",
   "commands": [],
   "mcpServers": [],

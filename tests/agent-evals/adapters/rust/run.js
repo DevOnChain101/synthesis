@@ -1,7 +1,7 @@
-// Runs `synth run` (the Rust binary) on the task. Binary: $SYNTHESIS_BIN, else target/{debug,release}/synth.
+// Runs `synt run` (the Rust binary) on the task. Binary: $SYNT_BIN, else target/{debug,release}/synt.
 //   EVAL_FAKE_SCRIPT=<script.json>  scripted model (needs a build with --features test-provider; selftest only)
 //   EVAL_PERMISSION_MODE_OVERRIDE=<mode>  diagnostic only (e.g. bypassPermissions under the sandbox); the task's mode otherwise
-//   EVAL_MODEL="provider/model"      optional; real mode needs SYNTHESIS_* credentials in the environment
+//   EVAL_MODEL="provider/model"      optional; real mode needs SYNT_* credentials in the environment
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,15 +10,15 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..', '..', '..');
-const exe = process.platform === 'win32' ? 'synth.exe' : 'synth';
+const exe = process.platform === 'win32' ? 'synt.exe' : 'synt';
 const targetDir = process.env.CARGO_TARGET_DIR || path.join(repoRoot, 'target');
-const bin = process.env.SYNTHESIS_BIN || ['debug', 'release'].map((p) => path.join(targetDir, p, exe)).find((p) => fs.existsSync(p));
+const bin = process.env.SYNT_BIN || ['debug', 'release'].map((p) => path.join(targetDir, p, exe)).find((p) => fs.existsSync(p));
 const die = (msg) => { process.stderr.write(`adapter "rust": ${msg}\n`); process.exit(3); };
 
 const cwd = process.env.EVAL_CWD;
 const prompt = process.env.EVAL_PROMPT;
 if (!cwd || !prompt) die('EVAL_CWD and EVAL_PROMPT are required');
-if (!bin || !fs.existsSync(bin)) die('synth binary not found (cargo build -p synthesis-cli, or set SYNTHESIS_BIN)');
+if (!bin || !fs.existsSync(bin)) die('synt binary not found (cargo build -p synthesis-cli, or set SYNT_BIN)');
 
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'eval-rust-')));
 // Loopback: tasks start a local server in their tests (still no outside network). The node
@@ -27,7 +27,7 @@ const args = ['run', '--cwd', cwd, '--no-session-store', '--network', 'loopback'
 const env = { ...process.env };
 const fake = process.env.EVAL_FAKE_SCRIPT;
 if (fake) { // never touch the real home in scripted mode
-  Object.assign(env, { HOME: tmp, USERPROFILE: tmp, SYNTHESIS_HOME: path.join(tmp, 'synthesis') });
+  Object.assign(env, { HOME: tmp, USERPROFILE: tmp, SYNT_HOME: path.join(tmp, 'synthesis') });
   args.push('--provider', `fake:${fake}`);
 } else if (process.env.EVAL_MODEL) {
   args.push('--model', process.env.EVAL_MODEL);
@@ -79,6 +79,6 @@ args.push('--prompt', taskPrompt);
 const r = spawnSync(bin, args, { env, stdio: ['ignore', 'inherit', 'inherit'] });
 fs.rmSync(tmp, { recursive: true, force: true });
 if (r.error) die(String(r.error));
-// synth exits 1/3/4 for failed/unverified/blocked; the claim is in task.ended. 3 would read as "adapter unavailable".
+// synt exits 1/3/4 for failed/unverified/blocked; the claim is in task.ended. 3 would read as "adapter unavailable".
 const code = r.status ?? 70;
 process.exit([0, 1, 3, 4].includes(code) ? 0 : code);

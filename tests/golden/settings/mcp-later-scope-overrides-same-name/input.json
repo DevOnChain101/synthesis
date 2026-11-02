@@ -9,7 +9,7 @@
         }
       }
     },
-    "<HOME>/.synthesis/synthesis.json": {
+    "<HOME>/.synt/synt.json": {
       "claude": {
         "readUserConfig": true
       },
@@ -19,7 +19,7 @@
         }
       }
     },
-    "<TMP>/ws/.synthesis/config.json": {
+    "<TMP>/ws/.synt/config.json": {
       "mcp": {
         "dup": {
           "command": "synthesis-project"

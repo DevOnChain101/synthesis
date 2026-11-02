@@ -2,8 +2,8 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {
-    "<TMP>/ws/.synthesis/commands/git/commit.md": "Commit everything.\nNo placeholder here.",
-    "<TMP>/ws/.synthesis/commands/review.md": "---\ndescription: Reviews code\nargument-hint: [file]\n---\nReview $1 carefully. $ARGUMENTS"
+    "<TMP>/ws/.synt/commands/git/commit.md": "Commit everything.\nNo placeholder here.",
+    "<TMP>/ws/.synt/commands/review.md": "---\ndescription: Reviews code\nargument-hint: [file]\n---\nReview $1 carefully. $ARGUMENTS"
   },
   "op": "workspace"
 }

@@ -192,8 +192,8 @@ fn events_are_gapless_redacted_and_replayable() {
     assert_eq!(w.read_events("s1", 0, 4).unwrap().len(), 4);
     assert_eq!(w.get_session("s1").unwrap().event_cursor, 10);
     // The raw database never holds the secret.
-    let raw = fs::read(e.home.join("synthesis.db")).unwrap();
-    let wal = fs::read(e.home.join("synthesis.db-wal")).unwrap_or_default();
+    let raw = fs::read(e.home.join("synt.db")).unwrap();
+    let wal = fs::read(e.home.join("synt.db-wal")).unwrap_or_default();
     for b in [raw, wal] {
         assert!(!String::from_utf8_lossy(&b).contains("hunter2-secret"));
     }
@@ -207,7 +207,7 @@ fn large_payload_becomes_an_artifact_ref() {
     let big = "x".repeat(20_000);
     let env1 = w.append_event(notice(&big)).unwrap();
     let small = w.append_event(notice("small")).unwrap();
-    let conn = rusqlite::Connection::open(e.home.join("synthesis.db")).unwrap();
+    let conn = rusqlite::Connection::open(e.home.join("synt.db")).unwrap();
     let row = |seq: i64| -> (Option<String>, Option<String>) {
         conn.query_row(
             "SELECT payload, payload_ref FROM events WHERE seq=?1",
@@ -298,7 +298,7 @@ fn schema_is_versioned_and_foreign_keys_are_on() {
     let e = env();
     drop(e.store());
     drop(e.store()); // reopening is a no-op
-    let conn = rusqlite::Connection::open(e.home.join("synthesis.db")).unwrap();
+    let conn = rusqlite::Connection::open(e.home.join("synt.db")).unwrap();
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();

@@ -1,10 +1,10 @@
 {
   "cwd": "<TMP>/ws",
   "env": {
-    "SYNTHESIS_BASE_URL": "https://p.example.test",
-    "SYNTHESIS_CUSTOM_HEADERS": "X-One: 1\r\nX-Two:two\nbad line\nx-one:  override  "
+    "SYNT_BASE_URL": "https://p.example.test",
+    "SYNT_CUSTOM_HEADERS": "X-One: 1\r\nX-Two:two\nbad line\nx-one:  override  "
   },
   "files": {},
-  "home": "<SYNTHESIS_HOME>",
+  "home": "<SYNT_HOME>",
   "op": "loadConfig"
 }

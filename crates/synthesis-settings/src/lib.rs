@@ -1,8 +1,8 @@
 //! `settings.json` loader (port of Node `claudecfg.js` `mergeSettings`, `loadSynthesisEnv`,
 //! `loadAutoModeConfig`, `loadBlockOutsideReads`, `findProjectRoot`; docs/specs/config.md).
 //!
-//! Layers, lowest to highest: `<synthesis_home>/settings.json` (user), `<project_root>/.synthesis/settings.json`
-//! (project), `<project_root>/.synthesis/settings.local.json` (local, gitignored, where "allow always"
+//! Layers, lowest to highest: `<synthesis_home>/settings.json` (user), `<project_root>/.synt/settings.json`
+//! (project), `<project_root>/.synt/settings.local.json` (local, gitignored, where "allow always"
 //! persists; same trust rules as project), then the managed file ([`managed_settings_path`]; the
 //! organisation's, always trusted). The CLI flags sit between local and managed: precedence is
 //! managed > CLI > local > project > user. Lists are unions (deduped, order kept); scalars: last layer wins. Unknown keys are
@@ -11,7 +11,7 @@
 //! SECURITY (deviation from Node): the project file comes from a possibly hostile repository.
 //! Unless the caller passes [`ProjectTrust::Trusted`], it can only TIGHTEN: `deny`/`ask` rules, the
 //! modes `default|manual|plan|dontAsk` and `mcp` disables are kept; `allow` rules, hooks,
-//! `additionalDirectories`, `disableAllHooks`, `env`, MCP approvals and the `synth` section are
+//! `additionalDirectories`, `disableAllHooks`, `env`, MCP approvals and the `synt` section are
 //! dropped with a diagnostic (counts and key names only, never values). `auto` and
 //! `bypassPermissions` are refused from the project even when trusted (as Node).
 //!
@@ -27,8 +27,8 @@ use synthesis_hooks::{HookGroup, HooksConfig};
 
 pub use synthesis_config::{LoadContext, ProjectTrust};
 
-/// Highest `synthesis.version` this build understands; a newer section is ignored with a diagnostic.
-pub const SYNTHESIS_SECTION_VERSION: u64 = 1;
+/// Highest `synt.version` this build understands; a newer section is ignored with a diagnostic.
+pub const SYNT_SECTION_VERSION: u64 = 1;
 const MAX_FILE_BYTES: u64 = 1 << 20;
 /// Modes an untrusted project may select: none of them allows more than the default.
 const UNTRUSTED_PROJECT_MODES: [&str; 4] = ["default", "manual", "plan", "dontAsk"];
@@ -95,7 +95,7 @@ pub struct Compat {
     pub write_node_transcripts: Option<bool>,
 }
 
-/// The Rust-only top-level `"synthesis"` object (config.md §6). Every field optional.
+/// The Rust-only top-level `"synt"` object (config.md §6). Every field optional.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SynthesisSettings {
     pub budget: Budget,
@@ -123,12 +123,12 @@ pub struct Settings {
     /// Non-secret notes: malformed files, ignored/refused items. Never contains setting values.
     pub diagnostics: Vec<String>,
     /// A settings file that exists but cannot be used (malformed JSON, not an object, unreadable,
-    /// oversized): its deny/ask rules are NOT in force, so callers must refuse to start (`synth run`
+    /// oversized): its deny/ask rules are NOT in force, so callers must refuse to start (`synt run`
     /// exits 2) instead of running without them. Also in `diagnostics`.
     pub errors: Vec<String>,
 }
 
-/// Nearest ancestor of `cwd` (inclusive) holding `.synthesis` or `.git`, else `cwd`. Lexical walk from
+/// Nearest ancestor of `cwd` (inclusive) holding `.synt` or `.git`, else `cwd`. Lexical walk from
 /// the given path; no process cwd, no canonicalisation. The project root decides which settings
 /// (hooks, MCP, agents) and which writable sandbox root apply, so a marker only counts when the
 /// directory and the marker are owned by the current user (unix) and not world-writable, and the
@@ -140,7 +140,7 @@ pub fn find_project_root(cwd: &Path) -> PathBuf {
     cwd.ancestors()
         .filter(|d| !d.as_os_str().is_empty())
         .find(|d| {
-            [".synthesis", ".git"]
+            [".synt", ".git"]
                 .iter()
                 .any(|m| d.join(m).exists() && marker_trusted(d, &d.join(m), &tmp))
         })
@@ -191,7 +191,7 @@ pub fn is_secret_env_key(key: &str) -> bool {
             "AZURE_",
             "GOOGLE_",
             "VERTEX_",
-            "SYNTHESIS_",
+            "SYNT_",
         ]
         .iter()
         .any(|p| key.starts_with(p))
@@ -209,9 +209,9 @@ pub fn managed_settings_path() -> PathBuf {
     }
 }
 
-/// `<project_root>/.synthesis/settings.local.json`.
+/// `<project_root>/.synt/settings.local.json`.
 pub fn local_settings_path(project_root: &Path) -> PathBuf {
-    project_root.join(".synthesis").join("settings.local.json")
+    project_root.join(".synt").join("settings.local.json")
 }
 
 pub fn load_settings(ctx: &LoadContext<'_>, trust: ProjectTrust) -> Settings {
@@ -261,7 +261,7 @@ fn load_settings_layers(
             true,
         ),
         (
-            project_root.join(".synthesis").join("settings.json"),
+            project_root.join(".synt").join("settings.json"),
             "project settings",
             false,
             t,
@@ -297,7 +297,7 @@ fn load_settings_layers(
 }
 
 /// Persists "allow always" rules into the local settings file (created with its own
-/// `.synthesis/.gitignore` entry). Existing keys are kept; rules are appended without duplicates.
+/// `.synt/.gitignore` entry). Existing keys are kept; rules are appended without duplicates.
 pub fn persist_allow_rules(project_root: &Path, rules: &[String]) -> std::io::Result<()> {
     let path = local_settings_path(project_root);
     let dir = path.parent().unwrap_or(project_root);
@@ -467,23 +467,29 @@ impl Settings {
         if let Some(hooks) = raw.get("hooks").and_then(Value::as_object) {
             self.apply_hooks(hooks, trusted, what);
         }
+        if raw.get("synthesis").is_some() {
+            // Renamed 2026-11-02; the old section is never read.
+            self.diagnostics.push(format!(
+                "{what}: key \"synthesis\" was renamed to \"synt\", ignored"
+            ));
+        }
         if trusted {
             if let Some(b) = raw.get("disableAllHooks").and_then(Value::as_bool) {
                 self.disable_all_hooks = b;
             }
             self.apply_env(raw);
             self.apply_synthesis(raw, what, user);
-            if !user && raw.get("synthesis").and_then(|n| n.get("peers")).is_some() {
+            if !user && raw.get("synt").and_then(|n| n.get("peers")).is_some() {
                 self.diagnostics.push(format!(
-                    "{what}: synthesis.peers is read from user settings only, ignored"
+                    "{what}: synt.peers is read from user settings only, ignored"
                 ));
             }
         } else if raw.get("disableAllHooks").is_some()
             || raw.get("env").is_some()
-            || raw.get("synthesis").is_some()
+            || raw.get("synt").is_some()
         {
             self.diagnostics.push(format!(
-                "{what}: ignored disableAllHooks/env/synthesis keys (project not trusted)"
+                "{what}: ignored disableAllHooks/env/synt keys (project not trusted)"
             ));
         }
 
@@ -578,13 +584,13 @@ impl Settings {
     }
 
     fn apply_synthesis(&mut self, raw: &Value, what: &str, user: bool) {
-        let Some(n) = raw.get("synthesis").and_then(Value::as_object) else {
+        let Some(n) = raw.get("synt").and_then(Value::as_object) else {
             return;
         };
         let version = n.get("version").and_then(Value::as_u64).unwrap_or(1);
-        if version > SYNTHESIS_SECTION_VERSION {
+        if version > SYNT_SECTION_VERSION {
             self.diagnostics.push(format!(
-                "{what}: synthesis section version {version} is newer than supported {SYNTHESIS_SECTION_VERSION}, ignored"
+                "{what}: synt section version {version} is newer than supported {SYNT_SECTION_VERSION}, ignored"
             ));
             return;
         }

@@ -12,7 +12,7 @@ workspace = true
 synthesis-config = { path = "../synthesis-config" }
 synthesis-events = { path = "../synthesis-events" }
 # No `system-proxy` (default feature): proxy settings are explicit config, never read from the
-# process environment (project rule: only SYNTHESIS_* variables). rustls TLS, no OpenSSL.
+# process environment (project rule: only SYNT_* variables). rustls TLS, no OpenSSL.
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "http2"] }
 tokio = { version = "1.54.1", default-features = false, features = ["rt", "time", "sync", "macros"] }
 tokio-util = { version = "0.7.20", default-features = false }

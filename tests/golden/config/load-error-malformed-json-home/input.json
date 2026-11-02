@@ -2,8 +2,8 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {
-    "<SYNTHESIS_HOME>/synthesis.json": "{\"apiKey\": \"sk-secret\", "
+    "<SYNT_HOME>/synt.json": "{\"apiKey\": \"sk-secret\", "
   },
-  "home": "<SYNTHESIS_HOME>",
+  "home": "<SYNT_HOME>",
   "op": "loadConfig"
 }

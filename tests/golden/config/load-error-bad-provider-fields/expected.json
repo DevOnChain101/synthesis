@@ -1,7 +1,7 @@
 {
   "error": {
-    "code": "SYNTHESIS_INVALID_CONFIG",
-    "message": "invalid config <SYNTHESIS_HOME>/synthesis.json: $.providers.p.extra is not allowed by config.json/v1; $.providers.p.type must be anthropic or openai; $.providers.p.apiKey must be a non-empty string or false; $.providers.p.authHeader must be bearer or x-api-key; $.providers.p.headers.a must be a string; $.providers.p.discover must be a boolean",
+    "code": "SYNT_INVALID_CONFIG",
+    "message": "invalid config <SYNT_HOME>/synt.json: $.providers.p.extra is not allowed by config.json/v1; $.providers.p.type must be anthropic or openai; $.providers.p.apiKey must be a non-empty string or false; $.providers.p.authHeader must be bearer or x-api-key; $.providers.p.headers.a must be a string; $.providers.p.discover must be a boolean",
     "name": "ConfigValidationError"
   }
 }

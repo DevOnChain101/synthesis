@@ -228,7 +228,7 @@ pub(crate) fn detect_linux() -> Vec<Box<dyn SandboxBackend>> {
     // Test hook: simulate a host where only Landlock works (e.g. Ubuntu 24.04 with userns blocked).
     #[cfg(all(feature = "test-backend", debug_assertions))]
     let skip_bwrap =
-        std::env::var_os("SYNTHESIS_TEST_FORCE_BACKEND").is_some_and(|v| v == "landlock-only");
+        std::env::var_os("SYNT_TEST_FORCE_BACKEND").is_some_and(|v| v == "landlock-only");
     #[cfg(not(all(feature = "test-backend", debug_assertions)))]
     let skip_bwrap = false;
     if !skip_bwrap {

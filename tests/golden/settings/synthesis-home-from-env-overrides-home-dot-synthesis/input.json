@@ -1,17 +1,17 @@
 {
   "cwd": "<TMP>/ws",
   "env": {
-    "SYNTHESIS_HOME": "<SYNTHESIS_HOME>"
+    "SYNT_HOME": "<SYNT_HOME>"
   },
   "files": {
-    "<HOME>/.synthesis/settings.json": {
+    "<HOME>/.synt/settings.json": {
       "permissions": {
         "allow": [
           "DotSynthesis"
         ]
       }
     },
-    "<SYNTHESIS_HOME>/settings.json": {
+    "<SYNT_HOME>/settings.json": {
       "permissions": {
         "allow": [
           "FromSynthesisHome"

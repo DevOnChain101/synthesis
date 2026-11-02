@@ -1,7 +1,7 @@
 {
   "error": {
-    "code": "SYNTHESIS_INVALID_CONFIG",
-    "message": "invalid config <SYNTHESIS_HOME>/synthesis.json: $.providers.p.models.m.junk is not allowed by config.json/v1; $.providers.p.models.m.limit.context must be a positive number; $.providers.p.models.m.capabilities.effort_tiers must not contain duplicates; $.providers.p.models.m.capabilities.x must be a boolean",
+    "code": "SYNT_INVALID_CONFIG",
+    "message": "invalid config <SYNT_HOME>/synt.json: $.providers.p.models.m.junk is not allowed by config.json/v1; $.providers.p.models.m.limit.context must be a positive number; $.providers.p.models.m.capabilities.effort_tiers must not contain duplicates; $.providers.p.models.m.capabilities.x must be a boolean",
     "name": "ConfigValidationError"
   }
 }

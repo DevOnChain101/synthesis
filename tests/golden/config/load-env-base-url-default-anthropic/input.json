@@ -1,10 +1,10 @@
 {
   "cwd": "<TMP>/ws",
   "env": {
-    "SYNTHESIS_API_KEY": "k",
-    "SYNTHESIS_BASE_URL": "https://proxy.example.test/anthropic"
+    "SYNT_API_KEY": "k",
+    "SYNT_BASE_URL": "https://proxy.example.test/anthropic"
   },
   "files": {},
-  "home": "<SYNTHESIS_HOME>",
+  "home": "<SYNT_HOME>",
   "op": "loadConfig"
 }

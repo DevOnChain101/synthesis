@@ -1,5 +1,5 @@
 //! Cross-session peer messaging transport (docs/specs/messaging.md Part B). OFF unless
-//! `synthesis.peers.enabled` in user settings. Same OS user, same machine; no TCP listener.
+//! `synt.peers.enabled` in user settings. Same OS user, same machine; no TCP listener.
 //!
 //! This crate is the transport, registry, policy and protocol. The model-facing parts (the
 //! read-only responder, `SendMessage`, inbox) plug in through [`serve::Responder`].
@@ -32,7 +32,7 @@ impl Key {
     }
 }
 
-/// `$SYNTHESIS_HOME/run`; the home comes from the caller's `Env`, never from `HOME`.
+/// `$SYNT_HOME/run`; the home comes from the caller's `Env`, never from `HOME`.
 pub fn run_dir(synthesis_home: &Path) -> PathBuf {
     synthesis_home.join("run")
 }
@@ -208,7 +208,7 @@ impl Addr {
     }
 }
 
-/// `synthesis.peers` (B8.5). User settings and CLI only; the caller must not pass project values.
+/// `synt.peers` (B8.5). User settings and CLI only; the caller must not pass project values.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub enabled: bool,
@@ -309,7 +309,7 @@ impl Config {
                 .any(|r| !r.starts_with("sess:") && rule_matches(r, p))
     }
 
-    /// Problems in the user's settings that make a rule inert, for `synth doctor`.
+    /// Problems in the user's settings that make a rule inert, for `synt doctor`.
     pub fn delegation_warnings(&self) -> Vec<String> {
         self.delegation_allow
             .iter()
@@ -386,7 +386,7 @@ pub struct Entry {
     pub started_at: u64,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub repo_key: String,
-    /// What this session is for (`--about`, else the first line of SYNTHESIS.md), <= 120 chars.
+    /// What this session is for (`--about`, else the first line of AGENTS.md), <= 120 chars.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub about: Option<String>,
 }
@@ -614,8 +614,8 @@ mod tests {
     #[test]
     fn profile_prefix_is_by_component() {
         let p = Path::new;
-        assert!(components_start_with(p("/u/bob/.synthesis"), p("/u/bob")));
-        assert!(!components_start_with(p("/u/bob2/.synthesis"), p("/u/bob")));
+        assert!(components_start_with(p("/u/bob/.synt"), p("/u/bob")));
+        assert!(!components_start_with(p("/u/bob2/.synt"), p("/u/bob")));
         assert!(!components_start_with(p("/u/bob"), p("")));
     }
 

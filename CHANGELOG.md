@@ -4,6 +4,9 @@ Format: Keep a Changelog. Versioning: SemVer (pre-1.0: minor versions may break)
 
 ## [Unreleased]
 
+### Changed (owner decision 2026-11-02)
+- The command is `synt` (was `synth`); no alias. The binary, archives, npm `bin`, Homebrew and winget entries, install scripts and all messages say `synt`. Config folder names follow: home `~/.synt`, project `.synt/`, `synt.json`, `synt.db` (were `~/.synthesis`, `.synthesis/`, `synthesis.json`, `synthesis.db`; the old ones are never read, `synt doctor` prints the `mv` commands). The instruction file `SYNTHESIS.md` is `AGENTS.md` (same lookup order and semantics). Env vars `SYNTHESIS_*` are `SYNT_*` (the old ones are not honoured; `synt doctor` names any that are set). Display text keeps the full name Synthesis (`synt --version` prints `Synthesis <version>`). Unchanged: crates, the npm package name, the `"synthesis"` settings key.
+
 ### Removed (owner decision 2026-10-31)
 - All interactive UI: the TUI (`synthesis-tui`, `-tui-base`, `-tui-render`, `synth tui`, `synthesis.tui.*` settings, `SYNTHESIS_ASCII`/`SYNTHESIS_COLOR`/`SYNTHESIS_ONCE_SCREEN`), the GPUI desktop app (`apps/desktop`) and their goldens, tty-qa and frame tooling. `synth` with no subcommand prints help. Archived at tag `archive/ui-before-removal`; a new UI will be built later from the HTML design.
 

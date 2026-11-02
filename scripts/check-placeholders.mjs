@@ -2,7 +2,7 @@
 // Release gate for the repository slug. The single source of the GitHub slug is packaging/REPO.
 //   node scripts/check-placeholders.mjs [--expect owner/repo]
 // Fails if the slug is malformed, still OWNER, or differs from --expect (case-insensitive); if an unfilled
-// placeholder (OWNER, @REPO@, @REPO_OWNER@, @SYNTHESIS_REPO@) remains in README/docs/packaging/installers; or if the
+// placeholder (OWNER, @REPO@, @REPO_OWNER@, @SYNT_REPO@) remains in README/docs/packaging/installers; or if the
 // installers' built-in default repository is not the slug. (@VERSION@/@SHA256_*@ are filled at submission.)
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -19,7 +19,7 @@ if (!SLUG.test(slug)) fail(`packaging/REPO is not owner/repo: ${JSON.stringify(s
 if (/\bOWNER\b/.test(slug)) fail(`packaging/REPO still holds the placeholder ${slug}`);
 if (a.expect && a.expect.toLowerCase() !== slug.toLowerCase()) fail(`packaging/REPO (${slug}) != ${a.expect}`);
 const files = ["README.md", "docs/INSTALL.md", "docs/RELEASE.md", ...installers, ...walk("packaging")];
-const left = files.filter((f) => /\bOWNER\b|@REPO@|@REPO_OWNER@|@SYNTHESIS_REPO@/.test(readFileSync(f, "utf8")));
+const left = files.filter((f) => /\bOWNER\b|@REPO@|@REPO_OWNER@|@SYNT_REPO@/.test(readFileSync(f, "utf8")));
 if (left.length) fail(`placeholder remains in: ${left.join(", ")}`);
 const stale = installers.filter((f) => !readFileSync(f, "utf8").includes(slug));
 if (stale.length) fail(`default repository in ${stale.join(", ")} is not ${slug}`);

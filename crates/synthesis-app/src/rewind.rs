@@ -1,5 +1,5 @@
-//! `synth rewind SESSION`: put the files a run changed back to their state before the run's first
-//! write to each (the checkpoints `synth run` takes). A dry run unless `--apply`.
+//! `synt rewind SESSION`: put the files a run changed back to their state before the run's first
+//! write to each (the checkpoints `synt run` takes). A dry run unless `--apply`.
 //!
 //! Safety: only files inside the session's workspace roots (the parent directory is resolved, so
 //! a link cannot lead out); a snapshot that is not the file's exact bytes (secret-masked) is never
@@ -21,7 +21,7 @@ use crate::homes;
 
 #[derive(clap::Args)]
 pub struct RewindArgs {
-    /// Session id (from `session.started` or the `synth: session ...` line).
+    /// Session id (from `session.started` or the `synt: session ...` line).
     pub session: String,
     /// Only this checkpoint (default: every checkpoint of the session).
     #[arg(long, value_name = "NAME")]
@@ -38,7 +38,7 @@ pub struct RewindArgs {
 fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = dir.join(format!(".synth-rewind-{}", uuid::Uuid::new_v4()));
+    let tmp = dir.join(format!(".synt-rewind-{}", uuid::Uuid::new_v4()));
     let r = (|| {
         let mut f = std::fs::OpenOptions::new()
             .write(true)

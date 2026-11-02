@@ -1,4 +1,4 @@
-//! MCP tool search through the real binary: with `synthesis.mcp.toolSearch` = "on" (user settings)
+//! MCP tool search through the real binary: with `synt.mcp.toolSearch` = "on" (user settings)
 //! a tool is refused until `ToolSearch` loaded it; a project settings file cannot switch that off.
 #![cfg(all(feature = "test-provider", unix))]
 
@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 fn server() -> PathBuf {
     static P: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     P.get_or_init(|| {
-        let exe = Path::new(env!("CARGO_BIN_EXE_synth"));
+        let exe = Path::new(env!("CARGO_BIN_EXE_synt"));
         let profile = exe.parent().unwrap();
         let p = profile.join("examples").join("atlassian_like_server");
         let mut c = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
@@ -35,18 +35,18 @@ fn run(script: Value, project_settings: Option<Value>) -> Vec<(String, String)> 
     let dir = tempfile::tempdir().unwrap();
     let (home, ws) = (dir.path().join("synthesis"), dir.path().join("ws"));
     std::fs::create_dir_all(&home).unwrap();
-    std::fs::create_dir_all(ws.join(".synthesis")).unwrap();
+    std::fs::create_dir_all(ws.join(".synt")).unwrap();
     let cfg = json!({"$schema": "config.json/v1", "mcpServers": {"atl": {"command": server()}}});
-    std::fs::write(home.join("synthesis.json"), cfg.to_string()).unwrap();
+    std::fs::write(home.join("synt.json"), cfg.to_string()).unwrap();
     let user =
-        json!({"permissions": {"allow": ["mcp__atl"]}, "synthesis": {"mcp": {"toolSearch": "on"}}});
+        json!({"permissions": {"allow": ["mcp__atl"]}, "synt": {"mcp": {"toolSearch": "on"}}});
     std::fs::write(home.join("settings.json"), user.to_string()).unwrap();
     if let Some(p) = project_settings {
-        std::fs::write(ws.join(".synthesis/settings.json"), p.to_string()).unwrap();
+        std::fs::write(ws.join(".synt/settings.json"), p.to_string()).unwrap();
     }
     let s = dir.path().join("script.json");
     std::fs::write(&s, script.to_string()).unwrap();
-    let o = Command::new(env!("CARGO_BIN_EXE_synth"))
+    let o = Command::new(env!("CARGO_BIN_EXE_synt"))
         .args(["run", "--cwd"])
         .arg(&ws)
         .arg("--provider")
@@ -55,7 +55,7 @@ fn run(script: Value, project_settings: Option<Value>) -> Vec<(String, String)> 
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", dir.path())
-        .env("SYNTHESIS_HOME", &home)
+        .env("SYNT_HOME", &home)
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -98,7 +98,7 @@ fn a_deferred_tool_is_refused_until_tool_search_loads_it() {
         "{loaded:?}"
     );
     // a repository settings file cannot turn tool search off
-    let off = json!({"synthesis": {"mcp": {"toolSearch": "off"}}});
+    let off = json!({"synt": {"mcp": {"toolSearch": "off"}}});
     let still = run(
         json!([call("mcp__atl__whoami", json!({})), {"text": "done"}]),
         Some(off),

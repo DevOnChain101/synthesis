@@ -28,8 +28,7 @@ impl TaskDb {
         session_id: &str,
         secrets: Vec<String>,
     ) -> Result<Self, String> {
-        let conn =
-            Connection::open(synthesis_home.join("synthesis.db")).map_err(|e| e.to_string())?;
+        let conn = Connection::open(synthesis_home.join("synt.db")).map_err(|e| e.to_string())?;
         conn.busy_timeout(Duration::from_millis(5000))
             .map_err(|e| e.to_string())?;
         conn.pragma_update(None, "foreign_keys", true)

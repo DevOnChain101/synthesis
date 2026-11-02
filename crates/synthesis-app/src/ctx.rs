@@ -27,7 +27,7 @@ use crate::transcript::Transcript;
 const SUB_RULES: &str =
     "You are a focused subagent. Complete the delegated task and report back a concise result.";
 
-/// `synthesis.context` of the USER settings.json (a repository must not switch compaction off or move
+/// `synt.context` of the USER settings.json (a repository must not switch compaction off or move
 /// its threshold). Missing or unreadable file = defaults; diagnostics name keys only.
 pub fn read_auto_compact(user_settings: &Path) -> (AutoCompact, Vec<String>) {
     let v = std::fs::read(user_settings)
@@ -38,7 +38,7 @@ pub fn read_auto_compact(user_settings: &Path) -> (AutoCompact, Vec<String>) {
     AutoCompact::from_settings(&v)
 }
 
-/// `synthesis.shell` of the USER settings.json (`!cmd` behaviour; a repository must not turn the
+/// `synt.shell` of the USER settings.json (`!cmd` behaviour; a repository must not turn the
 /// sandbox off for it). Missing or unreadable file = defaults; diagnostics name keys only.
 pub fn read_shell_settings(user_settings: &Path) -> (ShellSettings, Vec<String>) {
     let v = std::fs::read(user_settings)
@@ -49,7 +49,7 @@ pub fn read_shell_settings(user_settings: &Path) -> (ShellSettings, Vec<String>)
     ShellSettings::from_settings(&v)
 }
 
-/// `synthesis.mcp.toolSearch` of the USER settings.json (a repository must not change how MCP
+/// `synt.mcp.toolSearch` of the USER settings.json (a repository must not change how MCP
 /// schemas are sent). Missing or unreadable file = `auto`; diagnostics name keys only.
 pub fn read_tool_search(user_settings: &Path) -> (ToolSearchMode, Vec<String>) {
     let v = std::fs::read(user_settings)
@@ -158,7 +158,7 @@ pub type CompactHook = Arc<dyn Fn(&str, &str) -> Option<Option<String>> + Send +
 const AUTO_MEMORY_FILE_CAP: usize = 8 * 1024;
 const AUTO_MEMORY_TOTAL_CAP: usize = 16 * 1024;
 
-/// Directory name under `$SYNTHESIS_HOME/projects/` for the staged notes of project `dir`: Claude's
+/// Directory name under `$SYNT_HOME/projects/` for the staged notes of project `dir`: Claude's
 /// lossy `sanitize_path` (`/a/b` and `/a-b` collide) plus a hash of the real path, so one project
 /// never reads another's notes.
 pub fn auto_memory_key(dir: &Path) -> String {
@@ -172,7 +172,7 @@ pub fn auto_memory_key(dir: &Path) -> String {
     format!("{}-{hex}", synthesis_session::node::sanitize_path(&real))
 }
 
-/// Notes staged by `synth import claude` under `$SYNTHESIS_HOME/projects/<sanitized dir>/memory/*.md`,
+/// Notes staged by `synt import claude` under `$SYNT_HOME/projects/<sanitized dir>/memory/*.md`,
 /// for any of `dirs` (workspace root, launch dir). One low-priority block: `MEMORY.md` first, then
 /// the other files by name, size-capped. It travels as a project-scope (untrusted data) file, so
 /// it is fenced and defanged like repository text and never overrides real instructions.
@@ -466,12 +466,12 @@ fn any_file_matches(root: &Path, globs: &[String]) -> bool {
     false
 }
 
-/// `.synthesis/rules/*.md` and `.claude/rules/*.md` of the project. A file with `paths:` loads only
+/// `.synt/rules/*.md` and `.claude/rules/*.md` of the project. A file with `paths:` loads only
 /// when a matching file exists in the workspace.
 /// shortcut: the match is made once at start, not when the agent first touches such a file.
 pub fn load_rules(root: &Path) -> Vec<InstructionFile> {
     let mut out = vec![];
-    for dir in [".synthesis/rules", ".claude/rules"] {
+    for dir in [".synt/rules", ".claude/rules"] {
         let Ok(rd) = std::fs::read_dir(root.join(dir)) else {
             continue;
         };
@@ -658,11 +658,11 @@ mod tests {
     fn tool_search_setting_parses_and_defaults() {
         let p = |j: serde_json::Value| ToolSearchMode::from_settings(&j);
         assert_eq!(p(serde_json::json!({})), (ToolSearchMode::Auto, vec![]));
-        let on = serde_json::json!({"synthesis":{"mcp":{"toolSearch":"on"}}});
+        let on = serde_json::json!({"synt":{"mcp":{"toolSearch":"on"}}});
         assert_eq!(p(on), (ToolSearchMode::On, vec![]));
-        let off = serde_json::json!({"synthesis":{"mcp":{"toolSearch":"off"}}});
+        let off = serde_json::json!({"synt":{"mcp":{"toolSearch":"off"}}});
         assert_eq!(p(off).0, ToolSearchMode::Off);
-        let (m, d) = p(serde_json::json!({"synthesis":{"mcp":{"toolSearch":"maybe"}}}));
+        let (m, d) = p(serde_json::json!({"synt":{"mcp":{"toolSearch":"maybe"}}}));
         assert_eq!((m, d.len()), (ToolSearchMode::Auto, 1));
         assert_eq!(
             read_tool_search(Path::new("/nonexistent/settings.json")).0,
@@ -675,14 +675,13 @@ mod tests {
         let p = |j: serde_json::Value| AutoCompact::from_settings(&j);
         assert_eq!(p(serde_json::json!({})), (AutoCompact::default(), vec![]));
         let (c, d) = p(
-            serde_json::json!({"synthesis":{"context":{"auto_compact":false,"auto_compact_threshold":0.7}}}),
+            serde_json::json!({"synt":{"context":{"auto_compact":false,"auto_compact_threshold":0.7}}}),
         );
         assert!(!c.enabled && c.threshold == 0.7 && d.is_empty());
-        let (c, d) =
-            p(serde_json::json!({"synthesis":{"context":{"auto_compact_threshold":0.99}}}));
+        let (c, d) = p(serde_json::json!({"synt":{"context":{"auto_compact_threshold":0.99}}}));
         assert!(c.enabled && c.threshold == 0.95 && d.len() == 1, "{d:?}");
         let (c, d) = p(
-            serde_json::json!({"synthesis":{"context":{"auto_compact":"no","auto_compact_threshold":"x"}}}),
+            serde_json::json!({"synt":{"context":{"auto_compact":"no","auto_compact_threshold":"x"}}}),
         );
         assert_eq!((c, d.len()), (AutoCompact::default(), 2));
         assert_eq!(

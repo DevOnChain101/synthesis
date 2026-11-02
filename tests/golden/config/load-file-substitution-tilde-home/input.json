@@ -3,7 +3,7 @@
   "env": {},
   "files": {
     "<HOME>/tok.txt": "tok-home",
-    "<SYNTHESIS_HOME>/synthesis.json": {
+    "<SYNT_HOME>/synt.json": {
       "$schema": "config.json/v1",
       "providers": {
         "p": {
@@ -13,6 +13,6 @@
       }
     }
   },
-  "home": "<SYNTHESIS_HOME>",
+  "home": "<SYNT_HOME>",
   "op": "loadConfig"
 }

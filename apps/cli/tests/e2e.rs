@@ -8,16 +8,16 @@ use std::process::{Child, Command, Output, Stdio};
 use serde_json::{Value, json};
 
 /// Whether `--sandbox enforce` (the default) would start here with the standard policy, as
-/// `synth doctor` reports it (`enforce_ready: yes`). False e.g. on CI runners with userns blocked
+/// `synt doctor` reports it (`enforce_ready: yes`). False e.g. on CI runners with userns blocked
 /// (bubblewrap unusable) where Landlock alone cannot express the standard policy.
 fn host_confines() -> bool {
     static C: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *C.get_or_init(|| {
         let d = tempfile::tempdir().unwrap();
-        let o = Command::new(env!("CARGO_BIN_EXE_synth"))
+        let o = Command::new(env!("CARGO_BIN_EXE_synt"))
             .args(["doctor", "--cwd"])
             .arg(d.path())
-            .env("SYNTHESIS_HOME", d.path())
+            .env("SYNT_HOME", d.path())
             .output()
             .unwrap();
         String::from_utf8_lossy(&o.stdout).contains("enforce_ready: yes")
@@ -28,7 +28,7 @@ fn host_confines() -> bool {
 fn skip_without_sandbox() -> bool {
     let skip = !host_confines();
     if skip {
-        eprintln!("SKIP: `synth doctor` reports enforce_ready: no on this host");
+        eprintln!("SKIP: `synt doctor` reports enforce_ready: no on this host");
     }
     skip
 }
@@ -79,7 +79,7 @@ impl Rig {
     fn cmd_for(&self, ws: &Path, script_name: &str, script: Value, args: &[&str]) -> Command {
         let s = self.dir.path().join(script_name);
         std::fs::write(&s, script.to_string()).unwrap();
-        let mut c = Command::new(env!("CARGO_BIN_EXE_synth"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.args(["run", "--cwd"])
             .arg(ws)
             .arg("--provider")
@@ -94,11 +94,11 @@ impl Rig {
         c.env_clear();
         host_env(&mut c);
         c.env("HOME", self.dir.path())
-            .env("SYNTHESIS_HOME", self.home())
+            .env("SYNT_HOME", self.home())
             .stdin(Stdio::null());
         // Lets CI simulate a Landlock-only host (see synthesis-sandbox feature `test-backend`).
-        if let Some(v) = std::env::var_os("SYNTHESIS_TEST_FORCE_BACKEND") {
-            c.env("SYNTHESIS_TEST_FORCE_BACKEND", v);
+        if let Some(v) = std::env::var_os("SYNT_TEST_FORCE_BACKEND") {
+            c.env("SYNT_TEST_FORCE_BACKEND", v);
         }
         c
     }
@@ -201,7 +201,7 @@ fn edit_with_verification_completes_exit_0() {
         "--events-out is a copy of stdout"
     );
     // Persisted: database and Node transcript mirror.
-    assert!(rig.home().join("synthesis.db").exists());
+    assert!(rig.home().join("synt.db").exists());
     let projects = rig.home().join("projects");
     let found = std::fs::read_dir(&projects).unwrap().flatten().any(|d| {
         std::fs::read_dir(d.path())
@@ -243,7 +243,7 @@ fn no_session_store_writes_no_database() {
     let (o, ev) = rig.run(json!([{"text": "nothing to do"}]), &["--no-session-store"]);
     assert_eq!(o.status.code(), Some(0));
     check_stream(&ev);
-    assert!(!rig.home().join("synthesis.db").exists());
+    assert!(!rig.home().join("synt.db").exists());
 }
 
 #[test]
@@ -275,7 +275,7 @@ fn peers_are_off_by_default_and_a_flagged_run_registers_then_cleans_up() {
     );
     check_stream(&ev);
     let t = types(&ev);
-    // A very long SYNTHESIS_HOME turns peers off with a notice instead (unix socket path limit).
+    // A very long SYNT_HOME turns peers off with a notice instead (unix socket path limit).
     let off = ev.iter().any(|e| {
         e["payload"]["text"]
             .as_str()
@@ -596,7 +596,7 @@ impl Rig {
         p
     }
     fn db(&self) -> rusqlite::Connection {
-        rusqlite::Connection::open(self.home().join("synthesis.db")).unwrap()
+        rusqlite::Connection::open(self.home().join("synt.db")).unwrap()
     }
     /// All Node transcript mirror text.
     fn mirror(&self) -> String {
@@ -647,7 +647,7 @@ fn mcp_rig(args: &[&str]) -> (Rig, String) {
     let rig = Rig::new();
     let srv = rig.write("echo_server.py", ECHO_SERVER);
     rig.write(
-        "synthesis/synthesis.json",
+        "synthesis/synt.json",
         &json!({"$schema": "config.json/v1",
             "mcpServers": {"echo": {"command": "python3", "args": [srv]}}})
         .to_string(),
@@ -726,13 +726,13 @@ fn skill_body_is_served_and_listed_for_doctor() {
     );
     check_stream(&ev);
     assert!(rig.mirror().contains("RUN THE DEPLOY STEPS"));
-    let o = Command::new(env!("CARGO_BIN_EXE_synth"))
+    let o = Command::new(env!("CARGO_BIN_EXE_synt"))
         .args(["doctor", "--cwd"])
         .arg(rig.ws())
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", rig.dir.path())
-        .env("SYNTHESIS_HOME", rig.home())
+        .env("SYNT_HOME", rig.home())
         .output()
         .unwrap();
     let out = String::from_utf8_lossy(&o.stdout);
@@ -768,11 +768,11 @@ fn settings_env_reaches_commands_and_secret_names_are_refused() {
 fn verification_settings_add_required_checks() {
     let rig = Rig::new();
     let args = ["--permission-mode", "acceptEdits"];
-    rig.settings(json!({"synthesis": {"verification": {"checks": ["grep -q bye a.txt"]}}}));
+    rig.settings(json!({"synt": {"verification": {"checks": ["grep -q bye a.txt"]}}}));
     let (_, ev) = rig.run(edit_script(), &args);
     assert_eq!(ended(&ev)["status"], "completed");
     let rig2 = Rig::new();
-    rig2.settings(json!({"synthesis": {"verification": {"checks": ["test -f no-such-file"]}}}));
+    rig2.settings(json!({"synt": {"verification": {"checks": ["test -f no-such-file"]}}}));
     let (_, ev) = rig2.run(edit_script(), &args);
     assert_ne!(
         ended(&ev)["status"],
@@ -794,9 +794,9 @@ fn cost_budget_is_rejected_without_a_price_and_enforced_with_one() {
         .unwrap();
     assert_eq!(o.status.code(), Some(2));
     assert!(o.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&o.stderr).contains("synthesis.pricing"));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("synt.pricing"));
 
-    rig.settings(json!({"synthesis": {"pricing": {"fake/fake-model": {"input_per_mtok": 1.0, "output_per_mtok": 1.0}}}}));
+    rig.settings(json!({"synt": {"pricing": {"fake/fake-model": {"input_per_mtok": 1.0, "output_per_mtok": 1.0}}}}));
     let (o, ev) = rig.run(script, &["--max-cost-usd", "0.5"]);
     assert_eq!(o.status.code(), Some(1));
     let e = ended(&ev);
@@ -1041,10 +1041,10 @@ fn closed_stdout_cancels_the_run_exit_141_and_still_persists_the_end() {
 #[test]
 fn doctor_reports_enforce_readiness() {
     let d = tempfile::tempdir().unwrap();
-    let o = Command::new(env!("CARGO_BIN_EXE_synth"))
+    let o = Command::new(env!("CARGO_BIN_EXE_synt"))
         .args(["doctor", "--cwd"])
         .arg(d.path())
-        .env("SYNTHESIS_HOME", d.path())
+        .env("SYNT_HOME", d.path())
         .output()
         .unwrap();
     let out = String::from_utf8_lossy(&o.stdout);
@@ -1057,12 +1057,12 @@ fn doctor_reports_enforce_readiness() {
 #[test]
 fn doctor_into_a_closed_pipe_exits_quietly() {
     let rig = Rig::new();
-    let mut c = Command::new(env!("CARGO_BIN_EXE_synth"))
+    let mut c = Command::new(env!("CARGO_BIN_EXE_synt"))
         .arg("doctor")
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", rig.dir.path())
-        .env("SYNTHESIS_HOME", rig.home())
+        .env("SYNT_HOME", rig.home())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1203,13 +1203,13 @@ fn terminal_escapes_in_untrusted_text_are_not_printed() {
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(err.contains("invalid MCP server name"), "{err}");
     assert!(!err.contains(['\u{1b}', '\u{7}']), "{err:?}");
-    let d = Command::new(env!("CARGO_BIN_EXE_synth"))
+    let d = Command::new(env!("CARGO_BIN_EXE_synt"))
         .args(["doctor", "--cwd"])
         .arg(rig.ws())
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", rig.dir.path())
-        .env("SYNTHESIS_HOME", rig.home())
+        .env("SYNT_HOME", rig.home())
         .output()
         .unwrap();
     let out = String::from_utf8_lossy(&d.stdout);
@@ -1270,7 +1270,7 @@ fn worktree_sandbox_does_not_let_commands_overwrite_the_git_pointer() {
 
 // ---- cross-session messaging with two real processes (docs/specs/messaging-scenarios.md section 4) ----
 //
-// One shared SYNTHESIS_HOME, two workspaces (`ws` = label "ws", `ws_b` = label "ws_b"), the fake
+// One shared SYNT_HOME, two workspaces (`ws` = label "ws", `ws_b` = label "ws_b"), the fake
 // provider with per-agent queues (`"for": "responder" | "delegate"`, see crates/synthesis-app/src/fake.rs).
 // Order: start A, read its events until `peer.listening`, then start B. Both are joined with a 60 s
 // guard. What a model *saw* is asserted with `"seen"` turns whose text depends on the request.
@@ -1324,7 +1324,7 @@ fn spawn_live(mut c: Command) -> Live {
     live
 }
 
-/// A failing test must not leave `synth` (and its children) alive: on Windows an orphan keeps the
+/// A failing test must not leave `synt` (and its children) alive: on Windows an orphan keeps the
 /// test binary's pipes open and `cargo test` hangs. `taskkill /T` takes the whole tree.
 impl Drop for Live {
     fn drop(&mut self) {
@@ -1400,13 +1400,13 @@ fn peers_fit(rig: &Rig) -> bool {
         .len()
         <= 100;
     if !fits {
-        eprintln!("SKIP: SYNTHESIS_HOME is too long for a unix socket");
+        eprintln!("SKIP: SYNT_HOME is too long for a unix socket");
     }
     fits || cfg!(windows)
 }
 
 fn user_settings(rig: &Rig, peers: Value) {
-    rig.settings(json!({"synthesis": {"peers": peers,
+    rig.settings(json!({"synt": {"peers": peers,
         "pricing": {"fake-model": {"input_per_mtok": 1.0, "output_per_mtok": 1.0}}}}));
 }
 

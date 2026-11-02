@@ -2,7 +2,7 @@
 //! open store. Memory is data: every write goes through `Store::put` (secrets masked, size caps,
 //! poisoning scan, dedupe, slots) and trust is decided here, never by the model. The agent may
 //! change only notes it saved itself for this workspace; owner and verified records are the
-//! person's (`synth memory edit|forget`).
+//! person's (`synt memory edit|forget`).
 
 use std::sync::Arc;
 

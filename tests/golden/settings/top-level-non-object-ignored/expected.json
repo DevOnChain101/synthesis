@@ -1,6 +1,6 @@
 {
   "agents": [],
-  "autoMemoryDir": "<HOME>/.synthesis/projects/<SANITIZED_CWD>/memory",
+  "autoMemoryDir": "<HOME>/.synt/projects/<SANITIZED_CWD>/memory",
   "claudeDir": "<HOME>/.claude",
   "commands": [],
   "mcpServers": [],
@@ -29,6 +29,6 @@
     }
   ],
   "warnings": [
-    "malformed JSON in <TMP>/ws/.synthesis/settings.json: Unexpected token 's', \"str\" is not valid JSON"
+    "malformed JSON in <TMP>/ws/.synt/settings.json: Unexpected token 's', \"str\" is not valid JSON"
   ]
 }

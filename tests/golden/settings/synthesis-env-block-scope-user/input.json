@@ -1,11 +1,11 @@
 {
   "files": {
-    "<SYNTHESIS_HOME>/settings.json": {
+    "<SYNT_HOME>/settings.json": {
       "env": {
         "A": "1"
       }
     },
-    "<TMP>/ws/.synthesis/settings.json": {
+    "<TMP>/ws/.synt/settings.json": {
       "env": {
         "B": "2"
       }

@@ -47,7 +47,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
-          SYNTHESIS_ALLOW_ANY_VERIFIED_TAGGER: ${{ vars.SYNTHESIS_ALLOW_ANY_VERIFIED_TAGGER }}
+          SYNT_ALLOW_ANY_VERIFIED_TAGGER: ${{ vars.SYNT_ALLOW_ANY_VERIFIED_TAGGER }}
         run: bash scripts/check-release-tag.sh
       - run: node scripts/check-action-pins.mjs
       - name: Repository placeholder is replaced and matches this repository
@@ -127,21 +127,21 @@ jobs:
       - name: Build
         run: |
           pkgs=(-p synthesis-cli)
-          # Landlock backend looks for synthesis-sandbox-exec next to synth (crates/synthesis-sandbox/src/linux.rs).
+          # Landlock backend looks for synthesis-sandbox-exec next to synt (crates/synthesis-sandbox/src/linux.rs).
           case "$TARGET" in *linux*) pkgs+=(-p synthesis-sandbox);; esac
           cargo build --release --locked --target "$TARGET" "${pkgs[@]}"
       - name: Locate artifacts
         run: |
           d="target/$TARGET/release"
           exe=""; case "$TARGET" in *windows*) exe=".exe";; esac
-          echo "BIN=$d/synth$exe" >>"$GITHUB_ENV"
+          echo "BIN=$d/synt$exe" >>"$GITHUB_ENV"
           case "$TARGET" in *linux*) echo "HELPER=$d/synthesis-sandbox-exec" >>"$GITHUB_ENV";; esac
       - name: Prove the scripted test provider is absent
         run: bash scripts/check-no-test-provider.sh "$BIN"
       - name: Smoke test
         run: |
           "$BIN" --version | tee version.txt
-          grep -q "synth $VERSION" version.txt
+          grep -q "Synthesis $VERSION" version.txt
           "$BIN" doctor --cwd "$RUNNER_TEMP"
 
       - name: Package
@@ -309,7 +309,7 @@ jobs:
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
           PRE: ${{ needs.version.outputs.prerelease }}
-          SYNTHESIS_ALLOW_ANY_VERIFIED_TAGGER: ${{ vars.SYNTHESIS_ALLOW_ANY_VERIFIED_TAGGER }}
+          SYNT_ALLOW_ANY_VERIFIED_TAGGER: ${{ vars.SYNT_ALLOW_ANY_VERIFIED_TAGGER }}
         run: |
           # The gate ran long ago (environment approval can take days): the tag must still be the built commit.
           bash scripts/check-release-tag.sh
@@ -340,7 +340,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
-          SYNTHESIS_ALLOW_ANY_VERIFIED_TAGGER: ${{ vars.SYNTHESIS_ALLOW_ANY_VERIFIED_TAGGER }}
+          SYNT_ALLOW_ANY_VERIFIED_TAGGER: ${{ vars.SYNT_ALLOW_ANY_VERIFIED_TAGGER }}
         run: |
           bash scripts/check-release-tag.sh
           read -r draft target < <(gh release view "$TAG" --json isDraft,targetCommitish --jq '[.isDraft, .targetCommitish] | @tsv')
@@ -349,7 +349,7 @@ jobs:
           gh release edit "$TAG" --draft=false
 
   # Publishes the npm tarballs built above. Skips (green, with a log line) unless an npm credential is configured:
-  # secret NPM_TOKEN (granular, publish-only), or repo variable SYNTHESIS_NPM_TRUSTED_PUBLISHING=true once npm trusted publishing
+  # secret NPM_TOKEN (granular, publish-only), or repo variable SYNT_NPM_TRUSTED_PUBLISHING=true once npm trusted publishing
   # is set up for this repo + workflow file `release.yml` + environment `release` (then no token exists at all).
   npm-publish:
     needs: [publish, version]
@@ -363,7 +363,7 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       PRE: ${{ needs.version.outputs.prerelease }}
       HAVE_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
-      NPM_TRUSTED: ${{ vars.SYNTHESIS_NPM_TRUSTED_PUBLISHING }}
+      NPM_TRUSTED: ${{ vars.SYNT_NPM_TRUSTED_PUBLISHING }}
     steps:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -378,7 +378,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if [ "$HAVE_NPM_TOKEN" != true ] && [ "$NPM_TRUSTED" != true ]; then
-            echo "SKIP npm publish: no NPM_TOKEN secret and SYNTHESIS_NPM_TRUSTED_PUBLISHING is not 'true' (docs/RELEASE.md, npm)"; exit 0
+            echo "SKIP npm publish: no NPM_TOKEN secret and SYNT_NPM_TRUSTED_PUBLISHING is not 'true' (docs/RELEASE.md, npm)"; exit 0
           fi
           # An empty NODE_AUTH_TOKEN would make npm try (and fail) token auth instead of OIDC.
           if [ "$HAVE_NPM_TOKEN" != true ]; then unset NODE_AUTH_TOKEN; fi

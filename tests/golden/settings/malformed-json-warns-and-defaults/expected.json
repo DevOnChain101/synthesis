@@ -1,6 +1,6 @@
 {
   "agents": [],
-  "autoMemoryDir": "<HOME>/.synthesis/projects/<SANITIZED_CWD>/memory",
+  "autoMemoryDir": "<HOME>/.synt/projects/<SANITIZED_CWD>/memory",
   "claudeDir": "<HOME>/.claude",
   "commands": [],
   "mcpServers": [],
@@ -29,6 +29,6 @@
     }
   ],
   "warnings": [
-    "malformed JSON in <TMP>/ws/.synthesis/settings.json: Expected property name or '}' in JSON at position 2 (line 1 column 3)"
+    "malformed JSON in <TMP>/ws/.synt/settings.json: Expected property name or '}' in JSON at position 2 (line 1 column 3)"
   ]
 }

@@ -2,7 +2,7 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {
-    "<TMP>/ws/.synthesis/settings.json": "{ not valid json"
+    "<TMP>/ws/.synt/settings.json": "{ not valid json"
   },
   "op": "workspace"
 }
