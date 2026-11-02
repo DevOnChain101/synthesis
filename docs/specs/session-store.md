@@ -5,10 +5,10 @@ Tags as in events.md. Two formats: (A) the Node transcript JSONL that Rust must 
 ## A. Node transcript format (compat, read + mirror-write) [from-node]
 
 ### A.1 Location
-- Main: `$SYNTHESIS_HOME/projects/<sanitize(cwd)>/<session_id>.jsonl` [transcript.js:32-33]; `SYNTHESIS_HOME` defaults to `~/.synthesis` [auth.js:26-28].
+- Main: `$SYNT_HOME/projects/<sanitize(cwd)>/<session_id>.jsonl` [transcript.js:32-33]; `SYNT_HOME` defaults to `~/.synt` [auth.js:26-28].
 - `sanitize(p)` = every char outside `[A-Za-z0-9]` → `-` [claudecfg.js:16-18]. Lossy (`/a-b` and `/a/b` collide); the real cwd is in every line, so readers trust the line `cwd`, not the folder name.
 - Sub-agent: `…/<session_id>/subagents/agent-<agent_id>.jsonl` + `agent-<agent_id>.meta.json` = `{toolUseId:str, agentType:str, route:{source:str, fallback:str?, profile:str, candidate:str?}}` [transcript.js:28-30, agent.js:833-837].
-- Note: Node does NOT list `~/.claude/projects` as sessions; that tree is read only to import auto-memory [importclaude.js:297-307]. The comment at history.js:3 saying `~/.claude/projects` is stale; the watcher reads `$SYNTHESIS_HOME/projects` [watcher.js:11-12].
+- Note: Node does NOT list `~/.claude/projects` as sessions; that tree is read only to import auto-memory [importclaude.js:297-307]. The comment at history.js:3 saying `~/.claude/projects` is stale; the watcher reads `$SYNT_HOME/projects` [watcher.js:11-12].
 
 ### A.2 Common fields (every line) [agent.js:1023]
 `timestamp:str (ISO 8601)`, `sessionId:str`, `cwd:str`, `type:str`; sub-agent lines add `agentId:str` [agent.js:879]. Files are append-only, written one line at a time with no locking and no fsync [transcript.js:40-47].
@@ -32,12 +32,12 @@ Tags as in events.md. Two formats: (A) the Node transcript JSONL that Rust must 
 5. Soft errors are recognised by text patterns, since transcripts have no `soft` flag [tools/soft.js:3-7].
 
 ### A.5 Other Node state files (read; Rust writes them only when the user changes the value)
-`$SYNTHESIS_HOME/state.json` = `{model?:str, effort?:str|null, autocompact?:"auto"|"off"|int}` [state.js:3-5, agent.js:370-373]; open tabs are persisted by opentabs.js using the same transcript paths [opentabs.js:20].
+`$SYNT_HOME/state.json` = `{model?:str, effort?:str|null, autocompact?:"auto"|"off"|int}` [state.js:3-5, agent.js:370-373]; open tabs are persisted by opentabs.js using the same transcript paths [opentabs.js:20].
 
 ## B. New store [new]
 
 ### B.1 Location and engine
-`$SYNTHESIS_HOME/synthesis.db` (SQLite, `journal_mode=WAL`, `foreign_keys=ON`, `busy_timeout=5000`); artifacts in `$SYNTHESIS_HOME/sessions/<session_id>/artifacts/` (doc §5.7). Timestamps are RFC 3339 UTC TEXT; JSON columns are TEXT holding valid JSON; ids are UUIDv4 TEXT unless noted.
+`$SYNT_HOME/synt.db` (SQLite, `journal_mode=WAL`, `foreign_keys=ON`, `busy_timeout=5000`); artifacts in `$SYNT_HOME/sessions/<session_id>/artifacts/` (doc §5.7). Timestamps are RFC 3339 UTC TEXT; JSON columns are TEXT holding valid JSON; ids are UUIDv4 TEXT unless noted.
 
 ### B.2 Tables (doc §7.2 minimum plus marked additions)
 ```sql
@@ -82,21 +82,21 @@ CREATE TABLE approvals(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES 
 `tool_calls.id` is the provider's tool-use id and is unique only within a session, hence the composite key. The `messages` table exists because resume needs the exact history the model saw (Node rebuilds it lossily from UI items [agent.js:3035-3039]); whether events alone are enough is doc §13.4.
 
 ### B.3 Write rules
-- One writer process per session: advisory lock file `$SYNTHESIS_HOME/sessions/<id>/lock` (`fs4`-style OS lock; crate unverified). A second Rust process attaches read-only.
+- One writer process per session: advisory lock file `$SYNT_HOME/sessions/<id>/lock` (`fs4`-style OS lock; crate unverified). A second Rust process attaches read-only.
 - Each event is inserted in the same transaction that updates `sessions.event_cursor`; streaming to clients happens after commit, so a client never sees a seq that is not durable.
 - Artifacts are written to a temp file, fsynced, renamed, then the row is inserted.
 
 ## C. Compatibility and migration plan [new]
 Requirement: session formats read/write compatible both ways during the parallel run (doc §10 Phase 3).
-1. **Node → Rust (import on demand).** Resuming a Node session id, or `synth import node-sessions`, parses A.3 into `sessions`/`messages`/`tasks` and one synthetic `legacy.imported` event `{source_path, lines, skipped}`; `legacy_transcript_path` is set. The original JSONL is never modified.
+1. **Node → Rust (import on demand).** Resuming a Node session id, or `synt import node-sessions`, parses A.3 into `sessions`/`messages`/`tasks` and one synthetic `legacy.imported` event `{source_path, lines, skipped}`; `legacy_transcript_path` is set. The original JSONL is never modified.
 2. **Rust → Node (mirror).** While `compat.write_node_transcripts` is on (default ON until R9 cutover), Rust also appends A.3-shaped lines to `legacy_transcript_path` (created at A.1's path): `user`, `assistant`, tool-result `user`, `system/compact_boundary`, `summary`, `permission-mode`, hook `attachment`. Rust-only facts (verification, processes, approvals) are not mirrored. Mirror writes are best-effort, as in Node [transcript.js:39].
 3. **Concurrency.** Node takes no lock, so the same session must not be open in both binaries at once. Rust refuses to resume a session whose JSONL changed after its last mirror write (size+mtime recorded) until it re-imports it.
 4. **Golden gate.** For each fixture in `tests/golden/transcripts/`: Node JSONL → Rust import → Rust mirror export → Node `itemsFromEntries` must equal the original Node `itemsFromEntries` output (timestamps/ids normalised).
 5. **Cutover (R9).** The mirror is switched off by default; import stays forever. Schema changes go through numbered `schema_migrations`; the binary refuses to open a DB newer than it knows, and a downgrade needs an explicit export.
 
-## Checkpoints and `synth rewind`
-Each file entry of a checkpoint may carry `post_sha256`: the state of the file after the run's last write to it (`file_state_hash`: sha256, or `absent` / `not-a-regular-file`). `synth rewind` refuses a file whose state differs or has no recorded hash unless `--force`, never touches symlinks or non-regular files, restores through a temp file and rename, and removes a file the run created only while it still has the recorded hash. `synth run --resume ID` only finds sessions of the current directory unless `--resume-any-workspace`.
+## Checkpoints and `synt rewind`
+Each file entry of a checkpoint may carry `post_sha256`: the state of the file after the run's last write to it (`file_state_hash`: sha256, or `absent` / `not-a-regular-file`). `synt rewind` refuses a file whose state differs or has no recorded hash unless `--force`, never touches symlinks or non-regular files, restores through a temp file and rename, and removes a file the run created only while it still has the recorded hash. `synt run --resume ID` only finds sessions of the current directory unless `--resume-any-workspace`.
 
 ## Open
-- Artifact retention default and size cap (proposal: keep for the session's lifetime, `synth gc --older-than 30d`).
+- Artifact retention default and size cap (proposal: keep for the session's lifetime, `synt gc --older-than 30d`).
 - Store full raw provider responses for debugging? Not in v1 (cost, secrets).

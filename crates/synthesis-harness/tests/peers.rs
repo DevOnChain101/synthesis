@@ -1,5 +1,5 @@
 //! Cross-session peers end to end (messaging.md Part B, tests C15-C19, C23): two harnesses in one
-//! process, a real socket / pipe, a temp `SYNTHESIS_HOME` run dir, fake providers.
+//! process, a real socket / pipe, a temp `SYNT_HOME` run dir, fake providers.
 mod common;
 
 use std::sync::Arc;
@@ -2786,7 +2786,7 @@ async fn peer_work_under_bypass_still_asks_for_protected_paths_and_unclear_bash(
         ("Bash", json!({"command": "cat .env"}), None, false),
         (
             "Bash",
-            json!({"command": "cat ~/.synthesis/run/peer.key"}),
+            json!({"command": "cat ~/.synt/run/peer.key"}),
             None,
             false,
         ),

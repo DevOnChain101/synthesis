@@ -1,4 +1,4 @@
-//! Project instruction files (CLAUDE.md / SYNTHESIS.md / AGENTS.md style) with `@import` expansion
+//! Project instruction files (CLAUDE.md / AGENTS.md style) with `@import` expansion
 //! (port of claudecfg.js buildMemory / expandImports).
 //!
 //! Project files are untrusted data. Differences from Node, on purpose: a project file's imports
@@ -13,7 +13,7 @@ use synthesis_core::{WorkspaceContext, contains, realpath_lenient};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
-    /// Written by the user (e.g. `~/.synthesis/SYNTHESIS.md`): preferences, still no permission grants.
+    /// Written by the user (e.g. `~/.synt/AGENTS.md`): preferences, still no permission grants.
     User,
     /// Comes from the repository: untrusted.
     Project,
@@ -45,10 +45,9 @@ impl Default for InstructionLimits {
 }
 
 /// File names looked up in every directory from the workspace root down to the cwd. Per
-/// directory only the first non-empty one wins (SYNTHESIS.md > AGENTS.md > CLAUDE.md, owner decision
+/// directory only the first non-empty one wins (AGENTS.md > CLAUDE.md, owner decision
 /// D2, the Codex one-file-per-directory rule); [`LOCAL_NAME`] is the private extra on top.
-pub const DEFAULT_NAMES: [&str; 6] = [
-    "SYNTHESIS.md",
+pub const DEFAULT_NAMES: [&str; 5] = [
     "AGENTS.md",
     "CLAUDE.md",
     ".claude/CLAUDE.md",
@@ -59,9 +58,9 @@ pub const DEFAULT_NAMES: [&str; 6] = [
 /// Gitignored personal notes: loaded next to the winning file, not instead of it.
 pub const LOCAL_NAME: &str = "CLAUDE.local.md";
 
-/// Where `#` notes go when the repository has no SYNTHESIS.md / AGENTS.md: loaded next to the winning
+/// Where `#` notes go when the repository has no AGENTS.md: loaded next to the winning
 /// file, never instead of it.
-pub const NOTES_NAME: &str = ".synthesis/SYNTHESIS.md";
+pub const NOTES_NAME: &str = ".synt/AGENTS.md";
 
 struct Ctx<'a> {
     ws: &'a WorkspaceContext,

@@ -1,0 +1,25 @@
+{
+  "agent": {
+    "subagents": [
+      {
+        "def": {
+          "name": "coordinator"
+        },
+        "description": "focused task",
+        "effort": "high",
+        "id": "sub-1",
+        "model": "openai/gpt-5-mini",
+        "status": "running",
+        "type": "worker"
+      }
+    ]
+  },
+  "frame": 0,
+  "h": 20,
+  "now": 1790942400000,
+  "op": "agent",
+  "opts": {
+    "chatTarget": "sub-1"
+  },
+  "w": 70
+}

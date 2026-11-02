@@ -527,7 +527,7 @@ async fn child_env_is_allowlisted() {
         Registry::unsandboxed_for_tests(),
         &[
             ("GITHUB_TOKEN", "tok"),
-            ("SYNTHESIS_API_KEY", "k"),
+            ("SYNT_API_KEY", "k"),
             ("AWS_SECRET_ACCESS_KEY", "s"),
             ("LANG", "C"),
         ],
@@ -537,7 +537,7 @@ async fn child_env_is_allowlisted() {
     assert!(t.contains("LANG=C") && t.contains("PATH="), "{t}");
     for leak in [
         "GITHUB_TOKEN",
-        "SYNTHESIS_API_KEY",
+        "SYNT_API_KEY",
         "AWS_SECRET",
         "tok",
         "CARGO_MANIFEST_DIR",

@@ -75,7 +75,7 @@
       "type": "object",
       "properties": {
         "ref": { "type": "string", "description": "Element ref such as e12." },
-        "secret": { "type": "string", "description": "Name of a secret from the user settings (synthesis.browser.secrets)." }
+        "secret": { "type": "string", "description": "Name of a secret from the user settings (synt.browser.secrets)." }
       },
       "required": ["ref", "secret"],
       "additionalProperties": false

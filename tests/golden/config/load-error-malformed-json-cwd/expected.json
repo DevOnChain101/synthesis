@@ -1,7 +1,7 @@
 {
   "error": {
-    "code": "SYNTHESIS_INVALID_CONFIG",
-    "message": "invalid config <TMP>/ws/.synthesis/config.json: malformed JSON",
+    "code": "SYNT_INVALID_CONFIG",
+    "message": "invalid config <TMP>/ws/.synt/config.json: malformed JSON",
     "name": "ConfigValidationError"
   }
 }

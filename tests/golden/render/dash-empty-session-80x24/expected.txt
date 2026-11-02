@@ -1,0 +1,24 @@
+▐ ✻ SYNTHESIS ▌ │ ● 0 live │ ⌂ proj  session- · up 0s │ ctx ▱▱▱▱▱▱ 0% │ 12:00:00
+┏━ ◆ Running 0 ━━━━━━┓┏━ ◆ Status ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ no running sessions┃┃                                                        ┃
+│                    ││                                                        │
+┃                    ┃│                                                        │
+┗━━━━━━━━━━━━━━━━━━━━┛│ ● IDLE  last activity 0s ago                           │
+┏━ ◆ Session ━━━━━━━━┓│   waiting for the next prompt…                         │
+┃                    ┃│ Context  ░░░░░░░░░░░░░░░░░░░░░░░░░░   0% 0/200.0k      │
+│                    ││                                                        │
+│                    ││                                                        │
+│ model  loading mod…││                                                        │
+│ cwd    proj        │┃                                                        ┃
+│ turns  0 prompts ·…│┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+│                    │┏━ ◆ Activity ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+│                    │┃                                                        ┃
+┃                    ┃│                                                        │
+┗━━━━━━━━━━━━━━━━━━━━┛│                                                        │
+┏━ ◆ Tools & Skills ━┓│                                                        │
+┃                    ┃│                                                        │
+│ no tool calls yet  ││                                                        │
+│                    ││                                                        │
+┃                    ┃┃                                                        ┃
+┗━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+↑/↓ select session   a follow newest   u usage metric   r reload   q quit       

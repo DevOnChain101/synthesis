@@ -97,7 +97,7 @@ async fn stdin_payload_shape_and_env() {
     let f = fx();
     let out = f.dir.join("got.json");
     let cmd = format!(
-        "cat > '{0}'; echo \"$SYNTHESIS_PROJECT_DIR|$CLAUDE_PROJECT_DIR\" >> '{0}.env'",
+        "cat > '{0}'; echo \"$SYNT_PROJECT_DIR|$CLAUDE_PROJECT_DIR\" >> '{0}.env'",
         out.display()
     );
     let mut h = f.hooks(cfg("PreToolUse", Some("Bash"), &[&cmd]));
@@ -329,7 +329,7 @@ async fn multiline_command_and_env_filter() {
         ))
         .with_env(BTreeMap::from([
             ("HOME".into(), "/x".into()),
-            ("SYNTHESIS_A".into(), "1".into()),
+            ("SYNT_A".into(), "1".into()),
         ]));
     assert!(run(&h, HookEvent::Stop, None).await.blocked);
     assert_eq!(h.env.len(), 1);

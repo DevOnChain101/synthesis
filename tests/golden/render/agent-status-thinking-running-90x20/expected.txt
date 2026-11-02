@@ -1,0 +1,20 @@
+
+
+
+
+
+
+
+
+
+
+
+
+● hi
+
+· Thinking    hmm
+· Crunching    (8m 10s · ↓ 12.5k tokens · thinking · esc to interrupt)
+╭────────────────────────────────────────────────────────────────────────────────────────╮
+│ >  Try "explain this repo" · / commands · @ files · Alt+A add files · ! shell · # memo │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+⏸ manual mode on (shift+tab to cycle)                           fake-sonnet · effort: auto

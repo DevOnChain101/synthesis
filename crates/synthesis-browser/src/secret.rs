@@ -1,6 +1,6 @@
 //! Secrets for `browser_fill_secret` (docs/BROWSER-LOGIN.md). The model names a secret; the value
 //! is read here, typed into the page and never returned. Declarations come from USER settings
-//! only (`synthesis.browser.secrets`), each bound to the exact origins it may be typed into.
+//! only (`synt.browser.secrets`), each bound to the exact origins it may be typed into.
 
 use crate::error::{BrowserError, Result};
 use crate::profile::{origin_of, validate_login_origin};
@@ -44,9 +44,9 @@ const MAX_SECRET_BYTES: u64 = 4096;
 
 fn parse_source(s: &str) -> std::result::Result<Source, String> {
     if let Some(n) = s.strip_prefix("{env:").and_then(|r| r.strip_suffix('}')) {
-        // Secret-shaped SYNTHESIS_* names are the ones `Env::child_env` never hands to commands.
-        if !n.starts_with("SYNTHESIS_") || !is_secret_shaped(n) {
-            return Err("an env source must be a SYNTHESIS_* variable with KEY, TOKEN, SECRET, PASSWORD or similar in its name (so it is never passed to commands the agent runs)".into());
+        // Secret-shaped SYNT_* names are the ones `Env::child_env` never hands to commands.
+        if !n.starts_with("SYNT_") || !is_secret_shaped(n) {
+            return Err("an env source must be a SYNT_* variable with KEY, TOKEN, SECRET, PASSWORD or similar in its name (so it is never passed to commands the agent runs)".into());
         }
         return Ok(Source::Env(n.into()));
     }
@@ -57,16 +57,15 @@ fn parse_source(s: &str) -> std::result::Result<Source, String> {
         }
         return Ok(Source::File(p));
     }
-    Err("source must be {env:SYNTHESIS_NAME} or {file:/absolute/path}".into())
+    Err("source must be {env:SYNT_NAME} or {file:/absolute/path}".into())
 }
 
-/// Parses `synthesis.browser.secrets`. An invalid entry is skipped and named in the returned
+/// Parses `synt.browser.secrets`. An invalid entry is skipped and named in the returned
 /// diagnostics (never with a value).
 pub fn parse_secrets(raw: &Map<String, Value>) -> (BTreeMap<String, SecretSpec>, Vec<String>) {
     let (mut out, mut diag) = (BTreeMap::new(), vec![]);
     for (name, v) in raw {
-        let mut bad =
-            |m: &str| diag.push(format!("synthesis.browser.secrets.{name}: {m}, skipped"));
+        let mut bad = |m: &str| diag.push(format!("synt.browser.secrets.{name}: {m}, skipped"));
         if name.is_empty()
             || name.len() > 64
             || !name
@@ -254,7 +253,7 @@ mod tests {
 
     fn spec(kind: Option<FieldKind>) -> SecretSpec {
         SecretSpec {
-            source: Source::Env("SYNTHESIS_X_PASSWORD".into()),
+            source: Source::Env("SYNT_X_PASSWORD".into()),
             origins: vec!["https://app.example.com".into()],
             field_kind: kind,
         }
@@ -263,16 +262,16 @@ mod tests {
     #[test]
     fn parses_and_rejects_declarations() {
         let raw = json!({
-            "ok": {"source": "{env:SYNTHESIS_APP_PASSWORD}", "origins": ["https://app.example.com"], "field_kind": "password"},
+            "ok": {"source": "{env:SYNT_APP_PASSWORD}", "origins": ["https://app.example.com"], "field_kind": "password"},
             "file": {"source": "{file:/run/s/pw}", "origins": ["http://localhost:3000"]},
             "plain-env": {"source": "{env:HOME}", "origins": ["https://a.com"]},
-            "not-secret-shaped": {"source": "{env:SYNTHESIS_APP}", "origins": ["https://a.com"]},
+            "not-secret-shaped": {"source": "{env:SYNT_APP}", "origins": ["https://a.com"]},
             "relative": {"source": "{file:pw}", "origins": ["https://a.com"]},
-            "no-origins": {"source": "{env:SYNTHESIS_A_TOKEN}", "origins": []},
-            "http-remote": {"source": "{env:SYNTHESIS_A_TOKEN}", "origins": ["http://a.com"]},
-            "path-origin": {"source": "{env:SYNTHESIS_A_TOKEN}", "origins": ["https://a.com/login"]},
-            "bad kind": {"source": "{env:SYNTHESIS_A_TOKEN}", "origins": ["https://a.com"]},
-            "bad-kind": {"source": "{env:SYNTHESIS_A_TOKEN}", "origins": ["https://a.com"], "field_kind": "pin"},
+            "no-origins": {"source": "{env:SYNT_A_TOKEN}", "origins": []},
+            "http-remote": {"source": "{env:SYNT_A_TOKEN}", "origins": ["http://a.com"]},
+            "path-origin": {"source": "{env:SYNT_A_TOKEN}", "origins": ["https://a.com/login"]},
+            "bad kind": {"source": "{env:SYNT_A_TOKEN}", "origins": ["https://a.com"]},
+            "bad-kind": {"source": "{env:SYNT_A_TOKEN}", "origins": ["https://a.com"], "field_kind": "pin"},
         });
         let (ok, diag) = parse_secrets(raw.as_object().unwrap());
         assert_eq!(
@@ -287,15 +286,12 @@ mod tests {
     #[test]
     fn env_resolution_never_names_the_value() {
         let s = spec(None);
-        let e = Env::from_pairs([("SYNTHESIS_X_PASSWORD", "hunter2")]);
+        let e = Env::from_pairs([("SYNT_X_PASSWORD", "hunter2")]);
         assert_eq!(resolve("n", &s, &e).unwrap(), "hunter2");
-        for env in [
-            Env::default(),
-            Env::from_pairs([("SYNTHESIS_X_PASSWORD", "")]),
-        ] {
+        for env in [Env::default(), Env::from_pairs([("SYNT_X_PASSWORD", "")])] {
             let m = resolve("n", &s, &env).unwrap_err().to_string();
             assert!(
-                m.contains("SYNTHESIS_X_PASSWORD") && m.contains("missing or empty"),
+                m.contains("SYNT_X_PASSWORD") && m.contains("missing or empty"),
                 "{m}"
             );
         }

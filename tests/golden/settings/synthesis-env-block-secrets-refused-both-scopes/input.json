@@ -1,6 +1,6 @@
 {
   "files": {
-    "<SYNTHESIS_HOME>/settings.json": {
+    "<SYNT_HOME>/settings.json": {
       "env": {
         "ANTHROPIC_API_KEY": "x",
         "DB_PASSWORD": "p",
@@ -10,7 +10,7 @@
         "OPENAI_BASE_URL": "u"
       }
     },
-    "<TMP>/ws/.synthesis/settings.json": {
+    "<TMP>/ws/.synt/settings.json": {
       "env": {
         "AWS_SECRET_ACCESS_KEY": "s",
         "FOO": "override",

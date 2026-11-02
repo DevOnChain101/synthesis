@@ -1,0 +1,29 @@
+{
+  "chunks": [
+    {
+      "events": [
+        {
+          "action": "down",
+          "alt": false,
+          "button": 0,
+          "ctrl": false,
+          "name": "mouse",
+          "shift": false,
+          "x": 10,
+          "y": 5
+        },
+        {
+          "action": "up",
+          "alt": false,
+          "button": 0,
+          "ctrl": false,
+          "name": "mouse",
+          "shift": false,
+          "x": 10,
+          "y": 5
+        }
+      ],
+      "pending": ""
+    }
+  ]
+}

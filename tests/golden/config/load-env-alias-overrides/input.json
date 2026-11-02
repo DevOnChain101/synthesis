@@ -1,18 +1,18 @@
 {
   "cwd": "<TMP>/ws",
   "env": {
-    "SYNTHESIS_DEFAULT_CUSTOM_MODEL": "gateway/c-9",
-    "SYNTHESIS_DEFAULT_OPUS_MODEL": "gateway/o-9",
-    "SYNTHESIS_DEFAULT_SONNET_MODEL": "gateway/s-9"
+    "SYNT_DEFAULT_CUSTOM_MODEL": "gateway/c-9",
+    "SYNT_DEFAULT_OPUS_MODEL": "gateway/o-9",
+    "SYNT_DEFAULT_SONNET_MODEL": "gateway/s-9"
   },
   "files": {
-    "<SYNTHESIS_HOME>/synthesis.json": {
+    "<SYNT_HOME>/synt.json": {
       "$schema": "config.json/v1",
       "aliases": {
         "opus": "anthropic/claude-opus-1"
       }
     }
   },
-  "home": "<SYNTHESIS_HOME>",
+  "home": "<SYNT_HOME>",
   "op": "loadConfig"
 }

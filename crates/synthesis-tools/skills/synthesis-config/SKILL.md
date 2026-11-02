@@ -6,7 +6,7 @@ allowed-tools: [Read, Glob, Grep, Write, Edit, Bash]
 
 # Synthesis configuration
 
-Create native resources under `~/.synthesis` for user scope or `.synthesis` for project scope. Treat source CLI configuration as read-only. Never copy credentials, tokens, secret headers, OAuth state, or secret-looking environment values.
+Create native resources under `~/.synt` for user scope or `.synt` for project scope. Treat source CLI configuration as read-only. Never copy credentials, tokens, secret headers, OAuth state, or secret-looking environment values.
 
 For Claude Code or Codex conversion, parse source formats and map paths, secrets, models, hooks, and schemas deterministically first. The optional LLM step may rewrite instruction prose only. It must receive bounded input, have no tools or write access, and return `convertedText`, `unresolvedRefs`, and `assumptions`. Validate that response; if no model is configured or validation fails, keep the normalized source text and report a warning.
 
@@ -15,7 +15,7 @@ Use these native locations:
 - `skills/<name>/SKILL.md`: YAML frontmatter with `name` and a discriminating `description`, followed by concise instructions.
 - `agents/<name>.md`: frontmatter may contain `name`, `description`, `tools`, `model`, `profile`, `reasoning`, and `required-capabilities`; the body is the system prompt.
 - `settings.json`: `hooks` and permission guards. Preserve Synthesis event names and validate every command/path.
-- `synthesis.json` (user scope) or `.synthesis/config.json` (project scope): providers, profiles, MCP, and routing. Keep credentials as `{env:NAME}` references or use `synth auth login`.
+- `synt.json` (user scope) or `.synt/config.json` (project scope): providers, profiles, MCP, and routing. Keep credentials as `{env:NAME}` references or use `synt auth login`.
 
 Agents should normally use `profile: inherit`. Use `fast`, `balanced`, or `deep` profiles for portable intent and a concrete `model` only when the user explicitly requires one. Named agents use their own `model`/`profile`; there is no global sub-agent profile. Direct `@agent` flags may override that definition, while model-generated Task fields cannot. A provider describes transport separately from the advertised model:
 

@@ -4,7 +4,7 @@
       "description": "",
       "model": null,
       "name": "other",
-      "path": "<TMP>/ws/.synthesis/agents/other.md",
+      "path": "<TMP>/ws/.synt/agents/other.md",
       "profile": "inherit",
       "prompt": "no frontmatter body",
       "reasoning": "inherit",
@@ -16,7 +16,7 @@
       "description": "project tester",
       "model": "opus",
       "name": "tester",
-      "path": "<TMP>/ws/.synthesis/agents/tester.md",
+      "path": "<TMP>/ws/.synt/agents/tester.md",
       "profile": "inherit",
       "prompt": "Project prompt body",
       "reasoning": "inherit",
@@ -28,7 +28,7 @@
       ]
     }
   ],
-  "autoMemoryDir": "<HOME>/.synthesis/projects/<SANITIZED_CWD>/memory",
+  "autoMemoryDir": "<HOME>/.synt/projects/<SANITIZED_CWD>/memory",
   "claudeDir": "<HOME>/.claude",
   "commands": [],
   "mcpServers": [],

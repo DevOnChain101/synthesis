@@ -1,5 +1,5 @@
 //! Persistent login profiles (docs/BROWSER-LOGIN.md): a dedicated Chrome user-data-dir under
-//! `<SYNTHESIS_HOME>/browser-profiles/<name>`. Never the person's own Chrome profile and never a
+//! `<SYNT_HOME>/browser-profiles/<name>`. Never the person's own Chrome profile and never a
 //! path that came from the model: the only input is a validated name.
 
 use crate::discover::Os;
@@ -12,12 +12,12 @@ use synthesis_config::Env;
 use url::{Host, Url};
 
 /// Per-profile record of the registrable domains the person logged in to (no credentials).
-pub const META_FILE: &str = "synthesis-profile.json";
-/// Created by `synth browser done`; ends a headless login wait.
-pub const DONE_FILE: &str = "synthesis-login-done";
-/// Exists only while a `browser_login` waits; `synth browser done` refuses without it.
-pub const WAITING_FILE: &str = "synthesis-login-waiting";
-const LOCK_FILE: &str = "synthesis-profile.lock";
+pub const META_FILE: &str = "synt-profile.json";
+/// Created by `synt browser done`; ends a headless login wait.
+pub const DONE_FILE: &str = "synt-login-done";
+/// Exists only while a `browser_login` waits; `synt browser done` refuses without it.
+pub const WAITING_FILE: &str = "synt-login-waiting";
+const LOCK_FILE: &str = "synt-profile.lock";
 
 fn err(m: impl Into<String>) -> BrowserError {
     BrowserError::Launch(m.into())
@@ -309,7 +309,7 @@ pub fn harden_preferences(dir: &Path) -> Result<()> {
             }
         }
     }
-    let tmp = default.join("Preferences.synthesis-tmp");
+    let tmp = default.join("Preferences.synt-tmp");
     std::fs::write(&tmp, serde_json::to_vec(&v).unwrap_or_default())?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
@@ -342,7 +342,7 @@ pub fn display_available(env: &Env, os: Os) -> std::result::Result<(), String> {
         && env.get_nonempty("DISPLAY").is_none()
         && env.get_nonempty("WAYLAND_DISPLAY").is_none()
     {
-        return Err("no display (DISPLAY and WAYLAND_DISPLAY are unset: SSH, CI or a container), so a visible browser cannot open. Store the credential as a secret in your user settings (synthesis.browser.secrets) and use browser_fill_secret instead".into());
+        return Err("no display (DISPLAY and WAYLAND_DISPLAY are unset: SSH, CI or a container), so a visible browser cannot open. Store the credential as a secret in your user settings (synt.browser.secrets) and use browser_fill_secret instead".into());
     }
     Ok(())
 }
@@ -436,7 +436,7 @@ mod tests {
         assert_eq!(v["profile"]["name"], "x");
         assert_eq!(v["autofill"]["profile_enabled"], false);
         assert_eq!(v["keep"], 1);
-        assert!(!d.path().join("Default/Preferences.synthesis-tmp").exists());
+        assert!(!d.path().join("Default/Preferences.synt-tmp").exists());
         std::fs::write(d.path().join("Default/Preferences"), "{not json").unwrap();
         harden_preferences(d.path()).unwrap(); // garbage is replaced, not trusted
     }

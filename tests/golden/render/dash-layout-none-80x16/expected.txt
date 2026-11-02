@@ -1,0 +1,16 @@
+▐ ✻ Synthesis  ·  MISSION CONTROL ▌ │ ● 3 live               ctx ▱▱▱▱▱▱ 0% │ 12:00:00
+┏━ ◆ Running 3 ━━━━━━┓┏━ ◆ Status ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ ►● proj-0       10%┃┃                                                        ┃
+│ project-0 (…ace)   ││                                                        │
+│  ● proj-1       10%││                                                        │
+│ project-1 (…ace)   ││                                                        │
+│  ● proj-2       10%││ ● IDLE  last activity 0s ago                           │
+│ project-2 (…ace)   ││   waiting for the next prompt…                         │
+│                    ││ Context  ░░░░░░░░░░░░░░░░░░░░░░░░░░   0% 0/200.0k      │
+│                    ││                                                        │
+│                    ││                                                        │
+│                    ││                                                        │
+│                    ││                                                        │
+┃                    ┃┃                                                        ┃
+┗━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+↑/↓ select session   a follow newest   u usage metric   r reload   q quit       

@@ -1,8 +1,8 @@
 //! `settings.json` loader (port of Node `claudecfg.js` `mergeSettings`, `loadSynthesisEnv`,
 //! `loadAutoModeConfig`, `loadBlockOutsideReads`, `findProjectRoot`; docs/specs/config.md).
 //!
-//! Layers, lowest to highest: `<synthesis_home>/settings.json` (user), `<project_root>/.synthesis/settings.json`
-//! (project), `<project_root>/.synthesis/settings.local.json` (local, gitignored, where "allow always"
+//! Layers, lowest to highest: `<synthesis_home>/settings.json` (user), `<project_root>/.synt/settings.json`
+//! (project), `<project_root>/.synt/settings.local.json` (local, gitignored, where "allow always"
 //! persists; same trust rules as project), then the managed file ([`managed_settings_path`]; the
 //! organisation's, always trusted). The CLI flags sit between local and managed: precedence is
 //! managed > CLI > local > project > user. Lists are unions (deduped, order kept); scalars: last layer wins. Unknown keys are
@@ -11,7 +11,7 @@
 //! SECURITY (deviation from Node): the project file comes from a possibly hostile repository.
 //! Unless the caller passes [`ProjectTrust::Trusted`], it can only TIGHTEN: `deny`/`ask` rules, the
 //! modes `default|manual|plan|dontAsk` and `mcp` disables are kept; `allow` rules, hooks,
-//! `additionalDirectories`, `disableAllHooks`, `env`, MCP approvals and the `synth` section are
+//! `additionalDirectories`, `disableAllHooks`, `env`, MCP approvals and the `synt` section are
 //! dropped with a diagnostic (counts and key names only, never values). `auto` and
 //! `bypassPermissions` are refused from the project even when trusted (as Node).
 //!
@@ -27,8 +27,8 @@ use synthesis_hooks::{HookGroup, HooksConfig};
 
 pub use synthesis_config::{LoadContext, ProjectTrust};
 
-/// Highest `synthesis.version` this build understands; a newer section is ignored with a diagnostic.
-pub const SYNTHESIS_SECTION_VERSION: u64 = 1;
+/// Highest `synt.version` this build understands; a newer section is ignored with a diagnostic.
+pub const SYNT_SECTION_VERSION: u64 = 1;
 const MAX_FILE_BYTES: u64 = 1 << 20;
 /// Modes an untrusted project may select: none of them allows more than the default.
 const UNTRUSTED_PROJECT_MODES: [&str; 4] = ["default", "manual", "plan", "dontAsk"];
@@ -95,7 +95,7 @@ pub struct Compat {
     pub write_node_transcripts: Option<bool>,
 }
 
-/// The Rust-only top-level `"synthesis"` object (config.md §6). Every field optional.
+/// The Rust-only top-level `"synt"` object (config.md §6). Every field optional.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SynthesisSettings {
     pub budget: Budget,
@@ -126,12 +126,12 @@ pub struct Settings {
     /// Non-secret notes: malformed files, ignored/refused items. Never contains setting values.
     pub diagnostics: Vec<String>,
     /// A settings file that exists but cannot be used (malformed JSON, not an object, unreadable,
-    /// oversized): its deny/ask rules are NOT in force, so callers must refuse to start (`synth run`
+    /// oversized): its deny/ask rules are NOT in force, so callers must refuse to start (`synt run`
     /// exits 2) instead of running without them. Also in `diagnostics`.
     pub errors: Vec<String>,
 }
 
-/// Nearest ancestor of `cwd` (inclusive) holding `.synthesis` or `.git`, else `cwd`. Lexical walk from
+/// Nearest ancestor of `cwd` (inclusive) holding `.synt` or `.git`, else `cwd`. Lexical walk from
 /// the given path; no process cwd, no canonicalisation. The project root decides which settings
 /// (hooks, MCP, agents) and which writable sandbox root apply, so a marker only counts when the
 /// directory and the marker are owned by the current user (unix) and not world-writable, and the
@@ -143,7 +143,7 @@ pub fn find_project_root(cwd: &Path) -> PathBuf {
     cwd.ancestors()
         .filter(|d| !d.as_os_str().is_empty())
         .find(|d| {
-            [".synthesis", ".git"]
+            [".synt", ".git"]
                 .iter()
                 .any(|m| d.join(m).exists() && marker_trusted(d, &d.join(m), &tmp))
         })
@@ -194,7 +194,7 @@ pub fn is_secret_env_key(key: &str) -> bool {
             "AZURE_",
             "GOOGLE_",
             "VERTEX_",
-            "SYNTHESIS_",
+            "SYNT_",
         ]
         .iter()
         .any(|p| key.starts_with(p))
@@ -212,9 +212,9 @@ pub fn managed_settings_path() -> PathBuf {
     }
 }
 
-/// `<project_root>/.synthesis/settings.local.json`.
+/// `<project_root>/.synt/settings.local.json`.
 pub fn local_settings_path(project_root: &Path) -> PathBuf {
-    project_root.join(".synthesis").join("settings.local.json")
+    project_root.join(".synt").join("settings.local.json")
 }
 
 pub fn load_settings(ctx: &LoadContext<'_>, trust: ProjectTrust) -> Settings {
@@ -264,7 +264,7 @@ fn load_settings_layers(
             true,
         ),
         (
-            project_root.join(".synthesis").join("settings.json"),
+            project_root.join(".synt").join("settings.json"),
             "project settings",
             false,
             t,
@@ -300,33 +300,46 @@ fn load_settings_layers(
 }
 
 /// Persists "allow always" rules into the local settings file (created with its own
-/// `.synthesis/.gitignore` entry). Existing keys are kept; rules are appended without duplicates.
+/// `.synt/.gitignore` entry). Existing keys are kept; rules are appended without duplicates.
 pub fn persist_allow_rules(project_root: &Path, rules: &[String]) -> std::io::Result<()> {
     let path = local_settings_path(project_root);
     let dir = path.parent().unwrap_or(project_root);
-    std::fs::create_dir_all(dir)?;
-    let mut v = match read_json(&path, "local settings") {
-        Ok(Some(v)) => v,
-        Ok(None) => Value::Object(Map::new()),
-        Err(e) => return Err(std::io::Error::other(e)), // never overwrite a file we cannot parse
-    };
-    let allow = v
-        .as_object_mut()
-        .map(|o| {
-            o.entry("permissions")
-                .or_insert_with(|| Value::Object(Map::new()))
-        })
-        .and_then(Value::as_object_mut)
-        .map(|p| p.entry("allow").or_insert_with(|| Value::Array(vec![])))
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| std::io::Error::other("local settings: permissions.allow is not a list"))?;
-    for r in rules {
-        if !allow.iter().any(|x| x.as_str() == Some(r)) {
-            allow.push(Value::String(r.clone()));
+    let gi = dir.join(".gitignore");
+    // The project is untrusted data: a symlink at any of these would make this write land
+    // somewhere else (`settings.local.json -> ~/.ssh/authorized_keys`). Refused, not followed
+    // (unlike the user's own settings file, whose symlink is their choice).
+    for p in [dir, path.as_path(), gi.as_path()] {
+        if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "{} is a symbolic link; not writing the rule through it",
+                    p.display()
+                ),
+            ));
         }
     }
-    std::fs::write(&path, serde_json::to_string_pretty(&v)? + "\n")?;
-    let gi = dir.join(".gitignore");
+    std::fs::create_dir_all(dir)?;
+    edit_json_atomic(&path, "local settings", |v| {
+        let allow = v
+            .as_object_mut()
+            .map(|o| {
+                o.entry("permissions")
+                    .or_insert_with(|| Value::Object(Map::new()))
+            })
+            .and_then(Value::as_object_mut)
+            .map(|p| p.entry("allow").or_insert_with(|| Value::Array(vec![])))
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| {
+                std::io::Error::other("local settings: permissions.allow is not a list")
+            })?;
+        for r in rules {
+            if !allow.iter().any(|x| x.as_str() == Some(r)) {
+                allow.push(Value::String(r.clone()));
+            }
+        }
+        Ok(())
+    })?;
     let cur = std::fs::read_to_string(&gi).unwrap_or_default();
     if !cur.lines().any(|l| l.trim() == "settings.local.json") {
         let sep = if cur.is_empty() || cur.ends_with('\n') {
@@ -334,46 +347,205 @@ pub fn persist_allow_rules(project_root: &Path, rules: &[String]) -> std::io::Re
         } else {
             "\n"
         };
-        std::fs::write(&gi, format!("{cur}{sep}settings.local.json\n"))?;
+        write_text_atomic(&gi, &format!("{cur}{sep}settings.local.json\n"))?;
     }
     Ok(())
 }
 
-/// Read-modify-write of one JSON file: the file is read again first (edits made meanwhile
-/// survive), `edit` changes it (a missing file starts as `{}`), every other key and the key order
-/// are kept. A file that cannot be parsed is never overwritten (`InvalidData`). The write goes
-/// through a temp file and a rename, with the permissions of the file it replaces. An `Err` from
-/// `edit` writes nothing, so `edit` is also where the caller validates the result.
+/// Read-modify-write of one JSON file: the file is read first, `edit` changes it (a missing file
+/// starts as `{}`), every other key and the key order are kept. A file that cannot be parsed is
+/// never overwritten (`InvalidData`). An `Err` from `edit` writes nothing, so `edit` is also where
+/// the caller validates the result; because the file may change while `edit` runs it is called
+/// again on the new content (at most 3 times, then `Err`).
+///
+/// Writing: a symlinked `path` is followed and the resolved target is written (the link stays a
+/// link; a dangling link is refused); the temp file sits next to the target, has an unpredictable
+/// name, is created with `create_new`, and on unix with the mode of the file it replaces (0600 for
+/// a new one) so it is never wider than the original; it is flushed to disk and replaces the target
+/// with one rename (the target is never empty or half written). The temp file is removed on every
+/// error. The directory is synced after the rename on unix, best effort: that never turns a
+/// completed write into an error.
+///
+/// Concurrent writers: the target's size, mtime and content hash are compared right before the
+/// rename and a difference starts another round (3 at most, then `Err`). That is a best-effort
+/// check, not a lock: a writer that lands between the comparison and the rename is still
+/// overwritten. Windows: the read-only flag of the original is copied; the ACL of a new file is the
+/// one inherited from the directory (it is not made private).
 pub fn edit_json_atomic(
     path: &Path,
     what: &str,
-    edit: impl FnOnce(&mut Value) -> std::io::Result<()>,
+    mut edit: impl FnMut(&mut Value) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    let mut v = match read_json(path, what) {
-        Ok(Some(v)) => v,
-        Ok(None) => Value::Object(Map::new()),
-        Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
-    };
-    edit(&mut v)?;
-    let dir = path.parent().unwrap_or(Path::new("."));
+    use std::io::Write;
+    let target = resolve_target(path, what)?;
+    let dir = target.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let tmp = dir.join(format!("{name}.tmp-{}", std::process::id()));
-    std::fs::write(&tmp, serde_json::to_string_pretty(&v)? + "\n")?;
-    let done = std::fs::metadata(path)
-        .and_then(|m| std::fs::set_permissions(&tmp, m.permissions()))
-        .or_else(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        })
-        .and_then(|()| std::fs::rename(&tmp, path));
-    if done.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    let name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    for _ in 0..3 {
+        let before = fingerprint(&target)?;
+        let mut v = match read_json(&target, what) {
+            Ok(Some(v)) => v,
+            Ok(None) => Value::Object(Map::new()),
+            Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        };
+        edit(&mut v)?;
+        let text = serde_json::to_string_pretty(&v)? + "\n";
+        let tmp = dir.join(temp_name(name));
+        let mut open = std::fs::OpenOptions::new();
+        open.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+            let mode = std::fs::metadata(&target).map_or(0o600, |m| m.mode() & 0o777);
+            open.mode(mode);
+        }
+        let mut f = open.open(&tmp)?;
+        #[cfg_attr(unix, allow(unused_mut))]
+        let mut written = f.write_all(text.as_bytes()).and_then(|()| f.sync_all());
+        #[cfg(not(unix))]
+        if written.is_ok()
+            && let Ok(m) = std::fs::metadata(&target)
+        {
+            written = std::fs::set_permissions(&tmp, m.permissions());
+        }
+        drop(f);
+        if let Err(e) = written {
+            remove_tmp(&tmp);
+            return Err(e);
+        }
+        // someone else wrote the file while we edited: start again from what is there now
+        if fingerprint(&target)? != before {
+            remove_tmp(&tmp);
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &target) {
+            remove_tmp(&tmp);
+            return Err(e);
+        }
+        // best effort: the rename is done, so a failing directory sync is not a failed write
+        #[cfg(unix)]
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
+        return Ok(());
     }
-    done
+    Err(std::io::Error::other(format!(
+        "{what}: {} keeps changing while it is edited; not written",
+        target.display()
+    )))
+}
+
+/// Replaces `path` with `text` through a temp file and a rename: never writes through a hard link
+/// (the rename replaces the directory entry, the other names keep the old content), never follows
+/// a symlink (checked again right before the rename), and keeps the mode of the file it replaces
+/// (0644 for a new one: a `.gitignore` is meant to be shared).
+fn write_text_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let refuse = |p: &Path| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is a symbolic link; not writing through it", p.display()),
+        )
+    };
+    let is_link = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink());
+    if is_link(path) {
+        return Err(refuse(path));
+    }
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let tmp = dir.join(temp_name(name));
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let mode = std::fs::metadata(path).map_or(0o644, |m| m.mode() & 0o777);
+        open.mode(mode);
+    }
+    let mut f = open.open(&tmp)?;
+    let r = f
+        .write_all(text.as_bytes())
+        .and_then(|()| f.sync_all())
+        .and_then(|()| {
+            drop(f);
+            // the project may have swapped the name for a link while the temp was written
+            if is_link(path) {
+                Err(refuse(path))
+            } else {
+                std::fs::rename(&tmp, path)
+            }
+        });
+    if r.is_err() {
+        remove_tmp(&tmp);
+    }
+    r
+}
+
+/// Removes a temp file; a read-only flag copied from the original (Windows) would make the removal
+/// fail and leak the file, so it is cleared first.
+fn remove_tmp(tmp: &Path) {
+    if let Ok(m) = std::fs::metadata(tmp) {
+        let mut p = m.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        p.set_readonly(false);
+        let _ = std::fs::set_permissions(tmp, p);
+    }
+    let _ = std::fs::remove_file(tmp);
+}
+
+/// `path`, or where it points when it is a symlink (a dangling link is an error).
+fn resolve_target(path: &Path, what: &str) -> std::io::Result<PathBuf> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(path).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "{what}: {} is a dangling symlink; not writing",
+                    path.display()
+                ),
+            )
+        }),
+        _ => Ok(path.to_path_buf()),
+    }
+}
+
+/// Size, mtime and a hash of the content; `None` for a file that is not there.
+fn fingerprint(p: &Path) -> std::io::Result<Option<(u64, Option<std::time::SystemTime>, u64)>> {
+    use std::hash::{Hash, Hasher};
+    match std::fs::read(p) {
+        Ok(b) => {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            b.hash(&mut h);
+            let mtime = std::fs::metadata(p).and_then(|m| m.modified()).ok();
+            Ok(Some((b.len() as u64, mtime, h.finish())))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// `.name.<random>.tmp`: random from the OS-seeded hasher, so another user cannot predict it.
+fn temp_name(name: &str) -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let r = |_: u8| {
+        std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish()
+    };
+    format!(".{name}.{:016x}{:016x}.tmp", r(0), r(1))
+}
+
+#[cfg(test)]
+mod tmp_tests {
+    use super::temp_name;
+
+    #[test]
+    fn temp_names_are_random_hidden_and_never_the_pid() {
+        let (a, b) = (temp_name("settings.json"), temp_name("settings.json"));
+        assert_ne!(a, b);
+        assert!(a.starts_with(".settings.json.") && a.ends_with(".tmp") && a.len() > 40);
+    }
 }
 
 /// `Ok(None)`: no such file. `Err`: it exists but is unusable (names the file, never a value).
@@ -470,23 +642,35 @@ impl Settings {
         if let Some(hooks) = raw.get("hooks").and_then(Value::as_object) {
             self.apply_hooks(hooks, trusted, what);
         }
+        if raw.get("synthesis").is_some() {
+            // Renamed 2026-11-02; the old section is never read.
+            self.diagnostics.push(format!(
+                "{what}: key \"synthesis\" was renamed to \"synt\", ignored"
+            ));
+        }
         if trusted {
             if let Some(b) = raw.get("disableAllHooks").and_then(Value::as_bool) {
                 self.disable_all_hooks = b;
             }
             self.apply_env(raw);
             self.apply_synthesis(raw, what, user);
-            if !user && raw.get("synthesis").and_then(|n| n.get("peers")).is_some() {
+            // `user` is also true for the managed file: only the user settings file may set tui
+            if what != "user settings" && raw.get("synt").and_then(|n| n.get("tui")).is_some() {
                 self.diagnostics.push(format!(
-                    "{what}: synthesis.peers is read from user settings only, ignored"
+                    "{what}: synt.tui is read from user settings only, ignored"
+                ));
+            }
+            if !user && raw.get("synt").and_then(|n| n.get("peers")).is_some() {
+                self.diagnostics.push(format!(
+                    "{what}: synt.peers is read from user settings only, ignored"
                 ));
             }
         } else if raw.get("disableAllHooks").is_some()
             || raw.get("env").is_some()
-            || raw.get("synthesis").is_some()
+            || raw.get("synt").is_some()
         {
             self.diagnostics.push(format!(
-                "{what}: ignored disableAllHooks/env/synthesis keys (project not trusted)"
+                "{what}: ignored disableAllHooks/env/synt keys (project not trusted)"
             ));
         }
 
@@ -581,13 +765,13 @@ impl Settings {
     }
 
     fn apply_synthesis(&mut self, raw: &Value, what: &str, user: bool) {
-        let Some(n) = raw.get("synthesis").and_then(Value::as_object) else {
+        let Some(n) = raw.get("synt").and_then(Value::as_object) else {
             return;
         };
         let version = n.get("version").and_then(Value::as_u64).unwrap_or(1);
-        if version > SYNTHESIS_SECTION_VERSION {
+        if version > SYNT_SECTION_VERSION {
             self.diagnostics.push(format!(
-                "{what}: synthesis section version {version} is newer than supported {SYNTHESIS_SECTION_VERSION}, ignored"
+                "{what}: synt section version {version} is newer than supported {SYNT_SECTION_VERSION}, ignored"
             ));
             return;
         }
@@ -601,7 +785,7 @@ impl Settings {
                 self.synthesis.browser.extend(b.clone());
             } else {
                 self.diagnostics.push(format!(
-                    "{what}: synthesis.browser is read from user settings only, ignored"
+                    "{what}: synt.browser is read from user settings only, ignored"
                 ));
             }
         }
@@ -622,4 +806,174 @@ impl Settings {
             self.synthesis.compat.write_node_transcripts = Some(w);
         }
     }
+}
+
+// ---------------------------------------------------------------- synt.tui (USER file only)
+
+/// Panels of the dash sidebar that can be switched off (Workspace, Running sessions and the chat
+/// are always on).
+pub const TUI_PANELS: [(&str, &str); 4] = [
+    ("session", "Session info (model, mode, effort, cwd, uptime)"),
+    ("mcp", "MCP servers"),
+    ("tools", "Tools & Skills used in this session"),
+    ("activity", "Activity feed"),
+];
+
+/// `synt.tui` of the USER settings.json: what the interactive app shows and how it behaves.
+/// Defined here once; `/config` edits it, the app reads it. Project, local and managed files never
+/// set it (a diagnostic says so).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TuiSettings {
+    /// `[session, mcp, tools, activity]`: shown.
+    pub panels: [bool; 4],
+    /// `logo`: `art` (the braille symbol on the welcome) or `off`.
+    pub logo: bool,
+    pub show_thinking: bool,
+    /// Long tool output, code and diffs start expanded (what ctrl+o toggles).
+    pub diffs_expanded: bool,
+    /// The `queued: ...` lines above the prompt while a task runs.
+    pub queue_indicators: bool,
+    /// Spinners and animations; off draws them still and idles the redraw timer.
+    pub motion: bool,
+    /// Mouse reporting (click, drag-select, wheel). Off leaves the terminal's own selection.
+    pub mouse_capture: bool,
+    /// Drag-select copies when the button is released.
+    pub copy_on_select: bool,
+}
+
+impl Default for TuiSettings {
+    fn default() -> Self {
+        Self {
+            panels: [true; 4],
+            logo: true,
+            show_thinking: true,
+            diffs_expanded: false,
+            queue_indicators: true,
+            motion: true,
+            mouse_capture: true,
+            copy_on_select: true,
+        }
+    }
+}
+
+impl TuiSettings {
+    /// Reads `synt.tui` of a parsed settings file. A wrong type or an unknown value keeps the
+    /// default and yields a diagnostic that names the key, never the value.
+    pub fn from_settings(v: &Value) -> (Self, Vec<String>) {
+        let mut s = Self::default();
+        let mut diags = vec![];
+        let Some(tui) = v.get("synt").and_then(|n| n.get("tui")) else {
+            return (s, diags);
+        };
+        let Some(tui) = tui.as_object() else {
+            diags.push("synt.tui is not an object, ignored".into());
+            return (s, diags);
+        };
+        let mut flag = |key: &str, slot: &mut bool| match tui.get(key) {
+            None => {}
+            Some(Value::Bool(b)) => *slot = *b,
+            Some(_) => diags.push(format!("synt.tui.{key} must be true or false, kept")),
+        };
+        flag("show_thinking", &mut s.show_thinking);
+        flag("diffs_expanded", &mut s.diffs_expanded);
+        flag("queue_indicators", &mut s.queue_indicators);
+        flag("motion", &mut s.motion);
+        flag("mouse_capture", &mut s.mouse_capture);
+        flag("copy_on_select", &mut s.copy_on_select);
+        match tui.get("logo").map(Value::as_str) {
+            None => {}
+            Some(Some("art")) => s.logo = true,
+            Some(Some("off")) => s.logo = false,
+            Some(_) => diags.push("synt.tui.logo must be art or off, using art".into()),
+        }
+        match tui.get("panels") {
+            None => {}
+            Some(Value::Object(p)) => {
+                for (k, v) in p {
+                    let Some(i) = TUI_PANELS.iter().position(|(n, _)| n == k) else {
+                        diags.push(format!("synt.tui.panels.{k} is not a panel, ignored"));
+                        continue;
+                    };
+                    match v {
+                        Value::Bool(b) => s.panels[i] = *b,
+                        _ => diags.push(format!("synt.tui.panels.{k} must be true or false, kept")),
+                    }
+                }
+            }
+            Some(_) => diags.push("synt.tui.panels is not an object, ignored".into()),
+        }
+        for k in tui.keys() {
+            if ![
+                "panels",
+                "logo",
+                "show_thinking",
+                "diffs_expanded",
+                "queue_indicators",
+                "motion",
+                "mouse_capture",
+                "copy_on_select",
+            ]
+            .contains(&k.as_str())
+            {
+                diags.push(format!("synt.tui.{k} is not a setting, ignored"));
+            }
+        }
+        (s, diags)
+    }
+
+    /// The subtree to write back: every key, so the file shows what is in force.
+    pub fn to_value(&self) -> Value {
+        let panels: Map<String, Value> = TUI_PANELS
+            .iter()
+            .zip(self.panels)
+            .map(|((n, _), on)| ((*n).to_string(), Value::Bool(on)))
+            .collect();
+        serde_json::json!({
+            "panels": panels,
+            "logo": if self.logo { "art" } else { "off" },
+            "show_thinking": self.show_thinking,
+            "diffs_expanded": self.diffs_expanded,
+            "queue_indicators": self.queue_indicators,
+            "motion": self.motion,
+            "mouse_capture": self.mouse_capture,
+            "copy_on_select": self.copy_on_select,
+        })
+    }
+}
+
+/// `synt.tui` of `<synthesis_home>/settings.json`; a missing or unreadable file is the
+/// defaults.
+pub fn read_user_tui(synthesis_home: &Path) -> (TuiSettings, Vec<String>) {
+    let v = std::fs::read(synthesis_home.join("settings.json"))
+        .ok()
+        .filter(|b| b.len() <= 1 << 20)
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or(Value::Null);
+    TuiSettings::from_settings(&v)
+}
+
+/// Writes `tui` as the `synt.tui` subtree of `<synthesis_home>/settings.json` (the `/config`
+/// screen). Every other key and the key order are kept; a file that cannot be parsed, or whose
+/// `synthesis` is not an object, is never overwritten (`InvalidData`). Never writes a credential:
+/// only the keys of [`TuiSettings`] go into the subtree. See [`edit_json_atomic`].
+pub fn persist_user_tui(synthesis_home: &Path, tui: &TuiSettings) -> std::io::Result<()> {
+    let tui = tui.to_value();
+    edit_json_atomic(
+        &synthesis_home.join("settings.json"),
+        "user settings",
+        |v| {
+            let section = v
+                .as_object_mut()
+                .map(|o| o.entry("synt").or_insert_with(|| Value::Object(Map::new())))
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "user settings: `synthesis` is not an object",
+                    )
+                })?;
+            section.insert("tui".into(), tui.clone());
+            Ok(())
+        },
+    )
 }

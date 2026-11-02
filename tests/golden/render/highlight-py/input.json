@@ -1,0 +1,5 @@
+{
+  "code": "def f(x):\n    \"\"\"doc\"\"\"\n    return x # c\nclass A: pass",
+  "lang": "python",
+  "op": "highlight"
+}

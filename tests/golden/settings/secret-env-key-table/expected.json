@@ -16,11 +16,11 @@
     "secret": true
   },
   {
-    "key": "SYNTHESIS_API_KEY",
+    "key": "SYNT_API_KEY",
     "secret": true
   },
   {
-    "key": "SYNTHESIS_AUTH_TOKEN",
+    "key": "SYNT_AUTH_TOKEN",
     "secret": true
   },
   {

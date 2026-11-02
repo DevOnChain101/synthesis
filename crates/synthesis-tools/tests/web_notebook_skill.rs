@@ -26,7 +26,7 @@ fn fx() -> Fx {
     fs::create_dir(base.join("home")).unwrap();
     let ws = WorkspaceContext::open("w", &root, &root, &[], base.join("art"), "pg").unwrap();
     let env: BTreeMap<String, String> = [(
-        "SYNTHESIS_HOME".to_string(),
+        "SYNT_HOME".to_string(),
         base.join("home").display().to_string(),
     )]
     .into();
@@ -270,7 +270,7 @@ fn skill(dir: &Path, name: &str, fm: &str, body: &str) {
 async fn skills_precedence_untrusted_flag_and_progressive_disclosure() {
     let f = fx();
     let user = f.base.join("home/skills");
-    let proj = f.root.join(".synthesis/skills");
+    let proj = f.root.join(".synt/skills");
     skill(
         &user,
         "deploy",
@@ -352,7 +352,7 @@ async fn skills_precedence_untrusted_flag_and_progressive_disclosure() {
 async fn project_skill_symlink_to_outside_file_is_ignored() {
     let f = fx();
     fs::write(f.base.join("secret.md"), "---\nname: leak\n---\nSECRET").unwrap();
-    let d = f.root.join(".synthesis/skills/leak");
+    let d = f.root.join(".synt/skills/leak");
     fs::create_dir_all(&d).unwrap();
     std::os::unix::fs::symlink(f.base.join("secret.md"), d.join("SKILL.md")).unwrap();
     let o = call(

@@ -1,0 +1,31 @@
+{
+  "cols": 80,
+  "lines": [
+    "▐ ✻ Synthesis  ·  MISSION CONTROL ▌ │ ● 3 live               ctx ▱▱▱▱▱▱ 3% │ 12:00:00",
+    "┏━ ◆ Running 3 ━━━━━━┓┏━ ◆ Status ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓",
+    "┃ ►● proj-0       10%┃┃                                                        ┃",
+    "│ project-0 (…ace)   ││                                                        │",
+    "│  ● proj-1       10%││                                                        │",
+    "│ project-1 (…ace)   ││ · RUNNING TOOL  last activity 9m54s ago                │",
+    "│  ● proj-2       10%││   ✻ Agent explorer: find files 9m59s                   │",
+    "│ project-2 (…ace)   ││ Context  █░░░░░░░░░░░░░░░░░░░░░░░░░   3% 5.9k/200.0k   │",
+    "┃                    ┃│                                                        │",
+    "┗━━━━━━━━━━━━━━━━━━━━┛│                                                        │",
+    "┏━ ◆ Session ━━━━━━━━┓│                                                        │",
+    "┃                    ┃┃                                                        ┃",
+    "│ model  claude-opus…│┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛",
+    "┃                    ┃┏━ ◆ Activity ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓",
+    "┗━━━━━━━━━━━━━━━━━━━━┛┃ 11:50:00 ❯ refactor the parser                         ┃",
+    "┏━ ◆ MCP 1 enabled ━━┓│ 11:50:01 ✎ Looking.                                    │",
+    "┃ ● alpha       stdio┃│                                                        │",
+    "│ ○ pending   not ap…││                                                        │",
+    "┃ configured · synthesis …┃│                                                        │",
+    "┗━━━━━━━━━━━━━━━━━━━━┛│                                                        │",
+    "                      │                                                        │",
+    "                      ┃                                                        ┃",
+    "                      ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛",
+    "↑/↓ select session   a follow newest   u usage metric   r reload   q quit       "
+  ],
+  "rects": {},
+  "rows": 24
+}

@@ -18,7 +18,7 @@ struct Roots {
 impl Roots {
     fn expand(&self, s: &str) -> String {
         let p = |p: &Path| p.to_string_lossy().into_owned();
-        s.replace("<SYNTHESIS_HOME>", &p(&self.synthesis_home))
+        s.replace("<SYNT_HOME>", &p(&self.synthesis_home))
             .replace("<HOME>", &p(&self.home))
             .replace("<TMP>", &p(&self.tmp))
     }
@@ -26,7 +26,7 @@ impl Roots {
     /// Longest root first, as the golden README requires.
     fn collapse(&self, v: Value) -> Value {
         let mut roots = [
-            (&self.synthesis_home, "<SYNTHESIS_HOME>"),
+            (&self.synthesis_home, "<SYNT_HOME>"),
             (&self.home, "<HOME>"),
             (&self.ws, "<TMP>/ws"),
             (&self.tmp, "<TMP>"),

@@ -1,0 +1,7 @@
+{
+  "env": {
+    "WT_SESSION": "x"
+  },
+  "op": "detect",
+  "platform": "linux"
+}

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Harness wiring behind `synth` (prepare, Common, Prepared)"
+description = "Harness wiring behind `synt` and the interactive app (prepare, Common, Prepared)"
 
 [lints]
 workspace = true
@@ -31,6 +31,7 @@ synthesis-session = { path = "../synthesis-session" }
 synthesis-settings = { path = "../synthesis-settings" }
 synthesis-terminal = { path = "../synthesis-terminal" }
 synthesis-tools = { path = "../synthesis-tools" }
+synthesis-tui = { path = "../synthesis-tui" }
 synthesis-verification = { path = "../synthesis-verification" }
 synthesis-workspace = { path = "../synthesis-workspace" }
 rusqlite = { version = "0.41", features = ["bundled"] }
@@ -45,7 +46,8 @@ tokio-util = { version = "0.7.20", default-features = false }
 uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
-# O_NOFOLLOW constant only; tcflush (safe wrapper) drops typed-ahead terminal input before a prompt
+# O_NOFOLLOW constant only (no unsafe): files are never opened through a symlink; tcflush (safe
+# wrapper) drops typed-ahead terminal input before a prompt
 libc = "0.2"
 rustix = { version = "1", features = ["termios"] }
 

@@ -102,7 +102,7 @@ impl Persist {
                 && let Some(p) = self.writing.remove(tool_call_id)
                 && let Err(e) = w.record_post_run_hash(std::path::Path::new(&p))
             {
-                eprintln!("synth: warning: rewind hash: {e}");
+                eprintln!("synt: warning: rewind hash: {e}");
             }
             // restore point before the first write to a file (docs: checkpoints); best effort
             if let Event::ToolRequested {
@@ -128,7 +128,7 @@ impl Persist {
                     &[std::path::PathBuf::from(p)],
                 )
             {
-                eprintln!("synth: warning: checkpoint: {e}");
+                eprintln!("synt: warning: checkpoint: {e}");
             }
             drop(w);
             if seq != env.seq + self.base {
@@ -136,7 +136,7 @@ impl Persist {
             }
             if let Some((tasks, transcript)) = &self.derived {
                 if let Err(e) = tasks.on_event(&env) {
-                    eprintln!("synth: warning: task rows: {e}");
+                    eprintln!("synt: warning: task rows: {e}");
                 }
                 transcript.on_event(&env);
             }

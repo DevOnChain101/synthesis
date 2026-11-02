@@ -1,0 +1,25 @@
+{
+  "bounds": {
+    "x0": 2,
+    "x1": 12,
+    "y0": 1,
+    "y1": 3
+  },
+  "lines": [
+    "border",
+    "\u001b[1m  hello wor\u001b[0m   ",
+    "  second row",
+    "  third"
+  ],
+  "op": "textOfSelection",
+  "sel": {
+    "a": {
+      "x": 4,
+      "y": 1
+    },
+    "b": {
+      "x": 6,
+      "y": 2
+    }
+  }
+}

@@ -409,13 +409,13 @@ fn synthesis_state_db_and_memory_are_unreadable() {
     )
     .unwrap();
     std::fs::write(home.join("projects/p/s.jsonl"), "TRANSCRIPT").unwrap();
-    std::fs::write(home.join("synthesis.db"), "SESSIONS").unwrap();
+    std::fs::write(home.join("synt.db"), "SESSIONS").unwrap();
     std::fs::write(home.join("memory/memory.db"), "MEMORIES").unwrap();
     std::fs::write(home.join("other.txt"), "fine").unwrap();
     let mut p = pol(a.path());
     // control first: nothing denied, everything under the workspace root is readable
     for f in [
-        "synthesis.db",
+        "synt.db",
         "memory/memory.db",
         "projects/p/s.jsonl",
         "other.txt",
@@ -430,7 +430,7 @@ fn synthesis_state_db_and_memory_are_unreadable() {
             .success()
     );
     for f in [
-        "synthesis.db",
+        "synt.db",
         "memory/memory.db",
         "projects/p/s.jsonl",
         "browser-profiles/acme/Default/Cookies",
@@ -469,10 +469,10 @@ fn standard_policy_blocks_planting_synthesis_settings_and_instruction_files() {
         "the rest of the repo stays writable"
     );
     for bad in [
-        "mkdir .synthesis",
-        "mkdir -p .synthesis/agents && echo x > .synthesis/agents/a.md",
-        "echo '{}' > .synthesis/settings.json",
-        "echo x > SYNTHESIS.md",
+        "mkdir .synt",
+        "mkdir -p .synt/agents && echo x > .synt/agents/a.md",
+        "echo '{}' > .synt/settings.json",
+        "echo x > AGENTS.md",
         "echo x >> AGENTS.md",
         "echo x > .gitmodules",
         "echo x > .git/modules/sub/config",
@@ -480,7 +480,7 @@ fn standard_policy_blocks_planting_synthesis_settings_and_instruction_files() {
     ] {
         assert!(!ok(bad), "{bad}");
     }
-    assert!(!root.join(".synthesis").exists() && !root.join("SYNTHESIS.md").exists());
+    assert!(!root.join(".synt").exists());
     assert!(!root.join(".gitmodules").exists());
     assert_eq!(
         std::fs::read_to_string(root.join("AGENTS.md")).unwrap(),

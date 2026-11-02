@@ -1,0 +1,21 @@
+{
+  "chunks": [
+    {
+      "events": [
+        {
+          "name": "alt-up"
+        },
+        {
+          "name": "alt-down"
+        },
+        {
+          "name": "alt-right"
+        },
+        {
+          "name": "alt-left"
+        }
+      ],
+      "pending": ""
+    }
+  ]
+}

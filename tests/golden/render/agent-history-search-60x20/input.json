@@ -1,0 +1,17 @@
+{
+  "agent": {},
+  "frame": 0,
+  "h": 20,
+  "now": 1790942400000,
+  "op": "agent",
+  "opts": {
+    "search": {
+      "index": 0,
+      "matches": [
+        "fix the flaky login test"
+      ],
+      "query": "fix"
+    }
+  },
+  "w": 60
+}

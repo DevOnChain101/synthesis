@@ -2,11 +2,11 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {
-    "<HOME>/.synthesis/settings.json": [
+    "<HOME>/.synt/settings.json": [
       1,
       2
     ],
-    "<TMP>/ws/.synthesis/settings.json": "str"
+    "<TMP>/ws/.synt/settings.json": "str"
   },
   "op": "workspace"
 }

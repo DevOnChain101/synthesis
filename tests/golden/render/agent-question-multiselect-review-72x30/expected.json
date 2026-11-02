@@ -1,0 +1,69 @@
+{
+  "h": 30,
+  "lines": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "╭──────────────────────────────────────────────────────────────────────╮",
+    "│ ✻ Hello there! I'm Synthesis.  · 1.0.0                               │",
+    "│                                                                      │",
+    "│ /help for commands · alt+v pastes an image                           │",
+    "│ cwd: /work/proj                                                      │",
+    "╰──────────────────────────────────────────────────────────────────────╯",
+    "",
+    " Tips for getting started:",
+    "  1. Ask Synthesis to explain, fix or build something in this ",
+    "     folder",
+    "  2. Type / for commands and skills, @ to mention a file",
+    "  3. Drop or paste an image path to attach a screenshot",
+    "◆ Synthesis is asking you  ↑/↓ choose · enter confirm · esc reject",
+    "╭─ Synthesis has questions ────────────────────────────────────────────╮",
+    "│ ←  ☐ Colours  ☐ Size  ✓ Submit  →                                    │",
+    "│                                                                      │",
+    "│ Review your answers                                                  │",
+    "│   Pick colours → (no answer)                                         │",
+    "│   Pick size → (no answer)                                            │",
+    "│                                                                      │",
+    "│ ❯ Submit answers   esc to cancel                                     │",
+    "╰──────────────────────────────────────────────────────────────────────╯",
+    "⏸ manual mode on (shift+tab to cycle)         fake-sonnet · effort: auto"
+  ],
+  "maxScroll": 0,
+  "question_hits": [
+    {
+      "type": "tab",
+      "x0": 6,
+      "x1": 17,
+      "bodyRow": 0,
+      "y": 21,
+      "index": 0
+    },
+    {
+      "type": "tab",
+      "x0": 17,
+      "x1": 25,
+      "bodyRow": 0,
+      "y": 21,
+      "index": 1
+    },
+    {
+      "type": "submit-tab",
+      "x0": 25,
+      "x1": 35,
+      "bodyRow": 0,
+      "y": 21
+    },
+    {
+      "type": "submit",
+      "x0": 4,
+      "x1": 72,
+      "bodyRow": 6,
+      "y": 27
+    }
+  ],
+  "w": 72
+}

@@ -1,0 +1,19 @@
+[package]
+name = "synthesis-tui-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pure, deterministic renderer for the Synthesis TUI: session model, dashboard frame, agent pane, theme, highlight"
+
+[lints]
+workspace = true
+
+[dependencies]
+synthesis-events = { path = "../synthesis-events" }
+synthesis-tui-base = { path = "../synthesis-tui-base" }
+regex = "1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+time = { version = "0.3", features = ["parsing"] }
+unicode-segmentation = "1.13.3"

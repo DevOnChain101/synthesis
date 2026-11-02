@@ -9,7 +9,7 @@ license.workspace = true
 workspace = true
 
 [features]
-# `SYNTHESIS_TEST_FORCE_BACKEND=landlock-only|none` forces `detect()` (Landlock only / no sandbox). Debug builds only.
+# `SYNT_TEST_FORCE_BACKEND=landlock-only|none` forces `detect()` (Landlock only / no sandbox). Debug builds only.
 test-backend = []
 
 [dependencies]

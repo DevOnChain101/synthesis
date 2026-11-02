@@ -1,0 +1,37 @@
+{
+  "agent": {
+    "items": [
+      {
+        "kind": "user",
+        "text": "fix the flaky login test"
+      },
+      {
+        "end": 1790942399000,
+        "kind": "thinking",
+        "start": 1790942397000,
+        "text": "look"
+      },
+      {
+        "kind": "text",
+        "text": "I will check **login.ts** and `retry()`:\n- first\n- second"
+      },
+      {
+        "input": {
+          "command": "npm test",
+          "description": "Run tests"
+        },
+        "kind": "tool",
+        "name": "Bash",
+        "result": "Exit code 1\nFAIL login.test.ts\nexpected 2",
+        "status": "error"
+      }
+    ],
+    "mode": "plan"
+  },
+  "frame": 0,
+  "h": 40,
+  "now": 1790942400000,
+  "op": "agent",
+  "opts": {},
+  "w": 120
+}

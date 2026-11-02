@@ -33,15 +33,15 @@ printf 'x@example.com\n# c\n DEV@example.com \n' >"$w/listed.txt"
 printf 'x@example.com\n' >"$w/other.txt"
 run "empty list fails"        1 MAINTAINERS="$w/empty.txt"
 run "missing file fails"      1 MAINTAINERS="$w/nope.txt"
-run "flag true passes"        0 MAINTAINERS="$w/empty.txt" SYNTHESIS_ALLOW_ANY_VERIFIED_TAGGER=true
-run "flag missing file passes" 0 MAINTAINERS="$w/nope.txt" SYNTHESIS_ALLOW_ANY_VERIFIED_TAGGER=true
-run "flag not exactly true fails" 1 MAINTAINERS="$w/empty.txt" SYNTHESIS_ALLOW_ANY_VERIFIED_TAGGER=1
+run "flag true passes"        0 MAINTAINERS="$w/empty.txt" SYNT_ALLOW_ANY_VERIFIED_TAGGER=true
+run "flag missing file passes" 0 MAINTAINERS="$w/nope.txt" SYNT_ALLOW_ANY_VERIFIED_TAGGER=true
+run "flag not exactly true fails" 1 MAINTAINERS="$w/empty.txt" SYNT_ALLOW_ANY_VERIFIED_TAGGER=1
 run "listed email passes"     0 MAINTAINERS="$w/listed.txt"
 run "unlisted email fails"    1 MAINTAINERS="$w/other.txt"
-run "unlisted beats flag"     1 MAINTAINERS="$w/other.txt" SYNTHESIS_ALLOW_ANY_VERIFIED_TAGGER=true
+run "unlisted beats flag"     1 MAINTAINERS="$w/other.txt" SYNT_ALLOW_ANY_VERIFIED_TAGGER=true
 run "GH_TOKEN header fetch ok" 0 MAINTAINERS="$w/listed.txt" GH_TOKEN=dummy
 run "unsigned tag (not verified) fails" 1 MAINTAINERS="$w/listed.txt" STUB_VERIFIED=false
-run "unsigned beats flag"     1 MAINTAINERS="$w/empty.txt" SYNTHESIS_ALLOW_ANY_VERIFIED_TAGGER=true STUB_VERIFIED=false
+run "unsigned beats flag"     1 MAINTAINERS="$w/empty.txt" SYNT_ALLOW_ANY_VERIFIED_TAGGER=true STUB_VERIFIED=false
 run "wrong tagger fails"      1 MAINTAINERS="$w/listed.txt" STUB_EMAIL=evil@example.com
 run "not on main fails"       1 MAINTAINERS="$w/listed.txt" STUB_STATUS=diverged
 run "ahead of main fails"     1 MAINTAINERS="$w/listed.txt" STUB_STATUS=ahead

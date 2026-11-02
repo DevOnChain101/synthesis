@@ -960,12 +960,12 @@ impl Harness {
         let fail = |t: String| self.plain(t, true, ToolStatus::SoftError);
         let Some(link) = self.peers.clone().filter(|p| p.on()) else {
             return fail(
-                "disabled: cross-session messaging is off (synthesis.peers.enabled in user settings)"
+                "disabled: cross-session messaging is off (synt.peers.enabled in user settings)"
                     .into(),
             );
         };
         if !link.config.initiate {
-            return fail("denied: synthesis.peers.initiate is false".into());
+            return fail("denied: synt.peers.initiate is false".into());
         }
         let s = |k: &str| input.get(k).and_then(Value::as_str).unwrap_or_default();
         let Some(addr) = parse(s("to")) else {
@@ -1093,7 +1093,7 @@ impl Harness {
                                 .queue_offline(&link, &entry, &from, &id, text, &chain, delegate);
                         }
                         let hint = if addr.instance == MAIN {
-                            " (synthesis.peers.resume_offline queues messages for it)"
+                            " (synt.peers.resume_offline queues messages for it)"
                         } else {
                             ""
                         };
@@ -1305,7 +1305,7 @@ impl Harness {
         match self.peer_rows(only_main).await {
             Some(rows) => self.plain(Value::Array(rows).to_string(), false, ToolStatus::Ok),
             None => self.plain(
-                "disabled: cross-session messaging is off (synthesis.peers.enabled in user settings)",
+                "disabled: cross-session messaging is off (synt.peers.enabled in user settings)",
                 true,
                 ToolStatus::SoftError,
             ),
@@ -1460,7 +1460,7 @@ impl Harness {
         // Cost is the only spend cap that scales with tokens; without a price it cannot be enforced.
         if self.config.pricing.is_none() {
             return declined(
-                "no_price: this session has no model price (synthesis.pricing), so it cannot bound what an answer costs",
+                "no_price: this session has no model price (synt.pricing), so it cannot bound what an answer costs",
             );
         }
         // Reserve part of what is left before running; the guard settles it (spent += actual,
@@ -1762,7 +1762,7 @@ impl Harness {
                 "request": show(&req.text), "status": reply.status, "reply": reply.text}),
             dialog: "permission",
             prompt: format!("Send this reply to {}?", attr(&req.from.display())),
-            reason: "synthesis.peers.confirm_replies is on".into(),
+            reason: "synt.peers.confirm_replies is on".into(),
             suggestions: vec![],
             origin: None,
         };
@@ -2090,7 +2090,7 @@ mod tests {
         ];
         let red = |s: &str| s.replace("sk-LEAK-1", "[REDACTED]");
         let share = vec!["cargo test*".to_string()];
-        let t = dump(&sanitize(&hist, "/w", "/h/.synthesis", &share, &red));
+        let t = dump(&sanitize(&hist, "/w", "/h/.synt", &share, &red));
         assert!(
             t.contains("FAIL token=[REDACTED]") && !t.contains("sk-LEAK-1"),
             "{t}"
@@ -2114,17 +2114,13 @@ mod tests {
             result("c", "top-secret-output"),
             use_("d", "Read", json!({"file_path": "/etc/passwd"})),
             result("d", "root:x:0:0"),
-            use_(
-                "e",
-                "Read",
-                json!({"file_path": "/h/.synthesis/run/peer.key"}),
-            ),
+            use_("e", "Read", json!({"file_path": "/h/.synt/run/peer.key"})),
             result("e", "KEYBYTES"),
             use_("f", "Grep", json!({"pattern": "x", "path": "/w/../other"})),
             result("f", "other-repo-line"),
         ];
         let red = |s: &str| s.replace("sk-LEAK-1", "[REDACTED]");
-        let out = sanitize(&hist, "/w", "/h/.synthesis", &[], &red);
+        let out = sanitize(&hist, "/w", "/h/.synt", &[], &red);
         let t = dump(&out);
         assert!(t.contains("fn main() {} token=[REDACTED]"), "{t}");
         for leaked in [

@@ -53,7 +53,7 @@ async fn serve() -> String {
 }
 
 fn no_sandbox() -> bool {
-    std::env::var_os("SYNTHESIS_BROWSER_TEST_NO_SANDBOX").is_some_and(|v| !v.is_empty())
+    std::env::var_os("SYNT_BROWSER_TEST_NO_SANDBOX").is_some_and(|v| !v.is_empty())
 }
 
 /// False (and prints SKIP) when no browser is installed.
@@ -261,7 +261,7 @@ async fn missing_browser_is_a_clear_tool_error() {
     let d = tempfile::tempdir().unwrap();
     let mut c = ctx(d.path(), "s3");
     c.env = Arc::new(BTreeMap::from([(
-        "SYNTHESIS_BROWSER_PATH".to_string(),
+        "SYNT_BROWSER_PATH".to_string(),
         "/nonexistent/chrome".to_string(),
     )]));
     let o = registry(false, true)
@@ -271,13 +271,13 @@ async fn missing_browser_is_a_clear_tool_error() {
         o.is_error && o.meta["error"] == "browser_unavailable",
         "{o:?}"
     );
-    assert!(text(&o).contains("SYNTHESIS_BROWSER_PATH"), "{o:?}");
+    assert!(text(&o).contains("SYNT_BROWSER_PATH"), "{o:?}");
 }
 
 // ---- browser_fill_secret / browser_login ------------------------------------------------------
 
 const PW: &str = "Zq9-hunter2/S3CRET+value";
-const PW_VAR: &str = "SYNTHESIS_TEST_LOGIN_PASSWORD";
+const PW_VAR: &str = "SYNT_TEST_LOGIN_PASSWORD";
 
 /// The person, scripted: answers `confirm_secret` with `yes` and records what was shown.
 #[derive(Debug)]
@@ -322,7 +322,7 @@ impl BrowserHost for Person {
     }
 }
 
-/// The real process environment plus extra variables (what `synth run` hands the tools).
+/// The real process environment plus extra variables (what `synt run` hands the tools).
 fn proc_env(extra: &[(&str, &str)]) -> synthesis_config::Env {
     synthesis_config::Env::from_pairs(
         std::env::vars().chain(extra.iter().map(|(k, v)| (k.to_string(), v.to_string()))),
@@ -929,14 +929,14 @@ async fn the_browser_is_found_through_the_process_env_not_the_project_env() {
     // the tool env (settings `env`, project-controlled) names a good path; the process env a bad one
     let mut c = ctx(d.path(), "env1");
     c.env = Arc::new(BTreeMap::from([(
-        "SYNTHESIS_BROWSER_PATH".to_string(),
+        "SYNT_BROWSER_PATH".to_string(),
         "/project/chose/this/browser".to_string(),
     )]));
     let reg = Registry::unsandboxed_for_tests()
         .with_new_tools()
         .with_browser(BrowserConfig {
             process_env: Some(synthesis_config::Env::from_pairs([(
-                "SYNTHESIS_BROWSER_PATH",
+                "SYNT_BROWSER_PATH",
                 "/process/env/browser",
             )])),
             ..Default::default()
@@ -1126,7 +1126,7 @@ async fn a_short_secret_blocks_snapshots_and_screenshots_until_the_page_navigate
     reg.close_session("short1");
 }
 
-const USER_VAR: &str = "SYNTHESIS_TEST_USER_TOKEN";
+const USER_VAR: &str = "SYNT_TEST_USER_TOKEN";
 
 /// Two secrets on one origin: a SHORT username (unmaskable) and the long password.
 fn two_secret_registry(base: &str, host: Arc<Person>) -> Registry {

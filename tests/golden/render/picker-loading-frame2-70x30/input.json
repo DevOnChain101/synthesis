@@ -1,0 +1,32 @@
+{
+  "agent": {},
+  "frame": 2,
+  "h": 30,
+  "now": 1790942400000,
+  "op": "agent",
+  "opts": {
+    "picker": {
+      "id": "model",
+      "items": [
+        {
+          "current": true,
+          "detail": "most capable",
+          "label": "Opus (fake)",
+          "value": "opus"
+        },
+        {
+          "detail": "balanced",
+          "label": "Sonnet (fake)",
+          "value": "sonnet"
+        }
+      ],
+      "set": {
+        "loading": true,
+        "loadingText": "Checking Claude config…"
+      },
+      "subtitle": "pick a model to use",
+      "title": "Select model"
+    }
+  },
+  "w": 70
+}

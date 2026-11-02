@@ -15,10 +15,10 @@ fn host_confines() -> bool {
     static C: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *C.get_or_init(|| {
         let d = tempfile::tempdir().unwrap();
-        let o = Command::new(env!("CARGO_BIN_EXE_synth"))
+        let o = Command::new(env!("CARGO_BIN_EXE_synt"))
             .args(["doctor", "--cwd"])
             .arg(d.path())
-            .env("SYNTHESIS_HOME", d.path())
+            .env("SYNT_HOME", d.path())
             .output()
             .unwrap();
         String::from_utf8_lossy(&o.stdout).contains("enforce_ready: yes")
@@ -37,7 +37,7 @@ impl Rig {
     fn run(&self, script: Value, args: &[&str]) -> (Output, Vec<Value>) {
         let s = self.dir.path().join("script.json");
         std::fs::write(&s, script.to_string()).unwrap();
-        let mut c = Command::new(env!("CARGO_BIN_EXE_synth"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.args(["run", "--cwd"])
             .arg(self.ws())
             .arg("--provider")
@@ -62,7 +62,7 @@ impl Rig {
             }
         }
         c.env("HOME", self.dir.path())
-            .env("SYNTHESIS_HOME", self.dir.path().join("synthesis"))
+            .env("SYNT_HOME", self.dir.path().join("synthesis"))
             .stdin(Stdio::null());
         let o = c.output().unwrap();
         let ev = String::from_utf8_lossy(&o.stdout)
@@ -94,7 +94,7 @@ fn headless_run_prints_what_permission_is_needed_and_how_to_grant_it() {
     let (o, ev) = r.run(bash("cargo test"), &[]);
     let e = stderr(&o);
     assert!(
-        e.contains("synth: blocked: approval needed for Bash(cargo test:*)")
+        e.contains("synt: blocked: approval needed for Bash(cargo test:*)")
             && e.contains("rerun with --allow 'Bash(cargo test:*)'"),
         "{e}"
     );
@@ -280,7 +280,7 @@ fn bypass_allows_commands_but_hard_stops_stay() {
         "notice event"
     );
     // deny rules and critical removals are not lifted (the ported engine does let bypass write
-    // protected paths such as .env: crates/synthesis-permissions tests, "touch .synthesis/settings.json")
+    // protected paths such as .env: crates/synthesis-permissions tests, "touch .synt/settings.json")
     std::fs::write(r.ws().join("keep.txt"), "x").unwrap();
     for cmd in ["rm -rf .", "rm -rf ~"] {
         let (_, _) = r.run(bash(cmd), &["--permission-mode", "bypassPermissions"]);
@@ -361,9 +361,9 @@ fn auto_mode_fails_closed_and_never_judges_protected_paths() {
 #[test]
 fn bypass_cannot_be_turned_on_from_project_settings() {
     let r = Rig::new();
-    std::fs::create_dir_all(r.ws().join(".synthesis")).unwrap();
+    std::fs::create_dir_all(r.ws().join(".synt")).unwrap();
     std::fs::write(
-        r.ws().join(".synthesis/settings.json"),
+        r.ws().join(".synt/settings.json"),
         json!({"permissions": {"defaultMode": "bypassPermissions"}}).to_string(),
     )
     .unwrap();

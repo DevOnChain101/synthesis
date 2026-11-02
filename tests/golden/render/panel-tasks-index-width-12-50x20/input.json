@@ -1,0 +1,78 @@
+{
+  "h": 20,
+  "op": "tasks",
+  "state": {
+    "history_gen": {
+      "days": 371,
+      "end": "2026-10-02T12:00:00.000Z"
+    },
+    "session": {
+      "set": {
+        "todos": [
+          {
+            "activeForm": "task-1",
+            "content": "task-1",
+            "status": "pending"
+          },
+          {
+            "activeForm": "task-2",
+            "content": "task-2",
+            "status": "pending"
+          },
+          {
+            "activeForm": "task-3",
+            "content": "task-3",
+            "status": "pending"
+          },
+          {
+            "activeForm": "task-4",
+            "content": "task-4",
+            "status": "pending"
+          },
+          {
+            "activeForm": "task-5",
+            "content": "task-5",
+            "status": "pending"
+          },
+          {
+            "activeForm": "task-6",
+            "content": "task-6",
+            "status": "pending"
+          },
+          {
+            "activeForm": "task-7",
+            "content": "task-7",
+            "status": "pending"
+          },
+          {
+            "activeForm": "task-8",
+            "content": "task-8",
+            "status": "pending"
+          },
+          {
+            "activeForm": "task-9",
+            "content": "task-9",
+            "status": "pending"
+          },
+          {
+            "activeForm": "task-10",
+            "content": "task-10",
+            "status": "pending"
+          },
+          {
+            "activeForm": "task-11",
+            "content": "task-11",
+            "status": "pending"
+          },
+          {
+            "activeForm": "task-12",
+            "content": "task-12",
+            "status": "pending"
+          }
+        ]
+      }
+    },
+    "usageMetric": "tokens"
+  },
+  "w": 50
+}

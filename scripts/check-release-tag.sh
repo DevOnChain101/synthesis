@@ -2,7 +2,7 @@
 # Release tag policy. Run by release.yml in `gate` and again in `release` right before publishing.
 # Env: TAG (v1.2.3), REPO (owner/repo), GITHUB_SHA (commit the workflow runs on), GH_TOKEN (for `gh api`).
 # Optional: MAINTAINERS (default .github/release-maintainers.txt; one tagger email per line, # comments).
-# FAIL CLOSED: a missing or entry-less allowlist fails unless SYNTHESIS_ALLOW_ANY_VERIFIED_TAGGER is exactly "true"
+# FAIL CLOSED: a missing or entry-less allowlist fails unless SYNT_ALLOW_ANY_VERIFIED_TAGGER is exactly "true"
 # (repository variable, an explicit owner decision: then any GitHub-verified tagger passes).
 # Checks: tag name vX.Y.Z[-pre]; commit reachable from main (API compare); annotated tag; refs/tags/$TAG^{commit} == $GITHUB_SHA; API tag object has verified signature, name == $TAG,
 # points at $GITHUB_SHA, and is what the API ref resolves to; tagger email in the allowlist when one exists.
@@ -38,9 +38,9 @@ if [ -n "$allowed" ]; then
   printf '%s\n' "$allowed" | grep -Fxq -- "$(printf '%s' "$email" | tr '[:upper:]' '[:lower:]')" \
     || fail "tagger '$email' is not listed in $list"
   echo "tagger is a listed maintainer"
-elif [ "${SYNTHESIS_ALLOW_ANY_VERIFIED_TAGGER:-}" = true ]; then
-  echo "::warning::SYNTHESIS_ALLOW_ANY_VERIFIED_TAGGER=true: any GitHub-verified tagger is accepted (no maintainer allowlist)"
+elif [ "${SYNT_ALLOW_ANY_VERIFIED_TAGGER:-}" = true ]; then
+  echo "::warning::SYNT_ALLOW_ANY_VERIFIED_TAGGER=true: any GitHub-verified tagger is accepted (no maintainer allowlist)"
 else
-  fail "$list is missing or has no entries; add maintainer tagger emails, or set the repository variable SYNTHESIS_ALLOW_ANY_VERIFIED_TAGGER=true (docs/RELEASE.md)"
+  fail "$list is missing or has no entries; add maintainer tagger emails, or set the repository variable SYNT_ALLOW_ANY_VERIFIED_TAGGER=true (docs/RELEASE.md)"
 fi
 echo "release tag policy ok: $TAG -> $GITHUB_SHA"

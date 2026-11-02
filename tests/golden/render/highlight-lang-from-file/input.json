@@ -1,0 +1,15 @@
+{
+  "files": [
+    "a.js",
+    "A.TS",
+    "x.py",
+    "main.rs",
+    "Makefile",
+    "a.tar.gz",
+    "c:\\x\\y.json",
+    "x.yml",
+    "",
+    null
+  ],
+  "op": "langFromFile"
+}

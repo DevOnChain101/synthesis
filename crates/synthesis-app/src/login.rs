@@ -1,6 +1,6 @@
-//! Browser login hand-off and stored secrets for `synth run` (docs/BROWSER-LOGIN.md): the
+//! Browser login hand-off and stored secrets for `synt run` (docs/BROWSER-LOGIN.md): the
 //! headless implementation of `BrowserHost` (prompts on the terminal), the settings parsing for
-//! `synthesis.browser`, `synth browser done` and the `synth doctor` lines. A front-end with its
+//! `synt.browser`, `synt browser done` and the `synt doctor` lines. A front-end with its
 //! own dialogs implements `BrowserHost` instead.
 //!
 //! Terminal rules: ONE reader thread owns the terminal and prompts are serialized, so two
@@ -27,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{Homes, homes};
 
-/// What `synthesis.browser` of the user settings declares.
+/// What `synt.browser` of the user settings declares.
 #[derive(Default)]
 pub struct BrowserSettings {
     pub secrets: BTreeMap<String, SecretSpec>,
@@ -57,7 +57,7 @@ pub fn parse_settings(raw: &Map<String, Value>) -> BrowserSettings {
                 s.profile_domains.insert(name.clone(), domains);
             } else {
                 s.warnings.push(format!(
-                    "synthesis.browser.profiles.{name}: not a valid profile name, skipped"
+                    "synt.browser.profiles.{name}: not a valid profile name, skipped"
                 ));
             }
         }
@@ -81,7 +81,8 @@ pub fn parse_settings(raw: &Map<String, Value>) -> BrowserSettings {
                     s.approved_profiles.insert(n.to_owned());
                 }
                 None => s.warnings.push(
-                    "synthesis.browser.approved.profiles: an entry is not a valid profile name, skipped".into(),
+                    "synt.browser.approved.profiles: an entry is not a valid profile name, skipped"
+                        .into(),
                 ),
             }
         }
@@ -106,7 +107,7 @@ pub fn parse_settings(raw: &Map<String, Value>) -> BrowserSettings {
                     s.approved_secrets.insert(p);
                 }
                 None => s.warnings.push(
-                    "synthesis.browser.approved.secrets: an entry names no declared secret/bound origin, skipped".into(),
+                    "synt.browser.approved.secrets: an entry names no declared secret/bound origin, skipped".into(),
                 ),
             }
         }
@@ -194,8 +195,8 @@ pub fn stdio_servers(servers: &[synthesis_mcp::McpServerConfig]) -> Vec<String> 
         .collect()
 }
 
-/// Warnings about credentials the agent's side could reach. Printed at `synth run` start and by
-/// `synth doctor`; a front-end with its own start-up (a TUI) calls this too.
+/// Warnings about credentials the agent's side could reach. Printed at `synt run` start and by
+/// `synt doctor`; a front-end with its own start-up (a TUI) calls this too.
 pub fn exposure_warnings(
     home: &Path,
     b: &BrowserSettings,
@@ -212,7 +213,7 @@ pub fn exposure_warnings(
     }
     if b.holds_credentials(home) && !mcp_stdio.is_empty() && !b.allow_with_mcp {
         w.push(format!(
-            "browser: stdio MCP server(s) {} run outside the sandbox and could read your saved logins and secret files; browser_login, browser_fill_secret and saved logins are refused while they are configured (remove them or set synthesis.browser.allow_with_mcp to true)",
+            "browser: stdio MCP server(s) {} run outside the sandbox and could read your saved logins and secret files; browser_login, browser_fill_secret and saved logins are refused while they are configured (remove them or set synt.browser.allow_with_mcp to true)",
             mcp_stdio.join(", ")
         ));
     }
@@ -320,7 +321,7 @@ fn say_on_tty(text: &str) -> bool {
 /// `[y/N]` on the terminal. No terminal means no.
 pub async fn ask_yes(question: &str, cancel: &CancellationToken) -> bool {
     let Some(t) = tty() else { return false };
-    let q = format!("synth: {question} [y/N] ");
+    let q = format!("synt: {question} [y/N] ");
     t.ask(
         || {
             if !say_on_tty(&q) {
@@ -461,7 +462,7 @@ impl BrowserHost for CliHost {
             let _wait = Waiting::new(req)?;
             let token = uuid::Uuid::new_v4().simple().to_string();
             let text = format!(
-                "synth: log in to {} in the browser window that just opened (profile {}).\nsynth: press Enter here when you are done, or run `synth browser done {}` in another terminal and enter this code: {token}\nsynth: Ctrl-C cancels.\n",
+                "synt: log in to {} in the browser window that just opened (profile {}).\nsynth: press Enter here when you are done, or run `synt browser done {}` in another terminal and enter this code: {token}\nsynth: Ctrl-C cancels.\n",
                 sanitize_for_display(&req.origin),
                 req.profile,
                 req.profile
@@ -519,12 +520,12 @@ impl BrowserHost for CliHost {
     }
 }
 
-/// `synth browser done PROFILE`: ends the wait of a `browser_login` in another terminal. The
+/// `synt browser done PROFILE`: ends the wait of a `browser_login` in another terminal. The
 /// code printed in the terminal that waits is read from stdin (never from argv, which `ps` shows).
 pub fn done_cmd(env: &Env, name: &str) -> Result<u8, String> {
     let dir = profile::profile_path(&homes(env)?.synthesis, name).map_err(|e| e.to_string())?;
     if std::io::stdin().is_terminal() {
-        eprint!("code shown by the waiting synth: ");
+        eprint!("code shown by the waiting synt: ");
     }
     let mut token = String::new();
     std::io::stdin()
@@ -536,7 +537,7 @@ pub fn done_cmd(env: &Env, name: &str) -> Result<u8, String> {
     Ok(0)
 }
 
-/// Lines for `synth doctor`.
+/// Lines for `synt doctor`.
 pub fn doctor_lines(env: &Env, h: &Homes) -> Vec<String> {
     let root = profile::profiles_root(&h.synthesis);
     let n = std::fs::read_dir(&root).map_or(0, |d| {
@@ -561,7 +562,7 @@ mod tests {
     #[test]
     fn settings_parse_clamp_and_approvals() {
         let raw = json!({
-            "secrets": {"ok": {"source": "{env:SYNTHESIS_A_PASSWORD}", "origins": ["https://a.com"]}, "bad": {}},
+            "secrets": {"ok": {"source": "{env:SYNT_A_PASSWORD}", "origins": ["https://a.com"]}, "bad": {}},
             "profiles": {"acme": {"allow_domains": ["cdn.acme.com"]}, "Bad Name": {}},
             "login_timeout_sec": 1,
             "allow_unsandboxed": true,
@@ -585,9 +586,9 @@ mod tests {
             BTreeSet::from([("ok".to_string(), "https://a.com".to_string())])
         );
         assert_eq!(s.warnings.len(), 5, "{:?}", s.warnings);
-        let e = Env::from_pairs([("SYNTHESIS_A_PASSWORD", "hunter2-xyz")]);
+        let e = Env::from_pairs([("SYNT_A_PASSWORD", "hunter2-xyz")]);
         assert_eq!(s.values(&e), ["hunter2-xyz"]);
-        let short = Env::from_pairs([("SYNTHESIS_A_PASSWORD", "abc")]);
+        let short = Env::from_pairs([("SYNT_A_PASSWORD", "abc")]);
         assert!(s.values(&short).is_empty(), "too short to mask by content");
         assert!(s.values(&Env::default()).is_empty());
         assert!(!parse_settings(&Map::new()).allow_unsandboxed);
@@ -597,7 +598,7 @@ mod tests {
     fn secret_file_paths_are_listed_for_the_deny_list() {
         let raw = json!({"secrets": {
             "f": {"source": "{file:/home/me/.config/pw}", "origins": ["https://a.com"]},
-            "e": {"source": "{env:SYNTHESIS_A_PASSWORD}", "origins": ["https://a.com"]}}});
+            "e": {"source": "{env:SYNT_A_PASSWORD}", "origins": ["https://a.com"]}}});
         let s = parse_settings(raw.as_object().unwrap());
         assert_eq!(
             s.secret_files(),
@@ -619,9 +620,9 @@ mod tests {
 
     #[test]
     fn stored_secret_values_are_masked_in_every_event() {
-        let raw = json!({"secrets": {"pw": {"source": "{env:SYNTHESIS_A_PASSWORD}", "origins": ["https://a.com"]}}});
+        let raw = json!({"secrets": {"pw": {"source": "{env:SYNT_A_PASSWORD}", "origins": ["https://a.com"]}}});
         let s = parse_settings(raw.as_object().unwrap());
-        let env = Env::from_pairs([("SYNTHESIS_A_PASSWORD", "Zq9-hunter2/S3CRET")]);
+        let env = Env::from_pairs([("SYNT_A_PASSWORD", "Zq9-hunter2/S3CRET")]);
         let out = Buf::default();
         let sink = EventSink::new(out.clone(), "s", s.values(&env));
         for text in [

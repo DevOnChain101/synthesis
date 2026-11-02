@@ -35,26 +35,26 @@ pub struct BrowserConfig {
     /// Synthesis home: login profiles live in `<home>/browser-profiles`. `None` disables
     /// `browser_login` and the `profile` option.
     pub home: Option<PathBuf>,
-    /// `synthesis.browser.secrets` of the USER settings (`browser_fill_secret`).
+    /// `synt.browser.secrets` of the USER settings (`browser_fill_secret`).
     pub secrets: BTreeMap<String, SecretSpec>,
-    /// User-widened domain lists per profile (`synthesis.browser.profiles.<name>.allow_domains`).
+    /// User-widened domain lists per profile (`synt.browser.profiles.<name>.allow_domains`).
     pub profile_domains: BTreeMap<String, Vec<String>>,
     /// How long a login waits for the person (default 10 minutes).
     pub login_timeout: Option<Duration>,
-    /// The process environment snapshot. Used to resolve `{env:SYNTHESIS_...}` secret sources
+    /// The process environment snapshot. Used to resolve `{env:SYNT_...}` secret sources
     /// (the tool env is an allowlist that never carries secret-shaped names) and, when set, as
     /// the ONLY source for finding and starting the browser: a project's settings `env` cannot
-    /// redirect `SYNTHESIS_BROWSER_PATH` to a binary that then receives a login or a secret.
+    /// redirect `SYNT_BROWSER_PATH` to a binary that then receives a login or a secret.
     /// `None` (embedders, tests): secrets cannot be resolved and the tool env is used.
     pub process_env: Option<Env>,
     /// The commands the agent runs are confined (sandbox `enforce`). Without it, stored logins
     /// and secret files are readable by the agent's own tools, so the credential tools refuse.
     pub sandboxed: bool,
-    /// User setting `synthesis.browser.allow_unsandboxed`: use the credential tools anyway.
+    /// User setting `synt.browser.allow_unsandboxed`: use the credential tools anyway.
     pub allow_unsandboxed: bool,
     /// Names of the stdio MCP servers of this run (they run outside the sandbox).
     pub mcp_stdio: Vec<String>,
-    /// User setting `synthesis.browser.allow_with_mcp`: use the credential tools anyway.
+    /// User setting `synt.browser.allow_with_mcp`: use the credential tools anyway.
     pub allow_with_mcp: bool,
     /// Profiles the person pre-approved in user settings (for runs nobody can answer).
     pub pre_approved_profiles: BTreeSet<String>,
@@ -73,7 +73,7 @@ pub struct LoginRequest {
     pub task_id: String,
     pub turn_id: String,
     pub tool_call_id: String,
-    /// `synth browser done` creates this file to end the wait when there is no terminal.
+    /// `synt browser done` creates this file to end the wait when there is no terminal.
     pub done_file: PathBuf,
 }
 
@@ -141,14 +141,14 @@ fn require_sandbox(cfg: &BrowserConfig) -> Result<(), BrowserError> {
     // read the saved profiles and secret files whatever `sandboxed` says.
     if !cfg.mcp_stdio.is_empty() && !cfg.allow_with_mcp {
         return Err(BrowserError::Refused(format!(
-            "stdio MCP server(s) {} run outside the sandbox and could read the saved logins and secret files; remove them or set synthesis.browser.allow_with_mcp to true in your user settings",
+            "stdio MCP server(s) {} run outside the sandbox and could read the saved logins and secret files; remove them or set synt.browser.allow_with_mcp to true in your user settings",
             cfg.mcp_stdio.join(", ")
         )));
     }
     if cfg.sandboxed || cfg.allow_unsandboxed {
         return Ok(());
     }
-    Err(BrowserError::Refused("stored logins and secrets need the sandbox: run with --sandbox enforce (commands the agent runs could otherwise read the saved profile or secret files), or set synthesis.browser.allow_unsandboxed to true in your user settings".into()))
+    Err(BrowserError::Refused("stored logins and secrets need the sandbox: run with --sandbox enforce (commands the agent runs could otherwise read the saved profile or secret files), or set synt.browser.allow_unsandboxed to true in your user settings".into()))
 }
 
 /// A person who said no twice to the same question is not asked a third time in the session.
@@ -326,7 +326,7 @@ async fn login_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> Res {
     profile::display_available(&env, Os::current())
         .map_err(|e| BrowserError::Refused(format!("browser_login: {e}")))?;
     let (Some(host), Some(home)) = (cfg.host.clone(), cfg.home.clone()) else {
-        return Err(BrowserError::Refused("this front-end cannot ask a person to log in. Use browser_fill_secret with a secret declared in the user settings (synthesis.browser.secrets)".into()).into());
+        return Err(BrowserError::Refused("this front-end cannot ask a person to log in. Use browser_fill_secret with a secret declared in the user settings (synt.browser.secrets)".into()).into());
     };
     let origin_str = profile::origin_of(&origin).ok_or("origin has no host")?;
     let dir = profile::create(&home, &name)?;
@@ -431,7 +431,7 @@ async fn fill_secret_body(
     let refuse = |m: String| Box::<dyn Error + Send + Sync>::from(BrowserError::Refused(m));
     let spec = cfg.secrets.get(name).ok_or_else(|| {
         refuse(format!(
-            "no secret named {name:?} in the user settings (synthesis.browser.secrets)"
+            "no secret named {name:?} in the user settings (synt.browser.secrets)"
         ))
     })?;
     let origin = rt.page_origin().await?;

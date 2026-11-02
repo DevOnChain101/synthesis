@@ -1,0 +1,70 @@
+{
+  "cols": 120,
+  "frame": 0,
+  "now": 1790942400000,
+  "op": "frame",
+  "rows": 40,
+  "state": {
+    "history_gen": {
+      "days": 371,
+      "end": "2026-10-02T12:00:00.000Z"
+    },
+    "session": {
+      "cwd": "/work/日本語-プロジェクト",
+      "entries": [
+        {
+          "message": {
+            "content": "日本語の質問 😀 です",
+            "role": "user"
+          },
+          "timestamp": "2026-10-02T11:50:00.000Z",
+          "type": "user"
+        },
+        {
+          "message": {
+            "content": [
+              {
+                "text": "回答 ✅",
+                "type": "text"
+              },
+              {
+                "id": "t1",
+                "input": {
+                  "command": "echo 日本😀"
+                },
+                "name": "Bash",
+                "type": "tool_use"
+              }
+            ],
+            "id": "m1",
+            "model": "claude-opus-5.5",
+            "stop_reason": "tool_use",
+            "usage": {
+              "cache_read_input_tokens": 20000,
+              "input_tokens": 4000,
+              "output_tokens": 600
+            }
+          },
+          "timestamp": "2026-10-02T11:50:01.000Z",
+          "type": "assistant"
+        }
+      ],
+      "id": "session-1",
+      "model": "claude-sonnet"
+    },
+    "sessions": [
+      {
+        "cwd": "/work/日本語",
+        "id": "session-0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "live": {
+          "cwd": "/work/日本語",
+          "name": "日本語セッション😀"
+        },
+        "mtime": 1790942400000,
+        "phase": "idle",
+        "project": "日本語"
+      }
+    ],
+    "sessions_n": 3
+  }
+}

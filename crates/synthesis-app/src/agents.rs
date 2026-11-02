@@ -1,5 +1,5 @@
 //! Custom sub-agent definitions: `<synthesis_home>/agents/*.md` (user) and
-//! `<project_root>/.synthesis/agents/*.md` (project, repository content: only for a trusted project,
+//! `<project_root>/.synt/agents/*.md` (project, repository content: only for a trusted project,
 //! enforced by `AgentTable::from_sources`). Format as Node `loadAgentsDir`: Markdown with a
 //! `---` frontmatter (`name`, `description`, `tools`); the body is the system prompt.
 //! `model` is honoured when it names a model of the run's provider (`run.rs agent_model_resolver`);
@@ -120,7 +120,7 @@ pub fn load(synthesis_home: &Path, project_root: &Path, trust: ProjectTrust) -> 
     scan(&synthesis_home.join("agents"), AgentSource::User, &mut defs);
     let user = defs.len();
     scan(
-        &project_root.join(".synthesis").join("agents"),
+        &project_root.join(".synt").join("agents"),
         AgentSource::Project,
         &mut defs,
     );
@@ -177,7 +177,7 @@ mod tests {
             "rev.md",
             "---\nname: reviewer\ndescription: reviews\ntools: [Read, Grep]\n---\nBe strict.\n",
         );
-        write(&root.join(".synthesis/agents"), "evil.md", "no frontmatter");
+        write(&root.join(".synt/agents"), "evil.md", "no frontmatter");
         let l = load(&home, &root, ProjectTrust::Untrusted);
         let r = l.table.get("reviewer").unwrap();
         assert_eq!(

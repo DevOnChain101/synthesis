@@ -3,7 +3,7 @@
   "env": {},
   "files": {
     "<HOME>/.claude/skills/cl/SKILL.md": "---\ndescription: claude skill\n---\nb",
-    "<TMP>/ws/.synthesis/skills/scout/SKILL.md": "---\ndescription: finds things\nallowed-tools: Read, Grep\n---\nSkill body here"
+    "<TMP>/ws/.synt/skills/scout/SKILL.md": "---\ndescription: finds things\nallowed-tools: Read, Grep\n---\nSkill body here"
   },
   "op": "workspace"
 }

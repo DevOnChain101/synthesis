@@ -96,31 +96,31 @@ Node emitter names NOT carried into the stream (they are UI commands handled by 
 Ordering invariants: `tool.requested` < (`tool.approval_*`)* < `tool.started`? < `tool.completed`, all with the same `tool_call_id`; a denied call has no `tool.started` and `not_run:true`. Every `tool.requested` gets exactly one `tool.completed` (Node rule: every tool_use needs a tool_result [from-node agent.js:3455]). `task.ended` precedes `session.*` terminal event.
 
 ## 4. Artifact references [new]
-`ArtifactRef = {artifact_id:str(UUIDv4), path:str, size:u64, sha256:str(hex), mime:str}`; `path` is relative to the session artifact root (`$SYNTHESIS_HOME/sessions/<session_id>/`, doc §5.7). Events never inline binary data. Clients read content via `artifact.read` or the file path.
+`ArtifactRef = {artifact_id:str(UUIDv4), path:str, size:u64, sha256:str(hex), mime:str}`; `path` is relative to the session artifact root (`$SYNT_HOME/sessions/<session_id>/`, doc §5.7). Events never inline binary data. Clients read content via `artifact.read` or the file path.
 
 ## 5. Redaction and size rules [new unless tagged]
 Applied by the producer before persistence AND before streaming; an unredacted copy is never written anywhere.
-1. Never emitted: credential values; env values whose name matches `^SYNTHESIS_(?:[A-Z0-9]+_)*(?:API_KEY|AUTH_TOKEN|TOKEN)$` [from-node auth.js:46]; hook stdout/stderr [from-node agent.js:1030]; HTTP `Authorization`/`x-api-key` headers; thinking `signature`.
+1. Never emitted: credential values; env values whose name matches `^SYNT_(?:[A-Z0-9]+_)*(?:API_KEY|AUTH_TOKEN|TOKEN)$` [from-node auth.js:46]; hook stdout/stderr [from-node agent.js:1030]; HTTP `Authorization`/`x-api-key` headers; thinking `signature`.
 2. String values anywhere in `payload` matching built-in patterns are replaced by `"[REDACTED:<kind>]"`: `sk-ant-…`, `sk-…` (≥20 chars), `ghp_/gho_/github_pat_…`, `AKIA[0-9A-Z]{16}`, `-----BEGIN [A-Z ]*PRIVATE KEY-----…`, `Bearer <token>`. Browser `fill` values marked `sensitive` are always redacted.
 3. Any string > 8 KiB becomes a preview (head 60 % / tail 40 %, marker `… [N chars truncated] …`, same algorithm as [from-node bash.js:18-26]) plus an `ArtifactRef`; images always become artifacts.
 4. Redaction is lossy by design; tool results seen by the model are NOT redacted (the model must see real output), only their persisted/streamed copies.
 
 ## 6. Headless CLI contract [new]
-`synth run --headless --cwd <dir> [--model <provider/model>] [--mode <permission-mode>] [--criteria <file.json>] [--max-turns N] [--max-tool-calls N] [--max-wall-ms N] (--prompt <text> | --prompt-file <f> | stdin)`
+`synt run --headless --cwd <dir> [--model <provider/model>] [--mode <permission-mode>] [--criteria <file.json>] [--max-turns N] [--max-tool-calls N] [--max-wall-ms N] (--prompt <text> | --prompt-file <f> | stdin)`
 - `--cwd` is REQUIRED (no implicit cwd, workspace-context.md §4).
 - stdout: events only, one per line. stderr: human diagnostics, unstructured.
-- No interactive approver: every `ask` resolves `auto_denied` (`reviewer:"policy:non-interactive"` in `synth run`, which emits `tool.approval_required` + `tool.approval_resolved` for the audit trail; was `"headless"`) and the denial text goes back to the model as a tool error.
+- No interactive approver: every `ask` resolves `auto_denied` (`reviewer:"policy:non-interactive"` in `synt run`, which emits `tool.approval_required` + `tool.approval_resolved` for the audit trail; was `"headless"`) and the denial text goes back to the model as a tool error.
 
 | Exit | Meaning (`task.ended.status`) |
 |---|---|
 | 0 | `completed` (verification passed, or not applicable — verification.md §4) |
 | 1 | `failed` |
-| 2 | usage or config error, no session started (Node uses 1 for this [from-node bin/synth.js:269-685]; deliberately changed) |
+| 2 | usage or config error, no session started (Node uses 1 for this [from-node bin/synt.js:269-685]; deliberately changed) |
 | 3 | `unverified` |
 | 4 | `blocked` |
 | 70 | internal error (crash after the session started; `session.failed` emitted if possible) |
-| 130 | `cancelled` by SIGINT/Ctrl-C [from-node bin/synth.js:116] |
-| 141 | stdout was closed by the reader (EPIPE, e.g. `synth run ... \| head`): the task is cancelled cleanly, every event including the final ones is still persisted in the session store; `synth doctor/models/auth` just exit 0 quietly [new] |
+| 130 | `cancelled` by SIGINT/Ctrl-C [from-node bin/synt.js:116] |
+| 141 | stdout was closed by the reader (EPIPE, e.g. `synt run ... \| head`): the task is cancelled cleanly, every event including the final ones is still persisted in the session store; `synt doctor/models/auth` just exit 0 quietly [new] |
 
 ## 7. Versioning and compatibility [new]
 - Additive changes (new `type`, new optional payload field, new enum value in a field documented as open) keep `v`. Consumers MUST ignore unknown types and unknown fields, and MUST treat unknown enum values as "other".

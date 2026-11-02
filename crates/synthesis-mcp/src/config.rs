@@ -1,6 +1,6 @@
 //! MCP server config entries and env policy (port of claudecfg.js:560-607 + mcp.js:50-106).
 //!
-//! Only entry parsing lives here. Merging `.mcp.json` / `~/.claude.json` / `synthesis.json` sources and
+//! Only entry parsing lives here. Merging `.mcp.json` / `~/.claude.json` / `synt.json` sources and
 //! the project-server approval lists (claudecfg.js `buildMcpServers`) is not ported.
 
 use std::collections::BTreeMap;
@@ -466,10 +466,10 @@ mod tests {
             ("LC_ALL", "C"),
             ("HTTPS_PROXY", "p"),
             ("GITHUB_TOKEN", "nope"),
-            ("SYNTHESIS_PASSWORD", "nope"),
-            ("SYNTHESIS_HOME", "/h"),
-            ("SYNTHESIS_API_KEY", "secret"),
-            ("SYNTHESIS_OPENAI_AUTH_TOKEN", "secret"),
+            ("SYNT_PASSWORD", "nope"),
+            ("SYNT_HOME", "/h"),
+            ("SYNT_API_KEY", "secret"),
+            ("SYNT_OPENAI_AUTH_TOKEN", "secret"),
             ("ANTHROPIC_API_KEY", "nope"),
             ("RANDOM", "nope"),
         ]);
@@ -480,8 +480,8 @@ mod tests {
                 "HTTPS_PROXY",
                 "LC_ALL",
                 "PATH",
-                "SYNTHESIS_AGENT_SESSION",
-                "SYNTHESIS_HOME"
+                "SYNT_AGENT_SESSION",
+                "SYNT_HOME"
             ]
         );
     }

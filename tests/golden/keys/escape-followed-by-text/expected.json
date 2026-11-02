@@ -1,0 +1,16 @@
+{
+  "chunks": [
+    {
+      "events": [
+        {
+          "name": "escape"
+        },
+        {
+          "name": "text",
+          "text": "xyz"
+        }
+      ],
+      "pending": ""
+    }
+  ]
+}

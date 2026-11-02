@@ -1,0 +1,184 @@
+{
+  "cols": 60,
+  "frame": 0,
+  "now": 1790942400000,
+  "op": "frame",
+  "rows": 24,
+  "state": {
+    "history_gen": {
+      "days": 371,
+      "end": "2026-10-02T12:00:00.000Z"
+    },
+    "session": {
+      "cwd": "/very/long/path/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/segment/",
+      "entries": [
+        {
+          "message": {
+            "content": "refactor the parser",
+            "role": "user"
+          },
+          "timestamp": "2026-10-02T11:50:00.000Z",
+          "type": "user"
+        },
+        {
+          "message": {
+            "content": [
+              {
+                "text": "Looking.",
+                "type": "text"
+              },
+              {
+                "id": "t1",
+                "input": {
+                  "file_path": "src/a.js"
+                },
+                "name": "Read",
+                "type": "tool_use"
+              },
+              {
+                "id": "t2",
+                "input": {
+                  "command": "npm test"
+                },
+                "name": "Bash",
+                "type": "tool_use"
+              },
+              {
+                "id": "t3",
+                "input": {
+                  "skill": "scout"
+                },
+                "name": "Skill",
+                "type": "tool_use"
+              },
+              {
+                "id": "t4",
+                "input": {
+                  "description": "find files",
+                  "subagent_type": "explorer"
+                },
+                "name": "Agent",
+                "type": "tool_use"
+              },
+              {
+                "id": "t5",
+                "input": {
+                  "todos": [
+                    {
+                      "content": "Read",
+                      "status": "completed"
+                    },
+                    {
+                      "activeForm": "Fixing",
+                      "content": "Fix",
+                      "status": "in_progress"
+                    },
+                    {
+                      "content": "Test",
+                      "status": "pending"
+                    }
+                  ]
+                },
+                "name": "TodoWrite",
+                "type": "tool_use"
+              }
+            ],
+            "id": "m1",
+            "model": "claude-opus-5.5",
+            "stop_reason": "tool_use",
+            "usage": {
+              "cache_read_input_tokens": 20000,
+              "input_tokens": 4000,
+              "output_tokens": 600
+            }
+          },
+          "timestamp": "2026-10-02T11:50:01.000Z",
+          "type": "assistant"
+        },
+        {
+          "message": {
+            "content": [
+              {
+                "content": "ok",
+                "is_error": false,
+                "tool_use_id": "t1",
+                "type": "tool_result"
+              }
+            ],
+            "role": "user"
+          },
+          "timestamp": "2026-10-02T11:50:02.000Z",
+          "type": "user"
+        },
+        {
+          "message": {
+            "content": [
+              {
+                "content": "ok",
+                "is_error": false,
+                "tool_use_id": "t3",
+                "type": "tool_result"
+              }
+            ],
+            "role": "user"
+          },
+          "timestamp": "2026-10-02T11:50:03.000Z",
+          "type": "user"
+        },
+        {
+          "message": {
+            "content": [
+              {
+                "content": "ok",
+                "is_error": false,
+                "tool_use_id": "t5",
+                "type": "tool_result"
+              }
+            ],
+            "role": "user"
+          },
+          "timestamp": "2026-10-02T11:50:04.000Z",
+          "type": "user"
+        },
+        {
+          "message": {
+            "content": [
+              {
+                "content": "exit 1\nboom",
+                "is_error": true,
+                "tool_use_id": "t2",
+                "type": "tool_result"
+              }
+            ],
+            "role": "user"
+          },
+          "timestamp": "2026-10-02T11:50:05.000Z",
+          "type": "user"
+        },
+        {
+          "message": {
+            "content": [
+              {
+                "text": "Second reply with **bold** text.",
+                "type": "text"
+              }
+            ],
+            "id": "m2",
+            "model": "claude-opus-5.5",
+            "stop_reason": "end_turn",
+            "usage": {
+              "input_tokens": 5000,
+              "output_tokens": 900
+            }
+          },
+          "timestamp": "2026-10-02T11:50:06.000Z",
+          "type": "assistant"
+        }
+      ],
+      "gitBranch": "feature/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "id": "session-1",
+      "model": "provider/mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"
+    },
+    "sessions_n": 3
+  }
+}

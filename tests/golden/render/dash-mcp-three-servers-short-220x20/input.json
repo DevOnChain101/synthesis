@@ -1,0 +1,46 @@
+{
+  "cols": 220,
+  "frame": 0,
+  "now": 1790942400000,
+  "op": "frame",
+  "rows": 20,
+  "state": {
+    "history_gen": {
+      "days": 371,
+      "end": "2026-10-02T12:00:00.000Z"
+    },
+    "mcpServers": [
+      {
+        "command": "node",
+        "enabled": true,
+        "name": "alpha",
+        "scope": "project",
+        "source": "/x/.mcp.json",
+        "type": "stdio"
+      },
+      {
+        "command": "node",
+        "enabled": true,
+        "name": "beta",
+        "scope": "project",
+        "source": "/x/.mcp.json",
+        "type": "stdio"
+      },
+      {
+        "command": "node",
+        "enabled": true,
+        "name": "gamma",
+        "scope": "project",
+        "source": "/x/.mcp.json",
+        "type": "stdio"
+      }
+    ],
+    "session": {
+      "cwd": "D:/workspace/project",
+      "id": "session-1",
+      "model": "claude-sonnet",
+      "startedAt": 1790942340000
+    },
+    "sessions_n": 3
+  }
+}

@@ -1,7 +1,7 @@
 {
   "error": {
-    "code": "SYNTHESIS_INVALID_CONFIG",
-    "message": "invalid config <SYNTHESIS_HOME>/synthesis.json: $.maxTokens must be a positive number; $.aliases.a must be a non-empty string",
+    "code": "SYNT_INVALID_CONFIG",
+    "message": "invalid config <SYNT_HOME>/synt.json: $.maxTokens must be a positive number; $.aliases.a must be a non-empty string",
     "name": "ConfigValidationError"
   }
 }

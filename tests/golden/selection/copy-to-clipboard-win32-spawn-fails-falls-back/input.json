@@ -1,0 +1,7 @@
+{
+  "isTTY": true,
+  "op": "copy",
+  "platform": "win32",
+  "spawnThrows": true,
+  "text": "abc"
+}

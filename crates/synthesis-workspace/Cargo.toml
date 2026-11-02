@@ -16,5 +16,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW / O_NONBLOCK constants for the lock file (no unsafe)
+rustix = { version = "1", default-features = false, features = ["fs"] }
+
 [dev-dependencies]
 tempfile = "3"

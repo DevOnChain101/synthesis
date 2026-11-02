@@ -1,0 +1,210 @@
+[
+  {
+    "event": {
+      "alt": false,
+      "extending": false,
+      "moved": false,
+      "shift": false,
+      "type": "up"
+    },
+    "result": {
+      "act": "none",
+      "mode": "pending"
+    }
+  },
+  {
+    "event": {
+      "alt": false,
+      "extending": true,
+      "moved": false,
+      "shift": false,
+      "type": "up"
+    },
+    "result": {
+      "act": "none",
+      "mode": "pending"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "extending": false,
+      "moved": false,
+      "shift": false,
+      "type": "up"
+    },
+    "result": {
+      "act": "none",
+      "mode": "pending"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "extending": true,
+      "moved": false,
+      "shift": false,
+      "type": "up"
+    },
+    "result": {
+      "act": "none",
+      "mode": "pending"
+    }
+  },
+  {
+    "event": {
+      "alt": false,
+      "extending": false,
+      "moved": false,
+      "shift": true,
+      "type": "up"
+    },
+    "result": {
+      "act": "none",
+      "mode": "pending"
+    }
+  },
+  {
+    "event": {
+      "alt": false,
+      "extending": true,
+      "moved": false,
+      "shift": true,
+      "type": "up"
+    },
+    "result": {
+      "act": "none",
+      "mode": "pending"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "extending": false,
+      "moved": false,
+      "shift": true,
+      "type": "up"
+    },
+    "result": {
+      "act": "none",
+      "mode": "pending"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "extending": true,
+      "moved": false,
+      "shift": true,
+      "type": "up"
+    },
+    "result": {
+      "act": "none",
+      "mode": "pending"
+    }
+  },
+  {
+    "event": {
+      "alt": false,
+      "extending": false,
+      "moved": true,
+      "shift": false,
+      "type": "up"
+    },
+    "result": {
+      "act": "none",
+      "mode": "pending"
+    }
+  },
+  {
+    "event": {
+      "alt": false,
+      "extending": true,
+      "moved": true,
+      "shift": false,
+      "type": "up"
+    },
+    "result": {
+      "act": "none",
+      "mode": "pending"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "extending": false,
+      "moved": true,
+      "shift": false,
+      "type": "up"
+    },
+    "result": {
+      "act": "none",
+      "mode": "pending"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "extending": true,
+      "moved": true,
+      "shift": false,
+      "type": "up"
+    },
+    "result": {
+      "act": "none",
+      "mode": "pending"
+    }
+  },
+  {
+    "event": {
+      "alt": false,
+      "extending": false,
+      "moved": true,
+      "shift": true,
+      "type": "up"
+    },
+    "result": {
+      "act": "none",
+      "mode": "pending"
+    }
+  },
+  {
+    "event": {
+      "alt": false,
+      "extending": true,
+      "moved": true,
+      "shift": true,
+      "type": "up"
+    },
+    "result": {
+      "act": "none",
+      "mode": "pending"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "extending": false,
+      "moved": true,
+      "shift": true,
+      "type": "up"
+    },
+    "result": {
+      "act": "none",
+      "mode": "pending"
+    }
+  },
+  {
+    "event": {
+      "alt": true,
+      "extending": true,
+      "moved": true,
+      "shift": true,
+      "type": "up"
+    },
+    "result": {
+      "act": "none",
+      "mode": "pending"
+    }
+  }
+]

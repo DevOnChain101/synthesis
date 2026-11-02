@@ -1,0 +1,17 @@
+{
+  "events": [
+    {
+      "page": true,
+      "type": "key"
+    },
+    {
+      "page": false,
+      "type": "key"
+    },
+    {
+      "type": "key"
+    }
+  ],
+  "mode": "pending",
+  "op": "transition"
+}

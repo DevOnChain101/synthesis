@@ -1,0 +1,5 @@
+{
+  "line": "\u001b[48;2;1;2;3m   \u001b[0mx",
+  "mode": "truecolor",
+  "op": "encode"
+}

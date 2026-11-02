@@ -1,0 +1,21 @@
+{
+  "chunks": [
+    {
+      "events": [
+        {
+          "name": "ctrl-up"
+        },
+        {
+          "name": "ctrl-down"
+        },
+        {
+          "name": "ctrl-right"
+        },
+        {
+          "name": "ctrl-left"
+        }
+      ],
+      "pending": ""
+    }
+  ]
+}

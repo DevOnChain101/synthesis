@@ -80,7 +80,7 @@ fn home_db_artifacts_and_mirror_are_private() {
     assert_eq!(mode(&e.home.join("sessions/s1")), 0o700);
     assert_eq!(mode(&e.home.join("sessions/s1/artifacts")), 0o700);
     assert_eq!(mode(&e.home.join("sessions/s1/lock")), 0o600);
-    for f in ["synthesis.db", "synthesis.db-wal", "synthesis.db-shm"] {
+    for f in ["synt.db", "synt.db-wal", "synt.db-shm"] {
         assert_eq!(mode(&e.home.join(f)), 0o600, "{f}");
     }
     assert_eq!(mode(&e.home.join("sessions/s1").join(&a.path)), 0o600);
@@ -100,15 +100,11 @@ fn existing_loose_home_and_db_are_tightened() {
     let e = env();
     fs::create_dir_all(&e.home).unwrap();
     fs::set_permissions(&e.home, fs::Permissions::from_mode(0o755)).unwrap();
-    fs::write(e.home.join("synthesis.db"), b"").unwrap();
-    fs::set_permissions(
-        e.home.join("synthesis.db"),
-        fs::Permissions::from_mode(0o644),
-    )
-    .unwrap();
+    fs::write(e.home.join("synt.db"), b"").unwrap();
+    fs::set_permissions(e.home.join("synt.db"), fs::Permissions::from_mode(0o644)).unwrap();
     Store::open(&e.home, StoreOptions::default()).unwrap();
     assert_eq!(mode(&e.home), 0o700);
-    assert_eq!(mode(&e.home.join("synthesis.db")), 0o600);
+    assert_eq!(mode(&e.home.join("synt.db")), 0o600);
 }
 
 #[cfg(unix)]
@@ -117,7 +113,7 @@ fn symlinked_db_is_refused() {
     let e = env();
     fs::create_dir_all(&e.home).unwrap();
     let target = e.base.join("elsewhere.db");
-    std::os::unix::fs::symlink(&target, e.home.join("synthesis.db")).unwrap();
+    std::os::unix::fs::symlink(&target, e.home.join("synt.db")).unwrap();
     assert!(Store::open(&e.home, StoreOptions::default()).is_err());
     assert!(!target.exists(), "must not create through the symlink");
 }
@@ -215,7 +211,7 @@ fn snapshots_withhold_secret_files_and_redact_text_by_default() {
     };
     for i in [0, 1] {
         assert!(
-            bytes(i).starts_with("[synth: secret file withheld"),
+            bytes(i).starts_with("[synt: secret file withheld"),
             "{}",
             bytes(i)
         );
@@ -424,7 +420,7 @@ fn rolled_back_transaction_leaves_no_artifact_file() {
     let e = env();
     let (store, mut w) = session(&e, StoreOptions::default(), "s1");
     {
-        let c = rusqlite::Connection::open(e.home.join("synthesis.db")).unwrap();
+        let c = rusqlite::Connection::open(e.home.join("synt.db")).unwrap();
         c.execute_batch(
             "CREATE TRIGGER boom BEFORE INSERT ON events WHEN NEW.type='notice'
              BEGIN SELECT RAISE(ABORT,'boom'); END;",

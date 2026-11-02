@@ -1,0 +1,5 @@
+{
+  "line": "a\u001b[2Kb\u001b[1;5Hc\u001b[?25l",
+  "mode": "256",
+  "op": "encode"
+}

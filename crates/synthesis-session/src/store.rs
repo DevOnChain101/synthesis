@@ -115,7 +115,7 @@ fn chmod(p: &Path, mode: u32) -> Result<()> {
     Ok(fs::set_permissions(p, fs::Permissions::from_mode(mode))?)
 }
 
-/// Creates `synthesis.db` 0600 before SQLite does (it gives -wal/-shm the same mode); tightens an
+/// Creates `synt.db` 0600 before SQLite does (it gives -wal/-shm the same mode); tightens an
 /// existing one; refuses a symlink.
 fn ensure_db_file(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
@@ -139,7 +139,7 @@ fn ensure_db_file(path: &Path) -> Result<()> {
 }
 
 fn connect(home: &Path, read_only: bool) -> Result<Connection> {
-    let path = home.join("synthesis.db");
+    let path = home.join("synt.db");
     let conn = if read_only {
         Connection::open_with_flags(
             &path,
@@ -343,7 +343,7 @@ pub struct MessageRow {
 pub enum Retention {
     Session,
     Keep,
-    /// RFC 3339 expiry for a future `synth gc`.
+    /// RFC 3339 expiry for a future `synt gc`.
     Until(String),
 }
 
@@ -405,7 +405,7 @@ pub struct FileSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lossy_sha256: Option<String>,
     /// [`file_state_hash`] of the file after the run's last write to it (set when that write
-    /// completed). `synth rewind` refuses a file whose state differs, unless forced.
+    /// completed). `synt rewind` refuses a file whose state differs, unless forced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_sha256: Option<String>,
 }
@@ -433,7 +433,7 @@ impl Store {
         private_dir(synthesis_home)?;
         #[cfg(unix)]
         chmod(synthesis_home, 0o700)?;
-        ensure_db_file(&synthesis_home.join("synthesis.db"))?;
+        ensure_db_file(&synthesis_home.join("synt.db"))?;
         let mut conn = connect(synthesis_home, false)?;
         schema::migrate(&mut conn, &now())?;
         Ok(Store {
@@ -452,6 +452,103 @@ impl Store {
 
     pub fn home(&self) -> &Path {
         &self.home
+    }
+
+    /// Retention of attached images: in every session not touched for `days` days (`updated_at`
+    /// before `now - days`; messages carry no time of their own), each image block of a stored
+    /// message becomes the text `[image removed after N days]`. Rows keep their `idx` and order;
+    /// nothing else changes. One immediate transaction; a database that is locked by another
+    /// process is skipped (`Ok(0)`), never an error. Returns the images removed. `days == 0`
+    /// keeps everything.
+    pub fn purge_images(&self, days: u32, now: OffsetDateTime) -> Result<PurgeReport> {
+        if days == 0 {
+            return Ok(PurgeReport::default());
+        }
+        let fmt = time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+        );
+        let cutoff = (now - time::Duration::days(i64::from(days)))
+            .format(&fmt)
+            .expect("format utc timestamp");
+        let mut conn = connect(&self.home, false)?;
+        conn.busy_timeout(Duration::from_millis(200))?;
+        let busy = |e: &rusqlite::Error| {
+            matches!(
+                e,
+                rusqlite::Error::SqliteFailure(f, _)
+                    if matches!(f.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+            )
+        };
+        // freed pages are overwritten with zeros, not just unlinked (per connection; must be set
+        // before the transaction starts)
+        conn.pragma_update(None, "secure_delete", true)?;
+        let tx = match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+            Ok(t) => t,
+            Err(e) if busy(&e) => return Ok(PurgeReport::default()),
+            Err(e) => return Err(e.into()),
+        };
+        let rows: Vec<(String, i64, String, String)> = {
+            let mut st = tx.prepare(
+                "SELECT m.session_id, m.idx, m.content, m.meta FROM messages m \
+                 JOIN sessions s ON s.id = m.session_id \
+                 WHERE s.updated_at < ?1 \
+                   AND (m.content LIKE '%\"image\"%' OR m.meta LIKE '%\"image\"%')",
+            )?;
+            st.query_map([&cutoff], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?
+        };
+        let text = format!("[image removed after {days} days]");
+        let mut removed = 0;
+        for (sid, idx, content, meta) in rows {
+            let (Ok(mut c), Ok(mut m)) = (
+                serde_json::from_str::<Value>(&content),
+                serde_json::from_str::<Value>(&meta),
+            ) else {
+                continue;
+            };
+            // `meta` holds the extras of a Node-format line: images anywhere in it go too
+            let n = replace_images(&mut c, &text) + replace_images_deep(&mut m, &text);
+            if n > 0 {
+                tx.execute(
+                    "UPDATE messages SET content = ?1, meta = ?2 WHERE session_id = ?3 AND idx = ?4",
+                    rusqlite::params![c.to_string(), m.to_string(), sid, idx],
+                )?;
+                removed += n;
+            }
+        }
+        match tx.commit() {
+            Ok(()) => {
+                let mut wal_truncated = true;
+                if removed > 0 {
+                    // The old pages may still sit in the write-ahead log: fold it into the
+                    // database and truncate it. A reader holding the log makes that "busy":
+                    // retried briefly, then reported (the images are already gone from the
+                    // tables; only stale copies remain in the log until the next checkpoint).
+                    // No VACUUM: it rewrites the whole database under an exclusive lock and
+                    // needs free disk for a copy; secure_delete already zeroed what was freed.
+                    wal_truncated = false;
+                    for _ in 0..5 {
+                        let r: std::result::Result<(i64, i64, i64), _> =
+                            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                            });
+                        if matches!(r, Ok((0, _, _))) {
+                            wal_truncated = true;
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+                Ok(PurgeReport {
+                    images: removed,
+                    wal_truncated,
+                })
+            }
+            Err(e) if busy(&e) => Ok(PurgeReport::default()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// A read-only connection; any number may exist next to the single writer.
@@ -1720,7 +1817,7 @@ impl SessionWriter {
         }
         let sha = sha_hex(&bytes);
         if synthesis_core::secrets::is_secret_path(real) {
-            let note = format!("[synth: secret file withheld from snapshot; sha256={sha}]");
+            let note = format!("[synt: secret file withheld from snapshot; sha256={sha}]");
             return (note.into_bytes(), Some(sha));
         }
         match std::str::from_utf8(&bytes).map(|t| self.redactor.redact_str(t)) {
@@ -2011,4 +2108,74 @@ fn set_payload(tx: &Transaction<'_>, sid: &str, seq: i64, body: &str) -> Result<
         "UPDATE events SET payload=?3 WHERE session_id=?1 AND seq=?2 AND payload<>?3",
         params![sid, seq, body],
     )? as u64)
+}
+
+/// What [`Store::purge_images`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PurgeReport {
+    /// Images replaced.
+    pub images: usize,
+    /// The write-ahead log was truncated afterwards. `false` after a purge that removed images
+    /// means another connection held the log: stale copies stay in it until the next checkpoint.
+    pub wal_truncated: bool,
+}
+
+impl Default for PurgeReport {
+    fn default() -> Self {
+        Self {
+            images: 0,
+            wal_truncated: true,
+        }
+    }
+}
+
+/// Images at any depth (for `meta`, which is not model-visible content).
+fn replace_images_deep(v: &mut Value, text: &str) -> usize {
+    match v {
+        Value::Object(o) if o.get("type").and_then(Value::as_str) == Some("image") => {
+            *v = serde_json::json!({"type": "text", "text": text});
+            1
+        }
+        Value::Object(o) => o.values_mut().map(|x| replace_images_deep(x, text)).sum(),
+        Value::Array(a) => a.iter_mut().map(|x| replace_images_deep(x, text)).sum(),
+        _ => 0,
+    }
+}
+
+/// Image bytes in a stored message: the message's own image blocks, and what a `tool_result` block
+/// carries (a screenshot a tool returned, at any depth inside that content). Nothing else: a
+/// `tool_use` input or any other JSON that happens to say `"type": "image"` is left alone.
+fn replace_images(content: &mut Value, text: &str) -> usize {
+    let block = || serde_json::json!({"type": "text", "text": text});
+    // images anywhere inside a tool result's content
+    fn deep(v: &mut Value, block: &dyn Fn() -> Value) -> usize {
+        match v {
+            Value::Object(o) if o.get("type").and_then(Value::as_str) == Some("image") => {
+                *v = block();
+                1
+            }
+            Value::Object(o) => o.values_mut().map(|x| deep(x, block)).sum(),
+            Value::Array(a) => a.iter_mut().map(|x| deep(x, block)).sum(),
+            _ => 0,
+        }
+    }
+    let Value::Array(blocks) = content else {
+        return 0;
+    };
+    let mut n = 0;
+    for b in blocks {
+        match b.get("type").and_then(Value::as_str) {
+            Some("image") => {
+                *b = block();
+                n += 1;
+            }
+            Some("tool_result") => {
+                if let Some(c) = b.get_mut("content") {
+                    n += deep(c, &block);
+                }
+            }
+            _ => {}
+        }
+    }
+    n
 }

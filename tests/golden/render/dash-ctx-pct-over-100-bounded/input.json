@@ -1,0 +1,35 @@
+{
+  "cols": 180,
+  "frame": 0,
+  "now": 1790942400000,
+  "op": "frame",
+  "rows": 60,
+  "state": {
+    "history_gen": {
+      "days": 371,
+      "end": "2026-10-02T12:00:00.000Z"
+    },
+    "session": {
+      "cwd": "D:/workspace/project",
+      "id": "session-1",
+      "model": "claude-sonnet",
+      "startedAt": 1790942340000
+    },
+    "sessions": [
+      {
+        "ctxPct": 113,
+        "cwd": "D:/workspace/project-0",
+        "id": "session-0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "live": {
+          "cwd": "D:/workspace/project-0",
+          "name": "proj-0"
+        },
+        "mtime": 1790942400000,
+        "phase": "idle",
+        "project": "proj-0",
+        "tokens": 1000
+      }
+    ],
+    "sessions_n": 3
+  }
+}

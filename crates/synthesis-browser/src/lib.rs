@@ -532,7 +532,7 @@ async fn default_context(cdp: &Cdp) -> Result<(String, Option<String>)> {
 }
 
 impl BrowserRuntime {
-    /// Discovers a browser (`SYNTHESIS_BROWSER_PATH` first), launches it headless with an isolated
+    /// Discovers a browser (`SYNT_BROWSER_PATH` first), launches it headless with an isolated
     /// temp profile and opens one tab in a fresh browser context.
     pub async fn launch(opts: BrowserOptions, env: &Env) -> Result<Self> {
         if (opts.profile.is_some() || !opts.headless) && opts.transport == Transport::Tcp {

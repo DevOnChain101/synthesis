@@ -1,0 +1,44 @@
+{
+  "cases": [
+    {
+      "cap": 5,
+      "todos": [
+        "completed",
+        "completed",
+        "pending",
+        "pending",
+        "pending"
+      ]
+    },
+    {
+      "cap": 3,
+      "todos": [
+        "completed",
+        "completed",
+        "pending",
+        "pending",
+        "pending"
+      ]
+    },
+    {
+      "cap": 2,
+      "todos": [
+        "completed",
+        "completed",
+        "completed",
+        "completed",
+        "completed"
+      ]
+    },
+    {
+      "cap": 2,
+      "todos": [
+        "pending",
+        "pending",
+        "pending",
+        "in_progress"
+      ]
+    }
+  ],
+  "op": "todoWindow"
+}

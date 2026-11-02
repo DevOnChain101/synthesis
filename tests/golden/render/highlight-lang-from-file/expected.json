@@ -1,0 +1,42 @@
+[
+  {
+    "file": "a.js",
+    "lang": "js"
+  },
+  {
+    "file": "A.TS",
+    "lang": "js"
+  },
+  {
+    "file": "x.py",
+    "lang": "py"
+  },
+  {
+    "file": "main.rs",
+    "lang": "rust"
+  },
+  {
+    "file": "Makefile",
+    "lang": null
+  },
+  {
+    "file": "a.tar.gz",
+    "lang": null
+  },
+  {
+    "file": "c:\\x\\y.json",
+    "lang": "json"
+  },
+  {
+    "file": "x.yml",
+    "lang": "yaml"
+  },
+  {
+    "file": "",
+    "lang": null
+  },
+  {
+    "file": null,
+    "lang": null
+  }
+]

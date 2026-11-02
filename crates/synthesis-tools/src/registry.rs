@@ -311,7 +311,7 @@ pub fn standard_policy(ws: &WorkspaceContext) -> Option<SandboxPolicy> {
     standard_policy_with(ws, NetworkPolicy::Deny)
 }
 
-/// [`standard_policy`] with an explicit network mode (`synth run --network`).
+/// [`standard_policy`] with an explicit network mode (`synt run --network`).
 pub fn standard_policy_with(
     ws: &WorkspaceContext,
     network: NetworkPolicy,

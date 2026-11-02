@@ -1,5 +1,5 @@
 //! Cross-session peers wiring (messaging.md Part B): settings, run dir, key, endpoint, registry
-//! entry. Off unless `synthesis.peers.enabled` in USER settings or `--peers`.
+//! entry. Off unless `synt.peers.enabled` in USER settings or `--peers`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -30,7 +30,7 @@ pub fn valid_name(n: &str) -> bool {
 }
 
 /// What the session is for, shown to peers: `--about`, else the first non-empty line of
-/// `SYNTHESIS.md` at the workspace root (a regular file, first 4 KiB). Redacted, control
+/// `AGENTS.md` at the workspace root (a regular file, first 4 KiB). Redacted, control
 /// characters removed, at most 120 characters.
 pub fn about_of(
     flag: Option<&str>,
@@ -41,7 +41,7 @@ pub fn about_of(
         Some(f) => f.to_string(),
         None => {
             use std::io::Read;
-            let p = root.join("SYNTHESIS.md");
+            let p = root.join("AGENTS.md");
             if !std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_file()) {
                 return None;
             }
@@ -116,7 +116,7 @@ pub fn setup(
         .get_nonempty("USERPROFILE")
         .map(std::path::PathBuf::from);
     if !platform_ok(home, profile.as_deref()) {
-        return off("SYNTHESIS_HOME must be under your user profile on Windows".into());
+        return off("SYNT_HOME must be under your user profile on Windows".into());
     }
     let run = run_dir(home);
     let key = match load_or_create_key(&run) {
@@ -185,7 +185,7 @@ pub fn setup(
     Ok(Some(Started { link, listener }))
 }
 
-/// One `synth doctor` block.
+/// One `synt doctor` block.
 pub fn doctor_lines(
     peers: &Map<String, Value>,
     home: &Path,
@@ -194,12 +194,12 @@ pub fn doctor_lines(
 ) -> Vec<String> {
     let c = Config::from_settings(peers, "<workspace>");
     let mut v = vec![format!(
-        "peers (cross-session messaging, `synthesis.peers.enabled` in user settings or --peers): {}",
+        "peers (cross-session messaging, `synt.peers.enabled` in user settings or --peers): {}",
         if c.enabled { "enabled" } else { "off" }
     )];
     if !c.enabled {
         v.push(
-            "  hint: turn on with `synthesis.peers.enabled: true` in user settings.json or --peers; then set accept_delegation, accept_notify and share_commands (docs/CLI.md)"
+            "  hint: turn on with `synt.peers.enabled: true` in user settings.json or --peers; then set accept_delegation, accept_notify and share_commands (docs/CLI.md)"
                 .into(),
         );
         return v;
@@ -212,7 +212,7 @@ pub fn doctor_lines(
         if platform_ok(home, profile.as_deref()) {
             "yes"
         } else {
-            "no (Windows: SYNTHESIS_HOME must be under the user profile)"
+            "no (Windows: SYNT_HOME must be under the user profile)"
         }
     ));
     #[cfg(unix)]
@@ -225,7 +225,7 @@ pub fn doctor_lines(
                 "fits".to_string()
             } else {
                 format!(
-                    "too long (over {} bytes): peers stay off; use a shorter SYNTHESIS_HOME",
+                    "too long (over {} bytes): peers stay off; use a shorter SYNT_HOME",
                     synthesis_peers::net::MAX_SOCKET_PATH
                 )
             }
@@ -238,7 +238,7 @@ pub fn doctor_lines(
         );
     }
     v.push(
-        "  note: a session answers peers only when its model has a price (`synthesis.pricing` in user settings.json); otherwise it declines with no_price"
+        "  note: a session answers peers only when its model has a price (`synt.pricing` in user settings.json); otherwise it declines with no_price"
             .into(),
     );
     v.push(format!(
@@ -315,7 +315,7 @@ mod tests {
         let red = |s: &str| s.replace("sk-SECRET", "[REDACTED]");
         assert_eq!(about_of(None, t.path(), &red), None);
         std::fs::write(
-            t.path().join("SYNTHESIS.md"),
+            t.path().join("AGENTS.md"),
             "\n# Billing API sk-SECRET\nmore\n",
         )
         .unwrap();

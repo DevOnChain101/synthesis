@@ -1,0 +1,28 @@
+{
+  "h": 11,
+  "op": "tasksUsage",
+  "state": {
+    "history_gen": {
+      "days": 371,
+      "end": "2026-10-02T12:00:00.000Z"
+    },
+    "session": {
+      "set": {
+        "todos": [
+          {
+            "activeForm": "a very long task title that must be clipped to the box width of the panel",
+            "content": "a very long task title that must be clipped to the box width of the panel",
+            "status": "in_progress"
+          },
+          {
+            "activeForm": "b",
+            "content": "b",
+            "status": "pending"
+          }
+        ]
+      }
+    },
+    "usageMetric": "tokens"
+  },
+  "w": 120
+}

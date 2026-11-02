@@ -1,0 +1,5 @@
+[
+  "mouse down shift=true alt=false ctrl=false @3,4",
+  "wheel-up shift=false alt=false ctrl=false @1,2",
+  "mouse-drag shift=false alt=true ctrl=true @9,9"
+]

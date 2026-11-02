@@ -1,0 +1,27 @@
+{
+  "h": 20,
+  "lines": [
+    "",
+    "╭───────────────────────────────────╮",
+    "│ ✻ Hello there! I'm Synthesis.  · 1.0.0 │",
+    "│                                   │",
+    "│ /help for commands · alt+v pastes │",
+    "│ cwd: /work/proj                   │",
+    "╰───────────────────────────────────╯",
+    "",
+    " Tips for getting started:",
+    "  1. Ask Synthesis to explain, fix or",
+    "     build something in this ",
+    "     folder",
+    "  2. Type / for commands and ",
+    "     skills, @ to mention a file",
+    "  3. Drop or paste an image path",
+    "     to attach a screenshot",
+    "╭───────────────────────────────────╮",
+    "│ >  Try \"explain this repo\" · / co │",
+    "╰───────────────────────────────────╯",
+    "⏸ manual mode on  fak… · effort: auto"
+  ],
+  "maxScroll": 0,
+  "w": 37
+}

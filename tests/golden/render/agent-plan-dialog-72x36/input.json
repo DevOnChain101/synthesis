@@ -1,0 +1,21 @@
+{
+  "agent": {
+    "pending": [
+      {
+        "choice": 0,
+        "dialog": "plan",
+        "input": {
+          "plan": "# Add README\n1. **draft** it\n2. commit"
+        },
+        "kind": "permission",
+        "status": "pending"
+      }
+    ]
+  },
+  "frame": 0,
+  "h": 36,
+  "now": 1790942400000,
+  "op": "agent",
+  "opts": {},
+  "w": 72
+}

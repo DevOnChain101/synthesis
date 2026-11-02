@@ -1,0 +1,11 @@
+[
+  {
+    "event": {
+      "type": "drag"
+    },
+    "result": {
+      "act": "none",
+      "mode": "idle"
+    }
+  }
+]

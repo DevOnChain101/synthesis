@@ -19,7 +19,7 @@ in tests/golden/README.md (Node|NEMO_|nemo_home|loadNemoEnv|nemo-cli|nemo import
 token DevOnChain101/nemo-acd
 in docs/RELEASE.md nemo-acd
 
-# Legacy migration: `synth doctor` detects the old ~/.nemo and NEMO_* (names only), never reads them.
+# Legacy migration: `synt doctor` detects the old ~/.nemo and NEMO_* (names only), never reads them.
 file apps/cli/src/info.rs
 # Docs that explain the rename quote the old names (old -> new tables, migration steps).
 in CLAUDE.md Nemo|NEMO[_.*]\S*|\.nemo|\bnemo\b
@@ -31,6 +31,7 @@ in tests/golden/README.md Nemo|NEMO[_.*]\S*|\.nemo|nemo\.json|nemocode-config|\b
 # The checker itself, this list, and the rename test harness wording.
 file scripts/check-no-legacy-name.mjs
 file scripts/nemo-leftovers.allow
+in crates/synthesis-tui-render/tests/golden.rs (Nemo -> Synthesis|"nemo")
 
 # History: past entries describe what was true then.
 file CHANGELOG.md

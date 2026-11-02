@@ -2,8 +2,8 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {
-    "<TMP>/ws/.synthesis/config.json": "not json"
+    "<TMP>/ws/.synt/config.json": "not json"
   },
-  "home": "<SYNTHESIS_HOME>",
+  "home": "<SYNT_HOME>",
   "op": "loadConfig"
 }

@@ -39,6 +39,7 @@
 //! [`WorktreeManager::execute_merge`].
 
 mod git;
+pub use git::find_git;
 mod resources;
 mod restore;
 mod worktree;

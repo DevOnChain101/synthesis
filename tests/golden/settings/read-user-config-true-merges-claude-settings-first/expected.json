@@ -24,11 +24,11 @@
           "hooks": [
             {
               "command": "echo p",
-              "source": "<TMP>/ws/.synthesis/settings.json",
+              "source": "<TMP>/ws/.synt/settings.json",
               "type": "command"
             }
           ],
-          "source": "<TMP>/ws/.synthesis/settings.json"
+          "source": "<TMP>/ws/.synt/settings.json"
         }
       ]
     },

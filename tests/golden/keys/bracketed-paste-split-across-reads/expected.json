@@ -1,0 +1,21 @@
+{
+  "chunks": [
+    {
+      "events": [],
+      "pending": "\u001b[200~part one "
+    },
+    {
+      "events": [
+        {
+          "name": "paste",
+          "text": "part one part two"
+        },
+        {
+          "name": "text",
+          "text": "z"
+        }
+      ],
+      "pending": ""
+    }
+  ]
+}

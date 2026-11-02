@@ -5,13 +5,13 @@
     "KEEP": "k"
   },
   "files": {
-    "<SYNTHESIS_HOME>/settings.json": {
+    "<SYNT_HOME>/settings.json": {
       "env": {
         "A": "user",
         "B": "user"
       }
     },
-    "<TMP>/ws/.synthesis/settings.json": {
+    "<TMP>/ws/.synt/settings.json": {
       "env": {
         "A": "proj",
         "B": "proj",

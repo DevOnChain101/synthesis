@@ -188,7 +188,7 @@ impl Git {
 
 /// Resolve `git` from the injected PATH to an absolute path, so a `git.exe` planted in the
 /// (untrusted) working directory can never be picked up on Windows.
-fn find_git(env: &Env) -> Option<PathBuf> {
+pub fn find_git(env: &Env) -> Option<PathBuf> {
     let path: OsString = env.get("PATH").or_else(|| env.get("Path"))?.into();
     let name = if cfg!(windows) { "git.exe" } else { "git" };
     std::env::split_paths(&path)

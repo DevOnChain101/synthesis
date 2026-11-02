@@ -5,8 +5,8 @@ PackageVersion: @VERSION@
 InstallerType: zip
 NestedInstallerType: portable
 NestedInstallerFiles:
-  - RelativeFilePath: synthesis-@VERSION@-x86_64-pc-windows-msvc\synth.exe
-    PortableCommandAlias: synth
+  - RelativeFilePath: synthesis-@VERSION@-x86_64-pc-windows-msvc\synt.exe
+    PortableCommandAlias: synt
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/DevOnChain101/nemo-acd/releases/download/v@VERSION@/synthesis-@VERSION@-x86_64-pc-windows-msvc.zip
@@ -15,7 +15,7 @@ Installers:
     InstallerUrl: https://github.com/DevOnChain101/nemo-acd/releases/download/v@VERSION@/synthesis-@VERSION@-aarch64-pc-windows-msvc.zip
     InstallerSha256: @SHA256_AARCH64_PC_WINDOWS_MSVC@
     NestedInstallerFiles:
-      - RelativeFilePath: synthesis-@VERSION@-aarch64-pc-windows-msvc\synth.exe
-        PortableCommandAlias: synth
+      - RelativeFilePath: synthesis-@VERSION@-aarch64-pc-windows-msvc\synt.exe
+        PortableCommandAlias: synt
 ManifestType: installer
 ManifestVersion: 1.6.0
