@@ -1,0 +1,7 @@
+{
+  "env": {
+    "COLORTERM": "truecolor"
+  },
+  "op": "detect",
+  "platform": "linux"
+}

@@ -1,0 +1,30 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+● Title
+  
+  1. one
+  2. two
+  
+  │ + const a = 1; // c
+  │ + function f(x) { return x + "s"; }
+  
+  ▎ quote
+  
+  bold it code link (http://x)
+╭──────────────────────────────────────────────────────────╮
+│ >  Try "explain this repo" · / commands · @ files · Alt+ │
+╰──────────────────────────────────────────────────────────╯
+⏸ manual mode on (shift+tab to cycle)  fake-… · effort: auto

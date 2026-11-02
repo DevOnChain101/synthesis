@@ -1,0 +1,63 @@
+{
+  "cols": 80,
+  "lines": [
+    "▐ ✻ Synthesis  ·  MISSION CONTROL ▌ │ ● 2 live               ctx ▱▱▱▱▱▱ 3% │ 12:00:00",
+    "┏━ ◆ Running 2 ━━━━┓┏━ ◆ Status ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓",
+    "┃ ►● proj-0     10%┃┃                                                          ┃",
+    "│ project-0        ││ · RUNNING TOOL  last activity 9m54s ago                  │",
+    "│  ● proj-1     10%││   ✻ Agent explorer: find files 9m59s                     │",
+    "│ project-1        ││ Context  █░░░░░░░░░░░░░░░░░░░░░░░░░░░   3% 5.9k/200.0k   │",
+    "┃                  ┃┃                                                          ┃",
+    "┗━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛",
+    "┏━ ◆ Session ━━━━━━┓┏━ ◆ SYNTHESIS · /work/proj  · working ━━━━━━━━━━━━━━━━━━━━━━━━━┓",
+    "┃ model  anthropic…┃┃      FAIL login.test.ts                                  ┃",
+    "│ mode   manual    ││      expected 2                                          │",
+    "│ effort auto      ││                                                          │",
+    "│ window 200.0k to…││ · Read(login.ts)                                         │",
+    "│ cwd    proj      ││   ⎿  running                                             │",
+    "│ uptime 1m00s     ││ · Conjuring    (4s · ↓ 0 tokens · esc to interrupt)      │",
+    "│ turns  1 prompts…││   ⎿ ☒ Read                                               │",
+    "│ errors 1         ││     ■ Fixing                                             │",
+    "┃                  ┃│     ☐ Test                                               │",
+    "┗━━━━━━━━━━━━━━━━━━┛│ ╭───────────────────────────────────────────────────────╮│",
+    "                    │ │ > hello                                               ││",
+    "                    │ ╰───────────────────────────────────────────────────────╯│",
+    "                    ┃ ⏸ manual mode on               fake-sonnet · effort: auto┃",
+    "                    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛",
+    "tab workspace selector (when multiple) → sessions → prompt   enter send   esc i…"
+  ],
+  "rects": {
+    "chatRect": {
+      "h": 15,
+      "w": 60,
+      "x": 20,
+      "y": 8
+    },
+    "sessionRows": [
+      {
+        "id": "session-0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "y": 2
+      },
+      {
+        "id": "session-0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "y": 3
+      },
+      {
+        "id": "session-1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "y": 4
+      },
+      {
+        "id": "session-1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "y": 5
+      }
+    ],
+    "sidebarRect": {
+      "h": 22,
+      "w": 20,
+      "x": 0,
+      "y": 1
+    },
+    "workspaceRows": []
+  },
+  "rows": 24
+}

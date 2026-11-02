@@ -1,0 +1,9 @@
+{
+  "events": [
+    {
+      "type": "cancel"
+    }
+  ],
+  "mode": "dragging",
+  "op": "transition"
+}

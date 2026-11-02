@@ -1,0 +1,7 @@
+{
+  "env": {
+    "TERM": "alacritty-direct"
+  },
+  "op": "detect",
+  "platform": "linux"
+}

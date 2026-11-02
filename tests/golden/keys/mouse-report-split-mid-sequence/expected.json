@@ -1,0 +1,23 @@
+{
+  "chunks": [
+    {
+      "events": [],
+      "pending": "\u001b[<0;1"
+    },
+    {
+      "events": [
+        {
+          "action": "down",
+          "alt": false,
+          "button": 0,
+          "ctrl": false,
+          "name": "mouse",
+          "shift": false,
+          "x": 12,
+          "y": 5
+        }
+      ],
+      "pending": ""
+    }
+  ]
+}

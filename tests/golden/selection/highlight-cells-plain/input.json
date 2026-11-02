@@ -1,0 +1,6 @@
+{
+  "from": 2,
+  "line": "plain text",
+  "op": "highlightCells",
+  "to": 5
+}

@@ -1,0 +1,27 @@
+{
+  "h": 20,
+  "lines": [
+    "",
+    "",
+    "╭──────────────────────────────────────────────────────────╮",
+    "│ ✻ Hello there! I'm Synthesis.  · 1.0.0                        │",
+    "│                                                          │",
+    "│ /help for commands · alt+v pastes an image               │",
+    "│ cwd: /work/proj                                          │",
+    "╰──────────────────────────────────────────────────────────╯",
+    "",
+    " Tips for getting started:",
+    "  1. Ask Synthesis to explain, fix or build something in ",
+    "     this folder",
+    "  2. Type / for commands and skills, @ to mention a ",
+    "     file",
+    "  3. Drop or paste an image path to attach a screenshot",
+    "╭─ reverse-i-search · enter use · esc cancel · ctrl+r older ╮",
+    "│ search: fix▍                                             │",
+    "│ no match                                                 │",
+    "╰──────────────────────────────────────────────────────────╯",
+    "⏸ manual mode on (shift+tab to cycle)  fake-… · effort: auto"
+  ],
+  "maxScroll": 0,
+  "w": 60
+}

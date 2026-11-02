@@ -1,0 +1,23 @@
+{
+  "from": 10,
+  "op": "textOfContent",
+  "rows": [
+    "  alpha beta",
+    "  gamma",
+    "  delta epsilon"
+  ],
+  "sel": {
+    "a": {
+      "x": 4,
+      "y": 10
+    },
+    "b": {
+      "x": 5,
+      "y": 12
+    }
+  },
+  "xb": {
+    "x0": 2,
+    "x1": 20
+  }
+}

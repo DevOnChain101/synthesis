@@ -1,0 +1,16 @@
+{
+  "agent": {
+    "items": [
+      {
+        "kind": "text",
+        "text": "| Name | Score |\n| :--- | ---: |\n| **Việt Nam** | 42 |\n| 東京😀 | `longunbrokentoken` |"
+      }
+    ]
+  },
+  "frame": 0,
+  "h": 30,
+  "now": 1790942400000,
+  "op": "agent",
+  "opts": {},
+  "w": 28
+}

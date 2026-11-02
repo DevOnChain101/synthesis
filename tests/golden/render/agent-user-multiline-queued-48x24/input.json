@@ -1,0 +1,17 @@
+{
+  "agent": {
+    "items": [
+      {
+        "kind": "user",
+        "queued": true,
+        "text": "/ponytail full\r\ninstruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction instruction \nlast line"
+      }
+    ]
+  },
+  "frame": 0,
+  "h": 24,
+  "now": 1790942400000,
+  "op": "agent",
+  "opts": {},
+  "w": 48
+}

@@ -1,0 +1,30 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+● Bash(cat big)
+  ⎿  line 0
+     line 1 wwww
+     line 2 wwwwwwww
+     … +17 lines (ctrl+o to expand)
+╭──────────────────────────────────────────────────────────╮
+│ >  Try "explain this repo" · / commands · @ files · Alt+ │
+╰──────────────────────────────────────────────────────────╯
+⏸ manual mode on (shift+tab to cycle)  fake-… · effort: auto

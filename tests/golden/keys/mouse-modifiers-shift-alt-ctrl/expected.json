@@ -1,0 +1,57 @@
+{
+  "chunks": [
+    {
+      "events": [
+        {
+          "action": "down",
+          "alt": false,
+          "button": 0,
+          "ctrl": false,
+          "name": "mouse",
+          "shift": true,
+          "x": 1,
+          "y": 1
+        },
+        {
+          "action": "down",
+          "alt": true,
+          "button": 0,
+          "ctrl": false,
+          "name": "mouse",
+          "shift": false,
+          "x": 1,
+          "y": 1
+        },
+        {
+          "action": "down",
+          "alt": false,
+          "button": 0,
+          "ctrl": true,
+          "name": "mouse",
+          "shift": false,
+          "x": 1,
+          "y": 1
+        },
+        {
+          "action": "down",
+          "alt": true,
+          "button": 0,
+          "ctrl": true,
+          "name": "mouse",
+          "shift": true,
+          "x": 1,
+          "y": 1
+        },
+        {
+          "alt": false,
+          "ctrl": false,
+          "name": "wheel-up",
+          "shift": true,
+          "x": 9,
+          "y": 9
+        }
+      ],
+      "pending": ""
+    }
+  ]
+}

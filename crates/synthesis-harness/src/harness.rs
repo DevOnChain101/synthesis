@@ -16,7 +16,9 @@ use synthesis_core::{
 use synthesis_events::{Criterion as EvCriterion, Event, SessionEnd, Usage, WorkspaceInfo};
 use synthesis_hooks::{HookEvent, HookOutcome, Hooks};
 use synthesis_permissions::{Mode, Permissions};
-use synthesis_providers::{Content, Message, ModelProvider, ProviderCapabilities, Role};
+use synthesis_providers::{
+    Block, Content, ImageSource, Message, ModelProvider, ProviderCapabilities, Role,
+};
 use synthesis_verification::{CompletionGate, Criterion, CriterionSource, GateDecision, TaskState};
 use tokio_util::sync::CancellationToken;
 
@@ -276,8 +278,19 @@ pub fn budget_from_settings(s: &synthesis_settings::Settings) -> Budget {
 
 pub type GateFactory = Box<dyn Fn(&AgentSession) -> CompletionGate + Send + Sync>;
 
+/// An image the person attached to the request (clipboard paste): base64 of the file's bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageAttachment {
+    /// `image/png`, ...
+    pub media_type: String,
+    pub data_base64: String,
+}
+
 pub struct TaskRequest {
     pub request: String,
+    /// Sent with `request` as image blocks when the model takes images; otherwise dropped with a
+    /// notice.
+    pub images: Vec<ImageAttachment>,
     pub criteria: Vec<Criterion>,
     /// Earlier conversation of an interactive session.
     pub history: Vec<Message>,
@@ -290,6 +303,7 @@ impl TaskRequest {
     pub fn new(request: impl Into<String>) -> Self {
         Self {
             request: request.into(),
+            images: vec![],
             criteria: vec![],
             history: vec![],
             display_text: None,
@@ -418,6 +432,8 @@ pub(crate) struct AgentState {
     pub auto_pause_until: u64,
     /// Where the next inbox delivery happens, for `message.delivered.at`.
     pub drain_at: &'static str,
+    /// The "model does not take images" notice was given for this agent.
+    pub image_note: bool,
 }
 
 impl AgentState {
@@ -432,6 +448,7 @@ impl AgentState {
             auto_failures: 0,
             auto_pause_until: 0,
             drain_at: "tool_round",
+            image_note: false,
         }
     }
 }
@@ -905,9 +922,25 @@ impl Harness {
             .begin_task(bg_tx, task.cancel.clone(), task.task_id.clone());
         self.peer_task_started(&req.request, &main.name, &st.messages);
         *lock(&task.user_texts) = crate::classifier::user_texts(&st.messages, &req.request);
+        // images stay in the history; a model without vision gets "[image]" in its request copy
+        // (`make_request`), also after a model switch
+        let content = if req.images.is_empty() {
+            Content::Text(req.request.clone())
+        } else {
+            let mut blocks = vec![Block::Text {
+                text: req.request.clone(),
+            }];
+            blocks.extend(req.images.iter().map(|i| Block::Image {
+                source: ImageSource::Base64 {
+                    media_type: i.media_type.clone(),
+                    data: i.data_base64.clone(),
+                },
+            }));
+            Content::Blocks(blocks)
+        };
         st.messages.push(Message {
             role: Role::User,
-            content: Content::Text(req.request.clone()),
+            content,
         });
 
         if start == SessionStatus::Created {

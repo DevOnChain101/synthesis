@@ -1,0 +1,7 @@
+{
+  "env": {
+    "TERM_PROGRAM": "vscode"
+  },
+  "op": "detect",
+  "platform": "linux"
+}

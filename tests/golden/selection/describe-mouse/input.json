@@ -1,0 +1,27 @@
+{
+  "events": [
+    {
+      "action": "down",
+      "alt": false,
+      "ctrl": false,
+      "name": "mouse",
+      "shift": true,
+      "x": 3,
+      "y": 4
+    },
+    {
+      "name": "wheel-up",
+      "x": 1,
+      "y": 2
+    },
+    {
+      "alt": true,
+      "ctrl": true,
+      "name": "mouse-drag",
+      "shift": false,
+      "x": 9,
+      "y": 9
+    }
+  ],
+  "op": "describeMouse"
+}

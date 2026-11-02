@@ -5,7 +5,7 @@ Naming: text that identifies the product to a reader (version headline, titles, 
 ## Workspace directory (`--cwd`)
 `--cwd DIR` is optional for `synt run`: without it the workspace is the directory `synt` was started in (read once at the CLI boundary; the libraries never read the process cwd). `synt doctor` needs no workspace.
 
-`synt` with no subcommand prints the help. The interactive terminal app and the desktop app were removed on 2026-10-31 (archived at tag `archive/ui-before-removal`; to be rebuilt later from the HTML design).
+`synt` with no subcommand opens the interactive terminal app (see `docs/TUI.md`); without a terminal on stdin and stdout it prints the usage and exits 2. `synt tui` is the same, `synt run` is headless. The GPUI desktop app and the redesigned TUI stay removed (archived at tag `archive/ui-before-removal`).
 
 ## Commands the agent runs (tests, builds)
 The agent runs tests itself. A call that needs permission is denied unless a rule allows it. Verification-gate checks (`cargo test`, `npm test`, ...) go through the same permission check as a `Bash` call. Without an approver (`synt run`) the call is not run, the model is told which permission is missing and the task ends `blocked` (`approval_unavailable`); `task.ended.needed_permissions` lists the rules and `synt run` prints, e.g.:

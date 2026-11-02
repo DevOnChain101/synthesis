@@ -130,6 +130,8 @@ pub struct Opts {
     pub context_window: Option<u64>,
     /// Picks the provider's answer from the request before the script is consulted.
     pub responder: Option<synthesis_harness::testing::Responder>,
+    /// The model does not take images.
+    pub no_vision: bool,
 }
 
 /// Writes into `buf` until `left` writes are used up, then fails every write.
@@ -166,6 +168,7 @@ impl Default for Opts {
             fail_sink_after: None,
             context_window: None,
             responder: None,
+            no_vision: false,
         }
     }
 }
@@ -228,6 +231,7 @@ impl Rig {
             );
             c.parallel_tools = o.parallel_tools;
             c.context_window = o.context_window;
+            c.images = !o.no_vision;
             c
         };
         let mut fake = FakeProvider::new(turns).with_caps(caps);

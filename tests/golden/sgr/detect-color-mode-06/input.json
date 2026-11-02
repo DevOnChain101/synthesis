@@ -1,0 +1,7 @@
+{
+  "env": {
+    "SYNT_COLOR": "24bit"
+  },
+  "op": "detect",
+  "platform": "linux"
+}

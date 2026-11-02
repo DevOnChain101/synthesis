@@ -1,0 +1,118 @@
+{
+  "events": [
+    {
+      "alt": false,
+      "body": false,
+      "shift": false,
+      "text": false,
+      "type": "down"
+    },
+    {
+      "alt": true,
+      "body": false,
+      "shift": false,
+      "text": false,
+      "type": "down"
+    },
+    {
+      "alt": false,
+      "body": false,
+      "shift": true,
+      "text": false,
+      "type": "down"
+    },
+    {
+      "alt": true,
+      "body": false,
+      "shift": true,
+      "text": false,
+      "type": "down"
+    },
+    {
+      "alt": false,
+      "body": true,
+      "shift": false,
+      "text": false,
+      "type": "down"
+    },
+    {
+      "alt": true,
+      "body": true,
+      "shift": false,
+      "text": false,
+      "type": "down"
+    },
+    {
+      "alt": false,
+      "body": true,
+      "shift": true,
+      "text": false,
+      "type": "down"
+    },
+    {
+      "alt": true,
+      "body": true,
+      "shift": true,
+      "text": false,
+      "type": "down"
+    },
+    {
+      "alt": false,
+      "body": false,
+      "shift": false,
+      "text": true,
+      "type": "down"
+    },
+    {
+      "alt": true,
+      "body": false,
+      "shift": false,
+      "text": true,
+      "type": "down"
+    },
+    {
+      "alt": false,
+      "body": false,
+      "shift": true,
+      "text": true,
+      "type": "down"
+    },
+    {
+      "alt": true,
+      "body": false,
+      "shift": true,
+      "text": true,
+      "type": "down"
+    },
+    {
+      "alt": false,
+      "body": true,
+      "shift": false,
+      "text": true,
+      "type": "down"
+    },
+    {
+      "alt": true,
+      "body": true,
+      "shift": false,
+      "text": true,
+      "type": "down"
+    },
+    {
+      "alt": false,
+      "body": true,
+      "shift": true,
+      "text": true,
+      "type": "down"
+    },
+    {
+      "alt": true,
+      "body": true,
+      "shift": true,
+      "text": true,
+      "type": "down"
+    }
+  ],
+  "mode": "dragging",
+  "op": "transition"
+}

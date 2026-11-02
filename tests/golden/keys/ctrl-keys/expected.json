@@ -1,0 +1,48 @@
+{
+  "chunks": [
+    {
+      "events": [
+        {
+          "name": "ctrl-c"
+        },
+        {
+          "name": "ctrl-a"
+        },
+        {
+          "name": "ctrl-d"
+        },
+        {
+          "name": "ctrl-e"
+        },
+        {
+          "name": "ctrl-k"
+        },
+        {
+          "name": "ctrl-l"
+        },
+        {
+          "name": "ctrl-n"
+        },
+        {
+          "name": "ctrl-o"
+        },
+        {
+          "name": "ctrl-p"
+        },
+        {
+          "name": "ctrl-v"
+        },
+        {
+          "name": "ctrl-r"
+        },
+        {
+          "name": "ctrl-u"
+        },
+        {
+          "name": "ctrl-w"
+        }
+      ],
+      "pending": ""
+    }
+  ]
+}

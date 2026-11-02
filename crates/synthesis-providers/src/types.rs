@@ -76,6 +76,44 @@ pub struct Message {
     pub content: Content,
 }
 
+/// Replaces every `{"type":"image",...}` object, at any depth, by `{"type":"text","text":"[image]"}`.
+fn strip_value(v: &mut Value) -> usize {
+    match v {
+        Value::Object(o) if o.get("type").and_then(Value::as_str) == Some("image") => {
+            *v = serde_json::json!({"type": "text", "text": "[image]"});
+            1
+        }
+        Value::Object(o) => o.values_mut().map(strip_value).sum(),
+        Value::Array(a) => a.iter_mut().map(strip_value).sum(),
+        _ => 0,
+    }
+}
+
+impl Content {
+    /// Replaces the images by the text `[image]`: image blocks of the message AND the images inside
+    /// tool results (a screenshot a tool returned), however deeply nested. Returns how many.
+    /// `tool_use` input is not touched (it is not content the model reads as an image).
+    pub fn strip_images(&mut self) -> usize {
+        let Content::Blocks(bs) = self else { return 0 };
+        let mut n = 0;
+        for b in bs {
+            match b {
+                Block::Image { .. } => {
+                    *b = Block::Text {
+                        text: "[image]".into(),
+                    };
+                    n += 1;
+                }
+                Block::ToolResult {
+                    content: Some(c), ..
+                } => n += strip_value(c),
+                _ => {}
+            }
+        }
+        n
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct SystemBlock {
     #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]

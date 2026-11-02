@@ -1,0 +1,17 @@
+{
+  "cols": 80,
+  "frame": 0,
+  "now": 1790942400000,
+  "op": "frame",
+  "rows": 24,
+  "state": {
+    "history_gen": {
+      "days": 371,
+      "end": "2026-10-02T12:00:00.000Z"
+    },
+    "session": {
+      "cwd": "/work/proj",
+      "id": "session-1"
+    }
+  }
+}

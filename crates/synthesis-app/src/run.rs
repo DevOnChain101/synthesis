@@ -330,11 +330,17 @@ pub enum Front {
         /// Set (and the run cancelled) when stdout is closed by the reader.
         closed: Arc<std::sync::atomic::AtomicBool>,
     },
+    /// Events go to the interactive app; the person approves.
+    Tui,
 }
 
 /// Everything a front end needs, built once by [`prepare`].
 pub struct Prepared {
     pub harness: Arc<Harness>,
+    /// The context the harness uses (interactive sessions refresh its memory block per task).
+    pub context: Arc<SynthesisContext>,
+    /// Skills the Skill tool serves (project skills only in a trusted project).
+    pub skills: Vec<synthesis_tools::SkillInfo>,
     pub session: AgentSession,
     pub sid: String,
     pub cancel: CancellationToken,
@@ -350,9 +356,18 @@ pub struct Prepared {
     pub criteria: Vec<Criterion>,
     pub artifact_root: PathBuf,
     pub label: String,
+    /// Entries of the interactive `/model` picker.
+    pub models: Vec<String>,
+    /// `effort_tiers` the model declares (enables `/effort`).
+    pub effort_tiers: Vec<String>,
+    pub sandbox: synthesis_tui::SandboxStatus,
+    /// The interactive app's side of the event/approval/input channels (`Front::Tui` only).
+    pub link: Option<synthesis_tui::UiLink>,
     pub homes: crate::Homes,
     /// Open long-term memory store (None with --no-memory, a failure, or `synt.memory.enabled: false`).
     pub memory: Option<Arc<crate::memcmd::MemoryRun>>,
+    /// `#` notes and `/memory` (interactive app).
+    pub notes: crate::memory::Notes,
     /// Stored conversation of `--resume/--continue/--fork-session` (the next task's history).
     pub history: Vec<Message>,
     /// Set when the stored session itself continues: the last event seq it had.
@@ -495,6 +510,24 @@ impl Approver for AuditDeny {
     }
 }
 
+pub fn sandbox_status(mode: SandboxMode, unsandboxed: bool) -> synthesis_tui::SandboxStatus {
+    let b = synthesis_sandbox::detect();
+    let c = b.capabilities();
+    let g = |x: Guarantee| format!("{x:?}").to_lowercase();
+    synthesis_tui::SandboxStatus {
+        mode: match mode {
+            SandboxMode::Enforce => "enforce",
+            SandboxMode::BestEffort => "best-effort",
+            SandboxMode::Off => "off",
+        }
+        .into(),
+        backend: b.name().into(),
+        filesystem: g(c.filesystem),
+        network: g(c.network),
+        unsandboxed_by_request: unsandboxed,
+    }
+}
+
 /// Warnings for the sandbox/network flags; shown at start and sent as `notice` events.
 pub fn sandbox_notices(mode: SandboxMode, network: NetworkArg) -> Vec<String> {
     let mut n = vec![];
@@ -553,6 +586,7 @@ pub fn prepare(
         rules_arg(&c.allow, "--allow")?,
         rules_arg(&c.deny, "--deny")?,
     );
+    let is_tui = matches!(front, Front::Tui);
     let h = homes(env)?;
     let synthesis_deny = synthesis_sandbox::synthesis_state_paths(&h.synthesis);
     // Before anything is created (worktree, store): a bad grant is a usage error.
@@ -638,7 +672,17 @@ pub fn prepare(
         Some(ModeArg::Plan) => Mode::Plan,
         Some(ModeArg::DontAsk) => Mode::DontAsk,
         Some(ModeArg::Auto) => Mode::Auto,
-        Some(ModeArg::BypassPermissions) => Mode::BypassPermissions,
+        Some(ModeArg::BypassPermissions) => {
+            // A TUI session switches into bypass with a confirmation dialog instead (Shift+Tab
+            // never reaches it); the flag is for `synt run`.
+            if is_tui {
+                return Err(
+                    "--permission-mode bypassPermissions is only for `synt run`; in the TUI press Shift+Tab until the bypass dialog opens"
+                        .into(),
+                );
+            }
+            Mode::BypassPermissions
+        }
         // Settings (user or project) never select bypassPermissions: only the CLI flag does.
         None => match Mode::parse(&settings.permissions.default_mode) {
             Some(m @ (Mode::Default | Mode::AcceptEdits | Mode::Plan | Mode::DontAsk)) => m,
@@ -666,9 +710,10 @@ pub fn prepare(
     }
     budget.max_cost_usd = limits.max_cost_usd;
     // an unattended run must not run (and spend) forever
+    // (the interactive app has a person watching)
     budget.max_wall_ms = limits
         .max_wall_secs
-        .or(Some(HEADLESS_WALL_SECS))
+        .or((!is_tui).then_some(HEADLESS_WALL_SECS))
         .map(|s| s.saturating_mul(1000));
 
     let mut extra_dirs: Vec<PathBuf> = settings
@@ -865,19 +910,44 @@ pub fn prepare(
         _ => None,
     };
     let cancel = CancellationToken::new();
-    let Front::Headless {
-        prompt,
-        tee,
-        stdout_events,
-        closed,
-    } = front;
-    let out: Box<dyn std::io::Write + Send> = if stdout_events {
-        Box::new(std::io::stdout())
-    } else {
-        Box::new(std::io::sink())
+    let (out, tee, prompt, link, approver, closed): (
+        Box<dyn std::io::Write + Send>,
+        _,
+        String,
+        _,
+        Arc<dyn Approver>,
+        _,
+    ) = match front {
+        Front::Headless {
+            prompt,
+            tee,
+            stdout_events,
+            closed,
+        } => (
+            if stdout_events {
+                Box::new(std::io::stdout())
+            } else {
+                Box::new(std::io::sink())
+            },
+            tee,
+            prompt,
+            None,
+            Arc::new(AuditDeny),
+            Some((closed, cancel.clone())),
+        ),
+        Front::Tui => {
+            let l = synthesis_tui::UiLink::new();
+            let ap = l.approver();
+            (
+                Box::new(l.event_writer()),
+                None,
+                String::new(),
+                Some(l),
+                ap,
+                None,
+            )
+        }
     };
-    let approver: Arc<dyn Approver> = Arc::new(AuditDeny);
-    let closed = Some((closed, cancel.clone()));
     let taint = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sink = EventSink::new(
         Persist::new(
@@ -892,6 +962,18 @@ pub fn prepare(
         sid.clone(),
         res.secrets.clone(),
     );
+    if let Some(t) = &transcript {
+        let sink = sink.clone();
+        t.set_notifier(Arc::new(move |m| {
+            sink.emit(
+                &Scope::default(),
+                Event::Notice {
+                    level: "warning".into(),
+                    text: m.to_string(),
+                },
+            );
+        }));
+    }
 
     // settings.env: opt-in additions on top of the allowlisted child env (config.md §6). A
     // variable the process env already supplies to children wins, as in Node's agentEnv.
@@ -1047,6 +1129,14 @@ pub fn prepare(
         },
         cancel.clone(),
     );
+    let notes = crate::memory::Notes {
+        user: user_files[0].clone(),
+        project: crate::memory::project_file(&ws.root),
+        root: ws.root.clone(),
+        secrets: res.secrets.clone(),
+        loaded: crate::memory::describe(&instructions),
+        long_term: memory.is_some(),
+    };
     if let Some(m) = &memory {
         // MemoryUpdate/MemoryForget on a note the agent did not save ask the person
         perms.env.memory_notes = Some(synthesis_permissions::NoteOracle(
@@ -1173,11 +1263,11 @@ pub fn prepare(
         ));
     }
 
-    // headless: a Bash call that times out is killed (D6)
+    // interactive: a Bash call that times out moves to the background; headless kills it (D6)
     let mut toolbox = ToolBox::new(
         Registry::with_terminal_policy(rt.clone(), make_policy)
             .with_new_tools()
-            .with_background_on_timeout(false),
+            .with_background_on_timeout(is_tui),
     );
     if let Some(a) = mcp_attach {
         toolbox = a.apply(toolbox);
@@ -1210,17 +1300,21 @@ pub fn prepare(
         Some(s) => (Some(s.link), Some(s.listener)),
         None => (None, None),
     };
+    let context = Arc::new(context);
     let mut harness = Harness::new(res.provider.clone(), toolbox, perms, sink.clone(), hcfg)
         .with_approver(approver)
         .with_agents(agents.table)
         .with_model_resolver(agent_model_resolver(&cfg, &res.label))
-        .with_context(Arc::new(context))
+        .with_context(context.clone())
         .with_gate(Box::new(move |s| {
             CompletionGate::new(
                 VerifyRunner::new(rt_gate.clone(), &s.id, Arc::new(s.workspace.clone())),
                 gate_cfg.clone(),
             )
         }));
+    if let Some(l) = &link {
+        harness = harness.with_input(l.input());
+    }
     if let Some(l) = peer_link {
         harness = harness.with_peers(l);
     }
@@ -1252,6 +1346,34 @@ pub fn prepare(
         ws.cwd.display(),
         mode.as_str()
     );
+    if is_tui {
+        // Event log / replay copy; the UI also gets `notices` as startup notes (tui.rs) and shows
+        // each text once, so it no longer depends on this channel buffering.
+        for n in &notices {
+            sink.emit(
+                &Scope::default(),
+                Event::Notice {
+                    level: "warning".into(),
+                    text: n.clone(),
+                },
+            );
+        }
+    }
+    let models = synthesis_config::list_models(&cfg, None)
+        .into_iter()
+        .map(|m| m.value)
+        .collect();
+    let effort_tiers = res
+        .label
+        .strip_suffix(&format!("/{}", res.model))
+        .and_then(|id| cfg.providers.get(id)?.models_meta.as_ref()?.get(&res.model))
+        .and_then(|m| m.capabilities.get("effort_tiers")?.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
     let harness = Arc::new(harness);
     if let (Some(l), Some(server)) = (peer_listener, harness.peer_server()) {
         if let Some(w) = harness.peer_mailbox_worker(server.clone()) {
@@ -1261,6 +1383,8 @@ pub fn prepare(
     }
     Ok(Prepared {
         harness,
+        context,
+        skills,
         session,
         sid,
         cancel,
@@ -1275,8 +1399,13 @@ pub fn prepare(
         criteria: vs.checks,
         artifact_root,
         label: res.label,
+        models,
+        effort_tiers,
+        sandbox: sandbox_status(sandbox_mode, sandbox_mode != SandboxMode::Enforce),
+        link,
         homes: h,
         memory,
+        notes,
         history: resume.map(|(_, hist)| hist).unwrap_or_default(),
         resumed_from_seq,
     })
@@ -1416,6 +1545,7 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
                         &mut session,
                         TaskRequest {
                             request,
+                            images: vec![],
                             criteria,
                             history,
                             display_text: None,

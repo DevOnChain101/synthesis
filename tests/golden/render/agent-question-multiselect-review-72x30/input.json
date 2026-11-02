@@ -1,0 +1,47 @@
+{
+  "agent": {
+    "pending": [
+      {
+        "dialog": "question",
+        "kind": "permission",
+        "options": [],
+        "qi": 2,
+        "questions": [
+          {
+            "header": "Colours",
+            "multiSelect": true,
+            "options": [
+              {
+                "label": "Red"
+              },
+              {
+                "label": "Blue"
+              }
+            ],
+            "question": "Pick colours"
+          },
+          {
+            "header": "Size",
+            "multiSelect": false,
+            "options": [
+              {
+                "label": "Small"
+              },
+              {
+                "label": "Large"
+              }
+            ],
+            "question": "Pick size"
+          }
+        ],
+        "status": "pending"
+      }
+    ]
+  },
+  "frame": 0,
+  "h": 30,
+  "now": 1790942400000,
+  "op": "agent",
+  "opts": {},
+  "w": 72
+}

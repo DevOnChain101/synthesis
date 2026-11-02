@@ -56,7 +56,7 @@ During the parallel run both CLIs can be installed. See [docs/MIGRATION.md](docs
 - Not yet run end to end on GitHub CI, Linux or Windows by the maintainers; release pipeline and signing are unverified until the first tag.
 - Windows has no filesystem or network sandbox; macOS Seatbelt is deprecated by Apple and best-effort.
 - Eval parity with the Node CLI against real models is not yet measured (cutover gate).
-- There is no interactive UI: the terminal app and the desktop app were removed on 2026-10-31 (archived at tag `archive/ui-before-removal`; to be rebuilt later from the HTML design). `synt` is headless. Durable sessions and worktrees are incomplete; see `docs/STATUS.md`.
+- `synt` with no subcommand opens the classic terminal app (palette `docs/tui-palette.md`, commands `docs/TUI.md`); `synt run` is the headless CLI. The GPUI desktop app and the redesigned TUI stay removed (archived at tag `archive/ui-before-removal`). Durable sessions and worktrees are incomplete; see `docs/STATUS.md`.
 
 ## Development
 

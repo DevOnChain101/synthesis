@@ -1,0 +1,34 @@
+{
+  "cols": 200,
+  "frame": 0,
+  "now": 1790942400000,
+  "op": "frame",
+  "rows": 40,
+  "state": {
+    "history_gen": {
+      "days": 371,
+      "end": "2026-10-02T12:00:00.000Z"
+    },
+    "session": {
+      "cwd": "D:/workspace/project",
+      "id": "session-1",
+      "model": "claude-sonnet",
+      "startedAt": 1790942340000
+    },
+    "sessions": [
+      {
+        "cwd": "D:/workspace/project",
+        "id": "session-title-aaaaaaaaaaaaaaaa",
+        "live": {
+          "cwd": "D:/workspace/project",
+          "name": "first user message",
+          "status": "idle"
+        },
+        "mtime": 1790942400000,
+        "phase": "idle",
+        "project": "project"
+      }
+    ],
+    "sessions_n": 3
+  }
+}

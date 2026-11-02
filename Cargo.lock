@@ -537,6 +537,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
+name = "crossterm"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b"
+dependencies = [
+ "bitflags",
+ "crossterm_winapi",
+ "document-features",
+ "parking_lot",
+ "rustix",
+ "winapi",
+]
+
+[[package]]
+name = "crossterm_winapi"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acdd7c62a3665c7f6830a51635d9ac9b23ed385797f70a83bb8bafe9c572ab2b"
+dependencies = [
+ "winapi",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -632,6 +655,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "document-features"
+version = "0.2.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
+dependencies = [
+ "litrs",
 ]
 
 [[package]]
@@ -1497,6 +1529,12 @@ name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
+
+[[package]]
+name = "litrs"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
 name = "lock_api"
@@ -2410,6 +2448,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "signal-hook"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49f7447afd772ca79ad17ae0a3972a6b0df0cb4b80990fd82707593e9e012a74"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
+
+[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2584,6 +2632,7 @@ dependencies = [
  "futures-util",
  "globset",
  "jsonschema",
+ "libc",
  "rusqlite",
  "serde_json",
  "sha2",
@@ -2604,6 +2653,7 @@ dependencies = [
  "synthesis-settings",
  "synthesis-terminal",
  "synthesis-tools",
+ "synthesis-tui",
  "synthesis-verification",
  "synthesis-workspace",
  "tempfile",
@@ -2656,9 +2706,12 @@ dependencies = [
  "synthesis-settings",
  "synthesis-terminal",
  "synthesis-tools",
+ "synthesis-tui",
+ "synthesis-tui-base",
  "synthesis-verification",
  "synthesis-workspace",
  "tempfile",
+ "time",
  "tokio",
  "tokio-util",
  "uuid",
@@ -2921,6 +2974,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "synthesis-tui"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "signal-hook",
+ "synthesis-config",
+ "synthesis-core",
+ "synthesis-events",
+ "synthesis-harness",
+ "synthesis-permissions",
+ "synthesis-platform",
+ "synthesis-providers",
+ "synthesis-session",
+ "synthesis-settings",
+ "synthesis-terminal",
+ "synthesis-tools",
+ "synthesis-tui-base",
+ "synthesis-tui-render",
+ "synthesis-workspace",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "synthesis-tui-base"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "dunce",
+ "serde_json",
+ "signal-hook",
+ "synthesis-config",
+ "synthesis-platform",
+ "tempfile",
+ "unicode-properties",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "synthesis-tui-render"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "synthesis-events",
+ "synthesis-tui-base",
+ "time",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "synthesis-verification"
 version = "0.1.0"
 dependencies = [
@@ -2941,6 +3047,7 @@ dependencies = [
 name = "synthesis-workspace"
 version = "0.1.0"
 dependencies = [
+ "rustix",
  "serde",
  "sha2",
  "synthesis-config",
@@ -3234,6 +3341,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
+name = "unicode-properties"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993ad287eb20e8ba755312801cfe1413e0f25d604075863acaddca10b04c1833"
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
+
+[[package]]
 name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3450,6 +3569,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "winapi"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419"
+dependencies = [
+ "winapi-i686-pc-windows-gnu",
+ "winapi-x86_64-pc-windows-gnu",
+]
+
+[[package]]
+name = "winapi-i686-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
+
+[[package]]
 name = "winapi-util"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3457,6 +3592,12 @@ checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "winapi-x86_64-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows"

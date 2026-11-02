@@ -1,0 +1,14 @@
+{
+  "agent": {},
+  "editor": {
+    "text": "abc"
+  },
+  "frame": 0,
+  "h": 20,
+  "now": 1790942400000,
+  "op": "agent",
+  "opts": {
+    "focused": false
+  },
+  "w": 60
+}

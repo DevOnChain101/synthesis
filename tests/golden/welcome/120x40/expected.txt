@@ -1,0 +1,40 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                         ⣠⣴⣶⣶⣶⣤⣀    
+                                                       ⢀⣼⣿⣿⣿⣿⣿⣿⣿⣿⣦⡀ 
+                                                      ⣠⣿⣿⣿⣿⣿⠟⠉⠻⣿⣿⣿⣿⣆
+                                                     ⣴⣿⣿⣿⡿⠋⠁   ⣿⣿⣿⣿⣿
+                                                    ⣼⣿⣿⡟⠁      ⣿⣿⣿⣿⡏
+                                                    ⣿⣿⣿⣷⣤⣀⣀⣀⡀  ⠘⢿⣿⡟ 
+                                                    ⠘⢿⣿⣿⣿⣿⣿⣿⣿⣿⣶⣤⣼⠟  
+                                                      ⠙⠛⠿⠿⠿⠿⠿⠿⠟⠋⠁   
+
+                                                   S Y N T H E S I S
+                                           Autonomous development environment
+
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ✻ Good morning.  · 0.1.0                                                                                             │
+│ What shall we build?                                                                                                 │
+│ /help for commands · ctrl+v / alt+v pastes an image                                                                  │
+│ cwd: /work/proj                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ Tips for getting started:
+  1. Ask Synthesis to explain, fix or build something in this folder
+  2. Type / for commands and skills, @ to mention a file
+  3. Drop or paste an image path to attach a screenshot
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ >  Try "explain this repo" · Enter send · Shift+Enter newline · / commands · @ files · ! shell · Shift+Tab mode      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+⏸ manual mode on (shift+tab to cycle)                                                               model · effort: auto

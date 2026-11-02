@@ -1,0 +1,23 @@
+{
+  "chunks": [
+    {
+      "events": [
+        {
+          "name": "text",
+          "text": "ab"
+        },
+        {
+          "name": "ctrl-c"
+        },
+        {
+          "name": "text",
+          "text": "cd"
+        },
+        {
+          "name": "enter"
+        }
+      ],
+      "pending": ""
+    }
+  ]
+}

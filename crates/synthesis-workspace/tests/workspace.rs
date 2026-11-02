@@ -196,6 +196,34 @@ fn clean_cleanup_without_force() {
 }
 
 #[test]
+fn cleanup_without_force_keeps_a_worktree_that_holds_gitignored_files() {
+    need_git!();
+    let f = fx();
+    std::fs::write(f.repo.join(".gitignore"), "*.secret\ntarget/\n").unwrap();
+    g(&f.repo, &["add", ".gitignore"]);
+    g(&f.repo, &["commit", "-qm", "ignore"]);
+    let (_, info) = alloc(&f, "s-ignored", false);
+    std::fs::write(info.worktree.join("a.secret"), "token").unwrap();
+    assert!(
+        matches!(f.mgr.cleanup(&info, false), Err(Error::Refused(m)) if m.contains("gitignored")),
+        "ignored content must stop a non-forced removal"
+    );
+    assert_eq!(
+        std::fs::read_to_string(info.worktree.join("a.secret")).unwrap(),
+        "token"
+    );
+    // build output in an ignored directory too
+    std::fs::remove_file(info.worktree.join("a.secret")).unwrap();
+    std::fs::create_dir_all(info.worktree.join("target")).unwrap();
+    std::fs::write(info.worktree.join("target/out"), "x").unwrap();
+    assert!(f.mgr.cleanup(&info, false).is_err());
+    assert!(info.worktree.join("target/out").exists());
+    // nothing ignored left: removable again
+    std::fs::remove_dir_all(info.worktree.join("target")).unwrap();
+    f.mgr.cleanup(&info, false).unwrap();
+}
+
+#[test]
 fn include_uncommitted_snapshot_is_baseline_not_agent_work() {
     need_git!();
     let f = fx();
@@ -381,6 +409,86 @@ fn concurrent_sessions_get_distinct_worktrees_and_ports() {
     ports.sort();
     ports.dedup();
     assert_eq!(ports.len(), 8);
+}
+
+/// Adding and removing worktrees of one repository from many threads at once: git alone races on
+/// `.git/worktrees/<id>` ("failed to read .../commondir"); the repository lock serialises them.
+#[test]
+fn many_threads_adding_and_removing_worktrees_do_not_race() {
+    need_git!();
+    let f = fx();
+    std::thread::scope(|s| {
+        let hs: Vec<_> = (0..8)
+            .map(|i| {
+                let f = &f;
+                s.spawn(move || {
+                    for round in 0..3 {
+                        let id = format!("r{i}-{round}");
+                        let a = f
+                            .mgr
+                            .create(&f.repo, &id, f.base.join("art").join(&id), false)
+                            .unwrap_or_else(|e| panic!("{id}: {e}"));
+                        let info = a.git.expect("a git workspace");
+                        f.mgr
+                            .cleanup(&info, false)
+                            .unwrap_or_else(|e| panic!("{id}: {e}"));
+                    }
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+    });
+}
+
+/// The lock file path is inside a repository an attacker may have prepared: a symlink there must
+/// not make us create or touch a file elsewhere, and a FIFO there must not hang us.
+#[cfg(unix)]
+#[test]
+fn a_symlink_or_a_fifo_at_the_lock_path_neither_hangs_nor_writes_elsewhere() {
+    use std::os::unix::fs::FileTypeExt;
+    need_git!();
+    let f = fx();
+    let common = f.repo.join(".git");
+    let lock = common.join("synt-worktree.lock");
+    let outside = f.base.join("outside-target");
+    std::os::unix::fs::symlink(&outside, &lock).unwrap();
+    let run = |id: &str| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let a = f
+                    .mgr
+                    .create(&f.repo, id, f.base.join("art").join(id), false);
+                let _ = tx.send(a.map(|a| a.context.root));
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(30))
+                .expect("create hung on the planted lock path")
+        })
+    };
+    assert!(run("sym").is_ok());
+    assert!(
+        !outside.exists(),
+        "the symlink was followed and a file created"
+    );
+    // a FIFO: opening it for writing would block forever
+    std::fs::remove_file(&lock).unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&lock)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(run("fifo").is_ok());
+    assert!(
+        std::fs::symlink_metadata(&lock)
+            .unwrap()
+            .file_type()
+            .is_fifo(),
+        "left as it was"
+    );
 }
 
 #[test]

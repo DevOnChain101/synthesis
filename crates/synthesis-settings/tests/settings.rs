@@ -422,6 +422,336 @@ fn persisting_keeps_the_permissions_of_the_file_it_replaces() {
 }
 
 #[test]
+fn synthesis_tui_parses_validates_and_names_the_key_not_the_value() {
+    let (d, diag) = TuiSettings::from_settings(&json!({}));
+    assert_eq!((d, diag), (TuiSettings::default(), vec![]));
+    let (s, diag) = TuiSettings::from_settings(&json!({"synt": {"tui": {
+        "panels": {"tools": false, "activity": false},
+        "logo": "off", "show_thinking": false, "diffs_expanded": true,
+        "queue_indicators": false, "motion": false, "mouse_capture": false, "copy_on_select": false}}}));
+    assert_eq!(diag, Vec::<String>::new());
+    assert_eq!(s.panels, [true, true, false, false]);
+    assert!(!s.logo && !s.show_thinking && s.diffs_expanded);
+    assert!(!s.queue_indicators && !s.motion && !s.mouse_capture && !s.copy_on_select);
+    // wrong types and unknown names keep the defaults and say which key
+    let (s, diag) = TuiSettings::from_settings(&json!({"synt": {"tui": {
+        "motion": "yes", "logo": "SECRET-VALUE", "panels": {"chat": false, "mcp": 3}, "colour": 1}}}));
+    assert_eq!(s, TuiSettings::default());
+    let all = diag.join("\n");
+    for key in [
+        "tui.motion",
+        "tui.logo",
+        "tui.panels.chat",
+        "tui.panels.mcp",
+        "tui.colour",
+    ] {
+        assert!(all.contains(key), "{key}: {all}");
+    }
+    assert!(!all.contains("SECRET-VALUE"));
+    assert!(
+        TuiSettings::from_settings(&json!({"synt": {"tui": 5}})).1[0].contains("not an object")
+    );
+}
+
+#[test]
+fn synthesis_tui_is_read_from_the_user_file_only_and_the_others_are_named() {
+    let f = fx();
+    f.user(json!({"synt": {"tui": {"motion": false}}}));
+    f.project(json!({"synt": {"tui": {"motion": true}}}));
+    write(
+        f.proj.path(),
+        ".synt/settings.local.json",
+        json!({"synt": {"tui": {"logo": "off"}}}),
+    );
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"synt": {"tui": {"logo": "off"}}}),
+    );
+    let s = f.load(ProjectTrust::Trusted);
+    let warned = |what: &str| {
+        s.diagnostics
+            .iter()
+            .any(|d| d.starts_with(what) && d.contains("synt.tui is read from user settings only"))
+    };
+    assert!(warned("project settings") && warned("local settings") && warned("managed settings"));
+    assert!(!warned("user settings"), "{:?}", s.diagnostics);
+    assert!(
+        !read_user_tui(f.home.path()).0.motion,
+        "the user file's value is the one in force"
+    );
+}
+
+#[test]
+fn persisting_tui_keeps_everything_else_never_overwrites_a_bad_file_and_writes_no_credentials() {
+    let f = fx();
+    let home = f.home.path();
+    let t = TuiSettings {
+        panels: [true, true, false, true],
+        motion: false,
+        ..TuiSettings::default()
+    };
+    persist_user_tui(home, &t).unwrap();
+    assert_eq!(read_user_tui(home), (t, vec![]));
+    fs::write(
+        home.join("settings.json"),
+        r#"{"zeta":1,"permissions":{"deny":["x"]},"synt":{"budget":{"max_turns":3},"tui":{"old":1}},"alpha":2,"env":{"API_KEY":"sk-keep"}}"#,
+    )
+    .unwrap();
+    persist_user_tui(home, &t).unwrap();
+    let text = fs::read_to_string(home.join("settings.json")).unwrap();
+    assert!(text.find("zeta").unwrap() < text.find("permissions").unwrap());
+    assert!(
+        text.find("permissions").unwrap() < text.find("alpha").unwrap(),
+        "{text}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["synt"]["budget"]["max_turns"], 3);
+    assert!(v["synt"]["tui"].get("old").is_none());
+    assert_eq!(v["env"]["API_KEY"], "sk-keep", "other keys are untouched");
+    // the subtree is exactly the tui keys: nothing else (no key, no env) is added by this writer
+    let mut keys: Vec<_> = v["synt"]["tui"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "copy_on_select",
+            "diffs_expanded",
+            "logo",
+            "motion",
+            "mouse_capture",
+            "panels",
+            "queue_indicators",
+            "show_thinking"
+        ]
+    );
+    for bad in ["{not json", r#"{"synt": 5}"#, "[1]"] {
+        fs::write(home.join("settings.json"), bad).unwrap();
+        assert!(persist_user_tui(home, &t).is_err(), "{bad}");
+        assert_eq!(fs::read_to_string(home.join("settings.json")).unwrap(), bad);
+    }
+    assert!(
+        fs::read_dir(home).unwrap().all(|e| !e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("tmp")),
+        "no temp file is left behind"
+    );
+}
+
+fn leftovers(dir: &Path) -> Vec<String> {
+    fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect()
+}
+
+fn set_key(v: &mut serde_json::Value) -> std::io::Result<()> {
+    v["mine"] = json!(1);
+    Ok(())
+}
+
+#[test]
+fn a_failed_edit_leaves_the_file_and_no_temp_file() {
+    let f = fx();
+    let p = f.home.path().join("settings.json");
+    fs::write(&p, r#"{"keep": true}"#).unwrap();
+    let e =
+        edit_json_atomic(&p, "user settings", |_| Err(std::io::Error::other("no"))).unwrap_err();
+    assert_eq!(e.to_string(), "no");
+    assert_eq!(fs::read_to_string(&p).unwrap(), r#"{"keep": true}"#);
+    assert!(leftovers(f.home.path()).is_empty());
+    // a missing file is created; an empty or invalid one is never replaced
+    let q = f.home.path().join("new.json");
+    edit_json_atomic(&q, "x", set_key).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&q).unwrap()).unwrap()["mine"],
+        1
+    );
+    fs::write(&p, "").unwrap();
+    assert!(edit_json_atomic(&p, "x", set_key).is_err());
+    assert_eq!(fs::read_to_string(&p).unwrap(), "");
+    assert!(leftovers(f.home.path()).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_temp_file_is_private_from_the_start_and_the_mode_of_the_original_is_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fx();
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let new = f.home.path().join("new.json");
+    edit_json_atomic(&new, "x", set_key).unwrap();
+    assert_eq!(mode(&new), 0o600, "a new file is private");
+    let old = f.home.path().join("old.json");
+    fs::write(&old, "{}").unwrap();
+    fs::set_permissions(&old, fs::Permissions::from_mode(0o640)).unwrap();
+    edit_json_atomic(&old, "x", set_key).unwrap();
+    assert_eq!(mode(&old), 0o640);
+    // a read-only directory: nothing can be created, the file is untouched, nothing is left
+    let ro = tempfile::tempdir().unwrap();
+    let p = ro.path().join("settings.json");
+    fs::write(&p, "{}").unwrap();
+    fs::set_permissions(ro.path(), fs::Permissions::from_mode(0o500)).unwrap();
+    let r = edit_json_atomic(&p, "x", set_key);
+    fs::set_permissions(ro.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    if r.is_ok() {
+        return; // running as root: the directory permission does not bind
+    }
+    assert_eq!(fs::read_to_string(&p).unwrap(), "{}");
+    assert!(leftovers(ro.path()).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_settings_file_is_followed_and_stays_a_link_a_dangling_one_is_refused() {
+    let f = fx();
+    let real_dir = tempfile::tempdir().unwrap();
+    let real = real_dir.path().join("dotfiles-settings.json");
+    fs::write(&real, r#"{"keep": 1}"#).unwrap();
+    let link = f.home.path().join("settings.json");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    edit_json_atomic(&link, "user settings", set_key).unwrap();
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "still a link"
+    );
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&real).unwrap()).unwrap();
+    assert_eq!((v["keep"].clone(), v["mine"].clone()), (json!(1), json!(1)));
+    assert!(leftovers(f.home.path()).is_empty() && leftovers(real_dir.path()).is_empty());
+    // dangling: refused, and no file appears where the link points
+    let dangling = f.home.path().join("gone.json");
+    let nowhere = real_dir.path().join("nowhere.json");
+    std::os::unix::fs::symlink(&nowhere, &dangling).unwrap();
+    let e = edit_json_atomic(&dangling, "user settings", set_key).unwrap_err();
+    assert!(e.to_string().contains("dangling symlink"), "{e}");
+    assert!(!nowhere.exists());
+}
+
+#[test]
+fn a_change_made_while_editing_is_kept_not_overwritten_and_endless_changes_are_refused() {
+    let f = fx();
+    let p = f.home.path().join("settings.json");
+    fs::write(&p, r#"{"a": 1}"#).unwrap();
+    // another process adds "b" during our first edit: the second round sees it and keeps it
+    let mut first = true;
+    let q = p.clone();
+    edit_json_atomic(&p, "user settings", |v| {
+        if std::mem::take(&mut first) {
+            fs::write(&q, r#"{"a": 1, "b": 2}"#).unwrap();
+        }
+        v["mine"] = json!(true);
+        Ok(())
+    })
+    .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+    assert_eq!(
+        (v["b"].clone(), v["mine"].clone()),
+        (json!(2), json!(true)),
+        "{v}"
+    );
+    // changing every time: refused after 3 rounds, the other writer's file is what stays
+    let mut n = 0;
+    let q = p.clone();
+    let e = edit_json_atomic(&p, "user settings", |v| {
+        n += 1;
+        fs::write(&q, format!(r#"{{"writer": {n}}}"#)).unwrap();
+        v["mine"] = json!(1);
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(e.to_string().contains("keeps changing"), "{e}");
+    assert_eq!(n, 3);
+    assert_eq!(fs::read_to_string(&p).unwrap(), r#"{"writer": 3}"#);
+    assert!(leftovers(f.home.path()).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn persisting_a_rule_never_writes_through_a_symlink_of_the_untrusted_project() {
+    use std::os::unix::fs::symlink;
+    let rules = ["Bash(ls:*)".to_string()];
+    let victim = tempfile::tempdir().unwrap();
+    let target = victim.path().join("authorized_keys");
+    fs::write(&target, "ssh-ed25519 AAAA keep\n").unwrap();
+    // settings.local.json -> elsewhere
+    let f = fx();
+    fs::create_dir_all(f.proj.path().join(".synt")).unwrap();
+    symlink(&target, f.proj.path().join(".synt/settings.local.json")).unwrap();
+    let e = persist_allow_rules(f.proj.path(), &rules).unwrap_err();
+    assert!(e.to_string().contains("symbolic link"), "{e}");
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "ssh-ed25519 AAAA keep\n"
+    );
+    // .synt itself -> elsewhere: nothing is created there
+    let g = fx();
+    let elsewhere = victim.path().join("dir");
+    fs::create_dir_all(&elsewhere).unwrap();
+    symlink(&elsewhere, g.proj.path().join(".synt")).unwrap();
+    assert!(persist_allow_rules(g.proj.path(), &rules).is_err());
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    // .gitignore -> elsewhere: refused before anything is written
+    let h = fx();
+    fs::create_dir_all(h.proj.path().join(".synt")).unwrap();
+    symlink(&target, h.proj.path().join(".synt/.gitignore")).unwrap();
+    assert!(persist_allow_rules(h.proj.path(), &rules).is_err());
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "ssh-ed25519 AAAA keep\n"
+    );
+    assert!(!h.proj.path().join(".synt/settings.local.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_persisted_rule_file_is_written_atomically_with_a_private_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fx();
+    persist_allow_rules(f.proj.path(), &["Read".into()]).unwrap();
+    let p = f.proj.path().join(".synt/settings.local.json");
+    assert_eq!(
+        fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(leftovers(&f.proj.path().join(".synt")).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hardlinked_gitignore_is_replaced_not_modified_in_place() {
+    let f = fx();
+    let dir = f.proj.path().join(".synt");
+    fs::create_dir_all(&dir).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let other = outside.path().join("someone-elses-file");
+    fs::write(&other, "precious\n").unwrap();
+    fs::hard_link(&other, dir.join(".gitignore")).unwrap();
+    persist_allow_rules(f.proj.path(), &["Read".into()]).unwrap();
+    assert_eq!(
+        fs::read_to_string(&other).unwrap(),
+        "precious\n",
+        "written through the hard link"
+    );
+    let gi = fs::read_to_string(dir.join(".gitignore")).unwrap();
+    assert!(
+        gi.contains("precious") && gi.contains("settings.local.json"),
+        "{gi}"
+    );
+    assert!(leftovers(&dir).is_empty());
+}
+
+#[test]
 fn old_synthesis_key_is_reported_and_not_honoured() {
     let f = fx();
     f.user(json!({"synthesis":{"budget":{"max_turns":1}}}));

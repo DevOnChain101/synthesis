@@ -1,0 +1,24 @@
+
+
+
+
+
+
+
+
+> /ponytail full
+  instruction instruction instruction 
+  instruction instruction instruction 
+  instruction instruction instruction 
+  instruction instruction instruction 
+  instruction instruction instruction 
+  instruction instruction instruction 
+  instruction instruction instruction 
+  instruction instruction instruction 
+  instruction instruction instruction 
+  instruction instruction instruction 
+  last line  (queued)
+╭──────────────────────────────────────────────╮
+│ >  Try "explain this repo" · / commands · @  │
+╰──────────────────────────────────────────────╯
+⏸ manual mode on      fake-sonnet · effort: auto

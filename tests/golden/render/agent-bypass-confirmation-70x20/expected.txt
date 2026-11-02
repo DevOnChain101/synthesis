@@ -1,0 +1,20 @@
+
+╭────────────────────────────────────────────────────────────────────╮
+│ ✻ Hello there! I'm Synthesis.  · 1.0.0                             │
+│                                                                    │
+│ /help for commands · alt+v pastes an image                         │
+│ cwd: /work/proj                                                    │
+╰────────────────────────────────────────────────────────────────────╯
+
+ Tips for getting started:
+  1. Ask Synthesis to explain, fix or build something in this 
+     folder
+  2. Type / for commands and skills, @ to mention a file
+  3. Drop or paste an image path to attach a screenshot
+╭─ Warning: bypass permissions ──────────────────────────────────────╮
+│ Bypass permissions skips normal tool permission prompts. Explicit  │
+│ deny rules and protected-path safeguards still apply.              │
+│                                                                    │
+│ enter enable bypass permissions   esc keep auto mode               │
+╰────────────────────────────────────────────────────────────────────╯
+⏵⏵ auto mode on (shift+tab to cycle)        fake-sonnet · effort: auto

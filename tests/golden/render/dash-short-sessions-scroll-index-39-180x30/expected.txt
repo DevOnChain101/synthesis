@@ -1,0 +1,30 @@
+▐ ✻ SYNTHESIS ▌ │ ● 40 live │ ◆ claude-sonnet │ ⌂ project                                                                             session- · up 1m00s │ ctx ▱▱▱▱▱▱ 0% │ 12:00:00
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+┏━ ◆ Running 40 ━━━━━━━━━━━━━┓┏━ ◆ Status ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┏━ ◆ TOPOLOGY 0 nodes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃    ↑ 34 more               ┃┃                                                                   ┃┃ ○ 1 Plan ► ○ 2 Guard ► ○ 3 Orch ► ○ 4 Exec ► ○ 5 Verify ► ○ 6 Learn           ┃
+│  ● proj-34              10%││                                                                   ││ idle · waiting for a prompt                                                   │
+│ project-34 (…/workspace)   ││                                                                   ││                                                                               │
+│  ● proj-35              10%││ ● IDLE  last activity 0s ago                                      ││ ╭─── USER · PROJECT ───╮   ╭─── GUARDS ───────────╮   ╭─── SKILLS ───────────╮│
+│ project-35 (…/workspace)   ││   waiting for the next prompt…                                    ││ │ ❯ waiting for a pro… │   │ 0 guards             │   │ no skills used yet   ││
+│  ● proj-36              10%││ Context  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0% 0/200.0k      ││ │ prompts 0            │   │                      │   │                      ││
+│ project-36 (…/workspace)   ││                                                                   ││ │ project project      │   │                      │   │                      ││
+│  ● proj-37              10%││                                                                   ││ ╰──────────────────────╯   ╰─────────────────▲────╯   ╰──▲───────────────────╯│
+│ project-37 (…/workspace)   ││                                                                   ││                     │                        │           │                    │
+│  ● proj-38              10%│┃                                                                   ┃│                     └────┐                   │      ┌────┘                    │
+│ project-38 (…/workspace)   │┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│ ╭─── MEMORY ───────────╮ │ ╭─ CORE  sonnet ──┻────╮ │ ╭─── SUB-AGENTS ───────╮│
+│ ►● proj-39              10%│┏━ ◆ Activity ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓│ │ context ▱▱▱▱▱▱▱▱… 0% │ └─► · Intent       pars… ┣─┘ │ no sub-agents yet    ││
+┃ project-39 (…/workspace)   ┃┃                                                                   ┃│ │ verify  no test / b… │   │ · Plan         deco… │   │                      ││
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│                                                                   ││ │ memory  0 writes     ◄───┫ · Orchestrator  idle ┣───►                      ││
+┏━ ◆ Session ━━━━━━━━━━━━━━━━┓│                                                                   ││ │ tasks   none         │ ┌─┫ ctx 0% · 0 tok       ┣─┐ │                      ││
+┃                            ┃│                                                                   ││ ╰──────────────────────╯ │ ╰─────────────────┳────╯ │ ╰──────────────────────╯│
+│                            ││                                                                   ││                     ┌────┘                   │      └────┐                    │
+│ model  claude-sonnet       ││                                                                   ││                     │                        │           │                    │
+│ cwd    project             ││                                                                   ││ ╭─ EXTERNAL · MCP ──▼──╮   ╭─ EXECUTION ─────▼────╮   ╭──▼─ HOOKS ───────────╮│
+│ uptime 1m00s               ││                                                                   ││ │ no MCP servers call… │   │ 0 calls    no errors │   │ no event hooks fired ││
+│ turns  0 prompts · 0 tools ││                                                                   │┃ ╰──────────────────────╯   ╰──────────────────────╯   ╰──────────────────────╯┃
+│                            ││                                                                   │┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+│                            ││                                                                   │┏━ ◆ Usage · tokens · 1.0k this month ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃                            ┃│                                                                   │┃ ■ ■                                                                           ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┃                                                                   ┃┃ Less ■ ■ ■ ■ ■ More                                                           ┃
+                              ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+↑/↓ select session   a follow newest   u usage metric   r reload   q quit                                                                                                           

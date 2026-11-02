@@ -1,0 +1,23 @@
+{
+  "agent": {
+    "items": [
+      {
+        "input": {
+          "file_path": "src/a.js",
+          "new_string": "const a = 10;\nconst b = 2;\nconst c = 3;",
+          "old_string": "const a = 1;\nconst b = 2;"
+        },
+        "kind": "tool",
+        "name": "Edit",
+        "result": "ok",
+        "status": "done"
+      }
+    ]
+  },
+  "frame": 0,
+  "h": 30,
+  "now": 1790942400000,
+  "op": "agent",
+  "opts": {},
+  "w": 70
+}

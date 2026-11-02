@@ -1,0 +1,45 @@
+{
+  "agent": {
+    "items": [
+      {
+        "kind": "user",
+        "text": "fix the flaky login test"
+      },
+      {
+        "end": 1790942399000,
+        "kind": "thinking",
+        "start": 1790942397000,
+        "text": "look"
+      }
+    ],
+    "pending": [
+      {
+        "choice": 1,
+        "input": {
+          "command": "rm -rf build",
+          "description": "Clean build"
+        },
+        "kind": "permission",
+        "status": "pending",
+        "suggestions": [
+          {
+            "rules": [
+              {
+                "ruleContent": "rm:*",
+                "toolName": "Bash"
+              }
+            ],
+            "type": "addRules"
+          }
+        ],
+        "tool": "Bash"
+      }
+    ]
+  },
+  "frame": 0,
+  "h": 34,
+  "now": 1790942400000,
+  "op": "agent",
+  "opts": {},
+  "w": 70
+}

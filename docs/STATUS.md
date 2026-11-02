@@ -1,6 +1,6 @@
 # Synthesis status
 
-UI removed 2026-10-31: the figures below that mention the TUI, its goldens or tty-qa describe the archived state.
+The classic TUI is back (restored 2026-11, `docs/tui-feature-port.md`); the GPUI desktop and the redesigned TUI stay removed (tag `archive/ui-before-removal`). Figures below that mention the TUI's goldens or tty-qa describe the archived state, not the restored crates.
 
 Goal: R1–R9, hand over the full Synthesis autonomous coding agent. Not complete: see "Open".
 
@@ -18,7 +18,7 @@ Goal: R1–R9, hand over the full Synthesis autonomous coding agent. Not complet
 - R2 core: config, terminal, hooks, tools, permissions (all six modes incl. the auto-mode LLM judge; bypass needs confirmation).
 - R3 providers (Anthropic, OpenAI-compatible) and MCP (stdio, streamable HTTP, SSE; read-before-write guard; credential propagation checks; `synt mcp test`).
 - R4 harness, verification gate (one approval per check set; edits with no check end `unverified`), headless `synt run` with `--permission-mode`, `--allow/--deny`.
-- R5 TUI: built, then removed on 2026-10-31 together with the GPUI desktop app (archive tag `archive/ui-before-removal`); the product is a headless CLI plus libraries until the owner asks for a new UI built from the HTML design.
+- R5 TUI: the classic TUI was restored on the current core (crates `synthesis-tui*`, `apps/cli/src/tui.rs`; palette, logo welcome, `/config`, peers, image paste); the GPUI desktop app and the redesigned TUI remain removed (archive tag `archive/ui-before-removal`).
 - R6 browser (own CDP client). R7 sandbox (Seatbelt tested; Landlock/bwrap; Windows Job Object). R8 sessions (SQLite) and worktrees. R9a CI + release pipeline.
 
 ## Decisions on record

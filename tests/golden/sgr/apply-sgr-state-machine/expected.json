@@ -1,0 +1,119 @@
+[
+  {
+    "params": "1",
+    "state": {
+      "attr": 0,
+      "bg": null,
+      "fg": null,
+      "int": 1
+    }
+  },
+  {
+    "params": "3;4",
+    "state": {
+      "attr": 3,
+      "bg": null,
+      "fg": null,
+      "int": 1
+    }
+  },
+  {
+    "params": "38;2;1;2;3",
+    "state": {
+      "attr": 3,
+      "bg": null,
+      "fg": "1;2;3",
+      "int": 1
+    }
+  },
+  {
+    "params": "48;5;9",
+    "state": {
+      "attr": 3,
+      "bg": "#9",
+      "fg": "1;2;3",
+      "int": 1
+    }
+  },
+  {
+    "params": "31",
+    "state": {
+      "attr": 3,
+      "bg": "#9",
+      "fg": "#1",
+      "int": 1
+    }
+  },
+  {
+    "params": "0",
+    "state": {
+      "attr": 0,
+      "bg": null,
+      "fg": null,
+      "int": 0
+    }
+  },
+  {
+    "params": "",
+    "state": {
+      "attr": 0,
+      "bg": null,
+      "fg": null,
+      "int": 0
+    }
+  },
+  {
+    "params": "22",
+    "state": {
+      "attr": 0,
+      "bg": null,
+      "fg": null,
+      "int": 0
+    }
+  },
+  {
+    "params": "39",
+    "state": {
+      "attr": 0,
+      "bg": null,
+      "fg": null,
+      "int": 0
+    }
+  },
+  {
+    "params": "90",
+    "state": {
+      "attr": 0,
+      "bg": null,
+      "fg": "#8",
+      "int": 0
+    }
+  },
+  {
+    "params": "107",
+    "state": {
+      "attr": 0,
+      "bg": "#15",
+      "fg": "#8",
+      "int": 0
+    }
+  },
+  {
+    "params": "38;9",
+    "state": {
+      "attr": 8,
+      "bg": "#15",
+      "fg": null,
+      "int": 0
+    }
+  },
+  {
+    "params": "99",
+    "state": {
+      "attr": 8,
+      "bg": "#15",
+      "fg": null,
+      "int": 0
+    }
+  }
+]

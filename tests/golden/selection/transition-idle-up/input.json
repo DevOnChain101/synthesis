@@ -1,0 +1,118 @@
+{
+  "events": [
+    {
+      "alt": false,
+      "extending": false,
+      "moved": false,
+      "shift": false,
+      "type": "up"
+    },
+    {
+      "alt": false,
+      "extending": true,
+      "moved": false,
+      "shift": false,
+      "type": "up"
+    },
+    {
+      "alt": true,
+      "extending": false,
+      "moved": false,
+      "shift": false,
+      "type": "up"
+    },
+    {
+      "alt": true,
+      "extending": true,
+      "moved": false,
+      "shift": false,
+      "type": "up"
+    },
+    {
+      "alt": false,
+      "extending": false,
+      "moved": false,
+      "shift": true,
+      "type": "up"
+    },
+    {
+      "alt": false,
+      "extending": true,
+      "moved": false,
+      "shift": true,
+      "type": "up"
+    },
+    {
+      "alt": true,
+      "extending": false,
+      "moved": false,
+      "shift": true,
+      "type": "up"
+    },
+    {
+      "alt": true,
+      "extending": true,
+      "moved": false,
+      "shift": true,
+      "type": "up"
+    },
+    {
+      "alt": false,
+      "extending": false,
+      "moved": true,
+      "shift": false,
+      "type": "up"
+    },
+    {
+      "alt": false,
+      "extending": true,
+      "moved": true,
+      "shift": false,
+      "type": "up"
+    },
+    {
+      "alt": true,
+      "extending": false,
+      "moved": true,
+      "shift": false,
+      "type": "up"
+    },
+    {
+      "alt": true,
+      "extending": true,
+      "moved": true,
+      "shift": false,
+      "type": "up"
+    },
+    {
+      "alt": false,
+      "extending": false,
+      "moved": true,
+      "shift": true,
+      "type": "up"
+    },
+    {
+      "alt": false,
+      "extending": true,
+      "moved": true,
+      "shift": true,
+      "type": "up"
+    },
+    {
+      "alt": true,
+      "extending": false,
+      "moved": true,
+      "shift": true,
+      "type": "up"
+    },
+    {
+      "alt": true,
+      "extending": true,
+      "moved": true,
+      "shift": true,
+      "type": "up"
+    }
+  ],
+  "mode": "idle",
+  "op": "transition"
+}

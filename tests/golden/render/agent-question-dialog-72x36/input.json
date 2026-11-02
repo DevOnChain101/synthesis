@@ -1,0 +1,36 @@
+{
+  "agent": {
+    "pending": [
+      {
+        "dialog": "question",
+        "kind": "permission",
+        "options": [],
+        "qi": 0,
+        "questions": [
+          {
+            "header": "Colour",
+            "multiSelect": false,
+            "options": [
+              {
+                "description": "warm",
+                "label": "Red"
+              },
+              {
+                "description": "cool",
+                "label": "Blue"
+              }
+            ],
+            "question": "Which colour?"
+          }
+        ],
+        "status": "pending"
+      }
+    ]
+  },
+  "frame": 0,
+  "h": 36,
+  "now": 1790942400000,
+  "op": "agent",
+  "opts": {},
+  "w": 72
+}
