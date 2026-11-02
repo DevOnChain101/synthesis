@@ -1538,6 +1538,7 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
                         &mut session,
                         TaskRequest {
                             request,
+                            images: vec![],
                             criteria,
                             history,
                             display_text: None,
