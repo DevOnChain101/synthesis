@@ -236,7 +236,7 @@ impl Default for RealExec {
 
 /// Kills the child AND what it started (powershell.exe starts helpers; a script can fork): unix
 /// kills the process group (the child leads its own), Windows uses `taskkill /T`. Then reaps it.
-fn kill_tree(child: &mut std::process::Child) {
+pub fn kill_tree(child: &mut std::process::Child) {
     let pid = child.id();
     #[cfg(unix)]
     {
@@ -272,7 +272,27 @@ const READER_GRACE: Duration = Duration::from_millis(500);
 
 impl Exec for RealExec {
     fn run(&self, program: &Path, args: &[String]) -> io::Result<Output> {
+        self.run_with(program, args, None, None)
+    }
+}
+
+impl RealExec {
+    /// [`Exec::run`] in `cwd`, and with exactly `env` as the environment when given (everything
+    /// else cleared): for helpers that must not inherit the process environment.
+    pub fn run_with(
+        &self,
+        program: &Path,
+        args: &[String],
+        cwd: Option<&Path>,
+        env: Option<&[(String, String)]>,
+    ) -> io::Result<Output> {
         let mut cmd = Command::new(program);
+        if let Some(d) = cwd {
+            cmd.current_dir(d);
+        }
+        if let Some(e) = env {
+            cmd.env_clear().envs(e.iter().map(|(k, v)| (k, v)));
+        }
         cmd.args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

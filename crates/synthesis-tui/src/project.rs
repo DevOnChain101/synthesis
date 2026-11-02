@@ -4,9 +4,11 @@
 
 use crate::sanitize::clean_line;
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use synthesis_config::Env;
+use synthesis_tui_base::imgclip::RealExec;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TreeRow {
@@ -104,30 +106,116 @@ pub fn diff_lines(p: &ProjectData, which: &str) -> Vec<String> {
 
 const MAX_ROWS: usize = 400;
 const MAX_DIFF_LINES: usize = 600;
-const MAX_BYTES: u64 = 1 << 20;
+const MAX_BYTES: usize = 1 << 20;
+const GIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn git(cwd: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let mut child = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut buf = Vec::new();
-    child
-        .stdout
-        .take()?
-        .take(MAX_BYTES)
-        .read_to_end(&mut buf)
-        .ok()?;
-    // the bound may stop the read early: kill instead of waiting on a full pipe
-    let _ = child.kill();
-    let ok = child.wait().ok()?;
-    // a killed child has no success status; the output read before the kill is what we want
-    (ok.success() || !buf.is_empty()).then_some(buf)
+/// Read-only `git` for a workspace that may be hostile: its `.git/config` can name programs
+/// (`core.fsmonitor`, a textconv or external diff driver, a submodule helper), so every call
+/// turns those off, the process gets a minimal environment (never the API keys), a wall-clock
+/// limit with a process-group kill, and a bounded read. `safe.directory` is left alone: git's own
+/// refusal to read another user's repository stays.
+struct Git {
+    env: Vec<(String, String)>,
+    exec: RealExec,
+}
+
+impl Git {
+    fn new(env: &Env) -> Self {
+        // from the child allowlist, narrowed again to what git needs
+        let child = env.child_env();
+        let mut keep: Vec<(String, String)> = child
+            .iter()
+            .filter(|(k, _)| {
+                matches!(
+                    *k,
+                    "PATH"
+                        | "HOME"
+                        | "USERPROFILE"
+                        | "TMPDIR"
+                        | "TEMP"
+                        | "TMP"
+                        | "SystemRoot"
+                        | "SYSTEMROOT"
+                        | "LANG"
+                ) || k.starts_with("LC_")
+            })
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        keep.extend(
+            [
+                ("GIT_CONFIG_NOSYSTEM", "1"),
+                ("GIT_OPTIONAL_LOCKS", "0"),
+                ("GIT_TERMINAL_PROMPT", "0"),
+            ]
+            .map(|(k, v)| (k.to_string(), v.to_string())),
+        );
+        Self {
+            env: keep,
+            exec: RealExec {
+                timeout: GIT_TIMEOUT,
+                max: MAX_BYTES,
+            },
+        }
+    }
+
+    /// Stdout (cut at the last `cut_at` byte when the bound was hit) and whether it was cut.
+    fn run(&self, cwd: &Path, args: &[&str], cut_at: u8) -> Option<(Vec<u8>, bool)> {
+        let mut argv: Vec<String> = [
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.untrackedCache=false",
+            "-c",
+            "protocol.allow=never",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+        argv.extend(args.iter().map(|s| (*s).to_string()));
+        let o = self
+            .exec
+            .run_with(Path::new("git"), &argv, Some(cwd), Some(&self.env))
+            .ok()?;
+        if o.timed_out {
+            return None;
+        }
+        let mut out = o.stdout;
+        if o.truncated {
+            // a half record would be shown as a file or a diff line that is not there
+            let keep = out.iter().rposition(|b| *b == cut_at).map_or(0, |i| i + 1);
+            out.truncate(keep);
+        } else if o.code != Some(0) && out.is_empty() {
+            return None;
+        }
+        Some((out, o.truncated))
+    }
+}
+
+/// `git status --porcelain=v1 -z`: `XY path`, and for a rename or a copy (in either column) the
+/// origin follows as an entry of its own, which is not a file of its own.
+fn parse_status(st: &[u8]) -> HashMap<String, char> {
+    let mut status = HashMap::new();
+    let mut it = st.split(|c| *c == 0).filter(|p| p.len() > 3);
+    while let Some(e) = it.next() {
+        let (x, y) = (e[0] as char, e[1] as char);
+        let path = clean_line(&String::from_utf8_lossy(&e[3..]));
+        if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
+            it.next();
+        }
+        let letter = if x == '?' {
+            '?'
+        } else if x == 'A' || y == 'A' || x == 'C' || y == 'C' {
+            'A'
+        } else if x == 'D' || y == 'D' {
+            'D'
+        } else if x == 'R' || y == 'R' {
+            'R'
+        } else {
+            'M'
+        };
+        status.insert(path, letter);
+    }
+    status
 }
 
 fn split_nul(b: &[u8]) -> Vec<String> {
@@ -137,8 +225,10 @@ fn split_nul(b: &[u8]) -> Vec<String> {
         .collect()
 }
 
-pub fn scan(cwd: &Path) -> ProjectData {
-    let Some(files) = git(
+/// `env`: the process environment as the app holds it (only what git needs is passed on).
+pub fn scan(cwd: &Path, env: &Env) -> ProjectData {
+    let git = Git::new(env);
+    let Some((files, files_cut)) = git.run(
         cwd,
         &[
             "ls-files",
@@ -147,8 +237,9 @@ pub fn scan(cwd: &Path) -> ProjectData {
             "--others",
             "--exclude-standard",
         ],
+        0,
     ) else {
-        let note = if Command::new("git").arg("--version").output().is_ok() {
+        let note = if git.run(cwd, &["--version"], b'\n').is_some() {
             "not a git repository"
         } else {
             "git was not found"
@@ -163,27 +254,15 @@ pub fn scan(cwd: &Path) -> ProjectData {
     paths.sort();
     paths.dedup();
     let mut status: HashMap<String, char> = HashMap::new();
-    if let Some(st) = git(cwd, &["status", "--porcelain=v1", "-z"]) {
-        let mut it = st.split(|c| *c == 0).filter(|p| p.len() > 3);
-        while let Some(e) = it.next() {
-            let (x, y) = (e[0] as char, e[1] as char);
-            let path = clean_line(&String::from_utf8_lossy(&e[3..]));
-            let letter = if x == '?' {
-                '?'
-            } else if x == 'A' || y == 'A' {
-                'A'
-            } else if x == 'D' || y == 'D' {
-                'D'
-            } else if x == 'R' {
-                it.next(); // the old name of a rename follows as its own entry
-                'R'
-            } else {
-                'M'
-            };
-            status.insert(path, letter);
-        }
+    // submodules are not looked into (their own config could name programs too)
+    if let Some((st, _)) = git.run(
+        cwd,
+        &["status", "--porcelain=v1", "-z", "--ignore-submodules=all"],
+        0,
+    ) {
+        status = parse_status(&st);
     }
-    let mut truncated = false;
+    let mut truncated = files_cut;
     let mut rows: Vec<TreeRow> = vec![];
     let mut open: Vec<&str> = vec![];
     'files: for p in &paths {
@@ -215,9 +294,20 @@ pub fn scan(cwd: &Path) -> ProjectData {
             status: status.get(p).copied(),
         });
     }
-    let raw = git(cwd, &["diff", "--no-color", "--no-ext-diff", "HEAD"])
-        .or_else(|| git(cwd, &["diff", "--no-color", "--no-ext-diff"]))
-        .unwrap_or_default();
+    // no textconv and no external diff driver: both are programs named by the repository's config
+    let diff = |extra: &[&str]| {
+        let mut a = vec![
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=all",
+        ];
+        a.extend(extra);
+        git.run(cwd, &a, b'\n')
+    };
+    let (raw, diff_cut) = diff(&["HEAD"]).or_else(|| diff(&[])).unwrap_or_default();
+    truncated |= diff_cut;
     let all: Vec<String> = String::from_utf8_lossy(&raw)
         .lines()
         .map(clean_line)
@@ -235,6 +325,11 @@ pub fn scan(cwd: &Path) -> ProjectData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    fn env() -> Env {
+        Env::from_pairs([("PATH", std::env::var("PATH").unwrap_or_default())])
+    }
 
     fn run(dir: &Path, args: &[&str]) {
         let ok = Command::new("git")
@@ -251,7 +346,7 @@ mod tests {
     #[test]
     fn a_plain_folder_is_a_note_not_an_empty_tree() {
         let d = tempfile::tempdir().unwrap();
-        let p = scan(d.path());
+        let p = scan(d.path(), &env());
         assert!(p.loaded && p.rows.is_empty());
         assert!(p.note.is_some());
     }
@@ -267,7 +362,7 @@ mod tests {
         run(w, &["commit", "-qm", "x"]);
         std::fs::write(w.join("src/a.rs"), "two\n").unwrap();
         std::fs::write(w.join("new.txt"), "n\n").unwrap();
-        let p = scan(w);
+        let p = scan(w, &env());
         assert_eq!(p.note, None);
         let find = |n: &str| p.rows.iter().find(|r| r.name == n).unwrap().clone();
         assert!(find("src").dir);
@@ -288,7 +383,7 @@ mod tests {
         run(w, &["commit", "-qm", "x"]);
         std::fs::write(w.join("a.rs"), "two\nthree\n").unwrap();
         std::fs::write(w.join("b.rs"), "y\n").unwrap();
-        let p = scan(w);
+        let p = scan(w, &env());
         let all = diff_lines(&p, "");
         assert_eq!(all[0], "+2 -1  a.rs");
         assert_eq!(all[1], "+1 -1  b.rs");
@@ -304,7 +399,162 @@ mod tests {
         let t = tree_lines(&p);
         assert!(t.iter().any(|l| l == "M a.rs") && t.iter().any(|l| l == "M b.rs"));
         assert!(
-            diff_lines(&scan(tempfile::tempdir().unwrap().path()), "")[0].starts_with("/diff:")
+            diff_lines(&scan(tempfile::tempdir().unwrap().path(), &env()), "")[0]
+                .starts_with("/diff:")
         );
+    }
+
+    #[test]
+    fn status_origins_of_renames_and_copies_are_not_files() {
+        let st = b"R  new.rs\0old.rs\0C  copy.rs\0orig.rs\0 M plain.rs\0?? u.txt\0 R moved\0was\0";
+        let m = parse_status(st);
+        assert_eq!(m.get("new.rs"), Some(&'R'));
+        assert_eq!(m.get("copy.rs"), Some(&'A'));
+        assert_eq!(m.get("plain.rs"), Some(&'M'));
+        assert_eq!(m.get("u.txt"), Some(&'?'));
+        assert_eq!(m.get("moved"), Some(&'R'));
+        for origin in ["old.rs", "orig.rs", "was"] {
+            assert!(!m.contains_key(origin), "{origin} is an origin, not a file");
+        }
+        assert_eq!(m.len(), 5);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hostile_git_config_runs_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let w = std::fs::canonicalize(d.path()).unwrap();
+        let (repo, tools) = (w.join("repo"), w.join("tools"));
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&tools).unwrap();
+        let marker = |n: &str| w.join(format!("marker-{n}"));
+        let script = |name: &str, body: String| {
+            let p = tools.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let fsm = script(
+            "fsm.sh",
+            format!("touch {}\nprintf '\\0'", marker("fsmonitor").display()),
+        );
+        let conv = script(
+            "conv.sh",
+            format!("touch {}\ncat \"$1\"", marker("textconv").display()),
+        );
+        let ext = script(
+            "ext.sh",
+            format!("touch {}\nexit 0", marker("extdiff").display()),
+        );
+        run(&repo, &["init", "-q"]);
+        std::fs::write(repo.join("a.x"), "one\n").unwrap();
+        std::fs::write(repo.join(".gitattributes"), "*.x diff=x\n").unwrap();
+        run(&repo, &["add", "."]);
+        run(&repo, &["commit", "-qm", "c"]);
+        std::fs::write(repo.join("a.x"), "two\n").unwrap();
+        run(
+            &repo,
+            &["config", "core.fsmonitor", &fsm.display().to_string()],
+        );
+        run(
+            &repo,
+            &["config", "diff.x.textconv", &conv.display().to_string()],
+        );
+        run(
+            &repo,
+            &["config", "diff.external", &ext.display().to_string()],
+        );
+        // positive control: plain git DOES run them here (otherwise this test proves nothing)
+        let plain = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+        };
+        plain(&["status"]);
+        plain(&["diff"]);
+        let ran: Vec<&str> = ["fsmonitor", "textconv", "extdiff"]
+            .into_iter()
+            .filter(|n| marker(n).exists())
+            .collect();
+        assert!(
+            !ran.is_empty(),
+            "plain git ran none of the configured programs: the control failed"
+        );
+        for n in &ran {
+            std::fs::remove_file(marker(n)).unwrap();
+        }
+        // the scan reads the tree and the diff and runs none of them
+        let p = scan(&repo, &env());
+        assert_eq!(p.note, None);
+        assert!(
+            p.rows
+                .iter()
+                .any(|r| r.name == "a.x" && r.status == Some('M')),
+            "{:?}",
+            p.rows
+        );
+        assert!(p.diff.iter().any(|l| l == "+two"), "{:?}", p.diff);
+        for n in ["fsmonitor", "textconv", "extdiff"] {
+            assert!(!marker(n).exists(), "{n} ran from the repository's config");
+        }
+    }
+
+    #[test]
+    fn git_gets_a_minimal_environment_and_a_cut_diff_ends_on_a_line() {
+        // the environment: the allowlist only, never a key
+        let g = Git::new(&Env::from_pairs([
+            ("PATH", "/usr/bin"),
+            ("HOME", "/h"),
+            ("LC_ALL", "C"),
+            ("ANTHROPIC_API_KEY", "sk-secret"),
+            ("SYNTHESIS_API_KEY", "sk-secret2"),
+            ("GIT_DIR", "/elsewhere"),
+            ("GITHUB_TOKEN", "t"),
+        ]));
+        let keys: Vec<&str> = g.env.iter().map(|(k, _)| k.as_str()).collect();
+        for want in [
+            "PATH",
+            "HOME",
+            "LC_ALL",
+            "GIT_CONFIG_NOSYSTEM",
+            "GIT_OPTIONAL_LOCKS",
+            "GIT_TERMINAL_PROMPT",
+        ] {
+            assert!(keys.contains(&want), "{want}: {keys:?}");
+        }
+        for bad in [
+            "ANTHROPIC_API_KEY",
+            "SYNTHESIS_API_KEY",
+            "GIT_DIR",
+            "GITHUB_TOKEN",
+        ] {
+            assert!(!keys.contains(&bad), "{bad} reached git");
+        }
+        // a diff over the byte bound is cut on a line boundary and says so
+        let d = tempfile::tempdir().unwrap();
+        let w = d.path();
+        run(w, &["init", "-q"]);
+        let long = |c: char| format!("{}\n", c.to_string().repeat(200_000));
+        std::fs::write(
+            w.join("big.txt"),
+            (0..10).map(|_| long('a')).collect::<String>(),
+        )
+        .unwrap();
+        run(w, &["add", "."]);
+        run(w, &["commit", "-qm", "c"]);
+        std::fs::write(
+            w.join("big.txt"),
+            (0..10).map(|_| long('b')).collect::<String>(),
+        )
+        .unwrap();
+        let p = scan(w, &env());
+        assert!(p.truncated, "the byte bound was hit");
+        for l in &p.diff {
+            let n = l.chars().count();
+            assert!(n < 400 || n == 200_001, "a half line was shown ({n} chars)");
+        }
     }
 }

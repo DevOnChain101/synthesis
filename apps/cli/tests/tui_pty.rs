@@ -435,20 +435,30 @@ fn files_diff_terminal_and_browser_show_real_data() {
         "settings.json",
         r#"{"permissions": {"allow": ["Bash(echo:*)"]}}"#,
     );
-    let out = rig.drive(json!([
+    // not trusted: git is not run at all
+    let untrusted = rig.drive(json!([
         ["wait", 3],
         send("/files\r"),
-        expect("M a.rs"),
-        send("/diff a.rs\r"),
-        expect("+1 -1  a.rs"),
-        expect("+two"),
-        send("run something\r"),
-        expect("ran it"),
-        send("/terminal\r"),
-        expect("shell commands in this session"),
-        send("/browser\r"),
-        expect("no browser and web calls")
+        expect("this folder is not trusted")
     ]));
+    assert!(squash(&untrusted).contains("--trust-project"));
+    let out = rig.drive_with(
+        json!([
+            ["wait", 3],
+            send("/files\r"),
+            expect("M a.rs"),
+            send("/diff a.rs\r"),
+            expect("+1 -1  a.rs"),
+            expect("+two"),
+            send("run something\r"),
+            expect("ran it"),
+            send("/terminal\r"),
+            expect("shell commands in this session"),
+            send("/browser\r"),
+            expect("no browser and web calls")
+        ]),
+        &["--trust-project"],
+    );
     assert!(squash(&out).contains("echo hi"), "{}", squash(&out));
 }
 

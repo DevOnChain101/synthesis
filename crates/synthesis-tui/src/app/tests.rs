@@ -30,6 +30,7 @@ fn cfg(cwd: &str) -> AppConfig {
         home: None,
         mouse_debug: false,
         tz_offset_min: 0,
+        project_trusted: true,
         plain_logo: false,
         agent_defs: vec!["reviewer".into()],
     }
@@ -2464,4 +2465,31 @@ fn settings_change_what_is_drawn() {
     let mut b = app();
     b.set_tui(t, &[]);
     assert!(b.expanded);
+}
+
+#[test]
+fn files_and_diff_need_a_trusted_folder_and_never_run_two_scans_at_once() {
+    let mut c = cfg("/tmp/proj");
+    c.project_trusted = false;
+    let mut a = App::new(c, &[], T0);
+    for cmd in ["/files\r", "/diff\r"] {
+        let out = keys(&mut a, cmd);
+        assert!(
+            !out.iter().any(|c| matches!(c, Cmd::Project { .. })),
+            "git was asked for in an untrusted folder"
+        );
+    }
+    assert!(screen(&mut a).contains("not trusted"));
+    let mut b = app();
+    let started = |b: &mut App, s: &str| {
+        keys(b, s)
+            .iter()
+            .filter(|c| matches!(c, Cmd::Project { .. }))
+            .count()
+    };
+    assert_eq!(started(&mut b, "/files\r"), 1);
+    assert_eq!(started(&mut b, "/diff\r"), 0, "one scan at a time");
+    assert!(screen(&mut b).contains("still running"));
+    b.project_done();
+    assert_eq!(started(&mut b, "/diff x\r"), 1);
 }

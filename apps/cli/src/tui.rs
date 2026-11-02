@@ -271,6 +271,7 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
         let (exit, sid, ph_synthesis) = round(
             p,
             a.common.cleanup_worktree,
+            common.trust_project,
             &env,
             switch_note.take(),
             resume.take(),
@@ -298,6 +299,7 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
 fn round(
     p: Prepared,
     cleanup_worktree: bool,
+    project_trusted: bool,
     env: &Env,
     switch_note: Option<String>,
     resume: Option<Resume>,
@@ -412,6 +414,7 @@ fn round(
         o.tui = tui;
         o.tui_diagnostics = tui_diag;
         o.synthesis_home = Some(ph.synthesis.clone());
+        o.project_trusted = project_trusted;
         o.model = Some(label);
         o.models = models;
         o.effort_tiers = effort_tiers;
@@ -790,7 +793,7 @@ mod start_failure_tests {
             std::fs::write(wt.join(".env"), "TOKEN=1").unwrap();
         }
         p.harness.start_session(&mut p.session, "startup").unwrap(); // the app's own start now fails
-        let (exit, _sid, home) = round(p, true, &env, None, None, &mut |_| {
+        let (exit, _sid, home) = round(p, true, false, &env, None, None, &mut |_| {
             panic!("the UI must not run for a session that did not start")
         });
         assert!(exit.is_err());

@@ -113,6 +113,9 @@ pub(crate) struct AppConfig {
     /// `SYNTHESIS_MOUSE_DEBUG=1`: every mouse report is shown in the footer.
     pub mouse_debug: bool,
     pub tz_offset_min: i32,
+    /// The workspace is trusted (`--trust-project`): `/files` and `/diff` may run git in it, whose
+    /// repository config can name programs.
+    pub project_trusted: bool,
     /// 16-colour or colourless terminal: the welcome art is one colour.
     pub plain_logo: bool,
     /// Agent definitions `@agent:<name>` can start.
@@ -351,6 +354,8 @@ pub(crate) struct App {
     attachments: Vec<Attached>,
     /// A clipboard read is running: key repeat cannot start another.
     image_busy: bool,
+    /// A `/files` or `/diff` scan is running: at most one.
+    project_busy: bool,
     /// `synthesis.tui` (user settings), edited by `/config`.
     pub(crate) tui: TuiSettings,
     /// Cross-session messaging: the requests in flight, `None` when peers are off.
@@ -572,6 +577,7 @@ impl App {
             pastes: vec![],
             attachments: vec![],
             image_busy: false,
+            project_busy: false,
             peer_status: None,
             tui: TuiSettings::default(),
             esc_at: None,
@@ -1581,14 +1587,8 @@ impl App {
             }
             "effort" => self.set_effort(arg, out),
             "config" => self.open_config_picker(0),
-            "files" => out.push(Cmd::Project {
-                cwd: PathBuf::from(&self.cfg.cwd),
-                diff: None,
-            }),
-            "diff" => out.push(Cmd::Project {
-                cwd: PathBuf::from(&self.cfg.cwd),
-                diff: Some(arg.to_string()),
-            }),
+            "files" => self.project(None, out),
+            "diff" => self.project(Some(arg.to_string()), out),
             "terminal" => {
                 let v = self.calls(|n| n == "Bash", "shell commands");
                 self.out_item(v, false);
@@ -1851,6 +1851,33 @@ impl App {
             values,
             dir,
         });
+    }
+
+    /// `/files` (`None`) and `/diff [file]`: git reads the repository's config, which in a workspace
+    /// nobody trusted can name programs, so nothing runs there (and never two scans at once).
+    fn project(&mut self, diff: Option<String>, out: &mut Vec<Cmd>) {
+        let name = if diff.is_some() { "/diff" } else { "/files" };
+        if !self.cfg.project_trusted {
+            self.out_item(
+                format!(
+                    "{name}: this folder is not trusted, so git is not run in it (its .git/config can name programs). Start with --trust-project to allow it."
+                ),
+                true,
+            );
+        } else if self.project_busy {
+            self.out_item(format!("{name}: the last scan is still running"), true);
+        } else {
+            self.project_busy = true;
+            out.push(Cmd::Project {
+                cwd: PathBuf::from(&self.cfg.cwd),
+                diff,
+            });
+        }
+    }
+
+    /// The scan answered (any way): the next one may start.
+    pub fn project_done(&mut self) {
+        self.project_busy = false;
     }
 
     /// The tool calls of this session whose name `pick`s (`/terminal`, `/browser`): the data of

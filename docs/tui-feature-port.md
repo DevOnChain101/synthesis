@@ -29,7 +29,7 @@ slash command or a settings row: those are marked **new place** for the owner to
 | 17 | Setting: copy_on_select | b8820c8 | FUNCTIONAL | ported | off: drag-select highlights and ctrl+c copies |
 | 18 | First-run setup (no model configured) | 2fd00b0 | FUNCTIONAL | ported | `synth` shows a setup card instead of exiting 2: what to put where (key in an environment variable, `{env:NAME}` in synthesis.json, `synth models` / `doctor`), `r` checks again, `q` leaves; nothing is asked for or stored (ADR-011) |
 | 19 | Mission centre tab strip (chat / project / diff / terminal), `/tab` | 3acd7f7 | VISUAL | skipped (visual) | the data of each tab is rows 20-23, as commands (**new place**) |
-| 20 | Project tree with git status letters | 3acd7f7 | FUNCTIONAL | ported | `/files` (read-only git, bounded, on a worker thread; no git or not a repository is a note) **new place** |
+| 20 | Project tree with git status letters | 3acd7f7 | FUNCTIONAL | ported | `/files` (read-only git with the repository config's programs turned off, minimal environment, 5 s limit, one scan at a time, trusted folder only; no git or not a repository is a note) **new place** |
 | 21 | `git diff HEAD` view | 3acd7f7 | FUNCTIONAL | ported | `/diff`: a `+a -d path` line per changed file, then the diff **new place** |
 | 22 | Terminal tab: the session's shell commands | 3acd7f7 | FUNCTIONAL | ported | `/terminal`: the Bash calls of this session with their status; the output itself stays in the chat rows (ctrl+o) **new place** |
 | 23 | Per-file diff cards, per-file navigation | a8ea4df | FUNCTIONAL (cards: VISUAL) | ported (navigation), cards skipped (visual) | `/diff <file>` narrows to one file |

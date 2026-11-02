@@ -123,6 +123,8 @@ pub struct Options {
     /// `synthesis.tui` of the user settings, and what was wrong with it.
     pub tui: synthesis_settings::TuiSettings,
     pub tui_diagnostics: Vec<String>,
+    /// The workspace is trusted: `/files` and `/diff` run git in it.
+    pub project_trusted: bool,
     /// Where `/config` writes (`<synthesis_home>`); `None`: changes last for this run only.
     pub synthesis_home: Option<std::path::PathBuf>,
     pub saved: Vec<SavedSession>,
@@ -177,6 +179,7 @@ impl Options {
             tui: synthesis_settings::TuiSettings::default(),
             tui_diagnostics: vec![],
             synthesis_home: None,
+            project_trusted: false,
             saved: vec![],
             resume: None,
             startup_notes: vec![],
@@ -234,6 +237,7 @@ fn cfg_for(o: &Options) -> AppConfig {
             .map(Into::into),
         mouse_debug: o.env.get("SYNTHESIS_MOUSE_DEBUG") == Some("1"),
         tz_offset_min: o.tz_offset_min,
+        project_trusted: o.project_trusted,
         plain_logo: matches!(
             ColorMode::detect(&o.env, o.platform),
             ColorMode::Ansi16 | ColorMode::Mono
@@ -243,6 +247,7 @@ fn cfg_for(o: &Options) -> AppConfig {
 }
 
 struct Runner {
+    env: Env,
     settings_home: Option<std::path::PathBuf>,
     images: Option<Arc<dyn ImageSource>>,
     host: Option<Arc<dyn TaskHost>>,
@@ -664,6 +669,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
     };
 
     let mut runner = Runner {
+        env: o.env.clone(),
         settings_home: o.synthesis_home.clone(),
         images: o
             .image_source
@@ -837,6 +843,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                     urgent = true;
                 }
                 Msg::Output(text) => {
+                    app.project_done();
                     app.output(text, false);
                     dirty = true;
                 }
@@ -1003,9 +1010,9 @@ fn exec(
             agent,
         } => runner.start(app, text, images, display_text, cancel, agent),
         Cmd::Project { cwd, diff } => {
-            let tx = runner.tx.clone();
+            let (tx, env) = (runner.tx.clone(), runner.env.clone());
             std::thread::spawn(move || {
-                let p = crate::project::scan(&cwd);
+                let p = crate::project::scan(&cwd, &env);
                 let lines = match &diff {
                     None => crate::project::tree_lines(&p),
                     Some(f) => crate::project::diff_lines(&p, f.trim()),
@@ -1188,6 +1195,7 @@ pub fn render_once(o: &OnceOptions, out: &mut impl Write) -> io::Result<()> {
         home: None,
         mouse_debug: false,
         tz_offset_min: 0,
+        project_trusted: false,
         plain_logo: matches!(o.color, ColorMode::Ansi16 | ColorMode::Mono),
         agent_defs: vec![],
     };

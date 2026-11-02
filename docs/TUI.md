@@ -23,8 +23,8 @@ session continues in place), `--once` (print one frame and exit), plus the `synt
 | /mcp | MCP servers: state, tools, last error |
 | /images [clear] | the attached images, or drop them |
 | /config | the `synthesis.tui` settings as a list; enter flips a row, applies it and saves it |
-| /files | the project tree with git status letters (read-only git) |
-| /diff [file] | uncommitted changes: a line per file, then the diff (of one file) |
+| /files | the project tree with git status letters (read-only git; only in a trusted folder: `--trust-project`) |
+| /diff [file] | uncommitted changes: a line per file, then the diff (of one file); trusted folder only |
 | /terminal | the shell commands this session ran, with their status |
 | /browser | the browser and web calls this session made |
 | /peers | other sessions on this machine (needs `--peers` or `synthesis.peers.enabled`) |
@@ -57,8 +57,7 @@ limit is not raised), 8000x8000 px.
 Stored images: a pasted screenshot is kept UNREDACTED in `synthesis.db` (mode 0600, like the rest
 of the session) and in the Node-format transcript mirror. `synthesis.images.retentionDays` (user
 settings, default 30, `0` = forever) rewrites images of sessions untouched for that long to
-`[image removed after N days]` when the app starts; the mirror files are not rewritten (turn
-`synthesis.compat.write_node_transcripts` off to avoid them). A persistence problem (a message the
+`[image removed after N days]` in the session store when the app starts (see docs/specs/config.md for exactly what is and is not rewritten: the Node-format mirror, backups and browser screenshot files are not). A persistence problem (a message the
 store refuses, a failing store) is a visible `notice`, and a message over the limit is stored with
 its images replaced by `[image]` instead of stopping the later messages.
 
