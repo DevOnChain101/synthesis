@@ -676,3 +676,63 @@ fn a_change_made_while_editing_is_kept_not_overwritten_and_endless_changes_are_r
     assert_eq!(fs::read_to_string(&p).unwrap(), r#"{"writer": 3}"#);
     assert!(leftovers(f.home.path()).is_empty());
 }
+
+#[cfg(unix)]
+#[test]
+fn persisting_a_rule_never_writes_through_a_symlink_of_the_untrusted_project() {
+    use std::os::unix::fs::symlink;
+    let rules = ["Bash(ls:*)".to_string()];
+    let victim = tempfile::tempdir().unwrap();
+    let target = victim.path().join("authorized_keys");
+    fs::write(&target, "ssh-ed25519 AAAA keep\n").unwrap();
+    // settings.local.json -> elsewhere
+    let f = fx();
+    fs::create_dir_all(f.proj.path().join(".synthesis")).unwrap();
+    symlink(
+        &target,
+        f.proj.path().join(".synthesis/settings.local.json"),
+    )
+    .unwrap();
+    let e = persist_allow_rules(f.proj.path(), &rules).unwrap_err();
+    assert!(e.to_string().contains("symbolic link"), "{e}");
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "ssh-ed25519 AAAA keep\n"
+    );
+    // .synthesis itself -> elsewhere: nothing is created there
+    let g = fx();
+    let elsewhere = victim.path().join("dir");
+    fs::create_dir_all(&elsewhere).unwrap();
+    symlink(&elsewhere, g.proj.path().join(".synthesis")).unwrap();
+    assert!(persist_allow_rules(g.proj.path(), &rules).is_err());
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    // .gitignore -> elsewhere: refused before anything is written
+    let h = fx();
+    fs::create_dir_all(h.proj.path().join(".synthesis")).unwrap();
+    symlink(&target, h.proj.path().join(".synthesis/.gitignore")).unwrap();
+    assert!(persist_allow_rules(h.proj.path(), &rules).is_err());
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "ssh-ed25519 AAAA keep\n"
+    );
+    assert!(
+        !h.proj
+            .path()
+            .join(".synthesis/settings.local.json")
+            .exists()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_persisted_rule_file_is_written_atomically_with_a_private_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fx();
+    persist_allow_rules(f.proj.path(), &["Read".into()]).unwrap();
+    let p = f.proj.path().join(".synthesis/settings.local.json");
+    assert_eq!(
+        fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(leftovers(&f.proj.path().join(".synthesis")).is_empty());
+}

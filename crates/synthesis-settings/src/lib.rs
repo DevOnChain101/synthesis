@@ -301,29 +301,42 @@ fn load_settings_layers(
 pub fn persist_allow_rules(project_root: &Path, rules: &[String]) -> std::io::Result<()> {
     let path = local_settings_path(project_root);
     let dir = path.parent().unwrap_or(project_root);
-    std::fs::create_dir_all(dir)?;
-    let mut v = match read_json(&path, "local settings") {
-        Ok(Some(v)) => v,
-        Ok(None) => Value::Object(Map::new()),
-        Err(e) => return Err(std::io::Error::other(e)), // never overwrite a file we cannot parse
-    };
-    let allow = v
-        .as_object_mut()
-        .map(|o| {
-            o.entry("permissions")
-                .or_insert_with(|| Value::Object(Map::new()))
-        })
-        .and_then(Value::as_object_mut)
-        .map(|p| p.entry("allow").or_insert_with(|| Value::Array(vec![])))
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| std::io::Error::other("local settings: permissions.allow is not a list"))?;
-    for r in rules {
-        if !allow.iter().any(|x| x.as_str() == Some(r)) {
-            allow.push(Value::String(r.clone()));
+    let gi = dir.join(".gitignore");
+    // The project is untrusted data: a symlink at any of these would make this write land
+    // somewhere else (`settings.local.json -> ~/.ssh/authorized_keys`). Refused, not followed
+    // (unlike the user's own settings file, whose symlink is their choice).
+    for p in [dir, path.as_path(), gi.as_path()] {
+        if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "{} is a symbolic link; not writing the rule through it",
+                    p.display()
+                ),
+            ));
         }
     }
-    std::fs::write(&path, serde_json::to_string_pretty(&v)? + "\n")?;
-    let gi = dir.join(".gitignore");
+    std::fs::create_dir_all(dir)?;
+    edit_json_atomic(&path, "local settings", |v| {
+        let allow = v
+            .as_object_mut()
+            .map(|o| {
+                o.entry("permissions")
+                    .or_insert_with(|| Value::Object(Map::new()))
+            })
+            .and_then(Value::as_object_mut)
+            .map(|p| p.entry("allow").or_insert_with(|| Value::Array(vec![])))
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| {
+                std::io::Error::other("local settings: permissions.allow is not a list")
+            })?;
+        for r in rules {
+            if !allow.iter().any(|x| x.as_str() == Some(r)) {
+                allow.push(Value::String(r.clone()));
+            }
+        }
+        Ok(())
+    })?;
     let cur = std::fs::read_to_string(&gi).unwrap_or_default();
     if !cur.lines().any(|l| l.trim() == "settings.local.json") {
         let sep = if cur.is_empty() || cur.ends_with('\n') {
@@ -344,11 +357,17 @@ pub fn persist_allow_rules(project_root: &Path, rules: &[String]) -> std::io::Re
 ///
 /// Writing: a symlinked `path` is followed and the resolved target is written (the link stays a
 /// link; a dangling link is refused); the temp file sits next to the target, has an unpredictable
-/// name, is created with `create_new` and the mode of the file it replaces (0600 for a new one) so
-/// it is never wider than the original, is flushed to disk, and replaces the target with one
-/// rename (the target is never empty or half written); the directory is synced on unix. The temp
-/// file is removed on every error. Right before the rename the target's size, mtime and content
-/// hash are compared with what was read: a change means another round, not an overwrite.
+/// name, is created with `create_new`, and on unix with the mode of the file it replaces (0600 for
+/// a new one) so it is never wider than the original; it is flushed to disk and replaces the target
+/// with one rename (the target is never empty or half written). The temp file is removed on every
+/// error. The directory is synced after the rename on unix, best effort: that never turns a
+/// completed write into an error.
+///
+/// Concurrent writers: the target's size, mtime and content hash are compared right before the
+/// rename and a difference starts another round (3 at most, then `Err`). That is a best-effort
+/// check, not a lock: a writer that lands between the comparison and the rename is still
+/// overwritten. Windows: the read-only flag of the original is copied; the ACL of a new file is the
+/// one inherited from the directory (it is not made private).
 pub fn edit_json_atomic(
     path: &Path,
     what: &str,
@@ -391,26 +410,39 @@ pub fn edit_json_atomic(
         }
         drop(f);
         if let Err(e) = written {
-            let _ = std::fs::remove_file(&tmp);
+            remove_tmp(&tmp);
             return Err(e);
         }
         // someone else wrote the file while we edited: start again from what is there now
         if fingerprint(&target)? != before {
-            let _ = std::fs::remove_file(&tmp);
+            remove_tmp(&tmp);
             continue;
         }
         if let Err(e) = std::fs::rename(&tmp, &target) {
-            let _ = std::fs::remove_file(&tmp);
+            remove_tmp(&tmp);
             return Err(e);
         }
+        // best effort: the rename is done, so a failing directory sync is not a failed write
         #[cfg(unix)]
-        std::fs::File::open(dir).and_then(|d| d.sync_all())?;
+        let _ = std::fs::File::open(dir).and_then(|d| d.sync_all());
         return Ok(());
     }
     Err(std::io::Error::other(format!(
         "{what}: {} keeps changing while it is edited; not written",
         target.display()
     )))
+}
+
+/// Removes a temp file; a read-only flag copied from the original (Windows) would make the removal
+/// fail and leak the file, so it is cleared first.
+fn remove_tmp(tmp: &Path) {
+    if let Ok(m) = std::fs::metadata(tmp) {
+        let mut p = m.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        p.set_readonly(false);
+        let _ = std::fs::set_permissions(tmp, p);
+    }
+    let _ = std::fs::remove_file(tmp);
 }
 
 /// `path`, or where it points when it is a symlink (a dangling link is an error).
