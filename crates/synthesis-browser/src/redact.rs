@@ -56,6 +56,26 @@ fn percent(value: &str, keep: &str, upper: bool) -> String {
     o
 }
 
+/// JSON `\uXXXX` escapes of every non-ASCII character (surrogate pairs above the BMP).
+fn json_unicode(value: &str, upper: bool) -> String {
+    let mut o = String::new();
+    for c in value.chars() {
+        if c.is_ascii() {
+            o.push(c);
+        } else {
+            let mut b = [0u16; 2];
+            for u in c.encode_utf16(&mut b) {
+                o.push_str(&if upper {
+                    format!("\\u{u:04X}")
+                } else {
+                    format!("\\u{u:04x}")
+                });
+            }
+        }
+    }
+    o
+}
+
 /// The raw value plus: form-urlencoded, `encodeURIComponent`, strict percent-encoding (upper and
 /// lower hex), JSON string escape, HTML entities and base64 (standard/url-safe, padded or not).
 fn spellings(value: &str) -> Vec<String> {
@@ -77,6 +97,10 @@ fn spellings(value: &str) -> Vec<String> {
             .replace('"', "&quot;")
             .replace('\'', "&#39;"),
         value.replace('\'', "&#x27;"),
+        percent(value, "-._~!$&'()*+,;=:@", true), // a URL path segment
+        percent(value, "-._~!$&'()*+,;=:@", false),
+        json_unicode(value, true),
+        json_unicode(value, false),
         STANDARD.encode(value),
         STANDARD_NO_PAD.encode(value),
         URL_SAFE.encode(value),
@@ -213,6 +237,7 @@ mod tests {
                 .replace('\'', "&#39;"),
             base64::engine::general_purpose::STANDARD.encode(v),
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v),
+            percent(v, "-._~!$&'()*+,;=:@", true),
         ];
         for c in cases {
             let t = redact_text(&format!("before {c} after"));
@@ -223,6 +248,31 @@ mod tests {
             url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>()
         ));
         assert!(!u.contains("Zq9"), "{u}");
+    }
+
+    #[test]
+    fn unicode_escapes_and_basic_auth_pairs_are_masked() {
+        use base64::Engine;
+        let v = "pässw\u{1F512}rd-ü";
+        assert!(mask_secret(v));
+        for c in [
+            json_unicode(v, true),
+            json_unicode(v, false),
+            percent(v, "", true),
+        ] {
+            assert_eq!(redact_text(&format!("x{c}y")), "x[REDACTED:secret]y", "{c}");
+        }
+        assert!(json_unicode(v, false).contains("\\ud83d\\udd12"));
+        // `Authorization: Basic base64(user:pass)` only when the pair is registered
+        let auth =
+            base64::engine::general_purpose::STANDARD.encode("alice@example.com:Zr7-pair-secret");
+        assert_eq!(
+            redact_text(&auth),
+            auth,
+            "a pair nobody declared is not masked"
+        );
+        assert!(mask_secret("alice@example.com:Zr7-pair-secret"));
+        assert_eq!(redact_text(&auth), "[REDACTED:secret]");
     }
 
     #[test]

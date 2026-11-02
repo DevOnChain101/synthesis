@@ -27,6 +27,8 @@ pub(crate) struct SessionState {
     pub browser_profile: Mutex<Option<String>>,
     /// (secret, origin) pairs the person already approved in this session.
     pub secret_ok: Mutex<std::collections::HashSet<(String, String)>>,
+    /// How often the person refused a question (`profile:NAME`, `secret:NAME@ORIGIN`).
+    pub refusals: Mutex<HashMap<String, u8>>,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {

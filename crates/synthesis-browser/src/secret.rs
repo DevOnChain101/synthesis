@@ -193,7 +193,7 @@ pub fn origin_allowed(actual: &str, spec: &SecretSpec) -> bool {
         .is_some_and(|o| spec.origins.contains(&o))
 }
 
-/// Runs INSIDE the target element's frame as one `Runtime.callFunctionOn` (`this` = the element;
+/// Runs INSIDE the target element's frame, in an isolated world, as one `Runtime.callFunctionOn` (`this` = the element;
 /// arguments: allowed origins, field kind, value). Verification and the write happen in the same
 /// JavaScript task, so the page cannot navigate or restyle between check and write. The value is
 /// set through the native setter and announced with `input`/`change` events.
@@ -240,8 +240,10 @@ pub const FILL_JS: &str = r#"function(allowed, kind, value) {
   if (d.activeElement !== e && root.activeElement !== e) return no('the field could not be focused');
   const proto = tag === 'textarea' ? w.HTMLTextAreaElement.prototype : w.HTMLInputElement.prototype;
   Object.getOwnPropertyDescriptor(proto, 'value').set.call(e, value);
-  e.dispatchEvent(new w.Event('input', {bubbles: true}));
-  e.dispatchEvent(new w.Event('change', {bubbles: true}));
+  try {
+    e.dispatchEvent(new w.Event('input', {bubbles: true}));
+    e.dispatchEvent(new w.Event('change', {bubbles: true}));
+  } catch (_) { return {ok: true, maybe: true}; }
   return {ok: true};
 }"#;
 

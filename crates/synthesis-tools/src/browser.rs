@@ -52,6 +52,10 @@ pub struct BrowserConfig {
     pub sandboxed: bool,
     /// User setting `synthesis.browser.allow_unsandboxed`: use the credential tools anyway.
     pub allow_unsandboxed: bool,
+    /// Names of the stdio MCP servers of this run (they run outside the sandbox).
+    pub mcp_stdio: Vec<String>,
+    /// User setting `synthesis.browser.allow_with_mcp`: use the credential tools anyway.
+    pub allow_with_mcp: bool,
     /// Profiles the person pre-approved in user settings (for runs nobody can answer).
     pub pre_approved_profiles: BTreeSet<String>,
     /// (secret, origin) pairs pre-approved in user settings.
@@ -133,10 +137,29 @@ fn launch_env(cfg: &BrowserConfig, ctx: &ToolContext) -> Env {
 }
 
 fn require_sandbox(cfg: &BrowserConfig) -> Result<(), BrowserError> {
+    // MCP stdio servers are ordinary child processes of the session, outside the sandbox: they can
+    // read the saved profiles and secret files whatever `sandboxed` says.
+    if !cfg.mcp_stdio.is_empty() && !cfg.allow_with_mcp {
+        return Err(BrowserError::Refused(format!(
+            "stdio MCP server(s) {} run outside the sandbox and could read the saved logins and secret files; remove them or set synthesis.browser.allow_with_mcp to true in your user settings",
+            cfg.mcp_stdio.join(", ")
+        )));
+    }
     if cfg.sandboxed || cfg.allow_unsandboxed {
         return Ok(());
     }
     Err(BrowserError::Refused("stored logins and secrets need the sandbox: run with --sandbox enforce (commands the agent runs could otherwise read the saved profile or secret files), or set synthesis.browser.allow_unsandboxed to true in your user settings".into()))
+}
+
+/// A person who said no twice to the same question is not asked a third time in the session.
+const MAX_REFUSALS: u8 = 2;
+
+fn refused_too_often(state: &crate::native::SessionState, key: &str) -> bool {
+    lock(&state.refusals).get(key).copied().unwrap_or(0) >= MAX_REFUSALS
+}
+
+fn note_refusal(state: &crate::native::SessionState, key: &str) {
+    *lock(&state.refusals).entry(key.to_owned()).or_default() += 1;
 }
 
 /// `profile`: a saved login (see `browser_login`). It can only be chosen when the session's
@@ -172,11 +195,16 @@ async fn runtime(
                 // The person decides, per session, whether the agent may browse as this login.
                 if !cfg.pre_approved_profiles.contains(name) {
                     let Some(host) = &cfg.host else {
-                        return Err(BrowserError::Refused(
-                            "nobody can approve using a saved login here".into(),
-                        ));
+                        return Err(BrowserError::Refused("nobody can approve using a saved login here".into()));
                     };
+                    let key = format!("profile:{name}");
+                    if refused_too_often(&state, &key) {
+                        return Err(BrowserError::Refused(format!(
+                            "the person already refused saved login {name:?} twice in this session; not asking again"
+                        )));
+                    }
                     if !host.confirm_profile(name, &domains, &ctx.cancel).await {
+                        note_refusal(&state, &key);
                         return Err(BrowserError::Refused(format!(
                             "the person did not approve browsing with saved login {name:?}"
                         )));
@@ -423,15 +451,29 @@ async fn fill_secret_body(
         let Some(host) = &cfg.host else {
             return Err(refuse("nobody can approve the use of a secret here".into()));
         };
+        let rk = format!("secret:{name}@{origin}");
+        if refused_too_often(&state, &rk) {
+            return Err(refuse(format!(
+                "the person already refused secret {name:?} on {origin} twice in this session; not asking again"
+            )));
+        }
         if !host.confirm_secret(name, &origin, &ctx.cancel).await {
+            note_refusal(&state, &rk);
             return Err(refuse(format!(
                 "the person did not approve using secret {name:?} on {origin}"
             )));
         }
         lock(&state.secret_ok).insert(key);
     }
-    rt.fill_secret(r, spec, &value).await?;
-    let out = json!({"ok": true, "filled": true, "secret": name});
+    // Basic-auth style echoes (`base64(user:pass)`) of two declared secrets are masked as well
+    for (other, osp) in cfg.secrets.iter().filter(|(n, _)| n.as_str() != name) {
+        if let Ok(ov) = secret::resolve(other, osp, env) {
+            synthesis_browser::mask_secret(&format!("{value}:{ov}"));
+            synthesis_browser::mask_secret(&format!("{ov}:{value}"));
+        }
+    }
+    let maybe = rt.fill_secret(r, spec, &value).await?;
+    let out = json!({"ok": true, "filled": if maybe { json!("maybe") } else { json!(true) }, "secret": name});
     Ok(ToolOutput::text(out.to_string()))
 }
 
@@ -449,6 +491,12 @@ async fn nav(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
             .map_err(|_| BrowserError::Timeout(format!("navigation to {url}")))??,
         None => go.await?,
     };
+    // a same-document navigation keeps a typed short secret on the page: withhold its text
+    if rt.guard_text().await.is_err() {
+        return Ok(ToolOutput::text(
+            "Navigated. (page text withheld: a secret was typed into this document)",
+        ));
+    }
     Ok(ToolOutput::text(format!(
         "Navigated.\n{}",
         untrusted(page_text(&page))
@@ -597,6 +645,7 @@ fn cursor(input: &Value) -> Result<usize, Box<dyn Error + Send + Sync>> {
 }
 
 async fn console_body(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
+    rt.guard_text().await?;
     let from = cursor(input)?;
     let (msgs, next) = rt.console_messages(from, str_field(input, "level"));
     let mut lines: Vec<String> = msgs
@@ -623,6 +672,7 @@ async fn console_body(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
 }
 
 async fn network_body(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
+    rt.guard_text().await?;
     let (reqs, next) = rt.network_requests(cursor(input)?, input["failed_only"] == true);
     let lines: Vec<String> = reqs
         .iter()
@@ -654,6 +704,7 @@ async fn tabs_body(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
             .await?;
         return Ok(ToolOutput::text(format!("Selected tab {i}.")));
     }
+    rt.guard_text().await?; // the listing carries page titles and URLs
     let lines: Vec<String> = rt
         .tabs()
         .await?

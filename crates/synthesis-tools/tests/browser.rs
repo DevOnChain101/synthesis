@@ -1125,3 +1125,198 @@ async fn a_short_secret_blocks_snapshots_and_screenshots_until_the_page_navigate
     );
     reg.close_session("short1");
 }
+
+const USER_VAR: &str = "SYNTHESIS_TEST_USER_TOKEN";
+
+/// Two secrets on one origin: a SHORT username (unmaskable) and the long password.
+fn two_secret_registry(base: &str, host: Arc<Person>) -> Registry {
+    let (secrets, diag) = synthesis_browser::secret::parse_secrets(
+        json!({
+            "user": {"source": format!("{{env:{USER_VAR}}}"), "origins": [base], "field_kind": "username"},
+            "pw": {"source": format!("{{env:{PW_VAR}}}"), "origins": [base], "field_kind": "password"},
+        })
+        .as_object()
+        .unwrap(),
+    );
+    assert!(diag.is_empty(), "{diag:?}");
+    Registry::unsandboxed_for_tests()
+        .with_new_tools()
+        .with_browser(BrowserConfig {
+            policy: UrlPolicy {
+                allow_private_network: true,
+                ..Default::default()
+            },
+            no_sandbox: no_sandbox(),
+            secrets,
+            process_env: Some(proc_env(&[(USER_VAR, "abc"), (PW_VAR, PW)])),
+            allow_unsandboxed: true,
+            host: Some(host),
+            ..Default::default()
+        })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_short_secret_keeps_the_guard_after_a_long_one_and_covers_console_network_tabs() {
+    if !have_browser() {
+        return;
+    }
+    let base = serve_secret(None).await;
+    let d = tempfile::tempdir().unwrap();
+    let reg = two_secret_registry(&base, person(true));
+    let c = ctx(d.path(), "g1");
+    reg.execute(
+        "browser_navigate",
+        json!({"url": format!("{base}/login")}),
+        &c,
+    )
+    .await;
+    let user = field_ref(&reg, &c, "textbox \"Username\"").await;
+    let pw = field_ref(&reg, &c, "textbox \"Password\"").await;
+    for (r, name) in [(&user, "user"), (&pw, "pw")] {
+        let o = reg
+            .execute("browser_fill_secret", json!({"ref": r, "secret": name}), &c)
+            .await;
+        assert!(!o.is_error, "{name}: {o:?}");
+    }
+    // the long password did not release the guard the short username armed
+    for t in [
+        "browser_snapshot",
+        "browser_screenshot",
+        "browser_console",
+        "browser_network",
+        "browser_tabs",
+    ] {
+        let o = reg.execute(t, json!({}), &c).await;
+        assert!(
+            o.is_error && text(&o).contains("until the page navigates"),
+            "{t}: {o:?}"
+        );
+    }
+    // a same-document navigation keeps it armed: the page text is withheld, not returned
+    let o = reg
+        .execute(
+            "browser_navigate",
+            json!({"url": format!("{base}/login#x")}),
+            &c,
+        )
+        .await;
+    assert!(
+        text(&o).contains("withheld") && !text(&o).contains("Sign in"),
+        "{o:?}"
+    );
+    // a real navigation releases it
+    reg.execute(
+        "browser_navigate",
+        json!({"url": format!("{base}/login")}),
+        &c,
+    )
+    .await;
+    for t in [
+        "browser_snapshot",
+        "browser_screenshot",
+        "browser_console",
+        "browser_network",
+        "browser_tabs",
+    ] {
+        assert!(!reg.execute(t, json!({}), &c).await.is_error, "{t}");
+    }
+    reg.close_session("g1");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_person_is_not_asked_a_third_time_after_two_refusals() {
+    if !have_browser() {
+        return;
+    }
+    let base = serve_secret(None).await;
+    let d = tempfile::tempdir().unwrap();
+    let no = person(false);
+    let reg = two_secret_registry(&base, no.clone());
+    let c = ctx(d.path(), "rf1");
+    reg.execute(
+        "browser_navigate",
+        json!({"url": format!("{base}/login")}),
+        &c,
+    )
+    .await;
+    let pw = field_ref(&reg, &c, "textbox \"Password\"").await;
+    let mut last = String::new();
+    for _ in 0..4 {
+        let o = reg
+            .execute(
+                "browser_fill_secret",
+                json!({"ref": pw, "secret": "pw"}),
+                &c,
+            )
+            .await;
+        assert!(o.is_error);
+        last = text(&o);
+    }
+    assert_eq!(
+        no.asked.lock().unwrap().len(),
+        2,
+        "asked twice, then silent"
+    );
+    assert!(
+        last.contains("twice") && last.contains("not asking again"),
+        "{last}"
+    );
+    reg.close_session("rf1");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saved_login_refusals_are_cached_and_stdio_mcp_blocks_the_credential_tools() {
+    let (d, home) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    saved_profile(home.path());
+    let no = person(false);
+    let mk = |mcp: &[&str], allow: bool| {
+        Registry::unsandboxed_for_tests()
+            .with_new_tools()
+            .with_browser(BrowserConfig {
+                home: Some(home.path().to_owned()),
+                host: Some(no.clone()),
+                process_env: Some(proc_env(&[])),
+                sandboxed: true,
+                mcp_stdio: mcp.iter().map(|s| s.to_string()).collect(),
+                allow_with_mcp: allow,
+                ..Default::default()
+            })
+    };
+    // two refusals, then silence (no browser was started: the question comes first)
+    let reg = mk(&[], false);
+    let c = ctx(d.path(), "pr1");
+    let nav = json!({"url": "about:blank", "profile": "acme"});
+    let mut last = String::new();
+    for _ in 0..3 {
+        let o = reg.execute("browser_navigate", nav.clone(), &c).await;
+        assert!(o.is_error);
+        last = text(&o);
+    }
+    assert_eq!(no.profiles.lock().unwrap().len(), 2);
+    assert!(last.contains("twice"), "{last}");
+    // a stdio MCP server runs outside the sandbox: all three entry points refuse, naming it
+    let reg = mk(&["files", "git"], false);
+    let c = ctx(d.path(), "pr2");
+    for (tool, input) in [
+        ("browser_login", json!({"origin": "https://example.com"})),
+        ("browser_fill_secret", json!({"ref": "e1", "secret": "pw"})),
+        ("browser_navigate", nav.clone()),
+    ] {
+        let o = reg.execute(tool, input, &c).await;
+        let t = text(&o);
+        assert!(
+            o.is_error && t.contains("files, git") && t.contains("allow_with_mcp"),
+            "{tool}: {t}"
+        );
+    }
+    assert_eq!(
+        no.profiles.lock().unwrap().len(),
+        2,
+        "refused before anyone was asked"
+    );
+    // the user's setting lifts exactly that check
+    let o = mk(&["files"], true)
+        .execute("browser_navigate", nav, &ctx(d.path(), "pr3"))
+        .await;
+    assert!(!text(&o).contains("allow_with_mcp"), "{o:?}");
+}

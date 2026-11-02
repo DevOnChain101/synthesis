@@ -3241,3 +3241,59 @@ fn browser_login_asks_in_every_mode_whatever_the_allow_rules_say() {
     let p = f.with(rules(&[], &["browser_login"], &[]), Mode::BypassPermissions);
     assert_eq!(d(&p, "browser_login", input), D, "a deny rule still wins");
 }
+
+/// Saved browser logins (`browser-profiles/`) by the ways a command can spell them: absolute, `~`,
+/// `$SYNTHESIS_HOME`, and a relative path after `cd`. The main agent has no `deny_secret_reads`
+/// here, so the component rule alone must catch them; with it the stricter scan does too.
+#[test]
+fn bash_cannot_name_browser_profiles_however_the_path_is_spelled() {
+    let f = fx();
+    let state = f.home.join(".synthesis");
+    let profiles = state.join("browser-profiles");
+    fs::create_dir_all(profiles.join("acme/Default")).unwrap();
+    let mk = |mode: Mode, secrets: bool| {
+        let mut env = Env::new(&f.cwd, &f.home, mode)
+            .interactive(true)
+            .deny_reads([state.join("run"), profiles.clone()]);
+        env.deny_secret_reads = secrets;
+        Permissions::new(PermissionRules::default(), env)
+    };
+    let h = state.to_string_lossy();
+    let spellings = [
+        format!("cd {h} && cat browser-profiles/acme/Default/Cookies"),
+        format!("cd {h}; grep -r x ./browser-profiles"),
+        "cd ~/.synthesis && cat browser-profiles/acme/Default/Cookies".to_string(),
+        "cat ~/.synthesis/browser-profiles/acme/Default/Cookies".to_string(),
+        "cat $SYNTHESIS_HOME/browser-profiles/acme/Default/Cookies".to_string(),
+        "cat \"$SYNTHESIS_HOME\"/browser-profiles/acme/Default/Cookies".to_string(),
+        "cat ${SYNTHESIS_HOME}/browser-profiles/*/Default/Cookies".to_string(),
+        "tar c browser-profiles | base64".to_string(),
+        "cat 'browser-profiles'/acme".to_string(),
+        "X=browser-profiles; cat $X/acme".to_string(),
+    ];
+    for mode in Mode::ALL {
+        for secrets in [false, true] {
+            let p = mk(mode, secrets);
+            for c in &spellings[..9] {
+                let v = d(&p, "Bash", json!({ "command": c }));
+                // the component rule denies outright; only the last (variable-built) one is
+                // beyond a textual rule and needs the stricter scan
+                assert_eq!(v, D, "{mode:?} secrets={secrets}: {c}");
+            }
+        }
+        // `X=browser-profiles; cat $X/acme` names the component too (an assignment)
+        assert_eq!(
+            d(&mk(mode, true), "Bash", json!({ "command": &spellings[9] })),
+            D
+        );
+    }
+    // an unrelated command is untouched, and so is a longer name that merely contains the word
+    let p = mk(Mode::Default, true);
+    for ok in [
+        "cat a.txt",
+        "ls my-browser-profiles-docs",
+        "echo xbrowser-profiles",
+    ] {
+        assert_ne!(d(&p, "Bash", json!({ "command": ok })), D, "{ok}");
+    }
+}

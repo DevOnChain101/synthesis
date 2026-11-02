@@ -962,6 +962,9 @@ pub fn prepare(
             .deny_reads(state_paths.clone())
             .protect(state_paths),
     );
+    // Saved logins or {file:} secrets exist: the main agent gets the stricter Bash scan and the
+    // secret-file read ban the peer responder has (`$`, globs and `~user` words become a hard ask).
+    perms.env.deny_secret_reads = browser.holds_credentials(&h.synthesis);
     perms.env.auto_mode = synthesis_permissions::AutoModeSettings {
         classify_all_shell: user_settings.auto_mode.classify_all_shell.unwrap_or(false),
         use_auto_mode_during_plan: user_settings
@@ -1205,6 +1208,15 @@ pub fn prepare(
     }
 
     // headless: a Bash call that times out is killed (D6)
+    let stdio = crate::login::stdio_servers(&mplan.servers);
+    for w in crate::login::exposure_warnings(
+        &h.synthesis,
+        &browser,
+        &stdio,
+        sandbox_mode == SandboxMode::Enforce,
+    ) {
+        eprintln!("synth: warning: {}", sanitize_for_display(&w));
+    }
     let mut toolbox = ToolBox::new(
         Registry::with_terminal_policy(rt.clone(), make_policy)
             .with_new_tools()
@@ -1214,6 +1226,7 @@ pub fn prepare(
                 env,
                 Arc::new(crate::login::CliHost { sink: sink.clone() }),
                 sandbox_mode == SandboxMode::Enforce,
+                stdio,
             ))
             .with_background_on_timeout(false),
     );

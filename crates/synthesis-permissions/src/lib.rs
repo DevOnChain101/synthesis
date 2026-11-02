@@ -380,6 +380,16 @@ impl Env {
     }
 }
 
+/// `name` appears in `cmd` as a whole path component (delimited by `/`, space, quote, `=`, a
+/// shell operator or the ends), however the directory above it was spelled.
+fn names_component(cmd: &str, name: &str) -> bool {
+    let is_edge =
+        |c: Option<char>| c.is_none_or(|c| c.is_whitespace() || "/'\"=;&|()<>`,:".contains(c));
+    cmd.match_indices(name).any(|(i, _)| {
+        is_edge(cmd[..i].chars().next_back()) && is_edge(cmd[i + name.len()..].chars().next())
+    })
+}
+
 /// Result of `peer_bash_scan`.
 enum Scan {
     Clear,
@@ -760,7 +770,13 @@ impl Permissions {
                 .env
                 .deny_read
                 .iter()
-                .any(|p| cmd.contains(p.to_string_lossy().as_ref()));
+                .any(|p| cmd.contains(p.to_string_lossy().as_ref()))
+                // `cd <home> && cat browser-profiles/..`, `~/.synthesis/browser-profiles`,
+                // `$SYNTHESIS_HOME/browser-profiles`: the saved logins by their directory name
+                || self.env.deny_read.iter().any(|p| {
+                    p.file_name().is_some_and(|n| n == "browser-profiles")
+                        && names_component(cmd, "browser-profiles")
+                });
             return hit.then_some(WHY);
         }
         let mut targets: Vec<String> = ["file_path", "path", "notebook_path"]

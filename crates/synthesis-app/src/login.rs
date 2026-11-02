@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -33,6 +34,7 @@ pub struct BrowserSettings {
     pub profile_domains: BTreeMap<String, Vec<String>>,
     pub login_timeout: Option<Duration>,
     pub allow_unsandboxed: bool,
+    pub allow_with_mcp: bool,
     pub approved_profiles: BTreeSet<String>,
     pub approved_secrets: BTreeSet<(String, String)>,
     pub warnings: Vec<String>,
@@ -64,6 +66,7 @@ pub fn parse_settings(raw: &Map<String, Value>) -> BrowserSettings {
         s.login_timeout = Some(Duration::from_secs(sec.clamp(10, 3600)));
     }
     s.allow_unsandboxed = raw.get("allow_unsandboxed") == Some(&Value::Bool(true));
+    s.allow_with_mcp = raw.get("allow_with_mcp") == Some(&Value::Bool(true));
     // Pre-approval for runs nobody can answer: named profiles, and (secret, origin) pairs that the
     // secret is already bound to.
     if let Some(a) = raw.get("approved").and_then(Value::as_object) {
@@ -134,7 +137,13 @@ impl BrowserSettings {
             .collect()
     }
 
-    /// `sandboxed`: the agent's commands are confined (`--sandbox enforce` with a working backend).
+    /// Whether anything credential-like exists that commands outside the sandbox could read.
+    pub fn holds_credentials(&self, home: &Path) -> bool {
+        profile_count(home) > 0 || !self.secret_files().is_empty()
+    }
+
+    /// `sandboxed`: the agent's commands are confined (`--sandbox enforce` with a working
+    /// backend). `mcp_stdio`: names of the stdio MCP servers of the run (`stdio_servers`).
     pub fn config(
         self,
         base: BrowserConfig,
@@ -142,6 +151,7 @@ impl BrowserSettings {
         env: &Env,
         host: Arc<dyn BrowserHost>,
         sandboxed: bool,
+        mcp_stdio: Vec<String>,
     ) -> BrowserConfig {
         BrowserConfig {
             home: Some(home.to_owned()),
@@ -151,12 +161,62 @@ impl BrowserSettings {
             process_env: Some(env.clone()),
             sandboxed,
             allow_unsandboxed: self.allow_unsandboxed,
+            mcp_stdio,
+            allow_with_mcp: self.allow_with_mcp,
             pre_approved_profiles: self.approved_profiles,
             pre_approved_secrets: self.approved_secrets,
             host: Some(host),
             ..base
         }
     }
+}
+
+/// Saved logins on disk (a profile directory with a record).
+pub fn profile_count(home: &Path) -> usize {
+    std::fs::read_dir(profile::profiles_root(home)).map_or(0, |d| {
+        d.filter_map(Result::ok)
+            .filter(|e| e.path().join(profile::META_FILE).is_file())
+            .count()
+    })
+}
+
+/// Names of the enabled stdio MCP servers: ordinary child processes, outside the sandbox.
+pub fn stdio_servers(servers: &[synthesis_mcp::McpServerConfig]) -> Vec<String> {
+    use synthesis_mcp::TransportKind;
+    servers
+        .iter()
+        .filter(|s| !s.disabled)
+        .filter(|s| match s.transport {
+            Some(t) => t == TransportKind::Stdio,
+            None => s.url.is_none(),
+        })
+        .map(|s| s.name.clone())
+        .collect()
+}
+
+/// Warnings about credentials the agent's side could reach. Printed at `synth run` start and by
+/// `synth doctor`; a front-end with its own start-up (a TUI) calls this too.
+pub fn exposure_warnings(
+    home: &Path,
+    b: &BrowserSettings,
+    mcp_stdio: &[String],
+    sandbox_enforced: bool,
+) -> Vec<String> {
+    let mut w = vec![];
+    let n = profile_count(home);
+    if n > 0 && !sandbox_enforced {
+        w.push(format!(
+            "browser: {n} saved login(s) in {} but the sandbox is not enforce: commands the agent runs can read them. Use --sandbox enforce; the credential browser tools refuse otherwise",
+            profile::profiles_root(home).display()
+        ));
+    }
+    if b.holds_credentials(home) && !mcp_stdio.is_empty() && !b.allow_with_mcp {
+        w.push(format!(
+            "browser: stdio MCP server(s) {} run outside the sandbox and could read your saved logins and secret files; browser_login, browser_fill_secret and saved logins are refused while they are configured (remove them or set synthesis.browser.allow_with_mcp to true)",
+            mcp_stdio.join(", ")
+        ));
+    }
+    w
 }
 
 // ---- the terminal ---------------------------------------------------------------------------
@@ -241,6 +301,12 @@ fn tty() -> Option<&'static Prompter> {
     .as_ref()
 }
 
+/// The terminal can be written to (the one-time code is shown there and nowhere else).
+fn tty_writable() -> bool {
+    let w = if cfg!(windows) { "CONOUT$" } else { tty_path() };
+    std::fs::OpenOptions::new().write(true).open(w).is_ok()
+}
+
 /// Writes to the terminal itself (not stderr: a wrapper may log stderr into the workspace).
 /// `false` when there is no terminal.
 fn say_on_tty(text: &str) -> bool {
@@ -279,19 +345,39 @@ fn open_nofollow(o: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
     o
 }
 
-/// The file holds exactly the token: consumed on a match, deleted on a mismatch. A symlink is
-/// never followed.
-fn done_matches(file: &Path, token: &str) -> bool {
+/// What a signal file said. A wrong code is counted and ignored: the wait goes on (deleting the
+/// file keeps one bad write from being counted twice).
+#[derive(Debug, PartialEq, Eq)]
+enum Signal {
+    None,
+    Right,
+    Wrong,
+}
+
+/// The file holds exactly the token: consumed on a match. A symlink is never followed.
+fn check_signal(file: &Path, token: &str) -> Signal {
     use std::io::Read;
     let mut o = std::fs::OpenOptions::new();
     let Ok(f) = open_nofollow(o.read(true)).open(file) else {
-        return false;
+        return Signal::None;
     };
     let mut s = String::new();
     let ok = f.take(128).read_to_string(&mut s).is_ok() && s.trim() == token;
     let _ = std::fs::remove_file(file);
-    ok
+    if ok { Signal::Right } else { Signal::Wrong }
 }
+
+/// Ends the wait on the right code, or on the `MAX_WRONG_CODES`th wrong one.
+fn judge(sig: Signal, wrong: &AtomicU8) -> bool {
+    match sig {
+        Signal::Right => true,
+        Signal::Wrong => wrong.fetch_add(1, Ordering::SeqCst) + 1 >= MAX_WRONG_CODES,
+        Signal::None => false,
+    }
+}
+
+/// Wrong codes tolerated before the login is cancelled (something is guessing).
+const MAX_WRONG_CODES: u8 = 5;
 
 /// Writes the token for a waiting login. Refused when no login waits (no marker) or when the
 /// profile directory or either file is a symlink.
@@ -355,12 +441,12 @@ impl BrowserHost for CliHost {
         cancel: &'a CancellationToken,
     ) -> synthesis_tools::BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
-            // The token goes to the terminal only. Without one the wait could never be answered
-            // by the person; do not pretend.
-            let t = tty();
-            if t.is_none() && !std::io::stderr().is_terminal() {
+            // The one-time code is shown on the terminal and nowhere else (not stderr, which a
+            // wrapper may log into the workspace). Without a terminal the login cannot be
+            // confirmed by the person, so it does not start.
+            let Some(t) = tty().filter(|_| tty_writable()) else {
                 return Err("no terminal to ask on: the login cannot be confirmed here".into());
-            }
+            };
             self.sink.emit(
                 &Scope {
                     task_id: Some(req.task_id.clone()),
@@ -381,27 +467,19 @@ impl BrowserHost for CliHost {
                 req.profile
             );
             let say = || {
-                if !say_on_tty(&text) {
-                    let _ = std::io::stderr().write_all(text.as_bytes());
-                }
+                let _ = say_on_tty(&text);
             };
-            let tick = || done_matches(&req.done_file, &token);
-            match t {
-                Some(t) => t.ask(say, cancel, tick).await.map(|_| ()),
-                None => {
-                    say();
-                    loop {
-                        tokio::select! {
-                            () = tokio::time::sleep(Duration::from_millis(250)) => if tick() { break Some(()) },
-                            () = cancel.cancelled() => break None,
-                        }
-                    }
-                }
+            let wrong = AtomicU8::new(0);
+            let tick = || judge(check_signal(&req.done_file, &token), &wrong);
+            let ended = t.ask(say, cancel, tick).await;
+            if wrong.load(Ordering::SeqCst) >= MAX_WRONG_CODES {
+                return Err(format!(
+                    "{MAX_WRONG_CODES} wrong codes were written to the signal file; the login was cancelled"
+                ));
             }
-            .ok_or_else(|| "cancelled".to_string())
+            ended.map(|_| ()).ok_or_else(|| "cancelled".to_string())
         })
     }
-
     fn confirm_profile<'a>(
         &'a self,
         profile: &'a str,
@@ -617,6 +695,58 @@ mod tests {
     }
 
     #[test]
+    fn wrong_codes_are_counted_and_the_fifth_cancels_the_login() {
+        let n = AtomicU8::new(0);
+        for i in 1..MAX_WRONG_CODES {
+            assert!(!judge(Signal::Wrong, &n), "wrong code {i} is ignored");
+            assert!(!judge(Signal::None, &n));
+        }
+        assert!(judge(Signal::Wrong, &n), "the fifth cancels");
+        assert!(judge(Signal::Right, &AtomicU8::new(0)));
+    }
+
+    #[test]
+    fn exposure_warnings_name_the_risk_and_the_servers() {
+        let h = tempfile::tempdir().unwrap();
+        let none = parse_settings(&Map::new());
+        assert!(
+            exposure_warnings(h.path(), &none, &["fs".into()], false).is_empty(),
+            "nothing stored, nothing to warn about"
+        );
+        let dir = profile::create(h.path(), "acme").unwrap();
+        std::fs::write(dir.join(profile::META_FILE), "{}").unwrap(); // a saved login
+        let w = exposure_warnings(h.path(), &none, &["fs".into(), "git".into()], false);
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w[0].contains("1 saved login") && w[0].contains("--sandbox enforce"));
+        assert!(w[1].contains("fs, git") && w[1].contains("allow_with_mcp"));
+        // enforce silences the first; the MCP one needs the user's explicit setting
+        assert_eq!(
+            exposure_warnings(h.path(), &none, &["fs".into()], true).len(),
+            1
+        );
+        let ok = parse_settings(json!({"allow_with_mcp": true}).as_object().unwrap());
+        assert!(exposure_warnings(h.path(), &ok, &["fs".into()], true).is_empty());
+        assert!(exposure_warnings(h.path(), &none, &[], true).is_empty());
+    }
+
+    #[test]
+    fn stdio_servers_are_the_enabled_command_ones() {
+        use synthesis_mcp::{McpServerConfig, from_opencode_shape};
+        let mk = |n: &str, cfg: serde_json::Value, off: bool| -> McpServerConfig {
+            let mut c = from_opencode_shape(n, &cfg, None);
+            c.disabled = off;
+            c
+        };
+        let all = [
+            mk("a", json!({"type": "local", "command": ["x"]}), false),
+            mk("b", json!({"type": "remote", "url": "https://x"}), false),
+            mk("c", json!({"type": "local", "command": ["y"]}), true),
+            mk("d", json!({"type": "local", "command": ["z"]}), false),
+        ];
+        assert_eq!(stdio_servers(&all), ["a", "d"]);
+    }
+
+    #[test]
     fn done_needs_a_waiting_login_and_the_token_and_ignores_symlinks() {
         let d = tempfile::tempdir().unwrap();
         let file = d.path().join(DONE_FILE);
@@ -638,10 +768,15 @@ mod tests {
         let w = Waiting::new(&req).unwrap();
         // a file written by anyone who does not know the token does not end the wait
         std::fs::write(&file, "guess").unwrap();
-        assert!(!done_matches(&file, "tok"));
-        assert!(!file.exists(), "a wrong token is discarded");
+        assert_eq!(check_signal(&file, "tok"), Signal::Wrong);
+        assert!(
+            !file.exists(),
+            "a wrong token is discarded, the marker stays"
+        );
+        assert!(d.path().join(WAITING_FILE).exists());
+        assert_eq!(check_signal(&file, "tok"), Signal::None);
         signal_done(d.path(), "tok").unwrap();
-        assert!(done_matches(&file, "tok"));
+        assert_eq!(check_signal(&file, "tok"), Signal::Right);
         assert!(!file.exists(), "consumed");
         #[cfg(unix)]
         {
@@ -649,7 +784,11 @@ mod tests {
             let secret = d.path().join("elsewhere");
             std::fs::write(&secret, "tok").unwrap();
             std::os::unix::fs::symlink(&secret, &file).unwrap();
-            assert!(!done_matches(&file, "tok"));
+            assert_eq!(
+                check_signal(&file, "tok"),
+                Signal::None,
+                "symlink not followed"
+            );
             let _ = std::fs::remove_file(&file);
             std::os::unix::fs::symlink(&secret, &file).unwrap();
             assert!(signal_done(d.path(), "other").is_err());
@@ -684,10 +823,9 @@ mod tests {
             tool_call_id: "c".into(),
             done_file: d.path().join(DONE_FILE),
         };
-        // stderr is not a terminal under the test harness, so there is nobody to ask: refused
+        // nobody to ask: refused, and no code was printed anywhere (stderr is never used for it)
         let e = host.login(&req, &CancellationToken::new()).await;
-        if !std::io::stderr().is_terminal() {
-            assert!(e.unwrap_err().contains("no terminal"));
-        }
+        assert!(e.unwrap_err().contains("no terminal"));
+        assert!(!d.path().join(WAITING_FILE).exists(), "no wait was started");
     }
 }

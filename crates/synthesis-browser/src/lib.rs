@@ -174,7 +174,9 @@ pub struct BrowserRuntime {
     /// Held while a persistent profile is in use (released on drop or close).
     profile_lock: Mutex<Option<profile::ProfileLock>>,
     /// Where `fill_secret` last typed: (tab session, document id, value too short to mask).
-    filled: Mutex<Option<(String, String, bool)>>,
+    /// Armed capture guards: (tab session, document id) -> a value too short to mask was typed.
+    /// Armed BEFORE the fill is sent and kept whatever happens to the call.
+    filled: Mutex<HashMap<(String, String), bool>>,
 }
 
 impl Drop for BrowserRuntime {
@@ -753,7 +755,7 @@ impl BrowserRuntime {
             pid,
             shots: AtomicU32::new(0),
             profile_lock: Mutex::new(profile_lock),
-            filled: Mutex::new(None),
+            filled: Mutex::default(),
         };
         let first = match first_tab {
             Some(id) => rt.adopt(&id).await,
@@ -1170,19 +1172,74 @@ impl BrowserRuntime {
         Ok(())
     }
 
-    /// Types a secret into the element behind `r` and nothing else. One in-page call verifies
-    /// (page and frame origin, form targets, field type, visibility, not covered, not clipped)
-    /// and writes, so nothing can change in between (`secret::FILL_JS`). The value is registered
-    /// for masking first and never returned.
-    pub async fn fill_secret(&self, r: &str, spec: &secret::SecretSpec, value: &str) -> Result<()> {
+    /// The element behind `r` as an object of an ISOLATED world of its frame: the page's own
+    /// scripts cannot have replaced the prototypes or DOM getters the fill code relies on.
+    async fn isolated_object(&self, tab: &Tab, r: &str) -> Result<String> {
+        let backend = lock(&tab.refs)
+            .resolve(r)
+            .ok_or_else(|| BrowserError::StaleRef(r.to_owned()))?;
+        let stale = || BrowserError::StaleRef(r.to_owned());
+        // Refs come from the main frame's accessibility tree. An element of a child frame cannot be
+        // resolved in the main frame's world: that fails below, which is the safe outcome.
+        let tree = self.call(tab, "Page.getFrameTree", json!({})).await?;
+        let frame = tree["frameTree"]["frame"]["id"]
+            .as_str()
+            .ok_or_else(stale)?
+            .to_owned();
+        let world = self
+            .call(
+                tab,
+                "Page.createIsolatedWorld",
+                json!({"frameId": frame, "worldName": "synthesis-secret"}),
+            )
+            .await?;
+        let ctx = world["executionContextId"].as_i64().ok_or_else(stale)?;
+        let o = self
+            .call(
+                tab,
+                "DOM.resolveNode",
+                json!({"backendNodeId": backend, "executionContextId": ctx}),
+            )
+            .await
+            .map_err(|_| stale())?;
+        o["object"]["objectId"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(stale)
+    }
+
+    /// Types a secret into the element behind `r` and nothing else. One in-page call, in an
+    /// isolated world, verifies (page and frame origin, form targets, field type, visibility,
+    /// not covered, not clipped) and writes, so nothing can change in between
+    /// (`secret::FILL_JS`). The value is registered for masking first and never returned. The
+    /// capture guard is armed BEFORE the call is sent, so a failed follow-up or a cancelled call
+    /// cannot leave a typed value unguarded. `Ok(true)` = typed, but the page broke the
+    /// `input`/`change` events ("maybe typed").
+    pub async fn fill_secret(
+        &self,
+        r: &str,
+        spec: &secret::SecretSpec,
+        value: &str,
+    ) -> Result<bool> {
         let short = !mask_secret(value);
         let tab = self.current()?;
-        let oid = self.object_for(&tab, r).await?;
+        let oid = self.isolated_object(&tab, r).await?;
         let kind = match spec.field_kind {
             Some(secret::FieldKind::Password) => "password",
             Some(secret::FieldKind::Username) => "username",
             Some(secret::FieldKind::Totp) => "totp",
             None => "",
+        };
+        let doc = self.eval(&tab, "String(performance.timeOrigin)").await?;
+        let key = (
+            tab.session.clone(),
+            doc.as_str().unwrap_or_default().to_owned(),
+        );
+        let fresh = {
+            let mut f = lock(&self.filled);
+            let was = f.get(&key).copied();
+            f.insert(key.clone(), short || was == Some(true));
+            was.is_none()
         };
         let v = self
             .call(
@@ -1197,39 +1254,50 @@ impl BrowserRuntime {
             )
             .await?;
         let out = &v["result"]["value"];
-        if out["ok"] != true {
+        if out["ok"] == false {
+            if fresh {
+                lock(&self.filled).remove(&key); // the page refused before touching the field
+            }
             let why = out["error"]
                 .as_str()
                 .unwrap_or("the page did not accept the fill");
             let why: String = redact_text(why).chars().take(200).collect();
             return Err(BrowserError::Refused(format!("{why}; nothing was typed")));
         }
-        let doc = self.eval(&tab, "String(performance.timeOrigin)").await?;
-        *lock(&self.filled) = Some((
-            tab.session.clone(),
-            doc.as_str().unwrap_or_default().to_owned(),
-            short,
-        ));
-        Ok(())
+        if out["ok"] != true {
+            return Err(BrowserError::Page(
+                "the fill raised an error in the page; the value may have been typed".into(),
+            ));
+        }
+        Ok(out["maybe"] == true)
     }
 
-    /// Screenshots (and, for a value too short to mask, snapshots) are refused while the page
-    /// that received a secret is still the same document: pixels cannot be masked.
-    async fn guard_capture(&self, tab: &Tab, snapshot: bool) -> Result<()> {
-        let Some((session, doc, short)) = lock(&self.filled).clone() else {
-            return Ok(());
-        };
-        if session != tab.session || (snapshot && !short) {
+    /// Screenshots, and snapshots/console/network/tab text after a value too short to mask, are
+    /// refused while a document that received a secret is still the current one of its tab.
+    /// `text_only`: only short values matter (longer ones are masked in text, not in pixels).
+    async fn guard_capture(&self, tab: &Tab, text_only: bool) -> Result<()> {
+        if !lock(&self.filled).keys().any(|(s, _)| *s == tab.session) {
             return Ok(());
         }
         let now = self.eval(tab, "String(performance.timeOrigin)").await?;
-        if now.as_str() == Some(doc.as_str()) {
+        let now = now.as_str().unwrap_or_default();
+        let mut f = lock(&self.filled);
+        f.retain(|(s, d), _| *s != tab.session || d == now); // a new document releases its tab
+        if f.iter()
+            .any(|((s, _), short)| *s == tab.session && (!text_only || *short))
+        {
             return Err(BrowserError::Refused(
-                "a secret was typed into this page: screenshots (and snapshots after a short secret) are refused until the page navigates".into(),
+                "a secret was typed into this page: screenshots (and text from the page after a short secret) are refused until the page navigates".into(),
             ));
         }
-        *lock(&self.filled) = None;
         Ok(())
+    }
+
+    /// Fails while the current tab holds a short secret in its document: its console, network
+    /// and tab listings, and page text, could echo a value the masking cannot recognise.
+    pub async fn guard_text(&self) -> Result<()> {
+        let tab = self.current()?;
+        self.guard_capture(&tab, true).await
     }
 
     /// `scheme://host[:port]` of the current page, as the page itself reports it.

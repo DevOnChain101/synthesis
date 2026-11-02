@@ -996,3 +996,93 @@ async fn persistent_profile_body() {
     // the lock is free again
     launch(opts, &env).await.close().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_fill_never_leaves_a_typed_value_unguarded() {
+    traced(
+        "a_cancelled_fill_never_leaves_a_typed_value_unguarded",
+        cancelled_fill_body(),
+    )
+    .await;
+}
+
+async fn cancelled_fill_body() {
+    let Some(env) = browser_env() else { return };
+    let base = serve().await;
+    let art = tempfile::tempdir().unwrap();
+    let rt = launch(local_opts(art.path()), &env).await;
+    let spec = synthesis_browser::secret::parse_secrets(
+        serde_json::json!({"s": {"source": "{env:SYNTHESIS_X_TOKEN}", "origins": [base]}})
+            .as_object()
+            .unwrap(),
+    )
+    .0["s"]
+        .clone();
+    // Drop the fill at many points of its round trips. Whatever got sent and typed, the page must
+    // then be guarded: a snapshot either refuses, or shows no typed value.
+    for ms in [0u64, 1, 2, 3, 5, 8, 12, 18, 25, 40, 80] {
+        rt.navigate(&format!("{base}/login"), WaitUntil::Load)
+            .await
+            .unwrap();
+        let tree = rt.snapshot(50).await.unwrap().tree.expose().to_owned();
+        let r = ref_of(&tree, "textbox \"Username\"");
+        let _ =
+            tokio::time::timeout(Duration::from_millis(ms), rt.fill_secret(&r, &spec, "abc")).await;
+        tokio::time::sleep(Duration::from_millis(300)).await; // the browser finishes what was sent
+        match rt.snapshot(50).await {
+            Err(e) => assert!(e.to_string().contains("until the page navigates"), "{e}"),
+            Ok(s) => assert!(
+                !s.tree.expose().contains("value=\"abc\""),
+                "typed but unguarded after cancelling at {ms} ms"
+            ),
+        }
+    }
+    rt.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn filling_in_one_tab_does_not_release_the_guard_of_another() {
+    traced(
+        "filling_in_one_tab_does_not_release_the_guard_of_another",
+        two_tabs_body(),
+    )
+    .await;
+}
+
+async fn two_tabs_body() {
+    let Some(env) = browser_env() else { return };
+    let base = serve().await;
+    let art = tempfile::tempdir().unwrap();
+    let rt = launch(local_opts(art.path()), &env).await;
+    let spec = synthesis_browser::secret::parse_secrets(
+        serde_json::json!({"s": {"source": "{env:SYNTHESIS_X_TOKEN}", "origins": [base]}})
+            .as_object()
+            .unwrap(),
+    )
+    .0["s"]
+        .clone();
+    let fill_here = || async {
+        let tree = rt.snapshot(50).await.unwrap().tree.expose().to_owned();
+        let r = ref_of(&tree, "textbox \"Username\"");
+        rt.fill_secret(&r, &spec, "abc").await.unwrap(); // short: pixels and text are guarded
+    };
+    let guarded = || async { rt.screenshot(false).await.is_err() };
+    rt.navigate(&format!("{base}/login"), WaitUntil::Load)
+        .await
+        .unwrap();
+    fill_here().await; // tab A
+    rt.new_tab(Some(&format!("{base}/login"))).await.unwrap(); // tab B, current
+    assert!(!guarded().await, "B has no secret yet");
+    fill_here().await;
+    assert!(guarded().await, "B is armed");
+    rt.navigate(&format!("{base}/login"), WaitUntil::Load)
+        .await
+        .unwrap();
+    assert!(!guarded().await, "B moved on: released");
+    rt.select_tab(0).await.unwrap();
+    assert!(
+        guarded().await,
+        "A still holds the typed value: still guarded"
+    );
+    rt.close().await.unwrap();
+}
