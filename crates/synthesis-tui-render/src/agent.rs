@@ -2020,7 +2020,8 @@ fn hero_rows(w: usize, art: bool, tagline: bool, plain: bool) -> Vec<Row> {
             r(text, c),
         ]
     };
-    let mut rows: Vec<Row> = vec![];
+    // without art the wordmark gets a blank row above it (it would touch the pane title)
+    let mut rows: Vec<Row> = if art { vec![] } else { vec![vec![]] };
     if art {
         let pad = r(
             " ".repeat(w.saturating_sub(crate::logo::ART_COLS) / 2),
@@ -2049,19 +2050,30 @@ fn hero_rows(w: usize, art: bool, tagline: bool, plain: bool) -> Vec<Row> {
 /// the art is never drawn.
 fn hero_welcome(agent: &Agent, w: usize, h: usize, now: i64, tz: i32, plain: bool) -> Vec<Row> {
     let hero = Some((now, tz));
-    let with_tips = welcome_rows(agent, w, hero, true);
-    let boxed = welcome_rows(agent, w, hero, false);
-    let join = |mut a: Vec<Row>, b: &[Row]| {
-        a.extend(b.iter().cloned());
+    let join = |mut a: Vec<Row>, b: Vec<Row>| {
+        a.extend(b);
         a
     };
+    // biggest first; every candidate is whole (a tip is shown or dropped, never cut)
     let mut candidates: Vec<Vec<Row>> = vec![];
     if w >= 40 {
-        candidates.push(join(hero_rows(w, true, true, plain), &with_tips));
-        candidates.push(join(hero_rows(w, true, false, plain), &boxed));
+        for n in (1..=TIPS.len()).rev() {
+            candidates.push(join(
+                hero_rows(w, true, true, plain),
+                welcome_rows(agent, w, hero, n),
+            ));
+        }
+        candidates.push(join(
+            hero_rows(w, true, false, plain),
+            welcome_rows(agent, w, hero, 0),
+        ));
     }
-    candidates.push(join(hero_rows(w, false, false, plain), &with_tips));
-    candidates.push(join(hero_rows(w, false, false, plain), &boxed));
+    for n in (0..=TIPS.len()).rev() {
+        candidates.push(join(
+            hero_rows(w, false, false, plain),
+            welcome_rows(agent, w, hero, n),
+        ));
+    }
     let prompt = crate::greeting::GREETING.at(now, tz).1;
     let mut small = hero_rows(w, false, false, plain);
     small.pop();
@@ -2074,7 +2086,7 @@ fn hero_welcome(agent: &Agent, w: usize, h: usize, now: i64, tz: i32, plain: boo
     )]);
     candidates.push(small);
     let mut one = hero_rows(w, false, false, plain);
-    one.truncate(1);
+    one.truncate(2);
     candidates.push(one);
     let last = candidates.len() - 1;
     candidates
@@ -2085,7 +2097,15 @@ fn hero_welcome(agent: &Agent, w: usize, h: usize, now: i64, tz: i32, plain: boo
         .unwrap_or_default()
 }
 
-fn welcome_rows(agent: &Agent, w: usize, hero: Option<(i64, i32)>, tips: bool) -> Vec<Row> {
+/// The tips of the welcome, most useful first: a short welcome drops the last ones, whole.
+const TIPS: [&str; 3] = [
+    "Ask Synthesis to explain, fix or build something in this folder",
+    "Type / for commands and skills, @ to mention a file",
+    "Drop or paste an image path to attach a screenshot",
+];
+
+/// `tips`: how many of [`TIPS`] to show (0 = no tips block at all).
+fn welcome_rows(agent: &Agent, w: usize, hero: Option<(i64, i32)>, tips: usize) -> Vec<Row> {
     let greeting = hero.map(|(now, tz)| crate::greeting::GREETING.at(now, tz));
     let inner = w.saturating_sub(4).max(10);
     let line = |runs: Vec<Run>| -> Row {
@@ -2124,17 +2144,12 @@ fn welcome_rows(agent: &Agent, w: usize, hero: Option<(i64, i32)>, tips: bool) -
         ]),
         vec![r(format!("╰{}╯", "─".repeat(inner + 2)), C_BORDER)],
     ];
-    if !tips {
+    if tips == 0 {
         return v;
     }
     v.push(vec![]);
     v.push(vec![r(" Tips for getting started:", C_DIM)]);
-    let tips = [
-        "Ask Synthesis to explain, fix or build something in this folder",
-        "Type / for commands and skills, @ to mention a file",
-        "Drop or paste an image path to attach a screenshot",
-    ];
-    for (i, t) in tips.iter().enumerate() {
+    for (i, t) in TIPS.iter().take(tips).enumerate() {
         v.extend(wrap(
             &[r(*t, C_SUBTLE)],
             w.saturating_sub(5),
@@ -3565,32 +3580,40 @@ pub fn render_agent(
             "  (no messages in this session yet)",
             C_SUBTLE,
         )]]));
-    } else if items.is_empty() {
-        parts.push(Rc::new(if opts.hero {
-            hero_welcome(
-                agent,
-                content_w,
-                msg_h,
-                now,
-                opts.tz_offset_min,
-                opts.plain_logo,
-            )
-        } else {
-            welcome_rows(agent, content_w, None, true)
-        }));
     } else {
+        // The welcome stays until the first message the person sent (hero mode): notices that
+        // arrived before it (sandbox, skipped MCP server, peers) come after it, not instead.
+        let welcome = items.is_empty()
+            || (opts.hero && opts.preview.is_none() && !items.iter().any(|i| i.kind == "user"));
         let mut prev: Option<&str> = None;
+        let mut rest: Vec<Rc<Vec<Row>>> = vec![];
         for it in items {
             let focus_kinds = ["user", "text", "result", "note", "help", "info", "compact"];
             if !agent.focus_view
                 || opts.preview.is_some()
                 || focus_kinds.contains(&it.kind.as_str())
             {
-                parts.extend(note_gap(prev, it));
+                rest.extend(note_gap(prev, it));
                 prev = Some(&it.kind);
-                parts.push(cached_item_rows(it, content_w, frame, now, opts.expanded));
+                rest.push(cached_item_rows(it, content_w, frame, now, opts.expanded));
             }
         }
+        if welcome {
+            let below: usize = rest.iter().map(|p| p.len()).sum();
+            parts.push(Rc::new(if opts.hero {
+                hero_welcome(
+                    agent,
+                    content_w,
+                    msg_h.saturating_sub(below),
+                    now,
+                    opts.tz_offset_min,
+                    opts.plain_logo,
+                )
+            } else {
+                welcome_rows(agent, content_w, None, TIPS.len())
+            }));
+        }
+        parts.extend(rest);
     }
     let win = window_rows(&parts, opts.scroll, msg_h);
     let (max_scroll, off, skip, total) = (win.max_scroll, win.off, win.skip, win.total);
