@@ -37,14 +37,14 @@ struct Rig {
 }
 
 impl Rig {
-    /// `user_servers` is the `mcpServers` object of the user synthesis.json, `settings` the user
+    /// `user_servers` is the `mcpServers` object of the user synt.json, `settings` the user
     /// settings.json, `project` an optional `.mcp.json` `mcpServers` object for the workspace.
     fn new(user_servers: Value, settings: Value, project: Option<Value>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("ws")).unwrap();
         std::fs::create_dir_all(dir.path().join("synthesis")).unwrap();
         let cfg = json!({"$schema": "config.json/v1", "mcpServers": user_servers});
-        std::fs::write(dir.path().join("synthesis/synthesis.json"), cfg.to_string()).unwrap();
+        std::fs::write(dir.path().join("synthesis/synt.json"), cfg.to_string()).unwrap();
         std::fs::write(
             dir.path().join("synthesis/settings.json"),
             settings.to_string(),
@@ -65,7 +65,7 @@ impl Rig {
         c.env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", self.dir.path())
-            .env("SYNTHESIS_HOME", self.dir.path().join("synthesis"))
+            .env("SYNT_HOME", self.dir.path().join("synthesis"))
             .stdin(Stdio::null());
         for (k, v) in extra_env {
             c.env(k, v);
@@ -139,7 +139,7 @@ fn user_scope_env_credentials_attribute_the_write_to_the_configured_user() {
     // literal username, token from the process env through the user's passthrough list
     let rig = Rig::new(
         atl(json!({"JIRA_USERNAME": "ana@example.com", "JIRA_API_TOKEN": "${ATL_TOKEN}"})),
-        json!({"permissions": {"allow": ["mcp__atl"]}, "synthesis": {"mcp": {"env_passthrough": ["ATL_TOKEN"]}}}),
+        json!({"permissions": {"allow": ["mcp__atl"]}, "synt": {"mcp": {"env_passthrough": ["ATL_TOKEN"]}}}),
         None,
     );
     let (o, mirror) = rig.run(write_script(), &[], &[("ATL_TOKEN", "api-token-123")]);
@@ -172,7 +172,7 @@ fn a_missing_credential_is_loud_the_server_does_not_start_unauthenticated() {
     let (o, mirror) = rig.run(write_script(), &[], &[("ATL_TOKEN", "api-token-123")]);
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(
-        err.contains("ATL_TOKEN") && err.contains("synthesis.mcp.env_passthrough"),
+        err.contains("ATL_TOKEN") && err.contains("synt.mcp.env_passthrough"),
         "{err}"
     );
     assert!(
@@ -242,7 +242,7 @@ fn project_mcp_json_trusted_and_approved_by_hash_keeps_its_env_credentials() {
     // the user's own definition of the same name replaces the project one entirely
     let user = atl(json!({"JIRA_USERNAME": "ana@example.com", "JIRA_API_TOKEN": "tok-1"}));
     std::fs::write(
-        rig.dir.path().join("synthesis/synthesis.json"),
+        rig.dir.path().join("synthesis/synt.json"),
         json!({"$schema": "config.json/v1", "mcpServers": user}).to_string(),
     )
     .unwrap();
@@ -263,7 +263,7 @@ fn mcp_get_doctor_and_test_show_the_identity_without_values() {
             json!({"JIRA_USERNAME": "ana@example.com", "JIRA_API_TOKEN": "${ATL_TOKEN}",
             "CONFLUENCE_TOKEN": "${CONFLUENCE_TOKEN}"}),
         ),
-        json!({"synthesis": {"mcp": {"env_passthrough": ["ATL_TOKEN"]}}}),
+        json!({"synt": {"mcp": {"env_passthrough": ["ATL_TOKEN"]}}}),
         None,
     );
     let ws = rig.ws();
@@ -275,7 +275,7 @@ fn mcp_get_doctor_and_test_show_the_identity_without_values() {
     );
     assert!(
         get.contains(
-            "CONFLUENCE_TOKEN -> NOT AVAILABLE (export it and add it to synthesis.mcp.env_passthrough"
+            "CONFLUENCE_TOKEN -> NOT AVAILABLE (export it and add it to synt.mcp.env_passthrough"
         ),
         "{get}"
     );
@@ -298,7 +298,7 @@ fn mcp_get_doctor_and_test_show_the_identity_without_values() {
     // a working definition: connect, list, whoami
     let ok = atl(json!({"JIRA_USERNAME": "ana@example.com", "JIRA_API_TOKEN": "${ATL_TOKEN}"}));
     std::fs::write(
-        rig.dir.path().join("synthesis/synthesis.json"),
+        rig.dir.path().join("synthesis/synt.json"),
         json!({"$schema": "config.json/v1", "mcpServers": ok}).to_string(),
     )
     .unwrap();
@@ -316,7 +316,7 @@ fn mcp_get_doctor_and_test_show_the_identity_without_values() {
     // no credentials: the principal is anonymous and the command says so (exit 1)
     let bare = atl(json!({}));
     std::fs::write(
-        rig.dir.path().join("synthesis/synthesis.json"),
+        rig.dir.path().join("synthesis/synt.json"),
         json!({"$schema": "config.json/v1", "mcpServers": bare}).to_string(),
     )
     .unwrap();

@@ -37,7 +37,7 @@ pub struct Pricing {
     pub output_per_mtok: f64,
 }
 
-/// Proactive compaction (`synthesis.context.*` of the user settings.json).
+/// Proactive compaction (`synt.context.*` of the user settings.json).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AutoCompact {
     pub enabled: bool,
@@ -59,18 +59,18 @@ impl AutoCompact {
     pub const MIN_THRESHOLD: f64 = 0.5;
     pub const MAX_THRESHOLD: f64 = 0.95;
 
-    /// Reads `{"synthesis":{"context":{"auto_compact":bool,"auto_compact_threshold":0.5..0.95}}}`.
+    /// Reads `{"synt":{"context":{"auto_compact":bool,"auto_compact_threshold":0.5..0.95}}}`.
     /// Invalid values keep the default (out-of-range thresholds are clamped); each is named in
     /// the returned diagnostics (key only, never the value).
     pub fn from_settings(v: &Value) -> (Self, Vec<String>) {
         let (mut out, mut diag) = (Self::default(), vec![]);
-        let Some(c) = v.get("synthesis").and_then(|n| n.get("context")) else {
+        let Some(c) = v.get("synt").and_then(|n| n.get("context")) else {
             return (out, diag);
         };
         match c.get("auto_compact") {
             None => {}
             Some(Value::Bool(b)) => out.enabled = *b,
-            Some(_) => diag.push("synthesis.context.auto_compact must be true or false".into()),
+            Some(_) => diag.push("synt.context.auto_compact must be true or false".into()),
         }
         match c.get("auto_compact_threshold") {
             None => {}
@@ -79,20 +79,18 @@ impl AutoCompact {
                     out.threshold = t.clamp(Self::MIN_THRESHOLD, Self::MAX_THRESHOLD);
                     if out.threshold != t {
                         diag.push(
-                            "synthesis.context.auto_compact_threshold clamped to 0.5..0.95".into(),
+                            "synt.context.auto_compact_threshold clamped to 0.5..0.95".into(),
                         );
                     }
                 }
-                None => {
-                    diag.push("synthesis.context.auto_compact_threshold must be a number".into())
-                }
+                None => diag.push("synt.context.auto_compact_threshold must be a number".into()),
             },
         }
         (out, diag)
     }
 }
 
-/// `synthesis.mcp.toolSearch` of the USER settings.json: whether MCP tool schemas are deferred
+/// `synt.mcp.toolSearch` of the USER settings.json: whether MCP tool schemas are deferred
 /// behind the `ToolSearch` tool (Claude Code's MCP tool search; its `ENABLE_TOOL_SEARCH`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolSearchMode {
@@ -106,10 +104,10 @@ pub enum ToolSearchMode {
 }
 
 impl ToolSearchMode {
-    /// Reads `{"synthesis":{"mcp":{"toolSearch":"auto"|"on"|"off"}}}`; anything else keeps the
+    /// Reads `{"synt":{"mcp":{"toolSearch":"auto"|"on"|"off"}}}`; anything else keeps the
     /// default and names the key only.
     pub fn from_settings(v: &Value) -> (Self, Vec<String>) {
-        match v.pointer("/synthesis/mcp/toolSearch") {
+        match v.pointer("/synt/mcp/toolSearch") {
             None => (Self::Auto, vec![]),
             Some(Value::String(s)) => match s.as_str() {
                 "auto" => (Self::Auto, vec![]),
@@ -122,9 +120,9 @@ impl ToolSearchMode {
     }
 }
 
-const BAD_TOOL_SEARCH: &str = "synthesis.mcp.toolSearch must be \"auto\", \"on\" or \"off\"";
+const BAD_TOOL_SEARCH: &str = "synt.mcp.toolSearch must be \"auto\", \"on\" or \"off\"";
 
-/// `synthesis.shell.*` of the USER settings.json: commands the person types with `!`.
+/// `synt.shell.*` of the USER settings.json: commands the person types with `!`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShellSettings {
     /// After a `!cmd` the model gets a turn to analyse the result (`!!cmd` never does).
@@ -143,11 +141,11 @@ impl Default for ShellSettings {
 }
 
 impl ShellSettings {
-    /// Reads `{"synthesis":{"shell":{"user_commands_model_turn":bool,"user_commands_unsandboxed":bool}}}`.
+    /// Reads `{"synt":{"shell":{"user_commands_model_turn":bool,"user_commands_unsandboxed":bool}}}`.
     /// A wrong type keeps the default; the diagnostic names the key only.
     pub fn from_settings(v: &Value) -> (Self, Vec<String>) {
         let (mut out, mut diag) = (Self::default(), vec![]);
-        let Some(c) = v.get("synthesis").and_then(|n| n.get("shell")) else {
+        let Some(c) = v.get("synt").and_then(|n| n.get("shell")) else {
             return (out, diag);
         };
         for (key, slot) in [
@@ -163,7 +161,7 @@ impl ShellSettings {
             match c.get(key) {
                 None => {}
                 Some(Value::Bool(b)) => *slot = *b,
-                Some(_) => diag.push(format!("synthesis.shell.{key} must be true or false")),
+                Some(_) => diag.push(format!("synt.shell.{key} must be true or false")),
             }
         }
         (out, diag)
@@ -260,7 +258,7 @@ impl HarnessConfig {
     }
 }
 
-/// `synthesis.budget` of the settings over the defaults.
+/// `synt.budget` of the settings over the defaults.
 pub fn budget_from_settings(s: &synthesis_settings::Settings) -> Budget {
     let mut b = Budget::default();
     let t = &s.synthesis.budget;
@@ -573,7 +571,7 @@ impl Harness {
         self
     }
 
-    /// `synthesis.shell.*`: whether a `!cmd` is followed by a model turn, and where it runs.
+    /// `synt.shell.*`: whether a `!cmd` is followed by a model turn, and where it runs.
     pub fn shell_settings(&self) -> ShellSettings {
         self.config.shell
     }

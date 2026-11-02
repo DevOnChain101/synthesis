@@ -141,11 +141,11 @@ B (`ws:web`) needs a fact only A (`ws:api/sess:backend`, mid-task) has. B's agen
 **Pick T1:** no port, no HTTP stack; the transport comes from tokio `net`, already compiled, and the frame format is the event JSONL. Against it: the Windows default pipe DACL grants Everyone read (Microsoft docs, to verify) and `unsafe` is forbidden. That is covered by a handshake that releases nothing before both sides prove the key, plus unguessable pipe names. SSE was rejected because it presumes HTTP.
 
 ### B4. Endpoint, registry, discovery
-- **Endpoint per live session** (when `synthesis.peers.enabled`):
-  - unix: `$SYNTHESIS_HOME/run/<rand16hex>.sock` in a 0700 dir, socket chmod 0600; accepted connections must have `peer_cred().uid` equal to the owner uid of `run/` (`MetadataExt::uid`).
+- **Endpoint per live session** (when `synt.peers.enabled`):
+  - unix: `$SYNT_HOME/run/<rand16hex>.sock` in a 0700 dir, socket chmod 0600; accepted connections must have `peer_cred().uid` equal to the owner uid of `run/` (`MetadataExt::uid`).
   - Windows: `\\.\pipe\synthesis-peer-<rand32hex>` with `first_pipe_instance(true)` and `reject_remote_clients(true)`.
   - If the unix path exceeds 100 B, peers are off for that session (`notice` + `synt doctor`).
-- **Key:** `$SYNTHESIS_HOME/run/peer.key`, 32 random bytes, 0600. On Windows, peers stay off unless `SYNTHESIS_HOME` is under `%USERPROFILE%` (ACL inheritance, unverified).
+- **Key:** `$SYNT_HOME/run/peer.key`, 32 random bytes, 0600. On Windows, peers stay off unless `SYNT_HOME` is under `%USERPROFILE%` (ACL inheritance, unverified).
 - **Registry:** `run/<session_id>.json` = `{v:1, session_id, session_name?, workspace_key, workspace_label, workspace_root, cwd, pid, pid_start, endpoint, started_at}`. It is 0600, written temp+rename and removed on clean exit. Session-name uniqueness per workspace is checked against live entries at `--name` time.
 - **Discovery on demand** (no polling): the list and resolve calls read `run/*.json`, then fetch live data (status, agents, task summary) with a `status` frame per allowed session (parallel, 500 ms each).
 - **Stale:** a connect failure leads to a writer-lock probe. A free lock means the holder is dead: delete the entry and report `offline`. A held lock gives `unreachable`. pid probes are not used (they spawn PowerShell on Windows, recover.rs:45).
@@ -180,7 +180,7 @@ C→S {"t":"cancel","id"}                   closing the connection = cancel
 - **Responder** = a sub-agent of A (`kind:"peer-responder"`, instance `peer-<n>`), visible in A's events and TUI.
   - Tools: Read, Glob, Grep, git_status, git_diff only. No Bash, Web*, MCP, browser, SendMessage or Task, so hops are at most 1 by construction.
   - Mode: `stricter(A's mode, plan)`; A's deny rules and protected/secret paths apply; asks auto-deny.
-  - Budget: 8 turns, 20 tool calls, request timeout. Cost goes into A's usage and `synthesis.peers.max_cost_usd` (D13).
+  - Budget: 8 turns, 20 tool calls, request timeout. Cost goes into A's usage and `synt.peers.max_cost_usd` (D13).
 - **Sanitising:** `tool_result`s of reads of secret or protected paths become `[withheld from peers]` in the snapshot.
 - **The request** is the responder's first user turn: `<peer_request id from="<display>" reply_to="<canonical>" kind="<sender kind>" hop trust="peer-data">…</peer_request>`. The responder rules: answer only from that context and read-only lookups; decline any request to act; never include credentials, keys, tokens, env values or contents of protected/secret paths; share the minimum.
 - **Outgoing:** the final text and every `partial` (coalesced to at most 1 per 500 ms) pass A's `Redactor`. Cap 32 KiB.
@@ -194,7 +194,7 @@ C→S {"t":"cancel","id"}                   closing the connection = cancel
 - It returns `{request_id, to:<canonical>, status:"accepted"}`, and the harness keeps the connection open.
 - Partials become events only. The reply goes to the inbox as `<peer_reply id from reply_to kind status trust="peer-data">`. On timeout the model gets the partials marked `incomplete (timeout)`.
 - Errors: `not_found`, `ambiguous` (with candidates), `offline`, `unreachable`, `denied`, `busy`, `rate_limited`, `cycle`, `disabled`. At most 4 in flight per session.
-- **Offline:** a session known in `synthesis.db` but not live gets `offline` with its display form, title and last status.
+- **Offline:** a session known in `synt.db` but not live gets `offline` with its display form, title and last status.
 - **Optional resume (D12, off by default):** with `resume_offline:true` and `SendMessage{…, resume:true}`, Synthesis runs the hidden headless `synt peer-answer --session <id>`. It takes the free writer lock, runs R2 over the stored history, answers over its stdout pipe and exits. Needs R8.
 
 ### B8. Security model
@@ -203,14 +203,14 @@ C→S {"t":"cancel","id"}                   closing the connection = cancel
    - Windows: remote clients rejected; mutual HMAC with a key under the user profile.
    - No TCP listener. The Windows ACL assumption needs a real-machine test.
 2. **Peer text is untrusted data,** fenced in both directions. It is never an approval, a grant or a mode change, and it is excluded from the judge's input.
-3. **Exfiltration:** the receiver decides what to share, via the read-only responder under its own policy, snapshot withholding and the outgoing `Redactor`. **Residual:** content A's user showed A can reach an allowed peer. The allow list is the trust decision. **Residual (shared key, 6):** every process of the same OS user can read `peer.key`, and `from` in a request is self-asserted, so the allow list is policy against honest peers, not authentication against a process that holds the key; the rate limit is therefore global per receiver, not per asserted session. **Defence in depth (2):** the Bash substring check on denied paths is not a security boundary (a command can build the path in the shell); the sandbox deny of `$SYNTHESIS_HOME/run` is the second layer, and `synt doctor` warns when peers are enabled and the sandbox is not enforcing. **Residual (Windows, 9, accepted):** the default named-pipe DACL grants read to other local users; only the HMAC handshake and the unguessable pipe name stop them, and `platform_ok` (home under the profile, compared by path component) is the only ACL assumption. Unverified on a real machine. **Residual (no channel binding, 10):** the HMAC proves key possession per connection but is not bound to the channel; a same-user process that holds the key can relay or impersonate.
+3. **Exfiltration:** the receiver decides what to share, via the read-only responder under its own policy, snapshot withholding and the outgoing `Redactor`. **Residual:** content A's user showed A can reach an allowed peer. The allow list is the trust decision. **Residual (shared key, 6):** every process of the same OS user can read `peer.key`, and `from` in a request is self-asserted, so the allow list is policy against honest peers, not authentication against a process that holds the key; the rate limit is therefore global per receiver, not per asserted session. **Defence in depth (2):** the Bash substring check on denied paths is not a security boundary (a command can build the path in the shell); the sandbox deny of `$SYNT_HOME/run` is the second layer, and `synt doctor` warns when peers are enabled and the sandbox is not enforcing. **Residual (Windows, 9, accepted):** the default named-pipe DACL grants read to other local users; only the HMAC handshake and the unguessable pipe name stop them, and `platform_ok` (home under the profile, compared by path component) is the only ACL assumption. Unverified on a real machine. **Residual (no channel binding, 10):** the HMAC proves key possession per connection but is not bound to the channel; a same-user process that holds the key can relay or impersonate.
 4. **Impersonation:** a same-user process (including the agent's own Bash) could read `peer.key`. Mitigations:
-   - `$SYNTHESIS_HOME/run/` (and the other Synthesis state) is a hard-denied READ path in the permission engine (`Env::deny_read`, fed from `synthesis_state_paths`): Read/Grep/Glob/LS/edit tools on it or below it are denied in every mode and for every rule, and a Bash command that names the path is denied (a command that builds the path in the shell is not caught; the sandbox deny is the second layer). It is also a protected (write-ask) path and a sandbox deny path. An earlier draft claimed "file tools refuse it" with only the protected-path write scan behind it; that was false for reads and is corrected here;
-   - the peer responder additionally runs with `deny_secret_reads` (`.env*`, keys, `.ssh`, `.aws`, `.gnupg`, `.git-credentials`, and the whole `$SYNTHESIS_HOME`) and `block_outside_reads`; the main agent keeps reading project `.env` files unless the user adds a `Read(..)` deny rule.
+   - `$SYNT_HOME/run/` (and the other Synthesis state) is a hard-denied READ path in the permission engine (`Env::deny_read`, fed from `synthesis_state_paths`): Read/Grep/Glob/LS/edit tools on it or below it are denied in every mode and for every rule, and a Bash command that names the path is denied (a command that builds the path in the shell is not caught; the sandbox deny is the second layer). It is also a protected (write-ask) path and a sandbox deny path. An earlier draft claimed "file tools refuse it" with only the protected-path write scan behind it; that was false for reads and is corrected here;
+   - the peer responder additionally runs with `deny_secret_reads` (`.env*`, keys, `.ssh`, `.aws`, `.gnupg`, `.git-credentials`, and the whole `$SYNT_HOME`) and `block_outside_reads`; the main agent keeps reading project `.env` files unless the user adds a `Read(..)` deny rule.
    A Bash-capable agent can still bypass its *own* sender policy, but never the receiver's (R2 stays read-only and redacted).
 5. **Settings are honoured only from user settings and CLI flags, never from project settings:**
    ```json
-   "synthesis": {"peers": {"enabled": false, "allow": ["workspace:<this root>"], "deny": [],
+   "synt": {"peers": {"enabled": false, "allow": ["workspace:<this root>"], "deny": [],
      "initiate": true, "answer": true, "confirm_replies": false, "max_hops": 2,
      "max_cost_usd": 1.0, "resume_offline": false}}
    ```
@@ -269,7 +269,7 @@ Row = {"address": canonical, "display": display,
 13. Case-folded keys: the same root on Windows/macOS in a different case gives the same key; on Linux, different keys.
 14. A taken session name is rejected.
 
-**Part B** (two harnesses in one process, temp `SYNTHESIS_HOME`)
+**Part B** (two harnesses in one process, temp `SYNT_HOME`)
 15. B asks A, and A's responder answers. B's next request has `<peer_reply>`, and the same `request_id` appears in both streams.
 16. A is mid a long Bash call: the reply still arrives, and A's main requests never contain peer text.
 17. Addressing a peer's named instance forks that instance's snapshot, not main's.
@@ -278,7 +278,7 @@ Row = {"address": canonical, "display": display,
 20. Auth: a wrong key, or an impostor server → nothing is leaked or sent.
 21. Offline (free lock → cleanup) and `unreachable`.
 22. `cycle`, `rate_limited`, `busy`, timeout.
-23. Project `synthesis.peers` is ignored; a cross-workspace request without an allow rule is `denied`.
+23. Project `synt.peers` is ignored; a cross-workspace request without an allow rule is `denied`.
 24. Unix: a long-path disable, and a unit test for the uid comparison.
 
 ## D. Decisions
@@ -293,7 +293,7 @@ Accepted 2026-10-29:
 - **D8** (revised) In-session SendMessage follows the mode table above (asks in `default`); cross-session asks unless allowlisted with `initiate`.
 
 Open until 2026-10-29 (recommendations as written; all accepted, see below):
-- **D9** `synthesis.peers.enabled` default off, with a same-workspace default allow list once on (recommended).
+- **D9** `synt.peers.enabled` default off, with a same-workspace default allow list once on (recommended).
 - **D10** R2 read-only responder (recommended) vs R1.
 - **D11** `confirm_replies` default false (recommended).
 - **D12** Build offline resume, default off?
@@ -310,14 +310,14 @@ Open until 2026-10-29 (recommendations as written; all accepted, see below):
 | R10a-3 Events | `synthesis-events/src/types.rs`, schema, specs/events.md, golden `tests/golden/events/messaging-basic.jsonl` | additive only |
 | R10a-4 TUI | `synthesis-tui/src/{chat,app,runtime}.rs`, `synthesis-tui-base/src/complete.rs` | colour only |
 | R10b-1 Transport | new crate `crates/synthesis-peers` (registry, per-OS endpoint behind `cfg`, frames, handshake) | Windows DACL assumption, path length; **security-reviewer** |
-| R10b-2 Responder + sender | `synthesis-harness`, `synthesis-settings` (user-only `synthesis.peers`), `synthesis-permissions` (`$SYNTHESIS_HOME/run` protected) | exfil residual (B8.3) |
+| R10b-2 Responder + sender | `synthesis-harness`, `synthesis-settings` (user-only `synt.peers`), `synthesis-permissions` (`$SYNT_HOME/run` protected) | exfil residual (B8.3) |
 | R10b-3 CLI/TUI | `apps/cli` (`--name`, `/name`, `/peers`, `doctor`), rows | — |
 | R10c Offline resume | `apps/cli` hidden `peer-answer` | needs R8 |
 Order: R10a (after R5) → R10b (after the R7 protected-path/sandbox rules) → R10c (after R8). Each step is verified with `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` on macOS, Linux and Windows.
 
 ### Decisions (accepted 2026-10-29)
 The owner accepted every recommendation of D9–D16:
-- **D9** `synthesis.peers.enabled` is off by default. Once enabled, the default allow list is the same workspace only.
+- **D9** `synt.peers.enabled` is off by default. Once enabled, the default allow list is the same workspace only.
 - **D10** The receiver answers through a read-only responder forked from the addressed agent's context (R2).
 - **D11** `confirm_replies` defaults to false: no per-reply confirmation.
 - **D12** Offline resume is built, but off by default.
@@ -340,18 +340,18 @@ Not done (left for R10a follow-up or R10b):
 
 ## G. R10b status (cross-session peers) — Built, two security-review rounds applied
 Built:
-- `crates/synthesis-peers` (OFF unless `synthesis.peers.enabled` or `--peers`):
+- `crates/synthesis-peers` (OFF unless `synt.peers.enabled` or `--peers`):
   - Endpoint: unix socket `run/<rand16hex>.sock` (0700 dir, 0600 socket, `peer_cred` uid equals the `run/` owner, path over 100 B refuses to bind) or Windows pipe `\\.\pipe\synthesis-peer-<rand32hex>` (`first_pipe_instance`, `reject_remote_clients`). `run/peer.key` (32 random bytes, 0600). `platform_ok` implements the Windows "home under the user profile" rule.
   - Protocol B5: NDJSON, 1 MiB frame cap, 2 s handshake, mutual HMAC-SHA256 (`hmac` crate, D14; constant-time verify, base64 nonces). The client sends only a nonce until the server proves the key.
   - Server (`serve::Server`): `disabled|too_large|denied|cycle|no_agent|rate_limited|busy`, 2 concurrent responders, 10 requests per sender session per 10 min, request timeout (default 300 s, max 1800 s), cancel by frame or close, partials coalesced to 1 per 500 ms, all outgoing text through the owner's redactor and capped at 32 KiB; an observer hook reports every decision. Client: `status`, `begin` / `Call::wait`, `ask`, `discover` (parallel `status`, allow-list filter, `offline` with entry cleanup through the writer-lock probe, else `unreachable`).
   - Registry `run/<session_id>.json` (temp+rename, removed on drop), `name_taken`; `Config::from_settings`; `address` (grammar, resolver: exactly one session or `not_found` / `ambiguous` with up to 10 `canonical (display)` candidates, allow list applied first, the caller's own session never).
-- Settings: `synthesis.peers` is read from user settings only (`Settings.synthesis.peers`); a project value is ignored with a diagnostic.
+- Settings: `synt.peers` is read from user settings only (`Settings.synthesis.peers`); a project value is ignored with a diagnostic.
 - Events (additive v1, events.md): `peer.listening|stopped` (never the endpoint), `peer.request_sent|request_received|reply_partial|reply`.
 - Harness (`synthesis-harness/src/peer.rs`):
   - Snapshots per agent at every drain point and at the end of each run; the responder forks the addressed agent's snapshot (`main` or an instance), with results of calls whose input names a secret or protected file replaced by `[withheld from peers]` and thinking blocks dropped.
   - Responder (`kind:"peer-responder"`, instance `peer-<n>`, visible in A's events as `subagent.started|stopped`): tools Read, Glob, Grep, LS (and `git_status` / `git_diff` once they exist); mode `stricter(A's current mode, plan)`; asks auto-denied; 8 turns, 20 tool calls; cost added to `max_cost_usd` (`Harness::peer_cost_usd`), the next request is `declined` once it is spent; a first line `DECLINED:` makes the status `declined`. The request is the first user turn as a fenced `<peer_request ... trust="peer-data">`.
   - Sender: `SendMessage` with `ws:`/`sess:` (resolve, connect, handshake, wait for `accepted` / `rejected`, then a background wait), `ListSessions` (only offered with peers on), `ListAgents{scope:"all"}`, 4 in flight, `<peer_reply>` queued and moved into history at the next drain point (never between a `tool_use` and its `tool_result`), and the task waits for outstanding replies (D3). A `SendMessage` to a permitted peer is allowed without a prompt when `initiate` is true (any other reason for ask/deny is kept: deny rules, `plan`, `dontAsk`).
-- `$SYNTHESIS_HOME/run` is in `synthesis_sandbox::synthesis_state_paths`: protected (write) path, hard-denied READ path (`Env::deny_read`, all agents) and sandbox deny path.
+- `$SYNT_HOME/run` is in `synthesis_sandbox::synthesis_state_paths`: protected (write) path, hard-denied READ path (`Env::deny_read`, all agents) and sandbox deny path.
 - Security-review fixes (round 1):
   - Responder: `deny_secret_reads`, `deny_read` of the whole synthesis home, `block_outside_reads`, wall cap 120 s.
   - Cost: each responder reserves `min(free, max_cost_usd/2)` before it runs and a drop guard settles actual cost and refunds the rest (also on cancel); the request rate limit (10 per 10 min) is global per receiver; at most 16 connections at once; 5 s for the first frame after the handshake.
@@ -364,7 +364,7 @@ Built:
   - `ToolContext.skip_secrets` (set from `deny_secret_reads`): Grep's tree walk skips secret-shaped files (`.env*`, `.envrc`, keys, `secrets.*`, anything under `.ssh`/`.aws`/`.gnupg`), links to them (links are never followed) and a secret as the search root. `is_secret_path` strips NTFS `:stream` suffixes and trailing dots/spaces and compares lowercase.
   - `deny_read` roots are compared by their path and their real path (a state dir reached through a link, or a workspace link into it, is denied).
   - The responder gets no git tool (`git_diff` would print secret files unfiltered).
-  - A session whose model has no price declines peer questions with `no_price` (cost is the only token-scaled cap); set `synthesis.pricing` in user settings to answer.
+  - A session whose model has no price declines peer questions with `no_price` (cost is the only token-scaled cap); set `synt.pricing` in user settings to answer.
   - Reply `status` and every `from` field are cut to 256 chars on the sender side.
   - `synt doctor` warns when peers are on and the sandbox is not enforcing, and notes the price requirement.
   - Hard-denying Synthesis state for the main agent was checked against its features: memory is injected by the context provider, `#` notes and settings are written/read by Synthesis itself, and tool-output artifacts live under `sessions/`, which is not denied; nothing tells the model to `Read` a denied path.
@@ -384,7 +384,7 @@ Not done:
 - **Streamed partials:** the responder's text deltas (`stream_once`, agents named `peer-<n>`) are forwarded up to the last whitespace (a word is never cut between frames), then coalesced by the server (text inside the 500 ms window is joined into the next frame, never dropped; text that arrives as the answer finishes is flushed once under the same rule) and redacted over the cumulative text, see I. The asker emits `peer.reply_partial` (events and the JSONL stream, so headless `synt run` shows them); the final `reply` always carries the full text.
 - **`ws:x/agent:y` without `sess:`** resolves only when exactly one allowed session matches the `ws:`; several are `ambiguous` and the candidates are returned (a peer's self-reported agent list no longer chooses; see I).
 - **`SendMessage(ws:<label>/sess:<name>)` rules** match the address trimmed, and deny/ask rules also every spelling of the resolved target (see I).
-- **R10c offline queue** (`synthesis-peers/src/mailbox.rs`, off unless `synthesis.peers.resume_offline`):
+- **R10c offline queue** (`synthesis-peers/src/mailbox.rs`, off unless `synt.peers.resume_offline`):
   - A session with peers on writes `run/mailbox/<session_id>/card.entry` (its registry entry without the endpoint) at start; it stays after exit for 30 days, so a dead session is still addressable. `SendMessage` to a card whose writer lock is free (or to a registry entry that no longer answers and whose lock is free) is queued instead of failing `offline`: only the `main` agent, only for an allowed workspace, result `{"status":"queued"}`; the sender is not blocked.
   - The envelope (`<kind>.<id>.json`, 0600, temp + fsync + rename) is signed with HMAC-SHA256 under `peer.key` over its whole body, like the handshake; a file with a bad signature, wrong name or session, over 128 KiB or older than 7 days is deleted unread. Bounds: 32 per target, 256 in all, 32 KiB text.
   - No duplicates, no loss: the id is the file name and also goes to a `done` ledger (written before the file is deleted), so a retry or a crash between steps stores and delivers an id once; a crash mid-write leaves a temp file that is swept, never a half message. A reply is stored in the asker's mailbox before the request is retired, so a crash re-answers instead of losing it.
@@ -397,7 +397,7 @@ Fixes, each with a test:
 1. **Partials and `confirm_replies`:** with it on, partial frames carry no text (progress only, also the final flush after a decline); the asker sees response text only in the approved `reply`.
 2. **Partial redaction is cumulative:** the server redacts everything released so far and sends only the new part (`serve::Stream`). Held back: the last word, text from an opening `"` until it closes, and anything from an unterminated `-----BEGIN` (the PEM rule needs header and body in one string). If a later redaction would rewrite text already sent, nothing more is streamed (the final `reply` is complete anyway). Limit: other multi-token secrets rely on the owner's redactor seeing the whole prefix (a documented shortcut in `releasable`).
 3. **Confirm dialog:** the reply is redacted and capped to 32 KiB before the owner is asked, and the dialog shows it whole; the approved text is the text sent. The request, which is only context, is still cut to 2 KiB. The confirm has a 120 s timeout (silence declines) and the dialog is closed when the request is dropped (asker gone, timeout), which also releases the responder slot.
-4. **`SendMessage` rules:** `to` is trimmed; the harness adds `_resolved_targets` (every spelling of each allowed session it can resolve to: label, key prefix 6/12, session name, id, 8-char id, with/without `sess:`/`agent:`) to the copy of the input the rules see, after removing any such field the model sent. Only deny and ask use it; allow rules still match what was typed. In `acceptEdits` and `auto`, permissions allow `SendMessage` unconditionally; for a peer session the stated gate is `synthesis.peers` (allow/deny lists applied by the resolver and the receiver), not the mode.
+4. **`SendMessage` rules:** `to` is trimmed; the harness adds `_resolved_targets` (every spelling of each allowed session it can resolve to: label, key prefix 6/12, session name, id, 8-char id, with/without `sess:`/`agent:`) to the copy of the input the rules see, after removing any such field the model sent. Only deny and ask use it; allow rules still match what was typed. In `acceptEdits` and `auto`, permissions allow `SendMessage` unconditionally; for a peer session the stated gate is `synt.peers` (allow/deny lists applied by the resolver and the receiver), not the mode.
 5. **Reply provenance:** the `expect` ledger stores `id`, the target session id and workspace key; a late reply (push or mailbox) must come from that session and workspace, else it is discarded without using up the id. MAC domains are length-prefixed and labelled (`synthesis-peer-v1-envelope`, `-card`); no release used the old labels (the repository has no release tag), so the format changed in place. **Residual risk and open question for the owner:** every session of the user shares `peer.key`, so any of them can sign as another; provenance above is a consistency check, not authentication. Per-session keys would narrow it: each session creates `run/keys/<sid>.key`; a request is MACed with the receiver's key, replies with the asker's. Costs: key distribution on every connect (the key files are same-user readable, so impersonating a receiver stays possible), mailbox cards need the key kept for 30 days, and the Windows ACL story. Real isolation needs asymmetric signatures (per-session keypair, public key in the entry/card, signature over the envelope) and still trusts the registry directory. Not implemented; decision needed.
 6. **Cards** are signed (own MAC label), read with a 128 KiB cap and no links, and ignored if the session id differs from the directory.
 7. **Instance narrowing** by self-reported agents is removed; the `status` frame now carries the asker's `from` and the receiver applies `permits` (a refused asker gets `rejected`/`denied` and is not listed).
@@ -415,7 +415,7 @@ Source: messaging-scenarios.md. The owner accepted Q3-Q8 as proposed and CHANGED
 | Q | Decision |
 |---|---|
 | Q1/Q2 (changed) | Delegation to B's live session, B's mode governs. Guards J4. No separate "taint" dialog and no allow-once command executor. |
-| Q3 | `synthesis.peers.share_commands` (user settings, default empty): a Bash result enters responder snapshots only when the whole command matches a pattern (trailing `*` = prefix), has no shell metacharacters (`; | & $ ( ) < >`, backtick, newline) and names no secret, state or outside path. Output is redacted and cut to 8 KiB. |
+| Q3 | `synt.peers.share_commands` (user settings, default empty): a Bash result enters responder snapshots only when the whole command matches a pattern (trailing `*` = prefix), has no shell metacharacters (`; | & $ ( ) < >`, backtick, newline) and names no secret, state or outside path. Output is redacted and cut to 8 KiB. |
 | Q4 | Threads: `max_rounds` 6, `thread_idle_min` 30, `max_threads` 4 per receiver. |
 | Q5 | `notify_on_end`: gated like a reply, `notify_wait_max_s` 3600, cycle detection. |
 | Q6 | Lease deferred. Q7 no memory blackboard. |
@@ -435,11 +435,11 @@ Source: messaging-scenarios.md. The owner accepted Q3-Q8 as proposed and CHANGED
 
 ### J4. Guard model (all mandatory, each tested)
 1. **B's policy is never raised.** The worker's permission engine is a clone of B's (rules, hooks, sandbox, interactive flag, approver). Mode = `stricter(B's current mode, A's cap)`. Ask rules still ask; deny rules win in every mode. Peer-origin work is held STRICTER than B's own agent in two ways (`Env::deny_secret_reads` and `Env::protected_hard`, both forced on for the worker):
-   - **Secret and state reads.** File tools (Read, Grep, Glob, LS, edit tools) are hard-denied for secret-shaped files and for Synthesis state / `run/`, in every mode. Bash fails closed (`peer_bash_scan`): every word of the command is resolved (`~` expanded, `cd` followed, `>`/`<`/`--opt=` forms taken apart); a word that resolves to a secret-shaped path or to Synthesis state is a deny, reads and writes alike (`cat .env`, `cat ~/.synthesis/run/peer.key`, `cd ~/.synthesis && cat settings.json`, `echo x >> ~/.synthesis/settings.json`); a word that could BUILD such a path (`$`, a backtick, a glob character, `~user`, or a command that does not parse) is a hard ask (headless and dontAsk: deny). So a worker's Bash cannot use `$HOME`, `$(..)`, globs or regex-looking arguments without B's user approving that call. This is a lexical scan, not a sandbox: a program that computes a path at run time (`python -c`, a script) is caught only by the sandbox deny.
-   - **Protected paths** (`.git`, `.synthesis`, `.ssh`, `.env*`, ...) ask in every mode, bypass and auto included (headless: deny). B's own agent keeps the CLI.md behaviour (bypass does not stop plain writes to protected paths); only peer work is held to this.
+   - **Secret and state reads.** File tools (Read, Grep, Glob, LS, edit tools) are hard-denied for secret-shaped files and for Synthesis state / `run/`, in every mode. Bash fails closed (`peer_bash_scan`): every word of the command is resolved (`~` expanded, `cd` followed, `>`/`<`/`--opt=` forms taken apart); a word that resolves to a secret-shaped path or to Synthesis state is a deny, reads and writes alike (`cat .env`, `cat ~/.synt/run/peer.key`, `cd ~/.synt && cat settings.json`, `echo x >> ~/.synt/settings.json`); a word that could BUILD such a path (`$`, a backtick, a glob character, `~user`, or a command that does not parse) is a hard ask (headless and dontAsk: deny). So a worker's Bash cannot use `$HOME`, `$(..)`, globs or regex-looking arguments without B's user approving that call. This is a lexical scan, not a sandbox: a program that computes a path at run time (`python -c`, a script) is caught only by the sandbox deny.
+   - **Protected paths** (`.git`, `.synt`, `.ssh`, `.env*`, ...) ask in every mode, bypass and auto included (headless: deny). B's own agent keeps the CLI.md behaviour (bypass does not stop plain writes to protected paths); only peer work is held to this.
 
    Nothing in a message changes a mode, adds a rule or answers a dialog. Manual/default B: every tool call that asks needs B's approval dialog; the asker waits (<= `timeout_s`, default 600, max 1800) and the work is cancelled on timeout; headless B has no approver, so asks are denied.
-2. **Opt-in only in user settings:** `synthesis.peers.enabled`, `allow` (who may reach me at all), `accept_delegation` (default **false**) and `delegation_allow` (default **empty** = nobody; same rule syntax as `allow`, except that a bare `sess:<name>` is ignored there and reported by `synt doctor`, because a session name is unique only inside one workspace: write `ws:<label>/sess:<name>`; `allow` does not imply it). `accept_notify` (default **false**) likewise gates handing the main task's result to a `notify_on_end` subscriber. A project `settings.json` cannot set any of them (already ignored for all of `synthesis.peers`). `delegation_allow` applies on top of `allow` and the deny list.
+2. **Opt-in only in user settings:** `synt.peers.enabled`, `allow` (who may reach me at all), `accept_delegation` (default **false**) and `delegation_allow` (default **empty** = nobody; same rule syntax as `allow`, except that a bare `sess:<name>` is ignored there and reported by `synt doctor`, because a session name is unique only inside one workspace: write `ws:<label>/sess:<name>`; `allow` does not imply it). `accept_notify` (default **false**) likewise gates handing the main task's result to a `notify_on_end` subscriber. A project `settings.json` cannot set any of them (already ignored for all of `synt.peers`). `delegation_allow` applies on top of `allow` and the deny list.
 3. **Confused deputy.** The request carries `sender_mode` = A's effective mode at send time. B's cap is `Mode::parse(sender_mode)`; missing or unknown = `plan`. A in `plan` gets a read-only worker; `dontAsk` never asks; nobody gets more than A had. A lie can only lower B's mode: the cap is a minimum, never a grant. `sender_mode` is self-asserted like `from`.
 4. **Attribution.** The worker's agent context carries `origin = peer(<display from>, unverified)`. Every approval prompt starts with `[peer request from <display> (unverified sender)]`, the approval request has `origin`, and "allow always" is never offered nor applied for peer-origin requests. Each tool call of a worker emits `peer.delegation.tool`. `from` is self-asserted under the shared key; per-session keys remain the open item of I.5.
 5. **Bounds.** Round cap 6, idle TTL 30 min, 4 open threads, 1 delegation at a time per receiver (`busy`), the global 10 requests / 10 min limit, `delegation_max_tool_calls` (40) and `delegation_wall_s` (900) per round, the cost pool `max_cost_usd` shared with responders (reserve per run, `no_price` without a price), thread cost <= half of the pool. Hops: `chain` holds the session ids on the way; a session already in it is `cycle`; `chain.len() > delegation_max_hops` (default 2: A to B, and B's worker may delegate one further hop to C) is `too_deep`. Cancel: A's cancel/task end closes the connection, B drops the future, the worker is cancelled and `peer.delegation.completed{status:"cancelled"}` is emitted.
@@ -448,7 +448,7 @@ Source: messaging-scenarios.md. The owner accepted Q3-Q8 as proposed and CHANGED
 7. **Audit events** (additive v1): `peer.delegation.accepted {delegation_id, request_id, thread_id?, from, mode, cap}`, `.started {delegation_id, agent_id}`, `.tool {delegation_id, tool_call_id, name, from}`, `.completed {delegation_id, status, tool_calls, duration_ms}`, `.denied {request_id, from, reason}` (a refused request). Ids only, no text, no secrets.
 
 ### J5. Other changes
-- `--name` already existed (peers); `--about TEXT` is new. `about` defaults to the first line of `SYNTHESIS.md` at the workspace root, is redacted, cut to 120 chars, goes in the registry entry and in `session.about` of `ListSessions` / `ListAgents` rows (B9).
+- `--name` already existed (peers); `--about TEXT` is new. `about` defaults to the first line of `AGENTS.md` at the workspace root, is redacted, cut to 120 chars, goes in the registry entry and in `session.about` of `ListSessions` / `ListAgents` rows (B9).
 - `Config` keys added: `accept_notify`, `accept_delegation`, `delegation_allow`, `delegation_max_hops`, `delegation_max_tool_calls`, `delegation_wall_s`, `max_rounds`, `thread_idle_min`, `max_threads`, `notify_wait_max_s`, `share_commands`.
 
 ### J6. Residual risks (accepted by the owner's decision)

@@ -2,7 +2,7 @@
 
 `synt import claude` COPIES and CONVERTS your Claude Code configuration into Synthesis-owned files so
 Synthesis runs in an equivalent environment. Synthesis never reads `~/.claude` at runtime (ADR-011, only
-`SYNTHESIS_*` settings); after the import the Synthesis files are yours and the Claude ones are untouched.
+`SYNT_*` settings); after the import the Synthesis files are yours and the Claude ones are untouched.
 
 ```
 synt import claude [--scope user|project|all] [--project-dir DIR] [--from DIR]
@@ -15,8 +15,8 @@ synt import claude [--scope user|project|all] [--project-dir DIR] [--from DIR]
   warnings, a summary and a checklist of manual steps). `--apply` writes.
 - `--from` defaults to `$HOME/.claude`; `~/.claude.json` is read from its parent directory.
   `--project-dir` is required for the project scope (`all` without it imports the user scope only).
-  Targets are `$SYNTHESIS_HOME` (default `~/.synthesis`) and `<project>/.synthesis`. All paths derive from the
-  injected environment, so `HOME=/tmp/x SYNTHESIS_HOME=/tmp/x/.synthesis synt import claude --from /tmp/x/.claude`
+  Targets are `$SYNT_HOME` (default `~/.synt`) and `<project>/.synt`. All paths derive from the
+  injected environment, so `HOME=/tmp/x SYNT_HOME=/tmp/x/.synt synt import claude --from /tmp/x/.claude`
   never touches the real home.
 - `--only` takes `instructions,permissions,hooks,env,agents,skills,commands,mcp,memory`
   (default: all but `memory`).
@@ -25,14 +25,14 @@ synt import claude [--scope user|project|all] [--project-dir DIR] [--from DIR]
 
 | Claude source | Synthesis target | Notes |
 |---|---|---|
-| `~/.claude/CLAUDE.md`, `~/.claude/rules/*.md` | `$SYNTHESIS_HOME/SYNTHESIS.md`, `rules/` | header `<!-- imported from ... on DATE by synt import claude -->`, content verbatim; relative `@imports` are copied to `imports/` and rewritten; path-scoped rules (`paths:`) load for every task (warned) |
-| project `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md` | nothing | Synthesis already loads them from the project. Only when `.claude/rules/*.md` exist: `.synthesis/rules/*` plus a project `SYNTHESIS.md` (base text + `@.synthesis/rules/..` lines). A project `SYNTHESIS.md`/`AGENTS.md` wins over `CLAUDE.md` (reported) |
-| `settings.json` (`.claude/settings.local.json` for the project) | `settings.json` (`.synthesis/settings.local.json`, listed in `.synthesis/.gitignore`) | `permissions.allow/ask/deny/additionalDirectories/defaultMode`, `hooks`, `env` |
+| `~/.claude/CLAUDE.md`, `~/.claude/rules/*.md` | `$SYNT_HOME/AGENTS.md`, `rules/` | header `<!-- imported from ... on DATE by synt import claude -->`, content verbatim; relative `@imports` are copied to `imports/` and rewritten; path-scoped rules (`paths:`) load for every task (warned) |
+| project `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md` | nothing | Synthesis already loads them from the project. Only when `.claude/rules/*.md` exist: `.synt/rules/*` plus a project `AGENTS.md` (base text + `@.synt/rules/..` lines). A project `AGENTS.md` wins over `CLAUDE.md` (reported) |
+| `settings.json` (`.claude/settings.local.json` for the project) | `settings.json` (`.synt/settings.local.json`, listed in `.synt/.gitignore`) | `permissions.allow/ask/deny/additionalDirectories/defaultMode`, `hooks`, `env` |
 | `agents/*.md`, `skills/*/` (whole directory), `commands/**/*.md` | `agents/`, `skills/`, `commands/` | frontmatter kept; tool names translated; unsupported fields listed. Synthesis has no slash-command loader yet: commands are staged only |
-| `~/.claude.json` `mcpServers` | `$SYNTHESIS_HOME/synthesis.json` `mcpServers` (file gets `$schema` if new) | see MCP below |
-| `~/.claude.json` `projects.<dir>.mcpServers` | `synthesis.json` `projects.<dir>.mcpServers` | |
+| `~/.claude.json` `mcpServers` | `$SYNT_HOME/synt.json` `mcpServers` (file gets `$schema` if new) | see MCP below |
+| `~/.claude.json` `projects.<dir>.mcpServers` | `synt.json` `projects.<dir>.mcpServers` | |
 | project `.mcp.json` | untouched | Synthesis reads it itself; the plan prints `--approve-mcp NAME@HASH` |
-| `~/.claude/projects/<dir>/memory/*.md` (`--only memory`) | `$SYNTHESIS_HOME/projects/<dir>-<hash of the real path>/memory/` (the hash keeps `/a/b` and `/a-b` apart) | loaded at start as low-priority, size-capped (8 KiB per file, 16 KiB total) untrusted notes, `MEMORY.md` first |
+| `~/.claude/projects/<dir>/memory/*.md` (`--only memory`) | `$SYNT_HOME/projects/<dir>-<hash of the real path>/memory/` (the hash keeps `/a/b` and `/a-b` apart) | loaded at start as low-priority, size-capped (8 KiB per file, 16 KiB total) untrusted notes, `MEMORY.md` first |
 
 Tool names: `Agent->Task`, `MultiEdit->Edit`, `LS->Glob`, `KillBash->KillShell`; `Bash`, `Read`,
 `Edit`, `Write`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `Task`, `Skill`, `mcp__*` and
@@ -47,7 +47,7 @@ warning; an agent whose tools all vanish gets an empty `tools:` (no tools), neve
 - **Rules Synthesis cannot represent** (unknown tool, malformed): dropped with a warning. A dropped `deny` rule is flagged loudly: that restriction is NOT carried over.
 - **User-scope hooks**: printed (credential-looking words masked) and written only with `--accept-hooks`. Unsupported events (e.g. `SubagentStart`) are skipped. Project hooks are written but stay inert until the project is trusted (`--trust-project`). Treat imported hooks as unreviewed; `synt doctor` shows the count.
 - **`env`**: secret-shaped names (`*KEY*`, `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, ...) and `ANTHROPIC_/OPENAI_/CLAUDE_/CODEX_` prefixes are skipped; only names are listed.
-- `model` (noted only; use `SYNTHESIS_MODEL`), `statusLine`, `enabledPlugins`, theme and other keys (listed by name).
+- `model` (noted only; use `SYNT_MODEL`), `statusLine`, `enabledPlugins`, theme and other keys (listed by name).
 
 ## MCP servers
 
@@ -57,10 +57,10 @@ never copied**: a header/env/flag whose name is secret-shaped, a known token pre
 `xox*-`, `AKIA`, JWT...), a long random string, URL userinfo or a secret-shaped query parameter is
 replaced by `${SERVER_KEY}` (`Authorization: Bearer x` becomes `Bearer ${SERVER_TOKEN}`).
 Existing `${VAR}` references are kept. The checklist lists every variable you must export and add
-to `synthesis.mcp.env_passthrough` in the user `settings.json` (the import does not widen that list
+to `synt.mcp.env_passthrough` in the user `settings.json` (the import does not widen that list
 for you). OAuth servers are imported as-is with a warning; the login is left to the provider package.
 The plan shows each definition hash. Project servers need hash approval as always; servers in
-your own `synthesis.json` start without it (it is your file, and you just reviewed the plan).
+your own `synt.json` start without it (it is your file, and you just reviewed the plan).
 
 ## Safety properties
 
@@ -84,6 +84,6 @@ $ synt import claude --apply --accept-hooks --only hooks # after reviewing the h
 
 ## Undo
 
-Restore a file from its backup (`mv ~/.synthesis/settings.json.bak-20261029-101500 ~/.synthesis/settings.json`)
+Restore a file from its backup (`mv ~/.synt/settings.json.bak-20261029-101500 ~/.synt/settings.json`)
 and delete files that were `create`d (listed in `imports/claude.json`). Nothing under `~/.claude`
 is ever modified.

@@ -115,7 +115,7 @@ fn chmod(p: &Path, mode: u32) -> Result<()> {
     Ok(fs::set_permissions(p, fs::Permissions::from_mode(mode))?)
 }
 
-/// Creates `synthesis.db` 0600 before SQLite does (it gives -wal/-shm the same mode); tightens an
+/// Creates `synt.db` 0600 before SQLite does (it gives -wal/-shm the same mode); tightens an
 /// existing one; refuses a symlink.
 fn ensure_db_file(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
@@ -139,7 +139,7 @@ fn ensure_db_file(path: &Path) -> Result<()> {
 }
 
 fn connect(home: &Path, read_only: bool) -> Result<Connection> {
-    let path = home.join("synthesis.db");
+    let path = home.join("synt.db");
     let conn = if read_only {
         Connection::open_with_flags(
             &path,
@@ -433,7 +433,7 @@ impl Store {
         private_dir(synthesis_home)?;
         #[cfg(unix)]
         chmod(synthesis_home, 0o700)?;
-        ensure_db_file(&synthesis_home.join("synthesis.db"))?;
+        ensure_db_file(&synthesis_home.join("synt.db"))?;
         let mut conn = connect(synthesis_home, false)?;
         schema::migrate(&mut conn, &now())?;
         Ok(Store {

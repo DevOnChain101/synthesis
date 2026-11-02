@@ -1,5 +1,5 @@
 //! `synt import claude` against the synthetic fixture in tests/fixtures/import (no real data).
-//! Every run has an empty environment except PATH/HOME/SYNTHESIS_HOME pointing into a temp dir.
+//! Every run has an empty environment except PATH/HOME/SYNT_HOME pointing into a temp dir.
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -67,7 +67,7 @@ fn synthesis(fx: &Fx, args: &[&str]) -> Output {
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", &fx.home)
-        .env("SYNTHESIS_HOME", fx.home.join(".synthesis"))
+        .env("SYNT_HOME", fx.home.join(".synt"))
         .stdin(std::process::Stdio::null())
         .output()
         .unwrap()
@@ -121,8 +121,8 @@ fn dry_run_is_default_and_writes_nothing_and_prints_no_secret() {
         s.contains("DRY RUN") && s.contains("nothing written"),
         "{s}"
     );
-    assert!(!fx.home.join(".synthesis").exists());
-    assert!(!fx.project.join(".synthesis").exists() && !fx.project.join("SYNTHESIS.md").exists());
+    assert!(!fx.home.join(".synt").exists());
+    assert!(!fx.project.join(".synt").exists() && !fx.project.join("AGENTS.md").exists());
     for l in LITERALS {
         assert!(!s.contains(l), "{l} printed");
     }
@@ -134,8 +134,8 @@ fn apply_is_idempotent_and_makes_no_second_backup() {
     let fx = fixture();
     let o = import(&fx, &["--apply", "--accept-hooks"]);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    assert!(fx.home.join(".synthesis/SYNTHESIS.md").is_file());
-    let first = fs::read_to_string(fx.home.join(".synthesis/SYNTHESIS.md")).unwrap();
+    assert!(fx.home.join(".synt/AGENTS.md").is_file());
+    let first = fs::read_to_string(fx.home.join(".synt/AGENTS.md")).unwrap();
     assert!(first.starts_with("<!-- imported from ") && first.contains("by synt import claude"));
     assert!(first.contains("@imports/notes_md.md") && first.contains("@rules/style.md"));
     let o = import(&fx, &["--apply", "--accept-hooks"]);
@@ -144,7 +144,7 @@ fn apply_is_idempotent_and_makes_no_second_backup() {
     assert!(s.contains("0 imported"), "{s}");
     assert_eq!(baks(&fx.home), 0);
     assert_eq!(
-        fs::read_to_string(fx.home.join(".synthesis/SYNTHESIS.md")).unwrap(),
+        fs::read_to_string(fx.home.join(".synt/AGENTS.md")).unwrap(),
         first
     );
 }
@@ -162,8 +162,8 @@ fn no_literal_secret_reaches_any_file_and_forbidden_env_is_skipped() {
         ],
     );
     let mut files = vec![];
-    all_files(&fx.home.join(".synthesis"), &mut files);
-    all_files(&fx.project.join(".synthesis"), &mut files);
+    all_files(&fx.home.join(".synt"), &mut files);
+    all_files(&fx.project.join(".synt"), &mut files);
     for f in files {
         let t = fs::read_to_string(&f).unwrap();
         for l in LITERALS {
@@ -173,7 +173,7 @@ fn no_literal_secret_reaches_any_file_and_forbidden_env_is_skipped() {
             }
         }
     }
-    let n = json(&fx.home.join(".synthesis/synthesis.json"));
+    let n = json(&fx.home.join(".synt/synt.json"));
     assert_eq!(n["$schema"], "config.json/v1");
     assert_eq!(
         n["mcpServers"]["gh"]["headers"]["Authorization"],
@@ -191,14 +191,14 @@ fn no_literal_secret_reaches_any_file_and_forbidden_env_is_skipped() {
     assert!(n["mcpServers"]["cloud"].is_object());
     let proj_key = fx.project.to_str().unwrap();
     assert!(n["projects"][proj_key]["mcpServers"]["localsrv"].is_object());
-    let st = json(&fx.home.join(".synthesis/settings.json"));
+    let st = json(&fx.home.join(".synt/settings.json"));
     let env = st["env"].as_object().unwrap();
     assert_eq!(env.len(), 2, "{env:?}");
     assert!(env.contains_key("SAFE_FLAG") && env.contains_key("EDITOR_THEME"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let m = fs::metadata(fx.home.join(".synthesis/synthesis.json"))
+        let m = fs::metadata(fx.home.join(".synt/synt.json"))
             .unwrap()
             .permissions()
             .mode();
@@ -210,7 +210,7 @@ fn no_literal_secret_reaches_any_file_and_forbidden_env_is_skipped() {
 fn bypass_and_auto_modes_are_never_imported_and_broad_allow_is_guarded() {
     let fx = fixture();
     import(&fx, &["--apply"]);
-    let st = json(&fx.home.join(".synthesis/settings.json"));
+    let st = json(&fx.home.join(".synt/settings.json"));
     assert!(st["permissions"].get("defaultMode").is_none());
     let allow: Vec<&str> = st["permissions"]["allow"]
         .as_array()
@@ -226,16 +226,16 @@ fn bypass_and_auto_modes_are_never_imported_and_broad_allow_is_guarded() {
     assert!(!allow.contains(&"Bash") && !allow.iter().any(|r| r.starts_with("PowerShell")));
     assert_eq!(st["permissions"]["deny"].as_array().unwrap().len(), 2);
     assert_eq!(st["permissions"]["ask"][0], "Bash(git push:*)");
-    let ps = json(&fx.project.join(".synthesis/settings.json"));
+    let ps = json(&fx.project.join(".synt/settings.json"));
     assert!(ps["permissions"].get("defaultMode").is_none());
     assert_eq!(ps["permissions"]["allow"][0], "Bash(make:*)");
-    assert!(fx.project.join(".synthesis/settings.local.json").is_file());
-    let gi = fs::read_to_string(fx.project.join(".synthesis/.gitignore")).unwrap();
+    assert!(fx.project.join(".synt/settings.local.json").is_file());
+    let gi = fs::read_to_string(fx.project.join(".synt/.gitignore")).unwrap();
     assert!(gi.contains("settings.local.json"));
     // with the flag the broad rule arrives
     let fx2 = fixture();
     import(&fx2, &["--apply", "--accept-broad-allow"]);
-    let st = json(&fx2.home.join(".synthesis/settings.json"));
+    let st = json(&fx2.home.join(".synt/settings.json"));
     assert!(
         st["permissions"]["allow"]
             .as_array()
@@ -256,13 +256,13 @@ fn user_hooks_need_accept_hooks_and_unsupported_events_are_dropped() {
     );
     assert!(s.contains("check.sh --token ****"));
     assert!(
-        json(&fx.home.join(".synthesis/settings.json"))
+        json(&fx.home.join(".synt/settings.json"))
             .get("hooks")
             .is_none()
     );
     let fx = fixture();
     import(&fx, &["--apply", "--accept-hooks"]);
-    let h = json(&fx.home.join(".synthesis/settings.json"))["hooks"].clone();
+    let h = json(&fx.home.join(".synt/settings.json"))["hooks"].clone();
     assert!(h.get("SessionStart").is_some() && h.get("PreToolUse").is_some());
     assert!(h.get("SubagentStart").is_none());
     assert!(
@@ -270,36 +270,36 @@ fn user_hooks_need_accept_hooks_and_unsupported_events_are_dropped() {
             .get("statusMessage")
             .is_none()
     );
-    assert!(json(&fx.project.join(".synthesis/settings.json"))["hooks"]["PostToolUse"].is_array());
+    assert!(json(&fx.project.join(".synt/settings.json"))["hooks"]["PostToolUse"].is_array());
 }
 
 #[test]
 fn agents_skills_commands_are_converted() {
     let fx = fixture();
     import(&fx, &["--apply"]);
-    let a = fs::read_to_string(fx.home.join(".synthesis/agents/reviewer.md")).unwrap();
+    let a = fs::read_to_string(fx.home.join(".synt/agents/reviewer.md")).unwrap();
     assert!(
         a.contains("tools: Read, Grep, Glob, Edit, Task, Bash(git diff:*)"),
         "{a}"
     );
     assert!(a.contains("model: sonnet") && a.contains("Be strict."));
-    assert!(!fx.home.join(".synthesis/agents/NOTES.txt").exists());
-    let s = fs::read_to_string(fx.home.join(".synthesis/skills/demo/SKILL.md")).unwrap();
+    assert!(!fx.home.join(".synt/agents/NOTES.txt").exists());
+    let s = fs::read_to_string(fx.home.join(".synt/skills/demo/SKILL.md")).unwrap();
     assert!(s.contains("allowed-tools: Read, Bash(ls:*)\n"), "{s}");
     assert!(
         fx.home
-            .join(".synthesis/skills/demo/references/guide.md")
+            .join(".synt/skills/demo/references/guide.md")
             .is_file()
     );
-    assert!(fx.home.join(".synthesis/commands/team/deploy.md").is_file());
-    let c = fs::read_to_string(fx.home.join(".synthesis/commands/ship.md")).unwrap();
+    assert!(fx.home.join(".synt/commands/team/deploy.md").is_file());
+    let c = fs::read_to_string(fx.home.join(".synt/commands/ship.md")).unwrap();
     assert!(c.contains("allowed-tools: Bash(git add:*), Bash(git commit:*)"));
-    let r = fs::read_to_string(fx.home.join(".synthesis/rules/style.md")).unwrap();
+    let r = fs::read_to_string(fx.home.join(".synt/rules/style.md")).unwrap();
     assert_eq!(r.trim(), "Use rustfmt.");
     // memory is opt-in
-    assert!(!fx.home.join(".synthesis/projects").exists());
+    assert!(!fx.home.join(".synt/projects").exists());
     import(&fx, &["--apply", "--only", "memory"]);
-    assert!(fx.home.join(".synthesis/projects").is_dir());
+    assert!(fx.home.join(".synt/projects").is_dir());
 }
 
 #[test]
@@ -307,12 +307,12 @@ fn project_instructions_and_scopes() {
     let fx = fixture();
     let o = import(&fx, &["--scope", "user", "--apply"]);
     assert!(o.status.success());
-    assert!(!fx.project.join(".synthesis").exists() && !fx.project.join("SYNTHESIS.md").exists());
+    assert!(!fx.project.join(".synt").exists() && !fx.project.join("AGENTS.md").exists());
     let o = import(&fx, &["--scope", "project", "--apply"]);
     assert!(o.status.success());
-    let n = fs::read_to_string(fx.project.join("SYNTHESIS.md")).unwrap();
-    assert!(n.contains("Run tests with make test.") && n.contains("@.synthesis/rules/api.md"));
-    assert!(fx.project.join(".synthesis/rules/api.md").is_file());
+    let n = fs::read_to_string(fx.project.join("AGENTS.md")).unwrap();
+    assert!(n.contains("Run tests with make test.") && n.contains("@.synt/rules/api.md"));
+    assert!(fx.project.join(".synt/rules/api.md").is_file());
     // project .mcp.json is only reported: unchanged and approval hint given
     let s = out(&o);
     assert!(
@@ -331,14 +331,14 @@ fn project_instructions_and_scopes() {
 #[test]
 fn merge_keeps_existing_values_and_backs_up() {
     let fx = fixture();
-    let nh = fx.home.join(".synthesis");
+    let nh = fx.home.join(".synt");
     fs::create_dir_all(&nh).unwrap();
     fs::write(
         nh.join("settings.json"),
         r#"{"permissions":{"allow":["Read(./mine)"],"defaultMode":"plan"},"keep":1}"#,
     )
     .unwrap();
-    fs::write(nh.join("SYNTHESIS.md"), "my own notes\n").unwrap();
+    fs::write(nh.join("AGENTS.md"), "my own notes\n").unwrap();
     let o = import(&fx, &["--apply", "--only", "permissions,instructions"]);
     let s = out(&o);
     let st = json(&nh.join("settings.json"));
@@ -362,15 +362,15 @@ fn merge_keeps_existing_values_and_backs_up() {
             .unwrap()
             .contains("\"keep\":1")
     );
-    // a hand-written SYNTHESIS.md is not replaced without --overwrite
+    // a hand-written AGENTS.md is not replaced without --overwrite
     assert_eq!(
-        fs::read_to_string(nh.join("SYNTHESIS.md")).unwrap(),
+        fs::read_to_string(nh.join("AGENTS.md")).unwrap(),
         "my own notes\n"
     );
     assert!(s.contains("was not written by an import"), "{s}");
     import(&fx, &["--apply", "--only", "instructions", "--overwrite"]);
     assert!(
-        fs::read_to_string(nh.join("SYNTHESIS.md"))
+        fs::read_to_string(nh.join("AGENTS.md"))
             .unwrap()
             .starts_with("<!-- imported from")
     );
@@ -399,23 +399,20 @@ fn malformed_claude_settings_fail_clearly_without_partial_writes() {
         "{e}"
     );
     assert!(!e.contains("not json"));
-    assert!(!fx.home.join(".synthesis").exists(), "partial write");
-    assert!(!fx.project.join(".synthesis").exists() && !fx.project.join("SYNTHESIS.md").exists());
+    assert!(!fx.home.join(".synt").exists(), "partial write");
+    assert!(!fx.project.join(".synt").exists() && !fx.project.join("AGENTS.md").exists());
 }
 
 #[test]
 fn malformed_existing_synthesis_file_aborts_before_any_write() {
     let fx = fixture();
-    let nh = fx.home.join(".synthesis");
+    let nh = fx.home.join(".synt");
     fs::create_dir_all(&nh).unwrap();
-    fs::write(nh.join("synthesis.json"), "[1]").unwrap();
+    fs::write(nh.join("synt.json"), "[1]").unwrap();
     let o = import(&fx, &["--apply"]);
     assert_eq!(o.status.code(), Some(2));
-    assert!(!nh.join("SYNTHESIS.md").exists() && !nh.join("settings.json").exists());
-    assert_eq!(
-        fs::read_to_string(nh.join("synthesis.json")).unwrap(),
-        "[1]"
-    );
+    assert!(!nh.join("AGENTS.md").exists() && !nh.join("settings.json").exists());
+    assert_eq!(fs::read_to_string(nh.join("synt.json")).unwrap(), "[1]");
 }
 
 #[test]
@@ -429,5 +426,5 @@ fn doctor_reports_the_import_and_config_stays_valid() {
         s.contains("import (claude, user)") && s.contains("agents 1"),
         "{s}"
     );
-    assert!(s.contains("instruction files: user SYNTHESIS.md"), "{s}");
+    assert!(s.contains("instruction files: user AGENTS.md"), "{s}");
 }

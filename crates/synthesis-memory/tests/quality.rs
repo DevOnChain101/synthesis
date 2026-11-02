@@ -30,7 +30,7 @@ const CORPUS: &[(&str, &str)] = &[
     ),
     (
         "Sandbox deny paths",
-        "synthesis.db and auth.json are denied inside the sandbox",
+        "synt.db and auth.json are denied inside the sandbox",
     ),
     (
         "Release process",
@@ -54,7 +54,7 @@ const CORPUS: &[(&str, &str)] = &[
     ),
     (
         "Skill files",
-        "skills live in .synthesis/skills as SKILL.md with frontmatter",
+        "skills live in .synt/skills as SKILL.md with frontmatter",
     ),
     (
         "Event schema",
@@ -84,7 +84,7 @@ const QUERIES: &[(&str, &[&str])] = &[
     ("where are the parser golden fixtures", &["Parser fixtures"]),
     ("compare paths on windows", &["Windows paths"]),
     (
-        "can a sandboxed command read synthesis.db",
+        "can a sandboxed command read synt.db",
         &["Sandbox deny paths"],
     ),
     ("how do I cut a release", &["Release process"]),

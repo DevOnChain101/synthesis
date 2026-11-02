@@ -58,7 +58,7 @@ PASS = works as designed. PARTIAL = works with a defect. FAIL = broken or missin
 | 37 | Verification gate | FAIL | See B-3 and B-6: 3 to 4 extra dialogs per turn, `※ invalid session transition Verifying -> WaitingApproval`, ends `※ task unverified: unverified` although `4 passed, 0 failed`. |
 | 38 | End-to-end coding task | PARTIAL | Rust: edit + test correct in ~19 s once `--sandbox-read ~/.rustup ~/.cargo` was passed; without it cargo cannot run at all (B-2). Node (nvm) hit the same wall. 9 to 11 dialogs for a 3-line change. |
 | 39 | Error: bad key | PASS | `※ model error: Invalid API key` + `※ task blocked: model_error:auth: Invalid API key` (duplicated, B-19). |
-| 40 | Error: key missing | PARTIAL | TUI refuses to start, exit 2: `synt: error: No credential for provider "omniroute". Set SYNTHESIS_API_KEY / SYNTHESIS_AUTH_TOKEN or the provider's apiKey in config.` (B-20). |
+| 40 | Error: key missing | PARTIAL | TUI refuses to start, exit 2: `synt: error: No credential for provider "omniroute". Set SYNT_API_KEY / SYNT_AUTH_TOKEN or the provider's apiKey in config.` (B-20). |
 | 41 | Error: gateway down | PARTIAL | After 6.1 s: `model error: error sending request: client error (Connect): tcp connect error: Connection refused (os error 61)`; no URL or hint, duplicated (B-19). |
 | 42 | Error: network deny | PASS | Default `--network deny`: tool commands have no network (not exercised against a real host). |
 | 43 | Non-TTY, `--once` | PARTIAL | Piped stdin/stdout: `synt: the interactive app needs a terminal on stdin and stdout.` with usage; no `--cwd` on a tty: `synt: error: pass --cwd DIR`. `--once` prints one frame but with 24-bit/256-colour SGR even when stdout is a pipe (B-21). |

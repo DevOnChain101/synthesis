@@ -1,19 +1,19 @@
 #!/bin/sh
 # Synthesis installer (macOS, Linux). No sudo: installs to ~/.local/bin by default.
-#   SYNTHESIS_VERSION=0.1.0        version to install (default: latest release)
-#   SYNTHESIS_REPO=owner/repo      GitHub repository (default DevOnChain101/nemo-acd; scripts/check-placeholders.mjs keeps it equal to packaging/REPO)
-#   SYNTHESIS_INSTALL_DIR=DIR      default $HOME/.local/bin
-#   SYNTHESIS_BIN_NAME=synt       name of the installed command (e.g. synt-rs to coexist with the Node CLI)
+#   SYNT_VERSION=0.1.0        version to install (default: latest release)
+#   SYNT_REPO=owner/repo      GitHub repository (default DevOnChain101/nemo-acd; scripts/check-placeholders.mjs keeps it equal to packaging/REPO)
+#   SYNT_INSTALL_DIR=DIR      default $HOME/.local/bin
+#   SYNT_BIN_NAME=synt       name of the installed command (e.g. synt-rs to coexist with the Node CLI)
 #   (default)                 with `gh` present, a failing `gh attestation verify` of SHA256SUMS (signer workflow + source ref v$version) aborts;
 #                             without `gh` only the checksum is checked and a warning says so
-#   SYNTHESIS_SKIP_ATTESTATION=1   skip the attestation check even when gh exists (warning printed)
-#   SYNTHESIS_DOWNLOAD_BASE=URL    override the download base URL (mirrors, tests); must be https://
-#   SYNTHESIS_INSECURE_DOWNLOAD_BASE_I_KNOW=1  allow a non-https SYNTHESIS_DOWNLOAD_BASE (tests only)
+#   SYNT_SKIP_ATTESTATION=1   skip the attestation check even when gh exists (warning printed)
+#   SYNT_DOWNLOAD_BASE=URL    override the download base URL (mirrors, tests); must be https://
+#   SYNT_INSECURE_DOWNLOAD_BASE_I_KNOW=1  allow a non-https SYNT_DOWNLOAD_BASE (tests only)
 set -eu
 
-REPO=${SYNTHESIS_REPO:-DevOnChain101/nemo-acd}
-DIR=${SYNTHESIS_INSTALL_DIR:-$HOME/.local/bin}
-NAME=${SYNTHESIS_BIN_NAME:-synt}
+REPO=${SYNT_REPO:-DevOnChain101/nemo-acd}
+DIR=${SYNT_INSTALL_DIR:-$HOME/.local/bin}
+NAME=${SYNT_BIN_NAME:-synt}
 
 die() { echo "install.sh: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
@@ -43,15 +43,15 @@ fi
 target="$arch-$os"
 
 proto='=https'
-base=${SYNTHESIS_DOWNLOAD_BASE:-}
+base=${SYNT_DOWNLOAD_BASE:-}
 case $base in
   ''|https://*) ;;
-  *) [ "${SYNTHESIS_INSECURE_DOWNLOAD_BASE_I_KNOW:-}" = 1 ] || die "SYNTHESIS_DOWNLOAD_BASE must be https:// (got '$base')"
+  *) [ "${SYNT_INSECURE_DOWNLOAD_BASE_I_KNOW:-}" = 1 ] || die "SYNT_DOWNLOAD_BASE must be https:// (got '$base')"
      proto='=https,http,file'; echo "warning: insecure download base" >&2 ;;
 esac
 dl() { curl --proto "$proto" --proto-redir '=https' --tlsv1.2 --fail --location --silent --show-error "$@"; }
 
-version=${SYNTHESIS_VERSION:-}
+version=${SYNT_VERSION:-}
 if [ -z "$version" ]; then
   url=$(dl -I -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest") || die "cannot resolve latest release"
   version=${url##*/v}
@@ -76,12 +76,12 @@ else die "need sha256sum or shasum"; fi
 echo "sha256 ok"
 
 # SHA256SUMS is only as trustworthy as its source: verify its build-provenance attestation (made by release.yml).
-if [ "${SYNTHESIS_SKIP_ATTESTATION:-}" = 1 ]; then
-  echo "WARNING: SYNTHESIS_SKIP_ATTESTATION=1: SHA256SUMS was NOT authenticated; only the archive hash against it was checked. Anyone who can alter the download can alter both." >&2
+if [ "${SYNT_SKIP_ATTESTATION:-}" = 1 ]; then
+  echo "WARNING: SYNT_SKIP_ATTESTATION=1: SHA256SUMS was NOT authenticated; only the archive hash against it was checked. Anyone who can alter the download can alter both." >&2
 elif command -v gh >/dev/null 2>&1; then
   gh attestation verify "$tmp/SHA256SUMS" --repo "$REPO" --signer-workflow "$REPO/.github/workflows/release.yml" \
     --source-ref "refs/tags/v$version" \
-    || die "attestation verification of SHA256SUMS failed (not logged in to gh? set SYNTHESIS_SKIP_ATTESTATION=1 to accept checksum-only)"
+    || die "attestation verification of SHA256SUMS failed (not logged in to gh? set SYNT_SKIP_ATTESTATION=1 to accept checksum-only)"
   echo "attestation ok"
 else
   echo "WARNING: gh (GitHub CLI) not found: SHA256SUMS was NOT authenticated, only the archive hash against it was checked. Install gh (https://cli.github.com), run 'gh auth login' and re-run for full verification." >&2
@@ -99,7 +99,7 @@ echo "Installed $DIR/$NAME ($version, $target)"
 case ":$PATH:" in *":$DIR:"*) ;; *) echo "Add $DIR to PATH." ;; esac
 other=$(command -v "$NAME" 2>/dev/null || true)
 if [ -n "$other" ] && [ "$other" != "$DIR/$NAME" ]; then
-  echo "warning: '$NAME' on PATH currently resolves to $other (Node CLI?). Put $DIR first or use SYNTHESIS_BIN_NAME." >&2
+  echo "warning: '$NAME' on PATH currently resolves to $other (Node CLI?). Put $DIR first or use SYNT_BIN_NAME." >&2
 fi
 echo "Running: $DIR/$NAME doctor"
 "$DIR/$NAME" doctor || echo "warning: '$NAME doctor' reported problems (exit $?)" >&2

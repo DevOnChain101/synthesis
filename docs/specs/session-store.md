@@ -5,10 +5,10 @@ Tags as in events.md. Two formats: (A) the Node transcript JSONL that Rust must 
 ## A. Node transcript format (compat, read + mirror-write) [from-node]
 
 ### A.1 Location
-- Main: `$SYNTHESIS_HOME/projects/<sanitize(cwd)>/<session_id>.jsonl` [transcript.js:32-33]; `SYNTHESIS_HOME` defaults to `~/.synthesis` [auth.js:26-28].
+- Main: `$SYNT_HOME/projects/<sanitize(cwd)>/<session_id>.jsonl` [transcript.js:32-33]; `SYNT_HOME` defaults to `~/.synt` [auth.js:26-28].
 - `sanitize(p)` = every char outside `[A-Za-z0-9]` → `-` [claudecfg.js:16-18]. Lossy (`/a-b` and `/a/b` collide); the real cwd is in every line, so readers trust the line `cwd`, not the folder name.
 - Sub-agent: `…/<session_id>/subagents/agent-<agent_id>.jsonl` + `agent-<agent_id>.meta.json` = `{toolUseId:str, agentType:str, route:{source:str, fallback:str?, profile:str, candidate:str?}}` [transcript.js:28-30, agent.js:833-837].
-- Note: Node does NOT list `~/.claude/projects` as sessions; that tree is read only to import auto-memory [importclaude.js:297-307]. The comment at history.js:3 saying `~/.claude/projects` is stale; the watcher reads `$SYNTHESIS_HOME/projects` [watcher.js:11-12].
+- Note: Node does NOT list `~/.claude/projects` as sessions; that tree is read only to import auto-memory [importclaude.js:297-307]. The comment at history.js:3 saying `~/.claude/projects` is stale; the watcher reads `$SYNT_HOME/projects` [watcher.js:11-12].
 
 ### A.2 Common fields (every line) [agent.js:1023]
 `timestamp:str (ISO 8601)`, `sessionId:str`, `cwd:str`, `type:str`; sub-agent lines add `agentId:str` [agent.js:879]. Files are append-only, written one line at a time with no locking and no fsync [transcript.js:40-47].
@@ -32,12 +32,12 @@ Tags as in events.md. Two formats: (A) the Node transcript JSONL that Rust must 
 5. Soft errors are recognised by text patterns, since transcripts have no `soft` flag [tools/soft.js:3-7].
 
 ### A.5 Other Node state files (read; Rust writes them only when the user changes the value)
-`$SYNTHESIS_HOME/state.json` = `{model?:str, effort?:str|null, autocompact?:"auto"|"off"|int}` [state.js:3-5, agent.js:370-373]; open tabs are persisted by opentabs.js using the same transcript paths [opentabs.js:20].
+`$SYNT_HOME/state.json` = `{model?:str, effort?:str|null, autocompact?:"auto"|"off"|int}` [state.js:3-5, agent.js:370-373]; open tabs are persisted by opentabs.js using the same transcript paths [opentabs.js:20].
 
 ## B. New store [new]
 
 ### B.1 Location and engine
-`$SYNTHESIS_HOME/synthesis.db` (SQLite, `journal_mode=WAL`, `foreign_keys=ON`, `busy_timeout=5000`); artifacts in `$SYNTHESIS_HOME/sessions/<session_id>/artifacts/` (doc §5.7). Timestamps are RFC 3339 UTC TEXT; JSON columns are TEXT holding valid JSON; ids are UUIDv4 TEXT unless noted.
+`$SYNT_HOME/synt.db` (SQLite, `journal_mode=WAL`, `foreign_keys=ON`, `busy_timeout=5000`); artifacts in `$SYNT_HOME/sessions/<session_id>/artifacts/` (doc §5.7). Timestamps are RFC 3339 UTC TEXT; JSON columns are TEXT holding valid JSON; ids are UUIDv4 TEXT unless noted.
 
 ### B.2 Tables (doc §7.2 minimum plus marked additions)
 ```sql
@@ -82,7 +82,7 @@ CREATE TABLE approvals(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES 
 `tool_calls.id` is the provider's tool-use id and is unique only within a session, hence the composite key. The `messages` table exists because resume needs the exact history the model saw (Node rebuilds it lossily from UI items [agent.js:3035-3039]); whether events alone are enough is doc §13.4.
 
 ### B.3 Write rules
-- One writer process per session: advisory lock file `$SYNTHESIS_HOME/sessions/<id>/lock` (`fs4`-style OS lock; crate unverified). A second Rust process attaches read-only.
+- One writer process per session: advisory lock file `$SYNT_HOME/sessions/<id>/lock` (`fs4`-style OS lock; crate unverified). A second Rust process attaches read-only.
 - Each event is inserted in the same transaction that updates `sessions.event_cursor`; streaming to clients happens after commit, so a client never sees a seq that is not durable.
 - Artifacts are written to a temp file, fsynced, renamed, then the row is inserted.
 

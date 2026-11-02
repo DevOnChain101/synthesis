@@ -1,3 +1,3 @@
 # 2026-10-30: snapshots follow the product rename (tests/golden/README.md); cases that show the product name also differ by the rename.
 # Golden cases where Rust intentionally differs from Node. Format: case-name | reason
-load-deep-merge-providers-home-cwd | F6: project .synthesis/config.json is untrusted, so its providers.gateway.baseURL override is ignored (Node lets the project redirect the provider) and a warning is emitted
+load-deep-merge-providers-home-cwd | F6: project .synt/config.json is untrusted, so its providers.gateway.baseURL override is ignored (Node lets the project redirect the provider) and a warning is emitted

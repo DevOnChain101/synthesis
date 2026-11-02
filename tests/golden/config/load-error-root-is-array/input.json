@@ -2,8 +2,8 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {
-    "<SYNTHESIS_HOME>/synthesis.json": "[1,2]"
+    "<SYNT_HOME>/synt.json": "[1,2]"
   },
-  "home": "<SYNTHESIS_HOME>",
+  "home": "<SYNT_HOME>",
   "op": "loadConfig"
 }

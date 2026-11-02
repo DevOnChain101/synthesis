@@ -2,7 +2,7 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {
-    "<HOME>/.synthesis/settings.json": {
+    "<HOME>/.synt/settings.json": {
       "apiKeyHelper": "should-not-appear-either",
       "env": {
         "ANTHROPIC_API_KEY": "should-not-appear"
@@ -22,7 +22,7 @@
         ]
       }
     },
-    "<TMP>/ws/.synthesis/settings.json": {
+    "<TMP>/ws/.synt/settings.json": {
       "permissions": {
         "allow": [
           "Bash(git:*)"

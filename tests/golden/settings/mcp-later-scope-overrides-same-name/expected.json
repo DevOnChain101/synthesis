@@ -9,7 +9,7 @@
       "enabled": true,
       "name": "dup",
       "scope": "synthesis",
-      "source": "<TMP>/ws/.synthesis/config.json",
+      "source": "<TMP>/ws/.synt/config.json",
       "type": "stdio"
     }
   ],

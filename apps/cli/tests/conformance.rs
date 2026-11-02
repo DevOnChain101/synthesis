@@ -34,7 +34,7 @@ impl Rig {
         c.env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", self.dir.path())
-            .env("SYNTHESIS_HOME", self.home())
+            .env("SYNT_HOME", self.home())
             .stdin(Stdio::null());
         c
     }
@@ -147,7 +147,7 @@ fn session_id(ev: &[Value]) -> String {
 }
 
 fn messages(rig: &Rig, sid: &str) -> i64 {
-    let c = rusqlite::Connection::open(rig.home().join("synthesis.db")).unwrap();
+    let c = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
     c.query_row(
         "SELECT count(*) FROM messages WHERE session_id=?1",
         [sid],
@@ -294,7 +294,7 @@ fn json_schema_accepts_matching_and_rejects_mismatching_answers() {
 #[test]
 fn session_start_and_end_hooks_fire() {
     let rig = Rig::new();
-    let h = |f: &str| json!([{"hooks": [{"type": "command", "command": format!("cat > $SYNTHESIS_PROJECT_DIR/{f}")}]}]);
+    let h = |f: &str| json!([{"hooks": [{"type": "command", "command": format!("cat > $SYNT_PROJECT_DIR/{f}")}]}]);
     rig.settings(json!({"hooks": {"SessionStart": h("start.json"), "SessionEnd": h("end.json")}}));
     let (_, ev) = rig.run(text_script("ok"), &[]);
     for (f, name) in [("start.json", "SessionStart"), ("end.json", "SessionEnd")] {
@@ -392,7 +392,7 @@ fn closed_stderr_does_not_panic() {
     c.env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", rig.dir.path())
-        .env("SYNTHESIS_HOME", rig.home())
+        .env("SYNT_HOME", rig.home())
         .stdin(Stdio::null())
         .arg("-c")
         .arg("exec \"$0\" run --cwd \"$1\" --provider \"fake:$2\" --prompt hi --sandbox off 2>&-")
@@ -442,7 +442,7 @@ fn checkpoint_is_taken_before_the_first_write() {
     ]);
     let (_, ev) = rig.run(script, &["--permission-mode", "acceptEdits"]);
     let sid = session_id(&ev);
-    let c = rusqlite::Connection::open(rig.home().join("synthesis.db")).unwrap();
+    let c = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
     let n: i64 = c
         .query_row(
             "SELECT count(*) FROM checkpoints WHERE session_id=?1",

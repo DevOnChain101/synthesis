@@ -3,7 +3,7 @@
   "calls": [
     {
       "input": {
-        "command": "touch .synthesis/settings.json"
+        "command": "touch .synt/settings.json"
       },
       "tool": "Bash"
     }

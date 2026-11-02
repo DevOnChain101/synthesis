@@ -466,7 +466,7 @@ mod tests {
     fn fact_becomes_an_instructions_diff_and_apply_appends() {
         let d = tempfile::tempdir().unwrap();
         let mut s = Store::open(d.path(), vec![]).unwrap();
-        let file = d.path().join("SYNTHESIS.md");
+        let file = d.path().join("AGENTS.md");
         std::fs::write(&file, "# Project\nBe terse.").unwrap();
         let id = s
             .put(NewMemory::new(

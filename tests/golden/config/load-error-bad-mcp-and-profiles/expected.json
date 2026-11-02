@@ -1,7 +1,7 @@
 {
   "error": {
-    "code": "SYNTHESIS_INVALID_CONFIG",
-    "message": "invalid config <SYNTHESIS_HOME>/synthesis.json: $.profiles.p.candidates must be an array; $.profiles.q.candidates[0].model must be a non-empty string; $.mcp.s.type is invalid; $.mcp.s.command must be a string or array",
+    "code": "SYNT_INVALID_CONFIG",
+    "message": "invalid config <SYNT_HOME>/synt.json: $.profiles.p.candidates must be an array; $.profiles.q.candidates[0].model must be a non-empty string; $.mcp.s.type is invalid; $.mcp.s.command must be a string or array",
     "name": "ConfigValidationError"
   }
 }

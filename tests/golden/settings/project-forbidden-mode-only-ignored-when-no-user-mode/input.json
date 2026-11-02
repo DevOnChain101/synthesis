@@ -2,7 +2,7 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {
-    "<TMP>/ws/.synthesis/settings.json": {
+    "<TMP>/ws/.synt/settings.json": {
       "permissions": {
         "defaultMode": "auto"
       }

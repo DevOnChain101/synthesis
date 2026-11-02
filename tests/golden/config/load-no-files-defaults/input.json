@@ -2,6 +2,6 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {},
-  "home": "<SYNTHESIS_HOME>",
+  "home": "<SYNT_HOME>",
   "op": "loadConfig"
 }

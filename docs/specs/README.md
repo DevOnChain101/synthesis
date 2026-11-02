@@ -22,7 +22,7 @@ Review record: all seven specs were reviewed and approved by the product owner o
 3. `--cwd DIR` is optional: without it the CLI boundary (`launch_dir()` in `apps/cli/src/main.rs`) reads the launch directory once; the libraries never read the process cwd (clippy bars `std::env::current_dir`) and always take an explicit cwd. Owner fix 2026-10-31 (plain `synt` used to fail with `pass --cwd DIR`). workspace-context.md §4.1.
 4. Headless `ask` is never prompted (no stdin approval). What happens depends on the permission MODE (`synt run --permission-mode`, tools.md §3) plus a pre-declared allowlist (`--allow` / settings); an ask nobody can answer is auto-denied, and a denied write/execute call ends the task `blocked` / `approval_unavailable`. Node's "outside read is allowed when nobody can answer" is not carried over. Owner decision 2026-10-28. tools.md §3.
 5. Policy is re-checked after a hook or approver rewrites tool input (Node does not). tools.md §3.
-6. Rust adds nothing to `config.json/v1` during the parallel run; Rust-only settings live under `"synthesis"` in `settings.json`. config.md §6.
+6. Rust adds nothing to `config.json/v1` during the parallel run; Rust-only settings live under `"synt"` in `settings.json`. config.md §6.
 7. Rust mirror-writes Node-shaped transcript JSONL until cutover; SQLite is the source of truth. session-store.md §C.
 8. Pure Q&A tasks with no side effects skip the gate and end `completed`. verification.md §4.
 
@@ -35,7 +35,7 @@ Review record: all seven specs were reviewed and approved by the product owner o
 Also open, lower stakes: thinking deltas in the stream; artifact retention default; whether the model may call `verify_run`; keeping `TodoWrite` and `TaskCreate/*` both; case-sensitive macOS volumes.
 
 ## Found in the Node reference that the doc or the task brief do not reflect
-- Node transcripts live in `$SYNTHESIS_HOME/projects/…` (`~/.synthesis`), not `~/.claude/projects` (transcript.js:32, watcher.js:11-12); the `~/.claude/projects` comment in history.js:3 is stale. Claude Code's tree is only read to import memory.
+- Node transcripts live in `$SYNT_HOME/projects/…` (`~/.synt`), not `~/.claude/projects` (transcript.js:32, watcher.js:11-12); the `~/.claude/projects` comment in history.js:3 is stale. Claude Code's tree is only read to import memory.
 - Node has no headless/JSONL mode and no exit-code contract (bin/synt.js uses 1 for every error, 130 for SIGINT).
 - Node has no JSON Schema validation of tool input; each tool checks fields by hand.
 - Node tool paths have no containment: `resolvePath` accepts any absolute path (tools/util.js:10). Containment exists only in the permission layer (ask/deny), with realpath and case folding (permissions.js:323-353, 380-386).
@@ -43,7 +43,7 @@ Also open, lower stakes: thinking deltas in the stream; artifact retention defau
 - Node stacks retries: SDK `maxRetries: 4` (providers/anthropic.js:51, openai.js:88) under the agent's own 3 retries (agent.js:50). Rust should keep one retry layer.
 - Doc §10 and Appendix A put the Cargo workspace in `~/Vibe/Coding-Agent/nemo-cli`; CLAUDE.md and this repo are `~/Vibe/Nemo-ACD`.
 - Doc §5.6 lists `terminal.exec` etc. as new tools, but `Bash`/`Read`/`Edit`/`Grep` already cover `terminal.exec`/`file.*`.
-- Project config is read from `<cwd>/.synthesis/config.json` while settings come from `<projectRoot>/.synthesis/settings.json` (config.js:278 vs claudecfg.js:800).
+- Project config is read from `<cwd>/.synt/config.json` while settings come from `<projectRoot>/.synt/settings.json` (config.js:278 vs claudecfg.js:800).
 
 ## R1 progress
 - `tests/agent-evals/` holds the eval harness (Node ESM, no deps), the 8 v1 scenarios, and oracle/noop/node/rust adapters; see its README. Self-test: `node tests/agent-evals/harness/selftest.js`. Open question 4 above is answered in practice: `NativeAgent` runs headless through the in-repo adapter. Windows/Linux and real-provider runs are unverified.

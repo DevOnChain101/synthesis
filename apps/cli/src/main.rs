@@ -22,6 +22,7 @@ use synthesis_config::Env;
 #[derive(Parser)]
 #[command(
     name = "synt",
+    display_name = "Synthesis",
     version,
     about = "Synthesis autonomous coding agent",
     arg_required_else_help = true

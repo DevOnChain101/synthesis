@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "printf '%s|%s|%s|%s' \"$CLAUDE_PROJECT_DIR\" \"$SYNTHESIS_PROJECT_DIR\" \"${SYNTHESIS_API_KEY:-absent}\" \"${SYNTHESIS_ANTHROPIC_API_KEY:-absent}\"",
+            "command": "printf '%s|%s|%s|%s' \"$CLAUDE_PROJECT_DIR\" \"$SYNT_PROJECT_DIR\" \"${SYNT_API_KEY:-absent}\" \"${SYNT_ANTHROPIC_API_KEY:-absent}\"",
             "type": "command"
           }
         ],
@@ -17,8 +17,8 @@
   "opts": {
     "cwd": "<TMP>/ws",
     "env": {
-      "SYNTHESIS_ANTHROPIC_API_KEY": "secret",
-      "SYNTHESIS_API_KEY": "flat-secret"
+      "SYNT_ANTHROPIC_API_KEY": "secret",
+      "SYNT_API_KEY": "flat-secret"
     }
   },
   "payload": {

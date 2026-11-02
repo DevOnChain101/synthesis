@@ -56,7 +56,7 @@ use synthesis_config::{
 
 #[derive(Args)]
 pub struct CwdArg {
-    /// Project directory whose `.synthesis/config.json` is considered (default: none).
+    /// Project directory whose `.synt/config.json` is considered (default: none).
     #[arg(long)]
     pub cwd: Option<PathBuf>,
 }
@@ -79,8 +79,8 @@ pub fn homes(env: &Env) -> Result<Homes, String> {
         .get_nonempty("HOME")
         .or_else(|| env.get_nonempty("USERPROFILE"))
         .map(PathBuf::from);
-    if user.is_none() && env.get_nonempty("SYNTHESIS_HOME").is_none() {
-        return Err("neither HOME nor SYNTHESIS_HOME is set".into());
+    if user.is_none() && env.get_nonempty("SYNT_HOME").is_none() {
+        return Err("neither HOME nor SYNT_HOME is set".into());
     }
     let user = user.unwrap_or_default();
     Ok(Homes {

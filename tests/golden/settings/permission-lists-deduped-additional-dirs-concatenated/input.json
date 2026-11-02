@@ -2,7 +2,7 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {
-    "<HOME>/.synthesis/settings.json": {
+    "<HOME>/.synt/settings.json": {
       "permissions": {
         "additionalDirectories": [
           "/a",
@@ -18,7 +18,7 @@
         ]
       }
     },
-    "<TMP>/ws/.synthesis/settings.json": {
+    "<TMP>/ws/.synt/settings.json": {
       "permissions": {
         "additionalDirectories": [
           "/b",

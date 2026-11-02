@@ -185,7 +185,7 @@ pub fn restore_files(
                     fs::create_dir_all(parent)?;
                 }
                 let tmp = path.with_file_name(format!(
-                    ".{}.synthesis-restore",
+                    ".{}.synt-restore",
                     path.file_name()
                         .map(|n| n.to_string_lossy())
                         .unwrap_or_default()

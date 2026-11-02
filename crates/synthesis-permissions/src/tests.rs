@@ -122,7 +122,7 @@ const TABLE: &[(&str, &str)] = &[
     ("curl http://example.com", "QQCCDA"),
     ("node script.js", "QQCCDA"),
     ("touch .git/hooks/x", "QQCCDA"),
-    ("touch .synthesis/settings.json", "QQCCDA"),
+    ("touch .synt/settings.json", "QQCCDA"),
     ("mkdir x && touch .husky/pre-commit", "QQCCDA"),
     ("touch OUTSIDE/x", "QQCCDA"),
     ("mv a.txt OUTSIDE/a.txt", "QQCCDA"),
@@ -188,7 +188,7 @@ fn table_edit_tools_and_protected_paths_for_all_six_modes() {
         (f.cwd.join("sub/deep.txt"), "QADADA"),
         (out, "QQDCDA"),
         (f.cwd.join(".git/config"), "QQDCDA"),
-        (f.cwd.join(".synthesis/settings.json"), "QQDCDA"),
+        (f.cwd.join(".synt/settings.json"), "QQDCDA"),
         (f.cwd.join("sub/.vscode/tasks.json"), "QQDCDA"),
         (f.cwd.join(".zshrc"), "QQDCDA"),
         (f.cwd.join(".mcp.json"), "QQDCDA"),
@@ -505,7 +505,7 @@ fn deny_read_is_a_hard_deny_in_every_mode_and_secret_reads_only_when_asked() {
 #[test]
 fn peer_bash_fails_closed_on_secrets_state_and_unresolvable_words() {
     let f = fx();
-    let state = f.home.join(".synthesis");
+    let state = f.home.join(".synt");
     fs::create_dir_all(state.join("run")).unwrap();
     let mk = |mode: Mode, interactive: bool, secrets: bool| {
         let mut env = Env::new(&f.cwd, &f.home, mode)
@@ -516,15 +516,15 @@ fn peer_bash_fails_closed_on_secrets_state_and_unresolvable_words() {
     };
     // named: always a deny
     let named = [
-        "cat ~/.synthesis/run/peer.key",
-        "cd ~/.synthesis && cat settings.json",
+        "cat ~/.synt/run/peer.key",
+        "cd ~/.synt && cat settings.json",
         "cat .env",
         "cat `cat .env`",
         "cat sub/../.env",
         "cat ~/.ssh/id_rsa",
-        "echo x >> ~/.synthesis/settings.json",
-        "echo x>>~/.synthesis/settings.json",
-        "tee ~/.synthesis/settings.json",
+        "echo x >> ~/.synt/settings.json",
+        "echo x>>~/.synt/settings.json",
+        "tee ~/.synt/settings.json",
         "cp x server.pem",
     ];
     // could build one: a hard ask (a deny when nobody can answer)
@@ -635,11 +635,11 @@ fn extra_protected_paths_ask_for_writes_even_in_accept_edits() {
     let state = f.cwd.join("synthesis-state");
     let env = Env::new(&f.cwd, &f.home, Mode::AcceptEdits)
         .interactive(true)
-        .protect([state.join("memory"), state.join("synthesis.db")]);
+        .protect([state.join("memory"), state.join("synt.db")]);
     let p = Permissions::new(PermissionRules::default(), env);
     let w = |rel: &str| d(&p, "Write", json!({ "file_path": f.path(rel) }));
     assert_eq!(w("synthesis-state/memory/memory.db"), Q);
-    assert_eq!(w("synthesis-state/synthesis.db"), Q);
+    assert_eq!(w("synthesis-state/synt.db"), Q);
     assert_eq!(w("synthesis-state/notes.txt"), A, "only the named paths");
 }
 
@@ -3026,7 +3026,7 @@ fn send_message_is_not_read_only_and_list_agents_is() {
 fn instruction_files_are_protected_paths() {
     let f = fx();
     let p = f.perms(Mode::AcceptEdits);
-    for n in ["SYNTHESIS.md", "AGENTS.md", ".synthesis/SYNTHESIS.md"] {
+    for n in ["AGENTS.md", ".synt/AGENTS.md"] {
         assert_eq!(d(&p, "Write", json!({ "file_path": f.path(n) })), Q, "{n}");
     }
 }

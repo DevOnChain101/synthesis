@@ -80,15 +80,15 @@ pub fn candidates(os: Os, env: &Env) -> Vec<PathBuf> {
     out
 }
 
-/// `SYNTHESIS_BROWSER_PATH` wins and must exist; otherwise the first existing standard location.
+/// `SYNT_BROWSER_PATH` wins and must exist; otherwise the first existing standard location.
 pub fn discover(env: &Env, os: Os, exists: &dyn Fn(&Path) -> bool) -> Result<PathBuf> {
-    if let Some(p) = env.get_nonempty("SYNTHESIS_BROWSER_PATH") {
+    if let Some(p) = env.get_nonempty("SYNT_BROWSER_PATH") {
         let p = PathBuf::from(p);
         return if exists(&p) {
             Ok(p)
         } else {
             Err(BrowserError::NotFound(format!(
-                "SYNTHESIS_BROWSER_PATH={} does not exist",
+                "SYNT_BROWSER_PATH={} does not exist",
                 p.display()
             )))
         };
@@ -97,7 +97,7 @@ pub fn discover(env: &Env, os: Os, exists: &dyn Fn(&Path) -> bool) -> Result<Pat
     list.iter().find(|p| exists(p)).cloned().ok_or_else(|| {
         let shown: Vec<_> = list.iter().take(8).map(|p| p.display().to_string()).collect();
         BrowserError::NotFound(format!(
-            "no Chrome, Chromium or Edge found (looked at {}{}). Install one or set SYNTHESIS_BROWSER_PATH; Synthesis never downloads a browser",
+            "no Chrome, Chromium or Edge found (looked at {}{}). Install one or set SYNT_BROWSER_PATH; Synthesis never downloads a browser",
             shown.join(", "),
             if list.len() > 8 { ", ..." } else { "" }
         ))
@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn env_override_wins_and_must_exist() {
-        let env = Env::from_pairs([("SYNTHESIS_BROWSER_PATH", "/opt/b/chrome")]);
+        let env = Env::from_pairs([("SYNT_BROWSER_PATH", "/opt/b/chrome")]);
         assert_eq!(
             discover(&env, Os::Linux, &|_| true).unwrap(),
             PathBuf::from("/opt/b/chrome")
@@ -118,10 +118,7 @@ mod tests {
         let err = discover(&env, Os::Linux, &|_| false)
             .unwrap_err()
             .to_string();
-        assert!(
-            err.contains("SYNTHESIS_BROWSER_PATH=/opt/b/chrome"),
-            "{err}"
-        );
+        assert!(err.contains("SYNT_BROWSER_PATH=/opt/b/chrome"), "{err}");
     }
 
     #[test]

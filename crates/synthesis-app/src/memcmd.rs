@@ -38,25 +38,25 @@ pub fn repo_of(cwd: &Path) -> Repo {
     }
 }
 
-/// `synthesis.memory.enabled` of the USER settings.json (default on). A repository cannot turn it on.
+/// `synt.memory.enabled` of the USER settings.json (default on). A repository cannot turn it on.
 pub fn enabled(user_settings: &Path) -> bool {
     flag(user_settings, "enabled", true)
 }
 
 /// Reflection sends the task's digest (request, tool calls, user turns) to the model provider, so it
-/// is opt-in: `synthesis.memory.reflection: true` in the USER settings.json (the owner has not
+/// is opt-in: `synt.memory.reflection: true` in the USER settings.json (the owner has not
 /// confirmed a default policy; a repository cannot turn it on).
 pub fn reflection_enabled(user_settings: &Path) -> bool {
     flag(user_settings, "reflection", false)
 }
 
-/// `synthesis.memory.<key>` of the user settings.json as a bool.
+/// `synt.memory.<key>` of the user settings.json as a bool.
 fn flag(user_settings: &Path, key: &str, default: bool) -> bool {
     std::fs::read(user_settings)
         .ok()
         .filter(|b| b.len() <= 1 << 20)
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|v| v.pointer(&format!("/synthesis/memory/{key}"))?.as_bool())
+        .and_then(|v| v.pointer(&format!("/synt/memory/{key}"))?.as_bool())
         .unwrap_or(default)
 }
 
@@ -262,7 +262,7 @@ fn mutates(cmd: &MemoryCmd) -> bool {
 
 /// The agent must not approve, delete, import or opt out of its own memory: such a command needs a
 /// person at a terminal, and refuses inside a process the core started for the agent (the marker
-/// `SYNTHESIS_AGENT_SESSION` is set by the core for children; it is output, not a setting).
+/// `SYNT_AGENT_SESSION` is set by the core for children; it is output, not a setting).
 /// A permission rule also denies these from `Bash`; this is the second lock.
 fn refuse_unattended(env: &Env, cmd: &MemoryCmd) -> Result<(), String> {
     use std::io::IsTerminal;
@@ -274,7 +274,7 @@ fn refuse_unattended(env: &Env, cmd: &MemoryCmd) -> Result<(), String> {
     }
     // test builds only (the feature cannot be enabled in release): lets the test harness drive it
     #[cfg(feature = "test-provider")]
-    if env.get("SYNTHESIS_TEST_ATTENDED").is_some() {
+    if env.get("SYNT_TEST_ATTENDED").is_some() {
         return Ok(());
     }
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
@@ -602,7 +602,7 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
                 &mut s,
                 &repo.key,
                 &project_file(&repo.root),
-                &h.synthesis.join("SYNTHESIS.md"),
+                &h.synthesis.join("AGENTS.md"),
             )
             .map_err(e)?;
             out!("{} new proposal(s)", made.len());
@@ -626,7 +626,7 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
             } else {
                 let repo = repo_of(&cwd_of(&cwd));
                 let path = match p.target.as_str() {
-                    "user" => h.synthesis.join("SYNTHESIS.md"),
+                    "user" => h.synthesis.join("AGENTS.md"),
                     "project" => {
                         let own = p
                             .from_memory_ids
@@ -773,7 +773,7 @@ pub fn doctor_lines(h: &Homes) -> Vec<String> {
         if enabled(&settings) {
             "enabled"
         } else {
-            "disabled by synthesis.memory.enabled"
+            "disabled by synt.memory.enabled"
         }
     )];
     match store_facts(&path) {
@@ -792,7 +792,7 @@ pub fn doctor_lines(h: &Homes) -> Vec<String> {
             .into(),
     );
     v.push(format!(
-        "  reflection: {} (sends the task digest to the model provider; opt in with synthesis.memory.reflection: true)",
+        "  reflection: {} (sends the task digest to the model provider; opt in with synt.memory.reflection: true)",
         if reflection_enabled(&settings) { "ON" } else { "off" }
     ));
     v
@@ -814,7 +814,7 @@ fn store_facts(path: &Path) -> Option<Result<Vec<String>, String>> {
             notes.push("  memory is OFF for runs: quick_check failed; move memory.db aside and import the last export".to_string());
         }
         if ver as usize > synthesis_memory::SCHEMA_VERSION {
-            notes.push(format!("  memory is READ-ONLY for runs: schema v{ver} is newer than this build (v{}); upgrade synt", synthesis_memory::SCHEMA_VERSION));
+            notes.push(format!("  memory is READ-ONLY for runs: schema v{ver} is newer than this build (v{}); upgrade Synthesis", synthesis_memory::SCHEMA_VERSION));
         }
         notes.extend(
             synthesis_memory::budget_warnings(&c, size)?
@@ -896,20 +896,20 @@ pub struct Reflector {
     pub cancel: CancellationToken,
     /// `memory.reflection.*` and `memory.written` go here (None for `synt memory reflect`).
     pub sink: Option<EventSink>,
-    /// Price of `model`, from the user's `synthesis.pricing`; without it cost is unknown and only
+    /// Price of `model`, from the user's `synt.pricing`; without it cost is unknown and only
     /// the call cap applies.
     pub pricing: Option<synthesis_harness::Pricing>,
     /// Daily USD cap (memory.md D5).
     pub budget_usd: f64,
 }
 
-/// `synthesis.memory.daily_budget_usd` of the user settings (default 0.50, memory.md D5).
+/// `synt.memory.daily_budget_usd` of the user settings (default 0.50, memory.md D5).
 pub fn daily_budget(user_settings: &Path) -> f64 {
     std::fs::read(user_settings)
         .ok()
         .filter(|b| b.len() <= 1 << 20)
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|v| v.pointer("/synthesis/memory/daily_budget_usd")?.as_f64())
+        .and_then(|v| v.pointer("/synt/memory/daily_budget_usd")?.as_f64())
         .filter(|n| n.is_finite() && *n >= 0.0)
         .unwrap_or(0.50)
 }
@@ -919,7 +919,7 @@ pub struct MemoryRun {
     pub store: Mutex<Store>,
     pub key: String,
     pub sid: String,
-    /// None when `synthesis.memory.reflection` is false.
+    /// None when `synt.memory.reflection` is false.
     pub reflect: Option<Reflector>,
     pub root: PathBuf,
     pub home: PathBuf,
@@ -1513,7 +1513,7 @@ pub fn task_ended(
         );
     }
     let project = crate::memory::project_file(&m.root);
-    let user = m.home.join("SYNTHESIS.md");
+    let user = m.home.join("AGENTS.md");
     if let Ok(made) = synthesis_memory::propose_promotions(&mut s, &m.key, &project, &user)
         && !made.is_empty()
     {
@@ -1702,7 +1702,7 @@ fn claude_note(text: &str) -> (Vec<(String, String)>, &str) {
 }
 
 /// Claude Code auto-memory staged by `synt import claude`
-/// (`$SYNTHESIS_HOME/projects/<key>/memory/*.md`, memory.md §10). A file can say anything, so every
+/// (`$SYNT_HOME/projects/<key>/memory/*.md`, memory.md §10). A file can say anything, so every
 /// note arrives `untrusted` and `proposed` for `synt memory review` (the security-review rule for
 /// imports; the first spec text said `agent`). `user`-type notes go to user scope, the rest to this
 /// repository. `MEMORY.md` is only an index and is skipped. Returns (imported, skipped).
@@ -1762,8 +1762,8 @@ pub fn import_claude(s: &mut Store, home: &Path, repo: &Repo) -> (usize, usize) 
     (done, skipped)
 }
 
-/// D7 (memory.md §15): a repository's `.synthesis/settings.json` may only turn memory OFF
-/// (`synthesis.memory.enabled: false`); the user's `synthesis.memory.disabled_workspaces` globs
+/// D7 (memory.md §15): a repository's `.synt/settings.json` may only turn memory OFF
+/// (`synt.memory.enabled: false`); the user's `synt.memory.disabled_workspaces` globs
 /// match the repository root.
 pub fn disabled_here(user_settings: &Path, repo: &Repo) -> bool {
     let read = |p: &Path| {
@@ -1772,12 +1772,12 @@ pub fn disabled_here(user_settings: &Path, repo: &Repo) -> bool {
             .filter(|b| b.len() <= 1 << 20)
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
     };
-    let off = read(&repo.root.join(".synthesis").join("settings.json"))
-        .and_then(|v| v.pointer("/synthesis/memory/enabled")?.as_bool())
+    let off = read(&repo.root.join(".synt").join("settings.json"))
+        .and_then(|v| v.pointer("/synt/memory/enabled")?.as_bool())
         == Some(false);
     let root = repo.root.to_string_lossy().replace('\\', "/");
     let listed = read(user_settings)
-        .and_then(|v| v.pointer("/synthesis/memory/disabled_workspaces").cloned())
+        .and_then(|v| v.pointer("/synt/memory/disabled_workspaces").cloned())
         .and_then(|v| v.as_array().cloned())
         .is_some_and(|globs| {
             globs
@@ -1805,19 +1805,19 @@ mod tests {
     fn a_project_can_only_turn_memory_off_and_the_user_can_list_roots() {
         let d = tempfile::tempdir().unwrap();
         let root = d.path().join("repo");
-        std::fs::create_dir_all(root.join(".synthesis")).unwrap();
+        std::fs::create_dir_all(root.join(".synt")).unwrap();
         let user = d.path().join("settings.json");
         assert!(!disabled_here(&user, &repo(&root)));
         // `enabled: true` in a project changes nothing; it cannot switch memory on
-        let proj = root.join(".synthesis/settings.json");
-        std::fs::write(&proj, r#"{"synthesis":{"memory":{"enabled":true}}}"#).unwrap();
+        let proj = root.join(".synt/settings.json");
+        std::fs::write(&proj, r#"{"synt":{"memory":{"enabled":true}}}"#).unwrap();
         assert!(!disabled_here(&user, &repo(&root)));
-        std::fs::write(&proj, r#"{"synthesis":{"memory":{"enabled":false}}}"#).unwrap();
+        std::fs::write(&proj, r#"{"synt":{"memory":{"enabled":false}}}"#).unwrap();
         assert!(disabled_here(&user, &repo(&root)));
         std::fs::remove_file(&proj).unwrap();
         std::fs::write(
             &user,
-            r#"{"synthesis":{"memory":{"disabled_workspaces":["**/secret-*","/nope/**"]}}}"#,
+            r#"{"synt":{"memory":{"disabled_workspaces":["**/secret-*","/nope/**"]}}}"#,
         )
         .unwrap();
         assert!(!disabled_here(&user, &repo(&root)));
@@ -1829,9 +1829,9 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let s = d.path().join("settings.json");
         assert!(!reflection_enabled(&s), "no file");
-        std::fs::write(&s, r#"{"synthesis":{"memory":{"enabled":true}}}"#).unwrap();
+        std::fs::write(&s, r#"{"synt":{"memory":{"enabled":true}}}"#).unwrap();
         assert!(!reflection_enabled(&s), "key absent");
-        std::fs::write(&s, r#"{"synthesis":{"memory":{"reflection":true}}}"#).unwrap();
+        std::fs::write(&s, r#"{"synt":{"memory":{"reflection":true}}}"#).unwrap();
         assert!(reflection_enabled(&s));
         assert!(enabled(&s), "memory itself stays default-on");
     }

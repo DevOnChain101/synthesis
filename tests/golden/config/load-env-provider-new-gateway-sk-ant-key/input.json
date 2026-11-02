@@ -1,11 +1,11 @@
 {
   "cwd": "<TMP>/ws",
   "env": {
-    "SYNTHESIS_API_KEY": "sk-ant-abc",
-    "SYNTHESIS_BASE_URL": "https://corp.example.test/v1",
-    "SYNTHESIS_PROVIDER": "corp"
+    "SYNT_API_KEY": "sk-ant-abc",
+    "SYNT_BASE_URL": "https://corp.example.test/v1",
+    "SYNT_PROVIDER": "corp"
   },
   "files": {},
-  "home": "<SYNTHESIS_HOME>",
+  "home": "<SYNT_HOME>",
   "op": "loadConfig"
 }

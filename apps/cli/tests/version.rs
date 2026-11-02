@@ -8,5 +8,5 @@ fn version_exits_zero() {
         .unwrap();
     assert!(out.status.success());
     let s = String::from_utf8(out.stdout).unwrap();
-    assert_eq!(s.trim(), format!("synt {}", env!("CARGO_PKG_VERSION")));
+    assert_eq!(s.trim(), format!("Synthesis {}", env!("CARGO_PKG_VERSION")));
 }

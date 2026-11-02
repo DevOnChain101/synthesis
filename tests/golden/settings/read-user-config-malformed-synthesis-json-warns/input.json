@@ -9,7 +9,7 @@
         ]
       }
     },
-    "<HOME>/.synthesis/synthesis.json": "{oops"
+    "<HOME>/.synt/synt.json": "{oops"
   },
   "op": "workspace"
 }

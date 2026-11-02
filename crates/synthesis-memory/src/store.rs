@@ -1,4 +1,4 @@
-//! `$SYNTHESIS_HOME/memory/memory.db` (memory.md §3 option B, §5, §11): own file, own migrations,
+//! `$SYNT_HOME/memory/memory.db` (memory.md §3 option B, §5, §11): own file, own migrations,
 //! WAL, every write one short `BEGIN IMMEDIATE` transaction.
 
 use std::fs;

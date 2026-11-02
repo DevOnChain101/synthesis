@@ -1,6 +1,6 @@
 {
   "agents": [],
-  "autoMemoryDir": "<HOME>/.synthesis/projects/<SANITIZED_CWD>/memory",
+  "autoMemoryDir": "<HOME>/.synt/projects/<SANITIZED_CWD>/memory",
   "claudeDir": "<HOME>/.claude",
   "commands": [],
   "mcpServers": [],
@@ -14,23 +14,23 @@
           "hooks": [
             {
               "command": "echo user",
-              "source": "<HOME>/.synthesis/settings.json",
+              "source": "<HOME>/.synt/settings.json",
               "type": "command"
             }
           ],
           "matcher": "Bash",
-          "source": "<HOME>/.synthesis/settings.json"
+          "source": "<HOME>/.synt/settings.json"
         },
         {
           "hooks": [
             {
               "command": "echo project",
-              "source": "<TMP>/ws/.synthesis/settings.json",
+              "source": "<TMP>/ws/.synt/settings.json",
               "type": "command"
             }
           ],
           "matcher": "Bash",
-          "source": "<TMP>/ws/.synthesis/settings.json"
+          "source": "<TMP>/ws/.synt/settings.json"
         }
       ],
       "Stop": [
@@ -38,11 +38,11 @@
           "hooks": [
             {
               "command": "echo stop",
-              "source": "<HOME>/.synthesis/settings.json",
+              "source": "<HOME>/.synt/settings.json",
               "type": "command"
             }
           ],
-          "source": "<HOME>/.synthesis/settings.json"
+          "source": "<HOME>/.synt/settings.json"
         }
       ]
     },

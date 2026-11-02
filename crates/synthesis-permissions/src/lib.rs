@@ -124,7 +124,7 @@ const PROTECTED_DIRS: &[&str] = &[
     ".yarn",
     ".mvn",
     ".claude",
-    ".synthesis",
+    ".synt",
     ".ssh",
     ".aws",
 ];
@@ -168,9 +168,7 @@ const PROTECTED_FILES: &[&str] = &[
     ".mcp.json",
     ".claude.json",
     // instruction files are loaded as trusted prompt context (lowercase: case-folded policies)
-    "SYNTHESIS.md",
     "AGENTS.md",
-    "synthesis.md",
     "agents.md",
 ];
 
@@ -311,7 +309,7 @@ pub struct Env {
     /// `false` = nobody can answer a prompt (headless): every `ask` becomes `deny`.
     pub interactive: bool,
     /// Extra protected paths (files or directories, e.g. Synthesis's own state under a custom
-    /// `SYNTHESIS_HOME`, which the `.synthesis` directory name does not cover).
+    /// `SYNT_HOME`, which the `.synt` directory name does not cover).
     pub protected: Vec<PathBuf>,
     /// Paths nothing may read, whatever the mode or rules (Synthesis's own state, the peer key):
     /// Read/Grep/Glob/LS/edit tools on them or on an ancestor are denied, and so is a Bash command
@@ -1812,7 +1810,7 @@ impl Permissions {
         }
 
         // A message can wake another agent and steer it: not read-only, never in plan/dontAsk.
-        // acceptEdits and auto allow it here; for a peer session the gate is `synthesis.peers`
+        // acceptEdits and auto allow it here; for a peer session the gate is `synt.peers`
         // (the sender resolves only allowed, non-denied sessions), not this mode (messaging.md H).
         if tool == "SendMessage" {
             return match mode {

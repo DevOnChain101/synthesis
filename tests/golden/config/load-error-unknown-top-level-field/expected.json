@@ -1,7 +1,7 @@
 {
   "error": {
-    "code": "SYNTHESIS_INVALID_CONFIG",
-    "message": "invalid config <SYNTHESIS_HOME>/synthesis.json: $.bogus is not allowed by config.json/v1; $.alsoBogus is not allowed by config.json/v1",
+    "code": "SYNT_INVALID_CONFIG",
+    "message": "invalid config <SYNT_HOME>/synt.json: $.bogus is not allowed by config.json/v1; $.alsoBogus is not allowed by config.json/v1",
     "name": "ConfigValidationError"
   }
 }

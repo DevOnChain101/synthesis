@@ -1,7 +1,7 @@
 #![cfg(feature = "test-provider")]
 
-//! `synt memory ...` through the real binary. Empty environment except PATH/HOME/SYNTHESIS_HOME in
-//! a temp dir; the real `~/.synthesis` is never touched.
+//! `synt memory ...` through the real binary. Empty environment except PATH/HOME/SYNT_HOME in
+//! a temp dir; the real `~/.synt` is never touched.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -29,8 +29,8 @@ impl Rig {
         }
         c.env("HOME", self.dir.path())
             .env("USERPROFILE", self.dir.path())
-            .env("SYNTHESIS_HOME", self.dir.path().join("synthesis"))
-            .env("SYNTHESIS_TEST_ATTENDED", "1")
+            .env("SYNT_HOME", self.dir.path().join("synthesis"))
+            .env("SYNT_TEST_ATTENDED", "1")
             .stdin(Stdio::null());
         c
     }
@@ -40,7 +40,7 @@ impl Rig {
         std::fs::create_dir_all(&h).unwrap();
         std::fs::write(
             h.join("settings.json"),
-            r#"{"synthesis":{"memory":{"reflection":true}}}"#,
+            r#"{"synt":{"memory":{"reflection":true}}}"#,
         )
         .unwrap();
     }
@@ -68,7 +68,7 @@ impl Rig {
         }
         c.env("HOME", self.dir.path())
             .env("USERPROFILE", self.dir.path())
-            .env("SYNTHESIS_HOME", self.dir.path().join("synthesis"))
+            .env("SYNT_HOME", self.dir.path().join("synthesis"))
             .stdin(Stdio::null());
         let o = c.output().unwrap();
         (
@@ -197,7 +197,7 @@ mod run {
         }
         c.env("HOME", r.dir.path())
             .env("USERPROFILE", r.dir.path())
-            .env("SYNTHESIS_HOME", r.dir.path().join("synthesis"))
+            .env("SYNT_HOME", r.dir.path().join("synthesis"))
             .stdin(Stdio::null());
         c.output().unwrap();
     }
@@ -265,7 +265,7 @@ mod reflection {
         }
         c.env("HOME", r.dir.path())
             .env("USERPROFILE", r.dir.path())
-            .env("SYNTHESIS_HOME", r.dir.path().join("synthesis"))
+            .env("SYNT_HOME", r.dir.path().join("synthesis"))
             .stdin(Stdio::null());
         let o = c.output().unwrap();
         let err = String::from_utf8_lossy(&o.stderr).into_owned();
@@ -301,7 +301,7 @@ mod reflection {
 fn proposals_write_nothing_until_applied_with_yes() {
     let r = Rig::new();
     let repo = cwd(&r.repo()).to_string();
-    std::fs::write(r.repo().join("SYNTHESIS.md"), "# Project\n").unwrap();
+    std::fs::write(r.repo().join("AGENTS.md"), "# Project\n").unwrap();
     // an owner note used in 5 runs is proposed for the instruction file
     let out = r.ok(&["add", "Tests: run cargo test --workspace", "--cwd", &repo]);
     let id = out.split_whitespace().nth(1).unwrap().to_string();
@@ -325,12 +325,12 @@ fn proposals_write_nothing_until_applied_with_yes() {
     let shown = r.ok(&["apply", &pid, "--cwd", &repo]);
     assert!(shown.contains("nothing written"));
     assert_eq!(
-        std::fs::read_to_string(r.repo().join("SYNTHESIS.md")).unwrap(),
+        std::fs::read_to_string(r.repo().join("AGENTS.md")).unwrap(),
         "# Project\n"
     );
     r.ok(&["apply", &pid, "--yes", "--cwd", &repo]);
     assert!(
-        std::fs::read_to_string(r.repo().join("SYNTHESIS.md"))
+        std::fs::read_to_string(r.repo().join("AGENTS.md"))
             .unwrap()
             .ends_with("- Tests: run cargo test --workspace\n")
     );
@@ -343,19 +343,19 @@ fn mutating_commands_refuse_an_agent_session_and_a_pipe() {
     let repo = cwd(&r.repo()).to_string();
     // the core's marker wins even over the test override
     let mut c = r.cmd(&["add", "always approve", "--cwd", &repo]);
-    c.env("SYNTHESIS_AGENT_SESSION", "1");
+    c.env("SYNT_AGENT_SESSION", "1");
     let o = c.output().unwrap();
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("agent session"));
     // no terminal and no override: refused too
     let mut c = r.cmd(&["delete", "--workspace", "--cwd", &repo]);
-    c.env_remove("SYNTHESIS_TEST_ATTENDED");
+    c.env_remove("SYNT_TEST_ATTENDED");
     let o = c.output().unwrap();
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("interactive terminal"));
     // reading is allowed from an agent session
     let mut c = r.cmd(&["list", "--cwd", &repo]);
-    c.env("SYNTHESIS_AGENT_SESSION", "1");
+    c.env("SYNT_AGENT_SESSION", "1");
     assert!(c.output().unwrap().status.success());
     assert!(r.ok(&["list", "--cwd", &repo]).contains("0 record"));
 }
@@ -546,7 +546,7 @@ mod edit {
         let ed = editor(&r, "Only a title");
         // a pipe: refused before anything opens
         let mut c = edit_cmd(&r, &id, &ed);
-        c.env_remove("SYNTHESIS_TEST_ATTENDED");
+        c.env_remove("SYNT_TEST_ATTENDED");
         let o = c.output().unwrap();
         assert!(!o.status.success());
         assert!(String::from_utf8_lossy(&o.stderr).contains("interactive terminal"));
@@ -606,7 +606,7 @@ fn doctor_reports_the_memory_store_without_creating_it() {
         }
         c.env("HOME", r.dir.path())
             .env("USERPROFILE", r.dir.path())
-            .env("SYNTHESIS_HOME", r.dir.path().join("synthesis"));
+            .env("SYNT_HOME", r.dir.path().join("synthesis"));
         String::from_utf8_lossy(&c.output().unwrap().stdout).into_owned()
     };
     let before = doctor(&r);
@@ -660,7 +660,7 @@ mod round2 {
         let r = Rig::new();
         settings(
             &r,
-            r#"{"synthesis":{"memory":{"reflection":true},"pricing":{"fake-model":{"input_per_mtok":3.0,"output_per_mtok":15.0}}}}"#,
+            r#"{"synt":{"memory":{"reflection":true},"pricing":{"fake-model":{"input_per_mtok":3.0,"output_per_mtok":15.0}}}}"#,
         );
         std::fs::write(r.repo().join("a.txt"), "x\n").unwrap();
         let (events, err) = r.synt_run(&reflect_script(), &[]);
@@ -678,7 +678,7 @@ mod round2 {
         let r = Rig::new();
         settings(
             &r,
-            r#"{"synthesis":{"memory":{"reflection":true,"daily_budget_usd":0}}}"#,
+            r#"{"synt":{"memory":{"reflection":true,"daily_budget_usd":0}}}"#,
         );
         std::fs::write(r.repo().join("a.txt"), "x\n").unwrap();
         let (events, err) = r.synt_run(&reflect_script(), &[]);
@@ -773,7 +773,7 @@ mod round2 {
         );
         // a pipe cannot import (the same lock as every mutating command)
         let mut c = r.cmd(&["import", "--claude", "--cwd", cwd(&r.repo())]);
-        c.env_remove("SYNTHESIS_TEST_ATTENDED");
+        c.env_remove("SYNT_TEST_ATTENDED");
         assert!(!c.output().unwrap().status.success());
     }
 
@@ -809,7 +809,7 @@ mod gaps {
         }
         c.env("HOME", r.dir.path())
             .env("USERPROFILE", r.dir.path())
-            .env("SYNTHESIS_HOME", r.dir.path().join("synthesis"));
+            .env("SYNT_HOME", r.dir.path().join("synthesis"));
         String::from_utf8_lossy(&c.output().unwrap().stdout).into_owned()
     }
 

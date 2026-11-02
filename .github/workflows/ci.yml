@@ -102,7 +102,7 @@ jobs:
 
   browser:
     # Real Chrome from browser-actions/setup-chrome (stable channel). Synthesis never downloads a browser,
-    # so SYNTHESIS_BROWSER_PATH points at the one installed here.
+    # so SYNT_BROWSER_PATH points at the one installed here.
     name: browser (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
@@ -141,21 +141,21 @@ jobs:
         shell: bash
         timeout-minutes: 25 # per-test caps below name the hang; fail fast with the log so far instead of hanging to the job limit
         env:
-          SYNTHESIS_BROWSER_PATH: ${{ steps.pre.outputs.path || steps.chrome.outputs.chrome-path }}
+          SYNT_BROWSER_PATH: ${{ steps.pre.outputs.path || steps.chrome.outputs.chrome-path }}
         run: |
-          echo "Chrome: $SYNTHESIS_BROWSER_PATH"
+          echo "Chrome: $SYNT_BROWSER_PATH"
           # `chrome.exe --version` does NOT print on Windows: it launches the browser and never returns
           # (this alone hung the step for 15-25 min). Read the file version instead.
           if [ "$RUNNER_OS" = Windows ]; then
-            powershell -NoProfile -Command "(Get-Item -LiteralPath '$SYNTHESIS_BROWSER_PATH').VersionInfo.ProductVersion" || echo "(could not read the Chrome version)"
+            powershell -NoProfile -Command "(Get-Item -LiteralPath '$SYNT_BROWSER_PATH').VersionInfo.ProductVersion" || echo "(could not read the Chrome version)"
           else
-            "$SYNTHESIS_BROWSER_PATH" --version || echo "(could not print the Chrome version)"
+            "$SYNT_BROWSER_PATH" --version || echo "(could not print the Chrome version)"
           fi
           # Chrome's OWN helper sandbox is unusable on these ephemeral VMs (Linux: AppArmor userns
           # restriction; macOS: Mach port rendezvous denied, "Page.enable got no answer"). The test
           # hook only adds --no-sandbox so the tests can exercise OUR URL policy; production keeps
           # Chrome's sandbox ON (default). Windows keeps it on.
-          if [ "$RUNNER_OS" != Windows ]; then export SYNTHESIS_BROWSER_TEST_NO_SANDBOX=1; fi
+          if [ "$RUNNER_OS" != Windows ]; then export SYNT_BROWSER_TEST_NO_SANDBOX=1; fi
           # One test binary invocation per test, each with its own wall-clock cap, so a hang names the
           # test (step output + $GITHUB_STEP_SUMMARY) instead of eating the whole step. Test output goes
           # to a file, not a pipe: Chrome processes inherit pipe handles on Windows and would keep the
@@ -202,7 +202,7 @@ jobs:
       - name: Failure digest
         if: always()
         env:
-          SYNTHESIS_BROWSER_PATH: ${{ steps.pre.outputs.path || steps.chrome.outputs.chrome-path }}
+          SYNT_BROWSER_PATH: ${{ steps.pre.outputs.path || steps.chrome.outputs.chrome-path }}
         run: DIGEST_ENV=1 bash scripts/ci-digest.sh browser.log "browser (${{ matrix.os }})"
 
   sandbox-linux:

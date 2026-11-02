@@ -15,7 +15,7 @@ pub struct WorkspaceContext {
     pub cwd: PathBuf,                      // canonical, inside `root` or an additional dir
     pub additional_dirs: Vec<PathBuf>,     // canonical; /add-dir + settings permissions.additionalDirectories [from-node permissions.js:520, agent.js:2673]
     pub git_worktree: Option<PathBuf>,     // set when a worktree was allocated (R8)
-    pub artifact_root: PathBuf,            // $SYNTHESIS_HOME/sessions/<session_id>/
+    pub artifact_root: PathBuf,            // $SYNT_HOME/sessions/<session_id>/
     pub browser_context_id: Option<String>,
     pub process_group_id: String,          // ResourceManager handle, not an OS pgid
     pub path_policy: PathPolicy,           // decided once at creation

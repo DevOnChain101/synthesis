@@ -2,7 +2,7 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {
-    "<HOME>/.synthesis/synthesis.json": {
+    "<HOME>/.synt/synt.json": {
       "claude": {
         "readUserConfig": true
       }

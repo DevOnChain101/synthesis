@@ -79,7 +79,7 @@ impl Sandbox {
         }
     }
     fn expand_str(&self, s: &str) -> String {
-        s.replace("<SYNTHESIS_HOME>", &self.synthesis_home)
+        s.replace("<SYNT_HOME>", &self.synthesis_home)
             .replace("<HOME>", &self.home)
             .replace("<TMP>", &self.tmp)
     }
@@ -91,7 +91,7 @@ impl Sandbox {
     /// replaced and `\` -> `/` is folded only in the path token right after it, never in content.
     fn normalize_with(&self, s: &str, win: bool) -> String {
         let roots = [
-            (&self.synthesis_home, "<SYNTHESIS_HOME>"),
+            (&self.synthesis_home, "<SYNT_HOME>"),
             (&self.home, "<HOME>"),
             (&self.tmp, "<TMP>"),
         ];

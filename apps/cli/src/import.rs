@@ -1,7 +1,7 @@
 //! `synt import claude`: COPY/CONVERT a Claude Code setup into Synthesis-owned files.
 //!
 //! Claude files are only read here, never at runtime (docs/IMPORT.md). Every path derives from
-//! the injected `Env` (HOME / SYNTHESIS_HOME) or from `--from` / `--project-dir`; nothing else is
+//! the injected `Env` (HOME / SYNT_HOME) or from `--from` / `--project-dir`; nothing else is
 //! touched. Everything is computed in memory first (a malformed source or target aborts before
 //! the first write), then written atomically with a timestamped backup of each changed file.
 //! Credentials are never copied: literal secrets in MCP entries become `${VAR}` references,
@@ -33,7 +33,7 @@ const HOOK_EVENTS: [&str; 9] = [
     "PreCompact",
 ];
 /// Tool names Synthesis's toolbox knows (rules may also name `mcp__*` / `browser_*`).
-const SYNTHESIS_TOOLS: [&str; 16] = [
+const SYNT_TOOLS: [&str; 16] = [
     "Bash",
     "BashOutput",
     "KillShell",
@@ -83,7 +83,7 @@ pub enum ScopeSel {
 pub struct ClaudeArgs {
     #[arg(long, value_enum, default_value = "all")]
     scope: ScopeSel,
-    /// Project to import into `<DIR>/.synthesis` (needed for the project scope).
+    /// Project to import into `<DIR>/.synt` (needed for the project scope).
     #[arg(long)]
     project_dir: Option<PathBuf>,
     /// Claude config directory (default: $HOME/.claude; `.claude.json` is read from its parent).
@@ -221,7 +221,7 @@ struct Imp {
 
 /// Where one scope's files go.
 struct Target {
-    /// `$SYNTHESIS_HOME` or `<project>/.synthesis`.
+    /// `$SYNT_HOME` or `<project>/.synt`.
     root: PathBuf,
     user: bool,
 }
@@ -336,7 +336,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let dir = path.parent().ok_or("no parent directory")?;
     std::fs::create_dir_all(dir).map_err(e)?;
     let tmp = dir.join(format!(
-        ".{}.synthesis-import-tmp",
+        ".{}.synt-import-tmp",
         path.file_name().and_then(|n| n.to_str()).unwrap_or("f")
     ));
     {
@@ -345,7 +345,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         o.write(true).create(true).truncate(true);
         #[cfg(unix)]
         {
-            // settings/synthesis.json may hold env or headers: owner-only, like every file we write
+            // settings/synt.json may hold env or headers: owner-only, like every file we write
             use std::os::unix::fs::OpenOptionsExt;
             o.mode(0o600);
         }
@@ -655,7 +655,7 @@ fn has_literal_secret(cfg: &Value) -> bool {
 
 /// Claude tool name to Synthesis's tool name (`None`: Synthesis has no such tool).
 fn map_tool(name: &str) -> Option<&'static str> {
-    SYNTHESIS_TOOLS
+    SYNT_TOOLS
         .iter()
         .find(|t| **t == name)
         .copied()
@@ -807,7 +807,7 @@ fn bad_rule(r: &str) -> Option<String> {
     if r.contains('(') && (!r.ends_with(')') || r.ends_with("()")) {
         return Some("malformed rule".into());
     }
-    let known = SYNTHESIS_TOOLS.contains(&tool)
+    let known = SYNT_TOOLS.contains(&tool)
         || RULE_ONLY_TOOLS.contains(&tool)
         || tool.starts_with("mcp__")
         || tool.starts_with("browser_")
@@ -1098,13 +1098,13 @@ impl Imp {
             .into_iter()
             .filter(|p| p.extension().is_some_and(|e| e == "md"))
             .collect();
-        let target = project_dir.map_or(t.root.join("SYNTHESIS.md"), |p| p.join("SYNTHESIS.md"));
+        let target = project_dir.map_or(t.root.join("AGENTS.md"), |p| p.join("AGENTS.md"));
         let mut skip_note = None;
         if let Some(p) = project_dir {
             // Synthesis reads the project's CLAUDE.md and CLAUDE.local.md by itself; only
-            // .claude/rules need a Synthesis-owned file (SYNTHESIS.md wins over CLAUDE.md, so it carries
+            // .claude/rules need a Synthesis-owned file (AGENTS.md wins over CLAUDE.md, so it carries
             // the base text too).
-            let winner = ["SYNTHESIS.md", "AGENTS.md"].into_iter().find(|n| {
+            let winner = ["AGENTS.md"].into_iter().find(|n| {
                 read_text(&p.join(n))
                     .ok()
                     .flatten()
@@ -1145,7 +1145,7 @@ impl Imp {
             }
             if let Some(w) = winner {
                 skip_note = Some(format!(
-                    "{w} already exists; add `@.synthesis/rules/<file>` lines to it by hand"
+                    "{w} already exists; add `@.synt/rules/<file>` lines to it by hand"
                 ));
             }
         } else if base.is_none() && rule_files.is_empty() {
@@ -1179,7 +1179,7 @@ impl Imp {
                 vec![],
             );
             imports += &if project_dir.is_some() {
-                format!("@.synthesis/rules/{rel}\n")
+                format!("@.synt/rules/{rel}\n")
             } else {
                 format!("@rules/{rel}\n")
             };
@@ -1257,7 +1257,7 @@ impl Imp {
         }
         let mut notes = vec![];
         if let Some(m) = raw.get("model").and_then(Value::as_str) {
-            notes.push(format!("model \"{}\" noted, not imported: use SYNTHESIS_MODEL or `model` in synthesis.json (Synthesis aliases opus|sonnet|haiku|fable exist)", clean(m)));
+            notes.push(format!("model \"{}\" noted, not imported: use SYNT_MODEL or `model` in synt.json (Synthesis aliases opus|sonnet|haiku|fable exist)", clean(m)));
         }
         if raw.get("statusLine").is_some() {
             notes.push("statusLine not imported (Synthesis has its own status line)".into());
@@ -1287,7 +1287,7 @@ impl Imp {
         Ok(())
     }
 
-    /// `.synthesis/.gitignore` lists settings.local.json (as Synthesis's own "allow always" does).
+    /// `.synt/.gitignore` lists settings.local.json (as Synthesis's own "allow always" does).
     fn gitignore_local(&mut self, dst: &Path) -> Result<(), String> {
         let gi = dst.with_file_name(".gitignore");
         let cur = read_text(&gi)?.unwrap_or_default();
@@ -1745,7 +1745,7 @@ impl Imp {
 
     // --- MCP ------------------------------------------------------------------------------------
 
-    /// `servers`: Claude-shape map. `ptr`: where it goes in synthesis.json (user-owned file).
+    /// `servers`: Claude-shape map. `ptr`: where it goes in synt.json (user-owned file).
     fn mcp_servers(
         &mut self,
         servers: &Value,
@@ -1775,7 +1775,7 @@ impl Imp {
             notes.extend(more);
             for v in &vars {
                 notes.push(format!("literal secret replaced by ${{{v}}}"));
-                self.todo.push(format!("export {v} (replaces a literal secret of MCP server \"{}\") and list it in synthesis.mcp.env_passthrough of the user settings.json", clean(name)));
+                self.todo.push(format!("export {v} (replaces a literal secret of MCP server \"{}\") and list it in synt.mcp.env_passthrough of the user settings.json", clean(name)));
             }
             if let Some(h) = server_hash(name, &red, "user") {
                 notes.push(format!("definition hash {h}"));
@@ -1785,7 +1785,7 @@ impl Imp {
                 .filter(|v| !vars.contains(v))
             {
                 let line = format!(
-                    "export {v} and list it in synthesis.mcp.env_passthrough of the user settings.json (MCP servers only see allowlisted variables)"
+                    "export {v} and list it in synt.mcp.env_passthrough of the user settings.json (MCP servers only see allowlisted variables)"
                 );
                 if !self.todo.contains(&line) {
                     self.todo.push(line);
@@ -1815,7 +1815,7 @@ impl Imp {
             if act != Act::Skip && !kept_existing {
                 self.record(
                     root,
-                    &format!("synthesis.json#mcp/{}/{}", ptr.len(), clean(name)),
+                    &format!("synt.json#mcp/{}/{}", ptr.len(), clean(name)),
                     Kind::Mcp,
                     src,
                     None,
@@ -1984,7 +1984,7 @@ fn claude(env: &Env, a: &ClaudeArgs) -> Result<u8, String> {
         .map(|p| p.join(".claude.json"))
         .unwrap_or_default();
     let cj = read_obj(&claude_json, MAX_CLAUDE_JSON)?;
-    let synthesis_json = h.synthesis.join("synthesis.json");
+    let synthesis_json = h.synthesis.join("synt.json");
     let user_t = Target {
         root: h.synthesis.clone(),
         user: true,
@@ -2024,7 +2024,7 @@ fn claude(env: &Env, a: &ClaudeArgs) -> Result<u8, String> {
     let mut project_note = false;
     if let Some(p) = &project {
         let t = Target {
-            root: p.join(".synthesis"),
+            root: p.join(".synt"),
             user: false,
         };
         let pc = p.join(".claude");
@@ -2157,7 +2157,7 @@ pub fn doctor_report(synthesis_home: &Path, project_root: &Path) {
     let mut any = false;
     for (label, root) in [
         ("user", synthesis_home.to_path_buf()),
-        ("project", project_root.join(".synthesis")),
+        ("project", project_root.join(".synt")),
     ] {
         let Ok(Some(v)) = read_obj(&root.join("imports").join("claude.json"), MAX_TEXT) else {
             continue;
@@ -2182,19 +2182,14 @@ pub fn doctor_report(synthesis_home: &Path, project_root: &Path) {
             list.join(", ")
         );
     }
-    let proj = [
-        "SYNTHESIS.md",
-        "AGENTS.md",
-        "CLAUDE.md",
-        ".claude/CLAUDE.md",
-    ]
-    .iter()
-    .map(|n| project_root.join(n))
-    .find(|p| std::fs::read_to_string(p).is_ok_and(|s| !s.trim().is_empty()));
+    let proj = ["AGENTS.md", "CLAUDE.md", ".claude/CLAUDE.md"]
+        .iter()
+        .map(|n| project_root.join(n))
+        .find(|p| std::fs::read_to_string(p).is_ok_and(|s| !s.trim().is_empty()));
     out!(
         "instruction files: user {}, project {}{}",
-        if synthesis_home.join("SYNTHESIS.md").is_file() {
-            "SYNTHESIS.md"
+        if synthesis_home.join("AGENTS.md").is_file() {
+            "AGENTS.md"
         } else {
             "none"
         },

@@ -49,7 +49,7 @@ pub struct McpOptions {
     /// Injected environment: source of the stdio base env and (through an allowlist, see
     /// `env_passthrough`) of `${VAR}` expansion.
     pub env: Env,
-    /// Names the USER listed (`synthesis.mcp.env_passthrough`) as expandable in `${VAR}` besides
+    /// Names the USER listed (`synt.mcp.env_passthrough`) as expandable in `${VAR}` besides
     /// `Env::child_env`. Honoured only for user-owned scopes ("user", "synthesis"); a project or
     /// local-scope definition can only ever expand `child_env` names.
     pub env_passthrough: Vec<String>,
@@ -266,9 +266,9 @@ impl Shared {
     fn expand(&self, cfg: &McpServerConfig, v: &str) -> Result<String, String> {
         expand_vars(v, &self.expansion_env(cfg)).map_err(|n| {
             let fix = if matches!(cfg.scope.as_deref(), Some("user" | "synthesis")) {
-                format!("export {n} and add \"{n}\" to synthesis.mcp.env_passthrough in your user settings.json")
+                format!("export {n} and add \"{n}\" to synt.mcp.env_passthrough in your user settings.json")
             } else {
-                format!("a {} server can only read the child-env allowlist: move it to your user synthesis.json and list \"{n}\" in synthesis.mcp.env_passthrough", cfg.scope.as_deref().unwrap_or("project"))
+                format!("a {} server can only read the child-env allowlist: move it to your user synt.json and list \"{n}\" in synt.mcp.env_passthrough", cfg.scope.as_deref().unwrap_or("project"))
             };
             format!("variable \"{n}\" is not available for ${{{n}}} (unset, empty or not allowed). Not started: it would run unauthenticated. Fix: {fix}")
         })

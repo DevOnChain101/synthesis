@@ -104,7 +104,7 @@ Most coding chat workflows stop after producing a patch or command. The human mu
 | FR-12 | Desktop GPUI as an optional thin client | P2 |
 | FR-13 | Remote execution and multi-agent task orchestration | P2 |
 | FR-14 | Inter-agent messaging: named/background sub-agents messaged and resumed in a session (`SendMessage`, `@agent`), and request/response between local sessions of the same user (§5.13) | P1 (in-session) / P2 (peers) |
-| FR-15 | Long-term memory: per-user, per-repository and per-agent-definition records learned across sessions (episodes, facts, preferences, lessons, skills) with provenance, searchable and retrieved within a budget; promotion to skills and `SYNTHESIS.md` only through owner-applied proposals (§5.5.1) | P1 |
+| FR-15 | Long-term memory: per-user, per-repository and per-agent-definition records learned across sessions (episodes, facts, preferences, lessons, skills) with provenance, searchable and retrieved within a budget; promotion to skills and `AGENTS.md` only through owner-applied proposals (§5.5.1) | P1 |
 | FR-16 | Branded TUI: semantic theme tokens (kit palette) with truecolor/256/16/NO_COLOR fallbacks, logo mark and wordmark, a fixed panel registry with locked Workspace/Running/Chat/Sub-agents panels, reflow on hide/show, and a /config screen persisted in user settings only | P1 |
 
 ### 3.2 Non-functional requirements
@@ -265,9 +265,9 @@ Provider selection changes generation; it does not change the meaning or authori
 
 #### 5.5.1 Long-term memory (ADR-013, accepted)
 
-Normative spec: `docs/specs/memory.md` (it includes the audit of today's memory). Today Synthesis has only session memory (history, compaction summary, `TaskState`) and static instruction files (`$SYNTHESIS_HOME/SYNTHESIS.md`, per-directory `SYNTHESIS.md`/`AGENTS.md`/`CLAUDE.md`). It learns nothing across sessions. Long-term memory adds learning in the spirit of Hermes Agent, Claude Code auto memory and Codex memories.
+Normative spec: `docs/specs/memory.md` (it includes the audit of today's memory). Today Synthesis has only session memory (history, compaction summary, `TaskState`) and static instruction files (`$SYNT_HOME/AGENTS.md`, per-directory `AGENTS.md`/`CLAUDE.md`). It learns nothing across sessions. Long-term memory adds learning in the spirit of Hermes Agent, Claude Code auto memory and Codex memories.
 
-- **Store:** one SQLite file `$SYNTHESIS_HOME/memory/memory.db` (WAL), separate from `synthesis.db`.
+- **Store:** one SQLite file `$SYNT_HOME/memory/memory.db` (WAL), separate from `synt.db`.
   - Records are typed: `episode`, `fact`, `preference`, `lesson`, `skill`.
   - Records are scoped: `user`; `workspace`, keyed by the repository root's `workspace_key` and shared by its worktrees; `agent`, per definition.
   - Each record carries provenance (session/task/event ids), trust (`owner` > `verified` > `agent` > `untrusted`, computed by the harness from the cited evidence), status, confidence, use/success counts, versions linked by `supersedes`, file anchors for staleness, and decay.
@@ -279,7 +279,7 @@ Normative spec: `docs/specs/memory.md` (it includes the audit of today's memory)
 - **Learning loop:**
   - At task end the harness writes an episode and the verified build/test commands deterministically, with no model call.
   - A bounded reflection call on a small model adds facts and lessons for qualifying tasks. It is queued and deferrable and never changes a task result.
-  - Consolidation merges, decays and archives records. It promotes repeated lessons into **skill proposals** and stable facts into **`SYNTHESIS.md` diff proposals**; only the owner applies a proposal.
+  - Consolidation merges, decays and archives records. It promotes repeated lessons into **skill proposals** and stable facts into **`AGENTS.md` diff proposals**; only the owner applies a proposal.
 - **Interfaces:**
   - Tools: `MemorySearch`, `MemoryWrite`, `MemoryUpdate`, `MemoryForget`, under permission rules.
   - CLI: `synt memory list|search|show|add|edit|delete|review|apply|export|import|stats|prune|reflect`.
@@ -288,7 +288,7 @@ Normative spec: `docs/specs/memory.md` (it includes the audit of today's memory)
   - Memory is data: it never grants permissions and never edits instruction files.
   - Every field is redacted and scanned; on a hit the record is quarantined.
   - Records derived from web, browser or MCP content are `untrusted` and never injected.
-  - `$SYNTHESIS_HOME/memory` is a protected, sandbox-denied path.
+  - `$SYNT_HOME/memory` is a protected, sandbox-denied path.
   - Memory can be turned off per workspace or per run.
 
 ### 5.6 Tool System
@@ -325,7 +325,7 @@ cwd:       /projects/synthesis/worktrees/synthesis-s-42
 ports:     [43120, 43121]
 processes: [dev-server-1, test-runner-1]
 browser:   context-synthesis-s-42
-artifacts: ~/.synthesis/sessions/synthesis-s-42/artifacts/
+artifacts: ~/.synt/sessions/synthesis-s-42/artifacts/
 ```
 
 A local restricted backend should enforce boundaries as far as the operating system supports. Candidate OS primitives, all to be verified before being relied upon: macOS Seatbelt; Linux Landlock and/or bubblewrap; Windows Job Objects/AppContainer (expected to give weaker guarantees than the other two). A stronger sandbox/container is necessary for untrusted code. Path checks alone do not constitute a secure sandbox. For worktree isolation, shared external services (database, caches, cloud resources) also require namespacing or explicit warnings.
@@ -626,10 +626,10 @@ The Session Manager can route a session to a remote worker running the same tool
 | ADR-008 | Defer GPUI to thin client phase | UI should not block autonomous runtime development; GPUI is Rust and may share crates with the core |
 | ADR-009 | Defer complex multi-agent orchestration (amended by ADR-012) | Single-agent success and safety are foundational |
 | ADR-010 | Core engine is implemented in Rust; Node CLI is a frozen reference until cutover | Native cross-OS binary without Node runtime, access to OS sandbox primitives, crates shareable with GPUI. Cost: rewrite effort, unverified crate maturity, a dual-maintenance window while both implementations exist |
-| ADR-011 | Model access uses API keys only; no subscription/OAuth login flows | Anthropic and OpenAI do not permit third-party coding agents to authenticate through consumer subscriptions; API keys are the supported path (the Node CLI already works this way). Users manage their own keys through `SYNTHESIS_*` environment variables (no other env prefix is ever read) or provider config substitution; Synthesis does not store credentials in a keychain and does not write them to disk. Bearer-style keys for Anthropic-compatible gateways remain API keys. Cost: users need billed API access and handle key hygiene themselves; no subscription-priced usage |
+| ADR-011 | Model access uses API keys only; no subscription/OAuth login flows | Anthropic and OpenAI do not permit third-party coding agents to authenticate through consumer subscriptions; API keys are the supported path (the Node CLI already works this way). Users manage their own keys through `SYNT_*` environment variables (no other env prefix is ever read) or provider config substitution; Synthesis does not store credentials in a keychain and does not write them to disk. Bearer-style keys for Anthropic-compatible gateways remain API keys. Cost: users need billed API access and handle key hygiene themselves; no subscription-priced usage |
 | ADR-012 | **Status: Accepted (2026-10-29).** Inter-agent messaging without an orchestrator: in-session via an in-process per-session hub (named/background/resumable sub-agents, `SendMessage`, `@agent`); cross-session via a per-session local endpoint (Unix socket / Windows named pipe, NDJSON, mutual HMAC, same OS user only) answered by a read-only responder forked from the addressed agent's context; fully qualified `ws/sess/agent` addresses that never resolve by guessing. Amends ADR-009: messaging is allowed; planners and orchestrators stay deferred | Reuses tokio `net` and the session lock, with no TCP/HTTP server and no polling; the receiver's own policy decides what leaves it. Cost: per-OS endpoint code and a Windows ACL assumption to verify; same-user processes can impersonate a peer (sandbox R7 mitigates); queued in-session messages are lost on a crash; responder runs cost the receiver's tokens. Peers are off by default |
-| ADR-013 | **Status: Accepted (2026-10-29).** Long-term memory is a separate local SQLite store (`$SYNTHESIS_HOME/memory/memory.db`) of typed, scoped records with provenance and evidence-derived trust. Retrieval is FTS5/BM25 into a budgeted, frozen `<memory>` data block, with an on-demand `MemorySearch`. A bounded reflection loop runs on a small model, after deterministic episodes are written. Memory is data, never instructions or permission grants; skills and instruction files change only through owner-applied proposals (specs/memory.md) | Own lifecycle, migrations, export and deletion, apart from sessions; no new dependency (the bundled SQLite has FTS5/JSON1). Cost: one store shared by all repos (mitigated by scope filters, quarantine and backups); trust heuristics can misclassify; reflection spends tokens; the benefit is unproven until the R11 evaluation, and injection stays default-on only if that evaluation passes |
-| ADR-014 | **Status: Accepted (2026-10-30); superseded in effect 2026-10-31: the TUI it governs was removed (archive tag `archive/ui-before-removal`).** TUI theme is a set of semantic tokens chosen per render call (scoped thread-local); layout is a pure planner over a static panel registry; TUI preferences live only under `synthesis.tui` in the user settings file | Keeps the renderer deterministic and golden-testable, reuses the existing panel functions, needs no new dependency. Cost: one deliberate rebaseline of the render goldens gated by owner review, hidden per-call theme state, and a layout change for current users |
+| ADR-013 | **Status: Accepted (2026-10-29).** Long-term memory is a separate local SQLite store (`$SYNT_HOME/memory/memory.db`) of typed, scoped records with provenance and evidence-derived trust. Retrieval is FTS5/BM25 into a budgeted, frozen `<memory>` data block, with an on-demand `MemorySearch`. A bounded reflection loop runs on a small model, after deterministic episodes are written. Memory is data, never instructions or permission grants; skills and instruction files change only through owner-applied proposals (specs/memory.md) | Own lifecycle, migrations, export and deletion, apart from sessions; no new dependency (the bundled SQLite has FTS5/JSON1). Cost: one store shared by all repos (mitigated by scope filters, quarantine and backups); trust heuristics can misclassify; reflection spends tokens; the benefit is unproven until the R11 evaluation, and injection stays default-on only if that evaluation passes |
+| ADR-014 | **Status: Accepted (2026-10-30); superseded in effect 2026-10-31: the TUI it governs was removed (archive tag `archive/ui-before-removal`).** TUI theme is a set of semantic tokens chosen per render call (scoped thread-local); layout is a pure planner over a static panel registry; TUI preferences live only under `synt.tui` in the user settings file | Keeps the renderer deterministic and golden-testable, reuses the existing panel functions, needs no new dependency. Cost: one deliberate rebaseline of the render goldens gated by owner review, hidden per-call theme state, and a layout change for current users |
 
 ---
 
@@ -686,7 +686,7 @@ Indicative effort is about 9-11 months for one engineer (low confidence).
 
 ### Phase 7 — Long-term memory (P1; roadmap R11)
 
-**Deliverables:** M0 fixes of today's memory gaps (instruction and skill discovery from the project root, the read-deny predicate on instruction files, `TaskState` updates, a stable `workspace_key`, sandbox deny for the stores); the `synthesis-memory` crate (schema, FTS5 retrieval, scanner, redaction, export/import); deterministic episodes; memory tools, `synt memory` CLI and TUI `/memory`/`#`; the reflection loop with skill and `SYNTHESIS.md` proposals; consolidation and decay; optional embeddings behind a feature flag; the memory evaluation (specs/memory.md §12).
+**Deliverables:** M0 fixes of today's memory gaps (instruction and skill discovery from the project root, the read-deny predicate on instruction files, `TaskState` updates, a stable `workspace_key`, sandbox deny for the stores); the `synthesis-memory` crate (schema, FTS5 retrieval, scanner, redaction, export/import); deterministic episodes; memory tools, `synt memory` CLI and TUI `/memory`/`#`; the reflection loop with skill and `AGENTS.md` proposals; consolidation and decay; optional embeddings behind a feature flag; the memory evaluation (specs/memory.md §12).
 
 **Exit criteria:** the memory acceptance scenarios in §11.1 pass on macOS, Linux and Windows CI; the memory crate passes a security review; on paired repeat tasks warm runs meet the targets in specs/memory.md §12 (otherwise injection defaults to off).
 
@@ -717,7 +717,7 @@ Indicative effort is about 9-11 months for one engineer (low confidence).
 | Secret in tool output | No memory record or export contains the secret (redacted or dropped) |
 | Memory opt-out | With memory off for the workspace or `--no-memory`, no record is read or written and no memory tool is offered |
 | Two sessions finishing tasks in one repository | Both episodes are stored with no lost write or duplicate; one reflection job runs per task |
-| Learned skill or `SYNTHESIS.md` change | Appears only as a proposal; no instruction or skill file changes until `synt memory apply` |
+| Learned skill or `AGENTS.md` change | Appears only as a proposal; no instruction or skill file changes until `synt memory apply` |
 
 ### 11.2 Quality metrics
 
@@ -751,8 +751,8 @@ A small fixed benchmark of representative repositories and deterministic defects
 | Rust crate immaturity (MCP/provider SDKs unverified) | Blocked or costly integrations | Early spikes in Phase 1; thin adapters behind traits; fall back to own minimal implementation |
 | Node/Rust behavior drift during parallel run | Regressions, incompatible formats | Frozen Node reference, golden tests, shared eval suite, two-way format compatibility checks |
 | Long period without autonomous features | Lost momentum | Dogfood the headless Rust loop before the TUI |
-| Peer messaging leaks context or is used for injection | Data leakage across workspaces; agents steered by peers | Peers off by default, user-settings-only allow lists, read-only responder under the receiver's policy, secret withholding and outgoing redaction, fenced untrusted messages, hop/rate/cost limits, `$SYNTHESIS_HOME/run` protected and sandboxed |
-| Poisoned or stale long-term memory | Wrong or unsafe behavior carried across sessions and repositories | Trust from evidence, scanning and quarantine, untrusted records never injected, memory never grants permissions, file anchors and decay, owner review queue, poisoned-memory eval, `$SYNTHESIS_HOME/memory` protected and sandbox-denied (specs/memory.md §9, §12) |
+| Peer messaging leaks context or is used for injection | Data leakage across workspaces; agents steered by peers | Peers off by default, user-settings-only allow lists, read-only responder under the receiver's policy, secret withholding and outgoing redaction, fenced untrusted messages, hop/rate/cost limits, `$SYNT_HOME/run` protected and sandboxed |
+| Poisoned or stale long-term memory | Wrong or unsafe behavior carried across sessions and repositories | Trust from evidence, scanning and quarantine, untrusted records never injected, memory never grants permissions, file anchors and decay, owner review queue, poisoned-memory eval, `$SYNT_HOME/memory` protected and sandbox-denied (specs/memory.md §9, §12) |
 
 ---
 
@@ -796,7 +796,7 @@ Completed input: **audit of existing CLI modules mapped to the 12 logical compon
 - **R11 — Long-term memory** (§5.5.1, ADR-013, specs/memory.md §13):
   - M0: audit fixes, now; `workspace_key` is shared with R10a.
   - M1: SQLite store, CLI, FTS retrieval, tools; after R5, together with R7.
-  - M2: reflection loop, skill and `SYNTHESIS.md` proposals.
+  - M2: reflection loop, skill and `AGENTS.md` proposals.
   - M3: consolidation and decay, optional embeddings.
   - M4: evaluation while dogfooding.
 

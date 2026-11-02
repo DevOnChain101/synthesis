@@ -19,11 +19,11 @@ Windows (PowerShell 7+): `irm https://github.com/DevOnChain101/nemo-acd/releases
 
 ## Quick start
 
-Synthesis uses API keys only (ADR-011): no subscription login, no keychain, nothing written to disk. Keys come from `SYNTHESIS_*` environment variables (no other variable prefix is read; other names only via an explicit `{env:NAME}` reference in your provider config).
+Synthesis uses API keys only (ADR-011): no subscription login, no keychain, nothing written to disk. Keys come from `SYNT_*` environment variables (no other variable prefix is read; other names only via an explicit `{env:NAME}` reference in your provider config).
 
 ```sh
-export SYNTHESIS_API_KEY=...             # see docs/specs/config.md for the full list
-                                    # (SYNTHESIS_ANTHROPIC_API_KEY, SYNTHESIS_AUTH_TOKEN, SYNTHESIS_BASE_URL, SYNTHESIS_MODEL, ...)
+export SYNT_API_KEY=...             # see docs/specs/config.md for the full list
+                                    # (SYNT_ANTHROPIC_API_KEY, SYNT_AUTH_TOKEN, SYNT_BASE_URL, SYNT_MODEL, ...)
 synt doctor --cwd .                 # sandbox backend, shell, browser, git, config, proxy, legacy-name and PATH-shadowing hints
 synt models                         # configured models
 synt run --cwd . --model provider/model --prompt "fix the failing test in src/parser"

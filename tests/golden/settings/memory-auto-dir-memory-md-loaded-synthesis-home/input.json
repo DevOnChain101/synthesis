@@ -1,6 +1,6 @@
 {
   "auto_memory": {
-    "base": "<HOME>/.synthesis",
+    "base": "<HOME>/.synt",
     "content": "auto memory from synthesis"
   },
   "cwd": "<TMP>/ws",

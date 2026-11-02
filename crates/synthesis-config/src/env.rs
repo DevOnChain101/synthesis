@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 
 /// Set in the environment of every child process the core starts (see [`Env::child_env`]).
-pub const AGENT_SESSION_VAR: &str = "SYNTHESIS_AGENT_SESSION";
+pub const AGENT_SESSION_VAR: &str = "SYNT_AGENT_SESSION";
 
 /// Explicit environment snapshot. Library code never reads the process env
 /// except through [`Env::from_process`].
 ///
-/// Layering and credentials read only `SYNTHESIS_*` names. Other names are reachable
+/// Layering and credentials read only `SYNT_*` names. Other names are reachable
 /// solely through an explicit `{env:NAME}` reference written by the user in a
 /// provider entry (docs/specs/config.md §8).
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -58,7 +58,7 @@ impl Env {
 
     /// The canonical environment for child processes (Bash, hooks, `!`, MCP stdio): an
     /// ALLOWLIST. Passes only the standard names in [`CHILD_ENV_ALLOWLIST`], `LC_*`, `XDG_*`
-    /// and `SYNTHESIS_*` names that are not secret-shaped (see [`is_secret_shaped`]). Everything
+    /// and `SYNT_*` names that are not secret-shaped (see [`is_secret_shaped`]). Everything
     /// else (`AWS_*`, `GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, ...) is dropped. The only ways to
     /// opt another variable in are `{env:NAME}` in config and an explicit per-server env map.
     pub fn child_env(&self) -> Env {
@@ -67,7 +67,7 @@ impl Env {
             .iter()
             .filter(|(k, _)| {
                 let k = k.as_str();
-                if let Some(rest) = k.strip_prefix("SYNTHESIS_") {
+                if let Some(rest) = k.strip_prefix("SYNT_") {
                     return !is_secret_shaped(rest);
                 }
                 CHILD_ENV_ALLOWLIST.contains(&k) || k.starts_with("LC_") || k.starts_with("XDG_")
@@ -91,9 +91,9 @@ impl Env {
     }
 }
 
-/// `^SYNTHESIS_(?:[A-Z0-9]+_)*(?:API_KEY|AUTH_TOKEN|TOKEN)$`
+/// `^SYNT_(?:[A-Z0-9]+_)*(?:API_KEY|AUTH_TOKEN|TOKEN)$`
 pub fn is_secret_env_name(name: &str) -> bool {
-    let Some(mut rest) = name.strip_prefix("SYNTHESIS_") else {
+    let Some(mut rest) = name.strip_prefix("SYNT_") else {
         return false;
     };
     loop {

@@ -2,9 +2,9 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {
-    "<HOME>/.synthesis/agents/tester.md": "---\ndescription: user tester\ntools: Bash, Read\nmodel: inherit\n---\nUser prompt body",
-    "<TMP>/ws/.synthesis/agents/other.md": "no frontmatter body",
-    "<TMP>/ws/.synthesis/agents/tester.md": "---\ndescription: project tester\ntools: [Read, Write]\nmodel: opus\n---\nProject prompt body"
+    "<HOME>/.synt/agents/tester.md": "---\ndescription: user tester\ntools: Bash, Read\nmodel: inherit\n---\nUser prompt body",
+    "<TMP>/ws/.synt/agents/other.md": "no frontmatter body",
+    "<TMP>/ws/.synt/agents/tester.md": "---\ndescription: project tester\ntools: [Read, Write]\nmodel: opus\n---\nProject prompt body"
   },
   "op": "workspace"
 }

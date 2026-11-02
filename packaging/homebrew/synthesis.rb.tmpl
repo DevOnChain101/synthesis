@@ -35,6 +35,6 @@ class Synthesis < Formula
   end
 
   test do
-    assert_match "synt #{version}", shell_output("#{bin}/synt --version")
+    assert_match "Synthesis #{version}", shell_output("#{bin}/synt --version")
   end
 end

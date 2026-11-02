@@ -49,7 +49,7 @@ pub enum ModeArg {
     /// Headless: no classifier is wired, so asks the classifier would review are denied.
     Auto,
     /// Skips approval prompts. Still stops: deny rules, ask rules, critical rm, destructive MCP asks.
-    /// Does NOT stop plain writes to protected paths (.git, .synthesis, .ssh ...), as in Claude Code. CLI only.
+    /// Does NOT stop plain writes to protected paths (.git, .synt, .ssh ...), as in Claude Code. CLI only.
     #[value(name = "bypassPermissions")]
     BypassPermissions,
 }
@@ -185,7 +185,7 @@ pub struct Common {
     pub model: Option<String>,
     #[arg(long, value_enum)]
     pub permission_mode: Option<ModeArg>,
-    /// Trust `<cwd>/.synthesis/config.json`, `.synthesis/settings.json`, agents and (with approval) MCP servers.
+    /// Trust `<cwd>/.synt/config.json`, `.synt/settings.json`, agents and (with approval) MCP servers.
     #[arg(long)]
     pub trust_project: bool,
     /// Start this project-scope MCP server (needs --trust-project; repeatable).
@@ -212,7 +212,7 @@ pub struct Common {
     #[arg(long, requires = "worktree")]
     pub cleanup_worktree: bool,
     /// Let other live sessions of this user message this one, and this one message them (turns
-    /// `synthesis.peers.enabled` on for this run; the allow list still applies).
+    /// `synt.peers.enabled` on for this run; the allow list still applies).
     #[arg(long)]
     pub peers: bool,
     /// Session name other sessions can address (`sess:<name>`): `[a-z0-9_-]`, at most 32; unique
@@ -220,7 +220,7 @@ pub struct Common {
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
     /// What this session is for, shown to peers in `ListSessions` (<= 120 chars). Default: the
-    /// first line of SYNTHESIS.md. Only used with peers on.
+    /// first line of AGENTS.md. Only used with peers on.
     #[arg(long, value_name = "TEXT")]
     pub about: Option<String>,
     /// Continue a stored session of this workspace by id (or unique id prefix) with the new prompt.
@@ -291,7 +291,7 @@ pub struct RunArgs {
     max_turns: Option<u32>,
     #[arg(long)]
     max_tool_calls: Option<u32>,
-    /// Needs a price for the model: `synthesis.pricing` in the user settings.json (config.md §6).
+    /// Needs a price for the model: `synt.pricing` in the user settings.json (config.md §6).
     #[arg(long)]
     max_cost_usd: Option<f64>,
     #[arg(long)]
@@ -346,12 +346,12 @@ pub struct Prepared {
     pub mcp: Option<Arc<McpManager>>,
     pub notices: Vec<String>,
     pub worktree: Option<Worktree>,
-    /// Required checks from `synthesis.verification.checks`.
+    /// Required checks from `synt.verification.checks`.
     pub criteria: Vec<Criterion>,
     pub artifact_root: PathBuf,
     pub label: String,
     pub homes: crate::Homes,
-    /// Open long-term memory store (None with --no-memory, a failure, or `synthesis.memory.enabled: false`).
+    /// Open long-term memory store (None with --no-memory, a failure, or `synt.memory.enabled: false`).
     pub memory: Option<Arc<crate::memcmd::MemoryRun>>,
     /// Stored conversation of `--resume/--continue/--fork-session` (the next task's history).
     pub history: Vec<Message>,
@@ -426,7 +426,7 @@ fn resolve_resume(
     Ok(Some((id, history)))
 }
 
-/// Rows of `{"synthesis":{"pricing":{"<provider/model>"|"<model>": {input_per_mtok, output_per_mtok}}}}`
+/// Rows of `{"synt":{"pricing":{"<provider/model>"|"<model>": {input_per_mtok, output_per_mtok}}}}`
 /// from the USER settings file only (a repository must not be able to price a model at zero).
 pub(crate) fn pricing(user_settings: &Path, label: &str, model: &str) -> Option<Pricing> {
     let raw = std::fs::read(user_settings)
@@ -437,7 +437,7 @@ pub(crate) fn pricing(user_settings: &Path, label: &str, model: &str) -> Option<
 }
 
 fn parse_pricing(v: &Value, label: &str, model: &str) -> Option<Pricing> {
-    let table = v.get("synthesis")?.get("pricing")?;
+    let table = v.get("synt")?.get("pricing")?;
     let e = table.get(label).or_else(|| table.get(model))?;
     let num = |k: &str| {
         e.get(k)
@@ -530,9 +530,9 @@ fn read_denied(perms: &Permissions, p: &Path) -> bool {
 /// are bounded by default already; a cost cap needs a configured price, so it has no default.
 const HEADLESS_WALL_SECS: u64 = 3600;
 
-/// The repository root (nearest trusted ancestor with `.git` or `.synthesis`, see
+/// The repository root (nearest trusted ancestor with `.git` or `.synt`, see
 /// `synthesis_settings::find_project_root`), else the launch dir. The home directory and anything above
-/// it never count: `~/.synthesis` or a stray `/Users/.git` would otherwise make `$HOME` the workspace
+/// it never count: `~/.synt` or a stray `/Users/.git` would otherwise make `$HOME` the workspace
 /// (and writable).
 pub fn workspace_root(cwd: &Path, home: &Path) -> PathBuf {
     let real = synthesis_core::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
@@ -625,7 +625,7 @@ pub fn prepare(
     let price = pricing(&h.synthesis.join("settings.json"), &res.label, &res.model);
     if limits.max_cost_usd.is_some() && price.is_none() {
         return Err(format!(
-            "--max-cost-usd needs a price for {}: add synthesis.pricing[\"{}\"] = {{\"input_per_mtok\": N, \"output_per_mtok\": N}} to {} (see docs/specs/config.md §6)",
+            "--max-cost-usd needs a price for {}: add synt.pricing[\"{}\"] = {{\"input_per_mtok\": N, \"output_per_mtok\": N}} to {} (see docs/specs/config.md §6)",
             res.label,
             res.label,
             h.synthesis.join("settings.json").display()
@@ -987,7 +987,7 @@ pub fn prepare(
         }
         None => artifact_to_dir(artifact_root.clone()),
     };
-    let user_files = [h.synthesis.join("SYNTHESIS.md")];
+    let user_files = [h.synthesis.join("AGENTS.md")];
     // Read-deny rules apply to instruction files and their imports; a denied file is reported.
     let denied = Mutex::new(Vec::<PathBuf>::new());
     let deny = |p: &Path| {
@@ -1122,12 +1122,7 @@ pub fn prepare(
     mplan.guard = crate::mcp::read_guard(
         &h.synthesis.join("settings.json"),
         (trust == ProjectTrust::Trusted)
-            .then(|| {
-                settings
-                    .project_root
-                    .join(".synthesis")
-                    .join("settings.json")
-            })
+            .then(|| settings.project_root.join(".synt").join("settings.json"))
             .as_deref(),
     );
     mplan.artifact_dir = Some(artifact_root.join("mcp"));
@@ -1229,7 +1224,7 @@ pub fn prepare(
     if let Some(l) = peer_link {
         harness = harness.with_peers(l);
     }
-    // "Allow always" persists to .synthesis/settings.local.json, but only in a trusted project: an
+    // "Allow always" persists to .synt/settings.local.json, but only in a trusted project: an
     // untrusted project's allow rules are ignored on load, so writing them would be misleading.
     if trust == ProjectTrust::Trusted {
         let root = settings.project_root.clone();
@@ -1724,8 +1719,7 @@ pub struct Resolved {
 }
 
 /// The error `synt run` exits 2 with when no model is configured.
-pub const NO_MODEL: &str =
-    "no model configured: pass --model provider/model or set SYNTHESIS_MODEL";
+pub const NO_MODEL: &str = "no model configured: pass --model provider/model or set SYNT_MODEL";
 
 pub fn resolve_provider(
     provider_arg: Option<&str>,
@@ -1784,7 +1778,7 @@ pub fn resolve_provider(
         return Err(match var {
             Some(v) => format!("no API key for provider \"{id}\": set {v} and restart"),
             None => format!(
-                "no API key for provider \"{id}\": set SYNTHESIS_API_KEY (when SYNTHESIS_PROVIDER={id}) or add apiKey to its config"
+                "no API key for provider \"{id}\": set SYNT_API_KEY (when SYNT_PROVIDER={id}) or add apiKey to its config"
             ),
         });
     }
@@ -2049,20 +2043,20 @@ mod tests {
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         assert_eq!(workspace_root(&sub, &base), repo);
         assert_eq!(workspace_root(&repo, &base), repo);
-        // `.synthesis` also marks a root
+        // `.synt` also marks a root
         let proj = base.join("proj");
-        std::fs::create_dir_all(proj.join(".synthesis")).unwrap();
+        std::fs::create_dir_all(proj.join(".synt")).unwrap();
         std::fs::create_dir_all(proj.join("a")).unwrap();
         assert_eq!(workspace_root(&proj.join("a"), &base), proj);
         // no marker: the launch dir
         let lone = base.join("lone/x");
         std::fs::create_dir_all(&lone).unwrap();
         assert_eq!(workspace_root(&lone, &base), lone);
-        // `$HOME/.synthesis` must not turn the home directory into the workspace
-        std::fs::create_dir_all(base.join(".synthesis")).unwrap();
+        // `$HOME/.synt` must not turn the home directory into the workspace
+        std::fs::create_dir_all(base.join(".synt")).unwrap();
         assert_eq!(workspace_root(&lone, &base), lone);
         // ... nor may a marker ABOVE home (`/Users/.git`)
-        std::fs::remove_dir(base.join(".synthesis")).unwrap();
+        std::fs::remove_dir(base.join(".synt")).unwrap();
         std::fs::create_dir_all(base.join(".git")).unwrap();
         let home = base.join("users/me");
         std::fs::create_dir_all(home.join("proj")).unwrap();
@@ -2100,7 +2094,7 @@ mod tests {
         std::fs::create_dir_all(sub.clone()).unwrap();
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         std::fs::write(repo.join("AGENTS.md"), "root rules").unwrap();
-        std::fs::write(sub.join("SYNTHESIS.md"), "pkg rules").unwrap();
+        std::fs::write(sub.join("AGENTS.md"), "pkg rules").unwrap();
         let root = workspace_root(&sub, &base.join("home"));
         let ws = WorkspaceContext::open("w", &root, &sub, &[], base.join("art"), "pg").unwrap();
         assert_eq!(ws.cwd, sub);
@@ -2122,7 +2116,7 @@ mod tests {
         std::fs::write(base.join("AGENTS.md"), "secret plan").unwrap();
         std::fs::write(base.join("docs.md"), "imported").unwrap();
         std::fs::create_dir_all(base.join("sub")).unwrap();
-        std::fs::write(base.join("sub/SYNTHESIS.md"), "see @../docs.md").unwrap();
+        std::fs::write(base.join("sub/AGENTS.md"), "see @../docs.md").unwrap();
         let rules = PermissionRules {
             // `/x` is anchored at the cwd (= base)
             deny: vec!["Read(/AGENTS.md)".into(), "Read(/docs.md)".into()],
@@ -2133,7 +2127,7 @@ mod tests {
             synthesis_permissions::Env::new(&base, &base, Mode::Default),
         );
         assert!(read_denied(&perms, &base.join("AGENTS.md")));
-        assert!(!read_denied(&perms, &base.join("sub/SYNTHESIS.md")));
+        assert!(!read_denied(&perms, &base.join("sub/AGENTS.md")));
         let ws = WorkspaceContext::open("w", &base, &base.join("sub"), &[], base.join("art"), "pg")
             .unwrap();
         let deny = |p: &Path| read_denied(&perms, p);

@@ -49,7 +49,7 @@ impl Rig {
         std::fs::create_dir_all(dir.path().join("synthesis")).unwrap();
         let cfg = json!({"$schema": "config.json/v1",
             "mcpServers": {"atl": {"command": server(), "args": flags}}});
-        std::fs::write(dir.path().join("synthesis/synthesis.json"), cfg.to_string()).unwrap();
+        std::fs::write(dir.path().join("synthesis/synt.json"), cfg.to_string()).unwrap();
         std::fs::write(
             dir.path().join("synthesis/settings.json"),
             settings.to_string(),
@@ -70,7 +70,7 @@ impl Rig {
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", self.dir.path())
-            .env("SYNTHESIS_HOME", self.dir.path().join("synthesis"))
+            .env("SYNT_HOME", self.dir.path().join("synthesis"))
             .stdin(Stdio::null())
             .output()
             .unwrap();

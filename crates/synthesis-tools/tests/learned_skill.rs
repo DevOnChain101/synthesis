@@ -9,7 +9,7 @@ use synthesis_tools::{LearnedSkill, SkillSource, discover_skills, set_learned_sk
 #[test]
 fn learned_skills_are_listed_as_learned_and_can_be_cleared() {
     let d = tempfile::tempdir().unwrap();
-    let env = Env::from_pairs([("SYNTHESIS_HOME", d.path().to_str().unwrap())]);
+    let env = Env::from_pairs([("SYNT_HOME", d.path().to_str().unwrap())]);
     let list = discover_skills(&env, d.path());
     assert!(list.iter().all(|s| s.source != SkillSource::Learned));
 

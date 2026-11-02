@@ -46,7 +46,7 @@ Expected (read these lines, then send the whole output on failure):
 - first line `synt 0.1.0 on windows x86_64`;
 - `shell: C:\Program Files\Git\bin\bash.exe kind=Posix is_posix=true`. If it says `kind=Cmd` or a `Git Bash was not found` note, Git for Windows is missing or in an unusual place; that is a finding, not a pass;
 - the sandbox section says that this OS has no command confinement (Job Object only); that is expected. `synt run` then defaults to `--sandbox best-effort`;
-- `SYNTHESIS_HOME: C:\Users\<you>\.synthesis`. If it points elsewhere, check the `HOME` variable (Git for Windows can set one; `HOME` wins over `USERPROFILE`);
+- `SYNT_HOME: C:\Users\<you>\.synt`. If it points elsewhere, check the `HOME` variable (Git for Windows can set one; `HOME` wins over `USERPROFILE`);
 - `git: git version ...`; `browser:` may be found or not (not needed here);
 - `peers ... off`; no line may mention a path starting with `/` (POSIX path on Windows) or `/tmp`.
 
@@ -60,11 +60,11 @@ synt models
 
 ## 5. Provider config
 
-Create `%USERPROFILE%\.synthesis\synthesis.json` (see docs/INSTALL.md, "Keys", for the same file with comments). Save it as UTF-8; a BOM is accepted. Put the key in a user environment variable, never in the file:
+Create `%USERPROFILE%\.synt\synt.json` (see docs/INSTALL.md, "Keys", for the same file with comments). Save it as UTF-8; a BOM is accepted. Put the key in a user environment variable, never in the file:
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:USERPROFILE\.synthesis" | Out-Null
-notepad "$env:USERPROFILE\.synthesis\synthesis.json"      # paste the JSON, with your baseURL, model ids and {env:MY_GATEWAY_KEY}
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.synt" | Out-Null
+notepad "$env:USERPROFILE\.synt\synt.json"      # paste the JSON, with your baseURL, model ids and {env:MY_GATEWAY_KEY}
 [Environment]::SetEnvironmentVariable('MY_GATEWAY_KEY', '<your key>', 'User')   # then open a NEW terminal
 synt models
 synt doctor --cwd $HOME | Select-String 'config:'
@@ -99,6 +99,6 @@ Optional: `synt run --cwd . --sandbox enforce --prompt "say hi"` should refuse w
 - `synt --version` and the full `synt doctor --cwd $HOME` output;
 - Windows version (`winver`), `$PSVersionTable.PSVersion`, `git --version`, and whether SmartScreen, an antivirus or a proxy (`$env:HTTPS_PROXY`) is in play;
 - for provider errors: the `baseURL` host (not the key), the model id, and the `reason` field of the JSON result;
-- never include the API key or the contents of `%USERPROFILE%\.synthesis\` beyond `synthesis.json` with the key replaced.
+- never include the API key or the contents of `%USERPROFILE%\.synt\` beyond `synt.json` with the key replaced.
 
-Not covered by this list: npm install (`npm install -g @devonchain101/synthesis` on Windows, once published), `winget`, ARM64, Windows PowerShell 5.1 (`install.ps1` needs 7+), peers (they stay off unless `SYNTHESIS_HOME` is under `%USERPROFILE%`), and the browser tool.
+Not covered by this list: npm install (`npm install -g @devonchain101/synthesis` on Windows, once published), `winget`, ARM64, Windows PowerShell 5.1 (`install.ps1` needs 7+), peers (they stay off unless `SYNT_HOME` is under `%USERPROFILE%`), and the browser tool.
