@@ -290,7 +290,7 @@ impl ClipboardSource for PasteCommand {
 }
 
 /// `name` in a standard system directory (never PATH or the cwd).
-fn find_tool(name: &str) -> Option<PathBuf> {
+pub(crate) fn find_tool(name: &str) -> Option<PathBuf> {
     [
         "/usr/bin",
         "/usr/local/bin",

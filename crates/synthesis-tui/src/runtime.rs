@@ -9,13 +9,14 @@ use synthesis_permissions::Mode;
 use synthesis_config::Env;
 use synthesis_core::AgentSession;
 use synthesis_events::Envelope;
-use synthesis_harness::{Harness, TaskAgent, TaskOutcome, TaskRequest, from_mode};
+use synthesis_harness::{Harness, ImageAttachment, TaskAgent, TaskOutcome, TaskRequest, from_mode};
 use synthesis_providers::Message;
 use synthesis_tui_base::Platform;
 use synthesis_tui_base::clipboard::{
     ClipboardSink, ClipboardSource, copy_to_clipboard, default_chain, paste_chain, read_clipboard,
 };
 use synthesis_tui_base::complete::Command as CmdDef;
+use synthesis_tui_base::imgclip::{ImageSource, default_source};
 use synthesis_tui_base::keys::{Key, KeyParser, Named};
 use synthesis_tui_base::screen::{BRACKETED_PASTE_ON, Screen};
 use synthesis_tui_base::sgr::{ColorMode, encode};
@@ -117,6 +118,8 @@ pub struct Options {
     pub mcp_report: Option<Box<dyn Fn() -> Vec<String>>>,
     pub memory: Option<MemoryHook>,
     pub host: Option<Arc<dyn TaskHost>>,
+    /// Where Alt+V reads an image from; default: the Windows clipboard on WSL / Windows.
+    pub image_source: Option<Arc<dyn ImageSource>>,
     pub saved: Vec<SavedSession>,
     pub resume: Option<Resume>,
     /// Shown as warnings in the pane from the first frame (sanitised on ingest); the matching
@@ -165,6 +168,7 @@ impl Options {
             mcp_report: None,
             memory: None,
             host: None,
+            image_source: None,
             saved: vec![],
             resume: None,
             startup_notes: vec![],
@@ -231,6 +235,7 @@ fn cfg_for(o: &Options) -> AppConfig {
 }
 
 struct Runner {
+    images: Option<Arc<dyn ImageSource>>,
     host: Option<Arc<dyn TaskHost>>,
     mcp_report: Option<Box<dyn Fn() -> Vec<String>>>,
     memory: Option<MemoryHook>,
@@ -391,6 +396,7 @@ impl Runner {
         &mut self,
         app: &mut App,
         text: String,
+        images: Vec<ImageAttachment>,
         display_text: Option<String>,
         cancel: tokio_util::sync::CancellationToken,
         agent: Option<TaskAgent>,
@@ -426,6 +432,7 @@ impl Runner {
         let typed = text.clone();
         let mut req = TaskRequest {
             request: text,
+            images,
             criteria: vec![],
             history: self.history.clone(),
             display_text,
@@ -604,6 +611,10 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
     };
 
     let mut runner = Runner {
+        images: o
+            .image_source
+            .take()
+            .or_else(|| default_source(o.platform).map(Arc::from)),
         host: o.host.take(),
         mcp_report: o.mcp_report.take(),
         memory: o.memory.take(),
@@ -749,6 +760,27 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                         )?;
                     }
                 }
+                Msg::ImagePasted {
+                    result,
+                    fallback_text,
+                } => {
+                    match result {
+                        Ok(img) => app.attach_image(img, now),
+                        Err(synthesis_tui_base::imgclip::ImageError::NoImage(_))
+                            if fallback_text =>
+                        {
+                            match read_clipboard(&paste) {
+                                Ok(text) => app.paste_clipboard(&text, now),
+                                Err(e) => {
+                                    app.toast(format!("clipboard unavailable: {e}"), now, true)
+                                }
+                            }
+                        }
+                        Err(e) => app.image_failed(&e.to_string()),
+                    }
+                    dirty = true;
+                    urgent = true;
+                }
                 Msg::Wake => {}
                 Msg::Event(e) => {
                     app.on_event(&e, now);
@@ -808,6 +840,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                                 runner.start(
                                     &mut app,
                                     synthesis_harness::user_command_note().to_string(),
+                                    vec![],
                                     Some(String::new()),
                                     cancel,
                                     None,
@@ -905,10 +938,28 @@ fn exec(
     match c {
         Cmd::StartTask {
             text,
+            images,
             display_text,
             cancel,
             agent,
-        } => runner.start(app, text, display_text, cancel, agent),
+        } => runner.start(app, text, images, display_text, cancel, agent),
+        Cmd::PasteImage { fallback_text } => match &runner.images {
+            Some(src) => {
+                // off the UI thread: powershell.exe takes a second or more
+                let (src, tx) = (src.clone(), runner.tx.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(Msg::ImagePasted {
+                        result: src.read(),
+                        fallback_text,
+                    });
+                });
+            }
+            None if fallback_text => match read_clipboard(paste) {
+                Ok(text) => app.paste_clipboard(&text, now),
+                Err(e) => app.toast(format!("clipboard unavailable: {e}"), now, true),
+            },
+            None => app.image_failed(synthesis_tui_base::imgclip::unavailable()),
+        },
         Cmd::SendTo { to, text } => {
             let (h, tx) = (runner.harness.clone(), runner.tx.clone());
             runner.runtime.spawn(async move {

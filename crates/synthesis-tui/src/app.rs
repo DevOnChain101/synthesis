@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use synthesis_events::{Budget, Envelope, Event};
-use synthesis_harness::{Approval, DENY_MESSAGE, TaskAgent, TaskOutcome, UserReply};
+use synthesis_harness::{
+    Approval, DENY_MESSAGE, ImageAttachment, TaskAgent, TaskOutcome, UserReply,
+};
 use synthesis_permissions::{Mode, Suggestion};
 use synthesis_tools::NeedsUser;
 use synthesis_tui_base::complete::{self, Command as CmdDef, StdFs};
@@ -57,6 +59,18 @@ const ARM_MS: i64 = 400;
 const PASTE_QUIET_MS: i64 = 300;
 const TOAST_MS: i64 = 1800;
 /// A paste of more lines than this becomes a `[Pasted text #1 +300 lines]` chip in the prompt.
+/// Most images attached to one message.
+const MAX_ATTACHMENTS: usize = 5;
+
+/// A pasted image, held until the next request.
+struct Attached {
+    name: String,
+    bytes: usize,
+    width: u32,
+    height: u32,
+    base64: String,
+}
+
 const PASTE_CHIP_LINES: usize = 10;
 const PASTE_CHIP_MAX_CHARS: usize = 200_000;
 /// Two Esc presses within this long edit the last prompt.
@@ -99,8 +113,15 @@ pub(crate) struct AppConfig {
 /// Effects for the runtime.
 #[derive(Debug)]
 pub(crate) enum Cmd {
+    /// Alt+V / Ctrl+V: read an image off the clipboard (on a worker; the answer is
+    /// [`App::attach_image`] or a note). `fallback_text`: no image means paste the text (Ctrl+V).
+    PasteImage {
+        fallback_text: bool,
+    },
     StartTask {
         text: String,
+        /// Clipboard images attached to this request.
+        images: Vec<ImageAttachment>,
         /// What the pane shows instead of `text` (`Some("")`: nothing, a note to the model).
         display_text: Option<String>,
         cancel: CancellationToken,
@@ -299,6 +320,8 @@ pub(crate) struct App {
     queue: Vec<String>,
     /// Big pastes live in the prompt as a chip and are expanded when the prompt is sent.
     pastes: Vec<(String, String)>,
+    /// Images pasted with Alt+V, sent with the next request to the main agent.
+    attachments: Vec<Attached>,
     /// Time of an Esc on an idle empty prompt: a second one soon after edits the last prompt.
     esc_at: Option<i64>,
     /// A `/compact` between tasks is running: a new task would race with its history swap.
@@ -486,6 +509,7 @@ impl App {
             target: None,
             queue: vec![],
             pastes: vec![],
+            attachments: vec![],
             esc_at: None,
             compacting: false,
             ran_task,
@@ -830,6 +854,16 @@ impl App {
         }
         if is_key(&k, Named::AltT) && self.dialogs.is_empty() && self.picker.is_none() {
             self.set_effort("", &mut out);
+            return out;
+        }
+        if (is_key(&k, Named::AltV) || is_key(&k, Named::CtrlV))
+            && self.dialogs.is_empty()
+            && self.picker.is_none()
+            && self.search.is_none()
+        {
+            out.push(Cmd::PasteImage {
+                fallback_text: is_key(&k, Named::CtrlV),
+            });
             return out;
         }
         if is_key(&k, Named::CtrlO) {
@@ -1306,6 +1340,7 @@ impl App {
         }
         out.push(Cmd::StartTask {
             text,
+            images: vec![],
             display_text: None,
             cancel,
             agent: Some(agent),
@@ -1356,8 +1391,17 @@ impl App {
         }
         let cancel = self.begin_followup(now);
         self.clear_selection();
+        let images = self
+            .attachments
+            .drain(..)
+            .map(|a| ImageAttachment {
+                media_type: "image/png".into(),
+                data_base64: a.base64,
+            })
+            .collect();
         out.push(Cmd::StartTask {
             text,
+            images,
             display_text: None,
             cancel,
             agent: None,
@@ -1446,6 +1490,7 @@ impl App {
                     self.activity = activity_for(&self.cfg, &[]);
                     self.activity.model = clean_line(&self.model);
                     self.chat.note("new conversation", "");
+                    self.attachments.clear();
                     out.push(Cmd::ClearConversation);
                 }
             }
@@ -2423,6 +2468,39 @@ impl App {
             })
     }
 
+    /// An image from [`Cmd::PasteImage`]: shown as a chip above the prompt, sent with the next
+    /// request.
+    pub fn attach_image(&mut self, img: synthesis_tui_base::imgclip::ClipImage, now: i64) {
+        if self.attachments.len() >= MAX_ATTACHMENTS {
+            self.toast(
+                format!("at most {MAX_ATTACHMENTS} images per message"),
+                now,
+                true,
+            );
+            return;
+        }
+        let n = self.attachments.len() + 1;
+        self.attachments.push(Attached {
+            name: format!("image {n}.png"),
+            bytes: img.png.len(),
+            width: img.width,
+            height: img.height,
+            base64: synthesis_tui_base::clipboard::base64(&img.png),
+        });
+        self.toast(
+            format!("image {n} attached ({}x{})", img.width, img.height),
+            now,
+            false,
+        );
+    }
+
+    /// Why Alt+V brought no image.
+    pub fn image_failed(&mut self, why: &str) {
+        self.chat.note(why, "warn");
+        self.chat
+            .note("alt+v attaches an image from the clipboard", "");
+    }
+
     /// Clipboard text from [`Cmd::PasteClipboard`]: sanitised like a bracketed paste and
     /// inserted at the cursor (never submitted).
     pub fn paste_clipboard(&mut self, text: &str, now: i64) {
@@ -3009,6 +3087,16 @@ impl App {
             hero: true,
             tz_offset_min: self.cfg.tz_offset_min,
             plain_logo: self.cfg.plain_logo,
+            attachments: self
+                .attachments
+                .iter()
+                .map(|a| synthesis_tui_render::agent::Image {
+                    name: a.name.clone(),
+                    bytes: a.bytes as f64,
+                    width: Some(f64::from(a.width)),
+                    height: Some(f64::from(a.height)),
+                })
+                .collect(),
             ..AgentOpts::default()
         };
         if let Some(ps) = &self.picker {

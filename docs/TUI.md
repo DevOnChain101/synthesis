@@ -33,6 +33,12 @@ session continues in place), `--once` (print one frame and exit), plus the `synt
 Input: `!cmd` runs a shell command (`!!` only records it), `#note` saves a note to an instruction
 file (you pick the file), `@file`, `@agent:name`, `@server:scheme://uri` (an MCP resource),
 Shift+Tab cycles the permission mode.
+Alt+V attaches the clipboard image (up to 5; sent as image blocks with the next message to the main
+agent, dropped with a notice for a model without vision); Ctrl+V tries an image and falls back to
+text. Works on WSL (the Windows clipboard, read with `powershell.exe` by absolute path; Linux
+`wl-paste`/`xclip` as the fallback; interop off gives a one-line notice) and on Windows; not on
+macOS/Linux yet. WSL is detected from `/proc`, not from environment variables. Limits: 5 s, 10 MB
+PNG, 8000x8000 px.
 
 ## Events
 

@@ -64,6 +64,12 @@ pub(crate) enum Msg {
     Input(Box<InputAsk>),
     /// The approval/question with this id was cancelled or expired on the harness side.
     Withdraw(String),
+    /// Alt+V / Ctrl+V: what the clipboard image reader found.
+    ImagePasted {
+        result:
+            Result<synthesis_tui_base::imgclip::ClipImage, synthesis_tui_base::imgclip::ImageError>,
+        fallback_text: bool,
+    },
     TaskDone(Box<TaskDone>),
     /// A `!cmd` finished (the model turn that follows is started by the runtime).
     UserCommandDone(Box<UserDone>),
