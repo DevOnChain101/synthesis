@@ -41,8 +41,14 @@ fn side_effect(name: &str) -> SideEffectClass {
     match name {
         "Write" | "Edit" | "NotebookEdit" => Write,
         "Bash" | "KillShell" | "terminal_spawn" | "terminal_signal" => Execute,
-        "WebFetch" | "WebSearch" | "browser_navigate" | "browser_click" | "browser_fill"
-        | "browser_press_key" => External,
+        "WebFetch"
+        | "WebSearch"
+        | "browser_navigate"
+        | "browser_click"
+        | "browser_fill"
+        | "browser_press_key"
+        | "browser_login"
+        | "browser_fill_secret" => External,
         "verify_run" => Execute,
         _ => Read,
     }

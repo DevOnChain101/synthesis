@@ -249,6 +249,9 @@ pub fn doctor(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
     for l in legacy_notes(env, &h, &root, std::env::current_exe().ok().as_deref()) {
         out!("{l}");
     }
+    for l in synthesis_app::login::doctor_lines(env, &h) {
+        out!("{l}");
+    }
     for l in synthesis_app::memcmd::doctor_lines(&h) {
         out!("{l}");
     }
@@ -453,6 +456,13 @@ fn report_discovery(env: &Env, h: &synthesis_app::Homes, cfg: &Config, cwd: Opti
         plan.servers.len(),
         plan.skipped.len()
     );
+    {
+        let b = synthesis_app::login::parse_settings(&st.synthesis.browser);
+        let stdio = synthesis_app::login::stdio_servers(&plan.servers);
+        for l in synthesis_app::login::exposure_warnings(&h.synthesis, &b, &stdio, enforcing) {
+            out!("warning: {}", san(&l));
+        }
+    }
     let pass = synthesis_app::mcp::read_passthrough(&h.synthesis.join("settings.json"));
     for s in &plan.servers {
         out!(

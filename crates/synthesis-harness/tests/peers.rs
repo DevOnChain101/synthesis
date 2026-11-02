@@ -2113,6 +2113,54 @@ async fn bypass_receiver_does_the_work_unasked_and_every_call_is_attributed() {
 }
 
 #[tokio::test]
+async fn a_delegate_worker_can_neither_log_in_nor_fill_secrets_even_in_bypass() {
+    let ask = Asked::new(Some(true), 0);
+    let script: Responder = Arc::new(|r| {
+        Some(if !is_delegate(r) {
+            Turn::text("B idle")
+        } else if tool_result(r, "l1").is_none() {
+            Turn::tool(
+                "l1",
+                "browser_login",
+                json!({"origin": "https://app.example.com"}),
+            )
+        } else if tool_result(r, "s1").is_none() {
+            Turn::tool(
+                "s1",
+                "browser_fill_secret",
+                json!({"ref": "e1", "secret": "pw"}),
+            )
+        } else if tool_result(r, "n1").is_none() {
+            Turn::tool(
+                "n1",
+                "browser_navigate",
+                json!({"url": "https://app.example.com", "profile": "acme"}),
+            )
+        } else {
+            Turn::text("worker done")
+        })
+    });
+    let d = deleg(
+        PermissionMode::BypassPermissions,
+        true,
+        Some(ask.clone()),
+        &[],
+        deleg_cfg(json!({})),
+        script,
+    );
+    delegate_to(&d, "log in for me", "bypassPermissions", &["sess-a"], None)
+        .await
+        .unwrap();
+    let reqs = d.b.rig.requests();
+    let all: String = reqs.iter().map(texts).collect();
+    assert!(
+        all.matches("came from another session").count() >= 3,
+        "{all}"
+    );
+    assert!(ask.seen.lock().unwrap().is_empty(), "nobody was even asked");
+}
+
+#[tokio::test]
 async fn manual_receiver_asks_its_own_user_for_every_call_and_shows_where_it_came_from() {
     // allowed in B: the work is done
     let yes = Asked::new(Some(true), 300);

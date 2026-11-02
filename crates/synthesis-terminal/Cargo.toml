@@ -14,7 +14,7 @@ synthesis-core = { path = "../synthesis-core" }
 synthesis-events = { version = "0.1.0", path = "../synthesis-events" }
 synthesis-platform = { path = "../synthesis-platform" }
 synthesis-sandbox = { path = "../synthesis-sandbox" }
-process-wrap = { version = "10", default-features = false, features = ["tokio1", "process-group", "job-object"] }
+process-wrap = { version = "10", default-features = false, features = ["tokio1", "process-group", "process-session", "job-object"] }
 regex = "1.13.1"
 tokio = { version = "1.54.1", default-features = false, features = ["rt", "time", "net", "io-util", "macros"] }
 tokio-util = { version = "0.7.20", default-features = false }

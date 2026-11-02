@@ -17,7 +17,7 @@ mod tui;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use synthesis_app::{CwdArg, mcp, memcmd, rewind, run};
+use synthesis_app::{CwdArg, login, mcp, memcmd, rewind, run};
 use synthesis_config::Env;
 
 #[derive(Parser)]
@@ -61,6 +61,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: import::ImportCmd,
     },
+    /// Finish a `browser_login` wait from another terminal.
+    Browser {
+        #[command(subcommand)]
+        cmd: BrowserCmd,
+    },
     /// Put the files a run changed back to their state before its first write (dry run unless --apply).
     Rewind(rewind::RewindArgs),
     /// Long-term memory: list, search, add, review, export (data only; never permissions).
@@ -68,6 +73,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: memcmd::MemoryCmd,
     },
+}
+
+#[derive(Subcommand)]
+enum BrowserCmd {
+    /// Tell a waiting `browser_login` that you finished logging in to PROFILE.
+    Done { profile: String },
 }
 
 #[derive(Subcommand)]
@@ -91,6 +102,9 @@ fn main() -> ExitCode {
         Some(Cmd::Import { cmd }) => import::run_cmd(&env, cmd),
         Some(Cmd::Memory { cmd }) => memcmd::run_cmd(&env, cmd),
         Some(Cmd::Rewind(a)) => rewind::run_cmd(&env, a),
+        Some(Cmd::Browser {
+            cmd: BrowserCmd::Done { profile },
+        }) => login::done_cmd(&env, &profile),
     };
     match r {
         Ok(code) => ExitCode::from(code),

@@ -121,6 +121,18 @@ async fn serve() -> String {
                     "/form" => ("200 OK", "", "text/html", FORM.to_owned()),
                     "/login" => ("200 OK", "", "text/html", LOGIN.to_owned()),
                     "/console" => ("200 OK", "", "text/html", console),
+                    "/setcookie" => (
+                        "200 OK",
+                        "",
+                        "text/html",
+                        "<title>Set</title><script>document.cookie='sid=persisted-by-login; max-age=3600; path=/'</script>ok".to_owned(),
+                    ),
+                    "/readcookie" => (
+                        "200 OK",
+                        "",
+                        "text/html",
+                        "<title>Read</title><p id=b></p><script>document.getElementById('b').textContent='cookies:'+document.cookie</script>".to_owned(),
+                    ),
                     "/flood" => ("200 OK", "", "text/html", FLOOD.to_owned()),
                     "/api/login" => (
                         "422 Unprocessable Entity",
@@ -913,5 +925,161 @@ async fn event_flood_fails_closed_body() {
             "{r:?}"
         );
     }
+    rt.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn persistent_profile_keeps_cookies_is_exclusive_and_survives_close() {
+    traced(
+        "persistent_profile_keeps_cookies_is_exclusive_and_survives_close",
+        persistent_profile_body(),
+    )
+    .await;
+}
+
+async fn persistent_profile_body() {
+    let Some(env) = browser_env() else { return };
+    let base = serve().await;
+    let home = tempfile::tempdir().unwrap();
+    let art = tempfile::tempdir().unwrap();
+    let dir = synthesis_browser::profile::create(home.path(), "acme").unwrap();
+    let mut opts = local_opts(art.path());
+    opts.profile = Some(dir.clone());
+
+    let rt = launch(opts.clone(), &env).await;
+    // a second browser on the same profile fails cleanly, before another process starts
+    let err = BrowserRuntime::launch(opts.clone(), &env)
+        .await
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("already open"), "{err}");
+    rt.navigate(&format!("{base}/setcookie"), WaitUntil::Load)
+        .await
+        .unwrap();
+    assert_eq!(rt.cookie_count(&base).await.unwrap(), 1);
+    assert_eq!(rt.page_origin().await.unwrap(), base);
+    #[cfg(unix)]
+    let pid = rt.pid();
+    rt.close_graceful().await.unwrap(); // flushes the cookie jar
+    #[cfg(unix)]
+    assert_eq!(
+        group_members(pid),
+        Vec::<String>::new(),
+        "no live processes after close"
+    );
+    assert!(dir.is_dir(), "a persistent profile is never deleted");
+
+    let rt = launch(opts.clone(), &env).await;
+    rt.navigate(&format!("{base}/readcookie"), WaitUntil::Load)
+        .await
+        .unwrap();
+    let s = rt.snapshot(50).await.unwrap();
+    assert!(
+        s.tree.expose().contains("cookies:sid=persisted-by-login"),
+        "{}",
+        s.tree.expose()
+    );
+    // a cancel/timeout kill (plain close) takes the whole tree down and keeps the profile
+    #[cfg(unix)]
+    let pid = rt.pid();
+    rt.close().await.unwrap();
+    #[cfg(unix)]
+    assert_eq!(
+        group_members(pid),
+        Vec::<String>::new(),
+        "kill leaves no process"
+    );
+    assert!(dir.is_dir());
+    // the lock is free again
+    launch(opts, &env).await.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_fill_never_leaves_a_typed_value_unguarded() {
+    traced(
+        "a_cancelled_fill_never_leaves_a_typed_value_unguarded",
+        cancelled_fill_body(),
+    )
+    .await;
+}
+
+async fn cancelled_fill_body() {
+    let Some(env) = browser_env() else { return };
+    let base = serve().await;
+    let art = tempfile::tempdir().unwrap();
+    let rt = launch(local_opts(art.path()), &env).await;
+    let spec = synthesis_browser::secret::parse_secrets(
+        serde_json::json!({"s": {"source": "{env:SYNT_X_TOKEN}", "origins": [base]}})
+            .as_object()
+            .unwrap(),
+    )
+    .0["s"]
+        .clone();
+    // Drop the fill at many points of its round trips. Whatever got sent and typed, the page must
+    // then be guarded: a snapshot either refuses, or shows no typed value.
+    for ms in [0u64, 1, 2, 3, 5, 8, 12, 18, 25, 40, 80] {
+        rt.navigate(&format!("{base}/login"), WaitUntil::Load)
+            .await
+            .unwrap();
+        let tree = rt.snapshot(50).await.unwrap().tree.expose().to_owned();
+        let r = ref_of(&tree, "textbox \"Username\"");
+        let _ =
+            tokio::time::timeout(Duration::from_millis(ms), rt.fill_secret(&r, &spec, "abc")).await;
+        tokio::time::sleep(Duration::from_millis(300)).await; // the browser finishes what was sent
+        match rt.snapshot(50).await {
+            Err(e) => assert!(e.to_string().contains("until the page navigates"), "{e}"),
+            Ok(s) => assert!(
+                !s.tree.expose().contains("value=\"abc\""),
+                "typed but unguarded after cancelling at {ms} ms"
+            ),
+        }
+    }
+    rt.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn filling_in_one_tab_does_not_release_the_guard_of_another() {
+    traced(
+        "filling_in_one_tab_does_not_release_the_guard_of_another",
+        two_tabs_body(),
+    )
+    .await;
+}
+
+async fn two_tabs_body() {
+    let Some(env) = browser_env() else { return };
+    let base = serve().await;
+    let art = tempfile::tempdir().unwrap();
+    let rt = launch(local_opts(art.path()), &env).await;
+    let spec = synthesis_browser::secret::parse_secrets(
+        serde_json::json!({"s": {"source": "{env:SYNT_X_TOKEN}", "origins": [base]}})
+            .as_object()
+            .unwrap(),
+    )
+    .0["s"]
+        .clone();
+    let fill_here = || async {
+        let tree = rt.snapshot(50).await.unwrap().tree.expose().to_owned();
+        let r = ref_of(&tree, "textbox \"Username\"");
+        rt.fill_secret(&r, &spec, "abc").await.unwrap(); // short: pixels and text are guarded
+    };
+    let guarded = || async { rt.screenshot(false).await.is_err() };
+    rt.navigate(&format!("{base}/login"), WaitUntil::Load)
+        .await
+        .unwrap();
+    fill_here().await; // tab A
+    rt.new_tab(Some(&format!("{base}/login"))).await.unwrap(); // tab B, current
+    assert!(!guarded().await, "B has no secret yet");
+    fill_here().await;
+    assert!(guarded().await, "B is armed");
+    rt.navigate(&format!("{base}/login"), WaitUntil::Load)
+        .await
+        .unwrap();
+    assert!(!guarded().await, "B moved on: released");
+    rt.select_tab(0).await.unwrap();
+    assert!(
+        guarded().await,
+        "A still holds the typed value: still guarded"
+    );
     rt.close().await.unwrap();
 }

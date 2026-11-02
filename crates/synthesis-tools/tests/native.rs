@@ -619,7 +619,7 @@ async fn invalid_shell_inputs_stay_strict() {
         .map(|s| s.name.clone())
         .collect();
     assert_eq!(names.len(), 20);
-    assert_eq!(f.reg.specs().count(), 40);
+    assert_eq!(f.reg.specs().count(), 42); // + browser_login, browser_fill_secret
 }
 
 #[tokio::test]

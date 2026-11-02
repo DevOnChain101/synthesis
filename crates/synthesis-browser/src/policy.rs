@@ -160,9 +160,15 @@ pub struct UrlPolicy {
     /// When non-empty only these domains (and subdomains) are allowed.
     pub allow_domains: Vec<String>,
     pub deny_domains: Vec<String>,
+    /// When non-empty, top-level navigations (not subresources) are limited to these domains and
+    /// their subdomains: a login profile only browses the sites it was logged in to.
+    pub document_allow_domains: Vec<String>,
     /// Loopback, RFC1918, link-local (cloud metadata 169.254.169.254) and `localhost` are
     /// blocked unless this is set. Needed to test a local dev server.
     pub allow_private_network: bool,
+    /// Loopback (localhost, 127.0.0.0/8, ::1) is reachable ONLY on these ports, while the rest of
+    /// the private network stays blocked: a login on `http://localhost:3000` opens port 3000.
+    pub loopback_ports: Vec<u16>,
     /// Used by `check_resolved` to look hostnames up.
     pub resolver: Resolver,
 }
@@ -247,7 +253,21 @@ impl UrlPolicy {
         if raw == "about:blank" {
             return Ok(());
         }
-        self.check(raw, &["http", "https"])
+        self.check(raw, &["http", "https"])?;
+        let host = Url::parse(raw)
+            .ok()
+            .and_then(|u| u.host().map(|h| normalise(&h.to_string())));
+        match host {
+            Some(h)
+                if !self.document_allow_domains.is_empty()
+                    && !matches_domain(&h, &self.document_allow_domains) =>
+            {
+                Err(format!(
+                    "domain `{h}` is not one of this browser profile's domains"
+                ))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Subresource requests: http(s) plus data/about.
@@ -269,6 +289,9 @@ impl UrlPolicy {
         }
         if let Some(Host::Domain(d)) = Url::parse(raw).map_err(|e| e.to_string())?.host() {
             let name = normalise(d);
+            if name == "localhost" && self.loopback_port_ok(raw) {
+                return Ok(()); // `check` already vetted the port; localhost resolves to loopback
+            }
             let priority = document
                 || (!self.allow_domains.is_empty() && matches_domain(&name, &self.allow_domains));
             if let Some(ip) = self
@@ -286,12 +309,28 @@ impl UrlPolicy {
 
     /// The address Chrome actually connected to (`Network.responseReceived.remoteIPAddress`,
     /// possibly bracketed) is private while the policy forbids that.
-    pub fn remote_ip_denied(&self, remote: &str) -> bool {
+    pub fn remote_ip_denied(&self, remote: &str, url: &str) -> bool {
         !self.allow_private_network
             && remote
                 .trim_matches(['[', ']'])
                 .parse::<IpAddr>()
-                .is_ok_and(ip_is_private)
+                .is_ok_and(|ip| {
+                    ip_is_private(ip) && !(ip.is_loopback() && self.loopback_port_ok(url))
+                })
+    }
+
+    /// `url` points at a loopback host on one of `loopback_ports`.
+    fn loopback_port_ok(&self, url: &str) -> bool {
+        let Ok(u) = Url::parse(url) else { return false };
+        let loop_host = match u.host() {
+            Some(Host::Domain(d)) => normalise(d) == "localhost",
+            Some(Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        };
+        loop_host
+            && u.port_or_known_default()
+                .is_some_and(|p| self.loopback_ports.contains(&p))
     }
 
     fn check(&self, raw: &str, schemes: &[&str]) -> Result<(), String> {
@@ -319,7 +358,7 @@ impl UrlPolicy {
                         .any(|s| name.ends_with(s))
             }
         };
-        if private && !self.allow_private_network {
+        if private && !self.allow_private_network && !self.loopback_port_ok(raw) {
             return Err(format!("`{name}` is a private/loopback/metadata address"));
         }
         Ok(())
@@ -346,6 +385,49 @@ mod tests {
         assert!(p.check_navigation("about:blank").is_ok());
         assert!(p.check_request("data:image/png;base64,AA").is_ok());
         assert!(p.check_request("file:///x").is_err());
+    }
+
+    #[test]
+    fn profile_domains_limit_navigation_but_not_subresources() {
+        let p = UrlPolicy {
+            document_allow_domains: vec!["example.com".into()],
+            ..Default::default()
+        };
+        assert!(p.check_navigation("https://app.example.com/x").is_ok());
+        assert!(p.check_navigation("about:blank").is_ok());
+        let e = p.check_navigation("https://evil.io/").unwrap_err();
+        assert!(e.contains("profile's domains"), "{e}");
+        assert!(p.check_navigation("https://example.com.evil.io/").is_err());
+        assert!(p.check_request("https://cdn.other.net/a.js").is_ok());
+    }
+
+    #[test]
+    fn loopback_gate_is_scoped_to_the_recorded_port() {
+        let p = UrlPolicy {
+            loopback_ports: vec![3000],
+            ..Default::default()
+        };
+        for ok in [
+            "http://localhost:3000/a",
+            "http://127.0.0.1:3000/",
+            "http://[::1]:3000/",
+        ] {
+            assert!(p.check_navigation(ok).is_ok(), "{ok}");
+            assert!(p.check_request(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://localhost:3001/",
+            "http://127.0.0.1/",
+            "http://10.0.0.5:3000/",
+            "http://169.254.169.254:3000/",
+            "http://metadata.google.internal:3000/",
+        ] {
+            assert!(p.check_navigation(bad).is_err(), "{bad}");
+        }
+        assert!(!p.remote_ip_denied("127.0.0.1", "http://localhost:3000/x"));
+        assert!(p.remote_ip_denied("127.0.0.1", "http://localhost:3001/x"));
+        assert!(p.remote_ip_denied("127.0.0.1", "http://rebind.example.com:3000/"));
+        assert!(p.remote_ip_denied("10.0.0.5", "http://localhost:3000/"));
     }
 
     #[test]
@@ -496,8 +578,14 @@ mod tests {
                 .await
                 .is_ok()
         );
-        assert!(p.remote_ip_denied("[fd00::1]") && p.remote_ip_denied("127.0.0.1"));
-        assert!(!p.remote_ip_denied("93.184.216.34") && !open.remote_ip_denied("127.0.0.1"));
+        assert!(
+            p.remote_ip_denied("[fd00::1]", "http://x/")
+                && p.remote_ip_denied("127.0.0.1", "http://x/")
+        );
+        assert!(
+            !p.remote_ip_denied("93.184.216.34", "http://x/")
+                && !open.remote_ip_denied("127.0.0.1", "http://x/")
+        );
     }
 
     #[test]

@@ -46,8 +46,10 @@ tokio-util = { version = "0.7.20", default-features = false }
 uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
-# O_NOFOLLOW constant only (no unsafe): note files are never opened through a symlink.
+# O_NOFOLLOW constant only (no unsafe): files are never opened through a symlink; tcflush (safe
+# wrapper) drops typed-ahead terminal input before a prompt
 libc = "0.2"
+rustix = { version = "1", features = ["termios"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

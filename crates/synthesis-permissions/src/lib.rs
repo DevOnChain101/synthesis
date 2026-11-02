@@ -378,6 +378,16 @@ impl Env {
     }
 }
 
+/// `name` appears in `cmd` as a whole path component (delimited by `/`, space, quote, `=`, a
+/// shell operator or the ends), however the directory above it was spelled.
+fn names_component(cmd: &str, name: &str) -> bool {
+    let is_edge =
+        |c: Option<char>| c.is_none_or(|c| c.is_whitespace() || "/'\"=;&|()<>`,:".contains(c));
+    cmd.match_indices(name).any(|(i, _)| {
+        is_edge(cmd[..i].chars().next_back()) && is_edge(cmd[i + name.len()..].chars().next())
+    })
+}
+
 /// Result of `peer_bash_scan`.
 enum Scan {
     Clear,
@@ -758,7 +768,13 @@ impl Permissions {
                 .env
                 .deny_read
                 .iter()
-                .any(|p| cmd.contains(p.to_string_lossy().as_ref()));
+                .any(|p| cmd.contains(p.to_string_lossy().as_ref()))
+                // `cd <home> && cat browser-profiles/..`, `~/.synt/browser-profiles`,
+                // `$SYNT_HOME/browser-profiles`: the saved logins by their directory name
+                || self.env.deny_read.iter().any(|p| {
+                    p.file_name().is_some_and(|n| n == "browser-profiles")
+                        && names_component(cmd, "browser-profiles")
+                });
             return hit.then_some(WHY);
         }
         let mut targets: Vec<String> = ["file_path", "path", "notebook_path"]
@@ -1692,6 +1708,19 @@ impl Permissions {
         // Dialogs to the user, not real tool actions: ask in every mode, bypass and dontAsk included.
         if DIALOG_TOOLS.contains(&tool) {
             return v(Ask, "dialog tool");
+        }
+        // Hands the browser to the person: asks in every mode (auto and bypass included) and no
+        // allow rule can pre-approve it; only a deny rule or dontAsk can stop it earlier.
+        if tool == "browser_login" {
+            if mode == Mode::DontAsk {
+                return v(
+                    Deny,
+                    "dontAsk mode: browser_login needs the person's approval",
+                );
+            }
+            let mut r = v(Ask, "opens a visible browser for the person to log in");
+            r.hard = true;
+            return r;
         }
         // which path the tool touches is unclear: never decided by a rule or a mode (not even bypass)
         if ambiguous_paths(tool, input) {

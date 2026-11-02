@@ -652,6 +652,22 @@ impl Harness {
         mut forced: Option<String>,
         recheck: bool,
     ) -> Result<(), Denial> {
+        // Logging in and typing a stored secret are the local person's decisions, never work a
+        // peer session can delegate.
+        let saved_login = call.name == "browser_navigate" && input.get("profile").is_some();
+        if agent.origin.is_some()
+            && (saved_login
+                || matches!(call.name.as_str(), "browser_login" | "browser_fill_secret"))
+        {
+            return Err(Denial {
+                unavailable: false,
+                from_hook: false,
+                text: format!(
+                    "Permission denied: {} cannot run for a request that came from another session. The tool was NOT run.",
+                    call.name
+                ),
+            });
+        }
         for round in 0..4 {
             let mode = *lock(&agent.mode);
             // SendMessage: deny/ask rules also see every spelling of the session `to` resolves to.

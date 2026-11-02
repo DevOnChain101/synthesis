@@ -435,6 +435,8 @@ pub fn synthesis_state_paths(synthesis_home: &Path) -> Vec<PathBuf> {
         "projects",
         // peer endpoint sockets, `peer.key` and the session registry (messaging.md B8.4)
         "run",
+        // saved browser logins (cookies of the person's sessions) and the login hand-off files
+        "browser-profiles",
     ]
     .map(|n| synthesis_home.join(n))
     .to_vec()
@@ -633,6 +635,7 @@ mod tests {
     fn peer_run_dir_is_synthesis_state() {
         let home = p("/h/.synt");
         assert!(synthesis_state_paths(&home).contains(&home.join("run")));
+        assert!(synthesis_state_paths(&home).contains(&home.join("browser-profiles")));
     }
 
     #[test]

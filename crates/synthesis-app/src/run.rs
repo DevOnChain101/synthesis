@@ -500,8 +500,23 @@ fn env_pair_ok(k: &str, v: &str) -> bool {
 struct AuditDeny;
 
 impl Approver for AuditDeny {
-    fn approve<'a>(&'a self, _: ApprovalRequest, _: &'a CancellationToken) -> BoxFut<'a, Approval> {
-        Box::pin(async {
+    fn approve<'a>(
+        &'a self,
+        req: ApprovalRequest,
+        cancel: &'a CancellationToken,
+    ) -> BoxFut<'a, Approval> {
+        Box::pin(async move {
+            // A person at the terminal can approve a login hand-off (it needs them anyway).
+            // Nothing else is ever approved here, and no terminal means no.
+            if req.tool == "browser_login" {
+                let q = format!(
+                    "Open a visible browser at {} so you can log in?",
+                    sanitize_for_display(req.input["origin"].as_str().unwrap_or("?"))
+                );
+                if crate::login::ask_yes(&q, cancel).await {
+                    return Approval::allow();
+                }
+            }
             Approval {
                 reviewer: "policy:non-interactive",
                 ..Approval::auto_denied()
@@ -588,7 +603,7 @@ pub fn prepare(
     );
     let is_tui = matches!(front, Front::Tui);
     let h = homes(env)?;
-    let synthesis_deny = synthesis_sandbox::synthesis_state_paths(&h.synthesis);
+    let mut synthesis_deny = synthesis_sandbox::synthesis_state_paths(&h.synthesis);
     // Before anything is created (worktree, store): a bad grant is a usage error.
     let reads = {
         let mut probe = SandboxPolicy::standard(cwd, Path::new("/synthesis-probe-tmp"));
@@ -655,6 +670,17 @@ pub fn prepare(
         &h.synthesis,
         env,
     )?;
+
+    // `synt.browser` comes from the user's own settings file only (the loader enforces it)
+    let browser = crate::login::parse_settings(&settings.synthesis.browser);
+    for w in &browser.warnings {
+        eprintln!("synt: warning: {}", sanitize_for_display(w));
+    }
+    // exact values of the stored browser secrets are masked in events, transcript and database
+    let mut res = res;
+    res.secrets.extend(browser.values(env));
+    // files that hold stored secrets are state too: hidden from commands, Read/Grep/Glob and writes
+    synthesis_deny.extend(browser.secret_files());
 
     let price = pricing(&h.synthesis.join("settings.json"), &res.label, &res.model);
     if limits.max_cost_usd.is_some() && price.is_none() {
@@ -1018,6 +1044,9 @@ pub fn prepare(
             .deny_reads(state_paths.clone())
             .protect(state_paths),
     );
+    // Saved logins or {file:} secrets exist: the main agent gets the stricter Bash scan and the
+    // secret-file read ban the peer responder has (`$`, globs and `~user` words become a hard ask).
+    perms.env.deny_secret_reads = browser.holds_credentials(&h.synthesis);
     perms.env.auto_mode = synthesis_permissions::AutoModeSettings {
         classify_all_shell: user_settings.auto_mode.classify_all_shell.unwrap_or(false),
         use_auto_mode_during_plan: user_settings
@@ -1264,9 +1293,40 @@ pub fn prepare(
     }
 
     // interactive: a Bash call that times out moves to the background; headless kills it (D6)
+    let stdio = crate::login::stdio_servers(&mplan.servers);
+    for w in crate::login::exposure_warnings(
+        &h.synthesis,
+        &browser,
+        &stdio,
+        sandbox_mode == SandboxMode::Enforce,
+    ) {
+        let w = sanitize_for_display(&w);
+        if is_tui {
+            notices.push(w); // a startup note and a `notice` event; stderr would garble the screen
+        } else {
+            eprintln!("synt: warning: {w}");
+        }
+    }
+    // The interactive app asks in its own dialogs; headless asks on the terminal.
+    let browser_host: Arc<dyn synthesis_tools::BrowserHost> = if is_tui {
+        Arc::new(crate::login::DialogHost {
+            approver: approver.clone(),
+            sink: sink.clone(),
+        })
+    } else {
+        Arc::new(crate::login::CliHost { sink: sink.clone() })
+    };
     let mut toolbox = ToolBox::new(
         Registry::with_terminal_policy(rt.clone(), make_policy)
             .with_new_tools()
+            .with_browser(browser.config(
+                synthesis_tools::BrowserConfig::default(),
+                &h.synthesis,
+                env,
+                browser_host,
+                sandbox_mode == SandboxMode::Enforce,
+                stdio,
+            ))
             .with_background_on_timeout(is_tui),
     );
     if let Some(a) = mcp_attach {
