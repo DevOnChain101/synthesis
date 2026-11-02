@@ -1054,13 +1054,13 @@ fn images_of_old_sessions_are_replaced_in_place_and_recent_ones_are_kept() {
     age(&e.home, "old", "2026-10-01T00:00:00.000Z");
     age(&e.home, "new", "2026-11-09T00:00:00.000Z");
     assert_eq!(
-        store.purge_images(0, now).unwrap(),
+        store.purge_images(0, now).unwrap().images,
         0,
         "0 days keeps everything"
     );
     assert!(contents(&e.home, "old")[0].1.contains("SECRETPIXELS"));
     assert_eq!(
-        store.purge_images(30, now).unwrap(),
+        store.purge_images(30, now).unwrap().images,
         2,
         "the message image and the nested one"
     );
@@ -1078,7 +1078,7 @@ fn images_of_old_sessions_are_replaced_in_place_and_recent_ones_are_kept() {
         "recent session untouched"
     );
     // idempotent
-    assert_eq!(store.purge_images(30, now).unwrap(), 0);
+    assert_eq!(store.purge_images(30, now).unwrap().images, 0);
 }
 
 #[test]
@@ -1093,13 +1093,17 @@ fn a_locked_database_is_skipped_not_an_error() {
     let other = rusqlite::Connection::open(e.home.join("synthesis.db")).unwrap();
     other.execute_batch("BEGIN IMMEDIATE").unwrap();
     let now = time::macros::datetime!(2026-11-10 12:00 UTC);
-    assert_eq!(store.purge_images(30, now).unwrap(), 0);
+    assert_eq!(store.purge_images(30, now).unwrap().images, 0);
     other.execute_batch("COMMIT").unwrap();
     assert!(
         contents(&e.home, "s")[0].1.contains("SECRETPIXELS"),
         "nothing changed while locked"
     );
-    assert_eq!(store.purge_images(30, now).unwrap(), 1, "next time it runs");
+    assert_eq!(
+        store.purge_images(30, now).unwrap().images,
+        1,
+        "next time it runs"
+    );
 }
 
 fn raw_bytes(home: &Path) -> Vec<u8> {
@@ -1138,7 +1142,7 @@ fn only_content_blocks_lose_their_images_and_the_bytes_are_gone_from_the_files()
         "control: the bytes are in the files"
     );
     let now = time::macros::datetime!(2026-11-10 12:00 UTC);
-    assert_eq!(store.purge_images(30, now).unwrap(), 2);
+    assert_eq!(store.purge_images(30, now).unwrap().images, 2);
     let rows = contents(&e.home, "s");
     assert!(
         rows[1].1.contains("KEEPME") && rows[1].1.contains("\"image\""),
@@ -1157,4 +1161,47 @@ fn only_content_blocks_lose_their_images_and_the_bytes_are_gone_from_the_files()
         !has(&raw, "SECRETPIXELS") && !has(&raw, "TOOLSHOT"),
         "image bytes survive in the database files"
     );
+}
+
+#[test]
+fn meta_images_go_too_and_a_log_held_open_by_a_reader_is_reported_not_hidden() {
+    let e = env();
+    let store = e.store();
+    {
+        let mut w = create(&e, "s", &e.dir("s"));
+        w.append_message(NewMessage::user(image_message("see")))
+            .unwrap();
+    }
+    let c = rusqlite::Connection::open(e.home.join("synthesis.db")).unwrap();
+    c.execute(
+        "UPDATE messages SET meta = ?1",
+        [
+            json!({"extra": {"attachment": {"type": "image", "source": {"data": "METAPIXELS"}}}})
+                .to_string(),
+        ],
+    )
+    .unwrap();
+    age(&e.home, "s", "2020-01-01T00:00:00.000Z");
+    // a reader with an open snapshot keeps the log from being truncated
+    let reader = rusqlite::Connection::open(e.home.join("synthesis.db")).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT count(*) FROM messages;")
+        .unwrap();
+    let now = time::macros::datetime!(2026-11-10 12:00 UTC);
+    let r = store.purge_images(30, now).unwrap();
+    assert_eq!(r.images, 2, "the content image and the one in meta");
+    assert!(!r.wal_truncated, "a busy checkpoint is said, not hidden");
+    let (content, meta): (String, String) = c
+        .query_row("SELECT content, meta FROM messages", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert!(
+        !content.contains("SECRETPIXELS") && !meta.contains("METAPIXELS"),
+        "{content} {meta}"
+    );
+    reader.execute_batch("COMMIT").unwrap();
+    // nothing left to do: nothing reported
+    let again = store.purge_images(30, now).unwrap();
+    assert_eq!((again.images, again.wal_truncated), (0, true));
 }
