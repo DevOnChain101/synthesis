@@ -545,3 +545,134 @@ fn persisting_tui_keeps_everything_else_never_overwrites_a_bad_file_and_writes_n
         "no temp file is left behind"
     );
 }
+
+fn leftovers(dir: &Path) -> Vec<String> {
+    fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect()
+}
+
+fn set_key(v: &mut serde_json::Value) -> std::io::Result<()> {
+    v["mine"] = json!(1);
+    Ok(())
+}
+
+#[test]
+fn a_failed_edit_leaves_the_file_and_no_temp_file() {
+    let f = fx();
+    let p = f.home.path().join("settings.json");
+    fs::write(&p, r#"{"keep": true}"#).unwrap();
+    let e =
+        edit_json_atomic(&p, "user settings", |_| Err(std::io::Error::other("no"))).unwrap_err();
+    assert_eq!(e.to_string(), "no");
+    assert_eq!(fs::read_to_string(&p).unwrap(), r#"{"keep": true}"#);
+    assert!(leftovers(f.home.path()).is_empty());
+    // a missing file is created; an empty or invalid one is never replaced
+    let q = f.home.path().join("new.json");
+    edit_json_atomic(&q, "x", set_key).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&q).unwrap()).unwrap()["mine"],
+        1
+    );
+    fs::write(&p, "").unwrap();
+    assert!(edit_json_atomic(&p, "x", set_key).is_err());
+    assert_eq!(fs::read_to_string(&p).unwrap(), "");
+    assert!(leftovers(f.home.path()).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_temp_file_is_private_from_the_start_and_the_mode_of_the_original_is_kept() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fx();
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let new = f.home.path().join("new.json");
+    edit_json_atomic(&new, "x", set_key).unwrap();
+    assert_eq!(mode(&new), 0o600, "a new file is private");
+    let old = f.home.path().join("old.json");
+    fs::write(&old, "{}").unwrap();
+    fs::set_permissions(&old, fs::Permissions::from_mode(0o640)).unwrap();
+    edit_json_atomic(&old, "x", set_key).unwrap();
+    assert_eq!(mode(&old), 0o640);
+    // a read-only directory: nothing can be created, the file is untouched, nothing is left
+    let ro = tempfile::tempdir().unwrap();
+    let p = ro.path().join("settings.json");
+    fs::write(&p, "{}").unwrap();
+    fs::set_permissions(ro.path(), fs::Permissions::from_mode(0o500)).unwrap();
+    let r = edit_json_atomic(&p, "x", set_key);
+    fs::set_permissions(ro.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    if r.is_ok() {
+        return; // running as root: the directory permission does not bind
+    }
+    assert_eq!(fs::read_to_string(&p).unwrap(), "{}");
+    assert!(leftovers(ro.path()).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_settings_file_is_followed_and_stays_a_link_a_dangling_one_is_refused() {
+    let f = fx();
+    let real_dir = tempfile::tempdir().unwrap();
+    let real = real_dir.path().join("dotfiles-settings.json");
+    fs::write(&real, r#"{"keep": 1}"#).unwrap();
+    let link = f.home.path().join("settings.json");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    edit_json_atomic(&link, "user settings", set_key).unwrap();
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "still a link"
+    );
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&real).unwrap()).unwrap();
+    assert_eq!((v["keep"].clone(), v["mine"].clone()), (json!(1), json!(1)));
+    assert!(leftovers(f.home.path()).is_empty() && leftovers(real_dir.path()).is_empty());
+    // dangling: refused, and no file appears where the link points
+    let dangling = f.home.path().join("gone.json");
+    let nowhere = real_dir.path().join("nowhere.json");
+    std::os::unix::fs::symlink(&nowhere, &dangling).unwrap();
+    let e = edit_json_atomic(&dangling, "user settings", set_key).unwrap_err();
+    assert!(e.to_string().contains("dangling symlink"), "{e}");
+    assert!(!nowhere.exists());
+}
+
+#[test]
+fn a_change_made_while_editing_is_kept_not_overwritten_and_endless_changes_are_refused() {
+    let f = fx();
+    let p = f.home.path().join("settings.json");
+    fs::write(&p, r#"{"a": 1}"#).unwrap();
+    // another process adds "b" during our first edit: the second round sees it and keeps it
+    let mut first = true;
+    let q = p.clone();
+    edit_json_atomic(&p, "user settings", |v| {
+        if std::mem::take(&mut first) {
+            fs::write(&q, r#"{"a": 1, "b": 2}"#).unwrap();
+        }
+        v["mine"] = json!(true);
+        Ok(())
+    })
+    .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+    assert_eq!(
+        (v["b"].clone(), v["mine"].clone()),
+        (json!(2), json!(true)),
+        "{v}"
+    );
+    // changing every time: refused after 3 rounds, the other writer's file is what stays
+    let mut n = 0;
+    let q = p.clone();
+    let e = edit_json_atomic(&p, "user settings", |v| {
+        n += 1;
+        fs::write(&q, format!(r#"{{"writer": {n}}}"#)).unwrap();
+        v["mine"] = json!(1);
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(e.to_string().contains("keeps changing"), "{e}");
+    assert_eq!(n, 3);
+    assert_eq!(fs::read_to_string(&p).unwrap(), r#"{"writer": 3}"#);
+    assert!(leftovers(f.home.path()).is_empty());
+}

@@ -336,41 +336,135 @@ pub fn persist_allow_rules(project_root: &Path, rules: &[String]) -> std::io::Re
     Ok(())
 }
 
-/// Read-modify-write of one JSON file: the file is read again first (edits made meanwhile
-/// survive), `edit` changes it (a missing file starts as `{}`), every other key and the key order
-/// are kept. A file that cannot be parsed is never overwritten (`InvalidData`). The write goes
-/// through a temp file and a rename, with the permissions of the file it replaces. An `Err` from
-/// `edit` writes nothing, so `edit` is also where the caller validates the result.
+/// Read-modify-write of one JSON file: the file is read first, `edit` changes it (a missing file
+/// starts as `{}`), every other key and the key order are kept. A file that cannot be parsed is
+/// never overwritten (`InvalidData`). An `Err` from `edit` writes nothing, so `edit` is also where
+/// the caller validates the result; because the file may change while `edit` runs it is called
+/// again on the new content (at most 3 times, then `Err`).
+///
+/// Writing: a symlinked `path` is followed and the resolved target is written (the link stays a
+/// link; a dangling link is refused); the temp file sits next to the target, has an unpredictable
+/// name, is created with `create_new` and the mode of the file it replaces (0600 for a new one) so
+/// it is never wider than the original, is flushed to disk, and replaces the target with one
+/// rename (the target is never empty or half written); the directory is synced on unix. The temp
+/// file is removed on every error. Right before the rename the target's size, mtime and content
+/// hash are compared with what was read: a change means another round, not an overwrite.
 pub fn edit_json_atomic(
     path: &Path,
     what: &str,
-    edit: impl FnOnce(&mut Value) -> std::io::Result<()>,
+    mut edit: impl FnMut(&mut Value) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    let mut v = match read_json(path, what) {
-        Ok(Some(v)) => v,
-        Ok(None) => Value::Object(Map::new()),
-        Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
-    };
-    edit(&mut v)?;
-    let dir = path.parent().unwrap_or(Path::new("."));
+    use std::io::Write;
+    let target = resolve_target(path, what)?;
+    let dir = target.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let tmp = dir.join(format!("{name}.tmp-{}", std::process::id()));
-    std::fs::write(&tmp, serde_json::to_string_pretty(&v)? + "\n")?;
-    let done = std::fs::metadata(path)
-        .and_then(|m| std::fs::set_permissions(&tmp, m.permissions()))
-        .or_else(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        })
-        .and_then(|()| std::fs::rename(&tmp, path));
-    if done.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    let name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+    for _ in 0..3 {
+        let before = fingerprint(&target)?;
+        let mut v = match read_json(&target, what) {
+            Ok(Some(v)) => v,
+            Ok(None) => Value::Object(Map::new()),
+            Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        };
+        edit(&mut v)?;
+        let text = serde_json::to_string_pretty(&v)? + "\n";
+        let tmp = dir.join(temp_name(name));
+        let mut open = std::fs::OpenOptions::new();
+        open.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+            let mode = std::fs::metadata(&target).map_or(0o600, |m| m.mode() & 0o777);
+            open.mode(mode);
+        }
+        let mut f = open.open(&tmp)?;
+        #[cfg_attr(unix, allow(unused_mut))]
+        let mut written = f.write_all(text.as_bytes()).and_then(|()| f.sync_all());
+        #[cfg(not(unix))]
+        if written.is_ok()
+            && let Ok(m) = std::fs::metadata(&target)
+        {
+            written = std::fs::set_permissions(&tmp, m.permissions());
+        }
+        drop(f);
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        // someone else wrote the file while we edited: start again from what is there now
+        if fingerprint(&target)? != before {
+            let _ = std::fs::remove_file(&tmp);
+            continue;
+        }
+        if let Err(e) = std::fs::rename(&tmp, &target) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        #[cfg(unix)]
+        std::fs::File::open(dir).and_then(|d| d.sync_all())?;
+        return Ok(());
     }
-    done
+    Err(std::io::Error::other(format!(
+        "{what}: {} keeps changing while it is edited; not written",
+        target.display()
+    )))
+}
+
+/// `path`, or where it points when it is a symlink (a dangling link is an error).
+fn resolve_target(path: &Path, what: &str) -> std::io::Result<PathBuf> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(path).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "{what}: {} is a dangling symlink; not writing",
+                    path.display()
+                ),
+            )
+        }),
+        _ => Ok(path.to_path_buf()),
+    }
+}
+
+/// Size, mtime and a hash of the content; `None` for a file that is not there.
+fn fingerprint(p: &Path) -> std::io::Result<Option<(u64, Option<std::time::SystemTime>, u64)>> {
+    use std::hash::{Hash, Hasher};
+    match std::fs::read(p) {
+        Ok(b) => {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            b.hash(&mut h);
+            let mtime = std::fs::metadata(p).and_then(|m| m.modified()).ok();
+            Ok(Some((b.len() as u64, mtime, h.finish())))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// `.name.<random>.tmp`: random from the OS-seeded hasher, so another user cannot predict it.
+fn temp_name(name: &str) -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let r = |_: u8| {
+        std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish()
+    };
+    format!(".{name}.{:016x}{:016x}.tmp", r(0), r(1))
+}
+
+#[cfg(test)]
+mod tmp_tests {
+    use super::temp_name;
+
+    #[test]
+    fn temp_names_are_random_hidden_and_never_the_pid() {
+        let (a, b) = (temp_name("settings.json"), temp_name("settings.json"));
+        assert_ne!(a, b);
+        assert!(a.starts_with(".settings.json.") && a.ends_with(".tmp") && a.len() > 40);
+    }
 }
 
 /// `Ok(None)`: no such file. `Err`: it exists but is unusable (names the file, never a value).
