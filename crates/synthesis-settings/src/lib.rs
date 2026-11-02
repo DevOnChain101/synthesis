@@ -344,7 +344,7 @@ pub fn persist_allow_rules(project_root: &Path, rules: &[String]) -> std::io::Re
         } else {
             "\n"
         };
-        std::fs::write(&gi, format!("{cur}{sep}settings.local.json\n"))?;
+        write_text_atomic(&gi, &format!("{cur}{sep}settings.local.json\n"))?;
     }
     Ok(())
 }
@@ -431,6 +431,52 @@ pub fn edit_json_atomic(
         "{what}: {} keeps changing while it is edited; not written",
         target.display()
     )))
+}
+
+/// Replaces `path` with `text` through a temp file and a rename: never writes through a hard link
+/// (the rename replaces the directory entry, the other names keep the old content), never follows
+/// a symlink (checked again right before the rename), and keeps the mode of the file it replaces
+/// (0644 for a new one: a `.gitignore` is meant to be shared).
+fn write_text_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let refuse = |p: &Path| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is a symbolic link; not writing through it", p.display()),
+        )
+    };
+    let is_link = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink());
+    if is_link(path) {
+        return Err(refuse(path));
+    }
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let tmp = dir.join(temp_name(name));
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let mode = std::fs::metadata(path).map_or(0o644, |m| m.mode() & 0o777);
+        open.mode(mode);
+    }
+    let mut f = open.open(&tmp)?;
+    let r = f
+        .write_all(text.as_bytes())
+        .and_then(|()| f.sync_all())
+        .and_then(|()| {
+            drop(f);
+            // the project may have swapped the name for a link while the temp was written
+            if is_link(path) {
+                Err(refuse(path))
+            } else {
+                std::fs::rename(&tmp, path)
+            }
+        });
+    if r.is_err() {
+        remove_tmp(&tmp);
+    }
+    r
 }
 
 /// Removes a temp file; a read-only flag copied from the original (Windows) would make the removal

@@ -736,3 +736,27 @@ fn a_persisted_rule_file_is_written_atomically_with_a_private_mode() {
     );
     assert!(leftovers(&f.proj.path().join(".synthesis")).is_empty());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_hardlinked_gitignore_is_replaced_not_modified_in_place() {
+    let f = fx();
+    let dir = f.proj.path().join(".synthesis");
+    fs::create_dir_all(&dir).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let other = outside.path().join("someone-elses-file");
+    fs::write(&other, "precious\n").unwrap();
+    fs::hard_link(&other, dir.join(".gitignore")).unwrap();
+    persist_allow_rules(f.proj.path(), &["Read".into()]).unwrap();
+    assert_eq!(
+        fs::read_to_string(&other).unwrap(),
+        "precious\n",
+        "written through the hard link"
+    );
+    let gi = fs::read_to_string(dir.join(".gitignore")).unwrap();
+    assert!(
+        gi.contains("precious") && gi.contains("settings.local.json"),
+        "{gi}"
+    );
+    assert!(leftovers(&dir).is_empty());
+}
