@@ -179,6 +179,12 @@ async fn runtime(
             o.policy = cfg.policy.clone();
             o.no_sandbox = cfg.no_sandbox;
             if let Some(name) = profile {
+                // choosing a saved login is the local person's decision, like logging in
+                if ctx.sub_agent {
+                    return Err(BrowserError::Refused(
+                        "saved logins are not available to sub-agents".into(),
+                    ));
+                }
                 require_sandbox(&cfg)?;
                 let home = cfg.home.as_deref().ok_or_else(|| {
                     BrowserError::Launch("browser profiles are not available here".into())

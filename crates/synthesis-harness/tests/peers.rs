@@ -2130,6 +2130,12 @@ async fn a_delegate_worker_can_neither_log_in_nor_fill_secrets_even_in_bypass() 
                 "browser_fill_secret",
                 json!({"ref": "e1", "secret": "pw"}),
             )
+        } else if tool_result(r, "n1").is_none() {
+            Turn::tool(
+                "n1",
+                "browser_navigate",
+                json!({"url": "https://app.example.com", "profile": "acme"}),
+            )
         } else {
             Turn::text("worker done")
         })
@@ -2148,7 +2154,7 @@ async fn a_delegate_worker_can_neither_log_in_nor_fill_secrets_even_in_bypass() 
     let reqs = d.b.rig.requests();
     let all: String = reqs.iter().map(texts).collect();
     assert!(
-        all.matches("came from another session").count() >= 2,
+        all.matches("came from another session").count() >= 3,
         "{all}"
     );
     assert!(ask.seen.lock().unwrap().is_empty(), "nobody was even asked");

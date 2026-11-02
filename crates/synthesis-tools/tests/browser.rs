@@ -1320,3 +1320,33 @@ async fn saved_login_refusals_are_cached_and_stdio_mcp_blocks_the_credential_too
         .await;
     assert!(!text(&o).contains("allow_with_mcp"), "{o:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sub_agent_cannot_choose_a_saved_login_and_nobody_is_asked() {
+    let (d, home) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    saved_profile(home.path());
+    let p = person(true);
+    let reg = Registry::unsandboxed_for_tests()
+        .with_new_tools()
+        .with_browser(BrowserConfig {
+            home: Some(home.path().to_owned()),
+            host: Some(p.clone()),
+            process_env: Some(proc_env(&[])),
+            allow_unsandboxed: true,
+            ..Default::default()
+        });
+    let mut c = ctx(d.path(), "sub1");
+    c.sub_agent = true;
+    let o = reg
+        .execute(
+            "browser_navigate",
+            json!({"url": "about:blank", "profile": "acme"}),
+            &c,
+        )
+        .await;
+    assert!(o.is_error && text(&o).contains("sub-agents"), "{o:?}");
+    assert!(
+        p.profiles.lock().unwrap().is_empty(),
+        "refused before any dialog"
+    );
+}

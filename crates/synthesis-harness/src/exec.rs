@@ -654,8 +654,10 @@ impl Harness {
     ) -> Result<(), Denial> {
         // Logging in and typing a stored secret are the local person's decisions, never work a
         // peer session can delegate.
+        let saved_login = call.name == "browser_navigate" && input.get("profile").is_some();
         if agent.origin.is_some()
-            && matches!(call.name.as_str(), "browser_login" | "browser_fill_secret")
+            && (saved_login
+                || matches!(call.name.as_str(), "browser_login" | "browser_fill_secret"))
         {
             return Err(Denial {
                 unavailable: false,

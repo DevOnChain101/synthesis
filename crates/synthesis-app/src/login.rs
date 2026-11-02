@@ -399,27 +399,55 @@ fn signal_done(dir: &Path, token: &str) -> Result<(), String> {
     f.write_all(token.as_bytes()).map_err(|e| e.to_string())
 }
 
-/// Removes the wait markers when the wait ends, however it ends.
-struct Waiting<'a>(&'a LoginRequest);
+/// The wait marker of ONE login per profile. Created exclusively (a second login on the same
+/// profile fails instead of clobbering the first), it carries a unique id, and `Drop` removes
+/// only a marker that still holds that id, so one login never deletes another's files.
+struct Waiting {
+    marker: std::path::PathBuf,
+    done: std::path::PathBuf,
+    id: String,
+}
 
-impl<'a> Waiting<'a> {
-    fn new(req: &'a LoginRequest) -> Result<Self, String> {
+impl Waiting {
+    fn new(req: &LoginRequest) -> Result<Self, String> {
         let dir = req.done_file.parent().unwrap_or(Path::new("."));
-        let _ = std::fs::remove_file(&req.done_file);
-        let _ = std::fs::remove_file(dir.join(WAITING_FILE));
+        let marker = dir.join(WAITING_FILE);
+        // a marker left by a crashed run is stale once the login timeout (plus slack) has passed
+        if std::fs::metadata(&marker)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > req.timeout + Duration::from_secs(60))
+        {
+            let _ = std::fs::remove_file(&marker);
+        }
+        let id = uuid::Uuid::new_v4().simple().to_string();
         let mut o = std::fs::OpenOptions::new();
-        open_nofollow(o.write(true).create_new(true))
-            .open(dir.join(WAITING_FILE))
+        let mut f = open_nofollow(o.write(true).create_new(true))
+            .open(&marker)
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::AlreadyExists => format!(
+                    "another login is already waiting on profile {}; finish or cancel it first",
+                    req.profile
+                ),
+                _ => format!("cannot mark the wait: {e}"),
+            })?;
+        f.write_all(id.as_bytes())
             .map_err(|e| format!("cannot mark the wait: {e}"))?;
-        Ok(Self(req))
+        let _ = std::fs::remove_file(&req.done_file); // ours now: nothing earlier counts
+        Ok(Self {
+            marker,
+            done: req.done_file.clone(),
+            id,
+        })
     }
 }
 
-impl Drop for Waiting<'_> {
+impl Drop for Waiting {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0.done_file);
-        if let Some(d) = self.0.done_file.parent() {
-            let _ = std::fs::remove_file(d.join(WAITING_FILE));
+        if std::fs::read_to_string(&self.marker).is_ok_and(|c| c == self.id) {
+            let _ = std::fs::remove_file(&self.done);
+            let _ = std::fs::remove_file(&self.marker);
         }
     }
 }
@@ -528,8 +556,8 @@ fn emit_login_required(sink: &EventSink, req: &LoginRequest) {
 
 /// The interactive app's host (the classic TUI): the three questions are dialogs of the app's own
 /// [`Approver`], in its permission-dialog style. They are NOT harness approvals (no approval
-/// events, no "allow always"), and the permission mode cannot answer them. The one-time code of
-/// the login wait appears in the dialog text and nowhere else.
+/// events, no "allow always"), and the permission mode cannot answer them. The login wait is
+/// Enter/Esc in the dialog only: no one-time code, no signal file.
 pub struct DialogHost {
     pub approver: Arc<dyn Approver>,
     pub sink: EventSink,
@@ -574,41 +602,25 @@ impl BrowserHost for DialogHost {
         cancel: &'a CancellationToken,
     ) -> synthesis_tools::BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
+            // The person at the dialog is the only channel: no code is shown and no signal file is
+            // read (anything that can write the profile directory or capture the screen could
+            // otherwise finish the login). `synt browser done` belongs to the headless host.
             emit_login_required(&self.sink, req);
-            let _wait = Waiting::new(req)?;
-            let token = uuid::Uuid::new_v4().simple().to_string();
             let reason = format!(
-                "Log in to {} in the opened browser, then confirm. Enter = I am logged in, Esc = cancel. From another terminal: `synt browser done {}` and this code: {token}",
-                sanitize_for_display(&req.origin),
-                req.profile
+                "Log in to {} in the opened browser, then confirm. Enter = I am logged in, Esc = cancel.",
+                sanitize_for_display(&req.origin)
             );
-            // the dialog is withdrawn (its future dropped) as soon as the signal file ends the wait
-            let inner = CancellationToken::new();
-            let _stop = inner.clone().drop_guard();
             let dialog = self.ask(
                 "browser_login",
                 &req.tool_call_id,
                 serde_json::json!({"origin": req.origin, "profile": req.profile}),
                 reason,
-                &inner,
+                cancel,
             );
-            let wrong = AtomicU8::new(0);
-            let signal = async {
-                loop {
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                    if judge(check_signal(&req.done_file, &token), &wrong) {
-                        break;
-                    }
-                }
-            };
-            tokio::select! {
-                yes = dialog => if yes { Ok(()) } else { Err("cancelled".to_string()) },
-                () = signal => if wrong.load(Ordering::SeqCst) >= MAX_WRONG_CODES {
-                    Err(format!("{MAX_WRONG_CODES} wrong codes were written to the signal file; the login was cancelled"))
-                } else {
-                    Ok(())
-                },
-                () = cancel.cancelled() => Err("cancelled".to_string()),
+            if dialog.await {
+                Ok(())
+            } else {
+                Err("cancelled".to_string())
             }
         })
     }
@@ -625,7 +637,7 @@ impl BrowserHost for DialogHost {
                 "browser-host",
                 serde_json::json!({"saved_login": profile, "logged_in_to": domains}),
                 format!(
-                    "Browse with saved login \"{}\" (logged in to: {})? Asked once per session.",
+                    "The main agent asks to browse with saved login \"{}\" (logged in to: {}). Asked once per session; requests from sub-agents and peer sessions are refused before this dialog.",
                     sanitize_for_display(profile),
                     sanitize_for_display(&domains.join(", "))
                 ),
@@ -934,30 +946,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_tui_login_wait_confirms_cancels_and_keeps_the_code_in_the_dialog() {
+    async fn the_tui_login_wait_is_enter_or_esc_with_no_code_and_no_signal_file() {
         let d = tempfile::tempdir().unwrap();
         let (dlg, host, out) = dialogs(Some(true));
         host.login(&login_req(d.path()), &CancellationToken::new())
             .await
             .unwrap();
         let reason = dlg.seen.lock().unwrap()[0].reason.clone();
-        assert!(
-            reason.starts_with(
-                "Log in to https://app.example.com in the opened browser, then confirm"
-            )
+        assert_eq!(
+            reason,
+            "Log in to https://app.example.com in the opened browser, then confirm. Enter = I am logged in, Esc = cancel."
         );
-        let code = reason.rsplit(' ').next().unwrap().to_string();
-        assert_eq!(code.len(), 32);
-        // events: the names only, never the code
+        assert!(
+            !reason.contains("code") && !reason.contains("browser done"),
+            "{reason}"
+        );
         let ev = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
         assert!(
-            ev.contains("browser.login_required") && ev.contains("acme") && !ev.contains(&code),
+            ev.contains("browser.login_required") && ev.contains("acme"),
             "{ev}"
         );
-        assert!(
-            !d.path().join(WAITING_FILE).exists(),
-            "marker removed with the wait"
-        );
+        // nothing the dialog could be bypassed with was ever created
+        assert!(!d.path().join(WAITING_FILE).exists() && !d.path().join(DONE_FILE).exists());
         // Esc / No cancels
         let (_, no, _) = dialogs(Some(false));
         assert_eq!(
@@ -978,7 +988,6 @@ mod tests {
             host.login(&login_req(d.path()), &c).await.unwrap_err(),
             "cancelled"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             pending.withdrawn.load(Ordering::SeqCst),
             "the dialog was withdrawn"
@@ -986,46 +995,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_tui_login_wait_also_ends_with_the_code_from_another_terminal() {
+    async fn a_signal_file_cannot_finish_a_tui_login() {
         let d = tempfile::tempdir().unwrap();
-        let (dlg, host, _) = dialogs(None);
+        let (_dlg, host, _) = dialogs(None); // the person has not answered
         let dir = d.path().to_path_buf();
-        let dlg2 = dlg.clone();
-        let poke = tokio::spawn(async move {
-            // the code is read off the dialog, as the person would
-            let code = loop {
-                if let Some(r) = dlg2.seen.lock().unwrap().first() {
-                    break r.reason.rsplit(' ').next().unwrap().to_string();
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            };
-            signal_done(&dir, "0000-wrong").unwrap(); // a guess does not end it
-            tokio::time::sleep(Duration::from_millis(600)).await;
-            signal_done(&dir, &code).unwrap();
-        });
-        host.login(&login_req(d.path()), &CancellationToken::new())
-            .await
-            .unwrap();
-        poke.await.unwrap();
-        assert!(
-            dlg.withdrawn.load(Ordering::SeqCst),
-            "the dialog closed itself"
-        );
-        // five wrong codes cancel
-        let (_, host, _) = dialogs(None);
-        let dir = d.path().to_path_buf();
-        let spam = tokio::spawn(async move {
-            for _ in 0..MAX_WRONG_CODES {
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                let _ = signal_done(&dir, "nope");
+        let writer = tokio::spawn(async move {
+            for _ in 0..8 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                // whatever a process that can write the profile dir tries
+                let _ = std::fs::write(dir.join(DONE_FILE), "guess");
+                let _ = std::fs::write(dir.join(WAITING_FILE), "x");
             }
         });
-        let e = host
-            .login(&login_req(d.path()), &CancellationToken::new())
-            .await
-            .unwrap_err();
-        assert!(e.contains("wrong codes"), "{e}");
-        spam.abort();
+        let r = tokio::time::timeout(
+            Duration::from_secs(1),
+            host.login(&login_req(d.path()), &CancellationToken::new()),
+        )
+        .await;
+        assert!(r.is_err(), "still waiting for the person: {r:?}");
+        writer.abort();
+    }
+
+    #[test]
+    fn two_logins_on_one_profile_do_not_clobber_each_other() {
+        let d = tempfile::tempdir().unwrap();
+        let req = login_req(d.path());
+        let first = Waiting::new(&req).unwrap();
+        let e = Waiting::new(&req).err().unwrap();
+        assert!(
+            e.contains("another login is already waiting") && e.contains("acme"),
+            "{e}"
+        );
+        // the refused login left the first one's files alone, and its drop removes nothing
+        assert!(d.path().join(WAITING_FILE).exists());
+        std::fs::write(&req.done_file, "tok").unwrap();
+        drop(Waiting::new(&req).err());
+        assert!(d.path().join(WAITING_FILE).exists() && req.done_file.exists());
+        // a marker that is not this login's (replaced by another) is never removed by its Drop
+        let marker = d.path().join(WAITING_FILE);
+        std::fs::write(&marker, "someone-else").unwrap();
+        drop(first);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "someone-else");
+        // ... but a crashed run's stale marker does not block forever
+        let old = std::time::SystemTime::now() - Duration::from_secs(3 * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&marker)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let second = Waiting::new(&req).unwrap();
+        drop(second);
+        assert!(!marker.exists());
     }
 
     #[test]
