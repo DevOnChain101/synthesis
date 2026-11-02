@@ -107,7 +107,7 @@ pub enum Focus {
     Workspace,
 }
 
-/// Sidebar panels switched off (`synthesis.tui.panels`); the panels that stay take their rows.
+/// Sidebar panels switched off (`synt.tui.panels`); the panels that stay take their rows.
 /// Workspace, Running sessions and the chat cannot be hidden.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Hidden {

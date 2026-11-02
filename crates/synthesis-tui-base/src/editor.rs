@@ -348,12 +348,12 @@ mod tests {
         e.kill_word_left(); // nothing to do at the start
         assert_eq!(e.text(), "");
         // punctuation is its own run, unlike Ctrl+W
-        let mut e = ed("cd ~/src/synth-app", 18);
+        let mut e = ed("cd ~/src/demos-app", 18);
         e.kill_word_left();
-        assert_eq!(e.text(), "cd ~/src/synth-");
+        assert_eq!(e.text(), "cd ~/src/demos-");
         e.kill_word_left();
-        assert_eq!(e.text(), "cd ~/src/synth");
-        let mut w = ed("cd ~/src/synth-app", 18);
+        assert_eq!(e.text(), "cd ~/src/demos");
+        let mut w = ed("cd ~/src/demos-app", 18);
         w.kill_word();
         assert_eq!(w.text(), "cd ");
         // cursor in the middle: the tail stays

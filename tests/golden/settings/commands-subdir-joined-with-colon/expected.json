@@ -1,6 +1,6 @@
 {
   "agents": [],
-  "autoMemoryDir": "<HOME>/.synthesis/projects/<SANITIZED_CWD>/memory",
+  "autoMemoryDir": "<HOME>/.synt/projects/<SANITIZED_CWD>/memory",
   "claudeDir": "<HOME>/.claude",
   "commands": [
     {
@@ -10,7 +10,7 @@
       "description": "Commit everything.",
       "model": null,
       "name": "git:commit",
-      "path": "<TMP>/ws/.synthesis/commands/git/commit.md"
+      "path": "<TMP>/ws/.synt/commands/git/commit.md"
     },
     {
       "allowedTools": null,
@@ -19,7 +19,7 @@
       "description": "Reviews code",
       "model": null,
       "name": "review",
-      "path": "<TMP>/ws/.synthesis/commands/review.md"
+      "path": "<TMP>/ws/.synt/commands/review.md"
     }
   ],
   "mcpServers": [],

@@ -6,6 +6,6 @@
     "OPENAI_API_KEY": "y"
   },
   "files": {},
-  "home": "<SYNTHESIS_HOME>",
+  "home": "<SYNT_HOME>",
   "op": "loadConfig"
 }

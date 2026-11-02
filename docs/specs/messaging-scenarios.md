@@ -9,7 +9,7 @@ Status: owner decisions recorded 2026-11-01 (section 5). What was built is messa
 - Responder tools: Read, Glob, Grep, LS. Workspace only (`block_outside_reads`), `deny_secret_reads`, mode `stricter(own, plan)`, 8 turns, 20 tool calls, 120 s wall.
 - **Snapshots keep only Read/Glob/Grep/LS/Edit/Write/MultiEdit/NotebookEdit/TodoWrite results** (peer.rs:218). Bash, Web, MCP and Task results are withheld with their input. Thinking is dropped.
 - B's live agent **never sees** a request or its answer. Peer text never enters the receiver's main history.
-- Sender limits: 4 in flight. Receiver limits: 2 responders (`busy`), 10 requests per 10 min, global (`rate_limited`), `max_hops` 2, `max_cost_usd` 1.0, `no_price` without `synthesis.pricing`.
+- Sender limits: 4 in flight. Receiver limits: 2 responders (`busy`), 10 requests per 10 min, global (`rate_limited`), `max_hops` 2, `max_cost_usd` 1.0, `no_price` without `synt.pricing`.
 - Optional: `confirm_replies` (owner approves each reply). Offline mailbox (`resume_offline`): a dead session answers queued questions when it starts again.
 - Default allow list: the same workspace only. **A git worktree is its own workspace** (D16), so two sessions on worktrees of one repo cannot talk until the user adds a `workspace:` glob.
 
@@ -127,7 +127,7 @@ Each change keeps the non-negotiables (messaging.md §0): a message never grants
 - **Strongest reason against.** B's final summary leaves B without a question being answered. It is still the same class of data a responder would share, and it passes the same gates.
 
 ### P3. Share selected Bash results in responder snapshots
-- User settings only: `synthesis.peers.share_commands: ["cargo test*", "npm test*", "pytest*"]`, default empty. A Bash result is kept in the snapshot only when the **whole** command matches a prefix rule with no shell metacharacters (`;`, `|`, `&`, `$(`, backticks, `>`). The `permissions` matcher already parses this.
+- User settings only: `synt.peers.share_commands: ["cargo test*", "npm test*", "pytest*"]`, default empty. A Bash result is kept in the snapshot only when the **whole** command matches a prefix rule with no shell metacharacters (`;`, `|`, `&`, `$(`, backticks, `>`). The `permissions` matcher already parses this.
 - Kept output passes the session redactor and is cut to 8 KiB per result. A command that names a secret, state or outside path is still withheld.
 - **Strongest reason against.** Test output can print env values (a failing config test dumps `DATABASE_URL`). The redactor catches known shapes only.
 
@@ -136,7 +136,7 @@ B's main agent (not a fork) receives the message at its next drain point as `<pe
 - **Pros.** It is the only way to get real shared work: B can change its code, commit to a choice and keep it in its own context (S2, S3, S6, S8).
 - **Cons.** Peer text steers B's task and spends B's tokens (D13: the receiver pays). It is a prompt-injection channel straight into an agent with Edit/Bash. B's task can be derailed.
 - **Security model (all mandatory):**
-  1. **Opt-in per receiver session**: `synthesis.peers.live: "off" | "ask"` (user settings or `--peers-live`, default `off`). In `ask`, interactive B shows one dialog per new thread: "ws:web/sess:client wants to talk to your agent (summary). [Allow this thread] [Answer read-only] [Decline]". Headless B always falls back to the read-only responder (P1). No `allow` value in this version.
+  1. **Opt-in per receiver session**: `synt.peers.live: "off" | "ask"` (user settings or `--peers-live`, default `off`). In `ask`, interactive B shows one dialog per new thread: "ws:web/sess:client wants to talk to your agent (summary). [Allow this thread] [Answer read-only] [Decline]". Headless B always falls back to the read-only responder (P1). No `allow` value in this version.
   2. **Taint rule** (the same mechanism as A4 for non-mutating senders): from the delivery of a peer message until B's user types a new turn, B runs in `stricter(own, default)` for side effects. Edit/Write/Bash/MCP/Web ask B's user even in `acceptEdits`/`auto`/`bypassPermissions`, and the dialog says "requested after a peer message from ws:web/…". The auto judge ignores peer text (as today).
   3. **No grants**: unchanged §0.1. A peer message cannot answer a dialog, change mode or add a rule.
   4. **Hops and cycles**: messages B sends while tainted carry `chain + [B]`, and `max_hops` 2 holds. Same thread cap as P1 (6 rounds).
@@ -162,9 +162,9 @@ Memory is long-lived, trust-scored, scanner-filtered and retrieved **once at tas
 ### P0. Default allow list includes sibling worktrees
 With peers enabled, the default allow list becomes "same `repo_key`" (all worktrees of this repository) instead of "same worktree root". Addressing keeps `workspace_key` per worktree (D16 unchanged).
 
-## 4. End-to-end tests (two real `synth run` processes)
+## 4. End-to-end tests (two real `synt run` processes)
 **Rig.** Extends `apps/cli/tests/e2e.rs` `Rig`:
-- One temp `SYNTHESIS_HOME` is shared by both processes. User `settings.json`: `synthesis.peers.enabled: true`, an allow list naming both workspaces, and `synthesis.pricing` for `fake-model` (else `no_price`).
+- One temp `SYNT_HOME` is shared by both processes. User `settings.json`: `synt.peers.enabled: true`, an allow list naming both workspaces, and `synt.pricing` for `fake-model` (else `no_price`).
 - Each process gets `--provider fake:<script>`, `--peers --name <n>`, `--permission-mode acceptEdits`, `--sandbox off` where the host does not confine.
 - **Order.** Start A with piped stdout and read events until `peer.listening`. Then start B. Join both with a 60 s guard.
 - **Keeping A alive.** A's main script turn 2 has `delay_ms: 15000`. **Verified:** `FakeProvider` pops a turn when the request starts (testing.rs:275), so with A's main parked in its delayed turn 2, the next turn in the script (turn 3) is served to A's responder.

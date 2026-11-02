@@ -1,8 +1,8 @@
 //! `settings.json` loader (port of Node `claudecfg.js` `mergeSettings`, `loadSynthesisEnv`,
 //! `loadAutoModeConfig`, `loadBlockOutsideReads`, `findProjectRoot`; docs/specs/config.md).
 //!
-//! Layers, lowest to highest: `<synthesis_home>/settings.json` (user), `<project_root>/.synthesis/settings.json`
-//! (project), `<project_root>/.synthesis/settings.local.json` (local, gitignored, where "allow always"
+//! Layers, lowest to highest: `<synthesis_home>/settings.json` (user), `<project_root>/.synt/settings.json`
+//! (project), `<project_root>/.synt/settings.local.json` (local, gitignored, where "allow always"
 //! persists; same trust rules as project), then the managed file ([`managed_settings_path`]; the
 //! organisation's, always trusted). The CLI flags sit between local and managed: precedence is
 //! managed > CLI > local > project > user. Lists are unions (deduped, order kept); scalars: last layer wins. Unknown keys are
@@ -11,7 +11,7 @@
 //! SECURITY (deviation from Node): the project file comes from a possibly hostile repository.
 //! Unless the caller passes [`ProjectTrust::Trusted`], it can only TIGHTEN: `deny`/`ask` rules, the
 //! modes `default|manual|plan|dontAsk` and `mcp` disables are kept; `allow` rules, hooks,
-//! `additionalDirectories`, `disableAllHooks`, `env`, MCP approvals and the `synth` section are
+//! `additionalDirectories`, `disableAllHooks`, `env`, MCP approvals and the `synt` section are
 //! dropped with a diagnostic (counts and key names only, never values). `auto` and
 //! `bypassPermissions` are refused from the project even when trusted (as Node).
 //!
@@ -27,8 +27,8 @@ use synthesis_hooks::{HookGroup, HooksConfig};
 
 pub use synthesis_config::{LoadContext, ProjectTrust};
 
-/// Highest `synthesis.version` this build understands; a newer section is ignored with a diagnostic.
-pub const SYNTHESIS_SECTION_VERSION: u64 = 1;
+/// Highest `synt.version` this build understands; a newer section is ignored with a diagnostic.
+pub const SYNT_SECTION_VERSION: u64 = 1;
 const MAX_FILE_BYTES: u64 = 1 << 20;
 /// Modes an untrusted project may select: none of them allows more than the default.
 const UNTRUSTED_PROJECT_MODES: [&str; 4] = ["default", "manual", "plan", "dontAsk"];
@@ -95,7 +95,7 @@ pub struct Compat {
     pub write_node_transcripts: Option<bool>,
 }
 
-/// The Rust-only top-level `"synthesis"` object (config.md §6). Every field optional.
+/// The Rust-only top-level `"synt"` object (config.md §6). Every field optional.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SynthesisSettings {
     pub budget: Budget,
@@ -123,12 +123,12 @@ pub struct Settings {
     /// Non-secret notes: malformed files, ignored/refused items. Never contains setting values.
     pub diagnostics: Vec<String>,
     /// A settings file that exists but cannot be used (malformed JSON, not an object, unreadable,
-    /// oversized): its deny/ask rules are NOT in force, so callers must refuse to start (`synth run`
+    /// oversized): its deny/ask rules are NOT in force, so callers must refuse to start (`synt run`
     /// exits 2) instead of running without them. Also in `diagnostics`.
     pub errors: Vec<String>,
 }
 
-/// Nearest ancestor of `cwd` (inclusive) holding `.synthesis` or `.git`, else `cwd`. Lexical walk from
+/// Nearest ancestor of `cwd` (inclusive) holding `.synt` or `.git`, else `cwd`. Lexical walk from
 /// the given path; no process cwd, no canonicalisation. The project root decides which settings
 /// (hooks, MCP, agents) and which writable sandbox root apply, so a marker only counts when the
 /// directory and the marker are owned by the current user (unix) and not world-writable, and the
@@ -140,7 +140,7 @@ pub fn find_project_root(cwd: &Path) -> PathBuf {
     cwd.ancestors()
         .filter(|d| !d.as_os_str().is_empty())
         .find(|d| {
-            [".synthesis", ".git"]
+            [".synt", ".git"]
                 .iter()
                 .any(|m| d.join(m).exists() && marker_trusted(d, &d.join(m), &tmp))
         })
@@ -191,7 +191,7 @@ pub fn is_secret_env_key(key: &str) -> bool {
             "AZURE_",
             "GOOGLE_",
             "VERTEX_",
-            "SYNTHESIS_",
+            "SYNT_",
         ]
         .iter()
         .any(|p| key.starts_with(p))
@@ -209,9 +209,9 @@ pub fn managed_settings_path() -> PathBuf {
     }
 }
 
-/// `<project_root>/.synthesis/settings.local.json`.
+/// `<project_root>/.synt/settings.local.json`.
 pub fn local_settings_path(project_root: &Path) -> PathBuf {
-    project_root.join(".synthesis").join("settings.local.json")
+    project_root.join(".synt").join("settings.local.json")
 }
 
 pub fn load_settings(ctx: &LoadContext<'_>, trust: ProjectTrust) -> Settings {
@@ -261,7 +261,7 @@ fn load_settings_layers(
             true,
         ),
         (
-            project_root.join(".synthesis").join("settings.json"),
+            project_root.join(".synt").join("settings.json"),
             "project settings",
             false,
             t,
@@ -297,7 +297,7 @@ fn load_settings_layers(
 }
 
 /// Persists "allow always" rules into the local settings file (created with its own
-/// `.synthesis/.gitignore` entry). Existing keys are kept; rules are appended without duplicates.
+/// `.synt/.gitignore` entry). Existing keys are kept; rules are appended without duplicates.
 pub fn persist_allow_rules(project_root: &Path, rules: &[String]) -> std::io::Result<()> {
     let path = local_settings_path(project_root);
     let dir = path.parent().unwrap_or(project_root);
@@ -639,6 +639,12 @@ impl Settings {
         if let Some(hooks) = raw.get("hooks").and_then(Value::as_object) {
             self.apply_hooks(hooks, trusted, what);
         }
+        if raw.get("synthesis").is_some() {
+            // Renamed 2026-11-02; the old section is never read.
+            self.diagnostics.push(format!(
+                "{what}: key \"synthesis\" was renamed to \"synt\", ignored"
+            ));
+        }
         if trusted {
             if let Some(b) = raw.get("disableAllHooks").and_then(Value::as_bool) {
                 self.disable_all_hooks = b;
@@ -646,23 +652,22 @@ impl Settings {
             self.apply_env(raw);
             self.apply_synthesis(raw, what, user);
             // `user` is also true for the managed file: only the user settings file may set tui
-            if what != "user settings" && raw.get("synthesis").and_then(|n| n.get("tui")).is_some()
-            {
+            if what != "user settings" && raw.get("synt").and_then(|n| n.get("tui")).is_some() {
                 self.diagnostics.push(format!(
-                    "{what}: synthesis.tui is read from user settings only, ignored"
+                    "{what}: synt.tui is read from user settings only, ignored"
                 ));
             }
-            if !user && raw.get("synthesis").and_then(|n| n.get("peers")).is_some() {
+            if !user && raw.get("synt").and_then(|n| n.get("peers")).is_some() {
                 self.diagnostics.push(format!(
-                    "{what}: synthesis.peers is read from user settings only, ignored"
+                    "{what}: synt.peers is read from user settings only, ignored"
                 ));
             }
         } else if raw.get("disableAllHooks").is_some()
             || raw.get("env").is_some()
-            || raw.get("synthesis").is_some()
+            || raw.get("synt").is_some()
         {
             self.diagnostics.push(format!(
-                "{what}: ignored disableAllHooks/env/synthesis keys (project not trusted)"
+                "{what}: ignored disableAllHooks/env/synt keys (project not trusted)"
             ));
         }
 
@@ -757,13 +762,13 @@ impl Settings {
     }
 
     fn apply_synthesis(&mut self, raw: &Value, what: &str, user: bool) {
-        let Some(n) = raw.get("synthesis").and_then(Value::as_object) else {
+        let Some(n) = raw.get("synt").and_then(Value::as_object) else {
             return;
         };
         let version = n.get("version").and_then(Value::as_u64).unwrap_or(1);
-        if version > SYNTHESIS_SECTION_VERSION {
+        if version > SYNT_SECTION_VERSION {
             self.diagnostics.push(format!(
-                "{what}: synthesis section version {version} is newer than supported {SYNTHESIS_SECTION_VERSION}, ignored"
+                "{what}: synt section version {version} is newer than supported {SYNT_SECTION_VERSION}, ignored"
             ));
             return;
         }
@@ -789,7 +794,7 @@ impl Settings {
     }
 }
 
-// ---------------------------------------------------------------- synthesis.tui (USER file only)
+// ---------------------------------------------------------------- synt.tui (USER file only)
 
 /// Panels of the dash sidebar that can be switched off (Workspace, Running sessions and the chat
 /// are always on).
@@ -800,7 +805,7 @@ pub const TUI_PANELS: [(&str, &str); 4] = [
     ("activity", "Activity feed"),
 ];
 
-/// `synthesis.tui` of the USER settings.json: what the interactive app shows and how it behaves.
+/// `synt.tui` of the USER settings.json: what the interactive app shows and how it behaves.
 /// Defined here once; `/config` edits it, the app reads it. Project, local and managed files never
 /// set it (a diagnostic says so).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -838,22 +843,22 @@ impl Default for TuiSettings {
 }
 
 impl TuiSettings {
-    /// Reads `synthesis.tui` of a parsed settings file. A wrong type or an unknown value keeps the
+    /// Reads `synt.tui` of a parsed settings file. A wrong type or an unknown value keeps the
     /// default and yields a diagnostic that names the key, never the value.
     pub fn from_settings(v: &Value) -> (Self, Vec<String>) {
         let mut s = Self::default();
         let mut diags = vec![];
-        let Some(tui) = v.get("synthesis").and_then(|n| n.get("tui")) else {
+        let Some(tui) = v.get("synt").and_then(|n| n.get("tui")) else {
             return (s, diags);
         };
         let Some(tui) = tui.as_object() else {
-            diags.push("synthesis.tui is not an object, ignored".into());
+            diags.push("synt.tui is not an object, ignored".into());
             return (s, diags);
         };
         let mut flag = |key: &str, slot: &mut bool| match tui.get(key) {
             None => {}
             Some(Value::Bool(b)) => *slot = *b,
-            Some(_) => diags.push(format!("synthesis.tui.{key} must be true or false, kept")),
+            Some(_) => diags.push(format!("synt.tui.{key} must be true or false, kept")),
         };
         flag("show_thinking", &mut s.show_thinking);
         flag("diffs_expanded", &mut s.diffs_expanded);
@@ -865,25 +870,23 @@ impl TuiSettings {
             None => {}
             Some(Some("art")) => s.logo = true,
             Some(Some("off")) => s.logo = false,
-            Some(_) => diags.push("synthesis.tui.logo must be art or off, using art".into()),
+            Some(_) => diags.push("synt.tui.logo must be art or off, using art".into()),
         }
         match tui.get("panels") {
             None => {}
             Some(Value::Object(p)) => {
                 for (k, v) in p {
                     let Some(i) = TUI_PANELS.iter().position(|(n, _)| n == k) else {
-                        diags.push(format!("synthesis.tui.panels.{k} is not a panel, ignored"));
+                        diags.push(format!("synt.tui.panels.{k} is not a panel, ignored"));
                         continue;
                     };
                     match v {
                         Value::Bool(b) => s.panels[i] = *b,
-                        _ => diags.push(format!(
-                            "synthesis.tui.panels.{k} must be true or false, kept"
-                        )),
+                        _ => diags.push(format!("synt.tui.panels.{k} must be true or false, kept")),
                     }
                 }
             }
-            Some(_) => diags.push("synthesis.tui.panels is not an object, ignored".into()),
+            Some(_) => diags.push("synt.tui.panels is not an object, ignored".into()),
         }
         for k in tui.keys() {
             if ![
@@ -898,7 +901,7 @@ impl TuiSettings {
             ]
             .contains(&k.as_str())
             {
-                diags.push(format!("synthesis.tui.{k} is not a setting, ignored"));
+                diags.push(format!("synt.tui.{k} is not a setting, ignored"));
             }
         }
         (s, diags)
@@ -924,7 +927,7 @@ impl TuiSettings {
     }
 }
 
-/// `synthesis.tui` of `<synthesis_home>/settings.json`; a missing or unreadable file is the
+/// `synt.tui` of `<synthesis_home>/settings.json`; a missing or unreadable file is the
 /// defaults.
 pub fn read_user_tui(synthesis_home: &Path) -> (TuiSettings, Vec<String>) {
     let v = std::fs::read(synthesis_home.join("settings.json"))
@@ -935,7 +938,7 @@ pub fn read_user_tui(synthesis_home: &Path) -> (TuiSettings, Vec<String>) {
     TuiSettings::from_settings(&v)
 }
 
-/// Writes `tui` as the `synthesis.tui` subtree of `<synthesis_home>/settings.json` (the `/config`
+/// Writes `tui` as the `synt.tui` subtree of `<synthesis_home>/settings.json` (the `/config`
 /// screen). Every other key and the key order are kept; a file that cannot be parsed, or whose
 /// `synthesis` is not an object, is never overwritten (`InvalidData`). Never writes a credential:
 /// only the keys of [`TuiSettings`] go into the subtree. See [`edit_json_atomic`].
@@ -947,10 +950,7 @@ pub fn persist_user_tui(synthesis_home: &Path, tui: &TuiSettings) -> std::io::Re
         |v| {
             let section = v
                 .as_object_mut()
-                .map(|o| {
-                    o.entry("synthesis")
-                        .or_insert_with(|| Value::Object(Map::new()))
-                })
+                .map(|o| o.entry("synt").or_insert_with(|| Value::Object(Map::new())))
                 .and_then(Value::as_object_mut)
                 .ok_or_else(|| {
                     std::io::Error::new(

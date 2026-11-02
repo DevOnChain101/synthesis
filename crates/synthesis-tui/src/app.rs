@@ -110,7 +110,7 @@ pub(crate) struct AppConfig {
     pub extra_commands: Vec<CmdDef>,
     pub saved: Vec<SavedSession>,
     pub home: Option<PathBuf>,
-    /// `SYNTHESIS_MOUSE_DEBUG=1`: every mouse report is shown in the footer.
+    /// `SYNT_MOUSE_DEBUG=1`: every mouse report is shown in the footer.
     pub mouse_debug: bool,
     pub tz_offset_min: i32,
     /// The workspace is trusted (`--trust-project`): `/files` and `/diff` may run git in it, whose
@@ -132,7 +132,7 @@ pub(crate) enum Cmd {
         /// `None`: the tree; `Some(file)`: the diff (all changed files when empty).
         diff: Option<String>,
     },
-    /// `/config` changed a setting: write `synthesis.tui` of the USER settings file.
+    /// `/config` changed a setting: write `synt.tui` of the USER settings file.
     SaveTui(TuiSettings),
     /// Alt+V / Ctrl+V: read an image off the clipboard (on a worker; the answer is
     /// [`App::attach_image`] or a note). `fallback_text`: no image means paste the text (Ctrl+V).
@@ -252,7 +252,7 @@ impl Dialog {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PickerKind {
     Model,
-    /// `/config`: one row per `synthesis.tui` setting; enter flips it.
+    /// `/config`: one row per `synt.tui` setting; enter flips it.
     Config,
     Command,
     Folder,
@@ -356,7 +356,7 @@ pub(crate) struct App {
     image_busy: bool,
     /// A `/files` or `/diff` scan is running: at most one.
     project_busy: bool,
-    /// `synthesis.tui` (user settings), edited by `/config`.
+    /// `synt.tui` (user settings), edited by `/config`.
     pub(crate) tui: TuiSettings,
     /// Cross-session messaging: the requests in flight, `None` when peers are off.
     pub(crate) peer_status: Option<Box<dyn Fn() -> Option<usize>>>,
@@ -414,7 +414,7 @@ fn local_commands() -> Vec<CmdDef> {
         c("browser", "the browser and web calls this session made", ""),
         c(
             "config",
-            "settings of this app (synthesis.tui): panels, thinking, motion, mouse, ...",
+            "settings of this app (synt.tui): panels, thinking, motion, mouse, ...",
             "",
         ),
         c(
@@ -1937,7 +1937,7 @@ impl App {
         }
     }
 
-    /// `/config`: the `synthesis.tui` settings as a list; enter flips the row under the cursor and
+    /// `/config`: the `synt.tui` settings as a list; enter flips the row under the cursor and
     /// writes the USER settings file. `at` is the row to keep selected.
     fn open_config_picker(&mut self, at: usize) {
         let t = self.tui;
@@ -1967,7 +1967,7 @@ impl App {
         ]);
         self.open_picker(
             PickerKind::Config,
-            "Settings (synthesis.tui)",
+            "Settings (synt.tui)",
             "enter flips · esc closes · saved to your user settings.json",
             items,
             PathBuf::new(),
@@ -1978,7 +1978,7 @@ impl App {
         }
     }
 
-    /// The host read `synthesis.tui`: apply it, and say what was wrong with the file.
+    /// The host read `synt.tui`: apply it, and say what was wrong with the file.
     pub fn set_tui(&mut self, t: TuiSettings, diagnostics: &[String]) {
         self.expanded = t.diffs_expanded;
         self.tui = t;

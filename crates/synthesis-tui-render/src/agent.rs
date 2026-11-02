@@ -504,9 +504,9 @@ pub struct AgentOpts {
     pub tz_offset_min: i32,
     /// 16-colour or colourless terminal: the art is drawn in one colour.
     pub plain_logo: bool,
-    /// `synthesis.tui.logo` = `off`: no braille art on the welcome (the wordmark stays).
+    /// `synt.tui.logo` = `off`: no braille art on the welcome (the wordmark stays).
     pub no_logo: bool,
-    /// `synthesis.tui.show_thinking` = false: thinking blocks are not drawn.
+    /// `synt.tui.show_thinking` = false: thinking blocks are not drawn.
     pub hide_thinking: bool,
     #[serde(skip)]
     pub config: Option<ModelConfig>,

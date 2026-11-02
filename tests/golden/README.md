@@ -5,7 +5,7 @@ regression snapshots of its behaviour, approved by the owner on 2026-10-29. A di
 
 ## Rename to Synthesis (2026-10-30)
 
-The product was renamed Nemo to Synthesis (owner decision). The inputs and expected files of ALL areas were transformed with the same mapping (`NEMO_HOME` to `SYNTHESIS_HOME`, `.nemo/` to `.synthesis/`, `nemo.json` to `synthesis.json`, `NEMO.md` to `SYNTHESIS.md`, `"nemo"` settings key to `"synthesis"`, wordmark `Nemo` to `Synthesis`, bundled skill `nemocode-config` to `synthesis-config`, case directory names likewise, placeholders `<NEMO_HOME>` to `<SYNTHESIS_HOME>`). This is an owner-approved divergence from the Node captures: the snapshots are regression-only now. The render, keys, sgr and selection areas belonged to the removed TUI and were deleted on 2026-10-31 (archive tag `archive/ui-before-removal`). The other golden harnesses (config, permissions, providers, session, tools, settings) pass unchanged after the transform and have no update mode. Cases listed in a divergence list that show the product name also differ by the rename; their reasons describe only the Node divergence.
+The product was renamed Nemo to Synthesis (owner decision). The inputs and expected files of ALL areas were transformed with the same mapping (`NEMO_HOME` to `SYNT_HOME`, `.nemo/` to `.synt/`, `nemo.json` to `synt.json`, `NEMO.md` to `AGENTS.md`, `"nemo"` settings key to `"synthesis"`, wordmark `Nemo` to `Synthesis`, bundled skill `nemocode-config` to `synthesis-config`, case directory names likewise, placeholders `<NEMO_HOME>` to `<SYNT_HOME>`). This is an owner-approved divergence from the Node captures: the snapshots are regression-only now. The render, keys, sgr and selection areas belonged to the removed TUI and were deleted on 2026-10-31 (archive tag `archive/ui-before-removal`). The other golden harnesses (config, permissions, providers, session, tools, settings) pass unchanged after the transform and have no update mode. Cases listed in a divergence list that show the product name also differ by the rename; their reasons describe only the Node divergence.
 
 `tools/golden-capture` (untouched, it reads the Node repo with the old names) can NOT regenerate these snapshots any more: its output would use `NEMO_*`/`.nemo`. Treat the files as maintained by hand. The section below documents the original capture.
 
@@ -43,7 +43,7 @@ through the Bash tool's shell; `results[].ms` is dropped. Captured on darwin; mu
 
 ## Placeholders and normalisation
 
-Inputs may contain `<TMP>` (sandbox root; layout `<TMP>/home`, `<TMP>/synthesis_home`, `<TMP>/ws` = cwd, `<TMP>/outside`), `<HOME>`, `<SYNTHESIS_HOME>` (was `<NEMO_HOME>` in the Node capture).
+Inputs may contain `<TMP>` (sandbox root; layout `<TMP>/home`, `<TMP>/synthesis_home`, `<TMP>/ws` = cwd, `<TMP>/outside`), `<HOME>`, `<SYNT_HOME>` (was `<NEMO_HOME>` in the Node capture).
 A Rust test must expand them to its own temp dir (realpath it) before running and apply the same replacement, longest root first, to its
 output before comparing. In `expected.json` UUIDs become `<UUID>` and ISO-8601 `...Z` timestamps `<TS>`. Objects have sorted keys, `Map` is an
 object, `Set` a sorted array, `undefined` fields are absent, 2-space JSON, LF.
@@ -66,7 +66,7 @@ lines sorted (`sort_lines`); compare as a set. Glob order depends on mtimes, so 
 - Live Bash tool / background jobs / BashOutput / KillShell (processes, timing, platform shells, process-tree kill).
 - WebFetch / WebSearch (network), PDF text extraction, NotebookEdit (not yet), Skill/Task* tools' state (need agent runtime).
 - Subagents, the transcript watcher (`SessionWatcher`, timers, fs events; `loadTranscriptSession` is captured with `agents:false`).
-- Hooks: timeouts/kill-tree, spawn failures, `Hooks` wired into the agent loop (`native-hook-events`), `import-claude-hooks` conversion. Settings: `synth import claude` writers, `agents`/`skills` edge parsing beyond the cases listed, `~/.codex`.
+- Hooks: timeouts/kill-tree, spawn failures, `Hooks` wired into the agent loop (`native-hook-events`), `import-claude-hooks` conversion. Settings: `synt import claude` writers, `agents`/`skills` edge parsing beyond the cases listed, `~/.codex`.
 - Real SDK transport, SSE parsing, retries, auth/credential resolution (`auth.js`, keychain/plaintext `auth.json`).
 - Windows/Linux outputs: everything here was captured on one platform (see `meta.json.platform`). Path-sensitive areas (config paths,
   permissions case-fold/`\`/UNC, Bash tool text in schemas) must be re-captured on win32/linux before being treated as the 3-OS spec.

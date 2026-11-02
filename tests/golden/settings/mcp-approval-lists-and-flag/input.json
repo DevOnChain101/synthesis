@@ -2,7 +2,7 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {
-    "<HOME>/.synthesis/settings.json": {
+    "<HOME>/.synt/settings.json": {
       "disabledMcpjsonServers": [
         "c"
       ],
@@ -12,7 +12,7 @@
         "b"
       ]
     },
-    "<TMP>/ws/.synthesis/settings.json": {
+    "<TMP>/ws/.synt/settings.json": {
       "enableAllProjectMcpServers": false,
       "enabledMcpjsonServers": [
         "b",

@@ -197,7 +197,7 @@ pub fn open_gesture(button: u32, mods: Mods) -> bool {
     }
 }
 
-/// The `SYNTHESIS_MOUSE_DEBUG=1` line: what the terminal really sent.
+/// The `SYNT_MOUSE_DEBUG=1` line: what the terminal really sent.
 pub fn mouse_debug(k: &Key) -> Option<String> {
     Some(match k {
         Key::Mouse {
@@ -314,7 +314,7 @@ pub fn file_uri(p: &Path) -> String {
 
 /// Terminals known to turn OSC 8 into links they open themselves (cmd/ctrl+click).
 pub fn hyperlinks_enabled(env: &Env) -> bool {
-    match env.get("SYNTHESIS_HYPERLINKS") {
+    match env.get("SYNT_HYPERLINKS") {
         Some("0") => return false,
         Some("1") => return true,
         _ => {}
@@ -1065,9 +1065,9 @@ mod tests {
         }
         assert!(on(&[("WT_SESSION", "x")]) && on(&[("KITTY_WINDOW_ID", "1")]));
         assert!(on(&[("VTE_VERSION", "5000")]) && !on(&[("VTE_VERSION", "4999")]));
-        assert!(on(&[("SYNTHESIS_HYPERLINKS", "1")]));
+        assert!(on(&[("SYNT_HYPERLINKS", "1")]));
         assert!(!on(&[
-            ("SYNTHESIS_HYPERLINKS", "0"),
+            ("SYNT_HYPERLINKS", "0"),
             ("WT_SESSION", "x"),
             ("NO_COLOR", "1")
         ]));

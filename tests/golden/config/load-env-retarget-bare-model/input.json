@@ -1,16 +1,16 @@
 {
   "cwd": "<TMP>/ws",
   "env": {
-    "SYNTHESIS_AUTH_TOKEN": "t",
-    "SYNTHESIS_BASE_URL": "https://gw2.example.test/v1",
-    "SYNTHESIS_PROVIDER": "gateway"
+    "SYNT_AUTH_TOKEN": "t",
+    "SYNT_BASE_URL": "https://gw2.example.test/v1",
+    "SYNT_PROVIDER": "gateway"
   },
   "files": {
-    "<SYNTHESIS_HOME>/synthesis.json": {
+    "<SYNT_HOME>/synt.json": {
       "$schema": "config.json/v1",
       "model": "foo"
     }
   },
-  "home": "<SYNTHESIS_HOME>",
+  "home": "<SYNT_HOME>",
   "op": "loadConfig"
 }

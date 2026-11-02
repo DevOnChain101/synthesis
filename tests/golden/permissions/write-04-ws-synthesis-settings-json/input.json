@@ -3,13 +3,13 @@
   "calls": [
     {
       "input": {
-        "file_path": "<TMP>/ws/.synthesis/settings.json"
+        "file_path": "<TMP>/ws/.synt/settings.json"
       },
       "tool": "Write"
     },
     {
       "input": {
-        "file_path": "<TMP>/ws/.synthesis/settings.json"
+        "file_path": "<TMP>/ws/.synt/settings.json"
       },
       "tool": "Edit"
     }

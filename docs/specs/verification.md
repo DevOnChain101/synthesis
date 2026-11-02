@@ -64,7 +64,7 @@ Report status, first match wins:
 1. any check `failed` → `failed`
 2. any user criterion `blocked` → `blocked`
 3. any user criterion not `passed` → `unverified`
-4. no user criteria: no check failed and ≥ 1 check `passed` (a pass is authoritative: it ran to completion, exit 0, not downgraded by output parsing) → `passed`; `limitations` += "no explicit acceptance criteria; inferred checks only" and one line per `blocked`/`unverified` check. Checks that could not run do not turn a pass into `unverified`, they are listed. `synthesis.verification.inferred_only: "cap_unverified"` restores the old cap (inferred checks alone → `unverified`).
+4. no user criteria: no check failed and ≥ 1 check `passed` (a pass is authoritative: it ran to completion, exit 0, not downgraded by output parsing) → `passed`; `limitations` += "no explicit acceptance criteria; inferred checks only" and one line per `blocked`/`unverified` check. Checks that could not run do not turn a pass into `unverified`, they are listed. `synt.verification.inferred_only: "cap_unverified"` restores the old cap (inferred checks alone → `unverified`).
 5. otherwise → `unverified`
 
 ## 4. Completion gate [new]

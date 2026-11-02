@@ -1,6 +1,6 @@
 {
   "env": {
-    "SYNTHESIS_COLOR": "256",
+    "SYNT_COLOR": "256",
     "COLORTERM": "truecolor"
   },
   "op": "detect",

@@ -46,3 +46,22 @@ if (bad.length) {
   process.exit(1);
 }
 console.log(`check-no-legacy-name: ${files.length} tracked files ok`);
+
+// The command is `synt` (2026-11-02); a whole-word `synth` is the retired command name. Allowed: history and recorded oracle data.
+// Same for the config folder names renamed on 2026-11-02: `.synthesis/`, `synthesis.json`, `synthesis.db` (now `.synt/`, `synt.json`, `synt.db`), `SYNTHESIS.md` (now `AGENTS.md`), `SYNTHESIS_*` env (now `SYNT_*`);
+// only `synt doctor` (apps/cli/src/info.rs) may name the old ones, to print how to migrate.
+const synthOk = (f) => f === "CHANGELOG.md" || f === "CLAUDE.md" || f === "scripts/check-no-legacy-name.mjs" || f.startsWith("tests/golden/");
+const oldCfgOk = (f) => f === "CHANGELOG.md" || f === "CLAUDE.md" || f === "scripts/check-no-legacy-name.mjs" || f === "apps/cli/src/info.rs" || f === "docs/MIGRATION.md" || f === "crates/synthesis-settings/tests/settings.rs";
+const oldCfg = /(?<!^\s*)(?<![A-Za-z0-9_])\.synthesis(?![A-Za-z0-9_.(-])|(?<![A-Za-z0-9_-])synthesis\.(json|db)\b|(?<![A-Za-z0-9_])SYNTHESIS\.md\b|(?<![A-Za-z0-9_])SYNTHESIS_|"synthesis"(?=\s*:)/;
+const old = [];
+for (const f of files) {
+  if (synthOk(f) && oldCfgOk(f)) continue;
+  let buf;
+  try { buf = readFileSync(join(root, f)); } catch { continue; }
+  if (buf.includes(0)) continue;
+  buf.toString("utf8").split("\n").forEach((line, i) => { if ((!synthOk(f) && /(?<![A-Za-z0-9])synth(?![A-Za-z])|CARGO_BIN_EXE_synth\b/.test(line)) || (!oldCfgOk(f) && oldCfg.test(line))) old.push(`${f}:${i + 1}: ${line.trim().slice(0, 140)}`); });
+}
+if (old.length) {
+  console.error(`check-no-legacy-name: ${old.length} reference(s) to the retired command \`synth\` (now \`synt\`):\n${old.join("\n")}`);
+  process.exit(1);
+}

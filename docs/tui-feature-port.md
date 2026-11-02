@@ -11,13 +11,13 @@ slash command or a settings row: those are marked **new place** for the owner to
 | # | feature | commit | kind | decision | state after the port |
 |---|---|---|---|---|---|
 | 1 | Theme tokens and the Graphite / Midnight / Pearl / Classic / system themes | e301eeb, a9a7e68, 2fd00b0 | VISUAL | skipped (visual) | classic keeps its renderer; one palette "synthesis" (docs/tui-palette.md) |
-| 2 | `/themes` and the saved theme | 2fd00b0 | VISUAL | skipped (visual) | no theme switch; Mono / 16 / 256 colours still follow NO_COLOR, COLORTERM, SYNTHESIS_COLOR |
+| 2 | `/themes` and the saved theme | 2fd00b0 | VISUAL | skipped (visual) | no theme switch; Mono / 16 / 256 colours still follow NO_COLOR, COLORTERM, SYNT_COLOR |
 | 3 | Icon / glyph set setting (`icons`, ascii) | b8820c8, 2fd00b0 | VISUAL | skipped (visual) | not ported |
 | 4 | Brand header, topbar art, date in the header | e301eeb, a8ea4df | VISUAL | skipped (visual) | classic title bar kept (`✻ SYNTHESIS`, clock) |
 | 5 | Braille logo art and greeting by local hour | e301eeb, a9a7e68 | VISUAL | already present | ported in stage 2 (welcome hero); the setting that turns the art off is row 12 |
-| 6 | `SYNTHESIS_COLOR` colour-depth override | e301eeb | FUNCTIONAL | already present | stage 2 (replaced a foreign variable name) |
-| 7 | `synthesis.tui` settings in the USER file only | b8820c8, 2fd00b0 | FUNCTIONAL | ported | `synthesis-settings::TuiSettings`: panels, logo, show_thinking, diffs_expanded, queue_indicators, motion, mouse_capture, copy_on_select; project, local and managed files are rejected with a diagnostic; validated with key-only diagnostics (docs/config.md, TUI.md) |
-| 8 | `/config` editor | b8820c8 | FUNCTIONAL | ported | classic picker (`/config`): enter flips a row, applies at once and writes `synthesis.tui` of the USER settings.json atomically (other keys and order kept, bad file never overwritten); it can write nothing but those keys, so never a credential |
+| 6 | `SYNT_COLOR` colour-depth override | e301eeb | FUNCTIONAL | already present | stage 2 (replaced a foreign variable name) |
+| 7 | `synt.tui` settings in the USER file only | b8820c8, 2fd00b0 | FUNCTIONAL | ported | `synthesis-settings::TuiSettings`: panels, logo, show_thinking, diffs_expanded, queue_indicators, motion, mouse_capture, copy_on_select; project, local and managed files are rejected with a diagnostic; validated with key-only diagnostics (docs/config.md, TUI.md) |
+| 8 | `/config` editor | b8820c8 | FUNCTIONAL | ported | classic picker (`/config`): enter flips a row, applies at once and writes `synt.tui` of the USER settings.json atomically (other keys and order kept, bad file never overwritten); it can write nothing but those keys, so never a credential |
 | 9 | Panel registry, layout planner, geometry rules | b8820c8, 2fd00b0 | VISUAL | skipped (visual) | classic layout kept |
 | 10 | Panels on/off with the others re-flowing | b8820c8 | FUNCTIONAL | ported | Session, MCP, Tools & Skills and Activity can be hidden (Workspace, Running and the chat are locked, as in the new TUI); the rest take the rows; text goldens `tests/golden/panels` |
 | 11 | Setting: logo art on/off | b8820c8 | FUNCTIONAL | ported | `logo`: the welcome keeps its wordmark and drops the braille art |
@@ -27,7 +27,7 @@ slash command or a settings row: those are marked **new place** for the owner to
 | 15 | Setting: motion | b8820c8 | FUNCTIONAL | ported | spinners and the pulse are drawn still when off |
 | 16 | Setting: mouse_capture | b8820c8 | FUNCTIONAL | ported | off: no mouse reporting (the terminal's own selection); read at start |
 | 17 | Setting: copy_on_select | b8820c8 | FUNCTIONAL | ported | off: drag-select highlights and ctrl+c copies |
-| 18 | First-run setup (no model configured) | 2fd00b0 | FUNCTIONAL | ported | `synth` shows a setup card instead of exiting 2: what to put where (key in an environment variable, `{env:NAME}` in synthesis.json, `synth models` / `doctor`), `r` checks again, `q` leaves; nothing is asked for or stored (ADR-011) |
+| 18 | First-run setup (no model configured) | 2fd00b0 | FUNCTIONAL | ported | `synt` shows a setup card instead of exiting 2: what to put where (key in an environment variable, `{env:NAME}` in synt.json, `synt models` / `doctor`), `r` checks again, `q` leaves; nothing is asked for or stored (ADR-011) |
 | 19 | Mission centre tab strip (chat / project / diff / terminal), `/tab` | 3acd7f7 | VISUAL | skipped (visual) | the data of each tab is rows 20-23, as commands (**new place**) |
 | 20 | Project tree with git status letters | 3acd7f7 | FUNCTIONAL | ported | `/files` (read-only git with the repository config's programs turned off, minimal environment, 5 s limit, one scan at a time, trusted folder only; no git or not a repository is a note) **new place** |
 | 21 | `git diff HEAD` view | 3acd7f7 | FUNCTIONAL | ported | `/diff`: a `+a -d path` line per changed file, then the diff **new place** |
@@ -53,7 +53,7 @@ Settings of row 7 also have a user-facing description in `docs/TUI.md` and `docs
 ## Not equal to the new TUI, on purpose
 
 - `/config` applies and saves each flip at once (the new TUI edited a buffer and wrote on close).
-- `theme` and `icons` are not accepted in `synthesis.tui` (the diagnostic says "not a setting").
+- `theme` and `icons` are not accepted in `synt.tui` (the diagnostic says "not a setting").
 - Tabs, topology cards and every other layout feature of the new TUI stay out; their data is a command.
 
 ## Unverified

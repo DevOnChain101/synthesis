@@ -1,13 +1,13 @@
 {
   "agents": [],
-  "autoMemoryDir": "<HOME>/.synthesis/projects/<SANITIZED_CWD>/memory",
+  "autoMemoryDir": "<HOME>/.synt/projects/<SANITIZED_CWD>/memory",
   "claudeDir": "<HOME>/.claude",
   "commands": [],
   "mcpServers": [],
   "memory": [
     {
       "content": "user synth memory",
-      "path": "<HOME>/.synthesis/AGENTS.md",
+      "path": "<HOME>/.synt/AGENTS.md",
       "scope": "user"
     },
     {

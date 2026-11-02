@@ -237,9 +237,9 @@ async fn expansion_failures_are_loud_and_nothing_starts_unauthenticated() {
             );
             assert!(
                 e.contains(if scope == "user" {
-                    "synthesis.mcp.env_passthrough in your user settings.json"
+                    "synt.mcp.env_passthrough in your user settings.json"
                 } else {
-                    "user synthesis.json"
+                    "user synt.json"
                 }),
                 "{e}"
             );

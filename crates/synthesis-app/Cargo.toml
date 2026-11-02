@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Harness wiring behind `synth` and the interactive app (prepare, Common, Prepared)"
+description = "Harness wiring behind `synt` and the interactive app (prepare, Common, Prepared)"
 
 [lints]
 workspace = true

@@ -2,7 +2,7 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {
-    "<SYNTHESIS_HOME>/synthesis.json": {
+    "<SYNT_HOME>/synt.json": {
       "$schema": "config.json/v1",
       "k0": 0,
       "k1": 1,
@@ -26,6 +26,6 @@
       "k9": 9
     }
   },
-  "home": "<SYNTHESIS_HOME>",
+  "home": "<SYNT_HOME>",
   "op": "loadConfig"
 }

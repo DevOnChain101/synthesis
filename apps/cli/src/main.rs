@@ -1,4 +1,4 @@
-//! `synth`: the interactive app (no subcommand / `tui`), headless run, `auth status`, `models`, `doctor`.
+//! `synt`: the interactive app (no subcommand / `tui`), headless run, `auth status`, `models`, `doctor`.
 //!
 //! The process environment is read once (`Env::from_process`) and passed down. The binary never
 //! asks for the process cwd: `run` requires `--cwd`; other commands take an optional `--cwd`.
@@ -22,7 +22,8 @@ use synthesis_config::Env;
 
 #[derive(Parser)]
 #[command(
-    name = "synth",
+    name = "synt",
+    display_name = "Synthesis",
     version,
     about = "Synthesis autonomous coding agent",
     args_conflicts_with_subcommands = true
@@ -46,7 +47,7 @@ enum Cmd {
     },
     /// List configured models.
     Models(info::ModelsArgs),
-    /// The interactive app (same as running `synth` with no subcommand).
+    /// The interactive app (same as running `synt` with no subcommand).
     Tui(Box<tui::TuiArgs>),
     /// Diagnose the installation.
     Doctor(CwdArg),
@@ -94,7 +95,7 @@ fn main() -> ExitCode {
     match r {
         Ok(code) => ExitCode::from(code),
         Err(msg) => {
-            eprintln!("synth: error: {msg}");
+            eprintln!("synt: error: {msg}");
             ExitCode::from(2)
         }
     }

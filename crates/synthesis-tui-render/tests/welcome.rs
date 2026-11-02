@@ -1,7 +1,7 @@
 //! Goldens of the welcome (brand art, greeting by the local hour, "What shall we build?"):
 //! `tests/golden/welcome/<case>/{expected.txt, expected.ansi}`. `expected.txt` is the plain rows,
 //! `expected.ansi` the rows as the terminal gets them in that colour mode. Rewrite with
-//! `SYNTHESIS_UPDATE_GOLDEN=1 cargo test -p synthesis-tui-render --test welcome`.
+//! `SYNT_UPDATE_GOLDEN=1 cargo test -p synthesis-tui-render --test welcome`.
 
 use std::path::PathBuf;
 use synthesis_tui_base::sgr::{ColorMode, encode};
@@ -87,7 +87,7 @@ fn check_with(
         format!("{}\n", plain.join("\n")),
         format!("{}\n", ansi.join("\n")),
     );
-    if std::env::var_os("SYNTHESIS_UPDATE_GOLDEN").is_some_and(|v| v == "1") {
+    if std::env::var_os("SYNT_UPDATE_GOLDEN").is_some_and(|v| v == "1") {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("expected.txt"), &txt).unwrap();
         std::fs::write(dir.join("expected.ansi"), &raw).unwrap();

@@ -1,7 +1,7 @@
 {
   "error": {
-    "code": "SYNTHESIS_INVALID_CONFIG",
-    "message": "invalid config <SYNTHESIS_HOME>/synthesis.json: $.k0 is not allowed by config.json/v1; $.k1 is not allowed by config.json/v1; $.k2 is not allowed by config.json/v1; $.k3 is not allowed by config.json/v1; $.k4 is not allowed by config.json/v1; $.k5 is not allowed by config.json/v1; $.k6 is not allowed by config.json/v1; $.k7 is not allowed by config.json/v1; $.k8 is not allowed by config.json/v1; $.k9 is not allowed by config.json/v1; $.k10 is not allowed by config.json/v1; $.k11 is not allowed by config.json/v1",
+    "code": "SYNT_INVALID_CONFIG",
+    "message": "invalid config <SYNT_HOME>/synt.json: $.k0 is not allowed by config.json/v1; $.k1 is not allowed by config.json/v1; $.k2 is not allowed by config.json/v1; $.k3 is not allowed by config.json/v1; $.k4 is not allowed by config.json/v1; $.k5 is not allowed by config.json/v1; $.k6 is not allowed by config.json/v1; $.k7 is not allowed by config.json/v1; $.k8 is not allowed by config.json/v1; $.k9 is not allowed by config.json/v1; $.k10 is not allowed by config.json/v1; $.k11 is not allowed by config.json/v1",
     "name": "ConfigValidationError"
   }
 }

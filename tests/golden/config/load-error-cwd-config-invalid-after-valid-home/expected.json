@@ -1,7 +1,7 @@
 {
   "error": {
-    "code": "SYNTHESIS_INVALID_CONFIG",
-    "message": "invalid config <TMP>/ws/.synthesis/config.json: $.model must be a non-empty string",
+    "code": "SYNT_INVALID_CONFIG",
+    "message": "invalid config <TMP>/ws/.synt/config.json: $.model must be a non-empty string",
     "name": "ConfigValidationError"
   }
 }

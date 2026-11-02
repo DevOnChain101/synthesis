@@ -1907,10 +1907,7 @@ fn hardware_caret_follows_the_prompt_caret() {
 
 fn with_memory_files() -> App {
     let mut a = app();
-    a.set_memory_files(
-        "/home/u/.synthesis/SYNTHESIS.md".into(),
-        "/work/p/AGENTS.md".into(),
-    );
+    a.set_memory_files("/home/u/.synt/AGENTS.md".into(), "/work/p/AGENTS.md".into());
     a
 }
 
@@ -2418,7 +2415,7 @@ fn config_rows_flip_apply_at_once_and_ask_the_host_to_save() {
     keys(&mut a, "/config\r");
     let s = screen(&mut a);
     assert!(
-        s.contains("Settings (synthesis.tui)") && s.contains("[x] panel session"),
+        s.contains("Settings (synt.tui)") && s.contains("[x] panel session"),
         "{s}"
     );
     // enter flips the first row (the Session panel) and asks for a save of exactly that state
@@ -2449,12 +2446,12 @@ fn settings_change_what_is_drawn() {
     };
     a.set_tui(
         t,
-        &["synthesis.tui.motion must be true or false, kept".to_string()],
+        &["synt.tui.motion must be true or false, kept".to_string()],
     );
     let s = screen(&mut a);
     assert!(!s.contains("◆ Session") && !s.contains("◆ Activity"), "{s}");
     assert!(
-        s.contains("synthesis.tui.motion must be"),
+        s.contains("synt.tui.motion must be"),
         "a bad setting is told: {s}"
     );
     // diffs_expanded is the ctrl+o state from the start

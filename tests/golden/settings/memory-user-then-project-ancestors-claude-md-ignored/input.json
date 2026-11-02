@@ -3,7 +3,7 @@
   "env": {},
   "files": {
     "<HOME>/.claude/CLAUDE.md": "user claude memory",
-    "<HOME>/.synthesis/AGENTS.md": "user synth memory",
+    "<HOME>/.synt/AGENTS.md": "user synth memory",
     "<TMP>/ws/.git/KEEP": "",
     "<TMP>/ws/AGENTS.md": "root memory",
     "<TMP>/ws/CLAUDE.md": "root claude memory",

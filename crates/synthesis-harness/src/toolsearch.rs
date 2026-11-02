@@ -1,5 +1,5 @@
 //! MCP tool search (Claude Code's "Scale with MCP tool search"): when the MCP tool definitions
-//! are big (or `synthesis.mcp.toolSearch` is `on`) the request lists only their names and the
+//! are big (or `synt.mcp.toolSearch` is `on`) the request lists only their names and the
 //! model loads schemas with `ToolSearch`. Permissions are unchanged: a loaded tool is still
 //! checked under its full `mcp__server__tool` name, and a deny rule hides it from the search.
 

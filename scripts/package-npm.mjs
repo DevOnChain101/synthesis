@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Writes the npm packages for a release from already-built binaries.
 //   node scripts/package-npm.mjs --version 0.1.0 --raw <dir> --out <dir> [--name @devonchain101/synthesis]
-//        [--bin-names synth[,other]] [--require-all]
-// <dir> holds one subdirectory per Rust target (optionally prefixed "raw-"), each with `synth[.exe]`
+//        [--bin-names synt[,other]] [--require-all]
+// <dir> holds one subdirectory per Rust target (optionally prefixed "raw-"), each with `synt[.exe]`
 // and, on Linux, `synthesis-sandbox-exec`. Only targets that are present are emitted (and listed in
 // optionalDependencies); --require-all fails unless the 5 release-gating targets are present.
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -16,7 +16,7 @@ const { values: a } = parseArgs({
     version: { type: "string" }, raw: { type: "string" }, out: { type: "string" },
     name: { type: "string", default: "@devonchain101/synthesis" },
     repo: { type: "string" }, // owner/repo; default: packaging/REPO (the single source, scripts/check-placeholders.mjs --set)
-    "bin-names": { type: "string", default: "synth" }, // default: "synth" (the Node CLI is retired)
+    "bin-names": { type: "string", default: "synt" }, // default: "synt" (the Node CLI is retired)
     "require-all": { type: "boolean", default: false },
   },
 });
@@ -46,7 +46,7 @@ const optional = {};
 const missing = [];
 for (const [target, [suffix, os, cpu, libc]] of Object.entries(TARGETS)) {
   const src = [join(a.raw, `raw-${target}`), join(a.raw, target)].find(existsSync);
-  const exe = os === "win32" ? "synth.exe" : "synth";
+  const exe = os === "win32" ? "synt.exe" : "synt";
   if (!src || !existsSync(join(src, exe))) { if (REQUIRED.includes(target)) missing.push(target); continue; }
   const name = `${a.name}-${suffix}`;
   const dir = join(a.out, name.split("/").pop()); // scoped names: no nested @scope dir
@@ -56,7 +56,7 @@ for (const [target, [suffix, os, cpu, libc]] of Object.entries(TARGETS)) {
     if (os !== "win32") chmodSync(join(dir, "bin", f), 0o755);
   }
   if (os === "linux" && !existsSync(join(dir, "bin", "synthesis-sandbox-exec")))
-    throw new Error(`${target}: synthesis-sandbox-exec missing (Landlock backend requires it next to synth)`);
+    throw new Error(`${target}: synthesis-sandbox-exec missing (Landlock backend requires it next to synt)`);
   for (const f of ["LICENSE", "NOTICE", "README.md"]) copyFileSync(join(root, f), join(dir, f));
   writeFileSync(join(dir, "package.json"), JSON.stringify({
     name, ...common, description: `Synthesis native binary for ${suffix}`, os: [os], cpu: [cpu],
@@ -69,12 +69,12 @@ if (!Object.keys(optional).length) throw new Error(`no binaries found under ${a.
 
 const main = join(a.out, a.name.split("/").pop());
 mkdirSync(join(main, "bin"), { recursive: true });
-copyFileSync(join(root, "packaging/npm/bin/synth.js"), join(main, "bin/synth.js"));
-chmodSync(join(main, "bin/synth.js"), 0o755);
+copyFileSync(join(root, "packaging/npm/bin/synt.js"), join(main, "bin/synt.js"));
+chmodSync(join(main, "bin/synt.js"), 0o755);
 for (const f of ["LICENSE", "NOTICE", "README.md"]) copyFileSync(join(root, f), join(main, f));
 writeFileSync(join(main, "package.json"), JSON.stringify({
   name: a.name, ...common, description: "Synthesis autonomous coding agent (native binary, installed via platform packages)",
-  bin: Object.fromEntries(binNames.map((n) => [n, "bin/synth.js"])),
+  bin: Object.fromEntries(binNames.map((n) => [n, "bin/synt.js"])),
   files: ["bin", "LICENSE", "NOTICE", "README.md"], engines: { node: ">=18" },
   optionalDependencies: optional, synthesis: { platformPrefix: a.name },
 }, null, 2) + "\n");

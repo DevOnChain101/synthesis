@@ -3,14 +3,14 @@
 //! SGR rows plus their `sgr::encode` form). Every case must pass or be listed with a reason in
 //! `golden_divergences.txt` (`render/<case>` or `render/<case>#json|txt|ansi`); no silent skips.
 //!
-//! `SYNTHESIS_UPDATE_GOLDEN=top-row` rewrites a frame ONLY when every row but the first (the title
+//! `SYNT_UPDATE_GOLDEN=top-row` rewrites a frame ONLY when every row but the first (the title
 //! bar) is identical to the golden.
 //!
-//! `SYNTHESIS_UPDATE_GOLDEN=colour` rewrites the expected colours of a failing case ONLY when the
+//! `SYNT_UPDATE_GOLDEN=colour` rewrites the expected colours of a failing case ONLY when the
 //! text, structure and hit rects are identical to the golden (a palette change); it prints every
 //! rewritten case. Cases with any other difference still fail.
 //!
-//! `SYNTHESIS_UPDATE_GOLDEN=1` rewrites the expected files of a failing case from the actual output
+//! `SYNT_UPDATE_GOLDEN=1` rewrites the expected files of a failing case from the actual output
 //! ONLY when the difference is explained by the Nemo -> Synthesis rename (same text once the
 //! product name, whitespace and box drawing are ignored, or only text dropped: the longer name
 //! moves wrapping and padding and pushes header chips out). It prints every rewritten and every unexplained case; unexplained ones still fail.
@@ -369,7 +369,7 @@ impl Owned {
 
 type Check = (&'static str, Result<(), String>);
 
-/// Actual output of the case being run, for `SYNTHESIS_UPDATE_GOLDEN`.
+/// Actual output of the case being run, for `SYNT_UPDATE_GOLDEN`.
 #[derive(Default)]
 struct Actual {
     ansi: Vec<String>,
@@ -857,9 +857,9 @@ fn dialogs_json() -> Value {
 #[test]
 fn render_golden() {
     let allowed = divergences();
-    let update = std::env::var_os("SYNTHESIS_UPDATE_GOLDEN").is_some_and(|v| v == "1");
-    let colour_only = std::env::var_os("SYNTHESIS_UPDATE_GOLDEN").is_some_and(|v| v == "colour");
-    let top_row = std::env::var_os("SYNTHESIS_UPDATE_GOLDEN").is_some_and(|v| v == "top-row");
+    let update = std::env::var_os("SYNT_UPDATE_GOLDEN").is_some_and(|v| v == "1");
+    let colour_only = std::env::var_os("SYNT_UPDATE_GOLDEN").is_some_and(|v| v == "colour");
+    let top_row = std::env::var_os("SYNT_UPDATE_GOLDEN").is_some_and(|v| v == "top-row");
     let (mut rewritten, mut unexplained) = (Vec::<String>::new(), Vec::<String>::new());
     let base = root().join("../../tests/golden/render");
     let mut dirs: Vec<_> = std::fs::read_dir(&base)
@@ -1006,7 +1006,7 @@ fn render_golden() {
     }
     if top_row {
         println!(
-            "SYNTHESIS_UPDATE_GOLDEN=top-row: rewrote {} case(s):\n  {}\nnot rewritten ({}):\n  {}",
+            "SYNT_UPDATE_GOLDEN=top-row: rewrote {} case(s):\n  {}\nnot rewritten ({}):\n  {}",
             rewritten.len(),
             rewritten.join("\n  "),
             unexplained.len(),
@@ -1015,14 +1015,14 @@ fn render_golden() {
     }
     if colour_only {
         println!(
-            "SYNTHESIS_UPDATE_GOLDEN=colour: rewrote {} case(s):\n  {}",
+            "SYNT_UPDATE_GOLDEN=colour: rewrote {} case(s):\n  {}",
             rewritten.len(),
             rewritten.join("\n  ")
         );
     }
     if update {
         println!(
-            "SYNTHESIS_UPDATE_GOLDEN: rewrote {} case(s) whose diff is explained by the rename:\n  {}\nnot explained, left unchanged ({}):\n  {}",
+            "SYNT_UPDATE_GOLDEN: rewrote {} case(s) whose diff is explained by the rename:\n  {}\nnot explained, left unchanged ({}):\n  {}",
             rewritten.len(),
             rewritten.join("\n  "),
             unexplained.len(),

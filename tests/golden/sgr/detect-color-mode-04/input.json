@@ -1,6 +1,6 @@
 {
   "env": {
-    "SYNTHESIS_COLOR": "truecolor",
+    "SYNT_COLOR": "truecolor",
     "TERM_PROGRAM": "Apple_Terminal"
   },
   "op": "detect",

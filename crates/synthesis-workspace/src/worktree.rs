@@ -13,9 +13,9 @@ use crate::restore::hash_bytes;
 use crate::{Error, Result};
 
 pub struct WorktreeOptions {
-    /// Injected state dir (e.g. `$SYNTHESIS_HOME`); hosts the empty hooks dir.
+    /// Injected state dir (e.g. `$SYNT_HOME`); hosts the empty hooks dir.
     pub state_dir: PathBuf,
-    /// Where worktrees live; default `<repo>/../.synthesis-worktrees`.
+    /// Where worktrees live; default `<repo>/../.synt-worktrees`.
     pub worktrees_dir: Option<PathBuf>,
     /// Read the user's global git config (off by default; it can carry filters and aliases).
     pub allow_global_config: bool,
@@ -264,7 +264,7 @@ impl WorktreeManager {
             None => repo_root
                 .parent()
                 .ok_or_else(|| Error::Invalid("repo at filesystem root".into()))?
-                .join(".synthesis-worktrees"),
+                .join(".synt-worktrees"),
         };
         fs::create_dir_all(&dir)?;
         let wt = synthesis_core::canonicalize(&dir)?.join(session_id);
@@ -700,7 +700,7 @@ fn with_repo_lock<T>(common: &Path, f: impl FnOnce() -> T) -> Result<T> {
         .or_default()
         .clone();
     let _in_process = m.lock().unwrap_or_else(|e| e.into_inner());
-    let file = open_lock_file(&common.join("synthesis-worktree.lock"));
+    let file = open_lock_file(&common.join("synt-worktree.lock"));
     if let Some(file) = &file {
         let start = std::time::Instant::now();
         loop {

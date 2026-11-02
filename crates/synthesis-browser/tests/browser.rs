@@ -216,10 +216,7 @@ async fn launch_failure_reports_exit_status_and_stderr_body() {
     std::fs::write(&fake, "#!/bin/sh\necho dying-words-marker >&2\nexit 3\n").unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
     let env = Env::from_pairs([
-        (
-            "SYNTHESIS_BROWSER_PATH",
-            fake.to_string_lossy().into_owned(),
-        ),
+        ("SYNT_BROWSER_PATH", fake.to_string_lossy().into_owned()),
         ("PATH", "/usr/bin:/bin".to_owned()),
     ]);
     // The product execs the file itself, so retry the classic ETXTBSY race (another test thread
@@ -251,7 +248,7 @@ fn local_opts(dir: &std::path::Path) -> BrowserOptions {
     };
     // CI containers often run as root where Chrome's sandbox cannot start.
     o.no_sandbox = Env::from_process()
-        .get_nonempty("SYNTHESIS_BROWSER_TEST_NO_SANDBOX")
+        .get_nonempty("SYNT_BROWSER_TEST_NO_SANDBOX")
         .is_some();
     o
 }
@@ -501,7 +498,7 @@ async fn default_policy_blocks_and_close_leaves_no_processes_body() {
     let art = tempfile::tempdir().unwrap();
     let mut opts = BrowserOptions::new(art.path());
     opts.no_sandbox = Env::from_process()
-        .get_nonempty("SYNTHESIS_BROWSER_TEST_NO_SANDBOX")
+        .get_nonempty("SYNT_BROWSER_TEST_NO_SANDBOX")
         .is_some();
     let rt = launch(opts, &env).await;
     for url in [

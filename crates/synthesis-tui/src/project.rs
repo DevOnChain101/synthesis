@@ -756,7 +756,7 @@ mod tests {
             ("HOME", "/h"),
             ("LC_ALL", "C"),
             ("ANTHROPIC_API_KEY", "sk-secret"),
-            ("SYNTHESIS_API_KEY", "sk-secret2"),
+            ("SYNT_API_KEY", "sk-secret2"),
             ("GIT_DIR", "/elsewhere"),
             ("GITHUB_TOKEN", "t"),
         ]));
@@ -773,7 +773,7 @@ mod tests {
         }
         for bad in [
             "ANTHROPIC_API_KEY",
-            "SYNTHESIS_API_KEY",
+            "SYNT_API_KEY",
             "GIT_DIR",
             "GITHUB_TOKEN",
         ] {

@@ -18,7 +18,7 @@ pub enum CredentialKind {
 pub struct Credential {
     pub kind: CredentialKind,
     pub secret: String,
-    /// e.g. `env SYNTHESIS_AUTH_TOKEN`, `config {env:X}`, `config inline`, `auth.json`.
+    /// e.g. `env SYNT_AUTH_TOKEN`, `config {env:X}`, `config inline`, `auth.json`.
     pub source: String,
 }
 
@@ -53,12 +53,10 @@ pub fn mask(value: &str) -> String {
     }
 }
 
-/// Tier 1: `SYNTHESIS_AUTH_TOKEN` / `SYNTHESIS_API_KEY`, only for the `SYNTHESIS_PROVIDER` id
+/// Tier 1: `SYNT_AUTH_TOKEN` / `SYNT_API_KEY`, only for the `SYNT_PROVIDER` id
 /// (default `anthropic`, case-insensitive). The token wins.
 pub fn env_credential(id: &str, env: &Env) -> Option<Credential> {
-    let target = env
-        .get_nonempty("SYNTHESIS_PROVIDER")
-        .unwrap_or("anthropic");
+    let target = env.get_nonempty("SYNT_PROVIDER").unwrap_or("anthropic");
     if id.to_lowercase() != target.to_lowercase() {
         return None;
     }
@@ -69,8 +67,7 @@ pub fn env_credential(id: &str, env: &Env) -> Option<Credential> {
             source: format!("env {name}"),
         })
     };
-    mk(CredentialKind::Token, "SYNTHESIS_AUTH_TOKEN")
-        .or_else(|| mk(CredentialKind::Api, "SYNTHESIS_API_KEY"))
+    mk(CredentialKind::Token, "SYNT_AUTH_TOKEN").or_else(|| mk(CredentialKind::Api, "SYNT_API_KEY"))
 }
 
 /// Tier 3: legacy `<synthesis_home>/auth.json` written by the Node CLI. Read-only.
@@ -97,7 +94,7 @@ pub fn file_credential(id: &str, synthesis_home: &Path) -> Option<Credential> {
     text("key").map(|k| mk(CredentialKind::Api, k))
 }
 
-/// env (gated to `SYNTHESIS_PROVIDER`) > provider config `authToken`/`apiKey` (already
+/// env (gated to `SYNT_PROVIDER`) > provider config `authToken`/`apiKey` (already
 /// substituted) > legacy `auth.json`.
 pub fn resolve_credential(
     id: &str,

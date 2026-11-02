@@ -778,7 +778,7 @@ async fn subagent_tool_list_unknown_type_depth_and_stop_hook() {
                 r.rt.clone(),
                 "s1",
                 r.ws.clone(),
-                serde_json::from_value(json!({"SubagentStop": [{"matcher": "reader", "hooks": [{"type": "command", "command": "touch \"$SYNTHESIS_PROJECT_DIR/stopped.marker\""}]}]})).unwrap(),
+                serde_json::from_value(json!({"SubagentStop": [{"matcher": "reader", "hooks": [{"type": "command", "command": "touch \"$SYNT_PROJECT_DIR/stopped.marker\""}]}]})).unwrap(),
             );
             h.with_agents(agents()).with_hooks(Arc::new(hooks))
         },

@@ -641,7 +641,7 @@ mod signals {
     use std::process::{Command, Stdio};
     use synthesis_tui::Tty;
 
-    const CHILD: &str = "SYNTHESIS_TUI_E2E_CHILD";
+    const CHILD: &str = "SYNT_TUI_E2E_CHILD";
 
     /// Runs the app in this process with the process stdin/stdout as the terminal (a pipe pair,
     /// no raw mode), signals watched. Only does anything when the parent test spawned us.

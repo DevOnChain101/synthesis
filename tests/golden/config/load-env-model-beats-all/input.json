@@ -1,10 +1,10 @@
 {
   "cwd": "<TMP>/ws",
   "env": {
-    "SYNTHESIS_MODEL": "anthropic/claude-env"
+    "SYNT_MODEL": "anthropic/claude-env"
   },
   "files": {
-    "<SYNTHESIS_HOME>/synthesis.json": {
+    "<SYNT_HOME>/synt.json": {
       "$schema": "config.json/v1",
       "model": "gateway/m-1",
       "providers": {
@@ -19,11 +19,11 @@
         }
       }
     },
-    "<TMP>/ws/.synthesis/config.json": {
+    "<TMP>/ws/.synt/config.json": {
       "$schema": "config.json/v1",
       "model": "gateway/m-2"
     }
   },
-  "home": "<SYNTHESIS_HOME>",
+  "home": "<SYNT_HOME>",
   "op": "loadConfig"
 }

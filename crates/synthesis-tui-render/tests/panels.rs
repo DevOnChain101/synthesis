@@ -1,6 +1,6 @@
-//! `synthesis.tui.panels`: a sidebar panel switched off disappears and the panels that stay take
+//! `synt.tui.panels`: a sidebar panel switched off disappears and the panels that stay take
 //! its rows (no hole). Text goldens in `tests/golden/panels/<case>/expected.txt` (colour-agnostic);
-//! rewrite with `SYNTHESIS_UPDATE_GOLDEN=1 cargo test -p synthesis-tui-render --test panels`.
+//! rewrite with `SYNT_UPDATE_GOLDEN=1 cargo test -p synthesis-tui-render --test panels`.
 
 use std::path::PathBuf;
 use synthesis_tui_base::text::strip_ansi;
@@ -97,7 +97,7 @@ fn case(name: &str, cols: usize, rows: usize, hidden: Hidden) -> Vec<String> {
         .join("../../tests/golden/panels")
         .join(name);
     let text = format!("{}\n", lines.join("\n"));
-    if std::env::var_os("SYNTHESIS_UPDATE_GOLDEN").is_some_and(|v| v == "1") {
+    if std::env::var_os("SYNT_UPDATE_GOLDEN").is_some_and(|v| v == "1") {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("expected.txt"), &text).unwrap();
     }

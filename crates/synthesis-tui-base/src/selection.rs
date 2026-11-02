@@ -153,7 +153,7 @@ pub fn edge_scroll_step(y: i64, y0: i64, y1: i64) -> i64 {
     }
 }
 
-/// The `SYNTHESIS_MOUSE_DEBUG=1` line; `None` for non-mouse keys.
+/// The `SYNT_MOUSE_DEBUG=1` line; `None` for non-mouse keys.
 pub fn describe_mouse(k: &Key) -> Option<String> {
     let (mods, x, y) = match k {
         Key::Mouse { mods, x, y, .. }

@@ -1,13 +1,13 @@
-# The interactive app (`synth`, `synth tui`)
+# The interactive app (`synt`, `synt tui`)
 
-Branch `restore/ui-classic`. `synth` with no subcommand (on a terminal) or `synth tui` opens it;
-without a terminal it prints the usage and exits 2. It runs the same wiring as `synth run`
+Branch `restore/ui-classic`. `synt` with no subcommand (on a terminal) or `synt tui` opens it;
+without a terminal it prints the usage and exits 2. It runs the same wiring as `synt run`
 (`synthesis-app::run::prepare`, `Front::Tui`); it is a client of the harness event stream.
 
 Flags: `--cwd DIR` (default: the current directory), `--resume ID` / `--continue` (the stored
-session continues in place), `--once` (print one frame and exit), plus the `synth run` flags
+session continues in place), `--once` (print one frame and exit), plus the `synt run` flags
 (`--model`, `--sandbox`, `--allow`, `--worktree`, `--peers`, ...). `--fork-session` and
-`--permission-mode bypassPermissions` are for `synth run` only (bypass: Shift+Tab, confirm).
+`--permission-mode bypassPermissions` are for `synt run` only (bypass: Shift+Tab, confirm).
 
 ## Commands
 
@@ -22,12 +22,12 @@ session continues in place), `--once` (print one frame and exit), plus the `synt
 | /effort [auto\|low\|...] | reasoning effort, only when the model declares `effort_tiers` |
 | /mcp | MCP servers: state, tools, last error |
 | /images [clear] | the attached images, or drop them |
-| /config | the `synthesis.tui` settings as a list; enter flips a row, applies it and saves it |
+| /config | the `synt.tui` settings as a list; enter flips a row, applies it and saves it |
 | /files | the project tree with git status letters (read-only git, only in a trusted folder: `--trust-project`; see "Git in `/files` and `/diff`" below) |
 | /diff [file] | uncommitted changes: a line per file, then the diff (of one file); trusted folder only |
 | /terminal | the shell commands this session ran, with their status |
 | /browser | the browser and web calls this session made |
-| /peers | other sessions on this machine (needs `--peers` or `synthesis.peers.enabled`) |
+| /peers | other sessions on this machine (needs `--peers` or `synt.peers.enabled`) |
 | /agents --all | the session's agents, then the other sessions' table |
 | /name | the name other sessions address this one by (fixed for the run: `--name`) |
 | /memory | instruction files loaded, long-term memory on/off, where `#` notes go |
@@ -54,20 +54,20 @@ interop off gives a one-line notice) and on Windows; not on macOS/Linux yet. WSL
 PNG per image, 6 MB of base64 per message (the session store refuses a message over 8 MiB and that
 limit is not raised), 8000x8000 px.
 
-Stored images: a pasted screenshot is kept UNREDACTED in `synthesis.db` (mode 0600, like the rest
-of the session) and in the Node-format transcript mirror. `synthesis.images.retentionDays` (user
+Stored images: a pasted screenshot is kept UNREDACTED in `synt.db` (mode 0600, like the rest
+of the session) and in the Node-format transcript mirror. `synt.images.retentionDays` (user
 settings, default 30, `0` = forever) rewrites images of sessions untouched for that long to
 `[image removed after N days]` in the session store when the app starts (see docs/specs/config.md for exactly what is and is not rewritten: the Node-format mirror, backups and browser screenshot files are not). A persistence problem (a message the
 store refuses, a failing store) is a visible `notice`, and a message over the limit is stored with
 its images replaced by `[image]` instead of stopping the later messages.
 
-## Settings (`synthesis.tui`, user settings.json only)
+## Settings (`synt.tui`, user settings.json only)
 
 `panels.{session,mcp,tools,activity}` (Workspace, Running sessions and the chat are always shown; the
 other panels take the rows of a hidden one), `logo` (`art` | `off`), `show_thinking`, `diffs_expanded`
 (long output starts whole, like ctrl+o), `queue_indicators`, `motion` (spinners drawn still when off),
 `mouse_capture` (off: the terminal's own selection; applies at start), `copy_on_select`. Defaults:
-everything on, `diffs_expanded` off. A project, local or managed settings file that sets `synthesis.tui`
+everything on, `diffs_expanded` off. A project, local or managed settings file that sets `synt.tui`
 is ignored with a diagnostic; a wrong value keeps the default and the diagnostic names the key.
 `/config` edits these and writes the USER file atomically, keeping every other key; it can write
 nothing else, so never a credential. First run without a configured model shows a setup card
@@ -93,7 +93,7 @@ peers, memory, processes, mode changes, non-successful hooks and any future kind
 shown elsewhere (header, todo list, streaming text). An approval made for another session says
 `for <origin>:`.
 
-## Per task, like `synth run`
+## Per task, like `synt run`
 
 MCP mentions and prompts are expanded, the memory block is retrieved for the typed prompt, the
 memory episode and (opt-in) reflection run after it, usage reaches the session store, and the

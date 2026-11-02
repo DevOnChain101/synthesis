@@ -171,8 +171,7 @@ impl SandboxPolicy {
                 ".git/config",
                 ".git/modules",
                 ".gitmodules",
-                ".synthesis",
-                "SYNTHESIS.md",
+                ".synt",
                 "AGENTS.md",
             ]
             .map(|p| workspace_root.join(p))
@@ -379,7 +378,7 @@ impl SandboxBackend for NullSandbox {
 #[allow(clippy::vec_init_then_push)]
 pub fn detect_chain() -> Vec<Box<dyn SandboxBackend>> {
     #[cfg(all(feature = "test-backend", debug_assertions))]
-    if std::env::var_os("SYNTHESIS_TEST_FORCE_BACKEND").is_some_and(|v| v == "none") {
+    if std::env::var_os("SYNT_TEST_FORCE_BACKEND").is_some_and(|v| v == "none") {
         return vec![];
     }
     let mut v: Vec<Box<dyn SandboxBackend>> = vec![];
@@ -429,9 +428,9 @@ pub fn synthesis_state_paths(synthesis_home: &Path) -> Vec<PathBuf> {
     [
         "auth.json",
         "settings.json",
-        "synthesis.db",
-        "synthesis.db-wal",
-        "synthesis.db-shm",
+        "synt.db",
+        "synt.db-wal",
+        "synt.db-shm",
         "memory",
         "projects",
         // peer endpoint sockets, `peer.key` and the session registry (messaging.md B8.4)
@@ -480,7 +479,7 @@ fn credential_paths(home: &Path, appdata: Option<&Path>, local: Option<&Path>) -
     .iter()
     .map(|d| home.join(d))
     .collect();
-    v.extend(synthesis_state_paths(&home.join(".synthesis")));
+    v.extend(synthesis_state_paths(&home.join(".synt")));
     v.extend(
         appdata
             .into_iter()
@@ -632,7 +631,7 @@ mod tests {
 
     #[test]
     fn peer_run_dir_is_synthesis_state() {
-        let home = p("/h/.synthesis");
+        let home = p("/h/.synt");
         assert!(synthesis_state_paths(&home).contains(&home.join("run")));
     }
 
@@ -662,13 +661,7 @@ mod tests {
         assert_eq!(pol.tmp_dir.as_deref(), Some(p("/ws-tmp").as_path()));
         assert!(pol.readonly_paths.contains(&ws.join(".git/hooks")));
         assert!(pol.readonly_paths.contains(&ws.join(".git/config")));
-        for p in [
-            ".git/modules",
-            ".gitmodules",
-            ".synthesis",
-            "SYNTHESIS.md",
-            "AGENTS.md",
-        ] {
+        for p in [".git/modules", ".gitmodules", ".synt", "AGENTS.md"] {
             assert!(pol.readonly_paths.contains(&ws.join(p)), "{p}");
         }
         assert_eq!(
@@ -690,10 +683,10 @@ mod tests {
             ".kube",
             ".config/gcloud",
             ".azure",
-            ".synthesis/auth.json",
-            ".synthesis/synthesis.db",
-            ".synthesis/synthesis.db-wal",
-            ".synthesis/memory",
+            ".synt/auth.json",
+            ".synt/synt.db",
+            ".synt/synt.db-wal",
+            ".synt/memory",
             ".zsh_history",
             ".mozilla",
         ] {
@@ -845,7 +838,7 @@ mod tests {
     #[test]
     fn null_sandbox_reports_none_and_filters_env() {
         let p = SandboxPolicy {
-            env_passthrough: vec!["SYNTHESIS_NOPE_UNSET".into()],
+            env_passthrough: vec!["SYNT_NOPE_UNSET".into()],
             ..Default::default()
         };
         let c = SandboxedCommand {

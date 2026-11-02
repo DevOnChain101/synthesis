@@ -1,11 +1,11 @@
 {
   "cwd": "<TMP>/ws",
   "env": {
-    "SYNTHESIS_BASE_URL": "https://gw2.example.test/v1",
-    "SYNTHESIS_PROVIDER": "gateway"
+    "SYNT_BASE_URL": "https://gw2.example.test/v1",
+    "SYNT_PROVIDER": "gateway"
   },
   "files": {
-    "<SYNTHESIS_HOME>/synthesis.json": {
+    "<SYNT_HOME>/synt.json": {
       "$schema": "config.json/v1",
       "model": "anthropic/foo",
       "providers": {
@@ -21,6 +21,6 @@
       }
     }
   },
-  "home": "<SYNTHESIS_HOME>",
+  "home": "<SYNT_HOME>",
   "op": "loadConfig"
 }

@@ -35,7 +35,7 @@ fn spawn(
 }
 
 fn integrity(home: &Path) {
-    let conn = rusqlite::Connection::open(home.join("synthesis.db")).unwrap();
+    let conn = rusqlite::Connection::open(home.join("synt.db")).unwrap();
     let r: String = conn
         .query_row("PRAGMA integrity_check", [], |r| r.get(0))
         .unwrap();

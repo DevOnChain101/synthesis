@@ -1,4 +1,4 @@
-//! `synth` / `synth tui`: the interactive app over the same harness wiring as `synth run`.
+//! `synt` / `synt tui`: the interactive app over the same harness wiring as `synt run`.
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -37,7 +37,7 @@ pub struct TuiArgs {
     pub common: Common,
 }
 
-const USAGE: &str = "synth: the interactive app needs a terminal on stdin and stdout.\nUsage: synth [--cwd DIR] [--resume ID | --continue] [--once] [--worktree] [--sandbox MODE] [--network MODE] ...\n       synth run --cwd DIR --prompt TEXT   (headless; events as JSONL)\n       synth --help";
+const USAGE: &str = "synt: the interactive app needs a terminal on stdin and stdout.\nUsage: synt [--cwd DIR] [--resume ID | --continue] [--once] [--worktree] [--sandbox MODE] [--network MODE] ...\n       synt run --cwd DIR --prompt TEXT   (headless; events as JSONL)\n       synt --help";
 
 fn start_dir(a: &TuiArgs) -> Result<PathBuf, String> {
     let d = match &a.cwd {
@@ -60,7 +60,7 @@ fn common_for(c: &Common, granted: &Path, cwd: &Path) -> Common {
     let mut c = c.clone();
     if c.trust_project && root_of(cwd) != granted {
         eprintln!(
-            "synth: project root changed; --trust-project and --approve-mcp apply only to {}, so this project is untrusted",
+            "synt: project root changed; --trust-project and --approve-mcp apply only to {}, so this project is untrusted",
             synthesis_harness::sanitize_for_display(&granted.display().to_string())
         );
         c.trust_project = false;
@@ -72,7 +72,7 @@ fn common_for(c: &Common, granted: &Path, cwd: &Path) -> Common {
 /// `--resume ID` (id or unique prefix) or `--continue` (newest session of the start folder).
 fn requested_resume(a: &TuiArgs, h: &synthesis_app::Homes) -> Result<Option<Resume>, String> {
     if a.common.fork_session {
-        return Err("--fork-session is only for `synth run`".into());
+        return Err("--fork-session is only for `synt run`".into());
     }
     let id = match (&a.common.resume, a.common.continue_session) {
         (Some(id), _) => id.clone(),
@@ -98,11 +98,11 @@ fn first_run(env: &Env, why: &str) -> std::io::Result<synthesis_tui::SetupExit> 
         String::new(),
         "1. Keep the key in an environment variable you manage (never in a repository):".into(),
         "    export MY_PROVIDER_KEY=...".into(),
-        "2. Point your user config at it, in $SYNTHESIS_HOME/synthesis.json (~/.synthesis by default):".into(),
+        "2. Point your user config at it, in $SYNT_HOME/synt.json (~/.synt by default):".into(),
         r#"    {"$schema": "config.json/v1", "model": "anthropic/<model>","#.into(),
         r#"     "providers": {"anthropic": {"apiKey": "{env:MY_PROVIDER_KEY}"}}}"#.into(),
-        "3. `synth models` lists what is configured, `synth doctor` checks the installation;".into(),
-        "   or start once with `synth --model provider/model`.".into(),
+        "3. `synt models` lists what is configured, `synt doctor` checks the installation;".into(),
+        "   or start once with `synt --model provider/model`.".into(),
     ];
     synthesis_tui::run_setup(
         synthesis_tui::SetupOptions {
@@ -114,13 +114,13 @@ fn first_run(env: &Env, why: &str) -> std::io::Result<synthesis_tui::SetupExit> 
     )
 }
 
-/// Retention of stored images (`synthesis.images.retentionDays`, default 30): done once at start,
+/// Retention of stored images (`synt.images.retentionDays`, default 30): done once at start,
 /// before the screen is taken over. Failures are a warning, never a reason not to start.
 fn purge_old_images(synthesis_home: &Path) {
     let (days, diag) =
         synthesis_app::ctx::read_image_retention(&synthesis_home.join("settings.json"));
     for d in diag {
-        eprintln!("synth: warning: {d}");
+        eprintln!("synt: warning: {d}");
     }
     if days == 0 {
         return;
@@ -131,16 +131,16 @@ fn purge_old_images(synthesis_home: &Path) {
         Ok(r) if r.images == 0 => {}
         Ok(r) => {
             eprintln!(
-                "synth: rewrote {} stored image(s) older than {days} days to text",
+                "synt: rewrote {} stored image(s) older than {days} days to text",
                 r.images
             );
             if !r.wal_truncated {
                 eprintln!(
-                    "synth: warning: another process holds the database log, so old copies of those images stay in it until the next checkpoint"
+                    "synt: warning: another process holds the database log, so old copies of those images stay in it until the next checkpoint"
                 );
             }
         }
-        Err(e) => eprintln!("synth: warning: image retention: {e}"),
+        Err(e) => eprintln!("synt: warning: image retention: {e}"),
     }
 }
 
@@ -341,7 +341,7 @@ fn round(
         ..
     } = p;
     // Started here (not by the app) so the session hooks and `memory.retrieved` follow
-    // `session.started`, as in `synth run`.
+    // `session.started`, as in `synt run`.
     let started = match resumed_from_seq {
         Some(seq) => {
             harness.resume_session(&session, seq);
@@ -495,7 +495,7 @@ fn round(
         tokio.block_on(m.close());
     }
     if let Some(w) = &worktree {
-        eprintln!("synth: {}", w.finish(cleanup_worktree));
+        eprintln!("synt: {}", w.finish(cleanup_worktree));
     }
     drop(harness);
     // the global hook holds the memory run, and with it the event sink and the session
@@ -504,7 +504,7 @@ fn round(
     (exit, sid, ph.synthesis)
 }
 
-/// What `synth run` does around its task, for every task the person starts in the app:
+/// What `synt run` does around its task, for every task the person starts in the app:
 /// MCP mentions and prompts, skills, the memory block for the typed prompt, the memory episode
 /// afterwards and the stored usage.
 struct Host {
@@ -670,12 +670,12 @@ mod tests {
             json!({"mcpServers": {"proj": srv}}).to_string(),
         );
         w(
-            ".synthesis/config.json",
+            ".synt/config.json",
             json!({"$schema": "config.json/v1", "mcp": {"cfg": srv}}).to_string(),
         );
-        w(".synthesis/settings.json", json!({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": format!("touch {}", marker.display())}]}]}, "enableAllProjectMcpServers": true}).to_string());
+        w(".synt/settings.json", json!({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": format!("touch {}", marker.display())}]}]}, "enableAllProjectMcpServers": true}).to_string());
         w(
-            ".synthesis/agents/evil.md",
+            ".synt/agents/evil.md",
             "---\nname: evil\ndescription: d\n---\nbody".into(),
         );
     }
@@ -707,7 +707,7 @@ mod tests {
         let env = Env::from_pairs([
             ("HOME", root.to_string_lossy().into_owned()),
             (
-                "SYNTHESIS_HOME",
+                "SYNT_HOME",
                 root.join("synthesis").to_string_lossy().into_owned(),
             ),
             (
@@ -797,7 +797,7 @@ mod start_failure_tests {
         let env = Env::from_pairs([
             ("HOME", root.to_string_lossy().into_owned()),
             (
-                "SYNTHESIS_HOME",
+                "SYNT_HOME",
                 root.join("synthesis").to_string_lossy().into_owned(),
             ),
             (
@@ -824,7 +824,7 @@ mod start_failure_tests {
         } else {
             assert!(!wt.exists(), "worktree cleanup was skipped");
         }
-        let c = rusqlite::Connection::open(home.join("synthesis.db")).unwrap();
+        let c = rusqlite::Connection::open(home.join("synt.db")).unwrap();
         let ended: i64 = c
             .query_row(
                 "SELECT COUNT(*) FROM events WHERE type = 'session.failed'",

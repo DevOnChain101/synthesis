@@ -1,10 +1,10 @@
 {
   "cwd": "<TMP>/ws",
   "env": {
-    "SYNTHESIS_SMALL_MODEL": "gateway/m-2"
+    "SYNT_SMALL_MODEL": "gateway/m-2"
   },
   "files": {
-    "<SYNTHESIS_HOME>/synthesis.json": {
+    "<SYNT_HOME>/synt.json": {
       "$schema": "config.json/v1",
       "model": "gateway/m-1",
       "providers": {
@@ -20,6 +20,6 @@
       }
     }
   },
-  "home": "<SYNTHESIS_HOME>",
+  "home": "<SYNT_HOME>",
   "op": "loadConfig"
 }

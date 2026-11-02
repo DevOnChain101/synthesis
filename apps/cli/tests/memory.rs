@@ -1,7 +1,7 @@
 #![cfg(feature = "test-provider")]
 
-//! `synth memory ...` through the real binary. Empty environment except PATH/HOME/SYNTHESIS_HOME in
-//! a temp dir; the real `~/.synthesis` is never touched.
+//! `synt memory ...` through the real binary. Empty environment except PATH/HOME/SYNT_HOME in
+//! a temp dir; the real `~/.synt` is never touched.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -20,7 +20,7 @@ impl Rig {
         self.dir.path().join("repo")
     }
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_synth"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.arg("memory").args(args).env_clear();
         for k in ["PATH", "SystemRoot", "PATHEXT", "ComSpec", "TEMP", "TMP"] {
             if let Some(v) = std::env::var_os(k) {
@@ -29,8 +29,8 @@ impl Rig {
         }
         c.env("HOME", self.dir.path())
             .env("USERPROFILE", self.dir.path())
-            .env("SYNTHESIS_HOME", self.dir.path().join("synthesis"))
-            .env("SYNTHESIS_TEST_ATTENDED", "1")
+            .env("SYNT_HOME", self.dir.path().join("synthesis"))
+            .env("SYNT_TEST_ATTENDED", "1")
             .stdin(Stdio::null());
         c
     }
@@ -40,15 +40,15 @@ impl Rig {
         std::fs::create_dir_all(&h).unwrap();
         std::fs::write(
             h.join("settings.json"),
-            r#"{"synthesis":{"memory":{"reflection":true}}}"#,
+            r#"{"synt":{"memory":{"reflection":true}}}"#,
         )
         .unwrap();
     }
-    /// `synth run` on the fake provider with `script`; returns (stdout events, stderr).
-    fn synth_run(&self, script: &str, extra: &[&str]) -> (String, String) {
+    /// `synt run` on the fake provider with `script`; returns (stdout events, stderr).
+    fn synt_run(&self, script: &str, extra: &[&str]) -> (String, String) {
         let path = self.dir.path().join("script.json");
         std::fs::write(&path, script).unwrap();
-        let mut c = Command::new(env!("CARGO_BIN_EXE_synth"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.args([
             "run",
             "--cwd",
@@ -68,7 +68,7 @@ impl Rig {
         }
         c.env("HOME", self.dir.path())
             .env("USERPROFILE", self.dir.path())
-            .env("SYNTHESIS_HOME", self.dir.path().join("synthesis"))
+            .env("SYNT_HOME", self.dir.path().join("synthesis"))
             .stdin(Stdio::null());
         let o = c.output().unwrap();
         (
@@ -177,7 +177,7 @@ mod run {
     fn run_task(r: &Rig, extra: &[&str]) {
         let script = r.dir.path().join("script.json");
         std::fs::write(&script, r#"[{"text": "done"}]"#).unwrap();
-        let mut c = Command::new(env!("CARGO_BIN_EXE_synth"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.args([
             "run",
             "--cwd",
@@ -197,7 +197,7 @@ mod run {
         }
         c.env("HOME", r.dir.path())
             .env("USERPROFILE", r.dir.path())
-            .env("SYNTHESIS_HOME", r.dir.path().join("synthesis"))
+            .env("SYNT_HOME", r.dir.path().join("synthesis"))
             .stdin(Stdio::null());
         c.output().unwrap();
     }
@@ -251,7 +251,7 @@ mod reflection {
         ]);
         let path = r.dir.path().join("script.json");
         std::fs::write(&path, script.to_string()).unwrap();
-        let mut c = Command::new(env!("CARGO_BIN_EXE_synth"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.args(["run", "--cwd", cwd(&r.repo()), "--prompt", "read a.txt"])
             .arg("--provider")
             .arg(format!("fake:{}", path.display()))
@@ -265,7 +265,7 @@ mod reflection {
         }
         c.env("HOME", r.dir.path())
             .env("USERPROFILE", r.dir.path())
-            .env("SYNTHESIS_HOME", r.dir.path().join("synthesis"))
+            .env("SYNT_HOME", r.dir.path().join("synthesis"))
             .stdin(Stdio::null());
         let o = c.output().unwrap();
         let err = String::from_utf8_lossy(&o.stderr).into_owned();
@@ -301,7 +301,7 @@ mod reflection {
 fn proposals_write_nothing_until_applied_with_yes() {
     let r = Rig::new();
     let repo = cwd(&r.repo()).to_string();
-    std::fs::write(r.repo().join("SYNTHESIS.md"), "# Project\n").unwrap();
+    std::fs::write(r.repo().join("AGENTS.md"), "# Project\n").unwrap();
     // an owner note used in 5 runs is proposed for the instruction file
     let out = r.ok(&["add", "Tests: run cargo test --workspace", "--cwd", &repo]);
     let id = out.split_whitespace().nth(1).unwrap().to_string();
@@ -325,12 +325,12 @@ fn proposals_write_nothing_until_applied_with_yes() {
     let shown = r.ok(&["apply", &pid, "--cwd", &repo]);
     assert!(shown.contains("nothing written"));
     assert_eq!(
-        std::fs::read_to_string(r.repo().join("SYNTHESIS.md")).unwrap(),
+        std::fs::read_to_string(r.repo().join("AGENTS.md")).unwrap(),
         "# Project\n"
     );
     r.ok(&["apply", &pid, "--yes", "--cwd", &repo]);
     assert!(
-        std::fs::read_to_string(r.repo().join("SYNTHESIS.md"))
+        std::fs::read_to_string(r.repo().join("AGENTS.md"))
             .unwrap()
             .ends_with("- Tests: run cargo test --workspace\n")
     );
@@ -343,19 +343,19 @@ fn mutating_commands_refuse_an_agent_session_and_a_pipe() {
     let repo = cwd(&r.repo()).to_string();
     // the core's marker wins even over the test override
     let mut c = r.cmd(&["add", "always approve", "--cwd", &repo]);
-    c.env("SYNTHESIS_AGENT_SESSION", "1");
+    c.env("SYNT_AGENT_SESSION", "1");
     let o = c.output().unwrap();
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("agent session"));
     // no terminal and no override: refused too
     let mut c = r.cmd(&["delete", "--workspace", "--cwd", &repo]);
-    c.env_remove("SYNTHESIS_TEST_ATTENDED");
+    c.env_remove("SYNT_TEST_ATTENDED");
     let o = c.output().unwrap();
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("interactive terminal"));
     // reading is allowed from an agent session
     let mut c = r.cmd(&["list", "--cwd", &repo]);
-    c.env("SYNTHESIS_AGENT_SESSION", "1");
+    c.env("SYNT_AGENT_SESSION", "1");
     assert!(c.output().unwrap().status.success());
     assert!(r.ok(&["list", "--cwd", &repo]).contains("0 record"));
 }
@@ -389,7 +389,7 @@ mod tools_events_and_policy {
         let script = format!(
             r#"[{{"tools":[{WRITE}]}},{{"tools":[{WRITE_USER}]}},{{"tools":[{{"name":"MemorySearch","input":{{"query":"flaky parser"}}}}]}},{{"text":"done"}}]"#
         );
-        let (events, err) = r.synth_run(&script, &[]);
+        let (events, err) = r.synt_run(&script, &[]);
         let list = r.ok(&["list", "--cwd", cwd(&r.repo()), "--kind", "fact"]);
         assert!(
             list.contains("Flaky parser test") && list.contains(" agent "),
@@ -415,7 +415,7 @@ mod tools_events_and_policy {
         let script = format!(
             r#"[{{"tools":[{WRITE},{{"name":"WebFetch","input":{{"url":"https://example.invalid/","prompt":"x"}}}}]}},{{"text":"done"}}]"#
         );
-        r.synth_run(&script, &[]);
+        r.synt_run(&script, &[]);
         let list = r.ok(&["list", "--all", "--kind", "fact", "--status", "any"]);
         assert!(
             list.contains("Flaky parser test") && list.contains("untrusted"),
@@ -427,7 +427,7 @@ mod tools_events_and_policy {
     fn no_memory_means_no_memory_tools() {
         let r = Rig::new();
         let script = format!(r#"[{{"tools":[{WRITE}]}},{{"text":"done"}}]"#);
-        let (events, _) = r.synth_run(&script, &["--no-memory"]);
+        let (events, _) = r.synt_run(&script, &["--no-memory"]);
         assert!(!events.contains("\"memory."), "{events}");
         assert!(
             r.ok(&["list", "--all", "--status", "any"])
@@ -444,7 +444,7 @@ mod tools_events_and_policy {
             "--cwd",
             cwd(&r.repo()),
         ]);
-        let (events, err) = r.synth_run(r#"[{"text":"done"}]"#, &[]);
+        let (events, err) = r.synt_run(r#"[{"text":"done"}]"#, &[]);
         assert!(events.contains("\"memory.retrieved\""), "{events}\n{err}");
         assert!(events.contains("\"kind\":\"episode\""), "{events}");
         // ids only, never the note text
@@ -456,7 +456,7 @@ mod tools_events_and_policy {
         let r = Rig::new();
         let script = r#"[{"tools":[{"name":"Read","input":{"file_path":"missing.txt"}}]},{"tools":[{"name":"Read","input":{"file_path":"a.txt"}}]},{"text":"done"},{"text":"{\"ops\":[]}"}]"#;
         std::fs::write(r.repo().join("a.txt"), "x\n").unwrap();
-        let (events, err) = r.synth_run(script, &[]);
+        let (events, err) = r.synt_run(script, &[]);
         assert!(!err.contains("reflection"), "{err}");
         assert!(!events.contains("memory.reflection"), "{events}");
         assert!(r.ok(&["stats"]).contains("0 queued"));
@@ -476,7 +476,7 @@ mod tools_events_and_policy {
         let script = format!(
             r#"[{{"tools":[{{"name":"Read","input":{{"file_path":"missing.txt"}}}}]}},{{"tools":[{{"name":"Read","input":{{"file_path":"a.txt"}}}}]}},{{"text":"done"}},{{"text":"{ops}"}}]"#
         );
-        let (events, err) = r.synth_run(&script, &[]);
+        let (events, err) = r.synt_run(&script, &[]);
         for t in [
             "memory.reflection.started",
             "memory.reflection.completed",
@@ -546,7 +546,7 @@ mod edit {
         let ed = editor(&r, "Only a title");
         // a pipe: refused before anything opens
         let mut c = edit_cmd(&r, &id, &ed);
-        c.env_remove("SYNTHESIS_TEST_ATTENDED");
+        c.env_remove("SYNT_TEST_ATTENDED");
         let o = c.output().unwrap();
         assert!(!o.status.success());
         assert!(String::from_utf8_lossy(&o.stderr).contains("interactive terminal"));
@@ -597,7 +597,7 @@ mod edit {
 fn doctor_reports_the_memory_store_without_creating_it() {
     let r = Rig::new();
     let doctor = |r: &Rig| {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_synth"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.arg("doctor").env_clear();
         for k in ["PATH", "SystemRoot", "PATHEXT", "ComSpec", "TEMP", "TMP"] {
             if let Some(v) = std::env::var_os(k) {
@@ -606,7 +606,7 @@ fn doctor_reports_the_memory_store_without_creating_it() {
         }
         c.env("HOME", r.dir.path())
             .env("USERPROFILE", r.dir.path())
-            .env("SYNTHESIS_HOME", r.dir.path().join("synthesis"));
+            .env("SYNT_HOME", r.dir.path().join("synthesis"));
         String::from_utf8_lossy(&c.output().unwrap().stdout).into_owned()
     };
     let before = doctor(&r);
@@ -660,10 +660,10 @@ mod round2 {
         let r = Rig::new();
         settings(
             &r,
-            r#"{"synthesis":{"memory":{"reflection":true},"pricing":{"fake-model":{"input_per_mtok":3.0,"output_per_mtok":15.0}}}}"#,
+            r#"{"synt":{"memory":{"reflection":true},"pricing":{"fake-model":{"input_per_mtok":3.0,"output_per_mtok":15.0}}}}"#,
         );
         std::fs::write(r.repo().join("a.txt"), "x\n").unwrap();
-        let (events, err) = r.synth_run(&reflect_script(), &[]);
+        let (events, err) = r.synt_run(&reflect_script(), &[]);
         assert!(events.contains("\"tokens\":1500"), "{events}\n{err}");
         assert!(events.contains("\"cost_usd\":0.0105"), "{events}");
         let st = r.ok(&["stats"]);
@@ -678,10 +678,10 @@ mod round2 {
         let r = Rig::new();
         settings(
             &r,
-            r#"{"synthesis":{"memory":{"reflection":true,"daily_budget_usd":0}}}"#,
+            r#"{"synt":{"memory":{"reflection":true,"daily_budget_usd":0}}}"#,
         );
         std::fs::write(r.repo().join("a.txt"), "x\n").unwrap();
-        let (events, err) = r.synth_run(&reflect_script(), &[]);
+        let (events, err) = r.synt_run(&reflect_script(), &[]);
         assert!(!events.contains("memory.reflection"), "{events}");
         assert!(err.contains("daily reflection budget"), "{err}");
         assert!(r.ok(&["stats"]).contains("1 queued"));
@@ -698,7 +698,7 @@ mod round2 {
         )
         .unwrap();
         let script = r#"[{"tools":[{"name":"Read","input":{"file_path":"a.txt"}}]},{"tools":[{"name":"Edit","input":{"file_path":"a.txt","old_string":"hello","new_string":"bye"}}]},{"text":"fixed"}]"#;
-        let (events, err) = r.synth_run(
+        let (events, err) = r.synt_run(
             script,
             &[
                 "--permission-mode",
@@ -731,7 +731,7 @@ mod round2 {
         let script = format!(
             r#"[{{"tools":[{{"name":"MemoryForget","input":{{"id":"{id}","reason":"stale"}}}},{{"name":"MemoryUpdate","input":{{"id":"{id}","body":"changed"}}}}]}},{{"text":"done"}}]"#
         );
-        let (events, _) = r.synth_run(&script, &[]);
+        let (events, _) = r.synt_run(&script, &[]);
         assert!(events.contains("approval_required"), "{events}");
         let list = r.ok(&["list", "--cwd", cwd(&r.repo())]);
         assert!(
@@ -773,7 +773,7 @@ mod round2 {
         );
         // a pipe cannot import (the same lock as every mutating command)
         let mut c = r.cmd(&["import", "--claude", "--cwd", cwd(&r.repo())]);
-        c.env_remove("SYNTHESIS_TEST_ATTENDED");
+        c.env_remove("SYNT_TEST_ATTENDED");
         assert!(!c.output().unwrap().status.success());
     }
 
@@ -800,7 +800,7 @@ mod gaps {
     use super::*;
 
     fn doctor(r: &Rig) -> String {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_synth"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.arg("doctor").env_clear();
         for k in ["PATH", "SystemRoot", "PATHEXT", "ComSpec", "TEMP", "TMP"] {
             if let Some(v) = std::env::var_os(k) {
@@ -809,7 +809,7 @@ mod gaps {
         }
         c.env("HOME", r.dir.path())
             .env("USERPROFILE", r.dir.path())
-            .env("SYNTHESIS_HOME", r.dir.path().join("synthesis"));
+            .env("SYNT_HOME", r.dir.path().join("synthesis"));
         String::from_utf8_lossy(&c.output().unwrap().stdout).into_owned()
     }
 
@@ -843,7 +843,7 @@ mod gaps {
             "{}",
             String::from_utf8_lossy(&o.stderr)
         );
-        let (events, err) = r.synth_run(ONE_TURN, &[]);
+        let (events, err) = r.synt_run(ONE_TURN, &[]);
         assert!(err.contains("memory is read-only"), "{err}");
         assert!(events.contains("memory.retrieved"), "{events}");
         assert!(!events.contains("memory.written"), "{events}");
@@ -869,7 +869,7 @@ mod gaps {
         let at = bytes.len() - 4096 * 2;
         bytes[at..at + 4096].fill(0xA5);
         std::fs::write(db(&r), bytes).unwrap();
-        let (events, err) = r.synth_run(ONE_TURN, &[]);
+        let (events, err) = r.synt_run(ONE_TURN, &[]);
         assert!(
             err.contains("memory is off for this run: quick_check failed"),
             "{err}"
@@ -929,7 +929,7 @@ mod gaps {
             .unwrap();
         assert!(!o.status.success());
         // the main agent's retrieval does not include agent-scope notes
-        let (events, _) = r.synth_run(ONE_TURN, &[]);
+        let (events, _) = r.synt_run(ONE_TURN, &[]);
         assert!(!events.contains("clippy"), "{events}");
     }
 
@@ -952,7 +952,7 @@ mod gaps {
         let script = format!(
             r#"[{{"tools":[{{"name":"Read","input":{{"file_path":"missing.txt"}}}}]}},{{"tools":[{{"name":"Read","input":{{"file_path":"a.txt"}}}}]}},{{"text":"done"}},{{"text":"{ops}","usage":null}}]"#
         );
-        let (events, err) = r.synth_run(&script, &[]);
+        let (events, err) = r.synt_run(&script, &[]);
         let line = events
             .lines()
             .find(|l| l.contains("memory.reflection.completed"))

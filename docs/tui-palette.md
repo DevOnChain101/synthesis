@@ -5,7 +5,7 @@ pair lives in `synthesis-tui-base::selection` and is re-exported there). Neutral
 kit (`design/02-design-tokens/color-schema.md`); the only accent is teal; no violet, indigo or
 magenta anywhere (a test checks the hue of every token and of every colour a golden frame emits).
 All colours are 24-bit; `sgr::encode` downgrades to 256/16 colours and drops them for `NO_COLOR`.
-`SYNTHESIS_COLOR=truecolor|256|16` overrides detection, then `NO_COLOR`, `COLORTERM`, `TERM`.
+`SYNT_COLOR=truecolor|256|16` overrides detection, then `NO_COLOR`, `COLORTERM`, `TERM`.
 There is no light variant (the old code had none).
 
 Hue is HSV degrees; contrast is WCAG against BG `#0B0C0F` and SURFACE `#15171B`. Text tokens must
@@ -45,5 +45,5 @@ The welcome (`logo.rs`, regenerated from the brand symbol by `tools/logo-art/gen
 TEXT, ACCENT, ACCENT_LIGHT, PEARL as its sheen; on 16-colour and colourless terminals the art is
 drawn in ACCENT only.
 
-Goldens: `SYNTHESIS_UPDATE_GOLDEN=colour cargo test -p synthesis-tui-render --test golden` rewrites
+Goldens: `SYNT_UPDATE_GOLDEN=colour cargo test -p synthesis-tui-render --test golden` rewrites
 colours of a case only when its plain text and structure are identical.

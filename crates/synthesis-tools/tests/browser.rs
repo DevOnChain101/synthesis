@@ -53,7 +53,7 @@ async fn serve() -> String {
 }
 
 fn no_sandbox() -> bool {
-    std::env::var_os("SYNTHESIS_BROWSER_TEST_NO_SANDBOX").is_some_and(|v| !v.is_empty())
+    std::env::var_os("SYNT_BROWSER_TEST_NO_SANDBOX").is_some_and(|v| !v.is_empty())
 }
 
 /// False (and prints SKIP) when no browser is installed.
@@ -260,7 +260,7 @@ async fn missing_browser_is_a_clear_tool_error() {
     let d = tempfile::tempdir().unwrap();
     let mut c = ctx(d.path(), "s3");
     c.env = Arc::new(BTreeMap::from([(
-        "SYNTHESIS_BROWSER_PATH".to_string(),
+        "SYNT_BROWSER_PATH".to_string(),
         "/nonexistent/chrome".to_string(),
     )]));
     let o = registry(false, true)
@@ -270,5 +270,5 @@ async fn missing_browser_is_a_clear_tool_error() {
         o.is_error && o.meta["error"] == "browser_unavailable",
         "{o:?}"
     );
-    assert!(text(&o).contains("SYNTHESIS_BROWSER_PATH"), "{o:?}");
+    assert!(text(&o).contains("SYNT_BROWSER_PATH"), "{o:?}");
 }

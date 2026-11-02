@@ -2,8 +2,8 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {
-    "<HOME>/.synthesis/settings.json": "{{",
-    "<TMP>/ws/.synthesis/settings.json": {
+    "<HOME>/.synt/settings.json": "{{",
+    "<TMP>/ws/.synt/settings.json": {
       "permissions": {
         "allow": [
           "Read"

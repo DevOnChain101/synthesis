@@ -138,7 +138,7 @@ fn url_host(u: &str) -> Option<String> {
 
 impl ProviderSpec {
     /// Port of Node `providerForId`. The caller resolves `cred` with
-    /// `synthesis_config::resolve_credential` (SYNTHESIS_* env, config, auth.json); this crate never reads
+    /// `synthesis_config::resolve_credential` (SYNT_* env, config, auth.json); this crate never reads
     /// keys from the environment. `None` is accepted only for no-auth providers.
     pub fn from_config(
         id: &str,
@@ -152,7 +152,7 @@ impl ProviderSpec {
             let c = cred.ok_or_else(|| {
                 ProviderError::new(
                     ErrorKind::Auth,
-                    format!("No credential for provider \"{id}\". Set SYNTHESIS_API_KEY / SYNTHESIS_AUTH_TOKEN or the provider's apiKey in config."),
+                    format!("No credential for provider \"{id}\". Set SYNT_API_KEY / SYNT_AUTH_TOKEN or the provider's apiKey in config."),
                 )
             })?;
             // Nothing explicit decided the protocol and the key is an Anthropic one.

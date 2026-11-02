@@ -2,7 +2,7 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {
-    "<TMP>/ws/.synthesis/config.json": {
+    "<TMP>/ws/.synt/config.json": {
       "mcp": {
         "flat": {
           "command": "f"

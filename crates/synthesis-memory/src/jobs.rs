@@ -1,5 +1,5 @@
 //! Reflection job queue (memory.md §7, §11): no daemon. A job is queued at task end and drained by
-//! the next run or `synth memory reflect`. Claims expire after 10 minutes; 3 attempts, then `failed`.
+//! the next run or `synt memory reflect`. Claims expire after 10 minutes; 3 attempts, then `failed`.
 
 use rusqlite::{TransactionBehavior, params};
 use time::OffsetDateTime;
@@ -91,7 +91,7 @@ impl Store {
         Ok(())
     }
 
-    /// `synth memory reflect --retry`: failed jobs get one more attempt (past attempts stay counted).
+    /// `synt memory reflect --retry`: failed jobs get one more attempt (past attempts stay counted).
     pub fn retry_failed(&mut self) -> Result<usize> {
         Ok(self.conn.execute(
             "UPDATE reflection_jobs SET status='queued', attempts=?1, error=NULL WHERE status='failed'",

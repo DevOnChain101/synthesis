@@ -1,6 +1,6 @@
 {
   "error": {
-    "code": "SYNTHESIS_INVALID_CONFIG",
+    "code": "SYNT_INVALID_CONFIG",
     "message": "invalid config config.json: $ must be an object, got null",
     "name": "ConfigValidationError"
   }

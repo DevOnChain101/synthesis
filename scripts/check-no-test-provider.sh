@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fails if the given synth binary was built with the `test-provider` feature (scripted fake model).
+# Fails if the given synt binary was built with the `test-provider` feature (scripted fake model).
 # Note: `--help` text and the "needs a build with the test-provider feature" error exist in release
 # builds too, so we look for code that only exists in fake.rs and for behaviour.
 set -euo pipefail

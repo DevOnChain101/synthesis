@@ -44,7 +44,7 @@ fn main() {
     w.update_status(SessionStatus::Running, None).unwrap();
     let mut out = std::io::stdout();
     if mode == "txn" {
-        let conn = rusqlite::Connection::open(home.join("synthesis.db")).unwrap();
+        let conn = rusqlite::Connection::open(home.join("synt.db")).unwrap();
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .unwrap();
         conn.execute_batch(&format!(

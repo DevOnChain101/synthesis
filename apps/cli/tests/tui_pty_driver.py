@@ -1,4 +1,4 @@
-"""Drives `synth` on a pseudo-terminal for apps/cli/tests/tui_pty.rs (python3 standard library only).
+"""Drives `synt` on a pseudo-terminal for apps/cli/tests/tui_pty.rs (python3 standard library only).
 
 usage: tui_pty_driver.py scenario.json out.txt
 scenario: {"argv": [...], "env": {...}, "steps": [["send", "bytes"] | ["wait", secs] |

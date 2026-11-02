@@ -38,7 +38,7 @@ pub trait McpCatalog: Send + Sync {
     fn tools(&self) -> Vec<McpToolInfo>;
 }
 
-/// `synthesis.mcp.servers.<name>.write_tools | read_tools` (server tool names).
+/// `synt.mcp.servers.<name>.write_tools | read_tools` (server tool names).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServerRules {
     pub write_tools: Vec<String>,

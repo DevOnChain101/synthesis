@@ -1,6 +1,6 @@
 {
   "env": {
-    "SYNTHESIS_COLOR": "24bit"
+    "SYNT_COLOR": "24bit"
   },
   "op": "detect",
   "platform": "linux"

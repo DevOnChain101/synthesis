@@ -1,6 +1,6 @@
 {
   "agents": [],
-  "autoMemoryDir": "<HOME>/.synthesis/projects/<SANITIZED_CWD>/memory",
+  "autoMemoryDir": "<HOME>/.synt/projects/<SANITIZED_CWD>/memory",
   "claudeDir": "<HOME>/.claude",
   "commands": [],
   "mcpServers": [],
@@ -33,9 +33,9 @@
         "Grep"
       ],
       "description": "finds things",
-      "dir": "<TMP>/ws/.synthesis/skills/scout",
+      "dir": "<TMP>/ws/.synt/skills/scout",
       "name": "scout",
-      "path": "<TMP>/ws/.synthesis/skills/scout/SKILL.md",
+      "path": "<TMP>/ws/.synt/skills/scout/SKILL.md",
       "source": "project"
     }
   ],

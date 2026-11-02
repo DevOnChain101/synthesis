@@ -1,7 +1,7 @@
 //! Skill tool and skill discovery (port of skill.js + claudecfg.js loadSkillsDir).
 //!
-//! Sources, highest precedence first: bundled, user (`$SYNTHESIS_HOME/skills`, default `~/.synthesis`),
-//! project (`<workspace root>/.synthesis/skills`). Deviation from Node (later source wins): the first
+//! Sources, highest precedence first: bundled, user (`$SYNT_HOME/skills`, default `~/.synt`),
+//! project (`<workspace root>/.synt/skills`). Deviation from Node (later source wins): the first
 //! definition of a name wins, so a cloned repository cannot shadow a trusted skill. Project skills
 //! are untrusted: they are listed but flagged, and their text is returned inside an
 //! `untrusted_project_skill` wrapper. Directories are opened through cap-std, so a symlinked
@@ -194,13 +194,13 @@ fn scan(base: &Path, rel: &str, source: SkillSource, out: &mut Vec<Skill>) {
 }
 
 fn synthesis_home(env: &Env) -> Option<PathBuf> {
-    env.get_nonempty("SYNTHESIS_HOME")
+    env.get_nonempty("SYNT_HOME")
         .map(PathBuf::from)
         .or_else(|| {
             let home = env
                 .get_nonempty("HOME")
                 .or_else(|| env.get_nonempty("USERPROFILE"))?;
-            Some(Path::new(home).join(".synthesis"))
+            Some(Path::new(home).join(".synt"))
         })
 }
 
@@ -228,12 +228,7 @@ fn load(env: &Env, project_root: &Path) -> Vec<Skill> {
             });
         }
     }
-    scan(
-        project_root,
-        ".synthesis/skills",
-        SkillSource::Project,
-        &mut all,
-    );
+    scan(project_root, ".synt/skills", SkillSource::Project, &mut all);
     let mut seen = std::collections::HashSet::new();
     all.retain(|s| seen.insert(s.info.name.clone()));
     all

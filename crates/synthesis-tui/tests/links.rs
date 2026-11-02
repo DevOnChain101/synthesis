@@ -91,10 +91,7 @@ fn rig(reply: &str, hyperlinks: &'static str, opened: Arc<Mutex<Vec<OpenTarget>>
             session,
             link,
             rt.handle().clone(),
-            Env::from_pairs([
-                ("TERM", "xterm-256color"),
-                ("SYNTHESIS_HYPERLINKS", hyperlinks),
-            ]),
+            Env::from_pairs([("TERM", "xterm-256color"), ("SYNT_HYPERLINKS", hyperlinks)]),
         );
         o.opener = Some(Box::new(Rec(opened)));
         o.min_frame = Duration::from_millis(1);

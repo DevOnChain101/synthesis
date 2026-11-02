@@ -218,9 +218,9 @@ async fn list_changed_refreshes_tools_and_notifies() {
 async fn env_is_explicit_allowlisted_and_secrets_stripped() {
     let env = Env::from_pairs([
         ("PATH", std::env::var("PATH").unwrap_or_default().as_str()),
-        ("SYNTHESIS_HOME", "/synthesis-home"),
-        ("SYNTHESIS_API_KEY", "synthesis-secret-1"),
-        ("SYNTHESIS_FOO_TOKEN", "synthesis-secret-2"),
+        ("SYNT_HOME", "/synthesis-home"),
+        ("SYNT_API_KEY", "synthesis-secret-1"),
+        ("SYNT_FOO_TOKEN", "synthesis-secret-2"),
         ("UNLISTED", "x"),
         ("SRC", "from-injected"),
     ]);
@@ -237,9 +237,9 @@ async fn env_is_explicit_allowlisted_and_secrets_stripped() {
         async move { call(&m, "echo", "env", json!({"name": n})).await.text() }
     };
     assert_eq!(get("MCP_X").await, "from-injected-dflt");
-    assert_eq!(get("SYNTHESIS_HOME").await, "/synthesis-home");
-    assert_eq!(get("SYNTHESIS_API_KEY").await, "<unset>");
-    assert_eq!(get("SYNTHESIS_FOO_TOKEN").await, "<unset>");
+    assert_eq!(get("SYNT_HOME").await, "/synthesis-home");
+    assert_eq!(get("SYNT_API_KEY").await, "<unset>");
+    assert_eq!(get("SYNT_FOO_TOKEN").await, "<unset>");
     assert_eq!(get("UNLISTED").await, "<unset>");
     assert_eq!(get("SRC").await, "<unset>");
     m.close().await;
@@ -317,7 +317,7 @@ const SECRETS: [(&str, &str); 4] = [
 fn secret_env() -> Env {
     let mut pairs: Vec<(String, String)> = vec![
         ("PATH".into(), std::env::var("PATH").unwrap_or_default()),
-        ("SYNTHESIS_HOME".into(), "/synthesis-home".into()),
+        ("SYNT_HOME".into(), "/synthesis-home".into()),
     ];
     pairs.extend(SECRETS.iter().map(|(k, v)| (k.to_string(), v.to_string())));
     Env::from_pairs(pairs)
@@ -368,7 +368,7 @@ async fn hostile_project_config_cannot_expand_secrets() {
 async fn project_scope_still_expands_child_env_names() {
     let mut cfg = echo_cfg("echo", &[]);
     cfg.scope = Some("project".into());
-    cfg.env.insert("MCP_X".into(), "${SYNTHESIS_HOME}".into());
+    cfg.env.insert("MCP_X".into(), "${SYNT_HOME}".into());
     let m = started(vec![cfg], secret_env()).await;
     let r = call(&m, "echo", "env", json!({"name": "MCP_X"})).await;
     assert_eq!(r.text(), "/synthesis-home");
@@ -415,7 +415,7 @@ async fn project_scope_cannot_expand_proxy_or_cert_vars() {
         ("HTTPS_PROXY".into(), "http://u:pw@proxy:3128".into()),
         ("SSL_CERT_FILE".into(), "/etc/cert.pem".into()),
     ];
-    pairs.push(("SYNTHESIS_HOME".into(), "/synthesis-home".into()));
+    pairs.push(("SYNT_HOME".into(), "/synthesis-home".into()));
     for name in ["HTTPS_PROXY", "SSL_CERT_FILE"] {
         for (scope, ok) in [("project", false), ("local", false), ("user", true)] {
             let mut c = echo_cfg("echo", &[]);

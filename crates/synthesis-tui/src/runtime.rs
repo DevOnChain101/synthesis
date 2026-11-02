@@ -72,7 +72,7 @@ pub struct MemoryHook {
 pub type BoxFut<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
 /// What the host does around each task the person starts (not for sub-agent tasks): the same
-/// steps `synth run` takes, kept out of this crate because they need the MCP, memory and session
+/// steps `synt run` takes, kept out of this crate because they need the MCP, memory and session
 /// store wiring.
 pub trait TaskHost: Send + Sync {
     /// The typed line -> the request the model gets (MCP `@server:uri` and `/mcp__server__prompt`,
@@ -120,7 +120,7 @@ pub struct Options {
     pub host: Option<Arc<dyn TaskHost>>,
     /// Where Alt+V reads an image from; default: the Windows clipboard on WSL / Windows.
     pub image_source: Option<Arc<dyn ImageSource>>,
-    /// `synthesis.tui` of the user settings, and what was wrong with it.
+    /// `synt.tui` of the user settings, and what was wrong with it.
     pub tui: synthesis_settings::TuiSettings,
     pub tui_diagnostics: Vec<String>,
     /// The workspace is trusted: `/files` and `/diff` run git in it.
@@ -235,7 +235,7 @@ fn cfg_for(o: &Options) -> AppConfig {
             .env
             .get_nonempty(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
             .map(Into::into),
-        mouse_debug: o.env.get("SYNTHESIS_MOUSE_DEBUG") == Some("1"),
+        mouse_debug: o.env.get("SYNT_MOUSE_DEBUG") == Some("1"),
         tz_offset_min: o.tz_offset_min,
         project_trusted: o.project_trusted,
         plain_logo: matches!(
@@ -293,7 +293,7 @@ impl Runner {
         match self.runtime.block_on(self.harness.peer_rows(main_only)) {
             Some(rows) => crate::peers_view::table(&rows),
             None => {
-                vec!["peers are off (synthesis.peers.enabled in user settings, or --peers)".into()]
+                vec!["peers are off (synt.peers.enabled in user settings, or --peers)".into()]
             }
         }
     }
@@ -347,7 +347,10 @@ impl Runner {
             }
             Info::Name(new) => match self.harness.peer_summary() {
                 None => (
-                    vec!["/name: peers are off (synthesis.peers.enabled in user settings, or --peers)".into()],
+                    vec![
+                        "/name: peers are off (synt.peers.enabled in user settings, or --peers)"
+                            .into(),
+                    ],
                     true,
                 ),
                 Some((name, _)) => {

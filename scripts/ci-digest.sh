@@ -11,27 +11,27 @@ title=${2:-$log}
 max=${DIGEST_MAX:-60}
 
 env_dump() {
-  local py chrome synth=target/debug/synth
+  local py chrome synt=target/debug/synt
   py=$(python3 --version 2>&1 || python --version 2>&1 || echo none)
   echo "env: os=$(uname -s) arch=$(uname -m) runner=${RUNNER_OS:-local} node=$(node --version 2>/dev/null || echo none) python=${py%%$'\n'*} git=$(git --version 2>/dev/null || echo none)"
-  if [ -n "${SYNTHESIS_BROWSER_PATH:-}" ]; then
+  if [ -n "${SYNT_BROWSER_PATH:-}" ]; then
     # `chrome.exe --version` launches the browser on Windows and never returns: read the file version.
     if [ "${RUNNER_OS:-}" = Windows ]; then
-      chrome=$(powershell -NoProfile -Command "(Get-Item -LiteralPath '$SYNTHESIS_BROWSER_PATH').VersionInfo.ProductVersion" 2>&1 | head -n 1)
+      chrome=$(powershell -NoProfile -Command "(Get-Item -LiteralPath '$SYNT_BROWSER_PATH').VersionInfo.ProductVersion" 2>&1 | head -n 1)
     else
-      chrome=$("$SYNTHESIS_BROWSER_PATH" --version 2>&1 | head -n 1)
+      chrome=$("$SYNT_BROWSER_PATH" --version 2>&1 | head -n 1)
     fi
-    echo "chrome: $SYNTHESIS_BROWSER_PATH (${chrome:-no version output})"
+    echo "chrome: $SYNT_BROWSER_PATH (${chrome:-no version output})"
   fi
   if [ "$(uname -s)" = Linux ]; then
     echo "linux: apparmor_restrict_unprivileged_userns=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo n/a)" \
       "max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo n/a)" \
       "lsm=$(cat /sys/kernel/security/lsm 2>/dev/null || echo n/a)" "bwrap=$(command -v bwrap || echo none)"
   fi
-  if [ ! -x "$synth" ] && [ -x "$synth.exe" ]; then synth=$synth.exe; fi
-  if [ -x "$synth" ]; then
-    echo "synth doctor (sandbox):"
-    "$synth" doctor --cwd "${RUNNER_TEMP:-${TMPDIR:-/tmp}}" 2>&1 | grep -E 'default mode: enforce|enforce_ready|^  selected |available:' | sed 's/^/  /'
+  if [ ! -x "$synt" ] && [ -x "$synt.exe" ]; then synt=$synt.exe; fi
+  if [ -x "$synt" ]; then
+    echo "synt doctor (sandbox):"
+    "$synt" doctor --cwd "${RUNNER_TEMP:-${TMPDIR:-/tmp}}" 2>&1 | grep -E 'default mode: enforce|enforce_ready|^  selected |available:' | sed 's/^/  /'
   fi
 }
 

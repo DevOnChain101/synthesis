@@ -1,6 +1,6 @@
 {
   "agents": [],
-  "autoMemoryDir": "<HOME>/.synthesis/projects/<SANITIZED_CWD>/memory",
+  "autoMemoryDir": "<HOME>/.synt/projects/<SANITIZED_CWD>/memory",
   "claudeDir": "<HOME>/.claude",
   "commands": [],
   "mcpServers": [
@@ -9,7 +9,7 @@
       "enabled": false,
       "name": "nu",
       "scope": "synthesis",
-      "source": "<HOME>/.synthesis/synthesis.json",
+      "source": "<HOME>/.synt/synt.json",
       "type": "http",
       "url": "https://n.example.test/x#frag"
     },
@@ -18,7 +18,7 @@
       "enabled": true,
       "name": "nl",
       "scope": "local",
-      "source": "<HOME>/.synthesis/synthesis.json",
+      "source": "<HOME>/.synt/synt.json",
       "type": "stdio"
     }
   ],

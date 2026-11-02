@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 fn server() -> PathBuf {
     static P: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     P.get_or_init(|| {
-        let exe = Path::new(env!("CARGO_BIN_EXE_synth"));
+        let exe = Path::new(env!("CARGO_BIN_EXE_synt"));
         let profile = exe.parent().unwrap();
         let p = profile.join("examples").join("atlassian_like_server");
         if !p.exists() {
@@ -49,7 +49,7 @@ impl Rig {
         std::fs::create_dir_all(dir.path().join("synthesis")).unwrap();
         let cfg = json!({"$schema": "config.json/v1",
             "mcpServers": {"atl": {"command": server(), "args": flags}}});
-        std::fs::write(dir.path().join("synthesis/synthesis.json"), cfg.to_string()).unwrap();
+        std::fs::write(dir.path().join("synthesis/synt.json"), cfg.to_string()).unwrap();
         std::fs::write(
             dir.path().join("synthesis/settings.json"),
             settings.to_string(),
@@ -61,7 +61,7 @@ impl Rig {
     fn run(&self, script: Value) -> (Output, Vec<Value>, String) {
         let s = self.dir.path().join("script.json");
         std::fs::write(&s, script.to_string()).unwrap();
-        let o = Command::new(env!("CARGO_BIN_EXE_synth"))
+        let o = Command::new(env!("CARGO_BIN_EXE_synt"))
             .args(["run", "--cwd"])
             .arg(self.dir.path().join("ws"))
             .arg("--provider")
@@ -70,7 +70,7 @@ impl Rig {
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", self.dir.path())
-            .env("SYNTHESIS_HOME", self.dir.path().join("synthesis"))
+            .env("SYNT_HOME", self.dir.path().join("synthesis"))
             .stdin(Stdio::null())
             .output()
             .unwrap();

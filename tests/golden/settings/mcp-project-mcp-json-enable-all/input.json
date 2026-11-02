@@ -2,7 +2,7 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {
-    "<HOME>/.synthesis/synthesis.json": {
+    "<HOME>/.synt/synt.json": {
       "claude": {
         "readUserConfig": true
       }
@@ -27,7 +27,7 @@
         }
       }
     },
-    "<TMP>/ws/.synthesis/settings.json": {
+    "<TMP>/ws/.synt/settings.json": {
       "enableAllProjectMcpServers": true
     }
   },

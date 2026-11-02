@@ -105,7 +105,7 @@ async fn m9_sensitive_input_never_reaches_events_prompts_or_history() {
 async fn m9_hook_payloads_are_redacted() {
     let (o, approver) = fill_opts();
     let mut rig = Rig::build(o, fill_turns(), move |h, r| {
-        let cmd = r#"cat >> "$SYNTHESIS_PROJECT_DIR/payloads.log""#;
+        let cmd = r#"cat >> "$SYNT_PROJECT_DIR/payloads.log""#;
         h.with_approver(approver).with_hooks(hooks_for(
             r,
             json!({
@@ -328,7 +328,7 @@ async fn l7_pre_tool_use_runs_again_on_input_edited_by_the_approver() {
         ],
         move |h, r| {
             // asks for confirmation unless it already sees the edited input
-            let cmd = r#"in=$(cat); printf '%s\n' "$in" >> "$SYNTHESIS_PROJECT_DIR/hook.log"; case "$in" in *edited*) ;; *) printf '{"hookSpecificOutput":{"permissionDecision":"ask"}}';; esac"#;
+            let cmd = r#"in=$(cat); printf '%s\n' "$in" >> "$SYNT_PROJECT_DIR/hook.log"; case "$in" in *edited*) ;; *) printf '{"hookSpecificOutput":{"permissionDecision":"ask"}}';; esac"#;
             h.with_approver(a).with_hooks(hooks_for(
                 r,
                 json!({"PreToolUse": [{"matcher": "Probe", "hooks": [{"type": "command", "command": cmd}]}]}),
@@ -352,7 +352,7 @@ async fn stop_hook_can_keep_the_model_working() {
         Opts::default(),
         vec![Turn::text("done 1"), Turn::text("done 2")],
         |h, r| {
-            let cmd = r#"if [ -f "$SYNTHESIS_PROJECT_DIR/m" ]; then exit 0; fi; touch "$SYNTHESIS_PROJECT_DIR/m"; echo "keep going SECRET-HOOK-TEXT" >&2; exit 2"#;
+            let cmd = r#"if [ -f "$SYNT_PROJECT_DIR/m" ]; then exit 0; fi; touch "$SYNT_PROJECT_DIR/m"; echo "keep going SECRET-HOOK-TEXT" >&2; exit 2"#;
             h.with_hooks(hooks_for(
                 r,
                 json!({"Stop": [{"hooks": [{"type": "command", "command": cmd}]}]}),

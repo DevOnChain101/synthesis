@@ -45,7 +45,7 @@ impl Sandbox {
     fn expand(&self, v: &Value) -> Value {
         let t = self.tmp.to_string_lossy().into_owned();
         map_strings(v, &|s| {
-            s.replace("<SYNTHESIS_HOME>", &format!("{t}/synthesis_home"))
+            s.replace("<SYNT_HOME>", &format!("{t}/synthesis_home"))
                 .replace("<HOME>", &format!("{t}/home"))
                 .replace("<TMP>", &t)
         })
@@ -58,7 +58,7 @@ impl Sandbox {
             s = s.replace('\\', "/"); // the engine may re-spell our paths with backslashes
         }
         for (root, ph) in [
-            (format!("{t}/synthesis_home"), "<SYNTHESIS_HOME>"),
+            (format!("{t}/synthesis_home"), "<SYNT_HOME>"),
             (format!("{t}/home"), "<HOME>"),
             (t, "<TMP>"),
         ] {

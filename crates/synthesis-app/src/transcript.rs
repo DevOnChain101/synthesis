@@ -74,7 +74,7 @@ impl Transcript {
             .clone();
         match n {
             Some(n) => n(&text),
-            None => eprintln!("synth: warning: {text}"),
+            None => eprintln!("synt: warning: {text}"),
         }
     }
 

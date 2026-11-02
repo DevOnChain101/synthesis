@@ -192,8 +192,8 @@ fn events_are_gapless_redacted_and_replayable() {
     assert_eq!(w.read_events("s1", 0, 4).unwrap().len(), 4);
     assert_eq!(w.get_session("s1").unwrap().event_cursor, 10);
     // The raw database never holds the secret.
-    let raw = fs::read(e.home.join("synthesis.db")).unwrap();
-    let wal = fs::read(e.home.join("synthesis.db-wal")).unwrap_or_default();
+    let raw = fs::read(e.home.join("synt.db")).unwrap();
+    let wal = fs::read(e.home.join("synt.db-wal")).unwrap_or_default();
     for b in [raw, wal] {
         assert!(!String::from_utf8_lossy(&b).contains("hunter2-secret"));
     }
@@ -207,7 +207,7 @@ fn large_payload_becomes_an_artifact_ref() {
     let big = "x".repeat(20_000);
     let env1 = w.append_event(notice(&big)).unwrap();
     let small = w.append_event(notice("small")).unwrap();
-    let conn = rusqlite::Connection::open(e.home.join("synthesis.db")).unwrap();
+    let conn = rusqlite::Connection::open(e.home.join("synt.db")).unwrap();
     let row = |seq: i64| -> (Option<String>, Option<String>) {
         conn.query_row(
             "SELECT payload, payload_ref FROM events WHERE seq=?1",
@@ -298,7 +298,7 @@ fn schema_is_versioned_and_foreign_keys_are_on() {
     let e = env();
     drop(e.store());
     drop(e.store()); // reopening is a no-op
-    let conn = rusqlite::Connection::open(e.home.join("synthesis.db")).unwrap();
+    let conn = rusqlite::Connection::open(e.home.join("synt.db")).unwrap();
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
@@ -1010,7 +1010,7 @@ fn image_message(text: &str) -> Value {
 }
 
 fn contents(home: &Path, sid: &str) -> Vec<(i64, String)> {
-    let c = rusqlite::Connection::open(home.join("synthesis.db")).unwrap();
+    let c = rusqlite::Connection::open(home.join("synt.db")).unwrap();
     let mut q = c
         .prepare("SELECT idx, content FROM messages WHERE session_id = ?1 ORDER BY idx")
         .unwrap();
@@ -1021,7 +1021,7 @@ fn contents(home: &Path, sid: &str) -> Vec<(i64, String)> {
 }
 
 fn age(home: &Path, sid: &str, updated_at: &str) {
-    rusqlite::Connection::open(home.join("synthesis.db"))
+    rusqlite::Connection::open(home.join("synt.db"))
         .unwrap()
         .execute(
             "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
@@ -1090,7 +1090,7 @@ fn a_locked_database_is_skipped_not_an_error() {
         .unwrap();
     drop(w);
     age(&e.home, "s", "2020-01-01T00:00:00.000Z");
-    let other = rusqlite::Connection::open(e.home.join("synthesis.db")).unwrap();
+    let other = rusqlite::Connection::open(e.home.join("synt.db")).unwrap();
     other.execute_batch("BEGIN IMMEDIATE").unwrap();
     let now = time::macros::datetime!(2026-11-10 12:00 UTC);
     assert_eq!(store.purge_images(30, now).unwrap().images, 0);
@@ -1108,7 +1108,7 @@ fn a_locked_database_is_skipped_not_an_error() {
 
 fn raw_bytes(home: &Path) -> Vec<u8> {
     let mut all = vec![];
-    for f in ["synthesis.db", "synthesis.db-wal"] {
+    for f in ["synt.db", "synt.db-wal"] {
         all.extend(fs::read(home.join(f)).unwrap_or_default());
     }
     all
@@ -1172,7 +1172,7 @@ fn meta_images_go_too_and_a_log_held_open_by_a_reader_is_reported_not_hidden() {
         w.append_message(NewMessage::user(image_message("see")))
             .unwrap();
     }
-    let c = rusqlite::Connection::open(e.home.join("synthesis.db")).unwrap();
+    let c = rusqlite::Connection::open(e.home.join("synt.db")).unwrap();
     c.execute(
         "UPDATE messages SET meta = ?1",
         [
@@ -1183,7 +1183,7 @@ fn meta_images_go_too_and_a_log_held_open_by_a_reader_is_reported_not_hidden() {
     .unwrap();
     age(&e.home, "s", "2020-01-01T00:00:00.000Z");
     // a reader with an open snapshot keeps the log from being truncated
-    let reader = rusqlite::Connection::open(e.home.join("synthesis.db")).unwrap();
+    let reader = rusqlite::Connection::open(e.home.join("synt.db")).unwrap();
     reader
         .execute_batch("BEGIN; SELECT count(*) FROM messages;")
         .unwrap();

@@ -1,4 +1,4 @@
-//! The interactive app end to end: the real `synth` binary on a pseudo-terminal (a small python3
+//! The interactive app end to end: the real `synt` binary on a pseudo-terminal (a small python3
 //! driver, `tui_pty_driver.py`), a scripted model and, where needed, a stdio MCP server. Each
 //! scenario types into the app and then checks the screen and the session store.
 #![cfg(all(feature = "test-provider", unix))]
@@ -48,7 +48,7 @@ impl Rig {
     fn drive_bare(&self, steps: Value) -> String {
         self.run_scenario(
             vec![
-                json!(env!("CARGO_BIN_EXE_synth")),
+                json!(env!("CARGO_BIN_EXE_synt")),
                 json!("--cwd"),
                 json!(self.ws()),
             ],
@@ -58,7 +58,7 @@ impl Rig {
 
     fn drive_with(&self, steps: Value, extra: &[&str]) -> String {
         let mut argv = vec![
-            json!(env!("CARGO_BIN_EXE_synth")),
+            json!(env!("CARGO_BIN_EXE_synt")),
             json!("--cwd"),
             json!(self.ws()),
             json!("--provider"),
@@ -76,7 +76,7 @@ impl Rig {
     fn run_scenario(&self, argv: Vec<Value>, steps: Value) -> String {
         let scenario = json!({
             "argv": argv,
-            "env": {"HOME": self.root(), "SYNTHESIS_HOME": self.home()},
+            "env": {"HOME": self.root(), "SYNT_HOME": self.home()},
             "steps": steps,
         });
         let (sc, out) = (
@@ -105,7 +105,7 @@ impl Rig {
 
     /// `(type, payload)` of every stored event of the sessions in the store.
     fn events(&self) -> Vec<(String, Value)> {
-        let c = rusqlite::Connection::open(self.home().join("synthesis.db")).unwrap();
+        let c = rusqlite::Connection::open(self.home().join("synt.db")).unwrap();
         let mut q = c
             .prepare("SELECT type, COALESCE(payload, '{}') FROM events ORDER BY session_id, seq")
             .unwrap();
@@ -181,7 +181,7 @@ fn approval_subagent_model_switch_and_new_folder() {
     ]));
     let flat = squash(&text);
     assert!(flat.contains("memory.written"), "no memory row");
-    assert!(!flat.contains("synth: error"), "{flat}");
+    assert!(!flat.contains("synt: error"), "{flat}");
     let ev = rig.events();
     let n = |t: &str| ev.iter().filter(|e| e.0 == t).count();
     assert!(n("tool.approval_required") >= 1, "no approval event");
@@ -201,7 +201,7 @@ fn approval_subagent_model_switch_and_new_folder() {
         .collect();
     assert!(roots.len() >= 2, "{roots:?}");
     // the usage of finished tasks reached the store before the app ended (it is killed, not quit)
-    let c = rusqlite::Connection::open(rig.home().join("synthesis.db")).unwrap();
+    let c = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
     let used: i64 = c
         .query_row(
             "SELECT COUNT(*) FROM sessions WHERE json_extract(usage, '$.turns') >= 1",
@@ -254,7 +254,7 @@ fn mcp_mentions_prompts_skills_and_help() {
     std::fs::write(&srv, MCP_SERVER).unwrap();
     let reads = rig.root().join("reads.log");
     rig.write(
-        "synthesis.json",
+        "synt.json",
         &json!({"$schema": "config.json/v1", "mcpServers": {
             "doc": {"command": "python3", "args": [srv, reads]}}})
         .to_string(),
@@ -292,7 +292,7 @@ fn mcp_mentions_prompts_skills_and_help() {
 }
 
 fn atlassian_like_server() -> PathBuf {
-    let exe = Path::new(env!("CARGO_BIN_EXE_synth"));
+    let exe = Path::new(env!("CARGO_BIN_EXE_synt"));
     let profile = exe.parent().unwrap();
     let mut c = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     c.args([
@@ -318,13 +318,13 @@ fn tool_search_rows() {
         {"text": "searched"}
     ]));
     rig.write(
-        "synthesis.json",
+        "synt.json",
         &json!({"$schema": "config.json/v1", "mcpServers": {"atl": {"command": atlassian_like_server()}}})
             .to_string(),
     );
     rig.write(
         "settings.json",
-        &json!({"permissions": {"allow": ["mcp__atl"]}, "synthesis": {"mcp": {"toolSearch": "on"}}})
+        &json!({"permissions": {"allow": ["mcp__atl"]}, "synt": {"mcp": {"toolSearch": "on"}}})
             .to_string(),
     );
     let text = rig.drive(json!([
@@ -343,7 +343,7 @@ fn tool_search_rows() {
     assert_eq!(done, ["ok", "ok"], "{done:?}");
 }
 
-/// `/config` flips a `synthesis.tui` setting, applies it at once (the Session panel goes) and writes
+/// `/config` flips a `synt.tui` setting, applies it at once (the Session panel goes) and writes
 /// the USER settings file, leaving its other keys alone.
 #[test]
 fn config_flips_a_setting_applies_it_and_writes_the_user_file() {
@@ -356,7 +356,7 @@ fn config_flips_a_setting_applies_it_and_writes_the_user_file() {
         expect("Enter send"),
         expect("Session"),
         send("/config\r"),
-        expect("Settings (synthesis.tui)"),
+        expect("Settings (synt.tui)"),
         expect("[x] panel session"),
         send("\r"), // flips the first row: the Session panel off
         expect("[ ] panel session"),
@@ -365,8 +365,8 @@ fn config_flips_a_setting_applies_it_and_writes_the_user_file() {
     let v: Value =
         serde_json::from_str(&std::fs::read_to_string(rig.home().join("settings.json")).unwrap())
             .unwrap();
-    assert_eq!(v["synthesis"]["tui"]["panels"]["session"], false);
-    assert_eq!(v["synthesis"]["tui"]["panels"]["tools"], true);
+    assert_eq!(v["synt"]["tui"]["panels"]["session"], false);
+    assert_eq!(v["synt"]["tui"]["panels"]["tools"], true);
     assert_eq!(
         v["permissions"]["deny"][0], "Bash(rm:*)",
         "other keys survive"
@@ -390,7 +390,7 @@ fn peers_name_and_agents_all_say_so_when_peers_are_off_and_show_the_table_when_o
         send("/agents --all\r"),
         expect("Agents in this session")
     ]));
-    assert!(squash(&off).contains("synthesis.peers.enabled"));
+    assert!(squash(&off).contains("synt.peers.enabled"));
     let on = rig.drive_with(
         json!([
             expect("Enter send"),

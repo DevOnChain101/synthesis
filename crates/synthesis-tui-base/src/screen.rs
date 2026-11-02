@@ -9,7 +9,7 @@ use std::io::{self, Write};
 /// text selection) + 1006 (SGR coordinates), clear, home.
 pub const ENTER: &str =
     "\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[2J\x1b[H";
-/// [`ENTER`] without mouse reporting (`synthesis.tui.mouse_capture` = false).
+/// [`ENTER`] without mouse reporting (`synt.tui.mouse_capture` = false).
 pub const ENTER_NO_MOUSE: &str = "\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[2J\x1b[H";
 pub const TITLE: &str = "✻ SYNTHESIS";
 /// xterm title stack: push the old title on entering, pop it on leaving.

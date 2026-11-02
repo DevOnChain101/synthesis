@@ -4,7 +4,7 @@
     "_explicitAliases": [],
     "_modelExplicit": false,
     "_warnings": [
-      "provider \"p\" apiKey: could not read file \"<SYNTHESIS_HOME>/missing.txt\" (referenced by {file:missing.txt})"
+      "provider \"p\" apiKey: could not read file \"<SYNT_HOME>/missing.txt\" (referenced by {file:missing.txt})"
     ],
     "aliases": {
       "fable": null,

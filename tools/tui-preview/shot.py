@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Screenshot of the REAL `synth` TUI: runs the binary on a pty, feeds its output through a
+"""Screenshot of the REAL `synt` TUI: runs the binary on a pty, feeds its output through a
 terminal emulator (pyte) to the final screen grid, writes HTML (one fixed-size cell per character,
 24-bit colours kept) and has headless Chrome take the PNG. Dev tool, not part of the build.
 

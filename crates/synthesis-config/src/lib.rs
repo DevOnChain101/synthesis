@@ -2,7 +2,7 @@
 //! (docs/specs/config.md). Faithful port of Node `config.js`, `configschema.js`,
 //! `providercfg.js` and the read side of `auth.js`.
 //!
-//! Policy: only `SYNTHESIS_*` environment variables are read for layering and credentials;
+//! Policy: only `SYNT_*` environment variables are read for layering and credentials;
 //! no writes of credentials; no keychain.
 
 mod auth;

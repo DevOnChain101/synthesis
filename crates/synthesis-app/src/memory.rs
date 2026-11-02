@@ -16,18 +16,16 @@ pub struct Notes {
     pub root: PathBuf,
     pub secrets: Vec<String>,
     pub loaded: Vec<String>,
-    /// The long-term memory store is open for this session (`synth memory ...` manages it).
+    /// The long-term memory store is open for this session (`synt memory ...` manages it).
     pub long_term: bool,
 }
 
-/// User: `$SYNTHESIS_HOME/SYNTHESIS.md`. Project: the root's `SYNTHESIS.md` or `AGENTS.md` when one exists
-/// (the files the loader prefers), else `<root>/.synthesis/SYNTHESIS.md`, which is loaded next to them.
+/// User: `$SYNT_HOME/AGENTS.md`. Project: the root's `AGENTS.md` when it exists
+/// (the files the loader prefers), else `<root>/.synt/AGENTS.md`, which is loaded next to them.
 pub fn project_file(root: &Path) -> PathBuf {
-    ["SYNTHESIS.md", "AGENTS.md"]
-        .iter()
-        .map(|n| root.join(n))
-        .find(|p| p.is_file())
-        .unwrap_or_else(|| root.join(".synthesis").join("SYNTHESIS.md"))
+    Some(root.join("AGENTS.md"))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| root.join(".synt").join("AGENTS.md"))
 }
 
 pub fn describe(files: &[InstructionFile]) -> Vec<String> {
@@ -46,7 +44,7 @@ impl Notes {
                 v.push("  (none)".into());
             }
             v.push(if self.long_term {
-                "Long-term memory: on (the agent's Memory* tools; manage it with `synth memory`)"
+                "Long-term memory: on (the agent's Memory* tools; manage it with `synt memory`)"
                     .into()
             } else {
                 "Long-term memory: off".into()
@@ -172,17 +170,17 @@ mod tests {
     fn project_file_prefers_existing_synthesis_then_agents_else_dot_synthesis() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path();
-        assert_eq!(project_file(p), p.join(".synthesis/SYNTHESIS.md"));
+        assert_eq!(project_file(p), p.join(".synt/AGENTS.md"));
         std::fs::write(p.join("AGENTS.md"), "x").unwrap();
         assert_eq!(project_file(p), p.join("AGENTS.md"));
-        std::fs::write(p.join("SYNTHESIS.md"), "x").unwrap();
-        assert_eq!(project_file(p), p.join("SYNTHESIS.md"));
+        std::fs::write(p.join("AGENTS.md"), "x").unwrap();
+        assert_eq!(project_file(p), p.join("AGENTS.md"));
     }
 
     #[test]
     fn note_is_appended_on_its_own_line_with_secrets_masked() {
         let d = tempfile::tempdir().unwrap();
-        let f = d.path().join(".synthesis/SYNTHESIS.md");
+        let f = d.path().join(".synt/AGENTS.md");
         let root = synthesis_core::canonicalize(d.path()).unwrap();
         assert_eq!(
             append_note(&f, Some(&root), "run cargo test\nfirst", &r()),
@@ -225,7 +223,7 @@ mod tests {
         assert_eq!(n, "see `@~/.ssh/id_rsa` and `@x.md` bye a@b");
         assert!(!masked);
         let d = tempfile::tempdir().unwrap();
-        let f = d.path().join("SYNTHESIS.md");
+        let f = d.path().join("AGENTS.md");
         let root = synthesis_core::canonicalize(d.path()).unwrap();
         append_note(&f, Some(&root), "@~/.env", &r()).unwrap();
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "- `@~/.env`\n");
@@ -246,16 +244,15 @@ mod tests {
         let e = append_note(&root.join("AGENTS.md"), Some(&root), "n", &r()).unwrap_err();
         assert!(e.contains("symbolic link"), "{e}");
         // under .git/
-        let e = append_note(&root.join(".git/SYNTHESIS.md"), Some(&root), "n", &r()).unwrap_err();
+        let e = append_note(&root.join(".git/AGENTS.md"), Some(&root), "n", &r()).unwrap_err();
         assert!(e.contains(".git"), "{e}");
         // a directory symlinked out of the project: refused BEFORE create_dir_all makes anything
         std::os::unix::fs::symlink(d.path().join("out"), root.join("esc")).unwrap();
-        let e =
-            append_note(&root.join("esc/sub/SYNTHESIS.md"), Some(&root), "n", &r()).unwrap_err();
+        let e = append_note(&root.join("esc/sub/AGENTS.md"), Some(&root), "n", &r()).unwrap_err();
         assert!(e.contains("outside") || e.contains("dangling"), "{e}");
         assert!(!d.path().join("out").exists());
         // new files are private
-        let f = root.join(".synthesis/SYNTHESIS.md");
+        let f = root.join(".synt/AGENTS.md");
         append_note(&f, Some(&root), "n", &r()).unwrap();
         assert_eq!(
             std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,

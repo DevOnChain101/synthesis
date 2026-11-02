@@ -2,7 +2,7 @@
   "cwd": "<TMP>/ws",
   "env": {},
   "files": {
-    "<SYNTHESIS_HOME>/synthesis.json": {
+    "<SYNT_HOME>/synt.json": {
       "$schema": "config.json/v1",
       "providers": {
         "p": {
@@ -11,8 +11,8 @@
         }
       }
     },
-    "<SYNTHESIS_HOME>/secret.txt": "  sk-file-key \n"
+    "<SYNT_HOME>/secret.txt": "  sk-file-key \n"
   },
-  "home": "<SYNTHESIS_HOME>",
+  "home": "<SYNT_HOME>",
   "op": "loadConfig"
 }
