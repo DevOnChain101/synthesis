@@ -442,6 +442,55 @@ fn many_threads_adding_and_removing_worktrees_do_not_race() {
     });
 }
 
+/// The lock file path is inside a repository an attacker may have prepared: a symlink there must
+/// not make us create or touch a file elsewhere, and a FIFO there must not hang us.
+#[cfg(unix)]
+#[test]
+fn a_symlink_or_a_fifo_at_the_lock_path_neither_hangs_nor_writes_elsewhere() {
+    use std::os::unix::fs::FileTypeExt;
+    need_git!();
+    let f = fx();
+    let common = f.repo.join(".git");
+    let lock = common.join("synthesis-worktree.lock");
+    let outside = f.base.join("outside-target");
+    std::os::unix::fs::symlink(&outside, &lock).unwrap();
+    let run = |id: &str| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let a = f
+                    .mgr
+                    .create(&f.repo, id, f.base.join("art").join(id), false);
+                let _ = tx.send(a.map(|a| a.context.root));
+            });
+            rx.recv_timeout(std::time::Duration::from_secs(30))
+                .expect("create hung on the planted lock path")
+        })
+    };
+    assert!(run("sym").is_ok());
+    assert!(
+        !outside.exists(),
+        "the symlink was followed and a file created"
+    );
+    // a FIFO: opening it for writing would block forever
+    std::fs::remove_file(&lock).unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&lock)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(run("fifo").is_ok());
+    assert!(
+        std::fs::symlink_metadata(&lock)
+            .unwrap()
+            .file_type()
+            .is_fifo(),
+        "left as it was"
+    );
+}
+
 #[test]
 fn paths_with_spaces_and_unicode() {
     need_git!();

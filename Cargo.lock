@@ -3047,6 +3047,7 @@ dependencies = [
 name = "synthesis-workspace"
 version = "0.1.0"
 dependencies = [
+ "rustix",
  "serde",
  "sha2",
  "synthesis-config",

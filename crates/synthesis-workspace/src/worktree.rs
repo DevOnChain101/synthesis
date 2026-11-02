@@ -661,6 +661,30 @@ fn nul_split_until_blank(b: &[u8]) -> Vec<String> {
 /// repository.
 const REPO_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// The lock file, only when it is (or can become) a plain file: a symlink planted at that path
+/// would make this create or lock a file somewhere else, and a FIFO would block the open forever.
+/// Neither is followed or opened: the caller then relies on the in-process mutex alone. On unix
+/// the open itself also refuses a symlink (`O_NOFOLLOW`) and cannot block (`O_NONBLOCK`), and the
+/// opened file is checked to be a regular file (the path may have changed since the check).
+fn open_lock_file(path: &Path) -> Option<fs::File> {
+    match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_file() => {}
+        Ok(_) => return None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    let mut o = fs::OpenOptions::new();
+    o.create(true).truncate(false).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
+        o.custom_flags(flags.bits() as i32);
+    }
+    let f = o.open(path).ok()?;
+    f.metadata().ok()?.is_file().then_some(f)
+}
+
 /// Runs `f` while holding the repository's worktree lock: a process-wide mutex per common git
 /// directory (threads of this process) plus an advisory lock file inside it (other processes).
 /// The wait for the file is bounded; a file system without locks falls back to the mutex alone.
@@ -676,12 +700,7 @@ fn with_repo_lock<T>(common: &Path, f: impl FnOnce() -> T) -> Result<T> {
         .or_default()
         .clone();
     let _in_process = m.lock().unwrap_or_else(|e| e.into_inner());
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(common.join("synthesis-worktree.lock"))
-        .ok();
+    let file = open_lock_file(&common.join("synthesis-worktree.lock"));
     if let Some(file) = &file {
         let start = std::time::Instant::now();
         loop {
