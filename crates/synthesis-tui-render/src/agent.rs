@@ -504,6 +504,10 @@ pub struct AgentOpts {
     pub tz_offset_min: i32,
     /// 16-colour or colourless terminal: the art is drawn in one colour.
     pub plain_logo: bool,
+    /// `synthesis.tui.logo` = `off`: no braille art on the welcome (the wordmark stays).
+    pub no_logo: bool,
+    /// `synthesis.tui.show_thinking` = false: thinking blocks are not drawn.
+    pub hide_thinking: bool,
     #[serde(skip)]
     pub config: Option<ModelConfig>,
 }
@@ -2048,7 +2052,15 @@ fn hero_rows(w: usize, art: bool, tagline: bool, plain: bool) -> Vec<Row> {
 /// The empty-conversation welcome with the brand hero: the biggest of art + box + tips, art + box,
 /// wordmark + box, wordmark + prompt line, wordmark that fits `h` rows. Narrower than 40 columns
 /// the art is never drawn.
-fn hero_welcome(agent: &Agent, w: usize, h: usize, now: i64, tz: i32, plain: bool) -> Vec<Row> {
+fn hero_welcome(
+    agent: &Agent,
+    w: usize,
+    h: usize,
+    now: i64,
+    tz: i32,
+    plain: bool,
+    no_logo: bool,
+) -> Vec<Row> {
     let hero = Some((now, tz));
     let join = |mut a: Vec<Row>, b: Vec<Row>| {
         a.extend(b);
@@ -2056,7 +2068,7 @@ fn hero_welcome(agent: &Agent, w: usize, h: usize, now: i64, tz: i32, plain: boo
     };
     // biggest first; every candidate is whole (a tip is shown or dropped, never cut)
     let mut candidates: Vec<Vec<Row>> = vec![];
-    if w >= 40 {
+    if w >= 40 && !no_logo {
         for n in (1..=TIPS.len()).rev() {
             candidates.push(join(
                 hero_rows(w, true, true, plain),
@@ -3593,9 +3605,10 @@ pub fn render_agent(
         let mut rest: Vec<Rc<Vec<Row>>> = vec![];
         for it in items {
             let focus_kinds = ["user", "text", "result", "note", "help", "info", "compact"];
-            if !agent.focus_view
+            if (!agent.focus_view
                 || opts.preview.is_some()
-                || focus_kinds.contains(&it.kind.as_str())
+                || focus_kinds.contains(&it.kind.as_str()))
+                && !(opts.hide_thinking && it.kind == "thinking")
             {
                 rest.extend(note_gap(prev, it));
                 prev = Some(&it.kind);
@@ -3612,6 +3625,7 @@ pub fn render_agent(
                     now,
                     opts.tz_offset_min,
                     opts.plain_logo,
+                    opts.no_logo,
                 )
             } else {
                 welcome_rows(agent, content_w, None, TIPS.len())

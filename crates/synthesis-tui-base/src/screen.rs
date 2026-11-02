@@ -9,6 +9,8 @@ use std::io::{self, Write};
 /// text selection) + 1006 (SGR coordinates), clear, home.
 pub const ENTER: &str =
     "\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[2J\x1b[H";
+/// [`ENTER`] without mouse reporting (`synthesis.tui.mouse_capture` = false).
+pub const ENTER_NO_MOUSE: &str = "\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[2J\x1b[H";
 pub const TITLE: &str = "✻ SYNTHESIS";
 /// xterm title stack: push the old title on entering, pop it on leaving.
 pub const PUSH_TITLE: &str = "\x1b[22;2t";
@@ -58,6 +60,7 @@ pub struct Screen<W: Write> {
     caret_shown: Option<(u32, u32)>,
     /// Post-processes each encoded line (OSC 8 hyperlinks); the row cache compares the plain lines.
     linker: Option<Linker>,
+    mouse: bool,
 }
 
 pub type Linker = Box<dyn Fn(&str) -> String + Send>;
@@ -76,6 +79,7 @@ impl<W: Write> Screen<W> {
             caret: None,
             caret_shown: None,
             linker: None,
+            mouse: true,
         }
     }
 
@@ -89,9 +93,23 @@ impl<W: Write> Screen<W> {
         self.caret = caret;
     }
 
+    /// Mouse reporting on (default) or off; set before [`Screen::enter`].
+    pub fn set_mouse(&mut self, on: bool) {
+        self.mouse = on;
+    }
+
+    fn enter_seq(&self) -> &'static str {
+        if self.mouse { ENTER } else { ENTER_NO_MOUSE }
+    }
+
     pub fn enter(&mut self) -> io::Result<()> {
         self.active = true;
-        write!(self.out, "{PUSH_TITLE}{}{ENTER}", set_title(&self.title))?;
+        write!(
+            self.out,
+            "{PUSH_TITLE}{}{}",
+            set_title(&self.title),
+            self.enter_seq()
+        )?;
         self.out.flush()
     }
 
@@ -146,8 +164,9 @@ impl<W: Write> Screen<W> {
         if self.active {
             write!(
                 self.out,
-                "\x1b[0m\x1b[r\x1b[?1049l{}{ENTER}\x1b[3J\x1b[H",
-                set_title(&self.title)
+                "\x1b[0m\x1b[r\x1b[?1049l{}{}\x1b[3J\x1b[H",
+                set_title(&self.title),
+                self.enter_seq()
             )?;
             self.out.flush()?;
         }

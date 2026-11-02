@@ -1,0 +1,47 @@
+▐ ✻ SYNTHESIS ▌ │ ● 1 live │ ◆ fake/model │ ⌂ proj                                                                         s1 · up 0s │ ctx ▱▱▱▱▱▱ 0% │ 08:00:00
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+┏━ ◆ Workspace 1 ━━━━┓┏━ ◆ Status ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┏━ ◆ TOPOLOGY 0 nodes ━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ ▌● proj           1┃┃                                                                                          ┃┃ ○ 1›○ 2›○ 3›○ 4›○ 5›○ 6                    ┃
+┗━━━━━━━━━━━━━━━━━━━━┛│ ● IDLE  last activity 0s ago                                                             ││ idle · waiting for a prompt                │
+┏━ ◆ Running · proj… ┓│   waiting for the next prompt…                                                           ││                                            │
+┃ ▌● synthesis ⌘     ┃│ Context  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0% 0/200.0k      ││                                            │
+│ proj (/work)       │┃                                                                                          ┃│                                            │
+┃                    ┃┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│                                            │
+┗━━━━━━━━━━━━━━━━━━━━┛┏━ ◆ SYNTHESIS · /work/proj  ready ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓│                                            │
+┏━ ◆ Session ━━━━━━━━┓┃                                                                                          ┃│                                            │
+┃                    ┃│                                                                                          ││                                            │
+│                    ││                                                                                          ││                                            │
+│ model  fake/model  ││                                                                                          ││                                            │
+│ mode   manual      ││                                                                                          ││                                            │
+│ effort auto        ││                                                                                          ││                                            │
+│ cwd    proj        ││                                                                                          ││ ╭─── SYNTHESIS CORE  fake/model ──────────╮│
+│ turns  0 prompts ·…││                                                                                          ││ │ · Intent       parse request            ││
+│                    ││                                                                                          ││ │ · Plan         decompose                ││
+┃                    ┃│                                                                                          ││ │ · Orchestrator route work          idle ││
+┗━━━━━━━━━━━━━━━━━━━━┛│                                                                                          ││ │ ctx 0% · 0 tok                          ││
+┏━ ◆ Tools & Skills ━┓│                                                                                          ││ ╰┳┳┳┳┳┳┳▲─────────────────────────────────╯│
+┃ no tool calls yet  ┃│                                                                                          ││  │││││││└ USER  ❯ waiting for a prompt…    │
+┃                    ┃│                                                                                          ││  ││││││└─►GUARDS  0 guards                 │
+┗━━━━━━━━━━━━━━━━━━━━┛│                                                                                          ││  │││││└──►SUB-AGENTS  no sub-agents yet    │
+┏━ ◆ Activity ━━━━━━━┓│                                                                                          ││  ││││└───►SKILLS  no skills used yet       │
+┃                    ┃│                                                                                          ││  │││└────►HOOKS  no event hooks fired      │
+│                    ││                                                                                          ││  ││└─────►EXECUTION  0 calls      no errors│
+│                    ││                                                                                          ││  │└──────►MCP  no MCP servers called       │
+│                    ││                                                                                          ││  └───────►MEMORY  context ▱▱▱▱▱▱▱▱▱▱     0%│
+│                    ││ ╭───────────────────────────────────────────────────────────────────────────────────────╮││                                            │
+│                    ││ │ ✻ Hello there! I'm Synthesis.  · 0.1                                                  │││                                            │
+│                    ││ │                                                                                       │││                                            │
+│                    ││ │ /help for commands · alt+v pastes an image                                            │││                                            │
+│                    ││ │ cwd: /work/proj                                                                       │││                                            │
+│                    ││ ╰───────────────────────────────────────────────────────────────────────────────────────╯││                                            │
+│                    ││                                                                                          ││                                            │
+│                    ││  Tips for getting started:                                                               ││                                            │
+│                    ││   1. Ask Synthesis to explain, fix or build something in this folder                     ││                                            │
+│                    ││   2. Type / for commands and skills, @ to mention a file                                 ││                                            │
+│                    ││   3. Drop or paste an image path to attach a screenshot                                  │┃                                            ┃
+│                    ││ ╭───────────────────────────────────────────────────────────────────────────────────────╮│┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+│                    ││ │ >  Enter send · Shift+Enter newline · / commands · @ files · ! shell · Shift+Tab mode ││┏━ ◆ Usage ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+│                    ││ ╰───────────────────────────────────────────────────────────────────────────────────────╯│┃ collecting history…                        ┃
+┃                    ┃┃ ⏸ manual mode on (shift+tab to cycle)                                model · effort: auto┃┃                                            ┃
+┗━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+tab workspace selector (when multiple) → sessions → prompt   enter send   esc interrupt   ⇧tab mode   alt+v paste image   ! shell   ctrl+o expand

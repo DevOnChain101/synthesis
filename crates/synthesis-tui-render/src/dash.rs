@@ -107,8 +107,19 @@ pub enum Focus {
     Workspace,
 }
 
+/// Sidebar panels switched off (`synthesis.tui.panels`); the panels that stay take their rows.
+/// Workspace, Running sessions and the chat cannot be hidden.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Hidden {
+    pub session: bool,
+    pub mcp: bool,
+    pub tools: bool,
+    pub activity: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DashView {
+    pub hidden: Hidden,
     pub opts: AgentOpts,
     pub dock_scroll: usize,
     pub activity_scroll: usize,
@@ -1491,22 +1502,30 @@ fn side_column(
     let mut out = ws_rows;
     out.extend(sessions_panel(s, w, sessions_h, frame, &mut hits.session));
     let budget = h - ws_h - sessions_h;
+    let hidden = s.view.hidden;
     let mcp_rows = mcp_rows_of(s).1;
     let tool_count = s.session.tool_counts.len() as i64;
     let skill_count = s.session.skills.len() as i64;
     let tools_want = 4.max(tool_count + if skill_count > 0 { 2 } else { 0 } + 4);
-    let activity_want = if s.agent.is_some() { 4 } else { 0 };
-    let info_full_h = 11;
-    let info_ess_h = 5;
-    let mcp_full_h = if mcp_rows.is_empty() {
+    let activity_want = if s.agent.is_some() && !hidden.activity {
+        4
+    } else {
+        0
+    };
+    let (info_full_h, info_ess_h) = if hidden.session { (0, 0) } else { (11, 5) };
+    let mcp_full_h = if mcp_rows.is_empty() || hidden.mcp {
         0
     } else {
         clamp_int(mcp_rows.len() as i64 + 3, 4, 8)
     };
-    let mut show_activity = s.agent.is_some();
-    let mut show_tools = true;
+    let mut show_activity = s.agent.is_some() && !hidden.activity;
+    let mut show_tools = !hidden.tools;
     let mut info_full = true;
-    let mut mcp_mode = if mcp_rows.is_empty() { 0 } else { 3 }; // 3 full, 2 summary, 0 hidden
+    let mut mcp_mode = if mcp_rows.is_empty() || hidden.mcp {
+        0
+    } else {
+        3
+    }; // 3 full, 2 summary, 0 hidden
     let total_want = |act: bool, tools: bool, info_full: bool, mcp_mode: i32| {
         (if info_full {
             info_full_h.min(budget)
@@ -1539,11 +1558,13 @@ fn side_column(
     } else {
         info_ess_h
     };
-    out.extend(if info_full {
-        session_info_panel(s, w, info_h, frame, now)
-    } else {
-        session_info_essential(s, w, info_h, frame)
-    });
+    if !hidden.session {
+        out.extend(if info_full {
+            session_info_panel(s, w, info_h, frame, now)
+        } else {
+            session_info_essential(s, w, info_h, frame)
+        });
+    }
     let mut left = budget - info_h;
     if mcp_mode == 3 && left >= mcp_full_h {
         out.extend(mcp_panel(s, w, mcp_full_h, frame));
@@ -1553,7 +1574,7 @@ fn side_column(
         left -= 1;
     }
     if show_tools && left >= 6 {
-        let tools_h = if s.agent.is_some() && left >= 14 {
+        let tools_h = if s.agent.is_some() && !hidden.activity && left >= 14 {
             tools_want.min((left as f64 * 0.45).floor() as i64)
         } else {
             left
