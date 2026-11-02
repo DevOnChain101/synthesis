@@ -962,6 +962,18 @@ pub fn prepare(
         sid.clone(),
         res.secrets.clone(),
     );
+    if let Some(t) = &transcript {
+        let sink = sink.clone();
+        t.set_notifier(Arc::new(move |m| {
+            sink.emit(
+                &Scope::default(),
+                Event::Notice {
+                    level: "warning".into(),
+                    text: m.to_string(),
+                },
+            );
+        }));
+    }
 
     // settings.env: opt-in additions on top of the allowlisted child env (config.md §6). A
     // variable the process env already supplies to children wins, as in Node's agentEnv.
