@@ -22,6 +22,14 @@ session continues in place), `--once` (print one frame and exit), plus the `synt
 | /effort [auto\|low\|...] | reasoning effort, only when the model declares `effort_tiers` |
 | /mcp | MCP servers: state, tools, last error |
 | /images [clear] | the attached images, or drop them |
+| /config | the `synthesis.tui` settings as a list; enter flips a row, applies it and saves it |
+| /files | the project tree with git status letters (read-only git) |
+| /diff [file] | uncommitted changes: a line per file, then the diff (of one file) |
+| /terminal | the shell commands this session ran, with their status |
+| /browser | the browser and web calls this session made |
+| /peers | other sessions on this machine (needs `--peers` or `synthesis.peers.enabled`) |
+| /agents --all | the session's agents, then the other sessions' table |
+| /name | the name other sessions address this one by (fixed for the run: `--name`) |
 | /memory | instruction files loaded, long-term memory on/off, where `#` notes go |
 | /agents | agents of this session and the definitions `@agent:name` can start |
 | /permissions [allow\|remove RULE] | mode and rules; allow / remove a rule |
@@ -53,6 +61,19 @@ settings, default 30, `0` = forever) rewrites images of sessions untouched for t
 `synthesis.compat.write_node_transcripts` off to avoid them). A persistence problem (a message the
 store refuses, a failing store) is a visible `notice`, and a message over the limit is stored with
 its images replaced by `[image]` instead of stopping the later messages.
+
+## Settings (`synthesis.tui`, user settings.json only)
+
+`panels.{session,mcp,tools,activity}` (Workspace, Running sessions and the chat are always shown; the
+other panels take the rows of a hidden one), `logo` (`art` | `off`), `show_thinking`, `diffs_expanded`
+(long output starts whole, like ctrl+o), `queue_indicators`, `motion` (spinners drawn still when off),
+`mouse_capture` (off: the terminal's own selection; applies at start), `copy_on_select`. Defaults:
+everything on, `diffs_expanded` off. A project, local or managed settings file that sets `synthesis.tui`
+is ignored with a diagnostic; a wrong value keeps the default and the diagnostic names the key.
+`/config` edits these and writes the USER file atomically, keeping every other key; it can write
+nothing else, so never a credential. First run without a configured model shows a setup card
+(`r` checks again, `q` quits) instead of an error. What came from the removed new TUI and what did
+not: `docs/tui-feature-port.md`.
 
 ## Events
 
