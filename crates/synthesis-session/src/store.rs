@@ -479,6 +479,9 @@ impl Store {
                     if matches!(f.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
             )
         };
+        // freed pages are overwritten with zeros, not just unlinked (per connection; must be set
+        // before the transaction starts)
+        conn.pragma_update(None, "secure_delete", true)?;
         let tx = match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
             Ok(t) => t,
             Err(e) if busy(&e) => return Ok(0),
@@ -509,7 +512,19 @@ impl Store {
             }
         }
         match tx.commit() {
-            Ok(()) => Ok(removed),
+            Ok(()) => {
+                if removed > 0 {
+                    // the old pages may still sit in the write-ahead log: fold it into the
+                    // database and truncate it (best effort; a reader may hold it open).
+                    // No VACUUM: it rewrites the whole database under an exclusive lock and
+                    // needs free disk for a copy; secure_delete already zeroed what was freed.
+                    let _: std::result::Result<(i64, i64, i64), _> =
+                        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                        });
+                }
+                Ok(removed)
+            }
             Err(e) if busy(&e) => Ok(0),
             Err(e) => Err(e.into()),
         }
@@ -2074,15 +2089,40 @@ fn set_payload(tx: &Transaction<'_>, sid: &str, seq: i64, body: &str) -> Result<
     )? as u64)
 }
 
-/// Replaces every `{"type":"image",...}` object, at any depth, by a text block; returns how many.
-fn replace_images(v: &mut Value, text: &str) -> usize {
-    match v {
-        Value::Object(o) if o.get("type").and_then(Value::as_str) == Some("image") => {
-            *v = serde_json::json!({"type": "text", "text": text});
-            1
+/// Image bytes in a stored message: the message's own image blocks, and what a `tool_result` block
+/// carries (a screenshot a tool returned, at any depth inside that content). Nothing else: a
+/// `tool_use` input or any other JSON that happens to say `"type": "image"` is left alone.
+fn replace_images(content: &mut Value, text: &str) -> usize {
+    let block = || serde_json::json!({"type": "text", "text": text});
+    // images anywhere inside a tool result's content
+    fn deep(v: &mut Value, block: &dyn Fn() -> Value) -> usize {
+        match v {
+            Value::Object(o) if o.get("type").and_then(Value::as_str) == Some("image") => {
+                *v = block();
+                1
+            }
+            Value::Object(o) => o.values_mut().map(|x| deep(x, block)).sum(),
+            Value::Array(a) => a.iter_mut().map(|x| deep(x, block)).sum(),
+            _ => 0,
         }
-        Value::Object(o) => o.values_mut().map(|x| replace_images(x, text)).sum(),
-        Value::Array(a) => a.iter_mut().map(|x| replace_images(x, text)).sum(),
-        _ => 0,
     }
+    let Value::Array(blocks) = content else {
+        return 0;
+    };
+    let mut n = 0;
+    for b in blocks {
+        match b.get("type").and_then(Value::as_str) {
+            Some("image") => {
+                *b = block();
+                n += 1;
+            }
+            Some("tool_result") => {
+                if let Some(c) = b.get_mut("content") {
+                    n += deep(c, &block);
+                }
+            }
+            _ => {}
+        }
+    }
+    n
 }

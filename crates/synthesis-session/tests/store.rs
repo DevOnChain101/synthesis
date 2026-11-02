@@ -1101,3 +1101,60 @@ fn a_locked_database_is_skipped_not_an_error() {
     );
     assert_eq!(store.purge_images(30, now).unwrap(), 1, "next time it runs");
 }
+
+fn raw_bytes(home: &Path) -> Vec<u8> {
+    let mut all = vec![];
+    for f in ["synthesis.db", "synthesis.db-wal"] {
+        all.extend(fs::read(home.join(f)).unwrap_or_default());
+    }
+    all
+}
+
+fn has(hay: &[u8], needle: &str) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle.as_bytes())
+}
+
+#[test]
+fn only_content_blocks_lose_their_images_and_the_bytes_are_gone_from_the_files() {
+    let e = env();
+    let store = e.store();
+    {
+        let mut w = create(&e, "s", &e.dir("s"));
+        w.append_message(NewMessage::user(image_message("see")))
+            .unwrap();
+        // a tool_use whose INPUT merely says type image is not image content
+        w.append_message(NewMessage::assistant(json!([
+            {"type": "tool_use", "id": "t", "name": "Write",
+             "input": {"content": {"type": "image", "note": "KEEPME"}}}
+        ])))
+        .unwrap();
+        w.append_message(NewMessage::user(json!([{"type": "tool_result", "tool_use_id": "t",
+            "content": [{"type": "text", "text": "ok"}, {"type": "image", "source": {"data": "TOOLSHOT"}}]}])))
+            .unwrap();
+    }
+    age(&e.home, "s", "2020-01-01T00:00:00.000Z");
+    assert!(
+        has(&raw_bytes(&e.home), "SECRETPIXELS"),
+        "control: the bytes are in the files"
+    );
+    let now = time::macros::datetime!(2026-11-10 12:00 UTC);
+    assert_eq!(store.purge_images(30, now).unwrap(), 2);
+    let rows = contents(&e.home, "s");
+    assert!(
+        rows[1].1.contains("KEEPME") && rows[1].1.contains("\"image\""),
+        "tool_use input untouched: {}",
+        rows[1].1
+    );
+    assert!(rows[2].1.contains("ok") && rows[2].1.contains("[image removed after 30 days]"));
+    assert!(
+        !rows
+            .iter()
+            .any(|r| r.1.contains("SECRETPIXELS") || r.1.contains("TOOLSHOT"))
+    );
+    // freed pages are zeroed and the log is folded in: no copy of the pixels is left in the files
+    let raw = raw_bytes(&e.home);
+    assert!(
+        !has(&raw, "SECRETPIXELS") && !has(&raw, "TOOLSHOT"),
+        "image bytes survive in the database files"
+    );
+}
