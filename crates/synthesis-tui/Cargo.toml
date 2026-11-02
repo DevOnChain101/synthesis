@@ -18,6 +18,7 @@ synthesis-permissions = { path = "../synthesis-permissions" }
 synthesis-platform = { path = "../synthesis-platform" }
 synthesis-providers = { path = "../synthesis-providers" }
 synthesis-session = { path = "../synthesis-session" }
+synthesis-settings = { path = "../synthesis-settings" }
 synthesis-tools = { path = "../synthesis-tools" }
 synthesis-tui-base = { path = "../synthesis-tui-base" }
 synthesis-tui-render = { path = "../synthesis-tui-render" }

@@ -120,6 +120,11 @@ pub struct Options {
     pub host: Option<Arc<dyn TaskHost>>,
     /// Where Alt+V reads an image from; default: the Windows clipboard on WSL / Windows.
     pub image_source: Option<Arc<dyn ImageSource>>,
+    /// `synthesis.tui` of the user settings, and what was wrong with it.
+    pub tui: synthesis_settings::TuiSettings,
+    pub tui_diagnostics: Vec<String>,
+    /// Where `/config` writes (`<synthesis_home>`); `None`: changes last for this run only.
+    pub synthesis_home: Option<std::path::PathBuf>,
     pub saved: Vec<SavedSession>,
     pub resume: Option<Resume>,
     /// Shown as warnings in the pane from the first frame (sanitised on ingest); the matching
@@ -169,6 +174,9 @@ impl Options {
             memory: None,
             host: None,
             image_source: None,
+            tui: synthesis_settings::TuiSettings::default(),
+            tui_diagnostics: vec![],
+            synthesis_home: None,
             saved: vec![],
             resume: None,
             startup_notes: vec![],
@@ -235,6 +243,7 @@ fn cfg_for(o: &Options) -> AppConfig {
 }
 
 struct Runner {
+    settings_home: Option<std::path::PathBuf>,
     images: Option<Arc<dyn ImageSource>>,
     host: Option<Arc<dyn TaskHost>>,
     mcp_report: Option<Box<dyn Fn() -> Vec<String>>>,
@@ -274,6 +283,16 @@ impl Runner {
         });
     }
 
+    /// The sessions of other workspaces as the columns of messaging.md B9; one line when peers are off.
+    fn peer_table(&mut self, main_only: bool) -> Vec<String> {
+        match self.runtime.block_on(self.harness.peer_rows(main_only)) {
+            Some(rows) => crate::peers_view::table(&rows),
+            None => {
+                vec!["peers are off (synthesis.peers.enabled in user settings, or --peers)".into()]
+            }
+        }
+    }
+
     /// `/mcp`, `/agents`, `/permissions`: text for the pane and whether it is an error.
     fn info(&mut self, i: Info) -> (Vec<String>, bool) {
         match i {
@@ -288,7 +307,7 @@ impl Runner {
                 Some(m) => ((m.report)(), false),
                 None => (vec!["/memory: not available in this session".into()], true),
             },
-            Info::Agents => {
+            Info::Agents { all } => {
                 let mut v = vec!["Agents in this session (@name routes a line):".to_string()];
                 v.extend(self.harness.agents().into_iter().map(|a| {
                     format!(
@@ -310,8 +329,36 @@ impl Runner {
                         .into_iter()
                         .map(|(n, d)| format!("  {n} · {d}")),
                 );
+                if all {
+                    v.push(String::new());
+                    v.extend(self.peer_table(false));
+                }
                 (v, false)
             }
+            Info::Peers => {
+                let v = self.peer_table(true);
+                let off = self.harness.peer_summary().is_none();
+                (v, off)
+            }
+            Info::Name(new) => match self.harness.peer_summary() {
+                None => (
+                    vec!["/name: peers are off (synthesis.peers.enabled in user settings, or --peers)".into()],
+                    true,
+                ),
+                Some((name, _)) => {
+                    let shown = name.as_deref().unwrap_or("(none)");
+                    if new.is_empty() {
+                        (vec![format!("Session name for peers: {shown}")], false)
+                    } else {
+                        (
+                            vec![format!(
+                                "/name: the name is fixed for the run (now {shown}); start with --name {new}"
+                            )],
+                            true,
+                        )
+                    }
+                }
+            },
             Info::Permissions(a) => {
                 let perms = self.harness.permissions();
                 let mut p = perms.lock().unwrap_or_else(|e| e.into_inner());
@@ -539,6 +586,11 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
         .map(|r| r.history.clone())
         .unwrap_or_default();
     let mut app = App::new(cfg_for(&o), &replay, clock());
+    app.set_tui(o.tui, &std::mem::take(&mut o.tui_diagnostics));
+    if o.harness.peer_summary().is_some() {
+        let h = o.harness.clone();
+        app.peer_status = Some(Box::new(move || h.peer_summary().map(|p| p.1)));
+    }
     if let Some(m) = &o.memory {
         app.set_memory_files(m.user_file.clone(), m.project_file.clone());
         app.set_note_preview(m.preview.clone());
@@ -596,6 +648,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
             hyperlink_line_cached(l, base.as_deref(), home.as_deref(), &mut cache.borrow_mut())
         })));
     }
+    screen.set_mouse(o.tui.mouse_capture);
     screen.enter()?;
     out.clone().write_all(BRACKETED_PASTE_ON.as_bytes())?;
 
@@ -611,6 +664,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
     };
 
     let mut runner = Runner {
+        settings_home: o.synthesis_home.clone(),
         images: o
             .image_source
             .take()
@@ -782,6 +836,10 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                     dirty = true;
                     urgent = true;
                 }
+                Msg::Output(text) => {
+                    app.output(text, false);
+                    dirty = true;
+                }
                 Msg::Wake => {}
                 Msg::Event(e) => {
                     app.on_event(&e, now);
@@ -944,6 +1002,28 @@ fn exec(
             cancel,
             agent,
         } => runner.start(app, text, images, display_text, cancel, agent),
+        Cmd::Project { cwd, diff } => {
+            let tx = runner.tx.clone();
+            std::thread::spawn(move || {
+                let p = crate::project::scan(&cwd);
+                let lines = match &diff {
+                    None => crate::project::tree_lines(&p),
+                    Some(f) => crate::project::diff_lines(&p, f.trim()),
+                };
+                let _ = tx.send(Msg::Output(lines.join("\n")));
+            });
+        }
+        Cmd::SaveTui(t) => match &runner.settings_home {
+            Some(home) => {
+                if let Err(e) = synthesis_settings::persist_user_tui(home, &t) {
+                    app.note(format!("/config: not saved: {e}"), "error");
+                }
+            }
+            None => app.note(
+                "/config: no settings file in this run; the change lasts until you quit",
+                "warn",
+            ),
+        },
         Cmd::PasteImage { fallback_text } => match &runner.images {
             Some(src) => {
                 // off the UI thread: powershell.exe takes a second or more

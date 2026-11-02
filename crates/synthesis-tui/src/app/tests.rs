@@ -1764,8 +1764,17 @@ fn new_slash_commands_ask_the_host_and_status_has_no_debug_output() {
     ));
     assert!(matches!(
         &keys(&mut a, "/agents\r")[..],
-        [Cmd::Info(Info::Agents)]
+        [Cmd::Info(Info::Agents { all: false })]
     ));
+    assert!(matches!(
+        &keys(&mut a, "/agents --all\r")[..],
+        [Cmd::Info(Info::Agents { all: true })]
+    ));
+    assert!(matches!(
+        &keys(&mut a, "/peers\r")[..],
+        [Cmd::Info(Info::Peers)]
+    ));
+    assert!(matches!(&keys(&mut a, "/name beta\r")[..], [Cmd::Info(Info::Name(n))] if n == "beta"));
     assert!(matches!(
         &keys(&mut a, "/permissions\r")[..],
         [Cmd::Info(Info::Permissions(PermAction::List))]
@@ -2400,4 +2409,59 @@ fn an_empty_paste_starts_the_image_read_text_does_not_and_images_can_be_removed(
     keys(&mut a, "/images clear\r");
     assert!(a.attachments.is_empty());
     assert!(screen(&mut a).contains("1 attached image(s) dropped"));
+}
+
+#[test]
+fn config_rows_flip_apply_at_once_and_ask_the_host_to_save() {
+    let mut a = app();
+    keys(&mut a, "/config\r");
+    let s = screen(&mut a);
+    assert!(
+        s.contains("Settings (synthesis.tui)") && s.contains("[x] panel session"),
+        "{s}"
+    );
+    // enter flips the first row (the Session panel) and asks for a save of exactly that state
+    let c = keys(&mut a, "\r");
+    let saved: Vec<_> = c
+        .iter()
+        .filter_map(|c| match c {
+            Cmd::SaveTui(t) => Some(*t),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(saved.len(), 1);
+    assert!(!saved[0].panels[0] && saved[0].panels[1..].iter().all(|p| *p));
+    assert!(!a.tui.panels[0], "applied without a restart");
+    assert!(screen(&mut a).contains("[ ] panel session"));
+    // the cursor stayed on its row: another enter flips it back
+    let c = keys(&mut a, "\r");
+    assert!(matches!(&c[..], [Cmd::SaveTui(t)] if t.panels[0]));
+}
+
+#[test]
+fn settings_change_what_is_drawn() {
+    let mut a = app();
+    let t = synthesis_settings::TuiSettings {
+        logo: false,
+        panels: [false, true, false, false],
+        ..Default::default()
+    };
+    a.set_tui(
+        t,
+        &["synthesis.tui.motion must be true or false, kept".to_string()],
+    );
+    let s = screen(&mut a);
+    assert!(!s.contains("◆ Session") && !s.contains("◆ Activity"), "{s}");
+    assert!(
+        s.contains("synthesis.tui.motion must be"),
+        "a bad setting is told: {s}"
+    );
+    // diffs_expanded is the ctrl+o state from the start
+    let t = synthesis_settings::TuiSettings {
+        diffs_expanded: true,
+        ..Default::default()
+    };
+    let mut b = app();
+    b.set_tui(t, &[]);
+    assert!(b.expanded);
 }

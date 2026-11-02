@@ -11,6 +11,7 @@ use synthesis_harness::{
     Approval, DENY_MESSAGE, ImageAttachment, TaskAgent, TaskOutcome, UserReply,
 };
 use synthesis_permissions::{Mode, Suggestion};
+use synthesis_settings::{TUI_PANELS, TuiSettings};
 use synthesis_tools::NeedsUser;
 use synthesis_tui_base::complete::{self, Command as CmdDef, StdFs};
 use synthesis_tui_base::editor::LineEditor;
@@ -26,8 +27,8 @@ use synthesis_tui_render::agent::{
     Suggestions as RSug, body_sel_rows,
 };
 use synthesis_tui_render::dash::{
-    DashState, DashView, Focus, Frame, Live, MIN_COLS, MIN_ROWS, SessionRow, Usage, Workspace,
-    render_frame, workspace_key,
+    DashState, DashView, Focus, Frame, Hidden, Live, MIN_COLS, MIN_ROWS, SessionRow, Usage,
+    Workspace, render_frame, workspace_key,
 };
 use synthesis_tui_render::dialogs::HELP;
 use synthesis_tui_render::model::{
@@ -121,6 +122,15 @@ pub(crate) struct AppConfig {
 /// Effects for the runtime.
 #[derive(Debug)]
 pub(crate) enum Cmd {
+    /// `/files` and `/diff [file]`: read the working tree off the UI thread; the answer is a
+    /// command-output row.
+    Project {
+        cwd: PathBuf,
+        /// `None`: the tree; `Some(file)`: the diff (all changed files when empty).
+        diff: Option<String>,
+    },
+    /// `/config` changed a setting: write `synthesis.tui` of the USER settings file.
+    SaveTui(TuiSettings),
     /// Alt+V / Ctrl+V: read an image off the clipboard (on a worker; the answer is
     /// [`App::attach_image`] or a note). `fallback_text`: no image means paste the text (Ctrl+V).
     PasteImage {
@@ -185,7 +195,14 @@ pub(crate) enum Cmd {
 pub(crate) enum Info {
     Mcp,
     Memory,
-    Agents,
+    /// `/agents`; `all`: also the sessions of other workspaces (`--all`).
+    Agents {
+        all: bool,
+    },
+    /// `/peers`: the other sessions on this machine.
+    Peers,
+    /// `/name [NAME]`: the session name peers address.
+    Name(String),
     Permissions(PermAction),
 }
 
@@ -232,6 +249,8 @@ impl Dialog {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PickerKind {
     Model,
+    /// `/config`: one row per `synthesis.tui` setting; enter flips it.
+    Config,
     Command,
     Folder,
     Resume,
@@ -332,6 +351,10 @@ pub(crate) struct App {
     attachments: Vec<Attached>,
     /// A clipboard read is running: key repeat cannot start another.
     image_busy: bool,
+    /// `synthesis.tui` (user settings), edited by `/config`.
+    pub(crate) tui: TuiSettings,
+    /// Cross-session messaging: the requests in flight, `None` when peers are off.
+    pub(crate) peer_status: Option<Box<dyn Fn() -> Option<usize>>>,
     /// Time of an Esc on an idle empty prompt: a second one soon after edits the last prompt.
     esc_at: Option<i64>,
     /// A `/compact` between tasks is running: a new task would race with its history swap.
@@ -376,6 +399,19 @@ fn local_commands() -> Vec<CmdDef> {
             "[auto|low|medium|high]",
         ),
         c("mcp", "MCP servers: state, tools, errors", ""),
+        c("files", "the project tree with git status letters", ""),
+        c(
+            "diff",
+            "uncommitted changes: a line per file, then the diff (of one file)",
+            "[file]",
+        ),
+        c("terminal", "the shell commands this session ran", ""),
+        c("browser", "the browser and web calls this session made", ""),
+        c(
+            "config",
+            "settings of this app (synthesis.tui): panels, thinking, motion, mouse, ...",
+            "",
+        ),
         c(
             "images",
             "attached images: list, or `clear` to drop them (backspace on an empty prompt drops the last)",
@@ -388,8 +424,18 @@ fn local_commands() -> Vec<CmdDef> {
         ),
         c(
             "agents",
-            "agents of this session and the types you can start",
+            "agents of this session and the types you can start (--all: other sessions too)",
+            "[--all]",
+        ),
+        c(
+            "peers",
+            "other sessions on this machine you can message",
             "",
+        ),
+        c(
+            "name",
+            "the name other sessions address this one by",
+            "[name]",
         ),
         c(
             "permissions",
@@ -526,6 +572,8 @@ impl App {
             pastes: vec![],
             attachments: vec![],
             image_busy: false,
+            peer_status: None,
+            tui: TuiSettings::default(),
             esc_at: None,
             compacting: false,
             ran_task,
@@ -1532,6 +1580,26 @@ impl App {
                 }
             }
             "effort" => self.set_effort(arg, out),
+            "config" => self.open_config_picker(0),
+            "files" => out.push(Cmd::Project {
+                cwd: PathBuf::from(&self.cfg.cwd),
+                diff: None,
+            }),
+            "diff" => out.push(Cmd::Project {
+                cwd: PathBuf::from(&self.cfg.cwd),
+                diff: Some(arg.to_string()),
+            }),
+            "terminal" => {
+                let v = self.calls(|n| n == "Bash", "shell commands");
+                self.out_item(v, false);
+            }
+            "browser" => {
+                let v = self.calls(
+                    |n| n.starts_with("Browser") || n == "WebFetch" || n == "WebSearch",
+                    "browser and web calls",
+                );
+                self.out_item(v, false);
+            }
             "images" => match arg {
                 "clear" => {
                     let n = std::mem::take(&mut self.attachments).len();
@@ -1564,7 +1632,11 @@ impl App {
             },
             "mcp" => out.push(Cmd::Info(Info::Mcp)),
             "memory" => out.push(Cmd::Info(Info::Memory)),
-            "agents" => out.push(Cmd::Info(Info::Agents)),
+            "agents" => out.push(Cmd::Info(Info::Agents {
+                all: arg.split_whitespace().any(|a| a == "--all" || a == "-a"),
+            })),
+            "peers" => out.push(Cmd::Info(Info::Peers)),
+            "name" => out.push(Cmd::Info(Info::Name(arg.trim().to_string()))),
             "permissions" | "perms" => {
                 let (sub, rule) = arg.split_once(char::is_whitespace).unwrap_or((arg, ""));
                 let rule = rule.trim();
@@ -1779,6 +1851,113 @@ impl App {
             values,
             dir,
         });
+    }
+
+    /// The tool calls of this session whose name `pick`s (`/terminal`, `/browser`): the data of
+    /// the old Terminal and Browser tabs, from the rows already in the conversation.
+    fn calls(&self, pick: impl Fn(&str) -> bool, what: &str) -> String {
+        let rows: Vec<String> = self
+            .chat
+            .agent
+            .items
+            .iter()
+            .filter(|i| i.kind == "tool" && pick(&i.name))
+            .map(|i| {
+                let arg = ["command", "url", "query", "file_path"]
+                    .iter()
+                    .find_map(|k| i.input.get(*k).and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                let st = if i.status.is_empty() {
+                    "running"
+                } else {
+                    &i.status
+                };
+                format!("  {st:<9} {} {}", i.name, clean_line(arg))
+            })
+            .collect();
+        if rows.is_empty() {
+            format!("no {what} in this session yet")
+        } else {
+            format!(
+                "{} {what} in this session:\n{}",
+                rows.len(),
+                rows.join("\n")
+            )
+        }
+    }
+
+    /// Flips one `/config` row and applies it at once.
+    fn flip_tui(&mut self, key: &str) {
+        let t = &mut self.tui;
+        if let Some(p) = key.strip_prefix("panel:") {
+            if let Some(i) = TUI_PANELS.iter().position(|(n, _)| *n == p) {
+                t.panels[i] = !t.panels[i];
+            }
+            return;
+        }
+        match key {
+            "logo" => t.logo = !t.logo,
+            "show_thinking" => t.show_thinking = !t.show_thinking,
+            "diffs_expanded" => {
+                t.diffs_expanded = !t.diffs_expanded;
+                self.expanded = t.diffs_expanded;
+            }
+            "queue_indicators" => t.queue_indicators = !t.queue_indicators,
+            "motion" => t.motion = !t.motion,
+            "mouse_capture" => t.mouse_capture = !t.mouse_capture,
+            "copy_on_select" => t.copy_on_select = !t.copy_on_select,
+            _ => {}
+        }
+    }
+
+    /// `/config`: the `synthesis.tui` settings as a list; enter flips the row under the cursor and
+    /// writes the USER settings file. `at` is the row to keep selected.
+    fn open_config_picker(&mut self, at: usize) {
+        let t = self.tui;
+        let row = |key: &str, label: &str, desc: &str, on: bool| {
+            (
+                PickerItem {
+                    label: format!("{} {label}", if on { "[x]" } else { "[ ]" }),
+                    detail: desc.to_string(),
+                    current: false,
+                },
+                key.to_string(),
+            )
+        };
+        let mut items: Vec<(PickerItem, String)> = TUI_PANELS
+            .iter()
+            .zip(t.panels)
+            .map(|((n, d), on)| row(&format!("panel:{n}"), &format!("panel {n}"), d, on))
+            .collect();
+        items.extend([
+            row("logo", "logo art", "the braille symbol on the welcome", t.logo),
+            row("show_thinking", "show thinking", "draw the model's thinking blocks", t.show_thinking),
+            row("diffs_expanded", "expand long output", "tool output, code and diffs start whole (ctrl+o)", t.diffs_expanded),
+            row("queue_indicators", "queue lines", "the queued messages above the prompt", t.queue_indicators),
+            row("motion", "motion", "spinners and the pulse", t.motion),
+            row("mouse_capture", "mouse", "click, drag-select and wheel (off: the terminal's own selection; applies at the next start)", t.mouse_capture),
+            row("copy_on_select", "copy on select", "drag-select copies on release", t.copy_on_select),
+        ]);
+        self.open_picker(
+            PickerKind::Config,
+            "Settings (synthesis.tui)",
+            "enter flips · esc closes · saved to your user settings.json",
+            items,
+            PathBuf::new(),
+        );
+        if let Some(p) = self.picker.as_mut() {
+            p.picker.no_filter = true;
+            p.picker.choice = at.min(p.picker.items.len().saturating_sub(1));
+        }
+    }
+
+    /// The host read `synthesis.tui`: apply it, and say what was wrong with the file.
+    pub fn set_tui(&mut self, t: TuiSettings, diagnostics: &[String]) {
+        self.expanded = t.diffs_expanded;
+        self.tui = t;
+        for d in diagnostics {
+            self.chat.startup_note(d);
+        }
     }
 
     fn open_model_picker(&mut self) {
@@ -2019,6 +2198,12 @@ impl App {
             PickerKind::Model => {
                 self.picker = None;
                 self.switch_model(value, out);
+            }
+            PickerKind::Config => {
+                let at = self.picker.as_ref().map_or(0, |p| p.picker.choice);
+                self.flip_tui(value);
+                out.push(Cmd::SaveTui(self.tui));
+                self.open_config_picker(at);
             }
             PickerKind::BypassConfirm => {
                 self.picker = None;
@@ -2697,6 +2882,11 @@ impl App {
                 );
                 self.sel.mode = Some(mode);
                 match act {
+                    Act::Copy if !self.tui.copy_on_select => self.toast(
+                        "selected · ctrl+c copies it",
+                        now,
+                        false,
+                    ),
                     Act::Copy => self.copy_selection(now, out),
                     Act::Pend => self.toast(
                         "selection started · hold Shift and scroll, then click where it should end · esc cancels",
@@ -3090,7 +3280,12 @@ impl App {
             self.caret = None;
             return too_small(w, h);
         }
-        let frame_no = (now.max(0) / 80) as usize;
+        // no motion: spinners and the pulse are drawn still
+        let frame_no = if self.tui.motion {
+            (now.max(0) / 80) as usize
+        } else {
+            0
+        };
         // dialogs -> pending list, with the live countdown
         self.chat.agent.pending = self
             .dialogs
@@ -3151,12 +3346,17 @@ impl App {
             scroll: self.scroll,
             expanded: self.expanded,
             selected: self.sug_selected,
-            queued: self
-                .queue
-                .iter()
-                .cloned()
-                .chain(self.chat.inflight.iter().map(|(_, t)| t.clone()))
-                .collect(),
+            queued: if self.tui.queue_indicators {
+                self.queue
+                    .iter()
+                    .cloned()
+                    .chain(self.chat.inflight.iter().map(|(_, t)| t.clone()))
+                    .collect()
+            } else {
+                vec![]
+            },
+            no_logo: !self.tui.logo,
+            hide_thinking: !self.tui.show_thinking,
             agent_rows: self.agent_rows(),
             route: self.target.as_ref().map(|t| {
                 let (st, q) = self
@@ -3200,6 +3400,12 @@ impl App {
         }
         let view = DashView {
             opts,
+            hidden: Hidden {
+                session: !self.tui.panels[0],
+                mcp: !self.tui.panels[1],
+                tools: !self.tui.panels[2],
+                activity: !self.tui.panels[3],
+            },
             ..DashView::default()
         };
         let usage = Usage::default();
@@ -3245,6 +3451,8 @@ impl App {
                 context: Some(&self.chat.ctx),
                 now,
                 expanded: self.expanded,
+                peers: self.peer_status.as_ref().and_then(|f| f()),
+                memory: self.memory_files.as_ref().map(|_| true),
             },
         ));
         self.caret = frame.rects.caret.map(|(x, y)| (x as u32, y as u32));

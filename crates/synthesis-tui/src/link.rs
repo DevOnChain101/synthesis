@@ -70,6 +70,8 @@ pub(crate) enum Msg {
             Result<synthesis_tui_base::imgclip::ClipImage, synthesis_tui_base::imgclip::ImageError>,
         fallback_text: bool,
     },
+    /// A command that ran on a worker (`/files`, `/diff`): text for the pane.
+    Output(String),
     TaskDone(Box<TaskDone>),
     /// A `!cmd` finished (the model turn that follows is started by the runtime).
     UserCommandDone(Box<UserDone>),

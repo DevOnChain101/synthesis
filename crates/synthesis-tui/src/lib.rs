@@ -12,10 +12,13 @@ mod app;
 mod chat;
 mod link;
 pub mod links;
+mod peers_view;
 mod preview;
+mod project;
 mod resume;
 mod route;
 mod runtime;
+mod setup;
 mod status;
 mod tty;
 
@@ -26,6 +29,7 @@ pub use runtime::{
     BoxFut, Exit, ExitReason, MemoryHook, OnceOptions, Options, TaskHost, render_once,
     run_interactive, size_from_env,
 };
+pub use setup::{SetupExit, SetupOptions, card as setup_card, run_setup};
 pub use status::{SandboxStatus, status_line};
 pub use tty::{ScriptedTty, Tty, replay};
 

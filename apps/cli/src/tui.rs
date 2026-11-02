@@ -89,6 +89,31 @@ fn requested_resume(a: &TuiArgs, h: &synthesis_app::Homes) -> Result<Option<Resu
     load_resume(&h.synthesis, &id).map(Some)
 }
 
+/// No model configured: the setup card (the key itself stays in an environment variable or a file
+/// the user manages: nothing is asked for or stored here).
+fn first_run(env: &Env, why: &str) -> std::io::Result<synthesis_tui::SetupExit> {
+    let lines = vec![
+        "Synthesis needs a model and an API key before it can run a task.".to_string(),
+        format!("why: {why}"),
+        String::new(),
+        "1. Keep the key in an environment variable you manage (never in a repository):".into(),
+        "    export MY_PROVIDER_KEY=...".into(),
+        "2. Point your user config at it, in $SYNTHESIS_HOME/synthesis.json (~/.synthesis by default):".into(),
+        r#"    {"$schema": "config.json/v1", "model": "anthropic/<model>","#.into(),
+        r#"     "providers": {"anthropic": {"apiKey": "{env:MY_PROVIDER_KEY}"}}}"#.into(),
+        "3. `synth models` lists what is configured, `synth doctor` checks the installation;".into(),
+        "   or start once with `synth --model provider/model`.".into(),
+    ];
+    synthesis_tui::run_setup(
+        synthesis_tui::SetupOptions {
+            version: env!("CARGO_PKG_VERSION").into(),
+            env: env.clone(),
+            lines,
+        },
+        Tty::stdio(env),
+    )
+}
+
 /// Retention of stored images (`synthesis.images.retentionDays`, default 30): done once at start,
 /// before the screen is taken over. Failures are a warning, never a reason not to start.
 fn purge_old_images(synthesis_home: &Path) {
@@ -225,6 +250,14 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
             Ok(p) => p,
             Err(e) => {
                 let Some((prev, sid)) = switch_from.take() else {
+                    // nothing configured yet: a setup card instead of an error exit
+                    if e.starts_with("no model configured") {
+                        match first_run(&env, &e) {
+                            Ok(synthesis_tui::SetupExit::Reload) => continue,
+                            Ok(synthesis_tui::SetupExit::Quit) => return Ok(0),
+                            Err(io) => return Err(format!("{e} ({io})")),
+                        }
+                    }
                     return Err(e);
                 };
                 switch_note = Some(format!(
@@ -375,6 +408,10 @@ fn round(
         }));
         o.version = env!("CARGO_PKG_VERSION").into();
         o.tz_offset_min = local_offset_min();
+        let (tui, tui_diag) = synthesis_settings::read_user_tui(&ph.synthesis);
+        o.tui = tui;
+        o.tui_diagnostics = tui_diag;
+        o.synthesis_home = Some(ph.synthesis.clone());
         o.model = Some(label);
         o.models = models;
         o.effort_tiers = effort_tiers;

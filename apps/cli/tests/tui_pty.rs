@@ -41,10 +41,41 @@ impl Rig {
 
     /// Runs the app with `steps`; returns the screen text. Fails on a step that did not happen.
     fn drive(&self, steps: Value) -> String {
+        self.drive_with(steps, &[])
+    }
+
+    /// No `--provider`, no `--sandbox`: the app as a first-time user starts it.
+    fn drive_bare(&self, steps: Value) -> String {
+        self.run_scenario(
+            vec![
+                json!(env!("CARGO_BIN_EXE_synth")),
+                json!("--cwd"),
+                json!(self.ws()),
+            ],
+            steps,
+        )
+    }
+
+    fn drive_with(&self, steps: Value, extra: &[&str]) -> String {
+        let mut argv = vec![
+            json!(env!("CARGO_BIN_EXE_synth")),
+            json!("--cwd"),
+            json!(self.ws()),
+            json!("--provider"),
+            json!(format!(
+                "fake:{}",
+                self.root().join("script.json").display()
+            )),
+            json!("--sandbox"),
+            json!("off"),
+        ];
+        argv.extend(extra.iter().map(|a| json!(a)));
+        self.run_scenario(argv, steps)
+    }
+
+    fn run_scenario(&self, argv: Vec<Value>, steps: Value) -> String {
         let scenario = json!({
-            "argv": [env!("CARGO_BIN_EXE_synth"), "--cwd", self.ws(), "--provider",
-                     format!("fake:{}", self.root().join("script.json").display()),
-                     "--sandbox", "off"],
+            "argv": argv,
             "env": {"HOME": self.root(), "SYNTHESIS_HOME": self.home()},
             "steps": steps,
         });
@@ -303,4 +334,144 @@ fn tool_search_rows() {
         .map(|e| e.1["status"].as_str().unwrap_or("").to_string())
         .collect();
     assert_eq!(done, ["ok", "ok"], "{done:?}");
+}
+
+/// `/config` flips a `synthesis.tui` setting, applies it at once (the Session panel goes) and writes
+/// the USER settings file, leaving its other keys alone.
+#[test]
+fn config_flips_a_setting_applies_it_and_writes_the_user_file() {
+    let rig = Rig::new(json!([{"text": "x"}]));
+    rig.write(
+        "settings.json",
+        r#"{"permissions": {"deny": ["Bash(rm:*)"]}}"#,
+    );
+    rig.drive(json!([
+        ["wait", 3],
+        expect("Session"),
+        send("/config\r"),
+        expect("Settings (synthesis.tui)"),
+        expect("[x] panel session"),
+        send("\r"), // flips the first row: the Session panel off
+        expect("[ ] panel session"),
+        ["wait", 1]
+    ]));
+    let v: Value =
+        serde_json::from_str(&std::fs::read_to_string(rig.home().join("settings.json")).unwrap())
+            .unwrap();
+    assert_eq!(v["synthesis"]["tui"]["panels"]["session"], false);
+    assert_eq!(v["synthesis"]["tui"]["panels"]["tools"], true);
+    assert_eq!(
+        v["permissions"]["deny"][0], "Bash(rm:*)",
+        "other keys survive"
+    );
+    // no credential or env is ever written by the editor
+    assert!(!v.to_string().contains("API") && v.get("env").is_none());
+    // the next start applies it: the Session panel is not drawn
+    let out = rig.drive(json!([["wait", 3]]));
+    assert!(!squash(&out).contains("◆ Session"), "{}", squash(&out));
+}
+
+#[test]
+fn peers_name_and_agents_all_say_so_when_peers_are_off_and_show_the_table_when_on() {
+    let rig = Rig::new(json!([{"text": "x"}]));
+    let off = rig.drive(json!([
+        ["wait", 3],
+        send("/peers\r"),
+        expect("peers are off"),
+        send("/name\r"),
+        expect("/name: peers are off"),
+        send("/agents --all\r"),
+        expect("Agents in this session")
+    ]));
+    assert!(squash(&off).contains("synthesis.peers.enabled"));
+    let on = rig.drive_with(
+        json!([
+            ["wait", 3],
+            expect("peers on"),
+            send("/name\r"),
+            expect("Session name for peers: alpha"),
+            send("/name beta\r"),
+            expect("the name is fixed for the run"),
+            send("/peers\r"),
+            expect("WORKSPACE"),
+            send("/agents --all\r"),
+            expect("Agents in this session")
+        ]),
+        &["--peers", "--name", "alpha"],
+    );
+    let flat = squash(&on);
+    assert!(
+        flat.contains("SESSION") && flat.contains("AGENT") && flat.contains("STATUS"),
+        "{flat}"
+    );
+}
+
+/// `/files`, `/diff [file]`, `/terminal` and `/browser`: the data of the old centre tabs as
+/// command output.
+#[test]
+fn files_diff_terminal_and_browser_show_real_data() {
+    let rig = Rig::new(json!([
+        {"tools": [{"name": "Bash", "input": {"command": "echo hi"}}]},
+        {"text": "ran it"}
+    ]));
+    let git = |args: &[&str]| {
+        assert!(
+            Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(rig.ws())
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    };
+    std::fs::write(rig.ws().join("a.rs"), "one\n").unwrap();
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-qm", "c"]);
+    std::fs::write(rig.ws().join("a.rs"), "two\n").unwrap();
+    rig.write(
+        "settings.json",
+        r#"{"permissions": {"allow": ["Bash(echo:*)"]}}"#,
+    );
+    let out = rig.drive(json!([
+        ["wait", 3],
+        send("/files\r"),
+        expect("M a.rs"),
+        send("/diff a.rs\r"),
+        expect("+1 -1  a.rs"),
+        expect("+two"),
+        send("run something\r"),
+        expect("ran it"),
+        send("/terminal\r"),
+        expect("shell commands in this session"),
+        send("/browser\r"),
+        expect("no browser and web calls")
+    ]));
+    assert!(squash(&out).contains("echo hi"), "{}", squash(&out));
+}
+
+/// First run: nothing configured. The setup card replaces the exit-2 error, never asks for a key,
+/// `q` leaves cleanly.
+#[test]
+fn first_run_shows_the_setup_card_and_quits_cleanly() {
+    let rig = Rig::new(json!([]));
+    let out = rig.drive_bare(json!([
+        ["wait", 2],
+        expect("needs a model and an API key"),
+        expect("{env:MY_PROVIDER_KEY}"),
+        send("q")
+    ]));
+    let flat = squash(&out);
+    assert!(
+        flat.contains("check again") && flat.contains("never in a repository"),
+        "{flat}"
+    );
+    assert!(
+        flat.contains("STATE ok 0"),
+        "q exits 0: {}",
+        flat.rsplit("STATE").next().unwrap_or("")
+    );
+    assert!(!rig.home().join("auth.json").exists(), "nothing was stored");
 }

@@ -178,6 +178,10 @@ pub struct StatusExtra<'a> {
     pub now: i64,
     /// ctrl+o state: tasks / bash / code blocks shown whole.
     pub expanded: bool,
+    /// Cross-session messaging is on: the requests in flight (`peers on · N in flight`).
+    pub peers: Option<usize>,
+    /// The note files (`#` notes, `/memory`) are available.
+    pub memory: Option<bool>,
 }
 
 pub fn status_line(
@@ -265,12 +269,28 @@ pub fn status_line_with(
         },
     );
     // Dropped whole, last priority first: key hint, budgets, context, then verify; sandbox stays.
+    let peers = extra.peers.map_or(String::new(), |n| {
+        paint(
+            T_INACTIVE,
+            &if n > 0 {
+                format!("peers on · {n} in flight")
+            } else {
+                "peers on".to_string()
+            },
+        )
+    });
+    let memory = match extra.memory {
+        Some(true) => paint(T_INACTIVE, "memory on"),
+        _ => String::new(),
+    };
     let items = [
         (1, format!(" {sandbox}")),
         (4, paint(T_INACTIVE, &budgets.join(" · "))),
         (3, ctx),
         (2, verify),
         (5, view),
+        (3, peers),
+        (6, memory),
     ];
     let items: Vec<(u8, String)> = items.into_iter().filter(|i| !i.1.is_empty()).collect();
     fit_items(&items, &format!(" {dot} "), width)
