@@ -903,8 +903,11 @@ impl TerminalRuntime {
             None => (log.try_clone()?, log),
         };
         wrap.command_mut().stdout(out).stderr(err);
+        // A new session (setsid) has no controlling terminal: a command cannot open /dev/tty to
+        // read the person's answers to a prompt or push keystrokes into it. It is also a group
+        // leader, so the process-tree kill is unchanged.
         #[cfg(unix)]
-        wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
+        wrap.wrap(process_wrap::tokio::ProcessSession);
         #[cfg(windows)]
         wrap.wrap(process_wrap::tokio::JobObject);
         let mut child = wrap.spawn()?;

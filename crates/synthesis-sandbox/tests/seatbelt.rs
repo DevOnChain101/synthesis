@@ -402,6 +402,12 @@ fn synthesis_state_db_and_memory_are_unreadable() {
     let home = a.path().join("synthesis-home");
     std::fs::create_dir_all(home.join("memory")).unwrap();
     std::fs::create_dir_all(home.join("projects/p")).unwrap();
+    std::fs::create_dir_all(home.join("browser-profiles/acme/Default")).unwrap();
+    std::fs::write(
+        home.join("browser-profiles/acme/Default/Cookies"),
+        "COOKIES",
+    )
+    .unwrap();
     std::fs::write(home.join("projects/p/s.jsonl"), "TRANSCRIPT").unwrap();
     std::fs::write(home.join("synthesis.db"), "SESSIONS").unwrap();
     std::fs::write(home.join("memory/memory.db"), "MEMORIES").unwrap();
@@ -423,11 +429,17 @@ fn synthesis_state_db_and_memory_are_unreadable() {
             .status
             .success()
     );
-    for f in ["synthesis.db", "memory/memory.db", "projects/p/s.jsonl"] {
+    for f in [
+        "synthesis.db",
+        "memory/memory.db",
+        "projects/p/s.jsonl",
+        "browser-profiles/acme/Default/Cookies",
+    ] {
         let r = sh(&p, a.path(), &format!("cat synthesis-home/{f}"));
         let out = String::from_utf8_lossy(&r.stdout);
         assert!(
             !r.status.success()
+                && !out.contains("COOKIES")
                 && !out.contains("SESSIONS")
                 && !out.contains("MEMORIES")
                 && !out.contains("TRANSCRIPT"),

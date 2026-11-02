@@ -166,6 +166,9 @@ pub struct UrlPolicy {
     /// Loopback, RFC1918, link-local (cloud metadata 169.254.169.254) and `localhost` are
     /// blocked unless this is set. Needed to test a local dev server.
     pub allow_private_network: bool,
+    /// Loopback (localhost, 127.0.0.0/8, ::1) is reachable ONLY on these ports, while the rest of
+    /// the private network stays blocked: a login on `http://localhost:3000` opens port 3000.
+    pub loopback_ports: Vec<u16>,
     /// Used by `check_resolved` to look hostnames up.
     pub resolver: Resolver,
 }
@@ -286,6 +289,9 @@ impl UrlPolicy {
         }
         if let Some(Host::Domain(d)) = Url::parse(raw).map_err(|e| e.to_string())?.host() {
             let name = normalise(d);
+            if name == "localhost" && self.loopback_port_ok(raw) {
+                return Ok(()); // `check` already vetted the port; localhost resolves to loopback
+            }
             let priority = document
                 || (!self.allow_domains.is_empty() && matches_domain(&name, &self.allow_domains));
             if let Some(ip) = self
@@ -303,12 +309,28 @@ impl UrlPolicy {
 
     /// The address Chrome actually connected to (`Network.responseReceived.remoteIPAddress`,
     /// possibly bracketed) is private while the policy forbids that.
-    pub fn remote_ip_denied(&self, remote: &str) -> bool {
+    pub fn remote_ip_denied(&self, remote: &str, url: &str) -> bool {
         !self.allow_private_network
             && remote
                 .trim_matches(['[', ']'])
                 .parse::<IpAddr>()
-                .is_ok_and(ip_is_private)
+                .is_ok_and(|ip| {
+                    ip_is_private(ip) && !(ip.is_loopback() && self.loopback_port_ok(url))
+                })
+    }
+
+    /// `url` points at a loopback host on one of `loopback_ports`.
+    fn loopback_port_ok(&self, url: &str) -> bool {
+        let Ok(u) = Url::parse(url) else { return false };
+        let loop_host = match u.host() {
+            Some(Host::Domain(d)) => normalise(d) == "localhost",
+            Some(Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        };
+        loop_host
+            && u.port_or_known_default()
+                .is_some_and(|p| self.loopback_ports.contains(&p))
     }
 
     fn check(&self, raw: &str, schemes: &[&str]) -> Result<(), String> {
@@ -336,7 +358,7 @@ impl UrlPolicy {
                         .any(|s| name.ends_with(s))
             }
         };
-        if private && !self.allow_private_network {
+        if private && !self.allow_private_network && !self.loopback_port_ok(raw) {
             return Err(format!("`{name}` is a private/loopback/metadata address"));
         }
         Ok(())
@@ -377,6 +399,35 @@ mod tests {
         assert!(e.contains("profile's domains"), "{e}");
         assert!(p.check_navigation("https://example.com.evil.io/").is_err());
         assert!(p.check_request("https://cdn.other.net/a.js").is_ok());
+    }
+
+    #[test]
+    fn loopback_gate_is_scoped_to_the_recorded_port() {
+        let p = UrlPolicy {
+            loopback_ports: vec![3000],
+            ..Default::default()
+        };
+        for ok in [
+            "http://localhost:3000/a",
+            "http://127.0.0.1:3000/",
+            "http://[::1]:3000/",
+        ] {
+            assert!(p.check_navigation(ok).is_ok(), "{ok}");
+            assert!(p.check_request(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://localhost:3001/",
+            "http://127.0.0.1/",
+            "http://10.0.0.5:3000/",
+            "http://169.254.169.254:3000/",
+            "http://metadata.google.internal:3000/",
+        ] {
+            assert!(p.check_navigation(bad).is_err(), "{bad}");
+        }
+        assert!(!p.remote_ip_denied("127.0.0.1", "http://localhost:3000/x"));
+        assert!(p.remote_ip_denied("127.0.0.1", "http://localhost:3001/x"));
+        assert!(p.remote_ip_denied("127.0.0.1", "http://rebind.example.com:3000/"));
+        assert!(p.remote_ip_denied("10.0.0.5", "http://localhost:3000/"));
     }
 
     #[test]
@@ -527,8 +578,14 @@ mod tests {
                 .await
                 .is_ok()
         );
-        assert!(p.remote_ip_denied("[fd00::1]") && p.remote_ip_denied("127.0.0.1"));
-        assert!(!p.remote_ip_denied("93.184.216.34") && !open.remote_ip_denied("127.0.0.1"));
+        assert!(
+            p.remote_ip_denied("[fd00::1]", "http://x/")
+                && p.remote_ip_denied("127.0.0.1", "http://x/")
+        );
+        assert!(
+            !p.remote_ip_denied("93.184.216.34", "http://x/")
+                && !open.remote_ip_denied("127.0.0.1", "http://x/")
+        );
     }
 
     #[test]

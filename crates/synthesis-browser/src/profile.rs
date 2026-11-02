@@ -15,6 +15,8 @@ use url::{Host, Url};
 pub const META_FILE: &str = "synthesis-profile.json";
 /// Created by `synth browser done`; ends a headless login wait.
 pub const DONE_FILE: &str = "synthesis-login-done";
+/// Exists only while a `browser_login` waits; `synth browser done` refuses without it.
+pub const WAITING_FILE: &str = "synthesis-login-waiting";
 const LOCK_FILE: &str = "synthesis-profile.lock";
 
 fn err(m: impl Into<String>) -> BrowserError {
@@ -72,22 +74,41 @@ pub fn profile_path(home: &Path, name: &str) -> Result<PathBuf> {
     Ok(profiles_root(home).join(name))
 }
 
-#[cfg(unix)]
+/// Creates `p` (0700) or checks the existing one. lstat comes BEFORE any chmod, so a symlink
+/// planted at `p` is refused instead of having its target's mode changed.
 fn private_dir(p: &Path) -> Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    if !p.exists() {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(p)?;
+    match std::fs::symlink_metadata(p) {
+        Ok(m) if m.file_type().is_symlink() || !m.is_dir() => {
+            return Err(err(format!(
+                "{} is not a plain directory (symlinks are refused)",
+                p.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(p)?;
+            }
+            #[cfg(not(unix))]
+            std::fs::create_dir_all(p)?;
+        }
+        Err(e) => return Err(e.into()),
     }
-    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // re-check after create: a race could have swapped in a symlink
+        if std::fs::symlink_metadata(p)?.file_type().is_symlink() {
+            return Err(err(format!("{} became a symlink", p.display())));
+        }
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700))?;
+    }
     Ok(())
-}
-
-#[cfg(not(unix))]
-fn private_dir(p: &Path) -> Result<()> {
-    Ok(std::fs::create_dir_all(p)?)
 }
 
 /// Creates (mode 0700) or reuses the profile directory. A symlink at either level is refused,
@@ -189,52 +210,108 @@ pub fn origin_of(u: &Url) -> Option<String> {
         .then(|| u.origin().ascii_serialization())
 }
 
-/// Registrable domain (eTLD+1). shortcut: no public-suffix list; the last two labels, or three
-/// when the second-level label is a common generic one under a two-letter country TLD
-/// (`co.uk`, `com.au`). A wrong guess for an exotic suffix makes the profile's allow-list
-/// narrower or wider by one label; upgrade to the `psl` crate if that matters.
+/// Registrable domain (eTLD+1) from the public-suffix list (`psl` crate); a host without one
+/// (IP literal, `localhost`, a bare suffix) is returned as is.
 pub fn registrable_domain(host: &str) -> String {
     let h = host.trim_end_matches('.').to_ascii_lowercase();
-    if h.parse::<IpAddr>().is_ok() || h.starts_with('[') || !h.contains('.') {
-        return h;
+    if h.parse::<IpAddr>().is_ok() {
+        return h; // psl would call 127.0.0.1 a domain "0.1"
     }
-    let l: Vec<&str> = h.split('.').collect();
-    let n = l.len();
-    let generic = ["co", "com", "org", "net", "gov", "edu", "ac"];
-    let take = if n >= 3 && l[n - 1].len() == 2 && generic.contains(&l[n - 2]) {
-        3
-    } else {
-        2
-    };
-    l[n.saturating_sub(take)..].join(".")
+    psl::domain_str(&h).map_or(h.clone(), str::to_owned)
+}
+
+/// What the person logged in to, recorded per profile (no credentials).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Meta {
+    pub domains: Vec<String>,
+    /// Ports of loopback origins (`http://localhost:3000`): the only loopback ports the profile may use.
+    pub loopback_ports: Vec<u16>,
+}
+
+pub fn read_meta(dir: &Path) -> Meta {
+    let v: serde_json::Value = std::fs::read(dir.join(META_FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let list = |k: &str| v[k].as_array().cloned().unwrap_or_default();
+    Meta {
+        domains: list("domains")
+            .iter()
+            .filter_map(|d| d.as_str().map(str::to_owned))
+            .collect(),
+        loopback_ports: list("loopback_ports")
+            .iter()
+            .filter_map(|d| d.as_u64().and_then(|p| u16::try_from(p).ok()))
+            .collect(),
+    }
 }
 
 pub fn read_domains(dir: &Path) -> Vec<String> {
-    std::fs::read(dir.join(META_FILE))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|v| {
-            v["domains"].as_array().map(|a| {
-                a.iter()
-                    .filter_map(|d| d.as_str().map(str::to_owned))
-                    .collect()
-            })
-        })
-        .unwrap_or_default()
+    read_meta(dir).domains
 }
 
-/// Adds the registrable domain of `origin` to the profile record.
+/// Records the origin of a login that produced cookies: its registrable domain, and for a loopback
+/// origin its port. Written atomically (temp file, fsync, rename).
 pub fn add_domain(dir: &Path, origin: &Url) -> Result<()> {
-    let mut d = read_domains(dir);
+    use std::io::Write;
+    let mut m = read_meta(dir);
     let new = registrable_domain(origin.host_str().unwrap_or(""));
-    if !d.contains(&new) {
-        d.push(new);
+    if !m.domains.contains(&new) {
+        m.domains.push(new);
     }
-    let body = serde_json::json!({"version": 1, "domains": d});
-    std::fs::write(
-        dir.join(META_FILE),
-        serde_json::to_vec_pretty(&body).unwrap_or_default(),
-    )?;
+    if is_loopback(origin)
+        && let Some(p) = origin.port_or_known_default()
+        && !m.loopback_ports.contains(&p)
+    {
+        m.loopback_ports.push(p);
+    }
+    let body = serde_json::to_vec_pretty(&serde_json::json!({"version": 1, "domains": m.domains, "loopback_ports": m.loopback_ports}))
+        .unwrap_or_default();
+    let tmp = dir.join(format!("{META_FILE}.tmp"));
+    let mut f = File::create(&tmp)?;
+    f.write_all(&body)?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, dir.join(META_FILE))?;
+    Ok(())
+}
+
+/// Switches off Chrome's password manager, autofill and save prompts for a persistent profile
+/// (Preferences are merged, other keys kept). Chrome would otherwise offer to store the typed
+/// password in the profile, in clear reach of anyone who can read it.
+pub fn harden_preferences(dir: &Path) -> Result<()> {
+    let default = dir.join("Default");
+    private_dir(&default)?;
+    let path = default.join("Preferences");
+    let mut v: serde_json::Value = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    for k in [
+        "credentials_enable_service",
+        "credentials_enable_autosignin",
+        "profile.password_manager_enabled",
+        "profile.password_manager_leak_detection",
+        "autofill.profile_enabled",
+        "autofill.credit_card_enabled",
+        "autofill.enabled",
+    ] {
+        let mut cur = &mut v;
+        let mut parts = k.split('.').peekable();
+        while let Some(part) = parts.next() {
+            if parts.peek().is_none() {
+                cur[part] = serde_json::json!(false);
+            } else {
+                if !cur[part].is_object() {
+                    cur[part] = serde_json::json!({});
+                }
+                cur = &mut cur[part];
+            }
+        }
+    }
+    let tmp = default.join("Preferences.synthesis-tmp");
+    std::fs::write(&tmp, serde_json::to_vec(&v).unwrap_or_default())?;
+    std::fs::rename(&tmp, &path)?;
     Ok(())
 }
 
@@ -335,8 +412,44 @@ mod tests {
     fn registrable() {
         assert_eq!(registrable_domain("app.example.com"), "example.com");
         assert_eq!(registrable_domain("a.b.example.co.uk"), "example.co.uk");
+        assert_eq!(registrable_domain("alice.github.io"), "alice.github.io");
+        assert_eq!(registrable_domain("a.b.example.com.au"), "example.com.au");
         assert_eq!(registrable_domain("localhost"), "localhost");
         assert_eq!(registrable_domain("127.0.0.1"), "127.0.0.1");
+    }
+
+    #[test]
+    fn preferences_are_hardened_merged_and_atomic() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("Default")).unwrap();
+        std::fs::write(
+            d.path().join("Default/Preferences"),
+            r#"{"profile":{"name":"x","password_manager_enabled":true},"keep":1}"#,
+        )
+        .unwrap();
+        harden_preferences(d.path()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(d.path().join("Default/Preferences")).unwrap())
+                .unwrap();
+        assert_eq!(v["credentials_enable_service"], false);
+        assert_eq!(v["profile"]["password_manager_enabled"], false);
+        assert_eq!(v["profile"]["name"], "x");
+        assert_eq!(v["autofill"]["profile_enabled"], false);
+        assert_eq!(v["keep"], 1);
+        assert!(!d.path().join("Default/Preferences.synthesis-tmp").exists());
+        std::fs::write(d.path().join("Default/Preferences"), "{not json").unwrap();
+        harden_preferences(d.path()).unwrap(); // garbage is replaced, not trusted
+    }
+
+    #[test]
+    fn meta_records_loopback_port_and_is_written_atomically() {
+        let d = tempfile::tempdir().unwrap();
+        add_domain(d.path(), &Url::parse("http://localhost:3000").unwrap()).unwrap();
+        add_domain(d.path(), &Url::parse("https://app.example.com").unwrap()).unwrap();
+        let m = read_meta(d.path());
+        assert_eq!(m.domains, ["localhost", "example.com"]);
+        assert_eq!(m.loopback_ports, [3000]);
+        assert!(!d.path().join(format!("{META_FILE}.tmp")).exists());
     }
 
     #[test]
@@ -352,10 +465,21 @@ mod tests {
                 std::fs::metadata(&d).unwrap().permissions().mode() & 0o777,
                 0o700
             );
-            // a symlinked profile directory is refused
-            std::os::unix::fs::symlink(home.path(), profiles_root(home.path()).join("link"))
+            // a symlinked profile directory is refused, and its target is NOT chmod-ed
+            let target = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(target.path(), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            std::os::unix::fs::symlink(target.path(), profiles_root(home.path()).join("link"))
                 .unwrap();
             assert!(create(home.path(), "link").is_err());
+            assert_eq!(
+                std::fs::metadata(target.path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
         }
         assert!(existing(home.path(), "acme").is_err()); // no meta yet
         add_domain(&d, &Url::parse("https://app.example.com").unwrap()).unwrap();

@@ -6,7 +6,7 @@ How the agent gets into a site that needs a login without ever holding the crede
 
 **Context.** The browser runs headless, so a person cannot type into a login form, and the model must never see passwords, cookies or tokens (ADR-011: API keys the user manages; Rust never writes credentials; page text is untrusted data).
 
-**Decision (owner, approved).** Two mechanisms, both ending with credentials that never enter the model context, transcript, events, logs, tool output, session database or artifacts:
+**Decision (owner, approved).** Two mechanisms, aimed at credentials that do not enter the model context, transcript, events, logs, tool output, session database or artifacts. What actually holds (see "What is and is not protected" below): the tools never return a credential, and the harness masks the exact values it knows; it does not hold against a page that echoes a value in a form it cannot recognise, against a compromised bound site, or against the agent's own commands when the sandbox is off:
 
 - **A. Headed login hand-off** (`browser_login`). A VISIBLE Chrome opens on a dedicated persistent profile; the person logs in (password, 2FA, CAPTCHA are theirs); the browser closes; later headless browsers reuse the profile (`browser_navigate` with `profile`).
 - **B. Secret fill by reference** (`browser_fill_secret`). The person declares named secrets in their USER settings; the model passes only the name and an element ref; Rust reads the value and types it through CDP.
@@ -21,18 +21,18 @@ How the agent gets into a site that needs a login without ever holding the crede
 | `browser_fill_secret` | `ref` (from `browser_snapshot`), `secret` (a name) | `{ok, filled: true, secret}` only |
 | `browser_navigate` | gains optional `profile` (first browser call of a session only) | unchanged |
 
-`browser_login` flow: validate origin and profile name -> check a display exists -> permission engine asks the person (always) -> create `<SYNTHESIS_HOME>/browser-profiles/<name>` (mode 0700, symlinks refused, exclusive lock) -> launch a visible Chrome on it and navigate to the origin -> emit `browser.login_required {origin, profile}` -> wait for the person -> on confirmation close Chrome gracefully (so cookies reach disk), count the cookies for the origin, record the site's registrable domain in `<profile>/synthesis-profile.json` -> return the count. Timeout (default 10 minutes), cancel (Esc / Ctrl-C) and any error kill the whole browser process tree (process group on POSIX, job object on Windows) and return an error.
+`browser_login` flow: validate origin and profile name -> require `--sandbox enforce` (or `synthesis.browser.allow_unsandboxed`) -> check a display exists -> permission engine asks the person (always) -> create `<SYNTHESIS_HOME>/browser-profiles/<name>` (mode 0700, symlinks refused, exclusive lock) -> launch a visible Chrome on it and navigate to the origin -> emit `browser.login_required {origin, profile}` -> wait for the person -> on confirmation close Chrome gracefully (so cookies reach disk), count the cookies for the origin, record the site's registrable domain (public-suffix list) and, for a loopback origin, its port in `<profile>/synthesis-profile.json` (atomic write) ONLY when the origin has at least one cookie (otherwise `ok:false`, nothing recorded) -> return the count. The login window runs with Chrome's password manager, autofill and save prompts switched off in the profile's Preferences. Timeout (default 10 minutes), cancel (Esc / Ctrl-C) and any error kill the whole browser process tree (process group on POSIX, job object on Windows) and return an error.
 
-Using a profile: `browser_navigate {url, profile}` as the FIRST browser call of a session starts the session's headless browser on that profile (default browser context, so the cookies apply). Top-level navigation is then limited to the domains in the profile record plus any the person added in user settings (`synthesis.browser.profiles.<name>.allow_domains`). Subresources are not limited by this list (pages load their CDNs); the normal URL policy still applies to them. A second browser on the same profile (another session, or the login window) fails with "already open".
+Using a profile: `browser_navigate {url, profile}` as the FIRST browser call of a session starts the session's headless browser on that profile (default browser context, so the cookies apply). The person is asked once per session, with the profile name and the domains it holds a login for, outside the permission engine (no mode and no allow rule skips it; `synthesis.browser.approved.profiles` pre-approves named profiles for runs nobody can answer). Persistent profiles and the login window are refused when the DevTools transport is TCP (Windows) until the pipe transport exists. Top-level navigation is then limited to the domains in the profile record plus any the person added in user settings (`synthesis.browser.profiles.<name>.allow_domains`). Subresources are not limited by this list (pages load their CDNs); the normal URL policy still applies to them. A second browser on the same profile (another session, or the login window) fails with "already open".
 
 ## Who answers
 
-| Front | Approval of `browser_login` | "Done" signal | Approval of first secret use |
+| Front | Approval of `browser_login` | Ending the login wait | Approval of a saved login / first secret use |
 |---|---|---|---|
-| `synth run` (headless) | `[y/N]` on the terminal (`/dev/tty`, `CONIN$` on Windows); no terminal = denied, as every other ask | Enter on the terminal, or `synth browser done <profile>` from another terminal (creates a signal file) | `[y/N]` on the terminal; no terminal = refused |
-| A front with dialogs (TUI, desktop) | its `Approver` (the harness always asks) | implement `synthesis_tools::BrowserHost::login`: show "Log in to <origin> in the opened browser, then confirm" | `BrowserHost::confirm_secret(name, origin)` |
+| `synth run` (headless) | `[y/N]` on the terminal (`/dev/tty`, `CONIN$` on Windows); no terminal = denied, as every other ask | Enter on the terminal, or `synth browser done <profile>` in another terminal, which asks for the one-time code that is printed on the waiting terminal (never in argv, events or stderr logs) | `[y/N]` on the terminal; no terminal = refused, unless pre-approved in user settings |
+| A front with dialogs (TUI, desktop) | its `Approver` (the harness always asks) | implement `synthesis_tools::BrowserHost::login`: show "Log in to ORIGIN in the opened browser, then confirm" | `BrowserHost::confirm_profile(name, domains)` / `confirm_secret(name, origin)` |
 
-Instruction in headless mode (stderr): `synth: log in to <origin> in the browser window that just opened ... Press Enter here, or run synth browser done <profile>`. A run with neither a terminal nor anyone to run `synth browser done` ends at the timeout and kills the browser.
+Terminal handling: ONE thread reads the terminal and prompts are serialized, so two prompts can never answer each other; typed-ahead input is flushed (`tcflush`) before each prompt; a cancelled wait leaves no second reader behind. The waiting login writes a `synthesis-login-waiting` marker in the profile; `synth browser done` refuses without it, never follows symlinks (`O_NOFOLLOW`), and the wait only accepts a file whose content is the code (wrong content is deleted). The profile directory is in the protected paths. Commands the agent runs start in their own session (`setsid`), so they have no controlling terminal: `/dev/tty` cannot be opened by them. TIOCSTI: with no controlling terminal a command cannot inject into the person's terminal through `/dev/tty`; the macOS Seatbelt profile allows writing only the literal `/dev/tty` (and `/dev/null`), not `/dev/ttysNNN`, but a TIOCSTI ioctl could not be exercised from safe Rust, so that part is read from the profile, not tested. Linux 6.2+ disables TIOCSTI by default (`dev.tty.legacy_tiocsti`).
 
 No display: on Linux without `DISPLAY` and `WAYLAND_DISPLAY` (SSH, CI, containers) `browser_login` returns an error that names option B. The check reads those two variables through the injectable `Env` only. macOS and Windows are assumed to have a desktop (an SSH session into a Mac is not detected: the window opens on the Mac's screen).
 
@@ -64,6 +64,9 @@ No display: on Linux without `DISPLAY` and `WAYLAND_DISPLAY` (SSH, CI, container
 | `secrets.<name>.field_kind` | `password` (only into `type=password`), `username` or `totp` (never into `type=password`). Omitted: any text field. |
 | `profiles.<name>.allow_domains` | Extra domains (and subdomains) the headless browser may navigate to on that profile. |
 | `login_timeout_sec` | 10 to 3600, default 600. |
+| `allow_unsandboxed` | `true` lets the credential tools run when the sandbox is not `enforce`. Default false: they refuse (see "What is and is not protected"). |
+| `approved.profiles` | Profile names that need no per-session confirmation (for runs nobody can answer). |
+| `approved.secrets` | `[{ "secret": name, "origin": exact origin }]` pairs that need no first-use confirmation; the secret must exist and be bound to that origin. Without a pre-approval a run with no terminal refuses. |
 
 The `synthesis.browser` block is read from the user's own settings file only. In project, local, managed and `--settings` files it is ignored with the diagnostic `synthesis.browser is read from user settings only, ignored` (an untrusted project drops all `synthesis` keys). An invalid secret entry is skipped with a warning that names the entry, never a value.
 
@@ -71,11 +74,11 @@ The `synthesis.browser` block is read from the user's own settings file only. In
 
 1. The secret must exist in user settings; unknown names are refused.
 2. The current page's origin is read from the page at call time (so after redirects) and must equal one of the secret's origins exactly.
-3. The target element is measured in its own frame: its frame origin must equal the page origin (cross-origin iframes refused), it must be an `input` (text, password, email, search, tel, url, number) or `textarea`, visible, enabled and not read-only, and match `field_kind`.
+3. The target element is measured in its own frame: its frame origin must equal the page origin (cross-origin iframes refused), it must be an `input` (text, password, email, search, tel, url, number) or `textarea`, enabled, not read-only, and match `field_kind`. Its form (including `input[form=]` and any `formaction`) must submit to one of the secret's origins. It must be at least 8x8 px, inside the viewport, not covered (`elementFromPoint` returns it), with no ancestor that is hidden, below 10% opacity, clipped (`clip-path`, `clip`) or cutting it off with `overflow`.
 4. The value is resolved BEFORE the person is asked, so a missing variable fails without a prompt.
 5. First use per session of each (secret, origin) asks the person with the secret NAME and the origin (never the value). This is separate from the permission engine, so no mode (auto, bypass) and no allow rule skips it.
-6. After focusing, the origin and focus are checked again immediately before `Input.insertText`; any change refuses with nothing typed.
-7. The value is registered for masking before it is typed. From then on `redact_text` replaces it (raw and form-encoded) in every snapshot, console, network, tab and URL text the browser returns (`WebFetch` does not use this path). Exact values of all declared secrets that resolve at start are also added to the event sink, session store, task database and memory secret list, so they are masked in events, transcripts and the session database.
+6. Verification and the write are ONE in-page call (`secret::FILL_JS`): the value is set through the native setter and announced with `input`/`change` events, so nothing can navigate or restyle between check and write. After a fill, `browser_screenshot` is refused until the page is a new document (pixels cannot be masked), and so is `browser_snapshot` after a value too short to mask.
+7. A value of 6 or more bytes is registered for masking before it is typed (at most 64 values, least recently typed dropped first). From then on `redact_text` replaces it, and its form-urlencoded, `encodeURIComponent`, percent-encoded (upper/lower hex), JSON, HTML-entity and base64 (standard/url-safe, padded or not) spellings, in every snapshot, console, network, tab and URL text the browser returns (`WebFetch` does not use this path). Exact values of all declared secrets that resolve at start are also added to the event sink, session store, task database and memory secret list, so they are masked in events, transcripts and the session database.
 
 ## Threat model
 
@@ -99,6 +102,20 @@ The `synthesis.browser` block is read from the user's own settings file only. In
 | Hung login leaves a browser running | Timeout, cancel and errors kill the process tree; `KillOnDrop` backs it up |
 | Stolen profile used by a headless run on other sites | Top-level navigation limited to the domains the person logged in to unless widened in user settings |
 | Cookie values returned | The tool returns only a count |
+| Agent's own tools read the saved profile (cookies) or a `{file:}` secret | `browser-profiles/` and every `{file:}` secret path join Synthesis's state paths: hidden from sandboxed commands, denied to Read/Grep/Glob, protected from writes; the credential tools refuse unless the sandbox is `enforce` (or `allow_unsandboxed`) |
+| Agent approves its own saved-login use | Per-session confirmation of the profile (name + domains) through `BrowserHost`, outside the permission engine; skippable only by the person's `approved.profiles` |
+| Persistent profile or login window on the TCP transport (Windows) | Refused until the pipe transport exists |
+| Chrome stores the typed password (password manager, autofill, save prompt) | Switched off in the profile's Preferences and by `--disable-save-password-bubble` before each launch |
+| Screenshot shows a typed value | `browser_screenshot` is refused until the page is a new document; snapshots too after a value too short to mask. The show-password toggle of a page is not supported/handled: do not press it |
+| Page changes between check and write (TOCTOU) | Check and write are one in-page call |
+| Form submits the value elsewhere (`action`, `formaction`, `form=`) | The form's targets must all be the secret's origins |
+| Invisible, covered, clipped or tiny field | Viewport, `elementFromPoint`, ancestor opacity/clip/overflow and a minimum size are checked |
+| Stale or foreign terminal input answers a prompt | One serialized terminal reader, `tcflush` before each prompt, commands without a controlling terminal (`setsid`) |
+| The agent ends the login wait itself | Marker + one-time code shown only on the terminal; `done` reads the code from stdin, refuses without a waiting login, ignores symlinks; profile dir is protected |
+| Project settings redirect the browser binary | With `synth run` the browser is found and started from the process environment snapshot only, never from settings `env` |
+| Guessing a short secret through masking | Values under 6 bytes are not masked by content; the capture guard applies instead. Masking is an oracle for guesses of longer values (a page can learn "this string equals the secret" from `[REDACTED:secret]`); the origin binding limits who can try |
+| Over-broad domain record, wrong suffix | Registrable domain from the public-suffix list (`psl`), recorded only when the origin has cookies |
+| Loopback login opens all private ports | Only that origin's port is opened, and it is the only loopback port the profile may use later |
 
 ## Headless, CI, WSL, SSH
 
@@ -108,14 +125,23 @@ The `synthesis.browser` block is read from the user's own settings file only. In
 - **macOS / Windows desktop:** A works as is. On a remote-desktop-less Windows service session there is no window: use B.
 - **Docker as root:** Chrome's sandbox may not start; the existing `no_sandbox` option applies to both modes (not recommended for untrusted sites).
 
+## What is and is not protected
+
+- **Tool outputs, events, transcript, session database, memory:** never carry a credential from the tools; declared secret values of 6+ bytes that resolve at start are masked by exact match in events, the store and the task database. A secret that is unset at start but set later is masked in page captures only, not in those sinks.
+- **The agent's own commands and file tools** can read the saved profile and `{file:}` secret files unless the sandbox confines them. That is why the credential tools require `--sandbox enforce` (a working backend: Seatbelt, Landlock/bwrap) or the user setting `allow_unsandboxed: true`. On Windows the default sandbox is best-effort, so the tools refuse there unless that setting is true (and the TCP transport refuses them anyway today).
+- **Env-source secrets** live in the environment of `synth` itself: on Linux the same user can read `/proc/<synth pid>/environ`, and `ps eww` shows another process's environment on several systems. A sandboxed command cannot reach the process tree by name only where the sandbox denies it; do not count on that. Prefer `{file:}` secrets with mode 0600, which the sandbox hides, over environment variables for anything that matters.
+- **Chrome's profile store:** Chrome encrypts cookies with a key held in the OS keystore on a normal profile. Synthesis starts Chrome with `--use-mock-keychain` and `--password-store=basic` (it must not touch the person's keychain, and a headless service has none), which is a constant key: treat the profile directory as holding the sessions in clear. An OS-keystore-backed profile was not implemented. The directory is 0700 and in the protected paths.
+- **Page JavaScript** sees what is typed into its own field, like any site. The origin binding limits this to the bound site.
+
 ## Not covered / unverified
 
-- The headed window was not exercised on a real desktop in the implementation environment; the profile, cookie persistence, lock, kill and fill paths are tested against real headless Chrome, the headed-only part is the missing `--headless` flag and the skipped viewport emulation.
-- Screenshots: a `username` or `totp` value typed into a visible field can appear in a screenshot (password fields render dots). PNG pixels are not masked. Prefer `field_kind: password` secrets for anything sensitive, or avoid `browser_screenshot` after filling.
-- Page JavaScript can read what is typed into the field (the same as when a person types it). The origin binding limits this to the site the person bound the secret to; it does not protect against a compromised bound site.
-- Chrome's own password manager may offer to save the password in the login window; it stores into the dedicated profile only. The profile directory holds session cookies (like any browser profile): protect it as you protect your home directory; `chmod 0700` is set on unix, nothing on Windows beyond the user profile ACLs.
-- The domain record uses the last two labels (three for `co.uk` style suffixes), not the public-suffix list; an exotic suffix may be one label too wide or too narrow.
-- A loopback login (`http://localhost:...`) opens the private-network gate for that window; for remote origins it stays closed.
-- Cross-origin iframe refusal (rule 3) is covered by a unit test of the decision function; in real Chrome the cross-origin iframe field is not in the accessibility tree the refs come from, so an end-to-end refusal could not be provoked.
-- One browser per session: a session whose headless browser already runs cannot also open the login window for the same profile (locked); end the session or use a new one.
-- Windows ConPTY/`/dev/tty` equivalents (`CONIN$`) and Linux/Windows behaviour are untested here; CI covers the unit tests on the three OSes, the browser job covers real Chrome on Linux.
+- The headed window was not exercised on a real desktop in the implementation environment; the profile, cookie persistence, lock, kill and fill paths are tested against real headless Chrome, the headed-only part is the missing `--headless` flag, the skipped viewport emulation and the display variables passed to Chrome.
+- Screenshots of a `username`/`totp` value are refused after a fill, but a person's own later page content can still show it; use `field_kind: password` for anything sensitive.
+- That Chrome honours the Preferences keys (`credentials_enable_service`, `profile.password_manager_enabled`, `autofill.*`) was not observed in a headed window; the file contents are tested, the behaviour is read from Chrome's documented preferences.
+- Chrome's own cookie encryption key is the mock-keychain constant (see above).
+- A loopback login (`http://localhost:...`) opens that origin's port only.
+- Cross-origin iframe refusal is implemented in the page function, but in real Chrome the cross-origin iframe field is not in the accessibility tree the refs come from, so the refusal could not be provoked end to end.
+- One browser per profile: a session whose headless browser already runs cannot also open the login window for the same profile (locked).
+- `tcflush` and the terminal reader are exercised on macOS only; Windows `CONIN$`/`CONOUT$` and Linux are untested here. TIOCSTI itself was not exercised (see "Terminal handling").
+- `setsid` for commands is tested with `ps` on this machine; whether every sandbox backend still lets a command open a terminal device by path is not tested.
+- Fills use the native value setter with `input`/`change` events, not key events: sites that require real key events (some custom inputs) will not accept the value. Windows ConPTY and legacy conhost are untouched.

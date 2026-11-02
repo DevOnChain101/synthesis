@@ -2,7 +2,7 @@
 //! `BrowserRuntime` per session lives in `SessionState`; it dies with the session. Every string
 //! that came from a page is wrapped as `UntrustedText` so the harness can label it as data.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,9 +41,21 @@ pub struct BrowserConfig {
     pub profile_domains: BTreeMap<String, Vec<String>>,
     /// How long a login waits for the person (default 10 minutes).
     pub login_timeout: Option<Duration>,
-    /// The process environment, read ONLY to resolve `{env:SYNTHESIS_...}` secret sources (the
-    /// tool env is an allowlist that never carries secret-shaped names).
-    pub secret_env: Env,
+    /// The process environment snapshot. Used to resolve `{env:SYNTHESIS_...}` secret sources
+    /// (the tool env is an allowlist that never carries secret-shaped names) and, when set, as
+    /// the ONLY source for finding and starting the browser: a project's settings `env` cannot
+    /// redirect `SYNTHESIS_BROWSER_PATH` to a binary that then receives a login or a secret.
+    /// `None` (embedders, tests): secrets cannot be resolved and the tool env is used.
+    pub process_env: Option<Env>,
+    /// The commands the agent runs are confined (sandbox `enforce`). Without it, stored logins
+    /// and secret files are readable by the agent's own tools, so the credential tools refuse.
+    pub sandboxed: bool,
+    /// User setting `synthesis.browser.allow_unsandboxed`: use the credential tools anyway.
+    pub allow_unsandboxed: bool,
+    /// Profiles the person pre-approved in user settings (for runs nobody can answer).
+    pub pre_approved_profiles: BTreeSet<String>,
+    /// (secret, origin) pairs pre-approved in user settings.
+    pub pre_approved_secrets: BTreeSet<(String, String)>,
     /// Who can be asked. `None`: `browser_login` and `browser_fill_secret` refuse.
     pub host: Option<Arc<dyn BrowserHost>>,
 }
@@ -72,6 +84,15 @@ pub trait BrowserHost: Send + Sync + std::fmt::Debug {
         req: &'a LoginRequest,
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<(), String>>;
+
+    /// First use of the saved login `profile` in this session: show its name and the domains it
+    /// holds a login for; return whether the person agrees to browse with it.
+    fn confirm_profile<'a>(
+        &'a self,
+        profile: &'a str,
+        domains: &'a [String],
+        cancel: &'a CancellationToken,
+    ) -> BoxFuture<'a, bool>;
 
     /// First use of `secret` on `origin` in this session: show the NAME and the origin (never the
     /// value) and return whether the person agrees.
@@ -106,6 +127,18 @@ fn tool_env(ctx: &ToolContext) -> Env {
     Env::from_pairs(ctx.env.iter().map(|(k, v)| (k.clone(), v.clone())))
 }
 
+/// The environment the browser is found and started with (see `BrowserConfig::process_env`).
+fn launch_env(cfg: &BrowserConfig, ctx: &ToolContext) -> Env {
+    cfg.process_env.clone().unwrap_or_else(|| tool_env(ctx))
+}
+
+fn require_sandbox(cfg: &BrowserConfig) -> Result<(), BrowserError> {
+    if cfg.sandboxed || cfg.allow_unsandboxed {
+        return Ok(());
+    }
+    Err(BrowserError::Refused("stored logins and secrets need the sandbox: run with --sandbox enforce (commands the agent runs could otherwise read the saved profile or secret files), or set synthesis.browser.allow_unsandboxed to true in your user settings".into()))
+}
+
 /// `profile`: a saved login (see `browser_login`). It can only be chosen when the session's
 /// browser starts, and then limits top-level navigation to the domains the person logged in to.
 async fn runtime(
@@ -123,22 +156,38 @@ async fn runtime(
             o.policy = cfg.policy.clone();
             o.no_sandbox = cfg.no_sandbox;
             if let Some(name) = profile {
+                require_sandbox(&cfg)?;
                 let home = cfg.home.as_deref().ok_or_else(|| {
                     BrowserError::Launch("browser profiles are not available here".into())
                 })?;
                 let dir = profile::existing(home, name)?;
-                let mut domains = profile::read_domains(&dir);
+                let meta = profile::read_meta(&dir);
+                let mut domains = meta.domains;
                 domains.extend(cfg.profile_domains.get(name).cloned().unwrap_or_default());
                 if domains.is_empty() {
                     return Err(BrowserError::Launch(format!(
                         "browser profile {name:?} has no recorded domain"
                     )));
                 }
+                // The person decides, per session, whether the agent may browse as this login.
+                if !cfg.pre_approved_profiles.contains(name) {
+                    let Some(host) = &cfg.host else {
+                        return Err(BrowserError::Refused(
+                            "nobody can approve using a saved login here".into(),
+                        ));
+                    };
+                    if !host.confirm_profile(name, &domains, &ctx.cancel).await {
+                        return Err(BrowserError::Refused(format!(
+                            "the person did not approve browsing with saved login {name:?}"
+                        )));
+                    }
+                }
+                o.policy.loopback_ports = meta.loopback_ports;
                 o.policy.document_allow_domains = domains;
                 o.profile = Some(dir);
                 *lock(&state.browser_profile) = Some(name.to_owned());
             }
-            BrowserRuntime::launch(o, &tool_env(ctx))
+            BrowserRuntime::launch(o, &launch_env(&cfg, ctx))
                 .await
                 .map(Arc::new)
         })
@@ -244,7 +293,8 @@ async fn login_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> Res {
         }
         None => profile::default_name(&origin),
     };
-    let env = tool_env(ctx);
+    require_sandbox(&cfg)?;
+    let env = launch_env(&cfg, ctx);
     profile::display_available(&env, Os::current())
         .map_err(|e| BrowserError::Refused(format!("browser_login: {e}")))?;
     let (Some(host), Some(home)) = (cfg.host.clone(), cfg.home.clone()) else {
@@ -259,8 +309,10 @@ async fn login_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> Res {
     o.profile = Some(dir.clone());
     o.no_sandbox = cfg.no_sandbox;
     o.policy = cfg.policy.clone();
-    // shortcut: a loopback login opens the private-network gate for the whole window
-    o.policy.allow_private_network |= profile::is_loopback(&origin);
+    // a loopback login opens that one port of loopback, nothing else of the private network
+    if profile::is_loopback(&origin) {
+        o.policy.loopback_ports = origin.port_or_known_default().into_iter().collect();
+    }
     let rt = BrowserRuntime::launch(o, &env).await?;
     let req = LoginRequest {
         origin: origin_str.clone(),
@@ -279,8 +331,12 @@ async fn login_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> Res {
     match wait.await {
         Ok(n) => {
             rt.close_graceful().await?; // flushes the cookies to the profile
-            profile::add_domain(&dir, &origin)?;
-            let out = json!({"ok": true, "origin": origin_str, "profile": name, "cookie_count_for_origin": n});
+            // No cookie, no login: do not record the site, or a later session could browse it
+            // with a profile that holds nothing for it.
+            if n > 0 {
+                profile::add_domain(&dir, &origin)?;
+            }
+            let out = json!({"ok": n > 0, "origin": origin_str, "profile": name, "cookie_count_for_origin": n});
             Ok(ToolOutput::text(out.to_string()).with_meta(out))
         }
         Err(e) => {
@@ -319,6 +375,9 @@ pub(crate) fn fill_secret<'a>(
                 BrowserError::Refused("not available to sub-agents".into()).into(),
             );
         }
+        if let Err(e) = require_sandbox(&lock(&sh.browser_cfg)) {
+            return fail("browser_fill_secret", e.into());
+        }
         let rt = match runtime(sh, ctx, "browser_fill_secret", None).await {
             Ok(rt) => rt,
             Err(e) => return e,
@@ -340,6 +399,7 @@ async fn fill_secret_body(
     let r = str_field(input, "ref").ok_or("\"ref\" is required.")?;
     let name = str_field(input, "secret").ok_or("\"secret\" is required.")?;
     let cfg = lock(&sh.browser_cfg).clone();
+    require_sandbox(&cfg)?;
     let refuse = |m: String| Box::<dyn Error + Send + Sync>::from(BrowserError::Refused(m));
     let spec = cfg.secrets.get(name).ok_or_else(|| {
         refuse(format!(
@@ -352,10 +412,14 @@ async fn fill_secret_body(
             "the page origin {origin} is not one secret {name:?} is bound to"
         )));
     }
-    let value = secret::resolve(name, spec, &cfg.secret_env)?; // fail before bothering the person
+    let env = cfg
+        .process_env
+        .as_ref()
+        .ok_or_else(|| refuse("no process environment is configured for secrets".into()))?;
+    let value = secret::resolve(name, spec, env)?; // fail before bothering the person
     let state = sh.session(ctx);
     let key = (name.to_owned(), origin.clone());
-    if !lock(&state.secret_ok).contains(&key) {
+    if !lock(&state.secret_ok).contains(&key) && !cfg.pre_approved_secrets.contains(&key) {
         let Some(host) = &cfg.host else {
             return Err(refuse("nobody can approve the use of a secret here".into()));
         };
@@ -639,6 +703,14 @@ mod tests {
             &'a self,
             _: &'a str,
             _: &'a str,
+            _: &'a CancellationToken,
+        ) -> BoxFuture<'a, bool> {
+            Box::pin(async { false })
+        }
+        fn confirm_profile<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a [String],
             _: &'a CancellationToken,
         ) -> BoxFuture<'a, bool> {
             Box::pin(async { false })

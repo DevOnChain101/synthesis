@@ -569,7 +569,7 @@ pub fn prepare(
         rules_arg(&c.deny, "--deny")?,
     );
     let h = homes(env)?;
-    let synthesis_deny = synthesis_sandbox::synthesis_state_paths(&h.synthesis);
+    let mut synthesis_deny = synthesis_sandbox::synthesis_state_paths(&h.synthesis);
     // Before anything is created (worktree, store): a bad grant is a usage error.
     let reads = {
         let mut probe = SandboxPolicy::standard(cwd, Path::new("/synthesis-probe-tmp"));
@@ -645,6 +645,8 @@ pub fn prepare(
     // exact values of the stored browser secrets are masked in events, transcript and database
     let mut res = res;
     res.secrets.extend(browser.values(env));
+    // files that hold stored secrets are state too: hidden from commands, Read/Grep/Glob and writes
+    synthesis_deny.extend(browser.secret_files());
 
     let price = pricing(&h.synthesis.join("settings.json"), &res.label, &res.model);
     if limits.max_cost_usd.is_some() && price.is_none() {
@@ -1211,6 +1213,7 @@ pub fn prepare(
                 &h.synthesis,
                 env,
                 Arc::new(crate::login::CliHost { sink: sink.clone() }),
+                sandbox_mode == SandboxMode::Enforce,
             ))
             .with_background_on_timeout(false),
     );

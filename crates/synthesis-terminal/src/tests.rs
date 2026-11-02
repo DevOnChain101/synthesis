@@ -79,6 +79,20 @@ async fn exec_exit_code_and_output() {
     assert!(r.log_path.starts_with(f.cwd.parent().unwrap().join("art")));
 }
 
+/// A command runs in its own session: no controlling terminal (so no /dev/tty to read the
+/// person's prompt answers from or to push keystrokes into), and it leads its own group.
+#[cfg(unix)]
+#[tokio::test]
+async fn commands_have_no_controlling_terminal() {
+    let f = fx();
+    let r = exec(&f, ExecSpec::new("ps -o tty=,pgid=,pid= -p $$")).await;
+    let cols: Vec<&str> = r.output.split_whitespace().collect();
+    assert!(cols[0].starts_with('?'), "tty column: {}", r.output);
+    assert_eq!(cols[1], cols[2], "own process group leader: {}", r.output);
+    let r = exec(&f, ExecSpec::new("(exec 3<>/dev/tty) 2>/dev/null; echo rc=$?")).await;
+    assert!(!r.output.contains("rc=0"), "/dev/tty opened: {}", r.output);
+}
+
 #[tokio::test]
 async fn cwd_is_explicit_not_inherited() {
     let f = fx();

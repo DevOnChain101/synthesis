@@ -146,12 +146,22 @@ pub fn resolve(name: &str, spec: &SecretSpec, env: &Env) -> Result<String> {
     Ok(v)
 }
 
+/// Opens once (no symlink followed) and judges the open descriptor, so the file cannot be
+/// swapped between the check and the read.
 fn read_file(p: &std::path::Path, src: &Source) -> Result<String> {
+    use std::io::Read;
     let e = |m: &str| refused(format!("secret file {src}: {m}"));
-    let m = std::fs::symlink_metadata(p).map_err(|_| e("cannot be read"))?;
-    if m.file_type().is_symlink() {
-        return Err(e("is a symlink; point the source at the real file"));
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.custom_flags(libc::O_NOFOLLOW);
     }
+    let f = o.open(p).map_err(|_| {
+        e("cannot be opened (a symlink is refused; point the source at the real file)")
+    })?;
+    let m = f.metadata().map_err(|_| e("cannot be read"))?;
     if !m.is_file() {
         return Err(e("is not a regular file"));
     }
@@ -165,7 +175,10 @@ fn read_file(p: &std::path::Path, src: &Source) -> Result<String> {
             return Err(e("is readable by group or others; run chmod 600 on it"));
         }
     }
-    let s = std::fs::read_to_string(p).map_err(|_| e("cannot be read as UTF-8 text"))?;
+    let mut s = String::new();
+    f.take(MAX_SECRET_BYTES + 1)
+        .read_to_string(&mut s)
+        .map_err(|_| e("cannot be read as UTF-8 text"))?;
     Ok(s.strip_suffix('\n')
         .map(|s| s.strip_suffix('\r').unwrap_or(s))
         .unwrap_or(&s)
@@ -180,72 +193,57 @@ pub fn origin_allowed(actual: &str, spec: &SecretSpec) -> bool {
         .is_some_and(|o| spec.origins.contains(&o))
 }
 
-/// What the page says about the target element (measured inside the element's own frame).
-#[derive(Debug, Default)]
-pub struct Facts {
-    pub tag: String,
-    pub input_type: String,
-    pub visible: bool,
-    pub enabled: bool,
-    pub readonly: bool,
-    pub frame_origin: String,
-    pub top_origin: String,
-}
-
-impl Facts {
-    pub(crate) fn from_json(v: &Value, top_origin: &str) -> Self {
-        let s = |k: &str| v[k].as_str().unwrap_or_default().to_owned();
-        Self {
-            tag: s("tag"),
-            input_type: s("type"),
-            visible: v["visible"] == true,
-            enabled: v["enabled"] == true,
-            readonly: v["readonly"] == true,
-            frame_origin: s("frame_origin"),
-            top_origin: top_origin.to_owned(),
-        }
+/// Runs INSIDE the target element's frame as one `Runtime.callFunctionOn` (`this` = the element;
+/// arguments: allowed origins, field kind, value). Verification and the write happen in the same
+/// JavaScript task, so the page cannot navigate or restyle between check and write. The value is
+/// set through the native setter and announced with `input`/`change` events.
+pub const FILL_JS: &str = r#"function(allowed, kind, value) {
+  const e = this, d = e.ownerDocument, w = d.defaultView;
+  const no = m => ({ok: false, error: m});
+  let top;
+  const frame = String(w.origin);
+  try { top = String(w.top.origin); } catch (_) { return no('the field is in a frame of another origin; cross-origin frames are refused'); }
+  if (frame !== top) return no('the field is in a frame of another origin (' + frame + '); cross-origin frames are refused');
+  if (!allowed.includes(top)) return no('the page origin ' + top + ' is not one this secret is bound to');
+  const tag = e.tagName.toLowerCase(), type = String(e.type || '').toLowerCase();
+  const typeable = (tag === 'input' && ['text', 'password', 'email', 'search', 'tel', 'url', 'number', ''].includes(type)) || tag === 'textarea';
+  if (!typeable) return no('the target is not a text input or textarea');
+  if (e.disabled || e.readOnly) return no('the field is not enabled and editable');
+  const pw = type === 'password';
+  if (kind === 'password' && !pw) return no('a password secret goes only into an input of type=password');
+  if ((kind === 'username' || kind === 'totp') && pw) return no('this secret is not a password; the field is type=password');
+  const f = e.form;
+  if (f) {
+    const org = u => { try { return new URL(u, d.baseURI).origin; } catch (_) { return 'null'; } };
+    const act = f.getAttribute('action');
+    const targets = [act === null || act === '' ? d.URL : act];
+    for (const c of f.elements) { const fa = c.getAttribute && c.getAttribute('formaction'); if (fa) targets.push(fa); }
+    for (const t of targets) if (!allowed.includes(org(t))) return no('the form would submit to another origin (' + org(t) + ')');
+  }
+  e.scrollIntoView({block: 'center', inline: 'center'});
+  const r = e.getBoundingClientRect();
+  if (r.width < 8 || r.height < 8) return no('the field is too small to be a real input');
+  if (r.left < 0 || r.top < 0 || r.right > w.innerWidth || r.bottom > w.innerHeight) return no('the field is not inside the viewport');
+  for (let n = e; n; n = n.parentElement || (n.getRootNode && n.getRootNode().host)) {
+    const cs = w.getComputedStyle(n);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) < 0.1) return no('the field or an ancestor is hidden');
+    if (cs.clipPath !== 'none' || (cs.position === 'absolute' && cs.clip !== 'auto')) return no('the field or an ancestor is clipped');
+    if (n !== e && (cs.overflowX !== 'visible' || cs.overflowY !== 'visible')) {
+      const q = n.getBoundingClientRect();
+      if (r.left < q.left - 1 || r.top < q.top - 1 || r.right > q.right + 1 || r.bottom > q.bottom + 1) return no('the field is clipped by an ancestor');
     }
-}
-
-const TEXT_TYPES: [&str; 8] = [
-    "text", "password", "email", "search", "tel", "url", "number", "",
-];
-
-/// Decides whether the value may be typed into this element. The page's top origin AND the
-/// element's frame origin must both be bound to the secret.
-pub fn check_target(f: &Facts, spec: &SecretSpec) -> Result<()> {
-    let no = |m: String| Err(refused(m));
-    if !origin_allowed(&f.top_origin, spec) {
-        return no(format!(
-            "the page origin {} is not one this secret is bound to",
-            f.top_origin
-        ));
-    }
-    if f.frame_origin != f.top_origin {
-        return no(format!(
-            "the field is in a frame of another origin ({}); cross-origin frames are refused",
-            f.frame_origin
-        ));
-    }
-    let typeable =
-        (f.tag == "input" && TEXT_TYPES.contains(&f.input_type.as_str())) || f.tag == "textarea";
-    if !typeable {
-        return no("the target is not a text input or textarea".into());
-    }
-    if !f.visible || !f.enabled || f.readonly {
-        return no("the field is not visible, enabled and editable".into());
-    }
-    let password = f.input_type == "password";
-    match spec.field_kind {
-        Some(FieldKind::Password) if !password => {
-            no("a password secret goes only into an input of type=password".into())
-        }
-        Some(FieldKind::Username | FieldKind::Totp) if password => {
-            no("this secret is not a password; the field is type=password".into())
-        }
-        _ => Ok(()),
-    }
-}
+  }
+  const root = e.getRootNode();
+  const hit = (root.elementFromPoint ? root : d).elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  if (hit !== e && !(hit && e.contains(hit))) return no('another element covers the field');
+  e.focus();
+  if (d.activeElement !== e && root.activeElement !== e) return no('the field could not be focused');
+  const proto = tag === 'textarea' ? w.HTMLTextAreaElement.prototype : w.HTMLInputElement.prototype;
+  Object.getOwnPropertyDescriptor(proto, 'value').set.call(e, value);
+  e.dispatchEvent(new w.Event('input', {bubbles: true}));
+  e.dispatchEvent(new w.Event('change', {bubbles: true}));
+  return {ok: true};
+}"#;
 
 #[cfg(test)]
 mod tests {
@@ -257,18 +255,6 @@ mod tests {
             source: Source::Env("SYNTHESIS_X_PASSWORD".into()),
             origins: vec!["https://app.example.com".into()],
             field_kind: kind,
-        }
-    }
-
-    fn facts(top: &str, frame: &str, ty: &str) -> Facts {
-        Facts {
-            tag: "input".into(),
-            input_type: ty.into(),
-            visible: true,
-            enabled: true,
-            readonly: false,
-            frame_origin: frame.into(),
-            top_origin: top.into(),
         }
     }
 
@@ -373,42 +359,6 @@ mod tests {
             "",
         ] {
             assert!(!origin_allowed(bad, &s), "{bad}");
-        }
-    }
-
-    #[test]
-    fn target_checks() {
-        let a = "https://app.example.com";
-        assert!(check_target(&facts(a, a, "password"), &spec(Some(FieldKind::Password))).is_ok());
-        // page moved (redirect) to another origin
-        assert!(
-            check_target(
-                &facts("https://evil.io", "https://evil.io", "password"),
-                &spec(None)
-            )
-            .is_err()
-        );
-        // cross-origin iframe inside the right page
-        let m = check_target(&facts(a, "https://pay.evil.io", "password"), &spec(None))
-            .unwrap_err()
-            .to_string();
-        assert!(m.contains("cross-origin"), "{m}");
-        assert!(check_target(&facts(a, "null", "password"), &spec(None)).is_err());
-        // field kind
-        assert!(check_target(&facts(a, a, "text"), &spec(Some(FieldKind::Password))).is_err());
-        assert!(check_target(&facts(a, a, "password"), &spec(Some(FieldKind::Username))).is_err());
-        assert!(check_target(&facts(a, a, "text"), &spec(Some(FieldKind::Totp))).is_ok());
-        // element state
-        for tweak in [
-            |f: &mut Facts| f.visible = false,
-            |f: &mut Facts| f.enabled = false,
-            |f: &mut Facts| f.readonly = true,
-            |f: &mut Facts| f.input_type = "checkbox".into(),
-            |f: &mut Facts| f.tag = "button".into(),
-        ] {
-            let mut f = facts(a, a, "password");
-            tweak(&mut f);
-            assert!(check_target(&f, &spec(None)).is_err());
         }
     }
 }

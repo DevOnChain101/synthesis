@@ -284,6 +284,8 @@ const PW_VAR: &str = "SYNTHESIS_TEST_LOGIN_PASSWORD";
 struct Person {
     yes: bool,
     asked: Mutex<Vec<(String, String)>>,
+    /// (profile, domains shown) of every `confirm_profile`
+    profiles: Mutex<Vec<(String, Vec<String>)>>,
 }
 
 impl BrowserHost for Person {
@@ -306,6 +308,25 @@ impl BrowserHost for Person {
             .push((secret.into(), origin.into()));
         Box::pin(async move { self.yes })
     }
+    fn confirm_profile<'a>(
+        &'a self,
+        profile: &'a str,
+        domains: &'a [String],
+        _: &'a tokio_util::sync::CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, bool> {
+        self.profiles
+            .lock()
+            .unwrap()
+            .push((profile.into(), domains.to_vec()));
+        Box::pin(async move { self.yes })
+    }
+}
+
+/// The real process environment plus extra variables (what `synth run` hands the tools).
+fn proc_env(extra: &[(&str, &str)]) -> synthesis_config::Env {
+    synthesis_config::Env::from_pairs(
+        std::env::vars().chain(extra.iter().map(|(k, v)| (k.to_string(), v.to_string()))),
+    )
 }
 
 const SECRET_PAGE: &str = r#"<html><head><title>Sign in</title></head><body>
@@ -357,6 +378,15 @@ async fn serve_secret(other: Option<String>) -> String {
 }
 
 fn secret_registry(origins: &[&str], kind: Option<&str>, host: Arc<Person>) -> Registry {
+    secret_registry_with(origins, kind, host, PW)
+}
+
+fn secret_registry_with(
+    origins: &[&str],
+    kind: Option<&str>,
+    host: Arc<Person>,
+    value: &str,
+) -> Registry {
     let mut spec = json!({"source": format!("{{env:{PW_VAR}}}"), "origins": origins});
     if let Some(k) = kind {
         spec["field_kind"] = json!(k);
@@ -373,7 +403,8 @@ fn secret_registry(origins: &[&str], kind: Option<&str>, host: Arc<Person>) -> R
             },
             no_sandbox: no_sandbox(),
             secrets,
-            secret_env: synthesis_config::Env::from_pairs([(PW_VAR, PW)]),
+            process_env: Some(proc_env(&[(PW_VAR, value)])),
+            allow_unsandboxed: true,
             host: Some(host),
             ..Default::default()
         })
@@ -395,6 +426,7 @@ async fn fill_secret_types_the_value_and_it_reaches_no_output() {
     let person = Arc::new(Person {
         yes: true,
         asked: Mutex::default(),
+        profiles: Mutex::default(),
     });
     let reg = secret_registry(&[&base], Some("password"), person.clone());
     let c = ctx(d.path(), "sec1");
@@ -442,7 +474,12 @@ async fn fill_secret_types_the_value_and_it_reaches_no_output() {
     let net = text(&run!("browser_network", json!({})));
     assert!(net.contains("/api/x") && !net.contains("S3CRET"), "{net}");
     run!("browser_tabs", json!({}));
-    run!("browser_screenshot", json!({}));
+    // pixels cannot be masked: no screenshot while the page that took the secret is still up
+    let o = run!("browser_screenshot", json!({}));
+    assert!(
+        o.is_error && o.meta["error"] == "refused" && text(&o).contains("until the page navigates"),
+        "{o:?}"
+    );
     for s in &seen {
         assert!(
             !s.contains(PW) && !s.contains("S3CRET"),
@@ -492,6 +529,7 @@ async fn fill_secret_needs_the_person_the_binding_and_a_value() {
     let no = Arc::new(Person {
         yes: false,
         asked: Mutex::default(),
+        profiles: Mutex::default(),
     });
     let reg = secret_registry(&[&base], None, no.clone());
     let c = ctx(d.path(), "sec2");
@@ -517,6 +555,7 @@ async fn fill_secret_needs_the_person_the_binding_and_a_value() {
     let yes = Arc::new(Person {
         yes: true,
         asked: Mutex::default(),
+        profiles: Mutex::default(),
     });
     let reg = secret_registry(&["http://127.0.0.1:9"], None, yes.clone());
     let c = ctx(d.path(), "sec3");
@@ -545,6 +584,8 @@ async fn fill_secret_needs_the_person_the_binding_and_a_value() {
             ..Default::default()
         },
         no_sandbox: no_sandbox(),
+        process_env: Some(proc_env(&[])),
+        allow_unsandboxed: true,
         secrets: synthesis_browser::secret::parse_secrets(
             json!({"pw": {"source": format!("{{env:{PW_VAR}}}"), "origins": [base]}})
                 .as_object()
@@ -584,10 +625,12 @@ async fn browser_login_checks_come_before_any_browser_starts() {
     let person = Arc::new(Person {
         yes: true,
         asked: Mutex::default(),
+        profiles: Mutex::default(),
     });
     let cfg = |home: Option<std::path::PathBuf>, host: Option<Arc<Person>>| BrowserConfig {
         home,
         host: host.map(|h| h as Arc<dyn BrowserHost>),
+        allow_unsandboxed: true,
         ..Default::default()
     };
     let run = |cfg: BrowserConfig, i: Value, sub: bool| {
@@ -654,6 +697,11 @@ async fn a_profile_must_exist_and_limits_the_domains() {
     let d = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let base = serve_secret(None).await;
+    let person = Arc::new(Person {
+        yes: true,
+        asked: Mutex::default(),
+        profiles: Mutex::default(),
+    });
     let mk = || {
         Registry::unsandboxed_for_tests()
             .with_new_tools()
@@ -664,6 +712,8 @@ async fn a_profile_must_exist_and_limits_the_domains() {
                 },
                 no_sandbox: no_sandbox(),
                 home: Some(home.path().to_owned()),
+                allow_unsandboxed: true,
+                host: Some(person.clone()),
                 ..Default::default()
             })
     };
@@ -743,4 +793,335 @@ async fn a_profile_must_exist_and_limits_the_domains() {
     for sid in ["p2", "p4"] {
         reg.close_session(sid);
     }
+    // the person was shown the profile name and the domains it holds, before the browser started
+    assert_eq!(
+        person.profiles.lock().unwrap()[0],
+        ("acme".to_string(), vec!["127.0.0.1".to_string()])
+    );
+}
+
+fn person(yes: bool) -> Arc<Person> {
+    Arc::new(Person {
+        yes,
+        asked: Mutex::default(),
+        profiles: Mutex::default(),
+    })
+}
+
+fn saved_profile(home: &std::path::Path) {
+    let dir = synthesis_browser::profile::create(home, "acme").unwrap();
+    synthesis_browser::profile::add_domain(&dir, &url::Url::parse("http://127.0.0.1").unwrap())
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn credential_tools_refuse_without_a_sandbox_unless_the_user_allows_it() {
+    let (d, home) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    saved_profile(home.path());
+    let p = person(true);
+    let mk = |sandboxed: bool, allow: bool| {
+        Registry::unsandboxed_for_tests()
+            .with_new_tools()
+            .with_browser(BrowserConfig {
+                home: Some(home.path().to_owned()),
+                host: Some(p.clone()),
+                process_env: Some(proc_env(&[])),
+                sandboxed,
+                allow_unsandboxed: allow,
+                ..Default::default()
+            })
+    };
+    let reg = mk(false, false);
+    let c = ctx(d.path(), "sb1");
+    for (tool, input) in [
+        ("browser_login", json!({"origin": "https://example.com"})),
+        ("browser_fill_secret", json!({"ref": "e1", "secret": "pw"})),
+        (
+            "browser_navigate",
+            json!({"url": "about:blank", "profile": "acme"}),
+        ),
+    ] {
+        let o = reg.execute(tool, input, &c).await;
+        assert!(
+            o.is_error && text(&o).contains("--sandbox enforce"),
+            "{tool}: {o:?}"
+        );
+    }
+    assert!(
+        p.profiles.lock().unwrap().is_empty(),
+        "nobody was bothered, no browser started"
+    );
+    // the sandbox is enforced: the sandbox check passes (the next refusal is a different one)
+    let o = mk(true, false)
+        .execute(
+            "browser_fill_secret",
+            json!({"ref": "e1", "secret": "pw"}),
+            &ctx(d.path(), "sb2"),
+        )
+        .await;
+    assert!(!text(&o).contains("--sandbox enforce"), "{o:?}");
+    let _ = o;
+    // a plain navigation without a profile never needed it
+    let c = ctx(d.path(), "sb3");
+    let o = mk(false, false)
+        .execute("browser_navigate", json!({"url": "about:blank"}), &c)
+        .await;
+    assert!(!text(&o).contains("--sandbox enforce"), "{o:?}");
+    mk(false, false).close_session("sb3");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn using_a_saved_login_needs_the_person_unless_pre_approved() {
+    if !have_browser() {
+        return;
+    }
+    let (d, home) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    saved_profile(home.path());
+    let base = serve_secret(None).await;
+    let mk = |p: &Arc<Person>, pre: &[&str]| {
+        Registry::unsandboxed_for_tests()
+            .with_new_tools()
+            .with_browser(BrowserConfig {
+                policy: UrlPolicy {
+                    allow_private_network: true,
+                    ..Default::default()
+                },
+                no_sandbox: no_sandbox(),
+                home: Some(home.path().to_owned()),
+                host: Some(p.clone()),
+                allow_unsandboxed: true,
+                pre_approved_profiles: pre.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            })
+    };
+    let nav = json!({"url": format!("{base}/login"), "profile": "acme"});
+    // the person says no: refused, no browser, and not even bypass/auto can matter (not the engine's call)
+    let no = person(false);
+    let reg = mk(&no, &[]);
+    let c = ctx(d.path(), "ap1");
+    let o = reg.execute("browser_navigate", nav.clone(), &c).await;
+    assert!(o.is_error && text(&o).contains("did not approve"), "{o:?}");
+    assert_eq!(no.profiles.lock().unwrap().len(), 1);
+    // yes: asked once for the session, however many calls follow
+    let yes = person(true);
+    let reg = mk(&yes, &[]);
+    let c = ctx(d.path(), "ap2");
+    assert!(
+        !reg.execute("browser_navigate", nav.clone(), &c)
+            .await
+            .is_error
+    );
+    reg.execute("browser_snapshot", json!({}), &c).await;
+    assert_eq!(yes.profiles.lock().unwrap().len(), 1);
+    reg.close_session("ap2");
+    // pre-approved in user settings: nobody is asked (a run with no one to ask still works)
+    let silent = person(false);
+    let reg = mk(&silent, &["acme"]);
+    let c = ctx(d.path(), "ap3");
+    assert!(!reg.execute("browser_navigate", nav, &c).await.is_error);
+    assert!(silent.profiles.lock().unwrap().is_empty());
+    reg.close_session("ap3");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_browser_is_found_through_the_process_env_not_the_project_env() {
+    let d = tempfile::tempdir().unwrap();
+    // the tool env (settings `env`, project-controlled) names a good path; the process env a bad one
+    let mut c = ctx(d.path(), "env1");
+    c.env = Arc::new(BTreeMap::from([(
+        "SYNTHESIS_BROWSER_PATH".to_string(),
+        "/project/chose/this/browser".to_string(),
+    )]));
+    let reg = Registry::unsandboxed_for_tests()
+        .with_new_tools()
+        .with_browser(BrowserConfig {
+            process_env: Some(synthesis_config::Env::from_pairs([(
+                "SYNTHESIS_BROWSER_PATH",
+                "/process/env/browser",
+            )])),
+            ..Default::default()
+        });
+    let o = reg.execute("browser_snapshot", json!({}), &c).await;
+    assert!(
+        o.is_error && o.meta["error"] == "browser_unavailable",
+        "{o:?}"
+    );
+    let t = text(&o);
+    assert!(
+        t.contains("/process/env/browser") && !t.contains("/project/chose"),
+        "{t}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_approved_secret_pairs_skip_the_prompt_and_only_those() {
+    if !have_browser() {
+        return;
+    }
+    let base = serve_secret(None).await;
+    let d = tempfile::tempdir().unwrap();
+    let nobody = person(false);
+    let reg = secret_registry(&[&base], None, nobody.clone()).with_browser(BrowserConfig {
+        policy: UrlPolicy {
+            allow_private_network: true,
+            ..Default::default()
+        },
+        no_sandbox: no_sandbox(),
+        secrets: synthesis_browser::secret::parse_secrets(
+            json!({"pw": {"source": format!("{{env:{PW_VAR}}}"), "origins": [base]}})
+                .as_object()
+                .unwrap(),
+        )
+        .0,
+        process_env: Some(proc_env(&[(PW_VAR, PW)])),
+        allow_unsandboxed: true,
+        host: Some(nobody.clone()),
+        pre_approved_secrets: [("pw".to_string(), base.clone())].into(),
+        ..Default::default()
+    });
+    let c = ctx(d.path(), "pa1");
+    reg.execute(
+        "browser_navigate",
+        json!({"url": format!("{base}/login")}),
+        &c,
+    )
+    .await;
+    let pw = field_ref(&reg, &c, "textbox \"Password\"").await;
+    let o = reg
+        .execute(
+            "browser_fill_secret",
+            json!({"ref": pw, "secret": "pw"}),
+            &c,
+        )
+        .await;
+    assert!(!o.is_error, "{o:?}");
+    assert!(nobody.asked.lock().unwrap().is_empty());
+    reg.close_session("pa1");
+}
+
+fn fields_page(other: &str) -> String {
+    format!(
+        r#"<html><body style="margin:0">
+<form action="/login"><input aria-label="good"></form>
+<div style="opacity:0"><input aria-label="faded"></div>
+<input aria-label="offscreen" style="position:absolute;left:-5000px;top:100px">
+<div style="position:relative;width:200px"><input aria-label="covered"><div style="position:absolute;inset:0;background:red"></div></div>
+<div style="margin-left:100px;width:60px;height:30px;overflow:hidden"><input aria-label="clipped" style="width:100px"></div>
+<div style="clip-path:inset(0 90% 0 0)"><input aria-label="clip-path"></div>
+<input aria-label="tiny" style="width:2px;height:2px;padding:0;border:0">
+<input aria-label="locked" readonly><input aria-label="off" disabled>
+<form action="{other}/login"><input aria-label="foreign-action"></form>
+<form action="/login"><input aria-label="foreign-formaction"><button formaction="{other}/x">go</button></form>
+<input aria-label="foreign-form-attr" form="f2"><form id="f2" action="{other}/z"></form>
+</body></html>"#
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_real_visible_field_of_a_safe_form_receives_the_secret() {
+    if !have_browser() {
+        return;
+    }
+    let other = serve_secret(None).await;
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let page = fields_page(&other);
+    tokio::spawn(async move {
+        loop {
+            let (mut s, _) = l.accept().await.unwrap();
+            let page = page.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let _ = s.read(&mut buf).await;
+                let r = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+                    page.len()
+                );
+                let _ = s.write_all(r.as_bytes()).await;
+                let _ = s.shutdown().await;
+            });
+        }
+    });
+    let base = format!("http://{addr}");
+    let d = tempfile::tempdir().unwrap();
+    let reg = secret_registry(&[&base], None, person(true));
+    let c = ctx(d.path(), "fld1");
+    reg.execute("browser_navigate", json!({"url": format!("{base}/")}), &c)
+        .await;
+    let tree = text(&reg.execute("browser_snapshot", json!({}), &c).await);
+    let fill = |label: &str| {
+        let r = ref_of(&tree, &format!("textbox \"{label}\""));
+        let (reg, c) = (&reg, &c);
+        async move {
+            reg.execute("browser_fill_secret", json!({"ref": r, "secret": "pw"}), c)
+                .await
+        }
+    };
+    for (label, why) in [
+        ("faded", "hidden"),
+        ("offscreen", "viewport"),
+        ("covered", "covers"),
+        ("clipped", "clipped"),
+        ("clip-path", "clipped"),
+        ("tiny", "too small"),
+        ("locked", "editable"),
+        ("foreign-action", "another origin"),
+        ("foreign-formaction", "another origin"),
+        ("foreign-form-attr", "another origin"),
+    ] {
+        let o = fill(label).await;
+        assert!(
+            o.is_error && o.meta["error"] == "refused" && text(&o).contains(why),
+            "{label}: {o:?}"
+        );
+        assert!(text(&o).contains("nothing was typed"), "{label}: {o:?}");
+    }
+    let o = fill("good").await;
+    assert!(!o.is_error, "{o:?}");
+    reg.close_session("fld1");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_short_secret_blocks_snapshots_and_screenshots_until_the_page_navigates() {
+    if !have_browser() {
+        return;
+    }
+    let base = serve_secret(None).await;
+    let d = tempfile::tempdir().unwrap();
+    let reg = secret_registry_with(&[&base], None, person(true), "abc");
+    let c = ctx(d.path(), "short1");
+    reg.execute(
+        "browser_navigate",
+        json!({"url": format!("{base}/login")}),
+        &c,
+    )
+    .await;
+    let pw = field_ref(&reg, &c, "textbox \"Password\"").await;
+    let o = reg
+        .execute(
+            "browser_fill_secret",
+            json!({"ref": pw, "secret": "pw"}),
+            &c,
+        )
+        .await;
+    assert!(!o.is_error, "{o:?}");
+    for t in ["browser_snapshot", "browser_screenshot"] {
+        let o = reg.execute(t, json!({}), &c).await;
+        assert!(
+            o.is_error && text(&o).contains("until the page navigates"),
+            "{t}: {o:?}"
+        );
+    }
+    reg.execute(
+        "browser_navigate",
+        json!({"url": format!("{base}/login")}),
+        &c,
+    )
+    .await;
+    assert!(
+        !reg.execute("browser_snapshot", json!({}), &c)
+            .await
+            .is_error
+    );
+    reg.close_session("short1");
 }

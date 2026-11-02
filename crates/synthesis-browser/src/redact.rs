@@ -27,29 +27,96 @@ fn patterns() -> &'static [(&'static str, Regex)] {
     })
 }
 
-/// Exact secret values (and their form-encoded spelling) registered by `mask_secret`.
-static MASKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// Values shorter than this are not masked by content (a 3-letter "secret" would garble every
+/// page it appears in, and the masking itself would tell a page whether a guess matched). The
+/// capture guard in `BrowserRuntime` covers them instead.
+pub const MASK_MIN: usize = 6;
+/// Most secrets masked at once; the least recently typed one is dropped first.
+const MASK_CAP: usize = 64;
+
+/// One masked secret with every spelling a page could echo it in.
+struct Masked {
+    value: String,
+    spellings: Vec<String>,
+}
+
+static MASKED: std::sync::Mutex<Vec<Masked>> = std::sync::Mutex::new(Vec::new());
+
+fn percent(value: &str, keep: &str, upper: bool) -> String {
+    let mut o = String::new();
+    for b in value.bytes() {
+        if b.is_ascii_alphanumeric() || keep.as_bytes().contains(&b) {
+            o.push(b as char);
+        } else if upper {
+            o.push_str(&format!("%{b:02X}"));
+        } else {
+            o.push_str(&format!("%{b:02x}"));
+        }
+    }
+    o
+}
+
+/// The raw value plus: form-urlencoded, `encodeURIComponent`, strict percent-encoding (upper and
+/// lower hex), JSON string escape, HTML entities and base64 (standard/url-safe, padded or not).
+fn spellings(value: &str) -> Vec<String> {
+    use base64::Engine;
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+    let json = serde_json::to_string(value).unwrap_or_default();
+    let mut v = vec![
+        value.to_owned(),
+        url::form_urlencoded::byte_serialize(value.as_bytes()).collect(),
+        percent(value, "-_.!~*'()", true),
+        percent(value, "-_.!~*'()", false),
+        percent(value, "", true),
+        percent(value, "", false),
+        json[1..json.len().saturating_sub(1)].to_owned(),
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#39;"),
+        value.replace('\'', "&#x27;"),
+        STANDARD.encode(value),
+        STANDARD_NO_PAD.encode(value),
+        URL_SAFE.encode(value),
+        URL_SAFE_NO_PAD.encode(value),
+    ];
+    v.retain(|x| x.len() >= MASK_MIN);
+    v.sort_by_key(|x| std::cmp::Reverse(x.len())); // longest first: no spelling hides inside another
+    v.dedup();
+    v
+}
 
 /// From now on `redact_text` (and so every snapshot, console, network and tab text) replaces
-/// this value. Process-wide: a value typed with `browser_fill_secret` must not come back from
-/// any page capture.
-pub fn mask_secret(value: &str) {
-    if value.is_empty() {
-        return;
+/// this value in all its spellings. Process-wide: a value typed with `browser_fill_secret` must
+/// not come back from any page capture. Returns `false` (nothing masked) for a value shorter
+/// than [`MASK_MIN`].
+pub fn mask_secret(value: &str) -> bool {
+    if value.len() < MASK_MIN {
+        return false;
     }
-    let mut m = MASKED.lock().unwrap_or_else(|e| e.into_inner());
-    let enc: String = url::form_urlencoded::byte_serialize(value.as_bytes()).collect();
-    for v in [value.to_owned(), enc] {
-        if !m.contains(&v) {
-            m.push(v);
-        }
+    remember(&mut MASKED.lock().unwrap_or_else(|e| e.into_inner()), value);
+    true
+}
+
+fn remember(m: &mut Vec<Masked>, value: &str) {
+    m.retain(|x| x.value != value); // re-typing moves it to the most-recent end
+    m.push(Masked {
+        value: value.to_owned(),
+        spellings: spellings(value),
+    });
+    if m.len() > MASK_CAP {
+        m.remove(0);
     }
 }
 
 pub fn redact_text(s: &str) -> String {
     let mut out = s.to_owned();
-    for v in MASKED.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-        out = out.replace(v.as_str(), "[REDACTED:secret]");
+    for m in MASKED.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        for v in &m.spellings {
+            out = out.replace(v.as_str(), "[REDACTED:secret]");
+        }
     }
     for (kind, re) in patterns() {
         out = re
@@ -128,12 +195,52 @@ mod tests {
     }
 
     #[test]
-    fn masked_secret_values_disappear_everywhere() {
-        mask_secret("Zq9 pass&word!");
-        let t = redact_text("value=Zq9 pass&word! enc=Zq9+pass%26word%21");
-        assert!(!t.contains("Zq9") && !t.contains("pass"), "{t}");
-        let u = redact_url("https://h/p?note=Zq9+pass%26word%21");
+    fn masked_secret_values_disappear_in_every_spelling() {
+        use base64::Engine;
+        let v = "Zq9 pass&word!/'<x>\"";
+        assert!(mask_secret(v));
+        let cases = [
+            v.to_owned(),
+            url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>(),
+            percent(v, "-_.!~*'()", true),
+            percent(v, "-_.!~*'()", false),
+            percent(v, "", true),
+            percent(v, "", false),
+            v.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;")
+                .replace('\'', "&#39;"),
+            base64::engine::general_purpose::STANDARD.encode(v),
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v),
+        ];
+        for c in cases {
+            let t = redact_text(&format!("before {c} after"));
+            assert_eq!(t, "before [REDACTED:secret] after", "{c}");
+        }
+        let u = redact_url(&format!(
+            "https://h/p?note={}",
+            url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>()
+        ));
         assert!(!u.contains("Zq9"), "{u}");
+    }
+
+    #[test]
+    fn short_values_are_not_masked_and_the_list_is_bounded() {
+        assert!(!mask_secret("abc12"));
+        assert_eq!(redact_text("abc12 abc12"), "abc12 abc12");
+        let mut m = vec![];
+        for i in 0..(MASK_CAP + 5) {
+            remember(&mut m, &format!("lru-secret-value-{i:03}"));
+        }
+        remember(&mut m, "lru-secret-value-010"); // typed again: now the most recent
+        assert_eq!(m.len(), MASK_CAP);
+        let has = |v: &str| m.iter().any(|x| x.value == v);
+        assert!(
+            !has("lru-secret-value-000")
+                && has("lru-secret-value-010")
+                && has("lru-secret-value-068")
+        );
     }
 
     #[test]

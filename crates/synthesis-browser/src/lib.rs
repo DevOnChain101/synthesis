@@ -17,7 +17,7 @@ pub use capture::{ConsoleMessage, JsException, NetworkRequest};
 pub use discover::{Os, candidates, discover};
 pub use error::{BrowserError, Result};
 pub use policy::{Resolver, UrlPolicy};
-pub use redact::{mask_secret, redact_text, redact_url};
+pub use redact::{MASK_MIN, mask_secret, redact_text, redact_url};
 pub use untrusted::UntrustedText;
 
 use base64::Engine;
@@ -173,6 +173,8 @@ pub struct BrowserRuntime {
     shots: AtomicU32,
     /// Held while a persistent profile is in use (released on drop or close).
     profile_lock: Mutex<Option<profile::ProfileLock>>,
+    /// Where `fill_secret` last typed: (tab session, document id, value too short to mask).
+    filled: Mutex<Option<(String, String, bool)>>,
 }
 
 impl Drop for BrowserRuntime {
@@ -226,7 +228,8 @@ fn spawn_events(
             }
             if ev.method == "Network.responseReceived" {
                 let remote = ev.params["response"]["remoteIPAddress"].as_str();
-                if remote.is_some_and(|ip| policy.remote_ip_denied(ip)) {
+                let url = ev.params["response"]["url"].as_str().unwrap_or("");
+                if remote.is_some_and(|ip| policy.remote_ip_denied(ip, url)) {
                     // Chrome connected to a private address although our DNS check passed
                     // (rebinding / own resolver). The request was already sent; drop the page.
                     if let (Some(cdp), Some(session)) = (weak.upgrade(), ev.session_id.clone()) {
@@ -470,6 +473,17 @@ fn dir_listing(dir: &Path) -> String {
 }
 
 /// Windows system variables Chrome and its helpers expect; `child_env` strips them. Non-secret.
+/// A visible window needs the display the person is on; `child_env` (an allowlist) lacks it.
+fn display_env(env: &Env, headless: bool) -> Vec<(String, String)> {
+    if headless {
+        return vec![];
+    }
+    ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"]
+        .iter()
+        .filter_map(|k| env.get_nonempty(k).map(|v| ((*k).to_owned(), v.to_owned())))
+        .collect()
+}
+
 fn windows_chrome_env(env: &Env) -> Vec<(String, String)> {
     if !cfg!(windows) {
         return vec![];
@@ -519,6 +533,11 @@ impl BrowserRuntime {
     /// Discovers a browser (`SYNTHESIS_BROWSER_PATH` first), launches it headless with an isolated
     /// temp profile and opens one tab in a fresh browser context.
     pub async fn launch(opts: BrowserOptions, env: &Env) -> Result<Self> {
+        if (opts.profile.is_some() || !opts.headless) && opts.transport == Transport::Tcp {
+            return Err(BrowserError::Launch(
+                "persistent profiles and the visible login window are unsupported with the TCP DevTools transport (Windows) until the pipe transport exists".into(),
+            ));
+        }
         let exe = discover(env, Os::current(), &|p| p.is_file())?;
         let profile_lock = opts.profile.as_deref().map(profile::lock).transpose()?;
         let profile = tempfile::Builder::new()
@@ -529,6 +548,9 @@ impl BrowserRuntime {
             .clone()
             .unwrap_or_else(|| profile.path().join("data"));
         let _ = std::fs::remove_file(data_dir.join("DevToolsActivePort")); // a stale port of an earlier run
+        if opts.profile.is_some() {
+            profile::harden_preferences(&data_dir)?; // no password manager, no autofill, no save prompt
+        }
         let stderr_path = profile.path().join("stderr.log");
         let stderr = std::fs::File::create(&stderr_path)?;
         let (w, h) = opts.viewport;
@@ -558,6 +580,7 @@ impl BrowserRuntime {
                 "--disable-background-networking",
                 // bfcache would make back/forward skip the load event we wait for
                 "--disable-features=BackForwardCache,Translate",
+                "--disable-save-password-bubble",
                 "--password-store=basic",
                 "--use-mock-keychain",
             ]
@@ -584,6 +607,7 @@ impl BrowserRuntime {
                     .args(&chrome_args)
                     .env_clear()
                     .envs(env.child_env().iter())
+                    .envs(display_env(env, opts.headless))
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(stderr);
@@ -593,6 +617,7 @@ impl BrowserRuntime {
                 c.args(&chrome_args)
                     .env_clear()
                     .envs(env.child_env().iter())
+                    .envs(display_env(env, opts.headless))
                     .envs(windows_chrome_env(env))
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
@@ -696,7 +721,8 @@ impl BrowserRuntime {
         )
         .await?;
         let mut l = Logs::default();
-        l.deny_private = !opts.policy.allow_private_network;
+        l.deny_private =
+            !opts.policy.allow_private_network && opts.policy.loopback_ports.is_empty();
         let logs = Arc::new(Mutex::new(l));
         let compromised = Arc::new(AtomicBool::new(false));
         let events = spawn_events(
@@ -727,6 +753,7 @@ impl BrowserRuntime {
             pid,
             shots: AtomicU32::new(0),
             profile_lock: Mutex::new(profile_lock),
+            filled: Mutex::new(None),
         };
         let first = match first_tab {
             Some(id) => rt.adopt(&id).await,
@@ -1075,6 +1102,7 @@ impl BrowserRuntime {
     /// Accessibility snapshot of the current tab. Refs persist per element across snapshots.
     pub async fn snapshot(&self, max_nodes: usize) -> Result<PageSnapshot> {
         let tab = self.current()?;
+        self.guard_capture(&tab, true).await?;
         let r = self
             .call(&tab, "Accessibility.getFullAXTree", json!({}))
             .await?;
@@ -1142,41 +1170,65 @@ impl BrowserRuntime {
         Ok(())
     }
 
-    /// Types a secret into the element behind `r` and nothing else: the page origin (checked now,
-    /// after any redirect) and the element's own frame must both be bound to the secret, and the
-    /// element must be a visible, enabled, editable text field of the right kind. The value is
-    /// registered for masking first and never returned.
+    /// Types a secret into the element behind `r` and nothing else. One in-page call verifies
+    /// (page and frame origin, form targets, field type, visibility, not covered, not clipped)
+    /// and writes, so nothing can change in between (`secret::FILL_JS`). The value is registered
+    /// for masking first and never returned.
     pub async fn fill_secret(&self, r: &str, spec: &secret::SecretSpec, value: &str) -> Result<()> {
-        mask_secret(value);
+        let short = !mask_secret(value);
         let tab = self.current()?;
-        let top = self.eval(&tab, "location.origin").await?;
         let oid = self.object_for(&tab, r).await?;
-        let facts = "function(){const e=this,w=e.ownerDocument.defaultView,b=e.getBoundingClientRect(),c=w.getComputedStyle(e);return{tag:e.tagName.toLowerCase(),type:String(e.type||'').toLowerCase(),visible:b.width>0&&b.height>0&&c.visibility!=='hidden'&&c.display!=='none'&&Number(c.opacity)>0,enabled:!e.disabled,readonly:!!e.readOnly,frame_origin:String(w.origin)}}";
+        let kind = match spec.field_kind {
+            Some(secret::FieldKind::Password) => "password",
+            Some(secret::FieldKind::Username) => "username",
+            Some(secret::FieldKind::Totp) => "totp",
+            None => "",
+        };
         let v = self
             .call(
                 &tab,
                 "Runtime.callFunctionOn",
-                json!({"objectId": oid, "functionDeclaration": facts, "returnByValue": true}),
+                json!({
+                    "objectId": oid,
+                    "functionDeclaration": secret::FILL_JS,
+                    "arguments": [{"value": spec.origins}, {"value": kind}, {"value": value}],
+                    "returnByValue": true,
+                }),
             )
             .await?;
-        let f = secret::Facts::from_json(&v["result"]["value"], top.as_str().unwrap_or(""));
-        secret::check_target(&f, spec)?;
-        let focus = "function(){this.focus();if(typeof this.select==='function')this.select();return this.ownerDocument.activeElement===this}";
-        let v = self
-            .call(
-                &tab,
-                "Runtime.callFunctionOn",
-                json!({"objectId": oid, "functionDeclaration": focus, "returnByValue": true}),
-            )
-            .await?;
-        // the page can navigate between the check and the keystrokes: look once more
-        if v["result"]["value"] != true || self.eval(&tab, "location.origin").await? != top {
+        let out = &v["result"]["value"];
+        if out["ok"] != true {
+            let why = out["error"]
+                .as_str()
+                .unwrap_or("the page did not accept the fill");
+            let why: String = redact_text(why).chars().take(200).collect();
+            return Err(BrowserError::Refused(format!("{why}; nothing was typed")));
+        }
+        let doc = self.eval(&tab, "String(performance.timeOrigin)").await?;
+        *lock(&self.filled) = Some((
+            tab.session.clone(),
+            doc.as_str().unwrap_or_default().to_owned(),
+            short,
+        ));
+        Ok(())
+    }
+
+    /// Screenshots (and, for a value too short to mask, snapshots) are refused while the page
+    /// that received a secret is still the same document: pixels cannot be masked.
+    async fn guard_capture(&self, tab: &Tab, snapshot: bool) -> Result<()> {
+        let Some((session, doc, short)) = lock(&self.filled).clone() else {
+            return Ok(());
+        };
+        if session != tab.session || (snapshot && !short) {
+            return Ok(());
+        }
+        let now = self.eval(tab, "String(performance.timeOrigin)").await?;
+        if now.as_str() == Some(doc.as_str()) {
             return Err(BrowserError::Refused(
-                "the field lost focus or the page changed while filling; nothing was typed".into(),
+                "a secret was typed into this page: screenshots (and snapshots after a short secret) are refused until the page navigates".into(),
             ));
         }
-        self.call(&tab, "Input.insertText", json!({"text": value}))
-            .await?;
+        *lock(&self.filled) = None;
         Ok(())
     }
 
@@ -1239,6 +1291,7 @@ impl BrowserRuntime {
 
     pub async fn screenshot(&self, full_page: bool) -> Result<Screenshot> {
         let tab = self.current()?;
+        self.guard_capture(&tab, false).await?;
         let mut params = json!({"format": "png"});
         if full_page {
             let m = self.call(&tab, "Page.getLayoutMetrics", json!({})).await?;
@@ -1346,6 +1399,26 @@ impl BrowserRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tcp_transport_refuses_persistent_profiles_and_the_login_window() {
+        let env = Env::default();
+        for (headless, profile) in [(true, Some(PathBuf::from("/p"))), (false, None)] {
+            let mut o = BrowserOptions::new("/a");
+            o.transport = Transport::Tcp;
+            o.headless = headless;
+            o.profile = profile;
+            let e = BrowserRuntime::launch(o, &env)
+                .await
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(
+                e.contains("unsupported") && e.contains("pipe transport"),
+                "{e}"
+            );
+        }
+    }
 
     #[test]
     fn stderr_listening_line_gives_the_ws_url() {

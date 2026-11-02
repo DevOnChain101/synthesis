@@ -44,5 +44,10 @@ tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-th
 tokio-util = { version = "0.7.20", default-features = false }
 uuid = { version = "1", features = ["v4"] }
 
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW constant only; tcflush (safe wrapper) drops typed-ahead terminal input before a prompt
+libc = "0.2"
+rustix = { version = "1", features = ["termios"] }
+
 [dev-dependencies]
 tempfile = "3.27.0"
