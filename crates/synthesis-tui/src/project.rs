@@ -16,7 +16,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use synthesis_config::Env;
-use synthesis_tui_base::imgclip::RealExec;
+use synthesis_tui_base::imgclip::{Output, RealExec};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TreeRow {
@@ -176,57 +176,16 @@ impl Git {
         self.run_with(cwd, &[], args, cut_at)
     }
 
-    /// `git config --name-only --get-regexp ^filter\.` runs nothing: from its names, the
-    /// `-c` overrides that switch off every filter driver. `Err`: a name that cannot be passed
-    /// on a command line safely (so git is not run at all).
+    /// The `-c` overrides that switch off every `filter.<name>` driver the config defines, from
+    /// `git config -z --get-regexp ^filter\.` (runs nothing; works on every git that has
+    /// `--get-regexp` and `-z`, which is far older than anything supported). FAILS CLOSED: see
+    /// [`filter_guards_from`].
     fn filter_guards(&self, cwd: &Path) -> Result<Vec<String>, String> {
-        let Some((out, _)) = self.run(
-            cwd,
-            &["config", "--name-only", "-z", "--get-regexp", r"^filter\."],
-            0,
-        ) else {
-            return Ok(vec![]); // none defined (exit 1) or no config
-        };
-        let mut names: Vec<String> = vec![];
-        for key in out.split(|b| *b == 0).filter(|k| !k.is_empty()) {
-            let key = String::from_utf8_lossy(key);
-            // `filter.<name>.<variable>`; the name may itself contain dots
-            let Some((name, _var)) = key.strip_prefix("filter.").and_then(|r| r.rsplit_once('.'))
-            else {
-                continue;
-            };
-            if name.is_empty()
-                || name.contains(['=', '\n', '\0'])
-                || name.chars().any(char::is_control)
-            {
-                return Err("a git filter in this repository's config has a name that cannot be switched off safely".into());
-            }
-            if !names.iter().any(|n| n == name) {
-                names.push(name.to_string());
-            }
-        }
-        if names.len() > 100 {
-            return Err(
-                "this repository's config defines too many git filters to switch off".into(),
-            );
-        }
-        Ok(names
-            .iter()
-            .flat_map(|n| {
-                ["clean=", "smudge=", "process=", "required=false"]
-                    .map(|v| ["-c".to_string(), format!("filter.{n}.{v}")])
-            })
-            .flatten()
-            .collect())
+        filter_guards_from(self.raw(cwd, &[], &["config", "-z", "--get-regexp", r"^filter\."]))
     }
 
-    fn run_with(
-        &self,
-        cwd: &Path,
-        extra: &[String],
-        args: &[&str],
-        cut_at: u8,
-    ) -> Option<(Vec<u8>, bool)> {
+    /// One hardened git call, the raw result (`None`: git is missing or could not be started).
+    fn raw(&self, cwd: &Path, extra: &[String], args: &[&str]) -> Option<Output> {
         let exe = self.exe.as_ref()?;
         let mut argv: Vec<String> = [
             "-c",
@@ -249,10 +208,19 @@ impl Git {
         ]);
         argv.extend(extra.iter().cloned());
         argv.extend(args.iter().map(|s| (*s).to_string()));
-        let o = self
-            .exec
+        self.exec
             .run_with(exe, &argv, Some(cwd), Some(&self.env))
-            .ok()?;
+            .ok()
+    }
+
+    fn run_with(
+        &self,
+        cwd: &Path,
+        extra: &[String],
+        args: &[&str],
+        cut_at: u8,
+    ) -> Option<(Vec<u8>, bool)> {
+        let o = self.raw(cwd, extra, args)?;
         if o.timed_out {
             return None;
         }
@@ -266,6 +234,67 @@ impl Git {
         }
         Some((out, o.truncated))
     }
+}
+
+/// Longest filter name that is passed on a command line.
+const MAX_FILTER_NAME: usize = 256;
+
+/// Turns the answer of the filter query into the `-c` guards. Only exit code 1 with no output
+/// means "no filter is defined"; anything else that is not a complete, successful answer is
+/// REFUSED, because guards that were silently dropped (a timeout, a git without the option, an
+/// answer cut at the output bound that hides a later `[filter "evil"]`) would let the repository's
+/// own programs run. `Err` is the note shown instead of running git.
+fn filter_guards_from(o: Option<Output>) -> Result<Vec<String>, String> {
+    let unsafe_note = |why: &str| {
+        Err(format!(
+            "git filters in this repository's config cannot be switched off safely ({why})"
+        ))
+    };
+    let Some(o) = o else {
+        return unsafe_note("git could not be asked");
+    };
+    if o.timed_out {
+        return unsafe_note("the config query timed out");
+    }
+    if o.truncated {
+        return unsafe_note("the config query output was cut at the size limit");
+    }
+    match o.code {
+        Some(1) if o.stdout.is_empty() => return Ok(vec![]), // no match: none defined
+        Some(0) => {}
+        c => return unsafe_note(&format!("the config query failed, exit {c:?}")),
+    }
+    let mut names: Vec<String> = vec![];
+    // entries are `key\nvalue` separated by NUL; the key is up to the first newline
+    for entry in o.stdout.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        let key = entry.split(|b| *b == b'\n').next().unwrap_or(entry);
+        let key = String::from_utf8_lossy(key);
+        // `filter.<name>.<variable>`; the name may itself contain dots
+        let Some((name, _var)) = key.strip_prefix("filter.").and_then(|r| r.rsplit_once('.'))
+        else {
+            continue;
+        };
+        if name.is_empty() || name.len() > MAX_FILTER_NAME {
+            return unsafe_note("a filter name is empty or too long");
+        }
+        if name.contains(['=', '\n', '\0']) || name.chars().any(char::is_control) {
+            return unsafe_note("a filter name has characters that cannot be passed safely");
+        }
+        if !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    }
+    if names.len() > 100 {
+        return unsafe_note("too many filters");
+    }
+    Ok(names
+        .iter()
+        .flat_map(|n| {
+            ["clean=", "smudge=", "process=", "required=false"]
+                .map(|v| ["-c".to_string(), format!("filter.{n}.{v}")])
+        })
+        .flatten()
+        .collect())
 }
 
 /// `git status --porcelain=v1 -z`: `XY path`, and for a rename or a copy (in either column) the
@@ -773,5 +802,119 @@ mod tests {
             let n = l.chars().count();
             assert!(n < 400 || n == 200_001, "a half line was shown ({n} chars)");
         }
+    }
+
+    fn out(code: Option<i32>, stdout: &[u8], truncated: bool, timed_out: bool) -> Option<Output> {
+        Some(Output {
+            code,
+            stdout: stdout.to_vec(),
+            truncated,
+            timed_out,
+        })
+    }
+
+    #[test]
+    fn the_filter_query_fails_closed() {
+        let refused = |o: Option<Output>| {
+            let e = filter_guards_from(o).unwrap_err();
+            assert!(e.contains("cannot be switched off safely"), "{e}");
+        };
+        // git before 2.38 has no --name-only (exit 129), a timeout, a cut answer, no git at all
+        refused(out(Some(129), b"", false, false));
+        refused(out(None, b"", false, true));
+        refused(out(Some(0), b"filter.a.clean\nx\0", true, false));
+        refused(out(Some(2), b"", false, false));
+        refused(out(Some(1), b"filter.a.clean\nx\0", false, false));
+        refused(None);
+        // an over-long name is refused, not passed
+        let long = format!("filter.{}.clean\nx\0", "n".repeat(MAX_FILTER_NAME + 1));
+        refused(out(Some(0), long.as_bytes(), false, false));
+        // only exit 1 with no output is "none defined"
+        assert_eq!(
+            filter_guards_from(out(Some(1), b"", false, false)),
+            Ok(vec![])
+        );
+        // `key\nvalue` entries: the key is up to the first newline, dotted names work
+        let g = filter_guards_from(out(
+            Some(0),
+            b"filter.c.clean\n/bin/x\0filter.a.b.smudge\nline1\nline2\0filter.c.process\ny\0",
+            false,
+            false,
+        ))
+        .unwrap();
+        let joined = g.join(" ");
+        for want in [
+            "filter.c.clean=",
+            "filter.c.process=",
+            "filter.a.b.smudge=",
+            "filter.a.b.process=",
+            "filter.a.b.required=false",
+        ] {
+            assert!(joined.contains(want), "{want}: {joined}");
+        }
+        assert_eq!(g.len(), 16, "two names x four overrides x `-c`");
+    }
+
+    /// A config whose filter query answer is over the 1 MiB bound: the evil filter named after
+    /// the huge one must not be lost to the cut (that dropped every guard before).
+    #[cfg(unix)]
+    #[test]
+    fn a_huge_filter_name_before_an_evil_filter_refuses_the_scan() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let w = std::fs::canonicalize(d.path()).unwrap();
+        let repo = w.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let marker = w.join("marker-evil");
+        let evil = w.join("evil.sh");
+        std::fs::write(
+            &evil,
+            format!("#!/bin/sh\ntouch {}\ncat\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&evil, std::fs::Permissions::from_mode(0o755)).unwrap();
+        run(&repo, &["init", "-q"]);
+        std::fs::write(repo.join("a.e"), "one\n").unwrap();
+        std::fs::write(repo.join(".gitattributes"), "*.e filter=evil\n").unwrap();
+        run(&repo, &["add", "."]);
+        run(&repo, &["commit", "-qm", "c"]);
+        let cfg = repo.join(".git/config");
+        let mut text = std::fs::read_to_string(&cfg).unwrap();
+        text.push_str(&format!(
+            "[filter \"{}\"]\n\tclean = true\n",
+            "n".repeat(1_200_000)
+        ));
+        text.push_str(&format!(
+            "[filter \"evil\"]\n\tclean = {}\n",
+            evil.display()
+        ));
+        std::fs::write(&cfg, text).unwrap();
+        std::fs::write(repo.join("a.e"), "two\n").unwrap();
+        // positive control: plain git runs the evil filter through .gitattributes
+        Command::new("git")
+            .args(["status"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["diff"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            marker.exists(),
+            "control: plain git did not run the filter, the case proves nothing"
+        );
+        std::fs::remove_file(&marker).unwrap();
+        let p = scan(&repo, &env());
+        assert!(
+            p.note
+                .as_deref()
+                .is_some_and(|n| n.contains("cannot be switched off safely")),
+            "{:?}",
+            p.note
+        );
+        assert!(p.rows.is_empty());
+        assert!(!marker.exists(), "the evil filter ran");
     }
 }

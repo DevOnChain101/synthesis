@@ -129,10 +129,10 @@ fn send(s: &str) -> Value {
     json!(["send", s])
 }
 fn expect(s: &str) -> Value {
-    json!(["expect", s, 15])
+    json!(["expect", s, 40])
 }
 fn expect_new(s: &str) -> Value {
-    json!(["expect_new", s, 15])
+    json!(["expect_new", s, 40])
 }
 
 /// Approval, sub-agent, memory row, model switch and a new folder, in one app run.
@@ -148,7 +148,7 @@ fn approval_subagent_model_switch_and_new_folder() {
         {"text": "all done"}
     ]));
     let text = rig.drive(json!([
-        ["wait", 2],
+        expect("Enter send"),
         send("hi\r"),
         expect("first reply"),
         // a Write asks; Enter answers the first option (allow once)
@@ -161,6 +161,9 @@ fn approval_subagent_model_switch_and_new_folder() {
         expect("all done"),
         // /model restarts on the same session; the scripted model starts over
         send("/model fake/other\r"),
+        // the restarted app is ready when its header shows the new model; keys typed earlier
+        // arrive while the terminal is between two raw-mode sessions and are lost
+        expect_new("fake/other"),
         ["wait", 2],
         send("again\r"),
         expect_new("first reply"),
@@ -261,7 +264,7 @@ fn mcp_mentions_prompts_skills_and_help() {
         "---\nname: ship\ndescription: Ship the release\n---\nDo the shipping.\n",
     );
     rig.drive(json!([
-        ["wait", 4],
+        expect("Enter send"),
         send("/help\r"),
         expect("mcp__doc__greet"),
         expect("Ship the release"),
@@ -324,7 +327,11 @@ fn tool_search_rows() {
         &json!({"permissions": {"allow": ["mcp__atl"]}, "synthesis": {"mcp": {"toolSearch": "on"}}})
             .to_string(),
     );
-    let text = rig.drive(json!([["wait", 3], send("who am i\r"), expect("searched")]));
+    let text = rig.drive(json!([
+        expect("Enter send"),
+        send("who am i\r"),
+        expect("searched")
+    ]));
     let flat = squash(&text);
     assert!(flat.contains("ToolSearch"), "no ToolSearch row: {flat}");
     let done: Vec<String> = rig
@@ -346,7 +353,7 @@ fn config_flips_a_setting_applies_it_and_writes_the_user_file() {
         r#"{"permissions": {"deny": ["Bash(rm:*)"]}}"#,
     );
     rig.drive(json!([
-        ["wait", 3],
+        expect("Enter send"),
         expect("Session"),
         send("/config\r"),
         expect("Settings (synthesis.tui)"),
@@ -375,7 +382,7 @@ fn config_flips_a_setting_applies_it_and_writes_the_user_file() {
 fn peers_name_and_agents_all_say_so_when_peers_are_off_and_show_the_table_when_on() {
     let rig = Rig::new(json!([{"text": "x"}]));
     let off = rig.drive(json!([
-        ["wait", 3],
+        expect("Enter send"),
         send("/peers\r"),
         expect("peers are off"),
         send("/name\r"),
@@ -386,7 +393,7 @@ fn peers_name_and_agents_all_say_so_when_peers_are_off_and_show_the_table_when_o
     assert!(squash(&off).contains("synthesis.peers.enabled"));
     let on = rig.drive_with(
         json!([
-            ["wait", 3],
+            expect("Enter send"),
             expect("peers on"),
             send("/name\r"),
             expect("Session name for peers: alpha"),
@@ -437,14 +444,14 @@ fn files_diff_terminal_and_browser_show_real_data() {
     );
     // not trusted: git is not run at all
     let untrusted = rig.drive(json!([
-        ["wait", 3],
+        expect("Enter send"),
         send("/files\r"),
         expect("this folder is not trusted")
     ]));
     assert!(squash(&untrusted).contains("--trust-project"));
     let out = rig.drive_with(
         json!([
-            ["wait", 3],
+            expect("Enter send"),
             send("/files\r"),
             expect("M a.rs"),
             send("/diff a.rs\r"),
@@ -468,7 +475,6 @@ fn files_diff_terminal_and_browser_show_real_data() {
 fn first_run_shows_the_setup_card_and_quits_cleanly() {
     let rig = Rig::new(json!([]));
     let out = rig.drive_bare(json!([
-        ["wait", 2],
         expect("needs a model and an API key"),
         expect("{env:MY_PROVIDER_KEY}"),
         send("q")
