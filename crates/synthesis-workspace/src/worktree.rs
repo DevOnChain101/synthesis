@@ -217,6 +217,14 @@ impl WorktreeManager {
     /// plain workspace. The original tree is only ever read. With `include_uncommitted`,
     /// tracked changes and untracked files of the original tree are copied into the worktree
     /// and committed as the baseline, so they are not reported as agent edits.
+    /// The repository's common git directory (shared by all its worktrees), canonical.
+    fn common_dir(&self, repo_root: &Path) -> Result<PathBuf> {
+        let c = self
+            .git
+            .out_str(repo_root, &["rev-parse", "--git-common-dir"])?;
+        Ok(synthesis_core::canonicalize(repo_root.join(c))?)
+    }
+
     pub fn create(
         &self,
         source: &Path,
@@ -265,12 +273,17 @@ impl WorktreeManager {
         }
         let branch = format!("synthesis/{session_id}");
         let wt_s = wt.to_string_lossy().into_owned();
-        g.out(
-            &repo_root,
-            &[
-                "worktree", "add", "--quiet", "-b", &branch, &wt_s, &main_head,
-            ],
-        )?;
+        // `git worktree add` lists every worktree of the repository: two at once read each
+        // other's half-written `.git/worktrees/<id>` ("failed to read .../commondir")
+        let common = self.common_dir(&repo_root)?;
+        with_repo_lock(&common, || {
+            g.out(
+                &repo_root,
+                &[
+                    "worktree", "add", "--quiet", "-b", &branch, &wt_s, &main_head,
+                ],
+            )
+        })??;
         let wt = synthesis_core::canonicalize(&wt)?;
         let git_dir =
             synthesis_core::canonicalize(g.out_str(&wt, &["rev-parse", "--absolute-git-dir"])?)?;
@@ -626,9 +639,12 @@ impl WorktreeManager {
             rm.push("--force");
         }
         rm.push(&wt);
-        g.out(&info.repo_root, &rm)?;
-        g.out(&info.repo_root, &["branch", "-D", &info.branch])?;
-        Ok(())
+        let common = self.common_dir(&info.repo_root)?;
+        with_repo_lock(&common, || {
+            g.out(&info.repo_root, &rm)?;
+            g.out(&info.repo_root, &["branch", "-D", &info.branch])?;
+            Ok(())
+        })?
     }
 }
 
@@ -639,4 +655,53 @@ fn nul_split_until_blank(b: &[u8]) -> Vec<String> {
         .take_while(|s| !s.is_empty())
         .map(|s| String::from_utf8_lossy(s).into_owned())
         .collect()
+}
+
+/// How long to wait for another process that is adding or removing a worktree of the same
+/// repository.
+const REPO_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Runs `f` while holding the repository's worktree lock: a process-wide mutex per common git
+/// directory (threads of this process) plus an advisory lock file inside it (other processes).
+/// The wait for the file is bounded; a file system without locks falls back to the mutex alone.
+fn with_repo_lock<T>(common: &Path, f: impl FnOnce() -> T) -> Result<T> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let m = LOCKS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(common.to_path_buf())
+        .or_default()
+        .clone();
+    let _in_process = m.lock().unwrap_or_else(|e| e.into_inner());
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(common.join("synthesis-worktree.lock"))
+        .ok();
+    if let Some(file) = &file {
+        let start = std::time::Instant::now();
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(fs::TryLockError::WouldBlock) => {
+                    if start.elapsed() >= REPO_LOCK_WAIT {
+                        return Err(Error::Refused(format!(
+                            "another process has been changing the worktrees of {} for {} s; try again",
+                            common.display(),
+                            REPO_LOCK_WAIT.as_secs()
+                        )));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(_) => break, // no locks on this file system: the in-process mutex only
+            }
+        }
+    }
+    let r = f();
+    drop(file); // closing the file releases the advisory lock
+    Ok(r)
 }

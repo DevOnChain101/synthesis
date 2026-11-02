@@ -411,6 +411,37 @@ fn concurrent_sessions_get_distinct_worktrees_and_ports() {
     assert_eq!(ports.len(), 8);
 }
 
+/// Adding and removing worktrees of one repository from many threads at once: git alone races on
+/// `.git/worktrees/<id>` ("failed to read .../commondir"); the repository lock serialises them.
+#[test]
+fn many_threads_adding_and_removing_worktrees_do_not_race() {
+    need_git!();
+    let f = fx();
+    std::thread::scope(|s| {
+        let hs: Vec<_> = (0..8)
+            .map(|i| {
+                let f = &f;
+                s.spawn(move || {
+                    for round in 0..3 {
+                        let id = format!("r{i}-{round}");
+                        let a = f
+                            .mgr
+                            .create(&f.repo, &id, f.base.join("art").join(&id), false)
+                            .unwrap_or_else(|e| panic!("{id}: {e}"));
+                        let info = a.git.expect("a git workspace");
+                        f.mgr
+                            .cleanup(&info, false)
+                            .unwrap_or_else(|e| panic!("{id}: {e}"));
+                    }
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+    });
+}
+
 #[test]
 fn paths_with_spaces_and_unicode() {
     need_git!();
