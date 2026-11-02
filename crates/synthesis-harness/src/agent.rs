@@ -279,6 +279,18 @@ impl Harness {
                     .max_output_tokens
                     .min(m.min(u64::from(u32::MAX)) as u32)
             });
+        let mut messages = built.messages;
+        if !task.caps.images {
+            let n = strip_images(&mut messages);
+            if n > 0 && !st.image_note {
+                st.image_note = true;
+                self.notice(
+                    task,
+                    "warning",
+                    format!("the model does not take images: {n} image(s) are sent as \"[image]\""),
+                );
+            }
+        }
         let (tools, deferred) = self.tool_defs(task, agent);
         let mut system = built.system;
         if !deferred.is_empty() {
@@ -299,7 +311,7 @@ impl Harness {
             model: self.model_of(agent),
             max_tokens: max_output,
             system: Some(system),
-            messages: built.messages,
+            messages,
             tools,
             temperature: None,
             thinking: None,
@@ -775,4 +787,24 @@ pub(crate) fn tool_status_for(is_error: bool, soft: bool) -> ToolStatus {
         (true, true) => ToolStatus::SoftError,
         (true, false) => ToolStatus::Error,
     }
+}
+
+/// Replaces user-attached image blocks by the text `[image]` in a request copy (the history keeps
+/// them); returns how many.
+fn strip_images(messages: &mut [synthesis_providers::Message]) -> usize {
+    use synthesis_providers::{Block, Content};
+    let mut n = 0;
+    for m in messages {
+        if let Content::Blocks(bs) = &mut m.content {
+            for b in bs {
+                if matches!(b, Block::Image { .. }) {
+                    *b = Block::Text {
+                        text: "[image]".into(),
+                    };
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
 }

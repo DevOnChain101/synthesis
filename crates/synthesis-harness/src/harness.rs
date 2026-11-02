@@ -434,6 +434,8 @@ pub(crate) struct AgentState {
     pub auto_pause_until: u64,
     /// Where the next inbox delivery happens, for `message.delivered.at`.
     pub drain_at: &'static str,
+    /// The "model does not take images" notice was given for this agent.
+    pub image_note: bool,
 }
 
 impl AgentState {
@@ -448,6 +450,7 @@ impl AgentState {
             auto_failures: 0,
             auto_pause_until: 0,
             drain_at: "tool_round",
+            image_note: false,
         }
     }
 }
@@ -921,9 +924,11 @@ impl Harness {
             .begin_task(bg_tx, task.cancel.clone(), task.task_id.clone());
         self.peer_task_started(&req.request, &main.name, &st.messages);
         *lock(&task.user_texts) = crate::classifier::user_texts(&st.messages, &req.request);
+        // images stay in the history; a model without vision gets "[image]" in its request copy
+        // (`make_request`), also after a model switch
         let content = if req.images.is_empty() {
             Content::Text(req.request.clone())
-        } else if self.provider.capabilities(&self.config.model).images {
+        } else {
             let mut blocks = vec![Block::Text {
                 text: req.request.clone(),
             }];
@@ -934,16 +939,6 @@ impl Harness {
                 },
             }));
             Content::Blocks(blocks)
-        } else {
-            self.notice(
-                &task,
-                "warning",
-                format!(
-                    "the model does not take images: {} attached image(s) were not sent",
-                    req.images.len()
-                ),
-            );
-            Content::Text(req.request.clone())
         };
         st.messages.push(Message {
             role: Role::User,
