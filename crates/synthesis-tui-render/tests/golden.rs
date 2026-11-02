@@ -3,6 +3,9 @@
 //! SGR rows plus their `sgr::encode` form). Every case must pass or be listed with a reason in
 //! `golden_divergences.txt` (`render/<case>` or `render/<case>#json|txt|ansi`); no silent skips.
 //!
+//! `SYNTHESIS_UPDATE_GOLDEN=top-row` rewrites a frame ONLY when every row but the first (the title
+//! bar) is identical to the golden.
+//!
 //! `SYNTHESIS_UPDATE_GOLDEN=colour` rewrites the expected colours of a failing case ONLY when the
 //! text, structure and hit rects are identical to the golden (a palette change); it prints every
 //! rewritten case. Cases with any other difference still fail.
@@ -856,6 +859,7 @@ fn render_golden() {
     let allowed = divergences();
     let update = std::env::var_os("SYNTHESIS_UPDATE_GOLDEN").is_some_and(|v| v == "1");
     let colour_only = std::env::var_os("SYNTHESIS_UPDATE_GOLDEN").is_some_and(|v| v == "colour");
+    let top_row = std::env::var_os("SYNTHESIS_UPDATE_GOLDEN").is_some_and(|v| v == "top-row");
     let (mut rewritten, mut unexplained) = (Vec::<String>::new(), Vec::<String>::new());
     let base = root().join("../../tests/golden/render");
     let mut dirs: Vec<_> = std::fs::read_dir(&base)
@@ -884,6 +888,26 @@ fn render_golden() {
                         .unwrap_or_default();
                     vec![("json", Err(format!("panic: {msg}")))]
                 });
+        // `top-row`: a frame whose title bar changed and nothing else
+        if top_row
+            && checks.iter().any(|(_, r)| r.is_err())
+            && !allowed.keys().any(|k| k.starts_with(&id))
+        {
+            let a = ACTUAL.with(|a| std::mem::take(&mut *a.borrow_mut()));
+            let want = read(dir.join("expected.json"));
+            let got: Vec<String> = a.ansi.iter().map(|l| strip_ansi(l)).collect();
+            let old: Vec<&str> = want["lines"]
+                .as_array()
+                .map(|v| v.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            if !a.ansi.is_empty() && got.len() == old.len() && got[1..] == old[1..] {
+                rewrite_expected(dir, &want, &a);
+                rewritten.push(name.clone());
+                checks = vec![("json", Ok(()))];
+            } else {
+                unexplained.push(name.clone());
+            }
+        }
         if colour_only
             && checks.iter().any(|(_, r)| r.is_err())
             && !allowed.keys().any(|k| k.starts_with(&id))
@@ -979,6 +1003,15 @@ fn render_golden() {
                 "{k}: allow-list entry that is not needed (stale) or has no case"
             ));
         }
+    }
+    if top_row {
+        println!(
+            "SYNTHESIS_UPDATE_GOLDEN=top-row: rewrote {} case(s):\n  {}\nnot rewritten ({}):\n  {}",
+            rewritten.len(),
+            rewritten.join("\n  "),
+            unexplained.len(),
+            unexplained.join("\n  ")
+        );
     }
     if colour_only {
         println!(

@@ -129,6 +129,7 @@ struct Knobs {
     log: Option<Log>,
     notes: Vec<String>,
     paste: Option<FakePaste>,
+    images: Option<Arc<dyn synthesis_tui_base::imgclip::ImageSource>>,
 }
 
 fn rig(turns: Vec<Turn>, k: Knobs) -> Rig {
@@ -194,6 +195,7 @@ fn rig(turns: Vec<Turn>, k: Knobs) -> Rig {
         if let Some(p) = &k.paste {
             o.paste_source = Some(vec![Box::new(p.clone())]);
         }
+        o.image_source = k.images.clone();
         o.tick = Duration::from_millis(10);
         o.idle_tick = Duration::from_millis(20);
         o.quit_grace = Duration::from_secs(3);
@@ -770,7 +772,7 @@ mod signals {
         /// The first frame is on screen: the guard (SIGHUP/SIGTERM handlers) and the SIGINT
         /// watcher are installed before it is drawn, so signalling earlier is the test's race.
         fn ready(&self) {
-            self.wait_for("MISSION CONTROL"); // the title is set when the screen is entered
+            self.wait_for("SYNTHESIS"); // the title is set when the screen is entered
             self.wait_for("sandbox: unknown");
         }
         /// Exit status, after the reader has drained the pipe: without the join, the child's last
@@ -993,5 +995,87 @@ fn ctrl_o_expands_and_collapses_clamped_code_blocks() {
     r.wait_for("… +6 more lines (ctrl+o to expand)");
     assert!(!r.tty.screen_text().contains("let v12 = 12;"));
     r.tty.send("\x04");
+    r.finish();
+}
+
+/// A clipboard image source with a fixed answer.
+struct FakeImages(Result<Vec<u8>, synthesis_tui_base::imgclip::ImageError>);
+impl synthesis_tui_base::imgclip::ImageSource for FakeImages {
+    fn read(
+        &self,
+    ) -> Result<synthesis_tui_base::imgclip::ClipImage, synthesis_tui_base::imgclip::ImageError>
+    {
+        self.0
+            .clone()
+            .map(|png| synthesis_tui_base::imgclip::ClipImage {
+                png,
+                width: 4,
+                height: 3,
+            })
+    }
+}
+
+fn png_bytes() -> Vec<u8> {
+    let mut v = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
+    v.extend(b"IHDR");
+    v.extend([0, 0, 0, 4, 0, 0, 0, 3, 8, 6, 0, 0, 0]);
+    v
+}
+
+#[test]
+fn alt_v_attaches_the_clipboard_image_and_the_next_message_carries_it_as_an_image_block() {
+    let png = png_bytes();
+    let mut r = rig(
+        vec![Turn::text("a picture")],
+        Knobs {
+            images: Some(Arc::new(FakeImages(Ok(png.clone())))),
+            ..Knobs::default()
+        },
+    );
+    r.wait_for("Enter send");
+    r.tty.send("\x1bv"); // alt+v
+    r.wait_for("image 1.png");
+    r.tty.send("what is this?\r");
+    r.wait_for("a picture");
+    let req = &r.provider.requests()[0];
+    let dump = format!("{:?}", req.messages);
+    assert!(
+        dump.contains("what is this?") && dump.contains("Image"),
+        "{dump}"
+    );
+    assert!(
+        dump.contains(&synthesis_tui_base::clipboard::base64(&png)),
+        "the image bytes are in the message, not a path: {dump}"
+    );
+    // the attachment is spent: the next message has none
+    r.tty.send("and now?\r");
+    r.wait_for("a picture");
+    r.tty.send("\x04");
+    r.finish();
+}
+
+#[test]
+fn a_clipboard_without_an_image_says_so_and_ctrl_v_falls_back_to_text() {
+    let paste = FakePaste::new(Ok("plain text"));
+    let none = synthesis_tui_base::imgclip::ImageError::NoImage(
+        "no image on the Windows clipboard (a file copied in Explorer is not an image)".into(),
+    );
+    let mut r = rig(
+        vec![Turn::text("x")],
+        Knobs {
+            images: Some(Arc::new(FakeImages(Err(none)))),
+            paste: Some(paste.clone()),
+            ..Knobs::default()
+        },
+    );
+    r.wait_for("Enter send");
+    r.tty.send("\x1bv");
+    r.wait_for("no image on the Windows clipboard");
+    r.wait_for("alt+v attaches an image");
+    assert_eq!(paste.reads(), 0, "alt+v never pastes text");
+    r.tty.send("\x16"); // ctrl+v
+    r.wait_for("plain text");
+    assert_eq!(paste.reads(), 1);
+    r.tty.send("\x15\x04"); // ctrl+u clears the pasted text, ctrl+d quits on an empty prompt
     r.finish();
 }

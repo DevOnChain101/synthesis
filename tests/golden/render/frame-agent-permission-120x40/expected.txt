@@ -1,4 +1,4 @@
-▐ ✻ Synthesis  ·  MISSION CONTROL ▌ │ ● 2 live │ ◆ anthropic/fake-sonnet │ ⌂ proj               ctx ▱▱▱▱▱▱ 3% │ 12:00:00
+▐ ✻ SYNTHESIS ▌ │ ● 2 live │ ◆ anthropic/fake-sonnet │ ⌂ proj             session- · up 1m00s │ ctx ▱▱▱▱▱▱ 3% │ 12:00:00
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ┏━ ◆ Running 2 ━━━━┓┏━ ◆ Status ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┏━ ◆ Tokens ━━━━━━━━━━━━┓┏━ ◆ Tasks · 2 open ━━━━━━━━━┓
 ┃ ►● proj-0     10%┃┃                                           ┃┃ total  30.5k    agent…┃┃ █████░░░░░░░░░ 1/3         ┃

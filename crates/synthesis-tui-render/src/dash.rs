@@ -2455,12 +2455,7 @@ fn header(s: &DashState, w: i64, frame: usize, now: i64) -> String {
         }
     };
     let ctx_pct = ctx_pct_of(s);
-    let logos = [
-        " ✻ Synthesis  ·  MISSION CONTROL ",
-        " ✻ Synthesis · MISSION CONTROL ",
-        " ✻ Synthesis ",
-        " ✻ ",
-    ];
+    let logos = [" ✻ SYNTHESIS ", " ✻ "];
     let pulse_s = if busy > 0 {
         paint(COL_OK, spin(frame))
     } else {
