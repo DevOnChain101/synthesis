@@ -1300,8 +1300,22 @@ pub fn prepare(
         &stdio,
         sandbox_mode == SandboxMode::Enforce,
     ) {
-        eprintln!("synt: warning: {}", sanitize_for_display(&w));
+        let w = sanitize_for_display(&w);
+        if is_tui {
+            notices.push(w); // a startup note and a `notice` event; stderr would garble the screen
+        } else {
+            eprintln!("synt: warning: {w}");
+        }
     }
+    // The interactive app asks in its own dialogs; headless asks on the terminal.
+    let browser_host: Arc<dyn synthesis_tools::BrowserHost> = if is_tui {
+        Arc::new(crate::login::DialogHost {
+            approver: approver.clone(),
+            sink: sink.clone(),
+        })
+    } else {
+        Arc::new(crate::login::CliHost { sink: sink.clone() })
+    };
     let mut toolbox = ToolBox::new(
         Registry::with_terminal_policy(rt.clone(), make_policy)
             .with_new_tools()
@@ -1309,7 +1323,7 @@ pub fn prepare(
                 synthesis_tools::BrowserConfig::default(),
                 &h.synthesis,
                 env,
-                Arc::new(crate::login::CliHost { sink: sink.clone() }),
+                browser_host,
                 sandbox_mode == SandboxMode::Enforce,
                 stdio,
             ))

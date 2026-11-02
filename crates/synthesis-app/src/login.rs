@@ -20,7 +20,9 @@ use synthesis_browser::profile::{self, DONE_FILE, WAITING_FILE};
 use synthesis_browser::secret::{SecretSpec, Source, origin_allowed, parse_secrets, resolve};
 use synthesis_config::Env;
 use synthesis_events::Event;
-use synthesis_harness::{EventSink, Scope, sanitize_for_display};
+use synthesis_harness::{
+    Approval, ApprovalDecision, ApprovalRequest, Approver, EventSink, Scope, sanitize_for_display,
+};
 use synthesis_tools::{BrowserConfig, BrowserHost, LoginRequest};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -448,21 +450,11 @@ impl BrowserHost for CliHost {
             let Some(t) = tty().filter(|_| tty_writable()) else {
                 return Err("no terminal to ask on: the login cannot be confirmed here".into());
             };
-            self.sink.emit(
-                &Scope {
-                    task_id: Some(req.task_id.clone()),
-                    turn_id: Some(req.turn_id.clone()),
-                    agent_id: None,
-                },
-                Event::BrowserLoginRequired {
-                    origin: req.origin.clone(),
-                    profile: req.profile.clone(),
-                },
-            );
+            emit_login_required(&self.sink, req);
             let _wait = Waiting::new(req)?;
             let token = uuid::Uuid::new_v4().simple().to_string();
             let text = format!(
-                "synt: log in to {} in the browser window that just opened (profile {}).\nsynth: press Enter here when you are done, or run `synt browser done {}` in another terminal and enter this code: {token}\nsynth: Ctrl-C cancels.\n",
+                "synt: log in to {} in the browser window that just opened (profile {}).\nsynt: press Enter here when you are done, or run `synt browser done {}` in another terminal and enter this code: {token}\nsynt: Ctrl-C cancels.\n",
                 sanitize_for_display(&req.origin),
                 req.profile,
                 req.profile
@@ -520,10 +512,157 @@ impl BrowserHost for CliHost {
     }
 }
 
+fn emit_login_required(sink: &EventSink, req: &LoginRequest) {
+    sink.emit(
+        &Scope {
+            task_id: Some(req.task_id.clone()),
+            turn_id: Some(req.turn_id.clone()),
+            agent_id: None,
+        },
+        Event::BrowserLoginRequired {
+            origin: req.origin.clone(),
+            profile: req.profile.clone(),
+        },
+    );
+}
+
+/// The interactive app's host (the classic TUI): the three questions are dialogs of the app's own
+/// [`Approver`], in its permission-dialog style. They are NOT harness approvals (no approval
+/// events, no "allow always"), and the permission mode cannot answer them. The one-time code of
+/// the login wait appears in the dialog text and nowhere else.
+pub struct DialogHost {
+    pub approver: Arc<dyn Approver>,
+    pub sink: EventSink,
+}
+
+impl std::fmt::Debug for DialogHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DialogHost")
+    }
+}
+
+impl DialogHost {
+    async fn ask(
+        &self,
+        tool: &str,
+        tool_call_id: &str,
+        input: Value,
+        reason: String,
+        cancel: &CancellationToken,
+    ) -> bool {
+        let req = ApprovalRequest {
+            approval_id: uuid::Uuid::new_v4().to_string(),
+            agent_id: None,
+            tool_call_id: tool_call_id.to_owned(),
+            tool: tool.to_owned(),
+            input,
+            dialog: "permission",
+            prompt: reason.clone(),
+            reason,
+            suggestions: vec![],
+            origin: None,
+        };
+        let a: Approval = self.approver.approve(req, cancel).await;
+        a.decision == ApprovalDecision::Allow
+    }
+}
+
+impl BrowserHost for DialogHost {
+    fn login<'a>(
+        &'a self,
+        req: &'a LoginRequest,
+        cancel: &'a CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            emit_login_required(&self.sink, req);
+            let _wait = Waiting::new(req)?;
+            let token = uuid::Uuid::new_v4().simple().to_string();
+            let reason = format!(
+                "Log in to {} in the opened browser, then confirm. Enter = I am logged in, Esc = cancel. From another terminal: `synt browser done {}` and this code: {token}",
+                sanitize_for_display(&req.origin),
+                req.profile
+            );
+            // the dialog is withdrawn (its future dropped) as soon as the signal file ends the wait
+            let inner = CancellationToken::new();
+            let _stop = inner.clone().drop_guard();
+            let dialog = self.ask(
+                "browser_login",
+                &req.tool_call_id,
+                serde_json::json!({"origin": req.origin, "profile": req.profile}),
+                reason,
+                &inner,
+            );
+            let wrong = AtomicU8::new(0);
+            let signal = async {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    if judge(check_signal(&req.done_file, &token), &wrong) {
+                        break;
+                    }
+                }
+            };
+            tokio::select! {
+                yes = dialog => if yes { Ok(()) } else { Err("cancelled".to_string()) },
+                () = signal => if wrong.load(Ordering::SeqCst) >= MAX_WRONG_CODES {
+                    Err(format!("{MAX_WRONG_CODES} wrong codes were written to the signal file; the login was cancelled"))
+                } else {
+                    Ok(())
+                },
+                () = cancel.cancelled() => Err("cancelled".to_string()),
+            }
+        })
+    }
+
+    fn confirm_profile<'a>(
+        &'a self,
+        profile: &'a str,
+        domains: &'a [String],
+        cancel: &'a CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, bool> {
+        Box::pin(async move {
+            self.ask(
+                "browser_navigate",
+                "browser-host",
+                serde_json::json!({"saved_login": profile, "logged_in_to": domains}),
+                format!(
+                    "Browse with saved login \"{}\" (logged in to: {})? Asked once per session.",
+                    sanitize_for_display(profile),
+                    sanitize_for_display(&domains.join(", "))
+                ),
+                cancel,
+            )
+            .await
+        })
+    }
+
+    fn confirm_secret<'a>(
+        &'a self,
+        secret: &'a str,
+        origin: &'a str,
+        cancel: &'a CancellationToken,
+    ) -> synthesis_tools::BoxFuture<'a, bool> {
+        Box::pin(async move {
+            self.ask(
+                "browser_fill_secret",
+                "browser-host",
+                serde_json::json!({"secret": secret, "origin": origin}),
+                format!(
+                    "Type stored secret \"{}\" into {}? The value is never shown. Asked once per session.",
+                    sanitize_for_display(secret),
+                    sanitize_for_display(origin)
+                ),
+                cancel,
+            )
+            .await
+        })
+    }
+}
+
 /// `synt browser done PROFILE`: ends the wait of a `browser_login` in another terminal. The
 /// code printed in the terminal that waits is read from stdin (never from argv, which `ps` shows).
 pub fn done_cmd(env: &Env, name: &str) -> Result<u8, String> {
-    let dir = profile::profile_path(&homes(env)?.synthesis, name).map_err(|e| e.to_string())?;
+    let dir =
+        profile::profile_path(homes(env)?.synthesis.as_path(), name).map_err(|e| e.to_string())?;
     if std::io::stdin().is_terminal() {
         eprint!("code shown by the waiting synt: ");
     }
@@ -693,6 +832,200 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         c.cancel();
         assert_eq!(waiting.await.unwrap(), None);
+    }
+
+    /// The app's dialog, scripted: records every request, answers `answer` (`None` = waits until
+    /// its dialog is withdrawn, like a person who has not decided yet).
+    struct Dialogs {
+        answer: Option<bool>,
+        seen: std::sync::Mutex<Vec<ApprovalRequest>>,
+        withdrawn: std::sync::atomic::AtomicBool,
+    }
+
+    impl Approver for Dialogs {
+        fn approve<'a>(
+            &'a self,
+            req: ApprovalRequest,
+            cancel: &'a CancellationToken,
+        ) -> synthesis_harness::BoxFut<'a, Approval> {
+            self.seen.lock().unwrap().push(req);
+            Box::pin(async move {
+                // like the real dialog: dropping the future (cancel, answered elsewhere) withdraws it
+                struct Withdraw<'w>(&'w std::sync::atomic::AtomicBool);
+                impl Drop for Withdraw<'_> {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::SeqCst);
+                    }
+                }
+                let _w = (self.answer.is_none()).then(|| Withdraw(&self.withdrawn));
+                match self.answer {
+                    Some(true) => Approval::allow(),
+                    Some(false) => Approval::deny("no"),
+                    None => {
+                        cancel.cancelled().await;
+                        Approval::deny("withdrawn")
+                    }
+                }
+            })
+        }
+    }
+
+    fn dialogs(answer: Option<bool>) -> (Arc<Dialogs>, DialogHost, Buf) {
+        let d = Arc::new(Dialogs {
+            answer,
+            seen: Default::default(),
+            withdrawn: Default::default(),
+        });
+        let out = Buf::default();
+        let host = DialogHost {
+            approver: d.clone(),
+            sink: EventSink::new(out.clone(), "s", Vec::<String>::new()),
+        };
+        (d, host, out)
+    }
+
+    fn login_req(dir: &Path) -> LoginRequest {
+        LoginRequest {
+            origin: "https://app.example.com".into(),
+            profile: "acme".into(),
+            timeout: Duration::from_secs(5),
+            task_id: "t".into(),
+            turn_id: "u".into(),
+            tool_call_id: "c".into(),
+            done_file: dir.join(DONE_FILE),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_tui_dialogs_show_names_never_values_and_are_not_auto_answered() {
+        let c = CancellationToken::new();
+        let (d, host, _) = dialogs(Some(true));
+        assert!(
+            host.confirm_secret("acme-pw", "https://app.example.com", &c)
+                .await
+        );
+        assert!(
+            host.confirm_profile("acme", &["example.com".to_string()], &c)
+                .await
+        );
+        {
+            let seen = d.seen.lock().unwrap();
+            assert_eq!(seen.len(), 2);
+            let s = &seen[0];
+            assert_eq!(
+                (s.tool.as_str(), s.dialog),
+                ("browser_fill_secret", "permission")
+            );
+            assert_eq!(
+                s.input,
+                serde_json::json!({"secret": "acme-pw", "origin": "https://app.example.com"})
+            );
+            assert!(s.reason.contains("acme-pw") && s.reason.contains("app.example.com"));
+            assert!(s.suggestions.is_empty(), "no allow-always for a secret");
+            assert!(seen[1].reason.contains("acme") && seen[1].reason.contains("example.com"));
+        }
+        // a person who says no (or Esc) is a no
+        let (_, no, _) = dialogs(Some(false));
+        assert!(
+            !no.confirm_secret("acme-pw", "https://app.example.com", &c)
+                .await
+        );
+        assert!(!no.confirm_profile("acme", &[], &c).await);
+    }
+
+    #[tokio::test]
+    async fn the_tui_login_wait_confirms_cancels_and_keeps_the_code_in_the_dialog() {
+        let d = tempfile::tempdir().unwrap();
+        let (dlg, host, out) = dialogs(Some(true));
+        host.login(&login_req(d.path()), &CancellationToken::new())
+            .await
+            .unwrap();
+        let reason = dlg.seen.lock().unwrap()[0].reason.clone();
+        assert!(
+            reason.starts_with(
+                "Log in to https://app.example.com in the opened browser, then confirm"
+            )
+        );
+        let code = reason.rsplit(' ').next().unwrap().to_string();
+        assert_eq!(code.len(), 32);
+        // events: the names only, never the code
+        let ev = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            ev.contains("browser.login_required") && ev.contains("acme") && !ev.contains(&code),
+            "{ev}"
+        );
+        assert!(
+            !d.path().join(WAITING_FILE).exists(),
+            "marker removed with the wait"
+        );
+        // Esc / No cancels
+        let (_, no, _) = dialogs(Some(false));
+        assert_eq!(
+            no.login(&login_req(d.path()), &CancellationToken::new())
+                .await
+                .unwrap_err(),
+            "cancelled"
+        );
+        // a cancelled tool call withdraws the dialog
+        let (pending, host, _) = dialogs(None);
+        let c = CancellationToken::new();
+        let c2 = c.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            c2.cancel();
+        });
+        assert_eq!(
+            host.login(&login_req(d.path()), &c).await.unwrap_err(),
+            "cancelled"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            pending.withdrawn.load(Ordering::SeqCst),
+            "the dialog was withdrawn"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_tui_login_wait_also_ends_with_the_code_from_another_terminal() {
+        let d = tempfile::tempdir().unwrap();
+        let (dlg, host, _) = dialogs(None);
+        let dir = d.path().to_path_buf();
+        let dlg2 = dlg.clone();
+        let poke = tokio::spawn(async move {
+            // the code is read off the dialog, as the person would
+            let code = loop {
+                if let Some(r) = dlg2.seen.lock().unwrap().first() {
+                    break r.reason.rsplit(' ').next().unwrap().to_string();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            };
+            signal_done(&dir, "0000-wrong").unwrap(); // a guess does not end it
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            signal_done(&dir, &code).unwrap();
+        });
+        host.login(&login_req(d.path()), &CancellationToken::new())
+            .await
+            .unwrap();
+        poke.await.unwrap();
+        assert!(
+            dlg.withdrawn.load(Ordering::SeqCst),
+            "the dialog closed itself"
+        );
+        // five wrong codes cancel
+        let (_, host, _) = dialogs(None);
+        let dir = d.path().to_path_buf();
+        let spam = tokio::spawn(async move {
+            for _ in 0..MAX_WRONG_CODES {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let _ = signal_done(&dir, "nope");
+            }
+        });
+        let e = host
+            .login(&login_req(d.path()), &CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(e.contains("wrong codes"), "{e}");
+        spam.abort();
     }
 
     #[test]

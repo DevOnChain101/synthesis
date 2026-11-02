@@ -121,7 +121,7 @@ impl PipeClipboard {
         }
     }
 
-    /// `program` is a path found in a standard system directory ([`find_tool`]), never a bare
+    /// `program` is a path found in a standard system directory (`find_tool`), never a bare
     /// name that PATH or the cwd could resolve.
     pub fn wl_copy(program: PathBuf) -> Self {
         Self {

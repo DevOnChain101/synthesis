@@ -799,7 +799,7 @@ fn a_hardlinked_gitignore_is_replaced_not_modified_in_place() {
 #[test]
 fn old_synthesis_key_is_reported_and_not_honoured() {
     let f = fx();
-    f.user(json!({"synt":{"budget":{"max_turns":1}}}));
+    f.user(json!({"synthesis":{"budget":{"max_turns":1}}}));
     let s = f.load(ProjectTrust::Trusted);
     assert!(
         s.diagnostics
