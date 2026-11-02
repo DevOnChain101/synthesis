@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use synthesis_events::{Envelope, Event};
-use synthesis_providers::{Block, Content, Message, Role};
+use synthesis_providers::{Content, Message, Role};
 use synthesis_session::{Error, NewMessage};
 
 use crate::events::Store;
@@ -157,26 +157,16 @@ impl Transcript {
 }
 
 fn strip_images(c: &Content) -> Content {
-    match c {
-        Content::Blocks(bs) => Content::Blocks(
-            bs.iter()
-                .map(|b| match b {
-                    Block::Image { .. } => Block::Text {
-                        text: "[image]".into(),
-                    },
-                    b => b.clone(),
-                })
-                .collect(),
-        ),
-        c => c.clone(),
-    }
+    let mut c = c.clone();
+    c.strip_images();
+    c
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use synthesis_core::{Budget, PermissionMode, WorkspaceContext};
-    use synthesis_providers::ImageSource;
+    use synthesis_providers::{Block, ImageSource};
     use synthesis_session::{NewSession, Store as Sessions, StoreOptions};
 
     fn rig() -> (tempfile::TempDir, Store, Transcript) {
@@ -248,5 +238,38 @@ mod tests {
         // a second sync stores nothing twice
         t.sync(&history);
         assert_eq!(store.lock().unwrap().read_messages("s1").unwrap().len(), 3);
+    }
+
+    /// A screenshot a TOOL returned is image bytes too: over the limit it must not stall the
+    /// persistence of everything after it.
+    #[test]
+    fn an_oversized_tool_result_image_is_stored_without_it_and_later_messages_follow() {
+        let (_d, store, t) = rig();
+        t.set_notifier(Arc::new(|_| {}));
+        let shot = Block::ToolResult {
+            tool_use_id: "t1".into(),
+            content: Some(serde_json::json!([
+                {"type": "text", "text": "screenshot taken"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                              "data": "A".repeat(9 * 1024 * 1024)}}
+            ])),
+            is_error: None,
+        };
+        let history = vec![
+            user(vec![shot]),
+            user(vec![Block::Text {
+                text: "after".into(),
+            }]),
+        ];
+        t.sync(&history);
+        let rows = store.lock().unwrap().read_messages("s1").unwrap();
+        assert_eq!(rows.len(), 2, "persistence did not stall at the screenshot");
+        let first = rows[0].content.to_string();
+        assert!(
+            first.contains("screenshot taken") && first.contains("[image]"),
+            "{first}"
+        );
+        assert!(!first.contains("AAAAAAAA"));
+        assert!(rows[1].content.to_string().contains("after"));
     }
 }

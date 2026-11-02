@@ -122,3 +122,35 @@ async fn no_image_keeps_the_plain_text_message() {
             .any(|m| matches!(&m.content, Content::Text(t) if t == "hello"))
     );
 }
+
+/// A screenshot returned by a tool sits in the history too: a text-only model gets `[image]`
+/// instead of its bytes, nested in the tool result or not.
+#[tokio::test]
+async fn tool_result_images_are_replaced_for_a_model_without_vision() {
+    let o = Opts {
+        no_vision: true,
+        ..Opts::default()
+    };
+    let mut rig = Rig::new(o, vec![Turn::text("ok")]);
+    let history = vec![synthesis_providers::Message {
+        role: Role::User,
+        content: Content::Blocks(vec![Block::ToolResult {
+            tool_use_id: "t".into(),
+            content: Some(serde_json::json!([
+                {"type": "text", "text": "shot"},
+                {"type": "image", "source": {"data": "TOOLPIXELS"}},
+                {"nested": [{"type": "image", "source": {"data": "DEEPPIXELS"}}]}
+            ])),
+            is_error: None,
+        }]),
+    }];
+    let mut r = TaskRequest::new("next");
+    r.history = history;
+    rig.run_with(r, CancellationToken::new()).await;
+    let sent = format!("{:?}", rig.provider.requests()[0].messages);
+    assert!(
+        !sent.contains("TOOLPIXELS") && !sent.contains("DEEPPIXELS"),
+        "{sent}"
+    );
+    assert!(sent.matches("[image]").count() >= 2, "{sent}");
+}

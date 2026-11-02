@@ -789,22 +789,8 @@ pub(crate) fn tool_status_for(is_error: bool, soft: bool) -> ToolStatus {
     }
 }
 
-/// Replaces user-attached image blocks by the text `[image]` in a request copy (the history keeps
-/// them); returns how many.
+/// Replaces images (attached by the person or returned in a tool result) by the text `[image]` in a
+/// request copy (the history keeps them); returns how many.
 fn strip_images(messages: &mut [synthesis_providers::Message]) -> usize {
-    use synthesis_providers::{Block, Content};
-    let mut n = 0;
-    for m in messages {
-        if let Content::Blocks(bs) = &mut m.content {
-            for b in bs {
-                if matches!(b, Block::Image { .. }) {
-                    *b = Block::Text {
-                        text: "[image]".into(),
-                    };
-                    n += 1;
-                }
-            }
-        }
-    }
-    n
+    messages.iter_mut().map(|m| m.content.strip_images()).sum()
 }
