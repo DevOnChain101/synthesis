@@ -168,6 +168,7 @@ must report the pinned version. A placeholder never matches. The binary is COPIE
 
 - GUI sessions only. No display (Linux without `DISPLAY`/`WAYLAND_DISPLAY`, macOS ssh shell) or WSL: tools return `desktop_unavailable`. macOS/Windows cannot be told apart from CI without an OS call, so a headless macOS/Windows runner fails at the first `agent-desktop` call instead.
 - Launching requires `--sandbox enforce` and goes through the terminal runtime's sandbox. A GUI app under the macOS Seatbelt profile (mach-lookup is restricted) or the Linux sandboxes may start but not show a window; this is unverified (D0). The sandbox is not weakened for it: if it makes GUI apps unusable the answer is a reviewed, narrower profile, not `best-effort`.
+- Windows desktop launch currently refuses both project and external apps: its sandbox cannot enforce this boundary, and stable standard-library file identity is unavailable. Fake-CLI tests still exercise the protocol. A future Windows backend must add an enforceable sandbox and file identity before removing this refusal.
 - Process table: `ps -A -o pid=,ppid=` (macOS, Linux), PowerShell `Get-CimInstance Win32_Process` by absolute `System32` path (Windows; unverified).
 - `list-windows` is accepted as a JSON array or `{windows: [...]}` (the reference shows an array; confirm at D0).
 - Screenshot PNG is validated (magic, size 8 B-25 MiB) before it is reported.

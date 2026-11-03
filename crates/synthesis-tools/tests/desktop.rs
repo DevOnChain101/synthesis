@@ -223,6 +223,7 @@ async fn run(f: &Fx, tool: &str, input: Value, c: &ToolContext) -> ToolOutput {
     f.reg.execute(tool, input, &ctx).await
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_external_launch_without_hard_approval_evidence_is_refused() {
     let f = fx_with(false, Registry::unsandboxed_for_tests(), |c| {
@@ -281,6 +282,7 @@ async fn an_external_launch_without_hard_approval_evidence_is_refused() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_changed_executable_never_matches_its_approval() {
     let f = fx_with(false, Registry::unsandboxed_for_tests(), |c| {
@@ -340,6 +342,27 @@ async fn unreadable_executable_and_missing_evidence_fail_closed() {
         "{}",
         text(&out)
     );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn real_windows_project_and_external_launches_fail_closed() {
+    let f = fx_with(false, Registry::builtin(), |c| c.unsafe_for_tests = false);
+    let c = ctx(&f.root, PermissionMode::Default, false);
+    let outside = tempfile::tempdir().unwrap();
+    let external = outside.path().join(exe("outside"));
+    std::fs::copy(&f.app, &external).unwrap();
+    for path in [&f.app, &external] {
+        let out = f
+            .reg
+            .execute("desktop_launch", json!({"target": path}), &c)
+            .await;
+        assert!(
+            out.is_error && text(&out).contains("unavailable on Windows"),
+            "{}",
+            text(&out)
+        );
+    }
 }
 
 /// Launches the project app (`__sleep`) and gives the fake desktop one window owned by it.
@@ -792,6 +815,7 @@ async fn an_unpinned_binary_makes_the_tools_unavailable() {
 
 // ---- security review fixes ------------------------------------------------------------------
 
+#[cfg(unix)]
 #[tokio::test]
 async fn code_runners_scripts_and_interpreter_arguments_are_refused() {
     // the test hook is OFF here: this is what a real session does
@@ -877,6 +901,7 @@ async fn code_runners_scripts_and_interpreter_arguments_are_refused() {
     refused(&o, "plan mode");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn best_effort_and_off_sandbox_modes_refuse_a_desktop_launch() {
     let be = Registry::with_sandbox(SandboxMode::BestEffort, Arc::new(|_| None));

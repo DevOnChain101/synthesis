@@ -312,14 +312,6 @@ fn same_installed_binary(a: &Path, b: &Path) -> bool {
             return true;
         }
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if x.volume_serial_number() == y.volume_serial_number() && x.file_index() == y.file_index()
-        {
-            return true;
-        }
-    }
     let (Ok(a), Ok(b)) = (
         synthesis_desktop::pin::sha256_file(a),
         synthesis_desktop::pin::sha256_file(b),
@@ -621,6 +613,14 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
         return refuse(sh, W, format!("{shown}: {why}"));
     }
     let cfg = lock(&sh.desktop_cfg).clone();
+    #[cfg(windows)]
+    if !cfg.unsafe_for_tests {
+        return refuse(
+            sh,
+            W,
+            "desktop launch is unavailable on Windows: sandbox enforce and executable file identity are not implemented",
+        );
+    }
     let args: Vec<String> = input["args"]
         .as_array()
         .map(|a| {

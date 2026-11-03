@@ -6,6 +6,7 @@
 //! - The hard-deny list below is never lifted by an approval, a rule or a mode.
 
 use crate::Mode;
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
 
 /// Tools of the desktop family. Peers and sub-agents never get them.
@@ -25,6 +26,7 @@ pub enum Origin {
 /// Evidence for the exact executable judged by the engine. The harness creates this before an
 /// approval, and the tool compares it again immediately before spawning. It is carried to the
 /// tool in ToolContext, not accepted from model input.
+#[cfg(unix)]
 pub fn launch_token(
     target: &str,
     origin: Origin,
@@ -43,18 +45,9 @@ pub fn launch_token(
         .map_err(|_| "cannot read modification time")?
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| "invalid modification time")?;
-    #[cfg(unix)]
     let identity = {
         use std::os::unix::fs::MetadataExt;
         (meta.dev(), meta.ino())
-    };
-    #[cfg(windows)]
-    let identity = {
-        use std::os::windows::fs::MetadataExt;
-        (
-            u64::from(meta.volume_serial_number().unwrap_or(0)),
-            meta.file_index().unwrap_or(0),
-        )
     };
     Ok(serde_json::json!({
         "path": real.to_string_lossy(), "size": meta.len(),
@@ -64,6 +57,17 @@ pub fn launch_token(
         "external_approved": external_approved,
     })
     .to_string())
+}
+
+/// Windows has no stable standard-library file identity and no enforceable desktop sandbox.
+/// Keep approval evidence unavailable so enabling a future backend cannot silently allow launch.
+#[cfg(not(unix))]
+pub fn launch_token(
+    _target: &str,
+    _origin: Origin,
+    _external_approved: bool,
+) -> Result<String, String> {
+    Err("desktop launch identity is unavailable on this platform".into())
 }
 
 /// Binds evidence to one planned tool call. The plan consumes this value when it runs that call.
@@ -839,6 +843,7 @@ mod tests {
         assert_eq!(origin_of_app_id("app-1"), Origin::Project);
     }
 
+    #[cfg(unix)]
     #[test]
     fn launch_evidence_binds_origin_approval_and_file_identity() {
         let d = tempfile::tempdir().unwrap();
@@ -883,6 +888,14 @@ mod tests {
             before,
             launch_token(link.to_str().unwrap(), Origin::External, true).unwrap()
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn launch_evidence_is_unavailable_on_windows() {
+        for origin in [Origin::Project, Origin::External] {
+            assert!(launch_token(r"C:\\app.exe", origin, origin == Origin::External).is_err());
+        }
     }
 
     #[test]
