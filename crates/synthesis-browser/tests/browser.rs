@@ -371,6 +371,24 @@ async fn snapshot_click_fill_keys_tabs_screenshot_body() {
     rt.close().await.unwrap();
 }
 
+/// The network log is fed by CDP events that can arrive after the page already shows their effect
+/// (slow on Windows): poll up to 5 s until `ok` holds, then return the last list.
+async fn poll_net(
+    rt: &synthesis_browser::BrowserRuntime,
+    failed_only: bool,
+    ok: impl Fn(&[synthesis_browser::NetworkRequest]) -> bool,
+) -> Vec<synthesis_browser::NetworkRequest> {
+    let mut last = Vec::new();
+    for _ in 0..50 {
+        last = rt.network_requests(0, failed_only).0;
+        if ok(&last) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    last
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn console_network_exceptions_redirect_slow_and_denied_redirect() {
     traced(
@@ -400,7 +418,11 @@ async fn console_network_exceptions_redirect_slow_and_denied_redirect_body() {
     rt.wait_for(WaitFor::Text("expected field email".into()), T)
         .await
         .unwrap();
-    let (failed, _) = rt.network_requests(0, true);
+    // the page text can show before the network log has the request (slow on Windows): poll
+    let failed = poll_net(&rt, true, |l| {
+        l.iter().any(|r| r.url.expose().ends_with("/api/login"))
+    })
+    .await;
     let login = failed
         .iter()
         .find(|r| r.url.expose().ends_with("/api/login"))
@@ -433,7 +455,14 @@ async fn console_network_exceptions_redirect_slow_and_denied_redirect_body() {
             .iter()
             .any(|e| e.text.expose().contains("kaboom"))
     );
-    let (failed, _) = rt.network_requests(0, true);
+    let failed = poll_net(&rt, true, |l| {
+        l.iter().any(|r| {
+            r.error
+                .as_deref()
+                .is_some_and(|e| e.contains("ERR_CONNECTION_REFUSED"))
+        }) && l.iter().any(|r| r.url.expose().contains("/missing"))
+    })
+    .await;
     assert!(
         failed.iter().any(|r| r
             .error
@@ -454,7 +483,11 @@ async fn console_network_exceptions_redirect_slow_and_denied_redirect_body() {
         .await
         .unwrap();
     assert!(p.url.expose().ends_with("/form"));
-    let (all, _) = rt.network_requests(0, false);
+    let all = poll_net(&rt, false, |l| {
+        l.iter()
+            .any(|r| r.url.expose().ends_with("/redirect") && r.status == Some(302))
+    })
+    .await;
     assert!(
         all.iter()
             .any(|r| r.url.expose().ends_with("/redirect") && r.status == Some(302))
@@ -462,7 +495,12 @@ async fn console_network_exceptions_redirect_slow_and_denied_redirect_body() {
     rt.navigate(&format!("{base}/slow"), WaitUntil::Load)
         .await
         .unwrap();
-    let (all, _) = rt.network_requests(0, false);
+    let all = poll_net(&rt, false, |l| {
+        l.iter()
+            .find(|r| r.url.expose().ends_with("/slow"))
+            .is_some_and(|r| r.duration_ms.is_some())
+    })
+    .await;
     let slow = all
         .iter()
         .find(|r| r.url.expose().ends_with("/slow"))
