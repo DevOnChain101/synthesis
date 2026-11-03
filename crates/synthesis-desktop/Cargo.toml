@@ -1,0 +1,29 @@
+[package]
+name = "synthesis-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+# Test double that replays canned envelopes (docs/DESKTOP-CONTROL.md); never shipped.
+name = "fake-agent-desktop"
+path = "src/bin/fake_agent_desktop.rs"
+test = false
+doc = false
+
+[dependencies]
+synthesis-browser = { path = "../synthesis-browser" } # redact_text only
+synthesis-config = { path = "../synthesis-config" }
+synthesis-permissions = { path = "../synthesis-permissions" }
+process-wrap = { version = "10", default-features = false, features = ["tokio1", "process-group", "job-object", "kill-on-drop"] }
+serde_json = "1.0.154"
+sha2 = "0.10"
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "time", "io-util", "macros", "sync", "process"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread"] }

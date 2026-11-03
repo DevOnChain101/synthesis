@@ -69,6 +69,7 @@
 pub mod automode;
 mod automode_defaults;
 pub mod bash;
+pub mod desktop;
 pub mod paths;
 
 use std::path::{Path, PathBuf};
@@ -1709,6 +1710,10 @@ impl Permissions {
         if DIALOG_TOOLS.contains(&tool) {
             return v(Ask, "dialog tool");
         }
+        // Desktop control (docs/DESKTOP-CONTROL.md): by where the app came from, never by a rule.
+        if desktop::is_desktop_tool(tool) {
+            return self.decide_desktop(tool, input, mode);
+        }
         // Hands the browser to the person: asks in every mode (auto and bypass included) and no
         // allow rule can pre-approve it; only a deny rule or dontAsk can stop it earlier.
         if tool == "browser_login" {
@@ -1974,6 +1979,69 @@ impl Permissions {
         v(Ask, "unknown tool requires confirmation")
     }
 
+    /// `desktop_*` (owner policy 2026-11-03). Deny rules were applied before this. A hard-denied
+    /// app and an external app outside `default` mode are denied; an external launch asks (hard:
+    /// no allow rule, mode or "always" skips it); an app launched from the project is allowed in
+    /// every mode except that an explicit ask rule still prompts.
+    fn decide_desktop(&self, tool: &str, input: &Value, mode: Mode) -> Verdict {
+        use Decision::*;
+        let deny = |r: String| Verdict::new(Deny, r);
+        let field = |k: &str| input.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+        let launch = tool == "desktop_launch";
+        let origin = if launch {
+            let Some(target) = field("target") else {
+                return deny("desktop_launch needs a target".into());
+            };
+            let shown = desktop::sanitize(target);
+            if let Some(family) = desktop::hard_denied(target) {
+                return deny(format!(
+                    "{shown} is {family}: desktop control of it is never allowed, whatever the mode or approval"
+                ));
+            }
+            if !desktop::is_path_target(target) {
+                return deny(format!(
+                    "{shown}: launching by bundle id or program name is not supported; give the path of the executable"
+                ));
+            }
+            if self.in_scope(&paths::resolve(&self.env.cwd, target)) {
+                desktop::Origin::Project
+            } else {
+                desktop::Origin::External
+            }
+        } else {
+            field("app_id").map_or(desktop::Origin::External, desktop::origin_of_app_id)
+        };
+        match desktop::gate(origin, mode) {
+            desktop::Gate::Deny(why) => deny(why.into()),
+            desktop::Gate::Ask if launch => {
+                let name = field("target")
+                    .map(|t| paths::basename(t, self.policy()).to_owned())
+                    .unwrap_or_default();
+                let mut r = Verdict::new(
+                    Ask,
+                    format!(
+                        "controls the desktop app {}, which Synthesis did not launch from this project. Asked once per app per session; works only in default mode; what the app shows is untrusted data",
+                        desktop::sanitize(&name)
+                    ),
+                );
+                r.hard = true;
+                r
+            }
+            // the person approved this app when it was launched (the tool refuses an unknown id)
+            _ => {
+                if self.some_match(&self.rules.ask, tool, input) {
+                    if mode == Mode::DontAsk {
+                        return deny("dontAsk mode: ask rule becomes deny".into());
+                    }
+                    let mut r = Verdict::new(Ask, "matched an ask rule");
+                    r.rule = true;
+                    return r;
+                }
+                Verdict::new(Allow, "desktop app launched by Synthesis")
+            }
+        }
+    }
+
     // --- suggestions ---------------------------------------------------------------------
 
     /// "Allow always" options offered with a prompt.
@@ -2044,7 +2112,7 @@ impl Permissions {
             return host.map_or(vec![], |h| add(tool, Some(format!("domain:{h}"))));
         }
         // no scope exists for these: a blanket allow would cover any command, URL or page action
-        if tool.starts_with("browser_") {
+        if tool.starts_with("browser_") || desktop::is_desktop_tool(tool) {
             return vec![];
         }
         add(tool, None)

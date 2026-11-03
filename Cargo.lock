@@ -2773,6 +2773,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "synthesis-desktop"
+version = "0.1.0"
+dependencies = [
+ "process-wrap",
+ "serde_json",
+ "sha2",
+ "synthesis-browser",
+ "synthesis-config",
+ "synthesis-permissions",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "synthesis-events"
 version = "0.1.0"
 dependencies = [
