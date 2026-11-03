@@ -13,7 +13,7 @@ use synthesis_core::{PermissionMode, ToolContext, WorkspaceContext};
 use synthesis_terminal::SandboxMode;
 use synthesis_tools::{Content, DesktopAudit, DesktopConfig, DesktopHost, Registry, ToolOutput};
 
-const FAKE: &str = env!("CARGO_BIN_EXE_fake-agent-desktop");
+const FAKE: &str = env!("CARGO_BIN_EXE_fake-agent-desktop-tools");
 
 #[derive(Debug, Default)]
 struct Audit(Mutex<Vec<DesktopAudit>>);
@@ -141,18 +141,32 @@ fn text(o: &ToolOutput) -> String {
     }
 }
 
+/// Absolute path of a system tool (never found through PATH); a missing tool is a test error.
+fn system_tool(unix: &[&str], windows: &str) -> PathBuf {
+    if cfg!(windows) {
+        let root = std::env::var("SystemRoot").expect("SystemRoot");
+        return PathBuf::from(root).join("System32").join(windows);
+    }
+    unix.iter()
+        .map(PathBuf::from)
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| panic!("none of {unix:?} exists on this machine"))
+}
+
 fn alive(pid: u32) -> bool {
     if cfg!(windows) {
-        std::process::Command::new("tasklist")
+        let out = std::process::Command::new(system_tool(&[], "tasklist.exe"))
             .args(["/FI", &format!("PID eq {pid}"), "/NH"])
             .output()
-            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+            .expect("tasklist could not be started");
+        String::from_utf8_lossy(&out.stdout).contains(&pid.to_string())
     } else {
-        std::process::Command::new("kill")
+        std::process::Command::new(system_tool(&["/bin/kill", "/usr/bin/kill"], ""))
             .args(["-0", &pid.to_string()])
             .stderr(std::process::Stdio::null())
             .status()
-            .is_ok_and(|s| s.success())
+            .expect("kill could not be started")
+            .success()
     }
 }
 
@@ -384,17 +398,18 @@ async fn the_whole_loop_launch_snapshot_act_wait_screenshot_logs_close() {
         .trim()
         .parse()
         .unwrap();
-    assert!(alive(child));
     let cl = run(&f, "desktop_close", json!({"app_id": app_id}), &c).await;
     assert!(!cl.is_error, "{}", text(&cl));
+    #[cfg(unix)]
     assert!(
-        gone(&[pid, child]).await,
+        alive(child) || gone(&[pid, child]).await,
         "the whole process tree must be gone"
     );
     let again = run(&f, "desktop_snapshot", json!({"app_id": app_id}), &c).await;
     assert!(again.is_error);
 }
 
+#[cfg(unix)] // job-object kill on Windows is unverified
 #[tokio::test]
 async fn session_end_kills_the_app_tree() {
     let f = fx(false);
@@ -856,4 +871,201 @@ async fn a_dead_app_is_not_driven_even_if_its_pid_is_still_listed() {
     assert!(gone(&[pid]).await);
     let o = run(&f, "desktop_snapshot", json!({"app_id": id}), &c).await;
     assert!(o.is_error);
+}
+
+// ---- round 2: bundles, links, dialog limits ----------------------------------------------------
+
+#[cfg(unix)]
+mod bundles {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn bundle(root: &Path, name: &str) -> PathBuf {
+        let m = root.join(format!("{name}.app/Contents/MacOS"));
+        std::fs::create_dir_all(&m).unwrap();
+        m
+    }
+
+    #[tokio::test]
+    async fn a_bundle_whose_inner_executable_leaves_the_bundle_or_is_denied_is_refused() {
+        let f = fx(false);
+        let c = ctx(&f.root, PermissionMode::Default, false);
+        let out = tempfile::tempdir().unwrap();
+        let out = std::fs::canonicalize(out.path()).unwrap();
+        let refused = |o: &ToolOutput, tag: &str| {
+            assert!(
+                o.is_error && o.meta["error"] == "refused",
+                "{tag}: {}",
+                text(o)
+            );
+        };
+        // links to a hard-denied app, a browser, a password manager and the shell
+        for (i, (name, src)) in [
+            ("Terminal", Some(FAKE)),
+            ("1Password", Some(FAKE)),
+            ("firefox", Some(FAKE)),
+            ("sh", None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let target = out.join(name);
+            match src {
+                Some(src) => drop(std::fs::copy(src, &target).unwrap()),
+                None => drop(std::fs::copy("/bin/sh", &target).unwrap()),
+            }
+            let m = bundle(&f.root, &format!("Link{i}"));
+            symlink(&target, m.join("inner")).unwrap();
+            let o = run(
+                &f,
+                "desktop_launch",
+                json!({"target": f.root.join(format!("Link{i}.app")).to_string_lossy()}),
+                &c,
+            )
+            .await;
+            refused(&o, name);
+            assert!(
+                text(&o).contains("outside the bundle") || text(&o).contains("never allowed"),
+                "{}",
+                text(&o)
+            );
+        }
+        // Contents/MacOS is itself a link out
+        std::fs::create_dir_all(f.root.join("DirLink.app/Contents")).unwrap();
+        std::fs::copy(FAKE, out.join("real-exe")).unwrap();
+        symlink(&out, f.root.join("DirLink.app/Contents/MacOS")).unwrap();
+        // (the directory has several files and holds links out: either way refused)
+        let o = run(
+            &f,
+            "desktop_launch",
+            json!({"target": f.root.join("DirLink.app").to_string_lossy()}),
+            &c,
+        )
+        .await;
+        refused(&o, "dir link");
+        // two executables
+        let m = bundle(&f.root, "Two");
+        std::fs::copy(FAKE, m.join("a")).unwrap();
+        std::fs::copy(FAKE, m.join("b")).unwrap();
+        let o = run(
+            &f,
+            "desktop_launch",
+            json!({"target": f.root.join("Two.app").to_string_lossy()}),
+            &c,
+        )
+        .await;
+        refused(&o, "two");
+        // a real inner executable with a denied name is denied by that name
+        let m = bundle(&f.root, "Terminal");
+        std::fs::copy(FAKE, m.join("Terminal")).unwrap();
+        let o = run(
+            &f,
+            "desktop_launch",
+            json!({"target": f.root.join("Terminal.app").to_string_lossy()}),
+            &c,
+        )
+        .await;
+        refused(&o, "Terminal.app");
+        // a link in the bundle to a shell that stays inside the workspace is still a shell copy
+        let m = bundle(&f.root, "Shelly");
+        std::fs::copy("/bin/sh", f.root.join("plain-sh")).unwrap();
+        std::fs::copy("/bin/sh", m.join("shelly")).unwrap();
+        let o = run(
+            &f,
+            "desktop_launch",
+            json!({"target": f.root.join("Shelly.app").to_string_lossy()}),
+            &c,
+        )
+        .await;
+        refused(&o, "shell in bundle");
+        assert!(
+            text(&o).contains("copy of the system program"),
+            "{}",
+            text(&o)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_good_bundle_launches_and_runs_the_resolved_executable() {
+        let f = fx(false);
+        let c = ctx(&f.root, PermissionMode::Default, false);
+        let m = bundle(&f.root, "Good");
+        std::fs::copy(FAKE, m.join("good")).unwrap();
+        let o = run(
+            &f,
+            "desktop_launch",
+            json!({"target": f.root.join("Good.app").to_string_lossy(), "args": ["__sleep"]}),
+            &c,
+        )
+        .await;
+        assert!(!o.is_error, "{}", text(&o));
+        assert_eq!(o.meta["origin"], "project");
+        f.reg.close_session("s1");
+    }
+}
+
+#[tokio::test]
+async fn more_than_twenty_arguments_are_refused() {
+    let f = fx(false);
+    let c = ctx(&f.root, PermissionMode::Default, false);
+    let args: Vec<String> = (0..21).map(|i| i.to_string()).collect();
+    let o = run(
+        &f,
+        "desktop_launch",
+        json!({"target": f.app.to_string_lossy(), "args": args}),
+        &c,
+    )
+    .await;
+    assert!(
+        o.is_error && o.meta["error"] == "refused" && text(&o).contains("too many"),
+        "{}",
+        text(&o)
+    );
+    let o = run(
+        &f,
+        "desktop_launch",
+        json!({"target": f.app.to_string_lossy(), "args": ["--inspect"]}),
+        &c,
+    )
+    .await;
+    assert!(o.is_error && o.meta["error"] == "refused", "{}", text(&o));
+    let o = run(
+        &f,
+        "desktop_launch",
+        json!({"target": f.app.to_string_lossy(), "args": ["main.js"]}),
+        &c,
+    )
+    .await;
+    assert!(o.is_error && o.meta["error"] == "refused", "{}", text(&o));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_renamed_copy_of_a_path_interpreter_is_recognised() {
+    let f = fx(false);
+    let c = ctx(&f.root, PermissionMode::Default, false);
+    // any interpreter that exists on this machine (node, python3, perl ...) copied under a plain name
+    let found = ["node", "python3", "perl", "ruby", "deno", "bun"]
+        .iter()
+        .find_map(|n| {
+            std::env::var("PATH")
+                .ok()?
+                .split(':')
+                .map(|d| PathBuf::from(d).join(n))
+                .find(|p| p.is_file())
+        });
+    let Some(src) = found else {
+        eprintln!("SKIP: no node/python3/perl/ruby on PATH");
+        return;
+    };
+    let copy = f.root.join("PlainApp");
+    std::fs::copy(&src, &copy).unwrap();
+    let o = run(
+        &f,
+        "desktop_launch",
+        json!({"target": copy.to_string_lossy()}),
+        &c,
+    )
+    .await;
+    assert!(o.is_error && o.meta["error"] == "refused", "{}", text(&o));
 }

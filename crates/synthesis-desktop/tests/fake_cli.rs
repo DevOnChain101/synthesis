@@ -41,13 +41,13 @@ fn env_err(cmd: &str, code: &str, retry: &str) -> Value {
 
 /// Process tree: 1 -> 10 (terminal) -> 20 (synt = this test) ; app 30 -> 31 ; 99 unrelated
 fn table() -> ProcTable {
-    ProcTable::from_pairs([
-        (10, 1),
-        (20, 10),
-        (30, 20),
-        (31, 30),
-        (99, 1),
-        (std::process::id(), 10),
+    ProcTable::from_triples([
+        (10, 1, "t10"),
+        (20, 10, "t20"),
+        (30, 20, "t30"),
+        (31, 30, "t31"),
+        (99, 1, "t99"),
+        (std::process::id(), 10, "tself"),
     ])
 }
 
@@ -71,6 +71,10 @@ fn snapshot(sid: &str, ids: &[u32]) -> Value {
         json!({"app":"demo","window":{"id":"w-app","title":"Demo"},"snapshot_id":sid,"ref_count":ids.len(),"complete":true,
         "tree":{"role":"window","name":"Demo","children":kids}}),
     )
+}
+
+fn d_shots(d: &tempfile::TempDir) -> PathBuf {
+    d.path().join("desktop/shots")
 }
 
 async fn start(
@@ -529,7 +533,11 @@ async fn screenshots_and_observations_are_capped_per_session() {
     // total bytes
     let (_d, rt) = start(script.clone(), |o| o.max_shot_bytes = 10).await;
     let app = rt.register_app(30, Origin::Project, "/ws/demo").unwrap();
-    rt.screenshot(&app.id, None).await.unwrap();
+    // the file is over the byte budget: rejected, deleted, and still counted
+    let e = rt.screenshot(&app.id, None).await.unwrap_err();
+    assert!(e.to_string().contains("budget"), "{e}");
+    let left = std::fs::read_dir(d_shots(&_d)).unwrap().count();
+    assert_eq!(left, 0, "a rejected screenshot is deleted");
     assert_eq!(
         rt.screenshot(&app.id, None).await.unwrap_err().kind(),
         "rate_limited"

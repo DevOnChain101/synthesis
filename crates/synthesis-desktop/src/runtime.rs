@@ -24,6 +24,10 @@ use crate::snapshot::{self, RefTable, Snapshot};
 use crate::text::clean;
 use crate::untrusted::UntrustedText;
 
+/// The startup `version` probe has its own generous budget (a cold start of a freshly copied
+/// binary can be slow), independent of the per-call timeout.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub struct DesktopOptions {
     /// The agent-desktop executable.
     pub binary: PathBuf,
@@ -275,7 +279,7 @@ impl DesktopRuntime {
             state: Mutex::new(state),
         };
         let v = rt
-            .run(&["version".into()], "version", rt.opts.call_timeout)
+            .run(&["version".into()], "version", VERSION_TIMEOUT)
             .await?;
         let version = clean(v["version"].as_str().unwrap_or(""), 40);
         if version.is_empty() {
@@ -377,7 +381,17 @@ impl DesktopRuntime {
                 .unwrap_or(target),
             80,
         );
-        let start = self.procs.table().ok().and_then(|t| t.start_of(pid));
+        // No start time, no app: a pid alone cannot be told from a reused one (fail closed).
+        let start = self
+            .procs
+            .table()
+            .ok()
+            .and_then(|t| t.start_of(pid))
+            .ok_or_else(|| {
+                DesktopError::Unavailable(
+                    "the start time of the app's process cannot be read, so it cannot be told from a reused pid".into(),
+                )
+            })?;
         let mut st = lock(&self.state);
         let id = format!(
             "{}{}",
@@ -394,7 +408,7 @@ impl DesktopRuntime {
             pid,
             origin,
             name,
-            start,
+            start: Some(start),
         };
         st.apps.insert(id, app.clone());
         Ok(app)
@@ -436,8 +450,7 @@ impl DesktopRuntime {
             .await
             .map_err(|e| DesktopError::Unavailable(e.to_string()))??;
         // the pid must still be the process we started, not a reused number
-        if !table.contains(app.pid) || (app.start.is_some() && table.start_of(app.pid) != app.start)
-        {
+        if !table.contains(app.pid) || app.start.is_none() || table.start_of(app.pid) != app.start {
             return Err(gone());
         }
         let tree = table.descendants(app.pid);
@@ -607,19 +620,29 @@ impl DesktopRuntime {
             .await?;
         let bad = |m: &str| DesktopError::Protocol(format!("agent-desktop screenshot: {m}"));
         let meta = std::fs::metadata(&path).map_err(|_| bad("no file was written"))?;
+        // Whatever the CLI wrote counts against the session's budget, kept or not; a file that is
+        // rejected (too big, over budget, not a PNG) is deleted.
+        let total = {
+            let mut st = lock(&self.state);
+            st.shot_bytes += meta.len();
+            st.shot_bytes
+        };
+        let reject = |why: &str| {
+            let _ = std::fs::remove_file(&path);
+            Err(bad(why))
+        };
         if meta.len() < 8 || meta.len() > 25 * 1024 * 1024 {
-            return Err(bad("the image has an unexpected size"));
+            return reject("the image has an unexpected size");
+        }
+        if total > self.opts.max_shot_bytes {
+            return reject("this session's screenshot budget is used up");
         }
         let mut magic = [0u8; 8];
-        std::io::Read::read_exact(
-            &mut std::fs::File::open(&path).map_err(|e| bad(&e.to_string()))?,
-            &mut magic,
-        )
-        .map_err(|e| bad(&e.to_string()))?;
-        if magic != *b"\x89PNG\r\n\x1a\n" {
-            return Err(bad("the file is not a PNG"));
+        let read = std::fs::File::open(&path)
+            .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut magic));
+        if read.is_err() || magic != *b"\x89PNG\r\n\x1a\n" {
+            return reject("the file is not a PNG");
         }
-        lock(&self.state).shot_bytes += meta.len();
         Ok(Shot {
             path,
             window_id: w.id,

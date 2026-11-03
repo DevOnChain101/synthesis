@@ -289,6 +289,15 @@ impl synthesis_desktop::AppGuard for Guard {
     }
 }
 
+/// Size, modification time and (up to 256 MiB) sha256 of a file.
+fn fingerprint(p: &Path) -> Option<(u64, Option<std::time::SystemTime>, Option<String>)> {
+    let m = std::fs::metadata(p).ok()?;
+    let hash = (m.len() <= 256 * 1024 * 1024)
+        .then(|| synthesis_desktop::pin::sha256_file(p).ok())
+        .flatten();
+    Some((m.len(), m.modified().ok(), hash))
+}
+
 /// Mach-O (also universal), ELF or PE: a compiled program, not a script.
 fn is_native_executable(p: &Path) -> bool {
     use std::io::Read;
@@ -313,26 +322,58 @@ fn interpreter_copy(p: &Path, env: Option<&Env>) -> Option<PathBuf> {
     let root = env
         .and_then(|e| e.get_nonempty("SystemRoot"))
         .unwrap_or(r"C:\Windows");
-    let mut cands: Vec<PathBuf> = [
-        "/bin/sh",
-        "/bin/bash",
-        "/bin/zsh",
-        "/bin/dash",
-        "/bin/ksh",
-        "/bin/csh",
-        "/bin/tcsh",
-        "/usr/bin/env",
-        "/usr/bin/python3",
-        "/usr/bin/python",
-        "/usr/bin/perl",
-        "/usr/bin/ruby",
-        "/usr/bin/osascript",
-        "/usr/bin/php",
-        "/usr/bin/awk",
+    // The real interpreters: well-known names in the usual directories, the PATH of the injected
+    // Env and the Homebrew prefixes. A recompiled or modified copy is not recognised: this is a
+    // hint, the sandbox and the Bash verdict are the control.
+    let mut dirs: Vec<PathBuf> = [
+        "/bin",
+        "/usr/bin",
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/opt/local/bin",
+        "/snap/bin",
     ]
     .iter()
     .map(PathBuf::from)
     .collect();
+    if let Some(path) = env.and_then(|e| e.get_nonempty("PATH")) {
+        dirs.extend(std::env::split_paths(path));
+    }
+    const NAMES: &[&str] = &[
+        "sh",
+        "bash",
+        "zsh",
+        "dash",
+        "ksh",
+        "csh",
+        "tcsh",
+        "fish",
+        "env",
+        "osascript",
+        "awk",
+        "node",
+        "nodejs",
+        "python3",
+        "python",
+        "deno",
+        "bun",
+        "ruby",
+        "perl",
+        "php",
+        "lua",
+        "java",
+        "busybox",
+        "pwsh",
+        "tclsh",
+    ];
+    let mut cands: Vec<PathBuf> = dirs
+        .iter()
+        .flat_map(|d| {
+            NAMES
+                .iter()
+                .map(move |n| d.join(format!("{n}{}", std::env::consts::EXE_SUFFIX)))
+        })
+        .collect();
     cands.extend(
         [
             r"System32\cmd.exe",
@@ -448,11 +489,14 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
                 .collect()
         })
         .unwrap_or_default();
-    if args.len() > 64 || args.iter().any(|a| a.len() > 4096) {
+    if args.len() > desktop::MAX_ARGS || args.iter().any(|a| a.len() > 4096) {
         return refuse(
             sh,
             W,
-            "too many or too long arguments (64 of 4096 bytes at most)",
+            format!(
+                "too many or too long arguments ({} of 4096 bytes at most)",
+                desktop::MAX_ARGS
+            ),
         );
     }
     if let Some(a) = args.iter().find(|a| desktop::refused_arg(a)) {
@@ -474,41 +518,34 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
             ),
         );
     }
-    // Where it came from: inside the workspace (after links) is the project's own app.
-    let (path, origin) = match ctx.workspace.resolve(target) {
-        Ok(p) => (p, Origin::Project),
-        Err(_) => (PathBuf::from(target), Origin::External),
+    // What would really run: links resolved, a bundle replaced by its inner executable (which must
+    // resolve inside the bundle). Everything below, and the origin, judge THIS path; it is also
+    // the path that is executed.
+    let real = match desktop::resolve_executable(target) {
+        Ok(Some(r)) => r,
+        Ok(None) => return ToolOutput::error(format!("desktop_launch: {shown} does not exist.")),
+        Err(e) => return refuse(sh, W, format!("{shown}: {e}")),
+    };
+    // Where it came from: inside the workspace (after links) is the project's own app. The target
+    // and the executable it resolves to must agree; a project path that runs something outside
+    // the workspace is refused (it cannot be offered to the person as an outside app either).
+    let inside = |p: &str| ctx.workspace.resolve(p).is_ok();
+    let origin = match (inside(target), inside(&real.to_string_lossy())) {
+        (true, true) => Origin::Project,
+        (true, false) => {
+            return refuse(
+                sh,
+                W,
+                format!(
+                    "{shown} runs an executable outside the workspace ({}): refused",
+                    desktop::sanitize(&real.to_string_lossy())
+                ),
+            );
+        }
+        (false, _) => Origin::External,
     };
     if let Err(e) = mode_ok(sh, ctx, W, origin) {
         return e;
-    }
-    // the real file, not a link to something on the deny list
-    let mut real = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-    // an .app bundle stands for the one executable inside it
-    if real.is_dir()
-        && real
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("app"))
-    {
-        let files: Vec<PathBuf> = std::fs::read_dir(real.join("Contents/MacOS"))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_file())
-            .collect();
-        match files.as_slice() {
-            [one] => real = one.clone(),
-            _ => {
-                return refuse(
-                    sh,
-                    W,
-                    format!(
-                        "{shown}: cannot tell which executable of the bundle to run; give the file inside Contents/MacOS"
-                    ),
-                );
-            }
-        }
     }
     if let Some(family) = desktop::hard_denied(&real.to_string_lossy()) {
         return refuse(
@@ -579,6 +616,7 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
         },
         None => None,
     };
+    let before = fingerprint(&real);
     let posix = sh.rt.shell().is_posix();
     let line = match command_line(posix, &real.to_string_lossy(), &args) {
         Ok(l) => l,
@@ -589,6 +627,15 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
         Ok(r) => r,
         Err(e) => return e,
     };
+    // The checks above judged this exact file: if it changed since (or is not what was judged),
+    // do not run it. Narrows the check-to-exec window; it cannot close it.
+    if fingerprint(&real) != before {
+        return refuse(
+            sh,
+            W,
+            format!("{shown} changed while it was being checked: refused"),
+        );
+    }
     let mut spec = SpawnSpec::new(line);
     spec.name = Some("desktop-app".into());
     spec.cwd = cwd;
@@ -929,6 +976,18 @@ mod tests {
             got.keys().map(String::as_str).collect::<Vec<_>>(),
             ["DISPLAY"]
         );
+    }
+
+    #[test]
+    fn a_changed_file_has_another_fingerprint() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("app");
+        std::fs::write(&p, b"one").unwrap();
+        let before = fingerprint(&p);
+        assert_eq!(before, fingerprint(&p));
+        std::fs::write(&p, b"two").unwrap(); // same size, other content
+        assert_ne!(before, fingerprint(&p));
+        assert_eq!(fingerprint(&d.path().join("missing")), None);
     }
 
     #[test]

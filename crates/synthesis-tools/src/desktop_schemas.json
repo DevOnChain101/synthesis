@@ -1,7 +1,7 @@
 [
   {
     "name": "desktop_launch",
-    "description": "Starts a desktop app under test and returns its app_id, pid and windows, so you can read its UI, act on it, take a screenshot and read its logs, then fix and re-verify. target is the ABSOLUTE path of the executable (inside the project: allowed in every permission mode; anywhere else: the person is asked once per app and only in the default permission mode). Bundle ids and program names are not supported. Password managers, system settings, web browsers (use browser_*), the file manager and the terminal hosting you are never controllable. The app runs under the same sandbox as terminal_spawn; stdout and stderr go to desktop_logs. Not available to sub-agents or peer sessions.",
+    "description": "Starts a desktop app under test and returns its app_id, pid and windows, so you can read its UI, act on it, take a screenshot and read its logs, then fix and re-verify. target is the ABSOLUTE path of the executable (inside the project it is judged like running the same command in Bash, so it asks in the default mode, and plan mode refuses it; anywhere else the person is asked for every launch and only in the default permission mode). At most 20 arguments; shells, interpreters, scripts and arguments such as -c, -e, --eval, --inspect or --user-data-dir are refused; the sandbox must be enforce. Bundle ids and program names are not supported. Password managers, system settings, web browsers (use browser_*), the file manager and the terminal hosting you are never controllable. The app runs under the same sandbox as terminal_spawn; stdout and stderr go to desktop_logs. Not available to sub-agents or peer sessions.",
     "input_schema": {
       "type": "object",
       "properties": {

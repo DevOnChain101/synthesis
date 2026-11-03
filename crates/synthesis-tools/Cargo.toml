@@ -11,7 +11,7 @@ workspace = true
 [[bin]]
 # Test double for agent-desktop, same source as in synthesis-desktop (CARGO_BIN_EXE_ is only set
 # for the package's own tests). Never shipped: releases build `-p synthesis-cli`.
-name = "fake-agent-desktop"
+name = "fake-agent-desktop-tools"
 path = "src/bin/fake_agent_desktop.rs"
 test = false
 doc = false
