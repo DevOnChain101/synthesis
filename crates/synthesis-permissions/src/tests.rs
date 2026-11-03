@@ -3485,3 +3485,57 @@ fn desktop_deny_and_ask_rules_still_apply() {
     let p = f.with(rules(&[], &[], &["desktop_act"]), Mode::DontAsk);
     assert_eq!(d(&p, "desktop_act", json!({"app_id": "app-1"})), D);
 }
+
+#[cfg(unix)]
+#[test]
+fn the_engine_judges_the_resolved_executable_of_a_bundle_like_the_tool_does() {
+    use std::os::unix::fs::symlink;
+    let f = fx();
+    let mk = |name: &str| {
+        let m = f.cwd.join(format!("{name}.app/Contents/MacOS"));
+        fs::create_dir_all(&m).unwrap();
+        m
+    };
+    // an inner link to a denied app that sits outside the bundle
+    let term = f.outside.join("Terminal");
+    fs::write(&term, "x").unwrap();
+    symlink(&term, mk("Evil").join("inner")).unwrap();
+    // an inner link to a shell
+    let sh = f.outside.join("zsh");
+    fs::write(&sh, "x").unwrap();
+    symlink(&sh, mk("Evil2").join("inner")).unwrap();
+    // a real inner executable with a denied name
+    fs::write(mk("Browser").join("firefox"), "x").unwrap();
+    // a good bundle, and two executables
+    fs::write(mk("Good").join("good"), "x").unwrap();
+    fs::write(mk("Two").join("a"), "x").unwrap();
+    fs::write(f.cwd.join("Two.app/Contents/MacOS/b"), "x").unwrap();
+    for mode in Mode::ALL {
+        let p = f.with(rules(&["desktop_*", "Bash"], &[], &[]), mode);
+        for bad in ["Evil", "Evil2", "Browser", "Two"] {
+            let t = f.cwd.join(format!("{bad}.app"));
+            assert_eq!(
+                d(&p, "desktop_launch", json!({"target": t.to_string_lossy()})),
+                D,
+                "{bad} {mode:?}"
+            );
+        }
+    }
+    let good = f.cwd.join("Good.app");
+    let p = f.perms(Mode::Default);
+    assert_eq!(
+        d(
+            &p,
+            "desktop_launch",
+            json!({"target": good.to_string_lossy()})
+        ),
+        Q
+    );
+    // more arguments than the dialog is willing to show
+    let many: Vec<String> = (0..21).map(|i| i.to_string()).collect();
+    let v = f.perms(Mode::BypassPermissions).check_current(
+        "desktop_launch",
+        &json!({"target": good.to_string_lossy(), "args": many}),
+    );
+    assert_eq!(v.decision, D, "{}", v.reason);
+}

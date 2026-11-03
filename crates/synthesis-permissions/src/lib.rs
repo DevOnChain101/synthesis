@@ -2010,6 +2010,23 @@ impl Permissions {
             if let Some(why) = desktop::refused_target(target) {
                 return deny(format!("{shown}: {why}"));
             }
+            // What would really run: links resolved, a bundle replaced by its inner executable.
+            // Every check below, and the origin, use it (the tool layer does the same).
+            let resolved = match desktop::resolve_executable(target) {
+                Ok(r) => r,
+                Err(e) => return deny(format!("{shown}: {e}")),
+            };
+            let real = resolved
+                .as_ref()
+                .map_or_else(|| target.to_owned(), |r| r.to_string_lossy().into_owned());
+            if let Some(family) = desktop::hard_denied(&real) {
+                return deny(format!(
+                    "{shown} runs {family}: desktop control of it is never allowed"
+                ));
+            }
+            if let Some(why) = desktop::refused_target(&real) {
+                return deny(format!("{shown} runs a program that is refused: {why}"));
+            }
             let args: Vec<String> = input
                 .get("args")
                 .and_then(Value::as_array)
@@ -2019,6 +2036,12 @@ impl Permissions {
                         .collect()
                 })
                 .unwrap_or_default();
+            if args.len() > desktop::MAX_ARGS {
+                return deny(format!(
+                    "more than {} arguments: the dialog could not show them all",
+                    desktop::MAX_ARGS
+                ));
+            }
             if let Some(a) = args.iter().find(|a| desktop::refused_arg(a)) {
                 return deny(format!(
                     "argument {} runs code through the program (-c, -e, --eval, -m ...): refused",
@@ -2030,9 +2053,16 @@ impl Permissions {
                     "{shown}: launching by bundle id or program name is not supported; give the path of the executable"
                 ));
             }
-            let line = desktop::launch_command_line(target, &args, field("cwd"));
+            // A bundle runs its inner executable; a plain file keeps the path the person wrote
+            // (the engine's paths are not canonical: /var vs /private/var).
+            let run_path = if std::path::Path::new(target).is_dir() {
+                &real
+            } else {
+                target
+            };
+            let line = desktop::launch_command_line(run_path, &args, field("cwd"));
             bash = Some(self.decide_tool("Bash", &serde_json::json!({ "command": line }), mode));
-            if self.in_scope(&paths::resolve(&self.env.cwd, target)) {
+            if self.in_scope(&paths::resolve(&self.env.cwd, run_path)) {
                 desktop::Origin::Project
             } else {
                 desktop::Origin::External
@@ -2052,7 +2082,7 @@ impl Permissions {
                 let mut r = Verdict::new(
                     Ask,
                     format!(
-                        "controls the desktop app {}, which Synthesis did not launch from this project. Asked once per app per session; works only in default mode; what the app shows is untrusted data",
+                        "controls the desktop app {}, which Synthesis did not launch from this project. Asked for every launch; works only in default mode; what the app shows is untrusted data",
                         desktop::sanitize(&name)
                     ),
                 );

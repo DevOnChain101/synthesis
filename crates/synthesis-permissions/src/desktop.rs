@@ -99,6 +99,31 @@ const DENIED: &[(&str, &[&str])] = &[
             "kwalletmanager",
             "kwalletmanager5",
             "bitwarden.exe",
+            "microsoft authenticator",
+            "google authenticator",
+            "raivo",
+            "raivo otp",
+            "2fas",
+            "keeper",
+            "keeper password manager",
+            "exodus",
+            "electrum",
+            "ledger live",
+            "ledger",
+            "trezor",
+            "trezor suite",
+            "keychain",
+            "passwörter",
+            "mots de passe",
+            "contraseñas",
+            "パスワード",
+            "mật khẩu",
+            "schlüsselbundverwaltung",
+            "trousseau d’accès",
+            "trousseau d'accès",
+            "acceso a llaveros",
+            "キーチェーンアクセス",
+            "truy cập chuỗi khóa",
         ],
     ),
     (
@@ -138,6 +163,14 @@ const DENIED: &[(&str, &[&str])] = &[
             "tilix",
             "xfce4-terminal",
             "tmux",
+            "ターミナル",
+            "putty",
+            "mintty",
+            "wsl",
+            "x-terminal-emulator",
+            "regedit",
+            "mmc",
+            "consent",
         ],
     ),
     (
@@ -181,6 +214,8 @@ const DENIED: &[(&str, &[&str])] = &[
             "splashtop",
             "chrome remote desktop",
             "apple remote desktop",
+            "screen sharing",
+            "com.apple.screensharing",
         ],
     ),
     (
@@ -193,6 +228,10 @@ const DENIED: &[(&str, &[&str])] = &[
             "control",
             "credwiz",
             "gnome-control-center",
+            "disk utility",
+            "com.apple.diskutility",
+            "console",
+            "com.apple.console",
         ],
     ),
     (
@@ -257,7 +296,7 @@ const DENIED: &[(&str, &[&str])] = &[
 fn candidates(s: &str) -> Vec<String> {
     let strip = |n: &str| {
         let n = n.trim().to_lowercase();
-        for suf in [".exe", ".app", ".bat", ".cmd"] {
+        for suf in [".exe", ".app", ".bat", ".cmd", ".lnk", ".appimage"] {
             if let Some(b) = n.strip_suffix(suf) {
                 return b.to_owned();
             }
@@ -296,7 +335,25 @@ pub fn hard_denied(id: &str) -> Option<&'static str> {
 /// isolates, zero-width and other invisible format characters.
 fn is_spoofing(c: char) -> bool {
     c.is_control()
-        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}' | '\u{00AD}' | '\u{061C}' | '\u{180E}')
+        || matches!(
+            c,
+            '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{FEFF}'
+                | '\u{00AD}'
+                | '\u{061C}'
+                | '\u{180E}'
+                | '\u{3164}'
+                | '\u{115F}'
+                | '\u{1160}'
+                | '\u{FFA0}'
+                | '\u{2800}'
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{E0000}'..='\u{E007F}'
+                | '\u{E0100}'..='\u{E01EF}'
+        )
 }
 
 /// Text safe for a dialog or an event: control, bidi and zero-width characters dropped, length
@@ -319,8 +376,51 @@ pub fn sanitize_to(s: &str, max: usize) -> String {
     }
 }
 
-/// The whole command line of a launch as the person must see it: target, every argument (up to
-/// 20), cwd and env additions (none), each sanitized, cuts shown.
+/// Most arguments a launch may carry: the dialog shows all of them.
+pub const MAX_ARGS: usize = 20;
+
+/// The executable that would really run for `target`: links resolved, and for an `.app` bundle
+/// the single file in `Contents/MacOS`, which must itself resolve inside the bundle. `Ok(None)`
+/// when `target` does not exist (nothing to resolve).
+pub fn resolve_executable(target: &str) -> Result<Option<std::path::PathBuf>, String> {
+    // Windows canonical paths carry a `\\?\` prefix that no other path in the engine has
+    let plain = |p: std::path::PathBuf| -> std::path::PathBuf {
+        let t = p.to_string_lossy();
+        match t.strip_prefix(r"\\?\") {
+            Some(r) if !r.starts_with("UNC") => r.into(),
+            _ => p,
+        }
+    };
+    let Ok(real) = std::fs::canonicalize(target).map(plain) else {
+        return Ok(None);
+    };
+    if !(real.is_dir()
+        && real
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("app")))
+    {
+        return Ok(Some(real));
+    }
+    let files: Vec<std::path::PathBuf> = std::fs::read_dir(real.join("Contents/MacOS"))
+        .map_err(|_| "the bundle has no Contents/MacOS".to_string())?
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    let [one] = files.as_slice() else {
+        return Err("cannot tell which executable of the bundle to run (it needs exactly one file in Contents/MacOS)".into());
+    };
+    let inner = std::fs::canonicalize(one)
+        .map(plain)
+        .map_err(|_| "the bundle's executable cannot be resolved".to_string())?;
+    if !inner.starts_with(&real) || !inner.is_file() {
+        return Err("the bundle's executable resolves outside the bundle".into());
+    }
+    Ok(Some(inner))
+}
+
+/// The whole command line of a launch as the person must see it: target (and the executable it
+/// resolves to when that differs), every argument, cwd and the environment, each sanitized, cuts
+/// shown.
 pub fn describe_launch(input: &serde_json::Value) -> String {
     let get = |k: &str| {
         input
@@ -329,6 +429,16 @@ pub fn describe_launch(input: &serde_json::Value) -> String {
             .unwrap_or("")
     };
     let mut out = format!("target {:?}", sanitize_to(get("target"), 300));
+    match resolve_executable(get("target")) {
+        Ok(Some(r)) if r != std::path::Path::new(get("target")) => {
+            out += &format!(
+                " (runs the executable {:?})",
+                sanitize_to(&r.to_string_lossy(), 300)
+            );
+        }
+        Err(e) => out += &format!(" (cannot be resolved: {e})"),
+        _ => {}
+    }
     let args: Vec<&str> = input
         .get("args")
         .and_then(serde_json::Value::as_array)
@@ -338,11 +448,8 @@ pub fn describe_launch(input: &serde_json::Value) -> String {
         out += ", no arguments";
     } else {
         out += &format!(", {} argument(s):", args.len());
-        for a in args.iter().take(20) {
+        for a in &args {
             out += &format!(" {:?}", sanitize_to(a, 200));
-        }
-        if args.len() > 20 {
-            out += &format!(" ...[+{} more arguments not shown]", args.len() - 20);
         }
     }
     let cwd = get("cwd");
@@ -351,7 +458,7 @@ pub fn describe_launch(input: &serde_json::Value) -> String {
     } else {
         format!(", cwd {:?}", sanitize_to(cwd, 300))
     };
-    out + ", environment additions: none"
+    out + ", environment: the session's allowlisted variables plus DISPLAY when the desktop has one, nothing else"
 }
 
 fn posix_quote(s: &str) -> String {
@@ -435,6 +542,40 @@ const INTERPRETERS: &[&str] = &[
     "socat",
     "curl",
     "wget",
+    "xcrun",
+    "arch",
+    "caffeinate",
+    "time",
+    "systemd-run",
+    "flatpak",
+    "gtk-launch",
+    "wsl",
+    "exec",
+    "command",
+    "setsid",
+    "script",
+    "stdbuf",
+    "chroot",
+    "strace",
+    "ltrace",
+    "gdb",
+    "lldb",
+    "electron",
+    "npx",
+    "npm",
+    "yarn",
+    "pnpm",
+    "cargo",
+    "go",
+    "rustc",
+    "gcc",
+    "cc",
+    "clang",
+    "swift",
+    "osacompile",
+    "automator",
+    "sandbox-exec",
+    "ruby3",
 ];
 
 /// Why a target cannot be launched by name alone (a shell, an interpreter, a launcher).
@@ -455,32 +596,85 @@ pub fn refused_target(target: &str) -> Option<&'static str> {
     .then_some("a shell, script interpreter or launcher runs other code and is not a GUI app")
 }
 
-/// Interpreter-style arguments (`-c`, `-e`, `--eval`, `-m`, `/c` ...): refused for every target.
+/// Script file extensions: a program given one runs it (hints, not a guarantee).
+const SCRIPT_EXT: &[&str] = &[
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".py",
+    ".pyw",
+    ".rb",
+    ".pl",
+    ".php",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".ps1",
+    ".bat",
+    ".cmd",
+    ".vbs",
+    ".wsf",
+    ".lua",
+    ".asar",
+    ".jar",
+    ".scpt",
+    ".applescript",
+];
+
+/// Interpreter-style, debugger and profile-redirecting arguments: refused for every target. This
+/// is a list of known dangerous spellings: hints, not a guarantee (the sandbox and the Bash
+/// verdict are the control).
 pub fn refused_arg(arg: &str) -> bool {
     let a = arg.to_lowercase();
-    matches!(
-        a.as_str(),
-        "-c" | "-e"
-            | "-m"
-            | "-r"
-            | "-p"
-            | "-x"
-            | "--eval"
-            | "--exec"
-            | "--command"
-            | "--print"
-            | "--cmd"
-            | "-command"
-            | "-encodedcommand"
-            | "-enc"
-            | "-file"
-            | "/c"
-            | "/k"
-            | "/r"
-            | "--run"
-    ) || a.starts_with("--eval=")
-        || a.starts_with("--command=")
-        || a.starts_with("--exec=")
+    const EXACT: &[&str] = &[
+        "-c",
+        "-e",
+        "-m",
+        "-r",
+        "-p",
+        "-x",
+        "-lc",
+        "-ic",
+        "-pe",
+        "-ne",
+        "-le",
+        "-ec",
+        "-xc",
+        "-ce",
+        "-command",
+        "-encodedcommand",
+        "-enc",
+        "-file",
+        "/c",
+        "/k",
+        "/r",
+    ];
+    const PREFIX: &[&str] = &[
+        "--eval",
+        "--exec",
+        "--command",
+        "--print",
+        "--cmd",
+        "--run",
+        "--require",
+        "--import",
+        "--inspect",
+        "--remote-debugging",
+        "--remote-allow-origins",
+        "--js-flags",
+        "--user-data-dir",
+        "--load-extension",
+        "--no-sandbox",
+        "--disable-web-security",
+        "--disable-gpu-sandbox",
+        "--flag-switches",
+        "--renderer-cmd-prefix",
+        "--utility-cmd-prefix",
+    ];
+    EXACT.contains(&a.as_str())
+        || PREFIX.iter().any(|p| a.starts_with(p))
+        || (!a.starts_with('-') && SCRIPT_EXT.iter().any(|e| a.ends_with(e)))
 }
 
 /// `press` combos allowed inside an app: a plain named key, or one of ctrl/cmd/alt (optionally
@@ -508,18 +702,6 @@ pub fn press_allowed(combo: &str) -> Result<(), &'static str> {
         "end",
         "pageup",
         "pagedown",
-        "f1",
-        "f2",
-        "f3",
-        "f4",
-        "f5",
-        "f6",
-        "f7",
-        "f8",
-        "f9",
-        "f10",
-        "f11",
-        "f12",
     ];
     let single = key.len() == 1 && key.bytes().all(|b| b.is_ascii_alphanumeric());
     if mods.is_empty() {
@@ -662,7 +844,6 @@ mod tests {
             "tab",
             "a",
             "7",
-            "f5",
             "cmd+c",
             "ctrl+z",
             "alt+f",
@@ -673,6 +854,8 @@ mod tests {
             assert!(press_allowed(ok).is_ok(), "{ok}");
         }
         for bad in [
+            "f1",
+            "f5",
             "cmd+space",
             "cmd+tab",
             "cmd+q",
@@ -716,19 +899,153 @@ mod tests {
             "{d}"
         );
         assert!(
-            d.contains("chars cut]")
-                && d.contains("cwd")
-                && d.contains("environment additions: none"),
+            d.contains("chars cut]") && d.contains("cwd") && d.contains("DISPLAY"),
             "{d}"
         );
-        let many = serde_json::json!({"target": "/a", "args": (0..30).map(|i| i.to_string()).collect::<Vec<_>>()});
-        assert!(describe_launch(&many).contains("+10 more arguments not shown"));
+        // every argument is shown (the launch refuses more than MAX_ARGS)
+        let many = serde_json::json!({"target": "/a", "args": (0..MAX_ARGS).map(|i| i.to_string()).collect::<Vec<_>>()});
+        let d = describe_launch(&many);
+        assert!(d.contains("\"19\"") && !d.contains("not shown"), "{d}");
     }
 
     #[test]
     fn sanitize_drops_control_and_bidi_and_shows_the_cut() {
         assert_eq!(sanitize("a\nb\u{1b}[31mc\u{202E}d"), "ab[31mcd");
         assert!(sanitize(&"x".repeat(500)).ends_with("[+380 chars cut]"));
+    }
+
+    #[test]
+    fn more_spoofing_characters_are_dropped() {
+        let t = "a\u{E0041}\u{3164}\u{2800}\u{2028}\u{FE0F}\u{E0101}\u{202D}b";
+        assert_eq!(sanitize(t), "ab");
+    }
+
+    #[test]
+    fn localized_and_wider_names_are_denied_and_suffixes_are_stripped() {
+        for id in [
+            "Passwörter",
+            "Mots de passe",
+            "Contraseñas",
+            "パスワード",
+            "Mật khẩu",
+            "Schlüsselbundverwaltung",
+            "Acceso a Llaveros",
+            "キーチェーンアクセス",
+            "Screen Sharing",
+            "Console",
+            "Disk Utility",
+            "Microsoft Authenticator",
+            "Raivo OTP",
+            "2FAS",
+            "Keeper",
+            "Exodus",
+            "Electrum",
+            "Ledger Live",
+            "Trezor Suite",
+            "/x/putty.exe",
+            "/x/MobaXterm/mintty.exe",
+            "regedit.exe",
+            "mmc.exe",
+            "wsl.exe",
+            "/usr/bin/x-terminal-emulator",
+            "/home/u/Firefox.AppImage",
+            "/x/Terminal.lnk",
+        ] {
+            assert!(hard_denied(id).is_some(), "{id}");
+        }
+    }
+
+    #[test]
+    fn arguments_that_run_code_or_redirect_a_profile_are_refused() {
+        for a in [
+            "-lc",
+            "-ic",
+            "-pe",
+            "--require=./x.js",
+            "--inspect",
+            "--inspect-brk=9229",
+            "--remote-debugging-port=9222",
+            "--remote-allow-origins=*",
+            "--js-flags=--expose-gc",
+            "--user-data-dir=/tmp/p",
+            "app.js",
+            "run.PY",
+            "x.ps1",
+            "main.asar",
+            "--import=x",
+            "--no-sandbox",
+        ] {
+            assert!(refused_arg(a), "{a}");
+        }
+        for a in [
+            "--port=80",
+            "readme.txt",
+            "--config",
+            "-v",
+            "--theme=dark",
+            "photo.png",
+        ] {
+            assert!(!refused_arg(a), "{a}");
+        }
+        for t in [
+            "/x/xcrun",
+            "/x/arch",
+            "/x/caffeinate",
+            "/x/nohup",
+            "/x/sudo",
+            "/x/flatpak",
+            "/x/gtk-launch",
+            "/x/xdg-open",
+            "/x/wsl.exe",
+            "/x/busybox",
+            "/x/electron",
+            "/x/systemd-run",
+        ] {
+            assert!(refused_target(t).is_some(), "{t}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bundle_resolves_to_its_one_inner_executable_inside_the_bundle() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let r = std::fs::canonicalize(d.path()).unwrap();
+        let app = |n: &str| {
+            let p = r.join(format!("{n}.app/Contents/MacOS"));
+            std::fs::create_dir_all(&p).unwrap();
+            p
+        };
+        let ok = app("Good");
+        std::fs::write(ok.join("good"), "x").unwrap();
+        let bundle = r.join("Good.app");
+        assert_eq!(
+            resolve_executable(bundle.to_str().unwrap()).unwrap(),
+            Some(ok.join("good"))
+        );
+        let two = app("Two");
+        std::fs::write(two.join("a"), "x").unwrap();
+        std::fs::write(two.join("b"), "x").unwrap();
+        assert!(resolve_executable(r.join("Two.app").to_str().unwrap()).is_err());
+        let out = r.join("outside-bin");
+        std::fs::write(&out, "x").unwrap();
+        let ln = app("Link");
+        symlink(&out, ln.join("link")).unwrap();
+        assert!(resolve_executable(r.join("Link.app").to_str().unwrap()).is_err());
+        let dir = r.join("outside-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("x"), "x").unwrap();
+        std::fs::create_dir_all(r.join("DirLink.app/Contents")).unwrap();
+        symlink(&dir, r.join("DirLink.app/Contents/MacOS")).unwrap();
+        assert!(resolve_executable(r.join("DirLink.app").to_str().unwrap()).is_err());
+        assert_eq!(
+            resolve_executable(out.to_str().unwrap()).unwrap(),
+            Some(out.clone())
+        );
+        assert_eq!(
+            resolve_executable(r.join("nope").to_str().unwrap()).unwrap(),
+            None
+        );
     }
 
     #[test]
