@@ -747,14 +747,17 @@ mod tests {
 
     #[test]
     fn secret_file_paths_are_listed_for_the_deny_list() {
+        // a unix path is not absolute on Windows
+        let pw = if cfg!(windows) {
+            r"C:\Users\me\pw"
+        } else {
+            "/home/me/.config/pw"
+        };
         let raw = json!({"secrets": {
-            "f": {"source": "{file:/home/me/.config/pw}", "origins": ["https://a.com"]},
+            "f": {"source": format!("{{file:{pw}}}"), "origins": ["https://a.com"]},
             "e": {"source": "{env:SYNT_A_PASSWORD}", "origins": ["https://a.com"]}}});
         let s = parse_settings(raw.as_object().unwrap());
-        assert_eq!(
-            s.secret_files(),
-            [std::path::PathBuf::from("/home/me/.config/pw")]
-        );
+        assert_eq!(s.secret_files(), [std::path::PathBuf::from(pw)]);
     }
 
     #[derive(Clone, Default)]
