@@ -48,22 +48,43 @@ Not implemented: attaching to a running app, launching by bundle id or program n
 raw coordinates, clipboard commands, multi-display capture, sessions of agent-desktop (`--session`;
 isolation is by a private `AGENT_DESKTOP_HOME`).
 
-## Owner policy (2026-11-03) and where it is enforced
+## Owner policy (2026-11-03) as tightened by the security review
+
+**Narrowing of owner policy (a).** The owner asked for apps launched from the project to be allowed
+in every permission mode. A project app is code the agent may have just written, so launching it is
+code execution that must not bypass the Bash controls. Decision (safer option chosen): a project
+launch gets exactly the verdict the same command line would get in Bash (deny/ask rules, protected
+paths, critical-command checks, the auto-mode classifier, the secret scan) and so asks in `default`
+and `acceptEdits`, is classified in `auto`, is denied in `dontAsk` unless a Bash allow rule covers
+it, and passes in `bypassPermissions` like any Bash command. **Plan mode refuses it** (plan must not
+execute code). A user who wants no dialog adds a Bash allow rule for the binary. Driving an app that is
+already running (snapshot, act, wait, screenshot, logs, close) needs no new dialog, except in plan mode.
 
 | Rule | Enforced in |
 |---|---|
-| (a) Apps launched by Synthesis from inside the workspace are allowed in EVERY permission mode, no per-call dialog. An explicit `ask` rule on a desktop tool still prompts (dontAsk: deny); a `deny` rule still wins. | `synthesis-permissions/src/lib.rs` `decide_desktop` (before bypass/plan/allow rules); `desktop.rs::gate`; repeated in `synthesis-tools/src/desktop.rs::mode_ok` |
-| (b) Any other app (path outside the workspace) needs a dialog per launch, in the default mode only. In acceptEdits, plan, auto, dontAsk and bypassPermissions it is refused with a message. No allow rule, "always allow" or mode pre-approves it (`Verdict.hard`, no suggestions). The approved app is cut off again if the mode leaves `default`. | same functions; tool layer re-checks `ctx.permission_mode` on every call |
-| (c) Peers and sub-agents never get desktop tools. | tool list filters in `synthesis-harness/src/comm.rs` and `peer.rs`; refusal before any rule or dialog in `exec.rs::authorize`; tool layer refuses `ctx.sub_agent` |
-| (d) Disabled by default; `synt.desktop.*` is read from the user settings file only; project, local, managed and `--settings` layers get a diagnostic. | `synthesis-settings/src/lib.rs`; `synthesis-app/src/desktop.rs`; tools not registered otherwise |
-| (e) Hard-deny list, exact case-folded bundle id / executable name (and every `.app` path component), `keepass*` by prefix: 1Password, Bitwarden, KeePass*, Keychain Access, Dashlane, LastPass; System Settings/Preferences, `control`, `credwiz`; Finder, Explorer, Dock, loginwindow; web browsers (Chrome, Chromium, Firefox, Safari, Edge, Brave, Arc, Opera, Vivaldi, IE). No approval lifts it. The terminal/IDE hosting synt (process ancestry) is never offered as a window. | `synthesis-permissions/src/desktop.rs::hard_denied` (permission layer, on the target), `synthesis-tools/src/desktop.rs` (on the target AND its real path, so a link cannot launder a name), `synthesis-desktop/src/runtime.rs` (`register_app`, and every window's `app_name`; ancestors of the synt process are hidden) |
-| (f) UI text is untrusted data; secret-shaped strings are redacted; screenshots are one window; artifacts are 0700 and not uploaded. | `untrusted.rs`, `text.rs` (uses `synthesis_browser::redact_text`), `snapshot.rs`, `runtime.rs::private_dir`; password-role values are replaced |
-| (g) Audit events `desktop.launch`, `desktop.act` (no value), `desktop.screenshot`, `desktop.denied`. | `synthesis-events`, `synthesis-app/src/desktop.rs::AuditHost`, `exec.rs::desktop_denied`; spec in `docs/specs/events.md` |
-| (h) Kill switch: session end and Ctrl-C kill the launched app's process tree (terminal runtime `close_session`) and any in-flight `agent-desktop` call (process group / job object, kill on drop). | `native.rs::Shared::close_session`, `runtime.rs::run` |
+| (a) Project app: the same verdict as the command line in Bash; plan refuses; interpreter-style arguments, shells, scripts and copies of system interpreters refused. | `synthesis-permissions/src/lib.rs` `decide_desktop` (builds `launch_command_line` and runs the Bash verdict), `desktop.rs` (`gate`, `refused_target`, `refused_arg`); tool layer repeats name, argument, native-executable and content checks in `synthesis-tools/src/desktop.rs` |
+| Sandbox: the app runs only when the terminal runtime is in `enforce` mode with a policy for the session, and only if the process really reports a sandbox; best-effort and off refuse. The app has the same confinement as `terminal_spawn`. | `synthesis-tools/src/desktop.rs::launch_body` |
+| (b) Any other app (path outside the workspace): dialog per launch, default mode only, every other mode denied; no allow rule, "always" or mode pre-approves it; the dialog shows the WHOLE command line (target, every argument, cwd, environment additions: none), stripped of control, bidi and zero-width characters, with cuts marked. The approved app is cut off again if the mode leaves `default`. | `decide_desktop` (`Verdict.hard`, no suggestions), `desktop::describe_launch` used by `exec.rs::approve`, tool layer `mode_ok` on every call |
+| (c) Peers and sub-agents never get desktop tools. | tool filters in `synthesis-harness/src/comm.rs` and `peer.rs`; refusal before any rule or dialog in `exec.rs::authorize`; tool layer refuses `ctx.sub_agent` |
+| (d) Disabled by default; `synt.desktop.*` from the user settings file only; the managed file can force `enabled: false` for good (nothing re-enables it); other layers get a diagnostic. | `synthesis-settings/src/lib.rs` (`desktop_managed_off`), `synthesis-app/src/desktop.rs`; the tools are not registered otherwise |
+| (e) Hard-deny list (exact case-folded bundle id / executable name; for a path only the FILE NAME and `.app` bundle components, never parent directories; `keepass*` by prefix): password managers and authenticators (1Password, Bitwarden, KeePass*, Keychain Access, Passwords, Dashlane, LastPass, Authy, Proton Pass, NordPass, Enpass, Authenticator, seahorse, KWalletManager), system settings and control panel, terminals and shells (Terminal, iTerm2, Windows Terminal, cmd, PowerShell, conhost, Alacritty, kitty, WezTerm, Ghostty, Hyper, Warp, gnome-terminal, Konsole, xterm, tmux ...), script runners (Script Editor, Automator, Shortcuts), task managers, remote-desktop apps, the desktop shell (Finder, Explorer, Dock, loginwindow, SecurityAgent), and browsers including Tor Browser. The OS-reported app name AND window title of every window are matched too; the terminal/IDE hosting synt (process ancestry) is never offered. | `synthesis-permissions/src/desktop.rs::hard_denied`; tool layer (target and real path); `synthesis-desktop/src/runtime.rs` (`register_app`, `windows`) |
+| (f) UI text is untrusted; secret-shaped text redacted; password roles replaced; typed values redacted in events, hooks, prompts and history (`redact_input`); screenshots are one window; artifacts 0700. | `untrusted.rs`, `text.rs`, `snapshot.rs`, `runtime.rs::private_dir`, `synthesis-tools/src/lib.rs::redact_input` |
+| (g) Audit events `desktop.launch`, `desktop.act` (no value), `desktop.screenshot`, `desktop.denied`. | `synthesis-events`, `synthesis-app/src/desktop.rs::AuditHost`, `exec.rs::desktop_denied` |
+| (h) Kill switch: see "Kill switch" below. | |
 
-Notes on the classification: "inside the workspace" is `WorkspaceContext::resolve` (working
-directory and additional directories, after resolving links). The artifact directory is not treated
-as project code.
+Notes on classification: "inside the workspace" is `WorkspaceContext::resolve` (working directory
+and additional directories, after resolving links). The artifact directory is not project code.
+
+## Kill switch
+
+There is no separate `synt desktop stop` command (a second process would have to find the first
+one's app by pid, which is the stale-pid problem this design avoids). The kill path is the session
+one: `Registry::close_session` -> `TerminalRuntime::close_session`, called when a `synt run` or the
+TUI ends, kills the process group of every app and its children; `desktop_close` does the same for
+one app. A test starts an app with a child and checks both are dead after `close_session`. Ctrl-C
+reaches the same cleanup in `run.rs` and `tui.rs` by code reading; it has not been exercised on a
+real terminal. In-flight `agent-desktop` calls die with their future. NOT handled: the macOS command
+host `agent-desktop` may leave running (idles out after 15 minutes).
 
 ## Settings (user `settings.json` only)
 
@@ -72,13 +93,15 @@ as project code.
     "enabled": true,
     "binary": "/abs/path/to/agent-desktop",
     "allow_unpinned": false,
+    "allow_press": false,
     "actions_per_second": 2,
     "max_actions": 300
 } } }
 ```
 
-- `enabled`: exactly `true` turns the tools on. Default off.
+- `enabled`: exactly `true` turns the tools on. Default off. A managed `enabled: false` wins over every user setting.
 - `binary`: absolute path. Default: `agent-desktop` (`.exe`) next to the `synt` executable.
+- `allow_press`: let `desktop_act` send key combos (`press`). Default off: whether agent-desktop posts keys to the target process or to the frontmost app is unverified (D0). When on, only plain named keys and ctrl/cmd/alt (+shift) with one letter or digit pass; cmd+space/tab/q/h/m, cmd+shift+digit, alt+f4, ctrl+alt+delete, any win/super/meta combination and every two-modifier combination are refused.
 - `allow_unpinned`: run a binary that does not match the pin. At your own risk; `synt doctor` says so.
 - `actions_per_second` (0.1-10, default 2) paces `desktop_act`; `max_actions` (1-5000, default 300) is a hard cap per session.
 
@@ -86,14 +109,14 @@ as project code.
 
 `crates/synthesis-desktop/src/pin.rs` holds the one pinned version and one sha256 per `os-arch`.
 **All values are UNVERIFIED placeholders.** The binary is hashed (sha256) and its `version` command
-must report the pinned version. A placeholder never matches. Hashing is done in place just before
-the first run; the window between hash and exec is not closed (the binary's directory must be
-writable only by you).
+must report the pinned version. A placeholder never matches. The binary is COPIED into the private state directory (`<artifacts>/desktop/bin`, 0700) and that copy is hashed and run, so nothing can swap the file between check and exec. A helper file the program expects beside itself (macOS) is not copied: D0 must show whether it works without one; if it does not, the owner decides how to ship it.
 
 ## Child process contract
 
-- Environment cleared; only: `HOME USERPROFILE PATH TMPDIR TEMP TMP LANG LC_ALL XDG_RUNTIME_DIR XDG_SESSION_TYPE DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS SystemRoot SYSTEMROOT windir USERNAME APPDATA LOCALAPPDATA`, from the injected `Env`, plus `AGENT_DESKTOP_HOME=<artifacts>/desktop/state`. No API key or `SYNT_*` secret reaches it.
-- 30 s per call (configurable in code), 4 MiB stdout cap (the process is killed past it), stderr discarded.
+- Environment cleared; only: `HOME USERPROFILE PATH TMPDIR TEMP TMP LANG LC_ALL XDG_RUNTIME_DIR XDG_SESSION_TYPE DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS SystemRoot` (the CLI only; the launched APP gets `DISPLAY` and nothing else, because the sandbox is not proven to deny the session bus / secret-service sockets, so Wayland-only and cookie-protected X sessions may not open windows: a D0 item), from the injected `Env`, plus `AGENT_DESKTOP_HOME=<artifacts>/desktop/state`. No API key or `SYNT_*` secret reaches it.
+- 30 s per call (configurable in code), 4 MiB stdout cap (the process is killed past it), stderr discarded. Caps per session: 300 actions at 2/s, 8 observation commands per second and 5000 in total, 40 screenshots and 64 MiB of screenshots.
+- A reused pid is not the app: the process-table start time recorded at launch must still match and the terminal runtime must still report the process alive, else the app's windows are dropped.
+- Values for `type`, `set_value` and `select` must not start with `-` (the CLI could read them as options; `--` is not relied on because it is unverified).
 - Envelope: major version `2` required; unknown fields ignored; the command in the answer must match the one asked; a missing `disposition` is never "safe".
 - Every string from the UI tree, every window title and every agent-desktop error message is cleaned (control characters, length), redacted, and wrapped as untrusted text; the wrapper cannot be closed from inside.
 - Refs the model did not receive from a snapshot of that app are refused before any process starts. A new whole-window snapshot supersedes older refs of that window; an error `STALE_REF` poisons the snapshot it came from.
@@ -102,25 +125,29 @@ writable only by you).
 
 | Threat | Mitigation | Residual |
 |---|---|---|
-| Prompt injection through on-screen text (labels, titles, logs) | Wrapped as untrusted; never a permission grant; refs only from our snapshots; sub-agents/peers cannot be steered into desktop tools | The model still reads the text. Same as web pages. |
-| Agent controls a password manager, system settings, browser, shell | Hard-deny list at three layers, windows of denied apps hidden even if inside the tree | Name-based: an unlisted app with the same function is not covered. Only exact names; a project binary named like a denied app (`arc`, `control`...) is refused too. |
-| Agent drives another app than the one it launched | Window ids come from `list-windows` filtered by the launched process tree; ids outside it are refused; no `--app` | An app that re-parents itself away from the tree (daemonises, `open`-style launchers, XPC services) has windows that are simply not visible: fail closed, but it also means such apps cannot be tested yet. |
-| Keystrokes land in the wrong window (terminal hosting synt) | `press` is sent with `--window-id`; headless only; the host terminal is never offered | Depends on agent-desktop honouring `--window-id` for `press` (D0 item). |
-| Untrusted or tampered `agent-desktop` | Pin + sha256 + version; env cleared; own process group; output cap; timeout | Pin is empty until the owner fills it. TOCTOU between hash and exec. |
-| Secret exposure on screen | Pattern redaction of text; password roles replaced; typed values never in events or prompts (`desktop_act.value` is redacted in `redact_input`) | **Screenshots cannot be redacted** (pixels). Window-only, 0700 directory, never uploaded by Synthesis, but a vision model that receives it sees it. The app wiring currently never attaches the image to the model (path only), like the browser. |
-| macOS grants Accessibility to the terminal app, so every command the agent runs inherits it | `synt doctor` warns | A signed helper `.app` that holds the grant instead is the proper fix; not built. |
-| Runaway agent | 2 actions/s, 300 per session, one command at a time, kill switch | |
-| Leftover processes | Process group kill on session end; per-call children die with the call | The macOS command host `agent-desktop` starts (it idles out after 15 minutes) is NOT killed: no safe way to identify it was found (D0 item). |
-| Artifacts | `<artifacts>/desktop/{state,shots}` mode 0700 (Unix); not uploaded | Windows ACLs not hardened. |
+| "Project app" used to run arbitrary code outside the Bash controls (a copied shell, a workspace script, `app -c ...`) | Same verdict as Bash for the whole command line; plan refuses; shells/interpreters refused by name, by arguments (`-c -e --eval -m ...`), by content (byte-for-byte copy of a system interpreter) and by file type (only Mach-O/ELF/PE, no scripts); sandbox must be `enforce` and the process must report a sandbox | A compiled app is still code: it runs confined by the session sandbox but can do what that sandbox allows. A modified shell binary that is not byte-identical and not named like a shell is not recognised. |
+| Dialog spoofing (bidi, zero-width, long arguments) | The dialog shows target, every argument, cwd, environment additions, sanitized, cuts marked | A very long argument list shows the first 20 and says how many more |
+| Prompt injection through on-screen text | Wrapped as untrusted; refs only from our snapshots; sub-agents/peers have no tools | The model still reads the text |
+| Agent controls a password manager, authenticator, system settings, terminal, browser, remote-desktop app or shell | Hard-deny list at three layers, matched on file name / bundle id / OS-reported app name / window title (never on parent directories) | Name-based: an unlisted app with the same function is not covered; a project binary named like a denied app (`arc`, `control`, `wt`...) is refused too |
+| Drives another app than the one it launched | Window ids from `list-windows` filtered by the launched process tree and re-checked against a reused pid; no `--app`; ids that start with `-` or hold odd characters are dropped | An app that re-parents away from the tree has invisible windows: fail closed |
+| Global keystrokes / shortcuts (cmd+space, cmd+q, alt+f4, ctrl+alt+delete, screenshot, lock) | `press` is OFF unless `synt.desktop.allow_press`; when on, only app-local combos pass an allowlist, checked before anything is counted or started | Whether `press --window-id` posts to the target process or the frontmost app is unverified (D0) |
+| Option injection through a typed value (`--headed`, `-1`) | Values starting with `-` are refused | A value that must start with `-` cannot be typed |
+| Untrusted or tampered `agent-desktop` | Pin + sha256 + version of a private staged copy that is the file that runs; env cleared; own process group; output cap; timeout | Pin is empty until the owner fills it; the macOS helper beside the binary is not copied |
+| The launched app reaching the session bus, secret service or X cookie | The app gets `DISPLAY` only | Wayland-only desktops may not open windows until a safer design exists |
+| Secret exposure on screen | Pattern redaction, password roles replaced, typed values redacted in events, hooks, prompts and history | **Screenshots cannot be redacted**; capped at 40 files / 64 MiB per session; 0700; never uploaded; never attached to the model by the app wiring |
+| macOS grants Accessibility to the terminal app | `synt doctor` warns | A signed helper `.app` is the proper fix; not built |
+| Runaway agent | 2 actions/s and 300 per session, 8 observations/s and 5000 per session, one command at a time, kill switch | |
+| Leftover processes | Process group kill on session end / `desktop_close`; per-call children die with the call | The macOS command host is NOT killed |
+| Organisation wants it off | Managed `synt.desktop.enabled: false` wins | |
 
 ## Limits
 
 - GUI sessions only. No display (Linux without `DISPLAY`/`WAYLAND_DISPLAY`, macOS ssh shell) or WSL: tools return `desktop_unavailable`. macOS/Windows cannot be told apart from CI without an OS call, so a headless macOS/Windows runner fails at the first `agent-desktop` call instead.
-- Launching goes through the terminal runtime's sandbox. A GUI app under the macOS Seatbelt profile (mach-lookup is restricted) or the Linux sandboxes may not start or may not show a window; this is unverified (D0). The sandbox is not weakened for it.
+- Launching requires `--sandbox enforce` and goes through the terminal runtime's sandbox. A GUI app under the macOS Seatbelt profile (mach-lookup is restricted) or the Linux sandboxes may start but not show a window; this is unverified (D0). The sandbox is not weakened for it: if it makes GUI apps unusable the answer is a reviewed, narrower profile, not `best-effort`.
 - Process table: `ps -A -o pid=,ppid=` (macOS, Linux), PowerShell `Get-CimInstance Win32_Process` by absolute `System32` path (Windows; unverified).
 - `list-windows` is accepted as a JSON array or `{windows: [...]}` (the reference shows an array; confirm at D0).
 - Screenshot PNG is validated (magic, size 8 B-25 MiB) before it is reported.
-- Tests use the fake CLI `crates/synthesis-desktop/src/bin/fake_agent_desktop.rs` (never shipped) and, in `synthesis-tools`, a POSIX shell script (Unix only).
+- Tests use the fake CLI `crates/synthesis-desktop/src/bin/fake_agent_desktop.rs` (also built as a bin of `synthesis-tools` from the same source; never shipped, releases build `-p synthesis-cli` only). It doubles as the app under test (`__app`, `__sleep`), so the suites run on every OS; only tests that need Unix links or shell metacharacters are `cfg(unix)`. The Windows paths (PowerShell process table, job-object kill, `tasklist` in the tests) have not been run.
 
 ## D0 checklist for the owner (real machine, per OS)
 
@@ -128,6 +155,7 @@ Do these on a throwaway account with nothing private open. Use a disposable test
 
 1. Get a release of agent-desktop you trust (README: `npm install -g agent-desktop`, or a GitHub release archive). Note the version from `agent-desktop version`. Keep any helper beside the executable.
 2. Compute the sha256 of the executable and put `(os-arch, sha256)` and the version in `crates/synthesis-desktop/src/pin.rs`. Then `synt doctor` must say `desktop pin: sha256 matches`.
+3. Also check the security assumptions: `agent-desktop press --window-id <id> cmd+a` while ANOTHER app is frontmost (does it reach only the target window?); whether a staged COPY of the binary still works without its helper; whether a Seatbelt-confined app opens a window; whether `--` before positionals is accepted.
 3. **macOS**: `agent-desktop permissions --guide`, grant Accessibility (and Screen Recording for screenshots) to the terminal app. Expected `agent-desktop permissions`: envelope `ok:true`, `data` with `accessibility`, `screen_recording`, `automation`. **Windows**: no grant for same-integrity apps. **Linux**: X11 or Wayland session with `at-spi2-core`; `DBUS_SESSION_BUS_ADDRESS` must reach the child (Synthesis passes it).
 4. Run the app and check the contract Synthesis relies on:
    - `agent-desktop list-windows`: `data` is an array (or `{windows}`) of `{id, title, app_name, pid}`; **`pid` is the process that owns the window** (for the app you started, or a descendant).
@@ -152,7 +180,7 @@ add its LICENSE and attribution to `NOTICE` (a note is there) and to the release
 - Done: permission policy and engine rules; `synthesis-desktop` runtime (envelope, pin, process
   tree, window filtering, snapshot and ref table, limiter, kill) with a fake CLI; tools; events;
   user-only settings; peer/sub-agent refusal; app wiring, audit sink, doctor lines; docs.
-- Gates on the final tree: fmt, clippy (+ test-provider), `cargo test --workspace` (1403 tests, 0 failed), `cargo test -p synthesis-cli --features test-provider` (172 passed), rustdoc `-D warnings`, `check-no-legacy-name`.
+- Gates (re-run after the security fixes, see the report): fmt, clippy (+ test-provider), `cargo test --workspace` (1403 tests, 0 failed), `cargo test -p synthesis-cli --features test-provider` (172 passed), rustdoc `-D warnings`, `check-no-legacy-name`.
 - Verified by tests (fake CLI only): the whole launch -> snapshot -> act -> wait -> screenshot ->
   logs -> close loop, every permission mode for project and external apps, hard-deny list, settings
   rejection, rate limit, timeout/oversize kill, process-tree kill, redaction.

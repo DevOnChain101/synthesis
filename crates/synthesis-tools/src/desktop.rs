@@ -45,6 +45,12 @@ pub struct DesktopConfig {
     pub host: Option<Arc<dyn DesktopHost>>,
     /// Process table source (tests).
     pub procs: Option<Arc<dyn ProcSource>>,
+    /// `synt.desktop.allow_press`: let `desktop_act` send key combos. Off by default: whether
+    /// agent-desktop posts them to the target process or to the frontmost app is unverified.
+    pub allow_press: bool,
+    /// TESTS ONLY, never set by the app: skip the "sandbox must be enforce" gate and the
+    /// native-executable check so a shell-script fixture can stand in for an app.
+    pub unsafe_for_tests: bool,
 }
 
 impl std::fmt::Debug for DesktopConfig {
@@ -164,7 +170,7 @@ fn to_mode(m: PermissionMode) -> synthesis_permissions::Mode {
 async fn runtime(
     sh: &Shared,
     ctx: &ToolContext,
-    state: &SessionState,
+    state: &Arc<SessionState>,
     wire: &str,
 ) -> Result<Arc<DesktopRuntime>, ToolOutput> {
     let cfg = lock(&sh.desktop_cfg).clone();
@@ -196,7 +202,13 @@ async fn runtime(
                     system_root: env.get_nonempty("SystemRoot").map(str::to_owned),
                 })
             });
-            DesktopRuntime::start(o, &env, procs).await.map(Arc::new)
+            let rt = DesktopRuntime::start(o, &env, procs).await?;
+            rt.set_guard(Arc::new(Guard {
+                rt: sh.rt.clone(),
+                session: ctx.session_id.clone(),
+                state: Arc::downgrade(state),
+            }));
+            Ok(Arc::new(rt))
         })
         .await
         .cloned()
@@ -218,6 +230,9 @@ async fn app_runtime(
     ToolOutput,
 > {
     main_agent_only(sh, ctx, wire)?;
+    if ctx.permission_mode == PermissionMode::Plan {
+        return Err(refuse(sh, wire, desktop::PLAN_REFUSED));
+    }
     let id = str_field(input, "app_id")
         .ok_or_else(|| ToolOutput::error(format!("{wire}: \"app_id\" is required.")))?;
     let state = sh.session(ctx);
@@ -252,6 +267,98 @@ desktop_tool!(act, "desktop_act", act_body);
 desktop_tool!(wait, "desktop_wait", wait_body);
 
 // ---- launch ---------------------------------------------------------------------------------
+
+/// Vouches that the process behind an app id is still the one the terminal runtime started.
+struct Guard {
+    rt: Arc<synthesis_terminal::TerminalRuntime>,
+    session: String,
+    state: std::sync::Weak<SessionState>,
+}
+
+impl synthesis_desktop::AppGuard for Guard {
+    fn alive(&self, app_id: &str) -> bool {
+        let Some(state) = self.state.upgrade() else {
+            return false;
+        };
+        let pid = lock(&state.desktop_procs).get(app_id).cloned();
+        pid.is_some_and(|p| {
+            self.rt
+                .get_status(&self.session, &p)
+                .is_ok_and(|s| s.running)
+        })
+    }
+}
+
+/// Mach-O (also universal), ELF or PE: a compiled program, not a script.
+fn is_native_executable(p: &Path) -> bool {
+    use std::io::Read;
+    let mut b = [0u8; 4];
+    std::fs::File::open(p)
+        .and_then(|mut f| f.read_exact(&mut b))
+        .is_ok()
+        && (b == [0x7f, b'E', b'L', b'F']
+            || matches!(
+                b,
+                [0xfe, 0xed, 0xfa, 0xce | 0xcf]
+                    | [0xce | 0xcf, 0xfa, 0xed, 0xfe]
+                    | [0xca, 0xfe, 0xba, 0xbe | 0xbf]
+            )
+            || b[..2] == *b"MZ")
+}
+
+/// The system shell or interpreter this file is a byte-for-byte copy of, if any (a copy renamed
+/// to look like an app).
+fn interpreter_copy(p: &Path, env: Option<&Env>) -> Option<PathBuf> {
+    let len = std::fs::metadata(p).ok()?.len();
+    let root = env
+        .and_then(|e| e.get_nonempty("SystemRoot"))
+        .unwrap_or(r"C:\Windows");
+    let mut cands: Vec<PathBuf> = [
+        "/bin/sh",
+        "/bin/bash",
+        "/bin/zsh",
+        "/bin/dash",
+        "/bin/ksh",
+        "/bin/csh",
+        "/bin/tcsh",
+        "/usr/bin/env",
+        "/usr/bin/python3",
+        "/usr/bin/python",
+        "/usr/bin/perl",
+        "/usr/bin/ruby",
+        "/usr/bin/osascript",
+        "/usr/bin/php",
+        "/usr/bin/awk",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .collect();
+    cands.extend(
+        [
+            r"System32\cmd.exe",
+            r"System32\WindowsPowerShell\v1.0\powershell.exe",
+            r"System32\wscript.exe",
+            r"System32\cscript.exe",
+            r"System32\mshta.exe",
+        ]
+        .iter()
+        .map(|r| PathBuf::from(format!(r"{root}\{r}"))),
+    );
+    let mine = std::cell::OnceCell::new();
+    for c in cands {
+        let Ok(real) = std::fs::canonicalize(&c) else {
+            continue;
+        };
+        if std::fs::metadata(&real).ok().map(|m| m.len()) != Some(len) {
+            continue;
+        }
+        let h = mine.get_or_init(|| synthesis_desktop::pin::sha256_file(p).ok());
+        if h.is_some() && *h == synthesis_desktop::pin::sha256_file(&real).ok() {
+            return Some(c);
+        }
+    }
+    None
+}
 
 fn quote_posix(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
@@ -294,16 +401,13 @@ fn display_env(cfg: &DesktopConfig) -> std::collections::BTreeMap<String, String
     let Some(env) = &cfg.process_env else {
         return Default::default();
     };
-    [
-        "DISPLAY",
-        "WAYLAND_DISPLAY",
-        "XAUTHORITY",
-        "XDG_RUNTIME_DIR",
-        "DBUS_SESSION_BUS_ADDRESS",
-    ]
-    .iter()
-    .filter_map(|k| env.get_nonempty(k).map(|v| ((*k).to_owned(), v.to_owned())))
-    .collect()
+    // Only DISPLAY. XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS and XAUTHORITY would reach the
+    // secret-service / session-bus sockets and the X cookie, and the sandbox is not proven to
+    // deny them: the app gets them only through a safer design, the CLI gets them regardless.
+    ["DISPLAY"]
+        .iter()
+        .filter_map(|k| env.get_nonempty(k).map(|v| ((*k).to_owned(), v.to_owned())))
+        .collect()
 }
 
 #[cfg(unix)]
@@ -332,6 +436,35 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
             format!("{shown} is {family}: desktop control of it is never allowed"),
         );
     }
+    if let Some(why) = desktop::refused_target(target) {
+        return refuse(sh, W, format!("{shown}: {why}"));
+    }
+    let cfg = lock(&sh.desktop_cfg).clone();
+    let args: Vec<String> = input["args"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    if args.len() > 64 || args.iter().any(|a| a.len() > 4096) {
+        return refuse(
+            sh,
+            W,
+            "too many or too long arguments (64 of 4096 bytes at most)",
+        );
+    }
+    if let Some(a) = args.iter().find(|a| desktop::refused_arg(a)) {
+        return refuse(
+            sh,
+            W,
+            format!(
+                "argument {} runs code through the program (-c, -e, --eval, -m ...)",
+                desktop::sanitize(a)
+            ),
+        );
+    }
     if !desktop::is_path_target(target) || !Path::new(target).is_absolute() {
         return refuse(
             sh,
@@ -350,7 +483,83 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
         return e;
     }
     // the real file, not a link to something on the deny list
-    let real = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    let mut real = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    // an .app bundle stands for the one executable inside it
+    if real.is_dir()
+        && real
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("app"))
+    {
+        let files: Vec<PathBuf> = std::fs::read_dir(real.join("Contents/MacOS"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .collect();
+        match files.as_slice() {
+            [one] => real = one.clone(),
+            _ => {
+                return refuse(
+                    sh,
+                    W,
+                    format!(
+                        "{shown}: cannot tell which executable of the bundle to run; give the file inside Contents/MacOS"
+                    ),
+                );
+            }
+        }
+    }
+    if let Some(family) = desktop::hard_denied(&real.to_string_lossy()) {
+        return refuse(
+            sh,
+            W,
+            format!("{shown} resolves to {family}: desktop control of it is never allowed"),
+        );
+    }
+    if let Some(why) = desktop::refused_target(&real.to_string_lossy()) {
+        return refuse(
+            sh,
+            W,
+            format!("{shown} resolves to a program that is refused: {why}"),
+        );
+    }
+    if let Some(sys) = interpreter_copy(&real, cfg.process_env.as_ref()) {
+        return refuse(
+            sh,
+            W,
+            format!(
+                "{shown} is a copy of the system program {}: refused",
+                sys.display()
+            ),
+        );
+    }
+    if !cfg.unsafe_for_tests && !is_native_executable(&real) {
+        return refuse(
+            sh,
+            W,
+            format!(
+                "{shown} is not a compiled executable (a script runs other programs): build the app and launch the binary"
+            ),
+        );
+    }
+    // The app runs under the same sandbox as terminal_spawn, enforced, or not at all.
+    if !cfg.unsafe_for_tests {
+        if sh.rt.mode() != synthesis_terminal::SandboxMode::Enforce {
+            return refuse(
+                sh,
+                W,
+                "desktop apps are launched only when the sandbox mode is enforce (best-effort and off can run them unconfined): start synt with --sandbox enforce",
+            );
+        }
+        if sh.policy_for(&ctx.workspace).is_none() {
+            return refuse(
+                sh,
+                W,
+                "there is no sandbox policy for this session; the app would run unconfined",
+            );
+        }
+    }
     if let Some(family) = desktop::hard_denied(&real.to_string_lossy()) {
         return refuse(
             sh,
@@ -363,14 +572,6 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
             "desktop_launch: {shown} is not an executable file (on macOS give the file inside the bundle, e.g. App.app/Contents/MacOS/App)"
         ));
     }
-    let args: Vec<String> = input["args"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default();
     let cwd = match str_field(input, "cwd") {
         Some(c) => match ctx.workspace.resolve(c) {
             Ok(p) => Some(p),
@@ -391,11 +592,27 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
     let mut spec = SpawnSpec::new(line);
     spec.name = Some("desktop-app".into());
     spec.cwd = cwd;
-    spec.env = display_env(&lock(&sh.desktop_cfg));
+    spec.env = display_env(&cfg);
     let handle = match sh.rt.spawn(&ctx.session_id, spec).await {
         Ok(h) => h,
         Err(e) => return ToolOutput::error(format!("desktop_launch: {e}")),
     };
+    // the terminal runtime must really have confined it
+    if !cfg.unsafe_for_tests
+        && !sh
+            .rt
+            .get_status(&ctx.session_id, &handle.process_id)
+            .is_ok_and(|s| s.sandbox.is_some() && !s.unsandboxed_by_request)
+    {
+        let _ = sh
+            .rt
+            .signal(&ctx.session_id, &handle.process_id, Signal::Kill);
+        return refuse(
+            sh,
+            W,
+            "the app did not start under the sandbox; it was killed",
+        );
+    }
     let app = match rt.register_app(handle.pid, origin, &real.to_string_lossy()) {
         Ok(a) => a,
         Err(e) => {
@@ -611,6 +828,13 @@ async fn act_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutput {
     let Some(action) = str_field(input, "action").and_then(Action::parse) else {
         return ToolOutput::error("desktop_act: unknown \"action\".");
     };
+    if action == Action::Press && !lock(&sh.desktop_cfg).allow_press {
+        return refuse(
+            sh,
+            W,
+            "press is off: set synt.desktop.allow_press to true in your user settings once you have checked that agent-desktop sends keys only to the target window (docs/DESKTOP-CONTROL.md)",
+        );
+    }
     let r = str_field(input, "ref");
     let r = rt
         .act(
@@ -679,5 +903,67 @@ async fn wait_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutput 
     match rt.wait(&app.id, what, win, Duration::from_millis(t)).await {
         Ok(d) => ToolOutput::text(format!("Done waiting ({} ms).", d.as_millis())),
         Err(e) => fail(W, &e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_app_gets_the_display_and_nothing_that_reaches_the_session_bus_or_the_x_cookie() {
+        let env = Env::from_pairs([
+            ("DISPLAY", ":0"),
+            ("WAYLAND_DISPLAY", "wayland-0"),
+            ("XAUTHORITY", "/home/u/.Xauthority"),
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
+            ("ANTHROPIC_API_KEY", "sk-leak"),
+        ]);
+        let cfg = DesktopConfig {
+            process_env: Some(env),
+            ..Default::default()
+        };
+        let got = display_env(&cfg);
+        assert_eq!(
+            got.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["DISPLAY"]
+        );
+    }
+
+    #[test]
+    fn magic_numbers_tell_binaries_from_scripts() {
+        let d = tempfile::tempdir().unwrap();
+        let w = |n: &str, b: &[u8]| {
+            let p = d.path().join(n);
+            std::fs::write(&p, b).unwrap();
+            p
+        };
+        assert!(is_native_executable(&w("elf", b"\x7fELF....")));
+        assert!(is_native_executable(&w(
+            "macho",
+            &[0xcf, 0xfa, 0xed, 0xfe, 0, 0]
+        )));
+        assert!(is_native_executable(&w(
+            "fat",
+            &[0xca, 0xfe, 0xba, 0xbe, 0, 0]
+        )));
+        assert!(is_native_executable(&w("pe", b"MZ\x90\x00")));
+        assert!(!is_native_executable(&w("sh", b"#!/bin/sh\nid\n")));
+        assert!(!is_native_executable(&w("tiny", b"x")));
+    }
+
+    #[test]
+    fn a_renamed_copy_of_a_system_interpreter_is_recognised() {
+        if cfg!(windows) {
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let copy = d.path().join("MyApp");
+        std::fs::copy("/bin/sh", &copy).unwrap();
+        assert!(interpreter_copy(&copy, None).is_some());
+        let other = d.path().join("other");
+        std::fs::write(&other, b"not a shell").unwrap();
+        assert!(interpreter_copy(&other, None).is_none());
     }
 }

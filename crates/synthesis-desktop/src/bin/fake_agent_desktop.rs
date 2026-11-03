@@ -1,9 +1,10 @@
-//! Test double for `agent-desktop` (docs/DESKTOP-CONTROL.md). Replays canned envelopes from
-//! `$AGENT_DESKTOP_HOME/fake.json`: `{"<command>": <envelope> | [<envelope>, ...]}` (a list is
-//! consumed one entry per call, the last one repeats). Every call's arguments are appended to
-//! `$AGENT_DESKTOP_HOME/calls.log`, one JSON array per line; the names of its environment variables go to `env.log`. An entry may carry
-//! `"_fake": {"sleep_ms": N, "png": true, "flood": N}`; it is removed before printing.
-//! Not agent-desktop, never shipped, no OS API is touched.
+// Test double for `agent-desktop` (docs/DESKTOP-CONTROL.md). Replays canned envelopes from
+// `$AGENT_DESKTOP_HOME/fake.json`: `{"<command>": <envelope> | [<envelope>, ...]}` (a list is
+// consumed one entry per call, the last one repeats). Every call's arguments are appended to
+// `$AGENT_DESKTOP_HOME/calls.log`, one JSON array per line; the names of its environment variables go to `env.log`. An entry may carry
+// `"_fake": {"sleep_ms": N, "png": true, "flood": N}`; it is removed before printing.
+// Not agent-desktop, never shipped (releases build `-p synthesis-cli` only), no OS API is touched.
+// It reads AGENT_DESKTOP_HOME from the process env on purpose: that is the contract it fakes.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -12,6 +13,24 @@ use serde_json::Value;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // "App under test" modes, so tests need no shell: `__app <pidfile>` logs to both streams,
+    // starts a child that sleeps, records the child's pid and sleeps; `__sleep` just sleeps.
+    match args.first().map(String::as_str) {
+        Some("__sleep") => return std::thread::sleep(std::time::Duration::from_secs(61)),
+        Some("__app") => {
+            println!("hello from app");
+            eprintln!("boom on stderr");
+            if let Ok(child) = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("__sleep")
+                .spawn()
+                && let Some(f) = args.get(1)
+            {
+                let _ = std::fs::write(f, child.id().to_string());
+            }
+            return std::thread::sleep(std::time::Duration::from_secs(62));
+        }
+        _ => {}
+    }
     let Some(home) = std::env::var_os("AGENT_DESKTOP_HOME").map(PathBuf::from) else {
         eprintln!("fake-agent-desktop: AGENT_DESKTOP_HOME is not set");
         std::process::exit(2);

@@ -1316,7 +1316,7 @@ pub fn prepare(
     } else {
         Arc::new(crate::login::CliHost { sink: sink.clone() })
     };
-    let mut registry = Registry::with_terminal_policy(rt.clone(), make_policy)
+    let registry = Registry::with_terminal_policy(rt.clone(), make_policy)
         .with_new_tools()
         .with_browser(browser.config(
             synthesis_tools::BrowserConfig::default(),
@@ -1335,13 +1335,8 @@ pub fn prepare(
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
-    if let Some(cfg) = desktop.config(
-        exe_dir.as_deref(),
-        env,
-        Arc::new(crate::desktop::AuditHost { sink: sink.clone() }),
-    ) {
-        registry = registry.with_desktop(cfg);
-    }
+    let registry =
+        crate::desktop::attach(registry, &desktop, exe_dir.as_deref(), env, sink.clone());
     let mut toolbox = ToolBox::new(registry);
     if let Some(a) = mcp_attach {
         toolbox = a.apply(toolbox);

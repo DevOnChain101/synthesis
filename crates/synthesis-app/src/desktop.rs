@@ -21,6 +21,8 @@ pub struct DesktopSettings {
     pub binary: Option<PathBuf>,
     /// Run a binary that does not match the pin (at the person's own risk).
     pub allow_unpinned: bool,
+    /// Let `desktop_act` send key combos (off by default).
+    pub allow_press: bool,
     pub actions_per_sec: Option<f64>,
     pub max_actions: Option<u32>,
     pub warnings: Vec<String>,
@@ -30,6 +32,7 @@ pub fn parse_settings(raw: &Map<String, Value>) -> DesktopSettings {
     let mut s = DesktopSettings {
         enabled: raw.get("enabled") == Some(&Value::Bool(true)),
         allow_unpinned: raw.get("allow_unpinned") == Some(&Value::Bool(true)),
+        allow_press: raw.get("allow_press") == Some(&Value::Bool(true)),
         ..Default::default()
     };
     if let Some(b) = raw.get("binary") {
@@ -87,6 +90,7 @@ impl DesktopSettings {
         self.enabled.then(|| DesktopConfig {
             binary: self.binary_path(exe_dir),
             allow_unpinned: self.allow_unpinned,
+            allow_press: self.allow_press,
             process_env: Some(env.clone()),
             actions_per_sec: self.actions_per_sec,
             max_actions: self.max_actions,
@@ -149,13 +153,12 @@ impl DesktopHost for AuditHost {
 
 /// `agent-desktop permissions` with a scrubbed environment and a private state dir; only called
 /// for a binary that matched the pin.
-fn permissions(bin: &Path, env: &Env) -> Result<String, String> {
-    let dir = std::env::temp_dir().join(format!("synt-desktop-doctor-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+fn permissions(bin: &Path, env: &Env, dir: &Path) -> Result<String, String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let mut cmd = std::process::Command::new(bin);
     cmd.arg("permissions")
         .env_clear()
-        .env("AGENT_DESKTOP_HOME", &dir)
+        .env("AGENT_DESKTOP_HOME", dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
@@ -174,7 +177,7 @@ fn permissions(bin: &Path, env: &Env) -> Result<String, String> {
             cmd.env(k, v);
         }
     }
-    let r = (|| {
+    (|| {
         let mut child = cmd.spawn().map_err(|e| e.to_string())?;
         let t0 = Instant::now();
         while child.try_wait().map_err(|e| e.to_string())?.is_none() {
@@ -194,9 +197,39 @@ fn permissions(bin: &Path, env: &Env) -> Result<String, String> {
             show("screen_recording"),
             show("automation")
         ))
-    })();
-    let _ = std::fs::remove_dir_all(&dir);
-    r
+    })()
+}
+
+/// The temp directory from the injected Env (`TMPDIR`, `TEMP`, `TMP`), never the process's.
+fn temp_root(env: &Env) -> PathBuf {
+    ["TMPDIR", "TEMP", "TMP"]
+        .iter()
+        .find_map(|k| env.get_nonempty(k))
+        .map_or_else(
+            || {
+                PathBuf::from(if cfg!(windows) {
+                    r"C:\Windows\Temp"
+                } else {
+                    "/tmp"
+                })
+            },
+            PathBuf::from,
+        )
+}
+
+/// Adds the desktop tools to `registry` when the user settings turn them on; otherwise they do
+/// not exist at all. The one place `run` wires the feature.
+pub fn attach(
+    registry: synthesis_tools::Registry,
+    s: &DesktopSettings,
+    exe_dir: Option<&Path>,
+    env: &Env,
+    sink: EventSink,
+) -> synthesis_tools::Registry {
+    match s.config(exe_dir, env, Arc::new(AuditHost { sink })) {
+        Some(cfg) => registry.with_desktop(cfg),
+        None => registry,
+    }
 }
 
 /// Lines for `synt doctor`.
@@ -228,25 +261,31 @@ pub fn doctor_lines(s: &DesktopSettings, exe_dir: Option<&Path>, env: &Env) -> V
         return v;
     };
     v.push(format!("desktop binary: {}", bin.display()));
-    let status = pin::check(&bin, &Pin::builtin());
+    // Hash and run the same private copy, so nothing can swap the file in between.
+    let dir = temp_root(env).join(format!("synt-desktop-doctor-{}", std::process::id()));
+    let staged = pin::stage(&bin, &dir.join("bin"));
+    let status = match &staged {
+        Ok(c) => pin::check(c, &Pin::builtin()),
+        Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
+    };
     let verified = matches!(status, Ok(PinStatus::Match));
     v.push(match &status {
         Ok(PinStatus::Match) => "desktop pin: sha256 matches the pinned release".into(),
         Ok(PinStatus::Unpinned) => format!(
-            "desktop pin: UNVERIFIED, this build has no pinned agent-desktop release yet; the tools refuse to run{}",
+            "desktop pin: UNVERIFIED (placeholder): this build has no pinned agent-desktop release yet; the tools refuse to run{}",
             if s.allow_unpinned { " unless allow_unpinned (set: they will run it unverified)" } else { " (synt.desktop.allow_unpinned overrides, at your own risk)" }
         ),
         Ok(PinStatus::Mismatch { .. }) => "desktop pin: the binary does NOT match the pinned sha256".into(),
         Err(e) => format!("desktop pin: cannot read the binary ({e})"),
     });
-    v.push(if verified {
-        match permissions(&bin, env) {
+    v.push(match (&staged, verified) {
+        (Ok(c), true) => match permissions(c, env, &dir.join("state")) {
             Ok(p) => format!("desktop OS permissions: {p}"),
             Err(e) => format!("desktop OS permissions: could not be read ({e})"),
-        }
-    } else {
-        "desktop OS permissions: not checked (the binary is not pin-verified, so doctor does not run it)".into()
+        },
+        _ => "desktop OS permissions: not checked (the binary is not pin-verified, so doctor does not run it)".into(),
     });
+    let _ = std::fs::remove_dir_all(&dir);
     if cfg!(target_os = "macos") {
         v.push("desktop macOS: the Accessibility grant lands on the terminal app that runs synt, so every command the agent runs there inherits it; a signed helper .app that holds the grant instead is recommended (not built yet)".into());
     }
@@ -258,6 +297,15 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// An absolute path on every OS (`/u/ad` is relative on Windows).
+    fn abs() -> String {
+        if cfg!(windows) {
+            r"C:\u\ad".into()
+        } else {
+            "/u/ad".into()
+        }
+    }
+
     fn raw(v: Value) -> Map<String, Value> {
         v.as_object().unwrap().clone()
     }
@@ -268,12 +316,12 @@ mod tests {
         assert!(!parse_settings(&raw(json!({"enabled": "true"}))).enabled);
         assert!(!parse_settings(&raw(json!({"enabled": 1}))).enabled);
         let s = parse_settings(&raw(
-            json!({"enabled": true, "allow_unpinned": true, "binary": "/u/ad", "actions_per_second": 5, "max_actions": 40}),
+            json!({"enabled": true, "allow_unpinned": true, "binary": &abs(), "actions_per_second": 5, "max_actions": 40}),
         ));
         assert!(s.enabled && s.allow_unpinned && s.warnings.is_empty());
         assert_eq!(
             (s.binary, s.actions_per_sec, s.max_actions),
-            (Some("/u/ad".into()), Some(5.0), Some(40))
+            (Some(abs().into()), Some(5.0), Some(40))
         );
         let bad = parse_settings(&raw(
             json!({"binary": "rel/ad", "actions_per_second": 99, "max_actions": 0}),
@@ -289,10 +337,38 @@ mod tests {
         impl DesktopHost for H {
             fn audit(&self, _: DesktopAudit) {}
         }
-        let off = parse_settings(&raw(json!({"binary": "/u/ad"})));
+        let off = parse_settings(&raw(json!({"binary": &abs()})));
         assert!(off.config(None, &Env::default(), Arc::new(H)).is_none());
-        let on = parse_settings(&raw(json!({"enabled": true, "binary": "/u/ad"})));
+        let on = parse_settings(&raw(json!({"enabled": true, "binary": &abs()})));
         assert!(on.config(None, &Env::default(), Arc::new(H)).is_some());
+    }
+
+    #[test]
+    fn allow_press_is_off_unless_exactly_true() {
+        assert!(!parse_settings(&raw(json!({}))).allow_press);
+        assert!(!parse_settings(&raw(json!({"allow_press": "yes"}))).allow_press);
+        assert!(parse_settings(&raw(json!({"allow_press": true}))).allow_press);
+    }
+
+    #[test]
+    fn the_run_wiring_registers_the_desktop_tools_only_when_enabled() {
+        let sink = || EventSink::new(std::io::sink(), "s", vec![]);
+        let names = |r: &synthesis_tools::Registry| {
+            r.specs().filter(|s| s.name.starts_with("desktop_")).count()
+        };
+        let reg = || synthesis_tools::Registry::unsandboxed_for_tests().with_new_tools();
+        let env = Env::default();
+        for raw_settings in [
+            json!({}),
+            json!({"binary": abs()}),
+            json!({"enabled": "true"}),
+            json!({"enabled": false}),
+        ] {
+            let s = parse_settings(&raw(raw_settings));
+            assert_eq!(names(&attach(reg(), &s, None, &env, sink())), 0);
+        }
+        let s = parse_settings(&raw(json!({"enabled": true, "binary": abs()})));
+        assert_eq!(names(&attach(reg(), &s, None, &env, sink())), 7);
     }
 
     #[test]

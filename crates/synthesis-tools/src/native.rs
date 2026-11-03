@@ -71,6 +71,11 @@ impl Shared {
 
     /// State of the context's session; the first call also opens it in the terminal runtime
     /// with `Env::child_env` of the context env (allowlist: secrets never reach a child).
+    /// The sandbox policy this session's commands get (`None`: none, so `Enforce` refuses them).
+    pub fn policy_for(&self, ws: &WorkspaceContext) -> Option<SandboxPolicy> {
+        (self.policy)(ws)
+    }
+
     pub fn session(&self, ctx: &ToolContext) -> Arc<SessionState> {
         lock(&self.sessions)
             .entry(ctx.session_id.clone())

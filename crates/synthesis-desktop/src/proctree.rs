@@ -6,21 +6,47 @@ use std::collections::{HashMap, HashSet};
 
 use crate::error::{DesktopError, Result};
 
-/// `(pid, parent pid)` of every process.
+/// `(pid, parent pid, start time text)` of every process. The start time tells a reused pid
+/// from the process that had it.
 #[derive(Debug, Clone, Default)]
-pub struct ProcTable(HashMap<u32, u32>);
+pub struct ProcTable(HashMap<u32, (u32, Option<String>)>);
 
 impl ProcTable {
     pub fn from_pairs(pairs: impl IntoIterator<Item = (u32, u32)>) -> Self {
-        Self(pairs.into_iter().collect())
+        Self(pairs.into_iter().map(|(p, pp)| (p, (pp, None))).collect())
     }
 
-    /// Parses lines of `<pid> <ppid>` (both `ps -o pid=,ppid=` and the PowerShell script).
+    /// With start times: `(pid, ppid, start)`.
+    pub fn from_triples(t: impl IntoIterator<Item = (u32, u32, &'static str)>) -> Self {
+        Self(
+            t.into_iter()
+                .map(|(p, pp, s)| (p, (pp, Some(s.to_owned()))))
+                .collect(),
+        )
+    }
+
+    /// Parses lines of `<pid> <ppid> [start time ...]` (`ps -o pid=,ppid=,lstart=` and the
+    /// PowerShell script).
     pub fn parse(out: &str) -> Self {
-        Self::from_pairs(out.lines().filter_map(|l| {
-            let mut it = l.split_whitespace();
-            Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
-        }))
+        Self(
+            out.lines()
+                .filter_map(|l| {
+                    let mut it = l.split_whitespace();
+                    let (pid, ppid) = (it.next()?.parse().ok()?, it.next()?.parse().ok()?);
+                    let start = it.collect::<Vec<_>>().join(" ");
+                    Some((pid, (ppid, (!start.is_empty()).then_some(start))))
+                })
+                .collect(),
+        )
+    }
+
+    /// The start time text of a process, when the source gave one.
+    pub fn start_of(&self, pid: u32) -> Option<String> {
+        self.0.get(&pid)?.1.clone()
+    }
+
+    pub fn contains(&self, pid: u32) -> bool {
+        self.0.contains_key(&pid)
     }
 
     /// `root` and everything below it.
@@ -28,7 +54,7 @@ impl ProcTable {
         let mut set = HashSet::from([root]);
         loop {
             let before = set.len();
-            for (pid, ppid) in &self.0 {
+            for (pid, (ppid, _)) in &self.0 {
                 if set.contains(ppid) {
                     set.insert(*pid);
                 }
@@ -45,7 +71,7 @@ impl ProcTable {
         let mut cur = pid;
         while cur > 1 && set.insert(cur) {
             match self.0.get(&cur) {
-                Some(p) => cur = *p,
+                Some((p, _)) => cur = *p,
                 None => break,
             }
         }
@@ -75,12 +101,12 @@ impl ProcSource for SystemProcs {
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                r#"Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId)" }"#,
+                r#"Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $($_.CreationDate.Ticks)" }"#,
             ])
             .output()
         } else {
             std::process::Command::new("/bin/ps")
-                .args(["-A", "-o", "pid=,ppid="])
+                .args(["-A", "-o", "pid=,ppid=,lstart="])
                 .output()
         }
         .map_err(|e| DesktopError::Unavailable(format!("cannot read the process table: {e}")))?;
@@ -105,6 +131,14 @@ mod tests {
         assert_eq!(t.descendants(31), HashSet::from([31]));
         assert_eq!(t.ancestors(20), HashSet::from([20, 10]));
         assert!(!t.descendants(30).contains(&99));
+    }
+
+    #[test]
+    fn start_times_are_parsed_and_compared() {
+        let t = ProcTable::parse("30 20 Mon Nov  3 10:00:00 2026\n31 30\n");
+        assert_eq!(t.start_of(30).as_deref(), Some("Mon Nov 3 10:00:00 2026"));
+        assert_eq!(t.start_of(31), None);
+        assert!(t.contains(31) && !t.contains(32));
     }
 
     #[test]

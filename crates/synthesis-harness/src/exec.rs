@@ -173,7 +173,7 @@ fn suggestion_json(s: &Suggestion) -> Value {
 /// What the approver sees of the call. Never truncated: a cut command could hide the part that
 /// matters. Callers pass the redacted input.
 fn summarize(input: &Value) -> String {
-    let s = ["command", "file_path", "path", "url", "pattern", "target"]
+    let s = ["command", "file_path", "path", "url", "pattern"]
         .iter()
         .find_map(|k| input.get(*k).and_then(Value::as_str))
         .map_or_else(|| input.to_string(), String::from);
@@ -1105,7 +1105,12 @@ impl Harness {
             "{}{} wants to run {}: {}",
             origin.as_ref().map_or(String::new(), |o| format!("[{o}] ")),
             sanitize_for_display(&call.name),
-            summarize(&shown),
+            if call.name == "desktop_launch" {
+                // the whole command line, sanitized against bidi and zero-width spoofing
+                synthesis_permissions::desktop::describe_launch(&shown)
+            } else {
+                summarize(&shown)
+            },
             reason
         );
         let mut options = vec!["allow".to_string(), "deny".to_string()];

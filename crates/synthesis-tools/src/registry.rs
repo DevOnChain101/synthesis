@@ -254,7 +254,7 @@ impl Registry {
 
     /// Tool input safe to put in events and logs (secrets of `browser_fill sensitive` removed).
     pub fn redact_input(&self, name: &str, input: &Value) -> Value {
-        crate::desktop::redact_input(name, &crate::browser::redact_input(name, input))
+        crate::redact_input(name, input)
     }
 
     /// Session end: kills the session's background processes and browser and drops its todo/task state.

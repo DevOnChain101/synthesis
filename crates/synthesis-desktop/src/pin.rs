@@ -53,6 +53,31 @@ impl Pin {
     }
 }
 
+/// Copies the executable into `dir` (created private, 0700 on Unix) as a fresh file and returns
+/// the copy. The copy is what is hashed and what is run, so nothing can swap the binary between
+/// the check and the exec. A helper file the program expects beside itself is NOT copied.
+pub fn stage(src: &Path, dir: &Path) -> std::io::Result<std::path::PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let dst = dir.join(if cfg!(windows) {
+        "agent-desktop.exe"
+    } else {
+        "agent-desktop"
+    });
+    let _ = std::fs::remove_file(&dst);
+    std::fs::copy(src, &dst)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(dst)
+}
+
 pub fn sha256_file(path: &Path) -> std::io::Result<String> {
     let mut f = std::fs::File::open(path)?;
     let mut h = Sha256::new();

@@ -1979,10 +1979,13 @@ impl Permissions {
         v(Ask, "unknown tool requires confirmation")
     }
 
-    /// `desktop_*` (owner policy 2026-11-03). Deny rules were applied before this. A hard-denied
-    /// app and an external app outside `default` mode are denied; an external launch asks (hard:
-    /// no allow rule, mode or "always" skips it); an app launched from the project is allowed in
-    /// every mode except that an explicit ask rule still prompts.
+    /// `desktop_*` (owner policy 2026-11-03, tightened after the security review). Deny rules were
+    /// applied before this. A hard-denied app, a shell/interpreter, interpreter-style arguments and
+    /// plan mode are denied. A launch from the workspace gets exactly the verdict the same command
+    /// line would get in Bash (deny/ask rules, protected paths, critical commands, the auto
+    /// classifier, the secret scan). An external launch asks (hard: no allow rule, mode or "always"
+    /// skips it) in default mode and is denied in every other mode. Driving an app that is already
+    /// running needs no new dialog, but an explicit ask rule still prompts.
     fn decide_desktop(&self, tool: &str, input: &Value, mode: Mode) -> Verdict {
         use Decision::*;
         let deny = |r: String| Verdict::new(Deny, r);
@@ -1993,6 +1996,7 @@ impl Permissions {
                 .filter(|s| !s.is_empty())
         };
         let launch = tool == "desktop_launch";
+        let mut bash = None;
         let origin = if launch {
             let Some(target) = field("target") else {
                 return deny("desktop_launch needs a target".into());
@@ -2003,11 +2007,31 @@ impl Permissions {
                     "{shown} is {family}: desktop control of it is never allowed, whatever the mode or approval"
                 ));
             }
+            if let Some(why) = desktop::refused_target(target) {
+                return deny(format!("{shown}: {why}"));
+            }
+            let args: Vec<String> = input
+                .get("args")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(a) = args.iter().find(|a| desktop::refused_arg(a)) {
+                return deny(format!(
+                    "argument {} runs code through the program (-c, -e, --eval, -m ...): refused",
+                    desktop::sanitize(a)
+                ));
+            }
             if !desktop::is_path_target(target) {
                 return deny(format!(
                     "{shown}: launching by bundle id or program name is not supported; give the path of the executable"
                 ));
             }
+            let line = desktop::launch_command_line(target, &args, field("cwd"));
+            bash = Some(self.decide_tool("Bash", &serde_json::json!({ "command": line }), mode));
             if self.in_scope(&paths::resolve(&self.env.cwd, target)) {
                 desktop::Origin::Project
             } else {
@@ -2016,6 +2040,9 @@ impl Permissions {
         } else {
             field("app_id").map_or(desktop::Origin::External, desktop::origin_of_app_id)
         };
+        if let Some(b) = bash.as_ref().filter(|b| b.decision == Deny) {
+            return deny(format!("as a Bash command it is denied: {}", b.reason));
+        }
         match desktop::gate(origin, mode) {
             desktop::Gate::Deny(why) => deny(why.into()),
             desktop::Gate::Ask if launch => {
@@ -2031,6 +2058,19 @@ impl Permissions {
                 );
                 r.hard = true;
                 r
+            }
+            // the same verdict the command line gets in Bash (never looser)
+            desktop::Gate::Allow if launch => {
+                let mut b = bash.expect("launch has a bash verdict");
+                if b.decision == Allow && self.some_match(&self.rules.ask, tool, input) {
+                    b = Verdict::new(Ask, "matched an ask rule");
+                    b.rule = true;
+                }
+                b.reason = format!(
+                    "launching a project app is judged like a Bash command: {}",
+                    b.reason
+                );
+                b
             }
             // the person approved this app when it was launched (the tool refuses an unknown id)
             _ => {

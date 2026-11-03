@@ -38,6 +38,12 @@ pub struct DesktopOptions {
     pub max_output: usize,
     pub actions_per_sec: f64,
     pub max_actions: u32,
+    /// Screenshots per session and their total size.
+    pub max_shots: u32,
+    pub max_shot_bytes: u64,
+    /// Observation commands (`list-windows`, `snapshot`, `screenshot`, `wait`) per second and per session.
+    pub observations_per_sec: f64,
+    pub max_observations: u32,
 }
 
 impl DesktopOptions {
@@ -51,6 +57,10 @@ impl DesktopOptions {
             max_output: 4 * 1024 * 1024,
             actions_per_sec: 2.0,
             max_actions: 300,
+            max_shots: 40,
+            max_shot_bytes: 64 * 1024 * 1024,
+            observations_per_sec: 8.0,
+            max_observations: 5000,
         }
     }
 }
@@ -63,6 +73,14 @@ pub struct App {
     pub origin: Origin,
     /// Display name (the executable's file name), cleaned.
     pub name: String,
+    /// Start time of `pid` when the process table gave one (tells a reused pid from the app).
+    pub start: Option<String>,
+}
+
+/// Asked before the process tree of an app is trusted: is the process Synthesis started still
+/// that process? (The terminal runtime knows; a reused pid is not it.)
+pub trait AppGuard: Send + Sync {
+    fn alive(&self, app_id: &str) -> bool;
 }
 
 #[derive(Debug, Clone)]
@@ -101,8 +119,10 @@ struct State {
     apps: HashMap<String, App>,
     refs: RefTable,
     limiter: Limiter,
+    observe: Limiter,
     next_app: u64,
     next_shot: u64,
+    shot_bytes: u64,
 }
 
 pub struct DesktopRuntime {
@@ -110,6 +130,9 @@ pub struct DesktopRuntime {
     env: Vec<(String, String)>,
     procs: Arc<dyn ProcSource>,
     host_pid: u32,
+    /// The staged copy of the CLI that is hashed and run.
+    exe: PathBuf,
+    guard: Mutex<Option<Arc<dyn AppGuard>>>,
     pub pin_status: PinStatus,
     /// What `agent-desktop version` reported.
     pub version: String,
@@ -137,12 +160,7 @@ const ENV_ALLOW: &[&str] = &[
     "WAYLAND_DISPLAY",
     "XAUTHORITY",
     "DBUS_SESSION_BUS_ADDRESS", // AT-SPI is reached over the session bus
-    "SystemRoot",
-    "SYSTEMROOT",
-    "windir",
-    "USERNAME",
-    "APPDATA",
-    "LOCALAPPDATA",
+    "SystemRoot",               // Windows system DLLs
 ];
 
 /// A graphical session is present (Linux needs a display variable; macOS and Windows cannot be
@@ -201,7 +219,13 @@ impl DesktopRuntime {
                 opts.binary.display()
             )));
         }
-        let (bin, pn) = (opts.binary.clone(), opts.pin.clone());
+        // Hash and run a private copy: nothing can swap the binary between check and exec.
+        let (src, dir) = (opts.binary.clone(), opts.state_dir.join("bin"));
+        let exe = tokio::task::spawn_blocking(move || pin::stage(&src, &dir))
+            .await
+            .map_err(|e| un(e.to_string()))?
+            .map_err(|e| un(format!("cannot copy {}: {e}", opts.binary.display())))?;
+        let (bin, pn) = (exe.clone(), opts.pin.clone());
         let pin_status = tokio::task::spawn_blocking(move || pin::check(&bin, &pn))
             .await
             .map_err(|e| un(e.to_string()))?
@@ -209,9 +233,11 @@ impl DesktopRuntime {
         match (&pin_status, opts.allow_unpinned) {
             (PinStatus::Match, _) | (_, true) => {}
             (PinStatus::Unpinned, false) => {
+                let _ = std::fs::remove_file(&exe);
                 return Err(un("this build of Synthesis has no verified agent-desktop pin yet (docs/DESKTOP-CONTROL.md, D0 checklist); set synt.desktop.allow_unpinned to true in your user settings to run an unverified binary at your own risk".into()));
             }
             (PinStatus::Mismatch { .. }, false) => {
+                let _ = std::fs::remove_file(&exe);
                 return Err(un(format!(
                     "{} does not match the pinned sha256; refusing to run it (synt.desktop.allow_unpinned overrides, at your own risk)",
                     opts.binary.display()
@@ -232,14 +258,18 @@ impl DesktopRuntime {
             apps: HashMap::new(),
             refs: RefTable::default(),
             limiter: Limiter::new(opts.actions_per_sec, opts.max_actions),
+            observe: Limiter::new(opts.observations_per_sec, opts.max_observations),
             next_app: 1,
             next_shot: 1,
+            shot_bytes: 0,
         };
         let mut rt = Self {
             opts,
             env: child_env,
             procs,
             host_pid: std::process::id(),
+            exe,
+            guard: Mutex::new(None),
             pin_status,
             version: String::new(),
             state: Mutex::new(state),
@@ -267,7 +297,11 @@ impl DesktopRuntime {
     /// `data` of its envelope. The process gets its own group / job object and dies with the
     /// call: on timeout, on too much output, and when the future is dropped (cancel, session end).
     pub async fn run(&self, args: &[String], expect: &str, timeout: Duration) -> Result<Value> {
-        let mut wrap = CommandWrap::with_new(&self.opts.binary, |c| {
+        if matches!(expect, "list-windows" | "snapshot" | "screenshot" | "wait") {
+            let wait = lock(&self.state).observe.take(Instant::now())?;
+            tokio::time::sleep(wait).await;
+        }
+        let mut wrap = CommandWrap::with_new(&self.exe, |c| {
             c.args(args)
                 .env_clear()
                 .envs(self.env.iter().map(|(k, v)| (k, v)))
@@ -343,6 +377,7 @@ impl DesktopRuntime {
                 .unwrap_or(target),
             80,
         );
+        let start = self.procs.table().ok().and_then(|t| t.start_of(pid));
         let mut st = lock(&self.state);
         let id = format!(
             "{}{}",
@@ -359,9 +394,15 @@ impl DesktopRuntime {
             pid,
             origin,
             name,
+            start,
         };
         st.apps.insert(id, app.clone());
         Ok(app)
+    }
+
+    /// Lets the owner of the process (the terminal runtime) vouch that it is still the app.
+    pub fn set_guard(&self, g: Arc<dyn AppGuard>) {
+        *lock(&self.guard) = Some(g);
     }
 
     pub fn app(&self, id: &str) -> Result<App> {
@@ -385,10 +426,20 @@ impl DesktopRuntime {
     /// Windows owned by the app's process tree, minus what policy hides.
     pub async fn windows(&self, app_id: &str) -> Result<Windows> {
         let app = self.app(app_id)?;
+        let gone = || DesktopError::NotFound(format!("{} has exited; launch it again", app.id));
+        let guard = lock(&self.guard).clone();
+        if guard.is_some_and(|g| !g.alive(&app.id)) {
+            return Err(gone());
+        }
         let procs = self.procs.clone();
         let table = tokio::task::spawn_blocking(move || procs.table())
             .await
             .map_err(|e| DesktopError::Unavailable(e.to_string()))??;
+        // the pid must still be the process we started, not a reused number
+        if !table.contains(app.pid) || (app.start.is_some() && table.start_of(app.pid) != app.start)
+        {
+            return Err(gone());
+        }
         let tree = table.descendants(app.pid);
         let hosts = table.ancestors(self.host_pid);
         let data = self
@@ -410,7 +461,12 @@ impl DesktopRuntime {
         };
         for w in arr {
             let (Some(id), Some(pid)) = (
-                w["id"].as_str().filter(|s| !s.is_empty() && s.len() <= 128),
+                w["id"].as_str().filter(|s| {
+                    !s.is_empty()
+                        && s.len() <= 128
+                        && !s.starts_with('-')
+                        && s.bytes().all(|b| b.is_ascii_graphic())
+                }),
                 w["pid"].as_u64().and_then(|p| u32::try_from(p).ok()),
             ) else {
                 continue; // not a window we can name: never offered
@@ -419,13 +475,17 @@ impl DesktopRuntime {
                 continue;
             }
             let app_name = clean(w["app_name"].as_str().unwrap_or(""), 80);
-            if hosts.contains(&pid) || hard_denied(&app_name).is_some() {
+            let title = clean(w["title"].as_str().unwrap_or(""), 120);
+            if hosts.contains(&pid)
+                || hard_denied(&app_name).is_some()
+                || hard_denied(&title).is_some()
+            {
                 out.hidden.push(app_name);
                 continue;
             }
             out.windows.push(Window {
                 id: id.to_owned(),
-                title: UntrustedText::new(clean(w["title"].as_str().unwrap_or(""), 120)),
+                title: UntrustedText::new(title),
                 app_name,
                 pid,
             });
@@ -520,6 +580,15 @@ impl DesktopRuntime {
         let w = self.pick_window(app_id, window_id).await?;
         let n = {
             let mut st = lock(&self.state);
+            if st.next_shot > u64::from(self.opts.max_shots)
+                || st.shot_bytes >= self.opts.max_shot_bytes
+            {
+                return Err(DesktopError::RateLimited(format!(
+                    "this session already took its screenshots ({} files / {} bytes)",
+                    st.next_shot - 1,
+                    st.shot_bytes
+                )));
+            }
             st.next_shot += 1;
             st.next_shot - 1
         };
@@ -550,6 +619,7 @@ impl DesktopRuntime {
         if magic != *b"\x89PNG\r\n\x1a\n" {
             return Err(bad("the file is not a PNG"));
         }
+        lock(&self.state).shot_bytes += meta.len();
         Ok(Shot {
             path,
             window_id: w.id,
@@ -568,6 +638,8 @@ impl DesktopRuntime {
         value: Option<&str>,
         window_id: Option<&str>,
     ) -> Result<Delivery> {
+        // refuse bad input (and global shortcuts) before anything is counted or started
+        action.cli_args(r, value, "w")?;
         let wait = lock(&self.state).limiter.take(Instant::now())?;
         tokio::time::sleep(wait).await;
         let want = match (action.needs_ref(), r) {

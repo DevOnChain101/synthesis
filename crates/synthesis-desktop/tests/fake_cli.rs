@@ -433,3 +433,140 @@ async fn the_child_gets_a_scrubbed_environment() {
         }
     }
 }
+
+struct Switch(std::sync::Mutex<ProcTable>);
+impl ProcSource for Switch {
+    fn table(&self) -> synthesis_desktop::Result<ProcTable> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+}
+
+struct Dead;
+impl synthesis_desktop::AppGuard for Dead {
+    fn alive(&self, _: &str) -> bool {
+        false
+    }
+}
+
+async fn start_with(
+    script: Value,
+    procs: Arc<dyn ProcSource>,
+    tune: impl FnOnce(&mut DesktopOptions),
+) -> (tempfile::TempDir, DesktopRuntime) {
+    let d = tempfile::tempdir().unwrap();
+    let state = d.path().join("desktop");
+    std::fs::create_dir_all(state.join("state")).unwrap();
+    let mut s = script;
+    s["version"] = env_ok("version", json!({"version":"9.9.9","os":"test"}));
+    std::fs::write(state.join("state/fake.json"), s.to_string()).unwrap();
+    let mut o = DesktopOptions::new(PathBuf::from(FAKE), state);
+    o.allow_unpinned = true;
+    o.call_timeout = Duration::from_secs(10);
+    tune(&mut o);
+    let rt = DesktopRuntime::start(o, &env(), procs).await.unwrap();
+    (d, rt)
+}
+
+#[tokio::test]
+async fn a_reused_pid_or_a_dead_process_drops_the_windows() {
+    let one = env_ok(
+        "list-windows",
+        json!([{"id":"w-app","title":"Demo","app_name":"demo","pid":30}]),
+    );
+    let t1 = ProcTable::from_triples([(10, 1, "t0"), (20, 10, "t1"), (30, 20, "Mon 10:00")]);
+    let sw = Arc::new(Switch(std::sync::Mutex::new(t1)));
+    let (_d, rt) = start_with(json!({"list-windows": one}), sw.clone(), |_| {}).await;
+    let app = rt.register_app(30, Origin::Project, "/ws/demo").unwrap();
+    assert_eq!(app.start.as_deref(), Some("Mon 10:00"));
+    assert_eq!(rt.windows(&app.id).await.unwrap().windows.len(), 1);
+    // pid 30 is now a different process (same number, other start time): not our app
+    *sw.0.lock().unwrap() = ProcTable::from_triples([(10, 1, "t0"), (30, 10, "Tue 11:00")]);
+    let e = rt.windows(&app.id).await.unwrap_err();
+    assert_eq!(e.kind(), "not_found");
+    assert!(e.to_string().contains("has exited"), "{e}");
+    // the pid is gone altogether
+    *sw.0.lock().unwrap() = ProcTable::from_triples([(10, 1, "t0")]);
+    assert!(rt.windows(&app.id).await.is_err());
+    // and the owner of the process says it is dead although the table still shows the pid
+    *sw.0.lock().unwrap() = ProcTable::from_triples([(30, 10, "Mon 10:00")]);
+    assert_eq!(rt.windows(&app.id).await.unwrap().windows.len(), 1);
+    rt.set_guard(Arc::new(Dead));
+    assert!(rt.windows(&app.id).await.is_err());
+}
+
+#[tokio::test]
+async fn odd_window_ids_and_denied_window_titles_are_never_offered() {
+    let ws = json!([
+        {"id":"--headed","title":"x","app_name":"demo","pid":30},
+        {"id":"w ok","title":"x","app_name":"demo","pid":30},
+        {"id":"w-term","title":"Terminal","app_name":"demo","pid":30},
+        {"id":"w-good","title":"Main","app_name":"demo","pid":30}
+    ]);
+    let (_d, rt) = start(json!({"list-windows": env_ok("list-windows", ws)}), |_| {}).await;
+    let app = rt.register_app(30, Origin::Project, "/ws/demo").unwrap();
+    let w = rt.windows(&app.id).await.unwrap();
+    let ids: Vec<&str> = w.windows.iter().map(|w| w.id.as_str()).collect();
+    assert_eq!(ids, ["w-good"]);
+    assert_eq!(w.hidden, ["demo"]);
+}
+
+#[tokio::test]
+async fn screenshots_and_observations_are_capped_per_session() {
+    let one = env_ok(
+        "list-windows",
+        json!([{"id":"w-app","title":"Demo","app_name":"demo","pid":30}]),
+    );
+    let script = json!({
+        "list-windows": one,
+        "screenshot": {"_fake":{"png":true}, "version":"2.5","ok":true,"command":"screenshot","data":{}},
+    });
+    let (_d, rt) = start(script.clone(), |o| o.max_shots = 2).await;
+    let app = rt.register_app(30, Origin::Project, "/ws/demo").unwrap();
+    rt.screenshot(&app.id, None).await.unwrap();
+    rt.screenshot(&app.id, None).await.unwrap();
+    let e = rt.screenshot(&app.id, None).await.unwrap_err();
+    assert_eq!(e.kind(), "rate_limited");
+    // total bytes
+    let (_d, rt) = start(script.clone(), |o| o.max_shot_bytes = 10).await;
+    let app = rt.register_app(30, Origin::Project, "/ws/demo").unwrap();
+    rt.screenshot(&app.id, None).await.unwrap();
+    assert_eq!(
+        rt.screenshot(&app.id, None).await.unwrap_err().kind(),
+        "rate_limited"
+    );
+    // list-windows / snapshot / wait / screenshot calls share a cap
+    let (_d, rt) = start(script, |o| o.max_observations = 3).await;
+    let app = rt.register_app(30, Origin::Project, "/ws/demo").unwrap();
+    for _ in 0..3 {
+        rt.windows(&app.id).await.unwrap();
+    }
+    assert_eq!(
+        rt.windows(&app.id).await.unwrap_err().kind(),
+        "rate_limited"
+    );
+}
+
+#[tokio::test]
+async fn the_cli_that_runs_is_a_private_staged_copy() {
+    let (d, rt) = start(json!({}), |_| {}).await;
+    drop(rt);
+    let staged = d.path().join("desktop/bin").join(if cfg!(windows) {
+        "agent-desktop.exe"
+    } else {
+        "agent-desktop"
+    });
+    assert!(staged.is_file());
+    assert_eq!(
+        pin::sha256_file(&staged).unwrap(),
+        pin::sha256_file(&PathBuf::from(FAKE)).unwrap()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let m = std::fs::metadata(d.path().join("desktop/bin"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(m & 0o077, 0);
+    }
+}

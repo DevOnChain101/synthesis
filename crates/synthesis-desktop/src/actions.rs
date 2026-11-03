@@ -108,9 +108,20 @@ impl Action {
             if v.chars().count() > MAX_VALUE || v.contains('\0') {
                 return Err(bad("\"value\" is too long or contains NUL"));
             }
-            if self == Self::Press && !valid_combo(v) {
+            if self == Self::Press {
+                if !valid_combo(v) {
+                    return Err(bad(
+                        "\"value\" must be a key combo such as return, escape or cmd+c",
+                    ));
+                }
+                if let Err(why) = synthesis_permissions::desktop::press_allowed(v) {
+                    return Err(bad(&format!("key combo refused: {why}")));
+                }
+            } else if v.starts_with('-') {
+                // the CLI would read it as an option; `--` is not relied on (unverified), so
+                // refuse (shortcut: a value that must start with "-" cannot be typed yet)
                 return Err(bad(
-                    "\"value\" must be a key combo such as return, escape or cmd+c",
+                    "\"value\" must not start with \"-\" (it could be read as an option)",
                 ));
             }
             a.push(v.to_owned());
@@ -142,7 +153,7 @@ fn valid_combo(c: &str) -> bool {
     !c.starts_with('-')
         && (1..=40).contains(&c.len())
         && c.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'_' || b == b'-')
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'_')
 }
 
 #[cfg(test)]
@@ -190,8 +201,17 @@ mod tests {
         assert!(c(Action::Type, Some("@s:e8"), None).is_err());
         assert!(c(Action::Press, None, Some("--force")).is_err());
         assert!(c(Action::Type, Some("@s:e8"), Some(&long)).is_err());
-        // a value that looks like a flag is passed as the value, not parsed as one
-        assert!(c(Action::Type, Some("@s:e8"), Some("--headed")).is_ok());
+        // a value that looks like an option is refused, never passed on
+        for v in ["--headed", "-1", "-"] {
+            assert!(c(Action::Type, Some("@s:e8"), Some(v)).is_err(), "{v}");
+            assert!(c(Action::SetValue, Some("@s:e8"), Some(v)).is_err(), "{v}");
+            assert!(c(Action::Select, Some("@s:e8"), Some(v)).is_err(), "{v}");
+        }
+        assert!(c(Action::Type, Some("@s:e8"), Some("a-b -c")).is_ok());
+        // global shortcuts never reach the CLI
+        for k in ["cmd+space", "cmd+q", "alt+f4", "ctrl+alt+delete", "win+d"] {
+            assert!(c(Action::Press, None, Some(k)).is_err(), "{k}");
+        }
         assert!(Action::parse("mouse_click").is_none() && Action::parse("headed").is_none());
     }
 }

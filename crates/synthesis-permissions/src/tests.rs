@@ -3301,14 +3301,19 @@ fn bash_cannot_name_browser_profiles_however_the_path_is_spelled() {
 // --- desktop control (owner policy 2026-11-03) ----------------------------------------------------
 
 #[test]
-fn desktop_apps_launched_from_the_project_are_allowed_in_every_mode() {
+fn a_project_desktop_launch_is_judged_like_the_same_bash_command_and_plan_never_runs_it() {
     let f = fx();
     let app = f.cwd.join("demo");
     fs::write(&app, "x").unwrap();
-    let launch = json!({ "target": app.to_string_lossy() });
+    let path = app.to_string_lossy().into_owned();
+    let launch = json!({ "target": path });
     for mode in Mode::ALL {
         let p = f.perms(mode);
-        assert_eq!(d(&p, "desktop_launch", launch.clone()), A, "{mode:?}");
+        let bash = d(&p, "Bash", json!({ "command": format!("'{path}'") }));
+        let want = if mode == Mode::Plan { D } else { bash };
+        assert_eq!(d(&p, "desktop_launch", launch.clone()), want, "{mode:?}");
+        // an app that is already running: no new dialog, except in plan mode
+        let follow = if mode == Mode::Plan { D } else { A };
         for t in [
             "desktop_snapshot",
             "desktop_act",
@@ -3317,8 +3322,58 @@ fn desktop_apps_launched_from_the_project_are_allowed_in_every_mode() {
             "desktop_logs",
             "desktop_close",
         ] {
-            assert_eq!(d(&p, t, json!({"app_id": "app-1"})), A, "{t} {mode:?}");
+            assert_eq!(d(&p, t, json!({"app_id": "app-1"})), follow, "{t} {mode:?}");
         }
+    }
+    // default mode asks (nothing pre-approves running unreviewed code) ...
+    assert_eq!(
+        d(&f.perms(Mode::Default), "desktop_launch", launch.clone()),
+        Q
+    );
+    assert_eq!(
+        d(&f.perms(Mode::DontAsk), "desktop_launch", launch.clone()),
+        D
+    );
+    // ... until the person's own Bash allow rule covers the command, as for Bash
+    let allow = format!("Bash({path}:*)");
+    let p = f.with(rules(&[allow.as_str()], &[], &[]), Mode::Default);
+    assert_eq!(d(&p, "desktop_launch", launch.clone()), A);
+    // a Bash deny rule on the command applies to the launch
+    let deny = format!("Bash({path}:*)");
+    let p = f.with(rules(&[], &[deny.as_str()], &[]), Mode::BypassPermissions);
+    assert_eq!(d(&p, "desktop_launch", launch.clone()), D);
+    // shells, interpreters, copies named like them, and interpreter arguments are denied in every mode
+    let sh = f.cwd.join("bash");
+    fs::write(&sh, "x").unwrap();
+    for mode in Mode::ALL {
+        let p = f.with(rules(&["desktop_*", "Bash"], &[], &[]), mode);
+        assert_eq!(
+            d(
+                &p,
+                "desktop_launch",
+                json!({"target": sh.to_string_lossy()})
+            ),
+            D,
+            "{mode:?}"
+        );
+        assert_eq!(
+            d(
+                &p,
+                "desktop_launch",
+                json!({"target": path, "args": ["-c", "id"]})
+            ),
+            D,
+            "{mode:?}"
+        );
+        assert_eq!(
+            d(
+                &p,
+                "desktop_launch",
+                json!({"target": path, "args": ["--eval=1"]})
+            ),
+            D,
+            "{mode:?}"
+        );
     }
     // a link out of the workspace is not "inside"
     #[cfg(unix)]
@@ -3364,7 +3419,12 @@ fn external_desktop_apps_ask_in_manual_mode_only_and_no_rule_pre_approves() {
             );
         } else {
             assert_eq!(v.decision, D, "{mode:?}: {}", v.reason);
-            assert!(v.reason.contains("manual (default)"), "{}", v.reason);
+            assert!(
+                v.reason.contains("manual (default)")
+                    || (mode == Mode::Plan && v.reason.contains("plan mode")),
+                "{}",
+                v.reason
+            );
         }
         // the approved external app: usable in manual mode, refused in every other
         let want = if mode == Mode::Default { A } else { D };

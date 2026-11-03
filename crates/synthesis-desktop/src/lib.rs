@@ -21,7 +21,8 @@ pub use error::{DesktopError, Result};
 pub use pin::{Pin, PinStatus};
 pub use proctree::{ProcSource, ProcTable, SystemProcs};
 pub use runtime::{
-    App, DesktopOptions, DesktopRuntime, Shot, WaitFor, Window, Windows, display_available, is_wsl,
+    App, AppGuard, DesktopOptions, DesktopRuntime, Shot, WaitFor, Window, Windows,
+    display_available, is_wsl,
 };
 pub use snapshot::Snapshot;
 pub use untrusted::UntrustedText;

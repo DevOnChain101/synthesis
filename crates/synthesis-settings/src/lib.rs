@@ -109,6 +109,8 @@ pub struct SynthesisSettings {
     /// `desktop` (docs/DESKTOP-CONTROL.md): `enabled`, `binary`, `allow_unpinned`, rate limits.
     /// The user's own settings file only; interpreted by `synthesis-app`.
     pub desktop: Map<String, Value>,
+    /// The managed file said `synt.desktop.enabled: false`: `desktop.enabled` stays false.
+    pub desktop_managed_off: bool,
     pub compat: Compat,
 }
 
@@ -796,11 +798,19 @@ impl Settings {
         if let Some(d) = n.get("desktop").and_then(Value::as_object) {
             if what == "user settings" {
                 self.synthesis.desktop.extend(d.clone());
+            } else if what == "managed settings" && d.get("enabled") == Some(&Value::Bool(false)) {
+                // The organisation can switch desktop control off for good; nothing re-enables it.
+                self.synthesis.desktop_managed_off = true;
             } else {
                 self.diagnostics.push(format!(
                     "{what}: synt.desktop is read from user settings only, ignored"
                 ));
             }
+        }
+        if self.synthesis.desktop_managed_off {
+            self.synthesis
+                .desktop
+                .insert("enabled".into(), Value::Bool(false));
         }
         let num = |o: Option<&Value>, k: &str| o.and_then(|b| b.get(k)).and_then(Value::as_u64);
         let b = n.get("budget").filter(|b| b.is_object());

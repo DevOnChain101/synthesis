@@ -33,8 +33,13 @@ mod verify;
 mod web;
 mod write;
 
-pub use browser::{BrowserConfig, BrowserHost, LoginRequest, redact_input};
+pub use browser::{BrowserConfig, BrowserHost, LoginRequest};
 pub use desktop::{DesktopAudit, DesktopConfig, DesktopHost};
+/// Tool input safe for events, hooks, approval prompts and history: the secrets of
+/// `browser_fill sensitive` and the `value` of `desktop_act` removed.
+pub fn redact_input(tool: &str, input: &Value) -> Value {
+    desktop::redact_input(tool, &browser::redact_input(tool, input))
+}
 pub use registry::{Registry, standard_policy, standard_policy_git, standard_policy_with};
 pub use skill::{
     LearnedProvider, LearnedSkill, SkillInfo, SkillSource, discover_skills, set_learned_skills,

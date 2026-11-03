@@ -635,7 +635,7 @@ async fn desktop_calls_of_the_main_agent_follow_the_policy_and_are_audited() {
                 json!({"target": "/usr/bin/firefox"}),
             ),
             // an external path in bypass: denied (works in manual mode only)
-            Turn::tool("d2", "desktop_launch", json!({"target": "/opt/other/tool"})),
+            Turn::tool("d2", "desktop_launch", json!({"target": outside_app()})),
             Turn::text("ok"),
         ],
         |h, _| h,
@@ -657,8 +657,17 @@ async fn desktop_calls_of_the_main_agent_follow_the_policy_and_are_audited() {
     assert!(denied[1].1.contains("manual (default)"), "{denied:?}");
 }
 
+/// An absolute path outside any test workspace on every OS (`/opt/...` is not absolute on Windows).
+fn outside_app() -> &'static str {
+    if cfg!(windows) {
+        r"C:\opt\other\tool"
+    } else {
+        "/opt/other/tool"
+    }
+}
+
 #[tokio::test]
-async fn the_dialog_for_an_external_desktop_app_names_the_app_only_and_cannot_be_always_allowed() {
+async fn the_dialog_for_an_external_desktop_app_shows_the_whole_command_line_unspoofed() {
     let tools = ToolBox::empty().with_tool(Probe::new(
         "desktop_launch",
         SideEffectClass::Execute,
@@ -667,6 +676,7 @@ async fn the_dialog_for_an_external_desktop_app_names_the_app_only_and_cannot_be
     ));
     let approver = ScriptedApprover::new(vec![Approval::deny("no")]);
     let a = approver.clone();
+    let target = format!("{}\u{1b}[2J\u{202E}gpj.exe", outside_app());
     let mut rig = Rig::build(
         Opts {
             tools,
@@ -677,7 +687,7 @@ async fn the_dialog_for_an_external_desktop_app_names_the_app_only_and_cannot_be
             Turn::tool(
                 "d1",
                 "desktop_launch",
-                json!({"target": "/opt/other/Tool\u{1b}[2J", "args": ["--token", "SECRET-ARG"]}),
+                json!({"target": target, "args": ["--token", "ARG-\u{200B}ONE", "x".repeat(900)], "cwd": "work\u{2066}dir"}),
             ),
             Turn::text("ok"),
         ],
@@ -687,17 +697,67 @@ async fn the_dialog_for_an_external_desktop_app_names_the_app_only_and_cannot_be
     let asked = approver.asked.lock().unwrap();
     assert_eq!(asked.len(), 1);
     let p = &asked[0].prompt;
-    assert!(
-        p.contains("desktop_launch") && p.contains("/opt/other/Tool"),
-        "{p}"
-    );
+    assert!(p.contains("desktop_launch") && p.contains("other"), "{p}");
     assert!(
         p.contains("did not launch from this project") && p.contains("default mode"),
         "{p}"
     );
+    // every argument, the cwd and the environment are in the dialog; the spoofing characters are not
     assert!(
-        !p.contains("SECRET-ARG") && !p.chars().any(|c| c.is_control()),
+        p.contains("\"--token\"") && p.contains("\"ARG-ONE\"") && p.contains("cwd \"workdir\""),
         "{p}"
     );
+    assert!(
+        p.contains("environment additions: none") && p.contains("chars cut]"),
+        "{p}"
+    );
+    assert!(
+        p.contains("gpj.exe") && !p.contains('\u{202E}') && !p.contains('\u{200B}'),
+        "{p}"
+    );
+    assert!(!p.chars().any(|c| c.is_control()), "{p:?}");
     assert!(asked[0].suggestions.is_empty(), "no allow-always");
+}
+
+#[tokio::test]
+async fn text_typed_with_desktop_act_never_reaches_events_prompts_or_history() {
+    const TYPED: &str = "typed-PLANTED-text-98765";
+    let tools = ToolBox::empty().with_tool(Probe::new(
+        "desktop_act",
+        SideEffectClass::Execute,
+        0,
+        "ran",
+    ));
+    let mut rig = Rig::build(
+        Opts {
+            tools,
+            mode: PermissionMode::BypassPermissions,
+            secrets: vec![], // only the harness's own redaction of desktop_act may keep it out
+            ..Opts::default()
+        },
+        vec![
+            Turn::tool(
+                "a1",
+                "desktop_act",
+                json!({"app_id": "app-1", "ref": "@s1:e2", "action": "type", "value": TYPED}),
+            ),
+            Turn::text("done"),
+        ],
+        |h, _| h,
+    );
+    rig.run("type it").await;
+    assert!(
+        !rig.buf.text().contains(TYPED),
+        "typed text leaked into the event stream"
+    );
+    let reqd = rig.find(|e| match e {
+        Event::ToolRequested { input, .. } => Some(input.clone()),
+        _ => None,
+    });
+    assert_eq!(reqd[0]["value"], "[REDACTED]");
+    assert_eq!(reqd[0]["ref"], "@s1:e2");
+    assert!(
+        !format!("{:?}", rig.requests()).contains(TYPED),
+        "typed text came back in a later model request"
+    );
 }

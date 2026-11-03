@@ -2173,7 +2173,11 @@ async fn a_delegate_worker_never_gets_desktop_tools_even_in_bypass() {
         Some(if !is_delegate(r) {
             Turn::text("B idle")
         } else if tool_result(r, "d1").is_none() {
-            Turn::tool("d1", "desktop_launch", json!({"target": "/opt/other/tool"}))
+            Turn::tool(
+                "d1",
+                "desktop_launch",
+                json!({"target": if cfg!(windows) { r"C:\opt\other\tool" } else { "/opt/other/tool" }}),
+            )
         } else {
             Turn::text("worker done")
         })

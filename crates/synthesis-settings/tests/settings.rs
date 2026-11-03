@@ -369,6 +369,35 @@ fn desktop_settings_come_from_user_settings_only() {
 }
 
 #[test]
+fn the_managed_file_can_force_desktop_control_off_for_good() {
+    let on = json!({"desktop":{"enabled":true,"allow_unpinned":true}});
+    let f = fx();
+    f.user(json!({"synt": on}));
+    f.project(json!({"synt": {"desktop": {"enabled": true}}}));
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"synt":{"desktop":{"enabled":false}}}),
+    );
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(
+        s.synthesis.desktop["enabled"], false,
+        "{:?}",
+        s.synthesis.desktop
+    );
+    assert!(s.synthesis.desktop_managed_off);
+    // managed `true` does not enable anything (it is ignored with a diagnostic)
+    let f = fx();
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"synt": {"desktop": {"enabled": true}}}),
+    );
+    let s = f.load(ProjectTrust::Trusted);
+    assert!(s.synthesis.desktop.is_empty() && !s.synthesis.desktop_managed_off);
+}
+
+#[test]
 fn peers_settings_come_from_user_settings_only() {
     let f = fx();
     f.user(json!({"synt":{"peers":{"enabled":true,"max_hops":3}}}));
