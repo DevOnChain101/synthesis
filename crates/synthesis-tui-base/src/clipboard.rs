@@ -403,6 +403,7 @@ mod tests {
             Some(PathBuf::from("/usr/bin").join(n))
         });
         assert_eq!(*seen.borrow(), ["wl-copy", "xclip"]);
+        #[cfg(unix)] // "/usr/bin/..." is not an absolute path on Windows
         assert!(
             PipeClipboard::xclip("/usr/bin/xclip".into())
                 .program
