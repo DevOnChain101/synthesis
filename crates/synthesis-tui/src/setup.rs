@@ -131,8 +131,15 @@ mod tests {
             lines: lines(),
         };
         let h = std::thread::spawn(move || run_setup(o, tty).unwrap());
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        assert!(script.screen_text().contains("needs a model"));
+        let t0 = std::time::Instant::now();
+        while !script.screen_text().contains("needs a model") {
+            assert!(
+                t0.elapsed() < std::time::Duration::from_secs(5),
+                "card never drawn:\n{}",
+                script.screen_text()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         script.send(keys);
         h.join().unwrap()
     }

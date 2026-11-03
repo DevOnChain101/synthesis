@@ -568,6 +568,7 @@ mod tests {
             None,
             "interop off or missing: no PATH lookup"
         );
+        #[cfg(unix)] // "/mnt/c" is not an absolute path on Windows
         assert!(find_powershell(mounts, &|_| true).unwrap().is_absolute());
     }
 
