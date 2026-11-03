@@ -544,10 +544,22 @@ async fn default_policy_blocks_and_close_leaves_no_processes_body() {
     assert!(!profile.exists(), "profile removed");
     #[cfg(unix)]
     assert_eq!(
-        group_members(pid),
+        group_members_settled(pid).await,
         Vec::<String>::new(),
         "no live processes after close"
     );
+}
+
+/// Pids still in the group after letting the kernel finish tearing it down (up to 5 s).
+#[cfg(unix)]
+async fn group_members_settled(pgid: u32) -> Vec<String> {
+    for _ in 0..100 {
+        if group_members(pgid).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    group_members(pgid)
 }
 
 /// Pids still in the browser's process group (the browser is its leader).
@@ -939,6 +951,19 @@ async fn persistent_profile_keeps_cookies_is_exclusive_and_survives_close() {
 
 async fn persistent_profile_body() {
     let Some(env) = browser_env() else { return };
+    if cfg!(windows) {
+        // TCP DevTools transport: persistent profiles are refused on purpose (M3) until the pipe transport exists.
+        let art = tempfile::tempdir().unwrap();
+        let mut opts = local_opts(art.path());
+        opts.profile = Some(art.path().join("profile"));
+        let e = BrowserRuntime::launch(opts, &env).await.err().unwrap();
+        assert!(
+            e.to_string()
+                .contains("unsupported with the TCP DevTools transport"),
+            "{e}"
+        );
+        return;
+    }
     let base = serve().await;
     let home = tempfile::tempdir().unwrap();
     let art = tempfile::tempdir().unwrap();
@@ -963,7 +988,7 @@ async fn persistent_profile_body() {
     rt.close_graceful().await.unwrap(); // flushes the cookie jar
     #[cfg(unix)]
     assert_eq!(
-        group_members(pid),
+        group_members_settled(pid).await,
         Vec::<String>::new(),
         "no live processes after close"
     );
@@ -985,7 +1010,7 @@ async fn persistent_profile_body() {
     rt.close().await.unwrap();
     #[cfg(unix)]
     assert_eq!(
-        group_members(pid),
+        group_members_settled(pid).await,
         Vec::<String>::new(),
         "kill leaves no process"
     );
