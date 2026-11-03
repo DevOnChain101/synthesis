@@ -138,6 +138,60 @@ fn ensure_db_file(path: &Path) -> Result<()> {
     }
 }
 
+fn is_busy(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::Sqlite(rusqlite::Error::SqliteFailure(f, _))
+            if matches!(f.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
+}
+
+/// Runs `f` again while it fails with a busy/locked database, for at most `limit`.
+fn retry_busy<T>(limit: Duration, mut f: impl FnMut() -> Result<T>) -> Result<T> {
+    let start = std::time::Instant::now();
+    loop {
+        match f() {
+            Err(e) if is_busy(&e) && start.elapsed() < limit => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            r => return r,
+        }
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    fn busy() -> Error {
+        Error::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        ))
+    }
+
+    #[test]
+    fn busy_is_retried_until_it_works_and_other_errors_are_not() {
+        let mut n = 0;
+        let r = retry_busy(Duration::from_secs(5), || {
+            n += 1;
+            if n < 3 { Err(busy()) } else { Ok(n) }
+        });
+        assert_eq!(r.unwrap(), 3);
+        let mut m = 0;
+        let r: Result<()> = retry_busy(Duration::from_secs(5), || {
+            m += 1;
+            Err(Error::SchemaTooNew {
+                found: 9,
+                supported: 1,
+            })
+        });
+        assert!(r.is_err() && m == 1);
+        let r: Result<()> = retry_busy(Duration::from_millis(60), || Err(busy()));
+        assert!(is_busy(&r.unwrap_err()), "gives up after the limit");
+    }
+}
+
 fn connect(home: &Path, read_only: bool) -> Result<Connection> {
     let path = home.join("synt.db");
     let conn = if read_only {
@@ -434,8 +488,12 @@ impl Store {
         #[cfg(unix)]
         chmod(synthesis_home, 0o700)?;
         ensure_db_file(&synthesis_home.join("synt.db"))?;
-        let mut conn = connect(synthesis_home, false)?;
-        schema::migrate(&mut conn, &now())?;
+        // Two processes opening a fresh home at once: SQLite answers "locked" at once to the
+        // journal-mode switch (the busy timeout is not consulted), so retry instead of failing.
+        retry_busy(Duration::from_secs(15), || {
+            let mut conn = connect(synthesis_home, false)?;
+            schema::migrate(&mut conn, &now())
+        })?;
         Ok(Store {
             home: synthesis_home.to_path_buf(),
             mirror: opts.write_node_transcripts,

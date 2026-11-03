@@ -78,6 +78,10 @@ impl Rig {
     }
     fn cmd_for(&self, ws: &Path, script_name: &str, script: Value, args: &[&str]) -> Command {
         let s = self.dir.path().join(script_name);
+        let mut script = script;
+        if cfg!(windows) {
+            slow_delays(&mut script);
+        }
         std::fs::write(&s, script.to_string()).unwrap();
         let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.args(["run", "--cwd"])
@@ -1390,6 +1394,23 @@ fn outputs(ev: &[Value], name: &str) -> Vec<String> {
 
 fn ok(d: &Done) {
     assert_eq!(d.0.code(), Some(0), "stderr: {}", d.2);
+}
+
+/// Windows runners start processes slowly: the fixed `delay_ms` that keeps one peer alive for the
+/// other would expire first, so triple them there.
+fn slow_delays(v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m.iter_mut() {
+                match (k.as_str(), x.as_u64()) {
+                    ("delay_ms", Some(n)) => *x = json!(n * 3),
+                    _ => slow_delays(x),
+                }
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(slow_delays),
+        _ => {}
+    }
 }
 
 fn peers_fit(rig: &Rig) -> bool {

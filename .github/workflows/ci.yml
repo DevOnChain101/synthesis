@@ -67,7 +67,11 @@ jobs:
       # synthesis-cli binary tests (apps/cli/tests/*), which need it for the scripted model.
       # --no-fail-fast: a failing binary must not hide the crates after it. The digest step prints the
       # failures as the last lines of the job (the log viewer only shows the tail of a long step).
+      # Debuginfo off: the Ubuntu runner ran out of disk (os error 28) building the whole workspace's test binaries.
       - name: cargo test
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: cargo test --workspace --locked --no-fail-fast --features synthesis-cli/test-provider 2>&1 | tee test.log
       - name: Failure digest
         if: always()
