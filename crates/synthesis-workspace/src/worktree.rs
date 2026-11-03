@@ -594,53 +594,55 @@ impl WorktreeManager {
     /// yet merged into the original HEAD.
     pub fn cleanup(&self, info: &GitInfo, force: bool) -> Result<()> {
         let g = &self.git;
-        if !force {
-            let wg = self.pinned(info)?;
-            let dirty = self.changes_vs(&wg, &info.worktree, "HEAD")?;
-            if !dirty.is_empty() {
-                return Err(Error::Refused(format!(
-                    "{} uncommitted change(s) in worktree",
-                    dirty.len()
-                )));
-            }
-            // `git worktree remove` deletes gitignored files (.env, build output) without --force
-            let ignored = nul_split(&wg.out(
-                &info.worktree,
-                &[
-                    "ls-files",
-                    "--others",
-                    "--ignored",
-                    "--exclude-standard",
-                    "-z",
-                ],
-            )?)
-            .count();
-            if ignored > 0 {
-                return Err(Error::Refused(format!(
-                    "{ignored} gitignored file(s) in worktree (they would be deleted)"
-                )));
-            }
-            let tip = wg.out_str(&info.worktree, &["rev-parse", "HEAD"])?;
-            let merged = tip == info.baseline
-                || g.run(
-                    &info.repo_root,
-                    &["merge-base", "--is-ancestor", &tip, "HEAD"],
-                    None,
-                )?
-                .status
-                .success();
-            if !merged {
-                return Err(Error::Refused("session branch has unmerged commits".into()));
-            }
-        }
-        let wt = info.worktree.to_string_lossy().into_owned();
-        let mut rm = vec!["worktree", "remove"];
-        if force {
-            rm.push("--force");
-        }
-        rm.push(&wt);
+        // The read-only checks run under the lock too: on Windows a `git worktree add/remove` of
+        // another thread rewrites `.git/config`, and a concurrent reader gets "Permission denied".
         let common = self.common_dir(&info.repo_root)?;
-        with_repo_lock(&common, || {
+        with_repo_lock(&common, || -> Result<()> {
+            if !force {
+                let wg = self.pinned(info)?;
+                let dirty = self.changes_vs(&wg, &info.worktree, "HEAD")?;
+                if !dirty.is_empty() {
+                    return Err(Error::Refused(format!(
+                        "{} uncommitted change(s) in worktree",
+                        dirty.len()
+                    )));
+                }
+                // `git worktree remove` deletes gitignored files (.env, build output) without --force
+                let ignored = nul_split(&wg.out(
+                    &info.worktree,
+                    &[
+                        "ls-files",
+                        "--others",
+                        "--ignored",
+                        "--exclude-standard",
+                        "-z",
+                    ],
+                )?)
+                .count();
+                if ignored > 0 {
+                    return Err(Error::Refused(format!(
+                        "{ignored} gitignored file(s) in worktree (they would be deleted)"
+                    )));
+                }
+                let tip = wg.out_str(&info.worktree, &["rev-parse", "HEAD"])?;
+                let merged = tip == info.baseline
+                    || g.run(
+                        &info.repo_root,
+                        &["merge-base", "--is-ancestor", &tip, "HEAD"],
+                        None,
+                    )?
+                    .status
+                    .success();
+                if !merged {
+                    return Err(Error::Refused("session branch has unmerged commits".into()));
+                }
+            }
+            let wt = info.worktree.to_string_lossy().into_owned();
+            let mut rm = vec!["worktree", "remove"];
+            if force {
+                rm.push("--force");
+            }
+            rm.push(&wt);
             g.out(&info.repo_root, &rm)?;
             g.out(&info.repo_root, &["branch", "-D", &info.branch])?;
             Ok(())
