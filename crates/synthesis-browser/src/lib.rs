@@ -1439,6 +1439,21 @@ impl BrowserRuntime {
             let _ = child.start_kill(); // errors mean "already gone"
             // Bounded: a Windows job-object wait must never hang a caller (CI sat 15 min).
             let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+            // SIGKILL is asynchronous and the leader may already be reaped (graceful exit), so its
+            // helpers (crashpad, zygote) can outlive `wait`: hold until the group is gone.
+            #[cfg(unix)]
+            for _ in 0..50 {
+                // `kill -0 -- -pgid` probes the group (no unsafe allowed); a missing tool counts as gone.
+                let alive = std::process::Command::new("/bin/kill")
+                    .args(["-0", "--", &format!("-{}", self.pid)])
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success());
+                if !alive {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         }
         lock(&self.profile_lock).take(); // the profile is free only once the browser is gone
         let profile = lock(&self.profile).take();
