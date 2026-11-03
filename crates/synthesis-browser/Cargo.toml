@@ -24,6 +24,8 @@ url = "2.5.8"
 [target.'cfg(unix)'.dependencies]
 # O_NOFOLLOW constant only (no unsafe)
 libc = "0.2"
+# kill(-pgid, 0) probe on close, without unsafe
+rustix = { version = "1", default-features = false, features = ["process"] }
 
 [dev-dependencies]
 tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread"] }

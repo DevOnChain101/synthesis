@@ -194,11 +194,19 @@ fn approval_subagent_model_switch_and_new_folder() {
         .filter_map(|e| e.1["source"].as_str())
         .collect();
     assert!(sources.contains(&"resume"), "{sources:?}");
-    let roots: std::collections::BTreeSet<&str> = ev
-        .iter()
-        .filter(|e| e.0 == "session.started")
-        .filter_map(|e| e.1["workspace"]["cwd"].as_str())
-        .collect();
+    // the new session's event may land after the screen shows its reply: poll for it
+    let roots_of = |ev: &[(String, Value)]| {
+        ev.iter()
+            .filter(|e| e.0 == "session.started")
+            .filter_map(|e| e.1["workspace"]["cwd"].as_str().map(str::to_owned))
+            .collect::<std::collections::BTreeSet<String>>()
+    };
+    let t0 = std::time::Instant::now();
+    let mut roots = roots_of(&ev);
+    while roots.len() < 2 && t0.elapsed() < std::time::Duration::from_secs(5) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        roots = roots_of(&rig.events());
+    }
     assert!(roots.len() >= 2, "{roots:?}");
     // the usage of finished tasks reached the store before the app ended (it is killed, not quit)
     let c = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
