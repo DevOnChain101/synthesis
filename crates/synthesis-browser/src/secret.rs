@@ -261,9 +261,15 @@ mod tests {
 
     #[test]
     fn parses_and_rejects_declarations() {
+        // `/run/s/pw` is not absolute on Windows
+        let file_src = if cfg!(windows) {
+            r"{file:C:\run\s\pw}"
+        } else {
+            "{file:/run/s/pw}"
+        };
         let raw = json!({
             "ok": {"source": "{env:SYNT_APP_PASSWORD}", "origins": ["https://app.example.com"], "field_kind": "password"},
-            "file": {"source": "{file:/run/s/pw}", "origins": ["http://localhost:3000"]},
+            "file": {"source": file_src, "origins": ["http://localhost:3000"]},
             "plain-env": {"source": "{env:HOME}", "origins": ["https://a.com"]},
             "not-secret-shaped": {"source": "{env:SYNT_APP}", "origins": ["https://a.com"]},
             "relative": {"source": "{file:pw}", "origins": ["https://a.com"]},
