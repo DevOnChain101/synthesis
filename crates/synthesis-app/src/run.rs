@@ -1316,19 +1316,31 @@ pub fn prepare(
     } else {
         Arc::new(crate::login::CliHost { sink: sink.clone() })
     };
-    let mut toolbox = ToolBox::new(
-        Registry::with_terminal_policy(rt.clone(), make_policy)
-            .with_new_tools()
-            .with_browser(browser.config(
-                synthesis_tools::BrowserConfig::default(),
-                &h.synthesis,
-                env,
-                browser_host,
-                sandbox_mode == SandboxMode::Enforce,
-                stdio,
-            ))
-            .with_background_on_timeout(is_tui),
-    );
+    let mut registry = Registry::with_terminal_policy(rt.clone(), make_policy)
+        .with_new_tools()
+        .with_browser(browser.config(
+            synthesis_tools::BrowserConfig::default(),
+            &h.synthesis,
+            env,
+            browser_host,
+            sandbox_mode == SandboxMode::Enforce,
+            stdio,
+        ))
+        .with_background_on_timeout(is_tui);
+    // Desktop control exists only when the person's own settings turn it on (docs/DESKTOP-CONTROL.md).
+    let desktop = crate::desktop::parse_settings(&settings.synthesis.desktop);
+    for w in &desktop.warnings {
+        eprintln!("synt: warning: {}", sanitize_for_display(w));
+    }
+    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    if let Some(cfg) = desktop.config(
+        exe_dir.as_deref(),
+        env,
+        Arc::new(crate::desktop::AuditHost { sink: sink.clone() }),
+    ) {
+        registry = registry.with_desktop(cfg);
+    }
+    let mut toolbox = ToolBox::new(registry);
     if let Some(a) = mcp_attach {
         toolbox = a.apply(toolbox);
     }

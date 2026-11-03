@@ -31,6 +31,7 @@ macro_rules! out {
 
 pub mod agents;
 pub mod ctx;
+pub mod desktop;
 pub mod events;
 #[cfg(feature = "test-provider")]
 pub mod fake;

@@ -458,6 +458,13 @@ fn report_discovery(env: &Env, h: &synthesis_app::Homes, cfg: &Config, cwd: Opti
         plan.skipped.len()
     );
     {
+        let d = synthesis_app::desktop::parse_settings(&st.synthesis.desktop);
+        let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+        for l in synthesis_app::desktop::doctor_lines(&d, exe_dir.as_deref(), env) {
+            out!("{}", san(&l));
+        }
+    }
+    {
         let b = synthesis_app::login::parse_settings(&st.synthesis.browser);
         let stdio = synthesis_app::login::stdio_servers(&plan.servers);
         for l in synthesis_app::login::exposure_warnings(&h.synthesis, &b, &stdio, enforcing) {

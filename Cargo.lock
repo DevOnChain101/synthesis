@@ -2656,6 +2656,7 @@ dependencies = [
  "synthesis-config",
  "synthesis-context",
  "synthesis-core",
+ "synthesis-desktop",
  "synthesis-events",
  "synthesis-harness",
  "synthesis-hooks",

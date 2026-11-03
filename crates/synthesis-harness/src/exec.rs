@@ -173,7 +173,7 @@ fn suggestion_json(s: &Suggestion) -> Value {
 /// What the approver sees of the call. Never truncated: a cut command could hide the part that
 /// matters. Callers pass the redacted input.
 fn summarize(input: &Value) -> String {
-    let s = ["command", "file_path", "path", "url", "pattern"]
+    let s = ["command", "file_path", "path", "url", "pattern", "target"]
         .iter()
         .find_map(|k| input.get(*k).and_then(Value::as_str))
         .map_or_else(|| input.to_string(), String::from);

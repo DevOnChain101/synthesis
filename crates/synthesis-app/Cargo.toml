@@ -16,6 +16,7 @@ test-provider = ["synthesis-sandbox/test-backend"]
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 synthesis-browser = { path = "../synthesis-browser" }
+synthesis-desktop = { path = "../synthesis-desktop" }
 synthesis-config = { path = "../synthesis-config" }
 synthesis-context = { path = "../synthesis-context" }
 synthesis-core = { path = "../synthesis-core" }
