@@ -5,14 +5,14 @@ Synthesis is one native binary, `synt`. On Linux a helper, `synthesis-sandbox-ex
 ## 1. Install script (macOS, Linux)
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/DevOnChain101/nemo-acd/releases/latest/download/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/DevOnChain101/synthesis/releases/latest/download/install.sh | sh
 ```
 
 Needs `curl`, `tar` and `ca-certificates` (HTTPS to GitHub and to your provider); minimal container images such as `ubuntu:24.04` and `debian:12-slim` have none of the three beyond `tar` (`apt-get install -y curl ca-certificates`). Linux binaries need glibc 2.35 or newer (Ubuntu 22.04+, Debian 12+).
 
 Environment: `SYNT_VERSION` (must match `^[0-9A-Za-z.+-]+$`), `SYNT_REPO`, `SYNT_INSTALL_DIR` (default `~/.local/bin`), `SYNT_BIN_NAME` (default `synt`), `SYNT_SKIP_ATTESTATION=1` (accept a checksum-only install; the default requires `gh`), `SYNT_DOWNLOAD_BASE` (must be https; `SYNT_INSECURE_DOWNLOAD_BASE_I_KNOW=1` allows others, tests only).
 
-Verification: all downloads use `curl --proto '=https' --tlsv1.2`. The archive's sha256 is checked against `SHA256SUMS`. When `gh` is installed, `SHA256SUMS` itself is checked with `gh attestation verify` (build provenance from `release.yml`, pinned to that workflow and the `refs/tags/v<version>` source ref; needs `gh auth login`) and a failure aborts. Without `gh` the installer prints a warning and continues with the checksum only (the checksum file then comes from the same server as the archive and proves integrity, not origin); `SYNT_SKIP_ATTESTATION=1` does the same even when `gh` exists. After installing it runs `synt doctor`. The `install.sh` you pipe into `sh` is not covered by this: download it, read it, and verify it with `gh attestation verify install.sh --repo DevOnChain101/nemo-acd`. Prefer downloading `install.sh` first and reading it. musl systems get the x86_64 musl build when published.
+Verification: all downloads use `curl --proto '=https' --tlsv1.2`. The archive's sha256 is checked against `SHA256SUMS`. When `gh` is installed, `SHA256SUMS` itself is checked with `gh attestation verify` (build provenance from `release.yml`, pinned to that workflow and the `refs/tags/v<version>` source ref; needs `gh auth login`) and a failure aborts. Without `gh` the installer prints a warning and continues with the checksum only (the checksum file then comes from the same server as the archive and proves integrity, not origin); `SYNT_SKIP_ATTESTATION=1` does the same even when `gh` exists. After installing it runs `synt doctor`. The `install.sh` you pipe into `sh` is not covered by this: download it, read it, and verify it with `gh attestation verify install.sh --repo DevOnChain101/synthesis`. Prefer downloading `install.sh` first and reading it. musl systems get the x86_64 musl build when published.
 
 ## 2. Windows
 
@@ -29,7 +29,7 @@ synt --version
 
 ## 4. Manual
 
-Download `synthesis-<version>-<target>.tar.gz|zip` and `SHA256SUMS` from the release, check `sha256sum -c --ignore-missing SHA256SUMS`, `gh attestation verify SHA256SUMS --repo DevOnChain101/nemo-acd` (authenticates the checksum file) and optionally the archive itself, extract, and put the contents of the directory on your PATH. Targets: `x86_64`/`aarch64` `apple-darwin`, `unknown-linux-gnu`, `pc-windows-msvc`; `x86_64-unknown-linux-musl` is experimental.
+Download `synthesis-<version>-<target>.tar.gz|zip` and `SHA256SUMS` from the release, check `sha256sum -c --ignore-missing SHA256SUMS`, `gh attestation verify SHA256SUMS --repo DevOnChain101/synthesis` (authenticates the checksum file) and optionally the archive itself, extract, and put the contents of the directory on your PATH. Targets: `x86_64`/`aarch64` `apple-darwin`, `unknown-linux-gnu`, `pc-windows-msvc`; `x86_64-unknown-linux-musl` is experimental.
 
 ## 5. Homebrew / winget
 

@@ -5,7 +5,7 @@ The classic TUI is back (restored 2026-11, `docs/tui-feature-port.md`); the GPUI
 Goal: R1–R9, hand over the full Synthesis autonomous coding agent. Not complete: see "Open".
 
 ## Verified
-- CI run #22 on commit c6c6a29 (GitHub Actions, public repo `DevOnChain101/nemo-acd`): `ci-ok` green. test (macOS, Ubuntu, Windows), msrv 1.89, sandbox (linux), docs, cargo-deny, cargo-audit, shell-scripts and the three eval selftests passed. Only `browser (windows-latest)` is red (non-blocking, `continue-on-error`).
+- CI run #22 on commit c6c6a29 (GitHub Actions, public repo `DevOnChain101/synthesis`): `ci-ok` green. test (macOS, Ubuntu, Windows), msrv 1.89, sandbox (linux), docs, cargo-deny, cargo-audit, shell-scripts and the three eval selftests passed. Only `browser (windows-latest)` is red (non-blocking, `continue-on-error`).
 - macOS (local, tester + developers): `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (about 884 tests, 0 failed), `cargo test -p synthesis-cli --features test-provider` (88), eval selftest 6/6, rustdoc `-D warnings`, `cargo +1.89 check`.
 - Counting method (to compare future runs): `grep -E '^test result' log | awk '{p+=$4; f+=$6; i+=$8}'`.
 - Real-model eval after the rename (2026-10-30, 40 runs, acceptEdits, sandbox enforce; docs/research/eval-baseline-rust.md): status-ok haiku 79% (19/24), luna 94% (15/16); false-success 0/40; code tasks completed without model approval haiku 44%, luna 100%. Cutover thresholds: false-success met; status-ok >= 85% not met for haiku; approvals >= 50% not met for haiku alone (pooled 67%).

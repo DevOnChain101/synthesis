@@ -13,7 +13,7 @@ Owns its agent loop and tool runtime; talks to Anthropic-compatible and OpenAI-c
 - Kept full: crates `synthesis-*`, npm `@devonchain101/synthesis`, branch prefix `synthesis/`.
 - Before 2026-11-02: `synth`, `~/.synthesis`, `.synthesis/`, `synthesis.json`, `synthesis.db`, `SYNTHESIS.md`, `SYNTHESIS_*`, settings key `"synthesis"`. They are never read; `synt doctor` only detects them and prints how to migrate (names of variables only, never values). The check script fails if they reappear.
 - Synthesis never reads `~/.nemo` or `NEMO_*`; `synt doctor` only detects them and prints how to migrate. `node scripts/check-no-legacy-name.mjs` (CI) fails on any new "nemo" outside `scripts/nemo-leftovers.allow`.
-- The GitHub repo slug is still `DevOnChain101/nemo-acd` (`packaging/REPO`); it changes when the new repo exists (docs/RELEASE.md). Brand kit and GUI/landing references: `design/`.
+- The GitHub repo is `DevOnChain101/synthesis` (renamed from `nemo-acd` on 2026-11-03; slug in `packaging/REPO`, docs/RELEASE.md). Brand kit and GUI/landing references: `design/`.
 
 ## Hard decisions (ADR-010)
 - The core engine is **Rust** (mandatory). Allowed non-Rust: browser worker sidecar behind RPC (if the browser spike picks Playwright), external MCP servers, skill scripts, test/eval tooling.

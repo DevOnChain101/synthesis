@@ -14,17 +14,12 @@ in tests/agent-evals/README.md NEMO_HOME
 in tests/agent-evals/harness/selftest.js nemo-cli
 in tests/golden/README.md (Node|NEMO_|nemo_home|loadNemoEnv|nemo-cli|nemo import)[^ ]*
 
-# The GitHub repository slug. Lives in packaging/REPO (single source, kept equal everywhere else by scripts/check-placeholders.mjs).
-# docs/RELEASE.md says what to change when the new repository exists.
-token DevOnChain101/nemo-acd
-in docs/RELEASE.md nemo-acd
-
 # Legacy migration: `synt doctor` detects the old ~/.nemo and NEMO_* (names only), never reads them.
 file apps/cli/src/info.rs
 # Docs that explain the rename quote the old names (old -> new tables, migration steps).
 in CLAUDE.md Nemo|NEMO[_.*]\S*|\.nemo|\bnemo\b
 in docs/MIGRATION.md Nemo|NEMO[_.*]\S*|\.nemo|nemo\.(json|db)|nemocode|\bnemo\b|"nemo"
-in docs/RELEASE.md NEMO_[A-Z_]*
+in docs/RELEASE.md NEMO_[A-Z_]*|nemo-acd   # nemo-acd: the old repo name (rename note, historical validation log)
 in docs/specs/config.md Nemo|NEMO[_.*]\S*|\.nemo|nemo\.json|"nemo"
 in tests/golden/README.md Nemo|NEMO[_.*]\S*|\.nemo|nemo\.json|nemocode-config|\bnemo\b|"nemo"
 

@@ -15,7 +15,7 @@ cd $HOME\Downloads\release-assets
 Select-String 'windows-msvc.zip' .\SHA256SUMS
 ```
 
-After a real release: `irm https://github.com/DevOnChain101/nemo-acd/releases/latest/download/install.ps1 | iex` does steps 1 and 2 for you (it prints the PATH command when needed). Dry-run artifacts have no attestation, so for them use the manual steps.
+After a real release: `irm https://github.com/DevOnChain101/synthesis/releases/latest/download/install.ps1 | iex` does steps 1 and 2 for you (it prints the PATH command when needed). Dry-run artifacts have no attestation, so for them use the manual steps.
 
 ## 1. Install (manual)
 
