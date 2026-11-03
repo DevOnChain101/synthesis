@@ -12,6 +12,8 @@ use synthesis_core::{ToolContext, WorkspaceContext};
 use synthesis_terminal::{Error as TermError, SandboxPolicy, TerminalRuntime};
 
 use crate::browser::{self, BrowserConfig};
+use crate::desktop::{self, DesktopConfig};
+use synthesis_desktop::DesktopRuntime;
 use crate::tasks::Todo;
 use crate::web::{self, WebConfig};
 use crate::{BoxFuture, Tool, ToolOutput, ToolSpec, artifact, tasks, terminal, verify};
@@ -25,6 +27,10 @@ pub(crate) struct SessionState {
     pub browser: tokio::sync::OnceCell<Arc<BrowserRuntime>>,
     /// Login profile the browser was started with.
     pub browser_profile: Mutex<Option<String>>,
+    /// Created on the first desktop_* call; dropping it (session end) ends its agent-desktop calls.
+    pub desktop: tokio::sync::OnceCell<Arc<DesktopRuntime>>,
+    /// Terminal process id of each app `desktop_launch` started (its log, its process group).
+    pub desktop_procs: Mutex<HashMap<String, String>>,
     /// (secret, origin) pairs the person already approved in this session.
     pub secret_ok: Mutex<std::collections::HashSet<(String, String)>>,
     /// How often the person refused a question (`profile:NAME`, `secret:NAME@ORIGIN`).
@@ -43,6 +49,7 @@ pub(crate) struct Shared {
     policy: PolicyFactory,
     pub browser_cfg: Mutex<BrowserConfig>,
     pub web_cfg: Mutex<WebConfig>,
+    pub desktop_cfg: Mutex<DesktopConfig>,
     /// A foreground Bash call that times out keeps running in the background (interactive app)
     /// instead of being killed (headless).
     pub background_on_timeout: std::sync::atomic::AtomicBool,
@@ -56,6 +63,7 @@ impl Shared {
             policy,
             browser_cfg: Mutex::default(),
             web_cfg: Mutex::default(),
+            desktop_cfg: Mutex::default(),
             background_on_timeout: Default::default(),
             sessions: Mutex::default(),
         }
@@ -125,6 +133,13 @@ pub(crate) fn lookup(name: &str) -> Option<Run> {
         "browser_network" => Run::Async(browser::network),
         "browser_tabs" => Run::Async(browser::tabs),
         "browser_close" => Run::Async(browser::close),
+        "desktop_launch" => Run::Async(desktop::launch),
+        "desktop_snapshot" => Run::Async(desktop::snapshot),
+        "desktop_screenshot" => Run::Async(desktop::screenshot),
+        "desktop_logs" => Run::Async(desktop::logs),
+        "desktop_close" => Run::Async(desktop::close),
+        "desktop_act" => Run::Async(desktop::act),
+        "desktop_wait" => Run::Async(desktop::wait),
         "WebFetch" => Run::Async(web::fetch),
         "WebSearch" => Run::Async(web::search),
         "verify_run" => Run::Async(verify::run),

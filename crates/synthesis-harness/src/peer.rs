@@ -1553,7 +1553,8 @@ impl Harness {
             let mut a: BTreeSet<String> = have
                 .iter()
                 .filter(|n| {
-                    !matches!(
+                    !synthesis_permissions::desktop::is_desktop_tool(n)
+                        && !matches!(
                         n.as_str(),
                         "Task"
                             | "AskUserQuestion"

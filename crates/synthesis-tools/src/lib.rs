@@ -13,6 +13,7 @@ use synthesis_core::ToolContext;
 
 mod artifact;
 mod browser;
+mod desktop;
 mod diff;
 /// Line diff of a file change, for the approval dialog preview.
 pub use diff::for_file as file_diff;
@@ -33,6 +34,7 @@ mod web;
 mod write;
 
 pub use browser::{BrowserConfig, BrowserHost, LoginRequest, redact_input};
+pub use desktop::{DesktopAudit, DesktopConfig, DesktopHost};
 pub use registry::{Registry, standard_policy, standard_policy_git, standard_policy_with};
 pub use skill::{
     LearnedProvider, LearnedSkill, SkillInfo, SkillSource, discover_skills, set_learned_skills,

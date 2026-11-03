@@ -655,6 +655,35 @@ pub enum Event {
     /// confirm. Names only: no cookie, token or page content ever appears in an event.
     #[serde(rename = "browser.login_required")]
     BrowserLoginRequired { origin: String, profile: String },
+    /// `desktop_launch` started an app (docs/DESKTOP-CONTROL.md). Names and ids only.
+    #[serde(rename = "desktop.launch")]
+    DesktopLaunch {
+        app_id: String,
+        pid: u64,
+        name: String,
+        /// `"project"` (launched from the workspace) or `"external"` (approved by the person).
+        origin: String,
+    },
+    /// A `desktop_act` call. The value that was typed or set is never part of the event.
+    #[serde(rename = "desktop.act")]
+    DesktopAct {
+        app_id: String,
+        action: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        r#ref: Option<String>,
+        /// agent-desktop's `disposition.delivery`, or `"failed"`.
+        delivery: String,
+    },
+    /// A window screenshot was saved (path of the artifact, never the pixels).
+    #[serde(rename = "desktop.screenshot")]
+    DesktopScreenshot {
+        app_id: String,
+        window_id: String,
+        path: String,
+    },
+    /// A desktop call was refused by policy (hard-deny list, mode, peer or sub-agent, scope).
+    #[serde(rename = "desktop.denied")]
+    DesktopDenied { tool: String, reason: String },
     #[serde(rename = "notice")]
     Notice { level: String, text: String },
 }

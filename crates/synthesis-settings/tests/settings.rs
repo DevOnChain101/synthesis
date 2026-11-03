@@ -334,6 +334,37 @@ fn browser_secrets_come_from_user_settings_only() {
 }
 
 #[test]
+fn desktop_settings_come_from_user_settings_only() {
+    let on = json!({"desktop":{"enabled":true,"binary":"/u/agent-desktop"}});
+    let f = fx();
+    f.user(json!({"synt": on}));
+    f.project(json!({"synt":{"desktop":{"enabled":true,"binary":"/evil","allow_unpinned":true}}}));
+    write(
+        f.proj.path(),
+        ".synt/settings.local.json",
+        json!({"synt":{"desktop":{"binary":"/evil2"}}}),
+    );
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(s.synthesis.desktop["binary"], "/u/agent-desktop");
+    assert!(!s.synthesis.desktop.contains_key("allow_unpinned"));
+    for what in ["project settings", "local settings"] {
+        let want = format!("{what}: synt.desktop is read from user settings only");
+        assert!(s.diagnostics.iter().any(|d| d.contains(&want)), "{what}");
+    }
+    // project/local/managed alone, trusted or not, enable nothing
+    for trust in [ProjectTrust::Trusted, ProjectTrust::Untrusted] {
+        let f = fx();
+        f.project(json!({"synt": on}));
+        assert!(f.load(trust).synthesis.desktop.is_empty());
+    }
+    let f = fx();
+    write(f.home.path(), "managed.json", json!({"synt": on}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert!(s.synthesis.desktop.is_empty());
+    assert!(s.diagnostics.iter().any(|d| d.contains("managed settings: synt.desktop")));
+}
+
+#[test]
 fn peers_settings_come_from_user_settings_only() {
     let f = fx();
     f.user(json!({"synt":{"peers":{"enabled":true,"max_hops":3}}}));

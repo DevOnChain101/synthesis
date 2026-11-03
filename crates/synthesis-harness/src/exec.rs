@@ -652,6 +652,21 @@ impl Harness {
         mut forced: Option<String>,
         recheck: bool,
     ) -> Result<(), Denial> {
+        // Driving the desktop is the local person's main agent only (owner policy 2026-11-03):
+        // a peer request or a sub-agent is refused before any rule, mode or dialog is consulted.
+        let desktop = synthesis_permissions::desktop::is_desktop_tool(&call.name);
+        if desktop && (agent.origin.is_some() || agent.agent_id.is_some()) {
+            self.desktop_denied(task, agent, turn, call, "peers and sub-agents never get desktop tools");
+            return Err(Denial {
+                unavailable: false,
+                from_hook: false,
+                text: format!(
+                    "Permission denied: {} is not available to {}. The tool was NOT run.",
+                    call.name,
+                    if agent.origin.is_some() { "a request that came from another session" } else { "sub-agents" }
+                ),
+            });
+        }
         // Logging in and typing a stored secret are the local person's decisions, never work a
         // peer session can delegate.
         let saved_login = call.name == "browser_navigate" && input.get("profile").is_some();
@@ -705,6 +720,9 @@ impl Harness {
             match verdict.decision {
                 Decision::Allow => return Ok(()),
                 Decision::Deny if verdict.reason.starts_with("non-interactive") => {
+                    if desktop {
+                        self.desktop_denied(task, agent, turn, call, &verdict.reason);
+                    }
                     return Err(Denial {
                         unavailable: true,
                         from_hook: false,
@@ -719,6 +737,9 @@ impl Harness {
                     });
                 }
                 Decision::Deny => {
+                    if desktop {
+                        self.desktop_denied(task, agent, turn, call, &verdict.reason);
+                    }
                     return Err(Denial {
                         unavailable: false,
                         from_hook: false,
@@ -791,6 +812,19 @@ impl Harness {
             unavailable: false,
             from_hook: false,
         })
+    }
+
+    /// Audit record of a refused desktop call (`desktop.denied`): the tool and why, no input.
+    fn desktop_denied(&self, task: &TaskRun, agent: &AgentCtx, turn: &str, call: &Call, reason: &str) {
+        self.emit(
+            task,
+            agent,
+            Some(turn),
+            Event::DesktopDenied {
+                tool: sanitize_for_display(&call.name),
+                reason: sanitize_for_display(reason),
+            },
+        );
     }
 
     /// Settles a `Classify` verdict. Protected paths are a hard stop and never reach the judge;

@@ -6,7 +6,7 @@ use synthesis_core::ToolContext;
 
 use crate::native::{self, Native, PolicyFactory, Shared};
 use crate::{BoxFuture, SideEffectClass, Tool, ToolOutput, ToolRuntime, ToolSpec};
-use crate::{BrowserConfig, WebConfig};
+use crate::{BrowserConfig, DesktopConfig, WebConfig};
 use crate::{edit, glob, grep, notebook, read, skill, write};
 use synthesis_core::WorkspaceContext;
 use synthesis_terminal::{NetworkPolicy, SandboxMode, SandboxPolicy, TerminalRuntime};
@@ -20,6 +20,9 @@ const TERMINAL_SCHEMAS: &str = include_str!("terminal_schemas.json");
 
 /// browser_*, verify_run and artifact_read; their schemas say `additionalProperties:false` themselves.
 const EXTRA_SCHEMAS: &str = include_str!("extra_schemas.json");
+
+/// desktop_*: registered only by `with_desktop` (user setting `synt.desktop.enabled`).
+const DESKTOP_SCHEMAS: &str = include_str!("desktop_schemas.json");
 
 const STRICT_INPUT: [&str; 12] = [
     "Read",
@@ -48,7 +51,9 @@ fn side_effect(name: &str) -> SideEffectClass {
         | "browser_fill"
         | "browser_press_key"
         | "browser_login"
-        | "browser_fill_secret" => External,
+        | "browser_fill_secret"
+        | "desktop_launch"
+        | "desktop_act" => External,
         "verify_run" => Execute,
         _ => Read,
     }
@@ -231,6 +236,15 @@ impl Registry {
         self
     }
 
+    /// Registers the desktop_* tools with these settings. Without this call they do not exist.
+    pub fn with_desktop(mut self, cfg: DesktopConfig) -> Self {
+        *crate::native::lock(&self.shared.desktop_cfg) = cfg;
+        let shared = self.shared.clone();
+        let raw: Vec<Value> = serde_json::from_str(DESKTOP_SCHEMAS).expect("valid");
+        self.entries.extend(raw.into_iter().map(|v| entry(v, &shared)));
+        self
+    }
+
     /// URL policy for WebFetch / WebSearch (default: private, loopback and metadata addresses denied).
     pub fn with_web(self, cfg: WebConfig) -> Self {
         *crate::native::lock(&self.shared.web_cfg) = cfg;
@@ -239,7 +253,7 @@ impl Registry {
 
     /// Tool input safe to put in events and logs (secrets of `browser_fill sensitive` removed).
     pub fn redact_input(&self, name: &str, input: &Value) -> Value {
-        crate::browser::redact_input(name, input)
+        crate::desktop::redact_input(name, &crate::browser::redact_input(name, input))
     }
 
     /// Session end: kills the session's background processes and browser and drops its todo/task state.

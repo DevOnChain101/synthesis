@@ -106,6 +106,9 @@ pub struct SynthesisSettings {
     /// `browser` (docs/BROWSER-LOGIN.md): secrets, login timeout, profile domains. The user's own
     /// settings file only; interpreted by `synthesis-browser` / `synthesis-app`.
     pub browser: Map<String, Value>,
+    /// `desktop` (docs/DESKTOP-CONTROL.md): `enabled`, `binary`, `allow_unpinned`, rate limits.
+    /// The user's own settings file only; interpreted by `synthesis-app`.
+    pub desktop: Map<String, Value>,
     pub compat: Compat,
 }
 
@@ -786,6 +789,16 @@ impl Settings {
             } else {
                 self.diagnostics.push(format!(
                     "{what}: synt.browser is read from user settings only, ignored"
+                ));
+            }
+        }
+        // Which program may drive the desktop, and whether it may at all, is the person's alone.
+        if let Some(d) = n.get("desktop").and_then(Value::as_object) {
+            if what == "user settings" {
+                self.synthesis.desktop.extend(d.clone());
+            } else {
+                self.diagnostics.push(format!(
+                    "{what}: synt.desktop is read from user settings only, ignored"
                 ));
             }
         }

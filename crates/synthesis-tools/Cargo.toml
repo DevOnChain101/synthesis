@@ -12,6 +12,8 @@ workspace = true
 synthesis-browser = { path = "../synthesis-browser" }
 synthesis-config = { path = "../synthesis-config" }
 synthesis-core = { path = "../synthesis-core" }
+synthesis-desktop = { path = "../synthesis-desktop" }
+synthesis-permissions = { path = "../synthesis-permissions" }
 synthesis-terminal = { path = "../synthesis-terminal" }
 synthesis-verification = { path = "../synthesis-verification" }
 base64 = "0.22"

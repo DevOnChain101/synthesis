@@ -566,3 +566,70 @@ async fn bash_side_effects_are_recorded_through_the_change_tracker() {
     assert_eq!(out.changed_files, ["out.txt"]);
     assert_eq!(t.0.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
+// ---- desktop control: the main agent only (owner policy 2026-11-03) ---------------------------
+
+#[tokio::test]
+async fn a_sub_agent_never_gets_desktop_tools() {
+    let mut tools = ToolBox::new(Registry::builtin());
+    for n in ["desktop_launch", "desktop_act"] {
+        tools = tools.with_tool(Probe::new(n, SideEffectClass::Execute, 0, "ran"));
+    }
+    let any_tools = AgentTable::new([AgentDef {
+        name: "reader".into(),
+        description: "".into(),
+        prompt: "".into(),
+        tools: None,
+        mode: None,
+        model: None,
+        max_turns: None,
+    }]);
+    let mut rig = Rig::build(
+        Opts {
+            tools,
+            mode: PermissionMode::BypassPermissions,
+            ..Opts::default()
+        },
+        vec![task_call(), Turn::text("child done"), Turn::text("ok")],
+        |h, _| h.with_agents(any_tools),
+    );
+    rig.run("x").await;
+    let child: Vec<String> = rig.requests()[1].tools.iter().map(|t| t.name.clone()).collect();
+    assert!(!child.iter().any(|n| n.starts_with("desktop_")), "{child:?}");
+    // the main agent has them
+    let main: Vec<String> = rig.requests()[0].tools.iter().map(|t| t.name.clone()).collect();
+    assert!(main.contains(&"desktop_launch".to_string()), "{main:?}");
+}
+
+#[tokio::test]
+async fn desktop_calls_of_the_main_agent_follow_the_policy_and_are_audited() {
+    let tools = ToolBox::empty().with_tool(Probe::new("desktop_launch", SideEffectClass::Execute, 0, "ran"));
+    let mut rig = Rig::build(
+        Opts {
+            tools,
+            mode: PermissionMode::BypassPermissions,
+            interactive: true,
+            ..Opts::default()
+        },
+        vec![
+            // a browser: hard-denied whatever the mode
+            Turn::tool("d1", "desktop_launch", json!({"target": "/usr/bin/firefox"})),
+            // an external path in bypass: denied (works in manual mode only)
+            Turn::tool("d2", "desktop_launch", json!({"target": "/opt/other/tool"})),
+            Turn::text("ok"),
+        ],
+        |h, _| h,
+    );
+    rig.run("x").await;
+    for id in ["d1", "d2"] {
+        let (text, is_err) = tool_result(&rig.requests()[2], id).unwrap();
+        assert!(is_err && text.contains("Permission denied") && text.contains("NOT run"), "{id}: {text}");
+    }
+    let denied = rig.find(|e| match e {
+        Event::DesktopDenied { tool, reason } => Some((tool.clone(), reason.clone())),
+        _ => None,
+    });
+    assert_eq!(denied.len(), 2, "{denied:?}");
+    assert!(denied[0].1.contains("a web browser"), "{denied:?}");
+    assert!(denied[1].1.contains("manual (default)"), "{denied:?}");
+}

@@ -265,6 +265,27 @@ mod tests {
                 origin: s("https://app.example.com"),
                 profile: s("app-example-com"),
             },
+            Event::DesktopLaunch {
+                app_id: s("app-1"),
+                pid: 42,
+                name: s("demo"),
+                origin: s("project"),
+            },
+            Event::DesktopAct {
+                app_id: s("app-1"),
+                action: s("click"),
+                r#ref: Some(s("@s1:e2")),
+                delivery: s("delivered_unverified"),
+            },
+            Event::DesktopScreenshot {
+                app_id: s("app-1"),
+                window_id: s("w-1"),
+                path: s("/a/desktop/shots/app-1-1.png"),
+            },
+            Event::DesktopDenied {
+                tool: s("desktop_launch"),
+                reason: s("hard-deny list"),
+            },
             Event::SessionStatusChanged {
                 from: s("idle"),
                 to: s("running"),
@@ -674,6 +695,24 @@ mod tests {
         assert_eq!(
             v["payload"],
             json!({"origin":"https://app.example.com","profile":"acme"})
+        );
+    }
+
+    #[test]
+    fn desktop_act_wire_shape_has_no_value() {
+        let mut w = writer();
+        w.emit(Event::DesktopAct {
+            app_id: s("app-1"),
+            action: s("type"),
+            r#ref: Some(s("@s1:e2")),
+            delivery: s("delivered_verified"),
+        })
+        .unwrap();
+        let v: Value = serde_json::from_slice(&w.into_inner()).unwrap();
+        assert_eq!(v["type"], "desktop.act");
+        assert_eq!(
+            v["payload"],
+            json!({"app_id":"app-1","action":"type","ref":"@s1:e2","delivery":"delivered_verified"})
         );
     }
 

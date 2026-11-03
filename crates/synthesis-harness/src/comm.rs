@@ -149,6 +149,8 @@ pub(crate) fn child_parts(
     // Never delegable, even when the definition lists them: no nesting, no questions to the
     // user from a child.
     // Sub-agents may search memory, never change it (memory.md §8).
+    // Desktop control is the person's main agent only (owner policy 2026-11-03).
+    allowed.retain(|n| !synthesis_permissions::desktop::is_desktop_tool(n));
     allowed.retain(|n| {
         !matches!(
             n.as_str(),
