@@ -234,6 +234,15 @@ pub fn attach(
 
 /// Lines for `synt doctor`.
 pub fn doctor_lines(s: &DesktopSettings, exe_dir: Option<&Path>, env: &Env) -> Vec<String> {
+    doctor_lines_with(s, exe_dir, env, permissions)
+}
+
+fn doctor_lines_with(
+    s: &DesktopSettings,
+    exe_dir: Option<&Path>,
+    env: &Env,
+    run_permissions: impl Fn(&Path, &Env, &Path) -> Result<String, String>,
+) -> Vec<String> {
     let mut v = vec![format!(
         "desktop control: {}",
         if s.enabled {
@@ -297,7 +306,7 @@ pub fn doctor_lines(s: &DesktopSettings, exe_dir: Option<&Path>, env: &Env) -> V
         Err(e) => format!("desktop pin: cannot read the binary ({e})"),
     });
     v.push(match (&staged, verified) {
-        (Ok(c), true) => match permissions(c, env, &dir.join("state")) {
+        (Ok(c), true) => match run_permissions(c, env, &dir.join("state")) {
             Ok(p) => format!("desktop OS permissions: {p}"),
             Err(e) => format!("desktop OS permissions: could not be read ({e})"),
         },
@@ -392,27 +401,26 @@ mod tests {
     fn doctor_does_not_run_an_unverified_binary() {
         let d = tempfile::tempdir().unwrap();
         let bin = d.path().join("agent-desktop");
-        // a script that would leave a marker if doctor ever ran it
-        let marker = d.path().join("ran");
-        std::fs::write(&bin, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        std::fs::write(&bin, b"unverified binary").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-            // the script really is runnable: running it by hand leaves the marker ...
-            assert!(std::process::Command::new(&bin).status().unwrap().success());
-            assert!(marker.exists());
-            std::fs::remove_file(&marker).unwrap();
         }
         let env = Env::from_pairs([("DISPLAY", ":0")]);
         let s = parse_settings(&raw(json!({"enabled": true, "binary": bin})));
-        let text = doctor_lines(&s, None, &env).join("\n");
+        let calls = std::cell::Cell::new(0);
+        let text = doctor_lines_with(&s, None, &env, |_, _, _| {
+            calls.set(calls.get() + 1);
+            Ok("called".into())
+        })
+        .join("\n");
         assert!(
             text.contains("desktop pin: UNVERIFIED")
                 && text.contains("not checked (the binary is not pin-verified"),
             "{text}"
         );
-        assert!(!marker.exists());
+        assert_eq!(calls.get(), 0, "unverified binary reached the runner");
         let none = doctor_lines(&parse_settings(&raw(json!({}))), None, &env).join("\n");
         assert!(
             none.contains("disabled")

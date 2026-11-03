@@ -720,6 +720,51 @@ async fn the_dialog_for_an_external_desktop_app_shows_the_whole_command_line_uns
 }
 
 #[tokio::test]
+async fn only_a_hard_approved_external_launch_gets_file_bound_evidence() {
+    let outside = tempfile::tempdir().unwrap();
+    let app = outside.path().join("demo-app");
+    std::fs::write(&app, b"a test executable").unwrap();
+    let probe = Probe::new("desktop_launch", SideEffectClass::Execute, 0, "ran");
+    let tools = ToolBox::empty().with_tool(probe.clone());
+    let approver = ScriptedApprover::new(vec![Approval::allow()]);
+    let a = approver.clone();
+    let mut rig = Rig::build(
+        Opts {
+            tools,
+            interactive: true,
+            ..Opts::default()
+        },
+        vec![
+            Turn::tool("d1", "desktop_launch", json!({"target": app})),
+            Turn::text("ok"),
+        ],
+        move |h, _| h.with_approver(a),
+    );
+    rig.run("x").await;
+    assert_eq!(probe.runs(), 1);
+    let token = probe.approval_tokens.lock().unwrap()[0].clone().unwrap();
+    assert!(
+        token.ends_with(
+            &synthesis_permissions::desktop::launch_token(
+                app.to_str().unwrap(),
+                synthesis_permissions::desktop::Origin::External,
+                true
+            )
+            .unwrap()
+        )
+    );
+    assert!(
+        token.contains(":d1:"),
+        "token is not bound to the tool call"
+    );
+    assert!(
+        approver.asked.lock().unwrap()[0]
+            .prompt
+            .contains("approved executable identity")
+    );
+}
+
+#[tokio::test]
 async fn text_typed_with_desktop_act_never_reaches_events_prompts_or_history() {
     const TYPED: &str = "typed-PLANTED-text-98765";
     let tools = ToolBox::empty().with_tool(Probe::new(

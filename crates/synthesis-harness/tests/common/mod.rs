@@ -33,6 +33,7 @@ pub struct Probe {
     active: AtomicUsize,
     pub max_active: AtomicUsize,
     pub modes: Mutex<Vec<PermissionMode>>,
+    pub approval_tokens: Mutex<Vec<Option<String>>>,
 }
 
 impl Probe {
@@ -51,6 +52,7 @@ impl Probe {
             active: AtomicUsize::new(0),
             max_active: AtomicUsize::new(0),
             modes: Mutex::default(),
+            approval_tokens: Mutex::default(),
         })
     }
 
@@ -68,6 +70,10 @@ impl Tool for Probe {
         Box::pin(async move {
             self.runs.fetch_add(1, Ordering::SeqCst);
             self.modes.lock().unwrap().push(ctx.permission_mode);
+            self.approval_tokens
+                .lock()
+                .unwrap()
+                .push(ctx.approval_token.clone());
             let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_active.fetch_max(now, Ordering::SeqCst);
             tokio::select! {

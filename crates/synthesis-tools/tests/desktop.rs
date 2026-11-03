@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 use synthesis_config::Env;
 use synthesis_core::{PermissionMode, ToolContext, WorkspaceContext};
+use synthesis_permissions::desktop::{self, Origin};
 use synthesis_terminal::SandboxMode;
 use synthesis_tools::{Content, DesktopAudit, DesktopConfig, DesktopHost, Registry, ToolOutput};
 
@@ -156,10 +157,15 @@ fn system_tool(unix: &[&str], windows: &str) -> PathBuf {
 fn alive(pid: u32) -> bool {
     if cfg!(windows) {
         let out = std::process::Command::new(system_tool(&[], "tasklist.exe"))
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
             .output()
             .expect("tasklist could not be started");
-        String::from_utf8_lossy(&out.stdout).contains(&pid.to_string())
+        String::from_utf8_lossy(&out.stdout).lines().any(|line| {
+            line.trim_matches('"')
+                .split("\",\"")
+                .nth(1)
+                .is_some_and(|field| field.parse::<u32>() == Ok(pid))
+        })
     } else {
         std::process::Command::new(system_tool(&["/bin/kill", "/usr/bin/kill"], ""))
             .args(["-0", &pid.to_string()])
@@ -189,7 +195,151 @@ fn snapshot_env() -> Value {
 }
 
 async fn run(f: &Fx, tool: &str, input: Value, c: &ToolContext) -> ToolOutput {
-    f.reg.execute(tool, input, c).await
+    let mut ctx = c.clone();
+    if tool == "desktop_launch"
+        && ctx.approval_token.is_none()
+        && let Some(target) = input["target"].as_str()
+        && let Ok(Some(real)) = desktop::resolve_executable(target)
+    {
+        let origin = if ctx.workspace.resolve(target).is_ok()
+            && ctx.workspace.resolve(&real.to_string_lossy()).is_ok()
+        {
+            Origin::Project
+        } else {
+            Origin::External
+        };
+        // Direct tool tests simulate the harness granting the call. The missing-token test below
+        // calls Registry::execute directly to check that the tool itself refuses it.
+        ctx.approval_token = desktop::scoped_launch_token(
+            &ctx.task_id,
+            &ctx.turn_id,
+            &ctx.tool_call_id,
+            target,
+            origin,
+            origin == Origin::External,
+        )
+        .ok();
+    }
+    f.reg.execute(tool, input, &ctx).await
+}
+
+#[tokio::test]
+async fn an_external_launch_without_hard_approval_evidence_is_refused() {
+    let f = fx_with(false, Registry::unsandboxed_for_tests(), |c| {
+        c.unsafe_for_tests = false
+    });
+    let c = ctx(&f.root, PermissionMode::Default, false);
+    let outside = tempfile::tempdir().unwrap();
+    let app = outside.path().join(exe("outside"));
+    std::fs::copy(&f.app, &app).unwrap();
+    let out = f
+        .reg
+        .execute("desktop_launch", json!({"target": app}), &c)
+        .await;
+    assert!(
+        out.is_error && text(&out).contains("approved executable"),
+        "{}",
+        text(&out)
+    );
+    let mut wrong_origin = c.clone();
+    wrong_origin.approval_token = desktop::scoped_launch_token(
+        &c.task_id,
+        &c.turn_id,
+        &c.tool_call_id,
+        app.to_str().unwrap(),
+        Origin::Project,
+        false,
+    )
+    .ok();
+    let out = f
+        .reg
+        .execute("desktop_launch", json!({"target": app}), &wrong_origin)
+        .await;
+    assert!(
+        out.is_error && text(&out).contains("approved executable"),
+        "{}",
+        text(&out)
+    );
+    let mut wrong_call = wrong_origin.clone();
+    wrong_call.approval_token = desktop::scoped_launch_token(
+        &c.task_id,
+        &c.turn_id,
+        "another-call",
+        app.to_str().unwrap(),
+        Origin::External,
+        true,
+    )
+    .ok();
+    let out = f
+        .reg
+        .execute("desktop_launch", json!({"target": app}), &wrong_call)
+        .await;
+    assert!(
+        out.is_error && text(&out).contains("approved executable"),
+        "{}",
+        text(&out)
+    );
+}
+
+#[tokio::test]
+async fn a_changed_executable_never_matches_its_approval() {
+    let f = fx_with(false, Registry::unsandboxed_for_tests(), |c| {
+        c.unsafe_for_tests = false
+    });
+    let mut c = ctx(&f.root, PermissionMode::Default, false);
+    c.approval_token = desktop::scoped_launch_token(
+        &c.task_id,
+        &c.turn_id,
+        &c.tool_call_id,
+        f.app.to_str().unwrap(),
+        Origin::Project,
+        false,
+    )
+    .ok();
+    let mut bytes = std::fs::read(&f.app).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    std::fs::write(&f.app, bytes).unwrap();
+    let out = f
+        .reg
+        .execute("desktop_launch", json!({"target": f.app}), &c)
+        .await;
+    assert!(
+        out.is_error && text(&out).contains("approved executable"),
+        "{}",
+        text(&out)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unreadable_executable_and_missing_evidence_fail_closed() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fx_with(false, Registry::unsandboxed_for_tests(), |c| {
+        c.unsafe_for_tests = false
+    });
+    std::fs::set_permissions(&f.app, std::fs::Permissions::from_mode(0o111)).unwrap();
+    let c = ctx(&f.root, PermissionMode::Default, false);
+    assert!(
+        desktop::scoped_launch_token(
+            &c.task_id,
+            &c.turn_id,
+            &c.tool_call_id,
+            f.app.to_str().unwrap(),
+            Origin::Project,
+            false
+        )
+        .is_err()
+    );
+    let out = f
+        .reg
+        .execute("desktop_launch", json!({"target": f.app}), &c)
+        .await;
+    assert!(
+        out.is_error && text(&out).contains("approved executable"),
+        "{}",
+        text(&out)
+    );
 }
 
 /// Launches the project app (`__sleep`) and gives the fake desktop one window owned by it.
@@ -861,6 +1011,7 @@ async fn press_is_off_by_default_and_only_app_local_combos_pass_when_on() {
     on.reg.close_session("s1");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_dead_app_is_not_driven_even_if_its_pid_is_still_listed() {
     let f = fx(false);
@@ -883,6 +1034,9 @@ mod bundles {
     fn bundle(root: &Path, name: &str) -> PathBuf {
         let m = root.join(format!("{name}.app/Contents/MacOS"));
         std::fs::create_dir_all(&m).unwrap();
+        std::fs::write(m.parent().unwrap().join("Info.plist"),
+            format!("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>test.{name}</string><key>CFBundleName</key><string>{name}</string></dict></plist>"))
+            .unwrap();
         m
     }
 
@@ -1002,12 +1156,60 @@ mod bundles {
         assert_eq!(o.meta["origin"], "project");
         f.reg.close_session("s1");
     }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_bundle_with_a_denied_plist_identity_is_refused() {
+        let f = fx(false);
+        let c = ctx(&f.root, PermissionMode::Default, false);
+        let m = bundle(&f.root, "Innocent");
+        std::fs::copy(FAKE, m.join("innocent")).unwrap();
+        std::fs::write(m.parent().unwrap().join("Info.plist"),
+            "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>com.1password.1password</string><key>CFBundleName</key><string>Innocent</string></dict></plist>").unwrap();
+        let out = run(
+            &f,
+            "desktop_launch",
+            json!({"target": f.root.join("Innocent.app")}),
+            &c,
+        )
+        .await;
+        assert!(
+            out.is_error && text(&out).contains("password manager"),
+            "{}",
+            text(&out)
+        );
+        std::fs::remove_file(m.parent().unwrap().join("Info.plist")).unwrap();
+        let out = run(
+            &f,
+            "desktop_launch",
+            json!({"target": f.root.join("Innocent.app")}),
+            &c,
+        )
+        .await;
+        assert!(
+            out.is_error && text(&out).contains("Info.plist"),
+            "{}",
+            text(&out)
+        );
+    }
 }
 
 #[tokio::test]
 async fn more_than_twenty_arguments_are_refused() {
     let f = fx(false);
     let c = ctx(&f.root, PermissionMode::Default, false);
+    let accepted: Vec<String> = std::iter::once("__sleep".to_string())
+        .chain((0..19).map(|i| i.to_string()))
+        .collect();
+    let good = run(
+        &f,
+        "desktop_launch",
+        json!({"target": f.app.to_string_lossy(), "args": accepted}),
+        &c,
+    )
+    .await;
+    assert!(!good.is_error, "{}", text(&good));
+    f.reg.close_session("s1");
     let args: Vec<String> = (0..21).map(|i| i.to_string()).collect();
     let o = run(
         &f,
@@ -1037,6 +1239,21 @@ async fn more_than_twenty_arguments_are_refused() {
     )
     .await;
     assert!(o.is_error && o.meta["error"] == "refused", "{}", text(&o));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn project_hardlinks_are_refused() {
+    let f = fx(false);
+    let link = f.root.join("linked-app");
+    std::fs::hard_link(&f.app, &link).unwrap();
+    let c = ctx(&f.root, PermissionMode::Default, false);
+    let out = run(&f, "desktop_launch", json!({"target": link}), &c).await;
+    assert!(
+        out.is_error && text(&out).contains("hardlinked"),
+        "{}",
+        text(&out)
+    );
 }
 
 #[cfg(unix)]

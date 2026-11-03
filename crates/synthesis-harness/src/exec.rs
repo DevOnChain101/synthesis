@@ -144,11 +144,17 @@ struct Denial {
 
 enum Plan {
     Done(Res),
-    Run { input: Value, spec: ToolSpec },
-    Special { input: Value },
+    Run {
+        input: Value,
+        spec: ToolSpec,
+        approval_token: Option<String>,
+    },
+    Special {
+        input: Value,
+    },
 }
 
-type Pending = (usize, String, String, Value, ToolSpec);
+type Pending = (usize, String, String, Value, ToolSpec, Option<String>);
 
 fn side_effect_str(s: SideEffectClass) -> &'static str {
     match s {
@@ -347,14 +353,34 @@ impl Harness {
             }
             match self.plan_call(task, agent, turn, call).await {
                 Plan::Done(r) => slots[i] = Some(r),
-                Plan::Run { input, spec } => {
+                Plan::Run {
+                    input,
+                    spec,
+                    approval_token,
+                } => {
                     if parallel && spec.side_effect == SideEffectClass::Read {
-                        group.push((i, call.id.clone(), call.name.clone(), input, spec));
+                        group.push((
+                            i,
+                            call.id.clone(),
+                            call.name.clone(),
+                            input,
+                            spec,
+                            approval_token,
+                        ));
                     } else {
                         self.flush(task, agent, turn, &mut group, &mut slots).await;
                         slots[i] = Some(
-                            self.exec_call(task, agent, turn, &call.id, &call.name, input, &spec)
-                                .await,
+                            self.exec_call(
+                                task,
+                                agent,
+                                turn,
+                                &call.id,
+                                &call.name,
+                                input,
+                                &spec,
+                                approval_token,
+                            )
+                            .await,
                         );
                     }
                 }
@@ -407,13 +433,24 @@ impl Harness {
         slots: &mut [Option<Res>],
     ) {
         let items = std::mem::take(group);
-        let futs = items.iter().map(|(i, id, name, input, spec)| async move {
-            (
-                *i,
-                self.exec_call(task, agent, turn, id, name, input.clone(), spec)
+        let futs = items
+            .iter()
+            .map(|(i, id, name, input, spec, token)| async move {
+                (
+                    *i,
+                    self.exec_call(
+                        task,
+                        agent,
+                        turn,
+                        id,
+                        name,
+                        input.clone(),
+                        spec,
+                        token.clone(),
+                    )
                     .await,
-            )
-        });
+                )
+            });
         for (i, r) in join_all(futs).await {
             slots[i] = Some(r);
         }
@@ -536,6 +573,7 @@ impl Harness {
         // Policy, then PreToolUse; whenever the input changes after the hook saw it (an approver
         // edit), the hook runs again and the policy rechecks.
         let mut forced: Option<String> = None;
+        let mut approval_token = None;
         let mut settled = false;
         for round in 0..4 {
             let before = input.clone();
@@ -544,7 +582,7 @@ impl Harness {
                 crate::mcp_guard::Check::Reject(m) => return err(m),
                 crate::mcp_guard::Check::Ask(r) => forced = forced.or(Some(r)),
             }
-            if let Err(d) = self
+            let authorized = self
                 .authorize(
                     task,
                     agent,
@@ -555,9 +593,10 @@ impl Harness {
                     forced.take(),
                     round > 0,
                 )
-                .await
-            {
-                return denied(d);
+                .await;
+            match authorized {
+                Ok(token) => approval_token = token,
+                Err(d) => return denied(d),
             }
             if round > 0 && input == before {
                 settled = true;
@@ -602,6 +641,7 @@ impl Harness {
                     ));
                 }
                 input = new;
+                approval_token = None;
             }
             if !rewritten && forced.is_none() {
                 settled = true;
@@ -635,7 +675,11 @@ impl Harness {
         if let Some(r) = self.charge(task, agent, turn, call) {
             return Plan::Done(r);
         }
-        Plan::Run { input, spec }
+        Plan::Run {
+            input,
+            spec,
+            approval_token,
+        }
     }
 
     /// Policy decision plus approval. `Err` = the call must not run. Input edited by the
@@ -651,7 +695,7 @@ impl Harness {
         input: &mut Value,
         mut forced: Option<String>,
         recheck: bool,
-    ) -> Result<(), Denial> {
+    ) -> Result<Option<String>, Denial> {
         // Driving the desktop is the local person's main agent only (owner policy 2026-11-03):
         // a peer request or a sub-agent is refused before any rule, mode or dialog is consulted.
         let desktop = synthesis_permissions::desktop::is_desktop_tool(&call.name);
@@ -728,7 +772,27 @@ impl Harness {
                 verdict.reason = why;
             }
             match verdict.decision {
-                Decision::Allow => return Ok(()),
+                Decision::Allow => {
+                    let token = if call.name == "desktop_launch" {
+                        input
+                            .get("target")
+                            .and_then(Value::as_str)
+                            .and_then(|target| {
+                                synthesis_permissions::desktop::scoped_launch_token(
+                                    &task.task_id,
+                                    turn,
+                                    &call.id,
+                                    target,
+                                    synthesis_permissions::desktop::Origin::Project,
+                                    false,
+                                )
+                                .ok()
+                            })
+                    } else {
+                        None
+                    };
+                    return Ok(token);
+                }
                 Decision::Deny if verdict.reason.starts_with("non-interactive") => {
                     if desktop {
                         self.desktop_denied(task, agent, turn, call, &verdict.reason);
@@ -781,6 +845,33 @@ impl Harness {
                     ),
                 });
             }
+            let token = if call.name == "desktop_launch" {
+                input
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .and_then(|target| {
+                        synthesis_permissions::desktop::scoped_launch_token(
+                            &task.task_id,
+                            turn,
+                            &call.id,
+                            target,
+                            if verdict.hard {
+                                synthesis_permissions::desktop::Origin::External
+                            } else {
+                                synthesis_permissions::desktop::Origin::Project
+                            },
+                            verdict.hard,
+                        )
+                        .ok()
+                    })
+            } else {
+                None
+            };
+            if let Some(t) = &token {
+                verdict
+                    .reason
+                    .push_str(&format!("; approved executable identity: {t}"));
+            }
             let a = self.approve(task, agent, turn, call, input, &verdict).await;
             if a.decision != ApprovalDecision::Allow {
                 let auto = a.decision == ApprovalDecision::AutoDenied;
@@ -814,7 +905,7 @@ impl Harness {
                     *input = new;
                     forced = None;
                 }
-                _ => return Ok(()),
+                _ => return Ok(token),
             }
         }
         Err(Denial {
@@ -1236,8 +1327,10 @@ impl Harness {
         name: &str,
         input: Value,
         spec: &ToolSpec,
+        approval_token: Option<String>,
     ) -> Res {
-        let ctx = self.tool_ctx(task, agent, turn, id);
+        let mut ctx = self.tool_ctx(task, agent, turn, id);
+        ctx.approval_token = approval_token;
         self.emit(
             task,
             agent,

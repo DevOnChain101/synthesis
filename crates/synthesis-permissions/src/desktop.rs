@@ -6,6 +6,7 @@
 //! - The hard-deny list below is never lifted by an approval, a rule or a mode.
 
 use crate::Mode;
+use sha2::{Digest, Sha256};
 
 /// Tools of the desktop family. Peers and sub-agents never get them.
 pub fn is_desktop_tool(name: &str) -> bool {
@@ -19,6 +20,65 @@ pub enum Origin {
     Project,
     /// Anything else (outside the workspace, or attached).
     External,
+}
+
+/// Evidence for the exact executable judged by the engine. The harness creates this before an
+/// approval, and the tool compares it again immediately before spawning. It is carried to the
+/// tool in ToolContext, not accepted from model input.
+pub fn launch_token(
+    target: &str,
+    origin: Origin,
+    external_approved: bool,
+) -> Result<String, String> {
+    let real = resolve_executable(target)?.ok_or("the executable does not exist")?;
+    let meta = std::fs::metadata(&real).map_err(|_| "cannot stat the executable")?;
+    if !meta.is_file() {
+        return Err("the executable is not a file".into());
+    }
+    let mut file = std::fs::File::open(&real).map_err(|_| "cannot read the executable")?;
+    let mut hash = Sha256::new();
+    std::io::copy(&mut file, &mut hash).map_err(|_| "cannot hash the executable")?;
+    let modified = meta
+        .modified()
+        .map_err(|_| "cannot read modification time")?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "invalid modification time")?;
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        (meta.dev(), meta.ino())
+    };
+    #[cfg(windows)]
+    let identity = {
+        use std::os::windows::fs::MetadataExt;
+        (
+            u64::from(meta.volume_serial_number().unwrap_or(0)),
+            meta.file_index().unwrap_or(0),
+        )
+    };
+    Ok(serde_json::json!({
+        "path": real.to_string_lossy(), "size": meta.len(),
+        "mtime": modified.as_nanos().to_string(), "sha256": format!("{:x}", hash.finalize()),
+        "dev": identity.0, "ino": identity.1,
+        "origin": if origin == Origin::External { "external" } else { "project" },
+        "external_approved": external_approved,
+    })
+    .to_string())
+}
+
+/// Binds evidence to one planned tool call. The plan consumes this value when it runs that call.
+pub fn scoped_launch_token(
+    task: &str,
+    turn: &str,
+    call: &str,
+    target: &str,
+    origin: Origin,
+    external_approved: bool,
+) -> Result<String, String> {
+    Ok(format!(
+        "{task}:{turn}:{call}:{}",
+        launch_token(target, origin, external_approved)?
+    ))
 }
 
 /// `app_id` prefix of an external app (the id is minted by the tool, never by the model).
@@ -576,6 +636,18 @@ const INTERPRETERS: &[&str] = &[
     "automator",
     "sandbox-exec",
     "ruby3",
+    "find",
+    "git",
+    "vim",
+    "nvim",
+    "emacs",
+    "luajit",
+    "rscript",
+    "julia",
+    "sed",
+    "cmake",
+    "gradle",
+    "mvn",
 ];
 
 /// Why a target cannot be launched by name alone (a shell, an interpreter, a launcher).
@@ -646,6 +718,8 @@ pub fn refused_arg(arg: &str) -> bool {
         "-encodedcommand",
         "-enc",
         "-file",
+        "-exec",
+        "-eval",
         "/c",
         "/k",
         "/r",
@@ -675,6 +749,12 @@ pub fn refused_arg(arg: &str) -> bool {
     EXACT.contains(&a.as_str())
         || PREFIX.iter().any(|p| a.starts_with(p))
         || (!a.starts_with('-') && SCRIPT_EXT.iter().any(|e| a.ends_with(e)))
+        || ((a.starts_with('/')
+            || a.starts_with("./")
+            || a.starts_with("../")
+            || a.starts_with('\\')
+            || a.as_bytes().get(1) == Some(&b':'))
+            && std::path::Path::new(&a).extension().is_none())
 }
 
 /// `press` combos allowed inside an app: a plain named key, or one of ctrl/cmd/alt (optionally
@@ -757,6 +837,76 @@ mod tests {
     fn app_ids_carry_their_origin() {
         assert_eq!(origin_of_app_id("ext-3"), Origin::External);
         assert_eq!(origin_of_app_id("app-1"), Origin::Project);
+    }
+
+    #[test]
+    fn launch_evidence_binds_origin_approval_and_file_identity() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("app");
+        std::fs::write(&p, b"one").unwrap();
+        let path = p.to_str().unwrap();
+        let approved = launch_token(path, Origin::External, true).unwrap();
+        assert_eq!(
+            approved,
+            launch_token(path, Origin::External, true).unwrap()
+        );
+        assert_ne!(
+            approved,
+            launch_token(path, Origin::Project, false).unwrap()
+        );
+        assert_ne!(
+            approved,
+            launch_token(path, Origin::External, false).unwrap()
+        );
+        std::fs::write(&p, b"two").unwrap();
+        assert_ne!(
+            approved,
+            launch_token(path, Origin::External, true).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_evidence_changes_when_a_link_is_retargeted() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let first = d.path().join("first");
+        let second = d.path().join("second");
+        let link = d.path().join("app");
+        std::fs::write(&first, b"one").unwrap();
+        std::fs::write(&second, b"two").unwrap();
+        symlink(&first, &link).unwrap();
+        let before = launch_token(link.to_str().unwrap(), Origin::Project, false).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        symlink(&second, &link).unwrap();
+        assert_ne!(
+            before,
+            launch_token(link.to_str().unwrap(), Origin::External, true).unwrap()
+        );
+    }
+
+    #[test]
+    fn interpreter_flags_and_extensionless_paths_are_refused() {
+        for arg in [
+            "-exec",
+            "-eval",
+            "-e",
+            "-c",
+            "-command",
+            "-enc",
+            "-encodedcommand",
+            "-file",
+            "./run-script",
+            r"C:\\work\\run-script",
+        ] {
+            assert!(refused_arg(arg), "{arg}");
+        }
+        for name in [
+            "find", "git", "vim", "nvim", "emacs", "luajit", "Rscript", "julia", "sed", "cmake",
+            "gradle", "mvn",
+        ] {
+            assert!(refused_target(name).is_some(), "{name}");
+        }
     }
 
     #[test]

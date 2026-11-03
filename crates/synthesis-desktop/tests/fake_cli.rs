@@ -106,6 +106,31 @@ fn calls(d: &tempfile::TempDir) -> Vec<Vec<String>> {
 }
 
 #[tokio::test]
+async fn version_probe_has_its_own_timeout() {
+    let d = tempfile::tempdir().unwrap();
+    let state = d.path().join("desktop");
+    std::fs::create_dir_all(state.join("state")).unwrap();
+    std::fs::write(
+        state.join("state/fake.json"),
+        json!({
+            "version": {"_fake": {"sleep_ms": 250}, "version":"2.5", "ok":true,
+                "command":"version", "data":{"version":"1.2.3"}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut opts = DesktopOptions::new(PathBuf::from(FAKE), state);
+    opts.allow_unpinned = true;
+    opts.call_timeout = Duration::from_millis(20);
+    let rt = DesktopRuntime::start(opts, &env(), Arc::new(Fixed(table()))).await;
+    assert!(
+        rt.is_ok(),
+        "version probe used call_timeout: {:?}",
+        rt.err()
+    );
+}
+
+#[tokio::test]
 async fn an_unpinned_or_mismatching_binary_is_refused_unless_allowed() {
     let d = tempfile::tempdir().unwrap();
     let mk = |allow: bool, pin: Pin| {

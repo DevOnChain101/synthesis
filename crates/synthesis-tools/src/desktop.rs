@@ -298,6 +298,109 @@ fn fingerprint(p: &Path) -> Option<(u64, Option<std::time::SystemTime>, Option<S
     Some((m.len(), m.modified().ok(), hash))
 }
 
+fn same_installed_binary(a: &Path, b: &Path) -> bool {
+    let (Ok(x), Ok(y)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    if !x.is_file() || !y.is_file() || x.len() != y.len() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if x.dev() == y.dev() && x.ino() == y.ino() {
+            return true;
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if x.volume_serial_number() == y.volume_serial_number() && x.file_index() == y.file_index()
+        {
+            return true;
+        }
+    }
+    let (Ok(a), Ok(b)) = (
+        synthesis_desktop::pin::sha256_file(a),
+        synthesis_desktop::pin::sha256_file(b),
+    ) else {
+        return false;
+    };
+    a == b
+}
+
+fn installed_denied_copy(p: &Path, env: Option<&Env>) -> bool {
+    let mut roots = vec![
+        PathBuf::from("/Applications"),
+        PathBuf::from("/System/Applications"),
+        PathBuf::from("/System/Applications/Utilities"),
+        PathBuf::from("/System/Library/CoreServices/Applications"),
+    ];
+    if let Some(e) = env {
+        for key in ["ProgramFiles", "ProgramFiles(x86)"] {
+            if let Some(v) = e.get_nonempty(key) {
+                roots.push(PathBuf::from(v));
+            }
+        }
+    }
+    denied_copy_in_roots(p, &roots)
+}
+
+fn denied_copy_in_roots(p: &Path, roots: &[PathBuf]) -> bool {
+    roots
+        .iter()
+        .cloned()
+        .filter_map(|root| std::fs::read_dir(root).ok())
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|e| desktop::hard_denied(&e.file_name().to_string_lossy()).is_some())
+        .any(|e| {
+            let base = e.path();
+            if base.is_file() {
+                return same_installed_binary(p, &base);
+            }
+            let macos = base.join("Contents/MacOS");
+            std::fs::read_dir(macos)
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .any(|child| same_installed_binary(p, &child.path()))
+                || std::fs::read_dir(&base)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+                    .any(|child| same_installed_binary(p, &child.path()))
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn denied_bundle_identity(p: &Path) -> Result<Option<&'static str>, String> {
+    let bundle = p
+        .ancestors()
+        .find(|a| a.extension().is_some_and(|e| e.eq_ignore_ascii_case("app")));
+    let Some(bundle) = bundle else {
+        return Ok(None);
+    };
+    let plist = bundle.join("Contents/Info.plist");
+    for key in ["CFBundleIdentifier", "CFBundleName"] {
+        let out = std::process::Command::new("/usr/bin/plutil")
+            .args(["-extract", key, "raw", "-o", "-"])
+            .arg(&plist)
+            .output()
+            .map_err(|_| "cannot read the app bundle's Info.plist")?;
+        if !out.status.success() {
+            return Err("cannot read the app bundle's Info.plist".into());
+        }
+        let value = String::from_utf8(out.stdout).map_err(|_| "invalid app bundle Info.plist")?;
+        if let Some(family) = desktop::hard_denied(value.trim()) {
+            return Ok(Some(family));
+        }
+    }
+    Ok(None)
+}
+
 /// Mach-O (also universal), ELF or PE: a compiled program, not a script.
 fn is_native_executable(p: &Path) -> bool {
     use std::io::Read;
@@ -365,6 +468,28 @@ fn interpreter_copy(p: &Path, env: Option<&Env>) -> Option<PathBuf> {
         "busybox",
         "pwsh",
         "tclsh",
+        "find",
+        "git",
+        "vim",
+        "nvim",
+        "emacs",
+        "luajit",
+        "Rscript",
+        "julia",
+        "gawk",
+        "sed",
+        "xargs",
+        "make",
+        "cmake",
+        "gradle",
+        "mvn",
+        "npm",
+        "npx",
+        "pnpm",
+        "yarn",
+        "cargo",
+        "go",
+        "dotnet",
     ];
     let mut cands: Vec<PathBuf> = dirs
         .iter()
@@ -461,6 +586,21 @@ fn is_executable(p: &Path) -> bool {
     p.is_file()
 }
 
+fn approved_launch_matches(ctx: &ToolContext, target: &str, origin: Origin) -> bool {
+    let Some(given) = ctx.approval_token.as_deref() else {
+        return false;
+    };
+    desktop::scoped_launch_token(
+        &ctx.task_id,
+        &ctx.turn_id,
+        &ctx.tool_call_id,
+        target,
+        origin,
+        origin == Origin::External,
+    )
+    .is_ok_and(|expected| given == expected)
+}
+
 async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutput {
     const W: &str = "desktop_launch";
     if let Err(e) = main_agent_only(sh, ctx, W) {
@@ -544,6 +684,15 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
         }
         (false, _) => Origin::External,
     };
+    // The harness recorded the exact file and origin it judged. An external launch also needs
+    // the evidence minted only after the hard approval was answered Allow.
+    if !cfg.unsafe_for_tests && !approved_launch_matches(ctx, target, origin) {
+        return refuse(
+            sh,
+            W,
+            "the approved executable, its origin or its identity changed: refused",
+        );
+    }
     if let Err(e) = mode_ok(sh, ctx, W, origin) {
         return e;
     }
@@ -553,6 +702,30 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
             W,
             format!("{shown} resolves to {family}: desktop control of it is never allowed"),
         );
+    }
+    #[cfg(target_os = "macos")]
+    match denied_bundle_identity(&real) {
+        Ok(Some(family)) => return refuse(sh, W, format!("{shown} is {family}: refused")),
+        Err(why) => return refuse(sh, W, format!("{shown}: {why}")),
+        Ok(None) => {}
+    }
+    if installed_denied_copy(&real, cfg.process_env.as_ref()) {
+        return refuse(
+            sh,
+            W,
+            format!("{shown} has the identity of an installed denied app"),
+        );
+    }
+    #[cfg(unix)]
+    if origin == Origin::Project {
+        use std::os::unix::fs::MetadataExt;
+        if std::fs::metadata(&real).is_ok_and(|m| m.nlink() > 1) {
+            return refuse(
+                sh,
+                W,
+                format!("{shown} is a hardlinked executable: refused"),
+            );
+        }
     }
     if let Some(why) = desktop::refused_target(&real.to_string_lossy()) {
         return refuse(
@@ -634,6 +807,15 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
             sh,
             W,
             format!("{shown} changed while it was being checked: refused"),
+        );
+    }
+    // The runtime startup above can take time. Recheck the *approval* identity at the last
+    // point before spawning, not just the file observed by the tool after approval.
+    if !cfg.unsafe_for_tests && !approved_launch_matches(ctx, target, origin) {
+        return refuse(
+            sh,
+            W,
+            "the approved executable, its origin or its identity changed: refused",
         );
     }
     let mut spec = SpawnSpec::new(line);
@@ -991,6 +1173,19 @@ mod tests {
     }
 
     #[test]
+    fn renamed_copy_of_an_installed_denied_app_is_recognised() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("Applications");
+        let installed = root.join("1Password.app/Contents/MacOS");
+        std::fs::create_dir_all(&installed).unwrap();
+        let original = installed.join("hidden-name");
+        std::fs::write(&original, b"the installed denied program").unwrap();
+        let copy = d.path().join("innocent");
+        std::fs::copy(&original, &copy).unwrap();
+        assert!(denied_copy_in_roots(&copy, &[root]));
+    }
+
+    #[test]
     fn magic_numbers_tell_binaries_from_scripts() {
         let d = tempfile::tempdir().unwrap();
         let w = |n: &str, b: &[u8]| {
@@ -1012,11 +1207,9 @@ mod tests {
         assert!(!is_native_executable(&w("tiny", b"x")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_renamed_copy_of_a_system_interpreter_is_recognised() {
-        if cfg!(windows) {
-            return;
-        }
         let d = tempfile::tempdir().unwrap();
         let copy = d.path().join("MyApp");
         std::fs::copy("/bin/sh", &copy).unwrap();
