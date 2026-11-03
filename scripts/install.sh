@@ -1,7 +1,7 @@
 #!/bin/sh
 # Synthesis installer (macOS, Linux). No sudo: installs to ~/.local/bin by default.
 #   SYNT_VERSION=0.1.0        version to install (default: latest release)
-#   SYNT_REPO=owner/repo      GitHub repository (default DevOnChain101/nemo-acd; scripts/check-placeholders.mjs keeps it equal to packaging/REPO)
+#   SYNT_REPO=owner/repo      GitHub repository (default DevOnChain101/synthesis; scripts/check-placeholders.mjs keeps it equal to packaging/REPO)
 #   SYNT_INSTALL_DIR=DIR      default $HOME/.local/bin
 #   SYNT_BIN_NAME=synt       name of the installed command (e.g. synt-rs to coexist with the Node CLI)
 #   (default)                 with `gh` present, a failing `gh attestation verify` of SHA256SUMS (signer workflow + source ref v$version) aborts;
@@ -11,7 +11,7 @@
 #   SYNT_INSECURE_DOWNLOAD_BASE_I_KNOW=1  allow a non-https SYNT_DOWNLOAD_BASE (tests only)
 set -eu
 
-REPO=${SYNT_REPO:-DevOnChain101/nemo-acd}
+REPO=${SYNT_REPO:-DevOnChain101/synthesis}
 DIR=${SYNT_INSTALL_DIR:-$HOME/.local/bin}
 NAME=${SYNT_BIN_NAME:-synt}
 

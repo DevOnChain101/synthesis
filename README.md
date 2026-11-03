@@ -10,12 +10,12 @@ Pick one (details in [docs/INSTALL.md](docs/INSTALL.md)):
 
 ```sh
 # macOS / Linux: checksum + provenance verified (provenance needs gh, else checksum only with a warning), no sudo, installs to ~/.local/bin
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/DevOnChain101/nemo-acd/releases/latest/download/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/DevOnChain101/synthesis/releases/latest/download/install.sh | sh
 # any OS with Node >= 18: native binary via platform packages
 npm install -g @devonchain101/synthesis   # installs the command `synt`
 ```
 
-Windows (PowerShell 7+): `irm https://github.com/DevOnChain101/nemo-acd/releases/latest/download/install.ps1 | iex`. Release archives, SHA256SUMS and build provenance are on the GitHub Releases page. License: Apache-2.0.
+Windows (PowerShell 7+): `irm https://github.com/DevOnChain101/synthesis/releases/latest/download/install.ps1 | iex`. Release archives, SHA256SUMS and build provenance are on the GitHub Releases page. License: Apache-2.0.
 
 ## Quick start
 

@@ -32,7 +32,7 @@ function resolveBinary() {
     `synt: no native binary for ${process.platform}-${process.arch} (looked for: ${tried}).\n` +
       `Supported: darwin-arm64, darwin-x64, linux-x64, linux-arm64, win32-x64, win32-arm64.\n` +
       `If your platform is supported, reinstall without --no-optional / --omit=optional.\n` +
-      `Otherwise see https://github.com/DevOnChain101/nemo-acd/releases for other install methods.`,
+      `Otherwise see https://github.com/DevOnChain101/synthesis/releases for other install methods.`,
   );
   process.exit(127);
 }

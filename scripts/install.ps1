@@ -1,12 +1,12 @@
 # Synthesis installer for Windows (PowerShell 7+; Windows PowerShell 5.1 is not supported). No admin rights: installs to %LOCALAPPDATA%\Programs\Synthesis.
 #   $env:SYNT_VERSION, $env:SYNT_INSTALL_DIR, $env:SYNT_BIN_NAME (default synt),
-#   $env:SYNT_REPO (owner/repo; default DevOnChain101/nemo-acd, kept equal to packaging/REPO by scripts/check-placeholders.mjs),
+#   $env:SYNT_REPO (owner/repo; default DevOnChain101/synthesis, kept equal to packaging/REPO by scripts/check-placeholders.mjs),
 #   (default) with gh present a failing `gh attestation verify` of SHA256SUMS (signer workflow + source ref v$version) aborts; without gh only the checksum is checked (warning),
 #   $env:SYNT_SKIP_ATTESTATION=1 (skip the attestation check even when gh exists; prints a warning),
 #   $env:SYNT_DOWNLOAD_BASE (mirrors, tests; must be https:// unless $env:SYNT_INSECURE_DOWNLOAD_BASE_I_KNOW=1)
 $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw "PowerShell 7+ is required (this is $($PSVersionTable.PSVersion)). Install it with: winget install Microsoft.PowerShell, then run this script with pwsh" }
-$repo = if ($env:SYNT_REPO) { $env:SYNT_REPO } else { 'DevOnChain101/nemo-acd' }
+$repo = if ($env:SYNT_REPO) { $env:SYNT_REPO } else { 'DevOnChain101/synthesis' }
 if ($repo -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw "bad repository '$repo' (expected owner/repo)" }
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 if ($env:SYNT_DOWNLOAD_BASE -and $env:SYNT_DOWNLOAD_BASE -notmatch '^https://' -and $env:SYNT_INSECURE_DOWNLOAD_BASE_I_KNOW -ne '1') {
