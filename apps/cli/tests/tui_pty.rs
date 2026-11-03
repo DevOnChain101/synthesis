@@ -170,12 +170,13 @@ fn approval_subagent_model_switch_and_new_folder() {
         // /new -> sub/ -> use this folder: a fresh session in that folder
         send("/new\r"),
         expect("use this folder"),
+        // wait for each picker state instead of sleeping: a loaded runner drops keys sent too early
         send("sub"),
-        ["wait", 0.5],
+        expect("sub/"),
         send("\r"),
-        ["wait", 1],
+        expect_new("use this folder"),
         send("\r"),
-        ["wait", 3],
+        expect_new("/sub"),
         send("hello\r"),
         expect_new("first reply")
     ]));
