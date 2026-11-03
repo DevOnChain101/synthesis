@@ -328,6 +328,7 @@ fn legacy_notes(
         (h.synthesis.as_path(), "synthesis.db", "synt.db"),
         (h.synthesis.as_path(), "SYNTHESIS.md", "AGENTS.md"),
         (project, "SYNTHESIS.md", "AGENTS.md"),
+        (project, "synthesis.json", "synt.json"),
     ] {
         if dir.join(old).is_file() {
             v.push(format!(
@@ -568,8 +569,14 @@ mod tests {
         std::fs::create_dir_all(&h.synthesis).unwrap();
         std::fs::write(h.synthesis.join("synthesis.json"), "{}").unwrap();
         std::fs::write(proj.join("SYNTHESIS.md"), "x").unwrap();
+        std::fs::write(proj.join("synthesis.json"), "{}").unwrap();
         let v = legacy_notes(&env, &h, &proj, None).join("\n");
         assert!(v.contains("synthesis.json is ignored"), "{v}");
+        assert!(
+            v.contains(&proj.join("synthesis.json").display().to_string())
+                && v.contains(&proj.join("synt.json").display().to_string()),
+            "{v}"
+        );
         assert!(
             v.contains("SYNTHESIS.md is ignored") && v.contains("AGENTS.md"),
             "{v}"
