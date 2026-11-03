@@ -708,7 +708,7 @@ async fn the_dialog_for_an_external_desktop_app_shows_the_whole_command_line_uns
         "{p}"
     );
     assert!(
-        p.contains("environment additions: none") && p.contains("chars cut]"),
+        p.contains("environment: the session") && p.contains("chars cut]"),
         "{p}"
     );
     assert!(

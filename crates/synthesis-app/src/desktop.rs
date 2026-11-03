@@ -242,6 +242,14 @@ pub fn doctor_lines(s: &DesktopSettings, exe_dir: Option<&Path>, env: &Env) -> V
             "disabled (off by default; synt.desktop.enabled: true in your user settings turns it on)"
         }
     )];
+    if s.enabled {
+        let caps = synthesis_sandbox::detect().capabilities();
+        v.push(format!(
+            "desktop sandbox WARNING: the filesystem guarantee of this machine's sandbox is {:?}{}. A launched GUI app is confined only as far as that backend goes: macOS Seatbelt is documented as NOT a security boundary, X11 has no per-client isolation, and on macOS the Accessibility grant of the terminal app is inherited by the app's children. Treat desktop_launch as best-effort; the sandbox is never widened for GUI apps (docs/DESKTOP-CONTROL.md, release blocker).",
+            caps.filesystem,
+            if cfg!(target_os = "macos") { " (Seatbelt)" } else { "" }
+        ));
+    }
     if synthesis_desktop::is_wsl() {
         v.push("desktop: WSL is not supported (it has no desktop session of its own)".into());
     }
@@ -262,8 +270,18 @@ pub fn doctor_lines(s: &DesktopSettings, exe_dir: Option<&Path>, env: &Env) -> V
     };
     v.push(format!("desktop binary: {}", bin.display()));
     // Hash and run the same private copy, so nothing can swap the file in between.
-    let dir = temp_root(env).join(format!("synt-desktop-doctor-{}", std::process::id()));
-    let staged = pin::stage(&bin, &dir.join("bin"));
+    // in a random private directory (created exclusively, 0700), removed when this returns
+    let tmp = tempfile::Builder::new()
+        .prefix("synt-desktop-doctor-")
+        .tempdir_in(temp_root(env));
+    let dir = tmp
+        .as_ref()
+        .map(|t| t.path().to_path_buf())
+        .unwrap_or_default();
+    let staged = match &tmp {
+        Ok(_) => pin::stage(&bin, &dir.join("bin")),
+        Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
+    };
     let status = match &staged {
         Ok(c) => pin::check(c, &Pin::builtin()),
         Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
@@ -285,7 +303,6 @@ pub fn doctor_lines(s: &DesktopSettings, exe_dir: Option<&Path>, env: &Env) -> V
         },
         _ => "desktop OS permissions: not checked (the binary is not pin-verified, so doctor does not run it)".into(),
     });
-    let _ = std::fs::remove_dir_all(&dir);
     if cfg!(target_os = "macos") {
         v.push("desktop macOS: the Accessibility grant lands on the terminal app that runs synt, so every command the agent runs there inherits it; a signed helper .app that holds the grant instead is recommended (not built yet)".into());
     }
@@ -378,6 +395,15 @@ mod tests {
         // a script that would leave a marker if doctor ever ran it
         let marker = d.path().join("ran");
         std::fs::write(&bin, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // the script really is runnable: running it by hand leaves the marker ...
+            assert!(std::process::Command::new(&bin).status().unwrap().success());
+            assert!(marker.exists());
+            std::fs::remove_file(&marker).unwrap();
+        }
         let env = Env::from_pairs([("DISPLAY", ":0")]);
         let s = parse_settings(&raw(json!({"enabled": true, "binary": bin})));
         let text = doctor_lines(&s, None, &env).join("\n");
