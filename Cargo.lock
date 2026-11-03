@@ -2688,6 +2688,7 @@ dependencies = [
  "process-wrap",
  "psl",
  "regex",
+ "rustix",
  "serde_json",
  "synthesis-config",
  "tempfile",

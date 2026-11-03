@@ -1442,17 +1442,19 @@ impl BrowserRuntime {
             // SIGKILL is asynchronous and the leader may already be reaped (graceful exit), so its
             // helpers (crashpad, zygote) can outlive `wait`: hold until the group is gone.
             #[cfg(unix)]
-            for _ in 0..50 {
-                // `kill -0 -- -pgid` probes the group (no unsafe allowed); a missing tool counts as gone.
-                let alive = std::process::Command::new("/bin/kill")
-                    .args(["-0", "--", &format!("-{}", self.pid)])
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .is_ok_and(|s| s.success());
-                if !alive {
-                    break;
+            {
+                let mut left = 50;
+                while group_alive(self.pid) {
+                    left -= 1;
+                    if left == 0 {
+                        eprintln!(
+                            "synthesis-browser: process group {} still has members 5 s after kill",
+                            self.pid
+                        );
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
         lock(&self.profile_lock).take(); // the profile is free only once the browser is gone
@@ -1479,9 +1481,31 @@ impl BrowserRuntime {
     }
 }
 
+/// kill(-pgid, 0): does the group still have a member (a zombie counts)? pid 0 is never a group.
+#[cfg(unix)]
+fn group_alive(pgid: u32) -> bool {
+    i32::try_from(pgid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .is_some_and(|p| rustix::process::test_kill_process_group(p).is_ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn group_alive_follows_a_real_group_and_never_pid_zero() {
+        use std::os::unix::process::CommandExt;
+        let mut c = std::process::Command::new("sleep");
+        let mut child = c.arg("30").process_group(0).spawn().unwrap();
+        assert!(group_alive(child.id()));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!group_alive(child.id()));
+        assert!(!group_alive(0));
+    }
 
     #[tokio::test]
     async fn tcp_transport_refuses_persistent_profiles_and_the_login_window() {
