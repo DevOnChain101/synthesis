@@ -35,34 +35,46 @@ pub fn parse_settings(raw: &Map<String, Value>) -> DesktopSettings {
     if let Some(b) = raw.get("binary") {
         match b.as_str().map(PathBuf::from).filter(|p| p.is_absolute()) {
             Some(p) => s.binary = Some(p),
-            None => s.warnings.push("synt.desktop.binary: not an absolute path, ignored".into()),
+            None => s
+                .warnings
+                .push("synt.desktop.binary: not an absolute path, ignored".into()),
         }
     }
     if let Some(v) = raw.get("actions_per_second") {
         match v.as_f64().filter(|f| (0.1..=10.0).contains(f)) {
             Some(f) => s.actions_per_sec = Some(f),
-            None => s.warnings.push("synt.desktop.actions_per_second: expected 0.1 to 10, ignored".into()),
+            None => s
+                .warnings
+                .push("synt.desktop.actions_per_second: expected 0.1 to 10, ignored".into()),
         }
     }
     if let Some(v) = raw.get("max_actions") {
         match v.as_u64().filter(|n| (1..=5000).contains(n)) {
             Some(n) => s.max_actions = Some(n as u32),
-            None => s.warnings.push("synt.desktop.max_actions: expected 1 to 5000, ignored".into()),
+            None => s
+                .warnings
+                .push("synt.desktop.max_actions: expected 1 to 5000, ignored".into()),
         }
     }
     s
 }
 
 fn binary_name() -> &'static str {
-    if cfg!(windows) { "agent-desktop.exe" } else { "agent-desktop" }
+    if cfg!(windows) {
+        "agent-desktop.exe"
+    } else {
+        "agent-desktop"
+    }
 }
 
 impl DesktopSettings {
     /// The configured binary, or the one next to the `synt` executable.
     pub fn binary_path(&self, exe_dir: Option<&Path>) -> Option<PathBuf> {
-        self.binary
-            .clone()
-            .or_else(|| exe_dir.map(|d| d.join(binary_name())).filter(|p| p.is_file()))
+        self.binary.clone().or_else(|| {
+            exe_dir
+                .map(|d| d.join(binary_name()))
+                .filter(|p| p.is_file())
+        })
     }
 
     /// `None` while the feature is off: the tools are not registered at all.
@@ -98,14 +110,37 @@ impl std::fmt::Debug for AuditHost {
 impl DesktopHost for AuditHost {
     fn audit(&self, e: DesktopAudit) {
         let ev = match e {
-            DesktopAudit::Launch { app_id, pid, name, external } => Event::DesktopLaunch {
+            DesktopAudit::Launch {
+                app_id,
+                pid,
+                name,
+                external,
+            } => Event::DesktopLaunch {
                 app_id,
                 pid: pid.into(),
                 name,
                 origin: if external { "external" } else { "project" }.into(),
             },
-            DesktopAudit::Act { app_id, action, r#ref, delivery } => Event::DesktopAct { app_id, action, r#ref, delivery },
-            DesktopAudit::Screenshot { app_id, window_id, path } => Event::DesktopScreenshot { app_id, window_id, path },
+            DesktopAudit::Act {
+                app_id,
+                action,
+                r#ref,
+                delivery,
+            } => Event::DesktopAct {
+                app_id,
+                action,
+                r#ref,
+                delivery,
+            },
+            DesktopAudit::Screenshot {
+                app_id,
+                window_id,
+                path,
+            } => Event::DesktopScreenshot {
+                app_id,
+                window_id,
+                path,
+            },
             DesktopAudit::Denied { tool, reason } => Event::DesktopDenied { tool, reason },
         };
         self.sink.emit(&Scope::default(), ev);
@@ -124,7 +159,17 @@ fn permissions(bin: &Path, env: &Env) -> Result<String, String> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    for k in ["HOME", "USERPROFILE", "PATH", "TMPDIR", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "SystemRoot"] {
+    for k in [
+        "HOME",
+        "USERPROFILE",
+        "PATH",
+        "TMPDIR",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "SystemRoot",
+    ] {
         if let Some(v) = env.get_nonempty(k) {
             cmd.env(k, v);
         }
@@ -140,7 +185,8 @@ fn permissions(bin: &Path, env: &Env) -> Result<String, String> {
             std::thread::sleep(Duration::from_millis(50));
         }
         let out = child.wait_with_output().map_err(|e| e.to_string())?;
-        let data = synthesis_desktop::envelope::parse(&out.stdout, "permissions").map_err(|e| e.to_string())?;
+        let data = synthesis_desktop::envelope::parse(&out.stdout, "permissions")
+            .map_err(|e| e.to_string())?;
         let show = |k: &str| synthesis_desktop::text::clean(&data[k].to_string(), 40);
         Ok(format!(
             "accessibility {}, screen recording {}, automation {}",
@@ -167,8 +213,13 @@ pub fn doctor_lines(s: &DesktopSettings, exe_dir: Option<&Path>, env: &Env) -> V
         v.push("desktop: WSL is not supported (it has no desktop session of its own)".into());
     }
     match synthesis_desktop::display_available(env) {
-        Ok(()) => v.push("desktop session: a graphical session looks present (not verified: no OS call is made)".into()),
-        Err(e) => v.push(format!("desktop session: not available ({e}); the desktop tools return desktop_unavailable")),
+        Ok(()) => v.push(
+            "desktop session: a graphical session looks present (not verified: no OS call is made)"
+                .into(),
+        ),
+        Err(e) => v.push(format!(
+            "desktop session: not available ({e}); the desktop tools return desktop_unavailable"
+        )),
     }
     let Some(bin) = s.binary_path(exe_dir) else {
         v.push("desktop binary: not configured (synt.desktop.binary, or agent-desktop next to the synt executable)".into());
@@ -216,10 +267,17 @@ mod tests {
         assert!(!parse_settings(&raw(json!({}))).enabled);
         assert!(!parse_settings(&raw(json!({"enabled": "true"}))).enabled);
         assert!(!parse_settings(&raw(json!({"enabled": 1}))).enabled);
-        let s = parse_settings(&raw(json!({"enabled": true, "allow_unpinned": true, "binary": "/u/ad", "actions_per_second": 5, "max_actions": 40})));
+        let s = parse_settings(&raw(
+            json!({"enabled": true, "allow_unpinned": true, "binary": "/u/ad", "actions_per_second": 5, "max_actions": 40}),
+        ));
         assert!(s.enabled && s.allow_unpinned && s.warnings.is_empty());
-        assert_eq!((s.binary, s.actions_per_sec, s.max_actions), (Some("/u/ad".into()), Some(5.0), Some(40)));
-        let bad = parse_settings(&raw(json!({"binary": "rel/ad", "actions_per_second": 99, "max_actions": 0})));
+        assert_eq!(
+            (s.binary, s.actions_per_sec, s.max_actions),
+            (Some("/u/ad".into()), Some(5.0), Some(40))
+        );
+        let bad = parse_settings(&raw(
+            json!({"binary": "rel/ad", "actions_per_second": 99, "max_actions": 0}),
+        ));
         assert_eq!(bad.warnings.len(), 3);
         assert!(bad.binary.is_none() && bad.actions_per_sec.is_none() && bad.max_actions.is_none());
     }
@@ -247,9 +305,18 @@ mod tests {
         let env = Env::from_pairs([("DISPLAY", ":0")]);
         let s = parse_settings(&raw(json!({"enabled": true, "binary": bin})));
         let text = doctor_lines(&s, None, &env).join("\n");
-        assert!(text.contains("desktop pin: UNVERIFIED") && text.contains("not checked (the binary is not pin-verified"), "{text}");
+        assert!(
+            text.contains("desktop pin: UNVERIFIED")
+                && text.contains("not checked (the binary is not pin-verified"),
+            "{text}"
+        );
         assert!(!marker.exists());
         let none = doctor_lines(&parse_settings(&raw(json!({}))), None, &env).join("\n");
-        assert!(none.contains("disabled") && none.contains("not configured") && none.contains("OS permissions: not checked"), "{none}");
+        assert!(
+            none.contains("disabled")
+                && none.contains("not configured")
+                && none.contains("OS permissions: not checked"),
+            "{none}"
+        );
     }
 }

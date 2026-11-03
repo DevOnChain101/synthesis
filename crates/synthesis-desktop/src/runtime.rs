@@ -163,8 +163,9 @@ pub fn display_available(env: &Env) -> std::result::Result<(), String> {
 /// Windows Subsystem for Linux has no desktop session of its own.
 pub fn is_wsl() -> bool {
     cfg!(target_os = "linux")
-        && std::fs::read_to_string("/proc/sys/kernel/osrelease")
-            .is_ok_and(|s| s.to_lowercase().contains("microsoft") || s.to_lowercase().contains("wsl"))
+        && std::fs::read_to_string("/proc/sys/kernel/osrelease").is_ok_and(|s| {
+            s.to_lowercase().contains("microsoft") || s.to_lowercase().contains("wsl")
+        })
 }
 
 fn private_dir(p: &std::path::Path) -> Result<()> {
@@ -182,10 +183,16 @@ fn private_dir(p: &std::path::Path) -> Result<()> {
 }
 
 impl DesktopRuntime {
-    pub async fn start(opts: DesktopOptions, env: &Env, procs: Arc<dyn ProcSource>) -> Result<Self> {
+    pub async fn start(
+        opts: DesktopOptions,
+        env: &Env,
+        procs: Arc<dyn ProcSource>,
+    ) -> Result<Self> {
         let un = |m: String| DesktopError::Unavailable(m);
         if is_wsl() {
-            return Err(un("WSL is not supported: it has no desktop session of its own".into()));
+            return Err(un(
+                "WSL is not supported: it has no desktop session of its own".into(),
+            ));
         }
         display_available(env).map_err(un)?;
         if !opts.binary.is_file() {
@@ -237,10 +244,14 @@ impl DesktopRuntime {
             version: String::new(),
             state: Mutex::new(state),
         };
-        let v = rt.run(&["version".into()], "version", rt.opts.call_timeout).await?;
+        let v = rt
+            .run(&["version".into()], "version", rt.opts.call_timeout)
+            .await?;
         let version = clean(v["version"].as_str().unwrap_or(""), 40);
         if version.is_empty() {
-            return Err(DesktopError::Protocol("agent-desktop version: no version".into()));
+            return Err(DesktopError::Protocol(
+                "agent-desktop version: no version".into(),
+            ));
         }
         if rt.opts.pin.is_filled() && version != rt.opts.pin.version {
             return Err(un(format!(
@@ -278,7 +289,11 @@ impl DesktopRuntime {
         let cap = self.opts.max_output;
         let read = async {
             let mut buf = Vec::new();
-            (&mut out).take(cap as u64 + 1).read_to_end(&mut buf).await.map(|_| buf)
+            (&mut out)
+                .take(cap as u64 + 1)
+                .read_to_end(&mut buf)
+                .await
+                .map(|_| buf)
         };
         let buf = match tokio::time::timeout(timeout, read).await {
             Err(_) => {
@@ -288,7 +303,11 @@ impl DesktopRuntime {
                     timeout.as_secs()
                 )));
             }
-            Ok(Err(e)) => return Err(DesktopError::Protocol(format!("agent-desktop {expect}: {e}"))),
+            Ok(Err(e)) => {
+                return Err(DesktopError::Protocol(format!(
+                    "agent-desktop {expect}: {e}"
+                )));
+            }
             Ok(Ok(b)) => b,
         };
         if buf.len() > cap {
@@ -318,27 +337,37 @@ impl DesktopRuntime {
             )));
         }
         let name = clean(
-            target.rsplit(['/', '\\']).find(|p| !p.is_empty()).unwrap_or(target),
+            target
+                .rsplit(['/', '\\'])
+                .find(|p| !p.is_empty())
+                .unwrap_or(target),
             80,
         );
         let mut st = lock(&self.state);
         let id = format!(
             "{}{}",
-            if origin == Origin::External { synthesis_permissions::desktop::EXTERNAL_PREFIX } else { "app-" },
+            if origin == Origin::External {
+                synthesis_permissions::desktop::EXTERNAL_PREFIX
+            } else {
+                "app-"
+            },
             st.next_app
         );
         st.next_app += 1;
-        let app = App { id: id.clone(), pid, origin, name };
+        let app = App {
+            id: id.clone(),
+            pid,
+            origin,
+            name,
+        };
         st.apps.insert(id, app.clone());
         Ok(app)
     }
 
     pub fn app(&self, id: &str) -> Result<App> {
-        lock(&self.state)
-            .apps
-            .get(id)
-            .cloned()
-            .ok_or_else(|| DesktopError::NotFound(format!("no app {id:?}: launch one with desktop_launch")))
+        lock(&self.state).apps.get(id).cloned().ok_or_else(|| {
+            DesktopError::NotFound(format!("no app {id:?}: launch one with desktop_launch"))
+        })
     }
 
     pub fn forget_app(&self, id: &str) {
@@ -362,12 +391,23 @@ impl DesktopRuntime {
             .map_err(|e| DesktopError::Unavailable(e.to_string()))??;
         let tree = table.descendants(app.pid);
         let hosts = table.ancestors(self.host_pid);
-        let data = self.run(&["list-windows".into()], "list-windows", self.opts.call_timeout).await?;
+        let data = self
+            .run(
+                &["list-windows".into()],
+                "list-windows",
+                self.opts.call_timeout,
+            )
+            .await?;
         let arr = data
             .as_array()
             .or_else(|| data["windows"].as_array())
-            .ok_or_else(|| DesktopError::Protocol("agent-desktop list-windows: no window list".into()))?;
-        let mut out = Windows { windows: vec![], hidden: vec![] };
+            .ok_or_else(|| {
+                DesktopError::Protocol("agent-desktop list-windows: no window list".into())
+            })?;
+        let mut out = Windows {
+            windows: vec![],
+            hidden: vec![],
+        };
         for w in arr {
             let (Some(id), Some(pid)) = (
                 w["id"].as_str().filter(|s| !s.is_empty() && s.len() <= 128),
@@ -398,7 +438,10 @@ impl DesktopRuntime {
         let ws = self.windows(app_id).await?;
         match want {
             Some(id) => ws.windows.into_iter().find(|w| w.id == id).ok_or_else(|| {
-                DesktopError::Refused(format!("window {} is not a window of this app", clean(id, 60)))
+                DesktopError::Refused(format!(
+                    "window {} is not a window of this app",
+                    clean(id, 60)
+                ))
             }),
             None => {
                 let mut it = ws.windows.into_iter();
@@ -408,8 +451,11 @@ impl DesktopRuntime {
                         "the app has no window (yet); try desktop_wait or desktop_logs".into(),
                     )),
                     (Some(a), Some(b)) => {
-                        let ids: Vec<String> =
-                            [a, b].iter().map(|w| w.id.clone()).chain(it.map(|w| w.id)).collect();
+                        let ids: Vec<String> = [a, b]
+                            .iter()
+                            .map(|w| w.id.clone())
+                            .chain(it.map(|w| w.id))
+                            .collect();
                         Err(DesktopError::Refused(format!(
                             "the app has several windows; pass window_id (one of: {})",
                             ids.join(", ")
@@ -429,7 +475,9 @@ impl DesktopRuntime {
         skeleton: bool,
         max_nodes: usize,
     ) -> Result<Snapshot> {
-        let mut a: Vec<String> = ["snapshot", "--window-id", window, "--compact"].map(Into::into).into();
+        let mut a: Vec<String> = ["snapshot", "--window-id", window, "--compact"]
+            .map(Into::into)
+            .into();
         if skeleton {
             a.push("--skeleton".into());
         }
@@ -459,8 +507,12 @@ impl DesktopRuntime {
             None => window_id.map(str::to_owned),
         };
         let w = self.pick_window(app_id, want.as_deref()).await?;
-        let s = self.snapshot_of(&w.id, root_ref, skeleton, max_nodes).await?;
-        lock(&self.state).refs.record(app_id, &s, root_ref.is_none());
+        let s = self
+            .snapshot_of(&w.id, root_ref, skeleton, max_nodes)
+            .await?;
+        lock(&self.state)
+            .refs
+            .record(app_id, &s, root_ref.is_none());
         Ok(s)
     }
 
@@ -471,21 +523,38 @@ impl DesktopRuntime {
             st.next_shot += 1;
             st.next_shot - 1
         };
-        let path = self.opts.state_dir.join("shots").join(format!("{app_id}-{n}.png"));
-        let args = ["screenshot".to_owned(), "--window-id".into(), w.id.clone(), path.display().to_string()];
-        self.run(&args, "screenshot", self.opts.call_timeout).await?;
+        let path = self
+            .opts
+            .state_dir
+            .join("shots")
+            .join(format!("{app_id}-{n}.png"));
+        let args = [
+            "screenshot".to_owned(),
+            "--window-id".into(),
+            w.id.clone(),
+            path.display().to_string(),
+        ];
+        self.run(&args, "screenshot", self.opts.call_timeout)
+            .await?;
         let bad = |m: &str| DesktopError::Protocol(format!("agent-desktop screenshot: {m}"));
         let meta = std::fs::metadata(&path).map_err(|_| bad("no file was written"))?;
         if meta.len() < 8 || meta.len() > 25 * 1024 * 1024 {
             return Err(bad("the image has an unexpected size"));
         }
         let mut magic = [0u8; 8];
-        std::io::Read::read_exact(&mut std::fs::File::open(&path).map_err(|e| bad(&e.to_string()))?, &mut magic)
-            .map_err(|e| bad(&e.to_string()))?;
+        std::io::Read::read_exact(
+            &mut std::fs::File::open(&path).map_err(|e| bad(&e.to_string()))?,
+            &mut magic,
+        )
+        .map_err(|e| bad(&e.to_string()))?;
         if magic != *b"\x89PNG\r\n\x1a\n" {
             return Err(bad("the file is not a PNG"));
         }
-        Ok(Shot { path, window_id: w.id, bytes: meta.len() })
+        Ok(Shot {
+            path,
+            window_id: w.id,
+            bytes: meta.len(),
+        })
     }
 
     // ---- act ----------------------------------------------------------------------------
@@ -507,7 +576,10 @@ impl DesktopRuntime {
         };
         let w = self.pick_window(app_id, want.as_deref()).await?;
         let args = action.cli_args(r, value, &w.id)?;
-        match self.run(&args, action.envelope_command(), self.opts.call_timeout).await {
+        match self
+            .run(&args, action.envelope_command(), self.opts.call_timeout)
+            .await
+        {
             Ok(d) => Ok(envelope::delivery_of(&d)),
             Err(e) => {
                 if let (DesktopError::StaleRef(_), Some(r)) = (&e, r) {
@@ -520,7 +592,13 @@ impl DesktopRuntime {
 
     /// Waits until `what` holds. Polls the app's own windows (text, window gone) or asks the CLI
     /// (element). Never takes a ref-registering snapshot, so it cannot supersede the model's refs.
-    pub async fn wait(&self, app_id: &str, what: WaitFor, window_id: Option<&str>, timeout: Duration) -> Result<Duration> {
+    pub async fn wait(
+        &self,
+        app_id: &str,
+        what: WaitFor,
+        window_id: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Duration> {
         let t0 = Instant::now();
         if let WaitFor::Element(r) = &what {
             let w = lock(&self.state).refs.window_of(app_id, r)?;
@@ -532,7 +610,8 @@ impl DesktopRuntime {
                 "--timeout".into(),
                 timeout.as_millis().to_string(),
             ];
-            self.run(&a, "wait", timeout + self.opts.call_timeout).await?;
+            self.run(&a, "wait", timeout + self.opts.call_timeout)
+                .await?;
             return Ok(t0.elapsed());
         }
         loop {

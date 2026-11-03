@@ -1332,7 +1332,9 @@ pub fn prepare(
     for w in &desktop.warnings {
         eprintln!("synt: warning: {}", sanitize_for_display(w));
     }
-    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
     if let Some(cfg) = desktop.config(
         exe_dir.as_deref(),
         env,

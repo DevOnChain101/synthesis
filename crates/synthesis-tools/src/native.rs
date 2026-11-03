@@ -13,10 +13,10 @@ use synthesis_terminal::{Error as TermError, SandboxPolicy, TerminalRuntime};
 
 use crate::browser::{self, BrowserConfig};
 use crate::desktop::{self, DesktopConfig};
-use synthesis_desktop::DesktopRuntime;
 use crate::tasks::Todo;
 use crate::web::{self, WebConfig};
 use crate::{BoxFuture, Tool, ToolOutput, ToolSpec, artifact, tasks, terminal, verify};
+use synthesis_desktop::DesktopRuntime;
 
 #[derive(Default)]
 pub(crate) struct SessionState {

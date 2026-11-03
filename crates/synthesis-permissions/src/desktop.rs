@@ -225,7 +225,11 @@ mod tests {
             assert!(hard_denied(id).is_some(), "{id}");
         }
         // exact match, not substring: the user's own app named like a denied word is fine
-        for id in ["/work/proj/target/debug/safari-tests", "/work/proj/dist/MyApp.app", "controller"] {
+        for id in [
+            "/work/proj/target/debug/safari-tests",
+            "/work/proj/dist/MyApp.app",
+            "controller",
+        ] {
             assert!(hard_denied(id).is_none(), "{id}");
         }
     }

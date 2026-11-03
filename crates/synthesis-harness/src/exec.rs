@@ -656,14 +656,24 @@ impl Harness {
         // a peer request or a sub-agent is refused before any rule, mode or dialog is consulted.
         let desktop = synthesis_permissions::desktop::is_desktop_tool(&call.name);
         if desktop && (agent.origin.is_some() || agent.agent_id.is_some()) {
-            self.desktop_denied(task, agent, turn, call, "peers and sub-agents never get desktop tools");
+            self.desktop_denied(
+                task,
+                agent,
+                turn,
+                call,
+                "peers and sub-agents never get desktop tools",
+            );
             return Err(Denial {
                 unavailable: false,
                 from_hook: false,
                 text: format!(
                     "Permission denied: {} is not available to {}. The tool was NOT run.",
                     call.name,
-                    if agent.origin.is_some() { "a request that came from another session" } else { "sub-agents" }
+                    if agent.origin.is_some() {
+                        "a request that came from another session"
+                    } else {
+                        "sub-agents"
+                    }
                 ),
             });
         }
@@ -815,7 +825,14 @@ impl Harness {
     }
 
     /// Audit record of a refused desktop call (`desktop.denied`): the tool and why, no input.
-    fn desktop_denied(&self, task: &TaskRun, agent: &AgentCtx, turn: &str, call: &Call, reason: &str) {
+    fn desktop_denied(
+        &self,
+        task: &TaskRun,
+        agent: &AgentCtx,
+        turn: &str,
+        call: &Call,
+        reason: &str,
+    ) {
         self.emit(
             task,
             agent,

@@ -120,7 +120,10 @@ mod tests {
             return;
         }
         let t = SystemProcs { system_root: None }.table().unwrap();
-        assert!(t.descendants(std::process::id()).contains(&std::process::id()));
+        assert!(
+            t.descendants(std::process::id())
+                .contains(&std::process::id())
+        );
         assert!(t.ancestors(std::process::id()).len() >= 2);
     }
 }

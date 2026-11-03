@@ -594,16 +594,32 @@ async fn a_sub_agent_never_gets_desktop_tools() {
         |h, _| h.with_agents(any_tools),
     );
     rig.run("x").await;
-    let child: Vec<String> = rig.requests()[1].tools.iter().map(|t| t.name.clone()).collect();
-    assert!(!child.iter().any(|n| n.starts_with("desktop_")), "{child:?}");
+    let child: Vec<String> = rig.requests()[1]
+        .tools
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    assert!(
+        !child.iter().any(|n| n.starts_with("desktop_")),
+        "{child:?}"
+    );
     // the main agent has them
-    let main: Vec<String> = rig.requests()[0].tools.iter().map(|t| t.name.clone()).collect();
+    let main: Vec<String> = rig.requests()[0]
+        .tools
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
     assert!(main.contains(&"desktop_launch".to_string()), "{main:?}");
 }
 
 #[tokio::test]
 async fn desktop_calls_of_the_main_agent_follow_the_policy_and_are_audited() {
-    let tools = ToolBox::empty().with_tool(Probe::new("desktop_launch", SideEffectClass::Execute, 0, "ran"));
+    let tools = ToolBox::empty().with_tool(Probe::new(
+        "desktop_launch",
+        SideEffectClass::Execute,
+        0,
+        "ran",
+    ));
     let mut rig = Rig::build(
         Opts {
             tools,
@@ -613,7 +629,11 @@ async fn desktop_calls_of_the_main_agent_follow_the_policy_and_are_audited() {
         },
         vec![
             // a browser: hard-denied whatever the mode
-            Turn::tool("d1", "desktop_launch", json!({"target": "/usr/bin/firefox"})),
+            Turn::tool(
+                "d1",
+                "desktop_launch",
+                json!({"target": "/usr/bin/firefox"}),
+            ),
             // an external path in bypass: denied (works in manual mode only)
             Turn::tool("d2", "desktop_launch", json!({"target": "/opt/other/tool"})),
             Turn::text("ok"),
@@ -623,7 +643,10 @@ async fn desktop_calls_of_the_main_agent_follow_the_policy_and_are_audited() {
     rig.run("x").await;
     for id in ["d1", "d2"] {
         let (text, is_err) = tool_result(&rig.requests()[2], id).unwrap();
-        assert!(is_err && text.contains("Permission denied") && text.contains("NOT run"), "{id}: {text}");
+        assert!(
+            is_err && text.contains("Permission denied") && text.contains("NOT run"),
+            "{id}: {text}"
+        );
     }
     let denied = rig.find(|e| match e {
         Event::DesktopDenied { tool, reason } => Some((tool.clone(), reason.clone())),
@@ -632,4 +655,49 @@ async fn desktop_calls_of_the_main_agent_follow_the_policy_and_are_audited() {
     assert_eq!(denied.len(), 2, "{denied:?}");
     assert!(denied[0].1.contains("a web browser"), "{denied:?}");
     assert!(denied[1].1.contains("manual (default)"), "{denied:?}");
+}
+
+#[tokio::test]
+async fn the_dialog_for_an_external_desktop_app_names_the_app_only_and_cannot_be_always_allowed() {
+    let tools = ToolBox::empty().with_tool(Probe::new(
+        "desktop_launch",
+        SideEffectClass::Execute,
+        0,
+        "ran",
+    ));
+    let approver = ScriptedApprover::new(vec![Approval::deny("no")]);
+    let a = approver.clone();
+    let mut rig = Rig::build(
+        Opts {
+            tools,
+            interactive: true,
+            ..Opts::default()
+        },
+        vec![
+            Turn::tool(
+                "d1",
+                "desktop_launch",
+                json!({"target": "/opt/other/Tool\u{1b}[2J", "args": ["--token", "SECRET-ARG"]}),
+            ),
+            Turn::text("ok"),
+        ],
+        move |h, _| h.with_approver(a),
+    );
+    rig.run("x").await;
+    let asked = approver.asked.lock().unwrap();
+    assert_eq!(asked.len(), 1);
+    let p = &asked[0].prompt;
+    assert!(
+        p.contains("desktop_launch") && p.contains("/opt/other/Tool"),
+        "{p}"
+    );
+    assert!(
+        p.contains("did not launch from this project") && p.contains("default mode"),
+        "{p}"
+    );
+    assert!(
+        !p.contains("SECRET-ARG") && !p.chars().any(|c| c.is_control()),
+        "{p}"
+    );
+    assert!(asked[0].suggestions.is_empty(), "no allow-always");
 }

@@ -72,7 +72,9 @@ pub enum PinStatus {
     Match,
     /// The pin is still a placeholder: nothing can match.
     Unpinned,
-    Mismatch { actual: String },
+    Mismatch {
+        actual: String,
+    },
 }
 
 pub fn check(path: &Path, pin: &Pin) -> std::io::Result<PinStatus> {
@@ -98,9 +100,15 @@ mod tests {
         std::fs::write(&f, b"hello").unwrap();
         assert_eq!(check(&f, &Pin::builtin()).unwrap(), PinStatus::Unpinned);
         let sha = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
-        let pin = Pin { version: "1.0.0".into(), sha256: sha.into() };
+        let pin = Pin {
+            version: "1.0.0".into(),
+            sha256: sha.into(),
+        };
         assert_eq!(check(&f, &pin).unwrap(), PinStatus::Match);
         std::fs::write(&f, b"tampered").unwrap();
-        assert!(matches!(check(&f, &pin).unwrap(), PinStatus::Mismatch { .. }));
+        assert!(matches!(
+            check(&f, &pin).unwrap(),
+            PinStatus::Mismatch { .. }
+        ));
     }
 }

@@ -85,23 +85,25 @@ pub fn parse(stdout: &[u8], expect: &str) -> Result<Value> {
 fn error_of(e: &Value, expect: &str) -> DesktopError {
     let code = e["code"]
         .as_str()
-        .filter(|c| !c.is_empty() && c.len() <= 40 && c.chars().all(|c| c.is_ascii_uppercase() || c == '_'))
+        .filter(|c| {
+            !c.is_empty() && c.len() <= 40 && c.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+        })
         .unwrap_or("INTERNAL")
         .to_owned();
     let message = clean(e["message"].as_str().unwrap_or("(no message)"), 300);
     // only an explicit "safe" allows a retry; a missing or unknown disposition does not
     let retry_safe = e["disposition"]["retry"].as_str() == Some("safe");
     match code.as_str() {
-        "STALE_REF" | "ELEMENT_NOT_FOUND" if expect != "snapshot" => DesktopError::StaleRef(
-            format!(
+        "STALE_REF" | "ELEMENT_NOT_FOUND" if expect != "snapshot" => {
+            DesktopError::StaleRef(format!(
                 "{code}: {message}. Take a new snapshot and use its refs{}",
                 if retry_safe {
                     " (nothing was delivered)"
                 } else {
                     " (input may already have been delivered: check the UI before repeating)"
                 }
-            ),
-        ),
+            ))
+        }
         _ => DesktopError::Tool {
             code,
             message,
@@ -142,7 +144,13 @@ mod tests {
         assert_eq!(e.kind(), "ambiguous_target");
         // a missing disposition is never "safe"
         let none = r#"{"version":"2.5","ok":false,"command":"click","error":{"code":"ACTION_FAILED","message":"x"}}"#;
-        assert!(matches!(parse(none.as_bytes(), "click").unwrap_err(), DesktopError::Tool { retry_safe: false, .. }));
+        assert!(matches!(
+            parse(none.as_bytes(), "click").unwrap_err(),
+            DesktopError::Tool {
+                retry_safe: false,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -151,7 +159,12 @@ mod tests {
         let wrong_cmd = OK_CLICK.replace(r#""command":"click""#, r#""command":"type""#);
         assert!(parse(wrong_cmd.as_bytes(), "click").is_err());
         let v3 = OK_CLICK.replace(r#""version":"2.5""#, r#""version":"3.0""#);
-        assert!(parse(v3.as_bytes(), "click").unwrap_err().to_string().contains("not supported"));
+        assert!(
+            parse(v3.as_bytes(), "click")
+                .unwrap_err()
+                .to_string()
+                .contains("not supported")
+        );
         let no_data = r#"{"version":"2.5","ok":true,"command":"click"}"#;
         assert!(parse(no_data.as_bytes(), "click").is_err());
         let extra = OK_CLICK.replace(r#""ok":true"#, r#""ok":true,"future":{"x":1}"#);

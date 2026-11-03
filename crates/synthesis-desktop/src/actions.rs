@@ -73,7 +73,10 @@ impl Action {
     }
 
     pub fn needs_value(self) -> bool {
-        matches!(self, Self::SetValue | Self::Type | Self::Select | Self::Press)
+        matches!(
+            self,
+            Self::SetValue | Self::Type | Self::Select | Self::Press
+        )
     }
 
     /// `press` targets a window, every other action a ref.
@@ -83,13 +86,20 @@ impl Action {
 
     /// Arguments after the binary name. `window_id` scopes `press`; ref actions are scoped by
     /// the window their ref belongs to.
-    pub fn cli_args(self, r: Option<&str>, value: Option<&str>, window_id: &str) -> Result<Vec<String>> {
+    pub fn cli_args(
+        self,
+        r: Option<&str>,
+        value: Option<&str>,
+        window_id: &str,
+    ) -> Result<Vec<String>> {
         let bad = |m: &str| DesktopError::Refused(format!("desktop_act {}: {m}", self.command()));
         let mut a = vec![self.command().to_owned()];
         if self.needs_ref() {
             let r = r.ok_or_else(|| bad("\"ref\" is required"))?;
             if !valid_ref(r) {
-                return Err(bad("\"ref\" must look like @<snapshot>:eN, copied from a snapshot"));
+                return Err(bad(
+                    "\"ref\" must look like @<snapshot>:eN, copied from a snapshot",
+                ));
             }
             a.push(r.to_owned());
         }
@@ -99,7 +109,9 @@ impl Action {
                 return Err(bad("\"value\" is too long or contains NUL"));
             }
             if self == Self::Press && !valid_combo(v) {
-                return Err(bad("\"value\" must be a key combo such as return, escape or cmd+c"));
+                return Err(bad(
+                    "\"value\" must be a key combo such as return, escape or cmd+c",
+                ));
             }
             a.push(v.to_owned());
         } else if value.is_some() {
@@ -129,7 +141,8 @@ pub fn valid_ref(r: &str) -> bool {
 fn valid_combo(c: &str) -> bool {
     !c.starts_with('-')
         && (1..=40).contains(&c.len())
-        && c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'_' || b == b'-')
+        && c.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'_' || b == b'-')
 }
 
 #[cfg(test)]
@@ -139,8 +152,20 @@ mod tests {
     #[test]
     fn ref_actions_carry_the_ref_and_never_a_headed_or_app_flag() {
         for name in [
-            "click", "double_click", "right_click", "set_value", "type", "clear", "select", "toggle",
-            "check", "uncheck", "expand", "collapse", "focus", "scroll_to",
+            "click",
+            "double_click",
+            "right_click",
+            "set_value",
+            "type",
+            "clear",
+            "select",
+            "toggle",
+            "check",
+            "uncheck",
+            "expand",
+            "collapse",
+            "focus",
+            "scroll_to",
         ] {
             let a = Action::parse(name).unwrap();
             let v = a.needs_value().then_some("x");

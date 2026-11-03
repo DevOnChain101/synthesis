@@ -3309,7 +3309,14 @@ fn desktop_apps_launched_from_the_project_are_allowed_in_every_mode() {
     for mode in Mode::ALL {
         let p = f.perms(mode);
         assert_eq!(d(&p, "desktop_launch", launch.clone()), A, "{mode:?}");
-        for t in ["desktop_snapshot", "desktop_act", "desktop_wait", "desktop_screenshot", "desktop_logs", "desktop_close"] {
+        for t in [
+            "desktop_snapshot",
+            "desktop_act",
+            "desktop_wait",
+            "desktop_screenshot",
+            "desktop_logs",
+            "desktop_close",
+        ] {
             assert_eq!(d(&p, t, json!({"app_id": "app-1"})), A, "{t} {mode:?}");
         }
     }
@@ -3319,7 +3326,10 @@ fn desktop_apps_launched_from_the_project_are_allowed_in_every_mode() {
         let link = f.cwd.join("lnk");
         std::os::unix::fs::symlink(&f.outside, &link).unwrap();
         fs::write(f.outside.join("tool"), "x").unwrap();
-        let v = f.perms(Mode::Auto).check_current("desktop_launch", &json!({"target": link.join("tool").to_string_lossy()}));
+        let v = f.perms(Mode::Auto).check_current(
+            "desktop_launch",
+            &json!({"target": link.join("tool").to_string_lossy()}),
+        );
         assert_eq!(v.decision, D, "{}", v.reason);
     }
 }
@@ -3332,20 +3342,42 @@ fn external_desktop_apps_ask_in_manual_mode_only_and_no_rule_pre_approves() {
     let launch = json!({ "target": ext.to_string_lossy() });
     for mode in Mode::ALL {
         // allow rules of every shape, including the blanket ones
-        let p = f.with(rules(&["desktop_launch", "desktop_*", "desktop_launch(*)", "*"], &[], &[]), mode);
+        let p = f.with(
+            rules(
+                &["desktop_launch", "desktop_*", "desktop_launch(*)", "*"],
+                &[],
+                &[],
+            ),
+            mode,
+        );
         let v = p.check_current("desktop_launch", &launch);
         if mode == Mode::Default {
             assert_eq!(v.decision, Q, "{mode:?}");
-            assert!(v.hard && v.reason.contains("did not launch from this project"), "{}", v.reason);
-            assert!(p.suggestions("desktop_launch", &launch).is_empty(), "no allow-always");
+            assert!(
+                v.hard && v.reason.contains("did not launch from this project"),
+                "{}",
+                v.reason
+            );
+            assert!(
+                p.suggestions("desktop_launch", &launch).is_empty(),
+                "no allow-always"
+            );
         } else {
             assert_eq!(v.decision, D, "{mode:?}: {}", v.reason);
             assert!(v.reason.contains("manual (default)"), "{}", v.reason);
         }
         // the approved external app: usable in manual mode, refused in every other
         let want = if mode == Mode::Default { A } else { D };
-        assert_eq!(d(&p, "desktop_act", json!({"app_id": "ext-1"})), want, "{mode:?}");
-        assert_eq!(d(&p, "desktop_snapshot", json!({"app_id": "ext-1"})), want, "{mode:?}");
+        assert_eq!(
+            d(&p, "desktop_act", json!({"app_id": "ext-1"})),
+            want,
+            "{mode:?}"
+        );
+        assert_eq!(
+            d(&p, "desktop_snapshot", json!({"app_id": "ext-1"})),
+            want,
+            "{mode:?}"
+        );
         // a missing app_id is treated as external
         assert_eq!(d(&p, "desktop_act", json!({})), want, "{mode:?}");
     }
@@ -3383,7 +3415,10 @@ fn desktop_deny_and_ask_rules_still_apply() {
     let app = f.cwd.join("demo");
     fs::write(&app, "x").unwrap();
     let launch = json!({ "target": app.to_string_lossy() });
-    let p = f.with(rules(&[], &["desktop_launch"], &[]), Mode::BypassPermissions);
+    let p = f.with(
+        rules(&[], &["desktop_launch"], &[]),
+        Mode::BypassPermissions,
+    );
     assert_eq!(d(&p, "desktop_launch", launch.clone()), D);
     let p = f.with(rules(&[], &[], &["desktop_act"]), Mode::Auto);
     assert_eq!(d(&p, "desktop_act", json!({"app_id": "app-1"})), Q);

@@ -361,7 +361,11 @@ fn desktop_settings_come_from_user_settings_only() {
     write(f.home.path(), "managed.json", json!({"synt": on}));
     let s = f.load(ProjectTrust::Trusted);
     assert!(s.synthesis.desktop.is_empty());
-    assert!(s.diagnostics.iter().any(|d| d.contains("managed settings: synt.desktop")));
+    assert!(
+        s.diagnostics
+            .iter()
+            .any(|d| d.contains("managed settings: synt.desktop"))
+    );
 }
 
 #[test]

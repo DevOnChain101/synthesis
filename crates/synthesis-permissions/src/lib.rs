@@ -1986,7 +1986,12 @@ impl Permissions {
     fn decide_desktop(&self, tool: &str, input: &Value, mode: Mode) -> Verdict {
         use Decision::*;
         let deny = |r: String| Verdict::new(Deny, r);
-        let field = |k: &str| input.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+        let field = |k: &str| {
+            input
+                .get(k)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        };
         let launch = tool == "desktop_launch";
         let origin = if launch {
             let Some(target) = field("target") else {

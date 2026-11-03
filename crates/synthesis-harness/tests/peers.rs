@@ -94,7 +94,12 @@ fn probe_tools(slow_ms: u64) -> ToolBox {
             SECRET_ENV_VALUE,
         ))
         .with_tool(Probe::new("Slow", SideEffectClass::Read, slow_ms, "slept"))
-        .with_tool(Probe::new("desktop_launch", SideEffectClass::Execute, 0, "DESKTOP-RAN"))
+        .with_tool(Probe::new(
+            "desktop_launch",
+            SideEffectClass::Execute,
+            0,
+            "DESKTOP-RAN",
+        ))
 }
 
 struct Side {
@@ -2181,12 +2186,21 @@ async fn a_delegate_worker_never_gets_desktop_tools_even_in_bypass() {
         deleg_cfg(json!({})),
         script,
     );
-    delegate_to(&d, "drive the desktop", "bypassPermissions", &["sess-a"], None)
-        .await
-        .unwrap();
+    delegate_to(
+        &d,
+        "drive the desktop",
+        "bypassPermissions",
+        &["sess-a"],
+        None,
+    )
+    .await
+    .unwrap();
     let reqs = d.b.rig.requests();
     // the worker was not even offered the tool, and the call did not run
-    assert!(reqs.iter().all(|r| !r.tools.iter().any(|t| t.name.starts_with("desktop_"))));
+    assert!(
+        reqs.iter()
+            .all(|r| !r.tools.iter().any(|t| t.name.starts_with("desktop_")))
+    );
     let all: String = reqs.iter().map(texts).collect();
     assert!(!all.contains("DESKTOP-RAN"), "{all}");
     assert!(ask.seen.lock().unwrap().is_empty(), "nobody was even asked");

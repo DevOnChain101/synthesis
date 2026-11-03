@@ -241,7 +241,8 @@ impl Registry {
         *crate::native::lock(&self.shared.desktop_cfg) = cfg;
         let shared = self.shared.clone();
         let raw: Vec<Value> = serde_json::from_str(DESKTOP_SCHEMAS).expect("valid");
-        self.entries.extend(raw.into_iter().map(|v| entry(v, &shared)));
+        self.entries
+            .extend(raw.into_iter().map(|v| entry(v, &shared)));
         self
     }
 

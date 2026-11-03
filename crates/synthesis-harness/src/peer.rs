@@ -1555,14 +1555,14 @@ impl Harness {
                 .filter(|n| {
                     !synthesis_permissions::desktop::is_desktop_tool(n)
                         && !matches!(
-                        n.as_str(),
-                        "Task"
-                            | "AskUserQuestion"
-                            | "ExitPlanMode"
-                            | "MemoryWrite"
-                            | "MemoryUpdate"
-                            | "MemoryForget"
-                    )
+                            n.as_str(),
+                            "Task"
+                                | "AskUserQuestion"
+                                | "ExitPlanMode"
+                                | "MemoryWrite"
+                                | "MemoryUpdate"
+                                | "MemoryForget"
+                        )
                 })
                 .cloned()
                 .collect();

@@ -17,7 +17,11 @@ fn main() {
         std::process::exit(2);
     };
     let log = home.join("calls.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+    {
         let _ = writeln!(f, "{}", serde_json::to_string(&args).unwrap());
     }
     let names: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
@@ -32,7 +36,9 @@ fn main() {
         Some(Value::Array(a)) if a.len() > 1 => a.remove(0),
         Some(Value::Array(a)) if a.len() == 1 => a[0].clone(),
         Some(v) if !v.is_array() => v.clone(),
-        _ => serde_json::json!({"version":"2.5","ok":false,"command":cmd,"error":{"code":"INVALID_ARGS","message":"fake: no canned answer","disposition":{"delivery":"not_delivered","retry":"safe"}}}),
+        _ => {
+            serde_json::json!({"version":"2.5","ok":false,"command":cmd,"error":{"code":"INVALID_ARGS","message":"fake: no canned answer","disposition":{"delivery":"not_delivered","retry":"safe"}}})
+        }
     };
     let fake = entry.as_object_mut().and_then(|o| o.remove("_fake"));
     if let Some(f) = &fake {

@@ -25,7 +25,10 @@ mod tests {
     fn flattens_cuts_and_redacts() {
         assert_eq!(clean("a\nb\tc\u{1b}d", 50), "a b c d");
         assert_eq!(clean(&"x".repeat(30), 10), format!("{}...", "x".repeat(10)));
-        let t = clean("token sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789", 200);
+        let t = clean(
+            "token sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789",
+            200,
+        );
         assert!(!t.contains("abcdefghijklmnopqrstuvwxyz0123456789"), "{t}");
     }
 }

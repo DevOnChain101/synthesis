@@ -19,7 +19,7 @@ use synthesis_desktop::{
 use synthesis_permissions::desktop::{self, Origin};
 use synthesis_terminal::{Signal, SpawnSpec};
 
-use crate::native::{Shared, SessionState, lock};
+use crate::native::{SessionState, Shared, lock};
 use crate::util::{int_field, str_field};
 use crate::{Block, BoxFuture, Content, ImageSource, ToolOutput};
 
@@ -59,10 +59,27 @@ impl std::fmt::Debug for DesktopConfig {
 /// What the audit trail records. Names and ids only: never a typed value or UI content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DesktopAudit {
-    Launch { app_id: String, pid: u32, name: String, external: bool },
-    Act { app_id: String, action: String, r#ref: Option<String>, delivery: String },
-    Screenshot { app_id: String, window_id: String, path: String },
-    Denied { tool: String, reason: String },
+    Launch {
+        app_id: String,
+        pid: u32,
+        name: String,
+        external: bool,
+    },
+    Act {
+        app_id: String,
+        action: String,
+        r#ref: Option<String>,
+        delivery: String,
+    },
+    Screenshot {
+        app_id: String,
+        window_id: String,
+        path: String,
+    },
+    Denied {
+        tool: String,
+        reason: String,
+    },
 }
 
 pub trait DesktopHost: Send + Sync + std::fmt::Debug {
@@ -102,14 +119,24 @@ fn fail(wire: &str, e: &DesktopError) -> ToolOutput {
 
 fn refuse(sh: &Shared, wire: &str, reason: impl Into<String>) -> ToolOutput {
     let reason = reason.into();
-    audit(sh, DesktopAudit::Denied { tool: wire.into(), reason: reason.clone() });
+    audit(
+        sh,
+        DesktopAudit::Denied {
+            tool: wire.into(),
+            reason: reason.clone(),
+        },
+    );
     fail(wire, &DesktopError::Refused(reason))
 }
 
 /// Sub-agents never drive the desktop; the harness enforces this for peers before any dialog.
 fn main_agent_only(sh: &Shared, ctx: &ToolContext, wire: &str) -> Result<(), ToolOutput> {
     if ctx.sub_agent {
-        return Err(refuse(sh, wire, "desktop tools are not available to sub-agents"));
+        return Err(refuse(
+            sh,
+            wire,
+            "desktop tools are not available to sub-agents",
+        ));
     }
     Ok(())
 }
@@ -182,7 +209,14 @@ async fn app_runtime(
     ctx: &ToolContext,
     input: &Value,
     wire: &str,
-) -> Result<(Arc<SessionState>, Arc<DesktopRuntime>, synthesis_desktop::App), ToolOutput> {
+) -> Result<
+    (
+        Arc<SessionState>,
+        Arc<DesktopRuntime>,
+        synthesis_desktop::App,
+    ),
+    ToolOutput,
+> {
     main_agent_only(sh, ctx, wire)?;
     let id = str_field(input, "app_id")
         .ok_or_else(|| ToolOutput::error(format!("{wire}: \"app_id\" is required.")))?;
@@ -226,13 +260,18 @@ fn quote_posix(s: &str) -> String {
 /// cmd.exe has no safe quoting for these: refuse instead of guessing.
 fn quote_cmd(s: &str) -> Result<String, String> {
     if s.contains(['"', '%', '^', '&', '|', '<', '>', '(', ')', '!', '\r', '\n']) {
-        return Err(format!("{s:?} contains a character that cannot be passed safely to a Windows command"));
+        return Err(format!(
+            "{s:?} contains a character that cannot be passed safely to a Windows command"
+        ));
     }
     Ok(format!("\"{s}\""))
 }
 
 fn command_line(posix: bool, target: &str, args: &[String]) -> Result<String, String> {
-    if std::iter::once(target).chain(args.iter().map(String::as_str)).any(|a| a.contains('\0')) {
+    if std::iter::once(target)
+        .chain(args.iter().map(String::as_str))
+        .any(|a| a.contains('\0'))
+    {
         return Err("arguments cannot contain NUL".into());
     }
     if posix {
@@ -252,11 +291,19 @@ fn command_line(posix: bool, target: &str, args: &[String]) -> Result<String, St
 
 /// Display variables the app needs to open a window (the session env is an allowlist without them).
 fn display_env(cfg: &DesktopConfig) -> std::collections::BTreeMap<String, String> {
-    let Some(env) = &cfg.process_env else { return Default::default() };
-    ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]
-        .iter()
-        .filter_map(|k| env.get_nonempty(k).map(|v| ((*k).to_owned(), v.to_owned())))
-        .collect()
+    let Some(env) = &cfg.process_env else {
+        return Default::default();
+    };
+    [
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XAUTHORITY",
+        "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS",
+    ]
+    .iter()
+    .filter_map(|k| env.get_nonempty(k).map(|v| ((*k).to_owned(), v.to_owned())))
+    .collect()
 }
 
 #[cfg(unix)]
@@ -279,10 +326,20 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
     };
     let shown = desktop::sanitize(target);
     if let Some(family) = desktop::hard_denied(target) {
-        return refuse(sh, W, format!("{shown} is {family}: desktop control of it is never allowed"));
+        return refuse(
+            sh,
+            W,
+            format!("{shown} is {family}: desktop control of it is never allowed"),
+        );
     }
     if !desktop::is_path_target(target) || !Path::new(target).is_absolute() {
-        return refuse(sh, W, format!("{shown}: give the absolute path of the executable; bundle ids and program names are not supported"));
+        return refuse(
+            sh,
+            W,
+            format!(
+                "{shown}: give the absolute path of the executable; bundle ids and program names are not supported"
+            ),
+        );
     }
     // Where it came from: inside the workspace (after links) is the project's own app.
     let (path, origin) = match ctx.workspace.resolve(target) {
@@ -295,7 +352,11 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
     // the real file, not a link to something on the deny list
     let real = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
     if let Some(family) = desktop::hard_denied(&real.to_string_lossy()) {
-        return refuse(sh, W, format!("{shown} resolves to {family}: desktop control of it is never allowed"));
+        return refuse(
+            sh,
+            W,
+            format!("{shown} resolves to {family}: desktop control of it is never allowed"),
+        );
     }
     if !is_executable(&real) {
         return ToolOutput::error(format!(
@@ -304,7 +365,11 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
     }
     let args: Vec<String> = input["args"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
         .unwrap_or_default();
     let cwd = match str_field(input, "cwd") {
         Some(c) => match ctx.workspace.resolve(c) {
@@ -334,7 +399,9 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
     let app = match rt.register_app(handle.pid, origin, &real.to_string_lossy()) {
         Ok(a) => a,
         Err(e) => {
-            let _ = sh.rt.signal(&ctx.session_id, &handle.process_id, Signal::Kill);
+            let _ = sh
+                .rt
+                .signal(&ctx.session_id, &handle.process_id, Signal::Kill);
             return refuse(sh, W, e.to_string());
         }
     };
@@ -354,13 +421,19 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
         if let Ok(w) = rt.windows(&app.id).await {
             windows = w.windows;
         }
-        let running = sh.rt.get_status(&ctx.session_id, &handle.process_id).is_ok_and(|s| s.running);
+        let running = sh
+            .rt
+            .get_status(&ctx.session_id, &handle.process_id)
+            .is_ok_and(|s| s.running);
         if !windows.is_empty() || !running {
             break;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    let running = sh.rt.get_status(&ctx.session_id, &handle.process_id).is_ok_and(|s| s.running);
+    let running = sh
+        .rt
+        .get_status(&ctx.session_id, &handle.process_id)
+        .is_ok_and(|s| s.running);
     let head = json!({
         "app_id": app.id, "pid": app.pid, "running": running,
         "origin": if origin == Origin::External { "external" } else { "project" },
@@ -392,20 +465,36 @@ async fn snapshot_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOut
     };
     let max = int_field(input, "max_nodes").unwrap_or(300).clamp(1, 2000) as usize;
     let s = match rt
-        .snapshot(&app.id, str_field(input, "window_id"), str_field(input, "root_ref"), input["skeleton"] == true, max)
+        .snapshot(
+            &app.id,
+            str_field(input, "window_id"),
+            str_field(input, "root_ref"),
+            input["skeleton"] == true,
+            max,
+        )
         .await
     {
         Ok(s) => s,
         Err(e) => return fail(W, &e),
     };
-    let more = if s.truncated { "\n[truncated: use a larger max_nodes, skeleton or root_ref]" } else { "" };
+    let more = if s.truncated {
+        "\n[truncated: use a larger max_nodes, skeleton or root_ref]"
+    } else {
+        ""
+    };
     ToolOutput::text(format!(
         "window: {}\nsnapshot: {}\n{}{more}",
         s.window_id,
         s.snapshot_id,
-        untrusted(format!("title: {}\n\n{}", s.window_title.expose(), s.tree.expose()))
+        untrusted(format!(
+            "title: {}\n\n{}",
+            s.window_title.expose(),
+            s.tree.expose()
+        ))
     ))
-    .with_meta(json!({"snapshot_id": s.snapshot_id, "window_id": s.window_id, "refs": s.refs.len()}))
+    .with_meta(
+        json!({"snapshot_id": s.snapshot_id, "window_id": s.window_id, "refs": s.refs.len()}),
+    )
 }
 
 async fn shot_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutput {
@@ -419,10 +508,21 @@ async fn shot_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutput 
         Err(e) => return fail(W, &e),
     };
     let path = s.path.display().to_string();
-    audit(sh, DesktopAudit::Screenshot { app_id: app.id.clone(), window_id: s.window_id.clone(), path: path.clone() });
+    audit(
+        sh,
+        DesktopAudit::Screenshot {
+            app_id: app.id.clone(),
+            window_id: s.window_id.clone(),
+            path: path.clone(),
+        },
+    );
     let meta = json!({"artifact_path": path, "window_id": s.window_id});
-    let text = format!("Screenshot of window {} saved as artifact {path} (window only; it may show private data).", s.window_id);
-    if lock(&sh.desktop_cfg).supports_images && s.bytes <= 4 * 1024 * 1024
+    let text = format!(
+        "Screenshot of window {} saved as artifact {path} (window only; it may show private data).",
+        s.window_id
+    );
+    if lock(&sh.desktop_cfg).supports_images
+        && s.bytes <= 4 * 1024 * 1024
         && let Ok(png) = std::fs::read(&s.path)
     {
         return ToolOutput {
@@ -452,18 +552,28 @@ async fn logs_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutput 
     let Some(pid) = lock(&state.desktop_procs).get(&app.id).cloned() else {
         return ToolOutput::error("desktop_logs: this app has no log.");
     };
-    let chunk = match sh.rt.read_logs(&ctx.session_id, &pid, str_field(input, "since"), 30_000) {
+    let chunk = match sh
+        .rt
+        .read_logs(&ctx.session_id, &pid, str_field(input, "since"), 30_000)
+    {
         Ok(c) => c,
         Err(e) => return ToolOutput::error(format!("desktop_logs: {e}")),
     };
-    let running = sh.rt.get_status(&ctx.session_id, &pid).is_ok_and(|s| s.running);
+    let running = sh
+        .rt
+        .get_status(&ctx.session_id, &pid)
+        .is_ok_and(|s| s.running);
     let body = if chunk.data.is_empty() {
         "(no new output)".to_string()
     } else {
         untrusted(synthesis_browser::redact_text(&chunk.data))
     };
-    ToolOutput::text(format!("{body}\n[cursor {}] [{}]", chunk.cursor, if running { "running" } else { "exited" }))
-        .with_meta(json!({"cursor": chunk.cursor, "running": running}))
+    ToolOutput::text(format!(
+        "{body}\n[cursor {}] [{}]",
+        chunk.cursor,
+        if running { "running" } else { "exited" }
+    ))
+    .with_meta(json!({"cursor": chunk.cursor, "running": running}))
 }
 
 async fn close_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutput {
@@ -476,7 +586,11 @@ async fn close_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutput
     if let Some(pid) = proc_id {
         let _ = sh.rt.signal(&ctx.session_id, &pid, Signal::Kill); // the whole process group
         for _ in 0..20 {
-            if !sh.rt.get_status(&ctx.session_id, &pid).is_ok_and(|s| s.running) {
+            if !sh
+                .rt
+                .get_status(&ctx.session_id, &pid)
+                .is_ok_and(|s| s.running)
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -499,25 +613,47 @@ async fn act_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutput {
     };
     let r = str_field(input, "ref");
     let r = rt
-        .act(&app.id, action, r, input["value"].as_str(), str_field(input, "window_id"))
+        .act(
+            &app.id,
+            action,
+            r,
+            input["value"].as_str(),
+            str_field(input, "window_id"),
+        )
         .await;
     let name = str_field(input, "action").unwrap_or_default().to_owned();
     match r {
         Ok(d) => {
-            audit(sh, DesktopAudit::Act { app_id: app.id, action: name, r#ref: r_of(input), delivery: d.as_str().into() });
+            audit(
+                sh,
+                DesktopAudit::Act {
+                    app_id: app.id,
+                    action: name,
+                    r#ref: r_of(input),
+                    delivery: d.as_str().into(),
+                },
+            );
             let out = json!({"delivered": d.delivered(), "verified": d.verified(), "delivery": d.as_str()});
             ToolOutput::text(out.to_string()).with_meta(out)
         }
         Err(e) => {
             // the typed value is not echoed anywhere; the delivery outcome is the audit record
-            audit(sh, DesktopAudit::Act { app_id: app.id, action: name, r#ref: r_of(input), delivery: "failed".into() });
+            audit(
+                sh,
+                DesktopAudit::Act {
+                    app_id: app.id,
+                    action: name,
+                    r#ref: r_of(input),
+                    delivery: "failed".into(),
+                },
+            );
             fail(W, &e)
         }
     }
 }
 
 fn r_of(input: &Value) -> Option<String> {
-    str_field(input, "ref").map(|r| desktop::sanitize(r))
+    str_field(input, "ref").map(desktop::sanitize)
 }
 
 async fn wait_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutput {
@@ -526,9 +662,15 @@ async fn wait_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutput 
         Ok(x) => x,
         Err(e) => return e,
     };
-    let t = int_field(input, "timeout_ms").unwrap_or(10_000).clamp(1, 120_000) as u64;
+    let t = int_field(input, "timeout_ms")
+        .unwrap_or(10_000)
+        .clamp(1, 120_000) as u64;
     let win = str_field(input, "window_id");
-    let what = match (input["predicate"].as_str(), str_field(input, "text"), str_field(input, "ref")) {
+    let what = match (
+        input["predicate"].as_str(),
+        str_field(input, "text"),
+        str_field(input, "ref"),
+    ) {
         (Some("text"), Some(s), _) => WaitFor::Text(s.into()),
         (Some("element"), _, Some(r)) => WaitFor::Element(r.into()),
         (Some("window_gone"), ..) => WaitFor::WindowGone(win.map(Into::into)),

@@ -152,6 +152,7 @@ add its LICENSE and attribution to `NOTICE` (a note is there) and to the release
 - Done: permission policy and engine rules; `synthesis-desktop` runtime (envelope, pin, process
   tree, window filtering, snapshot and ref table, limiter, kill) with a fake CLI; tools; events;
   user-only settings; peer/sub-agent refusal; app wiring, audit sink, doctor lines; docs.
+- Gates on the final tree: fmt, clippy (+ test-provider), `cargo test --workspace` (1403 tests, 0 failed), `cargo test -p synthesis-cli --features test-provider` (172 passed), rustdoc `-D warnings`, `check-no-legacy-name`.
 - Verified by tests (fake CLI only): the whole launch -> snapshot -> act -> wait -> screenshot ->
   logs -> close loop, every permission mode for project and external apps, hard-deny list, settings
   rejection, rate limit, timeout/oversize kill, process-tree kill, redaction.
