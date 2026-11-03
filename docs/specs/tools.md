@@ -33,10 +33,10 @@ Rules:
 
 | Class | Tools |
 |---|---|
-| Read | Read, Glob, Grep, BashOutput, TodoWrite, TaskCreate/Get/List/Update, Skill, Task¹, AskUserQuestion, ExitPlanMode, terminal_logs, terminal_status, git_status, git_diff, artifact_read, browser_snapshot, browser_screenshot, browser_console, browser_network |
+| Read | Read, Glob, Grep, BashOutput, TodoWrite, TaskCreate/Get/List/Update, Skill, Task¹, AskUserQuestion, ExitPlanMode, terminal_logs, terminal_status, git_status, git_diff, artifact_read, browser_snapshot, browser_screenshot, browser_console, browser_network, desktop_snapshot, desktop_screenshot, desktop_logs, desktop_close, desktop_wait |
 | Write | Write, Edit, NotebookEdit, git_apply_patch |
 | Execute | Bash, KillShell, terminal_spawn, terminal_signal, verify_run, git_revert |
-| External | WebFetch, WebSearch, browser_navigate, browser_click, browser_fill, browser_login, browser_fill_secret, mcp__* |
+| External | WebFetch, WebSearch, browser_navigate, browser_click, browser_fill, browser_login, browser_fill_secret, desktop_launch, desktop_act, mcp__* |
 
 ¹ Task runs a sub-agent whose own calls are gated one by one. The class drives defaults; permission rules still decide (Node's READ_ONLY_TOOLS/EDIT_TOOLS sets [from-node permissions.js:11-12] are ported verbatim for the `Permissions::check` port).
 
@@ -128,6 +128,10 @@ The model-facing text and schemas are unchanged. Where the whole file is known t
  "browser_network":{"properties":{"cursor":{"type":"string"},"failed_only":{"type":"boolean"}}}}
 ```
 Semantics: `terminal_spawn` returns `{process_id, pid, status, ready:bool, log_cursor}` and outlives the tool call but not the session (doc §5.8). `terminal_status` without id lists the session's processes only. `git_revert` restores paths to the session baseline (agent edits only), never runs `git reset`/`checkout` on user changes, and is always `ask` (doc §5.10). `browser_*` use accessibility refs first, selectors as fallback, no coordinates (doc §5.9); backend decided by the R6 spike. `browser_login` asks in every mode and no allow rule applies; `browser_login` and `browser_fill_secret` are refused for peer-delegated work and sub-agents; see docs/BROWSER-LOGIN.md. Permission rule syntax for new tools follows Node: `terminal_spawn(<cmd prefix>:*)` like Bash, `browser_navigate(domain:<host>)` like WebFetch [from-node permissions.js:442-507].
+
+### 5b. Desktop tools [new; registered only by `Registry::with_desktop` when `synt.desktop.enabled`; docs/DESKTOP-CONTROL.md]
+
+`desktop_launch{target,args?,cwd?}`, `desktop_snapshot{app_id,window_id?,root_ref?,skeleton?,max_nodes?}`, `desktop_screenshot{app_id,window_id?}`, `desktop_logs{app_id,since?}`, `desktop_close{app_id}`, `desktop_act{app_id,ref?,action,value?,window_id?}` (`action` in click, double_click, right_click, set_value, type, clear, select, toggle, check, uncheck, expand, collapse, focus, scroll_to, press), `desktop_wait{app_id,predicate:"text"|"element"|"window_gone",text?,ref?,window_id?,timeout_ms?}`. Schemas: `crates/synthesis-tools/src/desktop_schemas.json` (all `additionalProperties:false`; no secret, coordinate, clipboard or headed field). Permission semantics: an app launched from the workspace is allowed in every mode; an app outside it asks (hard, no allow rule or suggestion) in `default` and is denied in every other mode; hard-deny list (password managers, system settings, browsers, shell) is denied always; `app_id` starting `ext-` marks an external app; deny rules apply, ask rules still prompt. Sub-agents and peer-delegated work do not see the tools and are refused before any dialog. `meta.error` is one of `desktop_unavailable`, `refused`, `timeout`, `stale_ref`, `ambiguous_target`, `desktop_error`, `protocol_error`, `rate_limited`, `not_found`. `desktop_act.value` is replaced by `[REDACTED]` in events, hooks and prompts (`redact_input`). Results with text from the app are wrapped in `<untrusted_ui_content>`.
 
 ### 5a. Agent tools [new, R10a; harness-run, `with_new_tools`]
 - `Task` gains `name?` (`[a-z0-9_-]{1,32}`, a taken name gets `-2`, `-3`) and `run_in_background?`. Background returns `{agent_id, name, kind, status:"running"}` and the final text arrives later as an `<agent_message type="result">`. The main task does not finish while background agents run (one gate, one budget). The schema replaces the ported one only in `with_new_tools`, so the Node golden is untouched.

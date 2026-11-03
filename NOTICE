@@ -2,3 +2,7 @@ Synthesis
 Copyright 2026 Synthesis contributors
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Third-party note: Synthesis can drive the desktop through the separately installed `agent-desktop`
+CLI (vercel-labs/agent-desktop, Apache-2.0). It is NOT bundled. If it is ever shipped with
+Synthesis, add its LICENSE text and attribution here and to the release archives.

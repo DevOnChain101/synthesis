@@ -378,6 +378,10 @@ Important implementation details:
 
 Do not embed Chromium into GPUI initially. The runtime can own a separate browser instance and stream screenshots/events to desktop UI later.
 
+### 5.9a Desktop control (D1/D2, owner policy 2026-11-03)
+
+Self-debugging of desktop apps the agent builds: launch, read the UI through the OS accessibility tree, act, screenshot one window, read logs. Implemented as `crates/synthesis-desktop` (a per-session runtime over the pinned `agent-desktop` CLI, Apache-2.0, not bundled) and `desktop_*` tools. Off by default (`synt.desktop.enabled`, user settings only). Synthesis starts the app itself, so every CLI call is scoped to windows of that process tree. Apps launched from the workspace are allowed in every permission mode; any other app needs a dialog and works in default mode only; a hard-deny list (password managers, system settings, browsers, shell, the hosting terminal) never lifts; peers and sub-agents get no desktop tools. Design, threat model, limits and the owner's real-machine checklist: docs/DESKTOP-CONTROL.md. Status: fake-CLI tested only.
+
 ### 5.10 Code Intelligence & Git
 
 Start with efficient primitives: `ripgrep`, file globbing, Git status/diff, patch operations and language-server diagnostics where useful. Add tree-sitter, symbol graphs or semantic indexes only after measuring retrieval gaps.
