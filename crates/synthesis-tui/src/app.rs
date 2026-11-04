@@ -1194,6 +1194,10 @@ impl App {
                 } else {
                     self.quit_armed_at = Some(now);
                     self.chat.note("press ctrl+c again to quit", "");
+                    if self.scroll > 0 {
+                        // the note is at the bottom of the chat, out of view while scrolled up
+                        self.toast("press ctrl+c again to quit", now, false);
+                    }
                 }
             }
             CtrlD => {
@@ -1655,6 +1659,12 @@ impl App {
                     _ => !self.chat.agent.focus_view,
                 };
                 self.chat.agent.focus_view = on;
+                // a toast: the focus view itself hides command-output rows
+                self.toast(
+                    format!("focus view {}", if on { "on" } else { "off" }),
+                    now,
+                    false,
+                );
             }
             other => self.out_item(format!("unknown command: /{other} (try /help)"), true),
         }

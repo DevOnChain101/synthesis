@@ -657,9 +657,11 @@ impl Chat {
             Event::MessageDropped { message_id, reason } => {
                 self.unqueue(message_id);
                 if let Some(i) = self.inflight.iter().position(|(id, _)| id == message_id) {
+                    // `task_done` says so once, when the line goes back to the prompt
                     self.dropped_lines.push(self.inflight.remove(i).1);
+                } else {
+                    self.note(format!("⚠ message dropped: {reason}"), "warn");
                 }
-                self.note(format!("⚠ message dropped: {reason}"), "warn");
             }
             Event::AutoVerdict {
                 name,
@@ -753,6 +755,15 @@ impl Chat {
                 self.agent.status = "idle".into();
                 self.agent.interrupting = false;
                 self.tools.clear();
+            }
+            // the person just answered the dialog; the tool row shows the outcome
+            Event::ToolApprovalResolved { .. } => {}
+            // nothing was retrieved: no row
+            Event::MemoryRetrieved {
+                ids, candidates, ..
+            } if ids.is_empty() && *candidates == 0 => {}
+            Event::SessionModeChanged { to, .. } => {
+                self.note(format!("mode: {}", clean_line(to)), "")
             }
             e if !quiet(e) => {
                 if let Some(t) = generic_row(e) {
@@ -858,6 +869,52 @@ mod tests {
             0,
         );
         assert_eq!(chat.agent.items.len(), n);
+    }
+
+    #[test]
+    fn mode_changes_read_as_a_sentence_and_answered_or_empty_rows_are_hidden() {
+        let mut chat = Chat::default();
+        let mut apply = |event: Event| {
+            chat.apply(
+                &Envelope {
+                    v: 1,
+                    seq: 1,
+                    ts: "2026-01-01T00:00:00.000Z".into(),
+                    session_id: "s".into(),
+                    task_id: None,
+                    turn_id: None,
+                    agent_id: None,
+                    event,
+                },
+                0,
+            );
+            chat.agent.items.len()
+        };
+        let none = |ids: &[&str]| Event::MemoryRetrieved {
+            ids: ids.iter().map(|s| s.to_string()).collect(),
+            tokens: 0,
+            candidates: 0,
+        };
+        assert_eq!(apply(none(&[])), 0);
+        assert_eq!(
+            apply(Event::ToolApprovalResolved {
+                approval_id: "a".into(),
+                decision: "allow".into(),
+                reviewer: "user".into(),
+                input_changed: false,
+                message: None,
+            }),
+            0
+        );
+        assert_eq!(
+            apply(Event::SessionModeChanged {
+                from: "default".into(),
+                to: "acceptEdits".into(),
+                reason: None,
+            }),
+            1
+        );
+        assert_eq!(chat.agent.items[0].text, "mode: acceptEdits");
     }
 
     #[test]

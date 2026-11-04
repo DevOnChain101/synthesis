@@ -365,9 +365,8 @@ fn round(
             json!({"source": source}),
             Some(source),
         ));
-        if let Some(m) = &memory {
-            synthesis_app::memcmd::announce(m);
-        }
+        // no `memory::announce` here: the app retrieves for each prompt it sends, and the start-up
+        // retrieval (no prompt yet) would print a second, empty `memory.retrieved` row
         let mut o = Options::new(
             harness.clone(),
             session,

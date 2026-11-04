@@ -88,6 +88,11 @@ pub fn models(env: &Env, a: &ModelsArgs) -> Result<u8, String> {
         for (v, ..) in &rows {
             out!("{v}");
         }
+        if rows.is_empty() {
+            eprintln!(
+                "synt: no models configured: add providers to $SYNT_HOME/synt.json (see `synt doctor`), or use `synt models --refresh` to ask the providers"
+            );
+        }
     }
     Ok(0)
 }
