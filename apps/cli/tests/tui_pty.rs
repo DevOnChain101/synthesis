@@ -283,6 +283,28 @@ fn resume_of_a_bad_id_and_unopenable_folders_are_notices_not_exits() {
     assert!(flat.contains("STATE ok"), "{flat}");
 }
 
+/// Choosing a folder while a task runs cancels it and says so in the new session.
+#[test]
+fn switching_folder_during_a_task_says_the_task_was_cancelled() {
+    let rig = Rig::new(json!([{"text": "slow reply", "delay_ms": 20000}]));
+    let out = rig.drive(json!([
+        expect("Enter send"),
+        send("hi"),
+        ["wait", 0.3],
+        send("\r"),
+        ["wait", 1.5],
+        send("/new"),
+        ["wait", 0.3],
+        send("\r"),
+        expect_new("use this folder"),
+        send("./sub"),
+        expect_new("open "),
+        send("\r"),
+        expect_new("task cancelled: switching folder")
+    ]));
+    assert!(!squash(&out).contains("synt: error"), "{out}");
+}
+
 const MCP_SERVER: &str = r#"
 import sys, json
 log = sys.argv[1]

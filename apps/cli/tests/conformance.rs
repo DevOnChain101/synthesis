@@ -114,6 +114,23 @@ fn allow_with_space_star_lets_the_command_run() {
     assert!(rig.ws().join("made.txt").exists());
 }
 
+/// `auto` allows edits inside the workspace itself (like acceptEdits), without the judge: there
+/// is no `permission.auto_verdict` event for them. docs/CLI.md and `--help` say so.
+#[test]
+fn auto_mode_allows_an_in_workspace_edit_without_the_judge() {
+    let rig = Rig::new();
+    let script = json!([
+        {"tools": [{"name": "Write", "input": {"file_path": "made.txt", "content": "x"}}]},
+        {"text": "done"}
+    ]);
+    let (_, ev) = rig.run(script, &["--permission-mode", "auto"]);
+    assert!(
+        rig.ws().join("made.txt").exists(),
+        "the in-workspace write was refused"
+    );
+    assert!(ev.iter().all(|e| e["type"] != "permission.auto_verdict"));
+}
+
 #[test]
 fn mcp_add_refuses_an_existing_name_unless_forced() {
     let rig = Rig::new();

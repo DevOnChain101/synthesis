@@ -46,7 +46,7 @@ pub enum ModeArg {
     Plan,
     #[value(name = "dontAsk")]
     DontAsk,
-    /// Headless: no classifier is wired, so asks the classifier would review are denied.
+    /// Edits inside the workspace are allowed (as in acceptEdits); a judge model call reviews the other open calls (Bash, MCP, edits outside the workspace); ask, unclear answer, error or timeout is denied.
     Auto,
     /// Skips approval prompts. Still stops: deny rules, ask rules, critical rm, destructive MCP asks.
     /// Does NOT stop plain writes to protected paths (.git, .synt, .ssh ...), as in Claude Code. CLI only.
