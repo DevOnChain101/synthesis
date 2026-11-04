@@ -126,10 +126,9 @@ fn add_list_search_scope_and_export() {
 
     let hit = r.ok(&["search", "how do I run the tests", "--cwd", &repo]);
     assert!(hit.contains("cargo test --workspace"));
-    assert!(
-        r.ok(&["search", "NEAR( \" *", "--cwd", &repo])
-            .trim()
-            .is_empty()
+    assert_eq!(
+        r.ok(&["search", "NEAR( \" *", "--cwd", &repo]).trim(),
+        "0 record(s)"
     );
 
     let dump = r.ok(&["export", "--cwd", &repo]);
