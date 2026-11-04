@@ -97,7 +97,8 @@ pub trait ModelProvider: Send + Sync {
     fn capabilities(&self, model: &str) -> ProviderCapabilities;
     /// Starts the request on a spawned task (needs a Tokio runtime) and returns its events.
     /// Dropping the stream or cancelling `cancel` aborts the request. Pre-stream failures are
-    /// retried per policy; after the first byte the stream is never replayed.
+    /// retried per policy; after the first byte this layer never replays the stream (the harness
+    /// may re-request the whole turn: it runs no tool before a stream has completed).
     fn stream(&self, req: &Request, cancel: CancellationToken) -> EventStream;
     fn list_models<'a>(
         &'a self,
@@ -232,6 +233,7 @@ impl ProviderSpec {
             retry,
             redaction,
             idle_timeout: net.idle_timeout,
+            header_timeout: net.header_timeout,
         };
         let base = match self.protocol {
             Protocol::Anthropic => anthropic::base_url(self.base_url.as_deref()),

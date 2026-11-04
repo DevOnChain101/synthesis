@@ -2,7 +2,9 @@
 //!
 //! Replay rule: only the request/response-header phase is retried. Once the first response byte
 //! of a stream has been handed to the consumer nothing is replayed (`ProviderError::mid_stream`),
-//! because the consumer may already have shown text or started acting on tool input. Model
+//! because the consumer may already have shown text or started acting on tool input. (This layer
+//! never replays; the harness may re-request the whole turn after a mid-stream failure, see
+//! `HarnessConfig::stream_recoveries`: it runs tools only after a stream completed.) Model
 //! requests have no server-side effects of their own, so retrying before streaming starts is
 //! idempotent.
 

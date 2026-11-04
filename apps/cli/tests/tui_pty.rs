@@ -330,6 +330,44 @@ fn esc_with_an_unread_line_gives_one_notice() {
     assert!(!flat.contains("synt: error"), "{flat}");
 }
 
+/// `--resume ID` of a session whose folder was deleted names the session and the folder.
+#[test]
+fn resume_of_a_deleted_folder_says_which_folder() {
+    let rig = Rig::new(json!([{"text": "first reply"}]));
+    let gone = rig.root().join("gone");
+    std::fs::create_dir_all(gone.join(".git")).unwrap();
+    let provider = format!("fake:{}", rig.root().join("script.json").display());
+    let argv = |cwd: &Path, extra: &[&str]| {
+        let mut a = vec![
+            json!(env!("CARGO_BIN_EXE_synt")),
+            json!("--cwd"),
+            json!(cwd),
+            json!("--provider"),
+            json!(provider),
+            json!("--sandbox"),
+            json!("off"),
+        ];
+        a.extend(extra.iter().map(|x| json!(x)));
+        a
+    };
+    rig.run_scenario(
+        argv(&gone, &[]),
+        json!([expect("Enter send"), send("hi\r"), expect("first reply")]),
+    );
+    let c = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
+    let id: String = c
+        .query_row("SELECT id FROM sessions LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    std::fs::remove_dir_all(&gone).unwrap();
+    let out = rig.run_scenario(
+        argv(&rig.ws(), &["--resume", &id]),
+        json!([expect("no longer exists")]),
+    );
+    let flat = squash(&out);
+    assert!(flat.contains(&format!("cannot resume {id}")), "{flat}");
+    assert!(flat.contains(&gone.display().to_string()), "{flat}");
+}
+
 const MCP_SERVER: &str = r#"
 import sys, json
 log = sys.argv[1]

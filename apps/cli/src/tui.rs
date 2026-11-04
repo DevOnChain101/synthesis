@@ -102,7 +102,14 @@ fn requested_resume(a: &TuiArgs, h: &synthesis_app::Homes) -> Result<Option<Resu
         }
         (None, false) => return Ok(None),
     };
-    load_resume(&h.synthesis, &id).map(Some)
+    let r = load_resume(&h.synthesis, &id)?;
+    if !Path::new(&r.record.cwd).is_dir() {
+        return Err(format!(
+            "cannot resume {id}: its folder {} no longer exists",
+            r.record.cwd
+        ));
+    }
+    Ok(Some(r))
 }
 
 /// No model configured: the setup card (the key itself stays in an environment variable or a file

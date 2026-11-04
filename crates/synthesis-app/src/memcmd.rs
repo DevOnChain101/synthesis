@@ -708,13 +708,15 @@ fn edit(env: &Env, s: &mut Store, id: &str) -> Result<(), String> {
     o.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-    std::io::Write::write_all(
-        &mut o
-            .open(&path)
-            .map_err(|x| format!("{}: {x}", path.display()))?,
-        edit_text(&old).as_bytes(),
-    )
-    .map_err(|x| x.to_string())?;
+    let mut f = o
+        .open(&path)
+        .map_err(|x| format!("{}: {x}", path.display()))?;
+    if let Err(x) = std::io::Write::write_all(&mut f, edit_text(&old).as_bytes()) {
+        drop(f);
+        let _ = std::fs::remove_file(&path); // a half-written file is not anybody's text
+        return Err(x.to_string());
+    }
+    drop(f);
     let result = (|| {
         let mut parts = editor.split_whitespace();
         let status = std::process::Command::new(parts.next().ok_or("empty $EDITOR")?)

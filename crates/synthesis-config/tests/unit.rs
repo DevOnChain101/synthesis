@@ -989,3 +989,18 @@ fn resolve_defaults() {
     assert_eq!(r.aliases["fable"], None);
     assert!(r.notes.is_empty());
 }
+
+#[test]
+fn save_effort_keeps_other_keys_and_clears() {
+    let h = tempfile::tempdir().unwrap();
+    std::fs::write(h.path().join("state.json"), r#"{"model":"a/b"}"#).unwrap();
+    save_effort(h.path(), Some("high")).unwrap();
+    let s = load_state(h.path());
+    assert_eq!(
+        (s.model.as_deref(), s.effort.as_deref()),
+        (Some("a/b"), Some("high"))
+    );
+    save_effort(h.path(), None).unwrap();
+    let s = load_state(h.path());
+    assert_eq!((s.model.as_deref(), s.effort), (Some("a/b"), None));
+}

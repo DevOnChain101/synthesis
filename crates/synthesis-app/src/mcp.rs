@@ -800,6 +800,20 @@ fn literal_secret_arg(args: &[String]) -> Option<String> {
     None
 }
 
+/// A literal credential in a `--url`: the NAME to report (never the value). A password in the
+/// userinfo, or a secret-named query parameter whose value is not a `${VAR}` reference.
+fn literal_secret_url(u: &str) -> Option<String> {
+    if url_credentials(u) {
+        return Some("the URL password".into());
+    }
+    let query = u.split_once('?')?.1.split('#').next().unwrap_or("");
+    query.split('&').find_map(|kv| {
+        let (k, v) = kv.split_once('=')?;
+        ((secret_like(k) && !only_refs(v) && !v.is_empty()) || secret_shaped(v))
+            .then(|| k.to_string())
+    })
+}
+
 fn kv(s: &str, sep: char) -> Result<(String, String), String> {
     let (k, v) = s
         .split_once(sep)
@@ -818,6 +832,11 @@ fn entry(a: &AddArgs) -> Result<Value, String> {
     let mut e = serde_json::Map::new();
     match (&a.url, a.command.split_first()) {
         (Some(u), None) => {
+            if let Some(k) = literal_secret_url(u) {
+                return Err(format!(
+                    "{k}: looks like a credential in the URL; synthesis never writes credentials into config files. Put it in an environment variable and pass ${{VAR}} (or use --header 'Authorization: Bearer ${{VAR}}')"
+                ));
+            }
             e.insert("type".into(), json!(a.transport));
             e.insert("url".into(), json!(u));
         }
@@ -832,8 +851,9 @@ fn entry(a: &AddArgs) -> Result<Value, String> {
         }
         _ => return Err("give either --url URL or a command after `--`".into()),
     }
-    if !matches!(a.transport.as_str(), "http" | "sse" | "ws") {
-        return Err("--transport must be http, sse or ws".into());
+    // the config schema knows no other remote type: an entry with one makes every command fail
+    if !matches!(a.transport.as_str(), "http" | "sse") {
+        return Err("--transport must be http or sse".into());
     }
     let env: Result<serde_json::Map<String, Value>, String> = a
         .env
@@ -888,6 +908,7 @@ fn edit_file(path: &Path, name: &str, value: Option<Value>) -> Result<bool, Stri
         .map(|o| o.entry("mcpServers").or_insert_with(|| json!({})))
         .and_then(Value::as_object_mut)
         .ok_or(format!("{}: mcpServers is not an object", path.display()))?;
+    let value_set = value.is_some();
     let changed = match value {
         Some(v) => {
             servers.insert(name.to_string(), v);
@@ -895,6 +916,13 @@ fn edit_file(path: &Path, name: &str, value: Option<Value>) -> Result<bool, Stri
         }
         None => servers.remove(name).is_some(),
     };
+    if changed && value_set {
+        // never write an entry the loader would refuse
+        if path.file_name().is_some_and(|n| n == "synt.json") {
+            synthesis_config::validate_versioned_config(&root, &path.display().to_string())
+                .map_err(|e| format!("refusing to write an invalid config: {e}"))?;
+        }
+    }
     if changed {
         if let Some(d) = path.parent() {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
@@ -1637,7 +1665,7 @@ mod tests {
         let f = d.path().join("synt.json");
         std::fs::write(
             &f,
-            json!({"model": "m", "mcpServers": {"old": {"command": "x"}}}).to_string(),
+            json!({"$schema": synthesis_config::SCHEMA_V1, "model": "m", "mcpServers": {"old": {"command": "x"}}}).to_string(),
         )
         .unwrap();
         let e = entry(&add("s", |a| {
@@ -1698,6 +1726,38 @@ mod tests {
         .map(String::from)
         .into();
         assert!(entry(&add("s", |a| a.command = std::mem::take(&mut cmd))).is_ok());
+
+        for bad in [
+            "https://user:hunter2pw@example.com/mcp",
+            "https://h/mcp?token=literal123456",
+            "https://h/mcp?x=1&api_key=literal123456",
+        ] {
+            let err = entry(&add("s", |a| a.url = Some(bad.into()))).unwrap_err();
+            assert!(err.contains("never writes credentials"), "{bad}");
+            assert!(!err.contains("hunter2pw") && !err.contains("literal123456"));
+        }
+        for ok in [
+            "https://h/mcp",
+            "https://h/mcp?x=1&page=2",
+            "https://user:${DB_PASS}@h/mcp",
+            "https://h/mcp?token=${T}",
+        ] {
+            assert!(
+                entry(&add("s", |a| a.url = Some(ok.into()))).is_ok(),
+                "{ok}"
+            );
+        }
+        // a transport the schema does not know would make synt.json invalid
+        let err = entry(&add("s", |a| {
+            a.url = Some("wss://h/mcp".into());
+            a.transport = "ws".into();
+        }))
+        .unwrap_err();
+        assert!(err.contains("http or sse"), "{err}");
+        // and edit_file refuses to write an entry that fails the schema
+        let bad_file = d.path().join("bad").join("synt.json");
+        assert!(edit_file(&bad_file, "s", Some(json!({"type": "ws", "url": "x"}))).is_err());
+        assert!(!bad_file.exists());
 
         let literal = entry(&add("s", |a| {
             a.url = Some("https://h/mcp".into());

@@ -27,6 +27,8 @@ enum Reply {
     },
     /// Sends headers, then nothing.
     Stall,
+    /// Reads the request, then sends nothing at all (not even headers).
+    Silent,
 }
 
 struct Mock {
@@ -127,6 +129,7 @@ async fn start(replies: Vec<Reply>) -> Mock {
                             let _ = sock.write_all(b"ff\r\npartial").await; // promised 255 bytes, dies
                         }
                     }
+                    Reply::Silent => tokio::time::sleep(Duration::from_secs(30)).await,
                     Reply::Stall => {
                         let _ = sock
                             .write_all(
@@ -730,4 +733,102 @@ async fn proxy_comes_from_the_injected_env_only() {
     let (_, err) = collect(p.as_ref(), CancellationToken::new()).await;
     assert!(err.is_none(), "{err:?}");
     assert_eq!(direct.count(), 1);
+}
+
+fn provider_with_header_timeout(
+    mock: &Mock,
+    retry: RetryPolicy,
+    ms: u64,
+) -> Arc<dyn ModelProvider> {
+    ProviderSpec {
+        id: "gw".into(),
+        protocol: Protocol::Anthropic,
+        base_url: Some(mock.base.clone()),
+        auth: Auth::ApiKey(Secret::new(KEY)),
+        headers: Default::default(),
+        models_meta: Default::default(),
+    }
+    .connect(
+        &Env::default(),
+        &NetSettings {
+            header_timeout: Duration::from_millis(ms),
+            ..Default::default()
+        },
+        retry,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_server_that_never_sends_headers_is_a_retryable_timeout() {
+    let m = start(vec![Reply::Silent]).await;
+    let p = provider_with_header_timeout(&m, fast_retry(1), 150);
+    let t = Instant::now();
+    let (ev, err) = collect(p.as_ref(), CancellationToken::new()).await;
+    let e = err.expect("a timeout error");
+    assert!(ev.is_empty());
+    assert!(e.to_string().contains("did not answer within"), "{e}");
+    assert!(e.retryable());
+    assert_eq!(m.count(), 2, "one retry");
+    assert!(t.elapsed() < Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn cancel_ends_the_wait_for_headers_at_once() {
+    let m = start(vec![Reply::Silent]).await;
+    let p = provider_with_header_timeout(&m, fast_retry(0), 60_000);
+    let cancel = CancellationToken::new();
+    let c2 = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        c2.cancel();
+    });
+    let t = Instant::now();
+    let (_, err) = collect(p.as_ref(), cancel).await;
+    assert_eq!(err.unwrap().kind, ErrorKind::Cancelled);
+    assert!(t.elapsed() < Duration::from_secs(3));
+}
+
+#[tokio::test]
+async fn the_effort_tier_reaches_both_protocols() {
+    for (proto, key, events) in [
+        (
+            Protocol::Anthropic,
+            "output_config",
+            sse(&anthropic_events()),
+        ),
+        (
+            Protocol::OpenAi,
+            "reasoning_effort",
+            b"data: [DONE]\n\n".to_vec(),
+        ),
+    ] {
+        let mock = start(vec![Reply::Sse {
+            body: events,
+            piece: 64,
+            cut: false,
+        }])
+        .await;
+        let p = provider(proto, &mock, Auth::ApiKey(Secret::new(KEY)), fast_retry(0));
+        let mut r = req();
+        r.reasoning_effort = Some("high".into());
+        let mut s = p.stream(&r, CancellationToken::new());
+        while s.next().await.is_some() {}
+        let sent = mock.req(0);
+        assert!(
+            sent.contains(key) && sent.contains("\"high\""),
+            "{key}: {sent}"
+        );
+        // and nothing when no tier is chosen
+        let mock = start(vec![Reply::Sse {
+            body: sse(&anthropic_events()),
+            piece: 64,
+            cut: false,
+        }])
+        .await;
+        let p = provider(proto, &mock, Auth::ApiKey(Secret::new(KEY)), fast_retry(0));
+        let mut s = p.stream(&req(), CancellationToken::new());
+        while s.next().await.is_some() {}
+        assert!(!mock.req(0).contains(key));
+    }
 }

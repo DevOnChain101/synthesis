@@ -160,6 +160,27 @@ pub fn load_state(synthesis_home: &Path) -> State {
     }
 }
 
+/// Records (`Some`) or clears (`None`) `effort` in `state.json`, keeping its other keys.
+/// A malformed file is replaced: it already reads as the empty state.
+pub fn save_effort(synthesis_home: &Path, effort: Option<&str>) -> std::io::Result<()> {
+    let path = synthesis_home.join("state.json");
+    let mut v: Value = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    match effort {
+        Some(e) => v["effort"] = e.into(),
+        None => {
+            v.as_object_mut().map(|o| o.remove("effort"));
+        }
+    }
+    std::fs::create_dir_all(synthesis_home)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&v)? + "\n")?;
+    std::fs::rename(&tmp, &path)
+}
+
 fn deep_merge(base: &mut Value, extra: &Value) {
     let (Some(b), Some(e)) = (base.as_object_mut(), extra.as_object()) else {
         return;

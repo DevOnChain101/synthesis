@@ -1616,7 +1616,7 @@ impl App {
             }
             "browser" => {
                 let v = self.calls(
-                    |n| n.starts_with("Browser") || n == "WebFetch" || n == "WebSearch",
+                    |n| n.starts_with("browser_") || n == "WebFetch" || n == "WebSearch",
                     "browser and web calls",
                 );
                 self.out_item(v, false);
@@ -1791,7 +1791,20 @@ impl App {
         self.chat
             .note(format!("effort: {}", next.as_deref().unwrap_or("auto")), "");
         self.effort.clone_from(&next);
+        self.chat.agent.effort = next.clone().unwrap_or_default();
         out.push(Cmd::SetEffort(next));
+    }
+
+    pub fn effort(&self) -> Option<String> {
+        self.effort.clone()
+    }
+
+    /// The tier saved by an earlier run, when this model declares it; the host passes it on to
+    /// the harness. Returns what is in force.
+    pub fn restore_effort(&mut self, saved: Option<String>) -> Option<String> {
+        self.effort = saved.filter(|e| self.cfg.effort_tiers.contains(e));
+        self.chat.agent.effort = self.effort.clone().unwrap_or_default();
+        self.effort.clone()
     }
 
     fn switch_model(&mut self, name: &str, out: &mut Vec<Cmd>) {

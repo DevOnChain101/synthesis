@@ -489,7 +489,16 @@ mod tests {
         let second = lock(&d).unwrap_err().to_string();
         assert!(second.contains("already open"), "{second}");
         drop(l);
-        assert!(lock(&d).is_ok());
+        // The lock is released with the file. A test thread that is forking at this very moment
+        // holds a copy of the descriptor until its exec, so allow that window to close.
+        let t = std::time::Instant::now();
+        while lock(&d).is_err() {
+            assert!(
+                t.elapsed() < std::time::Duration::from_secs(5),
+                "lock not released"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     #[test]

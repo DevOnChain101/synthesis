@@ -1887,8 +1887,56 @@ fn effort_cycles_with_alt_t_and_shows_in_the_footer() {
     assert!(matches!(&cmds[..], [Cmd::SetEffort(None)]), "{cmds:?}");
     let cmds = keys(&mut a, "/effort high\r");
     assert!(matches!(&cmds[..], [Cmd::SetEffort(Some(e))] if e == "high"));
+    assert_eq!(a.chat.agent.effort, "high", "the header and status read it");
     let cmds = keys(&mut a, "/effort bogus\r");
     assert!(cmds.is_empty() && screen(&mut a).contains("usage: /effort"));
+}
+
+#[test]
+fn browser_lists_the_browser_and_web_calls() {
+    let mut a = app();
+    assert!(screen_after(&mut a, "/browser\r").contains("no browser and web calls"));
+    for (i, (name, input)) in [
+        ("browser_navigate", json!({"url": "https://example.com/a"})),
+        ("WebFetch", json!({"url": "https://example.com/b"})),
+        ("Bash", json!({"command": "zzmarker"})),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        a.on_event(
+            &env(
+                i as u64 + 1,
+                Ev::ToolRequested {
+                    tool_call_id: format!("c{i}"),
+                    name: name.into(),
+                    input,
+                    input_truncated: false,
+                    origin: None,
+                },
+            ),
+            T0,
+        );
+    }
+    let s = screen_after(&mut a, "/browser\r");
+    assert!(s.contains("2 browser and web calls"), "{s}");
+}
+
+fn screen_after(a: &mut App, k: &str) -> String {
+    keys(a, k);
+    screen(a)
+}
+
+#[test]
+fn a_saved_effort_is_restored_only_when_the_model_declares_it() {
+    let mut a = app();
+    assert_eq!(
+        a.restore_effort(Some("high".into())).as_deref(),
+        Some("high")
+    );
+    assert_eq!(a.chat.agent.effort, "high");
+    assert_eq!(a.restore_effort(Some("max".into())), None);
+    assert_eq!(a.chat.agent.effort, "");
 }
 
 #[test]

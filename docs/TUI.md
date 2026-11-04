@@ -24,7 +24,7 @@ session continues in place), `--once` (print one frame and exit), plus the `synt
 | /images [clear] | the attached images, or drop them |
 | /config | the `synt.tui` settings as a list; enter flips a row, applies it and saves it |
 | /files | the project tree with git status letters (read-only git, only in a trusted folder: `--trust-project`; see "Git in `/files` and `/diff`" below) |
-| /diff [file] | uncommitted changes: a line per file, then the diff (of one file); trusted folder only |
+| /diff [file] | uncommitted changes: a line per file with its full `+added -deleted` count (from `git diff --numstat`), then the diff text (of one file), cut at 600 lines with a note at the top; trusted folder only |
 | /terminal | the shell commands this session ran, with their status |
 | /browser | the browser and web calls this session made |
 | /peers | other sessions on this machine (needs `--peers` or `synt.peers.enabled`) |
@@ -60,6 +60,10 @@ settings, default 30, `0` = forever) rewrites images of sessions untouched for t
 `[image removed after N days]` in the session store when the app starts (see docs/specs/config.md for exactly what is and is not rewritten: the Node-format mirror, backups and browser screenshot files are not). A persistence problem (a message the
 store refuses, a failing store) is a visible `notice`, and a message over the limit is stored with
 its images replaced by `[image]` instead of stopping the later messages.
+
+## Keys in dialogs
+
+A picker (`/new`, `/resume`, `/model`, `/config`, ...) closes with Esc; an approval dialog is answered with Enter / 1-3, and Esc or Ctrl+C rejects it. Ctrl+D does nothing inside a dialog (on the prompt it quits when the prompt is empty); close the dialog first.
 
 ## Settings (`synt.tui`, user settings.json only)
 
