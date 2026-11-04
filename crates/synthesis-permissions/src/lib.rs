@@ -894,19 +894,19 @@ impl Permissions {
             .any(|r| paths::within(r, &abs, self.policy()))
     }
 
-    /// Inside cwd/additional dirs lexically AND after resolving links.
+    /// Inside cwd/additional dirs after resolving links on both sides.
     fn in_scope(&self, p: &Path) -> bool {
         let Some(rp) = paths::real_of(p) else {
             return false;
         };
         self.roots().iter().any(|r| {
-            paths::within(r, p, self.policy())
-                && !paths::win_unsafe(&paths::relative(r, p), self.policy())
-                && paths::within(
-                    &paths::real_of(r).unwrap_or_else(|| r.clone()),
-                    &rp,
-                    self.policy(),
-                )
+            // Compared as realpaths only, so `/tmp/ws/x` and `/private/tmp/ws/x` are the same
+            // place; a link leading outside resolves outside. Unresolvable = outside.
+            let rr = paths::real_of(r).unwrap_or_else(|| r.clone());
+            paths::within(&rr, &rp, self.policy())
+                && !paths::win_unsafe(&paths::relative(&rr, &rp), self.policy())
+                && !(paths::within(r, p, self.policy())
+                    && paths::win_unsafe(&paths::relative(r, p), self.policy()))
         })
     }
 

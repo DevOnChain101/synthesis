@@ -3297,3 +3297,65 @@ fn bash_cannot_name_browser_profiles_however_the_path_is_spelled() {
         assert_ne!(d(&p, "Bash", json!({ "command": ok })), D, "{ok}");
     }
 }
+
+// --- workspace containment compares realpaths (macOS /tmp -> /private/tmp) ---------------------
+
+#[cfg(unix)]
+#[test]
+fn accept_edits_write_through_an_alias_of_the_workspace_is_inside() {
+    let f = fx();
+    let real = dunce::canonicalize(&f.cwd).unwrap();
+    let alias = f.outside.join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let p = Permissions::new(
+        PermissionRules::default(),
+        Env::new(&real, &f.home, Mode::AcceptEdits).interactive(true),
+    );
+    let w = |path: PathBuf| d(&p, "Write", json!({ "file_path": path, "content": "x" }));
+    assert_eq!(w(alias.join("x")), A);
+    assert_eq!(w(alias.join("new/deep/x")), A, "nested new file");
+    assert_eq!(w(real.join("x")), A);
+    // symlinked parent dir inside the workspace, both directions
+    fs::create_dir(real.join("d")).unwrap();
+    std::os::unix::fs::symlink(real.join("d"), real.join("dl")).unwrap();
+    assert_eq!(w(alias.join("dl/x")), A);
+    // `..` is resolved before links: out of the workspace and back through the alias
+    assert_eq!(w(alias.join("../x")), Q);
+    assert_eq!(w(alias.join("sub/../../x")), Q);
+    // a link inside pointing outside, also via the alias, and a dangling one
+    std::os::unix::fs::symlink(&f.home, real.join("esc")).unwrap();
+    assert_eq!(w(alias.join("esc/x")), Q);
+    assert_eq!(w(real.join("esc/new/x")), Q);
+    std::os::unix::fs::symlink(f.home.join("nowhere"), real.join("dang")).unwrap();
+    assert_eq!(w(alias.join("dang/x")), Q);
+    // protected paths stay protected through the alias
+    assert_eq!(w(alias.join(".git/config")), Q);
+    assert_eq!(w(alias.join(".synt/x")), Q);
+    assert_eq!(w(alias.join(".env")), Q);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn accept_edits_tmp_and_private_tmp_are_the_same_workspace() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let ws = dir.path().join("ws");
+    fs::create_dir(&ws).unwrap();
+    let real = dunce::canonicalize(&ws).unwrap();
+    assert!(real.starts_with("/private/tmp"));
+    let p = Permissions::new(
+        PermissionRules::default(),
+        Env::new(&real, dir.path(), Mode::AcceptEdits).interactive(true),
+    );
+    for path in [ws.join("x"), real.join("x")] {
+        assert_eq!(
+            d(&p, "Write", json!({ "file_path": path, "content": "x" })),
+            A
+        );
+    }
+    // case-folding of the native policy is unchanged
+    let upper = PathBuf::from(real.to_string_lossy().to_uppercase()).join("x");
+    assert_eq!(
+        d(&p, "Write", json!({ "file_path": upper, "content": "x" })),
+        A
+    );
+}
