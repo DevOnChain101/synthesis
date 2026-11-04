@@ -1179,9 +1179,8 @@ fn exec(
             Some(f) => match f(&name) {
                 Ok((h, label)) => {
                     runner.harness = h;
-                    // the chosen tier stays in force for the rebuilt harness
-                    runner.harness.set_reasoning_effort(app.effort());
                     app.model_switched(&label);
+                    runner.harness.set_reasoning_effort(app.effort());
                 }
                 Err(e) => app.note(format!("/model {name}: {e}"), "error"),
             },

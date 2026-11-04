@@ -176,9 +176,49 @@ pub fn save_effort(synthesis_home: &Path, effort: Option<&str>) -> std::io::Resu
         }
     }
     std::fs::create_dir_all(synthesis_home)?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&v)? + "\n")?;
-    std::fs::rename(&tmp, &path)
+    write_private_atomic(&path, (serde_json::to_string_pretty(&v)? + "\n").as_bytes())
+}
+
+/// Replaces `path` with `bytes`: a new file next to it (random name, `create_new`, mode 0600 on
+/// unix; so a symlink planted at the temp name is never followed), then a rename. The temp file is
+/// removed on any failure. A `path` that is itself a symlink is refused (a repository can commit
+/// one to point at a file elsewhere): edit the real file by hand instead.
+pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(std::io::Error::other(format!(
+            "{} is a symlink; edit the real file by hand",
+            path.display()
+        )));
+    }
+    let name = path
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let mut tries = 0;
+    let (tmp, mut f) = loop {
+        let salt = std::hash::BuildHasher::hash_one(
+            &std::collections::hash_map::RandomState::new(),
+            (std::process::id(), tries),
+        );
+        let tmp = path.with_file_name(format!(".{name}.{salt:016x}.tmp"));
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        match o.open(&tmp) {
+            Ok(f) => break (tmp, f),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && tries < 8 => tries += 1,
+            Err(e) => return Err(e),
+        }
+    };
+    let done = f
+        .write_all(bytes)
+        .and_then(|()| f.sync_all())
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if done.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    done
 }
 
 fn deep_merge(base: &mut Value, extra: &Value) {

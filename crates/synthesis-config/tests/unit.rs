@@ -1004,3 +1004,41 @@ fn save_effort_keeps_other_keys_and_clears() {
     let s = load_state(h.path());
     assert_eq!((s.model.as_deref(), s.effort), (Some("a/b"), None));
 }
+
+#[cfg(unix)]
+#[test]
+fn private_atomic_write_is_0600_leaves_no_temp_and_refuses_a_symlink_target() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("state.json");
+    write_private_atomic(&f, b"{}").unwrap();
+    assert_eq!(
+        std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::read_dir(d.path()).unwrap().count(),
+        1,
+        "no temp file left"
+    );
+    // a symlink at the target (a repository can commit one) is not followed or replaced
+    let victim = d.path().join("victim");
+    std::fs::write(&victim, "keep").unwrap();
+    let link = d.path().join(".mcp.json");
+    symlink(&victim, &link).unwrap();
+    let e = write_private_atomic(&link, b"x").unwrap_err().to_string();
+    assert!(e.contains("symlink"), "{e}");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    // the old fixed temp name is not used any more: a symlink there stays untouched
+    let old_tmp = d.path().join("state.json.tmp");
+    symlink(&victim, &old_tmp).unwrap();
+    save_effort(d.path(), Some("high")).unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    assert_eq!(load_state(d.path()).effort.as_deref(), Some("high"));
+}

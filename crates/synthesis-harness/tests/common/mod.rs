@@ -132,6 +132,8 @@ pub struct Opts {
     pub responder: Option<synthesis_harness::testing::Responder>,
     /// The model does not take images.
     pub no_vision: bool,
+    /// `capabilities.effort_tiers` of the model.
+    pub effort_tiers: Vec<String>,
 }
 
 /// Writes into `buf` until `left` writes are used up, then fails every write.
@@ -169,6 +171,7 @@ impl Default for Opts {
             context_window: None,
             responder: None,
             no_vision: false,
+            effort_tiers: vec![],
         }
     }
 }
@@ -232,6 +235,7 @@ impl Rig {
             c.parallel_tools = o.parallel_tools;
             c.context_window = o.context_window;
             c.images = !o.no_vision;
+            c.effort_tiers = o.effort_tiers.clone();
             c
         };
         let mut fake = FakeProvider::new(turns).with_caps(caps);

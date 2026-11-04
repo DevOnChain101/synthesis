@@ -1937,6 +1937,18 @@ fn a_saved_effort_is_restored_only_when_the_model_declares_it() {
     assert_eq!(a.chat.agent.effort, "high");
     assert_eq!(a.restore_effort(Some("max".into())), None);
     assert_eq!(a.chat.agent.effort, "");
+    assert!(screen(&mut a).contains("effort max is not declared by this model"));
+}
+
+#[test]
+fn switching_model_in_process_resets_the_effort_to_auto_with_a_notice() {
+    let mut a = app();
+    keys(&mut a, "/effort high\r");
+    assert_eq!(a.effort().as_deref(), Some("high"));
+    a.model_switched("fake/b");
+    assert_eq!(a.effort(), None);
+    assert_eq!(a.chat.agent.effort, "");
+    assert!(screen(&mut a).contains("effort reset to auto"));
 }
 
 #[test]
