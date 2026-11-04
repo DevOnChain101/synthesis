@@ -400,7 +400,8 @@ fn fold_confusables(s: &str) -> String {
             'ԁ' => 'd',
             'е' | 'Е' | 'ε' | 'Ε' => 'e',
             'һ' | 'Н' | 'Η' => 'h',
-            'і' | 'І' | 'ι' | 'Ι' | 'ӏ' | 'ı' => 'i',
+            'і' | 'І' | 'ι' | 'Ι' | 'ı' => 'i',
+            'ӏ' | 'Ӏ' | 'ǀ' => 'l',
             'ј' | 'Ј' => 'j',
             'к' | 'К' | 'κ' | 'Κ' => 'k',
             'М' | 'Μ' => 'm',
@@ -409,7 +410,8 @@ fn fold_confusables(s: &str) -> String {
             'р' | 'Р' | 'ρ' | 'Ρ' => 'p',
             'ѕ' | 'Ѕ' => 's',
             'т' | 'Т' | 'τ' | 'Τ' => 't',
-            'υ' | 'ν' => 'v',
+            'υ' => 'u',
+            'ν' => 'v',
             'х' | 'Х' | 'χ' | 'Χ' => 'x',
             'у' | 'У' | 'γ' => 'y',
             'ѡ' | 'ω' => 'w',
@@ -1140,6 +1142,9 @@ mod tests {
         assert!(hard_denied("B\u{456}twarden").is_some());
         assert!(hard_denied_loose("Auth\u{443} Desktop").is_some());
         assert!(hard_denied_loose("\u{391}uthy Desktop").is_some());
+        // Greek upsilon reads as u, palochka as l
+        assert!(hard_denied("A\u{3c5}thy").is_some());
+        assert!(hard_denied("Dash\u{4cf}ane").is_some());
         assert!(hard_denied("my-tool").is_none());
     }
 
