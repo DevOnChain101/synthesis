@@ -733,9 +733,19 @@ fn secret_like(k: &str) -> bool {
     !w.last()
         .is_some_and(|l| matches!(l.as_str(), "file" | "path" | "dir"))
         && w.iter().any(|w| {
+            // ordinary flags (`--max-tokens`, `--tokenizer`, `--session-name`); a secret-shaped
+            // value is still caught by `secret_shaped`
+            if matches!(
+                w.as_str(),
+                "tokenizer" | "tokenizers" | "tokens" | "session"
+            ) {
+                return false;
+            }
             matches!(
                 w.as_str(),
                 "token"
+                    | "tok"
+                    | "pswd"
                     | "secret"
                     | "password"
                     | "passwd"
@@ -754,7 +764,6 @@ fn secret_like(k: &str) -> bool {
                     | "jwt"
                     | "pw"
                     | "pat"
-                    | "session"
                     | "sessionid"
                     | "sid"
                     | "otp"
@@ -1967,8 +1976,10 @@ mod tests {
             "--authkey",
             "--pw",
             "--pat",
-            "--session",
             "--sid",
+            "--pswd",
+            "--tok",
+            "--session-token",
             "--otp",
             "--passphrase",
         ] {
@@ -1987,10 +1998,20 @@ mod tests {
             "author",
             "--port",
             "--monkey",
+            "--tokenizer",
+            "--max-tokens",
+            "--tokens",
+            "--session-name",
+            "--session",
             "--keyboard-layout",
         ] {
             assert!(!secret_like(ok), "{ok}");
         }
+        assert!(literal_secret_arg(&["--tokenizer".into(), "gpt2".into()]).is_none());
+        assert!(literal_secret_arg(&["--max-tokens".into(), "100".into()]).is_none());
+        assert!(
+            literal_secret_arg(&["--session".into(), "Bearer sk-abcdefghijkl".into()]).is_some()
+        );
         assert!(literal_secret_arg(&["--token".into(), "-abc123".into()]).is_some());
         assert!(literal_secret_arg(&["--token".into(), "--other-flag".into()]).is_none());
         assert!(secret_shaped("Bearer sk-abcdefghijkl"));

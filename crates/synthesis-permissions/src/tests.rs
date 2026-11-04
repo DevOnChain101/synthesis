@@ -3376,6 +3376,20 @@ fn bash_dotdot_after_a_symlinked_component_is_not_normalised_away() {
         assert_eq!(f.bash(mode, "cd link/.. && cat passwd"), Q, "{mode:?}");
         assert_eq!(f.bash(mode, "cat a/b/../../passwd"), A, "{mode:?}");
         assert_eq!(f.bash(mode, "cd a/b/.. && cat ../passwd"), A, "{mode:?}");
+        // entering the link with cd, then `..`
+        for c in [
+            "cd link && cat ../passwd",
+            "cd link; cat ../passwd",
+            "cd link/ && cat ../passwd",
+            "cd a/../link && cat ../passwd",
+        ] {
+            assert_eq!(f.bash(mode, c), Q, "{mode:?} {c}");
+        }
+        assert_eq!(f.bash(mode, "cd a && cat ../passwd"), A, "{mode:?}");
+        // cd out of the workspace, then an operand-less command
+        assert_eq!(f.bash(mode, "cd .. && ls"), Q, "{mode:?}");
+        assert_eq!(f.bash(mode, "cd /etc && ls"), Q, "{mode:?}");
+        assert_eq!(f.bash(mode, "cd a/b && ls"), A, "{mode:?}");
     }
 }
 

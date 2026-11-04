@@ -1252,11 +1252,13 @@ impl Permissions {
             bash::is_read_only_simple(w)
         };
         // echo only prints: its words are text, not paths
-        ok && (w[0] == "echo"
-            || w[1..].iter().filter(|a| !a.starts_with('-')).all(|a| {
-                base.and_then(|b| self.resolve_operand(a, b))
-                    .is_some_and(|(p, _)| self.in_scope(&p))
-            }))
+        // base `None` = an earlier `cd` went somewhere unknown or outside: even operand-less runs there
+        ok && base.is_some()
+            && (w[0] == "echo"
+                || w[1..].iter().filter(|a| !a.starts_with('-')).all(|a| {
+                    base.and_then(|b| self.resolve_operand(a, b))
+                        .is_some_and(|(p, _)| self.in_scope(&p))
+                }))
     }
 
     /// Working directory after a simple command (`cd` moves it).
@@ -1264,13 +1266,22 @@ impl Permissions {
         if seg[0] != "cd" {
             return base;
         }
-        match seg.len() {
-            2 => base
+        let to = match seg.len() {
+            2 if seg[1] != "-" => base
                 .as_deref()
                 .and_then(|b| self.resolve_operand(&seg[1], b))
                 .map(|(p, _)| p),
+            2 => None,
             _ => Some(self.env.home.clone()),
-        }
+        }?;
+        // Outside the workspace, or through a link inside it (a later `..` would step back
+        // physically, not in the spelling): unresolvable, so the command asks.
+        let roots = self.roots();
+        let linked = to
+            .ancestors()
+            .take_while(|a| !roots.iter().any(|r| r.starts_with(a)))
+            .any(|a| std::fs::symlink_metadata(a).is_ok_and(|m| m.file_type().is_symlink()));
+        (self.in_scope(&to) && !linked).then_some(to)
     }
 
     /// Every segment passes `seg_safe` (tracking `cd`); the scoped `is_read_only_bash` /
@@ -1592,13 +1603,10 @@ impl Permissions {
             let w = bash::unwrap_words(&seg, false);
             let name = w.first().map_or("", String::as_str);
             if name == "cd" {
-                base = match w.len() {
-                    1 => Some(self.env.home.clone()),
-                    2 => base
-                        .as_deref()
-                        .and_then(|b| self.resolve_operand(&w[1], b))
-                        .map(|(p, _)| p),
-                    _ => None,
+                base = if w.len() > 2 {
+                    None
+                } else {
+                    self.after_cd(&w, base.take())
                 };
                 continue;
             }
