@@ -703,17 +703,28 @@ fn edit(env: &Env, s: &mut Store, id: &str) -> Result<(), String> {
             old.kind, old.status
         ));
     }
-    let path = std::env::temp_dir().join(format!("synthesis-memory-{}.md", uuid::Uuid::new_v4()));
+    // the temp lives in its own private dir (0700) so no other user can read or swap the file
+    let dir = std::env::temp_dir().join(format!("synthesis-memory-{}", uuid::Uuid::new_v4()));
+    let mut db = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut db, 0o700);
+    db.create(&dir)
+        .map_err(|x| format!("{}: {x}", dir.display()))?;
+    let path = dir.join("note.md");
     let mut o = std::fs::OpenOptions::new();
     o.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-    let mut f = o
-        .open(&path)
-        .map_err(|x| format!("{}: {x}", path.display()))?;
+    let mut f = match o.open(&path) {
+        Ok(f) => f,
+        Err(x) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!("{}: {x}", path.display()));
+        }
+    };
     if let Err(x) = std::io::Write::write_all(&mut f, edit_text(&old).as_bytes()) {
         drop(f);
-        let _ = std::fs::remove_file(&path); // a half-written file is not anybody's text
+        let _ = std::fs::remove_dir_all(&dir); // a half-written file is not anybody's text
         return Err(x.to_string());
     }
     drop(f);
@@ -761,16 +772,15 @@ fn edit(env: &Env, s: &mut Store, id: &str) -> Result<(), String> {
         }
         Ok(())
     })();
-    // on a refused save the person's text is the only copy: keep it and say where
-    match &result {
-        Err(e) if !e.starts_with("the editor") && !e.starts_with("cannot start") => {
-            Err(format!("{e}; your text is kept at {}", path.display()))
-        }
-        _ => {
-            let _ = std::fs::remove_file(&path);
-            result
-        }
+    // Always removed, except a refused save whose text differs from the stored record: then it
+    // is the person's only copy, so keep it and say where.
+    let refused =
+        matches!(&result, Err(e) if !e.starts_with("the editor") && !e.starts_with("cannot start"));
+    if refused && std::fs::read(&path).is_ok_and(|b| b != edit_text(&old).as_bytes()) {
+        return result.map_err(|e| format!("{e}; your text is kept at {}", path.display()));
     }
+    let _ = std::fs::remove_dir_all(&dir);
+    result
 }
 
 /// `synt doctor` rows for memory: where the store is, how big, whether it is healthy, what trust the
@@ -1882,6 +1892,57 @@ mod tests {
         );
         assert_eq!(parse_edit("only title\n"), None);
         assert_eq!(parse_edit("\n\nbody"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn edit_temp_is_private_and_kept_only_as_the_only_copy_of_a_refused_save() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&d.path().join("home"), vec![]).unwrap();
+        let id = store
+            .put(NewMemory::new(
+                "user",
+                "",
+                "fact",
+                "T",
+                "body",
+                Trust::Owner,
+            ))
+            .unwrap()
+            .id;
+        // (editor body, expect an error, expect the temp kept)
+        for (name, body, err, kept) in [
+            ("same", ":", false, false),
+            ("fail", "exit 1", true, false),
+            ("refused", "printf 'no body' > \"$1\"", true, true),
+        ] {
+            let rec = d.path().join(format!("{name}.rec"));
+            let sh = d.path().join(format!("{name}.sh"));
+            std::fs::write(
+                &sh,
+                format!(
+                    "#!/bin/sh\nprintf '%s' \"$1\" > {}\n{body}\n",
+                    rec.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let env = Env::from_pairs([("EDITOR", sh.to_str().unwrap())]);
+            let r = edit(&env, &mut store, &id);
+            assert_eq!(r.is_err(), err, "{name}: {r:?}");
+            let tmp = PathBuf::from(std::fs::read_to_string(&rec).unwrap());
+            assert_eq!(tmp.exists(), kept, "{name}");
+            if kept {
+                assert!(r.unwrap_err().contains(tmp.to_str().unwrap()));
+                let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode(&tmp), 0o600);
+                assert_eq!(mode(tmp.parent().unwrap()), 0o700);
+                std::fs::remove_dir_all(tmp.parent().unwrap()).unwrap();
+            } else {
+                assert!(!tmp.parent().unwrap().exists(), "{name}: dir removed too");
+            }
+        }
     }
 
     // ---- round 2: episodes, verified facts, compaction, sub-agents, claude import ----

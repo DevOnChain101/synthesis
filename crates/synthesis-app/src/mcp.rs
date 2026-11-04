@@ -698,19 +698,62 @@ pub struct AddArgs {
     command: Vec<String>,
 }
 
+/// Name split into lowercase words at `_ - . ` and other punctuation, camelCase and digits:
+/// `accessToken` -> access, token; `APIKey` -> api, key.
+fn name_words(k: &str) -> Vec<String> {
+    let c: Vec<char> = k.chars().collect();
+    let mut words = vec![String::new()];
+    for (i, &ch) in c.iter().enumerate() {
+        if !ch.is_ascii_alphabetic() {
+            if !words.last().is_some_and(String::is_empty) {
+                words.push(String::new());
+            }
+            continue;
+        }
+        let prev = i.checked_sub(1).map(|j| c[j]);
+        let next = c.get(i + 1);
+        let boundary = ch.is_ascii_uppercase()
+            && prev.is_some_and(|p| {
+                p.is_ascii_lowercase()
+                    || (p.is_ascii_uppercase() && next.is_some_and(|n| n.is_ascii_lowercase()))
+            });
+        if boundary && !words.last().is_some_and(String::is_empty) {
+            words.push(String::new());
+        }
+        words.last_mut().unwrap().push(ch.to_ascii_lowercase());
+    }
+    words.retain(|w| !w.is_empty());
+    words
+}
+
+/// Does this flag / key / header name a credential? Whole words only (`--author`, `--keyboard`,
+/// `bypass` are fine), and not when the name ends in a location (`--key-file /path`).
 fn secret_like(k: &str) -> bool {
-    let k = k.to_ascii_lowercase();
-    [
-        "key",
-        "token",
-        "secret",
-        "password",
-        "auth",
-        "cookie",
-        "credential",
-    ]
-    .iter()
-    .any(|w| k.contains(w))
+    let w = name_words(k);
+    !w.last()
+        .is_some_and(|l| matches!(l.as_str(), "file" | "path" | "dir"))
+        && w.iter().any(|w| {
+            matches!(
+                w.as_str(),
+                "token"
+                    | "secret"
+                    | "password"
+                    | "passwd"
+                    | "pass"
+                    | "pwd"
+                    | "key"
+                    | "apikey"
+                    | "auth"
+                    | "authorization"
+                    | "cookie"
+                    | "credential"
+                    | "credentials"
+                    | "bearer"
+                    | "sig"
+                    | "signature"
+                    | "jwt"
+            )
+        })
 }
 
 /// `${NAME}` with a plain variable name: nothing else may sit inside the braces.
@@ -747,6 +790,11 @@ fn only_refs(v: &str) -> bool {
 
 /// Token-shaped literals that are secrets whatever the flag or key is called.
 fn secret_shaped(v: &str) -> bool {
+    let v = v.trim();
+    let v = match v.split_once(' ') {
+        Some((s, rest)) if s.eq_ignore_ascii_case("bearer") => rest.trim_start(),
+        _ => v,
+    };
     [
         "sk-",
         "ghp_",
@@ -811,16 +859,6 @@ fn literal_secret_arg(args: &[String]) -> Option<String> {
     None
 }
 
-/// Words that make a URL query key a credential (wider than [`secret_like`]: a URL has no
-/// other way to say what a value is).
-fn secret_like_url(k: &str) -> bool {
-    let k = k.to_ascii_lowercase();
-    secret_like(&k)
-        || ["pass", "pwd", "sig", "jwt", "bearer", "apikey", "access"]
-            .iter()
-            .any(|w| k.contains(w))
-}
-
 /// `%XX` decoded (invalid sequences stay as they are).
 fn pct_decode(s: &str) -> String {
     let b = s.as_bytes();
@@ -868,13 +906,24 @@ fn check_url(u: &str) -> Result<(), String> {
             return refuse("the URL fragment");
         }
     }
+    // `a=b` pairs split on `;` (path params) or `&`/`;` (query); a bare part is checked by shape.
+    let part = |p: &str| {
+        let (k, v) = p.split_once('=').unwrap_or((p, ""));
+        let (k, v) = (dec(k), dec(v));
+        (((secret_like(&k) || name_words(&k).iter().any(|w| w == "access"))
+            && !v.is_empty()
+            && !only_refs(&v))
+            || secret_shaped(&k)
+            || secret_shaped(&v))
+        .then_some(k)
+    };
     for seg in url.path_segments().into_iter().flatten() {
-        if secret_shaped(&dec(seg)) {
+        if seg.split(';').any(|p| part(p).is_some()) {
             return refuse("a URL path segment");
         }
     }
-    for (k, v) in url.query_pairs() {
-        if (secret_like_url(&k) && !v.is_empty() && !only_refs(&v)) || secret_shaped(&v) {
+    for p in url.query().unwrap_or("").split(['&', ';']) {
+        if let Some(k) = part(p) {
             return refuse(&format!("the query parameter {k}"));
         }
     }
@@ -1853,6 +1902,59 @@ mod tests {
                 && !only_refs("${1X}")
         );
         assert!(literal_secret_arg(&["--token=${sk-live-literal}".to_string()]).is_some());
+        for bad in [
+            "https://h/mcp?sk-abcdefghijkl",
+            "https://h/mcp?a=1;token=abcdef123456",
+            "https://h/mcp;key=abcdef123456",
+            "https://h/mcp?x=Bearer%20sk-abcdefghijkl",
+        ] {
+            assert!(check_url(bad).is_err(), "{bad}");
+        }
+        for ok in [
+            "https://h/mcp?design=1&assignee=bob&keyword=x;compass=y",
+            "https://h/mcp;v=2",
+        ] {
+            assert!(check_url(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "--api-key",
+            "API_KEY",
+            "x-api-key",
+            "accessToken",
+            "client_secret",
+            "--auth-token",
+            "APIKey",
+            "Authorization",
+            "key",
+        ] {
+            assert!(secret_like(bad), "{bad}");
+        }
+        for ok in [
+            "--author",
+            "--keyboard",
+            "--design",
+            "--key-file",
+            "assignee",
+            "signal",
+            "bypass",
+            "compass",
+            "keyword",
+            "author",
+            "--port",
+        ] {
+            assert!(!secret_like(ok), "{ok}");
+        }
+        assert!(secret_shaped("Bearer sk-abcdefghijkl"));
+        assert!(
+            literal_secret_arg(&[
+                "--author".into(),
+                "bob".into(),
+                "--key-file".into(),
+                "/p".into()
+            ])
+            .is_none()
+        );
+        assert!(literal_secret_arg(&["--api-key".into(), "abc".into()]).is_some());
         for ok in [
             "https://h/mcp",
             "https://h/mcp?x=1&page=2",
