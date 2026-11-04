@@ -2475,6 +2475,12 @@ fn header(s: &DashState, w: i64, frame: usize, now: i64) -> String {
             b
         }
     };
+    // on a narrow header a long folder name is shortened, not dropped with its chip
+    let project = if w < 100 && width(&project) > 10 {
+        fit(&project, 10)
+    } else {
+        project
+    };
     let ctx_pct = ctx_pct_of(s);
     let logos = [" ✻ SYNTHESIS ", " ✻ "];
     let pulse_s = if busy > 0 {
@@ -2505,7 +2511,7 @@ fn header(s: &DashState, w: i64, frame: usize, now: i64) -> String {
             },
         ),
         (
-            4,
+            3,
             if project.is_empty() {
                 String::new()
             } else {
@@ -2527,7 +2533,7 @@ fn header(s: &DashState, w: i64, frame: usize, now: i64) -> String {
     let right_chips: Vec<(u8, String)> = [
         (1, paint(COL_WHITE, &fmt_time(now, s.tz_offset_min))),
         (
-            3,
+            4,
             format!(
                 "{}{} {}",
                 paint(COL_MUTED, "ctx "),

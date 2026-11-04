@@ -624,6 +624,18 @@ impl Permissions {
         &self.rules
     }
 
+    /// `Tool` or `Tool(content)`: the shape `--allow` / `--deny` and `/permissions allow` accept.
+    pub fn is_well_formed_rule(r: &str) -> bool {
+        let name = r.split('(').next().unwrap_or("");
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+            && (r.len() == name.len() || r.ends_with(')'))
+            && r.len() <= 2000
+            && !r.chars().any(char::is_control)
+    }
+
     /// Adds a session-only allow rule typed by the user; `false` if it was already there.
     pub fn add_allow(&mut self, rule: &str) -> bool {
         let new = !self.rules.allow.iter().any(|r| r == rule);

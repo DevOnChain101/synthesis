@@ -1569,7 +1569,11 @@ fn only_a_typed_bang_makes_a_shell_command() {
     // a paste, or a burst of characters, that starts with `!` is plain text
     keys(&mut a, "\x1b[200~!rm -rf x\x1b[201~");
     assert!(!a.bash(), "{:?}", a.editor.text());
-    assert!(matches!(&keys(&mut a, "\r")[..], [Cmd::StartTask { .. }]));
+    assert!(screen(&mut a).contains("typed ! to run a shell command"));
+    // the model gets the text without the marker space
+    assert!(
+        matches!(&keys(&mut a, "\r")[..], [Cmd::StartTask { text, .. }] if text == "!rm -rf x")
+    );
     let mut a = app();
     a.on_key(Key::Text("!ls".into()), T0);
     assert!(!a.bash());
@@ -2489,4 +2493,121 @@ fn files_and_diff_need_a_trusted_folder_and_never_run_two_scans_at_once() {
     assert!(screen(&mut b).contains("still running"));
     b.project_done();
     assert_eq!(started(&mut b, "/diff x\r"), 1);
+}
+
+/// `/new` with a typed query: `Some(folder)` when Enter started a session, else the picker text.
+fn new_folder_typed(cwd: &Path, home: Option<&Path>, typed: &str) -> (Option<PathBuf>, String) {
+    let mut c = cfg(&cwd.to_string_lossy());
+    c.home = home.map(Path::to_path_buf);
+    let mut a = App::new(c, &[], T0);
+    keys(&mut a, "/new\r");
+    keys(&mut a, typed);
+    let shown = screen(&mut a);
+    keys(&mut a, "\r");
+    match a.quit.clone() {
+        Some(ExitReason::OpenFolder(p)) => (Some(p), shown),
+        _ => (None, screen(&mut a)),
+    }
+}
+
+#[test]
+fn new_folder_a_typed_query_never_falls_back_to_the_current_folder() {
+    let d = tempfile::tempdir().unwrap();
+    let cwd = d.path().join("here");
+    std::fs::create_dir_all(&cwd).unwrap();
+    // the current path is in the detail column of `use this folder`: it must not match
+    let (got, text) = new_folder_typed(&cwd, None, "bad");
+    assert!(got.is_none(), "{text}");
+    assert!(text.contains("no matches"), "{text}");
+}
+
+#[test]
+fn new_folder_typed_paths_open_a_folder_or_say_why_not() {
+    let d = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(d.path()).unwrap();
+    let cwd = root.join("here");
+    for sub in ["here/sub", "home/x", "my dir é"] {
+        std::fs::create_dir_all(root.join(sub)).unwrap();
+    }
+    std::fs::write(root.join("here/afile"), "x").unwrap();
+    let home = root.join("home");
+    let open = |q: &str| new_folder_typed(&cwd, Some(&home), q);
+    // relative to the session's folder, `~`, absolute, spaces and non-ASCII
+    assert_eq!(open("./sub").0, Some(cwd.join("sub")));
+    assert_eq!(open("~/x").0, Some(home.join("x")));
+    assert_eq!(open("../my dir é").0, Some(root.join("my dir é")));
+    assert_eq!(
+        open(&root.join("my dir é").to_string_lossy()).0,
+        Some(root.join("my dir é"))
+    );
+    // a file, a missing path
+    let (got, text) = open("./afile");
+    assert!(got.is_none() && text.contains("not a folder"), "{text}");
+    let (got, text) = open("./nope");
+    assert!(got.is_none() && text.contains("no such folder"), "{text}");
+    // a folder nobody may read
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let locked = root.join("here/locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let (got, text) = open("./locked");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // root can read anything: only assert where the mode is enforced
+        if std::fs::read_dir(&locked).is_ok() && got.is_some() {
+            return;
+        }
+        assert!(
+            got.is_none() && text.contains("permission denied"),
+            "{text}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn new_folder_lists_symlinked_folders_with_a_marker() {
+    let d = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(d.path()).unwrap();
+    std::fs::create_dir_all(cwd.join("real")).unwrap();
+    std::os::unix::fs::symlink(cwd.join("real"), cwd.join("lnk")).unwrap();
+    // a loop is just a link to a folder: one level per listing, no recursion
+    std::os::unix::fs::symlink(&cwd, cwd.join("loop")).unwrap();
+    let mut a = App::new(cfg(&cwd.to_string_lossy()), &[], T0);
+    keys(&mut a, "/new\r");
+    let text = screen(&mut a);
+    assert!(
+        text.contains("lnk/ (link)") && text.contains("real/"),
+        "{text}"
+    );
+}
+
+#[test]
+fn permissions_allow_rejects_a_malformed_rule() {
+    use synthesis_permissions::Permissions;
+    for bad in ["((", "", "Bash(", "a b", "Bash(x)\n"] {
+        assert!(!Permissions::is_well_formed_rule(bad), "{bad:?}");
+    }
+    for ok in ["Edit", "Bash(cargo test:*)", "mcp__srv__tool"] {
+        assert!(Permissions::is_well_formed_rule(ok), "{ok}");
+    }
+}
+
+#[test]
+fn resume_toggle_to_this_folder_says_so_when_it_has_no_sessions() {
+    let mut a = app(); // the only saved session is in /work/other
+    keys(&mut a, "/resume\r");
+    keys(&mut a, "only this");
+    keys(&mut a, "\r");
+    let text = screen(&mut a);
+    assert!(text.contains("no saved sessions in this folder"), "{text}");
+}
+
+#[test]
+fn a_long_folder_name_is_shortened_in_the_narrow_header_not_dropped() {
+    let mut a = App::new(cfg("/tmp/a-very-long-project-folder-name"), &[], T0);
+    let rows = a.render(80, 24, T0);
+    let head = strip_ansi(&rows[0]);
+    assert!(head.contains('⌂') && head.contains('…'), "{head}");
 }

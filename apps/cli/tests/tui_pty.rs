@@ -236,6 +236,53 @@ fn model_switch_before_the_first_prompt_keeps_the_app_running() {
     assert!(!squash(&out).contains("cannot be resumed"), "{out}");
 }
 
+/// `/resume <bad id>` and a folder the app cannot open stay in the app with a notice (they used
+/// to exit with `synt: error: ...`); a typed path starts a session there.
+#[test]
+fn resume_of_a_bad_id_and_unopenable_folders_are_notices_not_exits() {
+    let rig = Rig::new(json!([{"text": "first reply"}]));
+    // a folder whose project config nobody can read (the picker only checks the folder itself)
+    let bad = rig.ws().join("cfgbad");
+    std::fs::create_dir_all(bad.join(".synt")).unwrap();
+    std::fs::create_dir_all(bad.join(".git")).unwrap();
+    std::fs::write(bad.join(".synt/config.json"), "{}").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            bad.join(".synt/config.json"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+    }
+    std::fs::create_dir_all(rig.root().join("x/.git")).unwrap();
+    let out = rig.drive(json!([
+        expect("Enter send"),
+        send("/resume nope-nope\r"),
+        expect_new("no saved session matches"),
+        ["wait", 2],
+        // the unreadable config: a notice, the session goes on
+        send("/new\r"),
+        expect_new("use this folder"),
+        send("./cfgbad"),
+        expect_new("open "),
+        send("\r"),
+        expect_new("cannot open"),
+        ["wait", 2],
+        // `~/x` is the rig's HOME/x
+        send("/new\r"),
+        expect_new("use this folder"),
+        send("~/x"),
+        expect_new("open "),
+        send("\r"),
+        expect_new("/x"),
+        ["wait", 1]
+    ]));
+    let flat = squash(&out);
+    assert!(!flat.contains("synt: error"), "{flat}");
+    assert!(flat.contains("STATE ok"), "{flat}");
+}
+
 const MCP_SERVER: &str = r#"
 import sys, json
 log = sys.argv[1]

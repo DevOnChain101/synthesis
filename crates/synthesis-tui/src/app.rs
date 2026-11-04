@@ -1048,6 +1048,16 @@ impl App {
         }
     }
 
+    fn bang_hint(&mut self, t: &str, now: i64) {
+        if t.starts_with('!') && !t.contains('\n') {
+            self.toast(
+                "typed ! to run a shell command; pasted text is sent as a prompt",
+                now,
+                false,
+            );
+        }
+    }
+
     fn agent_key(&mut self, k: &Key, now: i64, out: &mut Vec<Cmd>) {
         match k {
             Key::Text(t) => {
@@ -1061,6 +1071,7 @@ impl App {
                     // only a typed `!` / `#` / `@` starts a shell command / note / agent message,
                     // never a burst of characters
                     self.editor.insert(&format!(" {t}"));
+                    self.bang_hint(t, now);
                 } else {
                     self.editor.insert(t);
                 }
@@ -1072,6 +1083,7 @@ impl App {
                 // pasted text never becomes a shell command (or an agent message) by itself: type
                 // the `!` / `@` yourself
                 let t = if self.editor.cur == 0 && t.starts_with(['!', '#', '@']) {
+                    self.bang_hint(t, now);
                     format!(" {t}")
                 } else {
                     t.clone()
@@ -1469,6 +1481,11 @@ impl App {
             });
             return;
         }
+        // the space that marked a burst / pasted `!x` as "not typed" is not part of the prompt
+        let text = match text.strip_prefix(' ') {
+            Some(r) if r.starts_with(['!', '#', '@']) => r.to_string(),
+            _ => text,
+        };
         let cancel = self.begin_followup(now);
         self.clear_selection();
         let images = self
@@ -2139,10 +2156,14 @@ impl App {
                 "up".to_string(),
             ),
         ];
-        for name in list_dirs(&dir) {
+        for (name, link) in list_dirs(&dir) {
             items.push((
                 PickerItem {
-                    label: format!("{}/", clean_line(&name)),
+                    label: format!(
+                        "{}/{}",
+                        clean_line(&name),
+                        if link { " (link)" } else { "" }
+                    ),
                     detail: String::new(),
                     current: false,
                 },
@@ -2155,6 +2176,7 @@ impl App {
             &dir.display().to_string(),
             vec![],
         );
+        picker.label_only = true;
         let (pi, values): (Vec<_>, Vec<_>) = items.into_iter().unzip();
         picker.items = pi;
         picker.choice = 0;
@@ -2188,8 +2210,14 @@ impl App {
             Key::Named(Named::PageDown) => p.move_by(p.window_size.max(1) as i64),
             Key::Named(Named::Home) => p.home(),
             Key::Named(Named::End) => p.end(),
-            Key::Named(Named::Backspace) => p.backspace(),
-            Key::Text(t) | Key::Paste(t) if !p.no_filter => p.type_text(&t.replace('\n', " ")),
+            Key::Named(Named::Backspace) => {
+                p.backspace();
+                self.folder_path_row();
+            }
+            Key::Text(t) | Key::Paste(t) if !p.no_filter => {
+                p.type_text(&t.replace('\n', " "));
+                self.folder_path_row();
+            }
             Key::Named(Named::Enter) => {
                 let Some(item) = p.filtered().get(p.choice).copied() else {
                     return;
@@ -2205,13 +2233,62 @@ impl App {
         }
     }
 
+    /// A typed path (`/x`, `~/x`, `./x`, `a/b`) becomes a first row `open <path>` when it is a
+    /// readable folder; otherwise the subtitle says why not.
+    fn folder_path_row(&mut self) {
+        let Some(ps) = self.picker.as_mut() else {
+            return;
+        };
+        if ps.kind != PickerKind::Folder {
+            return;
+        }
+        if ps.values.first().is_some_and(|v| v.starts_with("open:")) {
+            ps.values.remove(0);
+            ps.picker.items.remove(0);
+        }
+        ps.picker.pin_first = false;
+        ps.picker.subtitle = ps.dir.display().to_string();
+        let q = ps.picker.query.trim();
+        if !looks_like_path(q) {
+            return;
+        }
+        let path = typed_path(q, self.cfg.home.as_deref(), Path::new(&self.cfg.cwd));
+        match folder_problem(&path) {
+            None => {
+                let shown = path.display().to_string();
+                ps.picker.items.insert(
+                    0,
+                    PickerItem {
+                        label: format!("open {}", clean_line(&shown)),
+                        detail: String::new(),
+                        current: false,
+                    },
+                );
+                ps.values.insert(0, format!("open:{shown}"));
+                ps.picker.pin_first = true;
+                ps.picker.choice = 0;
+            }
+            Some(why) => ps.picker.subtitle = clean_line(&why),
+        }
+    }
+
     fn pick(&mut self, kind: PickerKind, value: &str, dir: PathBuf, now: i64, out: &mut Vec<Cmd>) {
         match kind {
-            PickerKind::Folder => match value {
-                "use" => {
-                    self.picker = None;
-                    self.quit = Some(ExitReason::OpenFolder(dir));
+            PickerKind::Folder if value.starts_with("open:") || value == "use" => {
+                let target = value.strip_prefix("open:").map_or(dir, PathBuf::from);
+                match folder_problem(&target) {
+                    None => {
+                        self.picker = None;
+                        self.quit = Some(ExitReason::OpenFolder(target));
+                    }
+                    Some(why) => {
+                        if let Some(ps) = self.picker.as_mut() {
+                            ps.picker.subtitle = clean_line(&why);
+                        }
+                    }
                 }
+            }
+            PickerKind::Folder => match value {
                 "up" => {
                     let parent = dir.parent().map_or(dir.clone(), Path::to_path_buf);
                     self.open_folder_picker(parent);
@@ -2227,6 +2304,10 @@ impl App {
                     .as_ref()
                     .is_some_and(|p| p.picker.title.contains("this folder"));
                 self.open_resume_picker(all, now);
+                // asked for this folder, got the full list back: there is nothing here
+                if !all && let Some(ps) = self.picker.as_mut() {
+                    ps.picker.subtitle = "no saved sessions in this folder".into();
+                }
             }
             PickerKind::Resume => {
                 self.picker = None;
@@ -3547,18 +3628,71 @@ fn suggestion_view(s: &Suggestion) -> Value {
     }
 }
 
-fn list_dirs(dir: &Path) -> Vec<String> {
-    let mut v: Vec<String> = std::fs::read_dir(dir)
+/// Sub-folders with a flag for symlinks (followed: a link to a folder is a folder). One level
+/// is listed per call, so a link loop cannot hang it.
+fn list_dirs(dir: &Path) -> Vec<(String, bool)> {
+    let mut v: Vec<(String, bool)> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| !n.starts_with('.'))
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let link = e.file_type().is_ok_and(|t| t.is_symlink());
+            Some((e.file_name().into_string().ok()?, link))
+        })
+        .filter(|(n, _)| !n.starts_with('.'))
         .collect();
-    v.sort_by_key(|n| n.to_lowercase());
+    v.sort_by_key(|(n, _)| n.to_lowercase());
     v.truncate(500);
     v
+}
+
+fn looks_like_path(q: &str) -> bool {
+    q.starts_with(['/', '~', '.']) || q.contains(['/', std::path::MAIN_SEPARATOR])
+}
+
+/// `~` and `~/x` from the home, relative paths from the session's folder.
+fn typed_path(q: &str, home: Option<&Path>, cwd: &Path) -> PathBuf {
+    let p = match (q.strip_prefix('~'), home) {
+        (Some(""), Some(h)) => h.to_path_buf(),
+        (Some(rest), Some(h)) if rest.starts_with(['/', std::path::MAIN_SEPARATOR]) => {
+            h.join(&rest[1..])
+        }
+        _ => PathBuf::from(q),
+    };
+    // joining an absolute path replaces the base
+    let p = cwd.join(p);
+    // fold `.` and `..` without touching the disk
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Why `p` cannot be the folder of a new session, or `None`.
+fn folder_problem(p: &Path) -> Option<String> {
+    let shown = p.display();
+    match std::fs::metadata(p) {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Some(format!("cannot open {shown}: permission denied"))
+        }
+        Err(_) => Some(format!("no such folder: {shown}")),
+        Ok(m) if !m.is_dir() => Some(format!("not a folder: {shown}")),
+        Ok(_) => std::fs::read_dir(p).err().map(|e| {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                format!("cannot open {shown}: permission denied")
+            } else {
+                format!("cannot open {shown}: {e}")
+            }
+        }),
+    }
 }
 
 pub(crate) fn too_small(w: usize, h: usize) -> Vec<String> {

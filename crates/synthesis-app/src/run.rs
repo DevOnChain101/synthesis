@@ -470,14 +470,7 @@ fn rules_arg(v: &[String], flag: &str) -> Result<Vec<String>, String> {
     v.iter()
         .map(|r| {
             let r = r.trim();
-            let name = r.split('(').next().unwrap_or("");
-            let well_formed = !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
-                && (r.len() == name.len() || r.ends_with(')'))
-                && r.len() <= 2000
-                && !r.chars().any(char::is_control);
+            let well_formed = synthesis_permissions::Permissions::is_well_formed_rule(r);
             if well_formed {
                 Ok(r.to_string())
             } else {
