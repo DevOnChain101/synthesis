@@ -338,11 +338,7 @@ fn boxed(title: &str, lines: Lines, w: i64, h: i64, active: bool, valign: VAlign
         VAlign::Top => lines,
     };
     for i in 0..row_count {
-        let lch = if i == 0 || i as i64 == h - 3 {
-            "┃"
-        } else {
-            "│"
-        };
+        let lch = "┃"; // the same heavy edge as the ┏┓┗┛ corners on every row
         let c = content.get(i).map_or("", String::as_str);
         rows.push(format!(
             "{}{}{}",
@@ -1091,7 +1087,8 @@ fn sessions_panel(
     let ws = s
         .workspaces
         .and_then(|l| l.iter().find(|x| x.key == s.active_workspace));
-    let where_ = ws.map_or(String::new(), |w0| {
+    // the workspace is named in its own panel: a narrow sidebar keeps the title whole instead
+    let where_ = ws.filter(|_| w >= 30).map_or(String::new(), |w0| {
         paint(
             COL_MUTED,
             &format!("· {} ", short(&w0.name, u((w - 20).max(4)))),
@@ -1157,13 +1154,18 @@ fn goal_row(g: &agent::Goal, inner: i64) -> String {
     )
 }
 
-fn session_info_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> Lines {
+fn session_info_panel(s: &DashState, w: i64, h: i64, _frame: usize, now: i64) -> Lines {
     let session = s.session;
     let inner = w - 3;
     let mut lines = vec![];
     let model = model_of(s)
         .or(Some(session.model.clone()).filter(|m| !m.is_empty()))
-        .unwrap_or_else(|| waiting("loading model…", frame));
+        .unwrap_or_else(|| "not set".into()); // `--once` starts no session: nothing is loading
+    // the header names the provider: a short column keeps the model's own name
+    let model = match model.rsplit_once('/') {
+        Some((_, m)) if width(&model) as i64 > inner - 7 => m.to_string(),
+        _ => model,
+    };
     lines.push(session_row("model", &model, COL_ACCENT, inner));
     if let Some(a) = s.agent {
         let (m, c) = mode_line(a);
@@ -1185,12 +1187,7 @@ fn session_info_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> 
             lines.push(goal_row(g, inner));
         }
         if let Some(cw) = a.context_window.filter(|c| *c != 0.0) {
-            lines.push(session_row(
-                "window",
-                &format!("{} tokens", fmt_num(Some(cw))),
-                COL_TEXT,
-                inner,
-            ));
+            lines.push(session_row("window", &fmt_num(Some(cw)), COL_TEXT, inner));
         }
     }
     if !session.git_branch.is_empty() {
@@ -1208,9 +1205,14 @@ fn session_info_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> 
         ));
     }
     let tools: u32 = session.tool_counts.iter().map(|t| t.1).sum();
+    let turns = format!("{} prompts · {tools} tools", session.prompts);
     lines.push(session_row(
         "turns",
-        &format!("{} prompts · {tools} tools", session.prompts),
+        if width(&turns) as i64 > inner - 7 {
+            &turns[..turns.find(" ·").unwrap_or(turns.len())]
+        } else {
+            &turns
+        },
         COL_TEXT,
         inner,
     ));
@@ -1226,12 +1228,12 @@ fn session_info_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> 
     boxed("Session", lines, w, h, false, VAlign::Evenly)
 }
 
-fn session_info_essential(s: &DashState, w: i64, h: i64, frame: usize) -> Lines {
+fn session_info_essential(s: &DashState, w: i64, h: i64, _frame: usize) -> Lines {
     let inner = w - 3;
     let session = s.session;
     let model = model_of(s)
         .or(Some(session.model.clone()).filter(|m| !m.is_empty()))
-        .unwrap_or_else(|| waiting("loading model…", frame));
+        .unwrap_or_else(|| "not set".into()); // `--once` starts no session: nothing is loading
     let mut lines = vec![session_row("model", &model, COL_ACCENT, inner)];
     if let Some(a) = s.agent {
         let (m, c) = mode_line(a);
@@ -2475,6 +2477,12 @@ fn header(s: &DashState, w: i64, frame: usize, now: i64) -> String {
             b
         }
     };
+    // likewise the model: a long id must not push the folder chip off
+    let model = if w < 100 && width(&model) > 18 {
+        fit(&model, 18)
+    } else {
+        model
+    };
     // on a narrow header a long folder name is shortened, not dropped with its chip
     let project = if w < 100 && width(&project) > 10 {
         fit(&project, 10)
@@ -3132,7 +3140,7 @@ pub fn render_frame(
     let side_w = if s.agent.is_some() && w < 80 {
         0
     } else if s.agent.is_some() {
-        clamp_int((w as f64 * 0.14).floor() as i64, 20, 40)
+        clamp_int((w as f64 * 0.14).floor() as i64, 22, 40)
     } else {
         clamp_int((w as f64 * 0.17).floor() as i64, 22, 40)
     };

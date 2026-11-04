@@ -2558,8 +2558,15 @@ fn new_folder_typed_paths_open_a_folder_or_say_why_not() {
         if std::fs::read_dir(&locked).is_ok() && got.is_some() {
             return;
         }
+        // the card may wrap the message: compare without borders and line breaks
+        let flat = text.replace(['│', '┃'], " ");
         assert!(
-            got.is_none() && text.contains("permission denied"),
+            got.is_none()
+                && flat
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains("permission denied"),
             "{text}"
         );
     }

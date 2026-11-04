@@ -2,7 +2,7 @@
 
 usage: tui_pty_driver.py scenario.json out.txt
 scenario: {"argv": [...], "env": {...}, "steps": [["send", "bytes"] | ["wait", secs] |
-           ["expect", "text", secs] | ["expect_new", "text", secs]]}
+           ["expect", "text", secs] | ["expect_new", "text", secs] | ["quiet", secs]]}
 `expect_new` looks only at output that arrived after the last `send`. out.txt gets the whole
 screen output (escape sequences removed) and the exit state, the last line is `STATE ok|failed <exit>`.
 """
@@ -36,6 +36,12 @@ sent_at=0
 for st in sc["steps"]:
     if st[0]=="send": sent_at=len(buf); os.write(fd,st[1].encode().decode("unicode_escape").encode("latin1")); rd(0.2)
     elif st[0]=="wait": rd(st[1])
+    elif st[0]=="quiet":
+        # no output for st[1] seconds; capped, because a spinner never goes quiet
+        end=time.time()+20
+        while time.time()<end:
+            n=len(buf); rd(st[1])
+            if len(buf)==n: break
     elif st[0] in ("expect","expect_new"):
         end=time.time()+st[2]; mark=sent_at if st[0]=="expect_new" else 0
         found=False
