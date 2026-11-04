@@ -452,9 +452,9 @@ mod tests {
             Ok("called".into())
         })
         .join("\n");
+        // a placeholder pin and a pin this file does not match both leave it unverified
         assert!(
-            text.contains("desktop pin: UNVERIFIED")
-                && text.contains("not checked (the binary is not pin-verified"),
+            text.contains("not checked (the binary is not pin-verified"),
             "{text}"
         );
         assert_eq!(calls.get(), 0, "unverified binary reached the runner");

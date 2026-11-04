@@ -22,6 +22,14 @@ impl ProcSource for Fixed {
     }
 }
 
+/// The pin placeholder, whatever the build's own pin is for this platform.
+fn unfilled_pin() -> Pin {
+    Pin {
+        version: "UNVERIFIED".into(),
+        sha256: "UNVERIFIED".into(),
+    }
+}
+
 fn env() -> Env {
     // the display variable keeps the Linux "no graphical session" check out of the way
     Env::from_pairs([
@@ -89,6 +97,7 @@ async fn start(
     std::fs::write(state.join("state/fake.json"), s.to_string()).unwrap();
     let mut o = DesktopOptions::new(PathBuf::from(FAKE), state);
     o.allow_unpinned = true;
+    o.pin = unfilled_pin();
     o.call_timeout = Duration::from_secs(10);
     tune(&mut o);
     let rt = DesktopRuntime::start(o, &env(), Arc::new(Fixed(table())))
@@ -121,6 +130,7 @@ async fn version_probe_has_its_own_timeout() {
     .unwrap();
     let mut opts = DesktopOptions::new(PathBuf::from(FAKE), state);
     opts.allow_unpinned = true;
+    opts.pin = unfilled_pin();
     opts.call_timeout = Duration::from_millis(20);
     let rt = DesktopRuntime::start(opts, &env(), Arc::new(Fixed(table()))).await;
     assert!(
@@ -147,7 +157,7 @@ async fn an_unpinned_or_mismatching_binary_is_refused_unless_allowed() {
     .unwrap();
     let procs = || -> Arc<dyn ProcSource> { Arc::new(Fixed(table())) };
     // the compiled-in pin is a placeholder: nothing matches
-    let e = DesktopRuntime::start(mk(false, Pin::builtin()), &env(), procs())
+    let e = DesktopRuntime::start(mk(false, unfilled_pin()), &env(), procs())
         .await
         .err()
         .unwrap();
@@ -203,7 +213,7 @@ async fn an_unpinned_or_mismatching_binary_is_refused_unless_allowed() {
         .unwrap();
     assert!(e.to_string().contains("reports version 1.2.3"), "{e}");
     // allow_unpinned runs it
-    let rt = DesktopRuntime::start(mk(true, Pin::builtin()), &env(), procs())
+    let rt = DesktopRuntime::start(mk(true, unfilled_pin()), &env(), procs())
         .await
         .unwrap();
     assert_eq!(rt.version, "1.2.3");
@@ -521,6 +531,7 @@ async fn start_with(
     std::fs::write(state.join("state/fake.json"), s.to_string()).unwrap();
     let mut o = DesktopOptions::new(PathBuf::from(FAKE), state);
     o.allow_unpinned = true;
+    o.pin = unfilled_pin();
     o.call_timeout = Duration::from_secs(10);
     tune(&mut o);
     let rt = DesktopRuntime::start(o, &env(), procs).await.unwrap();

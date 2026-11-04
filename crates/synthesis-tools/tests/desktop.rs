@@ -53,6 +53,11 @@ fn cfg_for(cli: &Path, audit: &Arc<Audit>, images: bool) -> DesktopConfig {
     DesktopConfig {
         binary: Some(cli.to_path_buf()),
         allow_unpinned: true,
+        // the placeholder, whatever this platform's built-in pin is
+        pin: Some(synthesis_desktop::Pin {
+            version: "UNVERIFIED".into(),
+            sha256: "UNVERIFIED".into(),
+        }),
         process_env: Some(penv()),
         supports_images: images,
         actions_per_sec: Some(100.0),

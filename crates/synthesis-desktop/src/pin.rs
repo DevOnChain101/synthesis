@@ -10,13 +10,18 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-/// Version `agent-desktop version` must report. UNVERIFIED placeholder.
-pub const PINNED_VERSION: &str = "UNVERIFIED";
+/// Version `agent-desktop version` must report (vercel-labs/agent-desktop v1.1.0).
+pub const PINNED_VERSION: &str = "1.1.0";
 
-/// `(<os>-<arch>, sha256 hex of the executable)`. UNVERIFIED placeholders.
+/// `(<os>-<arch>, sha256 hex of the executable)`. Only `macos-x86_64` is filled (hashed from the
+/// extracted `agent-desktop` of the v1.1.0 release archive, whose archive sha256 matched the
+/// release `checksums.txt`); the other platforms stay UNVERIFIED placeholders until hashed.
 pub const PINNED_SHA256: &[(&str, &str)] = &[
     ("macos-aarch64", "UNVERIFIED"),
-    ("macos-x86_64", "UNVERIFIED"),
+    (
+        "macos-x86_64",
+        "bfbb387446e615687dfe345158f7ac1e37197f5de203fa36bb621e474e016d77",
+    ),
     ("linux-x86_64", "UNVERIFIED"),
     ("linux-aarch64", "UNVERIFIED"),
     ("windows-x86_64", "UNVERIFIED"),
@@ -123,7 +128,11 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let f = d.path().join("bin");
         std::fs::write(&f, b"hello").unwrap();
-        assert_eq!(check(&f, &Pin::builtin()).unwrap(), PinStatus::Unpinned);
+        let placeholder = Pin {
+            version: "UNVERIFIED".into(),
+            sha256: "UNVERIFIED".into(),
+        };
+        assert_eq!(check(&f, &placeholder).unwrap(), PinStatus::Unpinned);
         let sha = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
         let pin = Pin {
             version: "1.0.0".into(),
