@@ -71,7 +71,7 @@ mod automode_defaults;
 pub mod bash;
 pub mod paths;
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 use synthesis_core::PathPolicy;
@@ -331,6 +331,47 @@ pub struct Env {
     pub project_root: Option<PathBuf>,
     /// Memory authorship (see [`NoteOracle`]); `None` = no store, so every note asks.
     pub memory_notes: Option<NoteOracle>,
+}
+
+/// `/proc/...` and `/dev/fd/...` (also `/dev/fd` itself), by their spelling.
+fn is_proc_path(p: &Path) -> bool {
+    let mut c = p.components().skip(1).map(|c| c.as_os_str());
+    match c.next().and_then(|x| x.to_str()) {
+        Some("proc") => true,
+        Some("dev") => c.next().and_then(|x| x.to_str()) == Some("fd"),
+        _ => false,
+    }
+}
+
+/// A `..` that follows a symlinked component of `op`: the shell steps back physically (out of the
+/// link's target), the lexical normalisation steps back in the spelling. Not resolvable then.
+fn dotdot_after_link(base: &Path, op: &str) -> bool {
+    let op = Path::new(op);
+    let mut cur = if op.is_absolute() {
+        PathBuf::new()
+    } else {
+        base.to_path_buf()
+    };
+    let mut linked: Vec<bool> = Vec::new();
+    for c in op.components() {
+        match c {
+            Component::ParentDir => {
+                if linked.iter().any(|&l| l) {
+                    return true;
+                }
+                linked.pop();
+                cur.pop();
+            }
+            Component::CurDir => {}
+            c => {
+                cur.push(c);
+                linked.push(
+                    std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink()),
+                );
+            }
+        }
+    }
+    false
 }
 
 impl Env {
@@ -894,19 +935,23 @@ impl Permissions {
             .any(|r| paths::within(r, &abs, self.policy()))
     }
 
-    /// Inside cwd/additional dirs lexically AND after resolving links.
+    /// Inside cwd/additional dirs after resolving links on both sides.
     fn in_scope(&self, p: &Path) -> bool {
         let Some(rp) = paths::real_of(p) else {
             return false;
         };
+        // the child, not synt, interprets these (`/proc/self/cwd`, `/dev/fd/N`): never inside
+        if is_proc_path(p) || is_proc_path(&rp) {
+            return false;
+        }
         self.roots().iter().any(|r| {
-            paths::within(r, p, self.policy())
-                && !paths::win_unsafe(&paths::relative(r, p), self.policy())
-                && paths::within(
-                    &paths::real_of(r).unwrap_or_else(|| r.clone()),
-                    &rp,
-                    self.policy(),
-                )
+            // Compared as realpaths only, so `/tmp/ws/x` and `/private/tmp/ws/x` are the same
+            // place; a link leading outside resolves outside. Unresolvable = outside.
+            let rr = paths::real_of(r).unwrap_or_else(|| r.clone());
+            paths::within(&rr, &rp, self.policy())
+                && !paths::win_unsafe(&paths::relative(&rr, &rp), self.policy())
+                && !(paths::within(r, p, self.policy())
+                    && paths::win_unsafe(&paths::relative(r, p), self.policy()))
         })
     }
 
@@ -1189,6 +1234,9 @@ impl Permissions {
         if g.is_some() && op[dir.len()..].starts_with('.') {
             return None;
         }
+        if dotdot_after_link(base, dir) {
+            return None;
+        }
         Some((
             paths::resolve(base, if dir.is_empty() { "." } else { dir }),
             g.is_some(),
@@ -1204,11 +1252,13 @@ impl Permissions {
             bash::is_read_only_simple(w)
         };
         // echo only prints: its words are text, not paths
-        ok && (w[0] == "echo"
-            || w[1..].iter().filter(|a| !a.starts_with('-')).all(|a| {
-                base.and_then(|b| self.resolve_operand(a, b))
-                    .is_some_and(|(p, _)| self.in_scope(&p))
-            }))
+        // base `None` = an earlier `cd` went somewhere unknown or outside: even operand-less runs there
+        ok && base.is_some()
+            && (w[0] == "echo"
+                || w[1..].iter().filter(|a| !a.starts_with('-')).all(|a| {
+                    base.and_then(|b| self.resolve_operand(a, b))
+                        .is_some_and(|(p, _)| self.in_scope(&p))
+                }))
     }
 
     /// Working directory after a simple command (`cd` moves it).
@@ -1216,13 +1266,22 @@ impl Permissions {
         if seg[0] != "cd" {
             return base;
         }
-        match seg.len() {
-            2 => base
+        let to = match seg.len() {
+            2 if seg[1] != "-" => base
                 .as_deref()
                 .and_then(|b| self.resolve_operand(&seg[1], b))
                 .map(|(p, _)| p),
+            2 => None,
             _ => Some(self.env.home.clone()),
-        }
+        }?;
+        // Outside the workspace, or through a link inside it (a later `..` would step back
+        // physically, not in the spelling): unresolvable, so the command asks.
+        let roots = self.roots();
+        let linked = to
+            .ancestors()
+            .take_while(|a| !roots.iter().any(|r| r.starts_with(a)))
+            .any(|a| std::fs::symlink_metadata(a).is_ok_and(|m| m.file_type().is_symlink()));
+        (self.in_scope(&to) && !linked).then_some(to)
     }
 
     /// Every segment passes `seg_safe` (tracking `cd`); the scoped `is_read_only_bash` /
@@ -1544,13 +1603,10 @@ impl Permissions {
             let w = bash::unwrap_words(&seg, false);
             let name = w.first().map_or("", String::as_str);
             if name == "cd" {
-                base = match w.len() {
-                    1 => Some(self.env.home.clone()),
-                    2 => base
-                        .as_deref()
-                        .and_then(|b| self.resolve_operand(&w[1], b))
-                        .map(|(p, _)| p),
-                    _ => None,
+                base = if w.len() > 2 {
+                    None
+                } else {
+                    self.after_cd(&w, base.take())
                 };
                 continue;
             }

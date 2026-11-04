@@ -63,7 +63,7 @@ its images replaced by `[image]` instead of stopping the later messages.
 
 ## Keys in dialogs
 
-A picker (`/new`, `/resume`, `/model`, `/config`, ...) closes with Esc; an approval dialog is answered with Enter / 1-3, and Esc or Ctrl+C rejects it. Ctrl+D does nothing inside a dialog (on the prompt it quits when the prompt is empty); close the dialog first.
+A picker (`/new`, `/resume`, `/model`, `/config`, ...) closes with Esc; an approval dialog is answered with Enter / 1-3, and Esc or Ctrl+C rejects it. Ctrl+D does nothing inside a dialog (on the prompt it quits when the prompt is empty); close the dialog first. `/help` is not a dialog: it prints its text into the conversation like any other output, so Esc does not dismiss it (it scrolls away with the chat).
 
 ## Settings (`synt.tui`, user settings.json only)
 
