@@ -639,7 +639,7 @@ pub fn prepare(
     // (`synt run` exits 2).
     if !settings.errors.is_empty() {
         return Err(format!(
-            "settings error: {}\nsynth: fix or remove the file; nothing was started because its deny/ask rules would not apply",
+            "settings error: {}\nsynt: fix or remove the file; nothing was started because its deny/ask rules would not apply",
             sanitize_for_display(&settings.errors.join("; "))
         ));
     }
@@ -907,6 +907,8 @@ pub fn prepare(
             let to = match w.get_session(&sid).map_err(|e| e.to_string())?.status {
                 SessionStatus::Interrupted => Some(SessionStatus::Recovering),
                 SessionStatus::Idle => None,
+                // opened but never prompted (a /model switch before the first task)
+                SessionStatus::Preparing => Some(SessionStatus::Idle),
                 s if s.is_task_terminal() => Some(SessionStatus::Idle),
                 s => return Err(format!("session {sid} is {s:?} and cannot be resumed")),
             };
@@ -1653,7 +1655,7 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
         });
         let code = match task.await {
             Ok(Ok(out)) => {
-                eprintln!("synt: task {:?}: {}", out.status, out.reason);
+                eprintln!("{}", task_line(out.status, &out.reason));
                 if let Some(h) = blocked_hint(&out) {
                     eprintln!("{h}");
                 }
@@ -1924,7 +1926,12 @@ pub fn resolve_provider(
             let model = model_arg.map_or_else(|| "fake-model".to_string(), String::from);
             return Ok(Resolved {
                 provider: crate::fake::load(Path::new(script))?,
-                label: format!("fake/{model}"),
+                // `/model fake/other` passes the label as the model
+                label: if model.starts_with("fake/") {
+                    model.clone()
+                } else {
+                    format!("fake/{model}")
+                },
                 model,
                 secrets: vec![],
             });
@@ -1950,8 +1957,14 @@ pub fn resolve_provider(
             }),
         (_, m) => m.map(String::from),
     };
-    let parsed = parse_model(spec.as_deref(), cfg).map_err(|_| NO_MODEL.to_string())?;
-    let id = parsed.provider_id.ok_or("no provider configured")?;
+    // `--provider X` without a model: say what is missing about X (key first), not NO_MODEL
+    let (id, parsed) = match parse_model(spec.as_deref(), cfg) {
+        Ok(m) => (
+            m.provider_id.clone().ok_or("no provider configured")?,
+            Some(m),
+        ),
+        Err(_) => (provider_arg.ok_or(NO_MODEL)?.to_string(), None),
+    };
     let p = cfg
         .providers
         .get(&id)
@@ -1972,6 +1985,9 @@ pub fn resolve_provider(
             ),
         });
     }
+    let parsed = parsed.ok_or_else(|| {
+        format!("no model for provider \"{id}\": pass --model {id}/<model> or set SYNT_MODEL")
+    })?;
     let provider = ProviderSpec::from_config(&id, p, cred.as_ref())
         .and_then(|s| s.connect(env, &NetSettings::default(), RetryPolicy::default()))
         .map_err(|e| e.message().to_string())?;
@@ -1987,6 +2003,23 @@ pub fn resolve_provider(
 pub const EXIT_STDOUT_CLOSED: u8 = 141;
 
 /// `synt: blocked: approval needed for ... - rerun with --allow ...`.
+/// The stderr summary of a finished task; the machine-readable reason stays in the JSON result.
+fn task_line(status: TaskStatus, reason: &str) -> String {
+    let word = format!("{status:?}").to_lowercase();
+    let why = match reason {
+        "gate_not_applicable" => "no verification applied",
+        "verified" => "verified",
+        // the reason only repeats the status
+        r if r.eq_ignore_ascii_case(&word) => "",
+        r => &r.replace('_', " "),
+    };
+    if why.is_empty() {
+        format!("synt: task {word}")
+    } else {
+        format!("synt: task {word} ({why})")
+    }
+}
+
 fn blocked_hint(out: &TaskOutcome) -> Option<String> {
     if out.needed_permissions.is_empty() {
         return None;
@@ -2162,6 +2195,22 @@ mod tests {
             needed_permissions: rules.iter().map(|r| r.to_string()).collect(),
             messages: vec![],
         }
+    }
+
+    #[test]
+    fn the_task_line_is_a_sentence() {
+        assert_eq!(
+            task_line(TaskStatus::Completed, "gate_not_applicable"),
+            "synt: task completed (no verification applied)"
+        );
+        assert_eq!(
+            task_line(TaskStatus::Unverified, "unverified"),
+            "synt: task unverified"
+        );
+        assert_eq!(
+            task_line(TaskStatus::Blocked, "approval_unavailable"),
+            "synt: task blocked (approval unavailable)"
+        );
     }
 
     #[test]

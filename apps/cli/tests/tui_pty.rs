@@ -221,6 +221,21 @@ fn approval_subagent_model_switch_and_new_folder() {
     assert!(used >= 2, "usage not persisted per task: {used} session(s)");
 }
 
+/// `/model` before the first prompt: the session is still Preparing; the restart must resume it.
+#[test]
+fn model_switch_before_the_first_prompt_keeps_the_app_running() {
+    let rig = Rig::new(json!([{"text": "first reply"}]));
+    let out = rig.drive(json!([
+        expect("Enter send"),
+        send("/model fake/other\r"),
+        expect_new("fake/other"),
+        ["wait", 2],
+        send("hi\r"),
+        expect_new("first reply")
+    ]));
+    assert!(!squash(&out).contains("cannot be resumed"), "{out}");
+}
+
 const MCP_SERVER: &str = r#"
 import sys, json
 log = sys.argv[1]
