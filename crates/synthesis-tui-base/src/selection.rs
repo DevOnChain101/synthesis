@@ -10,9 +10,9 @@ use crate::text::{char_width, csi_len, is_js_space, strip_ansi};
 use std::borrow::Cow;
 
 /// Selected text: the palette tokens of `synthesis-tui-render::theme` (re-exported there; this
-/// crate cannot depend on it). `SELECT_FG` is the brand `accent-light`, `SELECT_BG` a deep teal.
+/// crate cannot depend on it). `SELECT_FG` is the brand `accent-light`, `SELECT_BG` a deep green.
 pub const SELECT_FG: [u8; 3] = [247, 248, 250];
-pub const SELECT_BG: [u8; 3] = [31, 77, 73];
+pub const SELECT_BG: [u8; 3] = [30, 77, 50];
 
 fn select_on() -> String {
     let (f, b) = (SELECT_FG, SELECT_BG);

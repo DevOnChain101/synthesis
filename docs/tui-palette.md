@@ -2,7 +2,7 @@
 
 One built-in palette, defined as tokens in `crates/synthesis-tui-render/src/theme.rs` (the selection
 pair lives in `synthesis-tui-base::selection` and is re-exported there). Neutrals are the brand
-kit (`design/02-design-tokens/color-schema.md`); the only accent is teal; no violet, indigo or
+kit (`design/02-design-tokens/color-schema.md`); the only accent is green; no violet, indigo or
 magenta anywhere (a test checks the hue of every token and of every colour a golden frame emits).
 All colours are 24-bit; `sgr::encode` downgrades to 256/16 colours and drops them for `NO_COLOR`.
 `SYNT_COLOR=truecolor|256|16` overrides detection, then `NO_COLOR`, `COLORTERM`, `TERM`.
@@ -25,18 +25,18 @@ reach 4.5 (tests `palette_tests`). Regenerate with
 | SILVER | #D9D9E0 | 240 | 0.03 | 13.93 | 12.78 | body text (brand accent) |
 | PEARL | #F7F8FA | 220 | 0.01 | 18.41 | 16.89 | highlights (brand accent-light) |
 | BEIGE = THINKING | #D7CEC7 | 26 | 0.07 | 12.61 | 11.57 | thinking, plan/edit modes (brand soft-beige) |
-| ACCENT | #5EC8B8 | 171 | 0.53 | 9.71 | 8.91 | prompt, links, focus, selection |
-| ACCENT_LIGHT | #9AE3D6 | 169 | 0.32 | 13.35 | 12.25 | strong text, logo sheen |
-| ACCENT_GLOW | #CDF3EC | 169 | 0.16 | 16.42 | 15.06 | gradients |
-| ACCENT_DEEP | #2E8B7E | 172 | 0.67 | 4.76 | 4.37 | frame gradients (not text) |
-| SUCCESS | #7BD88F | 133 | 0.43 | 11.23 | 10.31 | ok, plan mode |
+| ACCENT | #4ADE80 | 142 | 0.67 | 11.22 | 10.30 | prompt, links, focus, selection |
+| ACCENT_LIGHT | #86EFAC | 142 | 0.44 | 13.93 | 12.78 | strong text, logo sheen |
+| ACCENT_GLOW | #BBF7D0 | 141 | 0.24 | 16.14 | 14.81 | gradients |
+| ACCENT_DEEP | #208C4E | 146 | 0.77 | 4.58 | 4.21 | frame gradients (not text) |
+| SUCCESS | #A6E22E | 80 | 0.80 | 12.61 | 11.57 | ok, plan mode |
 | WARN | #E5B567 | 37 | 0.55 | 10.37 | 9.52 | warnings, strings |
 | ERROR | #F26D6D | 0 | 0.55 | 6.69 | 6.14 | errors |
 | DIFF_ADD | #9ECE6A | 89 | 0.49 | 10.70 | 9.82 | added lines |
 | DIFF_REMOVE | #E8906A | 18 | 0.54 | 8.04 | 7.37 | removed lines, bash mode |
 | INFO | #7DB4E6 | 209 | 0.46 | 8.89 | 8.15 | MCP, permission asks |
 | CYAN | #6CCFE0 | 189 | 0.52 | 10.84 | 9.95 | inline code, storage keywords |
-| SELECT_BG | #1F4D49 | 175 | 0.60 | 2.06 | 1.89 | selected text ground (SELECT_FG = PEARL, 8.9:1 on it) |
+| SELECT_BG | #1E4D32 | 146 | 0.61 | 2.01 | 1.85 | selected text ground (SELECT_FG = PEARL, 9.1:1 on it) |
 
 Syntax colours (`SYN_*`) and the sub-agent/context colours (`AGENT_COLORS`) are drawn from these
 tokens. An agent definition that asks for the colour `purple` gets ACCENT_LIGHT, `pink` BEIGE.
