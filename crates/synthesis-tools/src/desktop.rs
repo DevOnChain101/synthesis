@@ -363,7 +363,7 @@ fn same_installed_binary(a: &Path, b: &Path) -> bool {
     a == b
 }
 
-fn installed_denied_copy(p: &Path, env: Option<&Env>) -> bool {
+fn installed_denied_copy(p: &Path, env: Option<&Env>) -> Result<bool, String> {
     let mut roots: Vec<PathBuf> = [
         "/Applications",
         "/System/Applications",
@@ -394,45 +394,71 @@ fn installed_denied_copy(p: &Path, env: Option<&Env>) -> bool {
     denied_copy_in_roots(p, &roots)
 }
 
-/// Is `p` a copy of a file below `dir` (links followed, at most `depth` levels and `budget`
-/// entries, so a huge or cyclic tree cannot stall a launch)?
-fn copy_below(p: &Path, dir: &Path, depth: u32, budget: &mut u32) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    for e in entries.flatten() {
-        if *budget == 0 {
-            return false;
-        }
-        *budget -= 1;
-        let path = e.path();
-        let found = if path.is_dir() {
-            depth > 0 && copy_below(p, &path, depth - 1, budget)
-        } else {
-            same_installed_binary(p, &path)
+/// Entries scanned below one denied-named root before the scan is declared incomplete.
+const SCAN_BUDGET: u32 = 5000;
+
+/// Is `p` a copy of a file below `dir` (links followed, at most `depth` levels)? Breadth-first,
+/// likely executable locations first, so a huge or cyclic tree is cut off only after the places
+/// a binary usually lives. `Err` = the `budget` ran out before a full scan: the caller refuses.
+fn copy_below(p: &Path, dir: &Path, depth: u32, budget: &mut u32) -> Result<bool, String> {
+    let mut queue = std::collections::VecDeque::from([(dir.to_path_buf(), depth)]);
+    while let Some((dir, depth)) = queue.pop_front() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
         };
-        if found {
-            return true;
+        for e in entries.flatten() {
+            if *budget == 0 {
+                return Err(format!(
+                    "the scan of {} for a copy of an installed denied app was cut off",
+                    desktop::sanitize(&dir.to_string_lossy())
+                ));
+            }
+            *budget -= 1;
+            let path = e.path();
+            if path.is_dir() {
+                if depth > 0 {
+                    let likely = matches!(
+                        e.file_name()
+                            .to_string_lossy()
+                            .to_ascii_lowercase()
+                            .as_str(),
+                        "contents" | "macos" | "bin" | "sbin" | "libexec"
+                    );
+                    if likely {
+                        queue.push_front((path, depth - 1));
+                    } else {
+                        queue.push_back((path, depth - 1));
+                    }
+                }
+            } else if same_installed_binary(p, &path) {
+                return Ok(true);
+            }
         }
     }
-    false
+    Ok(false)
 }
 
-fn denied_copy_in_roots(p: &Path, roots: &[PathBuf]) -> bool {
-    roots
+/// `Err` when a denied-named root could not be scanned completely (fail closed).
+fn denied_copy_in_roots(p: &Path, roots: &[PathBuf]) -> Result<bool, String> {
+    for e in roots
         .iter()
         .filter_map(|root| std::fs::read_dir(root).ok())
         .flatten()
         .filter_map(Result::ok)
         .filter(|e| desktop::hard_denied_loose(&e.file_name().to_string_lossy()).is_some())
-        .any(|e| {
-            let base = e.path();
-            if base.is_dir() {
-                copy_below(p, &base, 6, &mut 5000)
-            } else {
-                same_installed_binary(p, &base)
-            }
-        })
+    {
+        let base = e.path();
+        let found = if base.is_dir() {
+            let mut budget = SCAN_BUDGET;
+            copy_below(p, &base, 6, &mut budget)?
+        } else {
+            same_installed_binary(p, &base)
+        };
+        if found {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(target_os = "macos")]
@@ -864,17 +890,32 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
         );
     }
     #[cfg(target_os = "macos")]
-    match denied_bundle_identity(&real) {
-        Ok(Some(family)) => return refuse(sh, W, format!("{shown} is {family}: refused")),
-        Err(why) => return refuse(sh, W, format!("{shown}: {why}")),
-        Ok(None) => {}
+    {
+        let r = real.clone();
+        // a join error refuses (fail closed)
+        match blocking(move || denied_bundle_identity(&r)).await {
+            Some(Ok(Some(family))) => {
+                return refuse(sh, W, format!("{shown} is {family}: refused"));
+            }
+            Some(Ok(None)) => {}
+            Some(Err(why)) => return refuse(sh, W, format!("{shown}: {why}")),
+            None => return refuse(sh, W, format!("{shown}: the identity check failed")),
+        }
     }
-    if installed_denied_copy(&real, cfg.process_env.as_ref()) {
-        return refuse(
-            sh,
-            W,
-            format!("{shown} has the identity of an installed denied app"),
-        );
+    {
+        let (r, env) = (real.clone(), cfg.process_env.clone());
+        match blocking(move || installed_denied_copy(&r, env.as_ref())).await {
+            Some(Ok(false)) => {}
+            Some(Ok(true)) => {
+                return refuse(
+                    sh,
+                    W,
+                    format!("{shown} has the identity of an installed denied app"),
+                );
+            }
+            Some(Err(why)) => return refuse(sh, W, format!("{shown}: {why}")),
+            None => return refuse(sh, W, format!("{shown}: the identity check failed")),
+        }
     }
     #[cfg(unix)]
     if origin == Origin::Project {
@@ -913,6 +954,9 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
             ),
         );
     }
+    // Windows gap: this swap check (owner/mode bits, temp and writable roots) is unix-only.
+    // It MUST be ported (ACLs, %TEMP%, user-writable directories) before Windows launches are
+    // enabled; today every Windows launch is refused (docs/DESKTOP-CONTROL.md).
     #[cfg(unix)]
     if origin == Origin::External && !cfg.unsafe_for_tests() {
         let policy = sh.policy_for(&ctx.workspace);
@@ -1449,7 +1493,7 @@ mod tests {
         std::fs::write(&original, b"the installed denied program").unwrap();
         let copy = d.path().join("innocent");
         std::fs::copy(&original, &copy).unwrap();
-        assert!(denied_copy_in_roots(&copy, &[root]));
+        assert_eq!(denied_copy_in_roots(&copy, &[root]), Ok(true));
     }
 
     #[test]
@@ -1473,16 +1517,32 @@ mod tests {
             p
         };
         let roots = [root];
-        assert!(denied_copy_in_roots(
-            &copy("a", b"the installed vault program"),
-            &roots
-        ));
-        assert!(denied_copy_in_roots(
-            &copy("b", b"the installed authenticator"),
-            &roots
-        ));
-        assert!(!denied_copy_in_roots(&copy("c", b"innocent bytes"), &roots));
-        assert!(!denied_copy_in_roots(&copy("d", b"something else"), &roots));
+        let is = |name, bytes: &[u8]| denied_copy_in_roots(&copy(name, bytes), &roots);
+        assert_eq!(is("a", b"the installed vault program"), Ok(true));
+        assert_eq!(is("b", b"the installed authenticator"), Ok(true));
+        assert_eq!(is("c", b"innocent bytes"), Ok(false));
+        assert_eq!(is("d", b"something else"), Ok(false));
+    }
+
+    #[test]
+    fn an_exhausted_scan_budget_is_an_error_not_a_pass() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("opt/Bitwarden");
+        std::fs::create_dir_all(root.join("Contents/MacOS")).unwrap();
+        std::fs::write(root.join("Contents/MacOS/real"), b"vault").unwrap();
+        let junk = root.join("junk");
+        std::fs::create_dir_all(&junk).unwrap();
+        for i in 0..20 {
+            std::fs::write(junk.join(i.to_string()), b"x").unwrap();
+        }
+        let copy = d.path().join("c");
+        std::fs::write(&copy, b"vault").unwrap();
+        // the likely location is scanned first, so a small budget still finds the copy
+        assert_eq!(copy_below(&copy, &root, 6, &mut 6), Ok(true));
+        // no copy, budget gone before the tree is exhausted: Err
+        std::fs::write(&copy, b"other").unwrap();
+        assert!(copy_below(&copy, &root, 6, &mut 6).is_err());
+        assert_eq!(copy_below(&copy, &root, 6, &mut 100), Ok(false));
     }
 
     #[test]

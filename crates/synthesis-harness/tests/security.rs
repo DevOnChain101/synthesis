@@ -824,7 +824,7 @@ async fn a_hard_bash_verdict_on_a_project_app_mints_project_evidence() {
                     Turn::tool(
                         "d1",
                         "desktop_launch",
-                        json!({"target": app, "args": ["--config", ".env"]}),
+                        json!({"target": app, "args": ["--config", ".env", "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"]}),
                     )
                 } else {
                     Turn::text("ok")
@@ -840,11 +840,21 @@ async fn a_hard_bash_verdict_on_a_project_app_mints_project_evidence() {
     std::fs::write(&app, b"a test executable").unwrap();
     *app_path.lock().unwrap() = Some(app.clone());
     rig.run("x").await;
-    assert_eq!(
-        approver.asked.lock().unwrap().len(),
-        1,
-        "the protected argument must ask"
-    );
+    {
+        let asked = approver.asked.lock().unwrap();
+        assert_eq!(asked.len(), 1, "the protected argument must ask");
+        // the dialog hides the secret and says it did
+        assert!(
+            !asked[0].prompt.contains("abcdefghijklmnopqrstuvwxyz"),
+            "{}",
+            asked[0].prompt
+        );
+        assert!(
+            asked[0].prompt.contains("(secret-shaped text hidden)"),
+            "{}",
+            asked[0].prompt
+        );
+    }
     assert_eq!(probe.runs(), 1);
     let token = probe.approval_tokens.lock().unwrap()[0].clone().unwrap();
     let ev = |o, approved| {

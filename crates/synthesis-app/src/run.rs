@@ -820,6 +820,10 @@ pub fn prepare(
     let net = c.network.policy();
     let git_dir = worktree.as_ref().map(|w| w.info.git_dir.clone());
     // this session's desktop screenshots: not readable by the file tools nor by a launched app
+    // It must exist before the first spawn: the Linux sandbox masks only existing directories, so
+    // a shell started earlier could read screenshots made later.
+    private_desktop_dirs(&artifact_root.join("desktop"))
+        .map_err(|e| format!("cannot create the desktop artifact directory: {e}"))?;
     synthesis_deny.push(artifact_root.join("desktop"));
     let state_paths = synthesis_deny.clone();
     let build = Arc::new(move |ws: &synthesis_core::WorkspaceContext| {
@@ -2069,6 +2073,21 @@ fn on_signals(cancel: CancellationToken) -> std::io::Result<()> {
     Ok(())
 }
 
+/// `desktop` and the subdirectories the desktop tool writes to (state, shots, bin), 0700 on unix.
+fn private_desktop_dirs(desktop: &Path) -> std::io::Result<()> {
+    for d in ["state", "shots", "bin"] {
+        std::fs::create_dir_all(desktop.join(d))?;
+    }
+    #[cfg(unix)]
+    for d in ["", "state", "shots", "bin"] {
+        std::fs::set_permissions(
+            desktop.join(d),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )?;
+    }
+    Ok(())
+}
+
 /// Creates (or truncates) a file readable by the owner only; 0600 on unix even if it existed.
 fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
     let mut o = std::fs::OpenOptions::new();
@@ -2262,6 +2281,25 @@ mod tests {
         let home = base.join("users/me");
         std::fs::create_dir_all(home.join("proj")).unwrap();
         assert_eq!(workspace_root(&home.join("proj"), &home), home.join("proj"));
+    }
+
+    #[test]
+    fn the_desktop_artifact_dirs_exist_and_are_private_before_any_launch() {
+        let d = tempfile::tempdir().unwrap();
+        let desktop = d.path().join("sessions/s1/desktop");
+        private_desktop_dirs(&desktop).unwrap();
+        private_desktop_dirs(&desktop).unwrap(); // idempotent
+        for sub in ["", "state", "shots", "bin"] {
+            let p = desktop.join(sub);
+            assert!(p.is_dir(), "{p:?}");
+            #[cfg(unix)]
+            assert_eq!(
+                std::os::unix::fs::PermissionsExt::mode(
+                    &std::fs::metadata(&p).unwrap().permissions()
+                ) & 0o777,
+                0o700
+            );
+        }
     }
 
     #[cfg(unix)]

@@ -388,10 +388,41 @@ fn candidates(s: &str) -> Vec<String> {
     v
 }
 
+/// Best effort: drop invisible characters and fold the common Cyrillic and Greek look-alikes of
+/// Latin letters, so `1Passwоrd` (Cyrillic o) still matches. Not a full confusables table.
+fn fold_confusables(s: &str) -> String {
+    s.chars()
+        .filter(|c| !is_spoofing(*c))
+        .map(|c| match c {
+            'а' | 'α' | 'А' | 'Α' => 'a',
+            'в' | 'В' | 'Β' => 'b',
+            'с' | 'С' | 'ϲ' => 'c',
+            'ԁ' => 'd',
+            'е' | 'Е' | 'ε' | 'Ε' => 'e',
+            'һ' | 'Н' | 'Η' => 'h',
+            'і' | 'І' | 'ι' | 'Ι' | 'ӏ' | 'ı' => 'i',
+            'ј' | 'Ј' => 'j',
+            'к' | 'К' | 'κ' | 'Κ' => 'k',
+            'М' | 'Μ' => 'm',
+            'ո' | 'η' => 'n',
+            'о' | 'О' | 'ο' | 'Ο' => 'o',
+            'р' | 'Р' | 'ρ' | 'Ρ' => 'p',
+            'ѕ' | 'Ѕ' => 's',
+            'т' | 'Т' | 'τ' | 'Τ' => 't',
+            'υ' | 'ν' => 'v',
+            'х' | 'Х' | 'χ' | 'Χ' => 'x',
+            'у' | 'У' | 'γ' => 'y',
+            'ѡ' | 'ω' => 'w',
+            c => c,
+        })
+        .collect()
+}
+
 /// The family when `id` (a bundle id, executable name or path) is on the hard-deny list.
-/// Matching is exact on a case-folded name, except `keepass*` (every KeePass variant).
+/// Matching is exact on a case-folded name, except `keepass*` (every KeePass variant); invisible
+/// characters are dropped and common look-alike letters folded first (best effort).
 pub fn hard_denied(id: &str) -> Option<&'static str> {
-    for c in candidates(id) {
+    for c in candidates(&fold_confusables(id)) {
         if c.starts_with("keepass") {
             return Some("a password manager");
         }
@@ -411,7 +442,7 @@ pub fn hard_denied_loose(name: &str) -> Option<&'static str> {
     if let Some(f) = hard_denied(name) {
         return Some(f);
     }
-    let low = name.trim().to_lowercase();
+    let low = fold_confusables(name).trim().to_lowercase();
     let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
     DENIED.iter().find_map(|(family, names)| {
         names
@@ -434,12 +465,22 @@ pub fn is_spoofing(c: char) -> bool {
             c,
             '\u{200B}'..='\u{200F}'
                 | '\u{2028}'..='\u{202E}'
-                | '\u{2060}'..='\u{2064}'
-                | '\u{2066}'..='\u{2069}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{08E2}'
+                | '\u{034F}'
+                | '\u{17B4}'..='\u{17B5}'
+                | '\u{180B}'..='\u{180F}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
                 | '\u{FEFF}'
                 | '\u{00AD}'
                 | '\u{061C}'
-                | '\u{180E}'
                 | '\u{3164}'
                 | '\u{115F}'
                 | '\u{1160}'
@@ -1077,6 +1118,29 @@ mod tests {
         ] {
             assert!(press_allowed(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn invisible_characters_and_lookalike_letters_do_not_hide_a_denied_app() {
+        for c in [
+            '\u{206A}',
+            '\u{2065}',
+            '\u{034F}',
+            '\u{17B4}',
+            '\u{FFF9}',
+            '\u{1D173}',
+            '\u{180B}',
+            '\u{FE0F}',
+        ] {
+            assert!(is_spoofing(c), "{c:?}");
+            assert!(hard_denied(&format!("1Pass{c}word")).is_some(), "{c:?}");
+        }
+        // Cyrillic o and a, Greek omicron
+        assert!(hard_denied("1Passw\u{43E}rd").is_some());
+        assert!(hard_denied("B\u{456}twarden").is_some());
+        assert!(hard_denied_loose("Auth\u{443} Desktop").is_some());
+        assert!(hard_denied_loose("\u{391}uthy Desktop").is_some());
+        assert!(hard_denied("my-tool").is_none());
     }
 
     #[test]

@@ -20,6 +20,9 @@ pub fn clean(s: &str, max: usize) -> String {
     out
 }
 
+/// Most bytes one OSC/DCS/APC/PM/SOS sequence may swallow.
+const MAX_ESCAPE: usize = 4096;
+
 /// Text of an app's log: terminal escape sequences (CSI, OSC such as a title or a hyperlink, and
 /// other two-byte escapes) and invisible or bidi characters removed, newlines and tabs kept, secret-shaped
 /// strings redacted.
@@ -39,10 +42,18 @@ pub fn clean_log(s: &str) -> String {
                 }
                 // OSC (and DCS, APC, PM, SOS): up to BEL or ST (ESC \)
                 Some(']' | 'P' | '_' | '^' | 'X') => {
-                    while let Some(n) = it.next() {
+                    // An unterminated one must not eat the rest of the log: drop at most the cap.
+                    let (mut taken, mut ended) = (0usize, false);
+                    while taken < MAX_ESCAPE {
+                        let Some(n) = it.next() else { break };
+                        taken += n.len_utf8();
                         if n == '\u{7}' || (n == '\u{1b}' && it.next_if_eq(&'\\').is_some()) {
+                            ended = true;
                             break;
                         }
+                    }
+                    if !ended && taken >= MAX_ESCAPE {
+                        out.push_str("[unterminated escape removed]");
                     }
                 }
                 _ => {}
@@ -68,6 +79,16 @@ mod tests {
             200,
         );
         assert!(!t.contains("abcdefghijklmnopqrstuvwxyz0123456789"), "{t}");
+    }
+
+    #[test]
+    fn an_unterminated_escape_drops_only_a_capped_span() {
+        let tail = "y".repeat(100);
+        let t = clean_log(&format!("a\u{1b}]0;{}{tail}", "x".repeat(5000)));
+        assert!(t.starts_with("a[unterminated escape removed]"), "{t}");
+        assert!(t.ends_with(&"y".repeat(100)), "{t}");
+        // a short unterminated one at the end of the input: nothing left to show
+        assert_eq!(clean_log("a\u{1b}]0;title"), "a");
     }
 
     #[test]

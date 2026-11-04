@@ -774,14 +774,10 @@ impl Harness {
             match verdict.decision {
                 Decision::Allow => {
                     let token = if call.name == "desktop_launch" {
-                        launch_evidence(
-                            &task.task_id,
-                            turn,
-                            &call.id,
-                            input,
-                            synthesis_permissions::desktop::Origin::Project,
-                        )
-                        .await
+                        let origin = verdict
+                            .desktop_origin
+                            .unwrap_or(synthesis_permissions::desktop::Origin::External);
+                        launch_evidence(&task.task_id, turn, &call.id, input, origin).await
                     } else {
                         None
                     };
@@ -1173,8 +1169,14 @@ impl Harness {
         };
         let shown = self.tools.redact_input(&call.name, input);
         let reason = sanitize_for_display(&verdict.reason);
+        // the person must know the text above was altered, not that it was empty
+        let hidden = if shown != *input {
+            " (secret-shaped text hidden)"
+        } else {
+            ""
+        };
         let prompt = format!(
-            "{}{} wants to run {}: {}",
+            "{}{} wants to run {}{hidden}: {}",
             origin.as_ref().map_or(String::new(), |o| format!("[{o}] ")),
             sanitize_for_display(&call.name),
             if call.name == "desktop_launch" {
