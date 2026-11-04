@@ -71,7 +71,7 @@ mod automode_defaults;
 pub mod bash;
 pub mod paths;
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 use synthesis_core::PathPolicy;
@@ -331,6 +331,47 @@ pub struct Env {
     pub project_root: Option<PathBuf>,
     /// Memory authorship (see [`NoteOracle`]); `None` = no store, so every note asks.
     pub memory_notes: Option<NoteOracle>,
+}
+
+/// `/proc/...` and `/dev/fd/...` (also `/dev/fd` itself), by their spelling.
+fn is_proc_path(p: &Path) -> bool {
+    let mut c = p.components().skip(1).map(|c| c.as_os_str());
+    match c.next().and_then(|x| x.to_str()) {
+        Some("proc") => true,
+        Some("dev") => c.next().and_then(|x| x.to_str()) == Some("fd"),
+        _ => false,
+    }
+}
+
+/// A `..` that follows a symlinked component of `op`: the shell steps back physically (out of the
+/// link's target), the lexical normalisation steps back in the spelling. Not resolvable then.
+fn dotdot_after_link(base: &Path, op: &str) -> bool {
+    let op = Path::new(op);
+    let mut cur = if op.is_absolute() {
+        PathBuf::new()
+    } else {
+        base.to_path_buf()
+    };
+    let mut linked: Vec<bool> = Vec::new();
+    for c in op.components() {
+        match c {
+            Component::ParentDir => {
+                if linked.iter().any(|&l| l) {
+                    return true;
+                }
+                linked.pop();
+                cur.pop();
+            }
+            Component::CurDir => {}
+            c => {
+                cur.push(c);
+                linked.push(
+                    std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink()),
+                );
+            }
+        }
+    }
+    false
 }
 
 impl Env {
@@ -899,6 +940,10 @@ impl Permissions {
         let Some(rp) = paths::real_of(p) else {
             return false;
         };
+        // the child, not synt, interprets these (`/proc/self/cwd`, `/dev/fd/N`): never inside
+        if is_proc_path(p) || is_proc_path(&rp) {
+            return false;
+        }
         self.roots().iter().any(|r| {
             // Compared as realpaths only, so `/tmp/ws/x` and `/private/tmp/ws/x` are the same
             // place; a link leading outside resolves outside. Unresolvable = outside.
@@ -1187,6 +1232,9 @@ impl Permissions {
             Some(g) => op[..g].rfind(['/', '\\']).map_or("", |i| &op[..=i]),
         };
         if g.is_some() && op[dir.len()..].starts_with('.') {
+            return None;
+        }
+        if dotdot_after_link(base, dir) {
             return None;
         }
         Some((

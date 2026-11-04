@@ -752,9 +752,32 @@ fn secret_like(k: &str) -> bool {
                     | "sig"
                     | "signature"
                     | "jwt"
-            )
+                    | "pw"
+                    | "pat"
+                    | "session"
+                    | "sessionid"
+                    | "sid"
+                    | "otp"
+                    | "passphrase"
+            ) || SECRET_STEMS.iter().any(|t| w.contains(t))
+                || SECRET_KEY_ENDS.iter().any(|t| w.ends_with(t))
         })
 }
+
+/// Concatenated names (`--secretkey`, `AUTHTOKEN`, `xapikey`) have no word boundary to split on.
+const SECRET_STEMS: &[&str] = &[
+    "secret",
+    "password",
+    "passwd",
+    "passphrase",
+    "token",
+    "apikey",
+    "privatekey",
+    "accesskey",
+    "credential",
+];
+/// Only these may end a word in `key` (`keyboard`, `monkey` stay clean).
+const SECRET_KEY_ENDS: &[&str] = &["authkey", "signkey", "sshkey"];
 
 /// `${NAME}` with a plain variable name: nothing else may sit inside the braces.
 fn is_ref_name(n: &str) -> bool {
@@ -836,7 +859,7 @@ fn literal_secret_arg(args: &[String]) -> Option<String> {
     for a in args {
         if let Some(f) = flag.take()
             && !only_refs(a)
-            && !a.starts_with('-')
+            && !is_flag_shape(a)
         {
             return Some(f.to_string());
         }
@@ -857,6 +880,12 @@ fn literal_secret_arg(args: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+/// `--word` with letters and dashes only: the next flag, not a value (`-abc123` is a value).
+fn is_flag_shape(a: &str) -> bool {
+    a.strip_prefix("--")
+        .is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_alphabetic() || c == '-'))
 }
 
 /// `%XX` decoded (invalid sequences stay as they are).
@@ -1926,6 +1955,22 @@ mod tests {
             "APIKey",
             "Authorization",
             "key",
+            "--secretkey",
+            "--accesskey",
+            "--privatekey",
+            "--apitoken",
+            "--authtoken",
+            "--sessiontoken",
+            "--clientsecret",
+            "AUTHTOKEN",
+            "xapikey",
+            "--authkey",
+            "--pw",
+            "--pat",
+            "--session",
+            "--sid",
+            "--otp",
+            "--passphrase",
         ] {
             assert!(secret_like(bad), "{bad}");
         }
@@ -1941,9 +1986,13 @@ mod tests {
             "keyword",
             "author",
             "--port",
+            "--monkey",
+            "--keyboard-layout",
         ] {
             assert!(!secret_like(ok), "{ok}");
         }
+        assert!(literal_secret_arg(&["--token".into(), "-abc123".into()]).is_some());
+        assert!(literal_secret_arg(&["--token".into(), "--other-flag".into()]).is_none());
         assert!(secret_shaped("Bearer sk-abcdefghijkl"));
         assert!(
             literal_secret_arg(&[

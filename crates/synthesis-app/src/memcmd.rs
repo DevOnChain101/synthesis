@@ -777,7 +777,11 @@ fn edit(env: &Env, s: &mut Store, id: &str) -> Result<(), String> {
     let refused =
         matches!(&result, Err(e) if !e.starts_with("the editor") && !e.starts_with("cannot start"));
     if refused && std::fs::read(&path).is_ok_and(|b| b != edit_text(&old).as_bytes()) {
-        return result.map_err(|e| format!("{e}; your text is kept at {}", path.display()));
+        return result.map_err(|e| format!(
+                "{e}; your text is kept at {} (the directory {} is kept too: delete it yourself when done)",
+                path.display(),
+                dir.display()
+            ));
     }
     let _ = std::fs::remove_dir_all(&dir);
     result

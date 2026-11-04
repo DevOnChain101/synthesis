@@ -3359,3 +3359,38 @@ fn accept_edits_tmp_and_private_tmp_are_the_same_workspace() {
         A
     );
 }
+
+// --- `..` after a symlink, /proc and /dev/fd ----------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn bash_dotdot_after_a_symlinked_component_is_not_normalised_away() {
+    let f = fx();
+    fs::create_dir(f.outside.join("deep")).unwrap();
+    fs::write(f.outside.join("passwd"), "x").unwrap();
+    std::os::unix::fs::symlink(f.outside.join("deep"), f.cwd.join("link")).unwrap();
+    fs::write(f.cwd.join("passwd"), "x").unwrap();
+    fs::create_dir_all(f.cwd.join("a/b")).unwrap();
+    for mode in [Mode::Default, Mode::AcceptEdits] {
+        assert_eq!(f.bash(mode, "cat link/../passwd"), Q, "{mode:?}");
+        assert_eq!(f.bash(mode, "cd link/.. && cat passwd"), Q, "{mode:?}");
+        assert_eq!(f.bash(mode, "cat a/b/../../passwd"), A, "{mode:?}");
+        assert_eq!(f.bash(mode, "cd a/b/.. && cat ../passwd"), A, "{mode:?}");
+    }
+}
+
+#[test]
+fn proc_and_dev_fd_spellings_are_never_inside() {
+    for (p, yes) in [
+        ("/proc", true),
+        ("/proc/self/cwd/x", true),
+        ("/proc/123/root/etc", true),
+        ("/dev/fd/3", true),
+        ("/dev/fd", true),
+        ("/dev/null", false),
+        ("/procfs/x", false),
+        ("/home/proc/x", false),
+    ] {
+        assert_eq!(super::is_proc_path(Path::new(p)), yes, "{p}");
+    }
+}
