@@ -725,6 +725,14 @@ impl TerminalRuntime {
             .map_or(Guarantee::None, |b| b.capabilities().filesystem)
     }
 
+    /// GUI guarantee of the backend `Enforce` uses (`None` when nothing can confine).
+    pub fn enforced_gui_guarantee(&self) -> Guarantee {
+        self.backend_chain()
+            .0
+            .first()
+            .map_or(Guarantee::None, |b| b.capabilities().gui)
+    }
+
     /// Decides how a launch is confined. `Ok(None)` = run `cmd` as is (unconfined, allowed by the
     /// mode and flagged by the caller); otherwise the wrapped command and what it enforces.
     /// Runs before any file is created.

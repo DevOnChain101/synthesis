@@ -2224,6 +2224,7 @@ mod tests {
                     filesystem: Guarantee::Strong,
                     network: Guarantee::Strong,
                     process_tree: Guarantee::Strong,
+                    gui: Guarantee::Strong,
                     notes: vec![],
                 }
             }

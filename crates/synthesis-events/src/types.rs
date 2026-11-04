@@ -663,6 +663,9 @@ pub enum Event {
         name: String,
         /// `"project"` (launched from the workspace) or `"external"` (approved by the person).
         origin: String,
+        /// `"none"|"weak"|"strong"`: GUI guarantee of the sandbox the app was spawned under.
+        #[serde(default)]
+        gui: String,
     },
     /// A `desktop_act` call. The value that was typed or set is never part of the event.
     #[serde(rename = "desktop.act")]

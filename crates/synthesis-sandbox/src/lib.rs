@@ -281,6 +281,10 @@ pub struct SandboxCapabilities {
     pub network: Guarantee,
     /// Descendants stay confined / can be contained as a tree.
     pub process_tree: Guarantee,
+    /// Keeps a GUI app away from the display server (X11/Wayland, abstract sockets) and, on macOS,
+    /// from the terminal's Accessibility grant. Separate from `filesystem`: Landlock ABI >= 3 is
+    /// filesystem Strong yet does not scope abstract Unix sockets. `desktop_launch` needs > Weak.
+    pub gui: Guarantee,
     pub notes: Vec<String>,
 }
 
@@ -355,6 +359,7 @@ impl SandboxBackend for NullSandbox {
             filesystem: Guarantee::None,
             network: Guarantee::None,
             process_tree: Guarantee::None,
+            gui: Guarantee::None,
             notes: vec!["no sandbox: commands run with the agent's full privileges".into()],
         }
     }

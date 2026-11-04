@@ -49,7 +49,7 @@ pub struct DesktopConfig {
     /// agent-desktop posts them to the target process or to the frontmost app is unverified.
     pub allow_press: bool,
     /// `synt.desktop.allow_weak_sandbox` (user settings only). Launch an app even when the
-    /// sandbox's filesystem guarantee is only `Weak` (macOS Seatbelt, bubblewrap without a
+    /// sandbox's `gui` guarantee is only `Weak` or `None` (macOS Seatbelt, bubblewrap without a
     /// private /tmp and mount namespace), so the app can reach the display server and, on macOS,
     /// the Accessibility grant of the terminal. For D0 and development; a release blocker.
     pub allow_weak_sandbox: bool,
@@ -91,6 +91,8 @@ pub enum DesktopAudit {
         pid: u32,
         name: String,
         external: bool,
+        /// `none|weak|strong`: the GUI guarantee of the sandbox the app was spawned under.
+        gui: String,
     },
     Act {
         app_id: String,
@@ -988,13 +990,13 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
         }
         // A weak sandbox (Seatbelt, bubblewrap without a private mount namespace) does not keep a
         // GUI app away from the display server or Accessibility: refused unless the person opted in.
-        if !cfg.allow_weak_sandbox && sh.rt.enforced_filesystem_guarantee() <= Guarantee::Weak {
+        if !cfg.allow_weak_sandbox && sh.rt.enforced_gui_guarantee() <= Guarantee::Weak {
             return refuse(
                 sh,
                 W,
                 format!(
-                    "this machine's sandbox is not a security boundary for GUI apps (filesystem guarantee {:?}): the app could reach the display server and, on macOS, the Accessibility grant of the terminal. For D0 or development only, set synt.desktop.allow_weak_sandbox to true in your user settings (docs/DESKTOP-CONTROL.md)",
-                    sh.rt.enforced_filesystem_guarantee()
+                    "this machine's sandbox is not a security boundary for GUI apps (GUI guarantee {:?}): the app could reach the display server and, on macOS, the Accessibility grant of the terminal. For D0 or development only, set synt.desktop.allow_weak_sandbox to true in your user settings (docs/DESKTOP-CONTROL.md)",
+                    sh.rt.enforced_gui_guarantee()
                 ),
             );
         }
@@ -1070,7 +1072,7 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
             .is_ok_and(|s| {
                 !s.unsandboxed_by_request
                     && s.sandbox
-                        .is_some_and(|c| cfg.allow_weak_sandbox || c.filesystem > Guarantee::Weak)
+                        .is_some_and(|c| cfg.allow_weak_sandbox || c.gui > Guarantee::Weak)
             })
     {
         let _ = sh
@@ -1099,6 +1101,7 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
             pid: app.pid,
             name: app.name.clone(),
             external: origin == Origin::External,
+            gui: format!("{:?}", sh.rt.enforced_gui_guarantee()).to_lowercase(),
         },
     );
     // give the app a moment to show its first window

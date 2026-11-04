@@ -58,6 +58,7 @@ impl SandboxBackend for Fake {
             filesystem: self.0,
             network: self.0,
             process_tree: self.0,
+            gui: self.0,
             notes: vec![],
         }
     }

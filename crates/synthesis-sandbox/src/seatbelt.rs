@@ -205,6 +205,10 @@ pub fn seatbelt_profile(
     (s, params)
 }
 
+/// Hook for the planned macOS GUI isolation (docs/DESKTOP-CONTROL.md). Flip only together with the
+/// disclaim spawn and its responsible-pid check; until then `gui` stays Weak.
+const MACOS_GUI_DISCLAIM_IMPLEMENTED: bool = false;
+
 impl SandboxBackend for SeatbeltBackend {
     fn name(&self) -> &'static str {
         "seatbelt"
@@ -215,7 +219,9 @@ impl SandboxBackend for SeatbeltBackend {
             filesystem: Guarantee::Weak,
             network: Guarantee::Weak,
             process_tree: Guarantee::Strong,
+            gui: if MACOS_GUI_DISCLAIM_IMPLEMENTED { Guarantee::Strong } else { Guarantee::Weak },
             notes: vec![
+                "gui: Weak. macOS: Strong only when the app is spawned without the terminal's TCC responsibility (responsibility_spawnattrs_setdisclaim, verified with responsibility_get_pid_responsible_for_pid); not implemented yet".into(),
                 "sandbox-exec is deprecated by Apple; best-effort, may break on any macOS update".into(),
                 "kernel-enforced, inherited by all descendants; file metadata (stat) stays readable".into(),
                 "network Loopback exposes the HOST loopback (databases, Redis, docker TCP) to sandboxed code; a 0.0.0.0 listener is LAN-reachable; AF_UNIX stays denied".into(),

@@ -344,7 +344,10 @@ impl SandboxBackend for LinuxLandlockBackend {
             filesystem: if self.abi >= 3 { Guarantee::Strong } else { Guarantee::Weak },
             network: g(self.abi >= 4, Guarantee::Weak),
             process_tree: Guarantee::Strong,
+            // abstract Unix sockets (the host X server at @/tmp/.X11-unix/X0) are not scoped
+            gui: Guarantee::None,
             notes: vec![
+                "gui: None. Landlock does not scope abstract Unix sockets, so the app could reach the host display server".into(),
                 format!("landlock ABI {}; kernel-enforced and inherited by all descendants", self.abi),
                 "allow-list only: deny_paths overlapping an allowed root are rejected".into(),
                 "network Deny blocks TCP bind/connect only (ABI >= 4); UDP and AF_UNIX stay open (Strong network needs bubblewrap)".into(),
@@ -495,7 +498,9 @@ impl SandboxBackend for BwrapBackend {
             filesystem: Guarantee::Weak,
             network: Guarantee::Strong,
             process_tree: Guarantee::Strong,
+            gui: Guarantee::Weak,
             notes: vec![
+                "gui: Weak. A private Xvfb + dbus behind bwrap --unshare-net would make it Strong; not implemented".into(),
                 "writes confined to writable_roots, tmp_dir and a private /tmp; /run is a fresh tmpfs; reads are NOT confined except deny_paths (whole fs mounted read-only)".into(),
                 "Weak: defence in depth, not a security boundary".into(),
                 "network Deny/Loopback use a fresh net namespace; with Loopback its `lo` is up but PRIVATE to the sandbox: a dev server and tests inside it work, host loopback services are unreachable; AllowHosts and allow_exec=false are rejected".into(),

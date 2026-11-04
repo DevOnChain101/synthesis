@@ -123,11 +123,13 @@ impl DesktopHost for AuditHost {
                 pid,
                 name,
                 external,
+                gui,
             } => Event::DesktopLaunch {
                 app_id,
                 pid: pid.into(),
                 name,
                 origin: if external { "external" } else { "project" }.into(),
+                gui,
             },
             DesktopAudit::Act {
                 app_id,
@@ -257,13 +259,19 @@ fn doctor_lines_with(
     )];
     if s.enabled {
         let caps = synthesis_sandbox::detect().capabilities();
+        let reason = caps
+            .notes
+            .iter()
+            .find_map(|n| n.strip_prefix("gui: "))
+            .unwrap_or("no GUI isolation");
+        v.push(format!("desktop sandbox gui: {:?} ({reason})", caps.gui));
         v.push(format!(
             "desktop sandbox WARNING: the filesystem guarantee of this machine's sandbox is {:?}{}. A launched GUI app is confined only as far as that backend goes: macOS Seatbelt is documented as NOT a security boundary, X11 has no per-client isolation, and on macOS the Accessibility grant of the terminal app is inherited by the app's children. The sandbox is never widened for GUI apps (docs/DESKTOP-CONTROL.md, release blocker).",
             caps.filesystem,
             if cfg!(target_os = "macos") { " (Seatbelt)" } else { "" }
         ));
-        v.push(if caps.filesystem > synthesis_sandbox::Guarantee::Weak {
-            "desktop weak sandbox: not needed (the sandbox here is above Weak)".to_owned()
+        v.push(if caps.gui > synthesis_sandbox::Guarantee::Weak {
+            "desktop weak sandbox: not needed (the GUI guarantee here is above Weak)".to_owned()
         } else if s.allow_weak_sandbox {
             "desktop weak sandbox: ALLOWED (synt.desktop.allow_weak_sandbox): launched apps can reach the display server and, on macOS, the Accessibility grant of the terminal. For D0 and development only; a release blocker".to_owned()
         } else {
@@ -457,6 +465,7 @@ mod tests {
             text.contains("not checked (the binary is not pin-verified"),
             "{text}"
         );
+        assert!(text.contains("desktop sandbox gui:"), "{text}");
         assert_eq!(calls.get(), 0, "unverified binary reached the runner");
         assert!(
             text.contains("desktop weak sandbox:"),

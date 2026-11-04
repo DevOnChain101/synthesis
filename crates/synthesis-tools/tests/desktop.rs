@@ -1372,7 +1372,7 @@ fn secret_shaped_launch_arguments_and_cwd_are_masked_in_events_and_dialogs() {
 /// A backend with a chosen filesystem guarantee that confines nothing (the tests only need the
 /// guarantee it reports; the process still starts).
 #[cfg(unix)]
-struct Reporting(synthesis_sandbox::Guarantee);
+struct Reporting(synthesis_sandbox::Guarantee, synthesis_sandbox::Guarantee);
 
 #[cfg(unix)]
 impl synthesis_sandbox::SandboxBackend for Reporting {
@@ -1384,6 +1384,7 @@ impl synthesis_sandbox::SandboxBackend for Reporting {
             filesystem: self.0,
             network: synthesis_sandbox::Guarantee::Strong,
             process_tree: synthesis_sandbox::Guarantee::Weak,
+            gui: self.1,
             notes: vec![],
         }
     }
@@ -1398,8 +1399,17 @@ impl synthesis_sandbox::SandboxBackend for Reporting {
 
 #[cfg(unix)]
 fn enforced_with(g: synthesis_sandbox::Guarantee) -> Registry {
+    enforced_with_gui(g, g)
+}
+
+/// Filesystem guarantee `fs` and GUI guarantee `gui` reported separately.
+#[cfg(unix)]
+fn enforced_with_gui(
+    fs: synthesis_sandbox::Guarantee,
+    gui: synthesis_sandbox::Guarantee,
+) -> Registry {
     let rt = synthesis_terminal::TerminalRuntime::new(SandboxMode::Enforce)
-        .with_sandbox_backend(Arc::new(Reporting(g)));
+        .with_sandbox_backend(Arc::new(Reporting(fs, gui)));
     Registry::with_terminal_policy(Arc::new(rt), Arc::new(synthesis_tools::standard_policy))
 }
 
@@ -1440,6 +1450,39 @@ async fn a_weak_sandbox_refuses_a_launch_unless_the_person_opted_in() {
         c.unsafe_for_tests = false
     });
     let (c, input) = launch(&f);
+    let o = run(&f, "desktop_launch", input, &c).await;
+    assert!(!o.is_error && o.meta["running"] == true, "{}", text(&o));
+    f.reg.close_session("s1");
+}
+
+/// Landlock ABI >= 3: filesystem Strong, but the host display server is still reachable.
+#[cfg(unix)]
+#[tokio::test]
+async fn strong_filesystem_does_not_pass_when_the_gui_guarantee_is_weak() {
+    use synthesis_sandbox::Guarantee;
+    for gui in [Guarantee::None, Guarantee::Weak] {
+        let f = fx_with(false, enforced_with_gui(Guarantee::Strong, gui), |c| {
+            c.unsafe_for_tests = false
+        });
+        let c = ctx(&f.root, PermissionMode::Default, false);
+        let input = json!({"target": f.app.to_string_lossy(), "args": ["__sleep"]});
+        let o = run(&f, "desktop_launch", input.clone(), &c).await;
+        assert!(
+            o.is_error && o.meta["error"] == "refused" && text(&o).contains("GUI guarantee"),
+            "{gui:?}: {}",
+            text(&o)
+        );
+    }
+    let f = fx_with(
+        false,
+        enforced_with_gui(Guarantee::Strong, Guarantee::Weak),
+        |c| {
+            c.unsafe_for_tests = false;
+            c.allow_weak_sandbox = true;
+        },
+    );
+    let c = ctx(&f.root, PermissionMode::Default, false);
+    let input = json!({"target": f.app.to_string_lossy(), "args": ["__sleep"]});
     let o = run(&f, "desktop_launch", input, &c).await;
     assert!(!o.is_error && o.meta["running"] == true, "{}", text(&o));
     f.reg.close_session("s1");

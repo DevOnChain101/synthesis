@@ -270,6 +270,7 @@ mod tests {
                 pid: 42,
                 name: s("demo"),
                 origin: s("project"),
+                gui: s("weak"),
             },
             Event::DesktopAct {
                 app_id: s("app-1"),

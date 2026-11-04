@@ -20,6 +20,7 @@ impl SandboxBackend for WindowsJobBackend {
             filesystem: Guarantee::None,
             network: Guarantee::None,
             process_tree: Guarantee::Weak,
+            gui: Guarantee::None,
             notes: vec![
                 "no filesystem/network confinement (AppContainer/restricted token not implemented)".into(),
                 "tree kill comes from the terminal runtime's Job Object; memory and process-count limits are not implemented".into(),
