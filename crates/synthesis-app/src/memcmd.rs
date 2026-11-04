@@ -296,20 +296,27 @@ pub fn markdown(m: &Memory) -> String {
         .slot
         .as_deref()
         .map_or(String::new(), |s| format!("slot {s} · "));
+    // each field on its own line: `san` escapes newlines, so the body is cleaned line by line
+    let body = m.body.split('\n').map(san).collect::<Vec<_>>().join("\n");
     san(&format!(
-        "## {} · {} · {} · {} · {}\n{}used {} (ok {}) · {}\n{}\n{}",
+        "## {} · {} · {} · {} · {}",
         m.id,
         m.kind,
         scope,
         m.trust.as_str(),
-        m.status,
-        slot,
-        m.use_count,
-        m.success_count,
-        m.updated_at.get(..10).unwrap_or(&m.updated_at),
-        m.title,
-        m.body
-    ))
+        m.status
+    )) + "\n"
+        + &san(&format!(
+            "{}used {} (ok {}) · {}",
+            slot,
+            m.use_count,
+            m.success_count,
+            m.updated_at.get(..10).unwrap_or(&m.updated_at)
+        ))
+        + "\n"
+        + &san(&m.title)
+        + "\n"
+        + &body
 }
 
 fn cwd_of(c: &Option<PathBuf>) -> PathBuf {
@@ -349,9 +356,11 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
             limit,
         } => {
             let f = filter(&scope, None, "active", limit);
-            for m in s.search(&query, &f).map_err(e)? {
-                out!("{}\n", markdown(&m));
+            let found = s.search(&query, &f).map_err(e)?;
+            for m in &found {
+                out!("{}\n", markdown(m));
             }
+            out!("{} record(s)", found.len());
         }
         MemoryCmd::Show { id } => match s.get(&id).map_err(e)? {
             Some(m) => {
@@ -1809,6 +1818,23 @@ mod tests {
             key: "k".into(),
             label: "l".into(),
         }
+    }
+
+    #[test]
+    fn markdown_keeps_real_line_breaks_and_escapes_inside_a_line() {
+        let m: Memory = serde_json::from_value(serde_json::json!({
+            "id": "m1", "scope": "user", "scope_key": "", "kind": "fact", "slot": null,
+            "name": null, "title": "T", "body": "one\ntwo\u{202e}", "tags": [],
+            "trust": "owner", "status": "active", "pinned": false, "confidence": 1.0,
+            "use_count": 0, "success_count": 0, "failure_count": 0, "version": 1,
+            "supersedes": null, "source": null, "anchors": [], "flags": [],
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            "last_used_at": null
+        }))
+        .unwrap();
+        let t = markdown(&m);
+        assert_eq!(t.lines().count(), 5, "{t}");
+        assert!(!t.contains("\\n") && t.contains("two\\u{202e}"), "{t}");
     }
 
     #[test]

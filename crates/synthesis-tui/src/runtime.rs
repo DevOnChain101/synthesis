@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::sync::Arc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
-use synthesis_permissions::Mode;
+use synthesis_permissions::{Mode, Permissions};
 
 use synthesis_config::Env;
 use synthesis_core::AgentSession;
@@ -51,6 +51,8 @@ pub struct Exit {
     pub session: Option<AgentSession>,
     /// Outcome of the last finished task, for `Harness::end_session`.
     pub last_outcome: Option<TaskOutcome>,
+    /// The app was left while a task ran, so the task was cancelled.
+    pub cancelled_task: bool,
 }
 
 type SaveNote = Box<dyn Fn(bool, &str) -> Result<String, String>>;
@@ -389,6 +391,13 @@ impl Runner {
                         v.push("add: /permissions allow RULE · remove: /permissions remove RULE (this session only)".into());
                         (v, false)
                     }
+                    PermAction::Allow(rule) if !Permissions::is_well_formed_rule(&rule) => (
+                        vec![
+                            "expected a rule like Bash(cargo test:*), Edit or mcp__server__tool"
+                                .into(),
+                        ],
+                        true,
+                    ),
                     PermAction::Allow(rule) => {
                         if p.add_allow(&rule) {
                             (
@@ -745,6 +754,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                         reason,
                         session: None,
                         last_outcome: runner.last_outcome.take(),
+                        cancelled_task: true,
                     };
                 }
             } else {
@@ -752,6 +762,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                     reason,
                     session: runner.session.take(),
                     last_outcome: runner.last_outcome.take(),
+                    cancelled_task: quit_deadline.is_some(),
                 };
             }
         }
@@ -1005,6 +1016,7 @@ fn closed(runner: &mut Runner, reason: ExitReason) -> Exit {
         reason,
         session: runner.session.take(),
         last_outcome: runner.last_outcome.take(),
+        cancelled_task: false,
     }
 }
 

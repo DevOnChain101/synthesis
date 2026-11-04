@@ -56,17 +56,33 @@ fn root_of(cwd: &Path) -> PathBuf {
 /// `--trust-project` / `--approve-mcp` were granted for ONE project root. After OpenFolder or
 /// Resume moved to another root they are dropped (Untrusted, no re-prompt in v1: relaunch with
 /// --cwd for that project to trust it).
-fn common_for(c: &Common, granted: &Path, cwd: &Path) -> Common {
+/// The notice is for the app's startup notes: stderr would be wiped by the alternate screen.
+fn common_for(c: &Common, granted: &Path, cwd: &Path) -> (Common, Option<String>) {
     let mut c = c.clone();
+    let mut note = None;
     if c.trust_project && root_of(cwd) != granted {
-        eprintln!(
-            "synt: project root changed; --trust-project and --approve-mcp apply only to {}, so this project is untrusted",
+        note = Some(format!(
+            "project root changed; --trust-project and --approve-mcp apply only to {}, so this project is untrusted",
             synthesis_harness::sanitize_for_display(&granted.display().to_string())
-        );
+        ));
         c.trust_project = false;
         c.approve_mcp.clear();
     }
-    c
+    (c, note)
+}
+
+/// Why a folder could not be opened, one line.
+fn open_failure(folder: &Path, e: &str) -> String {
+    let why = if e.contains("Permission denied") {
+        "permission denied"
+    } else {
+        e
+    };
+    format!(
+        "cannot open {}: {}",
+        synthesis_harness::sanitize_for_display(&folder.display().to_string()),
+        synthesis_harness::sanitize_for_display(why)
+    )
 }
 
 /// `--resume ID` (id or unique prefix) or `--continue` (newest session of the start folder).
@@ -242,12 +258,15 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
     // falls back to the one in use, with a note.
     let mut model: Option<String> = None;
     let mut switch_from: Option<(Option<String>, String)> = None;
-    let mut switch_note: Option<String> = None;
+    let mut switch_note: Vec<String> = vec![];
+    // the folder and session to go back to when the one asked for cannot be opened
+    let mut back: Option<(PathBuf, String)> = None;
     loop {
         if let Some(r) = &resume {
             cwd = PathBuf::from(&r.record.cwd);
         }
-        let mut common = common_for(&a.common, &granted, &cwd);
+        let (mut common, root_note) = common_for(&a.common, &granted, &cwd);
+        switch_note.extend(root_note);
         // the stored session continues in place (workspace, history, store); the picker may name
         // a session of another folder, which is why the workspace check is off
         common.resume = resume.as_ref().map(|r| r.record.id.clone());
@@ -259,6 +278,12 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
         let p = match prepare(&common, &cwd, &env, &Limits::default(), Front::Tui) {
             Ok(p) => p,
             Err(e) => {
+                if let Some((prev_cwd, sid)) = back.take() {
+                    switch_note.push(open_failure(&cwd, &e));
+                    cwd = prev_cwd;
+                    resume = load_resume(&h.synthesis, &sid).ok();
+                    continue;
+                }
                 let Some((prev, sid)) = switch_from.take() else {
                     // nothing configured yet: a setup card instead of an error exit
                     if e.starts_with("no model configured") {
@@ -270,7 +295,7 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
                     }
                     return Err(e);
                 };
-                switch_note = Some(format!(
+                switch_note.push(format!(
                     "/model: could not switch ({e}); staying on the previous model"
                 ));
                 model = prev;
@@ -278,22 +303,50 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
                 continue;
             }
         };
+        back = None;
         let (exit, sid, ph_synthesis) = round(
             p,
             a.common.cleanup_worktree,
             common.trust_project,
             &env,
-            switch_note.take(),
+            std::mem::take(&mut switch_note),
             resume.take(),
             &mut |o| synthesis_tui::run_interactive(o, Tty::stdio(&env)),
         );
         switch_from = None;
-        match exit?.reason {
-            ExitReason::OpenFolder(p) => {
-                cwd = synthesis_core::canonicalize(&p)
-                    .map_err(|e| format!("{}: {e}", p.display()))?;
+        let exit = exit?;
+        if exit.cancelled_task {
+            match exit.reason {
+                ExitReason::OpenFolder(_) => {
+                    switch_note.push("task cancelled: switching folder".into());
+                }
+                ExitReason::Resume(_) => {
+                    switch_note.push("task cancelled: switching session".into());
+                }
+                _ => {}
             }
-            ExitReason::Resume(id) => resume = Some(load_resume(&ph_synthesis, &id)?),
+        }
+        match exit.reason {
+            ExitReason::OpenFolder(p) => match synthesis_core::canonicalize(&p) {
+                Ok(c) => {
+                    back = Some((cwd.clone(), sid.clone()));
+                    cwd = c;
+                }
+                Err(e) => {
+                    switch_note.push(open_failure(&p, &e.to_string()));
+                    resume = load_resume(&ph_synthesis, &sid).ok();
+                }
+            },
+            ExitReason::Resume(id) => match load_resume(&ph_synthesis, &id) {
+                Ok(r) => {
+                    back = Some((cwd.clone(), sid.clone()));
+                    resume = Some(r);
+                }
+                Err(e) => {
+                    switch_note.push(format!("/resume: {e}"));
+                    resume = load_resume(&ph_synthesis, &sid).ok();
+                }
+            },
             ExitReason::SwitchModel(m) => {
                 switch_from = Some((model.replace(m), sid.clone()));
                 resume = load_resume(&ph_synthesis, &sid).ok();
@@ -311,7 +364,7 @@ fn round(
     cleanup_worktree: bool,
     project_trusted: bool,
     env: &Env,
-    switch_note: Option<String>,
+    switch_note: Vec<String>,
     resume: Option<Resume>,
     ui: &mut dyn FnMut(Options) -> std::io::Result<Exit>,
 ) -> (Result<Exit, String>, String, PathBuf) {
@@ -365,9 +418,8 @@ fn round(
             json!({"source": source}),
             Some(source),
         ));
-        if let Some(m) = &memory {
-            synthesis_app::memcmd::announce(m);
-        }
+        // no `memory::announce` here: the app retrieves for each prompt it sends, and the start-up
+        // retrieval (no prompt yet) would print a second, empty `memory.retrieved` row
         let mut o = Options::new(
             harness.clone(),
             session,
@@ -720,7 +772,7 @@ mod tests {
         ]);
         let granted = root_of(&a);
         let run = |cwd: &Path| {
-            let c = common_for(&w.c, &granted, cwd);
+            let (c, _) = common_for(&w.c, &granted, cwd);
             let p = prepare(&c, cwd, &env, &Limits::default(), Front::Tui).unwrap();
             (c.trust_project, p.mcp.is_some())
         };
@@ -815,7 +867,7 @@ mod start_failure_tests {
             std::fs::write(wt.join(".env"), "TOKEN=1").unwrap();
         }
         p.harness.start_session(&mut p.session, "startup").unwrap(); // the app's own start now fails
-        let (exit, _sid, home) = round(p, true, false, &env, None, None, &mut |_| {
+        let (exit, _sid, home) = round(p, true, false, &env, vec![], None, &mut |_| {
             panic!("the UI must not run for a session that did not start")
         });
         assert!(exit.is_err());

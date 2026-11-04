@@ -80,7 +80,7 @@ git init; git add .; git commit -m init
 synt run --cwd . --prompt "Use the Glob tool to list the files here and name them." --output-format json
 echo "exit=$LASTEXITCODE"
 ```
-Expected: stderr shows a `synt: WARNING`/notice that commands run unconfined (Windows), then `synt: task Completed: ...`; the JSON has `"status":"completed"`, `"exit_code":0` and a result naming `readme.txt`; `exit=0`. Typical wall time is a few seconds.
+Expected: stderr shows a `synt: WARNING`/notice that commands run unconfined (Windows), then `synt: task completed (no verification applied)` (or `... (verified)`); the JSON has `"status":"completed"`, `"exit_code":0` and a result naming `readme.txt`; `exit=0`. Typical wall time is a few seconds.
 
 ## 7. Bash tool run
 

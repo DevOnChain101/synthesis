@@ -893,7 +893,8 @@ pub fn session_phase(s: &Session, now: i64) -> PhaseInfo<'_> {
         && s.last_assistant_at.unwrap_or(0) >= s.last_user_at.unwrap_or(0)
     {
         Phase::Idle
-    } else if idle_for < 5 * 60 * 1000 {
+    } else if s.last_user_at.is_some() && idle_for < 5 * 60 * 1000 {
+        // no prompt yet: a fresh session is idle, not thinking
         Phase::Thinking
     } else {
         Phase::Idle

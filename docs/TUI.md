@@ -16,8 +16,8 @@ session continues in place), `--once` (print one frame and exit), plus the `synt
 | /help | keys and commands, plus the skills and MCP prompts of this session |
 | /clear | new conversation in the same session |
 | /compact [instructions] | summarise the conversation (`Harness::request_compact` / compact now) |
-| /new | pick a folder; a fresh session starts there |
-| /resume [id] | continue a saved session (picker: this folder first) |
+| /new | pick a folder; a fresh session starts there. Type a path (`/abs`, `~/x`, `./rel`, `a/b`) to get an `open <path>` row, or the reason it cannot be a folder (`no such folder`, `not a folder`, `permission denied`). Symlinked folders are listed with `(link)`. A folder that cannot be opened is a notice; the current session stays. Choosing a folder while a task runs cancels the task and says so |
+| /resume [id] | continue a saved session (picker: this folder first); an unknown id is a notice, the app stays |
 | /model [name] | pick or set a model; restarts on the same session |
 | /effort [auto\|low\|...] | reasoning effort, only when the model declares `effort_tiers` |
 | /mcp | MCP servers: state, tools, last error |

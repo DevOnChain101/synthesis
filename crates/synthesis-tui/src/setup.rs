@@ -30,17 +30,37 @@ pub enum SetupExit {
     Quit,
 }
 
+/// `line` cut into rows of at most `max` cells, at spaces where it can (a long word is split).
+fn wrap(line: &str, max: usize) -> Vec<String> {
+    let mut rows = vec![String::new()];
+    for word in line.split_inclusive(' ') {
+        let cur = rows.last_mut().unwrap();
+        if width(cur) + width(word.trim_end()) > max && !cur.is_empty() {
+            rows.push(String::new());
+        }
+        for c in word.chars() {
+            let cur = rows.last_mut().unwrap();
+            if c != ' ' && width(cur) + width(c.encode_utf8(&mut [0; 4])) > max {
+                rows.push(String::new());
+            }
+            rows.last_mut().unwrap().push(c);
+        }
+    }
+    rows.iter().map(|r| r.trim_end().to_string()).collect()
+}
+
 /// The card as screen rows for a `cols` x `rows` terminal.
 pub fn card(lines: &[String], version: &str, cols: usize, rows: usize) -> Vec<String> {
     let inner = cols.saturating_sub(6).max(20);
     let mut body: Vec<String> = vec![String::new()];
     for (i, l) in lines.iter().enumerate() {
-        let shown: String = l.chars().take(inner).collect();
-        body.push(match i {
-            0 => paint(ACCENT_LIGHT, &shown),
-            _ if l.starts_with("    ") => paint(ACCENT, &shown),
-            _ => paint(T_BODY, &shown),
-        });
+        for shown in wrap(l, inner) {
+            body.push(match i {
+                0 => paint(ACCENT_LIGHT, &shown),
+                _ if l.starts_with("    ") => paint(ACCENT, &shown),
+                _ => paint(T_BODY, &shown),
+            });
+        }
     }
     body.push(String::new());
     body.push(paint(MUTED, "r  check again      q  quit"));
