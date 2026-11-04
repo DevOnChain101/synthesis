@@ -102,14 +102,19 @@ fn requested_resume(a: &TuiArgs, h: &synthesis_app::Homes) -> Result<Option<Resu
         }
         (None, false) => return Ok(None),
     };
-    let r = load_resume(&h.synthesis, &id)?;
+    load_resume_in_place(&h.synthesis, &id).map(Some)
+}
+
+/// `load_resume`, and the session's folder must still exist.
+fn load_resume_in_place(home: &Path, id: &str) -> Result<Resume, String> {
+    let r = load_resume(home, id)?;
     if !Path::new(&r.record.cwd).is_dir() {
         return Err(format!(
             "cannot resume {id}: its folder {} no longer exists",
             r.record.cwd
         ));
     }
-    Ok(Some(r))
+    Ok(r)
 }
 
 /// No model configured: the setup card (the key itself stays in an environment variable or a file
@@ -344,13 +349,17 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
                     resume = load_resume(&ph_synthesis, &sid).ok();
                 }
             },
-            ExitReason::Resume(id) => match load_resume(&ph_synthesis, &id) {
+            ExitReason::Resume(id) => match load_resume_in_place(&ph_synthesis, &id) {
                 Ok(r) => {
                     back = Some((cwd.clone(), sid.clone()));
                     resume = Some(r);
                 }
                 Err(e) => {
-                    switch_note.push(format!("/resume: {e}"));
+                    switch_note.push(if e.starts_with("cannot resume") {
+                        e
+                    } else {
+                        format!("/resume: {e}")
+                    });
                     resume = load_resume(&ph_synthesis, &sid).ok();
                 }
             },

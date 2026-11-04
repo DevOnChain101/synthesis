@@ -163,6 +163,8 @@ fn approval_subagent_model_switch_and_new_folder() {
         expect("wrote it"),
         send("use a subagent\r"),
         expect("all done"),
+        // a command sent while the task still runs is refused ("a task is running")
+        quiet(),
         // /model restarts on the same session; the scripted model starts over
         send("/model fake/other\r"),
         // the restarted app is ready when its header shows the new model; keys typed earlier
@@ -171,6 +173,7 @@ fn approval_subagent_model_switch_and_new_folder() {
         quiet(),
         send("again\r"),
         expect_new("first reply"),
+        quiet(),
         // /new -> sub/ -> use this folder: a fresh session in that folder
         send("/new\r"),
         expect("use this folder"),
@@ -366,6 +369,42 @@ fn resume_of_a_deleted_folder_says_which_folder() {
     let flat = squash(&out);
     assert!(flat.contains(&format!("cannot resume {id}")), "{flat}");
     assert!(flat.contains(&gone.display().to_string()), "{flat}");
+}
+
+/// `/resume ID` inside the app, for a session whose folder was deleted: the same wording as at
+/// startup, not the raw OS error.
+#[test]
+fn in_app_resume_of_a_deleted_folder_says_which_folder() {
+    let rig = Rig::new(json!([{"text": "first reply"}]));
+    let gone = rig.root().join("gone2");
+    std::fs::create_dir_all(gone.join(".git")).unwrap();
+    let provider = format!("fake:{}", rig.root().join("script.json").display());
+    rig.run_scenario(
+        vec![
+            json!(env!("CARGO_BIN_EXE_synt")),
+            json!("--cwd"),
+            json!(gone),
+            json!("--provider"),
+            json!(provider),
+            json!("--sandbox"),
+            json!("off"),
+        ],
+        json!([expect("Enter send"), send("hi\r"), expect("first reply")]),
+    );
+    let c = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
+    let id: String = c
+        .query_row("SELECT id FROM sessions LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    std::fs::remove_dir_all(&gone).unwrap();
+    let out = rig.drive(json!([
+        expect("Enter send"),
+        send(&format!("/resume {id}\r")),
+        expect_new("no longer exists"),
+        quiet()
+    ]));
+    let flat = squash(&out);
+    assert!(flat.contains(&format!("cannot resume {id}")), "{flat}");
+    assert!(!flat.contains("os error"), "{flat}");
 }
 
 const MCP_SERVER: &str = r#"
