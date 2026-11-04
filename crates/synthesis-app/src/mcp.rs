@@ -745,9 +745,29 @@ fn secret_shaped(v: &str) -> bool {
         "xoxp-",
         "AKIA",
         "AIza",
+        "glpat-",
+        "npm_",
+        "sk_live_",
+        "xoxa-",
+        "xoxs-",
+        "eyJ",
     ]
     .iter()
     .any(|p| v.starts_with(p) && v.len() >= p.len() + 8)
+        || url_credentials(v)
+}
+
+/// `scheme://user:password@host`: a literal password inside a URL.
+fn url_credentials(v: &str) -> bool {
+    let Some((_, rest)) = v.split_once("://") else {
+        return false;
+    };
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
+    auth.split_once('@').is_some_and(|(userinfo, _)| {
+        userinfo
+            .split_once(':')
+            .is_some_and(|(_, p)| !p.is_empty() && !only_refs(p))
+    })
 }
 
 /// Where a literal credential sits in the args after `--` (a secret-named `KEY=VALUE` / `--flag=v` /
@@ -765,6 +785,12 @@ fn literal_secret_arg(args: &[String]) -> Option<String> {
             if (secret_like(k) && !only_refs(v)) || secret_shaped(v) {
                 return Some(k.to_string());
             }
+        } else if let Some((h, v)) = a.split_once(": ")
+            && secret_like(h)
+            && !only_refs(v)
+        {
+            // a header given as one argument: `Authorization: Bearer abc`
+            return Some(h.to_string());
         } else if a.starts_with('-') && secret_like(a) {
             flag = Some(a);
         } else if secret_shaped(a) {
@@ -1641,6 +1667,9 @@ mod tests {
             vec!["--api-key", "abc12345"],
             vec!["sk-abcdefghijklmnop"],
             vec!["x", "ghp_abcdefghijklmnopqrstuvwx"],
+            vec!["Authorization: Bearer abc12345"],
+            vec!["postgres://user:abc12345@host/db"],
+            vec!["glpat-abcdefghijklmnop"],
         ] {
             let mut cmd = vec!["python3".to_string(), "srv.py".into()];
             cmd.extend(bad.iter().map(|s| s.to_string()));
@@ -1662,6 +1691,9 @@ mod tests {
             "--api-key",
             "${K}",
             "TOKEN=${T}",
+            "postgres://user:${DB_PASS}@host/db",
+            "https://host/path?x=1",
+            "Authorization: Bearer ${T}",
         ]
         .map(String::from)
         .into();
