@@ -14,8 +14,13 @@ use serde_json::Value;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // "App under test" modes, so tests need no shell: `__app <pidfile>` logs to both streams,
-    // starts a child that sleeps, records the child's pid and sleeps; `__sleep` just sleeps.
+    // starts a child that sleeps, records the child's pid and sleeps; `__sleep` just sleeps;
+    // `__echo <text>` prints the text to stdout, then sleeps.
     match args.first().map(String::as_str) {
+        Some("__echo") => {
+            println!("{}", args.get(1).map_or("", String::as_str));
+            return std::thread::sleep(std::time::Duration::from_secs(61));
+        }
         Some("__sleep") => return std::thread::sleep(std::time::Duration::from_secs(61)),
         Some("__app") => {
             println!("hello from app");

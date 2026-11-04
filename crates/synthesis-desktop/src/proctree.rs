@@ -105,7 +105,12 @@ impl ProcSource for SystemProcs {
             ])
             .output()
         } else {
-            std::process::Command::new("/bin/ps")
+            // /bin/ps on macOS and most Linux, /usr/bin/ps where /bin is not merged into /usr
+            let ps = ["/bin/ps", "/usr/bin/ps"]
+                .into_iter()
+                .find(|p| std::path::Path::new(p).is_file())
+                .unwrap_or("/bin/ps");
+            std::process::Command::new(ps)
                 .args(["-A", "-o", "pid=,ppid=,lstart="])
                 .output()
         }

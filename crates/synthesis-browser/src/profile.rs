@@ -489,7 +489,17 @@ mod tests {
         let second = lock(&d).unwrap_err().to_string();
         assert!(second.contains("already open"), "{second}");
         drop(l);
-        assert!(lock(&d).is_ok());
+        // The lock is an OS lock on the open file: a child forked by another test thread holds a
+        // copy of the descriptor until it execs, so release can lag by a moment. Poll, do not race.
+        let mut again = lock(&d);
+        for _ in 0..100 {
+            if again.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            again = lock(&d);
+        }
+        assert!(again.is_ok(), "{again:?}");
     }
 
     #[test]

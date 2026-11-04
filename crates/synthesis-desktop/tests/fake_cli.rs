@@ -169,6 +169,19 @@ async fn an_unpinned_or_mismatching_binary_is_refused_unless_allowed() {
         e.to_string().contains("does not match the pinned sha256"),
         "{e}"
     );
+    // allow_unpinned does NOT override a mismatch against a filled pin
+    let wrong = Pin {
+        version: "1.2.3".into(),
+        sha256: "0".repeat(64),
+    };
+    let e = DesktopRuntime::start(mk(true, wrong), &env(), procs())
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        e.to_string().contains("does not match the pinned sha256"),
+        "{e}"
+    );
     // the right hash and version
     let sha = pin::sha256_file(&PathBuf::from(FAKE)).unwrap();
     let good = Pin {
@@ -224,6 +237,24 @@ async fn windows_are_filtered_to_the_process_tree_and_policy() {
         .await
         .unwrap_err();
     assert!(e.to_string().contains("w-app, w-child"), "{e}");
+}
+
+#[tokio::test]
+async fn a_window_title_cannot_hide_a_denied_name_behind_invisible_characters() {
+    let list = env_ok(
+        "list-windows",
+        json!([
+            {"id":"w-ok","title":"Demo","app_name":"demo","pid":30},
+            {"id":"w-zw","title":"Key\u{200B}chain Access","app_name":"demo","pid":30},
+            {"id":"w-tag","title":"Demo","app_name":"Pass\u{E0041}words\u{202E}","pid":30}
+        ]),
+    );
+    let (_d, rt) = start(json!({"list-windows": list}), |_| {}).await;
+    let app = rt.register_app(30, Origin::Project, "/ws/demo").unwrap();
+    let ws = rt.windows(&app.id).await.unwrap();
+    let ids: Vec<&str> = ws.windows.iter().map(|w| w.id.as_str()).collect();
+    assert_eq!(ids, ["w-ok"]);
+    assert_eq!(ws.hidden.len(), 2, "{:?}", ws.hidden);
 }
 
 #[tokio::test]

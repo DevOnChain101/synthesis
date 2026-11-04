@@ -235,15 +235,16 @@ impl DesktopRuntime {
             .map_err(|e| un(e.to_string()))?
             .map_err(|e| un(format!("cannot read {}: {e}", opts.binary.display())))?;
         match (&pin_status, opts.allow_unpinned) {
-            (PinStatus::Match, _) | (_, true) => {}
+            // allow_unpinned covers the placeholder pin only, never a hash that does not match a real pin
+            (PinStatus::Match, _) | (PinStatus::Unpinned, true) => {}
             (PinStatus::Unpinned, false) => {
                 let _ = std::fs::remove_file(&exe);
                 return Err(un("this build of Synthesis has no verified agent-desktop pin yet (docs/DESKTOP-CONTROL.md, D0 checklist); set synt.desktop.allow_unpinned to true in your user settings to run an unverified binary at your own risk".into()));
             }
-            (PinStatus::Mismatch { .. }, false) => {
+            (PinStatus::Mismatch { .. }, _) => {
                 let _ = std::fs::remove_file(&exe);
                 return Err(un(format!(
-                    "{} does not match the pinned sha256; refusing to run it (synt.desktop.allow_unpinned overrides, at your own risk)",
+                    "{} does not match the pinned sha256; refusing to run it (allow_unpinned does not override a mismatch with a filled pin)",
                     opts.binary.display()
                 )));
             }
