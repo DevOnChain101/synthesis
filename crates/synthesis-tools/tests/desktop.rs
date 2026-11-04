@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use synthesis_config::Env;
 use synthesis_core::{PermissionMode, ToolContext, WorkspaceContext};
 use synthesis_permissions::desktop::{self, Origin};
+#[cfg(unix)]
 use synthesis_terminal::SandboxMode;
 use synthesis_tools::{Content, DesktopAudit, DesktopConfig, DesktopHost, Registry, ToolOutput};
 
@@ -176,6 +177,7 @@ fn alive(pid: u32) -> bool {
     }
 }
 
+#[cfg(unix)]
 async fn gone(pids: &[u32]) -> bool {
     for _ in 0..50 {
         if pids.iter().all(|p| !alive(*p)) {
@@ -566,6 +568,7 @@ async fn the_whole_loop_launch_snapshot_act_wait_screenshot_logs_close() {
     }
 
     // close stops the app, and the whole tree with it
+    #[cfg(unix)]
     let child: u32 = std::fs::read_to_string(&pidfile)
         .unwrap()
         .trim()
