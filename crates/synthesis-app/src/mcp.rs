@@ -734,6 +734,46 @@ fn only_refs(v: &str) -> bool {
     refs > 0 && rest.is_empty()
 }
 
+/// Token-shaped literals that are secrets whatever the flag or key is called.
+fn secret_shaped(v: &str) -> bool {
+    [
+        "sk-",
+        "ghp_",
+        "gho_",
+        "github_pat_",
+        "xoxb-",
+        "xoxp-",
+        "AKIA",
+        "AIza",
+    ]
+    .iter()
+    .any(|p| v.starts_with(p) && v.len() >= p.len() + 8)
+}
+
+/// Where a literal credential sits in the args after `--` (a secret-named `KEY=VALUE` / `--flag=v` /
+/// `--flag v`, or a token-shaped value): the NAME to report, never the value.
+fn literal_secret_arg(args: &[String]) -> Option<String> {
+    let mut flag: Option<&str> = None;
+    for a in args {
+        if let Some(f) = flag.take()
+            && !only_refs(a)
+            && !a.starts_with('-')
+        {
+            return Some(f.to_string());
+        }
+        if let Some((k, v)) = a.split_once('=') {
+            if (secret_like(k) && !only_refs(v)) || secret_shaped(v) {
+                return Some(k.to_string());
+            }
+        } else if a.starts_with('-') && secret_like(a) {
+            flag = Some(a);
+        } else if secret_shaped(a) {
+            return Some("an argument".into());
+        }
+    }
+    None
+}
+
 fn kv(s: &str, sep: char) -> Result<(String, String), String> {
     let (k, v) = s
         .split_once(sep)
@@ -756,6 +796,11 @@ fn entry(a: &AddArgs) -> Result<Value, String> {
             e.insert("url".into(), json!(u));
         }
         (None, Some((c, rest))) => {
+            if let Some(k) = literal_secret_arg(rest) {
+                return Err(format!(
+                    "{k}: looks like a credential in the command arguments; synthesis never writes credentials into config files. Put it in an environment variable and pass ${{VAR}} (or {{env:VAR}})"
+                ));
+            }
             e.insert("command".into(), json!(c));
             e.insert("args".into(), json!(rest));
         }
@@ -1589,6 +1634,38 @@ mod tests {
         assert!(server_exists(&fresh, "s") && !server_exists(&fresh, "t"));
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&fresh).unwrap()).unwrap();
         assert!(synthesis_config::validate_versioned_config(&v, "synt.json").is_ok());
+
+        for bad in [
+            vec!["--env", "API_KEY=literal123"],
+            vec!["--token=abc12345"],
+            vec!["--api-key", "abc12345"],
+            vec!["sk-abcdefghijklmnop"],
+            vec!["x", "ghp_abcdefghijklmnopqrstuvwx"],
+        ] {
+            let mut cmd = vec!["python3".to_string(), "srv.py".into()];
+            cmd.extend(bad.iter().map(|s| s.to_string()));
+            let err = entry(&add("s", |a| a.command = cmd)).unwrap_err();
+            assert!(err.contains("never writes credentials"), "{bad:?}");
+            assert!(
+                !err.contains("literal123")
+                    && !err.contains("abc12345")
+                    && !err.contains("ghp_abc")
+            );
+        }
+        let mut cmd: Vec<String> = [
+            "npx",
+            "-y",
+            "@scope/pkg",
+            "--port",
+            "8080",
+            "/tmp/key/x",
+            "--api-key",
+            "${K}",
+            "TOKEN=${T}",
+        ]
+        .map(String::from)
+        .into();
+        assert!(entry(&add("s", |a| a.command = std::mem::take(&mut cmd))).is_ok());
 
         let literal = entry(&add("s", |a| {
             a.url = Some("https://h/mcp".into());
