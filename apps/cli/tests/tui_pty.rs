@@ -134,6 +134,10 @@ fn expect(s: &str) -> Value {
 fn expect_new(s: &str) -> Value {
     json!(["expect_new", s, 40])
 }
+/// Waits until the app has printed nothing for a moment: it is idle and reads keys again.
+fn quiet() -> Value {
+    json!(["quiet", 0.7])
+}
 
 /// Approval, sub-agent, memory row, model switch and a new folder, in one app run.
 #[test]
@@ -154,7 +158,7 @@ fn approval_subagent_model_switch_and_new_folder() {
         // a Write asks; Enter answers the first option (allow once)
         send("write a file\r"),
         expect("Write"),
-        ["wait", 1],
+        quiet(),
         send("\r"),
         expect("wrote it"),
         send("use a subagent\r"),
@@ -164,7 +168,7 @@ fn approval_subagent_model_switch_and_new_folder() {
         // the restarted app is ready when its header shows the new model; keys typed earlier
         // arrive while the terminal is between two raw-mode sessions and are lost
         expect_new("fake/other"),
-        ["wait", 2],
+        quiet(),
         send("again\r"),
         expect_new("first reply"),
         // /new -> sub/ -> use this folder: a fresh session in that folder
@@ -229,7 +233,7 @@ fn model_switch_before_the_first_prompt_keeps_the_app_running() {
         expect("Enter send"),
         send("/model fake/other\r"),
         expect_new("fake/other"),
-        ["wait", 2],
+        quiet(),
         send("hi\r"),
         expect_new("first reply")
     ]));
@@ -260,7 +264,7 @@ fn resume_of_a_bad_id_and_unopenable_folders_are_notices_not_exits() {
         expect("Enter send"),
         send("/resume nope-nope\r"),
         expect_new("no saved session matches"),
-        ["wait", 2],
+        quiet(),
         // the unreadable config: a notice, the session goes on
         send("/new\r"),
         expect_new("use this folder"),
@@ -268,7 +272,7 @@ fn resume_of_a_bad_id_and_unopenable_folders_are_notices_not_exits() {
         expect_new("open "),
         send("\r"),
         expect_new("cannot open"),
-        ["wait", 2],
+        quiet(),
         // `~/x` is the rig's HOME/x
         send("/new\r"),
         expect_new("use this folder"),
@@ -276,7 +280,7 @@ fn resume_of_a_bad_id_and_unopenable_folders_are_notices_not_exits() {
         expect_new("open "),
         send("\r"),
         expect_new("/x"),
-        ["wait", 1]
+        quiet()
     ]));
     let flat = squash(&out);
     assert!(!flat.contains("synt: error"), "{flat}");
@@ -290,11 +294,12 @@ fn switching_folder_during_a_task_says_the_task_was_cancelled() {
     let out = rig.drive(json!([
         expect("Enter send"),
         send("hi"),
-        ["wait", 0.3],
+        expect_new("hi"),
         send("\r"),
-        ["wait", 1.5],
+        // the task runs (and the scripted reply is 20 s away) when the footer offers the interrupt
+        expect_new("esc to interrupt"),
         send("/new"),
-        ["wait", 0.3],
+        expect_new("/new"),
         send("\r"),
         expect_new("use this folder"),
         send("./sub"),
@@ -303,6 +308,64 @@ fn switching_folder_during_a_task_says_the_task_was_cancelled() {
         expect_new("task cancelled: switching folder")
     ]));
     assert!(!squash(&out).contains("synt: error"), "{out}");
+}
+
+/// Esc with a line the agent has not read yet: one notice (the line is back in the prompt), not
+/// also a `message dropped` warning.
+#[test]
+fn esc_with_an_unread_line_gives_one_notice() {
+    let rig = Rig::new(json!([{"text": "slow reply", "delay_ms": 20000}]));
+    let out = rig.drive(json!([
+        expect("Enter send"),
+        send("hi\r"),
+        expect_new("esc to interrupt"),
+        send("second\r"),
+        expect_new("queued:"),
+        send("\x1b"),
+        expect_new("back in the prompt"),
+        quiet()
+    ]));
+    let flat = squash(&out);
+    assert!(!flat.contains("message dropped"), "{flat}");
+    assert!(!flat.contains("synt: error"), "{flat}");
+}
+
+/// `--resume ID` of a session whose folder was deleted names the session and the folder.
+#[test]
+fn resume_of_a_deleted_folder_says_which_folder() {
+    let rig = Rig::new(json!([{"text": "first reply"}]));
+    let gone = rig.root().join("gone");
+    std::fs::create_dir_all(gone.join(".git")).unwrap();
+    let provider = format!("fake:{}", rig.root().join("script.json").display());
+    let argv = |cwd: &Path, extra: &[&str]| {
+        let mut a = vec![
+            json!(env!("CARGO_BIN_EXE_synt")),
+            json!("--cwd"),
+            json!(cwd),
+            json!("--provider"),
+            json!(provider),
+            json!("--sandbox"),
+            json!("off"),
+        ];
+        a.extend(extra.iter().map(|x| json!(x)));
+        a
+    };
+    rig.run_scenario(
+        argv(&gone, &[]),
+        json!([expect("Enter send"), send("hi\r"), expect("first reply")]),
+    );
+    let c = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
+    let id: String = c
+        .query_row("SELECT id FROM sessions LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    std::fs::remove_dir_all(&gone).unwrap();
+    let out = rig.run_scenario(
+        argv(&rig.ws(), &["--resume", &id]),
+        json!([expect("no longer exists")]),
+    );
+    let flat = squash(&out);
+    assert!(flat.contains(&format!("cannot resume {id}")), "{flat}");
+    assert!(flat.contains(&gone.display().to_string()), "{flat}");
 }
 
 const MCP_SERVER: &str = r#"
@@ -453,7 +516,7 @@ fn config_flips_a_setting_applies_it_and_writes_the_user_file() {
         expect("[x] panel session"),
         send("\r"), // flips the first row: the Session panel off
         expect("[ ] panel session"),
-        ["wait", 1]
+        quiet()
     ]));
     let v: Value =
         serde_json::from_str(&std::fs::read_to_string(rig.home().join("settings.json")).unwrap())
@@ -467,7 +530,7 @@ fn config_flips_a_setting_applies_it_and_writes_the_user_file() {
     // no credential or env is ever written by the editor
     assert!(!v.to_string().contains("API") && v.get("env").is_none());
     // the next start applies it: the Session panel is not drawn
-    let out = rig.drive(json!([["wait", 3]]));
+    let out = rig.drive(json!([expect("Enter send"), quiet()]));
     assert!(!squash(&out).contains("◆ Session"), "{}", squash(&out));
 }
 

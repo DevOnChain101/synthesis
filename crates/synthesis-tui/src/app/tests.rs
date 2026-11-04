@@ -1887,8 +1887,68 @@ fn effort_cycles_with_alt_t_and_shows_in_the_footer() {
     assert!(matches!(&cmds[..], [Cmd::SetEffort(None)]), "{cmds:?}");
     let cmds = keys(&mut a, "/effort high\r");
     assert!(matches!(&cmds[..], [Cmd::SetEffort(Some(e))] if e == "high"));
+    assert_eq!(a.chat.agent.effort, "high", "the header and status read it");
     let cmds = keys(&mut a, "/effort bogus\r");
     assert!(cmds.is_empty() && screen(&mut a).contains("usage: /effort"));
+}
+
+#[test]
+fn browser_lists_the_browser_and_web_calls() {
+    let mut a = app();
+    assert!(screen_after(&mut a, "/browser\r").contains("no browser and web calls"));
+    for (i, (name, input)) in [
+        ("browser_navigate", json!({"url": "https://example.com/a"})),
+        ("WebFetch", json!({"url": "https://example.com/b"})),
+        ("Bash", json!({"command": "zzmarker"})),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        a.on_event(
+            &env(
+                i as u64 + 1,
+                Ev::ToolRequested {
+                    tool_call_id: format!("c{i}"),
+                    name: name.into(),
+                    input,
+                    input_truncated: false,
+                    origin: None,
+                },
+            ),
+            T0,
+        );
+    }
+    let s = screen_after(&mut a, "/browser\r");
+    assert!(s.contains("2 browser and web calls"), "{s}");
+}
+
+fn screen_after(a: &mut App, k: &str) -> String {
+    keys(a, k);
+    screen(a)
+}
+
+#[test]
+fn a_saved_effort_is_restored_only_when_the_model_declares_it() {
+    let mut a = app();
+    assert_eq!(
+        a.restore_effort(Some("high".into())).as_deref(),
+        Some("high")
+    );
+    assert_eq!(a.chat.agent.effort, "high");
+    assert_eq!(a.restore_effort(Some("max".into())), None);
+    assert_eq!(a.chat.agent.effort, "");
+    assert!(screen(&mut a).contains("effort max is not declared by this model"));
+}
+
+#[test]
+fn switching_model_in_process_resets_the_effort_to_auto_with_a_notice() {
+    let mut a = app();
+    keys(&mut a, "/effort high\r");
+    assert_eq!(a.effort().as_deref(), Some("high"));
+    a.model_switched("fake/b");
+    assert_eq!(a.effort(), None);
+    assert_eq!(a.chat.agent.effort, "");
+    assert!(screen(&mut a).contains("effort reset to auto"));
 }
 
 #[test]
@@ -2558,8 +2618,15 @@ fn new_folder_typed_paths_open_a_folder_or_say_why_not() {
         if std::fs::read_dir(&locked).is_ok() && got.is_some() {
             return;
         }
+        // the card may wrap the message: compare without borders and line breaks
+        let flat = text.replace(['│', '┃'], " ");
         assert!(
-            got.is_none() && text.contains("permission denied"),
+            got.is_none()
+                && flat
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains("permission denied"),
             "{text}"
         );
     }

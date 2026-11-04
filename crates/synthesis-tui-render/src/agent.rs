@@ -1715,7 +1715,7 @@ fn item_rows(it: &Item, w: usize, frame: usize, now: i64, expanded: bool) -> Vec
             };
             rows.extend(wrap(
                 &[r(text, if it.busy { C_LIGHT } else { c })],
-                w,
+                w.saturating_sub(1), // a long unbreakable word (a path, a hash) must not touch the pane border
                 &[r(lead, if it.busy { C_LIGHT } else { c })],
                 &[r("  ", C_TEXT)],
             ));

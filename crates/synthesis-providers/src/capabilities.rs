@@ -20,6 +20,8 @@ pub struct ProviderCapabilities {
     pub prompt_cache: bool,
     pub context_window: Option<u64>,
     pub max_output: Option<u64>,
+    /// `capabilities.effort_tiers` of the model: the only effort values a request may carry.
+    pub effort_tiers: Vec<String>,
 }
 
 fn flag(caps: &Map<String, Value>, names: &[&str]) -> Option<bool> {
@@ -42,6 +44,7 @@ impl ProviderCapabilities {
             prompt_cache: anthropic,
             context_window: None,
             max_output: None,
+            effort_tiers: vec![],
         }
     }
 
@@ -75,10 +78,16 @@ impl ProviderCapabilities {
             &mut c.prompt_cache,
             flag(caps, &["prompt_cache", "promptCache"]),
         );
-        let has_tiers = caps
+        c.effort_tiers = caps
             .get("effort_tiers")
             .and_then(Value::as_array)
-            .is_some_and(|a| !a.is_empty());
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let has_tiers = !c.effort_tiers.is_empty();
         let top = [&m.reasoning, &m.thinking]
             .into_iter()
             .flatten()

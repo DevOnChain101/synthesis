@@ -622,6 +622,10 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
         .unwrap_or_default();
     let mut app = App::new(cfg_for(&o), &replay, clock());
     app.set_tui(o.tui, &std::mem::take(&mut o.tui_diagnostics));
+    if let Some(h) = &o.synthesis_home {
+        let e = app.restore_effort(synthesis_config::load_state(h).effort);
+        o.harness.set_reasoning_effort(e);
+    }
     if o.harness.peer_summary().is_some() {
         let h = o.harness.clone();
         app.peer_status = Some(Box::new(move || h.peer_summary().map(|p| p.1)));
@@ -1160,7 +1164,15 @@ fn exec(
                 app.mode_rejected(now, &e.to_string());
             }
         }
-        Cmd::SetEffort(e) => runner.harness.set_reasoning_effort(e),
+        Cmd::SetEffort(e) => {
+            // kept for the next start too (state.json)
+            if let Some(h) = &runner.settings_home
+                && let Err(err) = synthesis_config::save_effort(h, e.as_deref())
+            {
+                app.note(format!("/effort: not saved ({err})"), "warn");
+            }
+            runner.harness.set_reasoning_effort(e);
+        }
         Cmd::SwitchModel(name) => match switch.as_mut() {
             // the host restarts the app on the same session with the other model
             None => app.quit = Some(ExitReason::SwitchModel(name)),
@@ -1168,6 +1180,7 @@ fn exec(
                 Ok((h, label)) => {
                     runner.harness = h;
                     app.model_switched(&label);
+                    runner.harness.set_reasoning_effort(app.effort());
                 }
                 Err(e) => app.note(format!("/model {name}: {e}"), "error"),
             },

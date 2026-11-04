@@ -315,7 +315,10 @@ impl Harness {
             tools,
             temperature: None,
             thinking: None,
-            reasoning_effort: lock(&self.reasoning_effort).clone(),
+            // never a tier the model does not declare (it may have changed with /model)
+            reasoning_effort: lock(&self.reasoning_effort)
+                .clone()
+                .filter(|e| task.caps.effort_tiers.contains(e)),
         };
         st.fixed_raw = fixed_tokens(&req);
         Ok(req)

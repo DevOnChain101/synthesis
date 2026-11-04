@@ -1616,7 +1616,7 @@ impl App {
             }
             "browser" => {
                 let v = self.calls(
-                    |n| n.starts_with("Browser") || n == "WebFetch" || n == "WebSearch",
+                    |n| n.starts_with("browser_") || n == "WebFetch" || n == "WebSearch",
                     "browser and web calls",
                 );
                 self.out_item(v, false);
@@ -1791,7 +1791,26 @@ impl App {
         self.chat
             .note(format!("effort: {}", next.as_deref().unwrap_or("auto")), "");
         self.effort.clone_from(&next);
+        self.chat.agent.effort = next.clone().unwrap_or_default();
         out.push(Cmd::SetEffort(next));
+    }
+
+    pub fn effort(&self) -> Option<String> {
+        self.effort.clone()
+    }
+
+    /// The tier saved by an earlier run, when this model declares it; the host passes it on to
+    /// the harness. Returns what is in force.
+    pub fn restore_effort(&mut self, saved: Option<String>) -> Option<String> {
+        self.effort = saved.clone().filter(|e| self.cfg.effort_tiers.contains(e));
+        if let (Some(e), None) = (&saved, &self.effort) {
+            self.chat.note(
+                format!("effort {e} is not declared by this model: using auto"),
+                "",
+            );
+        }
+        self.chat.agent.effort = self.effort.clone().unwrap_or_default();
+        self.effort.clone()
     }
 
     fn switch_model(&mut self, name: &str, out: &mut Vec<Cmd>) {
@@ -1803,6 +1822,11 @@ impl App {
     }
 
     pub fn model_switched(&mut self, label: &str) {
+        // the new model's tiers are not known here: go back to auto rather than send a stale one
+        if self.effort.take().is_some() {
+            self.chat.agent.effort.clear();
+            self.chat.note("effort reset to auto for the new model", "");
+        }
         self.model = label.to_string();
         self.chat.agent.model = clean_line(label);
         self.activity.model = clean_line(label);
