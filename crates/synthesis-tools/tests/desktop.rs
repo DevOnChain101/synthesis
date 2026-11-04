@@ -13,6 +13,7 @@ use synthesis_core::{PermissionMode, ToolContext, WorkspaceContext};
 use synthesis_permissions::desktop::{self, Origin};
 #[cfg(unix)]
 use synthesis_terminal::SandboxMode;
+use synthesis_tools::Block;
 use synthesis_tools::{Content, DesktopAudit, DesktopConfig, DesktopHost, Registry, ToolOutput};
 
 const FAKE: &str = env!("CARGO_BIN_EXE_fake-agent-desktop-tools");
@@ -40,7 +41,7 @@ fn exe(name: &str) -> String {
 
 fn penv() -> Env {
     let mut pairs = vec![("DISPLAY".to_string(), ":0".to_string())];
-    for k in ["PATH", "SystemRoot", "TEMP", "TMP"] {
+    for k in ["PATH", "SystemRoot", "TEMP", "TMP", "TMPDIR"] {
         if let Ok(v) = std::env::var(k) {
             pairs.push((k.to_string(), v));
         }
@@ -186,6 +187,21 @@ async fn gone(pids: &[u32]) -> bool {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     false
+}
+
+/// The pid the `__app` child wrote (it does so shortly after the app starts).
+#[cfg(unix)]
+async fn pid_of(pidfile: &Path) -> u32 {
+    for _ in 0..50 {
+        if let Some(pid) = std::fs::read_to_string(pidfile)
+            .ok()
+            .and_then(|t| t.trim().parse().ok())
+        {
+            return pid;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("the app never wrote its child's pid to {pidfile:?}");
 }
 
 fn snapshot_env() -> Value {
@@ -537,6 +553,22 @@ async fn the_whole_loop_launch_snapshot_act_wait_screenshot_logs_close() {
         "{path:?}"
     );
     assert!(matches!(&sh.content, Content::Blocks(b) if b.len() == 2));
+    // the model gets a handle relative to the session artifacts, never the absolute path
+    let Content::Blocks(blocks) = &sh.content else {
+        unreachable!()
+    };
+    let shown = blocks
+        .iter()
+        .find_map(|b| match b {
+            Block::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        shown.contains("saved as artifact desktop") && shown.contains("shot"),
+        "{shown}"
+    );
+    assert!(!shown.contains(&*f.root.to_string_lossy()), "{shown}");
     assert!(
         f.audit
             .0
@@ -569,16 +601,12 @@ async fn the_whole_loop_launch_snapshot_act_wait_screenshot_logs_close() {
 
     // close stops the app, and the whole tree with it
     #[cfg(unix)]
-    let child: u32 = std::fs::read_to_string(&pidfile)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let child = pid_of(&pidfile).await;
     let cl = run(&f, "desktop_close", json!({"app_id": app_id}), &c).await;
     assert!(!cl.is_error, "{}", text(&cl));
     #[cfg(unix)]
     assert!(
-        alive(child) || gone(&[pid, child]).await,
+        gone(&[pid, child]).await,
         "the whole process tree must be gone"
     );
     let again = run(&f, "desktop_snapshot", json!({"app_id": app_id}), &c).await;
@@ -600,17 +628,7 @@ async fn session_end_kills_the_app_tree() {
     .await;
     assert!(!out.is_error, "{}", text(&out));
     let pid = out.meta["pid"].as_u64().unwrap() as u32;
-    for _ in 0..50 {
-        if pidfile.exists() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    let child: u32 = std::fs::read_to_string(&pidfile)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let child = pid_of(&pidfile).await;
     f.reg.close_session("s1");
     assert!(gone(&[pid, child]).await);
 }
@@ -643,11 +661,12 @@ async fn external_apps_work_in_manual_mode_only_and_the_hard_deny_list_never_lif
             "{mode:?}: {}",
             text(&o)
         );
-        assert!(
-            text(&o).contains("manual (default)") || text(&o).contains("plan mode"),
-            "{}",
-            text(&o)
-        );
+        let want = if mode == PermissionMode::Plan {
+            desktop::PLAN_REFUSED
+        } else {
+            desktop::EXTERNAL_ONLY_MANUAL
+        };
+        assert!(text(&o).contains(want), "{mode:?}: {}", text(&o));
     }
     let c = ctx(&f.root, PermissionMode::Default, false);
     let o = run(
@@ -858,7 +877,15 @@ async fn code_runners_scripts_and_interpreter_arguments_are_refused() {
         refused(&o, "runs code through the program");
     }
     // a shell or interpreter by name, wherever it sits
-    for n in ["bash", "python3", "node", "powershell", "cmd", "osascript"] {
+    // (powershell and cmd are also on the hard-deny list, which is checked first)
+    for (n, why) in [
+        ("bash", "script interpreter"),
+        ("python3", "script interpreter"),
+        ("node", "script interpreter"),
+        ("powershell", "never allowed"),
+        ("cmd", "never allowed"),
+        ("osascript", "script interpreter"),
+    ] {
         let p = f.root.join(exe(n));
         std::fs::copy(FAKE, &p).unwrap();
         let o = run(
@@ -873,11 +900,7 @@ async fn code_runners_scripts_and_interpreter_arguments_are_refused() {
             "{n}: {}",
             text(&o)
         );
-        assert!(
-            text(&o).contains("interpreter") || text(&o).contains("never allowed"),
-            "{}",
-            text(&o)
-        );
+        assert!(text(&o).contains(why), "{n}: {}", text(&o));
     }
     // a legit-looking native target still stops at the sandbox gate when the mode is not enforce
     refused(
@@ -925,6 +948,7 @@ async fn best_effort_and_off_sandbox_modes_refuse_a_desktop_launch() {
     // Enforce but no policy for the session: refused too
     let none = Registry::with_sandbox(SandboxMode::Enforce, Arc::new(|_| None));
     let f = fx_with(false, none, |c| c.unsafe_for_tests = false);
+    let c = ctx(&f.root, PermissionMode::Default, false); // this fixture's own workspace
     let o = run(
         &f,
         "desktop_launch",
@@ -939,9 +963,16 @@ async fn best_effort_and_off_sandbox_modes_refuse_a_desktop_launch() {
     );
 }
 
+// Unix only: Windows refuses every real launch (see `real_windows_project_and_external_launches_fail_closed`),
+// so on Windows this would only ever reach its "no sandbox" skip and prove nothing.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_native_app_launches_under_an_enforced_sandbox() {
-    let f = fx_with(false, Registry::builtin(), |c| c.unsafe_for_tests = false);
+    // the opt-in: Seatbelt (macOS) is Weak and would be refused without it
+    let f = fx_with(false, Registry::builtin(), |c| {
+        c.unsafe_for_tests = false;
+        c.allow_weak_sandbox = true;
+    });
     let c = ctx(&f.root, PermissionMode::Default, false);
     let o = run(
         &f,
@@ -1107,8 +1138,8 @@ mod bundles {
             .await;
             refused(&o, name);
             assert!(
-                text(&o).contains("outside the bundle") || text(&o).contains("never allowed"),
-                "{}",
+                text(&o).contains("resolves outside the bundle"),
+                "{name}: {}",
                 text(&o)
             );
         }
@@ -1313,4 +1344,153 @@ async fn a_renamed_copy_of_a_path_interpreter_is_recognised() {
     )
     .await;
     assert!(o.is_error && o.meta["error"] == "refused", "{}", text(&o));
+}
+
+// ---- review round 3: weak sandbox, swappable locations, log text, launch input ---------------
+
+#[test]
+fn secret_shaped_launch_arguments_and_cwd_are_masked_in_events_and_dialogs() {
+    let red = synthesis_tools::redact_input(
+        "desktop_launch",
+        &json!({"target": "/w/app", "args": ["--key", "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789", "--port=80"],
+                "cwd": "/w/sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"}),
+    );
+    let all = red.to_string();
+    assert!(
+        !all.contains("abcdefghijklmnopqrstuvwxyz0123456789"),
+        "{all}"
+    );
+    assert_eq!(red["args"][2], "--port=80");
+    assert_eq!(red["target"], "/w/app");
+}
+
+/// A backend with a chosen filesystem guarantee that confines nothing (the tests only need the
+/// guarantee it reports; the process still starts).
+#[cfg(unix)]
+struct Reporting(synthesis_sandbox::Guarantee);
+
+#[cfg(unix)]
+impl synthesis_sandbox::SandboxBackend for Reporting {
+    fn name(&self) -> &'static str {
+        "reporting-test"
+    }
+    fn capabilities(&self) -> synthesis_sandbox::SandboxCapabilities {
+        synthesis_sandbox::SandboxCapabilities {
+            filesystem: self.0,
+            network: synthesis_sandbox::Guarantee::Strong,
+            process_tree: synthesis_sandbox::Guarantee::Weak,
+            notes: vec![],
+        }
+    }
+    fn wrap(
+        &self,
+        policy: &synthesis_sandbox::SandboxPolicy,
+        c: &synthesis_sandbox::SandboxedCommand,
+    ) -> Result<synthesis_sandbox::SandboxedCommand, synthesis_sandbox::SandboxError> {
+        synthesis_sandbox::SandboxBackend::wrap(&synthesis_sandbox::NullSandbox, policy, c)
+    }
+}
+
+#[cfg(unix)]
+fn enforced_with(g: synthesis_sandbox::Guarantee) -> Registry {
+    let rt = synthesis_terminal::TerminalRuntime::new(SandboxMode::Enforce)
+        .with_sandbox_backend(Arc::new(Reporting(g)));
+    Registry::with_terminal_policy(Arc::new(rt), Arc::new(synthesis_tools::standard_policy))
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_weak_sandbox_refuses_a_launch_unless_the_person_opted_in() {
+    use synthesis_sandbox::Guarantee;
+    let launch = |f: &Fx| {
+        let c = ctx(&f.root, PermissionMode::Default, false);
+        let input = json!({"target": f.app.to_string_lossy(), "args": ["__sleep"]});
+        (c, input)
+    };
+    // Weak, no opt-in: refused before anything starts
+    let f = fx_with(false, enforced_with(Guarantee::Weak), |c| {
+        c.unsafe_for_tests = false
+    });
+    let (c, input) = launch(&f);
+    let o = run(&f, "desktop_launch", input, &c).await;
+    assert!(
+        o.is_error
+            && o.meta["error"] == "refused"
+            && text(&o).contains("not a security boundary")
+            && text(&o).contains("allow_weak_sandbox"),
+        "{}",
+        text(&o)
+    );
+    // Weak with the opt-in: starts
+    let f = fx_with(false, enforced_with(Guarantee::Weak), |c| {
+        c.unsafe_for_tests = false;
+        c.allow_weak_sandbox = true;
+    });
+    let (c, input) = launch(&f);
+    let o = run(&f, "desktop_launch", input, &c).await;
+    assert!(!o.is_error && o.meta["running"] == true, "{}", text(&o));
+    f.reg.close_session("s1");
+    // above Weak: no opt-in needed
+    let f = fx_with(false, enforced_with(Guarantee::Strong), |c| {
+        c.unsafe_for_tests = false
+    });
+    let (c, input) = launch(&f);
+    let o = run(&f, "desktop_launch", input, &c).await;
+    assert!(!o.is_error && o.meta["running"] == true, "{}", text(&o));
+    f.reg.close_session("s1");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_external_app_in_a_temp_directory_is_refused_because_it_could_be_swapped() {
+    // fixtures live in the system temp directory, so this is exactly such a location
+    let f = fx_with(false, Registry::unsandboxed_for_tests(), |c| {
+        c.unsafe_for_tests = false
+    });
+    let c = ctx(&f.root, PermissionMode::Default, false);
+    let outside = tempfile::tempdir().unwrap();
+    let app = std::fs::canonicalize(outside.path())
+        .unwrap()
+        .join(exe("outside"));
+    std::fs::copy(&f.app, &app).unwrap();
+    let o = run(&f, "desktop_launch", json!({"target": app}), &c).await;
+    assert!(
+        o.is_error
+            && o.meta["error"] == "refused"
+            && text(&o).contains("lies under")
+            && text(&o).contains("swapped after it was checked"),
+        "{}",
+        text(&o)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn app_logs_lose_escape_sequences_and_invisible_characters() {
+    let f = fx(false);
+    let c = ctx(&f.root, PermissionMode::Default, false);
+    let o = run(
+        &f,
+        "desktop_launch",
+        json!({"target": f.app.to_string_lossy(),
+               "args": ["__echo", "ok\u{1b}]0;fake title\u{7}\u{1b}[31mred\u{1b}[0m Pass\u{200B}word \u{202E}end"]}),
+        &c,
+    )
+    .await;
+    assert!(!o.is_error, "{}", text(&o));
+    let id = o.meta["app_id"].as_str().unwrap().to_owned();
+    let mut seen = String::new();
+    for _ in 0..50 {
+        seen = text(&run(&f, "desktop_logs", json!({"app_id": id}), &c).await);
+        if seen.contains("ok") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(seen.contains("okred Password end"), "{seen}");
+    assert!(
+        !seen.contains('\u{1b}') && !seen.contains("fake title") && !seen.contains('\u{202E}'),
+        "{seen:?}"
+    );
+    f.reg.close_session("s1");
 }

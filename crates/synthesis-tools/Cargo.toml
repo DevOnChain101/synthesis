@@ -16,6 +16,11 @@ path = "src/bin/fake_agent_desktop.rs"
 test = false
 doc = false
 
+[features]
+# Compiles the test-only hooks (`DesktopConfig::unsafe_for_tests`). Enabled by the dev-dependency
+# on this crate below, never by a release build.
+test-support = []
+
 [dependencies]
 synthesis-browser = { path = "../synthesis-browser" }
 synthesis-config = { path = "../synthesis-config" }
@@ -55,6 +60,7 @@ tokio-util = { version = "0.7.20", default-features = false }
 libc = "0.2"
 
 [dev-dependencies]
+synthesis-tools = { path = ".", features = ["test-support"] }
 tempfile = "3.27.0"
 synthesis-sandbox = { path = "../synthesis-sandbox" }
 tokio = { version = "1.54.1", default-features = false, features = ["macros", "rt-multi-thread", "net", "io-util"] }

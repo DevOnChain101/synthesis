@@ -338,7 +338,7 @@ fn desktop_settings_come_from_user_settings_only() {
     let on = json!({"desktop":{"enabled":true,"binary":"/u/agent-desktop"}});
     let f = fx();
     f.user(json!({"synt": on}));
-    f.project(json!({"synt":{"desktop":{"enabled":true,"binary":"/evil","allow_unpinned":true}}}));
+    f.project(json!({"synt":{"desktop":{"enabled":true,"binary":"/evil","allow_unpinned":true,"allow_weak_sandbox":true}}}));
     write(
         f.proj.path(),
         ".synt/settings.local.json",
@@ -347,6 +347,7 @@ fn desktop_settings_come_from_user_settings_only() {
     let s = f.load(ProjectTrust::Trusted);
     assert_eq!(s.synthesis.desktop["binary"], "/u/agent-desktop");
     assert!(!s.synthesis.desktop.contains_key("allow_unpinned"));
+    assert!(!s.synthesis.desktop.contains_key("allow_weak_sandbox"));
     for what in ["project settings", "local settings"] {
         let want = format!("{what}: synt.desktop is read from user settings only");
         assert!(s.diagnostics.iter().any(|d| d.contains(&want)), "{what}");
@@ -358,7 +359,11 @@ fn desktop_settings_come_from_user_settings_only() {
         assert!(f.load(trust).synthesis.desktop.is_empty());
     }
     let f = fx();
-    write(f.home.path(), "managed.json", json!({"synt": on}));
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"synt": {"desktop": {"enabled": true, "allow_weak_sandbox": true}}}),
+    );
     let s = f.load(ProjectTrust::Trusted);
     assert!(s.synthesis.desktop.is_empty());
     assert!(

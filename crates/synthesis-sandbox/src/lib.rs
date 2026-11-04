@@ -440,6 +440,22 @@ pub fn synthesis_state_paths(synthesis_home: &Path) -> Vec<PathBuf> {
     ]
     .map(|n| synthesis_home.join(n))
     .to_vec()
+    .into_iter()
+    // screenshots of the person's screen (desktop control), one directory per session
+    .chain(desktop_artifact_dirs(synthesis_home))
+    .collect()
+}
+
+/// `sessions/<id>/desktop` of every session that has one: screenshots and the state of
+/// agent-desktop. The session being started adds its own (it does not exist yet).
+fn desktop_artifact_dirs(synthesis_home: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(synthesis_home.join("sessions"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path().join("desktop"))
+        .filter(|p| p.is_dir())
+        .collect()
 }
 
 /// Credential / secret stores under a user profile that the standard policy hides.
@@ -636,6 +652,18 @@ mod tests {
         let home = p("/h/.synt");
         assert!(synthesis_state_paths(&home).contains(&home.join("run")));
         assert!(synthesis_state_paths(&home).contains(&home.join("browser-profiles")));
+    }
+
+    #[test]
+    fn desktop_screenshot_dirs_of_existing_sessions_are_state() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path();
+        let shots = home.join("sessions/s1/desktop");
+        std::fs::create_dir_all(&shots).unwrap();
+        std::fs::create_dir_all(home.join("sessions/s2/other")).unwrap();
+        let paths = synthesis_state_paths(home);
+        assert!(paths.contains(&shots));
+        assert!(!paths.iter().any(|p| p.ends_with("sessions/s2/desktop")));
     }
 
     #[test]

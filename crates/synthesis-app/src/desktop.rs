@@ -23,6 +23,8 @@ pub struct DesktopSettings {
     pub allow_unpinned: bool,
     /// Let `desktop_act` send key combos (off by default).
     pub allow_press: bool,
+    /// Launch apps even when the sandbox is only `Weak` (off by default; D0 and development).
+    pub allow_weak_sandbox: bool,
     pub actions_per_sec: Option<f64>,
     pub max_actions: Option<u32>,
     pub warnings: Vec<String>,
@@ -33,6 +35,7 @@ pub fn parse_settings(raw: &Map<String, Value>) -> DesktopSettings {
         enabled: raw.get("enabled") == Some(&Value::Bool(true)),
         allow_unpinned: raw.get("allow_unpinned") == Some(&Value::Bool(true)),
         allow_press: raw.get("allow_press") == Some(&Value::Bool(true)),
+        allow_weak_sandbox: raw.get("allow_weak_sandbox") == Some(&Value::Bool(true)),
         ..Default::default()
     };
     if let Some(b) = raw.get("binary") {
@@ -91,6 +94,7 @@ impl DesktopSettings {
             binary: self.binary_path(exe_dir),
             allow_unpinned: self.allow_unpinned,
             allow_press: self.allow_press,
+            allow_weak_sandbox: self.allow_weak_sandbox,
             process_env: Some(env.clone()),
             actions_per_sec: self.actions_per_sec,
             max_actions: self.max_actions,
@@ -254,10 +258,17 @@ fn doctor_lines_with(
     if s.enabled {
         let caps = synthesis_sandbox::detect().capabilities();
         v.push(format!(
-            "desktop sandbox WARNING: the filesystem guarantee of this machine's sandbox is {:?}{}. A launched GUI app is confined only as far as that backend goes: macOS Seatbelt is documented as NOT a security boundary, X11 has no per-client isolation, and on macOS the Accessibility grant of the terminal app is inherited by the app's children. Treat desktop_launch as best-effort; the sandbox is never widened for GUI apps (docs/DESKTOP-CONTROL.md, release blocker).",
+            "desktop sandbox WARNING: the filesystem guarantee of this machine's sandbox is {:?}{}. A launched GUI app is confined only as far as that backend goes: macOS Seatbelt is documented as NOT a security boundary, X11 has no per-client isolation, and on macOS the Accessibility grant of the terminal app is inherited by the app's children. The sandbox is never widened for GUI apps (docs/DESKTOP-CONTROL.md, release blocker).",
             caps.filesystem,
             if cfg!(target_os = "macos") { " (Seatbelt)" } else { "" }
         ));
+        v.push(if caps.filesystem > synthesis_sandbox::Guarantee::Weak {
+            "desktop weak sandbox: not needed (the sandbox here is above Weak)".to_owned()
+        } else if s.allow_weak_sandbox {
+            "desktop weak sandbox: ALLOWED (synt.desktop.allow_weak_sandbox): launched apps can reach the display server and, on macOS, the Accessibility grant of the terminal. For D0 and development only; a release blocker".to_owned()
+        } else {
+            "desktop weak sandbox: desktop_launch is REFUSED on this machine until synt.desktop.allow_weak_sandbox is true in your user settings (D0 and development only)".to_owned()
+        });
     }
     if synthesis_desktop::is_wsl() {
         v.push("desktop: WSL is not supported (it has no desktop session of its own)".into());
@@ -370,6 +381,32 @@ mod tests {
     }
 
     #[test]
+    fn allow_weak_sandbox_is_off_unless_exactly_true_and_reaches_the_tool_config() {
+        #[derive(Debug)]
+        struct H;
+        impl DesktopHost for H {
+            fn audit(&self, _: DesktopAudit) {}
+        }
+        for v in [
+            json!({}),
+            json!({"allow_weak_sandbox": "yes"}),
+            json!({"allow_weak_sandbox": 1}),
+        ] {
+            assert!(!parse_settings(&raw(v)).allow_weak_sandbox);
+        }
+        let on = parse_settings(&raw(json!({"enabled": true, "allow_weak_sandbox": true})));
+        assert!(on.allow_weak_sandbox);
+        let cfg = on.config(None, &Env::default(), Arc::new(H)).unwrap();
+        assert!(cfg.allow_weak_sandbox);
+        let off = parse_settings(&raw(json!({"enabled": true})));
+        assert!(
+            !off.config(None, &Env::default(), Arc::new(H))
+                .unwrap()
+                .allow_weak_sandbox
+        );
+    }
+
+    #[test]
     fn allow_press_is_off_unless_exactly_true() {
         assert!(!parse_settings(&raw(json!({}))).allow_press);
         assert!(!parse_settings(&raw(json!({"allow_press": "yes"}))).allow_press);
@@ -421,6 +458,10 @@ mod tests {
             "{text}"
         );
         assert_eq!(calls.get(), 0, "unverified binary reached the runner");
+        assert!(
+            text.contains("desktop weak sandbox:"),
+            "the doctor must say what the weak-sandbox setting does here: {text}"
+        );
         let none = doctor_lines(&parse_settings(&raw(json!({}))), None, &env).join("\n");
         assert!(
             none.contains("disabled")

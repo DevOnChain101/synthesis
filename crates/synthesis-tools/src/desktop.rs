@@ -17,7 +17,7 @@ use synthesis_desktop::{
     Action, DesktopError, DesktopOptions, DesktopRuntime, Pin, ProcSource, SystemProcs, WaitFor,
 };
 use synthesis_permissions::desktop::{self, Origin};
-use synthesis_terminal::{Signal, SpawnSpec};
+use synthesis_terminal::{Guarantee, Signal, SpawnSpec};
 
 use crate::native::{SessionState, Shared, lock};
 use crate::util::{int_field, str_field};
@@ -48,9 +48,30 @@ pub struct DesktopConfig {
     /// `synt.desktop.allow_press`: let `desktop_act` send key combos. Off by default: whether
     /// agent-desktop posts them to the target process or to the frontmost app is unverified.
     pub allow_press: bool,
-    /// TESTS ONLY, never set by the app: skip the "sandbox must be enforce" gate and the
-    /// native-executable check so a shell-script fixture can stand in for an app.
+    /// `synt.desktop.allow_weak_sandbox` (user settings only). Launch an app even when the
+    /// sandbox's filesystem guarantee is only `Weak` (macOS Seatbelt, bubblewrap without a
+    /// private /tmp and mount namespace), so the app can reach the display server and, on macOS,
+    /// the Accessibility grant of the terminal. For D0 and development; a release blocker.
+    pub allow_weak_sandbox: bool,
+    /// TESTS ONLY, never set by the app (the field does not exist in release builds): skip the
+    /// "sandbox must be enforce" gate and the native-executable check so a shell-script fixture
+    /// can stand in for an app.
+    #[cfg(any(test, feature = "test-support"))]
     pub unsafe_for_tests: bool,
+}
+
+impl DesktopConfig {
+    /// The test hook; constantly false when it is compiled out.
+    fn unsafe_for_tests(&self) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            self.unsafe_for_tests
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            false
+        }
+    }
 }
 
 impl std::fmt::Debug for DesktopConfig {
@@ -92,7 +113,8 @@ pub trait DesktopHost: Send + Sync + std::fmt::Debug {
     fn audit(&self, e: DesktopAudit);
 }
 
-/// `value` of `desktop_act` never reaches events, hooks or approval prompts.
+/// `value` of `desktop_act` never reaches events, hooks or approval prompts; secret-shaped text
+/// in the arguments and cwd of `desktop_launch` is masked there too.
 pub fn redact_input(tool: &str, input: &Value) -> Value {
     let mut v = input.clone();
     if tool == "desktop_act"
@@ -100,6 +122,20 @@ pub fn redact_input(tool: &str, input: &Value) -> Value {
         && o.contains_key("value")
     {
         o.insert("value".into(), "[REDACTED]".into());
+    }
+    // secret-shaped text in a launch's arguments and cwd stays out of events, hooks and dialogs
+    if tool == "desktop_launch" {
+        let red = |x: &mut Value| {
+            if let Some(t) = x.as_str() {
+                *x = synthesis_browser::redact_text(t).into();
+            }
+        };
+        if let Some(a) = v.get_mut("args").and_then(Value::as_array_mut) {
+            a.iter_mut().for_each(red);
+        }
+        if let Some(c) = v.get_mut("cwd") {
+            red(c);
+        }
     }
     v
 }
@@ -289,13 +325,19 @@ impl synthesis_desktop::AppGuard for Guard {
     }
 }
 
-/// Size, modification time and (up to 256 MiB) sha256 of a file.
+/// Size, modification time and sha256 of a file, up to the cap the launch evidence uses (a bigger
+/// file has no hash here and never has evidence, so it is not launched).
 fn fingerprint(p: &Path) -> Option<(u64, Option<std::time::SystemTime>, Option<String>)> {
     let m = std::fs::metadata(p).ok()?;
-    let hash = (m.len() <= 256 * 1024 * 1024)
+    let hash = (m.len() <= desktop::MAX_HASH_BYTES)
         .then(|| synthesis_desktop::pin::sha256_file(p).ok())
         .flatten();
     Some((m.len(), m.modified().ok(), hash))
+}
+
+/// Hashing and directory scans block: never on the async executor.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    tokio::task::spawn_blocking(f).await.ok()
 }
 
 fn same_installed_binary(a: &Path, b: &Path) -> bool {
@@ -322,48 +364,74 @@ fn same_installed_binary(a: &Path, b: &Path) -> bool {
 }
 
 fn installed_denied_copy(p: &Path, env: Option<&Env>) -> bool {
-    let mut roots = vec![
-        PathBuf::from("/Applications"),
-        PathBuf::from("/System/Applications"),
-        PathBuf::from("/System/Applications/Utilities"),
-        PathBuf::from("/System/Library/CoreServices/Applications"),
-    ];
+    let mut roots: Vec<PathBuf> = [
+        "/Applications",
+        "/System/Applications",
+        "/System/Applications/Utilities",
+        "/System/Library/CoreServices/Applications",
+        // Linux: packages, vendor directories, snaps and flatpaks (hints: other layouts exist)
+        "/usr/bin",
+        "/usr/local/bin",
+        "/usr/lib",
+        "/opt",
+        "/snap",
+        "/var/lib/flatpak/app",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect();
     if let Some(e) = env {
         for key in ["ProgramFiles", "ProgramFiles(x86)"] {
             if let Some(v) = e.get_nonempty(key) {
                 roots.push(PathBuf::from(v));
             }
         }
+        if let Some(h) = e.get_nonempty("HOME") {
+            let h = PathBuf::from(h);
+            roots.extend([h.join("Applications"), h.join(".local/share/flatpak/app")]);
+        }
     }
     denied_copy_in_roots(p, &roots)
+}
+
+/// Is `p` a copy of a file below `dir` (links followed, at most `depth` levels and `budget`
+/// entries, so a huge or cyclic tree cannot stall a launch)?
+fn copy_below(p: &Path, dir: &Path, depth: u32, budget: &mut u32) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for e in entries.flatten() {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        let path = e.path();
+        let found = if path.is_dir() {
+            depth > 0 && copy_below(p, &path, depth - 1, budget)
+        } else {
+            same_installed_binary(p, &path)
+        };
+        if found {
+            return true;
+        }
+    }
+    false
 }
 
 fn denied_copy_in_roots(p: &Path, roots: &[PathBuf]) -> bool {
     roots
         .iter()
-        .cloned()
         .filter_map(|root| std::fs::read_dir(root).ok())
         .flatten()
         .filter_map(Result::ok)
-        .filter(|e| desktop::hard_denied(&e.file_name().to_string_lossy()).is_some())
+        .filter(|e| desktop::hard_denied_loose(&e.file_name().to_string_lossy()).is_some())
         .any(|e| {
             let base = e.path();
-            if base.is_file() {
-                return same_installed_binary(p, &base);
+            if base.is_dir() {
+                copy_below(p, &base, 6, &mut 5000)
+            } else {
+                same_installed_binary(p, &base)
             }
-            let macos = base.join("Contents/MacOS");
-            std::fs::read_dir(macos)
-                .ok()
-                .into_iter()
-                .flatten()
-                .filter_map(Result::ok)
-                .any(|child| same_installed_binary(p, &child.path()))
-                || std::fs::read_dir(&base)
-                    .ok()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Result::ok)
-                    .any(|child| same_installed_binary(p, &child.path()))
         })
 }
 
@@ -376,17 +444,29 @@ fn denied_bundle_identity(p: &Path) -> Result<Option<&'static str>, String> {
         return Ok(None);
     };
     let plist = bundle.join("Contents/Info.plist");
-    for key in ["CFBundleIdentifier", "CFBundleName"] {
+    // The identifier must be readable (fail closed); the other names are optional keys.
+    for (i, key) in [
+        "CFBundleIdentifier",
+        "CFBundleName",
+        "CFBundleDisplayName",
+        "CFBundleExecutable",
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let out = std::process::Command::new("/usr/bin/plutil")
             .args(["-extract", key, "raw", "-o", "-"])
             .arg(&plist)
             .output()
             .map_err(|_| "cannot read the app bundle's Info.plist")?;
         if !out.status.success() {
-            return Err("cannot read the app bundle's Info.plist".into());
+            if i < 2 {
+                return Err("cannot read the app bundle's Info.plist".into());
+            }
+            continue;
         }
         let value = String::from_utf8(out.stdout).map_err(|_| "invalid app bundle Info.plist")?;
-        if let Some(family) = desktop::hard_denied(value.trim()) {
+        if let Some(family) = desktop::hard_denied_loose(value.trim()) {
             return Ok(Some(family));
         }
     }
@@ -556,16 +636,86 @@ fn command_line(posix: bool, target: &str, args: &[String]) -> Result<String, St
 
 /// Display variables the app needs to open a window (the session env is an allowlist without them).
 fn display_env(cfg: &DesktopConfig) -> std::collections::BTreeMap<String, String> {
-    let Some(env) = &cfg.process_env else {
+    // The display server is reachable through DISPLAY: only with the weak-sandbox opt-in.
+    let Some(env) = cfg.process_env.as_ref().filter(|_| cfg.allow_weak_sandbox) else {
         return Default::default();
     };
-    // Only DISPLAY. XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS and XAUTHORITY would reach the
+    // Only DISPLAY (never WAYLAND_DISPLAY or XAUTHORITY). XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS and XAUTHORITY would reach the
     // secret-service / session-bus sockets and the X cookie, and the sandbox is not proven to
     // deny them: the app gets them only through a safer design, the CLI gets them regardless.
     ["DISPLAY"]
         .iter()
         .filter_map(|k| env.get_nonempty(k).map(|v| ((*k).to_owned(), v.to_owned())))
         .collect()
+}
+
+#[cfg(unix)]
+fn canonical_all(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    paths
+        .into_iter()
+        .filter_map(|p| std::fs::canonicalize(p).ok())
+        .collect()
+}
+
+/// Temp directories (the injected Env's and the usual system ones), canonical.
+#[cfg(unix)]
+fn temp_dirs(env: Option<&Env>) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = ["/tmp", "/var/tmp", "/dev/shm", "/var/folders"]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    v.extend(
+        env.into_iter()
+            .flat_map(|e| ["TMPDIR", "TEMP", "TMP"].map(|k| e.get_nonempty(k).map(PathBuf::from)))
+            .flatten(),
+    );
+    canonical_all(v)
+}
+
+/// Why an external executable could be swapped between the checks and the exec by someone other
+/// than the person: the file or a directory above it is writable by group or others (a root-owned
+/// group-writable directory such as macOS `/Applications` is the one exception), or it lies under
+/// a temp directory or a root the session sandbox can write. `None` = acceptable. The residual
+/// window (a same-user process can still replace a file it owns) is documented, and fd-based exec
+/// is out of scope.
+#[cfg(unix)]
+fn swappable_location(
+    real: &Path,
+    writable_roots: &[PathBuf],
+    temps: &[PathBuf],
+) -> Option<String> {
+    if let Some(r) = writable_roots
+        .iter()
+        .chain(temps)
+        .find(|r| real.starts_with(r))
+    {
+        return Some(format!(
+            "it lies under {}, which the sandbox or other programs can write: it could be swapped after it was checked",
+            desktop::sanitize(&r.to_string_lossy())
+        ));
+    }
+    use std::os::unix::fs::MetadataExt;
+    for a in real.ancestors() {
+        let Ok(m) = std::fs::metadata(a) else {
+            return Some(format!(
+                "{} cannot be inspected, so it cannot be judged safe",
+                desktop::sanitize(&a.to_string_lossy())
+            ));
+        };
+        if others_can_write(m.mode(), m.uid(), a == real) {
+            return Some(format!(
+                "{} is writable by group or others: it could be swapped after it was checked",
+                desktop::sanitize(&a.to_string_lossy())
+            ));
+        }
+    }
+    None
+}
+
+/// World-writable, or group-writable unless it is a root-owned directory (macOS `/Applications`).
+#[cfg(unix)]
+fn others_can_write(mode: u32, owner: u32, is_file: bool) -> bool {
+    mode & 0o002 != 0 || (mode & 0o020 != 0 && (is_file || owner != 0))
 }
 
 #[cfg(unix)]
@@ -578,19 +728,29 @@ fn is_executable(p: &Path) -> bool {
     p.is_file()
 }
 
-fn approved_launch_matches(ctx: &ToolContext, target: &str, origin: Origin) -> bool {
-    let Some(given) = ctx.approval_token.as_deref() else {
+async fn approved_launch_matches(ctx: &ToolContext, target: &str, origin: Origin) -> bool {
+    let Some(given) = ctx.approval_token.clone() else {
         return false;
     };
-    desktop::scoped_launch_token(
-        &ctx.task_id,
-        &ctx.turn_id,
-        &ctx.tool_call_id,
-        target,
-        origin,
-        origin == Origin::External,
-    )
-    .is_ok_and(|expected| given == expected)
+    let (task, turn, call, target) = (
+        ctx.task_id.clone(),
+        ctx.turn_id.clone(),
+        ctx.tool_call_id.clone(),
+        target.to_owned(),
+    );
+    blocking(move || {
+        desktop::scoped_launch_token(
+            &task,
+            &turn,
+            &call,
+            &target,
+            origin,
+            origin == Origin::External,
+        )
+        .is_ok_and(|expected| given == expected)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutput {
@@ -614,7 +774,7 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
     }
     let cfg = lock(&sh.desktop_cfg).clone();
     #[cfg(windows)]
-    if !cfg.unsafe_for_tests {
+    if !cfg.unsafe_for_tests() {
         return refuse(
             sh,
             W,
@@ -686,7 +846,7 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
     };
     // The harness recorded the exact file and origin it judged. An external launch also needs
     // the evidence minted only after the hard approval was answered Allow.
-    if !cfg.unsafe_for_tests && !approved_launch_matches(ctx, target, origin) {
+    if !cfg.unsafe_for_tests() && !approved_launch_matches(ctx, target, origin).await {
         return refuse(
             sh,
             W,
@@ -744,7 +904,7 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
             ),
         );
     }
-    if !cfg.unsafe_for_tests && !is_native_executable(&real) {
+    if !cfg.unsafe_for_tests() && !is_native_executable(&real) {
         return refuse(
             sh,
             W,
@@ -753,8 +913,21 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
             ),
         );
     }
+    #[cfg(unix)]
+    if origin == Origin::External && !cfg.unsafe_for_tests() {
+        let policy = sh.policy_for(&ctx.workspace);
+        let roots = canonical_all(
+            policy
+                .iter()
+                .flat_map(|p| p.writable_roots.iter().chain(p.tmp_dir.iter()))
+                .cloned(),
+        );
+        if let Some(why) = swappable_location(&real, &roots, &temp_dirs(cfg.process_env.as_ref())) {
+            return refuse(sh, W, format!("{shown}: {why}"));
+        }
+    }
     // The app runs under the same sandbox as terminal_spawn, enforced, or not at all.
-    if !cfg.unsafe_for_tests {
+    if !cfg.unsafe_for_tests() {
         if sh.rt.mode() != synthesis_terminal::SandboxMode::Enforce {
             return refuse(
                 sh,
@@ -767,6 +940,18 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
                 sh,
                 W,
                 "there is no sandbox policy for this session; the app would run unconfined",
+            );
+        }
+        // A weak sandbox (Seatbelt, bubblewrap without a private mount namespace) does not keep a
+        // GUI app away from the display server or Accessibility: refused unless the person opted in.
+        if !cfg.allow_weak_sandbox && sh.rt.enforced_filesystem_guarantee() <= Guarantee::Weak {
+            return refuse(
+                sh,
+                W,
+                format!(
+                    "this machine's sandbox is not a security boundary for GUI apps (filesystem guarantee {:?}): the app could reach the display server and, on macOS, the Accessibility grant of the terminal. For D0 or development only, set synt.desktop.allow_weak_sandbox to true in your user settings (docs/DESKTOP-CONTROL.md)",
+                    sh.rt.enforced_filesystem_guarantee()
+                ),
             );
         }
     }
@@ -789,7 +974,10 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
         },
         None => None,
     };
-    let before = fingerprint(&real);
+    let before = {
+        let p = real.clone();
+        blocking(move || fingerprint(&p)).await.flatten()
+    };
     let posix = sh.rt.shell().is_posix();
     let line = match command_line(posix, &real.to_string_lossy(), &args) {
         Ok(l) => l,
@@ -802,7 +990,11 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
     };
     // The checks above judged this exact file: if it changed since (or is not what was judged),
     // do not run it. Narrows the check-to-exec window; it cannot close it.
-    if fingerprint(&real) != before {
+    let after = {
+        let p = real.clone();
+        blocking(move || fingerprint(&p)).await.flatten()
+    };
+    if before.is_none() || after != before {
         return refuse(
             sh,
             W,
@@ -811,7 +1003,7 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
     }
     // The runtime startup above can take time. Recheck the *approval* identity at the last
     // point before spawning, not just the file observed by the tool after approval.
-    if !cfg.unsafe_for_tests && !approved_launch_matches(ctx, target, origin) {
+    if !cfg.unsafe_for_tests() && !approved_launch_matches(ctx, target, origin).await {
         return refuse(
             sh,
             W,
@@ -827,11 +1019,15 @@ async fn launch_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutpu
         Err(e) => return ToolOutput::error(format!("desktop_launch: {e}")),
     };
     // the terminal runtime must really have confined it
-    if !cfg.unsafe_for_tests
+    if !cfg.unsafe_for_tests()
         && !sh
             .rt
             .get_status(&ctx.session_id, &handle.process_id)
-            .is_ok_and(|s| s.sandbox.is_some() && !s.unsandboxed_by_request)
+            .is_ok_and(|s| {
+                !s.unsandboxed_by_request
+                    && s.sandbox
+                        .is_some_and(|c| cfg.allow_weak_sandbox || c.filesystem > Guarantee::Weak)
+            })
     {
         let _ = sh
             .rt
@@ -963,8 +1159,16 @@ async fn shot_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutput 
         },
     );
     let meta = json!({"artifact_path": path, "window_id": s.window_id});
+    // The absolute path stays in the audit event and meta, not in what the model reads: the
+    // Read tool cannot open these files, so a handle relative to the session artifacts is enough.
+    let handle = s
+        .path
+        .strip_prefix(&ctx.workspace.artifact_root)
+        .unwrap_or(&s.path)
+        .display()
+        .to_string();
     let text = format!(
-        "Screenshot of window {} saved as artifact {path} (window only; it may show private data).",
+        "Screenshot of window {} saved as artifact {handle} (window only; it may show private data; it is not readable by the file tools).",
         s.window_id
     );
     if lock(&sh.desktop_cfg).supports_images
@@ -1012,7 +1216,7 @@ async fn logs_body(sh: &Shared, input: &Value, ctx: &ToolContext) -> ToolOutput 
     let body = if chunk.data.is_empty() {
         "(no new output)".to_string()
     } else {
-        untrusted(synthesis_browser::redact_text(&chunk.data))
+        untrusted(synthesis_desktop::text::clean_log(&chunk.data))
     };
     ToolOutput::text(format!(
         "{body}\n[cursor {}] [{}]",
@@ -1140,6 +1344,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_app_gets_no_display_variable_without_the_weak_sandbox_opt_in() {
+        let env = Env::from_pairs([("DISPLAY", ":0"), ("WAYLAND_DISPLAY", "wayland-0")]);
+        let cfg = DesktopConfig {
+            process_env: Some(env),
+            ..Default::default()
+        };
+        assert!(display_env(&cfg).is_empty());
+    }
+
+    #[test]
     fn the_app_gets_the_display_and_nothing_that_reaches_the_session_bus_or_the_x_cookie() {
         let env = Env::from_pairs([
             ("DISPLAY", ":0"),
@@ -1151,6 +1365,7 @@ mod tests {
         ]);
         let cfg = DesktopConfig {
             process_env: Some(env),
+            allow_weak_sandbox: true,
             ..Default::default()
         };
         let got = display_env(&cfg);
@@ -1158,6 +1373,58 @@ mod tests {
             got.keys().map(String::as_str).collect::<Vec<_>>(),
             ["DISPLAY"]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swappable_locations_are_recognised() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(d.path()).unwrap();
+        let mode =
+            |p: &Path, m| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+        let dir = root.join("apps");
+        std::fs::create_dir(&dir).unwrap();
+        let app = dir.join("app");
+        std::fs::write(&app, b"x").unwrap();
+        // under a temp dir or a sandbox-writable root: before any mode is looked at
+        for under in [&root, &dir] {
+            let why = swappable_location(&app, &[], std::slice::from_ref(under)).unwrap();
+            assert!(
+                why.contains("lies under") && why.contains("swapped after"),
+                "{why}"
+            );
+            assert!(swappable_location(&app, std::slice::from_ref(under), &[]).is_some());
+        }
+        // group or world write on the file, then on its directory
+        mode(&app, 0o664);
+        assert!(
+            swappable_location(&app, &[], &[])
+                .unwrap()
+                .contains("writable by group or others")
+        );
+        mode(&app, 0o755);
+        mode(&dir, 0o777);
+        let why = swappable_location(&app, &[], &[]).unwrap();
+        assert!(why.contains("apps is writable by group or others"), "{why}");
+        mode(&dir, 0o755);
+        // a missing path cannot be judged
+        assert!(
+            swappable_location(&dir.join("gone"), &[], &[])
+                .unwrap()
+                .contains("cannot be inspected")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_root_owned_directories_may_be_group_writable() {
+        assert!(others_can_write(0o666, 0, false));
+        assert!(others_can_write(0o664, 501, false));
+        assert!(others_can_write(0o775, 501, false));
+        assert!(!others_can_write(0o775, 0, false)); // /Applications: root:admin
+        assert!(others_can_write(0o775, 0, true)); // a file never gets the exception
+        assert!(!others_can_write(0o755, 501, false));
     }
 
     #[test]
@@ -1183,6 +1450,39 @@ mod tests {
         let copy = d.path().join("innocent");
         std::fs::copy(&original, &copy).unwrap();
         assert!(denied_copy_in_roots(&copy, &[root]));
+    }
+
+    #[test]
+    fn linux_layouts_and_display_names_of_installed_denied_apps_are_scanned() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("opt");
+        // a vendor directory and a flatpak-like nesting (several levels below the app id)
+        let deep = root.join("com.bitwarden.desktop/current/active/files/bin");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("helper"), b"the installed vault program").unwrap();
+        let named = root.join("Authy Desktop/resources");
+        std::fs::create_dir_all(&named).unwrap();
+        std::fs::write(named.join("core"), b"the installed authenticator").unwrap();
+        // not denied: never compared, even with identical content
+        let other = root.join("my-tool");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("same"), b"innocent bytes").unwrap();
+        let copy = |name: &str, bytes: &[u8]| {
+            let p = d.path().join(name);
+            std::fs::write(&p, bytes).unwrap();
+            p
+        };
+        let roots = [root];
+        assert!(denied_copy_in_roots(
+            &copy("a", b"the installed vault program"),
+            &roots
+        ));
+        assert!(denied_copy_in_roots(
+            &copy("b", b"the installed authenticator"),
+            &roots
+        ));
+        assert!(!denied_copy_in_roots(&copy("c", b"innocent bytes"), &roots));
+        assert!(!denied_copy_in_roots(&copy("d", b"something else"), &roots));
     }
 
     #[test]

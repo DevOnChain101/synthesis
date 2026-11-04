@@ -707,6 +707,24 @@ impl TerminalRuntime {
         ))
     }
 
+    fn backend_chain(&self) -> &Backends {
+        self.backends.get_or_init(|| {
+            let chain = synthesis_sandbox::detect_chain();
+            (
+                chain.into_iter().map(Arc::from).collect(),
+                synthesis_sandbox::skipped_backends(),
+            )
+        })
+    }
+
+    /// Filesystem guarantee of the backend `Enforce` uses (`None` when nothing can confine).
+    pub fn enforced_filesystem_guarantee(&self) -> Guarantee {
+        self.backend_chain()
+            .0
+            .first()
+            .map_or(Guarantee::None, |b| b.capabilities().filesystem)
+    }
+
     /// Decides how a launch is confined. `Ok(None)` = run `cmd` as is (unconfined, allowed by the
     /// mode and flagged by the caller); otherwise the wrapped command and what it enforces.
     /// Runs before any file is created.
@@ -723,13 +741,7 @@ impl TerminalRuntime {
                 return refuse("no sandbox policy for this session (SandboxMode::Enforce)".into());
             }
         };
-        let (chain, skipped) = self.backends.get_or_init(|| {
-            let chain = synthesis_sandbox::detect_chain();
-            (
-                chain.into_iter().map(Arc::from).collect(),
-                synthesis_sandbox::skipped_backends(),
-            )
-        });
+        let (chain, skipped) = self.backend_chain();
         let mut why = skipped.clone();
         // Enforce only ever uses the best backend (and refuses with its reason); best-effort
         // degrades to the next one when a backend cannot set up this policy.

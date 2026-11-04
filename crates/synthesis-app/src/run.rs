@@ -819,6 +819,8 @@ pub fn prepare(
     let sandbox_mode = c.sandbox_mode();
     let net = c.network.policy();
     let git_dir = worktree.as_ref().map(|w| w.info.git_dir.clone());
+    // this session's desktop screenshots: not readable by the file tools nor by a launched app
+    synthesis_deny.push(artifact_root.join("desktop"));
     let state_paths = synthesis_deny.clone();
     let build = Arc::new(move |ws: &synthesis_core::WorkspaceContext| {
         let mut p = standard_policy_git(ws, net.clone(), git_dir.as_deref())?;
