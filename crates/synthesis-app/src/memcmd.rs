@@ -705,6 +705,7 @@ fn edit(env: &Env, s: &mut Store, id: &str) -> Result<(), String> {
     }
     // the temp lives in its own private dir (0700) so no other user can read or swap the file
     let dir = std::env::temp_dir().join(format!("synthesis-memory-{}", uuid::Uuid::new_v4()));
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut db = std::fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut db, 0o700);

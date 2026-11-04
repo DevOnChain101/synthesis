@@ -399,11 +399,14 @@ fn in_app_resume_of_a_deleted_folder_says_which_folder() {
     let out = rig.drive(json!([
         expect("Enter send"),
         send(&format!("/resume {id}\r")),
-        expect_new("no longer exists"),
+        // the notice wraps inside the panel, so wait for its start, not for a phrase across the wrap
+        expect_new("cannot resume"),
         quiet()
     ]));
     let flat = squash(&out);
     assert!(flat.contains(&format!("cannot resume {id}")), "{flat}");
+    assert!(flat.contains("gone2"), "{flat}");
+    assert!(flat.contains("longer exists"), "{flat}");
     assert!(!flat.contains("os error"), "{flat}");
 }
 
