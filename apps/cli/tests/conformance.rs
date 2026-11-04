@@ -115,6 +115,21 @@ fn allow_with_space_star_lets_the_command_run() {
 }
 
 #[test]
+fn mcp_add_refuses_an_existing_name_unless_forced() {
+    let rig = Rig::new();
+    assert!(
+        rig.synt(&["mcp", "add", "demo", "--", "echo", "hi"])
+            .status
+            .success()
+    );
+    let o = rig.synt(&["mcp", "add", "demo", "--", "echo", "other"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--force"));
+    let o = rig.synt(&["mcp", "add", "demo", "--force", "--", "echo", "other"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+}
+
+#[test]
 fn mcp_add_then_run_works_on_a_fresh_home() {
     let rig = Rig::new();
     let o = rig.synt(&["mcp", "add", "demo", "--", "echo", "hi"]);

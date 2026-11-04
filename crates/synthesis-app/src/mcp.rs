@@ -691,6 +691,9 @@ pub struct AddArgs {
     header: Vec<String>,
     #[arg(long)]
     cwd: Option<std::path::PathBuf>,
+    /// Replace a server of the same name (otherwise `add` refuses).
+    #[arg(long)]
+    force: bool,
     #[arg(last = true)]
     command: Vec<String>,
 }
@@ -779,6 +782,13 @@ fn entry(a: &AddArgs) -> Result<Value, String> {
         e.insert("headers".into(), headers.into());
     }
     Ok(e.into())
+}
+
+fn server_exists(path: &Path, name: &str) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .is_some_and(|v| v["mcpServers"].get(name).is_some())
 }
 
 /// Sets (`Some`) or removes (`None`) `mcpServers.<name>` in the JSON object file, keeping every
@@ -894,6 +904,23 @@ const WHOAMI: [&str; 5] = [
     "getAccessibleAtlassianResources",
 ];
 
+/// A connect error without the transport library's type names; an unreachable server in one line.
+fn plain_connect_error(e: &str) -> String {
+    let (mut out, mut depth) = (String::new(), 0);
+    for c in e.chars() {
+        match c {
+            '[' => depth += 1,
+            ']' if depth > 0 => depth -= 1,
+            c if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    if out.contains("error sending request") {
+        return "could not reach the server (is the url right and the server running?)".into();
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn test_server(env: &Env, h: &crate::Homes, a: &TestArgs) -> Result<u8, String> {
     use synthesis_settings::{LoadContext, load_settings};
     // the server process runs here, so it must exist: default to the current directory
@@ -937,7 +964,7 @@ fn test_server(env: &Env, h: &crate::Homes, a: &TestArgs) -> Result<u8, String> 
         let (mgr, _attach, _) = start(&p, env, cwd).await;
         let st = mgr.status().into_iter().next().ok_or("no status")?;
         if st.state != ServerState::Connected {
-            out!("  connect: FAILED, {}", san(&st.error.unwrap_or_default()));
+            out!("  connect: FAILED, {}", san(&plain_connect_error(&st.error.unwrap_or_default())));
             mgr.close().await;
             return Ok(1);
         }
@@ -1064,6 +1091,13 @@ pub fn run_cmd(env: &Env, cmd: McpCmd) -> Result<u8, String> {
                 return Err("invalid server name (allowed: 1-64 of A-Z a-z 0-9 _ . -)".into());
             }
             let f = scope_file(a.scope, &h.synthesis, &cwd);
+            if !a.force && server_exists(&f, &a.name) {
+                return Err(format!(
+                    "server {:?} already exists in {}; use --force to replace it",
+                    a.name,
+                    f.display()
+                ));
+            }
             edit_file(&f, &a.name, Some(entry(&a)?))?;
             out!("added {} to {}", a.name, f.display());
             if matches!(a.scope, ScopeArg::Project) {
@@ -1156,6 +1190,16 @@ mod tests {
             extra: extra.as_object().unwrap().clone(),
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn connect_errors_lose_library_internals() {
+        let raw = "http: Send message error Transport [rmcp::transport::worker::WorkerTransport<rmcp::x<reqwest::Client>>] error: Client error: error sending request for url (***)";
+        assert_eq!(
+            plain_connect_error(raw),
+            "could not reach the server (is the url right and the server running?)"
+        );
+        assert_eq!(plain_connect_error("a [x] b"), "a b");
     }
 
     #[test]
@@ -1509,6 +1553,7 @@ mod tests {
             env: vec![],
             header: vec![],
             cwd: None,
+            force: false,
             command: vec![],
         };
         extra(&mut a);
@@ -1541,6 +1586,7 @@ mod tests {
         let fresh = d.path().join("fresh").join("synt.json");
         let e = entry(&add("s", |a| a.command = vec!["echo".into(), "hi".into()])).unwrap();
         assert!(edit_file(&fresh, "s", Some(e)).unwrap());
+        assert!(server_exists(&fresh, "s") && !server_exists(&fresh, "t"));
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&fresh).unwrap()).unwrap();
         assert!(synthesis_config::validate_versioned_config(&v, "synt.json").is_ok());
 
