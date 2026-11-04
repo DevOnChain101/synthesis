@@ -241,6 +241,9 @@ pub struct Verdict {
     /// An `ask` that even a command the user typed must not get past: critical path removal,
     /// a protected path, ambiguous path fields.
     pub hard: bool,
+    /// Where the app of a `desktop_launch` verdict came from, as the engine decided it (`hard`
+    /// alone says nothing: a project launch can be hard because of a protected path).
+    pub desktop_origin: Option<desktop::Origin>,
 }
 
 /// Chars of input JSON a generic permission dialog shows.
@@ -257,6 +260,7 @@ impl Verdict {
             message: None,
             full_input_digest: None,
             hard: false,
+            desktop_origin: None,
         }
     }
 }
@@ -2087,6 +2091,7 @@ impl Permissions {
                     ),
                 );
                 r.hard = true;
+                r.desktop_origin = Some(origin);
                 r
             }
             // the same verdict the command line gets in Bash (never looser)
@@ -2100,6 +2105,7 @@ impl Permissions {
                     "launching a project app is judged like a Bash command: {}",
                     b.reason
                 );
+                b.desktop_origin = Some(origin);
                 b
             }
             // the person approved this app when it was launched (the tool refuses an unknown id)

@@ -719,6 +719,7 @@ async fn the_dialog_for_an_external_desktop_app_shows_the_whole_command_line_uns
     assert!(asked[0].suggestions.is_empty(), "no allow-always");
 }
 
+#[cfg(unix)] // the launch evidence needs file identity, which Windows does not have
 #[tokio::test]
 async fn only_a_hard_approved_external_launch_gets_file_bound_evidence() {
     let outside = tempfile::tempdir().unwrap();
@@ -762,6 +763,95 @@ async fn only_a_hard_approved_external_launch_gets_file_bound_evidence() {
             .prompt
             .contains("approved executable identity")
     );
+}
+
+/// Windows has no file identity, so no launch evidence is minted: the tool then refuses every
+/// launch (`approved_launch_matches` needs a token), approved or not.
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_mints_no_launch_evidence_so_an_approved_launch_is_refused() {
+    let outside = tempfile::tempdir().unwrap();
+    let app = outside.path().join("demo-app.exe");
+    std::fs::write(&app, b"MZ a test executable").unwrap();
+    let probe = Probe::new("desktop_launch", SideEffectClass::Execute, 0, "ran");
+    let tools = ToolBox::empty().with_tool(probe.clone());
+    let approver = ScriptedApprover::new(vec![Approval::allow()]);
+    let a = approver.clone();
+    let mut rig = Rig::build(
+        Opts {
+            tools,
+            interactive: true,
+            ..Opts::default()
+        },
+        vec![
+            Turn::tool("d1", "desktop_launch", json!({"target": app})),
+            Turn::text("ok"),
+        ],
+        move |h, _| h.with_approver(a),
+    );
+    rig.run("x").await;
+    assert_eq!(probe.approval_tokens.lock().unwrap().as_slice(), [None]);
+    for o in [
+        synthesis_permissions::desktop::Origin::External,
+        synthesis_permissions::desktop::Origin::Project,
+    ] {
+        assert!(
+            synthesis_permissions::desktop::launch_token(app.to_str().unwrap(), o, true).is_err()
+        );
+    }
+}
+
+/// A project app can get a hard ask from the Bash verdict (here a protected path in its
+/// arguments); its evidence must still say "project", not "external".
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hard_bash_verdict_on_a_project_app_mints_project_evidence() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let probe = Probe::new("desktop_launch", SideEffectClass::Execute, 0, "ran");
+    let approver = ScriptedApprover::new(vec![Approval::allow()]);
+    let a = approver.clone();
+    // the workspace only exists once the rig is built: the responder reads the path from here
+    let app_path: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::default();
+    let (slot, calls) = (app_path.clone(), AtomicUsize::new(0));
+    let mut rig = Rig::build(
+        Opts {
+            tools: ToolBox::empty().with_tool(probe.clone()),
+            interactive: true,
+            responder: Some(Arc::new(move |_| {
+                Some(if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let app = slot.lock().unwrap().clone().unwrap();
+                    Turn::tool(
+                        "d1",
+                        "desktop_launch",
+                        json!({"target": app, "args": ["--config", ".env"]}),
+                    )
+                } else {
+                    Turn::text("ok")
+                })
+            })),
+            ..Opts::default()
+        },
+        vec![],
+        move |h, _| h.with_approver(a),
+    );
+    let app = rig.work().join("demo-app");
+    std::fs::create_dir_all(rig.work()).unwrap();
+    std::fs::write(&app, b"a test executable").unwrap();
+    *app_path.lock().unwrap() = Some(app.clone());
+    rig.run("x").await;
+    assert_eq!(
+        approver.asked.lock().unwrap().len(),
+        1,
+        "the protected argument must ask"
+    );
+    assert_eq!(probe.runs(), 1);
+    let token = probe.approval_tokens.lock().unwrap()[0].clone().unwrap();
+    let ev = |o, approved| {
+        synthesis_permissions::desktop::launch_token(app.to_str().unwrap(), o, approved).unwrap()
+    };
+    assert!(token.ends_with(&ev(synthesis_permissions::desktop::Origin::Project, false)));
+    assert!(!token.ends_with(&ev(synthesis_permissions::desktop::Origin::External, true)));
 }
 
 #[tokio::test]

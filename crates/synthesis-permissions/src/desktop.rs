@@ -23,6 +23,10 @@ pub enum Origin {
     External,
 }
 
+/// Largest executable that is hashed for launch evidence and for the tool's recheck. Both use
+/// this one cap, so the file the engine identified is the file the tool compares (bigger: refused).
+pub const MAX_HASH_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Evidence for the exact executable judged by the engine. The harness creates this before an
 /// approval, and the tool compares it again immediately before spawning. It is carried to the
 /// tool in ToolContext, not accepted from model input.
@@ -36,6 +40,9 @@ pub fn launch_token(
     let meta = std::fs::metadata(&real).map_err(|_| "cannot stat the executable")?;
     if !meta.is_file() {
         return Err("the executable is not a file".into());
+    }
+    if meta.len() > MAX_HASH_BYTES {
+        return Err("the executable is too large to be identified (over 256 MiB)".into());
     }
     let mut file = std::fs::File::open(&real).map_err(|_| "cannot read the executable")?;
     let mut hash = Sha256::new();
@@ -395,9 +402,33 @@ pub fn hard_denied(id: &str) -> Option<&'static str> {
     None
 }
 
+/// Like [`hard_denied`], and also when a denied name stands as a whole word inside `name` (a
+/// bundle's display name such as "1Password 7 - Password Manager" or "Authy Desktop", or a bundle
+/// id with a suffix). Names under 5 characters are exact-only: "wt", "arc", "dock" would hit too
+/// many ordinary apps. A hint for bundle metadata and installed-app scans, not for plain file
+/// names (`console-app` stays launchable).
+pub fn hard_denied_loose(name: &str) -> Option<&'static str> {
+    if let Some(f) = hard_denied(name) {
+        return Some(f);
+    }
+    let low = name.trim().to_lowercase();
+    let word = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+    DENIED.iter().find_map(|(family, names)| {
+        names
+            .iter()
+            .filter(|n| n.chars().count() >= 5)
+            .any(|n| {
+                low.match_indices(n).any(|(i, _)| {
+                    !word(low[..i].chars().next_back()) && !word(low[i + n.len()..].chars().next())
+                })
+            })
+            .then_some(*family)
+    })
+}
+
 /// Characters that can reorder or hide text on screen: control, bidi embeddings, overrides and
 /// isolates, zero-width and other invisible format characters.
-fn is_spoofing(c: char) -> bool {
+pub fn is_spoofing(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
@@ -1209,6 +1240,31 @@ mod tests {
             resolve_executable(r.join("nope").to_str().unwrap()).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn display_names_and_ids_of_denied_apps_match_as_whole_words() {
+        for n in [
+            "1Password 7 - Password Manager",
+            "Authy Desktop",
+            "com.1password.1password.helper",
+            "KeePassXC",
+            "Bitwarden (beta)",
+            "My Ledger Live",
+        ] {
+            assert!(hard_denied_loose(n).is_some(), "{n}");
+        }
+        for n in [
+            "TerminalUI",
+            "bitwardenish",
+            "ledgerly",
+            "Passwordless Demo",
+            "My App",
+        ] {
+            assert!(hard_denied_loose(n).is_none(), "{n}");
+        }
+        // plain names stay exact: only bundle metadata and installed-app scans use the loose form
+        assert!(hard_denied("Authy Desktop").is_none());
     }
 
     #[test]

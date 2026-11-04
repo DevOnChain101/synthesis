@@ -774,20 +774,14 @@ impl Harness {
             match verdict.decision {
                 Decision::Allow => {
                     let token = if call.name == "desktop_launch" {
-                        input
-                            .get("target")
-                            .and_then(Value::as_str)
-                            .and_then(|target| {
-                                synthesis_permissions::desktop::scoped_launch_token(
-                                    &task.task_id,
-                                    turn,
-                                    &call.id,
-                                    target,
-                                    synthesis_permissions::desktop::Origin::Project,
-                                    false,
-                                )
-                                .ok()
-                            })
+                        launch_evidence(
+                            &task.task_id,
+                            turn,
+                            &call.id,
+                            input,
+                            synthesis_permissions::desktop::Origin::Project,
+                        )
+                        .await
                     } else {
                         None
                     };
@@ -845,25 +839,12 @@ impl Harness {
                     ),
                 });
             }
+            // the engine's own origin decision (an unknown one is treated as external)
+            let origin = verdict
+                .desktop_origin
+                .unwrap_or(synthesis_permissions::desktop::Origin::External);
             let token = if call.name == "desktop_launch" {
-                input
-                    .get("target")
-                    .and_then(Value::as_str)
-                    .and_then(|target| {
-                        synthesis_permissions::desktop::scoped_launch_token(
-                            &task.task_id,
-                            turn,
-                            &call.id,
-                            target,
-                            if verdict.hard {
-                                synthesis_permissions::desktop::Origin::External
-                            } else {
-                                synthesis_permissions::desktop::Origin::Project
-                            },
-                            verdict.hard,
-                        )
-                        .ok()
-                    })
+                launch_evidence(&task.task_id, turn, &call.id, input, origin).await
             } else {
                 None
             };
@@ -1979,6 +1960,33 @@ fn bash_hint(tool: &str, input: &Value) -> &'static str {
     } else {
         ""
     }
+}
+
+/// Evidence for the executable of a `desktop_launch` call (see `permissions::desktop::launch_token`).
+/// It hashes the file, so it runs off the async executor.
+async fn launch_evidence(
+    task: &str,
+    turn: &str,
+    call: &str,
+    input: &Value,
+    origin: synthesis_permissions::desktop::Origin,
+) -> Option<String> {
+    let target = input.get("target").and_then(Value::as_str)?.to_owned();
+    let (task, turn, call) = (task.to_owned(), turn.to_owned(), call.to_owned());
+    tokio::task::spawn_blocking(move || {
+        synthesis_permissions::desktop::scoped_launch_token(
+            &task,
+            &turn,
+            &call,
+            &target,
+            origin,
+            origin == synthesis_permissions::desktop::Origin::External,
+        )
+        .ok()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 #[cfg(test)]
