@@ -61,6 +61,9 @@ settings, default 30, `0` = forever) rewrites images of sessions untouched for t
 store refuses, a failing store) is a visible `notice`, and a message over the limit is stored with
 its images replaced by `[image]` instead of stopping the later messages.
 
+## Context meter
+The status line shows `ctx 62% 124k/200k`; the Context panel, the header chip and the topology cards use the same number. The window is the one the harness resolved for the model in use (docs/specs/config.md §6.2), so `/model` shows the new model's window from its first response. When the window is unknown the status line shows `ctx 124k/?` and the panels show `?` instead of a percentage; nothing is guessed from the model name. Set `limit.context` for such a model.
+
 ## Keys in dialogs
 
 A picker (`/new`, `/resume`, `/model`, `/config`, ...) closes with Esc; an approval dialog is answered with Enter / 1-3, and Esc or Ctrl+C rejects it. Ctrl+D does nothing inside a dialog (on the prompt it quits when the prompt is empty); close the dialog first. `/help` is not a dialog: it prints its text into the conversation like any other output, so Esc does not dismiss it (it scrolls away with the chat).

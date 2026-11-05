@@ -712,11 +712,15 @@ fn build_cards(
     let todos = &s.todos;
     let done = todos.iter().filter(|t| t.status == "completed").count();
     let doing = todos.iter().find(|t| t.status == "in_progress");
-    let ctx_max = opts.context_size.filter(|c| *c != 0.0).unwrap_or(200_000.0);
-    let ctx_pct = opts
-        .ctx_pct
-        .unwrap_or(s.context_used as f64 / ctx_max * 100.0)
-        .min(100.0);
+    // no window known (and no percent): nothing is guessed, the cards show "?"
+    let ctx_pct = opts.ctx_pct.or(opts
+        .context_size
+        .filter(|c| *c != 0.0)
+        .map(|c| s.context_used as f64 / c * 100.0));
+    let ctx_txt = ctx_pct.map_or("?".to_string(), |p| {
+        format!("{}%", to_fixed(p.min(100.0), 0))
+    });
+    let ctx_pct = ctx_pct.unwrap_or(0.0).min(100.0);
     let stage = |k: &str| ps.current.as_deref() == Some(k);
     let stage_glyph = |on: bool, i: usize| {
         if on {
@@ -859,10 +863,7 @@ fn build_cards(
                 ),
                 Line {
                     left: vec![
-                        seg(
-                            format!("ctx {}% ", to_fixed(ctx_pct, 0)),
-                            level_or_inactive(ctx_pct),
-                        ),
+                        seg(format!("ctx {ctx_txt} "), level_or_inactive(ctx_pct)),
                         seg(
                             format!("· {} tok", fmt_num(s.tokens.total() as f64)),
                             T_SUBTLE,
@@ -1003,7 +1004,7 @@ fn build_cards(
                         seg("context ", T_SUBTLE),
                         seg(ctx_bar(ctx_pct, 10), level_col(ctx_pct)),
                     ],
-                    right: Some(seg(format!("{}%", to_fixed(ctx_pct, 0)), T_INACTIVE)),
+                    right: Some(seg(ctx_txt.clone(), T_INACTIVE)),
                 },
                 match v {
                     Some(v) => Line {

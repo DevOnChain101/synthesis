@@ -106,6 +106,8 @@ pub(crate) struct AppConfig {
     pub models: Vec<String>,
     /// `effort_tiers` the current model declares (empty: no effort control).
     pub effort_tiers: Vec<String>,
+    /// The model's context window if known.
+    pub context_window: Option<u64>,
     /// Skills / custom commands offered next to the local ones (sent to the model as text).
     pub extra_commands: Vec<CmdDef>,
     pub saved: Vec<SavedSession>,
@@ -540,6 +542,8 @@ impl App {
         for e in replay {
             chat.apply(e, parse_ts(&e.ts).unwrap_or(now));
         }
+        // the window belongs to the model in use, not to the one that wrote the history (/model)
+        chat.ctx.set_window(cfg.context_window.unwrap_or(0));
         chat.agent.status = "idle".into();
         // agents of an earlier run are gone with its process
         chat.agents.clear();
@@ -1580,7 +1584,7 @@ impl App {
                 } else {
                     self.chat.agent.items.clear();
                     // the meters belong to the conversation that is gone
-                    self.chat.ctx = Default::default();
+                    self.chat.ctx.reset();
                     self.chat.verification = None;
                     self.chat.totals = Default::default();
                     self.ran_task = false;

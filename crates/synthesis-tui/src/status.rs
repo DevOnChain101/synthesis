@@ -116,12 +116,26 @@ impl ContextStatus {
         self.compacting = false;
     }
 
-    /// `(used, window)` tokens; `(0, 0)` while nothing is known (new or cleared conversation).
+    pub fn set_window(&mut self, window: u64) {
+        self.window = window;
+        self.percent = None;
+    }
+
+    /// A new conversation on the same model: the numbers go, the window stays.
+    pub fn reset(&mut self) {
+        *self = Self {
+            window: self.window,
+            ..Self::default()
+        };
+    }
+
+    /// `(used, window)` tokens; `(0, 0)` until the first number arrives, `(0, window)` in a
+    /// cleared conversation.
     pub fn numbers(&self) -> (u64, u64) {
         if self.known {
             (self.used, self.window)
         } else {
-            (0, 0)
+            (0, self.window)
         }
     }
 
@@ -154,7 +168,7 @@ impl ContextStatus {
                 tok(self.window)
             )
         } else {
-            format!("ctx {}", tok(self.used))
+            format!("ctx {}/?", tok(self.used))
         };
         if self.stale {
             s.push('~'); // estimate older than the last history change
@@ -348,7 +362,7 @@ mod tests {
         c.on_usage(150_000, 200_000, None, true); // percent computed; stale is marked
         assert_eq!(ctx_text(&c, 0), "ctx 75% 150k/200k~");
         c.on_usage(900, 0, None, false);
-        assert_eq!(ctx_text(&c, 0), "ctx 900", "unknown window");
+        assert_eq!(ctx_text(&c, 0), "ctx 900/?", "unknown window");
         c.on_usage(1_000_000, 1_000_000, Some(100.4), false);
         assert_eq!(ctx_text(&c, 0), "ctx 100% 1M/1M");
 
@@ -366,6 +380,20 @@ mod tests {
         // unknown after-size: the old number is not kept as if it were current
         c.on_compacted(168_000, 0, 200_000, 5000);
         assert_eq!(ctx_text(&c, 5001), "↓ compacted 168k→?");
+    }
+
+    #[test]
+    fn a_new_window_replaces_the_old_one_at_once() {
+        // /model restarts the app on another model: the first number of the new run sets its window
+        let mut c = ContextStatus::default();
+        c.on_usage(150_000, 200_000, Some(75.0), false);
+        assert_eq!(ctx_text(&c, 0), "ctx 75% 150k/200k");
+        let mut d = ContextStatus::default();
+        assert_eq!(d.numbers(), (0, 0), "nothing carried over");
+        d.on_usage(150_000, 1_000_000, Some(15.0), false);
+        assert_eq!(ctx_text(&d, 0), "ctx 15% 150k/1M");
+        d.on_usage(150_000, 0, Some(0.0), false); // a model whose window is unknown
+        assert_eq!(ctx_text(&d, 0), "ctx 150k/?");
     }
 
     #[test]

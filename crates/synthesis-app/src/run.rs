@@ -360,6 +360,8 @@ pub struct Prepared {
     pub models: Vec<String>,
     /// `effort_tiers` the model declares (enables `/effort`).
     pub effort_tiers: Vec<String>,
+    /// The model's window as known now (config, cache, built-in table); `None` = unknown.
+    pub context_window: Option<u64>,
     pub sandbox: synthesis_tui::SandboxStatus,
     /// The interactive app's side of the event/approval/input channels (`Front::Tui` only).
     pub link: Option<synthesis_tui::UiLink>,
@@ -1224,6 +1226,16 @@ pub fn prepare(
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
+    start_model_info(
+        tokio_rt.handle(),
+        &cfg,
+        &h.synthesis,
+        env,
+        (
+            res.label.split('/').next().unwrap_or_default(),
+            &res.provider,
+        ),
+    );
     let mut mplan = crate::mcp::plan(
         &user_cfg,
         &settings,
@@ -1429,6 +1441,7 @@ pub fn prepare(
                 .collect()
         })
         .unwrap_or_default();
+    let context_window = res.provider.capabilities(&res.model).context_window;
     let harness = Arc::new(harness);
     if let (Some(l), Some(server)) = (peer_listener, harness.peer_server()) {
         if let Some(w) = harness.peer_mailbox_worker(server.clone()) {
@@ -1456,6 +1469,7 @@ pub fn prepare(
         label: res.label,
         models,
         effort_tiers,
+        context_window,
         sandbox: sandbox_status(sandbox_mode, sandbox_mode != SandboxMode::Enforce),
         link,
         homes: h,
@@ -1896,6 +1910,47 @@ fn agent_model_resolver(cfg: &Config, label: &str) -> synthesis_harness::ModelRe
     })
 }
 
+/// Starts fetching model info (context window, max output, ...) for every configured provider in
+/// the background: the active one updates `active` in place, the others only rewrite their cache
+/// file (read at the next start or `/model` switch). A fresh cache, a provider without a
+/// credential and any failure (offline, timeout) are silent; nothing here blocks the UI.
+pub fn start_model_info(
+    rt: &tokio::runtime::Handle,
+    cfg: &Config,
+    synthesis_home: &Path,
+    env: &Env,
+    active: (&str, &Arc<dyn ModelProvider>),
+) {
+    let net = NetSettings {
+        connect_timeout: std::time::Duration::from_secs(3),
+        header_timeout: std::time::Duration::from_secs(5),
+        ..NetSettings::default()
+    };
+    for (id, p) in &cfg.providers {
+        let provider = if id == active.0 {
+            active.1.clone()
+        } else {
+            let cred = resolve_credential(id, Some(p), synthesis_home, env);
+            let spec = ProviderSpec::from_config(id, p, cred.as_ref());
+            let cache = synthesis_providers::modelinfo::cache_path(synthesis_home, id);
+            match spec
+                .and_then(|s| s.connect_cached(env, &net, RetryPolicy::default(), Some(cache)))
+            {
+                Ok(x) => x,
+                Err(_) => continue, // no credential or unusable settings
+            }
+        };
+        rt.spawn(async move {
+            let cancel = CancellationToken::new();
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                provider.refresh_model_info(false, &cancel),
+            )
+            .await;
+        });
+    }
+}
+
 pub struct Resolved {
     pub provider: Arc<dyn ModelProvider>,
     pub model: String,
@@ -1982,7 +2037,17 @@ pub fn resolve_provider(
         format!("no model for provider \"{id}\": pass --model {id}/<model> or set SYNT_MODEL")
     })?;
     let provider = ProviderSpec::from_config(&id, p, cred.as_ref())
-        .and_then(|s| s.connect(env, &NetSettings::default(), RetryPolicy::default()))
+        .and_then(|s| {
+            s.connect_cached(
+                env,
+                &NetSettings::default(),
+                RetryPolicy::default(),
+                Some(synthesis_providers::modelinfo::cache_path(
+                    synthesis_home,
+                    &id,
+                )),
+            )
+        })
         .map_err(|e| e.message().to_string())?;
     Ok(Resolved {
         provider,

@@ -328,6 +328,7 @@ pub enum Event {
     #[serde(rename = "context.usage")]
     ContextUsage {
         used_tokens: u64,
+        /// 0 = the model's window is unknown (compaction assumes 200k); `percent` is then 0.
         window_tokens: u64,
         /// 0..=100 (may exceed 100 when the estimate is over the window).
         percent: f64,

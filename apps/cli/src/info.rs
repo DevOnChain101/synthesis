@@ -7,7 +7,7 @@ use clap::Args;
 use serde_json::json;
 use synthesis_config::{Config, Env, ProjectTrust, list_models, resolve_credential};
 use synthesis_harness::sanitize_for_display as san;
-use synthesis_providers::{NetSettings, ProviderSpec, RetryPolicy};
+use synthesis_providers::{NetSettings, ProviderSpec, RetryPolicy, modelinfo};
 use synthesis_sandbox::SandboxBackend;
 use tokio_util::sync::CancellationToken;
 
@@ -47,6 +47,21 @@ pub fn models(env: &Env, a: &ModelsArgs) -> Result<u8, String> {
         .into_iter()
         .map(|m| (m.value, m.provider, m.model, "config"))
         .collect();
+    let cache_of = |id: &str, p: &synthesis_config::Provider| {
+        let base = match p.protocol {
+            synthesis_config::Protocol::Anthropic => {
+                synthesis_providers::anthropic::base_url(p.base_url.as_deref())
+            }
+            synthesis_config::Protocol::OpenAi => {
+                synthesis_providers::openai::base_url(p.base_url.as_deref())
+            }
+        };
+        modelinfo::read_cache(
+            &modelinfo::cache_path(&h.synthesis, id),
+            base.trim_end_matches('/'),
+            p.protocol,
+        )
+    };
     if a.refresh {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -58,17 +73,28 @@ pub fn models(env: &Env, a: &ModelsArgs) -> Result<u8, String> {
             .filter(|(_, p)| p.discover != Some(false))
         {
             let cred = resolve_credential(id, Some(p), &h.synthesis, env);
+            let cache = modelinfo::cache_path(&h.synthesis, id);
             let found = ProviderSpec::from_config(id, p, cred.as_ref())
-                .and_then(|s| s.connect(env, &NetSettings::default(), RetryPolicy::default()))
+                .and_then(|s| {
+                    s.connect_cached(
+                        env,
+                        &NetSettings::default(),
+                        RetryPolicy::default(),
+                        Some(cache),
+                    )
+                })
                 .map(|prov| {
-                    rt.block_on(async move { prov.list_models(&CancellationToken::new()).await })
+                    rt.block_on(async move {
+                        prov.refresh_model_info(true, &CancellationToken::new())
+                            .await
+                    })
                 });
             match found {
-                Ok(Ok(list)) => {
-                    for m in list.iter().filter_map(|m| m.id.as_str()) {
+                Ok(Ok(())) => {
+                    for m in cache_of(id, p).iter().flat_map(|f| f.models.keys()) {
                         let value = format!("{id}/{m}");
                         if !rows.iter().any(|r| r.0 == value) {
-                            rows.push((value, id.clone(), m.to_string(), "discovered"));
+                            rows.push((value, id.clone(), m.clone(), "discovered"));
                         }
                     }
                 }
@@ -78,15 +104,37 @@ pub fn models(env: &Env, a: &ModelsArgs) -> Result<u8, String> {
             }
         }
     }
+    let caches: std::collections::HashMap<_, _> = cfg
+        .providers
+        .iter()
+        .filter_map(|(id, p)| Some((id.clone(), cache_of(id, p)?)))
+        .collect();
+    let facts = |provider: &str, model: &str| caches.get(provider)?.models.get(model).cloned();
     if a.json {
         let models: Vec<_> = rows
             .iter()
-            .map(|(v, p, m, s)| json!({"value": v, "provider": p, "model": m, "source": s}))
+            .map(|(v, p, m, s)| {
+                let f = facts(p, m).unwrap_or_default();
+                json!({"value": v, "provider": p, "model": m, "source": s,
+                    "context_window": f.context_window, "max_output": f.max_output, "vision": f.vision})
+            })
             .collect();
         out!("{}", json!({"default": cfg.model, "models": models}));
     } else {
-        for (v, ..) in &rows {
-            out!("{v}");
+        let n = |v: Option<u64>| v.map_or("-".to_string(), |v| v.to_string());
+        for (v, p, m, _) in &rows {
+            if a.refresh {
+                // value, context window, max output, vision ("-" = the provider did not say)
+                let f = facts(p, m).unwrap_or_default();
+                let vision = f.vision.map_or("-", |b| if b { "yes" } else { "no" });
+                out!(
+                    "{v}\t{}\t{}\t{vision}",
+                    n(f.context_window),
+                    n(f.max_output)
+                );
+            } else {
+                out!("{v}");
+            }
         }
         if rows.is_empty() {
             eprintln!(

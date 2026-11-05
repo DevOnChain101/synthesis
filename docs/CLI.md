@@ -91,3 +91,6 @@ Proposals: once a lesson or note proves useful across runs, `synt memory proposa
 Retrieval quality and the poisoned-record checks run offline in `cargo test -p synthesis-memory --test quality`.
 
 Commands that change memory (add, delete, forget, approve, reject, apply --yes, import, optout, prune, promote, reflect) need a terminal and refuse inside the agent's own commands; the agent cannot run them (a permission rule denies them). Imported records arrive `untrusted` and `proposed`; notes learned in an untrusted project or in a task that used the web, MCP or network commands are stored `untrusted` and never injected.
+
+## `synt models`
+Lists the configured models, one `provider/model` per line. `--json` adds `context_window`, `max_output` and `vision` per model (`null` = unknown) from the model-info cache (docs/specs/config.md §6.2). `--refresh` asks every provider with a credential for its model list (network, ignores the 24 h freshness), rewrites the cache, adds the discovered models, and prints tab-separated columns: `provider/model`, context window, max output, vision (`yes`/`no`); `-` = the provider did not say.

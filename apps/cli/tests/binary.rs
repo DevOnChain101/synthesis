@@ -189,3 +189,74 @@ fn no_subcommand_prints_usage_and_exits_2() {
     assert!(text(&o.stderr).contains("Usage: synt"));
     assert!(o.stdout.is_empty());
 }
+
+/// Serves `body` as JSON to every request on a local port until the test ends.
+fn serve_json(body: &'static str) -> String {
+    use std::io::{Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", l.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            let mut s = s;
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            let _ = write!(
+                s,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    url
+}
+
+#[test]
+fn models_refresh_prints_context_columns_and_writes_the_cache() {
+    let h = tempfile::tempdir().unwrap();
+    let home = h.path().join("synthesis");
+    std::fs::create_dir_all(&home).unwrap();
+    let url = serve_json(
+        r#"{"data":[{"id":"big","max_input_tokens":1000000,"max_tokens":64000,"capabilities":{"image_input":{"supported":true}}},{"id":"plain"}],"has_more":false}"#,
+    );
+    std::fs::write(
+        home.join("synt.json"),
+        format!(
+            r#"{{"$schema":"config.json/v1","providers":{{"gw":{{"type":"anthropic","baseURL":"{url}","apiKey":"{{env:SYNT_TEST_GW_KEY}}","models":["big"]}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_synt"))
+            .args(args)
+            .env_clear()
+            .env("HOME", h.path())
+            .env("SYNT_HOME", &home)
+            .env("SYNT_TEST_GW_KEY", "sk-test-0123456789abcdef")
+            .output()
+            .unwrap()
+    };
+    let o = run(&["models", "--refresh"]);
+    assert!(o.status.success(), "{}", text(&o.stderr));
+    let out = text(&o.stdout);
+    assert!(out.contains("gw/big\t1000000\t64000\tyes"), "{out}");
+    assert!(out.contains("gw/plain\t-\t-\t-"), "{out}");
+
+    let cache = home.join("cache/models/gw.json");
+    let file = std::fs::read_to_string(&cache).unwrap();
+    assert!(file.contains("\"context_window\": 1000000"), "{file}");
+    assert!(!file.contains("sk-test"), "no key in the cache");
+
+    // without --refresh the numbers still come from the cache (no network)
+    let o = run(&["models", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    let big = v["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == "big")
+        .unwrap();
+    assert_eq!(
+        (&big["context_window"], &big["max_output"], &big["vision"]),
+        (&1_000_000.into(), &64_000.into(), &true.into())
+    );
+}

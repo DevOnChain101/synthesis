@@ -832,3 +832,198 @@ async fn the_effort_tier_reaches_both_protocols() {
         assert!(!mock.req(0).contains(key));
     }
 }
+
+fn cached(proto: Protocol, base: &str, cache: &std::path::Path) -> Arc<dyn ModelProvider> {
+    ProviderSpec {
+        id: "gw".into(),
+        protocol: proto,
+        base_url: Some(base.into()),
+        auth: Auth::ApiKey(Secret::new(KEY)),
+        headers: Default::default(),
+        models_meta: Default::default(),
+    }
+    .connect_cached(
+        &Env::default(),
+        &NetSettings::default(),
+        fast_retry(0),
+        Some(cache.to_path_buf()),
+    )
+    .unwrap()
+}
+
+fn tmp_cache(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("synt-mock-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    d.join("cache/models/gw.json")
+}
+
+#[tokio::test]
+async fn anthropic_model_info_is_fetched_cached_and_reused_without_network() {
+    let mock = start(vec![status(
+        200,
+        vec![],
+        json!({"data":[
+            {"id":"big","max_input_tokens":1_000_000,"max_tokens":64_000,
+             "capabilities":{"image_input":{"supported":false},"effort":{"supported":true,"high":{"supported":true}}}},
+            {"id":"small","max_input_tokens":200_000,"max_tokens":8_000}
+        ],"has_more":false}),
+    )])
+    .await;
+    let cache = tmp_cache("anth");
+    let p = cached(Protocol::Anthropic, &mock.base, &cache);
+    // unknown until the fetch ran
+    assert_eq!(p.capabilities("big").context_window, None);
+    p.refresh_model_info(false, &CancellationToken::new())
+        .await
+        .unwrap();
+    let big = p.capabilities("big");
+    assert_eq!(
+        (big.context_window, big.max_output, big.images),
+        (Some(1_000_000), Some(64_000), false)
+    );
+    // the same provider serves another model of the list with its own numbers
+    assert_eq!(p.capabilities("small").context_window, Some(200_000));
+    assert_eq!(p.capabilities("small").max_output, Some(8_000));
+    let file = std::fs::read_to_string(&cache).unwrap();
+    assert!(!file.contains(KEY));
+    assert!(file.contains("\"effort_tiers\""));
+
+    // a second start: fresh cache, no request, same numbers
+    let q = cached(Protocol::Anthropic, &mock.base, &cache);
+    assert_eq!(q.capabilities("big").context_window, Some(1_000_000));
+    q.refresh_model_info(false, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(mock.count(), 1);
+    // --refresh forces it
+    q.refresh_model_info(true, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(mock.count(), 2);
+    let _ = std::fs::remove_dir_all(cache.ancestors().nth(3).unwrap());
+}
+
+#[tokio::test]
+async fn openai_compatible_shapes_and_offline_fallback_to_a_stale_cache() {
+    let mock = start(vec![status(
+        200,
+        vec![],
+        json!({"data":[
+            {"id":"a","context_length":131072},
+            {"id":"b","context_window":32000},
+            {"id":"c","top_provider":{"context_length":64000,"max_completion_tokens":4096}},
+            {"id":"d"}
+        ]}),
+    )])
+    .await;
+    let cache = tmp_cache("oai");
+    let p = cached(Protocol::OpenAi, &mock.base, &cache);
+    p.refresh_model_info(false, &CancellationToken::new())
+        .await
+        .unwrap();
+    let w = |m: &str| p.capabilities(m).context_window;
+    assert_eq!(
+        (w("a"), w("b"), w("c"), w("d")),
+        (Some(131_072), Some(32_000), Some(64_000), None)
+    );
+    assert_eq!(p.capabilities("c").max_output, Some(4096));
+
+    // age the cache past the TTL, then go offline (nothing listens on port 1)
+    let mut f: Value = serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
+    f["fetched_at"] = json!(1);
+    f["base_url"] = json!("http://127.0.0.1:1");
+    std::fs::write(&cache, serde_json::to_vec(&f).unwrap()).unwrap();
+    let off = cached(Protocol::OpenAi, "http://127.0.0.1:1", &cache);
+    assert_eq!(
+        off.capabilities("a").context_window,
+        Some(131_072),
+        "stale cache is used"
+    );
+    assert!(
+        off.refresh_model_info(false, &CancellationToken::new())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        off.capabilities("a").context_window,
+        Some(131_072),
+        "and kept"
+    );
+
+    // another endpoint: the cache does not apply
+    let other = cached(Protocol::OpenAi, "http://127.0.0.1:2", &cache);
+    assert_eq!(other.capabilities("a").context_window, None);
+    let _ = std::fs::remove_dir_all(cache.ancestors().nth(3).unwrap());
+}
+
+#[tokio::test]
+async fn config_beats_the_fetched_value_and_a_silent_server_times_out() {
+    let mock = start(vec![status(
+        200,
+        vec![],
+        json!({"data":[{"id":"m","max_input_tokens":1_000_000}]}),
+    )])
+    .await;
+    let mut meta = indexmap::IndexMap::new();
+    meta.insert(
+        "m".to_string(),
+        synthesis_config::ModelMeta {
+            context_window: Some(50_000.0),
+            ..Default::default()
+        },
+    );
+    let spec = |base: &str| ProviderSpec {
+        id: "gw".into(),
+        protocol: Protocol::Anthropic,
+        base_url: Some(base.into()),
+        auth: Auth::ApiKey(Secret::new(KEY)),
+        headers: Default::default(),
+        models_meta: meta.clone(),
+    };
+    let p = spec(&mock.base)
+        .connect(&Env::default(), &NetSettings::default(), fast_retry(0))
+        .unwrap();
+    p.refresh_model_info(false, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(p.capabilities("m").context_window, Some(50_000));
+
+    let silent = start(vec![Reply::Silent]).await;
+    let q = spec(&silent.base)
+        .connect(&Env::default(), &NetSettings::default(), fast_retry(0))
+        .unwrap();
+    let t = Instant::now();
+    let r = tokio::time::timeout(
+        Duration::from_millis(300),
+        q.refresh_model_info(false, &CancellationToken::new()),
+    )
+    .await;
+    assert!(r.is_err(), "the caller's timeout ends the wait");
+    assert!(t.elapsed() < Duration::from_secs(3));
+}
+
+#[test]
+fn only_openai_native_gets_the_builtin_table() {
+    let mk = |base: Option<&str>| {
+        ProviderSpec {
+            id: "openai".into(),
+            protocol: Protocol::OpenAi,
+            base_url: base.map(String::from),
+            auth: Auth::Bearer(Secret::new(KEY)),
+            headers: Default::default(),
+            models_meta: Default::default(),
+        }
+        .connect(&Env::default(), &NetSettings::default(), fast_retry(0))
+        .unwrap()
+    };
+    assert_eq!(
+        mk(None).capabilities("gpt-4o").context_window,
+        Some(128_000)
+    );
+    assert_eq!(
+        mk(Some("https://gw.example/v1"))
+            .capabilities("gpt-4o")
+            .context_window,
+        None
+    );
+}
