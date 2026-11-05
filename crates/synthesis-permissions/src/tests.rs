@@ -448,12 +448,238 @@ fn secret_files_ask_through_grep_globs_and_read_only_bash_in_every_mode() {
             );
         }
     }
-    // an allow rule is the person's decision
+    // a rule that names the file is the person's decision; a tool-wide one is not
+    let cat = json!({ "command": "cat .env" });
+    let p = f.with(rules(&["Bash(cat .env)"], &[], &[]), Mode::Default);
+    assert_eq!(d(&p, "Bash", cat.clone()), A);
     let p = f.with(
         rules(&["Bash(cat:*)", "Read(.env)"], &[], &[]),
         Mode::Default,
     );
-    assert_eq!(d(&p, "Bash", json!({ "command": "cat .env" })), A);
+    assert_eq!(d(&p, "Bash", cat), Q);
+}
+
+/// The real path of `p` the way the matcher sees it: no `\\?\` prefix, `/` separators on Windows.
+fn real_spelled(p: &Path) -> PathBuf {
+    let c = dunce::canonicalize(p).unwrap();
+    if cfg!(windows) {
+        PathBuf::from(c.to_string_lossy().replace('\\', "/"))
+    } else {
+        c
+    }
+}
+
+/// The rule path the engine offers for `<dir>/.env`.
+fn env_rule(dir: &Path) -> String {
+    crate::rule_path(&dir.join(".env").to_string_lossy(), cfg!(windows)).unwrap()
+}
+
+#[test]
+fn rule_paths_drop_the_verbatim_prefix_and_refuse_glob_characters_on_every_os() {
+    use crate::rule_path;
+    for p in [r"\\?\C:\proj\.env", r"C:\proj\.env", "C:/proj/.env"] {
+        assert_eq!(rule_path(p, true).as_deref(), Some("//C:/proj/.env"), "{p}");
+    }
+    assert_eq!(
+        rule_path("/home/u/.env", false).as_deref(),
+        Some("//home/u/.env")
+    );
+    for p in [
+        r"C:\proj\*.pem",
+        r"C:\proj\[a]\.env",
+        r"\\?\C:\proj\.env?",
+        r"\\?\UNC\s\h\.env",
+        r"\\s\h\.env",
+    ] {
+        assert_eq!(rule_path(p, true), None, "{p}");
+    }
+    // POSIX: `\` and `?` are literal name characters, `?` suppresses
+    assert_eq!(rule_path("/h/a?b/.env", false), None);
+    assert_eq!(rule_path("/h/*/.env", false), None);
+}
+
+#[test]
+fn a_blanket_allow_rule_does_not_lift_the_secret_file_ask() {
+    let f = fx();
+    let calls = [
+        ("Read", json!({ "file_path": f.cwd.join(".env") })),
+        (
+            "Grep",
+            json!({ "pattern": "x", "path": f.cwd.join(".env") }),
+        ),
+        ("Glob", json!({ "pattern": ".env*" })),
+        ("Bash", json!({ "command": "cat .env" })),
+    ];
+    for blanket in [
+        &["Read", "Grep", "Glob", "Bash"][..],
+        &[
+            "Read(*)",
+            "Read(//**)",
+            "Grep(**)",
+            "Bash(*)",
+            "Bash(cat:*)",
+        ],
+        &["Read(?*)", "Read(**/?*)", "Grep(?*)", "Glob(**/?*)"],
+    ] {
+        for (tool, input) in &calls {
+            for (mode, want) in [
+                (Mode::Default, Q),
+                (Mode::AcceptEdits, Q),
+                (Mode::Auto, Q),
+                (Mode::Plan, D),
+                (Mode::DontAsk, D),
+                (Mode::BypassPermissions, A),
+            ] {
+                let p = f.with(rules(blanket, &[], &[]), mode);
+                assert_eq!(
+                    d(&p, tool, input.clone()),
+                    want,
+                    "{blanket:?} {mode:?} {tool}"
+                );
+            }
+        }
+    }
+    // an absolute rule for that one file lifts it, another secret file still asks
+    let real = real_spelled(&f.cwd); // a rule must match the lexical and the real path
+    let rule = format!("Read({})", env_rule(&real));
+    let p = f.with(rules(&["Read", &rule], &[], &[]), Mode::Default);
+    assert_eq!(d(&p, "Read", json!({ "file_path": real.join(".env") })), A);
+    assert_eq!(
+        d(&p, "Read", json!({ "file_path": real.join("id_rsa") })),
+        Q
+    );
+}
+
+#[test]
+fn a_secret_ask_offers_a_rule_for_that_path_only() {
+    let f = fx();
+    let p = f.perms(Mode::Default);
+    let one = |tool: &str, input: Value| -> Vec<String> {
+        p.suggestions(tool, &input)
+            .iter()
+            .flat_map(|s| match s {
+                Suggestion::AddRules { rules, .. } => rules
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "{}({})",
+                            r.tool_name,
+                            r.rule_content.clone().unwrap_or_default()
+                        )
+                    })
+                    .collect(),
+                _ => vec![],
+            })
+            .collect()
+    };
+    let env = real_spelled(&f.cwd).join(".env");
+    let want = format!("Read({})", env_rule(&real_spelled(&f.cwd)));
+    assert_eq!(one("Read", json!({ "file_path": env })), [want]);
+    // the offered rule lifts that ask and no other
+    let mut q = f.perms(Mode::Default);
+    q.apply(&p.suggestions("Read", &json!({ "file_path": env })));
+    assert_eq!(d(&q, "Read", json!({ "file_path": env })), A);
+    assert_eq!(
+        d(
+            &q,
+            "Read",
+            json!({ "file_path": env.with_file_name("id_rsa") })
+        ),
+        Q
+    );
+    // a secret file whose own name holds a glob character gets no rule (it would be broader)
+    assert!(one("Read", json!({ "file_path": f.cwd.join("sub/*.pem") })).is_empty());
+    assert!(one("Read", json!({ "file_path": f.cwd.join("**/.env") })).is_empty());
+    // a pattern with no secret path, and a glob command, offer nothing; an exact command does
+    assert!(one("Glob", json!({ "pattern": ".env*" })).is_empty());
+    assert!(one("Bash", json!({ "command": "cat .e*" })).is_empty());
+    assert_eq!(
+        one("Bash", json!({ "command": "cat .env" })),
+        ["Bash(cat .env)"]
+    );
+    // an ordinary read still offers the tool rule
+    assert_eq!(
+        one("Read", json!({ "file_path": f.cwd.join("a.txt") })),
+        ["Read()"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bash_writes_through_a_hard_link_ask_even_with_a_bash_allow_rule() {
+    let f = fx();
+    fs::write(f.outside.join("x"), "x").unwrap();
+    fs::hard_link(f.outside.join("x"), f.cwd.join("hard")).unwrap();
+    fs::write(f.cwd.join("plain"), "x").unwrap();
+    for cmd in [
+        "echo y > hard",
+        "echo y >> hard",
+        "echo y | tee hard",
+        "sed -i s/x/y/ hard",
+        "cp plain hard",
+        "truncate -s 0 hard",
+        "dd if=plain of=hard",
+        "cd sub && echo y > ../hard",
+    ] {
+        for allow in [
+            &[][..],
+            &["Bash"],
+            &["Bash(echo:*)", "Bash(sed:*)", "Bash(cp:*)"],
+        ] {
+            for (mode, want) in [
+                (Mode::Default, Q),
+                (Mode::AcceptEdits, Q),
+                (Mode::Auto, Q),
+                (Mode::Plan, D),
+                (Mode::DontAsk, D),
+                (Mode::BypassPermissions, A),
+            ] {
+                let p = f.with(rules(allow, &[], &[]), mode);
+                assert_eq!(
+                    d(&p, "Bash", json!({ "command": cmd })),
+                    want,
+                    "{allow:?} {mode:?} {cmd}"
+                );
+            }
+        }
+    }
+    // removing a name, or renaming onto it, leaves the outside inode alone; a linked mv source,
+    // a cp source or any other writer still asks
+    for (cmd, want) in [
+        ("rm hard", A),
+        ("rmdir hard", A),
+        ("mv plain hard", A),
+        ("mv hard other", Q),
+        ("cp hard other", Q),
+        ("ln hard other", Q),
+        ("chmod 600 hard", Q),
+        ("install plain hard", Q),
+    ] {
+        let p = f.with(rules(&["Bash"], &[], &[]), Mode::Default);
+        assert_eq!(d(&p, "Bash", json!({ "command": cmd })), want, "{cmd}");
+    }
+    // a rule that names the exact command lifts it; a plain file and a read are untouched
+    let p = f.with(
+        rules(&["Bash(sed -i s/x/y/ hard)"], &[], &[]),
+        Mode::Default,
+    );
+    assert_eq!(d(&p, "Bash", json!({ "command": "sed -i s/x/y/ hard" })), A);
+    assert_eq!(
+        d(
+            &f.perms(Mode::AcceptEdits),
+            "Bash",
+            json!({ "command": "touch plain" })
+        ),
+        A
+    );
+    assert_eq!(
+        d(
+            &f.perms(Mode::Default),
+            "Bash",
+            json!({ "command": "cat hard" })
+        ),
+        A
+    );
 }
 
 #[cfg(unix)]

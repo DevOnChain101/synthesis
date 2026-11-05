@@ -957,6 +957,21 @@ impl Permissions {
             .any(|r| self.matches_rule(r, tool, input, false))
     }
 
+    /// Like `allow_match` but only rules that name something: a tool-wide rule (`Read`, `Bash`,
+    /// `Read(*)`, `Bash(cat:*)`) does not count. Used where the person must decide per path.
+    fn specific_allow(&self, mode: Mode, tool: &str, input: &Value) -> bool {
+        let rules: Vec<String> = self
+            .allow_rules(mode)
+            .into_iter()
+            .filter(|r| match bash::parse_rule(r) {
+                ("Bash", Some(s)) => !s.contains('*'),
+                (_, Some(s)) => !s.trim_matches(['/', '*', '.', '?']).is_empty(),
+                _ => false,
+            })
+            .collect();
+        self.allow_match(&rules, tool, input)
+    }
+
     /// Allow rules in force: while in auto the broad ones are left out (suspended, not deleted).
     fn allow_rules(&self, mode: Mode) -> Vec<String> {
         let all = self.env.auto_mode.classify_all_shell;
@@ -1410,6 +1425,48 @@ impl Permissions {
                         .is_some_and(|(p, _)| self.is_protected(&p))
                 })
             }) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Does the command write (redirect, `tee`, `sed -i`, `cp`/`mv`/`ln`/`dd of=` ... operands;
+    /// over-approximate: a source operand counts too) an existing file with more than one hard link?
+    fn bash_writes_hard_link(&self, cmd: &str) -> bool {
+        const WRITERS: &[&str] = &["tee", "install", "ln", "truncate", "chmod", "chown", "dd"];
+        let Some(segs) = bash::deep_segments(cmd, 0) else {
+            return false; // unparsable: the other rules already ask
+        };
+        let mut bases = vec![self.env.cwd.clone()];
+        for seg in segs {
+            let w = bash::unwrap_words(&seg, true);
+            let name = paths::basename(w.first().map_or("", String::as_str), self.policy());
+            let mut ops = bash::redirect_targets(&seg);
+            if name == "cd" {
+                self.widen_bases(&mut bases, w.get(1));
+            } else if (bash::FS_CMDS.contains(&name) || WRITERS.contains(&name))
+                // removing a name leaves the other inode alone
+                && !matches!(name, "rm" | "rmdir")
+            {
+                let mut args: Vec<String> = w[1..]
+                    .iter()
+                    .filter(|a| !a.starts_with('-'))
+                    .map(|a| a.strip_prefix("of=").unwrap_or(a).to_string())
+                    .collect();
+                // a rename replaces the destination's directory entry, not its inode
+                if name == "mv" {
+                    args.pop();
+                }
+                ops.extend(args);
+            }
+            let hit = ops.iter().any(|o| {
+                bases.iter().any(|b| {
+                    self.resolve_operand(o, b)
+                        .is_some_and(|(p, wild)| !wild && paths::hard_links(&p).is_some())
+                })
+            });
+            if hit {
                 return true;
             }
         }
@@ -1943,15 +2000,34 @@ impl Permissions {
 
         // a secret file (`.env`, keys) is the person's call, also through a read-only command, a
         // search `glob` or a wildcard; only an allow rule or bypassPermissions skips the question
+        // (only a rule that names the path lifts it, never a tool-wide one: `Read`, `Bash(cat:*)`)
         if (self.names_secret_file(tool, input)
             || (tool == "Bash" && self.bash_reads_secret(bash_cmd)))
-            && !self.allow_match(&self.allow_rules(mode), tool, input)
+            && !self.specific_allow(mode, tool, input)
         {
             return match mode {
                 Mode::DontAsk | Mode::Plan => {
                     v(Deny, format!("{} mode: reads a secret file", mode.as_str()))
                 }
                 _ => v(Ask, "reads a secret file (.env, key, credentials)"),
+            };
+        }
+
+        // a write through a hard link in the workspace changes a file whose other name may be
+        // outside it; the sandbox checks paths, not link counts (bypassPermissions skips this)
+        if tool == "Bash"
+            && self.bash_writes_hard_link(bash_cmd)
+            && !self.specific_allow(mode, tool, input)
+        {
+            return match mode {
+                Mode::DontAsk | Mode::Plan => v(
+                    Deny,
+                    format!("{} mode: writes through a hard link", mode.as_str()),
+                ),
+                _ => v(
+                    Ask,
+                    "writes a file with several hard links (another name may be outside the workspace)",
+                ),
             };
         }
 
@@ -2161,6 +2237,27 @@ impl Permissions {
                 behavior: Decision::Allow,
             }]
         };
+        // a secret file is the person's call each time: offer a rule for that path only
+        if self.names_secret_file(tool, input) {
+            let field = if tool == "Read" { "file_path" } else { "path" };
+            let abs = non_empty(input, field).map(|t| {
+                paths::lexical_normalize(&paths::resolve(&self.env.cwd, t))
+                    .to_string_lossy()
+                    .into_owned()
+            });
+            return abs
+                .filter(|a| synthesis_core::secrets::is_secret_path(Path::new(a)))
+                .and_then(|a| rule_path(&a, self.policy().windows_separators))
+                .map_or(vec![], |p| add(tool, Some(p)));
+        }
+        if tool == "Bash" && self.bash_reads_secret(command_of(input)) {
+            let cmd = command_of(input).trim();
+            return if exact_unsafe(cmd) || cmd.contains('*') {
+                vec![]
+            } else {
+                add("Bash", Some(cmd.to_string()))
+            };
+        }
         if tool == "Bash" || COMMAND_TOOLS.contains(&tool) {
             let cmd = command_of(input).trim();
             // the rule is a Bash rule: verify_run/terminal_spawn commands are judged as Bash
@@ -2253,6 +2350,24 @@ impl Permissions {
         }
         mode
     }
+}
+
+/// The `//abs` spelling of an absolute path for an allow rule, or `None` when no rule may be
+/// offered: a glob character in the name would make the rule broader than that file, and a UNC
+/// path has no `//` form. On Windows the verbatim prefix (`\\?\C:\x`) is dropped first (its `?` is
+/// not a glob character) and `\` becomes `/`, the spelling the matcher expects (`//C:/x`).
+fn rule_path(abs: &str, windows: bool) -> Option<String> {
+    let p = if windows {
+        let p = abs.strip_prefix(r"\\?\").unwrap_or(abs);
+        if p.starts_with(r"UNC\") || p.starts_with(r"\\") {
+            return None;
+        }
+        p.replace('\\', "/")
+    } else {
+        abs.to_string()
+    };
+    (!p.contains(['*', '?', '[', ']', '{', '}']))
+        .then(|| format!("//{}", p.trim_start_matches('/')))
 }
 
 /// `path.parse(p).root`.

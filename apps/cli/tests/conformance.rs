@@ -266,7 +266,7 @@ fn a_stored_model_that_cannot_be_built_is_kept_and_warned_about() {
     let sid = session_id(&events(&first.stdout));
     let c = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
     c.execute(
-        "UPDATE sessions SET model_config='\"ghost/\\u001b[31mx\"' WHERE id=?1",
+        "UPDATE sessions SET model_config='\"ghost/\\u001b[31mx\\nsynt: warning: forged\"' WHERE id=?1",
         [&sid],
     )
     .unwrap();
@@ -276,8 +276,55 @@ fn a_stored_model_that_cannot_be_built_is_kept_and_warned_about() {
     assert!(err.contains("stored model ghost/"), "{err}");
     assert!(!err.contains('\u{1b}'), "escape sequences are stripped");
     assert!(
+        !err.lines().any(|l| l.starts_with("synt: warning: forged")),
+        "a newline in the label cannot forge a line: {err}"
+    );
+    assert!(
         stored_model(&rig, &sid).contains("ghost/"),
         "the stored model is kept"
+    );
+}
+
+#[test]
+fn a_stored_model_removed_from_its_provider_list_warns_and_is_kept() {
+    let rig = Rig::new();
+    std::fs::create_dir_all(rig.home()).unwrap();
+    let conf = |models: &str| {
+        format!(
+            r#"{{"$schema":"config.json/v1","model":"gw/big","providers":{{"gw":{{"type":"anthropic","baseURL":"http://127.0.0.1:1","apiKey":false,"models":{models}}}}}}}"#
+        )
+    };
+    std::fs::write(rig.home().join("synt.json"), conf(r#"["big","other"]"#)).unwrap();
+    let go = |extra: &[&str]| {
+        rig.base()
+            .args(["run", "--cwd"])
+            .arg(rig.ws())
+            .args(["--sandbox", "off", "--prompt", "hi"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let first = go(&["--model", "gw/other"]);
+    let sid = session_id(&events(&first.stdout));
+    assert_eq!(stored_model(&rig, &sid), "\"gw/other\"");
+    std::fs::write(rig.home().join("synt.json"), conf(r#"["big"]"#)).unwrap();
+    let second = go(&["--resume", &sid]);
+    let err = String::from_utf8_lossy(&second.stderr);
+    let want = "synt: warning: stored model gw/other is not available (not in the models of provider \"gw\"); using gw/big";
+    assert!(err.contains(want), "{err}");
+    let ev = events(&second.stdout);
+    assert!(
+        ev.iter().any(|e| e["type"] == "notice"
+            && e["payload"]["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("stored model gw/other is not available"))),
+        "a notice event"
+    );
+    assert_eq!(turn_model(&ev), "big");
+    assert_eq!(
+        stored_model(&rig, &sid),
+        "\"gw/other\"",
+        "the label is kept"
     );
 }
 
