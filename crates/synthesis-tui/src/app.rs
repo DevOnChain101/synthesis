@@ -588,6 +588,15 @@ impl App {
                 })
                 .unwrap_or(false)
         {
+            // the tools of that run (and their Task rows) will never report back
+            for it in chat
+                .agent
+                .items
+                .iter_mut()
+                .filter(|i| i.status == "running")
+            {
+                it.status = "interrupted".into();
+            }
             chat.note("previous run was interrupted", "warn");
         }
         let ran_task = replay
@@ -2334,6 +2343,19 @@ impl App {
                 self.folder_path_row();
             }
             Key::Named(Named::Enter) => {
+                // a typed path that is not a folder never falls back to a fuzzy row: say why
+                let q = p.query.trim();
+                if ps.kind == PickerKind::Folder
+                    && looks_like_path(q)
+                    && !ps.values.first().is_some_and(|v| v.starts_with("open:"))
+                {
+                    let path = typed_path(q, self.cfg.home.as_deref(), Path::new(&self.cfg.cwd));
+                    p.subtitle = clean_line(
+                        &folder_problem(&path)
+                            .unwrap_or_else(|| format!("no such folder: {}", path.display())),
+                    );
+                    return;
+                }
                 let Some(item) = p.filtered().get(p.choice).copied() else {
                     return;
                 };

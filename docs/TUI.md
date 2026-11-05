@@ -11,7 +11,7 @@ session continues in place), `--once` (print one frame and exit), plus the `synt
 
 Resuming a session whose process died mid-task (kill, closed window): nothing runs in the new
 process, so the dashboard is IDLE and tools/agents without an end in the stored events are shown
-as ended (agents as `interrupted`); the chat gets one line, `previous run was interrupted`. The
+as ended (their chat rows read `interrupted`, with no spinner; agents as `interrupted`); the chat gets one line, `previous run was interrupted`. The
 store moves the stale `running` status to `interrupted` on resume (`Store::resume_session`), but
 never for a session another live process holds (writer lock). The phase is derived from replay by
 `Session::settle_replayed`; the later `session.started` (source `resume`) in the event log marks the
@@ -103,10 +103,10 @@ a prompt.
 | click a workspace row | select it; Running lists its sessions |
 | click a session row | open it (the live session: nothing happens) |
 | click a `❯` row in Activity | scrolls the chat so that prompt is the first row of the view |
-| wheel over Workspace / Running | moves the selection one row per notch (the panel scrolls with it) |
+| wheel over Workspace / Running | focuses that panel and moves its selection one row per notch (the panel scrolls with it) |
 | wheel over Activity | scrolls it (3 rows per notch, clamped); its title shows `↑n` older / `↓n` newer rows out of view |
 | wheel over the chat | scrolls the chat; over anything else nothing happens |
-| Ctrl+N | NEW WORKSPACE: the folder picker; the chosen folder gets a fresh session |
+| Ctrl+N | NEW WORKSPACE: the folder picker; the chosen folder gets a fresh session. Typed paths (`/x`, `~/x`, `./x`, `a/b`): a readable folder gets an `open <path>` row, and Enter on anything else keeps the picker open with one line saying why (`no such folder: <path>`, `not a folder`, `permission denied`); a word without a separator is only a filter. Rows marked `(link)` are symlinked folders and open on Enter like the others |
 | /new | new session in the selected workspace |
 | Ctrl+T (empty prompt, sub-agents exist) | cycles where the prompt goes: main, then each sub-agent (this was Tab before) |
 | Shift+Tab | cycles the permission mode (unchanged) |

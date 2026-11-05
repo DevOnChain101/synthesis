@@ -1263,6 +1263,47 @@ fn replayed_session_shows_its_history_and_is_idle() {
 }
 
 #[test]
+fn replayed_unfinished_tool_rows_end_as_interrupted() {
+    let evs = [
+        env(
+            0,
+            Ev::UserMessage {
+                text: "go".into(),
+                display_text: None,
+                images: vec![],
+            },
+        ),
+        env(
+            1,
+            Ev::TaskStarted {
+                request: "go".into(),
+                acceptance_criteria: vec![],
+                budget: Budget::default(),
+            },
+        ),
+        env(
+            2,
+            Ev::ToolRequested {
+                tool_call_id: "c1".into(),
+                name: "Bash".into(),
+                input: json!({"command": "sleep 60"}),
+                input_truncated: false,
+                origin: None,
+            },
+        ),
+    ];
+    let mut a = App::new(cfg("/tmp/proj"), &evs, T0);
+    let s = screen(&mut a);
+    assert!(s.contains("previous run was interrupted"), "{s}");
+    assert!(
+        s.contains("⎿  interrupted") && !s.contains("running…"),
+        "{s}"
+    );
+    assert!(a.chat.agent.items.iter().all(|i| i.status != "running"));
+    assert!(!a.animating(), "nothing left to animate");
+}
+
+#[test]
 fn animation_is_a_function_of_the_explicit_clock_and_startup_is_not_busy() {
     let mut a = app();
     // the harness emits created -> preparing at startup: that is not a running task
