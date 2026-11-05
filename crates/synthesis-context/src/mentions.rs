@@ -33,6 +33,27 @@ pub struct Mentions {
     pub text: String,
     /// Files whose content was inlined (so the harness can record them as read).
     pub files: Vec<PathBuf>,
+    /// Mentions that named nothing inside the workspace (they stay literal in the message).
+    pub missing: Vec<String>,
+}
+
+/// `@name` words and `@"name with spaces"`; the flag is true for the quoted form.
+fn tokens(text: &str) -> Vec<(&str, bool)> {
+    let (mut out, mut s) = (Vec::new(), text);
+    loop {
+        s = s.trim_start();
+        if s.is_empty() {
+            return out;
+        }
+        if let Some((name, rest)) = s.strip_prefix("@\"").and_then(|q| q.split_once('"')) {
+            out.push((name, true));
+            s = rest;
+            continue;
+        }
+        let (t, rest) = s.split_at(s.find(char::is_whitespace).unwrap_or(s.len()));
+        out.extend(t.strip_prefix('@').map(|n| (n, false)));
+        s = rest;
+    }
 }
 
 const IMAGE_EXT: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
@@ -99,8 +120,12 @@ pub fn expand_mentions(text: &str, ws: &WorkspaceContext, opts: &MentionOptions)
     let mut seen: Vec<PathBuf> = Vec::new();
     let mut blocks = Vec::new();
     let mut budget = opts.total_cap;
-    for tok in text.split_whitespace().filter_map(|t| t.strip_prefix('@')) {
-        let trimmed = tok.trim_end_matches(['.', ',', ';', ':', ')']);
+    for (tok, quoted) in tokens(text) {
+        let trimmed = if quoted {
+            tok
+        } else {
+            tok.trim_end_matches(['.', ',', ';', ':', ')'])
+        };
         let hit = [tok, trimmed]
             .into_iter()
             .filter(|c| !c.is_empty())
@@ -109,7 +134,14 @@ pub fn expand_mentions(text: &str, ws: &WorkspaceContext, opts: &MentionOptions)
                 let md = fs::metadata(&abs).ok()?;
                 Some((abs, c.trim_end_matches('/').to_string(), md))
             });
-        let Some((abs, rel, md)) = hit else { continue };
+        let Some((abs, rel, md)) = hit else {
+            // `@server:scheme://uri` is an MCP resource, not a file
+            if !tok.is_empty() && !tok.contains("://") && !out.missing.iter().any(|m| m == trimmed)
+            {
+                out.missing.push(trimmed.to_string());
+            }
+            continue;
+        };
         if seen.contains(&abs) || !(md.is_file() || md.is_dir()) {
             continue;
         }

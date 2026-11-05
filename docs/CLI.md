@@ -94,3 +94,76 @@ Commands that change memory (add, delete, forget, approve, reject, apply --yes, 
 
 ## `synt models`
 Lists the configured models, one `provider/model` per line. `--json` adds `context_window`, `max_output` and `vision` per model (`null` = unknown) from the model-info cache (docs/specs/config.md §6.2). `--refresh` asks every provider with a credential for its model list (network, ignores the 24 h freshness), rewrites the cache, adds the discovered models, and prints tab-separated columns: `provider/model`, context window, max output, vision (`yes`/`no`); `-` = the provider did not say.
+
+## Flag and command reference
+
+Checked against `--help` by `apps/cli/tests/docs_flags.rs`: a flag that `synt --help`, `synt run --help` or `synt tui --help` lists and this file does not mention fails the test.
+
+Flags of `synt run` and of the interactive app (`synt`, `synt tui`):
+
+| Flag | Does |
+|---|---|
+| `--cwd DIR` | Start folder / workspace directory (default: the current directory). |
+| `--sandbox MODE` | Command confinement: `enforce` (default), `best-effort` or `off` (loud warning). On Windows the default is `best-effort` with a notice. |
+| `--network MODE` | Network for tool commands: `deny` (default), `loopback` or `allow` (loud warning). |
+| `--sandbox-read PATH` | Extra read-only path for commands, e.g. a toolchain dir. Must exist; `$HOME`, filesystem roots and credential-store directories are refused (repeatable). |
+| `--provider ID` | Provider id (with `--model NAME`); `fake:<script.json>` in test-provider builds. |
+| `--model NAME` | `provider/model`, an alias or a bare model name. |
+| `--permission-mode MODE` | `default`, `acceptEdits`, `plan`, `dontAsk`, `auto` or `bypassPermissions` (see above). |
+| `--trust-project` | Trust `<cwd>/.synt/config.json`, `.synt/settings.json`, agents and (with approval) MCP servers. |
+| `--approve-mcp NAME` | Start this project-scope MCP server (needs `--trust-project`; repeatable). |
+| `--no-session-store` | Do not write the session to `synt.db` (no resume, no rewind). |
+| `--no-memory` | No long-term memory: nothing retrieved, injected or saved. |
+| `--allow RULE` | Allow a tool call without asking (repeatable; see above). |
+| `--deny RULE` | Deny a tool call; deny wins over every allow (repeatable). |
+| `--worktree` | Work in an isolated git worktree on branch `synthesis/<session>`; left in place for review. |
+| `--cleanup-worktree` | With `--worktree`: remove the worktree at the end when nothing changed. |
+| `--peers` | Turn cross-session messaging on for this run (see above). |
+| `--name NAME` | Session name other sessions can address (`sess:<name>`). |
+| `--about TEXT` | What this session is for, shown to peers. |
+| `--resume ID` | Continue a stored session of this workspace by id (or unique prefix) with the new prompt. |
+| `--resume-any-workspace` | With `--resume`: also accept a session of another workspace. |
+| `-c, --continue` | Continue the most recent session of this workspace. |
+| `--fork-session` | With `--resume`/`--continue`: start a new session seeded with the stored conversation. |
+| `--system-prompt TEXT` | Replace the default system rules (the untrusted-data rule stays). |
+| `--system-prompt-file FILE` | Same, read from a file. |
+| `--append-system-prompt TEXT` | Add text after the system rules. |
+| `--append-system-prompt-file FILE` | Same, read from a file. |
+| `--add-dir DIR` | Extra working directory the agent may access (repeatable). |
+| `--settings FILE` | Extra `settings.json` layered above local settings (managed settings still win). |
+| `--require-mcp NAME` | Fail (exit 2) unless this MCP server starts (repeatable). |
+| `--bare` | Minimal run: no hooks, no instruction files, no long-term memory. |
+
+Only `synt run`:
+
+| Flag | Does |
+|---|---|
+| `-p, --prompt TEXT` | The task. Without it the prompt is read from `--prompt-file`, `--prompt-command` or stdin. |
+| `--prompt-file FILE` | Read the task from a file. |
+| `--prompt-command CMD` | An MCP prompt as the task: `"/mcp__<server>__<prompt> arg1 arg2"` (`synt mcp prompts` lists them). |
+| `--max-turns N` | Turn budget (default 50). |
+| `--max-tool-calls N` | Tool-call budget (default 200). |
+| `--max-cost-usd X` | Cost cap; needs a price for the model (`synt.pricing` in the user `settings.json`). |
+| `--max-wall-secs N` | Wall-clock cap in seconds (default 3600). |
+| `--criteria-file FILE` | JSON array of `{id?, text, check?}` (or plain strings): the task is not done until they pass. |
+| `--events-out FILE` | Also write the event stream to this file. |
+| `--output-format F` | What stdout carries: `text` (final message), `json` (one result object) or `stream-json` (the JSONL events, default). |
+| `--json-schema SCHEMA` | JSON Schema (inline or a file) the final answer must satisfy; exit 1 when it does not. |
+
+Only the interactive app:
+
+| Flag | Does |
+|---|---|
+| `--once` | Print one frame to stdout and exit (no terminal needed). |
+
+Other commands:
+
+| Command | Does |
+|---|---|
+| `synt auth status` | Credential status per provider (variable names and where a key comes from, never values). |
+| `synt rewind SESSION` | Put the files a run changed back to their state before its first write to each. A dry run unless `--apply`; a file changed since the run is refused unless `--force`; `--checkpoint NAME` limits it to one checkpoint. Options: `--apply`, `--force`, `--checkpoint`. A checkpoint is taken before the first write attempt, so a dry run can list a file whose write was refused. |
+| `synt models [--json] [--refresh]` | List configured models (see below). |
+| `synt doctor` | Diagnose the installation. |
+| `synt browser done PROFILE` | Finish a `browser_login` wait from another terminal. |
+| `synt import claude [--apply]` | Copy/convert a Claude Code setup into Synthesis's own files (dry run unless `--apply`). |
+| `synt mcp ...` | Manage MCP server entries in your own config files (never credentials). |

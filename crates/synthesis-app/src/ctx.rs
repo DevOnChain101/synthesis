@@ -176,7 +176,18 @@ fn compact_error_text(e: &CompactError, history: &[Message]) -> String {
         CompactError::Summarizer(s) => s.0.chars().take(300).collect(),
         CompactError::Nothing => "nothing to compact".into(),
         CompactError::EmptySummary => "the summary came back empty".into(),
-        CompactError::NoProgress { .. } => "compaction would not make the history smaller".into(),
+        CompactError::NoProgress { .. } => {
+            let (n, bytes) = image_stats(history);
+            let size = if n > 0 {
+                format!(" ({n} images, {:.1} MB)", bytes as f64 / 1e6)
+            } else {
+                String::new()
+            };
+            format!(
+                "conversation too large to compact{size}: /images clear, /new to start fresh, \
+                 or remove older screenshots"
+            )
+        }
     }
 }
 
@@ -730,6 +741,32 @@ mod tests {
             "{t}"
         );
         assert!(!t.contains("request_too_large"));
+    }
+
+    #[test]
+    fn no_progress_compaction_failure_carries_the_hint() {
+        let big = Message {
+            role: Role::User,
+            content: Content::Blocks(vec![Block::Image {
+                source: synthesis_providers::ImageSource::Base64 {
+                    media_type: "image/png".into(),
+                    data: "A".repeat(4_000_000),
+                },
+            }]),
+        };
+        let t = compact_error_text(
+            &CompactError::NoProgress {
+                before: 9,
+                after: 9,
+            },
+            &[big],
+        );
+        assert!(
+            t.starts_with(
+                "conversation too large to compact (1 images, 3.0 MB): /images clear, /new"
+            ),
+            "{t}"
+        );
     }
 
     #[test]

@@ -367,6 +367,43 @@ fn resume_of_a_bad_id_and_unopenable_folders_are_notices_not_exits() {
     assert!(flat.contains("STATE ok"), "{flat}");
 }
 
+/// Typed paths in the Ctrl+N picker always answer: a missing absolute path (which fuzzy-matches the
+/// `sub/` row) keeps the picker open with a one-line reason, a symlink row descends on Enter, and
+/// a relative `./sub` opens.
+#[cfg(unix)]
+#[test]
+fn folder_picker_typed_paths_give_feedback_and_symlinks_descend() {
+    let rig = Rig::new(json!([]));
+    std::fs::create_dir_all(rig.ws().join("sub/.git")).unwrap();
+    std::fs::create_dir_all(rig.ws().join("real")).unwrap();
+    std::os::unix::fs::symlink(rig.ws().join("real"), rig.ws().join("lnk")).unwrap();
+    let out = rig.drive(json!([
+        expect("Enter send"),
+        send("\u{e}"), // ctrl+n: new workspace
+        expect_new("use this folder"),
+        send("lnk"),
+        expect_new("(link)"),
+        send("\r"),
+        expect_new("/lnk"),
+        send("\x1b"),
+        send("\u{e}"),
+        expect_new("use this folder"),
+        send("/sub"),
+        expect_new("no such folder: /sub"),
+        send("\r"),
+        quiet(),
+        send("\u{7f}\u{7f}\u{7f}\u{7f}"),
+        send("./sub"),
+        expect_new("open "),
+        send("\r"),
+        expect_new("/sub"),
+        quiet()
+    ]));
+    let flat = squash(&out);
+    assert!(!flat.contains("synt: error"), "{flat}");
+    assert!(flat.contains("STATE ok"), "{flat}");
+}
+
 /// Choosing a folder while a task runs cancels it and says so in the new session.
 #[test]
 fn switching_folder_during_a_task_says_the_task_was_cancelled() {
@@ -520,6 +557,34 @@ for line in sys.stdin:
 "#;
 
 /// `@server:uri`, `/mcp__server__prompt`, a skill command, and /help listing the last two.
+/// Tab inserts the quoted form for a name with spaces, and the file reaches the model.
+#[test]
+fn at_file_with_a_space_is_completed_quoted_and_attached() {
+    let rig = Rig::new(json!([{"text": "ok one"}]));
+    std::fs::write(rig.ws().join("my notes.txt"), "kiwi-content\n").unwrap();
+    rig.drive(json!([
+        expect("Enter send"),
+        send("read @my"),
+        expect("my notes.txt"),
+        send("\t"),
+        quiet(),
+        send("now\r"),
+        expect("ok one")
+    ]));
+    let users: Vec<String> = rig
+        .events()
+        .into_iter()
+        .filter(|e| e.0 == "user.message")
+        .filter_map(|e| e.1["text"].as_str().map(String::from))
+        .collect();
+    let u = users.first().cloned().unwrap_or_default();
+    assert!(u.starts_with("read @\"my notes.txt\" now"), "{users:?}");
+    assert!(
+        u.contains("<file path=\"my notes.txt\">") && u.contains("kiwi-content"),
+        "{users:?}"
+    );
+}
+
 #[test]
 fn mcp_mentions_prompts_skills_and_help() {
     let rig = Rig::new(json!([{"text": "ok one"}, {"text": "ok two"}, {"text": "ok three"}]));
@@ -819,6 +884,13 @@ fn kill_mid_task_then_continue_shows_idle() {
             flat.contains("previous run was interrupted"),
             "tool={tool}: {flat}"
         );
+        if tool {
+            assert!(
+                !flat.contains("running…") && !flat.contains("running.."),
+                "tool row settled: {flat}"
+            );
+            assert!(flat.contains("interrupted"), "tool row ended: {flat}");
+        }
     }
 }
 

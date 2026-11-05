@@ -1130,3 +1130,22 @@ fn many_large_images_trigger_auto_compaction_by_size() {
     assert!(should_compact(&EST, &[m(5)], 0, 30_000, &cfg));
     assert!(!should_compact(&EST, &[m(1)], 0, 30_000, &cfg));
 }
+
+#[test]
+fn quoted_mentions_allow_spaces_and_unresolved_ones_are_reported() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("my notes.txt"), "hi\n").unwrap();
+    let w = ws(d.path());
+    let m = expand_mentions(
+        r#"@"my notes.txt" @"open @nope.txt @a://b"#,
+        &w,
+        &MentionOptions::default(),
+    );
+    assert!(
+        m.text.contains(r#"<file path="my notes.txt">"#),
+        "{}",
+        m.text
+    );
+    // an unclosed quote is read as a plain word; `@a://b` is an MCP resource, not a file
+    assert_eq!(m.missing, ["\"open", "nope.txt"]);
+}
