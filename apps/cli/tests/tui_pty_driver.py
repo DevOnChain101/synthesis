@@ -32,10 +32,14 @@ def text():
     t=re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]",b" ",buf)
     return t.decode("utf8","replace")
 ok=True
+killed=False
 sent_at=0
 for st in sc["steps"]:
     if st[0]=="send": sent_at=len(buf); os.write(fd,st[1].encode().decode("unicode_escape").encode("latin1")); rd(0.2)
     elif st[0]=="wait": rd(st[1])
+    elif st[0]=="kill":
+        # SIGKILL, as when the terminal window is closed: no shutdown code runs
+        os.kill(pid,9); os.waitpid(pid,0); killed=True
     elif st[0]=="quiet":
         # no output for st[1] seconds; capped, because a spinner never goes quiet
         end=time.time()+20
@@ -53,9 +57,11 @@ for st in sc["steps"]:
             ok=False; print("FAIL step",st); break
 # exit
 time.sleep(0.5)
-try:
-    p,stt=os.waitpid(pid,os.WNOHANG)
-except Exception as e: p,stt=0,None
+if killed: p,stt=pid,"killed"
+else:
+    try:
+        p,stt=os.waitpid(pid,os.WNOHANG)
+    except Exception as e: p,stt=0,None
 if p==0:
     os.write(fd,b"\x04"); rd(1.0)
     try: p,stt=os.waitpid(pid,os.WNOHANG)
