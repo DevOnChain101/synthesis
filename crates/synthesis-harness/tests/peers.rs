@@ -1237,6 +1237,56 @@ async fn initiate_false_asks_the_user() {
 }
 
 #[tokio::test]
+async fn send_is_denied_without_a_prompt_headless_plan_and_dontask() {
+    for (name, mode, interactive) in [
+        ("headless", PermissionMode::Default, false),
+        ("plan", PermissionMode::Plan, true),
+        ("dontask", PermissionMode::DontAsk, true),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let run = run_dir(home.path());
+        let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "initiate": false});
+        let a_resp: Responder = Arc::new(|_| Some(Turn::text("A-ANSWER")));
+        let (a, ea) = side("sess-a", "alpha", &run, Some(on.clone()), a_resp, 10);
+        let shown = Arc::new(std::sync::Mutex::new(vec![]));
+        let ask: Responder = Arc::new(|r| {
+            Some(if tool_result(r, "ask").is_none() {
+                Turn::tool(
+                    "ask",
+                    "SendMessage",
+                    json!({"to": "ws:alpha/sess:sess-a", "message": "hi"}),
+                )
+            } else {
+                Turn::text("B done")
+            })
+        });
+        let (mut b, _) = side_x(
+            "sess-b",
+            "beta",
+            &run,
+            Some(on),
+            ask,
+            10,
+            true,
+            Some(Arc::new(Choose(shown.clone(), true))),
+            &[],
+            SideX {
+                mode,
+                interactive,
+                hooks: None,
+            },
+        );
+        let _reg = serve(&a, &run, ea);
+        go(&mut b, "go").await;
+        let reqs = b.rig.requests();
+        let (t, _) = tool_result(&reqs[1], "ask").unwrap();
+        assert!(shown.lock().unwrap().is_empty(), "{name}: no prompt: {t}");
+        assert!(t.contains("NOT run") || t.contains("denied"), "{name}: {t}");
+        assert!(a.rig.requests().is_empty(), "{name}: peer got the message");
+    }
+}
+
+#[tokio::test]
 async fn deny_rules_hold_against_every_spelling_of_a_peer_address() {
     for to in [
         "ws:alpha/sess:sess-a",
