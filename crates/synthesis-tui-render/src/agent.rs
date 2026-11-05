@@ -3318,6 +3318,9 @@ pub struct Body {
     pub skip: usize,
     pub total: usize,
     pub h: usize,
+    /// `(item index, first text row)` of every user prompt, rows counted from the top of `parts`
+    /// (so `skip` is still included).
+    pub prompts: Vec<(usize, usize)>,
 }
 
 pub struct AgentOut {
@@ -3590,6 +3593,7 @@ pub fn render_agent(
     let reserved = selector.len() + bottom.len() + 1 + working.len();
     let msg_h = h.saturating_sub(reserved);
     let mut parts: Vec<Rc<Vec<Row>>> = vec![];
+    let mut prompts: Vec<(usize, usize)> = vec![];
     let items: &[Item] = opts.preview.as_ref().map_or(&agent.items, |p| &p.items);
     if opts.preview.is_some() && items.is_empty() {
         parts.push(Rc::new(vec![vec![r(
@@ -3603,7 +3607,8 @@ pub fn render_agent(
             || (opts.hero && opts.preview.is_none() && !items.iter().any(|i| i.kind == "user"));
         let mut prev: Option<&str> = None;
         let mut rest: Vec<Rc<Vec<Row>>> = vec![];
-        for it in items {
+        let mut prompt_parts: Vec<(usize, usize)> = vec![];
+        for (idx, it) in items.iter().enumerate() {
             let focus_kinds = ["user", "text", "result", "note", "help", "info", "compact"];
             if (!agent.focus_view
                 || opts.preview.is_some()
@@ -3612,6 +3617,9 @@ pub fn render_agent(
             {
                 rest.extend(note_gap(prev, it));
                 prev = Some(&it.kind);
+                if it.kind == "user" {
+                    prompt_parts.push((idx, rest.len()));
+                }
                 rest.push(cached_item_rows(it, content_w, frame, now, opts.expanded));
             }
         }
@@ -3631,7 +3639,14 @@ pub fn render_agent(
                 welcome_rows(agent, content_w, None, TIPS.len())
             }));
         }
+        let first = parts.len();
         parts.extend(rest);
+        for (idx, k) in prompt_parts {
+            let before: usize = parts[..first + k].iter().map(|p| p.len()).sum();
+            // the item starts with a blank row: the prompt text is the first row with content
+            let lead = parts[first + k].iter().take_while(|r| r.is_empty()).count();
+            prompts.push((idx, before + lead));
+        }
     }
     let win = window_rows(&parts, opts.scroll, msg_h);
     let (max_scroll, off, skip, total) = (win.max_scroll, win.off, win.skip, win.total);
@@ -3683,6 +3698,7 @@ pub fn render_agent(
             skip,
             total,
             h: msg_h,
+            prompts,
         },
         question_hits,
     }

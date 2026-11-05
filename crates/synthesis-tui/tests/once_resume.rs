@@ -88,6 +88,7 @@ fn once_is_render_frame_plus_the_status_line() {
         ctx_pct: None,
         waiting: false,
         mode: Some("default".into()),
+        title: String::new(),
     }];
     let key = workspace_key(&o.cwd);
     let ws = [Workspace {
