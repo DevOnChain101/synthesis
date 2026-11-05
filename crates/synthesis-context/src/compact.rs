@@ -2,12 +2,19 @@
 //! the history; the tail keeps raw recent evidence, durable `TaskState` lives outside history, and
 //! the result is always pairing-valid. Failure never touches the input and never loops.
 
-use crate::{TaskState, TokenEstimator, message_tokens, messages_tokens, pairing};
+use crate::{TaskState, TokenEstimator, message_tokens, messages_tokens, omit_old_images, pairing};
 use std::future::Future;
 use synthesis_providers::{Block, Content, Message, Role};
 
 pub const SUMMARY_SYSTEM_PROMPT: &str = "Summarize the conversation so far for a coding assistant that is about to lose this context. Preserve: the user's overall goal, decisions made, files touched and why, commands run and their outcomes, open TODOs, and anything the assistant still needs to do. Be concise but keep anything a continuation would need. Plain text, no markdown headers.";
 pub const SUMMARY_PREFIX: &str = "Summary of the conversation so far: ";
+
+/// Prefix of a `SummarizeError` whose request was too large; `compact` then retries on less input.
+pub const OVERFLOW_MARK: &str = "context overflow: ";
+/// Attempts at the summary when the request is too large; each drops the older half of what is left.
+const OVERFLOW_RETRIES: usize = 5;
+/// Images kept in the verbatim tail: only the newest message that has any, and only within this.
+const TAIL_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SummarizeError(pub String);
@@ -179,7 +186,8 @@ pub async fn compact(
     if messages.is_empty() || is_summary_only(messages) {
         return Err(CompactError::Nothing);
     }
-    let (mut want, mut sum) = (messages.len(), 0);
+    // the newest message is always kept verbatim, however large (it is what the person just sent)
+    let (mut want, mut sum) = (messages.len() - 1, 0);
     for (i, m) in messages.iter().enumerate().rev() {
         sum += message_tokens(est, m);
         if sum > cfg.keep_recent_tokens {
@@ -188,19 +196,31 @@ pub async fn compact(
         want = i;
     }
     let cut = pairing::safe_cut(messages, want);
-    let summary = summarizer
-        .summarize(
-            SUMMARY_SYSTEM_PROMPT,
-            &build_summary_prompt(&messages[..cut], state, instructions),
-        )
-        .await
-        .map_err(CompactError::Summarizer)?;
+    let mut skip = 0;
+    let mut attempt = 0;
+    let summary = loop {
+        let prompt = build_summary_prompt(&messages[skip..cut], state, instructions);
+        match summarizer.summarize(SUMMARY_SYSTEM_PROMPT, &prompt).await {
+            Ok(s) => break s,
+            // Codex-style: too large, so drop the oldest part of the input and ask again
+            Err(e)
+                if e.0.starts_with(OVERFLOW_MARK)
+                    && attempt < OVERFLOW_RETRIES
+                    && skip + 1 < cut =>
+            {
+                attempt += 1;
+                skip += (cut - skip).div_ceil(2);
+            }
+            Err(e) => return Err(CompactError::Summarizer(e)),
+        }
+    };
     let summary = summary.trim();
     if summary.is_empty() {
         return Err(CompactError::EmptySummary);
     }
     let text = format!("{SUMMARY_PREFIX}{summary}");
     let mut out: Vec<Message> = messages[cut..].to_vec();
+    omit_old_images(&mut out, 1, TAIL_IMAGE_BYTES);
     match out.first_mut() {
         Some(first) if first.role == Role::User && !pairing::has_tool_result(first) => {
             let mut bs = match std::mem::replace(&mut first.content, Content::Blocks(vec![])) {
