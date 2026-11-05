@@ -24,7 +24,7 @@ cut for `synt run --resume` consumers.
 | /help | keys and commands, plus the skills and MCP prompts of this session |
 | /clear | new conversation in the same session |
 | /compact [instructions] | summarise the conversation (`Harness::request_compact` / compact now) |
-| /new | pick a folder; a fresh session starts there. Type a path (`/abs`, `~/x`, `./rel`, `a/b`) to get an `open <path>` row, or the reason it cannot be a folder (`no such folder`, `not a folder`, `permission denied`). Symlinked folders are listed with `(link)`. A folder that cannot be opened is a notice; the current session stays. Choosing a folder while a task runs cancels the task and says so |
+| /new | a fresh session in the SELECTED workspace (the one highlighted in the Workspace panel; no picker). When that is not the live workspace the app switches to it. A running task needs a second `/new` within 5 s (it cancels the task and says so). For a different folder use Ctrl+N |
 | /resume [id] | continue a saved session (picker: this folder first); an unknown id is a notice, the app stays |
 | /model [name] | pick or set a model; restarts on the same session |
 | /effort [auto\|low\|...] | reasoning effort, only when the model declares `effort_tiers` |
@@ -84,9 +84,40 @@ input is dropped and it is retried (up to 5 times); if that fails the message sa
 ## Context meter
 The status line shows `ctx 62% 124k/200k`; the Context panel, the header chip and the topology cards use the same number. The window is the one the harness resolved for the model in use (docs/specs/config.md §6.2), so `/model` shows the new model's window from its first response. When the window is unknown the status line shows `ctx 124k/?` and the panels show `?` instead of a percentage; nothing is guessed from the model name. Set `limit.context` for such a model.
 
+## Workspaces, sessions and the sidebar
+
+The sidebar has three controls. **Workspace** lists the folders that have sessions in the store (the
+live one first, then by newest session) with the session count. **Running** lists the sessions of the
+SELECTED workspace: the live one (`●`, marked `⌘`) and the stored ones (`○`, named by their first
+prompt), newest first. Selecting a workspace only changes that list; nothing restarts. Opening a
+stored session is `/resume` (the app restarts on it, in its own folder; a running task is cancelled
+after a second Enter / click within 5 s). **Activity** is the feed of the live session; a `❯` row is
+a prompt.
+
+| input | does |
+|---|---|
+| Tab (empty prompt, no dialog) | chat -> Workspace -> Running -> chat. The focused panel's border takes the accent colour and the footer shows its keys. Skipped when the sidebar is not on screen (terminal under 80 columns) |
+| Up/Down, PageUp/PageDown, Home/End | in a focused panel: move the selection (the panel scrolls to keep it visible) |
+| Enter | Workspace: its sessions get the keys. Running: open the selected session |
+| Esc, typing, Ctrl+C ... | back to the chat (a typed character is inserted) |
+| click a workspace row | select it; Running lists its sessions |
+| click a session row | open it (the live session: nothing happens) |
+| click a `❯` row in Activity | scrolls the chat so that prompt is the first row of the view |
+| wheel over Workspace / Running | moves the selection one row per notch (the panel scrolls with it) |
+| wheel over Activity | scrolls it (3 rows per notch, clamped); its title shows `↑n` older / `↓n` newer rows out of view |
+| wheel over the chat | scrolls the chat; over anything else nothing happens |
+| Ctrl+N | NEW WORKSPACE: the folder picker; the chosen folder gets a fresh session |
+| /new | new session in the selected workspace |
+| Ctrl+T (empty prompt, sub-agents exist) | cycles where the prompt goes: main, then each sub-agent (this was Tab before) |
+| Shift+Tab | cycles the permission mode (unchanged) |
+
+Workspaces are told apart by folder (symlinks resolved; case folded on macOS and Windows). The Activity
+panel is only drawn when the terminal is tall enough (about 160x48); `↑n more` / `↓n more` in
+Workspace and Running are clickable steps.
+
 ## Keys in dialogs
 
-A picker (`/new`, `/resume`, `/model`, `/config`, ...) closes with Esc; an approval dialog is answered with Enter / 1-3, and Esc or Ctrl+C rejects it. Ctrl+D does nothing inside a dialog (on the prompt it quits when the prompt is empty); close the dialog first. `/help` is not a dialog: it prints its text into the conversation like any other output, so Esc does not dismiss it (it scrolls away with the chat).
+A picker (Ctrl+N, `/resume`, `/model`, `/config`, ...) closes with Esc; an approval dialog is answered with Enter / 1-3, and Esc or Ctrl+C rejects it. Ctrl+D does nothing inside a dialog (on the prompt it quits when the prompt is empty); close the dialog first. `/help` is not a dialog: it prints its text into the conversation like any other output, so Esc does not dismiss it (it scrolls away with the chat).
 
 ## Settings (`synt.tui`, user settings.json only)
 
