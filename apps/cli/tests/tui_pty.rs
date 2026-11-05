@@ -250,6 +250,47 @@ fn approval_subagent_model_switch_and_new_folder() {
     assert!(used >= 2, "usage not persisted per task: {used} session(s)");
 }
 
+/// "Don't ask again" on a secret-file read stores a rule for that path, not a tool-wide `Read`,
+/// so a later read of another secret file asks again.
+#[test]
+fn dont_ask_again_on_a_secret_read_is_scoped_to_that_path() {
+    let rig = Rig::new(json!([{"text": "unused"}]));
+    let (env, key) = (rig.ws().join(".env"), rig.ws().join("id_rsa"));
+    std::fs::write(&env, "A=1\n").unwrap();
+    std::fs::write(&key, "k\n").unwrap();
+    rig.write_script(json!([
+        {"tools": [{"name": "Read", "input": {"file_path": env}}]},
+        {"text": "read env"},
+        {"tools": [{"name": "Read", "input": {"file_path": key}}]},
+        {"text": "read key"}
+    ]));
+    rig.drive_with(
+        json!([
+            expect("Enter send"),
+            send("go\r"),
+            expect("Do you want to proceed"),
+            quiet(),
+            send("2"),
+            expect("read env"),
+            quiet(),
+            send("again\r"),
+            // another secret file: the question comes back
+            expect_new("Do you want to proceed"),
+            quiet(),
+            send("\u{1b}")
+        ]),
+        &["--trust-project"],
+    );
+    let saved = rig.ws().join(".synt/settings.local.json");
+    let t0 = std::time::Instant::now();
+    while !saved.exists() && t0.elapsed() < std::time::Duration::from_secs(5) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+    let want = format!("Read(//{})", env.to_string_lossy().trim_start_matches('/'));
+    assert_eq!(v["permissions"]["allow"], json!([want]), "{v}");
+}
+
 /// The chat hides internal rows (memory, approval, mode bookkeeping, `key=value`) but still says
 /// a denial, the end of the task and an error; `synt.tui.verbose` shows readable lines.
 #[test]
@@ -481,6 +522,66 @@ fn resume_of_a_deleted_folder_says_which_folder() {
     let flat = squash(&out);
     assert!(flat.contains(&format!("cannot resume {id}")), "{flat}");
     assert!(flat.contains(&gone.display().to_string()), "{flat}");
+}
+
+/// A resumed session whose stored model left its provider's list shows a notice at start and
+/// keeps the stored label.
+#[test]
+fn resume_with_a_removed_stored_model_shows_a_notice() {
+    let rig = Rig::new(json!([{"text": "unused"}]));
+    let conf = |models: &str| {
+        format!(
+            r#"{{"$schema":"config.json/v1","model":"gw/big","providers":{{"gw":{{"type":"anthropic","baseURL":"http://127.0.0.1:1","apiKey":false,"models":{models}}}}}}}"#
+        )
+    };
+    rig.write("synt.json", &conf(r#"["big","other"]"#));
+    let run = Command::new(env!("CARGO_BIN_EXE_synt"))
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", rig.root())
+        .env("SYNT_HOME", rig.home())
+        .args([
+            "run",
+            "--sandbox",
+            "off",
+            "--model",
+            "gw/other",
+            "--prompt",
+            "hi",
+            "--cwd",
+        ])
+        .arg(rig.ws())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let c = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
+    let id: String = c
+        .query_row("SELECT id FROM sessions LIMIT 1", [], |r| r.get(0))
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&run.stderr)));
+    rig.write("synt.json", &conf(r#"["big"]"#));
+    let out = rig.run_scenario(
+        vec![
+            json!(env!("CARGO_BIN_EXE_synt")),
+            json!("--cwd"),
+            json!(rig.ws()),
+            json!("--sandbox"),
+            json!("off"),
+            json!("--resume"),
+            json!(id),
+        ],
+        json!([expect("stored model gw/other is not available")]),
+    );
+    let flat = squash(&out);
+    assert!(flat.contains("not in the models of provider"), "{flat}");
+    assert!(flat.contains("using gw/big"), "{flat}");
+    let stored: String = c
+        .query_row(
+            "SELECT model_config FROM sessions WHERE id=?1",
+            [&id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, "\"gw/other\"");
 }
 
 /// `/resume ID` inside the app, for a session whose folder was deleted: the same wording as at

@@ -717,18 +717,26 @@ pub fn prepare(
         &h.synthesis,
         env,
     );
-    // a stored model that cannot be built is kept as it is (warned about, not overwritten)
+    // a stored model that cannot be used is kept as it is (warned about, not overwritten)
     let mut stored_unbuildable = false;
+    let mut model_warning = None;
     let res = match (default, stored) {
         (Ok(r), Some(m)) if r.label != m => {
-            match resolve_provider(c.provider.as_deref(), Some(&m), &cfg, &h.synthesis, env) {
+            let stored_res = match stored_model_gone(&cfg, &m) {
+                Some(why) => Err(why),
+                None => resolve_provider(c.provider.as_deref(), Some(&m), &cfg, &h.synthesis, env),
+            };
+            match stored_res {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!(
-                        "synt: warning: stored model {}: {}; using the default",
+                    let w = format!(
+                        "stored model {} is not available ({}); using {}",
                         sanitize_for_display(&m),
-                        sanitize_for_display(&e)
+                        sanitize_for_display(&e),
+                        sanitize_for_display(&r.label)
                     );
+                    eprintln!("synt: warning: {w}");
+                    model_warning = Some(w);
                     stored_unbuildable = true;
                     r
                 }
@@ -934,6 +942,7 @@ pub fn prepare(
     for n in &notices {
         eprintln!("synt: WARNING: {n}");
     }
+    notices.extend(model_warning); // already printed above
 
     let mut resumed_from_seq = None;
     let mut model_changed = None;
@@ -2043,6 +2052,19 @@ pub fn start_model_info(
             .await;
         });
     }
+}
+
+/// Why a stored `provider/model` can no longer be used although its provider is still configured:
+/// the provider's model list no longer has it (a provider without a list is not checked; an
+/// unknown provider is an error of `resolve_provider`).
+fn stored_model_gone(cfg: &Config, label: &str) -> Option<String> {
+    let (p, m) = label.split_once('/')?;
+    cfg.providers
+        .get(p)?
+        .models
+        .as_ref()
+        .filter(|l| !l.is_empty() && !l.iter().any(|x| x == m))
+        .map(|_| format!("not in the models of provider \"{p}\""))
 }
 
 pub struct Resolved {
