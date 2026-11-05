@@ -191,6 +191,8 @@ pub struct Session {
     /// Set after a compaction until the next request reports usage (display only).
     pub context_display_reset: bool,
     pub context_estimated: bool,
+    /// Set by [`Session::settle_replayed`]; a new prompt (live) clears it.
+    pub interrupted: bool,
 }
 
 impl Session {
@@ -877,6 +879,33 @@ pub struct PhaseInfo<'a> {
     pub running_agents: Vec<&'a AgentRec>,
 }
 
+impl Session {
+    /// Call once after replaying stored events: nothing is running in this process yet, so a
+    /// tool or agent without an end, or a turn without a stop, was cut short (the process died).
+    /// Returns whether something was open.
+    pub fn settle_replayed(&mut self) -> bool {
+        let at = self.last_activity;
+        let open = session_phase(self, at.unwrap_or(0)).phase != Phase::Idle;
+        for t in self.tools.items.iter_mut().filter(|t| t.end.is_none()) {
+            t.end = at;
+        }
+        for a in self
+            .agents
+            .items
+            .iter_mut()
+            .filter(|a| a.status == "running")
+        {
+            a.end = at;
+            a.status = "interrupted".into();
+        }
+        for c in self.components.items.iter_mut() {
+            c.open = 0;
+        }
+        self.interrupted = open;
+        open
+    }
+}
+
 pub fn session_phase(s: &Session, now: i64) -> PhaseInfo<'_> {
     let running: Vec<&Tool> = s.tools.values().filter(|t| t.end.is_none()).collect();
     let running_agents: Vec<&AgentRec> = s
@@ -885,7 +914,9 @@ pub fn session_phase(s: &Session, now: i64) -> PhaseInfo<'_> {
         .filter(|a| a.status == "running")
         .collect();
     let idle_for = now - s.last_activity.unwrap_or(0);
-    let phase = if !running.is_empty() {
+    let phase = if s.interrupted {
+        Phase::Idle
+    } else if !running.is_empty() {
         Phase::Tool
     } else if !running_agents.is_empty() && idle_for < 10 * 60 * 1000 {
         Phase::Agents
@@ -983,6 +1014,12 @@ pub fn entries_from_event(env: &synthesis_events::Envelope) -> Vec<Value> {
 /// Applies one event; `todo.updated` and `model.changed` set fields directly.
 pub fn apply_event(s: &mut Session, env: &synthesis_events::Envelope) {
     use synthesis_events::Event;
+    if matches!(
+        env.event,
+        Event::UserMessage { .. } | Event::TaskStarted { .. }
+    ) {
+        s.interrupted = false;
+    }
     match &env.event {
         Event::TodoUpdated { todos } => {
             s.todos = todos

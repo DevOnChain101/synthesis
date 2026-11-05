@@ -9,6 +9,14 @@ session continues in place), `--once` (print one frame and exit), plus the `synt
 (`--model`, `--sandbox`, `--allow`, `--worktree`, `--peers`, ...). `--fork-session` and
 `--permission-mode bypassPermissions` are for `synt run` only (bypass: Shift+Tab, confirm).
 
+Resuming a session whose process died mid-task (kill, closed window): nothing runs in the new
+process, so the dashboard is IDLE and tools/agents without an end in the stored events are shown
+as ended (agents as `interrupted`); the chat gets one line, `previous run was interrupted`. The
+store moves the stale `running` status to `interrupted` on resume (`Store::resume_session`), but
+never for a session another live process holds (writer lock). The phase is derived from replay by
+`Session::settle_replayed`; the later `session.started` (source `resume`) in the event log marks the
+cut for `synt run --resume` consumers.
+
 ## Commands
 
 | command | does |

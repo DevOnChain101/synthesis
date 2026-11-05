@@ -514,6 +514,7 @@ fn bang_command(text: &str) -> (bool, String) {
 
 fn activity_for(cfg: &AppConfig, replay: &[Envelope]) -> Session {
     let mut activity = session_from_events(&cfg.session_id, replay.iter());
+    activity.settle_replayed();
     activity.cwd = clean_line(&cfg.cwd);
     activity.project = clean_line(&basename(&cfg.cwd));
     if activity.model.is_empty() {
@@ -555,6 +556,20 @@ impl App {
         // agents of an earlier run are gone with its process
         chat.agents.clear();
         chat.inflight.clear();
+        // the last task of the stored run never ended: its process died (kill, closed window)
+        if activity.interrupted
+            && replay
+                .iter()
+                .rev()
+                .find_map(|e| match e.event {
+                    Event::TaskStarted { .. } => Some(true),
+                    Event::TaskEnded { .. } => Some(false),
+                    _ => None,
+                })
+                .unwrap_or(false)
+        {
+            chat.note("previous run was interrupted", "warn");
+        }
         let ran_task = replay
             .iter()
             .any(|e| matches!(e.event, Event::TaskEnded { .. }));

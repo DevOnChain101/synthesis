@@ -38,6 +38,9 @@ impl Rig {
     fn ws(&self) -> PathBuf {
         self.root().join("ws")
     }
+    fn write_script(&self, script: Value) {
+        std::fs::write(self.root().join("script.json"), script.to_string()).unwrap();
+    }
     fn write(&self, rel: &str, text: &str) {
         let p = self.home().join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -92,14 +95,26 @@ impl Rig {
         );
         std::fs::write(&sc, scenario.to_string()).unwrap();
         let driver = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/tui_pty_driver.py");
-        let st = Command::new("python3")
+        let mut child = Command::new("python3")
             .arg("-I")
             .arg(driver)
             .arg(&sc)
             .arg(&out)
             .stdin(Stdio::null())
-            .status()
+            .spawn()
             .expect("python3 is needed for the pty tests");
+        // the driver has its own 120 s alarm; this is the backstop if even that is stuck
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(150);
+        let st = loop {
+            if let Some(st) = child.try_wait().unwrap() {
+                break st;
+            }
+            if std::time::Instant::now() > end {
+                let _ = child.kill();
+                panic!("pty driver stuck for 150 s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
         assert!(st.success());
         let text = std::fs::read_to_string(out).unwrap();
         assert!(
@@ -767,4 +782,44 @@ fn usage_panel_shows_stored_history_after_a_prompt() {
     ]));
     assert!(!squash(&out).contains("collecting history"), "{out}");
     assert!(squash(&out).contains("7d"), "{}", squash(&out));
+}
+
+/// The process dies (SIGKILL, as when the terminal window is closed) in the middle of a task,
+/// once while the model is still answering and once while a tool runs. Opening the session again
+/// shows it idle: the phase of a fresh process comes from its own runtime, not from the replay.
+#[test]
+fn kill_mid_task_then_continue_shows_idle() {
+    for tool in [false, true] {
+        let mut rig = Rig::new(json!([{"text": "never", "delay_ms": 120000}]));
+        rig.size = (48, 160);
+        let mut steps = vec![expect("Enter send"), quiet(), send("hi\r")];
+        if tool {
+            rig.write_script(json!([
+                {"tools": [{"name": "Bash", "input": {"command": "sleep 20"}}]},
+                {"text": "never"}
+            ]));
+            steps.extend([expect("Bash"), quiet(), send("\r"), json!(["wait", 1.5])]);
+        } else {
+            steps.push(json!(["wait", 1.5]));
+        }
+        steps.push(json!(["kill"]));
+        rig.drive(json!(steps));
+        rig.write_script(json!([{"text": "second reply"}]));
+        let out = rig.drive_with(
+            json!([
+                expect("Enter send"),
+                json!(["wait", 1.5]),
+                send("again\r"),
+                expect_new("second reply")
+            ]),
+            &["--continue"],
+        );
+        let flat = squash(&out);
+        assert!(!flat.contains("THINKING"), "tool={tool}: {flat}");
+        assert!(!flat.contains("RUNNING TOOL"), "tool={tool}: {flat}");
+        assert!(
+            flat.contains("previous run was interrupted"),
+            "tool={tool}: {flat}"
+        );
+    }
 }
