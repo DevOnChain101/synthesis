@@ -195,7 +195,7 @@ fn approval_subagent_model_switch_and_new_folder() {
         expect_new("first reply")
     ]));
     let flat = squash(&text);
-    assert!(flat.contains("memory.written"), "no memory row");
+    assert!(!flat.contains("memory.written"), "raw memory row");
     assert!(!flat.contains("synt: error"), "{flat}");
     let ev = rig.events();
     let n = |t: &str| ev.iter().filter(|e| e.0 == t).count();
@@ -233,6 +233,61 @@ fn approval_subagent_model_switch_and_new_folder() {
         )
         .unwrap();
     assert!(used >= 2, "usage not persisted per task: {used} session(s)");
+}
+
+/// The chat hides internal rows (memory, approval, mode bookkeeping, `key=value`) but still says
+/// a denial, the end of the task and an error; `synt.tui.verbose` shows readable lines.
+#[test]
+fn chat_hides_internal_rows_keeps_denials_and_done_and_verbose_shows_readable_lines() {
+    let script = json!([
+        {"text": "first reply"},
+        {"tools": [{"name": "Edit", "input": {"file_path": "a.txt", "old_string": "alpha",
+                                              "new_string": "ALPHA"}}]},
+        {"text": "after deny"}
+    ]);
+    let steps = || {
+        json!([
+            expect("Enter send"),
+            send("hi\r"),
+            expect("first reply"),
+            quiet(),
+            send("edit it\r"),
+            expect("Do you want to proceed?"),
+            quiet(),
+            send("\x1b"),
+            expect("after deny"),
+            quiet(),
+            send("/verbose on\r"),
+            expect("verbose on"),
+            quiet()
+        ])
+    };
+    let rig = Rig::new(script.clone());
+    std::fs::write(rig.ws().join("a.txt"), "alpha beta\n").unwrap();
+    let flat = squash(&rig.drive(steps()));
+    for raw in [
+        "memory.written",
+        "memory.retrieved",
+        "session.mode_changed",
+        "approval_resolved",
+        "memory:",
+        "op=added",
+    ] {
+        assert!(!flat.contains(raw), "{raw} in the chat:\n{flat}");
+    }
+    assert!(flat.contains("approval denied (user)"), "{flat}");
+    assert!(flat.contains("Done ·"), "{flat}");
+    // verbose in the user settings: the same session draws readable one-line forms
+    let rig = Rig::new(script);
+    std::fs::write(rig.ws().join("a.txt"), "alpha beta\n").unwrap();
+    rig.write("settings.json", r#"{"synt": {"tui": {"verbose": true}}}"#);
+    let flat = squash(&rig.drive(steps()));
+    assert!(flat.contains("memory: episode note added"), "{flat}");
+    assert!(flat.contains("approval denied (user)"), "{flat}");
+    assert!(
+        !flat.contains("memory.written") && !flat.contains("op=added"),
+        "{flat}"
+    );
 }
 
 /// `/model` before the first prompt: the session is still Preparing; the restart must resume it.

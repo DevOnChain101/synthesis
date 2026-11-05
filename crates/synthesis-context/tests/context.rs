@@ -999,3 +999,134 @@ fn task_state_renders_and_dedupes() {
     s.resolve_check("cargo test");
     assert!(!s.render().unwrap().contains("cargo test"));
 }
+
+// ---------- images in compaction ----------
+
+/// Fails with the overflow marker while the prompt holds more than `max` messages.
+struct Shrinking {
+    max: usize,
+    prompts: Mutex<Vec<usize>>,
+}
+
+impl Summarizer for Shrinking {
+    fn summarize(
+        &self,
+        _s: &str,
+        p: &str,
+    ) -> impl std::future::Future<Output = Result<String, SummarizeError>> + Send {
+        let n = p.matches("user: m").count();
+        self.prompts.lock().unwrap().push(n);
+        let r = if n > self.max {
+            Err(SummarizeError(format!("{OVERFLOW_MARK}too big")))
+        } else {
+            Ok("sum".to_string())
+        };
+        async move { r }
+    }
+}
+
+fn shot(len: usize) -> Block {
+    Block::Image {
+        source: synthesis_providers::ImageSource::Base64 {
+            media_type: "image/png".into(),
+            data: "A".repeat(len),
+        },
+    }
+}
+
+#[tokio::test]
+async fn newest_message_with_big_images_survives_compaction() {
+    let mut v: Vec<Message> = (0..6)
+        .flat_map(|i| {
+            [
+                text(Role::User, &format!("m{i} {}", "x".repeat(400))),
+                text(Role::Assistant, &"y".repeat(400)),
+            ]
+        })
+        .collect();
+    // 3 x 3 MiB: over the keep budget on its own and over the tail image budget
+    let mut bs = vec![Block::Text {
+        text: "look at these".into(),
+    }];
+    bs.extend((0..3).map(|_| shot(4 * 1024 * 1024)));
+    v.push(blocks(Role::User, bs));
+    let out = compact(
+        &EST,
+        &Fake::ok("sum"),
+        &v,
+        &TaskState::default(),
+        "",
+        &CompactConfig::default(),
+    )
+    .await
+    .unwrap();
+    let last = out.last().unwrap();
+    let Content::Blocks(b) = &last.content else {
+        panic!("{last:?}")
+    };
+    assert!(
+        b.iter()
+            .any(|b| matches!(b, Block::Text { text } if text == "look at these"))
+    );
+    assert_eq!(
+        image_stats(&out).0,
+        0,
+        "over budget: placeholders, not images"
+    );
+    assert!(
+        b.iter()
+            .any(|b| matches!(b, Block::Text { text } if text.starts_with("[image: 3")))
+    );
+}
+
+#[tokio::test]
+async fn overflowing_summary_request_retries_on_less_input() {
+    let v: Vec<Message> = (0..16)
+        .map(|i| {
+            text(
+                if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                &format!("m{i} {}", "x".repeat(400)),
+            )
+        })
+        .collect();
+    let cfg = CompactConfig {
+        keep_recent_tokens: 0,
+        ..Default::default()
+    };
+    let s = Shrinking {
+        max: 2,
+        prompts: Mutex::default(),
+    };
+    let out = compact(&EST, &s, &v, &TaskState::default(), "", &cfg)
+        .await
+        .unwrap();
+    assert!(out.len() < v.len());
+    let calls = s.prompts.lock().unwrap().clone();
+    assert!(
+        calls.len() > 1 && calls.windows(2).all(|w| w[1] < w[0]),
+        "{calls:?}"
+    );
+    // a hopeless summarizer stops after the bounded retries
+    let s = Shrinking {
+        max: 0,
+        prompts: Mutex::default(),
+    };
+    assert!(matches!(
+        compact(&EST, &s, &v, &TaskState::default(), "", &cfg).await,
+        Err(CompactError::Summarizer(_))
+    ));
+    assert!(s.prompts.lock().unwrap().len() <= 6);
+}
+
+#[test]
+fn many_large_images_trigger_auto_compaction_by_size() {
+    let cfg = CompactConfig::default();
+    let m = |n: usize| blocks(Role::User, (0..n).map(|_| shot(4_000_000)).collect());
+    // 3 MB files cost ~5000 tokens each: 5 reach 80% of a 30k window, 1 does not
+    assert!(should_compact(&EST, &[m(5)], 0, 30_000, &cfg));
+    assert!(!should_compact(&EST, &[m(1)], 0, 30_000, &cfg));
+}

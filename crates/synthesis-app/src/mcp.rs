@@ -978,7 +978,22 @@ fn kv(s: &str, sep: char) -> Result<(String, String), String> {
             "{k}: looks like a credential; synthesis never writes credentials into config files. Put it in an environment variable and pass {k}{sep}${{VAR}}"
         ));
     }
+    if secret_shaped(v) || literal_auth_scheme(v) {
+        return Err(format!(
+            "{k}: the value looks like a credential; synthesis never writes credentials into config files. Put it in an environment variable and pass {k}{sep}${{VAR}}"
+        ));
+    }
     Ok((k.to_string(), v.to_string()))
+}
+
+/// `Bearer abc12345` / `Basic abc12345`: an auth scheme followed by a literal token (not `${VAR}`).
+fn literal_auth_scheme(v: &str) -> bool {
+    v.split_once(' ').is_some_and(|(s, t)| {
+        let t = t.trim();
+        (s.eq_ignore_ascii_case("bearer") || s.eq_ignore_ascii_case("basic"))
+            && t.len() >= 8
+            && !only_refs(t)
+    })
 }
 
 /// The JSON entry for `a` (Claude shape).
@@ -1806,6 +1821,47 @@ mod tests {
         };
         extra(&mut a);
         a
+    }
+
+    #[test]
+    fn env_and_header_values_are_checked_by_shape() {
+        let env = |v: &str| {
+            entry(&add("s", |a| {
+                a.command = vec!["x".into()];
+                a.env = vec![format!("NOTE={v}")];
+            }))
+        };
+        let hdr = |v: &str| {
+            entry(&add("s", |a| {
+                a.url = Some("https://h/mcp".into());
+                a.header = vec![format!("X-Custom: {v}")];
+            }))
+        };
+        for bad in [
+            "sk-fakefakefake123",
+            "ghp_abcdefghijkl",
+            "AKIAABCDEFGHIJKL",
+            "eyJhbGciOiJIUzI1",
+            "Bearer abcdefgh1234",
+            "Bearer sk-fakefakefake123",
+            "Basic dXNlcjpwYXNz",
+            "https://u:hunter2@h/x",
+        ] {
+            assert!(env(bad).is_err(), "env {bad}");
+            assert!(hdr(bad).is_err(), "header {bad}");
+        }
+        for ok in [
+            "1",
+            "/usr/bin:/bin",
+            "8080",
+            "Bearer ${TOK}",
+            "${A}",
+            "Basic ${B}",
+            "Bearer abc",
+        ] {
+            assert!(env(ok).is_ok(), "env {ok}");
+            assert!(hdr(ok).is_ok(), "header {ok}");
+        }
     }
 
     #[cfg(unix)]

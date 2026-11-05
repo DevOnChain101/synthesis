@@ -420,7 +420,8 @@ pub(crate) struct AgentCtx {
 pub(crate) struct AgentState {
     pub messages: Vec<Message>,
     pub recent: VecDeque<u64>,
-    pub compacted: bool,
+    /// Reactive (overflow) compactions this task; bounded so a hopeless request cannot loop.
+    pub overflow_compactions: u8,
     /// Provider usage anchors the size estimate; see `ContextMeter`.
     pub meter: synthesis_context::ContextMeter,
     /// Estimated tokens of the request apart from `messages` (system, tool definitions).
@@ -434,6 +435,8 @@ pub(crate) struct AgentState {
     pub drain_at: &'static str,
     /// The "model does not take images" notice was given for this agent.
     pub image_note: bool,
+    /// Images already reported as left out of requests (the notice repeats only when more go).
+    pub images_omitted: usize,
 }
 
 impl AgentState {
@@ -441,7 +444,7 @@ impl AgentState {
         Self {
             messages,
             recent: VecDeque::new(),
-            compacted: false,
+            overflow_compactions: 0,
             meter: Default::default(),
             fixed_raw: 0,
             requests: 0,
@@ -449,6 +452,7 @@ impl AgentState {
             auto_pause_until: 0,
             drain_at: "tool_round",
             image_note: false,
+            images_omitted: 0,
         }
     }
 }

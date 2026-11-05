@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex};
 
 use futures_util::StreamExt;
 use synthesis_context::{
-    CharsPerToken, CompactConfig, ContextBudget, ContextInput, InstructionFile, Scope,
-    SummarizeError, Summarizer, TaskState, assemble, compact, messages_tokens,
+    CharsPerToken, CompactConfig, CompactError, ContextBudget, ContextInput, InstructionFile,
+    OVERFLOW_MARK, Scope, SummarizeError, Summarizer, TaskState, assemble, compact, image_stats,
+    messages_tokens,
 };
 use synthesis_events::ArtifactRef;
 use synthesis_harness::{
@@ -145,12 +146,37 @@ impl Summarizer for ProviderSummarizer {
                 Ok(StreamEvent::MessageStart { message }) => usage.merge(&message.usage),
                 Ok(StreamEvent::MessageDelta { usage: Some(u), .. }) => usage.merge(&u),
                 Ok(_) => {}
-                Err(e) => return Err(SummarizeError(e.message().to_string())),
+                Err(e) => {
+                    let mark = if e.context_overflow() {
+                        OVERFLOW_MARK
+                    } else {
+                        ""
+                    };
+                    return Err(SummarizeError(format!("{mark}{}", e.message())));
+                }
             }
         }
         *self.last.lock().unwrap_or_else(|e| e.into_inner()) = text.clone();
         *self.usage.lock().unwrap_or_else(|e| e.into_inner()) = usage;
         Ok(text)
+    }
+}
+
+/// What the person reads when compaction fails (never the raw provider JSON).
+fn compact_error_text(e: &CompactError, history: &[Message]) -> String {
+    match e {
+        CompactError::Summarizer(s) if s.0.starts_with(OVERFLOW_MARK) => {
+            let (n, bytes) = image_stats(history);
+            format!(
+                "conversation too large to compact ({n} images, {:.1} MB): /images clear, \
+                 remove older screenshots with /new, or compact fewer turns",
+                bytes as f64 / 1e6
+            )
+        }
+        CompactError::Summarizer(s) => s.0.chars().take(300).collect(),
+        CompactError::Nothing => "nothing to compact".into(),
+        CompactError::EmptySummary => "the summary came back empty".into(),
+        CompactError::NoProgress { .. } => "compaction would not make the history smaller".into(),
     }
 }
 
@@ -647,7 +673,7 @@ impl ContextProvider for SynthesisContext {
                 &CompactConfig::default(),
             )
             .await
-            .map_err(|e| format!("{e:?}"))?;
+            .map_err(|e| compact_error_text(&e, history))?;
             let summary = self
                 .summarizer
                 .last
@@ -683,6 +709,28 @@ impl ContextProvider for SynthesisContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compaction_failure_reads_as_advice_not_provider_json() {
+        let big = Message {
+            role: Role::User,
+            content: Content::Blocks(vec![Block::Image {
+                source: synthesis_providers::ImageSource::Base64 {
+                    media_type: "image/png".into(),
+                    data: "A".repeat(4_000_000),
+                },
+            }]),
+        };
+        let e = CompactError::Summarizer(SummarizeError(format!(
+            "{OVERFLOW_MARK}{{\"type\":\"request_too_large\"}}"
+        )));
+        let t = compact_error_text(&e, &[big]);
+        assert!(
+            t.starts_with("conversation too large to compact (1 images, 3.0 MB)"),
+            "{t}"
+        );
+        assert!(!t.contains("request_too_large"));
+    }
 
     #[test]
     fn image_retention_defaults_to_30_days_and_validates() {
