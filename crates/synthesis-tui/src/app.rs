@@ -27,8 +27,8 @@ use synthesis_tui_render::agent::{
     Suggestions as RSug, body_sel_rows,
 };
 use synthesis_tui_render::dash::{
-    DashState, DashView, Focus, Frame, Hidden, Live, MIN_COLS, MIN_ROWS, SessionRow, Usage,
-    Workspace, render_frame, workspace_key,
+    DashState, DashView, Focus, Frame, Hidden, HistoryDay, Live, MIN_COLS, MIN_ROWS, SessionRow,
+    Usage, Workspace, render_frame, workspace_key,
 };
 use synthesis_tui_render::dialogs::HELP;
 use synthesis_tui_render::model::{
@@ -356,6 +356,8 @@ pub(crate) struct App {
     image_busy: bool,
     /// A `/files` or `/diff` scan is running: at most one.
     project_busy: bool,
+    /// Usage panel: per-day history of the stored sessions; `None` until the first load ends.
+    usage_history: Option<Vec<HistoryDay>>,
     /// `synt.tui` (user settings), edited by `/config`.
     pub(crate) tui: TuiSettings,
     /// Cross-session messaging: the requests in flight, `None` when peers are off.
@@ -583,6 +585,7 @@ impl App {
             attachments: vec![],
             image_busy: false,
             project_busy: false,
+            usage_history: None,
             peer_status: None,
             tui: TuiSettings::default(),
             esc_at: None,
@@ -1945,6 +1948,11 @@ impl App {
                 diff,
             });
         }
+    }
+
+    /// The history load answered (at start, and after each task).
+    pub fn set_usage(&mut self, h: Vec<HistoryDay>) {
+        self.usage_history = Some(h);
     }
 
     /// The scan answered (any way): the next one may start.
@@ -3586,7 +3594,8 @@ impl App {
                 index: 0,
                 usage: &usage,
                 follow: false,
-                history: &[],
+                history: self.usage_history.as_deref().unwrap_or_default(),
+                history_loading: self.usage_history.is_none(),
                 usage_metric: "tokens",
                 mcp_servers: &[],
                 mcp_live: None,

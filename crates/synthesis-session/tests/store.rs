@@ -1205,3 +1205,68 @@ fn meta_images_go_too_and_a_log_held_open_by_a_reader_is_reported_not_hidden() {
     let again = store.purge_images(30, now).unwrap();
     assert_eq!((again.images, again.wal_truncated), (0, true));
 }
+
+#[test]
+fn usage_by_day_sums_across_sessions_and_cuts_days_at_the_offset() {
+    use synthesis_events::Usage;
+    let e = env();
+    let (da, db) = (e.dir("a"), e.dir("b"));
+    let turn = |i: u64, o: u64| Event::TurnCompleted {
+        stop_reason: "end_turn".into(),
+        usage: Some(Usage {
+            input_tokens: i,
+            output_tokens: o,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            cost_usd: None,
+        }),
+        duration_ms: 1,
+    };
+    let mut a = create(&e, "sa", &da);
+    let mut b = create(&e, "sb", &db);
+    let s1 = a.append_event(turn(100, 50)).unwrap().seq;
+    let s2 = a.append_event(turn(10, 5)).unwrap().seq;
+    let s3 = a
+        .append_event(Event::UserMessage {
+            text: "hi".into(),
+            display_text: None,
+            images: vec![],
+        })
+        .unwrap()
+        .seq;
+    let s4 = b.append_event(turn(7, 3)).unwrap().seq;
+    drop((a, b));
+    let conn = rusqlite::Connection::open(e.home.join("synt.db")).unwrap();
+    let set = |sid: &str, seq: u64, ts: &str| {
+        conn.execute(
+            "UPDATE events SET ts=?1 WHERE session_id=?2 AND seq=?3",
+            rusqlite::params![ts, sid, seq as i64],
+        )
+        .unwrap();
+    };
+    // day 20513 is 2026-03-01; 23:30Z is already 03-02 at +120 min; 03-02 10:00Z is 03-02 in both
+    set("sa", s1, "2026-03-01T23:30:00.000Z");
+    set("sa", s2, "2026-03-02T10:00:00.000Z");
+    set("sa", s3, "2026-03-02T10:00:01.000Z");
+    set("sb", s4, "2026-03-02T11:00:00.000Z");
+    let r = synthesis_session::Reader::open(&e.home).unwrap();
+    let since = 0;
+    let utc = r.usage_by_day(since, 0).unwrap();
+    assert_eq!(utc.len(), 2);
+    assert_eq!(
+        (utc[0].day, utc[0].tokens, utc[0].sessions),
+        (20513, 150, 1)
+    );
+    assert_eq!(utc[1].day, 20514);
+    assert_eq!((utc[1].tokens, utc[1].output, utc[1].messages), (25, 8, 1));
+    assert_eq!(utc[1].sessions, 2);
+    let east = r.usage_by_day(since, 120).unwrap();
+    assert_eq!(east.len(), 1);
+    assert_eq!(
+        (east[0].day, east[0].tokens, east[0].sessions),
+        (20514, 175, 2)
+    );
+    // `since` cuts older events
+    let late = r.usage_by_day(1_772_445_600_000, 0).unwrap(); // 2026-03-02T10:00Z
+    assert_eq!(late.len(), 1);
+}

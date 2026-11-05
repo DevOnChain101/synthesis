@@ -41,7 +41,7 @@
 ┃                    ┃┃   3. Drop or paste an image path to attach a screenshot                                  ┃┃                                            ┃
 ┃                    ┃┃ ╭───────────────────────────────────────────────────────────────────────────────────────╮┃┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 ┃                    ┃┃ │ >  Enter send · Shift+Enter newline · / commands · @ files · ! shell · Shift+Tab mode │┃┏━ ◆ Usage ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃                    ┃┃ ╰───────────────────────────────────────────────────────────────────────────────────────╯┃┃ collecting history…                        ┃
+┃                    ┃┃ ╰───────────────────────────────────────────────────────────────────────────────────────╯┃┃ no usage yet                               ┃
 ┃                    ┃┃ ⏸ manual mode on (shift+tab to cycle)                                model · effort: auto┃┃                                            ┃
 ┗━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 tab workspace selector (when multiple) → sessions → prompt   enter send   esc interrupt   ⇧tab mode   alt+v paste image   ! shell   ctrl+o expand

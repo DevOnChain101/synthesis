@@ -21,6 +21,7 @@ mod runtime;
 mod setup;
 mod status;
 mod tty;
+mod usage;
 
 pub use link::{EventWriter, UiLink};
 pub use links::{OpenTarget, Opener, PathTarget, SystemOpener};

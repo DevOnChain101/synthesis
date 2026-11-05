@@ -74,6 +74,8 @@ pub(crate) enum Msg {
     Output(String),
     /// The scan ended, any way: `/files` and `/diff` may start again.
     ProjectDone,
+    /// The Usage panel's per-day history (empty: nothing stored).
+    Usage(Vec<synthesis_tui_render::dash::HistoryDay>),
     TaskDone(Box<TaskDone>),
     /// A `!cmd` finished (the model turn that follows is started by the runtime).
     UserCommandDone(Box<UserDone>),

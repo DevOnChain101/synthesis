@@ -251,6 +251,7 @@ fn cfg_for(o: &Options) -> AppConfig {
 struct Runner {
     env: Env,
     settings_home: Option<std::path::PathBuf>,
+    tz_offset_min: i32,
     images: Option<Arc<dyn ImageSource>>,
     host: Option<Arc<dyn TaskHost>>,
     mcp_report: Option<Box<dyn Fn() -> Vec<String>>>,
@@ -266,6 +267,21 @@ struct Runner {
 }
 
 impl Runner {
+    /// Reads the Usage panel's history off the UI thread; [`Msg::Usage`] answers.
+    fn load_usage(&self, now: i64) {
+        let (home, tz, tx) = (
+            self.settings_home.clone(),
+            self.tz_offset_min,
+            self.tx.clone(),
+        );
+        std::thread::spawn(move || {
+            let h = home
+                .map(|h| crate::usage::load(&h, now, tz))
+                .unwrap_or_default();
+            let _ = tx.send(Msg::Usage(h));
+        });
+    }
+
     /// `/compact`: while a task runs the harness compacts at its next safe point, otherwise the
     /// conversation between tasks is compacted now (on the runtime; `Msg::Compacted` returns it).
     fn compact(&mut self, app: &mut App, instructions: Option<String>, now: i64) {
@@ -705,6 +721,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
     let mut runner = Runner {
         env: o.env.clone(),
         settings_home: o.synthesis_home.clone(),
+        tz_offset_min: o.tz_offset_min,
         images: o
             .image_source
             .take()
@@ -721,6 +738,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
         tx: tx.clone(),
     };
     let mut switch = o.switch_model.take();
+    runner.load_usage(clock());
     let mut parser = KeyParser::default();
     let mut last_size = size();
     let mut dirty = true;
@@ -883,6 +901,10 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                     dirty = true;
                 }
                 Msg::ProjectDone => app.project_done(),
+                Msg::Usage(h) => {
+                    app.set_usage(h);
+                    dirty = true;
+                }
                 Msg::Wake => {}
                 Msg::Event(e) => {
                     app.on_event(&e, now);
@@ -971,6 +993,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                         runner.last_outcome = Some(out.clone());
                     }
                     app.task_done(&result, now);
+                    runner.load_usage(now);
                     if let Some(w) = warn {
                         app.note(format!("session state: {w}"), "warn");
                     }

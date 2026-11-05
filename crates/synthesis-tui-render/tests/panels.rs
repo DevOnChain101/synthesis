@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use synthesis_tui_base::text::strip_ansi;
 use synthesis_tui_render::agent::{Agent, EditorView};
 use synthesis_tui_render::dash::{
-    DashState, DashView, Focus, Hidden, Live, SessionRow, Usage, Workspace, render_frame,
-    workspace_key,
+    DashState, DashView, Focus, Hidden, HistoryDay, Live, SessionRow, Usage, Workspace,
+    render_frame, workspace_key,
 };
 use synthesis_tui_render::model::session_from_events;
 use synthesis_tui_render::util::basename;
@@ -15,6 +15,16 @@ use synthesis_tui_render::util::basename;
 const NOW: i64 = 1_800_000_000_000;
 
 fn frame(cols: usize, rows: usize, hidden: Hidden) -> Vec<String> {
+    frame_with(cols, rows, hidden, &[], false)
+}
+
+fn frame_with(
+    cols: usize,
+    rows: usize,
+    hidden: Hidden,
+    history: &[HistoryDay],
+    history_loading: bool,
+) -> Vec<String> {
     let cwd = "/work/proj".to_string();
     let mut session = session_from_events("s1", []);
     session.cwd = cwd.clone();
@@ -67,7 +77,8 @@ fn frame(cols: usize, rows: usize, hidden: Hidden) -> Vec<String> {
         index: 0,
         usage: &usage,
         follow: false,
-        history: &[],
+        history,
+        history_loading,
         usage_metric: "tokens",
         mcp_servers: &[],
         mcp_live: None,
@@ -194,4 +205,24 @@ fn a_hidden_panel_disappears_and_the_others_take_its_rows() {
         blank[first_blank..].iter().all(|b| *b),
         "a hole in the sidebar: {blank:?}"
     );
+}
+
+#[test]
+fn usage_panel_says_loading_then_no_usage_then_shows_the_data() {
+    let (loading, empty) = (
+        frame_with(160, 47, Hidden::default(), &[], true),
+        frame_with(160, 47, Hidden::default(), &[], false),
+    );
+    assert!(has(&loading, "loading usage…") && !has(&loading, "no usage yet"));
+    assert!(has(&empty, "no usage yet") && !has(&empty, "loading usage…"));
+    // three days ending today (NOW is 2027-01-15 08:00Z)
+    let day = |ago: i64, tokens: f64| HistoryDay {
+        date_ms: NOW - ago * 86_400_000,
+        tokens,
+        ..HistoryDay::default()
+    };
+    let data = [day(2, 1200.0), day(1, 0.0), day(0, 34_500.0)];
+    let loaded = frame_with(160, 47, Hidden::default(), &data, false);
+    assert!(!has(&loaded, "no usage yet") && !has(&loaded, "loading usage…"));
+    assert!(has(&loaded, "35.7k"), "{}", loaded.join("\n"));
 }
