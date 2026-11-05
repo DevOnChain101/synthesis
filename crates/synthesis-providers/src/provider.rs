@@ -155,6 +155,18 @@ pub fn anthropic_uses_bearer(
     !key.is_some_and(|k| k.starts_with("sk-ant-"))
 }
 
+/// Percent-encodes everything but RFC 3986 unreserved characters.
+fn encode_query(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 fn url_host(u: &str) -> Option<String> {
     // Same host extraction as `new URL(u).hostname` for absolute http(s) URLs.
     let rest = u.split_once("://")?.1;
@@ -298,9 +310,13 @@ impl ProviderSpec {
             models_meta: self.models_meta,
             info,
             cache,
+            list_deadline: net.list_deadline,
         }))
     }
 }
+
+/// Largest model-list page read.
+const MAX_LIST_BYTES: usize = 8 << 20;
 
 struct HttpProvider {
     id: String,
@@ -310,6 +326,7 @@ struct HttpProvider {
     models_meta: IndexMap<String, ModelMeta>,
     info: ModelInfoStore,
     cache: Option<PathBuf>,
+    list_deadline: std::time::Duration,
     /// The built-in limits table applies (OpenAI's own API reports no context length).
     openai_native: bool,
 }
@@ -323,12 +340,34 @@ impl HttpProvider {
     }
 
     async fn page(&self, url: &str, cancel: &CancellationToken) -> Result<Value, ProviderError> {
-        let resp = self.ep.send(url, None, cancel).await?;
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| self.ep.redaction.transport(e))?;
-        serde_json::from_str(&text).map_err(|_| {
+        let mut resp = self.ep.send(url, None, cancel).await?;
+        // a hard size cap and a total deadline: a gateway may stream forever or drip
+        let read = async {
+            let mut body = Vec::new();
+            while let Some(c) = resp
+                .chunk()
+                .await
+                .map_err(|e| self.ep.redaction.transport(e))?
+            {
+                if body.len() + c.len() > MAX_LIST_BYTES {
+                    return Err(ProviderError::new(
+                        ErrorKind::InvalidResponse,
+                        "model list is too large",
+                    ));
+                }
+                body.extend_from_slice(&c);
+            }
+            Ok(body)
+        };
+        let text = tokio::select! {
+            () = cancel.cancelled() => {
+                return Err(ProviderError::new(ErrorKind::Cancelled, "cancelled"));
+            }
+            r = tokio::time::timeout(self.list_deadline, read) => r.map_err(|_| {
+                ProviderError::new(ErrorKind::Network, "model list did not arrive in time")
+            })??,
+        };
+        serde_json::from_slice(&text).map_err(|_| {
             ProviderError::new(ErrorKind::InvalidResponse, "model list is not valid JSON")
         })
     }
@@ -425,7 +464,7 @@ impl ModelProvider for HttpProvider {
                 if self.protocol == Protocol::Anthropic {
                     url.push_str("?limit=1000");
                     if let Some(a) = &after {
-                        url.push_str(&format!("&after_id={a}"));
+                        url.push_str(&format!("&after_id={}", encode_query(a)));
                     }
                 }
                 let page = self.page(&url, cancel).await?;
@@ -434,7 +473,8 @@ impl ModelProvider for HttpProvider {
                         .and_then(Value::as_array)
                         .into_iter()
                         .flatten()
-                        .map(normalize_model),
+                        .map(normalize_model)
+                        .filter(|m| m.id.as_str().is_some_and(modelinfo::valid_id)),
                 );
                 match (
                     page.get("has_more") == Some(&Value::Bool(true)),

@@ -106,6 +106,8 @@ pub struct SynthesisSettings {
     /// `browser` (docs/BROWSER-LOGIN.md): secrets, login timeout, profile domains. The user's own
     /// settings file only; interpreted by `synthesis-browser` / `synthesis-app`.
     pub browser: Map<String, Value>,
+    /// `modelInfo.fetch` (user settings only): `Some(false)` turns the startup model-info fetch off.
+    pub model_info_fetch: Option<bool>,
     pub compat: Compat,
 }
 
@@ -786,6 +788,19 @@ impl Settings {
             } else {
                 self.diagnostics.push(format!(
                     "{what}: synt.browser is read from user settings only, ignored"
+                ));
+            }
+        }
+        if let Some(m) = n.get("modelInfo") {
+            if what != "user settings" {
+                self.diagnostics.push(format!(
+                    "{what}: synt.modelInfo is read from user settings only, ignored"
+                ));
+            } else if let Some(f) = m.get("fetch").and_then(Value::as_bool) {
+                self.synthesis.model_info_fetch = Some(f);
+            } else if m.get("fetch").is_some() {
+                self.diagnostics.push(format!(
+                    "{what}: synt.modelInfo.fetch must be true or false"
                 ));
             }
         }

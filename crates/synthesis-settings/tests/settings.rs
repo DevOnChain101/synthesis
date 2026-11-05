@@ -810,3 +810,32 @@ fn old_synthesis_key_is_reported_and_not_honoured() {
     );
     assert_eq!(s.synthesis.budget.max_turns, None);
 }
+
+#[test]
+fn model_info_fetch_is_a_user_setting_only() {
+    let f = fx();
+    f.user(json!({"synt":{"modelInfo":{"fetch":false}}}));
+    f.project(json!({"synt":{"modelInfo":{"fetch":true}}}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(s.synthesis.model_info_fetch, Some(false));
+    assert!(
+        s.diagnostics
+            .iter()
+            .any(|d| d.contains("project settings: synt.modelInfo is read from user settings only"))
+    );
+    let f = fx();
+    f.project(json!({"synt":{"modelInfo":{"fetch":false}}}));
+    assert_eq!(
+        f.load(ProjectTrust::Trusted).synthesis.model_info_fetch,
+        None
+    );
+    let f = fx();
+    f.user(json!({"synt":{"modelInfo":{"fetch":"no"}}}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(s.synthesis.model_info_fetch, None);
+    assert!(
+        s.diagnostics
+            .iter()
+            .any(|d| d.contains("modelInfo.fetch must be"))
+    );
+}

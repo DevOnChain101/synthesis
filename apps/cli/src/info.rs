@@ -40,6 +40,9 @@ pub struct ModelsArgs {
     refresh: bool,
 }
 
+/// Longest `models --refresh` waits for one provider.
+const REFRESH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub fn models(env: &Env, a: &ModelsArgs) -> Result<u8, String> {
     let h = homes(env)?;
     let cfg = load_config(env, &h, a.cwd.cwd.as_deref(), ProjectTrust::Untrusted)?;
@@ -85,8 +88,18 @@ pub fn models(env: &Env, a: &ModelsArgs) -> Result<u8, String> {
                 })
                 .map(|prov| {
                     rt.block_on(async move {
-                        prov.refresh_model_info(true, &CancellationToken::new())
-                            .await
+                        // one provider may not hold the command for longer than this
+                        tokio::time::timeout(
+                            REFRESH_DEADLINE,
+                            prov.refresh_model_info(true, &CancellationToken::new()),
+                        )
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(synthesis_providers::ProviderError::new(
+                                synthesis_providers::ErrorKind::Network,
+                                "no answer in time",
+                            ))
+                        })
                     })
                 });
             match found {
@@ -99,7 +112,11 @@ pub fn models(env: &Env, a: &ModelsArgs) -> Result<u8, String> {
                     }
                 }
                 Ok(Err(e)) | Err(e) => {
-                    eprintln!("synt: {id}: model discovery failed: {}", e.message())
+                    eprintln!(
+                        "synt: {}: model discovery failed: {}",
+                        san(id),
+                        san(e.message())
+                    )
                 }
             }
         }
@@ -115,7 +132,7 @@ pub fn models(env: &Env, a: &ModelsArgs) -> Result<u8, String> {
             .iter()
             .map(|(v, p, m, s)| {
                 let f = facts(p, m).unwrap_or_default();
-                json!({"value": v, "provider": p, "model": m, "source": s,
+                json!({"value": san(v), "provider": san(p), "model": san(m), "source": s,
                     "context_window": f.context_window, "max_output": f.max_output, "vision": f.vision})
             })
             .collect();
@@ -128,12 +145,13 @@ pub fn models(env: &Env, a: &ModelsArgs) -> Result<u8, String> {
                 let f = facts(p, m).unwrap_or_default();
                 let vision = f.vision.map_or("-", |b| if b { "yes" } else { "no" });
                 out!(
-                    "{v}\t{}\t{}\t{vision}",
+                    "{}\t{}\t{}\t{vision}",
+                    san(v),
                     n(f.context_window),
                     n(f.max_output)
                 );
             } else {
-                out!("{v}");
+                out!("{}", san(v));
             }
         }
         if rows.is_empty() {

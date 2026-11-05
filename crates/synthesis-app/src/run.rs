@@ -1226,16 +1226,20 @@ pub fn prepare(
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    start_model_info(
-        tokio_rt.handle(),
-        &cfg,
-        &h.synthesis,
-        env,
-        (
-            res.label.split('/').next().unwrap_or_default(),
-            &res.provider,
-        ),
-    );
+    // `synt.modelInfo.fetch` is the user's own setting: a repository cannot switch it
+    if user_settings.synthesis.model_info_fetch != Some(false) {
+        start_model_info(
+            tokio_rt.handle(),
+            &cfg,
+            &user_cfg,
+            &h.synthesis,
+            env,
+            (
+                res.label.split('/').next().unwrap_or_default(),
+                &res.provider,
+            ),
+        );
+    }
     let mut mplan = crate::mcp::plan(
         &user_cfg,
         &settings,
@@ -1910,13 +1914,16 @@ fn agent_model_resolver(cfg: &Config, label: &str) -> synthesis_harness::ModelRe
     })
 }
 
-/// Starts fetching model info (context window, max output, ...) for every configured provider in
-/// the background: the active one updates `active` in place, the others only rewrite their cache
-/// file (read at the next start or `/model` switch). A fresh cache, a provider without a
+/// Starts fetching model info (context window, max output, ...) in the background for the active
+/// provider and for every other one that has declared models or `discover: true` and a credential
+/// (`discover: false` is never contacted; each provider gets only its own key). The active one
+/// updates `active` in place; the others come from the user's own config (`user_cfg`, never a
+/// project's) and only rewrite their cache file (read at the next start or `/model` switch). A fresh cache, a provider without a
 /// credential and any failure (offline, timeout) are silent; nothing here blocks the UI.
 pub fn start_model_info(
     rt: &tokio::runtime::Handle,
     cfg: &Config,
+    user_cfg: &Config,
     synthesis_home: &Path,
     env: &Env,
     active: (&str, &Arc<dyn ModelProvider>),
@@ -1926,7 +1933,17 @@ pub fn start_model_info(
         header_timeout: std::time::Duration::from_secs(5),
         ..NetSettings::default()
     };
-    for (id, p) in &cfg.providers {
+    let others = user_cfg.providers.iter().filter(|(id, _)| *id != active.0);
+    for (id, p) in cfg
+        .providers
+        .get_key_value(active.0)
+        .into_iter()
+        .chain(others)
+    {
+        let wanted = p.discover == Some(true) || p.models.as_ref().is_some_and(|m| !m.is_empty());
+        if p.discover == Some(false) || (id != active.0 && !wanted) {
+            continue;
+        }
         let provider = if id == active.0 {
             active.1.clone()
         } else {
@@ -2186,6 +2203,85 @@ fn artifact_to_dir(dir: PathBuf) -> PutArtifact {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server that counts the connections it gets and answers an empty model list.
+    fn counting_server() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n2 = n.clone();
+        std::thread::spawn(move || {
+            for mut s in l.incoming().flatten() {
+                n2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut b = [0u8; 2048];
+                let _ = s.read(&mut b);
+                let body = r#"{"data":[]}"#;
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (url, n)
+    }
+
+    #[test]
+    fn startup_fetch_skips_discover_false_and_providers_nobody_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("h");
+        std::fs::create_dir_all(&home).unwrap();
+        let names = ["act", "listed", "nodisc", "bare"];
+        let servers: Vec<_> = names.iter().map(|_| counting_server()).collect();
+        let prov = |i: usize, extra: &str| {
+            format!(
+                r#""{}":{{"type":"anthropic","baseURL":"{}","apiKey":"{{env:SYNT_TEST_K}}"{extra}}}"#,
+                names[i], servers[i].0
+            )
+        };
+        let json = format!(
+            r#"{{"$schema":"config.json/v1","providers":{{{},{},{},{}}}}}"#,
+            prov(0, r#","models":["m"]"#),
+            prov(1, r#","models":["m"]"#),
+            prov(2, r#","models":["m"],"discover":false"#),
+            prov(3, "")
+        );
+        std::fs::write(home.join("synt.json"), json).unwrap();
+        let env = Env::from_pairs([
+            ("HOME", dir.path().to_str().unwrap()),
+            ("SYNT_HOME", home.to_str().unwrap()),
+            ("SYNT_TEST_K", "sk-test-0123456789abcdef"),
+        ]);
+        let h = homes(&env).unwrap();
+        let cfg = load_config(&env, &h, None, ProjectTrust::Untrusted).unwrap();
+        let res = resolve_provider(None, Some("act/m"), &cfg, &h.synthesis, &env).unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        start_model_info(
+            rt.handle(),
+            &cfg,
+            &cfg,
+            &h.synthesis,
+            &env,
+            ("act", &res.provider),
+        );
+        let hits = |i: usize| servers[i].1.load(std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..100 {
+            if hits(0) == 1 && hits(1) == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(
+            (hits(0), hits(1), hits(2), hits(3)),
+            (1, 1, 0, 0),
+            "active and listed are asked; discover:false and unlisted are not"
+        );
+    }
 
     #[test]
     fn agent_models_resolve_only_within_the_runs_provider() {

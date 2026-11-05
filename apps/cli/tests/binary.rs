@@ -241,7 +241,12 @@ fn models_refresh_prints_context_columns_and_writes_the_cache() {
     assert!(out.contains("gw/big\t1000000\t64000\tyes"), "{out}");
     assert!(out.contains("gw/plain\t-\t-\t-"), "{out}");
 
-    let cache = home.join("cache/models/gw.json");
+    let cache = std::fs::read_dir(home.join("cache/models"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
     let file = std::fs::read_to_string(&cache).unwrap();
     assert!(file.contains("\"context_window\": 1000000"), "{file}");
     assert!(!file.contains("sk-test"), "no key in the cache");
@@ -259,4 +264,46 @@ fn models_refresh_prints_context_columns_and_writes_the_cache() {
         (&big["context_window"], &big["max_output"], &big["vision"]),
         (&1_000_000.into(), &64_000.into(), &true.into())
     );
+}
+
+#[test]
+fn models_refresh_never_prints_a_terminal_escape_from_the_provider() {
+    let h = tempfile::tempdir().unwrap();
+    let home = h.path().join("synthesis");
+    std::fs::create_dir_all(&home).unwrap();
+    let url = serve_json(
+        r#"{"data":[{"id":"fine"},{"id":"x\u001b]0;pwn\u0007"},{"id":"y\u001b[2J\u009b31m"},{"id":"z\u202eevil"}],"has_more":false}"#,
+    );
+    std::fs::write(
+        home.join("synt.json"),
+        format!(
+            r#"{{"$schema":"config.json/v1","providers":{{"gw":{{"type":"anthropic","baseURL":"{url}","apiKey":"{{env:SYNT_TEST_GW_KEY}}"}}}}}}"#
+        ),
+    )
+    .unwrap();
+    for extra in [&["--refresh"][..], &["--refresh", "--json"][..]] {
+        let mut args = vec!["models"];
+        args.extend(extra);
+        let o = Command::new(env!("CARGO_BIN_EXE_synt"))
+            .args(&args)
+            .env_clear()
+            .env("HOME", h.path())
+            .env("SYNT_HOME", &home)
+            .env("SYNT_TEST_GW_KEY", "sk-test-0123456789abcdef")
+            .output()
+            .unwrap();
+        let (out, err) = (text(&o.stdout), text(&o.stderr));
+        assert!(out.contains("gw/fine"), "{out}");
+        for s in [&out, &err] {
+            assert!(
+                !s.chars()
+                    .any(|c| c == '\u{1b}' || c == '\u{9b}' || c == '\u{202e}' || c == '\u{7}'),
+                "{s:?}"
+            );
+        }
+        assert!(
+            !out.contains("pwn") && !out.contains("evil"),
+            "dropped, not shown: {out}"
+        );
+    }
 }

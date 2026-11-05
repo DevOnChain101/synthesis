@@ -22,6 +22,8 @@ pub struct NetSettings {
     /// Max wait for the response headers after the request was sent (a server that accepts the
     /// connection and then says nothing).
     pub header_timeout: Duration,
+    /// Longest wait for the body of one model-list page (a gateway may drip or never finish).
+    pub list_deadline: Duration,
 }
 
 impl Default for NetSettings {
@@ -30,6 +32,7 @@ impl Default for NetSettings {
             connect_timeout: Duration::from_secs(30),
             idle_timeout: Duration::from_secs(300),
             header_timeout: Duration::from_secs(120),
+            list_deadline: Duration::from_secs(30),
         }
     }
 }

@@ -1027,3 +1027,120 @@ fn only_openai_native_gets_the_builtin_table() {
         None
     );
 }
+
+#[tokio::test]
+async fn a_model_list_over_the_size_cap_is_an_error_not_memory() {
+    let big = format!(
+        r#"{{"data":[{{"id":"m","pad":"{}"}}]}}"#,
+        "x".repeat(9 << 20)
+    );
+    let mock = start(vec![Reply::Status {
+        code: 200,
+        headers: vec![],
+        body: big,
+    }])
+    .await;
+    let p = provider(
+        Protocol::OpenAi,
+        &mock,
+        Auth::Bearer(Secret::new(KEY)),
+        fast_retry(0),
+    );
+    let e = p.list_models(&CancellationToken::new()).await.unwrap_err();
+    assert!(e.to_string().contains("too large"), "{e}");
+}
+
+fn with_list_deadline(base: &str, ms: u64) -> Arc<dyn ModelProvider> {
+    ProviderSpec {
+        id: "gw".into(),
+        protocol: Protocol::OpenAi,
+        base_url: Some(base.into()),
+        auth: Auth::Bearer(Secret::new(KEY)),
+        headers: Default::default(),
+        models_meta: Default::default(),
+    }
+    .connect(
+        &Env::default(),
+        &NetSettings {
+            list_deadline: Duration::from_millis(ms),
+            ..Default::default()
+        },
+        fast_retry(0),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_model_list_body_that_stalls_or_drips_hits_the_deadline() {
+    // headers, then nothing
+    let mock = start(vec![Reply::Stall]).await;
+    let t = Instant::now();
+    let e = with_list_deadline(&mock.base, 200)
+        .list_models(&CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("in time"), "{e}");
+    assert!(t.elapsed() < Duration::from_secs(3));
+
+    // one byte every 40 ms of a 100000-byte body: each read succeeds, the total does not
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut s, _) = l.accept().await.unwrap();
+        let mut b = [0u8; 2048];
+        let _ = s.read(&mut b).await;
+        let _ = s
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 100000\r\n\r\n")
+            .await;
+        for _ in 0..1000 {
+            if s.write_all(b" ").await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+    });
+    let t = Instant::now();
+    let e = with_list_deadline(&base, 300)
+        .list_models(&CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("in time"), "{e}");
+    assert!(t.elapsed() < Duration::from_secs(3));
+}
+
+#[tokio::test]
+async fn ids_with_terminal_escapes_are_not_listed_and_after_id_is_encoded() {
+    let mock = start(vec![
+        status(
+            200,
+            vec![],
+            json!({"data":[{"id":"ok-1"},{"id":"x\u{1b}]0;pwn\u{7}"},{"id":"y\u{1b}[2J"}],
+                   "has_more":true,"last_id":"x&limit=1 #"}),
+        ),
+        status(
+            200,
+            vec![],
+            json!({"data":[{"id":"ok-2"}],"has_more":false}),
+        ),
+    ])
+    .await;
+    let p = provider(
+        Protocol::Anthropic,
+        &mock,
+        Auth::ApiKey(Secret::new(KEY)),
+        fast_retry(0),
+    );
+    let ids: Vec<_> = p
+        .list_models(&CancellationToken::new())
+        .await
+        .unwrap()
+        .iter()
+        .map(|m| m.id.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, ["ok-1", "ok-2"]);
+    let second = mock.req(1);
+    assert!(
+        second.starts_with("GET /v1/models?limit=1000&after_id=x%26limit%3D1%20%23 "),
+        "{second}"
+    );
+}
