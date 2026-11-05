@@ -403,6 +403,7 @@ fn round(
         label,
         models,
         effort_tiers,
+        context_window,
         sandbox,
         notices,
         homes: ph,
@@ -496,6 +497,7 @@ fn round(
         o.model = Some(label);
         o.models = models;
         o.effort_tiers = effort_tiers;
+        o.context_window = context_window;
         o.sandbox = sandbox;
         o.startup_notes = notices;
         o.memory = Some(notes.hook());

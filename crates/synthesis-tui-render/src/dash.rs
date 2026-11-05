@@ -426,24 +426,19 @@ fn open_todos(s: &DashState) -> usize {
         .count()
 }
 
-fn context_size(session: &Session, tap: Option<&Tap>, agent_window: Option<f64>) -> f64 {
-    if let Some(c) = tap.and_then(|t| t.context_size).filter(|c| *c != 0.0) {
-        return c;
-    }
-    if let Some(c) = agent_window.filter(|c| *c != 0.0) {
-        return c;
-    }
-    if session.model.to_lowercase().contains("1m") {
-        1_000_000.0
-    } else {
-        200_000.0
-    }
+/// The harness's resolved window first (it is the one compaction uses), then the tap's. `None` =
+/// unknown: nothing is guessed from the model name.
+fn context_size(tap: Option<&Tap>, agent_window: Option<f64>) -> Option<f64> {
+    agent_window
+        .or_else(|| tap.and_then(|t| t.context_size))
+        .filter(|c| *c != 0.0)
 }
 
-fn ctx_pct_of(s: &DashState) -> f64 {
+/// `None` while the window is unknown.
+fn ctx_pct_of(s: &DashState) -> Option<f64> {
     let tap = s.usage.tap.as_ref();
     if s.session.context_display_reset {
-        return 0.0;
+        return Some(0.0);
     }
     let from_tap = if s.session.context_estimated {
         None
@@ -451,12 +446,11 @@ fn ctx_pct_of(s: &DashState) -> f64 {
         tap.and_then(|t| t.context_pct)
     };
     from_tap
-        .unwrap_or(
-            s.session.context_used as f64
-                / context_size(s.session, tap, s.agent.and_then(|a| a.context_window))
-                * 100.0,
-        )
-        .min(100.0)
+        .or_else(|| {
+            context_size(tap, s.agent.and_then(|a| a.context_window))
+                .map(|c| s.session.context_used as f64 / c * 100.0)
+        })
+        .map(|p| p.min(100.0))
 }
 
 fn thinking_wave(frame: usize, w: usize) -> String {
@@ -525,7 +519,7 @@ fn status_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> Lines 
         lines.push(paint(COL_MUTED, "  waiting for the next prompt…"));
     }
     let tap = s.usage.tap.as_ref();
-    let ctx_max = context_size(session, tap, s.agent.and_then(|a| a.context_window));
+    let ctx_max = context_size(tap, s.agent.and_then(|a| a.context_window));
     let ctx_pct = ctx_pct_of(s);
     let bw = u((w - 32).max(8));
     let nums = paint(
@@ -533,16 +527,19 @@ fn status_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> Lines 
         &format!(
             " {}/{}",
             fmt_num(Some(session.context_used as f64)),
-            fmt_num(Some(ctx_max))
+            ctx_max.map_or("?".to_string(), |c| fmt_num(Some(c)))
         ),
     );
     lines.push(format!(
         "{} {} {}{nums}",
         paint(COL_MUTED, "Context "),
-        bar(Some(ctx_pct), bw, frame, !idle),
+        bar(ctx_pct, bw, frame, !idle),
         paint(
-            level_color(ctx_pct),
-            &format!("{}%", pad_start(&to_fixed(ctx_pct, 0), 3))
+            level_color(ctx_pct.unwrap_or(0.0)),
+            &ctx_pct.map_or("  ?".to_string(), |p| format!(
+                "{}%",
+                pad_start(&to_fixed(p, 0), 3)
+            ))
         )
     ));
     let quota = |name: &str, win: &Quota| {
@@ -2554,8 +2551,11 @@ fn header(s: &DashState, w: i64, frame: usize, now: i64) -> String {
             format!(
                 "{}{} {}",
                 paint(COL_MUTED, "ctx "),
-                mini_bar(ctx_pct, 6),
-                paint(level_color(ctx_pct), &format!("{}%", to_fixed(ctx_pct, 0)))
+                mini_bar(ctx_pct.unwrap_or(0.0), 6),
+                paint(
+                    level_color(ctx_pct.unwrap_or(0.0)),
+                    &ctx_pct.map_or("?".to_string(), |p| format!("{}%", to_fixed(p, 0)))
+                )
             ),
         ),
         (
@@ -2661,7 +2661,7 @@ fn header_rule(w: i64) -> String {
 fn topology_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> Lines {
     let tap = s.usage.tap.as_ref();
     let opts = FlowOpts {
-        context_size: tap.and_then(|t| t.context_size),
+        context_size: context_size(tap, s.agent.and_then(|a| a.context_window)),
         ctx_pct: if s.session.context_display_reset {
             Some(0.0)
         } else if !s.session.context_estimated {

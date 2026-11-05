@@ -44,7 +44,18 @@ fn scene(agents: usize) -> String {
         (60, 11),
     ] {
         out += &format!("--- {w}x{h}\n");
-        for row in render_flow(&s, w, h, 0, NOW, FlowOpts::default()) {
+        for row in render_flow(
+            &s,
+            w,
+            h,
+            0,
+            NOW,
+            // a known window: the wires are under test, not the unknown-window "?"
+            FlowOpts {
+                context_size: Some(200_000.0),
+                ..FlowOpts::default()
+            },
+        ) {
             out += strip_ansi(&row).trim_end();
             out.push('\n');
         }

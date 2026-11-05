@@ -270,6 +270,21 @@ impl Harness {
         agent: &AgentCtx,
         st: &mut AgentState,
     ) -> Result<Request, String> {
+        if task.caps.context_window.is_none()
+            && agent.agent_id.is_none()
+            && !self
+                .window_noted
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.notice(
+                task,
+                "warning",
+                format!(
+                    "context window unknown for {}: assuming 200k; set limit.context",
+                    self.config.model
+                ),
+            );
+        }
         let built = self.context.build(&st.messages, agent.prompt.as_deref())?;
         let max_output = task
             .caps
@@ -350,8 +365,14 @@ impl Harness {
         messages_tokens(&CharsPerToken::default(), &st.messages)
     }
 
+    /// The window compaction is measured against: the model's, else the 200k fallback.
     pub(crate) fn window(task: &TaskRun) -> u64 {
         task.caps.context_window.unwrap_or(DEFAULT_WINDOW).max(1)
+    }
+
+    /// The window shown to people (`window_tokens` of the events): 0 = unknown.
+    fn reported_window(task: &TaskRun) -> u64 {
+        task.caps.context_window.map_or(0, |w| w.max(1))
     }
 
     fn auto_due(&self, task: &TaskRun, st: &AgentState, used: u64) -> bool {
@@ -363,7 +384,7 @@ impl Harness {
     }
 
     fn emit_usage(&self, task: &TaskRun, agent: &AgentCtx, used: u64, source: &str, stale: bool) {
-        let window = Self::window(task);
+        let window = Self::reported_window(task);
         self.emit(
             task,
             agent,
@@ -371,7 +392,11 @@ impl Harness {
             Event::ContextUsage {
                 used_tokens: used,
                 window_tokens: window,
-                percent: used as f64 * 100.0 / window as f64,
+                percent: if window == 0 {
+                    0.0
+                } else {
+                    used as f64 * 100.0 / window as f64
+                },
                 source: source.into(),
                 stale,
             },
@@ -412,7 +437,7 @@ impl Harness {
         instructions: &str,
     ) -> Result<(u64, u64), String> {
         let started = std::time::Instant::now();
-        let window = Self::window(task);
+        let window = Self::reported_window(task);
         let before = st.meter.estimate(st.fixed_raw + self.messages_raw(st));
         let hook = self
             .run_hook(

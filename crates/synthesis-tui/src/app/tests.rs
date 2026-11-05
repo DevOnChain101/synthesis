@@ -19,6 +19,7 @@ fn cfg(cwd: &str) -> AppConfig {
         mode: Mode::Default,
         models: vec!["fake/a".into(), "fake/b".into()],
         effort_tiers: vec!["low".into(), "medium".into(), "high".into()],
+        context_window: None,
         extra_commands: vec![],
         saved: vec![SavedSession {
             id: "abcdef123456".into(),

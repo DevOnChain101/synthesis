@@ -12,6 +12,7 @@ pub mod anthropic;
 pub mod capabilities;
 pub mod error;
 pub mod http;
+pub mod modelinfo;
 pub mod openai;
 pub mod provider;
 pub mod retry;

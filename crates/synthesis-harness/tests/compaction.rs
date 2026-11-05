@@ -110,6 +110,7 @@ fn opts(p: &Arc<Probe>) -> Opts {
     Opts {
         tools: ToolBox::empty().with_tool(p.clone()),
         allow: vec!["Probe".into()],
+        context_window: Some(200_000),
         ..Opts::default()
     }
 }
@@ -463,6 +464,72 @@ async fn response_without_usage_gives_a_stale_estimate() {
     let mut r = Rig::new(Opts::default(), vec![t]);
     r.run("hello").await;
     assert_eq!(ctx_events(&r), ["usage:estimate:true"]);
+}
+
+/// The same 190k request on a 200k model and on a 1M model (what `/model` switches between):
+/// the threshold and the reported percent follow the window of the model in use.
+#[tokio::test]
+async fn the_window_of_the_current_model_sets_the_threshold_and_the_percent() {
+    let mut seen = vec![];
+    for window in [200_000, 1_000_000] {
+        let sum = Sum::new(false, "short summary");
+        let p = Probe::new("Probe", SideEffectClass::Read, 0, "r");
+        let o = Opts {
+            context_window: Some(window),
+            ..opts(&p)
+        };
+        let turns = vec![tool(0, BIG), tool(1, SMALL), Turn::text("done")];
+        let s2 = sum.clone();
+        let mut r = Rig::build(o, turns, move |h, _| {
+            h.with_context(Arc::new(Real { sum: s2, keep: 20 }))
+        });
+        let out = r.run(&long_request()).await;
+        assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
+        let first = r.find(|e| match e {
+            Event::ContextUsage {
+                window_tokens,
+                percent,
+                ..
+            } => Some((*window_tokens, *percent)),
+            _ => None,
+        })[0];
+        seen.push((sum.calls(), first));
+    }
+    assert_eq!(seen[0], (1, (200_000, 95.0)), "190k of 200k compacts");
+    assert_eq!(seen[1], (0, (1_000_000, 19.0)), "190k of 1M does not");
+}
+
+#[tokio::test]
+async fn an_unknown_window_is_reported_as_zero_and_compacts_against_200k_with_one_notice() {
+    let sum = Sum::new(false, "short summary");
+    let p = Probe::new("Probe", SideEffectClass::Read, 0, "r");
+    let o = Opts {
+        context_window: None,
+        ..opts(&p)
+    };
+    let turns = vec![tool(0, BIG), tool(1, SMALL), Turn::text("done")];
+    let s2 = sum.clone();
+    let mut r = Rig::build(o, turns, move |h, _| {
+        h.with_context(Arc::new(Real { sum: s2, keep: 20 }))
+    });
+    let out = r.run(&long_request()).await;
+    assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
+    assert_eq!(sum.calls(), 1, "the 200k fallback still compacts");
+    let windows = r.find(|e| match e {
+        Event::ContextUsage {
+            window_tokens,
+            percent,
+            ..
+        } => Some((*window_tokens, *percent)),
+        _ => None,
+    });
+    assert!(windows.iter().all(|w| *w == (0, 0.0)), "{windows:?}");
+    let notes = r.find(|e| match e {
+        Event::Notice { text, .. } if text.contains("context window unknown") => Some(text.clone()),
+        _ => None,
+    });
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("assuming 200k; set limit.context"));
 }
 
 fn shot_msg(label: &str, b64_len: usize) -> Message {

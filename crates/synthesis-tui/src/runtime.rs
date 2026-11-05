@@ -112,6 +112,8 @@ pub struct Options {
     pub models: Vec<String>,
     /// `effort_tiers` of the current model; empty disables `/effort`.
     pub effort_tiers: Vec<String>,
+    /// The current model's context window if known; it replaces the one in a replayed history.
+    pub context_window: Option<u64>,
     /// Applies a model choice: returns the rebuilt harness and its label. Without it `/model`
     /// only lists.
     pub switch_model: Option<ModelSwitch>,
@@ -172,6 +174,7 @@ impl Options {
             sandbox: SandboxStatus::default(),
             models: vec![],
             effort_tiers: vec![],
+            context_window: None,
             switch_model: None,
             extra_commands: vec![],
             mcp_report: None,
@@ -226,6 +229,7 @@ fn cfg_for(o: &Options) -> AppConfig {
         },
         models: o.models.clone(),
         effort_tiers: o.effort_tiers.clone(),
+        context_window: o.context_window,
         extra_commands: o
             .extra_commands
             .iter()
@@ -1259,6 +1263,7 @@ pub fn render_once(o: &OnceOptions, out: &mut impl Write) -> io::Result<()> {
         mode: o.mode,
         models: vec![],
         effort_tiers: vec![],
+        context_window: None,
         extra_commands: vec![],
         saved: o.saved.clone(),
         home: None,

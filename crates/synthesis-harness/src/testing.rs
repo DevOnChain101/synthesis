@@ -238,7 +238,11 @@ pub type Responder = Arc<dyn Fn(&Request) -> Option<Turn> + Send + Sync>;
 impl FakeProvider {
     pub fn new(turns: impl IntoIterator<Item = Turn>) -> Self {
         Self {
-            caps: ProviderCapabilities::defaults(Protocol::Anthropic),
+            caps: ProviderCapabilities {
+                // a known window: an unknown one adds a notice to every run
+                context_window: Some(200_000),
+                ..ProviderCapabilities::defaults(Protocol::Anthropic)
+            },
             script: Mutex::new(turns.into_iter().collect()),
             requests: Mutex::default(),
             responder: None,

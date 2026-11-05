@@ -504,6 +504,8 @@ pub struct Harness {
     pub(crate) peers: Option<Arc<crate::peer::PeerLink>>,
     /// Passed commands of each task's latest verification report; taken by `verified_commands`.
     pub(crate) verified: Mutex<HashMap<String, Vec<VerifiedCommand>>>,
+    /// The "context window unknown" notice was shown.
+    pub(crate) window_noted: AtomicBool,
 }
 
 impl Harness {
@@ -545,6 +547,7 @@ impl Harness {
             read_ledger: Arc::default(),
             compact_wanted: Mutex::default(),
             reasoning_effort: Mutex::default(),
+            window_noted: AtomicBool::new(false),
             verify_ok: Mutex::default(),
             rule_store: None,
             hub: crate::hub::Hub::default(),
