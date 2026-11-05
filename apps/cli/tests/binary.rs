@@ -190,6 +190,17 @@ fn no_subcommand_prints_usage_and_exits_2() {
     assert!(o.stdout.is_empty());
 }
 
+/// What a child needs for sockets after `env_clear`: on Windows, Winsock fails to start without
+/// `SystemRoot` (os error 10106), so a provider request from a cleared environment never connects.
+fn host_env(c: &mut Command) -> &mut Command {
+    for k in ["PATH", "SystemRoot", "ComSpec", "TEMP", "TMP"] {
+        if let Some(v) = std::env::var_os(k) {
+            c.env(k, v);
+        }
+    }
+    c
+}
+
 /// Serves `body` as JSON to every request on a local port until the test ends.
 fn serve_json(body: &'static str) -> String {
     use std::io::{Read, Write};
@@ -226,20 +237,23 @@ fn models_refresh_prints_context_columns_and_writes_the_cache() {
     )
     .unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_synt"))
-            .args(args)
-            .env_clear()
-            .env("HOME", h.path())
-            .env("SYNT_HOME", &home)
-            .env("SYNT_TEST_GW_KEY", "sk-test-0123456789abcdef")
-            .output()
-            .unwrap()
+        host_env(
+            Command::new(env!("CARGO_BIN_EXE_synt"))
+                .args(args)
+                .env_clear(),
+        )
+        .env("HOME", h.path())
+        .env("SYNT_HOME", &home)
+        .env("SYNT_TEST_GW_KEY", "sk-test-0123456789abcdef")
+        .output()
+        .unwrap()
     };
     let o = run(&["models", "--refresh"]);
     assert!(o.status.success(), "{}", text(&o.stderr));
     let out = text(&o.stdout);
-    assert!(out.contains("gw/big\t1000000\t64000\tyes"), "{out}");
-    assert!(out.contains("gw/plain\t-\t-\t-"), "{out}");
+    let err = text(&o.stderr);
+    assert!(out.contains("gw/big\t1000000\t64000\tyes"), "{out}\n{err}");
+    assert!(out.contains("gw/plain\t-\t-\t-"), "{out}\n{err}");
 
     let cache = std::fs::read_dir(home.join("cache/models"))
         .unwrap()
@@ -284,14 +298,16 @@ fn models_refresh_never_prints_a_terminal_escape_from_the_provider() {
     for extra in [&["--refresh"][..], &["--refresh", "--json"][..]] {
         let mut args = vec!["models"];
         args.extend(extra);
-        let o = Command::new(env!("CARGO_BIN_EXE_synt"))
-            .args(&args)
-            .env_clear()
-            .env("HOME", h.path())
-            .env("SYNT_HOME", &home)
-            .env("SYNT_TEST_GW_KEY", "sk-test-0123456789abcdef")
-            .output()
-            .unwrap();
+        let o = host_env(
+            Command::new(env!("CARGO_BIN_EXE_synt"))
+                .args(&args)
+                .env_clear(),
+        )
+        .env("HOME", h.path())
+        .env("SYNT_HOME", &home)
+        .env("SYNT_TEST_GW_KEY", "sk-test-0123456789abcdef")
+        .output()
+        .unwrap();
         let (out, err) = (text(&o.stdout), text(&o.stderr));
         assert!(out.contains("gw/fine"), "{out}");
         for s in [&out, &err] {

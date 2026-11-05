@@ -531,3 +531,79 @@ async fn an_unknown_window_is_reported_as_zero_and_compacts_against_200k_with_on
     assert_eq!(notes.len(), 1, "{notes:?}");
     assert!(notes[0].contains("assuming 200k; set limit.context"));
 }
+
+fn shot_msg(label: &str, b64_len: usize) -> Message {
+    use synthesis_providers::{Block, Content, ImageSource, Role};
+    Message {
+        role: Role::User,
+        content: Content::Blocks(vec![
+            Block::Text { text: label.into() },
+            Block::Image {
+                source: ImageSource::Base64 {
+                    media_type: "image/png".into(),
+                    data: "A".repeat(b64_len),
+                },
+            },
+        ]),
+    }
+}
+
+fn image_count(m: &Message) -> usize {
+    use synthesis_providers::{Block, Content};
+    match &m.content {
+        Content::Blocks(b) => b
+            .iter()
+            .filter(|b| matches!(b, Block::Image { .. }))
+            .count(),
+        Content::Text(_) => 0,
+    }
+}
+
+#[tokio::test]
+async fn older_images_leave_the_request_but_not_the_history() {
+    let mut r = Rig::new(Opts::default(), vec![Turn::text("seen")]);
+    let mut req = synthesis_harness::TaskRequest::new("and now?");
+    // 4 screenshots of 1.5 MB each (decoded): the oldest two exceed the keep-2 policy
+    req.history = (0..4)
+        .map(|i| shot_msg(&format!("shot{i}"), 2_000_000))
+        .collect();
+    let out = r.run_with(req, CancellationToken::new()).await;
+    assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
+    let sent = &r.requests()[0].messages;
+    assert_eq!(
+        sent.iter().map(image_count).collect::<Vec<_>>(),
+        [0, 0, 1, 1, 0]
+    );
+    assert!(user_text(&sent[0]).contains("[image: 1, removed to save space]"));
+    assert_eq!(
+        out.messages.iter().map(image_count).sum::<usize>(),
+        4,
+        "the stored history keeps every image"
+    );
+    let notes = r.find(|e| match e {
+        Event::Notice { text, .. } if text.contains("older screenshots omitted") => {
+            Some(text.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(notes.len(), 1, "{notes:?}");
+}
+
+#[tokio::test]
+async fn overflow_compacts_again_but_only_a_bounded_number_of_times() {
+    let sum = Sum::new(false, "s");
+    let turns = |n: usize| {
+        let mut t = vec![tool(0, SMALL), tool(1, SMALL), tool(2, SMALL)];
+        t.extend((0..n).map(|_| Turn::context_overflow()));
+        t.push(Turn::text("fits"));
+        t
+    };
+    let mut r = rig(turns(9), &sum, 20, "r");
+    let out = r.run(&long_request()).await;
+    assert_ne!(out.status, TaskStatus::Completed);
+    let n = ctx_events(&r)
+        .iter()
+        .filter(|e| *e == "compacting:overflow")
+        .count();
+    assert!(n <= 3, "{n}");
+}

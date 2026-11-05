@@ -61,6 +61,18 @@ settings, default 30, `0` = forever) rewrites images of sessions untouched for t
 store refuses, a failing store) is a visible `notice`, and a message over the limit is stored with
 its images replaced by `[image]` instead of stopping the later messages.
 
+Images and the context: the stored history keeps every image, but a model request carries base64
+images only for the 2 newest messages that have any and at most 8 MiB of them (newest first); older
+ones go out as `[image: n, removed to save space]` with one notice (`older screenshots omitted from
+the model request ...`). The context estimate counts an image by size (about 1 token per 600 bytes,
+between 1500 and 8000), so many screenshots start auto-compaction early. `/compact` and auto-compact
+never put images in the summary request; the verbatim tail keeps the newest message in full, with
+its images only if they are at most 4 MiB, else as placeholders. A request the provider rejects as too
+large (HTTP 413, `request_too_large`, `too many images`, ...) is handled like a context overflow:
+compact, up to 3 times per task. If the summary request itself is too large, the oldest half of its
+input is dropped and it is retried (up to 5 times); if that fails the message says to use
+`/images clear` or `/new`. Pasted images are not downscaled (no image-decoding crate in the tree).
+
 ## Context meter
 The status line shows `ctx 62% 124k/200k`; the Context panel, the header chip and the topology cards use the same number. The window is the one the harness resolved for the model in use (docs/specs/config.md §6.2), so `/model` shows the new model's window from its first response. When the window is unknown the status line shows `ctx 124k/?` and the panels show `?` instead of a percentage; nothing is guessed from the model name. Set `limit.context` for such a model.
 
@@ -71,10 +83,11 @@ A picker (`/new`, `/resume`, `/model`, `/config`, ...) closes with Esc; an appro
 ## Settings (`synt.tui`, user settings.json only)
 
 `panels.{session,mcp,tools,activity}` (Workspace, Running sessions and the chat are always shown; the
-other panels take the rows of a hidden one), `logo` (`art` | `off`), `show_thinking`, `diffs_expanded`
+other panels take the rows of a hidden one), `logo` (`art` | `off`), `show_thinking`, `verbose`
+(internal rows in the chat, see Events), `diffs_expanded`
 (long output starts whole, like ctrl+o), `queue_indicators`, `motion` (spinners drawn still when off),
 `mouse_capture` (off: the terminal's own selection; applies at start), `copy_on_select`. Defaults:
-everything on, `diffs_expanded` off. A project, local or managed settings file that sets `synt.tui`
+everything on, `diffs_expanded` and `verbose` off. A project, local or managed settings file that sets `synt.tui`
 is ignored with a diagnostic; a wrong value keeps the default and the diagnostic names the key.
 `/config` edits these and writes the USER file atomically, keeping every other key; it can write
 nothing else, so never a credential. First run without a configured model shows a setup card
@@ -93,12 +106,21 @@ is why the folder must be trusted.
 
 ## Events
 
-Every event type of `synthesis-events` has a row or a reason not to: conversation, tool, approval,
-verification, budget, compaction, sub-agent and message events have their own views;
-peers, memory, processes, mode changes, non-successful hooks and any future kind get one sanitised
-`type: key=value` row; bookkeeping (tool.started, session lifecycle, todo/turn/delta events) is
-shown elsewhere (header, todo list, streaming text). An approval made for another session says
-`for <origin>:`.
+The chat shows what a person needs and nothing else. The full event stream is always kept in the
+session store (`synt.db`; `synt run --json` prints it), whatever the chat draws.
+
+| Shown | Hidden by default (one readable line each with `verbose`) |
+|---|---|
+| your prompt; the assistant's text and thinking (`show_thinking`); tool calls and results (collapsed) | memory retrieved / written / quarantined / reflection |
+| a permission that was denied, expired or refused by a policy or the auto judge | approval granted, mode changes (the footer shows the mode), `model.changed` |
+| model errors and the first retry; failed compaction; the compaction result (one line) | later model retries, `context.usage`, hook runs that succeeded |
+| failed hooks, failed verification and `verification passed`, budget exceeded, notices | unverified/blocked verification (the task end line says it), the harness notes to the model (`verification feedback`, `stop hook feedback`) |
+| `✓ Done · n turns · t`, `task failed/cancelled/blocked/unverified`, `interrupted` | foreground sub-agent start/stop (its Task row shows it), process, peer and session bookkeeping |
+| background sub-agents, peer messages, a browser login to confirm, a memory note waiting for review | any event kind the chat has no sentence for: nothing (verbose: its name only) |
+
+Never a raw `type: key=value` row. `synt.tui.verbose` (default false; `/config` row `verbose`) turns
+the right column on for the whole app; `/verbose [on|off]` flips it for this session (like `/focus`,
+it applies to rows from then on, earlier rows stay as they were drawn).
 
 ## Per task, like `synt run`
 

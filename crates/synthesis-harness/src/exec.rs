@@ -668,6 +668,15 @@ impl Harness {
                 ),
             });
         }
+        if call.name == "SendMessage"
+            && let Some(why) = self.peer_send_refusal(input)
+        {
+            return Err(Denial {
+                unavailable: false,
+                from_hook: false,
+                text: format!("Permission denied: {why}. The tool was NOT run."),
+            });
+        }
         for round in 0..4 {
             let mode = *lock(&agent.mode);
             // SendMessage: deny/ask rules also see every spelling of the session `to` resolves to.

@@ -844,6 +844,9 @@ pub struct TuiSettings {
     /// `logo`: `art` (the braille symbol on the welcome) or `off`.
     pub logo: bool,
     pub show_thinking: bool,
+    /// Also draw the internal rows (memory, mode, permission and sub-agent bookkeeping) as one
+    /// readable line each; they are always in the event log.
+    pub verbose: bool,
     /// Long tool output, code and diffs start expanded (what ctrl+o toggles).
     pub diffs_expanded: bool,
     /// The `queued: ...` lines above the prompt while a task runs.
@@ -862,6 +865,7 @@ impl Default for TuiSettings {
             panels: [true; 4],
             logo: true,
             show_thinking: true,
+            verbose: false,
             diffs_expanded: false,
             queue_indicators: true,
             motion: true,
@@ -890,6 +894,7 @@ impl TuiSettings {
             Some(_) => diags.push(format!("synt.tui.{key} must be true or false, kept")),
         };
         flag("show_thinking", &mut s.show_thinking);
+        flag("verbose", &mut s.verbose);
         flag("diffs_expanded", &mut s.diffs_expanded);
         flag("queue_indicators", &mut s.queue_indicators);
         flag("motion", &mut s.motion);
@@ -922,6 +927,7 @@ impl TuiSettings {
                 "panels",
                 "logo",
                 "show_thinking",
+                "verbose",
                 "diffs_expanded",
                 "queue_indicators",
                 "motion",
@@ -947,6 +953,7 @@ impl TuiSettings {
             "panels": panels,
             "logo": if self.logo { "art" } else { "off" },
             "show_thinking": self.show_thinking,
+            "verbose": self.verbose,
             "diffs_expanded": self.diffs_expanded,
             "queue_indicators": self.queue_indicators,
             "motion": self.motion,

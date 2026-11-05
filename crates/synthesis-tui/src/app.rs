@@ -459,6 +459,11 @@ fn local_commands() -> Vec<CmdDef> {
             "toggle focus view (prompt, summary and response only)",
             "[on|off]",
         ),
+        c(
+            "verbose",
+            "show internal rows (memory, mode, permissions) in the chat",
+            "[on|off]",
+        ),
         c("exit", "quit", ""),
     ]
 }
@@ -1687,6 +1692,22 @@ impl App {
                     false,
                 );
             }
+            "verbose" => {
+                let on = match arg {
+                    "on" => true,
+                    "off" => false,
+                    _ => !self.chat.verbose,
+                };
+                self.chat.verbose = on;
+                self.toast(
+                    format!(
+                        "verbose {} (rows from now on)",
+                        if on { "on" } else { "off" }
+                    ),
+                    now,
+                    false,
+                );
+            }
             other => self.out_item(format!("unknown command: /{other} (try /help)"), true),
         }
         let _ = now;
@@ -1980,6 +2001,10 @@ impl App {
         match key {
             "logo" => t.logo = !t.logo,
             "show_thinking" => t.show_thinking = !t.show_thinking,
+            "verbose" => {
+                t.verbose = !t.verbose;
+                self.chat.verbose = t.verbose;
+            }
             "diffs_expanded" => {
                 t.diffs_expanded = !t.diffs_expanded;
                 self.expanded = t.diffs_expanded;
@@ -2014,6 +2039,7 @@ impl App {
         items.extend([
             row("logo", "logo art", "the braille symbol on the welcome", t.logo),
             row("show_thinking", "show thinking", "draw the model's thinking blocks", t.show_thinking),
+            row("verbose", "verbose", "also show internal rows (memory, mode, permissions, sub-agents) as readable lines", t.verbose),
             row("diffs_expanded", "expand long output", "tool output, code and diffs start whole (ctrl+o)", t.diffs_expanded),
             row("queue_indicators", "queue lines", "the queued messages above the prompt", t.queue_indicators),
             row("motion", "motion", "spinners and the pulse", t.motion),
@@ -2036,6 +2062,7 @@ impl App {
     /// The host read `synt.tui`: apply it, and say what was wrong with the file.
     pub fn set_tui(&mut self, t: TuiSettings, diagnostics: &[String]) {
         self.expanded = t.diffs_expanded;
+        self.chat.verbose = t.verbose;
         self.tui = t;
         for d in diagnostics {
             self.chat.startup_note(d);

@@ -19,15 +19,15 @@
 ┃                    ┃┃                                                                                          ┃┃ │ · Plan         decompose                │┃
 ┃                    ┃┃                                                                                          ┃┃ │ · Orchestrator route work          idle │┃
 ┃                    ┃┃                                                                                          ┃┃ │ ctx ? · 0 tok                           │┃
-┃                    ┃┃                                                                                          ┃┃ ╰┳┳┳┳┳┳┳▲─────────────────────────────────╯┃
-┃                    ┃┃                                                                                          ┃┃  │││││││└ USER  ❯ waiting for a prompt…    ┃
-┃                    ┃┃                                                                                          ┃┃  ││││││└─►GUARDS  0 guards                 ┃
-┃                    ┃┃                                                                                          ┃┃  │││││└──►SUB-AGENTS  no sub-agents yet    ┃
-┃                    ┃┃                                                                                          ┃┃  ││││└───►SKILLS  no skills used yet       ┃
-┃                    ┃┃                                                                                          ┃┃  │││└────►HOOKS  no event hooks fired      ┃
-┃                    ┃┃                                                                                          ┃┃  ││└─────►EXECUTION  0 calls      no errors┃
-┃                    ┃┃                                                                                          ┃┃  │└──────►MCP  no MCP servers called       ┃
-┃                    ┃┃                                                                                          ┃┃  └───────►MEMORY  context ▱▱▱▱▱▱▱▱▱▱      ?┃
+┃                    ┃┃                                                                                          ┃┃ ╰────────────────┳┳┳┳┳┳┳▲─────────────────╯┃
+┃                    ┃┃                                                                                          ┃┃                  │││││││└ USER  ❯ waiting …┃
+┃                    ┃┃                                                                                          ┃┃                  ││││││└─►GUARDS  0 guards ┃
+┃                    ┃┃                                                                                          ┃┃                  │││││└──►AGENTS  no sub-a…┃
+┃                    ┃┃                                                                                          ┃┃                  ││││└───►SKILLS  no skill…┃
+┃                    ┃┃                                                                                          ┃┃                  │││└────►HOOKS  no event …┃
+┃                    ┃┃                                                                                          ┃┃                  ││└─────►EXEC  0 calls    ┃
+┃                    ┃┃                                                                                          ┃┃                  │└──────►MCP  no MCP serv…┃
+┃                    ┃┃                                                                                          ┃┃                  └───────►MEMORY  contex… ?┃
 ┃                    ┃┃ ╭───────────────────────────────────────────────────────────────────────────────────────╮┃┃                                            ┃
 ┃                    ┃┃ │ ✻ Hello there! I'm Synthesis.  · 0.1                                                  │┃┃                                            ┃
 ┃                    ┃┃ │                                                                                       │┃┃                                            ┃

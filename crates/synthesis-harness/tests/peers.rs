@@ -1152,6 +1152,62 @@ async fn the_confirm_dialog_shows_exactly_the_reply_that_is_sent() {
 }
 
 #[tokio::test]
+async fn initiate_false_refuses_before_any_approval_prompt() {
+    for initiate in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let run = run_dir(home.path());
+        let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "initiate": initiate});
+        let a_resp: Responder = Arc::new(|_| Some(Turn::text("A idle")));
+        let (a, ea) = side("sess-a", "alpha", &run, Some(on.clone()), a_resp, 10);
+        let shown = Arc::new(std::sync::Mutex::new(vec![]));
+        let ask: Responder = Arc::new(|r| {
+            Some(if tool_result(r, "ask").is_none() {
+                // delegate:true is never pre-approved, so with initiate on the user is asked
+                Turn::tool(
+                    "ask",
+                    "SendMessage",
+                    json!({"to": "ws:alpha/sess:sess-a", "message": "hi", "delegate": true}),
+                )
+            } else {
+                Turn::text("B done")
+            })
+        });
+        let (mut b, _) = side_x(
+            "sess-b",
+            "beta",
+            &run,
+            Some(on),
+            ask,
+            10,
+            true,
+            Some(Arc::new(Rec(shown.clone()))),
+            &[],
+            SideX {
+                mode: PermissionMode::Default,
+                interactive: true,
+                hooks: None,
+            },
+        );
+        let _reg = serve(&a, &run, ea);
+        go(&mut b, "go").await;
+        let reqs = b.rig.requests();
+        let (t, _) = tool_result(&reqs[1], "ask").unwrap();
+        if initiate {
+            assert!(!shown.lock().unwrap().is_empty(), "the user is asked: {t}");
+        } else {
+            assert!(
+                shown.lock().unwrap().is_empty(),
+                "no prompt for a refused send"
+            );
+            assert!(
+                t.contains("synt.peers.initiate") && t.contains("NOT run"),
+                "{t}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn deny_rules_hold_against_every_spelling_of_a_peer_address() {
     for to in [
         "ws:alpha/sess:sess-a",
