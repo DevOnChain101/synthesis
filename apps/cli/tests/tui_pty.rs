@@ -95,14 +95,26 @@ impl Rig {
         );
         std::fs::write(&sc, scenario.to_string()).unwrap();
         let driver = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/tui_pty_driver.py");
-        let st = Command::new("python3")
+        let mut child = Command::new("python3")
             .arg("-I")
             .arg(driver)
             .arg(&sc)
             .arg(&out)
             .stdin(Stdio::null())
-            .status()
+            .spawn()
             .expect("python3 is needed for the pty tests");
+        // the driver has its own 120 s alarm; this is the backstop if even that is stuck
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(150);
+        let st = loop {
+            if let Some(st) = child.try_wait().unwrap() {
+                break st;
+            }
+            if std::time::Instant::now() > end {
+                let _ = child.kill();
+                panic!("pty driver stuck for 150 s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
         assert!(st.success());
         let text = std::fs::read_to_string(out).unwrap();
         assert!(

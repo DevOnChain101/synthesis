@@ -6,7 +6,7 @@ scenario: {"argv": [...], "env": {...}, "steps": [["send", "bytes"] | ["wait", s
 `expect_new` looks only at output that arrived after the last `send`. out.txt gets the whole
 screen output (escape sequences removed) and the exit state, the last line is `STATE ok|failed <exit>`.
 """
-import pty,os,sys,time,select,re,json,struct,fcntl,termios
+import pty,os,sys,time,select,re,json,struct,fcntl,termios,signal
 sc=json.load(open(sys.argv[1]))
 env={"PATH":os.environ["PATH"],"TERM":"xterm-256color","COLORTERM":"truecolor"}
 env.update(sc["env"])
@@ -31,6 +31,13 @@ def rd(t):
 def text():
     t=re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]",b" ",buf)
     return t.decode("utf8","replace")
+def hang(*_):
+    # a hard stop, so a stuck scenario fails in a minute and not at the CI step limit
+    try: os.killpg(pid,9)
+    except OSError: pass
+    open(sys.argv[2],"w").write(text()+"\nSTATE failed driver deadline\n")
+    os._exit(1)
+signal.signal(signal.SIGALRM,hang); signal.alarm(sc.get("deadline",120))
 ok=True
 killed=False
 sent_at=0
@@ -39,7 +46,20 @@ for st in sc["steps"]:
     elif st[0]=="wait": rd(st[1])
     elif st[0]=="kill":
         # SIGKILL, as when the terminal window is closed: no shutdown code runs
-        os.kill(pid,9); os.waitpid(pid,0); killed=True
+        # Do not block in waitpid: on macOS a dying session leader waits for its tty output to
+        # drain, so keep reading the master until it is reaped (hard limit 10 s).
+        for f in (lambda: os.killpg(pid,9), lambda: os.kill(pid,9)):
+            try: f()
+            except OSError: pass
+        killed=True
+        end=time.time()+10
+        while time.time()<end:
+            rd(0.1)
+            try:
+                if os.waitpid(pid,os.WNOHANG)[0]==pid: break
+            except ChildProcessError: break
+        else:
+            print("kill: child not reaped in 10 s")
     elif st[0]=="quiet":
         # no output for st[1] seconds; capped, because a spinner never goes quiet
         end=time.time()+20
