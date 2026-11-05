@@ -568,7 +568,6 @@ impl Server {
     /// A `deliver` frame: a reply envelope for this session, from a permitted peer.
     fn accept_reply(&self, env: Envelope) -> bool {
         self.config.enabled
-            && self.config.initiate
             && env.kind == "reply"
             && env.to_session == self.me.session_id
             && env.verified(&self.key)
