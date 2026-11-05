@@ -2143,10 +2143,13 @@ impl Permissions {
                     format!("{} mode: path inside workspace", mode.as_str()),
                 );
             }
+            let hard = fp
+                .filter(|f| self.lex_inside(f))
+                .and_then(|f| paths::hard_links(&paths::resolve(&self.env.cwd, f)));
             if auto {
                 // inside by name but not after resolving links: the user decides, not the classifier
-                if let Some(f) = fp.filter(|f| self.lex_inside(f)) {
-                    if let Some(n) = paths::hard_links(&paths::resolve(&self.env.cwd, f)) {
+                if fp.is_some_and(|f| self.lex_inside(f)) {
+                    if let Some(n) = hard {
                         return v(
                             Ask,
                             format!(
@@ -2160,6 +2163,12 @@ impl Permissions {
             }
             if mode == Mode::DontAsk {
                 return v(Deny, "dontAsk mode");
+            }
+            if let Some(n) = hard {
+                return v(
+                    Ask,
+                    format!("file has {n} hard links; writing changes every path that shares it"),
+                );
             }
             return v(Ask, "edit tool requires confirmation");
         }

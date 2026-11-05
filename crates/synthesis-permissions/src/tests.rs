@@ -702,6 +702,19 @@ fn hard_linked_file_is_not_auto_allowed_for_writes() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn hard_linked_write_ask_reason_names_the_links() {
+    let f = fx();
+    fs::write(f.outside.join("secret"), "x").unwrap();
+    fs::hard_link(f.outside.join("secret"), f.cwd.join("link")).unwrap();
+    let v = f
+        .perms(Mode::Default)
+        .check_current("Write", &json!({ "file_path": f.cwd.join("link") }));
+    assert_eq!(v.decision, Q);
+    assert!(v.reason.contains("2 hard links"), "{}", v.reason);
+}
+
 #[test]
 fn bash_classifiers_split_read_only_and_auto_safe() {
     for c in [
