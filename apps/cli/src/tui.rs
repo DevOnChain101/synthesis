@@ -172,6 +172,19 @@ fn purge_old_images(synthesis_home: &Path) {
     }
 }
 
+/// Sessions nobody typed into (no message, no task) older than an hour are deleted at start; the
+/// one being resumed, recent ones and locked ones stay. A warning at most, never a reason not to start.
+fn prune_empty_sessions(synthesis_home: &Path, keep: &str) {
+    let store =
+        synthesis_session::Store::open(synthesis_home, synthesis_session::StoreOptions::default());
+    let hour = std::time::Duration::from_secs(3600);
+    if let Err(e) =
+        store.and_then(|s| s.prune_empty_sessions(keep, hour, time::OffsetDateTime::now_utc()))
+    {
+        eprintln!("synt: warning: pruning empty sessions: {e}");
+    }
+}
+
 /// Minutes east of UTC for the greeting ("Good morning"); 0 when the zone cannot be read. No
 /// std or dependency gives the local zone safely, so unix asks `date`; Windows greets by UTC.
 fn local_offset_min() -> i32 {
@@ -266,6 +279,7 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
     let mut cwd = start_dir(&a)?;
     let granted = root_of(&cwd);
     let mut resume = requested_resume(&a, &h)?;
+    prune_empty_sessions(&h.synthesis, resume.as_ref().map_or("", |r| &r.record.id));
     // `/model NAME` restarts on the same session with that model; a model that cannot be built
     // falls back to the one in use, with a note.
     let mut model: Option<String> = None;

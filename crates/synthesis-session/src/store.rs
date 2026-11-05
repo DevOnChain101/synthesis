@@ -628,6 +628,81 @@ impl Store {
         }
     }
 
+    /// Deletes the sessions that hold no message and no task, were last touched more than
+    /// `min_age` ago, are not `keep` and are not locked by a live process, with every dependent
+    /// row and their directory. Anything doubtful (a child session, a lock held, a failed
+    /// delete, a busy database) is skipped. Returns the sessions removed.
+    pub fn prune_empty_sessions(
+        &self,
+        keep: &str,
+        min_age: Duration,
+        now: OffsetDateTime,
+    ) -> Result<usize> {
+        let fmt = time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+        );
+        let cutoff = (now - min_age).format(&fmt).expect("format utc timestamp");
+        let mut conn = connect(&self.home, false)?;
+        conn.busy_timeout(Duration::from_millis(200))?;
+        let ids: Vec<String> = {
+            let mut st = conn.prepare(
+                "SELECT id FROM sessions s WHERE id != ?1 AND updated_at < ?2 \
+                 AND NOT EXISTS (SELECT 1 FROM messages WHERE session_id=s.id) \
+                 AND NOT EXISTS (SELECT 1 FROM tasks WHERE session_id=s.id) \
+                 AND NOT EXISTS (SELECT 1 FROM sessions c WHERE c.parent_session_id=s.id)",
+            )?;
+            st.query_map([keep, &cutoff], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        let mut removed = 0;
+        for id in ids.iter().filter(|id| valid_id(id)) {
+            let dir = self.home.join("sessions").join(id);
+            // a held lock (live process) is skipped at once; no lock file means nobody holds it
+            let lock = match File::options().write(true).open(dir.join("lock")) {
+                Ok(f) if f.try_lock().is_ok() => Some(f),
+                Ok(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => continue,
+            };
+            let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            else {
+                continue;
+            };
+            // re-checked inside the write transaction: a session that got a message meanwhile stays
+            let used: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM messages WHERE session_id=?1) \
+                     OR EXISTS (SELECT 1 FROM tasks WHERE session_id=?1)",
+                [id],
+                |r| r.get(0),
+            )?;
+            if used {
+                continue;
+            }
+            let gone = [
+                "DELETE FROM verification_reports WHERE task_id IN (SELECT id FROM tasks WHERE session_id=?1)",
+                "DELETE FROM tasks WHERE session_id=?1",
+                "DELETE FROM events WHERE session_id=?1",
+                "DELETE FROM messages WHERE session_id=?1",
+                "DELETE FROM tool_calls WHERE session_id=?1",
+                "DELETE FROM processes WHERE session_id=?1",
+                "DELETE FROM browser_contexts WHERE session_id=?1",
+                "DELETE FROM artifacts WHERE session_id=?1",
+                "DELETE FROM approvals WHERE session_id=?1",
+                "DELETE FROM checkpoints WHERE session_id=?1",
+                "DELETE FROM sessions WHERE id=?1",
+            ]
+            .iter()
+            .try_for_each(|q| tx.execute(q, [id]).map(drop));
+            if gone.is_err() || tx.commit().is_err() {
+                continue;
+            }
+            drop(lock); // Windows cannot remove an open file
+            let _ = fs::remove_dir_all(&dir);
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
     /// A read-only connection; any number may exist next to the single writer.
     pub fn reader(&self) -> Result<Reader> {
         Reader::open(&self.home)
@@ -974,6 +1049,19 @@ impl Reader {
     pub fn list_sessions(&self, cwd: Option<&str>) -> Result<Vec<SessionRecord>> {
         let mut st = self.conn.prepare(&format!(
             "SELECT {SESSION_COLS} FROM sessions WHERE (?1 IS NULL OR cwd=?1) ORDER BY updated_at DESC, id"
+        ))?;
+        let rows = st.query_map([cwd], session_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// [`Self::list_sessions`] without the sessions that hold no message and no task (the ones
+    /// every launch leaves behind when nothing was typed).
+    pub fn list_used_sessions(&self, cwd: Option<&str>) -> Result<Vec<SessionRecord>> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {SESSION_COLS} FROM sessions WHERE (?1 IS NULL OR cwd=?1) \
+             AND (EXISTS (SELECT 1 FROM messages WHERE session_id=sessions.id) \
+               OR EXISTS (SELECT 1 FROM tasks WHERE session_id=sessions.id)) \
+             ORDER BY updated_at DESC, id"
         ))?;
         let rows = st.query_map([cwd], session_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

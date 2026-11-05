@@ -1042,6 +1042,35 @@ fn wheel(x: u32, y: u32, down: bool) -> String {
     format!("\x1b[<{};{x};{y}M", if down { 65 } else { 64 })
 }
 
+/// Launches that never get a prompt leave empty sessions in the store; the Running panel lists
+/// only the ones with a conversation (the open session shows on its own row, never as untitled).
+#[test]
+fn empty_launches_do_not_fill_the_running_panel() {
+    let rig = {
+        let mut r = Rig::new(json!([{"text": "first reply"}]));
+        r.size = (48, 160);
+        r
+    };
+    rig.drive(json!([
+        expect("Enter send"),
+        send("alpha-one\r"),
+        expect("first reply"),
+        quiet()
+    ]));
+    for _ in 0..2 {
+        rig.drive(json!([expect("Enter send"), quiet()]));
+    }
+    let out = rig.drive(json!([expect("Enter send"), quiet()]));
+    let c = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
+    let n: i64 = c
+        .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 4, "every launch stores a session");
+    let flat = squash(&out);
+    assert!(flat.contains("alpha-one"), "{flat}");
+    assert!(!flat.contains("(untitled)"), "{flat}");
+}
+
 /// Three workspaces by ctrl+n, then the Workspace / Running / Activity panels by mouse and Tab:
 /// clicking a workspace lists its sessions, clicking a stored session resumes it, the Tab order
 /// is chat -> Workspace -> Running -> chat, a click on a prompt in Activity scrolls the chat to

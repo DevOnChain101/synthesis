@@ -1270,3 +1270,56 @@ fn usage_by_day_sums_across_sessions_and_cuts_days_at_the_offset() {
     let late = r.usage_by_day(1_772_445_600_000, 0).unwrap(); // 2026-03-02T10:00Z
     assert_eq!(late.len(), 1);
 }
+
+#[test]
+fn prune_removes_only_old_unlocked_empty_sessions_and_listing_hides_empty_ones() {
+    let e = env();
+    let d = e.dir("w");
+    let store = e.store();
+    let hour = std::time::Duration::from_secs(3600);
+    let now = time::OffsetDateTime::now_utc();
+    let later = now + time::Duration::hours(2);
+    let mut with_msg = create(&e, "with-msg", &d);
+    with_msg
+        .append_message(NewMessage::user(json!("hi")))
+        .unwrap();
+    let mut with_task = create(&e, "with-task", &d);
+    with_task.begin_task("do it", &[]).unwrap();
+    with_task.append_event(notice("n")).unwrap();
+    let _locked = create(&e, "locked", &d);
+    let _current = create(&e, "current", &d);
+    drop(create(&e, "empty", &d));
+    let empty_dir = e.home.join("sessions").join("empty");
+    assert!(empty_dir.exists());
+
+    let r = store.reader().unwrap();
+    let used: Vec<_> = r
+        .list_used_sessions(None)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(used.len(), 2, "{used:?}");
+    assert!(used.contains(&"with-msg".into()) && used.contains(&"with-task".into()));
+
+    // recent: nothing goes
+    assert_eq!(store.prune_empty_sessions("current", hour, now).unwrap(), 0);
+    // old: only the unlocked, non-current, empty one
+    assert_eq!(
+        store.prune_empty_sessions("current", hour, later).unwrap(),
+        1
+    );
+    assert!(!empty_dir.exists());
+    let mut left: Vec<_> = r
+        .list_sessions(None)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    left.sort();
+    assert_eq!(left, ["current", "locked", "with-msg", "with-task"]);
+    assert_eq!(
+        store.prune_empty_sessions("current", hour, later).unwrap(),
+        0
+    );
+}
