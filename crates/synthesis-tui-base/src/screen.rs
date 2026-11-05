@@ -113,6 +113,13 @@ impl<W: Write> Screen<W> {
         self.out.flush()
     }
 
+    /// Takes over a terminal that is already in the app's screen mode (a guard held across a
+    /// restart): nothing is written, the next draw is a full frame.
+    pub fn adopt(&mut self) {
+        self.active = true;
+        self.invalidate();
+    }
+
     pub fn set_title(&mut self, title: &str) -> io::Result<()> {
         self.title = if title.is_empty() {
             TITLE.into()

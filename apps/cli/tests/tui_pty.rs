@@ -127,6 +127,12 @@ impl Rig {
         text
     }
 
+    /// The raw terminal bytes between the scenario's `mark` and `cut` steps.
+    fn raw(&self) -> String {
+        String::from_utf8_lossy(&std::fs::read(self.root().join("out.txt.raw")).unwrap())
+            .into_owned()
+    }
+
     /// `(type, payload)` of every stored event of the sessions in the store.
     fn events(&self) -> Vec<(String, Value)> {
         let c = rusqlite::Connection::open(self.home().join("synt.db")).unwrap();
@@ -396,6 +402,42 @@ fn model_picker_selection_keeps_the_app_running() {
         expect_new("enter select")
     ]));
     assert!(!squash(&out).contains("could not switch"), "{out}");
+}
+
+/// Picking a model restarts the app on the same session without leaving the alternate screen or
+/// raw mode: no `ESC[?1049l` between the pick and the next frame, the header shows the new model,
+/// and the switch leaves no extra (empty) session behind.
+#[test]
+fn model_switch_does_not_leave_the_alternate_screen() {
+    let rig = Rig::new(json!([{"text": "unused"}]));
+    rig.write(
+        "synt.json",
+        r#"{"$schema":"config.json/v1","model":"gw/big","providers":{
+            "gw":{"type":"anthropic","baseURL":"http://127.0.0.1:1","apiKey":false,"models":["big","other"]}}}"#,
+    );
+    let out = rig.drive_bare(json!([
+        expect("Enter send"),
+        quiet(),
+        send("/model\r"),
+        expect_new("enter select"),
+        json!(["mark"]),
+        send("\x1b[B\r"),
+        expect_new("gw/other"),
+        quiet(),
+        json!(["cut"])
+    ]));
+    let raw = rig.raw();
+    assert!(raw.contains("gw/other"), "{}", squash(&out));
+    assert!(!raw.contains("\x1b[?1049l"), "left the alternate screen");
+    assert!(
+        !raw.contains("\x1b[?1049h"),
+        "entered the alternate screen again"
+    );
+    let c = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
+    let n: i64 = c
+        .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+        .unwrap();
+    assert!(n <= 1, "the switch left {n} sessions");
 }
 
 /// `/resume <bad id>` and a folder the app cannot open stay in the app with a notice (they used

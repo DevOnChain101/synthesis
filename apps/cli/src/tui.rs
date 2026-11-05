@@ -287,6 +287,8 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
     let mut switch_note: Vec<String> = vec![];
     // the folder and session to go back to when the one asked for cannot be opened
     let mut back: Option<(PathBuf, String)> = None;
+    // keeps the screen and raw mode across a `/model` restart (dropped, so restored, on return)
+    let hold = synthesis_tui::Hold::default();
     loop {
         if let Some(r) = &resume {
             cwd = PathBuf::from(&r.record.cwd);
@@ -337,7 +339,10 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
             &env,
             std::mem::take(&mut switch_note),
             resume.take(),
-            &mut |o| synthesis_tui::run_interactive(o, Tty::stdio(&env)),
+            &mut |mut o| {
+                o.hold = Some(hold.clone());
+                synthesis_tui::run_interactive(o, Tty::stdio(&env))
+            },
         );
         switch_from = None;
         let exit = exit?;
