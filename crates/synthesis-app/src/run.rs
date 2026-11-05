@@ -569,6 +569,32 @@ fn read_denied(perms: &Permissions, p: &Path) -> bool {
         == synthesis_permissions::Decision::Deny
 }
 
+/// `@file` / `@dir/` / `@"name with spaces"` mentions in a prompt become fenced data blocks after
+/// it (workspace containment, caps and secret-file rules are `expand_mentions`', read-deny rules
+/// are the session's). Returns the request and one notice per mention that named nothing.
+pub fn expand_file_mentions(
+    harness: &Harness,
+    ws: &WorkspaceContext,
+    request: String,
+) -> (String, Vec<String>) {
+    let perms = harness.permissions();
+    let deny = |p: &Path| {
+        let g = perms.lock().unwrap_or_else(|e| e.into_inner());
+        read_denied(&g, p)
+    };
+    let opts = synthesis_context::MentionOptions {
+        deny: Some(&deny),
+        ..Default::default()
+    };
+    let m = synthesis_context::expand_mentions(&request, ws, &opts);
+    let notes = m
+        .missing
+        .iter()
+        .map(|x| format!("@{}: no such file", sanitize_for_display(x)))
+        .collect();
+    (request + &m.text, notes)
+}
+
 /// Default `--max-wall-secs` of a headless `synt run` (one hour). Turns (50) and tool calls (200)
 /// are bounded by default already; a cost cap needs a configured price, so it has no default.
 const HEADLESS_WALL_SECS: u64 = 3600;
@@ -1434,18 +1460,9 @@ pub fn prepare(
         .into_iter()
         .map(|m| m.value)
         .collect();
-    let effort_tiers = res
-        .label
-        .strip_suffix(&format!("/{}", res.model))
-        .and_then(|id| cfg.providers.get(id)?.models_meta.as_ref()?.get(&res.model))
-        .and_then(|m| m.capabilities.get("effort_tiers")?.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let context_window = res.provider.capabilities(&res.model).context_window;
+    let caps = res.provider.capabilities(&res.model);
+    let effort_tiers = caps.effort_tiers;
+    let context_window = caps.context_window;
     let harness = Arc::new(harness);
     if let (Some(l), Some(server)) = (peer_listener, harness.peer_server()) {
         if let Some(w) = harness.peer_mailbox_worker(server.clone()) {
@@ -1572,6 +1589,8 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
             }
         };
     let mut notices = notices;
+    let (request, files_missing) = expand_file_mentions(&harness, &session.workspace, request);
+    let more: Vec<String> = more.into_iter().chain(files_missing).collect();
     for n in more {
         let n = sanitize_for_display(&n);
         eprintln!("synt: warning: {n}");

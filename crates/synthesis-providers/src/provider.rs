@@ -390,6 +390,9 @@ impl ModelProvider for HttpProvider {
         let known = modelinfo::builtin(self.openai_native, model);
         c.context_window = c.context_window.or(f.context_window).or(known.map(|k| k.0));
         c.max_output = c.max_output.or(f.max_output).or(known.map(|k| k.1));
+        if c.effort_tiers.is_empty() {
+            c.effort_tiers = f.effort_tiers;
+        }
         let declared = meta.is_some_and(|m| {
             ["images", "vision"]
                 .iter()

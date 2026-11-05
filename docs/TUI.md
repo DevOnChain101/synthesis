@@ -6,8 +6,10 @@ without a terminal it prints the usage and exits 2. It runs the same wiring as `
 
 Flags: `--cwd DIR` (default: the current directory), `--resume ID` / `--continue` (the stored
 session continues in place), `--once` (print one frame and exit), plus the `synt run` flags
-(`--model`, `--sandbox`, `--allow`, `--worktree`, `--peers`, ...). `--fork-session` and
-`--permission-mode bypassPermissions` are for `synt run` only (bypass: Shift+Tab, confirm).
+(`--model`, `--sandbox`, `--allow`, `--worktree`, `--peers`, ...; the full list is the table in
+docs/CLI.md). `--fork-session` and `--permission-mode bypassPermissions` are for `synt run` only
+(bypass: Shift+Tab, confirm). Related commands: `synt auth status` (credential status per provider)
+and `synt rewind SESSION` (put a run's files back; dry run unless `--apply`).
 
 Resuming a session whose process died mid-task (kill, closed window): nothing runs in the new
 process, so the dashboard is IDLE and tools/agents without an end in the stored events are shown
@@ -27,7 +29,7 @@ cut for `synt run --resume` consumers.
 | /new | a fresh session in the SELECTED workspace (the one highlighted in the Workspace panel; no picker). When that is not the live workspace the app switches to it. A running task needs a second `/new` within 5 s (it cancels the task and says so). For a different folder use Ctrl+N |
 | /resume [id] | continue a saved session (picker: this folder first); an unknown id is a notice, the app stays |
 | /model [name] | pick or set a model; restarts on the same session |
-| /effort [auto\|low\|...] | reasoning effort, only when the model declares `effort_tiers` |
+| /effort [auto\|low\|...] | reasoning effort, only when the model declares `effort_tiers` (in `synt.json` or in its `/v1/models` entry, cached) |
 | /mcp | MCP servers: state, tools, last error |
 | /images [clear] | the attached images, or drop them |
 | /config | the `synt.tui` settings as a list; enter flips a row, applies it and saves it |
@@ -48,7 +50,9 @@ cut for `synt run --resume` consumers.
 | /mcp__server__prompt [args] | fetches the MCP prompt and sends it as the request |
 
 Input: `!cmd` runs a shell command (`!!` only records it), `#note` saves a note to an instruction
-file (you pick the file), `@file`, `@agent:name`, `@server:scheme://uri` (an MCP resource),
+file (you pick the file), `@file` (also `@dir/`; a name with spaces is written `@"my notes.txt"`, and Tab inserts that form;
+the file is added to the message as data, inside the workspace only, never a secret file, capped;
+an `@x` that is no file stays as typed with a notice `@x: no such file`), `@agent:name`, `@server:scheme://uri` (an MCP resource),
 Shift+Tab cycles the permission mode.
 Ctrl+V and Alt+V paste a clipboard image: Ctrl+V tries an image first and falls back to the text
 (an EMPTY bracketed paste, which is what Windows Terminal and WSL send when the clipboard holds only
@@ -157,7 +161,7 @@ is why the folder must be trusted.
 ## Events
 
 The chat shows what a person needs and nothing else. The full event stream is always kept in the
-session store (`synt.db`; `synt run --json` prints it), whatever the chat draws.
+session store (`synt.db`; `synt run --output-format stream-json`, the default, prints it), whatever the chat draws.
 
 | Shown | Hidden by default (one readable line each with `verbose`) |
 |---|---|

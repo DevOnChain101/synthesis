@@ -881,6 +881,9 @@ async fn anthropic_model_info_is_fetched_cached_and_reused_without_network() {
         (big.context_window, big.max_output, big.images),
         (Some(1_000_000), Some(64_000), false)
     );
+    // discovered effort tiers are the model's tiers (what /effort and the request check use)
+    assert_eq!(big.effort_tiers, ["high"]);
+    assert!(p.capabilities("small").effort_tiers.is_empty());
     // the same provider serves another model of the list with its own numbers
     assert_eq!(p.capabilities("small").context_window, Some(200_000));
     assert_eq!(p.capabilities("small").max_output, Some(8_000));
@@ -891,6 +894,7 @@ async fn anthropic_model_info_is_fetched_cached_and_reused_without_network() {
     // a second start: fresh cache, no request, same numbers
     let q = cached(Protocol::Anthropic, &mock.base, &cache);
     assert_eq!(q.capabilities("big").context_window, Some(1_000_000));
+    assert_eq!(q.capabilities("big").effort_tiers, ["high"]);
     q.refresh_model_info(false, &CancellationToken::new())
         .await
         .unwrap();
