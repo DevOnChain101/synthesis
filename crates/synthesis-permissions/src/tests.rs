@@ -350,6 +350,76 @@ fn symlink_escaping_cwd_is_not_inside_for_bash_fs_commands_or_edit_tools() {
 }
 
 #[test]
+fn plan_mode_ignores_allow_rules_for_non_read_calls() {
+    let f = fx();
+    let p = f.with(
+        rules(&["Bash(touch:*)", "Bash(ls:*)", "mcp__s__w"], &[], &[]),
+        Mode::Plan,
+    );
+    let v = p.check_current("Bash", &json!({ "command": "touch x" }));
+    assert_eq!(v.decision, D);
+    assert!(v.reason.contains("plan mode"), "{}", v.reason);
+    assert_eq!(d(&p, "Bash", json!({ "command": "ls && touch x" })), D);
+    assert_eq!(d(&p, "mcp__s__w", json!({})), D);
+    assert_eq!(d(&p, "Bash", json!({ "command": "ls" })), A);
+    assert_eq!(d(&p, "Read", json!({ "file_path": f.cwd.join("a") })), A);
+}
+
+#[test]
+fn secret_file_reads_ask_by_mode_and_an_allow_rule_wins() {
+    let f = fx();
+    let env = json!({ "file_path": f.cwd.join(".env") });
+    for (mode, want) in [
+        (Mode::Default, Q),
+        (Mode::AcceptEdits, Q),
+        (Mode::Auto, Q),
+        (Mode::Plan, D),
+        (Mode::DontAsk, D),
+        (Mode::BypassPermissions, A),
+    ] {
+        assert_eq!(d(&f.perms(mode), "Read", env.clone()), want, "{mode:?}");
+    }
+    assert_eq!(
+        d(
+            &f.perms(Mode::Default),
+            "Grep",
+            json!({ "pattern": "x", "path": f.cwd.join(".env") })
+        ),
+        Q
+    );
+    assert_eq!(
+        d(
+            &f.perms(Mode::Default),
+            "Read",
+            json!({ "file_path": f.cwd.join(".env.example") })
+        ),
+        A
+    );
+    let allowed = f.with(rules(&["Read(.env)"], &[], &[]), Mode::Default);
+    assert_eq!(d(&allowed, "Read", env), A);
+}
+
+#[cfg(unix)]
+#[test]
+fn hard_linked_file_is_not_auto_allowed_for_writes() {
+    let f = fx();
+    fs::write(f.outside.join("secret"), "x").unwrap();
+    fs::hard_link(f.outside.join("secret"), f.cwd.join("link")).unwrap();
+    fs::write(f.cwd.join("plain"), "x").unwrap();
+    for mode in [Mode::AcceptEdits, Mode::Auto] {
+        let p = f.perms(mode);
+        assert_eq!(
+            d(&p, "Write", json!({ "file_path": f.cwd.join("link") })),
+            Q
+        );
+        assert_eq!(
+            d(&p, "Write", json!({ "file_path": f.cwd.join("plain") })),
+            A
+        );
+    }
+}
+
+#[test]
 fn bash_classifiers_split_read_only_and_auto_safe() {
     for c in [
         "ls",

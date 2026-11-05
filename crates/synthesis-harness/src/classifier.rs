@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use serde_json::Value;
@@ -201,7 +201,11 @@ impl Harness {
             }
             b.finish().map_err(|e| e.to_string())
         };
-        let msg = match tokio::time::timeout(cfg.timeout, run).await {
+        // never outlives the task wall budget either
+        let limit = task.deadline.map_or(cfg.timeout, |d| {
+            cfg.timeout.min(d.saturating_duration_since(Instant::now()))
+        });
+        let msg = match tokio::time::timeout(limit, run).await {
             Ok(r) => r?,
             Err(_) => {
                 cancel.cancel();

@@ -146,6 +146,36 @@ async fn budget_wall_clock_stops_a_slow_tool() {
 }
 
 #[tokio::test]
+async fn budget_wall_clock_stops_a_stalled_or_slow_model_call() {
+    for turn in [
+        Turn::text("never").delayed(60_000),
+        Turn::text("partial then slow").delayed_mid_stream(60_000),
+    ] {
+        let p = Probe::new("Probe", SideEffectClass::Read, 0, "r");
+        let mut o = probe_opts(&p);
+        o.budget = Budget {
+            max_wall_ms: Some(300),
+            ..Budget::default()
+        };
+        let mut rig = Rig::new(o, vec![turn]);
+        let t0 = Instant::now();
+        let out = rig.run("x").await;
+        assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", t0.elapsed());
+        assert_eq!(
+            out.reason,
+            "budget_exceeded:max_wall_ms",
+            "{}",
+            reason_of(&out)
+        );
+        assert!(
+            rig.types().iter().any(|t| t == "budget.exceeded"),
+            "{:?}",
+            rig.types()
+        );
+    }
+}
+
+#[tokio::test]
 async fn budget_tokens_and_cost() {
     let p = Probe::new("Probe", SideEffectClass::Read, 0, "r");
     let mut o = probe_opts(&p);

@@ -19,7 +19,7 @@ The agent runs tests itself. A call that needs permission is denied unless a rul
 |---|---|
 | `default` | asks are auto-denied unless allowed by `--allow`/settings (`SendMessage` between agents asks; `ListAgents` is read-only) |
 | `acceptEdits` | edits inside the workspace are allowed, and so is `SendMessage`; other asks (Bash, MCP, ...) are auto-denied |
-| `plan` | read-only; writes are denied; `SendMessage` is denied (it can steer another agent) |
+| `plan` | read-only; writes are denied, whatever `--allow` says; `SendMessage` is denied (it can steer another agent) |
 | `dontAsk` | an ask becomes a deny |
 | `auto` | like `acceptEdits`, edits inside the workspace are allowed without the judge (no `permission.auto_verdict` event for them); a judge model call decides the other open calls (Bash, MCP, edits outside the workspace) as allow / deny / ask; ask, unclear answer, error or timeout = denied |
 | `bypassPermissions` | skips approval prompts; still stops: deny rules, ask rules (they still ask, so an unattended run denies them), critical `rm`, destructive MCP asks. Protected paths (`.git`, `.synt`, `.ssh`, ...) are NOT stopped by plain writes, as in Claude Code (work delegated by a peer session is the exception: it asks); the sandbox still confines commands. Loud notice at start. Only from the CLI flag: never from project settings, `.mcp.json` or the environment |

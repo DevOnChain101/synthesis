@@ -51,7 +51,7 @@ Rules:
      |---|---|---|
      | `default` | ask -> auto-denied | auto-denied |
      | `acceptEdits` | allowed | auto-denied |
-     | `plan` | denied (read-only) | denied (a read-only shell command may be allowed) |
+     | `plan` | denied (read-only) | denied, even with an allow rule (a read-only shell command may be allowed) |
      | `dontAsk` | an ask becomes a deny (policy) | same |
      | `auto` | the judge model decides (below) | same; an ask or unclear answer is auto-denied |
      | `bypassPermissions` | allowed | allowed, except hard stops |

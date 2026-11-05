@@ -115,6 +115,9 @@ Workspaces are told apart by folder (symlinks resolved; case folded on macOS and
 panel is only drawn when the terminal is tall enough (about 160x48); `↑n more` / `↓n more` in
 Workspace and Running are clickable steps.
 
+## Secret files and hard links
+Reading a secret file by name (`.env`, keys, cloud credentials) asks first in `default`, `acceptEdits` and `auto`, is denied in `plan` and `dontAsk`, and runs in `bypassPermissions`; `@mentions` skip such files. A write tool refuses a file with more than one hard link (it may be a name for a file outside the workspace). Reads through a hard link are allowed, and Bash writes through one are covered by the sandbox only (docs/SECURITY.md).
+
 ## Keys in dialogs
 
 A picker (Ctrl+N, `/resume`, `/model`, `/config`, ...) closes with Esc; an approval dialog is answered with Enter / 1-3, and Esc or Ctrl+C rejects it. Ctrl+D does nothing inside a dialog (on the prompt it quits when the prompt is empty); close the dialog first. `/help` is not a dialog: it prints its text into the conversation like any other output, so Esc does not dismiss it (it scrolls away with the chat).

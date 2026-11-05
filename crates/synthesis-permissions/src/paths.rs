@@ -81,6 +81,20 @@ pub fn real_of(p: &Path) -> Option<PathBuf> {
     realpath_lenient(p)
 }
 
+/// An existing regular file with more than one hard link (unix only; other platforms: false).
+pub fn multilinked(p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.nlink() > 1)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = p;
+        false
+    }
+}
+
 /// `path.relative(from, to)` over components, `/`-joined.
 pub fn relative(from: &Path, to: &Path) -> String {
     let f: Vec<_> = from.components().collect();

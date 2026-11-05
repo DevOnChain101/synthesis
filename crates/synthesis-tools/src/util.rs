@@ -78,11 +78,28 @@ impl Root {
         #[cfg(unix)]
         o.custom_flags(libc::O_NONBLOCK);
         let f = self.dir.open_with(self.rel(abs), &o)?;
-        if !f.metadata()?.is_file() {
+        let md = f.metadata()?;
+        if !md.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "not a regular file",
             ));
+        }
+        // A hard link can point at a file outside the root and no path check sees it.
+        // shortcut: Windows link counts are not checked (cap-std has no stable accessor), so
+        // there a hard link is covered by the sandbox only; upgrade with GetFileInformationByHandle.
+        #[cfg(unix)]
+        if write {
+            let n = cap_std::fs::MetadataExt::nlink(&md);
+            if n > 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "{} has {n} hard links; it may be a path to a file outside the workspace; remove the link or edit the original",
+                        abs.display()
+                    ),
+                ));
+            }
         }
         Ok(f)
     }
@@ -271,5 +288,19 @@ mod tests {
         let e = root.read_capped(&big, 1024).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::FileTooLarge);
         assert_eq!(root.read_capped(&big, 1025).unwrap().len(), 1025);
+    }
+
+    #[test]
+    fn write_refuses_a_hard_linked_file() {
+        let (_d, base, c) = fx();
+        fs::hard_link(base.join("outside/f.txt"), base.join("ws/hl.txt")).unwrap();
+        fs::write(base.join("ws/plain.txt"), "a").unwrap();
+        let abs = c.workspace.resolve("hl.txt").unwrap();
+        let root = Root::open(&c, &abs).unwrap();
+        let e = root.write(&abs, "HARD").unwrap_err();
+        assert!(e.to_string().contains("2 hard links"), "{e}");
+        assert_eq!(fs::read(base.join("outside/f.txt")).unwrap(), b"SECRET");
+        let plain = c.workspace.resolve("plain.txt").unwrap();
+        root.write(&plain, "b").unwrap();
     }
 }

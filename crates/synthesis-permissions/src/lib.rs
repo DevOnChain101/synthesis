@@ -868,6 +868,19 @@ impl Permissions {
         None
     }
 
+    /// Read/Grep/Glob aimed straight at a secret file (`.env`, keys, ...), by name or through a link.
+    fn names_secret_file(&self, tool: &str, input: &Value) -> bool {
+        let field = if tool == "Read" { "file_path" } else { "path" };
+        OUTSIDE_READ_TOOLS.contains(&tool)
+            && non_empty(input, field).is_some_and(|t| {
+                let abs = paths::resolve(&self.env.cwd, t);
+                [Some(paths::lexical_normalize(&abs)), paths::real_of(&abs)]
+                    .into_iter()
+                    .flatten()
+                    .any(|c| synthesis_core::secrets::is_secret_path(&c))
+            })
+    }
+
     /// ANY rule matches (deny/ask). Bash: ANY sub-command against ANY rule.
     fn some_match(&self, rules: &[String], tool: &str, input: &Value) -> bool {
         if tool == "Bash" {
@@ -990,8 +1003,12 @@ impl Permissions {
         outside
     }
 
+    /// For writes: inside after links, and not a hard-linked file (its other name may be outside).
     fn path_inside_allowed(&self, tool: &str, input: &Value) -> bool {
-        path_of(tool, input).is_some_and(|fp| self.in_scope(&paths::resolve(&self.env.cwd, fp)))
+        path_of(tool, input).is_some_and(|fp| {
+            let abs = paths::resolve(&self.env.cwd, fp);
+            self.in_scope(&abs) && !paths::multilinked(&abs)
+        })
     }
 
     // --- protected and critical paths ------------------------------------------------------
@@ -1887,9 +1904,26 @@ impl Permissions {
             return self.protected_path_decision(mode);
         }
 
-        // explicit allow rules always win once we're past deny/ask.
+        // explicit allow rules always win once we're past deny/ask, except in plan mode, where
+        // they apply to read-only calls only (a read-only Bash command was allowed above)
         if self.allow_match(&self.allow_rules(mode), tool, input) {
+            if mode == Mode::Plan
+                && !READ_ONLY_TOOLS.contains(&tool)
+                && !matches!(tool, "WebFetch" | "WebSearch")
+            {
+                return v(Deny, "plan mode: read-only (an allow rule does not apply)");
+            }
             return v(Allow, "matched an allow rule");
+        }
+
+        // a secret file (`.env`, keys) is the person's call; only an allow rule (above) or bypass skips it
+        if self.names_secret_file(tool, input) {
+            return match mode {
+                Mode::DontAsk | Mode::Plan => {
+                    v(Deny, format!("{} mode: reads a secret file", mode.as_str()))
+                }
+                _ => v(Ask, "reads a secret file (.env, key, credentials)"),
+            };
         }
 
         // auto: the first read outside the working directories is the user's call
@@ -1996,11 +2030,13 @@ impl Permissions {
             {
                 let mut base = Some(self.env.cwd.clone());
                 let rules = self.allow_rules(mode);
-                if bash::bash_all_match_or(&rules, bash_cmd, |seg| {
-                    let ok = self.seg_safe(seg, base.as_deref(), false);
-                    base = self.after_cd(seg, base.take());
-                    ok
-                }) {
+                if mode != Mode::Plan
+                    && bash::bash_all_match_or(&rules, bash_cmd, |seg| {
+                        let ok = self.seg_safe(seg, base.as_deref(), false);
+                        base = self.after_cd(seg, base.take());
+                        ok
+                    })
+                {
                     return v(Allow, "matched an allow rule; other parts are read-only");
                 }
             }
