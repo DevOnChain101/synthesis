@@ -965,7 +965,7 @@ impl Permissions {
             .into_iter()
             .filter(|r| match bash::parse_rule(r) {
                 ("Bash", Some(s)) => !s.contains('*'),
-                (_, Some(s)) => !s.trim_matches(['/', '*', '.']).is_empty(),
+                (_, Some(s)) => !s.trim_matches(['/', '*', '.', '?']).is_empty(),
                 _ => false,
             })
             .collect();
@@ -1445,13 +1445,20 @@ impl Permissions {
             let mut ops = bash::redirect_targets(&seg);
             if name == "cd" {
                 self.widen_bases(&mut bases, w.get(1));
-            } else if bash::FS_CMDS.contains(&name) || WRITERS.contains(&name) {
-                ops.extend(
-                    w[1..]
-                        .iter()
-                        .filter(|a| !a.starts_with('-'))
-                        .map(|a| a.strip_prefix("of=").unwrap_or(a).to_string()),
-                );
+            } else if (bash::FS_CMDS.contains(&name) || WRITERS.contains(&name))
+                // removing a name leaves the other inode alone
+                && !matches!(name, "rm" | "rmdir")
+            {
+                let mut args: Vec<String> = w[1..]
+                    .iter()
+                    .filter(|a| !a.starts_with('-'))
+                    .map(|a| a.strip_prefix("of=").unwrap_or(a).to_string())
+                    .collect();
+                // a rename replaces the destination's directory entry, not its inode
+                if name == "mv" {
+                    args.pop();
+                }
+                ops.extend(args);
             }
             let hit = ops.iter().any(|o| {
                 bases.iter().any(|b| {
@@ -2240,6 +2247,8 @@ impl Permissions {
             });
             return abs
                 .filter(|a| synthesis_core::secrets::is_secret_path(Path::new(a)))
+                // a glob character in the name would make the rule broader than that file
+                .filter(|a| !a.contains(['*', '?', '[', ']', '{', '}']))
                 .map_or(vec![], |a| {
                     let a = if self.policy().windows_separators {
                         a.replace('\\', "/")

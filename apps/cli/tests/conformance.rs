@@ -266,7 +266,7 @@ fn a_stored_model_that_cannot_be_built_is_kept_and_warned_about() {
     let sid = session_id(&events(&first.stdout));
     let c = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
     c.execute(
-        "UPDATE sessions SET model_config='\"ghost/\\u001b[31mx\"' WHERE id=?1",
+        "UPDATE sessions SET model_config='\"ghost/\\u001b[31mx\\nsynt: warning: forged\"' WHERE id=?1",
         [&sid],
     )
     .unwrap();
@@ -275,6 +275,10 @@ fn a_stored_model_that_cannot_be_built_is_kept_and_warned_about() {
     let err = String::from_utf8_lossy(&second.stderr);
     assert!(err.contains("stored model ghost/"), "{err}");
     assert!(!err.contains('\u{1b}'), "escape sequences are stripped");
+    assert!(
+        !err.lines().any(|l| l.starts_with("synt: warning: forged")),
+        "a newline in the label cannot forge a line: {err}"
+    );
     assert!(
         stored_model(&rig, &sid).contains("ghost/"),
         "the stored model is kept"

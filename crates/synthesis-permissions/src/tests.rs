@@ -480,6 +480,7 @@ fn a_blanket_allow_rule_does_not_lift_the_secret_file_ask() {
             "Bash(*)",
             "Bash(cat:*)",
         ],
+        &["Read(?*)", "Read(**/?*)", "Grep(?*)", "Glob(**/?*)"],
     ] {
         for (tool, input) in &calls {
             for (mode, want) in [
@@ -550,6 +551,9 @@ fn a_secret_ask_offers_a_rule_for_that_path_only() {
         ),
         Q
     );
+    // a secret file whose own name holds a glob character gets no rule (it would be broader)
+    assert!(one("Read", json!({ "file_path": f.cwd.join("sub/*.pem") })).is_empty());
+    assert!(one("Read", json!({ "file_path": f.cwd.join("**/.env") })).is_empty());
     // a pattern with no secret path, and a glob command, offer nothing; an exact command does
     assert!(one("Glob", json!({ "pattern": ".env*" })).is_empty());
     assert!(one("Bash", json!({ "command": "cat .e*" })).is_empty());
@@ -577,7 +581,6 @@ fn bash_writes_through_a_hard_link_ask_even_with_a_bash_allow_rule() {
         "echo y | tee hard",
         "sed -i s/x/y/ hard",
         "cp plain hard",
-        "mv plain hard",
         "truncate -s 0 hard",
         "dd if=plain of=hard",
         "cd sub && echo y > ../hard",
@@ -603,6 +606,21 @@ fn bash_writes_through_a_hard_link_ask_even_with_a_bash_allow_rule() {
                 );
             }
         }
+    }
+    // removing a name, or renaming onto it, leaves the outside inode alone; a linked mv source,
+    // a cp source or any other writer still asks
+    for (cmd, want) in [
+        ("rm hard", A),
+        ("rmdir hard", A),
+        ("mv plain hard", A),
+        ("mv hard other", Q),
+        ("cp hard other", Q),
+        ("ln hard other", Q),
+        ("chmod 600 hard", Q),
+        ("install plain hard", Q),
+    ] {
+        let p = f.with(rules(&["Bash"], &[], &[]), Mode::Default);
+        assert_eq!(d(&p, "Bash", json!({ "command": cmd })), want, "{cmd}");
     }
     // a rule that names the exact command lifts it; a plain file and a read are untouched
     let p = f.with(

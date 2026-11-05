@@ -734,7 +734,9 @@ pub fn prepare(
                         sanitize_for_display(&m),
                         sanitize_for_display(&e),
                         sanitize_for_display(&r.label)
-                    );
+                    )
+                    // one line: a label with a newline must not forge a second `synt: warning:`
+                    .replace(['\n', '\t'], " ");
                     eprintln!("synt: warning: {w}");
                     model_warning = Some(w);
                     stored_unbuildable = true;
