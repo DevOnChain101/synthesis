@@ -37,6 +37,8 @@ pub struct SessionRow {
     pub ctx_pct: Option<f64>,
     pub waiting: bool,
     pub mode: Option<String>,
+    /// Name of a stored session (the first prompt); live rows use `Live::name`.
+    pub title: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -165,6 +167,8 @@ pub struct Rects {
     pub dock_rect: Option<Rect>,
     pub activity_rect: Option<Rect>,
     pub workspace_rect: Option<Rect>,
+    /// The Running panel (same columns as `workspace_rect`).
+    pub session_rect: Option<Rect>,
     pub session_rows: Vec<(i64, String)>,
     pub workspace_rows: Vec<(i64, String)>,
     pub activity_hits: Vec<(usize, usize)>,
@@ -788,7 +792,15 @@ fn feed_panel(s: &DashState, w: i64, h: i64, now: i64, rects: &mut Rects) -> Lin
             )
         })
         .collect();
-    boxed("Activity", lines, w, h, false, VAlign::Top)
+    // content cut: how many older rows are above and how many newer below the window
+    let mut title = "Activity".to_string();
+    if start > 0 {
+        title += &paint(COL_SUBTLE, &format!(" ↑{start}"));
+    }
+    if scroll > 0 {
+        title += &paint(COL_SUBTLE, &format!(" ↓{scroll}"));
+    }
+    boxed(&title, lines, w, h, false, VAlign::Top)
 }
 
 /// Visible window `[start, end)` of the session list and the "more" counts; the selected row
@@ -1026,6 +1038,7 @@ fn sessions_panel(
             (inner - 3 - width(&tag) as i64 - mode_s.len() as i64 - ctx.len() as i64 - 1).max(4);
         let raw_name = match live {
             Some(l) if !l.name.is_empty() && l.name != "agent" => l.name.clone(),
+            None if !sr.title.is_empty() => sr.title.clone(),
             _ => {
                 let b = basename(&sr.cwd);
                 if b.is_empty() { sr.project.clone() } else { b }
@@ -1468,6 +1481,7 @@ fn mcp_summary_line(s: &DashState, w: i64) -> Lines {
 struct Hits {
     ws: Vec<Option<String>>,
     ws_h: i64,
+    sess_h: i64,
     session: Vec<Option<String>>,
 }
 
@@ -1497,10 +1511,12 @@ fn side_column(
     }
     if h - ws_h - sessions_h < 10 {
         let mut out = ws_rows;
+        hits.sess_h = h - ws_h;
         out.extend(sessions_panel(s, w, h - ws_h, frame, &mut hits.session));
         return out;
     }
     let mut out = ws_rows;
+    hits.sess_h = sessions_h;
     out.extend(sessions_panel(s, w, sessions_h, frame, &mut hits.session));
     let budget = h - ws_h - sessions_h;
     let hidden = s.view.hidden;
@@ -2688,46 +2704,54 @@ fn topology_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> Line
 }
 
 fn footer(s: &DashState, w: i64) -> String {
-    let agent_keys: &[(&str, &str)] = &[
-        (
-            "tab",
-            "workspace selector (when multiple) → sessions → prompt",
-        ),
+    let mut agent_keys: Vec<(&str, &str)> = vec![];
+    if w >= 80 {
+        agent_keys.push(("tab", "workspaces → running → prompt"));
+    }
+    if s.agent.is_some_and(|a| !a.subagents.is_empty()) {
+        agent_keys.push(("ctrl+t", "talk to next agent"));
+    }
+    agent_keys.extend([
         ("enter", "send"),
         ("esc", "interrupt"),
         ("⇧tab", "mode"),
+        ("ctrl+n", "new workspace"),
+        ("/new", "new session"),
         ("alt+v", "paste image"),
         ("!", "shell"),
         ("ctrl+o", "expand"),
         ("ctrl+r", "search history"),
         ("ctrl+l", "redraw"),
-        ("ctrl+↑/↓", "browse sessions"),
-        ("ctrl+n", "new workspace"),
-        ("/new", "new session"),
-        ("ctrl+pgup/pgdn", "switch session"),
-        ("alt+↑/↓", "switch workspace"),
         ("pgup/pgdn", "scroll"),
         ("ctrl+c ×2", "quit"),
-    ];
-    let mut dash_keys: Vec<(&str, &str)> = vec![("↑/↓", "select session")];
-    if s.workspaces.is_some() {
-        dash_keys.push(("←/→", "switch workspace"));
-    }
-    dash_keys.extend([
-        ("a", "follow newest"),
-        ("u", "usage metric"),
-        ("r", "reload"),
     ]);
-    if s.agent.is_some() {
-        dash_keys.push(("tab", "agent"));
-    }
-    dash_keys.push(("q", "quit"));
+    // the standalone dashboard (no chat) keeps the Node keys; the app's Running panel has its own
+    let dash_keys: Vec<(&str, &str)> = if s.agent.is_some() {
+        vec![
+            ("↑/↓", "select session"),
+            ("enter", "open it"),
+            ("tab", "prompt"),
+            ("esc", "prompt"),
+        ]
+    } else {
+        let mut k = vec![("↑/↓", "select session")];
+        if s.workspaces.is_some() {
+            k.push(("←/→", "switch workspace"));
+        }
+        k.extend([
+            ("a", "follow newest"),
+            ("u", "usage metric"),
+            ("r", "reload"),
+            ("q", "quit"),
+        ]);
+        k
+    };
     let ws_keys: &[(&str, &str)] = &[
-        ("↑/↓", "switch workspace"),
-        ("g/G", "first/last"),
-        ("enter/→/tab", "sessions"),
-        ("esc", "agent"),
-        ("q", "quit"),
+        ("↑/↓", "select workspace"),
+        ("home/end", "first/last"),
+        ("enter", "its sessions"),
+        ("tab", "running"),
+        ("esc", "prompt"),
     ];
     let perm_keys: &[(&str, &str)] = &[
         ("↑/↓ 1-3", "choose"),
@@ -2736,7 +2760,7 @@ fn footer(s: &DashState, w: i64) -> String {
         ("tab", "dashboard"),
     ];
     let mut keys: Vec<(&str, &str)> = if s.agent.is_some() && s.focus == Focus::Agent {
-        agent_keys.to_vec()
+        agent_keys
     } else if s.focus == Focus::Workspace {
         ws_keys.to_vec()
     } else {
@@ -3318,6 +3342,12 @@ pub fn render_frame(
     } else {
         None
     };
+    r.session_rect = (hits.sess_h > 0).then_some(Rect {
+        x: 0,
+        y: header_rows + hits.ws_h,
+        w: side_w,
+        h: hits.sess_h,
+    });
     r.session_rows = hits
         .session
         .iter()

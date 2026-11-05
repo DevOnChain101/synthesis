@@ -146,6 +146,8 @@ pub struct FeedItem {
     pub ts: Option<i64>,
     pub kind: &'static str,
     pub text: String,
+    /// A prompt row: index of the chat item that holds it (set by the host, which owns the chat).
+    pub anchor: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -415,13 +417,23 @@ fn is_synthetic_prompt(text: &str) -> bool {
 }
 
 fn push_feed(s: &mut Session, ts: Option<i64>, kind: &'static str, text: String) {
-    s.feed.push(FeedItem { ts, kind, text });
+    s.feed.push(FeedItem {
+        ts,
+        kind,
+        text,
+        anchor: None,
+    });
     if s.feed.len() > FEED_LIMIT {
         s.feed.drain(..s.feed.len() - FEED_LIMIT);
     }
 }
 fn push_activity(s: &mut Session, ts: Option<i64>, kind: &'static str, text: String) {
-    s.activity.push(FeedItem { ts, kind, text });
+    s.activity.push(FeedItem {
+        ts,
+        kind,
+        text,
+        anchor: None,
+    });
     if s.activity.len() > FEED_LIMIT {
         s.activity.drain(..s.activity.len() - FEED_LIMIT);
     }

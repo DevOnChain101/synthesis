@@ -9,7 +9,7 @@ use synthesis_tui_render::dash::{
     DashState, DashView, Focus, Hidden, HistoryDay, Live, SessionRow, Usage, Workspace,
     render_frame, workspace_key,
 };
-use synthesis_tui_render::model::session_from_events;
+use synthesis_tui_render::model::{FeedItem, session_from_events};
 use synthesis_tui_render::util::basename;
 
 const NOW: i64 = 1_800_000_000_000;
@@ -25,11 +25,47 @@ fn frame_with(
     history: &[HistoryDay],
     history_loading: bool,
 ) -> Vec<String> {
+    raw_frame(
+        cols,
+        rows,
+        hidden,
+        history,
+        history_loading,
+        Focus::Agent,
+        0,
+        0,
+    )
+    .lines
+    .iter()
+    .map(|l| strip_ansi(l).trim_end().to_string())
+    .collect()
+}
+
+/// The frame as the renderer made it (colours, hit rects); `n_prompts` rows in Activity.
+#[allow(clippy::too_many_arguments)]
+fn raw_frame(
+    cols: usize,
+    rows: usize,
+    hidden: Hidden,
+    history: &[HistoryDay],
+    history_loading: bool,
+    focus: Focus,
+    activity_scroll: usize,
+    n_prompts: usize,
+) -> synthesis_tui_render::dash::Frame {
     let cwd = "/work/proj".to_string();
     let mut session = session_from_events("s1", []);
     session.cwd = cwd.clone();
     session.project = basename(&cwd);
     session.model = "fake/model".into();
+    for i in 0..n_prompts {
+        session.activity.push(FeedItem {
+            ts: Some(NOW),
+            kind: "prompt",
+            text: format!("prompt {i}"),
+            anchor: Some(i),
+        });
+    }
     let agent = Agent {
         id: "s1".into(),
         kind: "main".into(),
@@ -55,6 +91,7 @@ fn frame_with(
         ctx_pct: None,
         waiting: false,
         mode: Some("default".into()),
+        title: String::new(),
     }];
     let key = workspace_key(&cwd);
     let ws = [Workspace {
@@ -67,6 +104,7 @@ fn frame_with(
     }];
     let view = DashView {
         hidden,
+        activity_scroll,
         ..DashView::default()
     };
     let usage = Usage::default();
@@ -90,16 +128,12 @@ fn frame_with(
             chars: &editor,
             cur: 0,
         }),
-        focus: Focus::Agent,
+        focus,
         view: &view,
         agent_session_id: Some("s1"),
         tz_offset_min: 0,
     };
     render_frame(&state, cols, rows, 0, NOW)
-        .lines
-        .iter()
-        .map(|l| strip_ansi(l).trim_end().to_string())
-        .collect()
 }
 
 fn case(name: &str, cols: usize, rows: usize, hidden: Hidden) -> Vec<String> {
@@ -225,4 +259,65 @@ fn usage_panel_says_loading_then_no_usage_then_shows_the_data() {
     let loaded = frame_with(160, 47, Hidden::default(), &data, false);
     assert!(!has(&loaded, "no usage yet") && !has(&loaded, "loading usage…"));
     assert!(has(&loaded, "35.7k"), "{}", loaded.join("\n"));
+}
+
+#[test]
+fn the_focused_panel_has_the_accent_border_and_the_hit_rects_cover_the_panels() {
+    use synthesis_tui_render::theme::{T_CLAUDE, paint};
+    let accent = paint(T_CLAUDE, "┏━");
+    // (line of the Workspace top border, line of the Running top border)
+    let lit = |focus| {
+        let f = raw_frame(160, 47, Hidden::default(), &[], false, focus, 0, 0);
+        let at = |t: &str| {
+            f.lines
+                .iter()
+                .position(|l| strip_ansi(l).contains(t))
+                .unwrap()
+        };
+        (
+            f.lines[at("Workspace")].contains(&accent),
+            f.lines[at("Running")].contains(&accent),
+        )
+    };
+    assert_eq!(lit(Focus::Agent), (false, false));
+    assert_eq!(lit(Focus::Workspace), (true, false));
+    assert_eq!(lit(Focus::Dashboard), (false, true));
+    let r = raw_frame(160, 47, Hidden::default(), &[], false, Focus::Agent, 0, 0).rects;
+    let (w, q) = (r.workspace_rect.unwrap(), r.session_rect.unwrap());
+    assert_eq!(q.y, w.y + w.h, "Running starts under Workspace");
+    assert_eq!(r.workspace_rows, [(w.y + 1, workspace_key("/work/proj"))]);
+    assert_eq!(r.session_rows[0], (q.y + 1, "s1".to_string()));
+}
+
+#[test]
+fn activity_scrolls_clamped_and_says_how_much_is_cut() {
+    let at = |scroll| {
+        raw_frame(
+            160,
+            47,
+            Hidden::default(),
+            &[],
+            false,
+            Focus::Agent,
+            scroll,
+            60,
+        )
+    };
+    let f = at(0);
+    let title = |f: &synthesis_tui_render::dash::Frame| {
+        f.lines
+            .iter()
+            .map(|l| strip_ansi(l))
+            .find(|l| l.contains("Activity"))
+            .unwrap()
+    };
+    let max = f.rects.activity_max_scroll;
+    assert!(max > 0 && title(&f).contains('↑') && !title(&f).contains('↓'));
+    // newest at the bottom: the last row is the newest prompt
+    assert_eq!(f.rects.activity_hits.last().unwrap().1, 59);
+    // past the end is clamped to the oldest row
+    let old = at(10_000);
+    assert_eq!(old.rects.activity_scroll, max);
+    assert_eq!(old.rects.activity_hits[0].1, 0);
+    assert!(title(&old).contains('↓') && !title(&old).contains('↑'));
 }

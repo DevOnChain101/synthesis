@@ -27,8 +27,8 @@ use synthesis_tui_render::agent::{
     Suggestions as RSug, body_sel_rows,
 };
 use synthesis_tui_render::dash::{
-    DashState, DashView, Focus, Frame, Hidden, HistoryDay, Live, MIN_COLS, MIN_ROWS, SessionRow,
-    Usage, Workspace, render_frame, workspace_key,
+    DashState, DashView, Focus, Frame, Hidden, HistoryDay, Live, MIN_COLS, MIN_ROWS, Rect,
+    SessionRow, Usage, Workspace, render_frame, workspace_key,
 };
 use synthesis_tui_render::dialogs::HELP;
 use synthesis_tui_render::model::{
@@ -381,6 +381,18 @@ pub(crate) struct App {
     lines: Vec<String>,
     size: (u32, u32),
     commands: Vec<CmdDef>,
+    /// The workspaces of the session store, the live one first (`panels`).
+    groups: Vec<panels::Group>,
+    /// Selected workspace (index into `groups`) and row of the Running panel.
+    ws_sel: usize,
+    run_sel: usize,
+    /// Which part has the keyboard: the chat, the Workspace panel (`Workspace`) or Running
+    /// (`Dashboard`).
+    side: Focus,
+    /// Rows the Activity panel is scrolled up from the newest.
+    act_scroll: usize,
+    /// A switch waiting for its second press because a task is running: (what, when).
+    switch_armed: Option<(String, i64)>,
 }
 
 fn local_commands() -> Vec<CmdDef> {
@@ -399,7 +411,7 @@ fn local_commands() -> Vec<CmdDef> {
             "summarise the conversation to free context",
             "[instructions]",
         ),
-        c("new", "open a session in another folder", ""),
+        c("new", "new session in the selected workspace", ""),
         c("resume", "continue a saved session", "[session id]"),
         c("model", "pick a model, or change it directly", "[model]"),
         c(
@@ -513,7 +525,10 @@ fn bang_command(text: &str) -> (bool, String) {
 }
 
 fn activity_for(cfg: &AppConfig, replay: &[Envelope]) -> Session {
-    let mut activity = session_from_events(&cfg.session_id, replay.iter());
+    finish_activity(session_from_events(&cfg.session_id, replay.iter()), cfg)
+}
+
+fn finish_activity(mut activity: Session, cfg: &AppConfig) -> Session {
     activity.settle_replayed();
     activity.cwd = clean_line(&cfg.cwd);
     activity.project = clean_line(&basename(&cfg.cwd));
@@ -531,6 +546,7 @@ fn is_key(k: &Key, n: Named) -> bool {
     matches!(k, Key::Named(x) if *x == n)
 }
 
+mod panels;
 #[cfg(test)]
 mod tests;
 
@@ -546,10 +562,14 @@ impl App {
         chat.agent.mode = mode_str(cfg.mode).into();
         chat.agent.version = cfg.version.clone();
         chat.agent.status = "idle".into();
-        let activity = activity_for(&cfg, replay);
+        let mut activity = Session::new(&cfg.session_id);
         for e in replay {
+            let (prompts, items) = (activity.prompts, chat.agent.items.len());
+            apply_event(&mut activity, e);
             chat.apply(e, parse_ts(&e.ts).unwrap_or(now));
+            panels::link_prompt(&mut activity, &chat, prompts, items);
         }
+        let activity = finish_activity(activity, &cfg);
         // the window belongs to the model in use, not to the one that wrote the history (/model)
         chat.ctx.set_window(cfg.context_window.unwrap_or(0));
         chat.agent.status = "idle".into();
@@ -573,6 +593,7 @@ impl App {
         let ran_task = replay
             .iter()
             .any(|e| matches!(e.event, Event::TaskEnded { .. }));
+        let groups = panels::group_sessions(&cfg.cwd, &cfg.session_id, &cfg.saved);
         Self {
             mode: cfg.mode,
             model: cfg.model.clone(),
@@ -620,14 +641,22 @@ impl App {
             lines: vec![],
             size: (80, 24),
             commands,
+            groups,
+            ws_sel: 0,
+            run_sel: 0,
+            side: Focus::Agent,
+            act_scroll: 0,
+            switch_armed: None,
         }
     }
 
     // ------------------------------------------------------------------ inputs from the harness
 
     pub fn on_event(&mut self, env: &Envelope, now: i64) {
+        let (prompts, items) = (self.activity.prompts, self.chat.agent.items.len());
         apply_event(&mut self.activity, env);
         self.chat.apply(env, now);
+        panels::link_prompt(&mut self.activity, &self.chat, prompts, items);
         if self
             .target
             .as_ref()
@@ -949,6 +978,10 @@ impl App {
             out.push(Cmd::ResetScreen);
             return out;
         }
+        // a dialog, picker or search owns the keyboard: the panels give it up
+        if !self.dialogs.is_empty() || self.picker.is_some() || self.search.is_some() {
+            self.side = Focus::Agent;
+        }
         if is_key(&k, Named::AltT) && self.dialogs.is_empty() && self.picker.is_none() {
             self.set_effort("", &mut out);
             return out;
@@ -987,6 +1020,7 @@ impl App {
             self.picker_key(&k, now, &mut out);
         } else if self.search.is_some() {
             self.search_key(&k);
+        } else if self.side != Focus::Agent && self.panel_key(&k, now) {
         } else if !self.suggestion_key(&k, now, &mut out) {
             self.agent_key(&k, now, &mut out);
         }
@@ -1203,7 +1237,10 @@ impl App {
                     self.esc_at = Some(now);
                 }
             }
-            Tab if tab_cycles => self.cycle_target(),
+            Tab if tab_cycles => self.tab_into_sidebar(),
+            CtrlT if tab_cycles && (!self.chat.agents.is_empty() || self.target.is_some()) => {
+                self.cycle_target()
+            }
             CtrlR => {
                 let from = e.history.len() as i64 - 1;
                 let (matched, at) = self.search_history("", from);
@@ -1359,7 +1396,7 @@ impl App {
         self.chat.note(format!("now talking to @{name}"), "");
     }
 
-    /// Tab on an empty prompt: main, then the agents of this session, then main again.
+    /// Ctrl+T on an empty prompt: main, then the agents of this session, then main again.
     fn cycle_target(&mut self) {
         let mut order = vec!["main".to_string()];
         order.extend(self.chat.agents.iter().map(|r| r.name.clone()));
@@ -1618,7 +1655,7 @@ impl App {
                     out.push(Cmd::ClearConversation);
                 }
             }
-            "new" => self.open_folder_picker(PathBuf::from(&self.cfg.cwd)),
+            "new" => self.new_session(now),
             "resume" => {
                 if arg.is_empty() {
                     self.open_resume_picker(false, now);
@@ -2250,7 +2287,7 @@ impl App {
         }
         let mut picker = Picker::new(
             "folder",
-            "New session in folder",
+            "New workspace: pick a folder",
             &dir.display().to_string(),
             vec![],
         );
@@ -3013,6 +3050,11 @@ impl App {
                         self.scroll.saturating_sub(WHEEL_LINES)
                     };
                     self.follow_pointer();
+                } else if self.dialogs.is_empty()
+                    && self.picker.is_none()
+                    && matches!(dir, WheelDir::Up | WheelDir::Down)
+                {
+                    self.panel_wheel(p, dir == WheelDir::Up);
                 }
             }
             // motion with no button (terminals that report it): hint when over a link
@@ -3109,6 +3151,16 @@ impl App {
                 action: MouseAction::Down,
                 ..
             } if !self.dialogs.is_empty() => self.dialog_click(i64::from(y) - 1, now),
+            // a click on the Workspace / Running / Activity panels
+            Key::Mouse {
+                x,
+                y,
+                button: 0,
+                action: MouseAction::Down,
+                ..
+            } if self.picker.is_none() && self.search.is_none() && self.panel_click(x, y, now) => {
+                self.clear_selection();
+            }
             Key::Mouse {
                 x,
                 y,
@@ -3404,14 +3456,18 @@ impl App {
         } else {
             "idle"
         };
+        let g = &self.groups[self.ws_sel];
+        let live_cwd = &self.groups[0].cwd;
+        // the live session is always a row (the header counts it); the renderer lists only the
+        // rows of the selected workspace
         let mut rows = vec![SessionRow {
             id: self.cfg.session_id.clone(),
             project: clean_line(&basename(&self.cfg.cwd)),
-            cwd: clean_line(&self.cfg.cwd),
+            cwd: live_cwd.clone(),
             mtime: now,
             live: Some(Live {
                 name: "synthesis".into(),
-                cwd: clean_line(&self.cfg.cwd),
+                cwd: live_cwd.clone(),
                 status: if !self.dialogs.is_empty() {
                     "waiting"
                 } else if busy {
@@ -3426,40 +3482,21 @@ impl App {
             ctx_pct: None,
             waiting: !self.dialogs.is_empty(),
             mode: Some(mode_str(self.mode).into()),
+            title: String::new(),
         }];
-        // One row per other folder (the newest): the same repo listed once per stored session is noise.
-        let mut seen: Vec<(String, &SavedSession)> = vec![];
-        let mut canon: std::collections::HashMap<&str, String> = Default::default();
-        let me = fold_dir(&self.cfg.cwd);
-        for s in self.cfg.saved.iter() {
-            let k = canon
-                .entry(s.cwd.as_str())
-                .or_insert_with(|| fold_dir(&s.cwd))
-                .clone();
-            if k == me {
-                continue;
-            }
-            match seen.iter_mut().find(|(n, _)| *n == k) {
-                Some((_, n)) if n.mtime < s.mtime => *n = s,
-                Some(_) => {}
-                None => seen.push((k, s)),
-            }
-        }
-        let newest: Vec<&SavedSession> = seen.into_iter().map(|(_, s)| s).collect();
-        for s in newest {
-            rows.push(SessionRow {
-                id: s.id.clone(),
-                project: clean_line(&basename(&s.cwd)),
-                cwd: clean_line(&s.cwd),
-                mtime: s.mtime,
-                live: None,
-                phase: "idle".into(),
-                tokens: 0.0,
-                ctx_pct: None,
-                waiting: false,
-                mode: None,
-            });
-        }
+        // the stored sessions of the selected workspace, newest first
+        rows.extend(g.sessions.iter().map(|s| SessionRow {
+            id: s.id.clone(),
+            project: clean_line(&basename(&g.cwd)),
+            cwd: g.cwd.clone(),
+            mtime: s.mtime,
+            phase: "idle".into(),
+            title: match clean_line(&s.title) {
+                t if t.is_empty() => "(untitled)".into(),
+                t => t,
+            },
+            ..SessionRow::default()
+        }));
         rows
     }
 
@@ -3518,20 +3555,20 @@ impl App {
         self.activity.context_display_reset = false;
         self.chat.agent.context_window = (window > 0).then_some(window as f64);
         let rows_s = self.session_rows(now);
-        let key = workspace_key(&self.cfg.cwd);
-        let ws = [Workspace {
-            key: key.clone(),
-            name: clean_line(&basename(&self.cfg.cwd)),
-            cwd: clean_line(&self.cfg.cwd),
-            count: (1 + self
-                .cfg
-                .saved
-                .iter()
-                .filter(|s| s.id != self.cfg.session_id)
-                .count()) as u32,
-            waiting: !self.dialogs.is_empty(),
-            busy: self.chat.agent.status != "idle",
-        }];
+        let ws: Vec<Workspace> = self
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(i, g)| Workspace {
+                key: workspace_key(&g.cwd),
+                name: basename(&g.cwd),
+                cwd: g.cwd.clone(),
+                count: g.sessions.len() as u32 + u32::from(i == 0),
+                waiting: i == 0 && !self.dialogs.is_empty(),
+                busy: i == 0 && self.chat.agent.status != "idle",
+            })
+            .collect();
+        let key = workspace_key(&self.groups[self.ws_sel].cwd);
         let lead = self.bash() || self.memory();
         let mut opts = AgentOpts {
             input_mode: if self.bash() {
@@ -3595,6 +3632,7 @@ impl App {
             });
         }
         let view = DashView {
+            activity_scroll: self.act_scroll,
             opts,
             hidden: Hidden {
                 session: !self.tui.panels[0],
@@ -3604,13 +3642,19 @@ impl App {
             },
             ..DashView::default()
         };
+        let focus = if self.dialogs.is_empty() && self.picker.is_none() && self.search.is_none() {
+            self.side
+        } else {
+            Focus::Agent
+        };
         let usage = Usage::default();
         let sid = self.cfg.session_id.clone();
         let frame = {
             let state = DashState {
                 session: &self.activity,
                 sessions: &rows_s,
-                index: 0,
+                index: (self.run_sel + usize::from(!self.live_group()))
+                    .min(rows_s.len().saturating_sub(1)),
                 usage: &usage,
                 follow: false,
                 history: self.usage_history.as_deref().unwrap_or_default(),
@@ -3626,7 +3670,7 @@ impl App {
                     chars: &self.editor.chars[usize::from(lead)..],
                     cur: self.editor.cur.saturating_sub(usize::from(lead)),
                 }),
-                focus: Focus::Agent,
+                focus,
                 view: &view,
                 agent_session_id: Some(&sid),
                 tz_offset_min: self.cfg.tz_offset_min,
@@ -3653,6 +3697,10 @@ impl App {
             },
         ));
         self.caret = frame.rects.caret.map(|(x, y)| (x as u32, y as u32));
+        // no sidebar on this screen (narrow terminal): the chat keeps the keyboard
+        if frame.rects.workspace_rect.is_none() {
+            self.side = Focus::Agent;
+        }
         self.frame = Some(frame);
         self.lines.clone_from(&lines);
         // selection highlight is painted on a copy: hit tests keep reading the plain lines

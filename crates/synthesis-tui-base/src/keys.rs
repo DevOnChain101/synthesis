@@ -26,7 +26,7 @@ named_keys! {
     AltDelete = "alt-delete", AltD = "alt-d", AltT = "alt-t",
     CtrlA = "ctrl-a", CtrlC = "ctrl-c", CtrlD = "ctrl-d", CtrlE = "ctrl-e", CtrlJ = "ctrl-j",
     CtrlK = "ctrl-k", CtrlL = "ctrl-l", CtrlN = "ctrl-n", CtrlO = "ctrl-o", CtrlP = "ctrl-p",
-    CtrlR = "ctrl-r", CtrlU = "ctrl-u", CtrlV = "ctrl-v", CtrlW = "ctrl-w",
+    CtrlR = "ctrl-r", CtrlT = "ctrl-t", CtrlU = "ctrl-u", CtrlV = "ctrl-v", CtrlW = "ctrl-w",
     Enter = "enter", Tab = "tab", Backspace = "backspace", Escape = "escape",
 }
 
@@ -100,6 +100,7 @@ fn ctrl(c: char) -> Option<Named> {
         '\x10' => CtrlP,
         '\x16' => CtrlV,
         '\x12' => CtrlR,
+        '\x14' => CtrlT,
         '\x15' => CtrlU,
         '\x17' => CtrlW,
         '\x0a' => CtrlJ, // also shift+enter in some terminals

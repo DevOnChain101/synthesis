@@ -196,8 +196,8 @@ fn approval_subagent_model_switch_and_new_folder() {
         send("again\r"),
         expect_new("first reply"),
         quiet(),
-        // /new -> sub/ -> use this folder: a fresh session in that folder
-        send("/new\r"),
+        // ctrl+n (new workspace) -> sub/ -> use this folder: a fresh session in that folder
+        send("\u{e}"),
         expect("use this folder"),
         // wait for each picker state instead of sleeping: a loaded runner drops keys sent too early
         send("sub"),
@@ -346,7 +346,7 @@ fn resume_of_a_bad_id_and_unopenable_folders_are_notices_not_exits() {
         expect_new("no saved session matches"),
         quiet(),
         // the unreadable config: a notice, the session goes on
-        send("/new\r"),
+        send("\u{e}"), // ctrl+n: new workspace
         expect_new("use this folder"),
         send("./cfgbad"),
         expect_new("open "),
@@ -354,7 +354,7 @@ fn resume_of_a_bad_id_and_unopenable_folders_are_notices_not_exits() {
         expect_new("cannot open"),
         quiet(),
         // `~/x` is the rig's HOME/x
-        send("/new\r"),
+        send("\u{e}"), // ctrl+n: new workspace
         expect_new("use this folder"),
         send("~/x"),
         expect_new("open "),
@@ -378,9 +378,7 @@ fn switching_folder_during_a_task_says_the_task_was_cancelled() {
         send("\r"),
         // the task runs (and the scripted reply is 20 s away) when the footer offers the interrupt
         expect_new("esc to interrupt"),
-        send("/new"),
-        expect_new("/new"),
-        send("\r"),
+        send("\u{e}"), // ctrl+n: new workspace
         expect_new("use this folder"),
         send("./sub"),
         expect_new("open "),
@@ -822,4 +820,144 @@ fn kill_mid_task_then_continue_shows_idle() {
             "tool={tool}: {flat}"
         );
     }
+}
+
+/// SGR mouse report: left press and release at the 1-based cell `(x, y)`.
+fn click(x: u32, y: u32) -> String {
+    format!("\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m")
+}
+
+/// SGR wheel report (`down`: 65, else 64) at the 1-based cell `(x, y)`.
+fn wheel(x: u32, y: u32, down: bool) -> String {
+    format!("\x1b[<{};{x};{y}M", if down { 65 } else { 64 })
+}
+
+/// Three workspaces by ctrl+n, then the Workspace / Running / Activity panels by mouse and Tab:
+/// clicking a workspace lists its sessions, clicking a stored session resumes it, the Tab order
+/// is chat -> Workspace -> Running -> chat, a click on a prompt in Activity scrolls the chat to
+/// it, the wheel over Workspace moves its selection and `/new` opens the selected workspace.
+#[test]
+fn workspace_panels_by_mouse_and_tab_and_new_in_the_selected_workspace() {
+    let long = |n: u32| {
+        (1..=8)
+            .map(|i| format!("r{n} line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let rig = {
+        let mut r = Rig::new(json!([
+            {"text": long(1)}, {"text": long(2)}, {"text": long(3)},
+            {"text": long(4)}, {"text": long(5)}, {"text": long(6)}
+        ]));
+        r.size = (48, 160);
+        r
+    };
+    for d in ["ws2", "ws3"] {
+        std::fs::create_dir_all(rig.root().join(d).join(".git")).unwrap();
+    }
+    // a workspace by typed path, as in the picker
+    let open = |name: &str| {
+        vec![
+            send("\u{e}"),
+            expect_new("use this folder"),
+            send(&rig.root().join(name).display().to_string()),
+            expect_new("open "),
+            send("\r"),
+            // the chat title names the folder
+            expect_new(&format!("/{name}")),
+            quiet(),
+        ]
+    };
+    let mut steps = vec![
+        expect("Enter send"),
+        send("alpha-one\r"),
+        expect("r1 line 8"),
+        quiet(),
+    ];
+    steps.extend(open("ws2"));
+    steps.extend([send("beta-one\r"), expect_new("r1 line 8"), quiet()]);
+    steps.extend(open("ws3"));
+    // six prompts in the live session: more than the chat shows
+    for (i, w) in [
+        "gamma-one",
+        "gamma-two",
+        "gamma-three",
+        "gamma-four",
+        "gamma-five",
+        "gamma-six",
+    ]
+    .iter()
+    .enumerate()
+    {
+        steps.extend([
+            send(&format!("{w}\r")),
+            expect_new(&format!("r{} line 8", i + 1)),
+            quiet(),
+        ]);
+    }
+    // Activity: click every sidebar row from the bottom up; the last prompt row hit is the oldest
+    let sweep: String = (24..=47).rev().map(|y| click(4, y)).collect();
+    steps.extend([send(&sweep), expect_new("gamma-one"), quiet()]);
+    // Workspace: live ws3 first, then ws2 (newer) and ws; the third row is ws
+    steps.extend([send(&click(4, 6)), expect_new("alpha-one"), quiet()]);
+    // its stored session is the first Running row: it resumes
+    steps.extend([
+        send(&click(4, 9)),
+        expect_new("alpha-one"),
+        expect_new("r1 line 8"),
+        quiet(),
+    ]);
+    // Tab: chat -> Workspace -> Running -> chat, told apart by the footer
+    steps.extend([
+        send("\t"),
+        expect_new("select workspace"),
+        send("\t"),
+        expect_new("open it"),
+        send("\t"),
+        expect_new("workspaces → running"),
+        quiet(),
+    ]);
+    // the wheel over Workspace selects the next workspace: its sessions show in Running
+    steps.extend([send(&wheel(4, 5, true)), expect_new("gamma-one"), quiet()]);
+    steps.extend([send(&wheel(4, 5, true)), expect_new("beta-one"), quiet()]);
+    // /new: a fresh session in the selected workspace (ws2), not in the live one
+    steps.extend([send("/new\r"), expect_new("/ws2"), quiet()]);
+    let out = rig.drive(json!(steps));
+    assert!(!squash(&out).contains("synt: error"), "{}", squash(&out));
+    let starts = |ev: &[(String, Value)]| -> Vec<(String, String)> {
+        ev.iter()
+            .filter(|e| e.0 == "session.started")
+            .filter_map(|e| {
+                Some((
+                    e.1["workspace"]["cwd"].as_str()?.to_string(),
+                    e.1["source"].as_str().unwrap_or("").to_string(),
+                ))
+            })
+            .collect()
+    };
+    let in_ws2 = |ev: &[(String, Value)]| {
+        starts(ev)
+            .iter()
+            .filter(|(c, _)| c.ends_with("/ws2"))
+            .count()
+    };
+    let t0 = std::time::Instant::now();
+    let mut ev = rig.events();
+    while in_ws2(&ev) < 2 && t0.elapsed() < std::time::Duration::from_secs(5) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        ev = rig.events();
+    }
+    assert_eq!(
+        in_ws2(&ev),
+        2,
+        "ws2 got a second, fresh session: {:?}",
+        starts(&ev)
+    );
+    assert!(
+        starts(&ev)
+            .iter()
+            .any(|(c, s)| c.ends_with("/ws") && s == "resume"),
+        "the stored session of ws was resumed: {:?}",
+        starts(&ev)
+    );
 }
