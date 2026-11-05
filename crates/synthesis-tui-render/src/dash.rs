@@ -1497,10 +1497,12 @@ fn side_column(
 ) -> Lines {
     let n = running_sessions(s).0.len() as i64;
     let ws_h = match s.workspaces {
-        Some(l) if !l.is_empty() => (l.len() as i64 + 2).min(6),
+        // room for 5 rows plus the "more" lines when the column is tall enough, fewer as it shrinks
+        Some(l) if !l.is_empty() => (l.len() as i64 + 2).min(9).min(h / 3).max(3),
         _ => 0,
     };
-    let cap = max_sessions_h - ws_h;
+    // 3/5 of the terminal (was 1/2): Running lists 5 sessions (2 lines each) on a tall one
+    let cap = max_sessions_h * 6 / 5 - ws_h;
     let sessions_h = clamp_int(2 * n + 3, 5, cap.max(5));
     let mut ws_rows: Lines = vec![];
     if ws_h > 0 {

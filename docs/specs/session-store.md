@@ -98,5 +98,6 @@ Requirement: session formats read/write compatible both ways during the parallel
 Each file entry of a checkpoint may carry `post_sha256`: the state of the file after the run's last write to it (`file_state_hash`: sha256, or `absent` / `not-a-regular-file`). `synt rewind` refuses a file whose state differs or has no recorded hash unless `--force`, never touches symlinks or non-regular files, restores through a temp file and rename, and removes a file the run created only while it still has the recorded hash. `synt run --resume ID` only finds sessions of the current directory unless `--resume-any-workspace`.
 
 ## Open
+- Empty sessions (no `messages` and no `tasks` row): `Reader::list_used_sessions` leaves them out of listings (TUI panels, `/resume`); `Store::prune_empty_sessions` deletes those older than 1 hour at TUI start (all dependent rows and `sessions/<id>/`), skipping the session being resumed, any session with a child session, and any whose `lock` is held by a live process.
 - Artifact retention default and size cap (proposal: keep for the session's lifetime, `synt gc --older-than 30d`).
 - Store full raw provider responses for debugging? Not in v1 (cost, secrets).

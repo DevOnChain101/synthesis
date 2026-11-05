@@ -93,6 +93,10 @@ pub trait TaskHost: Send + Sync {
     ) -> BoxFut<'a, ()>;
 }
 
+/// Where the terminal guard waits between two runs of the app (a `/model` restart): the screen
+/// is never left, so there is no flash and no cooked-mode gap.
+pub type Hold = Arc<std::sync::Mutex<Option<TerminalGuard>>>;
+
 type ModelSwitch = Box<dyn FnMut(&str) -> Result<(Arc<Harness>, String), String>>;
 
 pub struct Options {
@@ -117,6 +121,9 @@ pub struct Options {
     /// Applies a model choice: returns the rebuilt harness and its label. Without it `/model`
     /// only lists.
     pub switch_model: Option<ModelSwitch>,
+    /// With it, a run that ends in `ExitReason::SwitchModel` leaves the terminal in the app's
+    /// screen mode and parks its guard here; the next run takes it over.
+    pub hold: Option<Hold>,
     pub extra_commands: Vec<CmdDef>,
     /// Lines for `/mcp`: servers, state, tools, errors (called each time the command runs).
     pub mcp_report: Option<Box<dyn Fn() -> Vec<String>>>,
@@ -176,6 +183,7 @@ impl Options {
             effort_tiers: vec![],
             context_window: None,
             switch_model: None,
+            hold: None,
             extra_commands: vec![],
             mcp_report: None,
             memory: None,
@@ -693,7 +701,15 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
     }
     let _stop_reading = StopReading(stop);
     let out = SharedOut::new(output);
-    let guard = TerminalGuard::enter(out.clone(), GuardOptions { raw_mode })?;
+    let held = o
+        .hold
+        .as_ref()
+        .and_then(|h| h.lock().unwrap_or_else(|e| e.into_inner()).take());
+    let resumed = held.is_some();
+    let guard = match held {
+        Some(g) => g,
+        None => TerminalGuard::enter(out.clone(), GuardOptions { raw_mode })?,
+    };
     let mut screen = Screen::new(out.clone(), color);
     if hyperlinks_enabled(&o.env) {
         let (base, home) = (
@@ -708,8 +724,12 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
         })));
     }
     screen.set_mouse(o.tui.mouse_capture);
-    screen.enter()?;
-    out.clone().write_all(BRACKETED_PASTE_ON.as_bytes())?;
+    if resumed {
+        screen.adopt();
+    } else {
+        screen.enter()?;
+        out.clone().write_all(BRACKETED_PASTE_ON.as_bytes())?;
+    }
 
     #[cfg(not(unix))]
     let _ = watch_signals; // Ctrl-C arrives as a key in raw mode; there is no SIGWINCH to watch
@@ -1034,10 +1054,17 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
         }
     };
 
-    guard.restore();
     #[cfg(unix)]
     if let Some(h) = signals {
         h.close();
+    }
+    match o
+        .hold
+        .as_ref()
+        .filter(|_| matches!(result.reason, ExitReason::SwitchModel(_)))
+    {
+        Some(h) => *h.lock().unwrap_or_else(|e| e.into_inner()) = Some(guard),
+        None => guard.restore(),
     }
     Ok(result)
 }

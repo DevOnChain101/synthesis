@@ -29,10 +29,10 @@ fn saved(r: &SessionRecord) -> SavedSession {
     }
 }
 
-/// Newest first; `cwd` limits it to one folder.
+/// Newest first; `cwd` limits it to one folder. Sessions without a message or task are left out.
 pub fn list_saved(synthesis_home: &Path, cwd: Option<&str>) -> Result<Vec<SavedSession>, String> {
     let r = Reader::open(synthesis_home).map_err(|e| e.to_string())?;
-    Ok(r.list_sessions(cwd)
+    Ok(r.list_used_sessions(cwd)
         .map_err(|e| e.to_string())?
         .iter()
         .enumerate()

@@ -93,7 +93,7 @@ The status line shows `ctx 62% 124k/200k`; the Context panel, the header chip an
 The sidebar has three controls. **Workspace** lists the folders that have sessions in the store (the
 live one first, then by newest session) with the session count. **Running** lists the sessions of the
 SELECTED workspace: the live one (`●`, marked `⌘`) and the stored ones (`○`, named by their first
-prompt), newest first. Selecting a workspace only changes that list; nothing restarts. Opening a
+prompt), newest first. On a tall terminal each panel lists 5 rows (a session is 2 lines) before it scrolls (`↑ n more` / `↓ n more`); a shorter terminal gives them fewer, and the panels below shrink or drop out instead of overlapping. Sessions with no message and no task (a launch where nothing was typed) are not listed, in these panels or in `/resume`; the open session always shows, and a folder whose sessions are all hidden is not a workspace row (the live folder stays). At start the app deletes such sessions when they are older than 1 hour, are not the one being resumed and are not locked by a running `synt` (with their rows and directory); anything doubtful is kept. Selecting a workspace only changes that list; nothing restarts. Opening a
 stored session is `/resume` (the app restarts on it, in its own folder; a running task is cancelled
 after a second Enter / click within 5 s). **Activity** is the feed of the live session; a `❯` row is
 a prompt.

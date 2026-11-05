@@ -11,12 +11,10 @@ const MS_DAY: i64 = 86_400_000;
 /// 53 weeks: the year grid plus the partial week.
 const WINDOW_DAYS: i64 = 371;
 
-/// Contiguous days from the first active one to today (the render indexes days back from the
-/// last entry); empty when nothing was ever recorded.
+/// Contiguous days from the first active one (at most a year back) to today (the render indexes
+/// days back from the last entry); the last year at least, so the grid is drawn with no history.
 fn fill(days: &[UsageDay], today: i64, tz: i32) -> Vec<HistoryDay> {
-    let Some(first) = days.first().map(|d| d.day) else {
-        return vec![];
-    };
+    let first = days.first().map_or(today, |d| d.day).min(today - 364);
     (first.min(today)..=today)
         .map(|day| {
             let d = days.iter().find(|d| d.day == day);
@@ -34,14 +32,14 @@ fn fill(days: &[UsageDay], today: i64, tz: i32) -> Vec<HistoryDay> {
         .collect()
 }
 
-/// An unreadable or missing store is an empty history (the panel says "no usage yet").
+/// An unreadable or missing store is a history of zeros.
 pub(crate) fn load(home: &Path, now_ms: i64, tz: i32) -> Vec<HistoryDay> {
     let today = (now_ms + i64::from(tz) * 60_000).div_euclid(MS_DAY);
     let since = now_ms - WINDOW_DAYS * MS_DAY;
     Reader::open(home)
         .and_then(|r| r.usage_by_day(since, tz))
         .map(|d| fill(&d, today, tz))
-        .unwrap_or_default()
+        .unwrap_or_else(|_| fill(&[], today, tz))
 }
 
 #[cfg(test)]
@@ -64,17 +62,25 @@ mod tests {
     fn fills_gaps_and_ends_today_at_local_midnight() {
         let h = fill(&[day(100, 7), day(102, 9)], 103, 120);
         assert_eq!(
-            h.iter().map(|d| d.tokens).collect::<Vec<_>>(),
-            [7.0, 0.0, 9.0, 0.0]
+            h.iter().rev().take(4).map(|d| d.tokens).collect::<Vec<_>>(),
+            [0.0, 9.0, 0.0, 7.0]
         );
-        assert_eq!(h[3].date_ms, 103 * MS_DAY - 120 * 60_000);
-        assert_eq!((h[0].sessions, h[1].sessions), (5.0, 0.0));
-        assert!(fill(&[], 103, 0).is_empty());
+        assert_eq!(
+            (h.len(), h[364].date_ms),
+            (365, 103 * MS_DAY - 120 * 60_000)
+        );
+        assert_eq!((h[363].sessions, h[362].sessions), (5.0, 0.0));
+        let z = fill(&[], 103, 0);
+        assert_eq!(
+            (z.len(), z[0].tokens, z[364].date_ms),
+            (365, 0.0, 103 * MS_DAY)
+        );
     }
 
     #[test]
-    fn a_missing_store_is_empty() {
+    fn a_missing_store_is_a_year_of_zeros() {
         let t = std::env::temp_dir().join("synt-usage-no-store-here");
-        assert!(load(&t, 1_800_000_000_000, 0).is_empty());
+        let h = load(&t, 1_800_000_000_000, 0);
+        assert_eq!((h.len(), h[0].tokens), (365, 0.0));
     }
 }
