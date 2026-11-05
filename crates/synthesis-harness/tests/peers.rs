@@ -138,7 +138,7 @@ impl synthesis_harness::Approver for Fixed {
             if yes {
                 synthesis_harness::Approval::allow()
             } else {
-                synthesis_harness::Approval::deny("no")
+                synthesis_harness::Approval::deny("user said no")
             }
         })
     }
@@ -1155,22 +1155,49 @@ async fn the_confirm_dialog_shows_exactly_the_reply_that_is_sent() {
     assert_eq!(dialog, long.trim(), "what is approved is what is sent");
 }
 
+/// Approves or denies everything and keeps what the dialog showed.
+struct Choose(Arc<std::sync::Mutex<Vec<serde_json::Value>>>, bool);
+impl synthesis_harness::Approver for Choose {
+    fn approve<'a>(
+        &'a self,
+        r: synthesis_harness::ApprovalRequest,
+        _: &'a CancellationToken,
+    ) -> synthesis_harness::BoxFut<'a, synthesis_harness::Approval> {
+        self.0.lock().unwrap().push(r.input.clone());
+        let ok = self.1;
+        Box::pin(async move {
+            if ok {
+                synthesis_harness::Approval::allow()
+            } else {
+                synthesis_harness::Approval::deny("user said no")
+            }
+        })
+    }
+}
+
 #[tokio::test]
-async fn initiate_false_refuses_before_any_approval_prompt() {
-    for initiate in [false, true] {
+async fn initiate_false_asks_the_user() {
+    // (initiate, user approves)
+    for (initiate, approve) in [(false, true), (false, false), (true, true)] {
         let home = tempfile::tempdir().unwrap();
         let run = run_dir(home.path());
         let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "initiate": initiate});
-        let a_resp: Responder = Arc::new(|_| Some(Turn::text("A idle")));
+        let a_resp: Responder = Arc::new(|r| {
+            Some(if is_responder(r) {
+                Turn::text("A-ANSWER")
+            } else {
+                Turn::text("A idle")
+            })
+        });
         let (a, ea) = side("sess-a", "alpha", &run, Some(on.clone()), a_resp, 10);
         let shown = Arc::new(std::sync::Mutex::new(vec![]));
         let ask: Responder = Arc::new(|r| {
             Some(if tool_result(r, "ask").is_none() {
-                // delegate:true is never pre-approved, so with initiate on the user is asked
+                // a plain send: pre-approved only when initiate is true
                 Turn::tool(
                     "ask",
                     "SendMessage",
-                    json!({"to": "ws:alpha/sess:sess-a", "message": "hi", "delegate": true}),
+                    json!({"to": "ws:alpha/sess:sess-a", "message": "hi"}),
                 )
             } else {
                 Turn::text("B done")
@@ -1184,7 +1211,7 @@ async fn initiate_false_refuses_before_any_approval_prompt() {
             ask,
             10,
             true,
-            Some(Arc::new(Rec(shown.clone()))),
+            Some(Arc::new(Choose(shown.clone(), approve))),
             &[],
             SideX {
                 mode: PermissionMode::Default,
@@ -1196,17 +1223,15 @@ async fn initiate_false_refuses_before_any_approval_prompt() {
         go(&mut b, "go").await;
         let reqs = b.rig.requests();
         let (t, _) = tool_result(&reqs[1], "ask").unwrap();
-        if initiate {
-            assert!(!shown.lock().unwrap().is_empty(), "the user is asked: {t}");
+        let asked = !shown.lock().unwrap().is_empty();
+        assert_eq!(asked, !initiate, "initiate={initiate}: {t}");
+        if !approve {
+            assert!(
+                t.contains("user said no"),
+                "a denied send does not run: {t}"
+            );
         } else {
-            assert!(
-                shown.lock().unwrap().is_empty(),
-                "no prompt for a refused send"
-            );
-            assert!(
-                t.contains("synt.peers.initiate") && t.contains("NOT run"),
-                "{t}"
-            );
+            assert!(!t.contains("NOT run") && !t.contains("denied"), "{t}");
         }
     }
 }
@@ -1928,7 +1953,7 @@ impl synthesis_harness::Approver for Asked {
             tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
             match self.answer {
                 Some(true) => synthesis_harness::Approval::allow(),
-                Some(false) => synthesis_harness::Approval::deny("no"),
+                Some(false) => synthesis_harness::Approval::deny("user said no"),
                 None => {
                     cancel.cancelled().await;
                     synthesis_harness::Approval::deny("closed")
