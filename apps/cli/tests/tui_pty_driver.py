@@ -13,7 +13,7 @@ env.update(sc["env"])
 pid,fd=pty.fork()
 if pid==0:
     os.execve(sc["argv"][0],sc["argv"],env)
-fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack("HHHH",40,120,0,0))
+fcntl.ioctl(fd,termios.TIOCSWINSZ,struct.pack("HHHH",sc.get("rows",40),sc.get("cols",120),0,0))
 buf=b""
 def rd(t):
     global buf

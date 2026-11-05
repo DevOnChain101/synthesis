@@ -78,6 +78,17 @@ nothing else, so never a credential. First run without a configured model shows 
 (`r` checks again, `q` quits) instead of an error. What came from the removed new TUI and what did
 not: `docs/tui-feature-port.md`.
 
+## Usage panel
+
+The sidebar's Usage panel (wide terminals) is a per-day history of every session in the store
+(`<SYNT_HOME>/synt.db`, all folders, last 53 weeks), read-only and off the UI thread: once at
+start (`loading usage…` until it ends) and again when a task ends. Per local day (the terminal's UTC
+offset): tokens (`turn.completed` input + output), messages (`user.message`), tool calls
+(`tool.started`), agents (`subagent.started`) and sessions with activity. An empty store says
+`no usage yet`. The metric is always tokens (the render can show the others; no key switches it
+yet, so the `u: metric` hint in the title does nothing). There is no provider quota source, so the
+5-hour and 7-day quota rows are absent, and no cost is shown.
+
 ## Git in `/files` and `/diff`
 
 Only in a folder started with `--trust-project`, one scan at a time, 5 s limit, output bounded and cut

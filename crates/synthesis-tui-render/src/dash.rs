@@ -132,6 +132,8 @@ pub struct DashState<'a> {
     pub usage: &'a Usage,
     pub follow: bool,
     pub history: &'a [HistoryDay],
+    /// The first load of `history` is still running (the Usage panel says so, not "no usage yet").
+    pub history_loading: bool,
     pub usage_metric: &'a str,
     pub mcp_servers: &'a [McpServer],
     pub mcp_live: Option<&'a [McpLive]>,
@@ -1996,7 +1998,14 @@ fn usage_month_panel(s: &DashState, w: i64, h: i64, valign: VAlign, now: i64) ->
     if history.is_empty() {
         return boxed(
             "Usage",
-            vec![paint(COL_MUTED, "collecting history…")],
+            vec![paint(
+                COL_MUTED,
+                if s.history_loading {
+                    "loading usage…"
+                } else {
+                    "no usage yet"
+                },
+            )],
             w,
             h,
             false,

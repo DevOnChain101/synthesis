@@ -10,12 +10,17 @@ use serde_json::{Value, json};
 
 struct Rig {
     dir: tempfile::TempDir,
+    /// Terminal (rows, cols); the sidebar's Usage panel needs more than the default.
+    size: (u16, u16),
 }
 
 impl Rig {
     fn new(script: Value) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let r = Rig { dir };
+        let r = Rig {
+            dir,
+            size: (40, 120),
+        };
         for d in ["home", "ws/.git", "ws/sub/.git"] {
             std::fs::create_dir_all(r.root().join(d)).unwrap();
         }
@@ -78,6 +83,8 @@ impl Rig {
             "argv": argv,
             "env": {"HOME": self.root(), "SYNT_HOME": self.home()},
             "steps": steps,
+            "rows": self.size.0,
+            "cols": self.size.1,
         });
         let (sc, out) = (
             self.root().join("scenario.json"),
@@ -688,4 +695,21 @@ fn first_run_shows_the_setup_card_and_quits_cleanly() {
         flat.rsplit("STATE").next().unwrap_or("")
     );
     assert!(!rig.home().join("auth.json").exists(), "nothing was stored");
+}
+
+/// The Usage panel loads the stored history off the UI thread: no "collecting history…" any more,
+/// and after a prompt the panel shows the tokens of the session.
+#[test]
+fn usage_panel_shows_stored_history_after_a_prompt() {
+    let mut rig = Rig::new(json!([{"text": "first reply"}]));
+    rig.size = (48, 160);
+    let out = rig.drive(json!([
+        expect("Enter send"),
+        quiet(),
+        send("hi\r"),
+        expect_new("first reply"),
+        expect_new("tokens \u{b7}")
+    ]));
+    assert!(!squash(&out).contains("collecting history"), "{out}");
+    assert!(squash(&out).contains("7d"), "{}", squash(&out));
 }

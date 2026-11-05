@@ -110,6 +110,7 @@ fn once_is_render_frame_plus_the_status_line() {
         usage: &usage,
         follow: false,
         history: &[],
+        history_loading: false,
         usage_metric: "tokens",
         mcp_servers: &[],
         mcp_live: None,

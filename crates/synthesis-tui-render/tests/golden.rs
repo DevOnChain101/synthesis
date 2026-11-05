@@ -349,6 +349,7 @@ impl Owned {
             usage: &self.usage,
             follow: false,
             history: &self.history,
+            history_loading: false,
             usage_metric: &self.metric,
             mcp_servers: &self.mcp,
             mcp_live: None,

@@ -269,6 +269,18 @@ pub struct Store {
     limits: Limits,
 }
 
+/// One local calendar day of [`Reader::usage_by_day`]; `day` counts days since 1970-01-01.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageDay {
+    pub day: i64,
+    pub tokens: u64,
+    pub output: u64,
+    pub messages: u64,
+    pub tools: u64,
+    pub agents: u64,
+    pub sessions: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionRecord {
     pub id: String,
@@ -957,6 +969,41 @@ impl Reader {
             "SELECT {SESSION_COLS} FROM sessions WHERE (?1 IS NULL OR cwd=?1) ORDER BY updated_at DESC, id"
         ))?;
         let rows = st.query_map([cwd], session_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Per-day activity of every session in the store since `since_ms`, days taken at
+    /// `tz_offset_min` east of UTC (read-only; sparse: days without events are absent).
+    pub fn usage_by_day(&self, since_ms: i64, tz_offset_min: i32) -> Result<Vec<UsageDay>> {
+        let mut st = self.conn.prepare(
+            "SELECT (CAST(strftime('%s', ts) AS INTEGER) + ?2 * 60) / 86400 AS day,
+               SUM(CASE WHEN type='turn.completed'
+                   THEN COALESCE(json_extract(payload,'$.usage.input_tokens'),0)
+                      + COALESCE(json_extract(payload,'$.usage.output_tokens'),0) ELSE 0 END),
+               SUM(CASE WHEN type='turn.completed'
+                   THEN COALESCE(json_extract(payload,'$.usage.output_tokens'),0) ELSE 0 END),
+               SUM(type='user.message'), SUM(type='tool.started'), SUM(type='subagent.started'),
+               COUNT(DISTINCT session_id)
+             FROM events
+             WHERE type IN ('turn.completed','user.message','tool.started','subagent.started')
+               AND payload IS NOT NULL AND CAST(strftime('%s', ts) AS INTEGER) >= ?1 / 1000
+             GROUP BY day ORDER BY day",
+        )?;
+        let rows = st.query_map(params![since_ms, tz_offset_min], |r| {
+            let n = |i: usize| {
+                r.get::<_, Option<i64>>(i)
+                    .map(|v| v.unwrap_or(0).max(0) as u64)
+            };
+            Ok(UsageDay {
+                day: r.get(0)?,
+                tokens: n(1)?,
+                output: n(2)?,
+                messages: n(3)?,
+                tools: n(4)?,
+                agents: n(5)?,
+                sessions: n(6)?,
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
