@@ -515,7 +515,11 @@ async fn a_peer_outside_the_allow_list_is_not_found_and_nothing_is_sent() {
     assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
     let reqs = b.rig.requests();
     let (t, err) = tool_result(&reqs[1], "ask").unwrap();
-    assert!(err && t.contains("requires approval"), "{t}");
+    // refused before any approval prompt
+    assert!(
+        err && t.contains("not_found") && t.contains("synt.peers.allow"),
+        "{t}"
+    );
     assert!(
         a.rig
             .find(|e| matches!(e, Event::PeerRequestReceived { .. }).then_some(()))
@@ -857,7 +861,7 @@ async fn offline_queueing_needs_the_opt_in_the_main_agent_and_an_allowed_workspa
     assert!(err && r.starts_with("offline:"), "{r}");
     // a workspace the allow list refuses is not even addressable
     let (r, err) = attempt("ws:secret/sess:dead-s", on.clone()).await;
-    assert!(err && r.contains("requires approval"), "{r}");
+    assert!(err && r.contains("not_found"), "{r}");
     assert!(mb.pending("dead-a").is_empty() && mb.pending("dead-s").is_empty());
     // with everything in place it is queued, and a full queue says busy instead of dropping
     let (r, err) = attempt("ws:alpha/sess:dead-a", on).await;

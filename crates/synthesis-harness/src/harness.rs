@@ -754,6 +754,17 @@ impl Harness {
         self.peer_endpoint_event(true);
     }
 
+    /// A resumed session continues on another model than the one stored: records `model.changed`.
+    pub fn model_changed(&self, model: &str) {
+        self.sink.emit(
+            &Scope::default(),
+            Event::ModelChanged {
+                model: model.into(),
+                effort: None,
+            },
+        );
+    }
+
     /// Runs the `SessionStart` / `SessionEnd` / `Notification` hooks (outside any task) and
     /// records `hook.ran`. Returns the hook output text meant for the model (`SessionStart`).
     pub async fn session_hook(&self, event: HookEvent, payload: Value, target: Option<&str>) {

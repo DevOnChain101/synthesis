@@ -26,7 +26,7 @@ cut for `synt run --resume` consumers.
 | /compact [instructions] | summarise the conversation (`Harness::request_compact` / compact now) |
 | /new | a fresh session in the SELECTED workspace (the one highlighted in the Workspace panel; no picker). When that is not the live workspace the app switches to it. A running task needs a second `/new` within 5 s (it cancels the task and says so). For a different folder use Ctrl+N |
 | /resume [id] | continue a saved session (picker: this folder first); an unknown id is a notice, the app stays |
-| /model [name] | pick or set a model; restarts on the same session |
+| /model [name] | pick or set a model; restarts on the same session; the choice is stored (`model.changed`, `sessions.model_config`) and `--resume` continues on it unless `--model` is given |
 | /effort [auto\|low\|...] | reasoning effort, only when the model declares `effort_tiers` |
 | /mcp | MCP servers: state, tools, last error |
 | /images [clear] | the attached images, or drop them |

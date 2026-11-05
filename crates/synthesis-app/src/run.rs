@@ -374,6 +374,8 @@ pub struct Prepared {
     pub history: Vec<Message>,
     /// Set when the stored session itself continues: the last event seq it had.
     pub resumed_from_seq: Option<u64>,
+    /// Set with `resumed_from_seq` when the session continues on another model than the stored one.
+    pub model_changed: Option<String>,
 }
 
 /// The stored session `--resume ID` / `--continue` names and its live (non-compacted) messages.
@@ -658,13 +660,55 @@ pub fn prepare(
             sanitize_for_display(&settings.env_refused.join(", "))
         );
     }
-    let res = resolve_provider(
+    let resume = resolve_resume(c, &h, cwd)?;
+    if resume.is_some() && (c.worktree || c.no_session_store) {
+        return Err(
+            "--resume/--continue cannot be combined with --worktree or --no-session-store".into(),
+        );
+    }
+    // a resumed session continues on the model it last used (`/model` is stored) unless
+    // --model says otherwise or --provider names another provider; a stored model that cannot be
+    // built falls back to the default
+    let stored = resume
+        .as_ref()
+        .filter(|_| c.model.is_none())
+        .and_then(|(id, _)| {
+            synthesis_session::Reader::open(&h.synthesis)
+                .ok()?
+                .get_session(id)
+                .ok()
+        })
+        .map(|r| r.model_config_id)
+        .filter(|m| {
+            c.provider
+                .as_deref()
+                .is_none_or(|p| m.starts_with(&format!("{}/", p.split(':').next().unwrap_or(p))))
+        });
+    let default = resolve_provider(
         c.provider.as_deref(),
         c.model.as_deref(),
         &cfg,
         &h.synthesis,
         env,
-    )?;
+    );
+    let res = match (default, stored) {
+        (Ok(r), Some(m)) if r.label != m => {
+            match resolve_provider(c.provider.as_deref(), Some(&m), &cfg, &h.synthesis, env) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("synt: warning: stored model {m}: {e}; using the default");
+                    r
+                }
+            }
+        }
+        (Ok(r), _) => r,
+        // nothing configured by default: the stored model may still be buildable
+        (Err(e), Some(m)) => {
+            resolve_provider(c.provider.as_deref(), Some(&m), &cfg, &h.synthesis, env)
+                .map_err(|_| e)?
+        }
+        (Err(e), None) => return Err(e),
+    };
 
     // `synt.browser` comes from the user's own settings file only (the loader enforces it)
     let browser = crate::login::parse_settings(&settings.synthesis.browser);
@@ -760,12 +804,6 @@ pub fn prepare(
                 ));
             }
         }
-    }
-    let resume = resolve_resume(c, &h, cwd)?;
-    if resume.is_some() && (c.worktree || c.no_session_store) {
-        return Err(
-            "--resume/--continue cannot be combined with --worktree or --no-session-store".into(),
-        );
     }
     let in_place = resume.is_some() && !c.fork_session;
     let sid = match &resume {
@@ -865,6 +903,7 @@ pub fn prepare(
     }
 
     let mut resumed_from_seq = None;
+    let mut model_changed = None;
     let store: Option<Store> = if c.no_session_store {
         None
     } else {
@@ -914,7 +953,12 @@ pub fn prepare(
             } else {
                 session.status = SessionStatus::Idle;
             }
-            resumed_from_seq = Some(w.get_session(&sid).map_err(|e| e.to_string())?.event_cursor);
+            let rec = w.get_session(&sid).map_err(|e| e.to_string())?;
+            resumed_from_seq = Some(rec.event_cursor);
+            if rec.model_config_id != res.label {
+                w.set_model(&res.label).map_err(|e| e.to_string())?;
+                model_changed = Some(res.label.clone());
+            }
         }
         Some(Arc::new(Mutex::new(w)))
     };
@@ -1481,6 +1525,7 @@ pub fn prepare(
         notes,
         history: resume.map(|(_, hist)| hist).unwrap_or_default(),
         resumed_from_seq,
+        model_changed,
     })
 }
 
@@ -1558,6 +1603,7 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
         memory,
         history,
         resumed_from_seq,
+        model_changed,
         ..
     } = p;
     // `@server:uri` mentions and `/mcp__server__prompt` commands; memory below sees what was typed
@@ -1586,7 +1632,12 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
             let mut session = session;
             let r = async {
                 match resumed_from_seq {
-                    Some(seq) => h2.resume_session(&session, seq),
+                    Some(seq) => {
+                        h2.resume_session(&session, seq);
+                        if let Some(m) = &model_changed {
+                            h2.model_changed(m);
+                        }
+                    }
                     None => h2.start_session(&mut session, "startup")?,
                 }
                 h2.session_hook(

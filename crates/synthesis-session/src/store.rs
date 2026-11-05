@@ -1616,6 +1616,15 @@ impl SessionWriter {
         Ok(())
     }
 
+    /// `/model`: the model the session continues with (`resume` uses it unless `--model` is given).
+    pub fn set_model(&mut self, label: &str) -> Result<()> {
+        self.reader.conn.execute(
+            "UPDATE sessions SET model_config=?2, updated_at=?3 WHERE id=?1",
+            params![self.id, serde_json::to_string(label)?, now()],
+        )?;
+        Ok(())
+    }
+
     /// Row plus a Node `permission-mode` line.
     pub fn set_permission_mode(&mut self, mode: PermissionMode) -> Result<()> {
         self.reader.conn.execute(
