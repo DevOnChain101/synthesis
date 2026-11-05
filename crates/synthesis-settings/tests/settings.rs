@@ -472,11 +472,12 @@ fn synthesis_tui_parses_validates_and_names_the_key_not_the_value() {
     assert_eq!((d, diag), (TuiSettings::default(), vec![]));
     let (s, diag) = TuiSettings::from_settings(&json!({"synt": {"tui": {
         "panels": {"tools": false, "activity": false},
-        "logo": "off", "show_thinking": false, "diffs_expanded": true,
+        "logo": "off", "show_thinking": false, "verbose": true, "diffs_expanded": true,
         "queue_indicators": false, "motion": false, "mouse_capture": false, "copy_on_select": false}}}));
     assert_eq!(diag, Vec::<String>::new());
     assert_eq!(s.panels, [true, true, false, false]);
-    assert!(!s.logo && !s.show_thinking && s.diffs_expanded);
+    assert!(!s.logo && !s.show_thinking && s.diffs_expanded && s.verbose);
+    assert!(!TuiSettings::default().verbose);
     assert!(!s.queue_indicators && !s.motion && !s.mouse_capture && !s.copy_on_select);
     // wrong types and unknown names keep the defaults and say which key
     let (s, diag) = TuiSettings::from_settings(&json!({"synt": {"tui": {
@@ -572,7 +573,8 @@ fn persisting_tui_keeps_everything_else_never_overwrites_a_bad_file_and_writes_n
             "mouse_capture",
             "panels",
             "queue_indicators",
-            "show_thinking"
+            "show_thinking",
+            "verbose"
         ]
     );
     for bad in ["{not json", r#"{"synt": 5}"#, "[1]"] {
