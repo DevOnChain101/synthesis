@@ -446,7 +446,10 @@ async fn console_network_exceptions_redirect_slow_and_denied_redirect_body() {
         .unwrap();
     // the page text can show before the network log has the request (slow on Windows): poll
     let failed = poll_net(&rt, true, |l| {
-        l.iter().any(|r| r.url.expose().ends_with("/api/login"))
+        // finished (loadingFinished fills duration_ms), not just seen
+        l.iter().any(|r| {
+            r.url.expose().ends_with("/api/login") && r.status.is_some() && r.duration_ms.is_some()
+        })
     })
     .await;
     let login = failed
@@ -486,7 +489,9 @@ async fn console_network_exceptions_redirect_slow_and_denied_redirect_body() {
             r.error
                 .as_deref()
                 .is_some_and(|e| e.contains("ERR_CONNECTION_REFUSED"))
-        }) && l.iter().any(|r| r.url.expose().contains("/missing"))
+        }) && l
+            .iter()
+            .any(|r| r.url.expose().contains("/missing") && r.status == Some(404))
     })
     .await;
     assert!(

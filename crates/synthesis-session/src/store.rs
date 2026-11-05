@@ -192,7 +192,14 @@ mod retry_tests {
     }
 }
 
+/// One connection, set up with the busy timeout first. SQLite answers "locked" at once to some
+/// steps (journal-mode switch, WAL recovery on first open) without consulting the timeout, so the
+/// whole setup is retried while busy/locked, for up to 15 s (slow Windows runners).
 fn connect(home: &Path, read_only: bool) -> Result<Connection> {
+    retry_busy(Duration::from_secs(15), || connect_once(home, read_only))
+}
+
+fn connect_once(home: &Path, read_only: bool) -> Result<Connection> {
     let path = home.join("synt.db");
     let conn = if read_only {
         Connection::open_with_flags(
@@ -202,7 +209,7 @@ fn connect(home: &Path, read_only: bool) -> Result<Connection> {
     } else {
         Connection::open(&path)?
     };
-    conn.busy_timeout(Duration::from_millis(2000))?;
+    conn.busy_timeout(Duration::from_millis(5000))?;
     conn.pragma_update(None, "foreign_keys", true)?;
     if !read_only {
         let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
@@ -500,8 +507,8 @@ impl Store {
         #[cfg(unix)]
         chmod(synthesis_home, 0o700)?;
         ensure_db_file(&synthesis_home.join("synt.db"))?;
-        // Two processes opening a fresh home at once: SQLite answers "locked" at once to the
-        // journal-mode switch (the busy timeout is not consulted), so retry instead of failing.
+        // Two processes opening a fresh home at once: `connect` retries its setup; the migration
+        // is retried here too.
         retry_busy(Duration::from_secs(15), || {
             let mut conn = connect(synthesis_home, false)?;
             schema::migrate(&mut conn, &now())
