@@ -405,7 +405,7 @@ impl ContextProvider for Compacting {
 }
 
 #[tokio::test]
-async fn context_overflow_compacts_once() {
+async fn context_overflow_compacts_a_bounded_number_of_times() {
     let mut rig = Rig::build(
         Opts::default(),
         vec![Turn::context_overflow(), Turn::text("fits now")],
@@ -416,10 +416,22 @@ async fn context_overflow_compacts_once() {
     assert!(rig.types().contains(&"context.compacted".to_string()));
     assert!(user_text(&rig.requests()[1].messages[0]).starts_with("Summary of the conversation"));
 
-    // second overflow: reported, not looped
+    // a second overflow compacts again (images can keep a request too big); the fourth is reported
     let mut rig = Rig::build(
         Opts::default(),
         vec![
+            Turn::context_overflow(),
+            Turn::context_overflow(),
+            Turn::text("fits"),
+        ],
+        |h, _| h.with_context(Arc::new(Compacting)),
+    );
+    assert_eq!(rig.run("x").await.status, TaskStatus::Completed);
+    let mut rig = Rig::build(
+        Opts::default(),
+        vec![
+            Turn::context_overflow(),
+            Turn::context_overflow(),
             Turn::context_overflow(),
             Turn::context_overflow(),
             Turn::text("never"),

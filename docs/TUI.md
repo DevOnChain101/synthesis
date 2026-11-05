@@ -61,6 +61,18 @@ settings, default 30, `0` = forever) rewrites images of sessions untouched for t
 store refuses, a failing store) is a visible `notice`, and a message over the limit is stored with
 its images replaced by `[image]` instead of stopping the later messages.
 
+Images and the context: the stored history keeps every image, but a model request carries base64
+images only for the 2 newest messages that have any and at most 8 MiB of them (newest first); older
+ones go out as `[image: n, removed to save space]` with one notice (`older screenshots omitted from
+the model request ...`). The context estimate counts an image by size (about 1 token per 600 bytes,
+between 1500 and 8000), so many screenshots start auto-compaction early. `/compact` and auto-compact
+never put images in the summary request; the verbatim tail keeps the newest message in full, with
+its images only if they are at most 4 MiB, else as placeholders. A request the provider rejects as too
+large (HTTP 413, `request_too_large`, `too many images`, ...) is handled like a context overflow:
+compact, up to 3 times per task. If the summary request itself is too large, the oldest half of its
+input is dropped and it is retried (up to 5 times); if that fails the message says to use
+`/images clear` or `/new`. Pasted images are not downscaled (no image-decoding crate in the tree).
+
 ## Keys in dialogs
 
 A picker (`/new`, `/resume`, `/model`, `/config`, ...) closes with Esc; an approval dialog is answered with Enter / 1-3, and Esc or Ctrl+C rejects it. Ctrl+D does nothing inside a dialog (on the prompt it quits when the prompt is empty); close the dialog first. `/help` is not a dialog: it prints its text into the conversation like any other output, so Esc does not dismiss it (it scrolls away with the chat).

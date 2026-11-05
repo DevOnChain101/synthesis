@@ -291,6 +291,19 @@ impl Harness {
                 );
             }
         }
+        // older screenshots go out as placeholders; the history keeps them
+        let (n, bytes) = synthesis_context::omit_old_images(&mut messages, 2, REQUEST_IMAGE_BYTES);
+        if n > st.images_omitted {
+            st.images_omitted = n;
+            self.notice(
+                task,
+                "info",
+                format!(
+                    "older screenshots omitted from the model request ({n} images, {:.1} MB); they stay in the session",
+                    bytes as f64 / 1e6
+                ),
+            );
+        }
         let (tools, deferred) = self.tool_defs(task, agent);
         let mut system = built.system;
         if !deferred.is_empty() {
@@ -611,8 +624,8 @@ impl Harness {
                             context_overflow: e.context_overflow(),
                         },
                     );
-                    if e.context_overflow() && !st.compacted {
-                        st.compacted = true;
+                    if e.context_overflow() && st.overflow_compactions < MAX_OVERFLOW_COMPACTIONS {
+                        st.overflow_compactions += 1;
                         match self.compact_history(task, agent, st, "overflow", "").await {
                             Ok(_) => continue,
                             Err(why) => {
@@ -791,6 +804,11 @@ pub(crate) fn tool_status_for(is_error: bool, soft: bool) -> ToolStatus {
         (true, false) => ToolStatus::Error,
     }
 }
+
+/// Reactive compactions allowed per task.
+const MAX_OVERFLOW_COMPACTIONS: u8 = 3;
+/// Decoded image bytes one request may carry (newest first); well under common gateway limits.
+const REQUEST_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Replaces images (attached by the person or returned in a tool result) by the text `[image]` in a
 /// request copy (the history keeps them); returns how many.
