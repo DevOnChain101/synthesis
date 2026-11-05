@@ -101,6 +101,12 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "ExitPlanMode",
 ];
 const EDIT_TOOLS: &[&str] = &["Write", "Edit", "MultiEdit", "NotebookEdit"];
+/// Programs that read their file operands (a secret among them is asked about).
+const READERS: &[&str] = &[
+    "cat", "head", "tail", "less", "more", "grep", "egrep", "fgrep", "rg", "sed", "awk", "gawk",
+    "nl", "tac", "od", "xxd", "hexdump", "strings", "cut", "sort", "uniq", "wc", "diff", "cmp",
+    "bat", "cp", "mv", "tee", "source", ".", "base64", "paste", "fold",
+];
 const PATH_TOOLS: &[&str] = &[
     "Read",
     "Write",
@@ -868,17 +874,67 @@ impl Permissions {
         None
     }
 
-    /// Read/Grep/Glob aimed straight at a secret file (`.env`, keys, ...), by name or through a link.
+    /// Read/Grep/Glob aimed at a secret file (`.env`, keys, ...): the `path`, a Grep `glob` or a Glob
+    /// `pattern` that names one or could match one (`.env*`, `*.pem`), by name or through a link.
     fn names_secret_file(&self, tool: &str, input: &Value) -> bool {
+        use synthesis_core::secrets::{is_secret_path, names_secret};
+        if !OUTSIDE_READ_TOOLS.contains(&tool) {
+            return false;
+        }
         let field = if tool == "Read" { "file_path" } else { "path" };
-        OUTSIDE_READ_TOOLS.contains(&tool)
-            && non_empty(input, field).is_some_and(|t| {
+        let by_pattern = match tool {
+            "Grep" => non_empty(input, "glob"),
+            "Glob" => non_empty(input, "pattern"),
+            _ => None,
+        };
+        by_pattern.is_some_and(names_secret)
+            || non_empty(input, field).is_some_and(|t| {
                 let abs = paths::resolve(&self.env.cwd, t);
                 [Some(paths::lexical_normalize(&abs)), paths::real_of(&abs)]
                     .into_iter()
                     .flatten()
-                    .any(|c| synthesis_core::secrets::is_secret_path(&c))
+                    .any(|c| is_secret_path(&c))
             })
+    }
+
+    /// A read-only (or auto-safe) command, or a known reader, with an operand that names a secret file or could match
+    /// one, lexically or through a link: `cat .env`, `head -1 .e*`, `grep x *.pem`. Other commands
+    /// are not scanned (a `git add .env` is not a read; the sandbox is the real boundary).
+    fn bash_reads_secret(&self, cmd: &str) -> bool {
+        let all_safe = self.bash_safe(cmd, true);
+        let Some(segs) = bash::deep_segments(cmd, 0) else {
+            return false;
+        };
+        let mut bases = vec![self.env.cwd.clone()];
+        for seg in segs {
+            let w = bash::unwrap_words(&seg, true);
+            let prog = paths::basename(w.first().map_or("", String::as_str), self.policy());
+            if prog == "cd" {
+                self.widen_bases(&mut bases, w.get(1));
+            }
+            if !all_safe && !READERS.contains(&prog) {
+                continue;
+            }
+            for word in &seg {
+                let bare = word.rsplit(['<', '>']).next().unwrap_or(word);
+                let val = bare.rsplit_once('=').map(|(_, v)| v);
+                for t in [word.as_str(), bare].into_iter().chain(val) {
+                    if synthesis_core::secrets::names_secret(t) {
+                        return true;
+                    }
+                    if !t.contains(['$', '`', '*', '?', '[']) {
+                        for b in &bases {
+                            if let Some((p, _)) = self.resolve_operand(t, b)
+                                && paths::real_of(&p).is_some_and(|r| secret_shaped(&r))
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// ANY rule matches (deny/ask). Bash: ANY sub-command against ANY rule.
@@ -1007,7 +1063,7 @@ impl Permissions {
     fn path_inside_allowed(&self, tool: &str, input: &Value) -> bool {
         path_of(tool, input).is_some_and(|fp| {
             let abs = paths::resolve(&self.env.cwd, fp);
-            self.in_scope(&abs) && !paths::multilinked(&abs)
+            self.in_scope(&abs) && paths::hard_links(&abs).is_none()
         })
     }
 
@@ -1434,11 +1490,6 @@ impl Permissions {
     /// `patch`, `git checkout`, `perl -pi` ...).
     fn bash_paths_denied(&self, cmd: &str, write: bool) -> bool {
         const WRITERS: &[&str] = &["tee", "install", "ln", "truncate", "dd"];
-        const READERS: &[&str] = &[
-            "cat", "head", "tail", "less", "more", "grep", "egrep", "fgrep", "rg", "sed", "awk",
-            "gawk", "nl", "tac", "od", "xxd", "hexdump", "strings", "cut", "sort", "uniq", "wc",
-            "diff", "cmp", "bat", "cp", "mv", "tee", "source", ".", "base64", "paste", "fold",
-        ];
         // programs that never write their operands (`sort -o`, `awk -i inplace` are checked apart)
         const HARMLESS: &[&str] = &[
             "echo", "printf", "ls", "pwd", "true", "false", "test", "[", "[[", "stat", "file",
@@ -1890,12 +1941,33 @@ impl Permissions {
             return r;
         }
 
+        // a secret file (`.env`, keys) is the person's call, also through a read-only command, a
+        // search `glob` or a wildcard; only an allow rule or bypassPermissions skips the question
+        if (self.names_secret_file(tool, input)
+            || (tool == "Bash" && self.bash_reads_secret(bash_cmd)))
+            && !self.allow_match(&self.allow_rules(mode), tool, input)
+        {
+            return match mode {
+                Mode::DontAsk | Mode::Plan => {
+                    v(Deny, format!("{} mode: reads a secret file", mode.as_str()))
+                }
+                _ => v(Ask, "reads a secret file (.env, key, credentials)"),
+            };
+        }
+
         if mode == Mode::Plan {
             if EDIT_TOOLS.contains(&tool) {
                 return v(Deny, "plan mode: read-only");
             }
             if tool == "Bash" && self.bash_safe(bash_cmd, false) {
                 return v(Allow, "plan mode: read-only command");
+            }
+            // plan is read-only: the judge (`useAutoModeDuringPlan`) is only ever asked about reads
+            if tool == "Bash"
+                || !(READ_ONLY_TOOLS.contains(&tool)
+                    || matches!(tool, "WebFetch" | "WebSearch" | "SendMessage"))
+            {
+                return v(Deny, "plan mode: read-only (only read-only calls run)");
             }
         }
 
@@ -1914,16 +1986,6 @@ impl Permissions {
                 return v(Deny, "plan mode: read-only (an allow rule does not apply)");
             }
             return v(Allow, "matched an allow rule");
-        }
-
-        // a secret file (`.env`, keys) is the person's call; only an allow rule (above) or bypass skips it
-        if self.names_secret_file(tool, input) {
-            return match mode {
-                Mode::DontAsk | Mode::Plan => {
-                    v(Deny, format!("{} mode: reads a secret file", mode.as_str()))
-                }
-                _ => v(Ask, "reads a secret file (.env, key, credentials)"),
-            };
         }
 
         // auto: the first read outside the working directories is the user's call
@@ -2007,7 +2069,15 @@ impl Permissions {
             }
             if auto {
                 // inside by name but not after resolving links: the user decides, not the classifier
-                if fp.is_some_and(|f| self.lex_inside(f)) {
+                if let Some(f) = fp.filter(|f| self.lex_inside(f)) {
+                    if let Some(n) = paths::hard_links(&paths::resolve(&self.env.cwd, f)) {
+                        return v(
+                            Ask,
+                            format!(
+                                "file has {n} hard links (another name may be outside the workspace)"
+                            ),
+                        );
+                    }
                     return v(Ask, "path resolves outside the workspace (link)");
                 }
                 return v(Classify, "edit outside the workspace: classifier review");

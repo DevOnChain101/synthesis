@@ -691,12 +691,19 @@ pub fn prepare(
         &h.synthesis,
         env,
     );
+    // a stored model that cannot be built is kept as it is (warned about, not overwritten)
+    let mut stored_unbuildable = false;
     let res = match (default, stored) {
         (Ok(r), Some(m)) if r.label != m => {
             match resolve_provider(c.provider.as_deref(), Some(&m), &cfg, &h.synthesis, env) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("synt: warning: stored model {m}: {e}; using the default");
+                    eprintln!(
+                        "synt: warning: stored model {}: {}; using the default",
+                        sanitize_for_display(&m),
+                        sanitize_for_display(&e)
+                    );
+                    stored_unbuildable = true;
                     r
                 }
             }
@@ -955,7 +962,7 @@ pub fn prepare(
             }
             let rec = w.get_session(&sid).map_err(|e| e.to_string())?;
             resumed_from_seq = Some(rec.event_cursor);
-            if rec.model_config_id != res.label {
+            if rec.model_config_id != res.label && !stored_unbuildable {
                 w.set_model(&res.label).map_err(|e| e.to_string())?;
                 model_changed = Some(res.label.clone());
             }

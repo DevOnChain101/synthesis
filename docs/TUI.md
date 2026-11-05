@@ -116,7 +116,7 @@ panel is only drawn when the terminal is tall enough (about 160x48); `↑n more`
 Workspace and Running are clickable steps.
 
 ## Secret files and hard links
-Reading a secret file by name (`.env`, keys, cloud credentials) asks first in `default`, `acceptEdits` and `auto`, is denied in `plan` and `dontAsk`, and runs in `bypassPermissions`; `@mentions` skip such files. A write tool refuses a file with more than one hard link (it may be a name for a file outside the workspace). Reads through a hard link are allowed, and Bash writes through one are covered by the sandbox only (docs/SECURITY.md).
+Reading a secret file (`.env`, keys, cloud credentials), by name, by a `glob`/wildcard that could match one, or with a read-only Bash command such as `cat .env`, asks first in `default`, `acceptEdits` and `auto`, is denied in `plan` and `dontAsk`, and runs in `bypassPermissions`; Grep and Glob skip such files in directory walks, and `@mentions` skip them. A write tool refuses a file with more than one hard link (it may be a name for a file outside the workspace). Reads through a hard link are allowed, and Bash writes through one are covered by the sandbox only (docs/SECURITY.md).
 
 ## Keys in dialogs
 

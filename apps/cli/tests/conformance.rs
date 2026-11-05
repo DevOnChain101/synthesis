@@ -245,6 +245,43 @@ fn a_model_change_is_stored_and_a_resume_continues_on_it() {
 }
 
 #[test]
+fn a_stored_model_that_cannot_be_built_is_kept_and_warned_about() {
+    let rig = Rig::new();
+    std::fs::create_dir_all(rig.home()).unwrap();
+    std::fs::write(
+        rig.home().join("synt.json"),
+        r#"{"$schema":"config.json/v1","model":"gw/big","providers":{"gw":{"type":"anthropic","baseURL":"http://127.0.0.1:1","apiKey":false,"models":["big"]}}}"#,
+    )
+    .unwrap();
+    let go = |extra: &[&str]| {
+        rig.base()
+            .args(["run", "--cwd"])
+            .arg(rig.ws())
+            .args(["--sandbox", "off", "--prompt", "hi"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let first = go(&[]);
+    let sid = session_id(&events(&first.stdout));
+    let c = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
+    c.execute(
+        "UPDATE sessions SET model_config='\"ghost/\\u001b[31mx\"' WHERE id=?1",
+        [&sid],
+    )
+    .unwrap();
+    drop(c);
+    let second = go(&["--resume", &sid]);
+    let err = String::from_utf8_lossy(&second.stderr);
+    assert!(err.contains("stored model ghost/"), "{err}");
+    assert!(!err.contains('\u{1b}'), "escape sequences are stripped");
+    assert!(
+        stored_model(&rig, &sid).contains("ghost/"),
+        "the stored model is kept"
+    );
+}
+
+#[test]
 fn run_continue_picks_the_latest_session_and_fork_starts_a_new_one() {
     let rig = Rig::new();
     let (_, ev1) = rig.run(text_script("first"), &[]);

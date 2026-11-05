@@ -81,17 +81,20 @@ pub fn real_of(p: &Path) -> Option<PathBuf> {
     realpath_lenient(p)
 }
 
-/// An existing regular file with more than one hard link (unix only; other platforms: false).
-pub fn multilinked(p: &Path) -> bool {
+/// Link count of an existing regular file with more than one hard link (unix only; else `None`).
+pub fn hard_links(p: &Path) -> Option<u64> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.nlink() > 1)
+        std::fs::metadata(p)
+            .ok()
+            .filter(|m| m.is_file() && m.nlink() > 1)
+            .map(|m| m.nlink())
     }
     #[cfg(not(unix))]
     {
         let _ = p;
-        false
+        None
     }
 }
 

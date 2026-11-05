@@ -186,6 +186,7 @@ pub(crate) fn is_binary(buf: &[u8]) -> bool {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
     use std::os::unix::fs::symlink;
@@ -302,5 +303,36 @@ mod tests {
         assert_eq!(fs::read(base.join("outside/f.txt")).unwrap(), b"SECRET");
         let plain = c.workspace.resolve("plain.txt").unwrap();
         root.write(&plain, "b").unwrap();
+    }
+
+    fn out(o: &crate::ToolOutput) -> String {
+        format!("{:?}", o.content)
+    }
+
+    #[test]
+    fn directory_walks_skip_secret_files_unless_the_call_names_them() {
+        let (_d, base, c) = fx();
+        fs::write(base.join("ws/.env"), "TOKEN=hunter2").unwrap();
+        fs::write(base.join("ws/key.pem"), "hunter2").unwrap();
+        fs::write(base.join("ws/ok.txt"), "hunter2").unwrap();
+        let g = |v: Value| out(&crate::grep::run(&v, &c));
+        let found = g(json!({"pattern": "hunter2", "output_mode": "files_with_matches"}));
+        assert!(
+            found.contains("ok.txt") && !found.contains(".env") && !found.contains("key.pem"),
+            "{found}"
+        );
+        let by_path = g(json!({"pattern": "hunter2", "path": ".", "glob": "*"}));
+        assert!(!by_path.contains(".env"), "{by_path}");
+        // naming it with `glob` is what the permission layer asks about; then it is searched
+        let named =
+            g(json!({"pattern": "hunter2", "glob": ".env", "output_mode": "files_with_matches"}));
+        assert!(named.contains(".env"), "{named}");
+        let list = out(&crate::glob::run(&json!({"pattern": "**/*"}), &c));
+        assert!(
+            list.contains("ok.txt") && !list.contains("key.pem"),
+            "{list}"
+        );
+        let list = out(&crate::glob::run(&json!({"pattern": "*.pem"}), &c));
+        assert!(list.contains("key.pem"), "{list}");
     }
 }

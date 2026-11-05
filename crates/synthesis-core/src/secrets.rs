@@ -50,9 +50,79 @@ pub fn is_secret_shaped(path: &Path) -> bool {
         })
 }
 
+/// `*`/`?` wildcard match of `name` against `pat` (shell style, no classes).
+fn wild(pat: &[u8], name: &[u8]) -> bool {
+    match pat.split_first() {
+        None => name.is_empty(),
+        Some((b'*', rest)) => (0..=name.len()).any(|i| wild(rest, &name[i..])),
+        Some((b'?', rest)) => !name.is_empty() && wild(rest, &name[1..]),
+        Some((c, rest)) => name.first() == Some(c) && wild(rest, &name[1..]),
+    }
+}
+
+/// Does the last segment of a path or glob name a secret file, or could its wildcards match one
+/// (`.env*`, `*.pem`, `.e*`)? A segment of wildcards only (`*`) does not count, and like a shell a
+/// leading `*`/`?` does not match a leading dot.
+pub fn names_secret(segment_or_path: &str) -> bool {
+    let seg = segment_or_path
+        .rsplit(['/', '\\'])
+        .find(|s| !s.is_empty())
+        .unwrap_or("");
+    if is_secret_path(Path::new(seg)) {
+        return true;
+    }
+    if !seg.contains(['*', '?']) || seg.chars().all(|c| c == '*' || c == '?') {
+        return false;
+    }
+    let pat = seg.to_ascii_lowercase();
+    [
+        ".env",
+        ".env.local",
+        ".envrc",
+        "id_rsa",
+        "id_ed25519",
+        "credentials",
+        "a.pem",
+        "a.key",
+        "a.p12",
+        "a.pfx",
+        "a.jks",
+        "a.keystore",
+        "a.tfvars",
+        ".netrc",
+        ".npmrc",
+        ".pgpass",
+        ".git-credentials",
+        ".htpasswd",
+    ]
+    .iter()
+    .any(|n| (pat.starts_with('.') || !n.starts_with('.')) && wild(pat.as_bytes(), n.as_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn globs_that_could_name_a_secret() {
+        for (p, want) in [
+            (".env", true),
+            ("a/.env*", true),
+            (".e*", true),
+            ("*.pem", true),
+            ("**/*.key", true),
+            ("id_*", true),
+            ("*", false),
+            ("**", false),
+            ("*.rs", false),
+            ("*.json", false),
+            ("src/*.txt", false),
+            ("main.rs", false),
+            (".gitignore", false),
+        ] {
+            assert_eq!(names_secret(p), want, "{p}");
+        }
+    }
 
     #[test]
     fn table() {
