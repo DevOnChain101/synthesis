@@ -459,6 +459,45 @@ fn secret_files_ask_through_grep_globs_and_read_only_bash_in_every_mode() {
     assert_eq!(d(&p, "Bash", cat), Q);
 }
 
+/// The real path of `p` the way the matcher sees it: no `\\?\` prefix, `/` separators on Windows.
+fn real_spelled(p: &Path) -> PathBuf {
+    let c = dunce::canonicalize(p).unwrap();
+    if cfg!(windows) {
+        PathBuf::from(c.to_string_lossy().replace('\\', "/"))
+    } else {
+        c
+    }
+}
+
+/// The rule path the engine offers for `<dir>/.env`.
+fn env_rule(dir: &Path) -> String {
+    crate::rule_path(&dir.join(".env").to_string_lossy(), cfg!(windows)).unwrap()
+}
+
+#[test]
+fn rule_paths_drop_the_verbatim_prefix_and_refuse_glob_characters_on_every_os() {
+    use crate::rule_path;
+    for p in [r"\\?\C:\proj\.env", r"C:\proj\.env", "C:/proj/.env"] {
+        assert_eq!(rule_path(p, true).as_deref(), Some("//C:/proj/.env"), "{p}");
+    }
+    assert_eq!(
+        rule_path("/home/u/.env", false).as_deref(),
+        Some("//home/u/.env")
+    );
+    for p in [
+        r"C:\proj\*.pem",
+        r"C:\proj\[a]\.env",
+        r"\\?\C:\proj\.env?",
+        r"\\?\UNC\s\h\.env",
+        r"\\s\h\.env",
+    ] {
+        assert_eq!(rule_path(p, true), None, "{p}");
+    }
+    // POSIX: `\` and `?` are literal name characters, `?` suppresses
+    assert_eq!(rule_path("/h/a?b/.env", false), None);
+    assert_eq!(rule_path("/h/*/.env", false), None);
+}
+
 #[test]
 fn a_blanket_allow_rule_does_not_lift_the_secret_file_ask() {
     let f = fx();
@@ -501,11 +540,8 @@ fn a_blanket_allow_rule_does_not_lift_the_secret_file_ask() {
         }
     }
     // an absolute rule for that one file lifts it, another secret file still asks
-    let real = fs::canonicalize(&f.cwd).unwrap(); // a rule must match the lexical and the real path
-    let rule = format!(
-        "Read(//{})",
-        real.join(".env").to_string_lossy().trim_start_matches('/')
-    );
+    let real = real_spelled(&f.cwd); // a rule must match the lexical and the real path
+    let rule = format!("Read({})", env_rule(&real));
     let p = f.with(rules(&["Read", &rule], &[], &[]), Mode::Default);
     assert_eq!(d(&p, "Read", json!({ "file_path": real.join(".env") })), A);
     assert_eq!(
@@ -536,8 +572,8 @@ fn a_secret_ask_offers_a_rule_for_that_path_only() {
             })
             .collect()
     };
-    let env = fs::canonicalize(&f.cwd).unwrap().join(".env");
-    let want = format!("Read(//{})", env.to_string_lossy().trim_start_matches('/'));
+    let env = real_spelled(&f.cwd).join(".env");
+    let want = format!("Read({})", env_rule(&real_spelled(&f.cwd)));
     assert_eq!(one("Read", json!({ "file_path": env })), [want]);
     // the offered rule lifts that ask and no other
     let mut q = f.perms(Mode::Default);

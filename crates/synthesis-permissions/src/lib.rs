@@ -2247,16 +2247,8 @@ impl Permissions {
             });
             return abs
                 .filter(|a| synthesis_core::secrets::is_secret_path(Path::new(a)))
-                // a glob character in the name would make the rule broader than that file
-                .filter(|a| !a.contains(['*', '?', '[', ']', '{', '}']))
-                .map_or(vec![], |a| {
-                    let a = if self.policy().windows_separators {
-                        a.replace('\\', "/")
-                    } else {
-                        a
-                    };
-                    add(tool, Some(format!("//{}", a.trim_start_matches('/'))))
-                });
+                .and_then(|a| rule_path(&a, self.policy().windows_separators))
+                .map_or(vec![], |p| add(tool, Some(p)));
         }
         if tool == "Bash" && self.bash_reads_secret(command_of(input)) {
             let cmd = command_of(input).trim();
@@ -2358,6 +2350,24 @@ impl Permissions {
         }
         mode
     }
+}
+
+/// The `//abs` spelling of an absolute path for an allow rule, or `None` when no rule may be
+/// offered: a glob character in the name would make the rule broader than that file, and a UNC
+/// path has no `//` form. On Windows the verbatim prefix (`\\?\C:\x`) is dropped first (its `?` is
+/// not a glob character) and `\` becomes `/`, the spelling the matcher expects (`//C:/x`).
+fn rule_path(abs: &str, windows: bool) -> Option<String> {
+    let p = if windows {
+        let p = abs.strip_prefix(r"\\?\").unwrap_or(abs);
+        if p.starts_with(r"UNC\") || p.starts_with(r"\\") {
+            return None;
+        }
+        p.replace('\\', "/")
+    } else {
+        abs.to_string()
+    };
+    (!p.contains(['*', '?', '[', ']', '{', '}']))
+        .then(|| format!("//{}", p.trim_start_matches('/')))
 }
 
 /// `path.parse(p).root`.
