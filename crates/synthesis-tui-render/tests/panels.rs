@@ -53,6 +53,32 @@ fn raw_frame(
     activity_scroll: usize,
     n_prompts: usize,
 ) -> synthesis_tui_render::dash::Frame {
+    raw_frame_n(
+        cols,
+        rows,
+        hidden,
+        history,
+        history_loading,
+        focus,
+        activity_scroll,
+        n_prompts,
+        1,
+    )
+}
+
+/// [`raw_frame`] with `n` workspaces and `n` sessions in the active one.
+#[allow(clippy::too_many_arguments)]
+fn raw_frame_n(
+    cols: usize,
+    rows: usize,
+    hidden: Hidden,
+    history: &[HistoryDay],
+    history_loading: bool,
+    focus: Focus,
+    activity_scroll: usize,
+    n_prompts: usize,
+    n: usize,
+) -> synthesis_tui_render::dash::Frame {
     let cwd = "/work/proj".to_string();
     let mut session = session_from_events("s1", []);
     session.cwd = cwd.clone();
@@ -76,7 +102,7 @@ fn raw_frame(
         status: "idle".into(),
         ..Agent::default()
     };
-    let srows = [SessionRow {
+    let one = SessionRow {
         id: "s1".into(),
         project: basename(&cwd),
         cwd: cwd.clone(),
@@ -92,16 +118,37 @@ fn raw_frame(
         waiting: false,
         mode: Some("default".into()),
         title: String::new(),
-    }];
+    };
+    let srows: Vec<SessionRow> = (0..n)
+        .map(|i| SessionRow {
+            id: if i == 0 {
+                "s1".into()
+            } else {
+                format!("s{}", i + 1)
+            },
+            live: if i == 0 { one.live.clone() } else { None },
+            ..one.clone()
+        })
+        .collect();
     let key = workspace_key(&cwd);
-    let ws = [Workspace {
-        key: key.clone(),
-        name: basename(&cwd),
-        cwd: cwd.clone(),
-        count: 1,
-        waiting: false,
-        busy: false,
-    }];
+    let ws: Vec<Workspace> = (0..n)
+        .map(|i| Workspace {
+            key: if i == 0 {
+                key.clone()
+            } else {
+                format!("{key}{i}")
+            },
+            name: if i == 0 {
+                basename(&cwd)
+            } else {
+                format!("proj{i}")
+            },
+            cwd: cwd.clone(),
+            count: 1,
+            waiting: false,
+            busy: false,
+        })
+        .collect();
     let view = DashView {
         hidden,
         activity_scroll,
@@ -274,10 +321,13 @@ fn the_focused_panel_has_the_accent_border_and_the_hit_rects_cover_the_panels() 
                 .position(|l| strip_ansi(l).contains(t))
                 .unwrap()
         };
-        (
-            f.lines[at("Workspace")].contains(&accent),
-            f.lines[at("Running")].contains(&accent),
-        )
+        // only the sidebar's columns: the chat's own border is accented when it has the focus
+        let side = |t: &str| {
+            let l = &f.lines[at(t)];
+            let cut = l.find("┓").map_or(l.len(), |i| i + 3);
+            l[..cut].contains(&accent)
+        };
+        (side("Workspace"), side("Running"))
     };
     assert_eq!(lit(Focus::Agent), (false, false));
     assert_eq!(lit(Focus::Workspace), (true, false));
@@ -320,4 +370,35 @@ fn activity_scrolls_clamped_and_says_how_much_is_cut() {
     assert_eq!(old.rects.activity_scroll, max);
     assert_eq!(old.rects.activity_hits[0].1, 0);
     assert!(title(&old).contains('↓') && !title(&old).contains('↑'));
+}
+
+/// With 7 workspaces and 7 sessions the Workspace and Running panels list 5 rows each (a session
+/// is 2 lines) on a tall terminal; a short one gives them less, never overlapping.
+#[test]
+fn workspace_and_running_list_five_rows_and_degrade_without_overlap() {
+    let rects = |rows| {
+        let f = raw_frame_n(
+            160,
+            rows,
+            Hidden::default(),
+            &[],
+            false,
+            Focus::Agent,
+            0,
+            0,
+            7,
+        );
+        f.rects
+    };
+    let r = rects(47);
+    let (w, q) = (r.workspace_rect.unwrap(), r.session_rect.unwrap());
+    assert!(r.workspace_rows.len() >= 5);
+    assert!(r.session_rows.len() >= 10, "{}", r.session_rows.len());
+    assert_eq!(q.y, w.y + w.h);
+    for rows in [20, 24, 30, 40] {
+        let r = rects(rows);
+        let (w, q) = (r.workspace_rect.unwrap(), r.session_rect.unwrap());
+        assert_eq!(q.y, w.y + w.h, "{rows} rows");
+        assert!(q.y + q.h <= rows as i64, "{rows} rows: {} {}", w.h, q.h);
+    }
 }

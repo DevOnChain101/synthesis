@@ -88,6 +88,8 @@ impl Rig {
             "steps": steps,
             "rows": self.size.0,
             "cols": self.size.1,
+            // a hard stop for a stuck scenario (the driver kills the app and fails)
+            "deadline": 90,
         });
         let (sc, out) = (
             self.root().join("scenario.json"),
@@ -359,6 +361,41 @@ fn model_switch_before_the_first_prompt_keeps_the_app_running() {
         expect_new("first reply")
     ]));
     assert!(!squash(&out).contains("cannot be resumed"), "{out}");
+}
+
+/// Picking a model in the /model picker (Enter on the current one, arrows + Enter to a model of
+/// another provider, a typed name) restarts the app on the same session and never leaves it: each
+/// step waits for the restarted app, and the last one needs the app to still answer.
+#[test]
+fn model_picker_selection_keeps_the_app_running() {
+    let rig = Rig::new(json!([{"text": "unused"}]));
+    rig.write(
+        "synt.json",
+        r#"{"$schema":"config.json/v1","model":"gw/big","providers":{
+            "gw":{"type":"anthropic","baseURL":"http://127.0.0.1:1","apiKey":false,"models":["big","other"]},
+            "oa":{"type":"openai","baseURL":"http://127.0.0.1:1/v1","apiKey":false,"models":["x1","x2"]}}}"#,
+    );
+    let out = rig.drive_bare(json!([
+        expect("Enter send"),
+        quiet(),
+        send("/model\r"),
+        expect_new("enter select"),
+        // the same model: Enter on the current row
+        send("\r"),
+        quiet(),
+        send("/model\r"),
+        expect_new("enter select"),
+        // another provider: two rows down
+        send("\x1b[B\x1b[B\r"),
+        expect_new("oa/x1"),
+        quiet(),
+        send("/model gw/other\r"),
+        expect_new("gw/other"),
+        quiet(),
+        send("/model\r"),
+        expect_new("enter select")
+    ]));
+    assert!(!squash(&out).contains("could not switch"), "{out}");
 }
 
 /// `/resume <bad id>` and a folder the app cannot open stay in the app with a notice (they used
