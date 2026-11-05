@@ -382,16 +382,44 @@ fn judge(sig: Signal, wrong: &AtomicU8) -> bool {
 /// Wrong codes tolerated before the login is cancelled (something is guessing).
 const MAX_WRONG_CODES: u8 = 5;
 
-/// Writes the token for a waiting login. Refused when no login waits (no marker) or when the
-/// profile directory or either file is a symlink.
-fn signal_done(dir: &Path, token: &str) -> Result<(), String> {
+/// Ok when a login waits for this profile (marker present; directory and marker not symlinks).
+fn login_waiting(dir: &Path) -> Result<(), String> {
     let plain = |p: &Path| {
         std::fs::symlink_metadata(p)
             .is_ok_and(|m| !m.file_type().is_symlink() && (m.is_dir() || m.is_file()))
     };
-    if !plain(dir) || !plain(&dir.join(WAITING_FILE)) {
-        return Err("no login is waiting for this profile".into());
+    if plain(dir) && plain(&dir.join(WAITING_FILE)) {
+        Ok(())
+    } else {
+        Err("no login is waiting for this profile".into())
     }
+}
+
+/// One line from `r`, within `timeout`; EOF before any text is an error, never an empty code.
+fn read_code(r: impl std::io::Read + Send + 'static, timeout: Duration) -> Result<String, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = tx.send(
+            std::io::BufReader::new(r)
+                .read_line(&mut line)
+                .map(|_| line)
+                .map_err(|e| e.to_string()),
+        );
+    });
+    let line = rx
+        .recv_timeout(timeout)
+        .map_err(|_| format!("no code was entered within {} s", timeout.as_secs()))??;
+    match line.trim() {
+        "" => Err("no code was given on stdin (the waiting synt prints it)".into()),
+        t => Ok(t.to_string()),
+    }
+}
+
+/// Writes the token for a waiting login. Refused when no login waits (no marker) or when the
+/// profile directory or either file is a symlink.
+fn signal_done(dir: &Path, token: &str) -> Result<(), String> {
+    login_waiting(dir)?;
     let mut o = std::fs::OpenOptions::new();
     let mut f = open_nofollow(o.write(true).create(true).truncate(true))
         .open(dir.join(DONE_FILE))
@@ -675,15 +703,12 @@ impl BrowserHost for DialogHost {
 pub fn done_cmd(env: &Env, name: &str) -> Result<u8, String> {
     let dir =
         profile::profile_path(homes(env)?.synthesis.as_path(), name).map_err(|e| e.to_string())?;
+    login_waiting(&dir)?; // before asking for anything
     if std::io::stdin().is_terminal() {
         eprint!("code shown by the waiting synt: ");
     }
-    let mut token = String::new();
-    std::io::stdin()
-        .lock()
-        .read_line(&mut token)
-        .map_err(|e| e.to_string())?;
-    signal_done(&dir, token.trim())?;
+    let token = read_code(std::io::stdin(), Duration::from_secs(120))?;
+    signal_done(&dir, &token)?;
     out!("signalled {name}");
     Ok(0)
 }
@@ -1102,6 +1127,18 @@ mod tests {
             mk("d", json!({"type": "local", "command": ["z"]}), false),
         ];
         assert_eq!(stdio_servers(&all), ["a", "d"]);
+    }
+
+    #[test]
+    fn done_reads_a_bounded_code_and_eof_is_an_error() {
+        let t = Duration::from_secs(5);
+        assert_eq!(read_code(&b"abc\n"[..], t).unwrap(), "abc");
+        assert!(read_code(&b""[..], t).unwrap_err().contains("no code"));
+        assert!(read_code(&b"\n"[..], t).is_err());
+        // a pipe that never writes nor closes: times out instead of hanging
+        let (rd, _wr) = std::io::pipe().unwrap();
+        let e = read_code(rd, Duration::from_millis(200)).unwrap_err();
+        assert!(e.contains("within"), "{e}");
     }
 
     #[test]
