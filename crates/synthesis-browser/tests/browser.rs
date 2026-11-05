@@ -62,16 +62,42 @@ setTimeout(()=>{{throw new Error('kaboom')}},10);fetch('http://127.0.0.1:{dead_p
     )
 }
 
+/// Bind loopback, retrying a few times: Windows can answer WSAENOBUFS (10055) when many tests bind at once.
+async fn bind_loopback() -> TcpListener {
+    for _ in 0..5 {
+        match TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => return l,
+            Err(e) if e.raw_os_error() == Some(10055) => {
+                tokio::time::sleep(Duration::from_millis(200)).await
+            }
+            Err(e) => panic!("bind: {e}"),
+        }
+    }
+    TcpListener::bind("127.0.0.1:0").await.unwrap()
+}
+
+/// A loopback port nothing listens on: bound and closed, then proven refused by a connect. Windows
+/// hands a just-freed ephemeral port straight to the next bind (CI saw the dead port equal the
+/// server's own port, so the "refused" fetch got a 404), so `taken` ports are skipped.
+async fn dead_port(taken: u16) -> u16 {
+    for _ in 0..20 {
+        let p = bind_loopback().await.local_addr().unwrap().port();
+        if p != taken
+            && tokio::net::TcpStream::connect(("127.0.0.1", p))
+                .await
+                .is_err()
+        {
+            return p;
+        }
+    }
+    panic!("no refused loopback port found");
+}
+
 async fn serve() -> String {
-    // A port that was free a moment ago: connecting to it is refused (port 1 is "unsafe" in Chrome).
-    let dead = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let console = console_html(dead);
-    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // The server binds first so the dead port can be chosen distinct from it.
+    let l = bind_loopback().await;
     let addr = l.local_addr().unwrap();
+    let console = console_html(dead_port(addr.port()).await);
     tokio::spawn(async move {
         loop {
             let (mut s, _) = l.accept().await.unwrap();
@@ -372,14 +398,14 @@ async fn snapshot_click_fill_keys_tabs_screenshot_body() {
 }
 
 /// The network log is fed by CDP events that can arrive after the page already shows their effect
-/// (slow on Windows): poll up to 5 s until `ok` holds, then return the last list.
+/// (slow on Windows): poll up to 20 s until `ok` holds, then return the last list.
 async fn poll_net(
     rt: &synthesis_browser::BrowserRuntime,
     failed_only: bool,
     ok: impl Fn(&[synthesis_browser::NetworkRequest]) -> bool,
 ) -> Vec<synthesis_browser::NetworkRequest> {
     let mut last = Vec::new();
-    for _ in 0..50 {
+    for _ in 0..200 {
         last = rt.network_requests(0, failed_only).0;
         if ok(&last) {
             break;
@@ -620,7 +646,7 @@ async fn counting_server(
 ) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let hits = std::sync::Arc::new(AtomicUsize::new(0));
-    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let l = bind_loopback().await;
     let port = l.local_addr().unwrap().port();
     let (h, page) = (hits.clone(), std::sync::Arc::new(page));
     tokio::spawn(async move {
@@ -672,7 +698,7 @@ async fn policy_covers_popups_iframes_workers_websockets_body() {
     // `localhost` is denied by name, 127.0.0.1 (the main page) is allowed: a different site.
     let (denied, denied_hits) =
         counting_server(|_| ("text/html", "<title>secret</title>".into())).await;
-    let ws = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws = bind_loopback().await;
     let ws_port = ws.local_addr().unwrap().port();
     let ws_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let h = ws_hits.clone();
