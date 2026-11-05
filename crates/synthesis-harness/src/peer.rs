@@ -894,7 +894,7 @@ impl Harness {
         parse(input.get("to").and_then(Value::as_str)?)?;
         let p = self.peers.as_ref().filter(|p| p.on())?;
         (!p.config.initiate).then_some(
-            "denied: this session may not start messages to other sessions; the user can enable it with synt.peers.initiate in user settings",
+            "this session may not start messages to other sessions; the user can enable it with synt.peers.initiate in user settings",
         )
     }
 

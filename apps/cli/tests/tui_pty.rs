@@ -520,6 +520,34 @@ for line in sys.stdin:
 "#;
 
 /// `@server:uri`, `/mcp__server__prompt`, a skill command, and /help listing the last two.
+/// Tab inserts the quoted form for a name with spaces, and the file reaches the model.
+#[test]
+fn at_file_with_a_space_is_completed_quoted_and_attached() {
+    let rig = Rig::new(json!([{"text": "ok one"}]));
+    std::fs::write(rig.ws().join("my notes.txt"), "kiwi-content\n").unwrap();
+    rig.drive(json!([
+        expect("Enter send"),
+        send("read @my"),
+        expect("my notes.txt"),
+        send("\t"),
+        quiet(),
+        send("now\r"),
+        expect("ok one")
+    ]));
+    let users: Vec<String> = rig
+        .events()
+        .into_iter()
+        .filter(|e| e.0 == "user.message")
+        .filter_map(|e| e.1["text"].as_str().map(String::from))
+        .collect();
+    let u = users.first().cloned().unwrap_or_default();
+    assert!(u.starts_with("read @\"my notes.txt\" now"), "{users:?}");
+    assert!(
+        u.contains("<file path=\"my notes.txt\">") && u.contains("kiwi-content"),
+        "{users:?}"
+    );
+}
+
 #[test]
 fn mcp_mentions_prompts_skills_and_help() {
     let rig = Rig::new(json!([{"text": "ok one"}, {"text": "ok two"}, {"text": "ok three"}]));

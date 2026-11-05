@@ -452,11 +452,22 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
             let mut n = 0;
             for status in ["proposed", "quarantined"] {
                 for m in s.list(&filter(&scope, None, status, 100)).map_err(e)? {
-                    out!("{}\n", markdown(&m));
+                    out!("{}", markdown(&m));
+                    if let Some(r) = m.flags.iter().find_map(|f| f.strip_prefix("quarantine:")) {
+                        out!("quarantined by rule: {}", san(r));
+                    }
+                    out!("");
                     n += 1;
                 }
             }
-            out!("{n} item(s) to review; `synt memory approve <id>` or `forget <id> --reason ...`");
+            let at = if scope.all {
+                ""
+            } else {
+                " in this repository and user scope (--all: every repository)"
+            };
+            out!(
+                "{n} item(s) to review{at}; `synt memory approve <id>` or `forget <id> --reason ...`"
+            );
         }
         MemoryCmd::Export { format, scope } => {
             let key = (!scope.all).then(|| repo_of(&cwd_of(&scope.cwd)).key);
@@ -729,6 +740,7 @@ fn edit(env: &Env, s: &mut Store, id: &str) -> Result<(), String> {
         return Err(x.to_string());
     }
     drop(f);
+    let mut quarantined = false;
     let result = (|| {
         let mut parts = editor.split_whitespace();
         let status = std::process::Command::new(parts.next().ok_or("empty $EDITOR")?)
@@ -763,11 +775,14 @@ fn edit(env: &Env, s: &mut Store, id: &str) -> Result<(), String> {
         n.source = serde_json::json!({"origin": "cli_edit", "edits": id});
         let r = s.revise(id, n).map_err(|x| x.to_string())?;
         match (r.op, r.rule) {
-            ("quarantined", rule) => out!(
-                "not applied: {} was quarantined by rule {} (structure that could steer the model); {id} is unchanged",
-                r.id,
-                rule.unwrap_or("?")
-            ),
+            ("quarantined", rule) => {
+                quarantined = true;
+                out!(
+                    "not applied: {} was quarantined by rule {} (structure that could steer the model; see `synt memory review`); {id} is unchanged",
+                    r.id,
+                    rule.unwrap_or("?")
+                );
+            }
             ("deduped", _) => out!("no changes (identical to {})", r.id),
             _ => out!("edited {id}: new owner version {} ({})", r.id, r.status),
         }
@@ -777,7 +792,16 @@ fn edit(env: &Env, s: &mut Store, id: &str) -> Result<(), String> {
     // is the person's only copy, so keep it and say where.
     let refused =
         matches!(&result, Err(e) if !e.starts_with("the editor") && !e.starts_with("cannot start"));
-    if refused && std::fs::read(&path).is_ok_and(|b| b != edit_text(&old).as_bytes()) {
+    let differs = std::fs::read(&path).is_ok_and(|b| b != edit_text(&old).as_bytes());
+    if quarantined && differs {
+        out!(
+            "your text is kept at {} (the directory {} is kept too: delete it yourself when done)",
+            path.display(),
+            dir.display()
+        );
+        return result;
+    }
+    if refused && differs {
         return result.map_err(|e| format!(
                 "{e}; your text is kept at {} (the directory {} is kept too: delete it yourself when done)",
                 path.display(),

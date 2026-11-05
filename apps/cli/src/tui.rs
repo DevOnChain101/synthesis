@@ -437,6 +437,7 @@ fn round(
         ));
         // no `memory::announce` here: the app retrieves for each prompt it sends, and the start-up
         // retrieval (no prompt yet) would print a second, empty `memory.retrieved` row
+        let workspace = session.workspace.clone();
         let mut o = Options::new(
             harness.clone(),
             session,
@@ -486,6 +487,7 @@ fn round(
             store: store.clone(),
             transcript: transcript.clone(),
             skills: skills.iter().map(|s| s.name.clone()).collect(),
+            workspace,
         }));
         o.version = env!("CARGO_PKG_VERSION").into();
         o.tz_offset_min = local_offset_min();
@@ -586,6 +588,7 @@ struct Host {
     store: Option<synthesis_app::events::Store>,
     transcript: Option<Arc<synthesis_app::transcript::Transcript>>,
     skills: Vec<String>,
+    workspace: synthesis_core::WorkspaceContext,
 }
 
 impl Host {
@@ -617,7 +620,9 @@ impl TaskHost for Host {
             }
             let (request, notes) =
                 synthesis_app::mcpinput::expand(self.mcp.as_ref(), typed, cancel).await?;
-            for n in notes {
+            let (request, files_missing) =
+                synthesis_app::run::expand_file_mentions(&self.harness, &self.workspace, request);
+            for n in notes.into_iter().chain(files_missing) {
                 self.sink.emit(
                     &Scope::default(),
                     Event::Notice {
