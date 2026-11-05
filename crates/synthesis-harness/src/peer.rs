@@ -889,6 +889,15 @@ impl Harness {
         self.peers.as_ref().map(|p| p.changed.subscribe())
     }
 
+    /// Why a `SendMessage` to a peer session cannot be sent at all (`initiate` false), so the user is not asked to approve a send that is refused afterwards.
+    pub(crate) fn peer_send_refusal(&self, input: &Value) -> Option<&'static str> {
+        parse(input.get("to").and_then(Value::as_str)?)?;
+        let p = self.peers.as_ref().filter(|p| p.on())?;
+        (!p.config.initiate).then_some(
+            "denied: this session may not start messages to other sessions; the user can enable it with synt.peers.initiate in user settings",
+        )
+    }
+
     /// True when `input` is a `SendMessage` to a peer session this session may ask without a
     /// prompt (peers on, `initiate`, target allowed, B7).
     pub(crate) fn peer_preapproved(&self, input: &Value) -> bool {
@@ -965,7 +974,10 @@ impl Harness {
             );
         };
         if !link.config.initiate {
-            return fail("denied: synt.peers.initiate is false".into());
+            return fail(
+                "denied: synt.peers.initiate is false (the user can enable it in user settings)"
+                    .into(),
+            );
         }
         let s = |k: &str| input.get(k).and_then(Value::as_str).unwrap_or_default();
         let Some(addr) = parse(s("to")) else {

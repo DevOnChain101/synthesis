@@ -118,13 +118,25 @@ impl WorkspaceContext {
             return Err(ResolveError::Network(PathBuf::from(input)));
         }
         let p = PathBuf::from(input);
-        let abs = lexical_normalize(&if p.is_absolute() { p } else { self.cwd.join(p) });
+        let mut abs = lexical_normalize(&if p.is_absolute() { p } else { self.cwd.join(p) });
 
-        let roots = std::iter::once(&self.cwd).chain(&self.additional_dirs);
-        let root = roots
-            .into_iter()
-            .find(|r| contains(r, &abs, policy))
-            .ok_or_else(|| ResolveError::Outside(abs.clone()))?;
+        let find = |a: &Path| {
+            std::iter::once(&self.cwd)
+                .chain(&self.additional_dirs)
+                .find(|r| contains(r, a, policy))
+        };
+        // Roots are realpaths: a path spelled through a symlinked prefix of a root (macOS `/tmp`)
+        // is judged, and returned, by its realpath.
+        let root = match find(&abs) {
+            Some(r) => r,
+            None => {
+                let real =
+                    realpath_lenient(&abs).ok_or_else(|| ResolveError::Outside(abs.clone()))?;
+                let r = find(&real).ok_or_else(|| ResolveError::Outside(abs.clone()))?;
+                abs = real;
+                r
+            }
+        };
 
         if policy.windows_separators
             && let Some(bad) = abs
@@ -370,6 +382,51 @@ mod tests {
             ..p
         };
         assert!(contains(Path::new("/a/b"), Path::new("/A/B/c"), ci));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_spelling_of_the_root_resolves_to_the_canonical_path() {
+        use std::os::unix::fs::symlink;
+        let f = fx();
+        let alias = f.base.join("alias");
+        symlink(f.base.join("p"), &alias).unwrap();
+        symlink(f.base.join("outside"), f.base.join("p/sub/esc")).unwrap();
+        let want = f.base.join("p/sub/f.txt");
+        assert_eq!(
+            f.ws.resolve(alias.join("sub/f.txt").to_str().unwrap())
+                .unwrap(),
+            want
+        );
+        assert_eq!(
+            f.ws.resolve(alias.join("sub/new/deep.txt").to_str().unwrap())
+                .unwrap(),
+            f.base.join("p/sub/new/deep.txt")
+        );
+        for bad in [
+            "sub/esc/secret",
+            "sub/esc/new",
+            "../outside/secret",
+            "../pp",
+        ] {
+            let r = f.ws.resolve(alias.join(bad).to_str().unwrap());
+            assert!(r.is_err(), "{bad}: {r:?}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn tmp_and_private_tmp_are_the_same_workspace() {
+        let d = tempfile::tempdir_in("/tmp").unwrap();
+        let root = canonicalize(d.path()).unwrap();
+        assert!(root.starts_with("/private/tmp"));
+        let ws = WorkspaceContext::open("w", &root, &root, &[], root.join("art"), "pg").unwrap();
+        let via_tmp = d.path().join("a.txt");
+        assert!(via_tmp.starts_with("/tmp"));
+        assert_eq!(
+            ws.resolve(via_tmp.to_str().unwrap()).unwrap(),
+            root.join("a.txt")
+        );
     }
 
     #[cfg(unix)]
