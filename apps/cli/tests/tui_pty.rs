@@ -54,14 +54,19 @@ impl Rig {
 
     /// No `--provider`, no `--sandbox`: the app as a first-time user starts it.
     fn drive_bare(&self, steps: Value) -> String {
-        self.run_scenario(
-            vec![
-                json!(env!("CARGO_BIN_EXE_synt")),
-                json!("--cwd"),
-                json!(self.ws()),
-            ],
-            steps,
-        )
+        self.drive_bare_with(steps, &[])
+    }
+
+    /// `drive_bare` plus flags, for a config-only start where the host has no sandbox backend
+    /// (CI Linux has no bubblewrap and the standard policy is refused).
+    fn drive_bare_with(&self, steps: Value, extra: &[&str]) -> String {
+        let mut argv = vec![
+            json!(env!("CARGO_BIN_EXE_synt")),
+            json!("--cwd"),
+            json!(self.ws()),
+        ];
+        argv.extend(extra.iter().map(|a| json!(a)));
+        self.run_scenario(argv, steps)
     }
 
     fn drive_with(&self, steps: Value, extra: &[&str]) -> String {
@@ -131,6 +136,11 @@ impl Rig {
     fn raw(&self) -> String {
         String::from_utf8_lossy(&std::fs::read(self.root().join("out.txt.raw")).unwrap())
             .into_owned()
+    }
+
+    /// The screen text between the scenario's `mark` and `cut` steps.
+    fn span(&self) -> String {
+        std::fs::read_to_string(self.root().join("out.txt.span")).unwrap()
     }
 
     /// `(type, payload)` of every stored event of the sessions in the store.
@@ -381,26 +391,29 @@ fn model_picker_selection_keeps_the_app_running() {
             "gw":{"type":"anthropic","baseURL":"http://127.0.0.1:1","apiKey":false,"models":["big","other"]},
             "oa":{"type":"openai","baseURL":"http://127.0.0.1:1/v1","apiKey":false,"models":["x1","x2"]}}}"#,
     );
-    let out = rig.drive_bare(json!([
-        expect("Enter send"),
-        quiet(),
-        send("/model\r"),
-        expect_new("enter select"),
-        // the same model: Enter on the current row
-        send("\r"),
-        quiet(),
-        send("/model\r"),
-        expect_new("enter select"),
-        // another provider: two rows down
-        send("\x1b[B\x1b[B\r"),
-        expect_new("oa/x1"),
-        quiet(),
-        send("/model gw/other\r"),
-        expect_new("gw/other"),
-        quiet(),
-        send("/model\r"),
-        expect_new("enter select")
-    ]));
+    let out = rig.drive_bare_with(
+        json!([
+            expect("Enter send"),
+            quiet(),
+            send("/model\r"),
+            expect_new("enter select"),
+            // the same model: Enter on the current row
+            send("\r"),
+            quiet(),
+            send("/model\r"),
+            expect_new("enter select"),
+            // another provider: two rows down
+            send("\x1b[B\x1b[B\r"),
+            expect_new("oa/x1"),
+            quiet(),
+            send("/model gw/other\r"),
+            expect_new("gw/other"),
+            quiet(),
+            send("/model\r"),
+            expect_new("enter select")
+        ]),
+        &["--sandbox", "off"],
+    );
     assert!(!squash(&out).contains("could not switch"), "{out}");
 }
 
@@ -415,17 +428,20 @@ fn model_switch_does_not_leave_the_alternate_screen() {
         r#"{"$schema":"config.json/v1","model":"gw/big","providers":{
             "gw":{"type":"anthropic","baseURL":"http://127.0.0.1:1","apiKey":false,"models":["big","other"]}}}"#,
     );
-    let out = rig.drive_bare(json!([
-        expect("Enter send"),
-        quiet(),
-        send("/model\r"),
-        expect_new("enter select"),
-        json!(["mark"]),
-        send("\x1b[B\r"),
-        expect_new("gw/other"),
-        quiet(),
-        json!(["cut"])
-    ]));
+    let out = rig.drive_bare_with(
+        json!([
+            expect("Enter send"),
+            quiet(),
+            send("/model\r"),
+            expect_new("enter select"),
+            json!(["mark"]),
+            send("\x1b[B\r"),
+            expect_new("gw/other"),
+            quiet(),
+            json!(["cut"])
+        ]),
+        &["--sandbox", "off"],
+    );
     let raw = rig.raw();
     assert!(raw.contains("gw/other"), "{}", squash(&out));
     assert!(!raw.contains("\x1b[?1049l"), "left the alternate screen");
@@ -1052,14 +1068,17 @@ fn kill_mid_task_then_continue_shows_idle() {
             json!([
                 expect("Enter send"),
                 json!(["wait", 1.5]),
+                json!(["cut"]),
                 send("again\r"),
                 expect_new("second reply")
             ]),
             &["--continue"],
         );
         let flat = squash(&out);
-        assert!(!flat.contains("THINKING"), "tool={tool}: {flat}");
-        assert!(!flat.contains("RUNNING TOOL"), "tool={tool}: {flat}");
+        // idle until the person types: after "again" a THINKING frame is the app working
+        let idle = squash(&rig.span());
+        assert!(!idle.contains("THINKING"), "tool={tool}: {idle}");
+        assert!(!idle.contains("RUNNING TOOL"), "tool={tool}: {idle}");
         assert!(
             flat.contains("previous run was interrupted"),
             "tool={tool}: {flat}"

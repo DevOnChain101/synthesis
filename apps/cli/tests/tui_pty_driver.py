@@ -5,7 +5,7 @@ scenario: {"argv": [...], "env": {...}, "steps": [["send", "bytes"] | ["wait", s
            ["expect", "text", secs] | ["expect_new", "text", secs] | ["quiet", secs] | ["mark"] | ["cut"]]}
 `expect_new` looks only at output that arrived after the last `send`. out.txt gets the whole
 screen output (escape sequences removed); out.txt.raw gets the raw bytes between the last `mark` and `cut`
-(start / end without them) and the exit state, the last line is `STATE ok|failed <exit>`.
+(start / end without them); out.txt.span is the same span as text and the exit state, the last line is `STATE ok|failed <exit>`.
 """
 import pty,os,sys,time,select,re,json,struct,fcntl,termios,signal
 sc=json.load(open(sys.argv[1]))
@@ -29,8 +29,8 @@ def rd(t):
             if not d: return False
             buf+=d
     return True
-def text():
-    t=re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]",b" ",buf)
+def text(b=None):
+    t=re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]",b" ",buf if b is None else b)
     return t.decode("utf8","replace")
 def hang(*_):
     # a hard stop, so a stuck scenario fails in a minute and not at the CI step limit
@@ -93,5 +93,6 @@ if p==0:
     except Exception: pass
     if p==0:
         os.kill(pid,9); stt="killed"
+open(sys.argv[2]+".span","w").write(text(buf[raw_from:raw_to]))
 open(sys.argv[2]+".raw","wb").write(buf[raw_from:raw_to])
 open(sys.argv[2],"w").write(text()+"\nSTATE "+("ok" if ok else "failed")+" "+str(stt)+"\n")
