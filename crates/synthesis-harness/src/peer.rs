@@ -890,12 +890,19 @@ impl Harness {
     }
 
     /// Why a `SendMessage` to a peer session cannot be sent at all (`initiate` false), so the user is not asked to approve a send that is refused afterwards.
-    pub(crate) fn peer_send_refusal(&self, input: &Value) -> Option<&'static str> {
-        parse(input.get("to").and_then(Value::as_str)?)?;
+    pub(crate) fn peer_send_refusal(&self, input: &Value) -> Option<String> {
+        let a = parse(input.get("to").and_then(Value::as_str)?)?;
         let p = self.peers.as_ref().filter(|p| p.on())?;
-        (!p.config.initiate).then_some(
-            "this session may not start messages to other sessions; the user can enable it with synt.peers.initiate in user settings",
-        )
+        if !p.config.initiate {
+            return Some("this session may not start messages to other sessions; the user can enable it with synt.peers.initiate in user settings".into());
+        }
+        // no session the allow list permits: another workspace needs `synt.peers.allow`
+        match resolve(&p.entries(), &p.config, &p.me.session_id, &a) {
+            Err(e) if e.kind == "not_found" => Some(format!(
+                "{e}; only sessions allowed by synt.peers.allow can be addressed (default: this workspace and its worktrees)"
+            )),
+            _ => None,
+        }
     }
 
     /// True when `input` is a `SendMessage` to a peer session this session may ask without a

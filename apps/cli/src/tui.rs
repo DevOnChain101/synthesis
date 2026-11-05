@@ -351,6 +351,8 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
             },
             ExitReason::Resume(id) => match load_resume_in_place(&ph_synthesis, &id) {
                 Ok(r) => {
+                    // the session picked continues on its own stored model
+                    model = None;
                     back = Some((cwd.clone(), sid.clone()));
                     resume = Some(r);
                 }
@@ -399,6 +401,7 @@ fn round(
         mcp,
         memory,
         resumed_from_seq,
+        model_changed,
         worktree,
         label,
         models,
@@ -415,6 +418,9 @@ fn round(
     let started = match resumed_from_seq {
         Some(seq) => {
             harness.resume_session(&session, seq);
+            if let Some(m) = &model_changed {
+                harness.model_changed(m);
+            }
             Ok(())
         }
         None => harness.start_session(&mut session, "startup"),

@@ -28,7 +28,7 @@ cut for `synt run --resume` consumers.
 | /compact [instructions] | summarise the conversation (`Harness::request_compact` / compact now) |
 | /new | a fresh session in the SELECTED workspace (the one highlighted in the Workspace panel; no picker). When that is not the live workspace the app switches to it. A running task needs a second `/new` within 5 s (it cancels the task and says so). For a different folder use Ctrl+N |
 | /resume [id] | continue a saved session (picker: this folder first); an unknown id is a notice, the app stays |
-| /model [name] | pick or set a model; restarts on the same session |
+| /model [name] | pick or set a model; restarts on the same session; the choice is stored (`model.changed`, `sessions.model_config`) and `--resume` continues on it unless `--model` is given |
 | /effort [auto\|low\|...] | reasoning effort, only when the model declares `effort_tiers` (in `synt.json` or in its `/v1/models` entry, cached) |
 | /mcp | MCP servers: state, tools, last error |
 | /images [clear] | the attached images, or drop them |
@@ -118,6 +118,9 @@ a prompt.
 Workspaces are told apart by folder (symlinks resolved; case folded on macOS and Windows). The Activity
 panel is only drawn when the terminal is tall enough (about 160x48); `↑n more` / `↓n more` in
 Workspace and Running are clickable steps.
+
+## Secret files and hard links
+Reading a secret file (`.env`, keys, cloud credentials), by name, by a `glob`/wildcard that could match one, or with a read-only Bash command such as `cat .env`, asks first in `default`, `acceptEdits` and `auto`, is denied in `plan` and `dontAsk`, and runs in `bypassPermissions`; Grep and Glob skip such files in directory walks, and `@mentions` skip them. A write tool refuses a file with more than one hard link (it may be a name for a file outside the workspace). Reads through a hard link are allowed, and Bash writes through one are covered by the sandbox only (docs/SECURITY.md).
 
 ## Keys in dialogs
 

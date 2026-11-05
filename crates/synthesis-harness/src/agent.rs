@@ -35,6 +35,8 @@ fn provider_used(p: Protocol, u: &synthesis_providers::Usage) -> Option<u64> {
 
 pub(crate) enum StreamFail {
     Cancelled,
+    /// The task wall budget ran out during the model call.
+    Budget(&'static str),
     Provider(ProviderError),
 }
 
@@ -170,6 +172,16 @@ impl Harness {
             let next = tokio::select! {
                 biased;
                 () = agent.cancel.cancelled() => return Err(StreamFail::Cancelled),
+                // dropping the stream ends the request; a stalled or slow provider cannot outlive `max_wall_ms`
+                () = async {
+                    match task.deadline {
+                        Some(d) => tokio::time::sleep_until(tokio::time::Instant::from_std(d)).await,
+                        None => std::future::pending().await,
+                    }
+                } => match self.budget_hit(task, agent) {
+                    Some(k) => return Err(StreamFail::Budget(k)),
+                    None => continue,
+                },
                 n = stream.next() => n,
             };
             let Some(item) = next else { break };
@@ -634,6 +646,7 @@ impl Harness {
             let streamed = match self.stream_once(task, agent, &turn, &req).await {
                 Ok(s) => s,
                 Err(StreamFail::Cancelled) => return AgentEnd::Cancelled,
+                Err(StreamFail::Budget(k)) => return AgentEnd::Budget(k),
                 Err(StreamFail::Provider(e)) => {
                     if agent.cancel.is_cancelled() || e.kind == ErrorKind::Cancelled {
                         return AgentEnd::Cancelled;

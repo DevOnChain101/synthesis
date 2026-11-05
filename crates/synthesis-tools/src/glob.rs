@@ -44,6 +44,8 @@ pub(crate) fn run(input: &Value, ctx: &ToolContext) -> ToolOutput {
         })
         .build();
 
+    // secret-shaped entries are listed only when the pattern itself names them
+    let explicit = synthesis_core::secrets::names_secret(pattern);
     let mut found: Vec<(std::path::PathBuf, SystemTime)> = Vec::new();
     for entry in walk.flatten() {
         if ctx.cancel.is_cancelled() {
@@ -53,6 +55,11 @@ pub(crate) fn run(input: &Value, ctx: &ToolContext) -> ToolOutput {
             continue;
         };
         if rel.as_os_str().is_empty() || !matcher.is_match(rel) {
+            continue;
+        }
+        if (!explicit || ctx.skip_secrets)
+            && synthesis_core::secrets::is_secret_shaped(entry.path())
+        {
             continue;
         }
         let mtime = fs::metadata(entry.path())

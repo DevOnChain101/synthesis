@@ -116,10 +116,20 @@ async fn grep_for_a_responder_skips_secret_shaped_files_and_links_to_them() {
             json!({"pattern": "needle", "path": w, "output_mode": "content"}),
         )
         .await;
+    // since the secret-file control: a walk never returns secrets, for the main agent too
     assert!(
-        text(&all).contains("needle-env"),
-        "the main agent still greps everything"
+        text(&all).contains("needle-ok") && !text(&all).contains("needle-env"),
+        "{}",
+        text(&all)
     );
+    // naming one with `glob` (which the permission layer asks about) searches it
+    let named = f
+        .run(
+            "Grep",
+            json!({"pattern": "needle", "path": w, "glob": ".env", "output_mode": "content"}),
+        )
+        .await;
+    assert!(text(&named).contains("needle-env"), "{}", text(&named));
     f.ctx.skip_secrets = true;
     let o = f
         .run(

@@ -37,6 +37,7 @@ instance  = name | agent_id-prefix (>= 6 hex) | "main" | "parent" (in-session on
 **Resolution:**
 1. Without `ws:`/`sess:`, resolution is in-session only. It never escapes to peers.
 2. With `sess:` or `ws:`, the candidates are the live sessions in the registry that the caller's allow list permits (B8). Each given component filters them: exact match on name or label first, then id or key prefix.
+2a. Another workspace is addressable (`ws:<label>/sess:<name>`) only when `synt.peers.allow` permits it (default: this workspace and its worktrees). A `SendMessage` with no permitted match is refused with `not_found` BEFORE any approval prompt. An ended session (offline card) counts only when no live session matches, so it never makes a live name `ambiguous`.
 3. The result must be exactly one agent. Zero gives `not_found`; several give `ambiguous`. Both list the canonical and display forms of up to 10 candidates. There is no recency or "best match" tie-break.
 4. An agent component that names a retained sub-agent of a peer session addresses that instance. Omitted, it addresses the session's main agent.
 
