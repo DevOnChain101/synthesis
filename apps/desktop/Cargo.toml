@@ -57,6 +57,7 @@ synthesis-view = { path = "../../crates/synthesis-view" }
 synthesis-hooks = { path = "../../crates/synthesis-hooks" }
 synthesis-session = { path = "../../crates/synthesis-session" }
 synthesis-settings = { path = "../../crates/synthesis-settings" }
+synthesis-settings-ui = { path = "../../crates/synthesis-settings-ui" }
 synthesis-terminal = { path = "../../crates/synthesis-terminal" }
 synthesis-tui-base = { path = "../../crates/synthesis-tui-base" }
 time = "0.3"

@@ -8,6 +8,7 @@ use gpui::{
     div, prelude::*, px, svg,
 };
 
+use crate::settings_view::{self, Close, SettingsView};
 use crate::tui_view::driver::LiveCfg;
 use crate::tui_view::{TuiView, layout};
 use crate::{brand, theme};
@@ -42,7 +43,7 @@ impl View {
         match self {
             View::Tui => "The classic TUI, drawn natively from the engine's events.",
             View::Agent => "Conversation, tool calls and approvals of the session.",
-            View::Settings => "Model, permissions, appearance.",
+            View::Settings => "Memory, execution, guards, MCP and interface settings.",
         }
     }
 }
@@ -52,7 +53,10 @@ pub const RAIL_W: f32 = 72.;
 
 pub struct Shell {
     view: View,
+    /// The view the Settings panel returns to when it closes.
+    back: View,
     tui: Entity<TuiView>,
+    settings: Entity<SettingsView>,
 }
 
 impl Shell {
@@ -71,8 +75,16 @@ impl Shell {
             .text_color(fg)
             .when(on, |d| d.bg(theme::hsla(t::ELEVATED)))
             .hover(|d| d.bg(theme::hsla(t::ELEVATED)))
-            .on_click(cx.listener(move |s, _, _, cx| {
-                s.view = v;
+            .on_click(cx.listener(move |s, _, window, cx| {
+                if v == View::Settings && s.view != View::Settings {
+                    s.back = s.view;
+                    s.settings.update(cx, |p, cx| p.focus(window, cx));
+                }
+                s.view = if v == View::Settings && s.view == View::Settings {
+                    s.back
+                } else {
+                    v
+                };
                 cx.notify();
             }))
             .child(
@@ -131,7 +143,20 @@ impl Render for Shell {
                     .text_color(theme::hsla(t::MUTED))
                     .child(v.blurb()),
             );
-        let content = if v == View::Tui {
+        let content = if v == View::Settings {
+            // the panel slides over the view it was opened from
+            let under = if self.back == View::Tui {
+                div().size_full().child(self.tui.clone())
+            } else {
+                div().size_full()
+            };
+            div()
+                .relative()
+                .flex_1()
+                .min_w(px(0.))
+                .child(under)
+                .child(div().absolute().inset_0().child(self.settings.clone()))
+        } else if v == View::Tui {
             div().flex_1().min_w(px(0.)).child(self.tui.clone())
         } else {
             body
@@ -183,15 +208,45 @@ pub fn open(cx: &mut App, live: Option<LiveCfg>) {
         window_min_size: Some(gpui::size(px(layout::MIN_W + RAIL_W), px(layout::MIN_H))),
         ..Default::default()
     };
+    // `--sample` reads and writes nothing, so its Settings view has no files to open
+    let settings_cfg = match &live {
+        Some(c) => Ok(settings_view::model::Cfg {
+            env: c.env.clone(),
+            home: c.synthesis_home.clone(),
+            user_home: c.home.clone().map(Into::into).unwrap_or_default(),
+            cwd: c.project.clone(),
+            managed: synthesis_settings::managed_settings_path(),
+            trust: if c.args.common.trust_project {
+                synthesis_config::ProjectTrust::Trusted
+            } else {
+                synthesis_config::ProjectTrust::Untrusted
+            },
+        }),
+        None => Err("--sample draws sample data and reads no files".to_string()),
+    };
+    let hidden = live
+        .as_ref()
+        .map(|c| settings_view::hidden_from(&c.tui))
+        .unwrap_or_default();
     let opened = cx.open_window(opts, |window, cx| {
         let tui = cx.new(|cx| match live {
-            Some(cfg) => TuiView::live(window, cx, cfg, layout::Hidden::default(), RAIL_W),
-            None => TuiView::new(RAIL_W, layout::Hidden::default()),
+            Some(cfg) => TuiView::live(window, cx, cfg, hidden, RAIL_W),
+            None => TuiView::new(RAIL_W, hidden),
         });
         tui.update(cx, |t, cx| t.start(window, cx));
-        cx.new(|_| Shell {
-            view: View::Tui,
-            tui,
+        let settings = cx.new(|cx| SettingsView::new(window, cx, settings_cfg, RAIL_W));
+        cx.new(|cx| {
+            cx.subscribe(&settings, |s: &mut Shell, _, _: &Close, cx| {
+                s.view = s.back;
+                cx.notify();
+            })
+            .detach();
+            Shell {
+                view: View::Tui,
+                back: View::Tui,
+                tui,
+                settings,
+            }
         })
     });
     if let Err(e) = opened {
