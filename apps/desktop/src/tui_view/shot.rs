@@ -33,6 +33,11 @@ pub struct LiveShot {
     script: PathBuf,
     prompt: String,
     answer: Option<Choice>,
+    /// `--cmd TEXT`: typed after the task, so a command's output or picker is in the frame.
+    cmd: Option<String>,
+    /// `--earlier TEXT`: a first session of the same folder and home that ran this prompt and
+    /// ended (what `/resume` lists).
+    earlier: Option<String>,
 }
 
 /// `None` when `--shot` is absent.
@@ -62,6 +67,8 @@ pub fn parse(args: &[String]) -> Option<Args> {
             Some("deny") => Some(Choice::Deny),
             _ => None,
         },
+        cmd: val("--cmd").cloned(),
+        earlier: val("--earlier").cloned(),
     });
     Some(Args {
         path,
@@ -100,6 +107,22 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
         std::fs::read_to_string(&l.script)?.replace("{WS}", &ws.to_string_lossy()),
     )?;
     let provider = format!("fake:{}", script.display());
+    if let Some(p) = &l.earlier {
+        let (e, mut rx) = Engine::start(&ws, &env, None, Some(&provider), Some("off"))?;
+        e.send(p.clone()).map_err(|e| e.to_string())?;
+        let t0 = Instant::now();
+        loop {
+            match rx.try_recv() {
+                Ok(UiMsg::TaskDone(_)) => break,
+                Ok(_) => {}
+                Err(_) if t0.elapsed() > Duration::from_secs(30) => {
+                    return Err("timed out waiting for the earlier session".into());
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        crate::engine::close_shared(Arc::new(e));
+    }
     let (engine, mut rx) = Engine::start(&ws, &env, None, Some(&provider), Some("off"))?;
     let engine = Arc::new(engine);
     let mut live = Live::new();
@@ -163,6 +186,9 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
         live.view.usage = synthesis_view::usage::UsageHistory { days };
         live.view.set_peers(&[]);
         live.ws_key = synthesis_view::workspaces::fold_dir(&engine.root);
+    }
+    if let Some(c) = &l.cmd {
+        live.submit(c);
     }
     Ok((live, cfg, engine, tmp))
 }

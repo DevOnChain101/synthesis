@@ -1,9 +1,10 @@
 //! The modal dialogs shared by the TUI view and the Agent view: permission asks (`permission` and
-//! `outside_read`), the plan and the questions. The text is what the harness sent, shown the way the TUI
-//! shows it: the reason first, then every line of the tool input.
+//! `outside_read`), the plan, the questions (with the free-text "Other" answer) and the pickers. The text
+//! is what the harness sent, shown the way the TUI shows it: the reason first, then every line of the
+//! tool input.
 
 use gpui::{
-    AnyElement, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+    AnyElement, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, ScrollHandle,
     StatefulInteractiveElement as _, Styled as _, div, prelude::*, px,
 };
 use gpui_component::text::TextView;
@@ -16,8 +17,13 @@ use crate::tui_view::panels::{OnClick, dim, strong, text};
 /// Lines of the tool input a permission dialog shows before the count of the rest.
 const INPUT_LINES: usize = 40;
 
-/// The front dialog over the whole window, or `None`. `click(i)` is the handler of option `i`.
-pub fn overlay(live: &Live, click: &dyn Fn(usize) -> OnClick) -> Option<AnyElement> {
+/// The front dialog over the whole window, or `None`. `click(i)` is the handler of option `i`;
+/// `scroll` keeps the option list's position (the pickers scroll to the selected row).
+pub fn overlay(
+    live: &Live,
+    scroll: &ScrollHandle,
+    click: &dyn Fn(usize) -> OnClick,
+) -> Option<AnyElement> {
     let d = live.dialogs.first()?;
     let queued = live.dialogs.len() - 1;
     let mut card = div()
@@ -93,43 +99,100 @@ pub fn overlay(live: &Live, click: &dyn Fn(usize) -> OnClick) -> Option<AnyEleme
                 )))
                 .child(div().text_color(strong()).child(q.question.clone()));
         }
+        DialogKind::Picker { .. } => {}
     }
-    card = card.children(d.options.iter().enumerate().map(|(i, (_, label))| {
+    let typing = match &d.kind {
+        DialogKind::Question { typing, .. } => typing.clone(),
+        _ => None,
+    };
+    if let Some(t) = &typing {
+        card = card.child(
+            div()
+                .flex()
+                .gap(px(8.))
+                .p(px(8.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(hsla(t::ACCENT))
+                .bg(hsla(t::BG))
+                .child(div().text_color(dim()).child("Other:"))
+                .child(div().text_color(strong()).child(format!("{t}\u{258F}"))),
+        );
+    }
+    let headers: &[(usize, String)] = match &d.kind {
+        DialogKind::Picker { headers, .. } => headers,
+        _ => &[],
+    };
+    let mut list: Vec<AnyElement> = vec![];
+    for (i, (_, label)) in d.options.iter().enumerate() {
+        if let Some((_, h)) = headers.iter().find(|(at, _)| *at == i) {
+            list.push(
+                div()
+                    .px(px(10.))
+                    .pt(px(8.))
+                    .text_color(hsla(t::ACCENT))
+                    .child(h.clone())
+                    .into_any_element(),
+            );
+        }
         let on = i == d.sel;
+        list.push(
+            div()
+                .id(("dialog-opt", i))
+                .flex()
+                .gap(px(10.))
+                .px(px(10.))
+                .py(px(5.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .border_1()
+                .border_color(if on {
+                    hsla(t::ACCENT)
+                } else {
+                    gpui::transparent_black()
+                })
+                .when(on, |d| d.bg(hsla(t::ELEVATED)))
+                .hover(|d| d.bg(hsla(t::ELEVATED)))
+                .child(
+                    div()
+                        .w(px(18.))
+                        .flex_none()
+                        .text_color(dim())
+                        .child(if i < 9 {
+                            format!("{}.", i + 1)
+                        } else {
+                            String::new()
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .text_color(if on { strong() } else { text() })
+                        .child(label.clone()),
+                )
+                .on_click(click(i))
+                .into_any_element(),
+        );
+    }
+    card = card.child(
         div()
-            .id(("dialog-opt", i))
+            .id("dialog-list")
+            .debug_selector(|| "dialog-list".to_string())
             .flex()
-            .gap(px(10.))
-            .px(px(10.))
-            .py(px(5.))
-            .rounded(px(6.))
-            .cursor_pointer()
-            .border_1()
-            .border_color(if on {
-                hsla(t::ACCENT)
-            } else {
-                gpui::transparent_black()
-            })
-            .when(on, |d| d.bg(hsla(t::ELEVATED)))
-            .hover(|d| d.bg(hsla(t::ELEVATED)))
-            .child(
-                div()
-                    .w(px(18.))
-                    .flex_none()
-                    .text_color(dim())
-                    .child(format!("{}.", i + 1)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .text_color(if on { strong() } else { text() })
-                    .child(label.clone()),
-            )
-            .on_click(click(i))
-    }));
+            .flex_col()
+            .max_h(px(420.))
+            .overflow_y_scroll()
+            .track_scroll(scroll)
+            .children(list),
+    );
+    let verb = match (&d.kind, typing.is_some()) {
+        (_, true) => "Enter keeps the text \u{b7} Esc drops it",
+        (DialogKind::Picker { .. }, _) => "Enter selects \u{b7} Esc closes",
+        _ => "Enter confirms \u{b7} Esc rejects",
+    };
     card = card.child(div().text_color(dim()).child(format!(
-        "\u{2191}\u{2193} or 1-9 choose \u{b7} Enter confirms \u{b7} Esc rejects{}",
+        "\u{2191}\u{2193} or 1-9 choose \u{b7} {verb}{}",
         if queued > 0 {
             format!(" \u{b7} {queued} more waiting")
         } else {

@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use gpui::{
-    AppContext as _, Context, Entity, Keystroke, ScrollHandle, Subscription, Task, WeakEntity,
-    Window,
+    AppContext as _, Context, Entity, FollowMode, Keystroke, ListAlignment, ListState,
+    ScrollHandle, Subscription, Task, WeakEntity, Window,
 };
 use gpui_component::input::{InputEvent, TextareaState};
 use synthesis_config::Env;
@@ -17,9 +17,9 @@ use synthesis_tui_base::complete::{self, StdFs};
 use synthesis_tui_base::editor::LineEditor;
 use synthesis_view::workspaces::{LoadOpts, WorkspaceList, fold_dir};
 
-use super::TuiView;
+use super::{TuiView, panels};
 use crate::engine::{self, Args, Engine, StartOpts, UiMsg};
-use crate::live::{Focus, Live, SWITCH_ARM_MS, Submitted, now_ms};
+use crate::live::{Action, Focus, Live, SWITCH_ARM_MS, Submitted, now_ms};
 
 /// What the live view needs from `main`: the environment snapshot and the flags.
 #[derive(Clone)]
@@ -42,6 +42,38 @@ pub struct LiveCfg {
 pub enum Target {
     /// A stored session, continued in place.
     Resume(String),
+    /// The same session on this `provider/model`.
+    Model(String),
+    /// A fresh session in this folder.
+    New(PathBuf),
+    /// Hide the session we came from and open a fresh one in its folder.
+    Close,
+}
+
+/// `/config`: asks the shell to show the Settings view.
+pub struct OpenSettings;
+
+impl gpui::EventEmitter<OpenSettings> for TuiView {}
+
+/// Rows at the end of the chat measured again after every change.
+const TAIL_REMEASURE: usize = 12;
+
+/// One row of the chat list: an item of the conversation, the plan card or the working line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Row {
+    Item(usize),
+    Plan,
+    Activity,
+}
+
+/// What the worker thread hands back.
+pub struct Launched {
+    pub engine: Engine,
+    pub rx: futures::channel::mpsc::UnboundedReceiver<UiMsg>,
+    /// The stored conversation of a resumed session.
+    pub replay: Option<synthesis_view::state::ViewState>,
+    /// The model the session runs on when the person chose one (kept for later relaunches).
+    pub model: Option<String>,
 }
 
 /// Completion popup state: what the token under the cursor offers.
@@ -62,11 +94,19 @@ pub struct LiveUi {
     pub live: Live,
     pub cfg: Arc<LiveCfg>,
     pub prompt: Entity<TextareaState>,
-    pub scroll: ScrollHandle,
-    /// The chat sticks to the newest row until the person scrolls up.
+    /// The chat is a virtual list: only the rows near the viewport are built.
+    pub list: ListState,
+    pub rows: Vec<Row>,
+    /// The next sync starts the list over (another session, `/clear`).
+    pub list_reset: bool,
+    /// The chat sticks to the newest row until the person scrolls up (read off the list).
     pub follow: bool,
-    /// The scroll offset after the last frame.
-    pub last_y: gpui::Pixels,
+    /// Scroll handles of the Workspace and Running bodies and of a picker dialog.
+    pub ws_scroll: ScrollHandle,
+    pub run_scroll: ScrollHandle,
+    pub dlg_scroll: ScrollHandle,
+    /// The model chosen with `/model`, applied to every relaunch until a resume.
+    pub model_override: Option<String>,
     pub dirty: bool,
     pub comp: Option<Comp>,
     pub hist: Option<HistNav>,
@@ -129,9 +169,18 @@ impl TuiView {
             live,
             cfg: Arc::new(cfg),
             prompt,
-            scroll: ScrollHandle::new(),
+            list: {
+                let l = ListState::new(0, ListAlignment::Top, gpui::px(600.));
+                l.set_follow_mode(FollowMode::Tail);
+                l
+            },
+            rows: vec![],
+            list_reset: true,
             follow: true,
-            last_y: gpui::px(0.),
+            ws_scroll: ScrollHandle::new(),
+            run_scroll: ScrollHandle::new(),
+            dlg_scroll: ScrollHandle::new(),
+            model_override: None,
             dirty: true,
             comp: None,
             hist: None,
@@ -203,7 +252,7 @@ impl TuiView {
     }
 
     /// Builds the engine on a worker thread (closing `prior` first), then installs it.
-    /// `resume`: a session to continue; with `None` the `--resume`/`--continue` flags apply once.
+    /// `target`: where it goes; with `None` the `--resume`/`--continue` flags apply once.
     fn launch(
         &mut self,
         project: PathBuf,
@@ -219,86 +268,18 @@ impl TuiView {
         project: PathBuf,
         prior: Option<Arc<Engine>>,
         target: Option<Target>,
-        mut notes: Vec<String>,
+        notes: Vec<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(lu) = &mut self.live else { return };
+        // the old conversation stays on screen until the new engine replaces it: no blank frame
         lu.live.starting = true;
         lu.live.engine = None;
         lu.dirty = true;
-        let cfg = lu.cfg.clone();
-        let first_start = prior.is_none() && target.is_none();
+        let (cfg, model) = (lu.cfg.clone(), lu.model_override.clone());
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
-            let prior_sid = prior.as_ref().map(|p| p.sid.clone());
-            let mut project = project;
-            if let Some(p) = prior {
-                engine::close_shared(p);
-            }
-            let home = cfg.synthesis_home.clone();
-            let mut resume = None;
-            if first_start {
-                let keep = cfg.args.common.resume.clone().unwrap_or_default();
-                notes.extend(engine::housekeeping(&home, &keep));
-            }
-            let want = match &target {
-                Some(Target::Resume(id)) => Some(Ok(id.clone())),
-                None if first_start => {
-                    match engine::requested_resume(&cfg.args.common, &project, &home) {
-                        Ok(r) => {
-                            resume = r;
-                            None
-                        }
-                        Err(e) => Some(Err(e)),
-                    }
-                }
-                None => None,
-            };
-            match want {
-                Some(Ok(id)) => match engine::load_resume_in_place(&home, &id) {
-                    Ok(r) => resume = Some(r),
-                    Err(e) => {
-                        notes.push(if e.starts_with("cannot resume") {
-                            e
-                        } else {
-                            format!("/resume: {e}")
-                        });
-                        // the session we came from continues
-                        resume = prior_sid.and_then(|s| synthesis_tui::load_resume(&home, &s).ok());
-                    }
-                },
-                Some(Err(e)) => {
-                    let _ = tx.send(Err(e));
-                    return;
-                }
-                None => {}
-            }
-            if let Some(r) = &resume {
-                project = PathBuf::from(&r.record.cwd);
-            }
-            // the replay of the stored conversation, before the new engine adds its own events
-            let mut replay = synthesis_view::state::ViewState::default();
-            if let Some(r) = &resume {
-                for e in &r.events {
-                    replay.apply(e);
-                }
-                if replay.session.cwd.is_empty() {
-                    replay.session.cwd = r.record.cwd.clone();
-                }
-            }
-            let (common, note) = engine::common_for(&cfg.args.common, &cfg.granted, &project);
-            notes.extend(note);
-            let had_resume = resume.is_some();
-            let r = Engine::start_with(
-                StartOpts {
-                    project,
-                    common,
-                    resume,
-                    notes,
-                },
-                &cfg.env,
-            );
-            let _ = tx.send(r.map(|(e, rx)| (e, rx, had_resume.then_some(replay))));
+            let _ = tx.send(build(&cfg, project, prior, target, model, notes));
         });
         let task = cx.spawn(async move |this, cx| {
             let r = rx
@@ -312,18 +293,7 @@ impl TuiView {
         cx.notify();
     }
 
-    fn engine_ready(
-        &mut self,
-        r: Result<
-            (
-                Engine,
-                futures::channel::mpsc::UnboundedReceiver<UiMsg>,
-                Option<synthesis_view::state::ViewState>,
-            ),
-            String,
-        >,
-        cx: &mut Context<Self>,
-    ) {
+    fn engine_ready(&mut self, r: Result<Launched, String>, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
         lu.live.starting = false;
         lu.dirty = true;
@@ -331,9 +301,12 @@ impl TuiView {
             Err(e) => {
                 lu.live.note(startup_failure(&e), true);
             }
-            Ok((engine, rx, replay)) => {
-                lu.live.attach(Arc::new(engine), replay);
-                lu.follow = true;
+            Ok(l) => {
+                lu.model_override = l.model;
+                lu.live.attach(Arc::new(l.engine), l.replay);
+                lu.list_reset = true;
+                lu.stick();
+                let rx = l.rx;
                 let pump = cx.spawn(async move |this, cx| pump(this, rx, cx).await);
                 lu.pump_task = Some(pump);
                 self.refresh_store(cx);
@@ -371,11 +344,12 @@ impl TuiView {
 
     fn send_text(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
-        lu.follow = true;
+        lu.stick();
         let Some(e) = lu.live.engine.clone() else {
             return;
         };
-        if let Err(why) = e.send(text) {
+        let images = lu.live.take_images();
+        if let Err(why) = e.send_images(text, images) {
             lu.live.busy = false;
             lu.live.note(why, true);
         }
@@ -483,13 +457,17 @@ impl TuiView {
                 self.send_text(t, cx);
                 return;
             }
+            Submitted::Do(a) => {
+                self.set_prompt("", window, cx);
+                return self.run_action(a, cx);
+            }
             Submitted::Nothing => {}
         }
         if !text.trim().is_empty() {
             self.set_prompt("", window, cx);
         }
         let Some(lu) = &mut self.live else { return };
-        lu.follow = true;
+        lu.stick();
         lu.dirty = true;
         cx.notify();
     }
@@ -556,6 +534,28 @@ impl TuiView {
         // a dialog owns the keyboard
         if !lu.live.dialogs.is_empty() {
             let mut out = None;
+            if lu.live.typing_other() {
+                // the free-text "Other" answer of a question
+                match key {
+                    "enter" => lu.live.commit_other(),
+                    "escape" => {
+                        lu.live.reject();
+                    }
+                    "backspace" => lu.live.backspace_other(),
+                    "v" if ctrl || ks.modifiers.platform => {
+                        let t = cx.read_from_clipboard().and_then(|c| c.text());
+                        let t = t.unwrap_or_default();
+                        lu.live.type_other(t.lines().next().unwrap_or(""));
+                    }
+                    _ if !ctrl && !cmd && ks.key_char.is_some() => {
+                        lu.live.type_other(ks.key_char.as_deref().unwrap_or(""));
+                    }
+                    _ => {}
+                }
+                lu.dirty = true;
+                cx.notify();
+                return true;
+            }
             match key {
                 "up" => lu.live.move_sel(false),
                 "down" => lu.live.move_sel(true),
@@ -571,11 +571,15 @@ impl TuiView {
                 }
                 _ => {}
             }
-            if let Some(k) = out {
-                lu.live.answer(&k, now);
+            let action = out.and_then(|k| lu.live.answer(&k, now));
+            if let Some(ix) = lu.live.dialogs.first().and_then(|d| d.scroll_child()) {
+                lu.dlg_scroll.scroll_to_item(ix);
             }
             lu.dirty = true;
             cx.notify();
+            if let Some(a) = action {
+                self.run_action(a, cx);
+            }
             return true;
         }
         // Ctrl+R: history search
@@ -608,6 +612,14 @@ impl TuiView {
             return true;
         }
         match (key, ctrl) {
+            ("n", true) => {
+                self.pick_folder(cx);
+                return true;
+            }
+            ("v", _) if ctrl || ks.modifiers.platform || ks.modifiers.alt => {
+                // an image on the clipboard first (Alt+V: only an image); text pastes as usual
+                return self.paste_image(ks.modifiers.alt, cx);
+            }
             ("c", true) => {
                 if lu.live.ctrl_c(now) {
                     self.quit(cx);
@@ -634,16 +646,13 @@ impl TuiView {
                 return true;
             }
             ("pageup", _) | ("pagedown", _) => {
-                let h = f32::from(lu.scroll.bounds().size.height);
-                let mut o = lu.scroll.offset();
-                let step = gpui::px((h - 40.).max(40.));
-                o.y = if key == "pageup" {
-                    (o.y + step).min(gpui::px(0.))
-                } else {
-                    (o.y - step).max(-lu.scroll.max_offset().y)
-                };
-                lu.scroll.set_offset(o);
-                lu.follow = o.y <= -lu.scroll.max_offset().y + gpui::px(1.);
+                let h = lu.list.viewport_bounds().size.height;
+                let step = (h - gpui::px(40.)).max(gpui::px(40.));
+                lu.list
+                    .scroll_by(if key == "pageup" { -step } else { step });
+                if lu.list.is_scrolled_to_end() != Some(false) {
+                    lu.stick();
+                }
                 cx.notify();
                 return true;
             }
@@ -791,6 +800,14 @@ impl TuiView {
             }
             _ => lu.live.run_sel = i,
         }
+        panels::reveal_row(
+            if lu.live.focus == Focus::Workspace {
+                &lu.ws_scroll
+            } else {
+                &lu.run_scroll
+            },
+            i,
+        );
         lu.dirty = true;
         cx.notify();
     }
@@ -826,6 +843,13 @@ impl TuiView {
     /// Resume a stored session: the engine restarts on it (like the TUI's relaunch). While a task
     /// runs, the second request within 5 s cancels it and switches.
     pub fn open_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.switch(Target::Resume(id.to_string()), id.to_string(), cx);
+    }
+
+    /// Every relaunch (resume, `/new`, `/close`, `/model`, Ctrl+N, the Running panel) goes through
+    /// here: the engine restarts without the window going blank. `key` names the request, so the
+    /// repeat within [`SWITCH_ARM_MS`] that cancels a running task is for the same one.
+    fn switch(&mut self, target: Target, key: String, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
         let now = now_ms();
         if lu.live.busy {
@@ -833,11 +857,11 @@ impl TuiView {
                 .live
                 .switch_armed
                 .as_ref()
-                .is_some_and(|(a, t)| a == id && now < *t);
+                .is_some_and(|(a, t)| *a == key && now < *t);
             if !armed {
-                lu.live.switch_armed = Some((id.to_string(), now + SWITCH_ARM_MS));
+                lu.live.switch_armed = Some((key, now + SWITCH_ARM_MS));
                 lu.live.note(
-                    "a task is running: pick the session again within 5 s to cancel it and switch",
+                    "a task is running: repeat it within 5 s to cancel the task and switch",
                     false,
                 );
                 lu.dirty = true;
@@ -847,21 +871,167 @@ impl TuiView {
             if let Some(e) = &lu.live.engine {
                 e.cancel();
             }
-            lu.live.note("task cancelled: switching session", false);
+            lu.live.note("task cancelled: switching", false);
         }
         lu.live.switch_armed = None;
+        let project = match &target {
+            Target::New(p) => p.clone(),
+            Target::Close => lu
+                .live
+                .engine
+                .as_ref()
+                .map_or_else(|| lu.cfg.project.clone(), |e| PathBuf::from(&e.cwd)),
+            _ => lu.cfg.project.clone(),
+        };
         let prior = lu.live.engine.take();
-        let project = lu.cfg.project.clone();
         lu.live.queue.clear();
         lu.live.dialogs.clear();
         lu.live.busy = false;
-        self.launch_with(
-            project,
-            prior,
-            Some(Target::Resume(id.to_string())),
-            vec![],
-            cx,
-        );
+        self.launch_with(project, prior, Some(target), vec![], cx);
+    }
+
+    /// What a command or picker asked the window to do.
+    pub(super) fn run_action(&mut self, a: Action, cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        let busy = lu.live.busy;
+        match a {
+            Action::Clear => {
+                if let Some(e) = &lu.live.engine {
+                    e.clear_history();
+                }
+                lu.live.clear_conversation();
+                lu.list_reset = true;
+                lu.stick();
+            }
+            Action::Compact(i) => {
+                let r = lu.live.engine.as_ref().map(|e| e.compact(i));
+                match r {
+                    Some(Ok(true)) => lu.live.note(
+                        "compaction requested: it runs before the next model request",
+                        false,
+                    ),
+                    Some(Ok(false)) => lu.live.note("compacting the conversation...", false),
+                    Some(Err(e)) => lu.live.note(format!("/compact: {e}"), true),
+                    None => {}
+                }
+            }
+            Action::Model(_) if busy => lu.live.note(
+                "/model: a task is running \u{b7} esc cancels it first",
+                true,
+            ),
+            Action::Model(m) => return self.switch(Target::Model(m), "model".into(), cx),
+            Action::Resume(id) => return self.open_session(&id, cx),
+            Action::New => {
+                let l = &lu.live;
+                let root = l
+                    .view
+                    .workspaces
+                    .workspaces
+                    .iter()
+                    .find(|w| w.key == l.ws_key)
+                    .map(|w| (w.root.clone(), w.available))
+                    .or_else(|| l.engine.as_ref().map(|e| (e.root.clone(), true)));
+                match root {
+                    Some((r, true)) => {
+                        return self.switch(Target::New(PathBuf::from(r)), "new".into(), cx);
+                    }
+                    Some((r, false)) => lu
+                        .live
+                        .note(format!("/new: the folder {r} no longer exists"), true),
+                    None => lu.live.note("/new: the session is still starting", true),
+                }
+            }
+            Action::Close => return self.switch(Target::Close, "close".into(), cx),
+            Action::OpenSettings => cx.emit(OpenSettings),
+        }
+        lu.dirty = true;
+        cx.notify();
+    }
+
+    /// Ctrl+N: the system folder picker; the folder gets a fresh session.
+    fn pick_folder(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open a folder as a new workspace".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await
+                && let Some(p) = paths.into_iter().next()
+            {
+                this.update(cx, |t, cx| t.open_folder(&p, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// A folder chosen as a new workspace: it must be a readable directory.
+    pub fn open_folder(&mut self, p: &Path, cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        match synthesis_core::canonicalize(p) {
+            Ok(c) if c.is_dir() => {
+                let key = format!("folder:{}", c.display());
+                self.switch(Target::New(c), key, cx)
+            }
+            _ => {
+                lu.live
+                    .note(format!("no such folder: {}", p.display()), true);
+                lu.dirty = true;
+                cx.notify();
+            }
+        }
+    }
+
+    // ---- images ----
+
+    /// Cmd/Ctrl+V and Alt+V: an image on the clipboard is attached. Returns true when it was
+    /// (Alt+V: always, with a note when there is none); Cmd/Ctrl+V falls back to the text paste.
+    fn paste_image(&mut self, image_only: bool, cx: &mut Context<Self>) -> bool {
+        let Some(lu) = &mut self.live else {
+            return false;
+        };
+        let img = cx.read_from_clipboard().and_then(|c| {
+            c.into_entries().find_map(|e| match e {
+                gpui::ClipboardEntry::Image(i) => Some(i),
+                _ => None,
+            })
+        });
+        let Some(img) = img else {
+            if image_only {
+                lu.live.note(
+                    "the clipboard holds no image \u{b7} Cmd/Ctrl+V pastes text",
+                    true,
+                );
+                lu.dirty = true;
+                cx.notify();
+            }
+            return image_only;
+        };
+        let r = match img.format {
+            gpui::ImageFormat::Png => attach_png(&mut lu.live, img.bytes),
+            gpui::ImageFormat::Jpeg => attach_jpeg(&mut lu.live, img.bytes),
+            f => Err(format!("a {f:?} image is not supported yet (PNG or JPEG)")),
+        };
+        lu.report_image(r);
+        cx.notify();
+        true
+    }
+
+    /// Files dropped on the window: images are attached, anything else is said.
+    pub fn drop_files(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        for p in paths {
+            let r = read_image_file(p).and_then(|(png, bytes)| {
+                if png {
+                    attach_png(&mut lu.live, bytes)
+                } else {
+                    attach_jpeg(&mut lu.live, bytes)
+                }
+            });
+            lu.report_image(r.map_err(|e| format!("{}: {e}", p.display())));
+        }
+        cx.notify();
     }
 
     // ---- history ----
@@ -916,8 +1086,232 @@ impl TuiView {
 }
 
 impl LiveUi {
+    /// Follow the newest row again (a sent message, a new session, "jump to latest").
+    pub fn stick(&mut self) {
+        self.follow = true;
+        self.list.set_follow_mode(FollowMode::Tail);
+    }
+
+    /// Rows of the chat now: what the quiet chat shows, then the plan and the working line.
+    fn rows_now(&self) -> Vec<Row> {
+        let l = &self.live;
+        let c = &l.view.convo;
+        let mut rows: Vec<Row> = c
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| super::chat::visible(it, l.show_thinking, l.verbose))
+            .map(|(i, _)| Row::Item(i))
+            .collect();
+        if !c.plan.is_empty() {
+            rows.push(Row::Plan);
+        }
+        if c.activity().is_some() && l.dialogs.is_empty() {
+            rows.push(Row::Activity);
+        }
+        rows
+    }
+
+    /// Tells the list what changed: rows added or dropped at the end, and the last rows (a streaming
+    /// answer, a tool that just finished) measured again. Shortcut: a row older than
+    /// `TAIL_REMEASURE` rows that changes (a slow parallel tool) keeps its old height until the
+    /// next `remeasure`.
+    pub fn sync_rows(&mut self) {
+        let rows = self.rows_now();
+        let (old, new) = (self.list.item_count(), rows.len());
+        if std::mem::take(&mut self.list_reset) {
+            self.list.reset(new);
+            self.list.set_follow_mode(FollowMode::Tail);
+        } else if new > old {
+            self.list.splice(old..old, new - old);
+        } else if new < old {
+            self.list.splice(new..old, 0);
+        }
+        self.list
+            .remeasure_items(new.saturating_sub(TAIL_REMEASURE)..new);
+        self.rows = rows;
+        self.follow = self.list.is_following_tail();
+    }
+
+    /// The outcome of an attach, as a line in the chat.
+    fn report_image(&mut self, r: Result<String, String>) {
+        match r {
+            Ok(m) => self.live.note(m, false),
+            Err(e) => self.live.note(format!("image: {e}"), true),
+        }
+        self.dirty = true;
+    }
+
     fn add_sub(&mut self, s: Subscription) {
         self._subs.push(s);
+    }
+}
+
+/// The TUI's checks for a pasted PNG (magic, 4 MB, 8000x8000) and the per-message limits.
+fn attach_png(l: &mut Live, bytes: Vec<u8>) -> Result<String, String> {
+    let img = synthesis_tui_base::imgclip::validate_png(bytes).map_err(|e| e.to_string())?;
+    l.attach_image("image/png", &img.png, Some((img.width, img.height)))
+}
+
+/// JPEG: magic bytes and the same 4 MB cap (no decoder in the tree, so no size check in pixels).
+fn attach_jpeg(l: &mut Live, bytes: Vec<u8>) -> Result<String, String> {
+    if bytes.len() > synthesis_tui_base::imgclip::MAX_PNG {
+        return Err("the image is larger than 4 MB".into());
+    }
+    if !bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Err("not a JPEG".into());
+    }
+    l.attach_image("image/jpeg", &bytes, None)
+}
+
+/// A dropped file: (is PNG, bytes). Only `.png`, `.jpg` and `.jpeg`, read up to the cap.
+fn read_image_file(p: &Path) -> Result<(bool, Vec<u8>), String> {
+    use std::io::Read as _;
+    let ext = p
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let png = match ext.as_str() {
+        "png" => true,
+        "jpg" | "jpeg" => false,
+        _ => return Err("not an image (png, jpg)".into()),
+    };
+    let cap = synthesis_tui_base::imgclip::MAX_PNG as u64;
+    let mut v = vec![];
+    std::fs::File::open(p)
+        .and_then(|f| f.take(cap + 1).read_to_end(&mut v))
+        .map_err(|e| e.to_string())?;
+    Ok((png, v))
+}
+
+/// The worker side of a (re)launch: ends `prior`, then starts the engine on `target`. A model
+/// that cannot be built falls back to the session on the model it had.
+pub fn build(
+    cfg: &LiveCfg,
+    project: PathBuf,
+    prior: Option<Arc<Engine>>,
+    target: Option<Target>,
+    model: Option<String>,
+    mut notes: Vec<String>,
+) -> Result<Launched, String> {
+    let first_start = prior.is_none() && target.is_none();
+    let prior_sid = prior.as_ref().map(|p| p.sid.clone());
+    if let Some(p) = prior {
+        engine::close_shared(p);
+    }
+    let home = cfg.synthesis_home.clone();
+    let mut model = model;
+    let prior_model = model.clone();
+    let mut project = project;
+    let mut resume = None;
+    if first_start {
+        let keep = cfg.args.common.resume.clone().unwrap_or_default();
+        notes.extend(engine::housekeeping(&home, &keep));
+    }
+    let back = |home: &Path, sid: Option<String>| {
+        sid.and_then(|s| synthesis_tui::load_resume(home, &s).ok())
+    };
+    let want = match &target {
+        Some(Target::Resume(id)) => {
+            // the session picked continues on its own stored model
+            model = None;
+            Some(Ok(id.clone()))
+        }
+        Some(Target::Model(m)) => {
+            model = Some(m.clone());
+            prior_sid.clone().map(Ok)
+        }
+        Some(Target::New(p)) => {
+            project.clone_from(p);
+            None
+        }
+        Some(Target::Close) => {
+            // hidden, not deleted; a fresh session opens in the same folder
+            let closed = prior_sid.as_deref().map(|sid| {
+                synthesis_session::Store::open(&home, synthesis_session::StoreOptions::default())
+                    .and_then(|s| s.close_session(sid))
+            });
+            if let Some(Err(e)) = closed {
+                notes.push(format!("/close: could not close the session ({e})"));
+                prior_sid.clone().map(Ok)
+            } else {
+                None
+            }
+        }
+        None if first_start => match engine::requested_resume(&cfg.args.common, &project, &home) {
+            Ok(r) => {
+                resume = r;
+                None
+            }
+            Err(e) => Some(Err(e)),
+        },
+        None => None,
+    };
+    match want {
+        Some(Ok(id)) => match engine::load_resume_in_place(&home, &id) {
+            Ok(r) => resume = Some(r),
+            Err(e) => {
+                notes.push(if e.starts_with("cannot resume") {
+                    e
+                } else {
+                    format!("/resume: {e}")
+                });
+                // the session we came from continues
+                resume = back(&home, prior_sid.clone());
+                model = prior_model.clone();
+            }
+        },
+        Some(Err(e)) => return Err(e),
+        None => {}
+    }
+    let attempt = |project: PathBuf,
+                   resume: Option<synthesis_tui::Resume>,
+                   model: Option<String>,
+                   notes: Vec<String>| {
+        let project = resume
+            .as_ref()
+            .map_or(project, |r| PathBuf::from(&r.record.cwd));
+        // the replay of the stored conversation, before the new engine adds its own events
+        let mut replay = synthesis_view::state::ViewState::default();
+        if let Some(r) = &resume {
+            for e in &r.events {
+                replay.apply(e);
+            }
+            if replay.session.cwd.is_empty() {
+                replay.session.cwd = r.record.cwd.clone();
+            }
+        }
+        let (mut common, note) = engine::common_for(&cfg.args.common, &cfg.granted, &project);
+        if model.is_some() {
+            common.model.clone_from(&model);
+        }
+        let mut notes = notes;
+        notes.extend(note);
+        let had_resume = resume.is_some();
+        Engine::start_with(
+            StartOpts {
+                project,
+                common,
+                resume,
+                notes,
+            },
+            &cfg.env,
+        )
+        .map(|(engine, rx)| Launched {
+            engine,
+            rx,
+            replay: had_resume.then_some(replay),
+            model,
+        })
+    };
+    match attempt(project.clone(), resume, model, notes.clone()) {
+        Err(e) if matches!(target, Some(Target::Model(_))) => {
+            notes.push(format!(
+                "/model: could not switch ({e}); staying on the previous model"
+            ));
+            attempt(project, back(&home, prior_sid), prior_model, notes)
+        }
+        r => r,
     }
 }
 

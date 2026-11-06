@@ -238,10 +238,8 @@ impl Convo {
                 self.cost_usd = self.cost_usd.max(usage.cost_usd.unwrap_or(0.0));
             }
             // an empty display text marks the harness's own follow-up note to the model
-            Event::UserMessage {
-                display_text: Some(d),
-                ..
-            } if d.is_empty() || d == "verification feedback" || d == "stop hook feedback" => {}
+            Event::UserMessage { display_text, .. }
+                if crate::text::is_harness_note(display_text.as_deref()) => {}
             Event::UserMessage {
                 text, display_text, ..
             } if main => self.items.push(Item::User(
@@ -645,5 +643,16 @@ mod tests {
             json!({"report_id": "r", "status": "unverified", "attempt": 1, "summary": "s"}),
         ));
         assert!(c.items.is_empty(), "{:?}", c.items);
+    }
+
+    #[test]
+    fn a_note_is_never_a_prompt_or_a_title() {
+        let note = json!({"text": "[Synthesis verification report]", "display_text": "verification feedback", "images": []});
+        let mut v = crate::state::ViewState::default();
+        v.apply(&ev("user.message", json!({"text": "fix it", "images": []})));
+        v.apply(&ev("user.message", note));
+        assert_eq!(v.session.prompts, 1);
+        assert_eq!(v.session.last_prompt, "fix it");
+        assert_eq!(v.convo.items.len(), 1);
     }
 }

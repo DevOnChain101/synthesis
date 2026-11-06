@@ -53,7 +53,10 @@ pub(crate) fn first_prompt(r: &Reader, id: &str) -> Option<String> {
                 text, display_text, ..
             } = e.event
         {
-            let t = display_text.filter(|d| !d.is_empty()).unwrap_or(text);
+            if crate::text::is_harness_note(display_text.as_deref()) {
+                continue;
+            }
+            let t = display_text.unwrap_or(text);
             if !t.trim().is_empty() && !t.starts_with("[Synthesis") {
                 return Some(t.split_whitespace().collect::<Vec<_>>().join(" "));
             }

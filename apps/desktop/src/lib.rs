@@ -5,6 +5,7 @@ pub mod agent_view;
 pub mod brand;
 pub mod engine;
 pub mod live;
+pub mod settings_view;
 pub mod theme;
 pub mod tui_view;
 pub mod ui;

@@ -1,6 +1,15 @@
 //! JS-compatible string helpers shared by the models (moved from `synthesis-tui-render::util`,
 //! which re-exports them).
 
+/// `user.message.display_text` of the harness's own notes to the model (empty, verification or
+/// stop-hook feedback): not something the person said, so never a prompt, title or chat row.
+pub fn is_harness_note(display_text: Option<&str>) -> bool {
+    matches!(
+        display_text,
+        Some("" | "verification feedback" | "stop hook feedback")
+    )
+}
+
 pub fn u16len(s: &str) -> usize {
     s.chars().map(char::len_utf16).sum()
 }

@@ -16,13 +16,24 @@ use synthesis_view::project::{self, ProjectData};
 
 use super::AgentView;
 use crate::engine::{self, Engine, StartOpts, UiMsg};
-use crate::live::{Live, Submitted, now_ms};
+use crate::live::{Action, Live, Submitted, now_ms};
 use crate::tui_view::driver::{read_store, startup_failure};
 use crate::tui_view::sample::Snapshot;
 use crate::tui_view::snapshot;
 
 /// Sessions open at once: each holds an engine (a runtime, its MCP servers and a model client).
 pub const MAX_SESSIONS: usize = 4;
+
+/// What an engine start is asked for.
+#[derive(Default)]
+pub struct Spec {
+    /// A stored session to continue.
+    pub resume: Option<String>,
+    /// The folder of a fresh session (default: the start folder).
+    pub project: Option<PathBuf>,
+    /// `provider/model` to run on.
+    pub model: Option<String>,
+}
 
 pub struct AgentSession {
     pub uid: u64,
@@ -121,35 +132,68 @@ impl AgentView {
 
     /// Opens a session in a new tab: a new one, or the stored `resume` (focused if already open).
     pub fn open(&mut self, resume: Option<String>, cx: &mut Context<Self>) {
-        let Some(cfg) = self.cfg.clone() else { return };
         if let Some(id) = &resume
             && let Some(i) = self.sessions.iter().position(|s| &s.live.sid == id)
         {
             self.active = i;
             return cx.notify();
         }
-        if self.sessions.len() >= MAX_SESSIONS {
-            if let Some(s) = self.active_mut() {
-                s.live.note(
-                    format!("{MAX_SESSIONS} sessions are open; close a tab first"),
-                    true,
-                );
+        self.launch(
+            None,
+            Spec {
+                resume,
+                ..Spec::default()
+            },
+            cx,
+        );
+    }
+
+    /// Every start of an engine (a new tab, a resume, `/new`, `/model`, `/close` on the last tab)
+    /// goes through here. `replace`: the tab whose engine is ended first and whose session slot is
+    /// reused (the window does not go blank, like the TUI view's relaunch).
+    pub(super) fn launch(&mut self, replace: Option<u64>, spec: Spec, cx: &mut Context<Self>) {
+        let Some(cfg) = self.cfg.clone() else { return };
+        let mut prior = None;
+        let uid = match replace.and_then(|u| self.index_of(u)) {
+            Some(i) => {
+                let s = &mut self.sessions[i];
+                prior = s.live.engine.take();
+                s.live.queue.clear();
+                s.live.dialogs.clear();
+                s.live.busy = false;
+                s.live.starting = true;
                 s.dirty = true;
+                self.active = i;
+                s.uid
             }
-            return cx.notify();
-        }
-        self.next_uid += 1;
-        let uid = self.next_uid;
-        self.sessions.push(AgentSession::new(uid, Live::new()));
-        self.active = self.sessions.len() - 1;
+            None => {
+                if self.sessions.len() >= MAX_SESSIONS {
+                    if let Some(s) = self.active_mut() {
+                        s.live.note(
+                            format!("{MAX_SESSIONS} sessions are open; close a tab first"),
+                            true,
+                        );
+                        s.dirty = true;
+                    }
+                    return cx.notify();
+                }
+                self.next_uid += 1;
+                self.sessions
+                    .push(AgentSession::new(self.next_uid, Live::new()));
+                self.active = self.sessions.len() - 1;
+                self.next_uid
+            }
+        };
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
             let home = cfg.synthesis_home.clone();
-            let mut notes = vec![];
-            let mut project: PathBuf = cfg.project.clone();
+            if let Some(p) = prior {
+                engine::close_shared(p);
+            }
+            let mut project: PathBuf = spec.project.unwrap_or_else(|| cfg.project.clone());
             let mut resume_data = None;
             let mut replay = None;
-            if let Some(id) = &resume {
+            if let Some(id) = &spec.resume {
                 match engine::load_resume_in_place(&home, id) {
                     Ok(r) => {
                         project = PathBuf::from(&r.record.cwd);
@@ -169,14 +213,16 @@ impl AgentView {
                     }
                 }
             }
-            let (common, note) = engine::common_for(&cfg.args.common, &cfg.granted, &project);
-            notes.extend(note);
+            let (mut common, note) = engine::common_for(&cfg.args.common, &cfg.granted, &project);
+            if spec.model.is_some() {
+                common.model = spec.model;
+            }
             let r = Engine::start_with(
                 StartOpts {
                     project,
                     common,
                     resume: resume_data,
-                    notes,
+                    notes: note.into_iter().collect(),
                 },
                 &cfg.env,
             );
@@ -188,9 +234,102 @@ impl AgentView {
                 .unwrap_or_else(|_| Err("the engine thread ended unexpectedly".into()));
             this.update(cx, |t, cx| t.engine_ready(uid, r, cx)).ok();
         });
-        if let Some(s) = self.sessions.last_mut() {
-            s.engine_task = Some(task);
+        if let Some(i) = self.index_of(uid) {
+            self.sessions[i].engine_task = Some(task);
         }
+        cx.notify();
+    }
+
+    /// What a command or picker asked the window to do (the same `Action`s as the TUI view).
+    pub(super) fn run_action(&mut self, a: Action, cx: &mut Context<Self>) {
+        let n = self.sessions.len();
+        let Some(s) = self.sessions.get_mut(self.active) else {
+            return;
+        };
+        let uid = s.uid;
+        let many = n > 1;
+        match a {
+            Action::Clear => {
+                if let Some(e) = &s.live.engine {
+                    e.clear_history();
+                }
+                s.live.clear_conversation();
+                s.follow = true;
+            }
+            Action::Compact(i) => {
+                let r = s.live.engine.as_ref().map(|e| e.compact(i));
+                match r {
+                    Some(Ok(true)) => s.live.note(
+                        "compaction requested: it runs before the next model request",
+                        false,
+                    ),
+                    Some(Ok(false)) => s.live.note("compacting the conversation...", false),
+                    Some(Err(e)) => s.live.note(format!("/compact: {e}"), true),
+                    None => {}
+                }
+            }
+            Action::Model(_) if s.live.busy => s.live.note(
+                "/model: a task is running \u{b7} esc cancels it first",
+                true,
+            ),
+            Action::Model(m) => {
+                let resume = (!s.live.sid.is_empty()).then(|| s.live.sid.clone());
+                return self.launch(
+                    Some(uid),
+                    Spec {
+                        resume,
+                        model: Some(m),
+                        project: None,
+                    },
+                    cx,
+                );
+            }
+            Action::Resume(id) => return self.open(Some(id), cx),
+            Action::New => {
+                let l = &s.live;
+                let root = l
+                    .view
+                    .workspaces
+                    .workspaces
+                    .iter()
+                    .find(|w| w.key == l.ws_key)
+                    .map(|w| (w.root.clone(), w.available))
+                    .or_else(|| l.engine.as_ref().map(|e| (e.root.clone(), true)));
+                match root {
+                    Some((r, true)) => {
+                        return self.launch(
+                            None,
+                            Spec {
+                                project: Some(PathBuf::from(r)),
+                                ..Spec::default()
+                            },
+                            cx,
+                        );
+                    }
+                    Some((r, false)) => s
+                        .live
+                        .note(format!("/new: the folder {r} no longer exists"), true),
+                    None => s.live.note("/new: the session is still starting", true),
+                }
+            }
+            Action::Close => {
+                // the last tab is replaced by a fresh session in its folder, like the TUI view
+                let project = s.live.engine.as_ref().map(|e| PathBuf::from(&e.cwd));
+                if many {
+                    return self.close_tab(self.active, cx);
+                }
+                return self.launch(
+                    Some(uid),
+                    Spec {
+                        project,
+                        ..Spec::default()
+                    },
+                    cx,
+                );
+            }
+            Action::OpenSettings => s.live.note("open Settings from the rail", false),
+        }
+        s.dirty = true;
         cx.notify();
     }
 
@@ -471,6 +610,10 @@ impl AgentView {
                 self.set_prompt("", window, cx);
                 return self.send_text(uid, t, cx);
             }
+            Submitted::Do(a) => {
+                self.set_prompt("", window, cx);
+                return self.run_action(a, cx);
+            }
             Submitted::Nothing => {}
         }
         if !text.trim().is_empty() {
@@ -497,11 +640,12 @@ impl AgentView {
             return;
         };
         let now = now_ms();
-        if let Some(k) = s.live.pick(i, now) {
-            s.live.answer(&k, now);
-        }
+        let action = s.live.pick(i, now).and_then(|k| s.live.answer(&k, now));
         s.dirty = true;
         cx.notify();
+        if let Some(a) = action {
+            self.run_action(a, cx);
+        }
     }
 
     // ---- keys ----
@@ -522,6 +666,28 @@ impl AgentView {
         // a dialog owns the keyboard
         if !s.live.dialogs.is_empty() {
             let mut out = None;
+            if s.live.typing_other() {
+                // the free-text "Other" answer of a question
+                match key {
+                    "enter" => s.live.commit_other(),
+                    "escape" => {
+                        s.live.reject();
+                    }
+                    "backspace" => s.live.backspace_other(),
+                    "v" if ctrl || ks.modifiers.platform => {
+                        let t = cx.read_from_clipboard().and_then(|c| c.text());
+                        let t = t.unwrap_or_default();
+                        s.live.type_other(t.lines().next().unwrap_or(""));
+                    }
+                    _ if !ctrl && !cmd && ks.key_char.is_some() => {
+                        s.live.type_other(ks.key_char.as_deref().unwrap_or(""));
+                    }
+                    _ => {}
+                }
+                s.dirty = true;
+                cx.notify();
+                return true;
+            }
             match key {
                 "up" => s.live.move_sel(false),
                 "down" => s.live.move_sel(true),
@@ -537,11 +703,17 @@ impl AgentView {
                 }
                 _ => {}
             }
-            if let Some(k) = out {
-                s.live.answer(&k, now);
+            let action = out.and_then(|k| s.live.answer(&k, now));
+            if let Some(ix) = s.live.dialogs.first().and_then(|d| d.scroll_child()) {
+                self.dlg_scroll.scroll_to_item(ix);
             }
-            s.dirty = true;
+            if let Some(s) = self.sessions.get_mut(self.active) {
+                s.dirty = true;
+            }
             cx.notify();
+            if let Some(a) = action {
+                self.run_action(a, cx);
+            }
             return true;
         }
         match (key, ctrl) {

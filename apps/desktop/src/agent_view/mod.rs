@@ -144,6 +144,8 @@ pub struct AgentView {
     pub(crate) prompt: Entity<TextareaState>,
     pub(crate) tree: Tree,
     pub(crate) next_uid: u64,
+    /// Scroll position of the dialog's option list (pickers).
+    pub(crate) dlg_scroll: gpui::ScrollHandle,
     /// The view is narrower than 1000px: tabs drop their icons.
     narrow: bool,
     /// Files of the diff tab that are expanded (the newest one when none was picked).
@@ -182,6 +184,7 @@ impl AgentView {
             .collect();
         Self {
             narrow: false,
+            dlg_scroll: gpui::ScrollHandle::new(),
             next_uid: sessions.len() as u64,
             sessions,
             active: 0,
@@ -854,7 +857,7 @@ impl Render for AgentView {
             .child(self.centre(w, cx))
             .child(self.right(tier, w));
         let dialog = self.active_session().and_then(|s| {
-            crate::widgets::dialog::overlay(&s.live, &|i| {
+            crate::widgets::dialog::overlay(&s.live, &self.dlg_scroll, &|i| {
                 Box::new(cx.listener(move |this, _, _, cx| this.click_option(i, cx)))
             })
         });
