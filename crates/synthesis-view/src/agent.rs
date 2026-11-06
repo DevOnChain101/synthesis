@@ -552,12 +552,12 @@ impl AgentPanes {
         }
     }
 
-    /// Reports whose checks were not read from the store yet: `(report_id, task_id)`.
-    pub fn unloaded_reports(&self) -> Vec<(String, String)> {
+    /// Reports whose checks were not read from the store yet: `(report_id, task_id, attempt)`.
+    pub fn unloaded_reports(&self) -> Vec<(String, String, i64)> {
         self.verify
             .iter()
             .filter(|v| !v.loaded && !v.task_id.is_empty())
-            .map(|v| (v.report_id.clone(), v.task_id.clone()))
+            .map(|v| (v.report_id.clone(), v.task_id.clone(), v.attempt))
             .collect()
     }
 
@@ -807,7 +807,7 @@ mod tests {
             json!({"report_id": "r1", "status": "failed", "attempt": 1,
                 "summary": "failed: 0 passed, 1 failed, 0 blocked, 1 unverified check(s); 1 limitation(s)"}),
         )]);
-        assert_eq!(p.unloaded_reports(), [("r1".to_string(), "t1".to_string())]);
+        assert_eq!(p.unloaded_reports(), [("r1".to_string(), "t1".to_string(), 1)]);
         p.set_report(
             "r1",
             &json!({"checks": [

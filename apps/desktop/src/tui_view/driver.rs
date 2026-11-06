@@ -534,6 +534,9 @@ impl TuiView {
 
     /// Handles a keystroke before the focused input sees it. True: consumed.
     fn on_key(&mut self, ks: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.active {
+            return false;
+        }
         let Some(lu) = &mut self.live else {
             return false;
         };
