@@ -116,7 +116,7 @@ impl App {
     }
 
     /// A switch that cancels the running task needs a second press within `SWITCH_ARM_MS`.
-    fn confirm_switch(&mut self, what: &str, now: i64) -> bool {
+    pub(super) fn confirm_switch(&mut self, what: &str, now: i64) -> bool {
         if self.task.is_none()
             || self
                 .switch_armed

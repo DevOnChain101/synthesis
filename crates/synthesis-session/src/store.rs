@@ -703,6 +703,18 @@ impl Store {
         Ok(removed)
     }
 
+    /// `/close`: hides the session from [`Reader::list_used_sessions`]; messages stay and it can
+    /// still be resumed by id. Returns whether a session of that id exists.
+    pub fn close_session(&self, id: &str) -> Result<bool> {
+        check_id(id)?;
+        let conn = connect(&self.home, false)?;
+        let n = conn.execute(
+            "UPDATE sessions SET closed_at=?2 WHERE id=?1 AND closed_at IS NULL",
+            (id, now()),
+        )?;
+        Ok(n > 0)
+    }
+
     /// A read-only connection; any number may exist next to the single writer.
     pub fn reader(&self) -> Result<Reader> {
         Reader::open(&self.home)
@@ -1055,10 +1067,11 @@ impl Reader {
     }
 
     /// [`Self::list_sessions`] without the sessions that hold no message and no task (the ones
-    /// every launch leaves behind when nothing was typed).
+    /// every launch leaves behind when nothing was typed) and the closed ones.
     pub fn list_used_sessions(&self, cwd: Option<&str>) -> Result<Vec<SessionRecord>> {
         let mut st = self.conn.prepare(&format!(
             "SELECT {SESSION_COLS} FROM sessions WHERE (?1 IS NULL OR cwd=?1) \
+             AND closed_at IS NULL \
              AND (EXISTS (SELECT 1 FROM messages WHERE session_id=sessions.id) \
                OR EXISTS (SELECT 1 FROM tasks WHERE session_id=sessions.id)) \
              ORDER BY updated_at DESC, id"

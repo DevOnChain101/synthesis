@@ -43,6 +43,8 @@ pub enum ExitReason {
     Resume(String),
     /// `/model NAME`: the host rebuilds the harness for that model and reopens this session.
     SwitchModel(String),
+    /// `/close`: the host hides this session, then opens a fresh one in the same folder.
+    Close,
 }
 
 pub struct Exit {
@@ -93,7 +95,7 @@ pub trait TaskHost: Send + Sync {
     ) -> BoxFut<'a, ()>;
 }
 
-/// Where the terminal guard waits between two runs of the app (a `/model` restart): the screen
+/// Where the terminal guard waits between two runs of the app (a `/model`, session or folder switch): the screen
 /// is never left, so there is no flash and no cooked-mode gap.
 pub type Hold = Arc<std::sync::Mutex<Option<TerminalGuard>>>;
 
@@ -121,7 +123,7 @@ pub struct Options {
     /// Applies a model choice: returns the rebuilt harness and its label. Without it `/model`
     /// only lists.
     pub switch_model: Option<ModelSwitch>,
-    /// With it, a run that ends in `ExitReason::SwitchModel` leaves the terminal in the app's
+    /// With it, a run that ends in anything but a quit leaves the terminal in the app's
     /// screen mode and parks its guard here; the next run takes it over.
     pub hold: Option<Hold>,
     pub extra_commands: Vec<CmdDef>,
@@ -762,7 +764,17 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
         tx: tx.clone(),
     };
     let mut switch = o.switch_model.take();
-    runner.load_usage(clock());
+    if resumed {
+        // a relaunch: the history is read before the first frame, so the Usage panel (and the
+        // layout around it) does not change a moment after the screen is taken over
+        let h = o
+            .synthesis_home
+            .as_ref()
+            .map(|h| crate::usage::load(h, clock(), o.tz_offset_min));
+        app.set_usage(h.unwrap_or_default());
+    } else {
+        runner.load_usage(clock());
+    }
     let mut parser = KeyParser::default();
     let mut last_size = size();
     let mut dirty = true;
@@ -1061,7 +1073,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
     match o
         .hold
         .as_ref()
-        .filter(|_| matches!(result.reason, ExitReason::SwitchModel(_)))
+        .filter(|_| !matches!(result.reason, ExitReason::Quit | ExitReason::InputClosed))
     {
         Some(h) => *h.lock().unwrap_or_else(|e| e.into_inner()) = Some(guard),
         None => guard.restore(),

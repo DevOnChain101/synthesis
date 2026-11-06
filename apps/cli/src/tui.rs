@@ -354,6 +354,9 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
                 ExitReason::Resume(_) => {
                     switch_note.push("task cancelled: switching session".into());
                 }
+                ExitReason::Close => {
+                    switch_note.push("task cancelled: closing session".into());
+                }
                 _ => {}
             }
         }
@@ -384,6 +387,18 @@ pub fn launch(a: TuiArgs, env: Env) -> Result<u8, String> {
                     resume = load_resume(&ph_synthesis, &sid).ok();
                 }
             },
+            ExitReason::Close => {
+                // hidden, not deleted; a fresh session opens in the same folder
+                let closed = synthesis_session::Store::open(
+                    &ph_synthesis,
+                    synthesis_session::StoreOptions::default(),
+                )
+                .and_then(|s| s.close_session(&sid));
+                if let Err(e) = closed {
+                    switch_note.push(format!("/close: could not close the session ({e})"));
+                    resume = load_resume(&ph_synthesis, &sid).ok();
+                }
+            }
             ExitReason::SwitchModel(m) => {
                 switch_from = Some((model.replace(m), sid.clone()));
                 resume = load_resume(&ph_synthesis, &sid).ok();

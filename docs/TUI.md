@@ -27,8 +27,9 @@ cut for `synt run --resume` consumers.
 | /clear | new conversation in the same session |
 | /compact [instructions] | summarise the conversation (`Harness::request_compact` / compact now) |
 | /new | a fresh session in the SELECTED workspace (the one highlighted in the Workspace panel; no picker). When that is not the live workspace the app switches to it. A running task needs a second `/new` within 5 s (it cancels the task and says so). For a different folder use Ctrl+N |
+| /close | closes THIS session: it is marked closed (`sessions.closed_at`, schema v2; nothing is deleted) and leaves the Running / Workspace / `/resume` lists, but `/resume <id>` still opens it. The app then starts a fresh session in the same folder. A running task needs a second `/close` within 5 s (it cancels the task and says so) |
 | /resume [id] | continue a saved session (picker: this folder first); an unknown id is a notice, the app stays |
-| /model [name] | pick or set a model; restarts on the same session; the choice is stored (`model.changed`, `sessions.model_config`) and `--resume` continues on it unless `--model` is given |
+| /model [name] | pick or set a model; restarts on the same session (like every relaunch, /new, /close, /resume and the Running panel, without leaving the alternate screen: no blank frame, the Usage history is read before the first frame); the choice is stored (`model.changed`, `sessions.model_config`) and `--resume` continues on it unless `--model` is given |
 | /effort [auto\|low\|...] | reasoning effort, only when the model declares `effort_tiers` (in `synt.json` or in its `/v1/models` entry, cached) |
 | /mcp | MCP servers: state, tools, last error |
 | /images [clear] | the attached images, or drop them |
@@ -112,6 +113,7 @@ a prompt.
 | wheel over the chat | scrolls the chat; over anything else nothing happens |
 | Ctrl+N | NEW WORKSPACE: the folder picker; the chosen folder gets a fresh session. Typed paths (`/x`, `~/x`, `./x`, `a/b`): a readable folder gets an `open <path>` row, and Enter on anything else keeps the picker open with one line saying why (`no such folder: <path>`, `not a folder`, `permission denied`); a word without a separator is only a filter. Rows marked `(link)` are symlinked folders and open on Enter like the others |
 | /new | new session in the selected workspace |
+| /close | close this session (hide it) and start a new one |
 | Ctrl+T (empty prompt, sub-agents exist) | cycles where the prompt goes: main, then each sub-agent (this was Tab before) |
 | Shift+Tab | cycles the permission mode (unchanged) |
 

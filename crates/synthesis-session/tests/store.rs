@@ -310,7 +310,7 @@ fn schema_is_versioned_and_foreign_keys_are_on() {
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(n, 1);
+    assert_eq!(n, synthesis_session::SCHEMA_VERSION_LATEST);
     for t in [
         "sessions",
         "tasks",
@@ -333,7 +333,12 @@ fn schema_is_versioned_and_foreign_keys_are_on() {
         Store::open(&e.home, StoreOptions::default()),
         Err(Error::SchemaTooNew { found: 99, .. })
     ));
-    conn.pragma_update(None, "user_version", 1).unwrap();
+    conn.pragma_update(
+        None,
+        "user_version",
+        synthesis_session::SCHEMA_VERSION_LATEST,
+    )
+    .unwrap();
     Store::open(&e.home, StoreOptions::default()).unwrap();
 }
 
@@ -1322,4 +1327,21 @@ fn prune_removes_only_old_unlocked_empty_sessions_and_listing_hides_empty_ones()
         store.prune_empty_sessions("current", hour, later).unwrap(),
         0
     );
+}
+
+#[test]
+fn close_hides_a_session_from_the_lists_but_keeps_it_and_its_messages() {
+    let e = env();
+    let d = e.dir("w");
+    let store = e.store();
+    let mut s = create(&e, "to-close", &d);
+    s.append_message(NewMessage::user(json!("hi"))).unwrap();
+    drop(s);
+    let r = store.reader().unwrap();
+    assert_eq!(r.list_used_sessions(None).unwrap().len(), 1);
+    assert!(store.close_session("to-close").unwrap());
+    assert!(!store.close_session("to-close").unwrap(), "already closed");
+    assert!(r.list_used_sessions(None).unwrap().is_empty());
+    assert_eq!(r.list_sessions(None).unwrap().len(), 1);
+    assert_eq!(r.read_messages("to-close").unwrap().len(), 1);
 }
