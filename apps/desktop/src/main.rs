@@ -35,9 +35,9 @@ fn live_cfg(args: Args, env: Env) -> Result<LiveCfg, String> {
 fn main() {
     #[cfg(feature = "shot")]
     if let Some(a) =
-        synthesis_desktop::settings_view::shot::parse(&std::env::args().collect::<Vec<_>>())
+        synthesis_desktop::agent_view::shot::parse(&std::env::args().collect::<Vec<_>>())
     {
-        if let Err(e) = synthesis_desktop::settings_view::shot::render(a) {
+        if let Err(e) = synthesis_desktop::agent_view::shot::render(a) {
             eprintln!("synthesis-desktop: shot: {e}");
             std::process::exit(1);
         }

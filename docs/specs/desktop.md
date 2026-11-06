@@ -109,6 +109,39 @@ tools and skills, conversation. Not done, with where the data would come from:
   with a 5 s limit per call, so load off the UI thread.
 - Interactive PTY: not wanted (owner decision).
 
+### Agent view (phase 3, `src/agent_view/`)
+
+`cli.html` `#view2` (`.parts/p5.js`; the current `cli.html` folded it into view 1 with the bottom tabs): grid
+`260 | 1fr | 430`, sub-agent split `2fr | 1fr` (min 220). The design has no breakpoints; `agent_view/layout.rs`
+extends them like the TUI view's (230|320|360 below 1400, 210|300|320 below 1200, 180|300|260 below 1000) and
+re-uses its header/footer/height-tier tokens. Elements and their data:
+
+| Element | Source |
+|---|---|
+| Conversation, tool cards, inline approval rows | `Convo` (same reducer as the TUI view) |
+| Approval / plan / question dialog | `widgets::dialog` (shared with the TUI view), `Live.dialogs` |
+| Sub-agent switch + transcript pane | `AgentPanes.subs` (new): `subagent.*` + events carrying `agent_id` |
+| Plan (todo list) | `Convo.plan` |
+| Commands tab (read-only history) | `AgentPanes.commands` (new): Bash tool calls (`tool.output` tail, exit code from `[exit code N]`) and `process.*` |
+| Verify tab | `AgentPanes.verify` (new) + stored report (`Reader::verification_reports`) read off-thread |
+| Browser tab | `AgentPanes.browser` (new): `browser_*` calls, last URL, newest screenshot path |
+| Diff tab | `AgentPanes.files` (new): `ToolCompleted.diff` summed per file (+N -N), click expands the diff |
+| Files tab | `project::scan`, trusted folders only (`--trust-project`); a changed file shows its `git diff` |
+| Topology, Usage, Session, Tools, Activity, status line | `snapshot::build` (shared with the TUI view) |
+| Session tabs | one engine + `Live` per tab (max 4), "+" opens a new one, a Workspace session row resumes one |
+
+Backend added: `synthesis_view::agent` (`AgentPanes`, `read_report`) with tests, fed by `ViewState::apply`.
+
+Known gaps / TODO:
+- Browser: events do not carry image bytes, only the artifact path in the `browser_screenshot` result; the tab
+  shows that PNG (<= 8 MiB) and the call list. TODO: a live page stream needs a browser-runtime event with frames.
+- `process.*` events are handled but the terminal runtime does not emit them yet; the commands tab lists Bash calls.
+- Concurrent engines share process-global state (`set_learned_skills`): closing one tab resets learned skills for
+  the others until their next task. The Agent view ignores `--resume/--continue` (the TUI view owns them).
+- The Agent view has no completion popup, history search or sidebar focus (TUI-only keys); Ctrl+C interrupts, it does not quit.
+- The sub-agent switch appears only when a sub-agent exists. At 900x520 the conversation keeps little room.
+- The key hook of the hidden view is off (`TuiView.active`, `AgentView.shown`), set by the shell.
+
 ## 6. Settings (backend: `crates/synthesis-settings-ui`)
 
 **What the design has.** `cli.html` has no settings form with these sections. USER & PROMPT, MEMORY,

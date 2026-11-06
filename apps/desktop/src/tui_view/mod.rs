@@ -64,11 +64,14 @@ pub struct TuiView {
     hidden: layout::Hidden,
     /// Width taken by chrome beside the view (the shell's rail): breakpoints use the view's own width.
     inset: f32,
+    /// False while another view of the shell is shown: the window-wide key hook then leaves the keys alone.
+    pub active: bool,
 }
 
 impl TuiView {
     pub fn new(inset: f32, hidden: layout::Hidden) -> Self {
         Self {
+            active: true,
             snap: sample(),
             live: None,
             hidden,

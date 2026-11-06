@@ -4,10 +4,11 @@
 use std::borrow::Cow;
 
 use gpui::{
-    App, Context, Entity, FontWeight, IntoElement, ParentElement as _, Render, Styled as _, Window,
-    div, prelude::*, px, svg,
+    App, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Window, div,
+    prelude::*, px, svg,
 };
 
+use crate::agent_view::AgentView;
 use crate::settings_view::{self, Close, SettingsView};
 use crate::tui_view::driver::{LiveCfg, OpenSettings};
 use crate::tui_view::{TuiView, layout};
@@ -39,13 +40,6 @@ impl View {
             View::Settings => ICONS[2],
         }
     }
-    fn blurb(self) -> &'static str {
-        match self {
-            View::Tui => "The classic TUI, drawn natively from the engine's events.",
-            View::Agent => "Conversation, tool calls and approvals of the session.",
-            View::Settings => "Memory, execution, guards, MCP and interface settings.",
-        }
-    }
 }
 
 /// Width of the rail; the TUI view takes the rest and lays itself out on that width.
@@ -56,10 +50,32 @@ pub struct Shell {
     /// The view the Settings panel returns to when it closes.
     back: View,
     tui: Entity<TuiView>,
+    agent: Entity<AgentView>,
     settings: Entity<SettingsView>,
 }
 
 impl Shell {
+    /// Switches the view; the views that keep a window-wide key hook are told whether they are shown.
+    /// Settings slides over the view it was opened from (`back`).
+    fn go(&mut self, v: View, window: &mut Window, cx: &mut Context<Self>) {
+        if v == View::Settings && self.view != View::Settings {
+            self.back = self.view;
+            self.settings.update(cx, |p, cx| p.focus(window, cx));
+        }
+        self.view = v;
+        let tui_on = v == View::Tui || (v == View::Settings && self.back == View::Tui);
+        self.tui.update(cx, |t, cx| {
+            let was = t.active;
+            t.active = tui_on;
+            if tui_on && !was {
+                t.focus_prompt(window, cx);
+            }
+        });
+        self.agent
+            .update(cx, |a, cx| a.set_shown(v == View::Agent, window, cx));
+        cx.notify();
+    }
+
     fn rail_button(&self, v: View, cx: &mut Context<Self>) -> impl IntoElement {
         let on = self.view == v;
         let fg = theme::hsla(if on { t::ACCENT } else { t::TEXT });
@@ -76,16 +92,12 @@ impl Shell {
             .when(on, |d| d.bg(theme::hsla(t::ELEVATED)))
             .hover(|d| d.bg(theme::hsla(t::ELEVATED)))
             .on_click(cx.listener(move |s, _, window, cx| {
-                if v == View::Settings && s.view != View::Settings {
-                    s.back = s.view;
-                    s.settings.update(cx, |p, cx| p.focus(window, cx));
-                }
-                s.view = if v == View::Settings && s.view == View::Settings {
+                let to = if v == View::Settings && s.view == View::Settings {
                     s.back
                 } else {
                     v
                 };
-                cx.notify();
+                s.go(to, window, cx);
             }))
             .child(
                 svg()
@@ -99,10 +111,6 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mono = cx
-            .global::<gpui_component::Theme>()
-            .mono_font_family
-            .clone();
         let rail = div()
             .flex()
             .flex_col()
@@ -119,36 +127,12 @@ impl Render for Shell {
             .child(div().flex_1())
             .child(self.rail_button(View::Settings, cx));
         let v = self.view;
-        let body = div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .child(
-                div()
-                    .text_size(px(20.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme::hsla(t::TEXT_STRONG))
-                    .child(v.label()),
-            )
-            .child(
-                div()
-                    .font_family(if v == View::Tui {
-                        mono
-                    } else {
-                        brand::UI_FONT.into()
-                    })
-                    .text_color(theme::hsla(t::MUTED))
-                    .child(v.blurb()),
-            );
         let content = if v == View::Settings {
             // the panel slides over the view it was opened from
-            let under = if self.back == View::Tui {
-                div().size_full().child(self.tui.clone())
-            } else {
-                div().size_full()
+            let under = match self.back {
+                View::Tui => div().size_full().child(self.tui.clone()),
+                View::Agent => div().size_full().child(self.agent.clone()),
+                View::Settings => div().size_full(),
             };
             div()
                 .relative()
@@ -159,7 +143,7 @@ impl Render for Shell {
         } else if v == View::Tui {
             div().flex_1().min_w(px(0.)).child(self.tui.clone())
         } else {
-            body
+            div().flex_1().min_w(px(0.)).child(self.agent.clone())
         };
         div()
             .size_full()
@@ -229,6 +213,16 @@ pub fn open(cx: &mut App, live: Option<LiveCfg>) {
         .map(|c| settings_view::hidden_from(&c.tui))
         .unwrap_or_default();
     let opened = cx.open_window(opts, |window, cx| {
+        let agent = cx.new(|cx| match &live {
+            // the engine starts when the view is first shown
+            Some(cfg) => AgentView::live(window, cx, cfg.clone(), RAIL_W),
+            None => AgentView::with_sessions(
+                window,
+                cx,
+                vec![crate::agent_view::sample::live()],
+                RAIL_W,
+            ),
+        });
         let tui = cx.new(|cx| match live {
             Some(cfg) => TuiView::live(window, cx, cfg, hidden, RAIL_W),
             None => TuiView::new(RAIL_W, hidden),
@@ -236,20 +230,18 @@ pub fn open(cx: &mut App, live: Option<LiveCfg>) {
         tui.update(cx, |t, cx| t.start(window, cx));
         let settings = cx.new(|cx| SettingsView::new(window, cx, settings_cfg, RAIL_W));
         cx.new(|cx| {
-            cx.subscribe(&settings, |s: &mut Shell, _, _: &Close, cx| {
-                s.view = s.back;
-                cx.notify();
-            })
+            cx.subscribe_in(
+                &settings,
+                window,
+                |s: &mut Shell, _, _: &Close, window, cx| s.go(s.back, window, cx),
+            )
             .detach();
             cx.subscribe_in(
                 &tui,
                 window,
                 |s: &mut Shell, _, _: &OpenSettings, window, cx| {
                     if s.view != View::Settings {
-                        s.back = s.view;
-                        s.view = View::Settings;
-                        s.settings.update(cx, |p, cx| p.focus(window, cx));
-                        cx.notify();
+                        s.go(View::Settings, window, cx);
                     }
                 },
             )
@@ -258,6 +250,7 @@ pub fn open(cx: &mut App, live: Option<LiveCfg>) {
                 view: View::Tui,
                 back: View::Tui,
                 tui,
+                agent,
                 settings,
             }
         })

@@ -5,6 +5,7 @@
 //! [`state::ViewState`] is the entry point; the other modules are the panels it holds.
 
 pub mod activity;
+pub mod agent;
 pub mod convo;
 pub mod model;
 pub mod project;
