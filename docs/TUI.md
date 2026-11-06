@@ -130,8 +130,12 @@ A picker (Ctrl+N, `/resume`, `/model`, `/config`, ...) closes with Esc; an appro
 
 ## Settings (`synt.tui`, user settings.json only)
 
-`panels.{session,mcp,tools,activity}` (Workspace, Running sessions and the chat are always shown; the
-other panels take the rows of a hidden one), `logo` (`art` | `off`), `show_thinking`, `verbose`
+`panels.{session,mcp,tools,activity,status,tokens,topology,usage}` (Workspace, Running sessions and
+the chat are always shown; the other panels take the rows of a hidden one. With session, mcp, tools
+and activity all hidden, Workspace and Running split the whole left column in halves. `status` and
+`tokens` are the boxes above the chat: with both hidden the chat takes their rows. `topology` is
+the right-hand graph and `usage` the history panel: hiding one gives its space to the other, and
+with both hidden the chat spans to the right edge), `logo` (`art` | `off`), `show_thinking`, `verbose`
 (internal rows in the chat, see Events), `diffs_expanded`
 (long output starts whole, like ctrl+o), `queue_indicators`, `motion` (spinners drawn still when off),
 `mouse_capture` (off: the terminal's own selection; applies at start), `copy_on_select`. Defaults:
