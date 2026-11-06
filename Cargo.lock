@@ -7066,6 +7066,7 @@ dependencies = [
  "synthesis-providers",
  "synthesis-session",
  "synthesis-settings",
+ "synthesis-settings-ui",
  "synthesis-terminal",
  "synthesis-tools",
  "synthesis-tui",
