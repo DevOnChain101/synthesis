@@ -174,7 +174,7 @@ pub fn sample() -> Snapshot {
         },
         workspaces: vec![
             ws("synthesis", "~/Vibe/synthesis", 12, true),
-            ws("nemo-cli", "~/Vibe/nemo-cli", 4, false),
+            ws("legacy-cli", "~/Vibe/legacy-cli", 4, false),
             ws(
                 "synthesis-view-model",
                 "~/Vibe/synthesis-view-model",
