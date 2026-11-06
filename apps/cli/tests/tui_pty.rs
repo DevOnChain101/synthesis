@@ -1261,3 +1261,163 @@ fn workspace_panels_by_mouse_and_tab_and_new_in_the_selected_workspace() {
         starts(&ev)
     );
 }
+
+/// Text of every row write (`ESC[<row>;1H<text>ESC[K`) in `raw`, CSI sequences removed, grouped
+/// into frames (a frame ends where the row number stops growing).
+fn frames(raw: &str) -> Vec<std::collections::BTreeMap<usize, String>> {
+    let mut out: Vec<std::collections::BTreeMap<usize, String>> = vec![Default::default()];
+    let (mut last, mut rest) = (0, raw);
+    while let Some(at) = rest.find("\x1b[") {
+        rest = &rest[at + 2..];
+        let n = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(0);
+        if !rest[n..].starts_with(";1H") {
+            continue;
+        }
+        let row: usize = rest[..n].parse().unwrap();
+        let body = &rest[n + 3..];
+        let end = body.find("\x1b[K").unwrap_or(body.len());
+        let (mut text, mut chars) = (String::new(), body[..end].chars().peekable());
+        while let Some(c) = chars.next() {
+            if c != '\x1b' {
+                text.push(c);
+                continue;
+            }
+            chars.next();
+            while chars.next().is_some_and(|c| !c.is_ascii_alphabetic()) {}
+        }
+        if row <= last {
+            out.push(Default::default());
+        }
+        last = row;
+        out.last_mut().unwrap().insert(row, text);
+    }
+    out
+}
+
+/// The terminal bytes of a relaunch (`mark` .. `cut`) must not flash: no clear, no leaving the
+/// alternate screen, and the right-hand panels (Topology, Usage) of the first full frame are
+/// already what they stay (the model name in the topology card aside).
+fn assert_seamless(raw: &str, rows: usize) {
+    for bad in ["\x1b[2J", "\x1b[?1049l", "\x1b[?1049h", "\x1b[3J"] {
+        assert!(!raw.contains(bad), "{bad:?} written during the switch");
+    }
+    let fr = frames(raw);
+    let first = fr
+        .iter()
+        .position(|f| f.len() >= rows)
+        .expect("no full frame after the switch");
+    let mut settled = fr[first].clone();
+    for f in &fr[first + 1..] {
+        settled.extend(f.iter().map(|(k, v)| (*k, v.clone())));
+    }
+    let tail = |t: &str| {
+        let c: Vec<char> = t.chars().collect();
+        c[c.len().saturating_sub(46)..].iter().collect::<String>()
+    };
+    for r in 2..=rows {
+        let (a, b) = (tail(&fr[first][&r]), tail(&settled[&r]));
+        if a != b && !(a.contains("SYNTHESIS CORE") && b.contains("SYNTHESIS CORE")) {
+            panic!("row {r} changed after the first frame:\n{a}\n{b}");
+        }
+    }
+    assert!(
+        !fr[first].values().any(|t| t.contains("loading usage")),
+        "the first frame shows an empty Usage panel"
+    );
+}
+
+#[test]
+fn model_switch_first_frame_is_the_settled_frame_and_nothing_clears() {
+    let mut rig = Rig::new(json!([{"text": "first reply"}]));
+    rig.size = (48, 160);
+    rig.drive(json!([
+        expect("Enter send"),
+        quiet(),
+        send("hi\r"),
+        expect_new("first reply"),
+        expect_new("tokens \u{b7}"),
+        quiet(),
+        json!(["mark"]),
+        send("/model fake/other\r"),
+        expect_new("fake/other"),
+        quiet(),
+        json!(["cut"])
+    ]));
+    assert_seamless(&rig.raw(), 48);
+}
+
+#[test]
+fn new_session_and_running_panel_switch_keep_the_screen_without_a_flash() {
+    let mut rig = Rig::new(json!([{"text": "first reply"}]));
+    rig.size = (48, 160);
+    // /new: a fresh session in the same folder
+    rig.drive(json!([
+        expect("Enter send"),
+        quiet(),
+        send("alpha-one\r"),
+        expect_new("first reply"),
+        quiet(),
+        json!(["mark"]),
+        send("/new\r"),
+        json!(["wait", 2]),
+        quiet(),
+        json!(["cut"])
+    ]));
+    assert_seamless(&rig.raw(), 48);
+    // a second launch lists the first session in the Running panel: Tab Tab, Down, Enter
+    rig.drive(json!([
+        expect("Enter send"),
+        quiet(),
+        send("\t\t"),
+        quiet(),
+        send("\x1b[B"),
+        quiet(),
+        json!(["mark"]),
+        send("\r"),
+        expect_new("alpha-one"),
+        json!(["wait", 1]),
+        quiet(),
+        json!(["cut"])
+    ]));
+    assert_seamless(&rig.raw(), 48);
+}
+
+#[test]
+fn close_hides_the_session_and_opens_a_fresh_one_without_a_flash() {
+    let mut rig = Rig::new(json!([{"text": "first reply"}]));
+    rig.size = (48, 160);
+    let out = rig.drive(json!([
+        expect("Enter send"),
+        quiet(),
+        send("alpha-one\r"),
+        expect_new("first reply"),
+        quiet(),
+        json!(["mark"]),
+        send("/close\r"),
+        json!(["wait", 2]),
+        quiet(),
+        json!(["cut"])
+    ]));
+    assert_seamless(&rig.raw(), 48);
+    assert!(
+        !squash(&out).contains("could not close"),
+        "{}",
+        squash(&out)
+    );
+    let c = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
+    let closed: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE closed_at IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(closed, 1);
+    let msgs: i64 = c
+        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .unwrap();
+    assert!(msgs >= 1, "messages are kept");
+    // the next launch does not list the closed session
+    let next = rig.drive(json!([expect("Enter send"), quiet()]));
+    assert!(!squash(&next).contains("alpha-one"), "{}", squash(&next));
+}

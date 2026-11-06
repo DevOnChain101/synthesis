@@ -412,6 +412,11 @@ fn local_commands() -> Vec<CmdDef> {
             "[instructions]",
         ),
         c("new", "new session in the selected workspace", ""),
+        c(
+            "close",
+            "close this session (hide it) and start a new one",
+            "",
+        ),
         c("resume", "continue a saved session", "[session id]"),
         c("model", "pick a model, or change it directly", "[model]"),
         c(
@@ -1665,6 +1670,11 @@ impl App {
                 }
             }
             "new" => self.new_session(now),
+            "close" => {
+                if self.confirm_switch("/close", now) {
+                    self.quit = Some(ExitReason::Close);
+                }
+            }
             "resume" => {
                 if arg.is_empty() {
                     self.open_resume_picker(false, now);

@@ -81,6 +81,8 @@ CREATE TABLE approvals(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES 
 ```
 `tool_calls.id` is the provider's tool-use id and is unique only within a session, hence the composite key. The `messages` table exists because resume needs the exact history the model saw (Node rebuilds it lossily from UI items [agent.js:3035-3039]); whether events alone are enough is doc §13.4.
 
+Migration v2 (addition): `ALTER TABLE sessions ADD COLUMN closed_at TEXT`. `/close` sets it; `Reader::list_used_sessions` (Running/Workspace panels, `/resume` picker) skips closed sessions, `list_sessions` and resume by id still see them. A v2 store makes older binaries fail with `SchemaTooNew`.
+
 ### B.3 Write rules
 - One writer process per session: advisory lock file `$SYNT_HOME/sessions/<id>/lock` (`fs4`-style OS lock; crate unverified). A second Rust process attaches read-only.
 - Each event is inserted in the same transaction that updates `sessions.event_cursor`; streaming to clients happens after commit, so a client never sees a seq that is not durable.
