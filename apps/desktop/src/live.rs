@@ -57,8 +57,55 @@ pub enum DialogKind {
         cur: usize,
         /// Chosen option indexes per question.
         picked: Vec<Vec<usize>>,
+        /// "Other": the free-text answer per question.
+        other: Vec<Option<String>>,
+        /// The text being typed for "Other" (Enter keeps it, Esc drops it).
+        typing: Option<String>,
+    },
+    /// `/model` and `/resume`: a list to choose from. `headers`: (index of the first option under
+    /// it, text); an option's key is the model or session id.
+    Picker {
+        kind: PickerKind,
+        title: String,
+        headers: Vec<(usize, String)>,
     },
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerKind {
+    Model,
+    Resume,
+}
+
+/// What the window does after a command or a picker (it restarts the engine, talks to it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// Restart on the same session with this `provider/model`.
+    Model(String),
+    Resume(String),
+    /// A fresh session in the selected workspace.
+    New,
+    /// Hide this session, open a fresh one in its folder.
+    Close,
+    Clear,
+    Compact(Option<String>),
+    /// `/config`: the shell shows the Settings view.
+    OpenSettings,
+}
+
+/// An image waiting for the next message (the TUI's chip).
+#[derive(Clone, Debug)]
+pub struct Attached {
+    pub name: String,
+    pub media_type: &'static str,
+    pub bytes: usize,
+    pub base64: String,
+}
+
+/// The TUI's limits (`docs/TUI.md`): images per message and base64 bytes per message (the session
+/// store refuses a message over 8 MiB).
+pub const MAX_ATTACHMENTS: usize = 5;
+pub const MAX_ATTACHED_BYTES: usize = 6 << 20;
 
 #[derive(Clone, Debug)]
 pub struct Dialog {
@@ -75,7 +122,17 @@ impl Dialog {
         match &self.kind {
             DialogKind::Approval(a) => &a.id,
             DialogKind::Plan { id, .. } | DialogKind::Question { id, .. } => id,
+            DialogKind::Picker { .. } => "",
         }
+    }
+
+    /// Index of the highlighted option among the children of a picker's list (its group headers
+    /// count), for keeping it in view.
+    pub fn scroll_child(&self) -> Option<usize> {
+        let DialogKind::Picker { headers, .. } = &self.kind else {
+            return None;
+        };
+        Some(self.sel + headers.iter().filter(|(i, _)| *i <= self.sel).count())
     }
 
     /// The headline.
@@ -87,6 +144,7 @@ impl Dialog {
             DialogKind::Approval(a) => format!("{} needs your permission", a.tool),
             DialogKind::Plan { .. } => "Ready to code? Here is the plan".into(),
             DialogKind::Question { .. } => "Synthesis has a question".into(),
+            DialogKind::Picker { title, .. } => title.clone(),
         }
     }
 }
@@ -114,10 +172,50 @@ pub enum Submitted {
     Nothing,
     /// Hand it to the engine.
     Send(String),
+    /// A command the window carries out.
+    Do(Action),
     Quit,
 }
 
 pub const NOT_YET: &str = "not available in the desktop app yet";
+
+/// Built-in commands the desktop app carries out (the others answer [`NOT_YET`]).
+pub const WIRED: [&str; 19] = [
+    "help",
+    "clear",
+    "compact",
+    "new",
+    "close",
+    "resume",
+    "model",
+    "effort",
+    "mcp",
+    "memory",
+    "agents",
+    "permissions",
+    "status",
+    "exit",
+    "images",
+    "terminal",
+    "browser",
+    "verbose",
+    "config",
+];
+
+pub fn is_wired(name: &str) -> bool {
+    WIRED.contains(&name)
+}
+
+/// `5m ago`, `3h ago`, `2d ago` (the TUI's wording).
+pub fn age(ms: i64) -> String {
+    let m = ms.max(0) / 60_000;
+    match m {
+        0 => "just now".into(),
+        1..=59 => format!("{m}m ago"),
+        60..=2879 => format!("{}h ago", m / 60),
+        _ => format!("{}d ago", m / 1440),
+    }
+}
 
 /// The chat's own state beyond the events.
 pub struct Live {
@@ -150,6 +248,10 @@ pub struct Live {
     pub sid: String,
     pub cwd: String,
     pub trusted: bool,
+    /// Images for the next message.
+    pub images: Vec<Attached>,
+    /// A clipboard read is in flight (key repeat starts no second one).
+    pub image_busy: bool,
 }
 
 impl Live {
@@ -177,6 +279,8 @@ impl Live {
             sid: String::new(),
             cwd: String::new(),
             trusted: false,
+            images: vec![],
+            image_busy: false,
         }
     }
 
@@ -214,6 +318,37 @@ impl Live {
         self.engine = Some(engine);
     }
 
+    /// `/clear`: the conversation and its meters start over in the same session (the model,
+    /// mode and folder stay).
+    pub fn clear_conversation(&mut self) {
+        let old = std::mem::take(&mut self.view.status);
+        self.view.status = synthesis_view::status::StatusModel {
+            model: old.model.clone(),
+            effort: old.effort,
+            mode: old.mode,
+            cwd: old.cwd.clone(),
+            started_ms: old.started_ms,
+            ..Default::default()
+        };
+        let sid = self
+            .engine
+            .as_ref()
+            .map_or(self.sid.clone(), |e| e.sid.clone());
+        let prev = std::mem::replace(
+            &mut self.view.session,
+            synthesis_view::model::Session::new(&sid),
+        );
+        self.view.session.cwd = prev.cwd;
+        self.view.session.project = prev.project;
+        self.view.session.model = prev.model;
+        self.view.convo = Default::default();
+        if let Some(w) = self.engine.as_ref().and_then(|e| e.context_window) {
+            self.view.status.context.set_window(w);
+        }
+        self.images.clear();
+        self.note("new conversation", false);
+    }
+
     /// A line in the chat that is not from the model.
     pub fn note(&mut self, text: impl Into<String>, warning: bool) {
         self.view.convo.items.push(Item::Notice {
@@ -249,6 +384,10 @@ impl Live {
                     self.arm(now);
                 }
             }
+            UiMsg::Compacted(r) => match r {
+                Ok(()) => self.note("conversation compacted", false),
+                Err(e) => self.note(format!("/compact: {e}"), true),
+            },
             UiMsg::TaskDone(r) => {
                 self.busy = false;
                 self.dialogs.clear();
@@ -313,7 +452,8 @@ impl Live {
                 armed_until: 0,
             },
             NeedsUser::AskUserQuestion { questions } => {
-                let picked = vec![vec![]; questions.len()];
+                let n = questions.len();
+                let picked = vec![vec![]; n];
                 let mut d = Dialog {
                     options: vec![],
                     kind: DialogKind::Question {
@@ -321,6 +461,8 @@ impl Live {
                         questions,
                         cur: 0,
                         picked,
+                        other: vec![None; n],
+                        typing: None,
                     },
                     sel: 0,
                     armed_until: 0,
@@ -356,6 +498,22 @@ impl Live {
 
     /// Esc / Ctrl+C in a dialog: the last option ("no" / "keep planning").
     pub fn reject(&mut self) -> Option<String> {
+        if let Some(Dialog {
+            kind: DialogKind::Picker { .. },
+            ..
+        }) = self.dialogs.first()
+        {
+            self.dialogs.remove(0);
+            return None;
+        }
+        if let Some(Dialog {
+            kind: DialogKind::Question { typing, .. },
+            ..
+        }) = self.dialogs.first_mut()
+            && typing.take().is_some()
+        {
+            return None;
+        }
         let n = self.dialogs.first()?.options.len();
         self.activate(n.checked_sub(1)?)
     }
@@ -368,11 +526,17 @@ impl Live {
             questions,
             cur,
             picked,
+            other,
+            typing,
             ..
         } = &mut d.kind
         {
             match key.as_str() {
                 "no" => {}
+                "other" => {
+                    *typing = Some(other[*cur].clone().unwrap_or_default());
+                    return None;
+                }
                 "next" => {
                     *cur += 1;
                     d.sel = 0;
@@ -384,6 +548,9 @@ impl Live {
                     // an option of the current question: toggle (multi) or choose (single)
                     let idx: usize = k.strip_prefix("opt")?.parse().ok()?;
                     let multi = questions[*cur].multi_select;
+                    if !multi {
+                        other[*cur] = None;
+                    }
                     let p = &mut picked[*cur];
                     if let Some(pos) = p.iter().position(|x| *x == idx) {
                         p.remove(pos);
@@ -403,13 +570,25 @@ impl Live {
 
     /// Sends the answer of the front dialog to the engine and drops it. `key` comes from
     /// [`Live::pick`] / [`Live::reject`].
-    pub fn answer(&mut self, key: &str, now: i64) {
+    pub fn answer(&mut self, key: &str, now: i64) -> Option<Action> {
         if self.dialogs.is_empty() {
-            return;
+            return None;
         }
         let d = self.dialogs.remove(0);
+        if let DialogKind::Picker { kind, .. } = d.kind {
+            let current = self.engine.as_ref().map(|e| e.label.as_str());
+            return match kind {
+                PickerKind::Model if current == Some(key) => {
+                    self.note(format!("model: already {key}"), false);
+                    None
+                }
+                PickerKind::Model => Some(Action::Model(key.to_string())),
+                PickerKind::Resume => Some(Action::Resume(key.to_string())),
+            };
+        }
         if let Some(e) = &self.engine {
             match d.kind {
+                DialogKind::Picker { .. } => {}
                 DialogKind::Approval(a) => {
                     let choice = match key {
                         "yes" => Choice::Once,
@@ -443,15 +622,17 @@ impl Live {
                     id,
                     questions,
                     picked,
+                    other,
                     ..
                 } => {
                     let mut answers = serde_json::Map::new();
-                    for (q, p) in questions.iter().zip(&picked) {
+                    for ((q, p), o) in questions.iter().zip(&picked).zip(&other) {
                         let text = if key == "no" {
                             "The user declined to answer.".to_string()
                         } else {
                             p.iter()
                                 .filter_map(|k| q.options.get(*k).map(|o| o.label.clone()))
+                                .chain(o.iter().cloned())
                                 .collect::<Vec<_>>()
                                 .join(", ")
                         };
@@ -462,6 +643,75 @@ impl Live {
             }
         }
         self.arm(now);
+        None
+    }
+
+    /// The front dialog is a question whose "Other" text is being typed.
+    pub fn typing_other(&self) -> bool {
+        matches!(
+            self.dialogs.first(),
+            Some(Dialog {
+                kind: DialogKind::Question {
+                    typing: Some(_),
+                    ..
+                },
+                ..
+            })
+        )
+    }
+
+    /// A character typed into the "Other" answer of the front question (false: not typing).
+    pub fn type_other(&mut self, c: &str) -> bool {
+        match self.dialogs.first_mut() {
+            Some(Dialog {
+                kind:
+                    DialogKind::Question {
+                        typing: Some(t), ..
+                    },
+                ..
+            }) => {
+                t.push_str(c);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Backspace in the "Other" answer.
+    pub fn backspace_other(&mut self) {
+        if let Some(Dialog {
+            kind: DialogKind::Question {
+                typing: Some(t), ..
+            },
+            ..
+        }) = self.dialogs.first_mut()
+        {
+            t.pop();
+        }
+    }
+
+    /// Enter in the "Other" answer: keep the text (empty drops it) and go back to the choices.
+    pub fn commit_other(&mut self) {
+        let Some(d) = self.dialogs.first_mut() else {
+            return;
+        };
+        if let DialogKind::Question {
+            cur,
+            picked,
+            other,
+            typing,
+            questions,
+            ..
+        } = &mut d.kind
+            && let Some(t) = typing.take()
+        {
+            let t = t.trim().to_string();
+            if !t.is_empty() && !questions[*cur].multi_select {
+                picked[*cur].clear();
+            }
+            other[*cur] = (!t.is_empty()).then_some(t);
+            d.options = question_options_of(&d.kind);
+        }
     }
 
     /// Esc on the prompt: reject a dialog, else interrupt the task and drop what was queued
@@ -510,16 +760,11 @@ impl Live {
         if let Some(rest) = text.strip_prefix('/') {
             let name = rest.split_whitespace().next().unwrap_or("");
             match self.commands.iter().find(|c| c.name == name) {
-                Some(c) if c.local && name == "exit" => return Submitted::Quit,
-                Some(c) if c.local && name == "help" => {
-                    self.help();
-                    return Submitted::Nothing;
-                }
                 // skills and MCP prompts are for the engine
                 Some(c) if !c.local => {}
                 Some(_) => {
-                    self.note(format!("/{name}: {NOT_YET}"), false);
-                    return Submitted::Nothing;
+                    let arg = rest.trim_start()[name.len()..].trim();
+                    return self.command(name, arg);
                 }
                 None => {
                     self.note(format!("unknown command /{name}"), true);
@@ -554,23 +799,337 @@ impl Live {
         Some(t)
     }
 
+    /// A built-in command (docs/TUI.md "Commands"): what the person sees in the chat, or the
+    /// action the window carries out.
+    fn command(&mut self, name: &str, arg: &str) -> Submitted {
+        let busy_err = |l: &mut Self, what: &str| {
+            l.note(
+                format!("/{what}: a task is running \u{b7} esc cancels it first"),
+                true,
+            );
+            Submitted::Nothing
+        };
+        match name {
+            "exit" => return Submitted::Quit,
+            "help" => self.help(),
+            "clear" if self.busy => return busy_err(self, "clear"),
+            "clear" => return Submitted::Do(Action::Clear),
+            "compact" => {
+                return Submitted::Do(Action::Compact((!arg.is_empty()).then(|| arg.into())));
+            }
+            "config" => return Submitted::Do(Action::OpenSettings),
+            "new" => return Submitted::Do(Action::New),
+            "close" => return Submitted::Do(Action::Close),
+            "resume" if arg.is_empty() => self.open_resume_picker(now_ms()),
+            "resume" => return Submitted::Do(Action::Resume(arg.into())),
+            "model" if self.busy => return busy_err(self, "model"),
+            "model" if arg.is_empty() => self.open_model_picker(),
+            "model" => return Submitted::Do(Action::Model(arg.into())),
+            "effort" => self.set_effort(arg),
+            "mcp" | "memory" | "agents" | "permissions" | "status" if self.engine.is_none() => {
+                self.note(format!("/{name}: the session is still starting"), true)
+            }
+            "mcp" => self.info(|e| e.mcp_report()),
+            "memory" => self.info(|e| e.memory_report.clone()),
+            "agents" => self.info(|e| e.agents_report()),
+            "permissions" if arg.is_empty() || arg == "list" => {
+                self.info(|e| e.permissions_report())
+            }
+            "status" => self.status(),
+            "terminal" => {
+                let v = self.calls(|n| n == "Bash", "shell commands");
+                self.note(v, false);
+            }
+            "browser" => {
+                let v = self.calls(
+                    |n| n.starts_with("browser_") || n == "WebFetch" || n == "WebSearch",
+                    "browser and web calls",
+                );
+                self.note(v, false);
+            }
+            "images" => self.images_command(arg),
+            "verbose" => {
+                self.verbose = match arg {
+                    "on" => true,
+                    "off" => false,
+                    _ => !self.verbose,
+                };
+                self.note(
+                    format!("verbose {}", if self.verbose { "on" } else { "off" }),
+                    false,
+                );
+            }
+            // the rest: /files, /diff, /focus, /peers, /name and
+            // /permissions allow|remove
+            _ => self.note(format!("/{name}: {NOT_YET}"), false),
+        }
+        Submitted::Nothing
+    }
+
+    fn info(&mut self, f: impl Fn(&Engine) -> Vec<String>) {
+        if let Some(e) = &self.engine {
+            let text = f(e).join("\n");
+            self.note(text, false);
+        }
+    }
+
+    /// `/status`: session, model, mode, context, verification.
+    fn status(&mut self) {
+        let Some(e) = &self.engine else { return };
+        let verification = self
+            .view
+            .convo
+            .items
+            .iter()
+            .rev()
+            .find_map(|i| match i {
+                Item::Verification { status, summary } => Some(format!("{status}: {summary}")),
+                _ => None,
+            })
+            .unwrap_or_else(|| "none".into());
+        let t = self.view.status.context.numbers();
+        let lines = [
+            format!("session: {}", e.sid),
+            format!("folder: {}", sanitize_for_display(&e.cwd)),
+            format!("model: {}", e.label),
+            format!("mode: {}", e.mode().as_str()),
+            format!("context: {} / {} tokens", t.0, t.1),
+            format!("trusted folder: {}", if e.trusted { "yes" } else { "no" }),
+            format!("verification: {verification}"),
+        ];
+        self.note(lines.join("\n"), false);
+    }
+
+    /// `/terminal` and `/browser`: the matching tool calls of this conversation.
+    fn calls(&self, pick: impl Fn(&str) -> bool, what: &str) -> String {
+        let rows: Vec<String> = self
+            .view
+            .convo
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Tool {
+                    name,
+                    summary,
+                    state,
+                    ..
+                } if pick(name) => {
+                    Some(format!("  {state:?} \u{b7} {name} \u{b7} {summary}").to_lowercase())
+                }
+                _ => None,
+            })
+            .collect();
+        if rows.is_empty() {
+            format!("no {what} in this session yet")
+        } else {
+            format!("{} ({}):\n{}", what, rows.len(), rows.join("\n"))
+        }
+    }
+
+    /// `/images [clear]`.
+    fn images_command(&mut self, arg: &str) {
+        match arg {
+            "clear" => {
+                let n = std::mem::take(&mut self.images).len();
+                self.note(format!("{n} attached image(s) dropped"), false);
+            }
+            "" if self.images.is_empty() => self.note(
+                "no images attached \u{b7} Cmd/Ctrl+V pastes one, or drop a file on the window",
+                false,
+            ),
+            "" => {
+                let list: Vec<String> = self
+                    .images
+                    .iter()
+                    .map(|a| format!("{} ({:.1} MB)", a.name, a.bytes as f64 / 1e6))
+                    .collect();
+                self.note(
+                    format!(
+                        "attached: {} \u{b7} /images clear drops them",
+                        list.join(", ")
+                    ),
+                    false,
+                );
+            }
+            _ => self.note("usage: /images [clear]", true),
+        }
+    }
+
+    /// An image for the next message: the TUI's limits (5 images, 6 MiB of base64 together).
+    pub fn attach_image(
+        &mut self,
+        media_type: &'static str,
+        bytes: &[u8],
+        dims: Option<(u32, u32)>,
+    ) -> Result<String, String> {
+        if self.images.len() >= MAX_ATTACHMENTS {
+            return Err(format!("at most {MAX_ATTACHMENTS} images per message"));
+        }
+        let base64 = synthesis_tui_base::clipboard::base64(bytes);
+        let held: usize = self.images.iter().map(|a| a.base64.len()).sum();
+        if held + base64.len() > MAX_ATTACHED_BYTES {
+            return Err(format!(
+                "image not attached: a message holds at most {} MB of images",
+                MAX_ATTACHED_BYTES >> 20
+            ));
+        }
+        let n = self.images.len() + 1;
+        let ext = if media_type == "image/png" {
+            "png"
+        } else {
+            "jpg"
+        };
+        self.images.push(Attached {
+            name: format!("image {n}.{ext}"),
+            media_type,
+            bytes: bytes.len(),
+            base64,
+        });
+        Ok(match dims {
+            Some((w, h)) => format!("image {n} attached ({w}x{h})"),
+            None => format!("image {n} attached"),
+        })
+    }
+
+    /// The images of the message being sent, as the harness takes them.
+    pub fn take_images(&mut self) -> Vec<synthesis_harness::ImageAttachment> {
+        std::mem::take(&mut self.images)
+            .into_iter()
+            .map(|a| synthesis_harness::ImageAttachment {
+                media_type: a.media_type.into(),
+                data_base64: a.base64,
+            })
+            .collect()
+    }
+
+    /// `/effort [tier|auto]`; no argument steps through auto, then the model's tiers.
+    fn set_effort(&mut self, arg: &str) {
+        let Some(e) = self.engine.clone() else { return };
+        let tiers = e.effort_tiers.clone();
+        if tiers.is_empty() {
+            return self.note("/effort: this model declares no effort tiers", true);
+        }
+        let cur = self.view.status.effort.clone();
+        let next = match arg {
+            "" => match cur.as_ref().and_then(|c| tiers.iter().position(|t| t == c)) {
+                None => tiers.first().cloned(),
+                Some(i) => tiers.get(i + 1).cloned(),
+            },
+            "auto" | "default" => None,
+            t if tiers.iter().any(|x| x == t) => Some(t.to_string()),
+            _ => return self.note(format!("usage: /effort [auto|{}]", tiers.join("|")), true),
+        };
+        // kept for the next start too (state.json), like the TUI
+        if let Err(err) = synthesis_config::save_effort(&e.synthesis_home, next.as_deref()) {
+            self.note(format!("/effort: not saved ({err})"), false);
+        }
+        e.set_effort(next.clone());
+        self.note(
+            format!("effort: {}", next.as_deref().unwrap_or("auto")),
+            false,
+        );
+        self.view.status.effort = next;
+    }
+
+    /// `/model`: the models of the config (and aliases), the one in use marked.
+    fn open_model_picker(&mut self) {
+        let Some(e) = &self.engine else { return };
+        let mut options: Vec<(String, String)> = e
+            .models
+            .iter()
+            .map(|m| {
+                let label = if *m == e.label {
+                    let ctx = e
+                        .context_window
+                        .map_or("?".into(), |w| format!("{}k", w / 1000));
+                    let tiers = if e.effort_tiers.is_empty() {
+                        "none".into()
+                    } else {
+                        e.effort_tiers.join("|")
+                    };
+                    format!("{m}  (current \u{b7} context {ctx} \u{b7} effort {tiers})")
+                } else {
+                    m.clone()
+                };
+                (m.clone(), label)
+            })
+            .collect();
+        // the one in use is not listed twice, and is always there
+        if !e.models.contains(&e.label) {
+            options.insert(0, (e.label.clone(), format!("{}  (current)", e.label)));
+        }
+        let sel = options.iter().position(|(k, _)| *k == e.label).unwrap_or(0);
+        self.dialogs.push(Dialog {
+            kind: DialogKind::Picker {
+                kind: PickerKind::Model,
+                title: "Model".into(),
+                headers: vec![],
+            },
+            options,
+            sel,
+            armed_until: 0,
+        });
+    }
+
+    /// `/resume`: the stored sessions, grouped by workspace; a session without a prompt, the open
+    /// one and closed ones are not listed (the workspace list already leaves them out).
+    fn open_resume_picker(&mut self, now: i64) {
+        let (mut options, mut headers) = (vec![], vec![]);
+        for w in &self.view.workspaces.workspaces {
+            let first = options.len();
+            for s in w
+                .sessions
+                .iter()
+                .filter(|s| s.id != self.sid && s.title != "(untitled)")
+            {
+                let live = if s.is_live {
+                    " \u{b7} open in another window"
+                } else {
+                    ""
+                };
+                options.push((
+                    s.id.clone(),
+                    format!("{} \u{b7} {}{live}", s.title, age(now - s.mtime)),
+                ));
+            }
+            if options.len() > first {
+                headers.push((first, format!("{}  {}", w.label, w.root)));
+            }
+        }
+        if options.is_empty() {
+            return self.note("/resume: no saved sessions to continue", false);
+        }
+        self.dialogs.push(Dialog {
+            kind: DialogKind::Picker {
+                kind: PickerKind::Resume,
+                title: "Resume a session".into(),
+                headers,
+            },
+            options,
+            sel: 0,
+            armed_until: 0,
+        });
+    }
+
     fn help(&mut self) {
         let mut lines = vec![
             "Enter sends; Shift+Enter adds a line. Esc interrupts a running task (partial output is kept).".to_string(),
             "Up/Down walk the prompt history, Ctrl+R searches it; Tab walks chat, Workspace, Running; Shift+Tab cycles the permission mode.".into(),
-            "Ctrl+O shows every tool output whole; Ctrl+C twice quits.".into(),
+            "Ctrl+N opens a folder as a new workspace; Cmd/Ctrl+V pastes text or an image; Ctrl+O shows every tool output whole; Ctrl+C twice quits.".into(),
             "@ mentions a file, / completes a command. Commands:".into(),
         ];
         for c in &self.commands {
-            let tag = if c.local && !matches!(c.name.as_str(), "help" | "exit") {
+            let tag = if c.local && !is_wired(&c.name) {
                 format!("  ({NOT_YET})")
             } else {
                 String::new()
             };
-            lines.push(format!(
-                "  /{} {}: {}{tag}",
-                c.name, c.argument_hint, c.description
-            ));
+            let hint = if c.argument_hint.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", c.argument_hint)
+            };
+            lines.push(format!("  /{}{hint}: {}{tag}", c.name, c.description));
         }
         self.note(lines.join("\n"), false);
     }
@@ -622,6 +1181,7 @@ fn question_options_of(k: &DialogKind) -> Vec<(String, String)> {
         questions,
         cur,
         picked,
+        other,
         ..
     } = k
     else {
@@ -653,6 +1213,13 @@ fn question_options_of(k: &DialogKind) -> Vec<(String, String)> {
             )
         })
         .collect();
+    let typed = other[*cur]
+        .as_deref()
+        .map_or(String::new(), |t| format!(": {}", sanitize_for_display(t)));
+    v.push((
+        "other".into(),
+        format!("Other{typed} (type your own answer)"),
+    ));
     let last = *cur + 1 >= questions.len();
     v.push((
         if last { "done" } else { "next" }.into(),
@@ -762,9 +1329,13 @@ mod tests {
     fn slash_commands_are_never_dropped_silently() {
         let mut l = live_with_commands();
         assert_eq!(l.submit("/exit"), Submitted::Quit);
+        assert_eq!(l.submit("/files"), Submitted::Nothing);
+        assert!(
+            matches!(l.view.convo.items.last(), Some(Item::Notice { text, .. }) if text == &format!("/files: {NOT_YET}"))
+        );
         assert_eq!(l.submit("/resume"), Submitted::Nothing);
         assert!(
-            matches!(l.view.convo.items.last(), Some(Item::Notice { text, .. }) if text == &format!("/resume: {NOT_YET}"))
+            matches!(l.view.convo.items.last(), Some(Item::Notice { text, .. }) if text.contains("no saved sessions"))
         );
         assert_eq!(l.submit("/nope"), Submitted::Nothing);
         assert!(
@@ -876,7 +1447,7 @@ mod tests {
             l.dialogs[0].options[0].1.starts_with("[x]")
                 && l.dialogs[0].options[1].1.starts_with("[x]")
         );
-        assert_eq!(l.pick(2, 1000), None, "next question");
+        assert_eq!(l.pick(3, 1000), None, "next question");
         let DialogKind::Question { cur, .. } = &l.dialogs[0].kind else {
             panic!()
         };
@@ -887,7 +1458,7 @@ mod tests {
             l.dialogs[0].options[0].1.starts_with("( )")
                 && l.dialogs[0].options[1].1.starts_with("(o)")
         );
-        assert_eq!(l.pick(2, 1000).as_deref(), Some("done"));
+        assert_eq!(l.pick(3, 1000).as_deref(), Some("done"));
     }
 
     #[test]
@@ -916,5 +1487,183 @@ mod tests {
         assert_eq!(zone_minutes("+0700\n"), 420);
         assert_eq!(zone_minutes("-0530"), -330);
         assert_eq!(zone_minutes("garbage"), 0);
+    }
+
+    #[test]
+    fn every_builtin_command_works_or_says_it_is_not_available() {
+        let mut unwired: Vec<String> = synthesis_tui::local_commands()
+            .into_iter()
+            .map(|c| c.name)
+            .filter(|n| !is_wired(n))
+            .collect();
+        unwired.sort();
+        assert_eq!(unwired, ["diff", "files", "focus", "name", "peers"]);
+        // the wired ones are all real commands, and the unwired ones answer with the notice
+        let mut l = live_with_commands();
+        for c in synthesis_tui::local_commands() {
+            assert!(!is_wired(&c.name) || WIRED.contains(&c.name.as_str()));
+            if !is_wired(&c.name) {
+                assert_eq!(l.submit(&format!("/{}", c.name)), Submitted::Nothing);
+                assert!(
+                    matches!(l.view.convo.items.last(), Some(Item::Notice { text, .. }) if text.ends_with(NOT_YET)),
+                    "{}",
+                    c.name
+                );
+            }
+        }
+        assert!(
+            WIRED
+                .iter()
+                .all(|w| synthesis_tui::local_commands().iter().any(|c| c.name == *w))
+        );
+        // the actions the window carries out
+        assert_eq!(l.submit("/config"), Submitted::Do(Action::OpenSettings));
+        assert_eq!(l.submit("/new"), Submitted::Do(Action::New));
+        assert_eq!(l.submit("/close"), Submitted::Do(Action::Close));
+        assert_eq!(l.submit("/clear"), Submitted::Do(Action::Clear));
+        assert_eq!(
+            l.submit("/compact keep the plan"),
+            Submitted::Do(Action::Compact(Some("keep the plan".into())))
+        );
+        assert_eq!(
+            l.submit("/resume abc"),
+            Submitted::Do(Action::Resume("abc".into()))
+        );
+        assert_eq!(
+            l.submit("/model a/b"),
+            Submitted::Do(Action::Model("a/b".into()))
+        );
+        l.busy = true;
+        assert_eq!(
+            l.submit("/clear"),
+            Submitted::Nothing,
+            "not while a task runs"
+        );
+        assert_eq!(l.submit("/model a/b"), Submitted::Nothing);
+    }
+
+    #[test]
+    fn images_are_capped_like_the_tui() {
+        let mut l = Live::new();
+        for i in 1..=MAX_ATTACHMENTS {
+            assert!(
+                l.attach_image("image/png", &[1, 2, 3], Some((1, 1)))
+                    .unwrap()
+                    .contains(&format!("image {i}"))
+            );
+        }
+        assert!(
+            l.attach_image("image/png", &[1], None)
+                .unwrap_err()
+                .contains("at most 5")
+        );
+        let taken = l.take_images();
+        assert_eq!(taken.len(), 5);
+        assert!(l.images.is_empty(), "they go with one message");
+        // 6 MiB of base64 in all: 4 MB of bytes is 5.3 MB of base64, a second one does not fit
+        let big = vec![7u8; 4 << 20];
+        assert!(l.attach_image("image/png", &big, None).is_ok());
+        assert!(
+            l.attach_image("image/png", &big, None)
+                .unwrap_err()
+                .contains("at most 6 MB")
+        );
+    }
+
+    fn question(multi: bool) -> Live {
+        let mut l = Live::new();
+        let o = |s: &str| synthesis_tools::QuestionOption {
+            label: s.into(),
+            description: None,
+        };
+        let q = Question {
+            question: "which".into(),
+            header: None,
+            multi_select: multi,
+            options: vec![o("a"), o("b")],
+        };
+        l.on_msg(
+            UiMsg::Input(Box::new(crate::engine::AskInput {
+                id: "q".into(),
+                req: NeedsUser::AskUserQuestion { questions: vec![q] },
+            })),
+            0,
+        );
+        l
+    }
+
+    #[test]
+    fn other_is_a_free_text_answer() {
+        let mut l = question(false);
+        assert_eq!(l.pick(0, 1000), None);
+        // the "Other" row sits before "send" and "decline"
+        let other = l.dialogs[0]
+            .options
+            .iter()
+            .position(|(k, _)| k == "other")
+            .unwrap();
+        assert_eq!(l.pick(other, 1000), None, "opens the text field");
+        assert!(l.typing_other());
+        assert!(l.type_other("pur") && l.type_other("ple"));
+        l.backspace_other();
+        l.commit_other();
+        assert!(!l.typing_other());
+        let (_, label) = &l.dialogs[0].options[other];
+        assert!(label.starts_with("Other: purpl"), "{label}");
+        // a single choice: the typed answer replaced the earlier pick
+        assert!(l.dialogs[0].options[0].1.starts_with("( )"));
+        // Esc while typing leaves the field, not the dialog
+        l.pick(other, 1000);
+        assert_eq!(l.reject(), None);
+        assert!(!l.typing_other() && l.dialogs.len() == 1);
+        // multi-select keeps the picked options next to the typed one
+        let mut m = question(true);
+        m.pick(1, 1000);
+        let other = m.dialogs[0]
+            .options
+            .iter()
+            .position(|(k, _)| k == "other")
+            .unwrap();
+        m.pick(other, 1000);
+        m.type_other("x");
+        m.commit_other();
+        let DialogKind::Question { picked, other, .. } = &m.dialogs[0].kind else {
+            panic!()
+        };
+        assert_eq!(
+            (picked[0].clone(), other[0].clone()),
+            (vec![1], Some("x".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_picker_closes_with_esc_and_never_answers_the_engine() {
+        let mut l = Live::new();
+        l.dialogs.push(Dialog {
+            kind: DialogKind::Picker {
+                kind: PickerKind::Resume,
+                title: "t".into(),
+                headers: vec![(0, "ws".into()), (2, "other".into())],
+            },
+            options: vec![
+                ("a".into(), "A".into()),
+                ("b".into(), "B".into()),
+                ("c".into(), "C".into()),
+            ],
+            sel: 2,
+            armed_until: 0,
+        });
+        // the third option is the fifth child: two group headers come before it
+        assert_eq!(l.dialogs[0].scroll_child(), Some(4));
+        assert_eq!(l.reject(), None);
+        assert!(l.dialogs.is_empty());
+    }
+
+    #[test]
+    fn age_reads_like_the_tui() {
+        assert_eq!(age(30_000), "just now");
+        assert_eq!(age(5 * 60_000), "5m ago");
+        assert_eq!(age(3 * 3_600_000), "3h ago");
+        assert_eq!(age(3 * 86_400_000), "3d ago");
     }
 }

@@ -89,20 +89,9 @@ impl TuiView {
                 lu.cfg.tz_min,
                 lu.cfg.home.as_deref(),
             );
+            lu.sync_rows();
         }
-        let (o, mx) = (lu.scroll.offset().y, lu.scroll.max_offset().y);
-        if lu.follow {
-            // wheel or PgUp moved it above where we left it: the person is reading
-            if o > lu.last_y + px(1.) {
-                lu.follow = false;
-            }
-        } else if mx > px(0.) && o <= -mx + px(2.) {
-            lu.follow = true;
-        }
-        lu.last_y = o;
-        if lu.follow {
-            lu.scroll.scroll_to_bottom();
-        }
+        lu.follow = lu.list.is_following_tail();
     }
 
     fn top_bar(&self) -> Div {
@@ -250,12 +239,19 @@ impl TuiView {
         let live = self.live.as_ref();
         let focus = live.map(|l| l.live.focus);
         let list = |id, title, ic, m, body: Div, focused: bool| {
-            let p = panel(
+            let p = panels::panel_scroll(
                 head(id, title, ic),
                 Some(m),
                 !split,
                 (!split).then(list_body_h),
                 body,
+                live.map(|l| {
+                    if id == "p-workspace" {
+                        &l.ws_scroll
+                    } else {
+                        &l.run_scroll
+                    }
+                }),
             )
             .when(focused, |d| d.border_color(hsla(t::ACCENT)));
             if split {
@@ -326,7 +322,7 @@ impl TuiView {
                     head("p-mcp", "MCP", "network"),
                     Some(meta(text(), s.mcp.len().to_string())),
                     true,
-                    Some(72.),
+                    Some(layout::whole_rows_h(72.)),
                     panels::mcp_rows(&s.mcp),
                 )
                 .flex_initial()
@@ -340,7 +336,7 @@ impl TuiView {
                     head("p-tools", "Tools & Skills", "settings-2"),
                     None,
                     true,
-                    Some(72.),
+                    Some(layout::body_h(4)),
                     panels::kv(&s.tools, 62.),
                 )
                 .flex_initial()
@@ -568,6 +564,10 @@ impl Render for TuiView {
         let dialog = self.dialog_overlay(cx);
         div()
             .debug_selector(|| "view".to_string())
+            // an image file dropped anywhere on the window is attached
+            .on_drop(
+                cx.listener(|this, p: &gpui::ExternalPaths, _, cx| this.drop_files(p.paths(), cx)),
+            )
             .relative()
             .size_full()
             .min_w(px(MIN_W))
@@ -783,5 +783,54 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// A throwaway live view (no engine): the conversation is whatever the test pushes.
+    fn live_cfg() -> driver::LiveCfg {
+        use clap::Parser as _;
+        let dir = std::env::temp_dir();
+        driver::LiveCfg {
+            env: synthesis_config::Env::from_pairs([("HOME", "/nonexistent")]),
+            args: crate::engine::Args::try_parse_from(["synthesis-desktop"]).unwrap(),
+            project: dir.clone(),
+            granted: dir.clone(),
+            synthesis_home: dir,
+            home: None,
+            tz_min: 0,
+            tui: Default::default(),
+        }
+    }
+
+    #[gpui::test]
+    fn a_long_chat_builds_only_the_rows_near_the_viewport(cx: &mut TestAppContext) {
+        use crate::live::Live;
+        use synthesis_view::convo::Item;
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let mut l = Live::new();
+        l.starting = false;
+        l.view.convo.items = (0..2000)
+            .map(|i| Item::Notice {
+                warning: false,
+                text: format!("row {i}"),
+            })
+            .collect();
+        view.update(vcx, |t, _| t.set_live(l));
+        vcx.simulate_resize(size(px(1400.), px(900.)));
+        vcx.run_until_parked();
+        let list = view.read_with(vcx, |t, _| t.live.as_ref().unwrap().list.clone());
+        assert_eq!(list.item_count(), 2000);
+        // stuck to the newest row: the tail is built, the head is not
+        assert!(
+            list.bounds_for_item(1999).is_some(),
+            "the newest row is drawn"
+        );
+        assert!(
+            list.bounds_for_item(0).is_none(),
+            "the oldest row is not built"
+        );
+        assert!(list.bounds_for_item(1000).is_none());
     }
 }

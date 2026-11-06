@@ -9,7 +9,7 @@ use gpui::{
 };
 
 use crate::settings_view::{self, Close, SettingsView};
-use crate::tui_view::driver::LiveCfg;
+use crate::tui_view::driver::{LiveCfg, OpenSettings};
 use crate::tui_view::{TuiView, layout};
 use crate::{brand, theme};
 use synthesis_tui_render::theme as t;
@@ -240,6 +240,19 @@ pub fn open(cx: &mut App, live: Option<LiveCfg>) {
                 s.view = s.back;
                 cx.notify();
             })
+            .detach();
+            cx.subscribe_in(
+                &tui,
+                window,
+                |s: &mut Shell, _, _: &OpenSettings, window, cx| {
+                    if s.view != View::Settings {
+                        s.back = s.view;
+                        s.view = View::Settings;
+                        s.settings.update(cx, |p, cx| p.focus(window, cx));
+                        cx.notify();
+                    }
+                },
+            )
             .detach();
             Shell {
                 view: View::Tui,

@@ -8,7 +8,7 @@ use gpui::{
 use synthesis_tui_render::theme as t;
 
 use super::layout::{
-    BODY_PAD, BODY_PAD_LEFT_BOTTOM, HEAD_LINE, HEAD_PAD, HEAD_PAD_LEFT, PANEL_RADIUS, ROW_H,
+    BODY_PAD, BODY_PAD_LEFT_BOTTOM, HEAD_LINE, HEAD_PAD, HEAD_PAD_LEFT, KV_ROW, PANEL_RADIUS, ROW_H,
 };
 use super::sample::{Activity, McpRow, McpState, Running, Snapshot, Tokens, Workspace};
 use super::tracked;
@@ -52,6 +52,18 @@ pub fn panel(
     max_h: Option<f32>,
     body: impl IntoElement,
 ) -> Div {
+    panel_scroll(h, meta, fit, max_h, body, None)
+}
+
+/// [`panel`] whose body scroll position the caller can move (keyboard selection kept in view).
+pub fn panel_scroll(
+    h: Head,
+    meta: Option<AnyElement>,
+    fit: bool,
+    max_h: Option<f32>,
+    body: impl IntoElement,
+    scroll: Option<&gpui::ScrollHandle>,
+) -> Div {
     let (pt, pb) = if h.left { HEAD_PAD_LEFT } else { HEAD_PAD };
     let (pt, pb, size, px_) = if h.compact {
         (4., 2., 11., 10.)
@@ -71,6 +83,10 @@ pub fn panel(
         .pt(px(BODY_PAD.0))
         .overflow_y_scroll();
     b = if fit { b.flex_initial() } else { b.flex_1() };
+    let mut b = match scroll {
+        Some(h) => b.track_scroll(h),
+        None => b,
+    };
     if let Some(m) = max_h {
         b = b.max_h(px(m));
     }
@@ -127,6 +143,8 @@ pub fn kv(rows: &[(String, String)], label_w: f32) -> Div {
     div().flex().flex_col().children(rows.iter().map(|(k, v)| {
         div()
             .flex()
+            .h(px(KV_ROW))
+            .flex_none()
             .gap(px(12.))
             .child(
                 div()
@@ -231,6 +249,8 @@ pub fn mcp_rows(rows: &[McpRow]) -> Div {
         };
         div()
             .flex()
+            .h(px(KV_ROW))
+            .flex_none()
             .items_center()
             .gap(px(8.))
             .child(dot(c, m.state == McpState::Connected))
@@ -325,6 +345,27 @@ pub fn tokens_body(k: &Tokens) -> Div {
         )
 }
 
+/// The scroll offset (px from the top) that brings the row `[top, top + row)` into a view of
+/// `view` px currently showing from `cur`, or `None` when it is already whole in view.
+pub fn reveal_offset(cur: f32, top: f32, row: f32, view: f32) -> Option<f32> {
+    if top < cur {
+        Some(top)
+    } else if top + row > cur + view {
+        Some((top + row - view).max(0.))
+    } else {
+        None
+    }
+}
+
+/// Keeps list row `i` (rows of `ROW_H`) in view of `h`.
+pub fn reveal_row(h: &gpui::ScrollHandle, i: usize) {
+    let (cur, view) = (-f32::from(h.offset().y), f32::from(h.bounds().size.height));
+    let top = BODY_PAD.0 + i as f32 * ROW_H;
+    if let Some(next) = reveal_offset(cur, top, ROW_H, view) {
+        h.set_offset(gpui::point(h.offset().x, px(-next)));
+    }
+}
+
 /// Heat level 0..=4 of a day relative to the busiest one shown.
 pub fn level(v: f32, max: f32) -> usize {
     if v <= 0. || max <= 0. {
@@ -334,44 +375,53 @@ pub fn level(v: f32, max: f32) -> usize {
     }
 }
 
-/// Weeks (columns) of 11px cells with 3px gaps that fit in `w` px.
-pub fn heat_weeks(w: f32) -> usize {
-    (((w + 3.) / 14.).floor() as usize).max(1)
+/// (weeks, cell px, gap px) of the Usage grid in `w` px: all 53 weeks, the cells shrinking to fit
+/// (never under 4 px; a narrower panel shows the newest weeks that fit).
+pub fn heat_grid(w: f32) -> (usize, f32, f32) {
+    let gap = 2.;
+    let cell = ((w + gap) / 53. - gap).floor().clamp(4., 11.);
+    let weeks = (((w + gap) / (cell + gap)).floor() as usize).clamp(1, 53);
+    (weeks, cell, gap)
 }
 
-pub fn heat_body(s: &Snapshot, inner_w: f32) -> Div {
-    let weeks = heat_weeks(inner_w);
-    let days = &s.usage.days;
+/// The levels of every cell of a `weeks`-wide grid (column-major, 7 rows): the newest days at the
+/// end, empty cells before a short history, so the grid is always drawn in full.
+pub fn heat_levels(days: &[f32], weeks: usize) -> Vec<usize> {
     let n = (weeks * 7).min(days.len());
     let shown = &days[days.len() - n..];
     let max = shown.iter().cloned().fold(0., f32::max);
-    // the oldest column may be partial: pad it at the top
-    let pad = weeks * 7 - n;
+    let mut v = vec![0; weeks * 7 - n];
+    v.extend(shown.iter().map(|d| level(*d, max)));
+    v
+}
+
+pub fn heat_body(s: &Snapshot, inner_w: f32) -> Div {
+    let (weeks, size, gap) = heat_grid(inner_w);
+    let levels = heat_levels(&s.usage.days, weeks);
+    // an empty day is a faint cell, not the panel's own colour: the whole grid is visible
     let cell = |lvl: usize| {
         div()
-            .size(px(11.))
+            .size(px(size))
             .flex_none()
             .rounded(px(2.))
-            .bg(hsla(t::HEAT[lvl]))
+            .bg(if lvl == 0 {
+                hsla(t::BORDER)
+            } else {
+                hsla(t::HEAT[lvl])
+            })
     };
     let cols = (0..weeks).map(|c| {
         div()
             .flex()
             .flex_col()
-            .gap(px(3.))
-            .children((0..7).map(|r| {
-                let i = c * 7 + r;
-                match i.checked_sub(pad) {
-                    Some(j) => cell(level(shown[j], max)),
-                    None => div().size(px(11.)).flex_none(),
-                }
-            }))
+            .gap(px(gap))
+            .children((0..7).map(|r| cell(levels[c * 7 + r])))
     });
     div()
         .flex()
         .flex_col()
         .gap(px(6.))
-        .child(div().flex().gap(px(3.)).children(cols))
+        .child(div().flex().gap(px(gap)).children(cols))
         .child(
             div()
                 .flex()
@@ -408,8 +458,24 @@ mod tests {
         assert_eq!(level(100., 100.), 4);
         assert_eq!(level(50., 100.), 2);
         assert_eq!(level(5., 0.), 0);
-        // 500px right column: 500 - 2 border - 24 padding = 474 wide
-        assert_eq!(heat_weeks(474.), 34);
-        assert_eq!(heat_weeks(1.), 1);
+        // 500px right column: 500 - 2 border - 24 padding = 474 wide: all 53 weeks, 6px cells
+        assert_eq!(heat_grid(474.), (53, 6., 2.));
+        assert_eq!(heat_grid(234.), (39, 4., 2.));
+        assert_eq!(heat_grid(1.).0, 1);
+        // a sparse history still fills the grid: empty cells first, the days at the end
+        let v = heat_levels(&[0., 5.], 53);
+        assert_eq!(
+            (
+                v.len(),
+                v[..v.len() - 1].iter().sum::<usize>(),
+                v[v.len() - 1]
+            ),
+            (371, 0, 4)
+        );
+        assert_eq!(heat_levels(&[], 4), vec![0; 28]);
+        // a row below the view scrolls up to it, one above scrolls back, one in view stays
+        assert_eq!(reveal_offset(0., 150., 36., 100.), Some(86.));
+        assert_eq!(reveal_offset(100., 36., 36., 100.), Some(36.));
+        assert_eq!(reveal_offset(0., 36., 36., 100.), None);
     }
 }

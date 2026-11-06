@@ -22,8 +22,8 @@ use synthesis_config::Env;
 use synthesis_core::{AgentSession, WorkspaceContext};
 use synthesis_events::{Envelope, Event};
 use synthesis_harness::{
-    Approval, ApprovalRequest, Approver, BoxFut, EventSink, Harness, InputProvider, Scope,
-    TaskOutcome, TaskRequest, UserReply, sanitize_for_display,
+    Approval, ApprovalRequest, Approver, BoxFut, EventSink, Harness, ImageAttachment,
+    InputProvider, Scope, TaskOutcome, TaskRequest, UserReply, sanitize_for_display,
 };
 use synthesis_hooks::HookEvent;
 use synthesis_permissions::{Mode, Suggestion};
@@ -47,6 +47,8 @@ pub enum UiMsg {
     Withdraw(String),
     /// The task ended (`Err`: it could not run, or the session did not return to idle).
     TaskDone(Result<(), String>),
+    /// `/compact` between tasks ended (`Err`: the reason, history unchanged).
+    Compacted(Result<(), String>),
 }
 
 /// What the dialog shows of an [`ApprovalRequest`]. `suggestions` is the list the person can accept:
@@ -482,6 +484,8 @@ pub struct Engine {
     began: bool,
     pub sandbox: synthesis_tui::SandboxStatus,
     pub memory_on: bool,
+    /// Lines of `/memory`: the instruction files loaded at start and where `#` notes go.
+    pub memory_report: Vec<String>,
 }
 
 impl Engine {
@@ -576,6 +580,7 @@ impl Engine {
             notices,
             homes,
             tokio,
+            notes: memory_notes,
             ..
         } = p;
         // Started here (not by the app) so the session hooks follow `session.started`.
@@ -681,6 +686,7 @@ impl Engine {
             began: started.is_ok(),
             sandbox,
             memory_on: memory.is_some(),
+            memory_report: (memory_notes.hook().report)(),
         };
         match started {
             Ok(()) => Ok((engine, rx)),
@@ -737,6 +743,16 @@ impl Engine {
 
     /// Starts a task. `Err`: one is already running.
     pub fn send(&self, text: String) -> Result<(), &'static str> {
+        self.send_images(text, vec![])
+    }
+
+    /// [`Engine::send`] with pasted images (the harness keeps the 2 newest messages' images in a
+    /// request and drops them for a model without vision).
+    pub fn send_images(
+        &self,
+        text: String,
+        images: Vec<ImageAttachment>,
+    ) -> Result<(), &'static str> {
         let Some(mut session) = lock(&self.session).take() else {
             return Err("a task is already running");
         };
@@ -748,6 +764,7 @@ impl Engine {
         session.permission_mode = synthesis_harness::from_mode(mode);
         let mut req = TaskRequest {
             history: lock(&self.history).clone(),
+            images,
             ..TaskRequest::new(text.clone())
         };
         let (h, tx, host) = (self.harness.clone(), self.tx.clone(), self.host.clone());
@@ -788,6 +805,112 @@ impl Engine {
             let _ = tx.unbounded_send(UiMsg::TaskDone(done));
         });
         Ok(())
+    }
+
+    /// `/clear`: the next task starts without the earlier conversation.
+    pub fn clear_history(&self) {
+        lock(&self.history).clear();
+    }
+
+    /// `/compact`. While a task runs the harness compacts at its next safe point (`Ok(true)`);
+    /// otherwise the conversation between tasks is compacted now and [`UiMsg::Compacted`] follows
+    /// (`Ok(false)`). `Err`: nothing to compact.
+    pub fn compact(&self, instructions: Option<String>) -> Result<bool, &'static str> {
+        if self.running() {
+            self.harness.request_compact(instructions);
+            return Ok(true);
+        }
+        let Some(session) = lock(&self.session).clone() else {
+            return Err("a task is running");
+        };
+        let history = lock(&self.history).clone();
+        let Some(rt) = self.tokio.as_ref().filter(|_| !history.is_empty()) else {
+            return Err("nothing to compact yet");
+        };
+        let (h, slot, tx) = (self.harness.clone(), self.history.clone(), self.tx.clone());
+        rt.spawn(async move {
+            let r = h
+                .compact_now(&session, history, instructions, CancellationToken::new())
+                .await
+                .map(|m| *lock(&slot) = m);
+            let _ = tx.unbounded_send(UiMsg::Compacted(r));
+        });
+        Ok(false)
+    }
+
+    /// `/agents`: this session's agents and the types `@agent:name` starts.
+    pub fn agents_report(&self) -> Vec<String> {
+        let mut v = vec!["Agents in this session (@name routes a line):".to_string()];
+        v.extend(self.harness.agents().into_iter().map(|a| {
+            let q = if a.queued > 0 {
+                format!(" \u{b7} {} queued", a.queued)
+            } else {
+                String::new()
+            };
+            sanitize_for_display(&format!(
+                "  @{} \u{b7} {} \u{b7} {}{q}",
+                a.name, a.kind, a.status
+            ))
+        }));
+        v.push("Types @agent:<type> starts (Task tool and chat):".to_string());
+        v.extend(
+            self.harness
+                .agent_defs()
+                .into_iter()
+                .map(|(n, d)| sanitize_for_display(&format!("  {n} \u{b7} {d}"))),
+        );
+        v
+    }
+
+    /// `/permissions`: the mode and the rules in force.
+    pub fn permissions_report(&self) -> Vec<String> {
+        let perms = self.harness.permissions();
+        let p = lock(&perms);
+        let r = p.rules();
+        let mut v = vec![format!("mode: {}", p.mode().as_str())];
+        for (k, rules) in [("allow", &r.allow), ("ask", &r.ask), ("deny", &r.deny)] {
+            v.push(format!("{k} rules ({}):", rules.len()));
+            v.extend(
+                rules
+                    .iter()
+                    .map(|x| format!("  {}", sanitize_for_display(x))),
+            );
+        }
+        v
+    }
+
+    /// `/mcp`: one block per server with state, transport, tools and the last error.
+    pub fn mcp_report(&self) -> Vec<String> {
+        let Some(m) = &self.mcp else {
+            return vec!["MCP: no servers are configured for this session".into()];
+        };
+        let status = m.status();
+        if status.is_empty() {
+            return vec!["MCP: no servers are configured for this session".into()];
+        }
+        let clean = sanitize_for_display;
+        let tools = m.tools();
+        let mut v = vec![format!("MCP servers ({}):", status.len())];
+        for s in status {
+            let state = format!("{:?}", s.state).to_lowercase();
+            v.push(format!(
+                "  {} \u{b7} {state} \u{b7} {} \u{b7} {} tools",
+                clean(&s.name),
+                s.transport,
+                s.tool_count
+            ));
+            if let Some(e) = &s.error {
+                v.push(format!("    error: {}", clean(e)));
+            }
+            for t in tools.iter().filter(|t| t.server == s.name && !t.synthetic) {
+                v.push(format!(
+                    "    {} \u{b7} {}",
+                    clean(&t.tool),
+                    clean(t.description.lines().next().unwrap_or(""))
+                ));
+            }
+        }
+        v
     }
 
     pub fn cancel(&self) {

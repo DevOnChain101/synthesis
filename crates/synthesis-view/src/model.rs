@@ -965,10 +965,11 @@ pub fn entries_from_event(env: &synthesis_events::Envelope) -> Vec<Value> {
             ]
         }
         // a harness note to the model (`display_text: ""`) is not something the person said
-        Event::UserMessage {
-            display_text: Some(d),
-            ..
-        } if d.is_empty() => vec![],
+        Event::UserMessage { display_text, .. }
+            if crate::text::is_harness_note(display_text.as_deref()) =>
+        {
+            vec![]
+        }
         Event::UserMessage {
             text, display_text, ..
         } => vec![json!({
