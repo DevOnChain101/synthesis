@@ -1,0 +1,3 @@
+#define RT_MANIFEST 24
+1 ICON "../assets/icons/synthesis.ico"
+1 RT_MANIFEST "synthesis.manifest.xml"
