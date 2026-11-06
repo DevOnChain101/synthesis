@@ -170,6 +170,69 @@ jobs:
           path: raw/*
           if-no-files-found: error
 
+  # Desktop app (apps/desktop, GPUI): one archive per target, packaged by scripts/package-desktop.mjs. Not signed or
+  # notarized (docs/RELEASE.md "Desktop"). arm64 Linux/Windows have never run: experimental, they cannot block the release.
+  desktop:
+    name: desktop ${{ matrix.target }}
+    needs: [ci, version]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-apple-darwin,       os: macos-latest,     experimental: false }
+          - { target: aarch64-apple-darwin,      os: macos-latest,     experimental: false }
+          - { target: x86_64-unknown-linux-gnu,  os: ubuntu-22.04,     experimental: false }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm, experimental: true }
+          - { target: x86_64-pc-windows-msvc,    os: windows-latest,   experimental: false }
+          - { target: aarch64-pc-windows-msvc,   os: windows-11-arm,   experimental: true }
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain (rust-toolchain.toml) and target
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      # Same list as the `desktop` job in ci.yml.
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config cmake libfontconfig-dev libfreetype-dev \
+            libxcb1-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev
+      - name: Build
+        run: cargo build --release --locked --target "$TARGET" -p synthesis-desktop
+      - name: Locate binary and prove the scripted test provider is absent
+        run: |
+          exe=""; case "$TARGET" in *windows*) exe=".exe";; esac
+          bin="target/$TARGET/release/synthesis-desktop$exe"
+          ls -l "$bin"
+          if grep -aq "fake script" "$bin"; then echo "::error::$bin contains fake.rs strings (test-provider compiled in)"; exit 1; fi
+          echo "BIN=$bin" >>"$GITHUB_ENV"
+      # No display on the runners: --help exits in clap before any window code. (Windows release builds use the GUI subsystem, so only the exit code counts.)
+      - name: Smoke test (--help exits 0)
+        run: '"$BIN" --help >/dev/null'
+      - name: Package
+        run: |
+          node scripts/package-desktop.mjs --target "$TARGET" --version "$VERSION" --bin "$BIN" --out dist
+          ls -l dist
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-${{ matrix.target }}
+          path: dist/synthesis-desktop-*.*
+          if-no-files-found: error
+
   sbom:
     needs: [ci, version]
     runs-on: ubuntu-latest
@@ -191,6 +254,11 @@ jobs:
           cargo cyclonedx --format json
           ls -l ./*.cdx.json
           mkdir -p ../../sbom && cp ./*.cdx.json "../../sbom/synthesis-$VERSION.cdx.json"
+      - name: Generate CycloneDX SBOM for synthesis-desktop
+        run: |
+          cd apps/desktop || exit 1
+          cargo cyclonedx --format json
+          cp ./*.cdx.json "../../sbom/synthesis-desktop-$VERSION.cdx.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom
@@ -226,17 +294,19 @@ jobs:
           path: npm-tgz/*.tgz
 
   checksums:
-    needs: [build, sbom, npm-packages, version]
+    needs: [build, desktop, sbom, npm-packages, version]
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: "{archive-*,sbom,npm-tarballs}"
+          pattern: "{archive-*,desktop-*,sbom,npm-tarballs}"
           path: assets
           merge-multiple: true
       - name: Add the installers
@@ -252,7 +322,11 @@ jobs:
         working-directory: assets
         run: |
           for t in x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-msvc; do
-            ls synthesis-*-"$t".* >/dev/null || { echo "::error::missing archive for $t"; exit 1; }
+            ls synthesis-"$VERSION"-"$t".* >/dev/null || { echo "::error::missing archive for $t"; exit 1; }
+          done
+          # aarch64 desktop builds for Linux and Windows are experimental and may be absent.
+          for t in x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-gnu x86_64-pc-windows-msvc; do
+            ls synthesis-desktop-"$VERSION"-"$t".* >/dev/null || { echo "::error::missing desktop archive for $t"; exit 1; }
           done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
