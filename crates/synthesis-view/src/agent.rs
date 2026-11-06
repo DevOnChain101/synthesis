@@ -414,7 +414,8 @@ impl AgentPanes {
                         tail: vec![],
                     });
                     let at = self.commands.len() - 1;
-                    self.pending.push((tool_call_id.clone(), Pending::Command(at)));
+                    self.pending
+                        .push((tool_call_id.clone(), Pending::Command(at)));
                     if self.commands.len() > COMMAND_LIMIT {
                         self.commands.remove(0);
                         self.pending.retain_mut(|(_, p)| match p {
@@ -437,7 +438,8 @@ impl AgentPanes {
                         self.url = u.to_string();
                     }
                     let at = self.browser.len() - 1;
-                    self.pending.push((tool_call_id.clone(), Pending::Browser(at)));
+                    self.pending
+                        .push((tool_call_id.clone(), Pending::Browser(at)));
                 }
             }
             Event::ToolOutput {
@@ -521,9 +523,7 @@ impl AgentPanes {
                     .find(|c| c.source == CmdSource::Process && c.id == p.process_id)
                 {
                     c.exit_code = p.exit_code;
-                    c.duration_ms = ts
-                        .zip(c.started)
-                        .map_or(0, |(e, s)| (e - s).max(0) as u64);
+                    c.duration_ms = ts.zip(c.started).map_or(0, |(e, s)| (e - s).max(0) as u64);
                     c.state = if p.exit_code == Some(0) {
                         CmdState::Ok
                     } else {
@@ -607,9 +607,11 @@ mod tests {
     use serde_json::json;
 
     fn ev(seq: u64, agent: Option<&str>, ty: &str, payload: Value) -> Envelope {
-        serde_json::from_value(json!({"v": 1, "seq": seq, "ts": format!("2026-11-07T10:00:{seq:02}Z"),
+        serde_json::from_value(
+            json!({"v": 1, "seq": seq, "ts": format!("2026-11-07T10:00:{seq:02}Z"),
             "session_id": "s1", "task_id": "t1", "turn_id": null, "agent_id": agent,
-            "type": ty, "payload": payload}))
+            "type": ty, "payload": payload}),
+        )
         .unwrap()
     }
 
@@ -708,7 +710,12 @@ mod tests {
                 "tool.output",
                 json!({"tool_call_id": "b1", "stream": "merged", "text": "line1\nline2\n", "seq": 1}),
             ),
-            ev(3, None, "tool.completed", completed("b1", "Bash", "ok", "line1\nline2\ndone", None)),
+            ev(
+                3,
+                None,
+                "tool.completed",
+                completed("b1", "Bash", "ok", "line1\nline2\ndone", None),
+            ),
             ev(
                 4,
                 Some("a1"),
@@ -725,7 +732,10 @@ mod tests {
         ]);
         assert_eq!(p.commands.len(), 2);
         let (a, b) = (&p.commands[0], &p.commands[1]);
-        assert_eq!((a.state, a.exit_code, a.duration_ms), (CmdState::Ok, Some(0), 12));
+        assert_eq!(
+            (a.state, a.exit_code, a.duration_ms),
+            (CmdState::Ok, Some(0), 12)
+        );
         assert_eq!(a.tail, ["line1", "line2", "done"]);
         assert_eq!((b.state, b.exit_code), (CmdState::Failed, Some(3)));
         assert_eq!(b.source, CmdSource::User);
@@ -737,11 +747,24 @@ mod tests {
     #[test]
     fn processes_join_the_command_history() {
         let p = run(vec![
-            ev(1, None, "process.spawned", json!({"process_id": "p1", "name": "npm run dev", "pid": 7})),
-            ev(3, None, "process.exited", json!({"process_id": "p1", "exit_code": 1})),
+            ev(
+                1,
+                None,
+                "process.spawned",
+                json!({"process_id": "p1", "name": "npm run dev", "pid": 7}),
+            ),
+            ev(
+                3,
+                None,
+                "process.exited",
+                json!({"process_id": "p1", "exit_code": 1}),
+            ),
         ]);
         let c = &p.commands[0];
-        assert_eq!((c.source, c.state, c.exit_code), (CmdSource::Process, CmdState::Failed, Some(1)));
+        assert_eq!(
+            (c.source, c.state, c.exit_code),
+            (CmdSource::Process, CmdState::Failed, Some(1))
+        );
         assert_eq!(c.duration_ms, 2000);
     }
 
@@ -749,17 +772,36 @@ mod tests {
     fn edits_sum_per_file_and_keep_the_latest_diff() {
         let d = |a, r| json!({"path": "src/a.rs", "kind": "edit", "added": a, "removed": r, "hunks": []});
         let p = run(vec![
-            ev(1, None, "tool.completed", completed("e1", "Edit", "ok", "", Some(d(3, 1)))),
-            ev(2, Some("a1"), "tool.completed", completed("e2", "Edit", "ok", "", Some(d(2, 0)))),
+            ev(
+                1,
+                None,
+                "tool.completed",
+                completed("e1", "Edit", "ok", "", Some(d(3, 1))),
+            ),
+            ev(
+                2,
+                Some("a1"),
+                "tool.completed",
+                completed("e2", "Edit", "ok", "", Some(d(2, 0))),
+            ),
             ev(
                 3,
                 None,
                 "tool.completed",
-                completed("e3", "Write", "ok", "", Some(json!({"path": "b.rs", "added": 5, "removed": 0, "hunks": []}))),
+                completed(
+                    "e3",
+                    "Write",
+                    "ok",
+                    "",
+                    Some(json!({"path": "b.rs", "added": 5, "removed": 0, "hunks": []})),
+                ),
             ),
         ]);
         assert_eq!(p.files.len(), 2);
-        assert_eq!((p.files[0].added, p.files[0].removed, p.files[0].edits), (5, 1, 2));
+        assert_eq!(
+            (p.files[0].added, p.files[0].removed, p.files[0].edits),
+            (5, 1, 2)
+        );
         assert_eq!(p.totals(), (10, 1));
     }
 
@@ -773,7 +815,12 @@ mod tests {
                 json!({"tool_call_id": "w1", "name": "browser_navigate",
                     "input": {"url": "https://example.com"}, "input_truncated": false}),
             ),
-            ev(2, None, "tool.completed", completed("w1", "browser_navigate", "ok", "ok", None)),
+            ev(
+                2,
+                None,
+                "tool.completed",
+                completed("w1", "browser_navigate", "ok", "ok", None),
+            ),
             ev(
                 3,
                 None,
@@ -784,7 +831,13 @@ mod tests {
                 4,
                 None,
                 "tool.completed",
-                completed("w2", "browser_screenshot", "ok", "Screenshot saved as artifact /tmp/x/shot-1.png", None),
+                completed(
+                    "w2",
+                    "browser_screenshot",
+                    "ok",
+                    "Screenshot saved as artifact /tmp/x/shot-1.png",
+                    None,
+                ),
             ),
         ]);
         assert_eq!(p.url, "https://example.com");
@@ -792,7 +845,9 @@ mod tests {
         assert_eq!(p.browser[0].summary, "https://example.com");
         assert_eq!(p.screenshot.as_deref(), Some("/tmp/x/shot-1.png"));
         assert_eq!(
-            screenshot_path("Screenshot saved as artifact /a/b.png (images are not supported by this model; page summary follows).\nx"),
+            screenshot_path(
+                "Screenshot saved as artifact /a/b.png (images are not supported by this model; page summary follows).\nx"
+            ),
             Some("/a/b.png".into())
         );
         assert_eq!(screenshot_path("saved as artifact rel.png"), None);
@@ -807,7 +862,10 @@ mod tests {
             json!({"report_id": "r1", "status": "failed", "attempt": 1,
                 "summary": "failed: 0 passed, 1 failed, 0 blocked, 1 unverified check(s); 1 limitation(s)"}),
         )]);
-        assert_eq!(p.unloaded_reports(), [("r1".to_string(), "t1".to_string(), 1)]);
+        assert_eq!(
+            p.unloaded_reports(),
+            [("r1".to_string(), "t1".to_string(), 1)]
+        );
         p.set_report(
             "r1",
             &json!({"checks": [
@@ -842,7 +900,12 @@ mod tests {
         }
         assert_eq!(p.commands.len(), COMMAND_LIMIT);
         let last = format!("b{}", COMMAND_LIMIT + 4);
-        p.apply(&ev(2, None, "tool.completed", completed(&last, "Bash", "ok", "x", None)));
+        p.apply(&ev(
+            2,
+            None,
+            "tool.completed",
+            completed(&last, "Bash", "ok", "x", None),
+        ));
         assert_eq!(p.commands.last().unwrap().state, CmdState::Ok);
         assert_eq!(p.commands[0].command, "c5");
     }

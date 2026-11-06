@@ -144,6 +144,8 @@ pub struct AgentView {
     pub(crate) prompt: Entity<TextareaState>,
     pub(crate) tree: Tree,
     pub(crate) next_uid: u64,
+    /// The view is narrower than 1000px: tabs drop their icons.
+    narrow: bool,
     /// Files of the diff tab that are expanded (the newest one when none was picked).
     pub(crate) diff_open: HashSet<String>,
     _tick: Option<Task<()>>,
@@ -179,6 +181,7 @@ impl AgentView {
             .map(|(i, l)| AgentSession::new(i as u64 + 1, l))
             .collect();
         Self {
+            narrow: false,
             next_uid: sessions.len() as u64,
             sessions,
             active: 0,
@@ -840,6 +843,7 @@ impl Render for AgentView {
         let w = f32::from(vp.width) - self.inset;
         let h = f32::from(vp.height);
         let tier = tiers(h);
+        self.narrow = w < 1000.;
         let body = div()
             .flex_1()
             .min_h(px(0.))
