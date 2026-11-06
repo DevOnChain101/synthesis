@@ -326,6 +326,37 @@ pub fn load_resume_in_place(home: &Path, id: &str) -> Result<Resume, String> {
     Ok(r)
 }
 
+/// What `synt` does once at start, before the first session: stored images older than
+/// `synt.images.retentionDays` become text, and sessions nobody typed into (older than an hour,
+/// not `keep`, not locked) are deleted. Problems come back as lines for the chat, never as a
+/// reason not to start.
+pub fn housekeeping(synthesis_home: &Path, keep: &str) -> Vec<String> {
+    let mut out = vec![];
+    let (days, diag) =
+        synthesis_app::ctx::read_image_retention(&synthesis_home.join("settings.json"));
+    out.extend(diag.into_iter().map(|d| format!("warning: {d}")));
+    let open = || {
+        synthesis_session::Store::open(synthesis_home, synthesis_session::StoreOptions::default())
+    };
+    if days != 0 {
+        match open().and_then(|s| s.purge_images(days, time::OffsetDateTime::now_utc())) {
+            Ok(r) if r.images == 0 => {}
+            Ok(r) => out.push(format!(
+                "rewrote {} stored image(s) older than {days} days to text",
+                r.images
+            )),
+            Err(e) => out.push(format!("warning: image retention: {e}")),
+        }
+    }
+    let hour = std::time::Duration::from_secs(3600);
+    if let Err(e) =
+        open().and_then(|s| s.prune_empty_sessions(keep, hour, time::OffsetDateTime::now_utc()))
+    {
+        out.push(format!("warning: pruning empty sessions: {e}"));
+    }
+    out
+}
+
 /// Everything `start_with` needs besides the environment.
 pub struct StartOpts {
     pub project: PathBuf,

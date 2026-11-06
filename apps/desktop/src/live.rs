@@ -144,6 +144,8 @@ pub struct Live {
     pub switch_armed: Option<(String, i64)>,
     pub history: Vec<String>,
     pub mcp: Vec<McpInfo>,
+    /// Rows of the peers listing (polled).
+    pub peer_rows: Vec<Value>,
     pub commands: Vec<Command>,
     pub sid: String,
     pub cwd: String,
@@ -170,6 +172,7 @@ impl Live {
             switch_armed: None,
             history: vec![],
             mcp: vec![],
+            peer_rows: vec![],
             commands: vec![],
             sid: String::new(),
             cwd: String::new(),
