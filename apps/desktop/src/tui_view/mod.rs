@@ -89,20 +89,9 @@ impl TuiView {
                 lu.cfg.tz_min,
                 lu.cfg.home.as_deref(),
             );
+            lu.sync_rows();
         }
-        let (o, mx) = (lu.scroll.offset().y, lu.scroll.max_offset().y);
-        if lu.follow {
-            // wheel or PgUp moved it above where we left it: the person is reading
-            if o > lu.last_y + px(1.) {
-                lu.follow = false;
-            }
-        } else if mx > px(0.) && o <= -mx + px(2.) {
-            lu.follow = true;
-        }
-        lu.last_y = o;
-        if lu.follow {
-            lu.scroll.scroll_to_bottom();
-        }
+        lu.follow = lu.list.is_following_tail();
     }
 
     fn top_bar(&self) -> Div {
@@ -250,12 +239,19 @@ impl TuiView {
         let live = self.live.as_ref();
         let focus = live.map(|l| l.live.focus);
         let list = |id, title, ic, m, body: Div, focused: bool| {
-            let p = panel(
+            let p = panels::panel_scroll(
                 head(id, title, ic),
                 Some(m),
                 !split,
                 (!split).then(list_body_h),
                 body,
+                live.map(|l| {
+                    if id == "p-workspace" {
+                        &l.ws_scroll
+                    } else {
+                        &l.run_scroll
+                    }
+                }),
             )
             .when(focused, |d| d.border_color(hsla(t::ACCENT)));
             if split {
@@ -568,6 +564,10 @@ impl Render for TuiView {
         let dialog = self.dialog_overlay(cx);
         div()
             .debug_selector(|| "view".to_string())
+            // an image file dropped anywhere on the window is attached
+            .on_drop(
+                cx.listener(|this, p: &gpui::ExternalPaths, _, cx| this.drop_files(p.paths(), cx)),
+            )
             .relative()
             .size_full()
             .min_w(px(MIN_W))

@@ -52,6 +52,18 @@ pub fn panel(
     max_h: Option<f32>,
     body: impl IntoElement,
 ) -> Div {
+    panel_scroll(h, meta, fit, max_h, body, None)
+}
+
+/// [`panel`] whose body scroll position the caller can move (keyboard selection kept in view).
+pub fn panel_scroll(
+    h: Head,
+    meta: Option<AnyElement>,
+    fit: bool,
+    max_h: Option<f32>,
+    body: impl IntoElement,
+    scroll: Option<&gpui::ScrollHandle>,
+) -> Div {
     let (pt, pb) = if h.left { HEAD_PAD_LEFT } else { HEAD_PAD };
     let (pt, pb, size, px_) = if h.compact {
         (4., 2., 11., 10.)
@@ -71,6 +83,10 @@ pub fn panel(
         .pt(px(BODY_PAD.0))
         .overflow_y_scroll();
     b = if fit { b.flex_initial() } else { b.flex_1() };
+    let mut b = match scroll {
+        Some(h) => b.track_scroll(h),
+        None => b,
+    };
     if let Some(m) = max_h {
         b = b.max_h(px(m));
     }
@@ -329,6 +345,27 @@ pub fn tokens_body(k: &Tokens) -> Div {
         )
 }
 
+/// The scroll offset (px from the top) that brings the row `[top, top + row)` into a view of
+/// `view` px currently showing from `cur`, or `None` when it is already whole in view.
+pub fn reveal_offset(cur: f32, top: f32, row: f32, view: f32) -> Option<f32> {
+    if top < cur {
+        Some(top)
+    } else if top + row > cur + view {
+        Some((top + row - view).max(0.))
+    } else {
+        None
+    }
+}
+
+/// Keeps list row `i` (rows of `ROW_H`) in view of `h`.
+pub fn reveal_row(h: &gpui::ScrollHandle, i: usize) {
+    let (cur, view) = (-f32::from(h.offset().y), f32::from(h.bounds().size.height));
+    let top = BODY_PAD.0 + i as f32 * ROW_H;
+    if let Some(next) = reveal_offset(cur, top, ROW_H, view) {
+        h.set_offset(gpui::point(h.offset().x, px(-next)));
+    }
+}
+
 /// Heat level 0..=4 of a day relative to the busiest one shown.
 pub fn level(v: f32, max: f32) -> usize {
     if v <= 0. || max <= 0. {
@@ -426,5 +463,9 @@ mod tests {
             (371, 0, 4)
         );
         assert_eq!(heat_levels(&[], 4), vec![0; 28]);
+        // a row below the view scrolls up to it, one above scrolls back, one in view stays
+        assert_eq!(reveal_offset(0., 150., 36., 100.), Some(86.));
+        assert_eq!(reveal_offset(100., 36., 36., 100.), Some(36.));
+        assert_eq!(reveal_offset(0., 36., 36., 100.), None);
     }
 }

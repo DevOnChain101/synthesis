@@ -4,7 +4,7 @@
 
 use gpui::{
     AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, prelude::*, px,
+    StatefulInteractiveElement as _, Styled as _, div, list, prelude::*, px,
 };
 use gpui_component::input::Textarea;
 use gpui_component::text::TextView;
@@ -47,58 +47,31 @@ fn line_box(s: &str, c: gpui::Hsla) -> Div {
 }
 
 impl TuiView {
-    /// The scrolling conversation (or the welcome screen when there is nothing yet).
+    /// The scrolling conversation (or the welcome screen when there is nothing yet). A virtual
+    /// list: only the rows near the viewport are built, so a 2000-row session costs what a short
+    /// one does.
     pub(super) fn conversation(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(lu) = &self.live else {
             return div().into_any_element();
         };
-        let l = &lu.live;
-        let c = &l.view.convo;
-        let rows: Vec<AnyElement> = c
-            .items
-            .iter()
-            .enumerate()
-            .filter(|(_, it)| visible(it, l.show_thinking, l.verbose))
-            .map(|(i, it)| self.item(i, it, cx))
-            .collect();
-        if rows.is_empty() && !c.running {
+        if lu.rows.is_empty() {
             return self.welcome().into_any_element();
         }
-        let mut body = div()
-            .flex()
-            .flex_col()
-            .gap(px(10.))
-            .px(px(16.))
-            .py(px(12.))
-            .children(rows);
-        if !c.plan.is_empty() {
-            body = body.child(self.plan_card());
-        }
-        if let Some(a) = c.activity().filter(|_| l.dialogs.is_empty()) {
-            body = body.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .text_color(dim())
-                    .child(super::panels::dot(hsla(t::ACCENT), true))
-                    .child(a),
-            );
-        }
-        let scroll = div()
-            .id("chat-scroll")
-            .debug_selector(|| "chat-scroll".to_string())
-            .size_full()
-            .overflow_y_scroll()
-            .track_scroll(&lu.scroll)
-            .child(body);
-        // the padding is outside the scroll area: a row scrolled to the top edge stops below it
+        let rows = list(
+            lu.list.clone(),
+            cx.processor(|this: &mut Self, ix: usize, _window, cx| this.row(ix, cx)),
+        )
+        .size_full()
+        .px(px(16.))
+        .pb(px(12.));
+        // the padding is outside the list: a row scrolled to the top edge stops below it
         let mut wrap = div()
             .relative()
             .flex_1()
             .min_h(px(0.))
             .pt(px(8.))
-            .child(scroll);
+            .debug_selector(|| "chat-scroll".to_string())
+            .child(rows);
         if !lu.follow {
             wrap = wrap.child(
                 div()
@@ -117,13 +90,38 @@ impl TuiView {
                     .child("\u{2193} Jump to latest")
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Some(lu) = &mut this.live {
-                            lu.follow = true;
+                            lu.stick();
                         }
                         cx.notify();
                     })),
             );
         }
         wrap.into_any_element()
+    }
+
+    /// Row `ix` of the chat list, with the gap below it.
+    fn row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(lu) = &self.live else {
+            return div().into_any_element();
+        };
+        let c = &lu.live.view.convo;
+        let el = match lu.rows.get(ix) {
+            Some(super::driver::Row::Item(i)) => match c.items.get(*i) {
+                Some(it) => self.item(*i, it, cx),
+                None => div().into_any_element(),
+            },
+            Some(super::driver::Row::Plan) => self.plan_card().into_any_element(),
+            Some(super::driver::Row::Activity) => div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .text_color(dim())
+                .child(super::panels::dot(hsla(t::ACCENT), true))
+                .children(c.activity())
+                .into_any_element(),
+            None => div().into_any_element(),
+        };
+        div().pb(px(10.)).child(el).into_any_element()
     }
 
     fn plan_card(&self) -> Div {
@@ -475,6 +473,25 @@ impl TuiView {
                     .child(format!(
                         "(history search) `{needle}`  Ctrl+R older, Enter keeps, Esc leaves"
                     )),
+            );
+        }
+        if !l.images.is_empty() {
+            col = col.child(
+                div()
+                    .mx(px(12.))
+                    .mb(px(2.))
+                    .flex()
+                    .gap(px(6.))
+                    .children(l.images.iter().map(|a| {
+                        div()
+                            .px(px(8.))
+                            .rounded(px(10.))
+                            .border_1()
+                            .border_color(hsla(t::ACCENT))
+                            .text_color(strong())
+                            .child(format!("{} {:.1} MB", a.name, a.bytes as f64 / 1e6))
+                    }))
+                    .child(div().text_color(dim()).child("/images clear drops them")),
             );
         }
         if !l.queue.is_empty() {

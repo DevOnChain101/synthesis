@@ -96,43 +96,100 @@ impl TuiView {
                     )))
                     .child(div().text_color(strong()).child(q.question.clone()));
             }
+            DialogKind::Picker { .. } => {}
         }
-        card = card.children(d.options.iter().enumerate().map(|(i, (_, label))| {
+        let typing = match &d.kind {
+            DialogKind::Question { typing, .. } => typing.clone(),
+            _ => None,
+        };
+        if let Some(t) = &typing {
+            card = card.child(
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .p(px(8.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(hsla(t::ACCENT))
+                    .bg(hsla(t::BG))
+                    .child(div().text_color(dim()).child("Other:"))
+                    .child(div().text_color(strong()).child(format!("{t}\u{258F}"))),
+            );
+        }
+        let headers: &[(usize, String)] = match &d.kind {
+            DialogKind::Picker { headers, .. } => headers,
+            _ => &[],
+        };
+        let mut list: Vec<AnyElement> = vec![];
+        for (i, (_, label)) in d.options.iter().enumerate() {
+            if let Some((_, h)) = headers.iter().find(|(at, _)| *at == i) {
+                list.push(
+                    div()
+                        .px(px(10.))
+                        .pt(px(8.))
+                        .text_color(hsla(t::ACCENT))
+                        .child(h.clone())
+                        .into_any_element(),
+                );
+            }
             let on = i == d.sel;
+            list.push(
+                div()
+                    .id(("dialog-opt", i))
+                    .flex()
+                    .gap(px(10.))
+                    .px(px(10.))
+                    .py(px(5.))
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(if on {
+                        hsla(t::ACCENT)
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .when(on, |d| d.bg(hsla(t::ELEVATED)))
+                    .hover(|d| d.bg(hsla(t::ELEVATED)))
+                    .child(
+                        div()
+                            .w(px(18.))
+                            .flex_none()
+                            .text_color(dim())
+                            .child(if i < 9 {
+                                format!("{}.", i + 1)
+                            } else {
+                                String::new()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_color(if on { strong() } else { text() })
+                            .child(label.clone()),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.click_option(i, cx)))
+                    .into_any_element(),
+            );
+        }
+        card = card.child(
             div()
-                .id(("dialog-opt", i))
+                .id("dialog-list")
+                .debug_selector(|| "dialog-list".to_string())
                 .flex()
-                .gap(px(10.))
-                .px(px(10.))
-                .py(px(5.))
-                .rounded(px(6.))
-                .cursor_pointer()
-                .border_1()
-                .border_color(if on {
-                    hsla(t::ACCENT)
-                } else {
-                    gpui::transparent_black()
-                })
-                .when(on, |d| d.bg(hsla(t::ELEVATED)))
-                .hover(|d| d.bg(hsla(t::ELEVATED)))
-                .child(
-                    div()
-                        .w(px(18.))
-                        .flex_none()
-                        .text_color(dim())
-                        .child(format!("{}.", i + 1)),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .text_color(if on { strong() } else { text() })
-                        .child(label.clone()),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.click_option(i, cx)))
-        }));
+                .flex_col()
+                .max_h(px(420.))
+                .overflow_y_scroll()
+                .track_scroll(&lu.dlg_scroll)
+                .children(list),
+        );
+        let verb = match (&d.kind, typing.is_some()) {
+            (_, true) => "Enter keeps the text \u{b7} Esc drops it",
+            (DialogKind::Picker { .. }, _) => "Enter selects \u{b7} Esc closes",
+            _ => "Enter confirms \u{b7} Esc rejects",
+        };
         card = card.child(div().text_color(dim()).child(format!(
-            "\u{2191}\u{2193} or 1-9 choose \u{b7} Enter confirms \u{b7} Esc rejects{}",
+            "\u{2191}\u{2193} or 1-9 choose \u{b7} {verb}{}",
             if queued > 0 {
                 format!(" \u{b7} {queued} more waiting")
             } else {
@@ -159,10 +216,11 @@ impl TuiView {
     pub(super) fn click_option(&mut self, i: usize, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
         let now = now_ms();
-        if let Some(k) = lu.live.pick(i, now) {
-            lu.live.answer(&k, now);
-        }
+        let action = lu.live.pick(i, now).and_then(|k| lu.live.answer(&k, now));
         lu.dirty = true;
         cx.notify();
+        if let Some(a) = action {
+            self.run_action(a, cx);
+        }
     }
 }

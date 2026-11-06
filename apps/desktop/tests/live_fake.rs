@@ -154,7 +154,7 @@ fn a_question_dialog_is_answered_and_the_tool_result_carries_the_choice() {
     ));
     let t = r.live.dialogs[0].armed_until;
     assert_eq!(r.live.pick(1, t), None, "choosing toggles");
-    let k = r.live.pick(2, t).expect("send answers");
+    let k = r.live.pick(3, t).expect("send answers");
     r.live.answer(&k, t);
     r.pump("task end", |l| !l.busy);
     // the harness gave the model the chosen label
