@@ -101,7 +101,7 @@ a prompt.
 
 | input | does |
 |---|---|
-| Tab (empty prompt, no dialog) | chat -> Workspace -> Running -> chat. The focused panel's border takes the accent colour and the footer shows its keys. Skipped when the sidebar is not on screen (terminal under 80 columns) |
+| Tab (empty prompt, no dialog) | chat -> Workspace -> Running -> chat. The focused panel's border takes the accent colour (warm sand #C7AE90, see `docs/tui-palette.md`) and the footer shows its keys. Skipped when the sidebar is not on screen (terminal under 80 columns) |
 | Up/Down, PageUp/PageDown, Home/End | in a focused panel: move the selection (the panel scrolls to keep it visible) |
 | Enter | Workspace: its sessions get the keys. Running: open the selected session |
 | Esc, typing, Ctrl+C ... | back to the chat (a typed character is inserted) |

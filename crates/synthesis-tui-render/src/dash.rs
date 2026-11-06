@@ -331,7 +331,7 @@ fn boxed(title: &str, lines: Lines, w: i64, h: i64, active: bool, valign: VAlign
         "{}{}{}",
         paint(bc, "┏━"),
         paint(
-            if active { COL_ACCENT } else { COL_MUTED },
+            if active { COL_ACCENT } else { COL_WHITE },
             &format!("{t}{RESET}")
         ),
         paint(bc, &format!("{}┓", "━".repeat(u(w - 3 - tw))))

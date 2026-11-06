@@ -7,49 +7,50 @@ use unicode_segmentation::UnicodeSegmentation;
 
 pub type Rgb = [u8; 3];
 
-// ---- The Synthesis palette: graphite/silver neutrals (design/02-design-tokens/color-schema.md)
-// plus ONE accent family (green) and distinct semantic colours. No violet, magenta or indigo
+// ---- The Synthesis palette (platinum): near-black graphite neutrals (Background #0B0D0F, Surface
+// #17191D, Border #393A3E, Platinum #D8D8D8, Silver #A6A6A8, Text #F2F2F2, Muted #85868A) plus ONE
+// accent family (warm #C7AE90) and distinct, desaturated semantic colours. No violet, magenta or indigo
 // anywhere: `palette_tests` checks the hue of every token and the contrast of every text token.
 // Every colour the renderers use is a token here (the selection pair lives in `tui-base`, which
 // cannot depend on this crate, and is re-exported below).
 
 // Neutrals. BG/SURFACE/ELEVATED are the brand grounds; the terminal's own background shows.
-pub const BG: Rgb = [11, 12, 15];
-pub const SURFACE: Rgb = [21, 23, 27];
-pub const ELEVATED: Rgb = [36, 40, 48];
+pub const BG: Rgb = [11, 13, 15];
+pub const SURFACE: Rgb = [23, 25, 29];
+pub const ELEVATED: Rgb = [38, 40, 45];
 /// Brand border; decorative (rules, tracks), never text.
-pub const BORDER: Rgb = [58, 63, 74];
+pub const BORDER: Rgb = [57, 58, 62];
 /// A lighter rule for frames that should read on a dark ground; decorative.
-pub const RULE: Rgb = [75, 82, 96];
+pub const RULE: Rgb = [78, 79, 84];
 /// Brand `text`.
-pub const TEXT: Rgb = [156, 163, 175];
+pub const TEXT: Rgb = [166, 166, 168];
 /// Dimmest readable text (hints, placeholders).
-pub const MUTED: Rgb = [127, 135, 151];
-pub const TEXT_STRONG: Rgb = [229, 231, 235];
+pub const MUTED: Rgb = [133, 134, 138];
+pub const TEXT_STRONG: Rgb = [242, 242, 242];
 /// Brand `accent` (a neutral silver).
-pub const SILVER: Rgb = [217, 217, 224];
+pub const SILVER: Rgb = [216, 216, 216];
 /// Brand `accent-light`.
-pub const PEARL: Rgb = [247, 248, 250];
+pub const PEARL: Rgb = [248, 248, 248];
 /// Brand `soft-beige`; also the thinking colour.
-pub const BEIGE: Rgb = [215, 206, 199];
+pub const BEIGE: Rgb = [210, 204, 198];
 
-// The one accent: green (emerald, hue 142).
-pub const ACCENT: Rgb = [74, 222, 128];
-pub const ACCENT_LIGHT: Rgb = [134, 239, 172];
-pub const ACCENT_GLOW: Rgb = [187, 247, 208];
-pub const ACCENT_DEEP: Rgb = [32, 140, 78];
+// The one accent: warm sand (#C7AE90).
+pub const ACCENT: Rgb = [199, 174, 144];
+pub const ACCENT_LIGHT: Rgb = [226, 210, 190];
+pub const ACCENT_GLOW: Rgb = [242, 232, 218];
+pub const ACCENT_DEEP: Rgb = [128, 108, 84];
 /// Text on an accent-coloured ground.
 pub const ACCENT_INK: Rgb = BG;
 
 // Semantic colours, each distinct from the others and from the accent.
-pub const SUCCESS: Rgb = [166, 226, 46];
-pub const WARN: Rgb = [229, 181, 103];
-pub const ERROR: Rgb = [242, 109, 109];
-pub const DIFF_ADD: Rgb = [158, 206, 106];
-pub const DIFF_REMOVE: Rgb = [232, 144, 106];
+pub const SUCCESS: Rgb = [150, 192, 112];
+pub const WARN: Rgb = [228, 164, 74];
+pub const ERROR: Rgb = [228, 108, 104];
+pub const DIFF_ADD: Rgb = [128, 184, 132];
+pub const DIFF_REMOVE: Rgb = [216, 128, 112];
 pub const THINKING: Rgb = BEIGE;
-pub const INFO: Rgb = [125, 180, 230];
-pub const CYAN: Rgb = [108, 207, 224];
+pub const INFO: Rgb = [130, 162, 196];
+pub const CYAN: Rgb = [128, 182, 188];
 
 // Names the renderers already use.
 pub const GREEN: Rgb = SUCCESS;
@@ -80,10 +81,10 @@ pub const T_ERROR: Rgb = ERROR;
 pub const T_WARNING: Rgb = WARN;
 pub const T_TRACK: Rgb = BORDER;
 
-pub const HEAT: [Rgb; 5] = [SURFACE, [18, 62, 36], [28, 104, 60], [48, 160, 92], ACCENT];
+pub const HEAT: [Rgb; 5] = [SURFACE, [48, 43, 38], [88, 77, 64], [146, 127, 105], ACCENT];
 pub use synthesis_tui_base::selection::{SELECT_BG, SELECT_FG};
-pub const BORDER_GRAD: [Rgb; 5] = [ACCENT_DEEP, ACCENT, CYAN, ACCENT, ACCENT_DEEP];
-pub const LOGO_GRAD: [Rgb; 4] = [ACCENT_LIGHT, CYAN, ACCENT_GLOW, ACCENT_LIGHT];
+pub const BORDER_GRAD: [Rgb; 5] = [ACCENT_DEEP, ACCENT, ACCENT_LIGHT, ACCENT, ACCENT_DEEP];
+pub const LOGO_GRAD: [Rgb; 4] = [ACCENT_LIGHT, ACCENT, ACCENT_GLOW, ACCENT_LIGHT];
 /// Sub-agent and context-segment colours (no violet).
 pub const AGENT_COLORS: [Rgb; 8] = [BLUE, BEIGE, TEAL, YELLOW, DIFF_REMOVE, CYAN, GREEN, RED];
 
