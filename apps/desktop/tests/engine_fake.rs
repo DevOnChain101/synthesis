@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::UnboundedReceiver;
 use synthesis_config::Env;
-use synthesis_view::convo::{ApprovalState, Convo, Item};
 use synthesis_desktop::engine::{Choice, Engine, UiMsg};
+use synthesis_view::convo::{ApprovalState, Convo, Item};
 
 struct Rig {
     engine: Engine,
