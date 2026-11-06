@@ -290,7 +290,7 @@ impl Runner {
         );
         std::thread::spawn(move || {
             let h = home
-                .map(|h| crate::usage::load(&h, now, tz))
+                .map(|h| synthesis_view::usage::load(&h, now, tz))
                 .unwrap_or_default();
             let _ = tx.send(Msg::Usage(h));
         });
@@ -770,7 +770,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
         let h = o
             .synthesis_home
             .as_ref()
-            .map(|h| crate::usage::load(h, clock(), o.tz_offset_min));
+            .map(|h| synthesis_view::usage::load(h, clock(), o.tz_offset_min));
         app.set_usage(h.unwrap_or_default());
     } else {
         runner.load_usage(clock());
@@ -1115,10 +1115,10 @@ fn exec(
         Cmd::Project { cwd, diff } => {
             let env = runner.env.clone();
             spawn_scan(runner.tx.clone(), move || {
-                let p = crate::project::scan(&cwd, &env);
+                let p = synthesis_view::project::scan(&cwd, &env);
                 match &diff {
-                    None => crate::project::tree_lines(&p),
-                    Some(f) => crate::project::diff_lines(&p, f.trim()),
+                    None => synthesis_view::project::tree_lines(&p),
+                    Some(f) => synthesis_view::project::diff_lines(&p, f.trim()),
                 }
                 .join("\n")
             });

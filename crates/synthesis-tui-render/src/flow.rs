@@ -1,69 +1,16 @@
 //! Topology / flow canvas: port of `topology.js` (node states, z-ordered character canvas, wire
 //! glyphs, conveyor animation) and `flow.js` (phase bar, cards, ring / stack / fan / list layouts).
 
-use crate::model::{AgentRec, Component, Phase, Session, Tool, session_phase};
+use crate::model::{AgentRec, Component, Session};
 use crate::theme::*;
 use crate::util::{basename, one_line, to_fixed};
 use std::collections::BTreeSet;
+use synthesis_view::topology::{PhaseState, agent_state, component_state, is_guard, phase_state};
+pub use synthesis_view::topology::{St, is_active, is_busy};
 
-const DISPATCH_MS: i64 = 1800;
-const RETURN_HOLD_MS: i64 = 6000;
-const COMP_DISPATCH_MS: i64 = 600;
-const COMP_HOLD_MS: i64 = 2500;
 const CONVEYOR_MS: i64 = 50;
 const SLATE: Rgb = SILVER;
 const DIM: Rgb = WARM_DIM;
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum St {
-    Dispatch,
-    Working,
-    Returning,
-    Failed,
-    Done,
-}
-pub fn is_active(s: St) -> bool {
-    matches!(s, St::Dispatch | St::Working | St::Returning)
-}
-pub fn is_busy(s: St) -> bool {
-    matches!(s, St::Dispatch | St::Working)
-}
-
-fn agent_state(a: &AgentRec, now: i64) -> St {
-    if a.status == "running" {
-        return if now - a.start.unwrap_or(0) < DISPATCH_MS {
-            St::Dispatch
-        } else {
-            St::Working
-        };
-    }
-    if let Some(e) = a.end.filter(|e| *e != 0)
-        && now - e < RETURN_HOLD_MS
-    {
-        return St::Returning;
-    }
-    if a.status == "failed" {
-        St::Failed
-    } else {
-        St::Done
-    }
-}
-
-fn component_state(c: &Component, now: i64) -> St {
-    if c.open > 0 {
-        return if now - c.last_start.unwrap_or(0) < COMP_DISPATCH_MS {
-            St::Dispatch
-        } else {
-            St::Working
-        };
-    }
-    if let Some(e) = c.last_end.filter(|e| *e != 0)
-        && now - e < COMP_HOLD_MS
-    {
-        return St::Returning;
-    }
-    if c.error { St::Failed } else { St::Done }
-}
 
 pub enum NodeRef<'a> {
     Agent(&'a AgentRec),
@@ -412,76 +359,6 @@ fn ago(ms: i64) -> String {
         format!("{}m", ms / 60_000)
     } else {
         format!("{}h", ms / 3_600_000)
-    }
-}
-
-fn is_guard(c: &Component) -> bool {
-    let s = c
-        .event
-        .as_deref()
-        .filter(|e| !e.is_empty())
-        .unwrap_or(&c.name);
-    ["PreToolUse", "UserPromptSubmit", "PermissionRequest"]
-        .iter()
-        .any(|p| {
-            s.strip_prefix(p).is_some_and(|rest| {
-                !rest.starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
-            })
-        })
-}
-
-struct PhaseState<'a> {
-    current: Option<String>,
-    seen: BTreeSet<String>,
-    current_tool: Option<&'a Tool>,
-}
-
-fn phase_state(s: &Session, now: i64) -> PhaseState<'_> {
-    let since = s.last_prompt_at.unwrap_or(0);
-    let mut seen = BTreeSet::new();
-    let mut current_tool: Option<&Tool> = None;
-    for t in s.tools.values() {
-        if t.start.unwrap_or(0) >= since {
-            seen.insert(t.cat.to_string());
-        }
-        if t.end.is_none()
-            && current_tool.is_none_or(|c| t.start.unwrap_or(0) > c.start.unwrap_or(0))
-        {
-            current_tool = Some(t);
-        }
-    }
-    let mut last_guard = 0;
-    for c in s.components.values() {
-        let Some(le) = c.last_end.filter(|e| *e != 0) else {
-            continue;
-        };
-        if c.kind != "hook" || !is_guard(c) {
-            continue;
-        }
-        if le >= since {
-            seen.insert("guard".into());
-        }
-        last_guard = last_guard.max(le);
-    }
-    let agents_busy = s.agents.values().any(|a| a.status == "running");
-    let current = if last_guard != 0 && now - last_guard < 900 {
-        Some("guard".to_string())
-    } else if let Some(t) = current_tool {
-        Some(t.cat.to_string())
-    } else if agents_busy {
-        Some("orchestrate".into())
-    } else if session_phase(s, now).phase == Phase::Thinking {
-        Some("plan".into())
-    } else {
-        None
-    };
-    if let Some(c) = &current {
-        seen.remove(c);
-    }
-    PhaseState {
-        current,
-        seen,
-        current_tool,
     }
 }
 

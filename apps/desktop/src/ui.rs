@@ -1,5 +1,5 @@
 //! The window: a left rail (TUI view, Agent view, Settings) and the content of the active view.
-//! Phase 0: the views are placeholders; later phases fill them from `engine` / `convo`.
+//! Phase 0: the views are placeholders; later phases fill them from `engine` / `synthesis_view`.
 
 use std::borrow::Cow;
 

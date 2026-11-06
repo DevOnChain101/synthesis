@@ -5,7 +5,7 @@
 //! Shortcut: `serde_json` keeps object keys sorted, Node keeps insertion order; this only
 //! matters for `summarize_tool`'s "first string input" fallback and `serde_json::to_string`.
 
-use crate::util::{basename, short};
+use crate::text::{basename, short};
 use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::HashMap;
