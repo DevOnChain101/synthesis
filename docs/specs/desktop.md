@@ -59,10 +59,22 @@ of the classic TUI design, in this repo, running the Rust engine in process.
 - `cargo build -p synthesis-desktop` (run `target/debug/synthesis-desktop`); `cargo test -p synthesis-desktop`.
 - The root `Cargo.toml` has `default-members` without the desktop crate, so plain `cargo build/test`
   skip it. `--workspace` ignores `default-members`, hence the CI commands carry `--exclude synthesis-desktop`.
-- macOS: verified (phase 0). Linux: needs the gpui-pre-linux system libraries (X11 and Wayland:
-  xcb, xkbcommon, wayland, plus fontconfig/freetype, and Vulkan loader/headers for the wgpu
-  renderer), not yet built. Windows: gpui-pre-windows (DirectX 11/DirectWrite), not yet built.
-  Client-side window controls (minimise/maximise/close) are missing for Windows and Linux.
+- CI (`ci.yml` job `desktop`, required by `ci-ok`): `cargo build`, `clippy -D warnings`, `test` on ubuntu, macos and windows. Linux needs the
+  gpui-pre-linux system libraries (xcb, xkbcommon, wayland, fontconfig/freetype, Vulkan loader/headers for the wgpu renderer; the apt list is in
+  the job); Windows is gpui-pre-windows (DirectX 11/DirectWrite). Client-side window controls (minimise/maximise/close) are missing for Windows and Linux.
+- Release (`release.yml` job `desktop`, `scripts/package-desktop.mjs`): archives `synthesis-desktop-<version>-<target>`; docs/RELEASE.md "Desktop".
+
+  | Target | Runner | Archive | Contents | Status |
+  |---|---|---|---|---|
+  | aarch64-apple-darwin, x86_64-apple-darwin | macos-latest | zip | `Synthesis.app` (ad-hoc signed) | required |
+  | x86_64-unknown-linux-gnu | ubuntu-22.04 | tar.gz | `synthesis-desktop`, `.desktop`, hicolor icons, README.txt | required |
+  | x86_64-pc-windows-msvc | windows-latest | zip | `Synthesis.exe` (icon + manifest embedded, GUI subsystem in release) | required |
+  | aarch64-unknown-linux-gnu, aarch64-pc-windows-msvc | ubuntu-22.04-arm, windows-11-arm | tar.gz, zip | as above | experimental |
+
+- Names: the cargo binary stays `synthesis-desktop` (technical; it is not the `synt` command and there is no alias). Display name "Synthesis"
+  (bundle name, window/app name in the menu, `.desktop` Name, `Synthesis.exe`). Bundle identifier `dev.synthesis.desktop`
+  (`[package.metadata.bundle]`). Icons: `assets/icons/` (committed .icns/.ico/png, from `design/01-brand/app-icons`); fonts are compiled in.
+- No signing or notarization (no secrets in the pipeline). Started from Finder the cwd is `/`; the app then uses the home folder.
 
 ## 4. Phases
 
@@ -75,8 +87,7 @@ of the classic TUI design, in this repo, running the Rust engine in process.
 ## 5. Known gaps
 
 Views are placeholders; `InputProvider` answers nothing; no stored-session resume; no
-plan/question dialogs, browser or verification UI; Linux/Windows unbuilt (no ConPTY need any more);
-no CI job for the desktop crate.
+plan/question dialogs, browser or verification UI; Linux/Windows run in CI but no maintainer has used them on a real machine (no ConPTY need any more).
 
 TUI view is LIVE (phase 2b-1): `engine.rs` mirrors `synt tui` (prepare + `round` + `Host`), `live.rs` holds the
 dialogs/queue/history/focus rules, `tui_view/snapshot.rs` builds the painted `Snapshot` from `ViewState`,
