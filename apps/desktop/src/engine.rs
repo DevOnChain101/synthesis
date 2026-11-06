@@ -252,7 +252,7 @@ impl io::Write for Lines {
 
 /// The flags of `synt` plus `--cwd` and `--sample`: the desktop takes the same `Common` flags as
 /// `synt tui` (`--model`, `--sandbox`, `--trust-project`, `--approve-mcp`, `--peers`, `--resume`, ...).
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(name = "synthesis-desktop", about = "Synthesis desktop app")]
 pub struct Args {
     /// Start folder (default: the current directory).

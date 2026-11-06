@@ -8,6 +8,7 @@ use gpui::{
     div, prelude::*, px, svg,
 };
 
+use crate::agent_view::AgentView;
 use crate::tui_view::driver::LiveCfg;
 use crate::tui_view::{TuiView, layout};
 use crate::{brand, theme};
@@ -53,9 +54,24 @@ pub const RAIL_W: f32 = 72.;
 pub struct Shell {
     view: View,
     tui: Entity<TuiView>,
+    agent: Entity<AgentView>,
 }
 
 impl Shell {
+    /// Switches the view; the views that keep a window-wide key hook are told whether they are shown.
+    fn show(&mut self, v: View, window: &mut Window, cx: &mut Context<Self>) {
+        self.view = v;
+        self.tui.update(cx, |t, cx| {
+            t.active = v == View::Tui;
+            if t.active {
+                t.focus_prompt(window, cx);
+            }
+        });
+        self.agent
+            .update(cx, |a, cx| a.set_shown(v == View::Agent, window, cx));
+        cx.notify();
+    }
+
     fn rail_button(&self, v: View, cx: &mut Context<Self>) -> impl IntoElement {
         let on = self.view == v;
         let fg = theme::hsla(if on { t::ACCENT } else { t::TEXT });
@@ -71,10 +87,7 @@ impl Shell {
             .text_color(fg)
             .when(on, |d| d.bg(theme::hsla(t::ELEVATED)))
             .hover(|d| d.bg(theme::hsla(t::ELEVATED)))
-            .on_click(cx.listener(move |s, _, _, cx| {
-                s.view = v;
-                cx.notify();
-            }))
+            .on_click(cx.listener(move |s, _, window, cx| s.show(v, window, cx)))
             .child(
                 svg()
                     .path(format!("icons/{}.svg", v.icon()))
@@ -131,10 +144,10 @@ impl Render for Shell {
                     .text_color(theme::hsla(t::MUTED))
                     .child(v.blurb()),
             );
-        let content = if v == View::Tui {
-            div().flex_1().min_w(px(0.)).child(self.tui.clone())
-        } else {
-            body
+        let content = match v {
+            View::Tui => div().flex_1().min_w(px(0.)).child(self.tui.clone()),
+            View::Agent => div().flex_1().min_w(px(0.)).child(self.agent.clone()),
+            View::Settings => body,
         };
         div()
             .size_full()
@@ -184,6 +197,16 @@ pub fn open(cx: &mut App, live: Option<LiveCfg>) {
         ..Default::default()
     };
     let opened = cx.open_window(opts, |window, cx| {
+        let agent = cx.new(|cx| match &live {
+            // the engine starts when the view is first shown
+            Some(cfg) => AgentView::live(window, cx, cfg.clone(), RAIL_W),
+            None => AgentView::with_sessions(
+                window,
+                cx,
+                vec![crate::agent_view::sample::live()],
+                RAIL_W,
+            ),
+        });
         let tui = cx.new(|cx| match live {
             Some(cfg) => TuiView::live(window, cx, cfg, layout::Hidden::default(), RAIL_W),
             None => TuiView::new(RAIL_W, layout::Hidden::default()),
@@ -192,6 +215,7 @@ pub fn open(cx: &mut App, live: Option<LiveCfg>) {
         cx.new(|_| Shell {
             view: View::Tui,
             tui,
+            agent,
         })
     });
     if let Err(e) = opened {

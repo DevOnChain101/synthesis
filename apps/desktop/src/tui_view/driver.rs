@@ -22,6 +22,7 @@ use crate::engine::{self, Args, Engine, StartOpts, UiMsg};
 use crate::live::{Focus, Live, SWITCH_ARM_MS, Submitted, now_ms};
 
 /// What the live view needs from `main`: the environment snapshot and the flags.
+#[derive(Clone)]
 pub struct LiveCfg {
     pub env: Env,
     pub args: Args,
@@ -150,6 +151,13 @@ impl TuiView {
         if let Some(lu) = &mut self.live {
             lu.live = live;
             lu.dirty = true;
+        }
+    }
+
+    /// Puts the keyboard focus back in the prompt (the shell shows this view again).
+    pub fn focus_prompt(&self, window: &mut Window, cx: &mut gpui::App) {
+        if let Some(lu) = &self.live {
+            lu.prompt.update(cx, |s, cx| s.focus(window, cx));
         }
     }
 
@@ -956,7 +964,7 @@ async fn pump(
 }
 
 /// Why the engine did not start, for the chat. A missing model gets the setup card of `synt`.
-fn startup_failure(e: &str) -> String {
+pub fn startup_failure(e: &str) -> String {
     if e.starts_with("no model configured") {
         [
             "Synthesis needs a model and an API key before it can run a task.".to_string(),
