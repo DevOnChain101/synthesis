@@ -1,6 +1,35 @@
 [workspace]
 resolver = "3"
 members = ["apps/*", "crates/*"]
+# apps/desktop (GPUI) needs platform system libraries on Linux; build it explicitly:
+#   cargo build -p synthesis-desktop
+default-members = [
+    "apps/cli",
+    "crates/synthesis-app",
+    "crates/synthesis-browser",
+    "crates/synthesis-config",
+    "crates/synthesis-context",
+    "crates/synthesis-core",
+    "crates/synthesis-events",
+    "crates/synthesis-harness",
+    "crates/synthesis-hooks",
+    "crates/synthesis-mcp",
+    "crates/synthesis-memory",
+    "crates/synthesis-peers",
+    "crates/synthesis-permissions",
+    "crates/synthesis-platform",
+    "crates/synthesis-providers",
+    "crates/synthesis-sandbox",
+    "crates/synthesis-session",
+    "crates/synthesis-settings",
+    "crates/synthesis-terminal",
+    "crates/synthesis-tools",
+    "crates/synthesis-tui",
+    "crates/synthesis-tui-base",
+    "crates/synthesis-tui-render",
+    "crates/synthesis-verification",
+    "crates/synthesis-workspace",
+]
 
 [workspace.package]
 version = "0.1.0"
