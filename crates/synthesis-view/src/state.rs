@@ -9,6 +9,7 @@ use synthesis_events::{Envelope, Record};
 use synthesis_session::Reader;
 
 use crate::activity::{ActivityModel, ToolsSkillsModel};
+use crate::agent::AgentPanes;
 use crate::convo::Convo;
 use crate::model::{Session, apply_event, parse_ts};
 use crate::running::RunningList;
@@ -31,6 +32,8 @@ pub struct StoreLoad<'a> {
 #[derive(Clone, Debug, Default)]
 pub struct ViewState {
     pub convo: Convo,
+    /// Sub-agent transcripts, commands, verification, browser calls and changed files (Agent view).
+    pub panes: AgentPanes,
     /// Activity, Tools & Skills and Topology are read off this.
     pub session: Session,
     pub status: StatusModel,
@@ -44,6 +47,7 @@ impl ViewState {
     pub fn apply(&mut self, e: &Envelope) {
         let now = parse_ts(&e.ts).unwrap_or(0);
         self.convo.apply(e);
+        self.panes.apply(e);
         apply_event(&mut self.session, e);
         self.status.apply(e, now);
     }
@@ -87,6 +91,7 @@ impl ViewState {
                 .read_events(id, 0, usize::MAX >> 1)
                 .map_err(|e| e.to_string())?;
             self.convo = Convo::default();
+            self.panes = AgentPanes::default();
             self.session = Session::new(id);
             self.status = StatusModel::default();
             // events of a newer schema are skipped on purpose (consumers ignore unknown types)
