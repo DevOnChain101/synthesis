@@ -43,7 +43,7 @@ pub const ACCENT_DEEP: Rgb = [128, 108, 84];
 pub const ACCENT_INK: Rgb = BG;
 
 // Semantic colours, each distinct from the others and from the accent.
-pub const SUCCESS: Rgb = [150, 192, 112];
+pub const SUCCESS: Rgb = [92, 191, 126];
 pub const WARN: Rgb = [228, 164, 74];
 pub const ERROR: Rgb = [228, 108, 104];
 pub const DIFF_ADD: Rgb = [128, 184, 132];

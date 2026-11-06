@@ -32,7 +32,7 @@ reach 4.5 (tests `palette_tests`). Regenerate with
 | ACCENT_LIGHT | #E2D2BE | 33 | 0.16 | 13.16 | 11.90 | strong text, logo sheen |
 | ACCENT_GLOW | #F2E8DA | 35 | 0.10 | 16.07 | 14.52 | gradients |
 | ACCENT_DEEP | #806C54 | 33 | 0.34 | 3.89 | 3.51 | frame gradients (not text) |
-| SUCCESS | #96C070 | 92 | 0.42 | 9.34 | 8.44 | ok, plan mode |
+| SUCCESS | #5CBF7E | 141 | 0.52 | 8.54 | 7.72 | ok, plan mode |
 | WARN | #E4A44A | 35 | 0.68 | 9.00 | 8.14 | warnings, strings |
 | ERROR | #E46C68 | 2 | 0.54 | 6.16 | 5.57 | errors |
 | DIFF_ADD | #80B884 | 124 | 0.30 | 8.44 | 7.63 | added lines |
