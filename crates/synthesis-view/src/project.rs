@@ -10,10 +10,10 @@
 //! network protocols are refused. NOT guaranteed: other config keys git may honour that this list does not
 //! name. The scan runs only in a trusted folder (`--trust-project`), which is the real gate.
 
-use crate::sanitize::clean_line;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
+use synthesis_harness::sanitize_for_display as clean_line;
 
 use synthesis_config::Env;
 use synthesis_tui_base::imgclip::{Output, RealExec};

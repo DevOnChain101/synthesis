@@ -28,6 +28,7 @@ default-members = [
     "crates/synthesis-tui-base",
     "crates/synthesis-tui-render",
     "crates/synthesis-verification",
+    "crates/synthesis-view",
     "crates/synthesis-workspace",
 ]
 

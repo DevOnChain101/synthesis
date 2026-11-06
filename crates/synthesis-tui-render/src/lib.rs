@@ -11,8 +11,10 @@ pub mod greeting;
 pub mod highlight;
 pub mod logo;
 mod logo_art;
-pub mod model;
 pub mod modelname;
 pub mod picker;
 pub mod theme;
 pub mod util;
+
+// The session/activity model lives in `synthesis-view`; the render keeps its old path.
+pub use synthesis_view::model;
