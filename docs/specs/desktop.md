@@ -68,7 +68,7 @@ of the classic TUI design, in this repo, running the Rust engine in process.
   |---|---|---|---|---|
   | aarch64-apple-darwin, x86_64-apple-darwin | macos-latest | zip | `Synthesis.app` (ad-hoc signed) | required |
   | x86_64-unknown-linux-gnu | ubuntu-22.04 | tar.gz | `synthesis-desktop`, `.desktop`, hicolor icons, README.txt | required |
-  | x86_64-pc-windows-msvc | windows-latest | zip | `Synthesis.exe` (icon + manifest embedded, GUI subsystem in release) | required |
+  | x86_64-pc-windows-msvc | windows-latest | zip | `Synthesis.exe` (icon embedded, GUI subsystem in release) | required |
   | aarch64-unknown-linux-gnu, aarch64-pc-windows-msvc | ubuntu-22.04-arm, windows-11-arm | tar.gz, zip | as above | experimental |
 
 - Names: the cargo binary stays `synthesis-desktop` (technical; it is not the `synt` command and there is no alias). Display name "Synthesis"

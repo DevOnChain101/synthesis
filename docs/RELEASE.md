@@ -43,7 +43,7 @@ The native app (`apps/desktop`, docs/specs/desktop.md) ships as separate archive
 | Target | Archive | Contents |
 |---|---|---|
 | macOS (both) | `synthesis-desktop-<v>-<target>.zip` | `Synthesis.app` (Info.plist: name Synthesis, id `dev.synthesis.desktop`; `synthesis.icns`; executable `Synthesis`; fonts are inside the binary), LICENSE, NOTICE |
-| Windows | `.zip` | `Synthesis.exe` (icon + manifest embedded by `apps/desktop/build.rs`, GUI subsystem), LICENSE, NOTICE |
+| Windows | `.zip` | `Synthesis.exe` (icon embedded by `apps/desktop/build.rs`, GUI subsystem), LICENSE, NOTICE |
 | Linux | `.tar.gz` | `synthesis-desktop`, `synthesis.desktop`, `icons/hicolor/<size>/apps/synthesis.png`, `README.txt` (runtime libraries), LICENSE, NOTICE |
 
 No signing and no notarization (the pipeline has no secrets): the macOS bundle is sealed ad-hoc with `codesign --sign -`, which does not satisfy Gatekeeper for downloaded apps; Windows exes carry no Authenticode signature, so SmartScreen warns. User steps are in docs/INSTALL.md section 6. Later options, each needing an owner decision and secrets: Apple Developer ID + `notarytool` (macOS), Authenticode or Azure Trusted Signing (Windows). A `.dmg` and an AppImage are not built.

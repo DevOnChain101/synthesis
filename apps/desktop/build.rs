@@ -1,5 +1,4 @@
-//! Windows only: embed the app icon and the DPI-aware manifest (same one gpui ships for its examples)
-//! into `synthesis-desktop.exe`. Other targets have nothing to do (macOS/Linux icons live in the package).
+//! Windows only: embed the app icon into `synthesis-desktop.exe`. Other targets have nothing to do (macOS/Linux icons live in the package).
 
 fn main() {
     println!("cargo:rerun-if-changed=windows");
