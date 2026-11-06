@@ -77,6 +77,38 @@ jobs:
         if: always()
         run: DIGEST_ENV=1 bash scripts/ci-digest.sh test.log "cargo test (${{ matrix.os }})"
 
+  desktop:
+    # The GPUI desktop app (docs/specs/desktop.md). Not in ci-ok yet: macOS is verified locally,
+    # Linux and Windows have never run, so those two may fail without turning the run red. Add it
+    # to ci-ok `needs` (and drop continue-on-error) once all three are green.
+    name: desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os != 'macos-latest' }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustc -Vv
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      # From the build scripts of gpui-pre-linux's dependencies: pkg-config probes fontconfig
+      # (yeslogic-fontconfig-sys), freetype (freetype-sys), wayland-client/cursor/egl (wayland-sys);
+      # xcb, xkbcommon(-x11) for the X11 backend; the Vulkan loader for the wgpu renderer.
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config cmake libfontconfig-dev libfreetype-dev \
+            libxcb1-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev
+      - run: cargo build -p synthesis-desktop --locked
+      - run: cargo clippy -p synthesis-desktop --all-targets --locked -- -D warnings
+      - run: cargo test -p synthesis-desktop --locked
+
   evals-selftest:
     name: eval selftest (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
