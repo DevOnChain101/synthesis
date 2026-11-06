@@ -109,7 +109,7 @@ pub enum Focus {
     Workspace,
 }
 
-/// Sidebar panels switched off (`synt.tui.panels`); the panels that stay take their rows.
+/// Panels switched off (`synt.tui.panels`); the panels that stay take their rows.
 /// Workspace, Running sessions and the chat cannot be hidden.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Hidden {
@@ -117,6 +117,10 @@ pub struct Hidden {
     pub mcp: bool,
     pub tools: bool,
     pub activity: bool,
+    pub status: bool,
+    pub tokens: bool,
+    pub topology: bool,
+    pub usage: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1496,7 +1500,11 @@ fn side_column(
     hits: &mut Hits,
 ) -> Lines {
     let n = running_sessions(s).0.len() as i64;
+    let hd = s.view.hidden;
+    // only Workspace and Running left: they split the whole column
+    let only_two = hd.session && hd.mcp && hd.tools && hd.activity;
     let ws_h = match s.workspaces {
+        Some(l) if !l.is_empty() && only_two => h / 2,
         // room for 5 rows plus the "more" lines when the column is tall enough, fewer as it shrinks
         Some(l) if !l.is_empty() => (l.len() as i64 + 2).min(9).min(h / 3).max(3),
         _ => 0,
@@ -1511,7 +1519,7 @@ fn side_column(
         hits.ws = wh;
         hits.ws_h = ws_h;
     }
-    if h - ws_h - sessions_h < 10 {
+    if only_two || h - ws_h - sessions_h < 10 {
         let mut out = ws_rows;
         hits.sess_h = h - ws_h;
         out.extend(sessions_panel(s, w, h - ws_h, frame, &mut hits.session));
@@ -2901,7 +2909,19 @@ fn viewed_subagent<'a>(s: &DashState<'a>) -> Option<&'a Agent> {
 }
 
 fn topology_column(s: &DashState, w: i64, h: i64, frame: usize, now: i64, cx: &mut Ctx) -> Topo {
-    let min_below = USAGE_MIN_H;
+    let hidden = s.view.hidden;
+    if hidden.topology {
+        // the usage (or tasks) panel takes the whole column
+        let below = tasks_usage_row(s, w, h, frame, now);
+        return Topo {
+            rows: below.rows,
+            usage: below.usage,
+            tasks: below.tasks,
+            docked: false,
+            dock_offset: None,
+        };
+    }
+    let min_below = if hidden.usage { 0 } else { USAGE_MIN_H };
     if h - TOPO_MIN_H < min_below {
         return Topo {
             rows: topology_panel(s, w, h, frame, now),
@@ -2935,7 +2955,18 @@ fn topology_column(s: &DashState, w: i64, h: i64, frame: usize, now: i64, cx: &m
     if s.agent.is_some() {
         below_h = below_h.min(USAGE_MAX_H.max(if open_todos(s) > 0 { todo_count + 4 } else { 0 }));
     }
-    let below = tasks_usage_row(s, w, below_h, frame, now);
+    if hidden.usage {
+        below_h = 0;
+    }
+    let below = if hidden.usage {
+        TasksUsage {
+            rows: vec![],
+            usage: false,
+            tasks: false,
+        }
+    } else {
+        tasks_usage_row(s, w, below_h, frame, now)
+    };
     let sub = viewed_subagent(s);
     let spare = h - below_h - topo_h;
     if let Some(sub) = sub.filter(|_| w >= DOCK_MIN_W && spare >= DOCK_MIN_H) {
@@ -3007,6 +3038,47 @@ fn frame_active(sub: &Agent) -> bool {
     sub.status == "running"
 }
 
+/// The row of boxes above the chat: Status, Tokens (wide only) and the open tasks; a hidden box
+/// gives its width to the first one left, and nothing is drawn when none is.
+fn agent_top(s: &DashState, d: i64, wide: bool, with_tasks: bool, frame: usize, now: i64) -> Lines {
+    let hd = s.view.hidden;
+    let tasks = wide && with_tasks && open_todos(s) > 0;
+    let tasks_w = if tasks {
+        (d as f64 * 0.3).floor() as i64
+    } else {
+        0
+    };
+    let rest_w = d - tasks_w;
+    let status_w = (rest_w as f64 * if tasks { 0.65 } else { 0.6 }).floor() as i64;
+    let mut cols: Vec<(char, i64)> = vec![];
+    if !hd.status {
+        cols.push(('s', status_w));
+    }
+    if wide && !hd.tokens {
+        cols.push(('t', rest_w - status_w));
+    }
+    if tasks {
+        cols.push(('k', tasks_w));
+    }
+    if !wide && !hd.status {
+        cols[0].1 = d;
+    }
+    let used: i64 = cols.iter().map(|c| c.1).sum();
+    let Some(first) = cols.first_mut() else {
+        return vec![];
+    };
+    first.1 += d - used;
+    hstack(
+        cols.iter()
+            .map(|&(k, w)| match k {
+                's' => status_panel(s, w, STATUS_H, frame, now),
+                't' => token_panel(s, w, STATUS_H),
+                _ => tasks_panel(s, w, STATUS_H, frame, VAlign::Evenly),
+            })
+            .collect(),
+    )
+}
+
 fn agent_detail(
     s: &DashState,
     d: i64,
@@ -3017,7 +3089,12 @@ fn agent_detail(
     with_tasks: bool,
     cx: &mut Ctx,
 ) -> Lines {
-    if h < STATUS_H + AGENT_MIN_H {
+    let hd = s.view.hidden;
+    let with_usage = with_usage && !hd.usage;
+    let wide = d >= 96;
+    let top = agent_top(s, d, wide, with_tasks, frame, now);
+    let top_h = top.len() as i64;
+    if h < top_h + AGENT_MIN_H {
         cx.local_rect = Some(Rect {
             x: 0,
             y: 0,
@@ -3026,49 +3103,30 @@ fn agent_detail(
         });
         return agent_panel(s, d, h, frame, now, cx.sub_docked, cx.rects, &mut cx.body);
     }
-    let wide = d >= 96;
     let todos_len = if with_tasks {
         s.session.todos.len() as i64
     } else {
         0
-    };
-    let top = if wide && (!with_tasks || open_todos(s) == 0) {
-        let status_w = (d as f64 * 0.6).floor() as i64;
-        hstack(vec![
-            status_panel(s, status_w, STATUS_H, frame, now),
-            token_panel(s, d - status_w, STATUS_H),
-        ])
-    } else if wide {
-        let tasks_w = (d as f64 * 0.3).floor() as i64;
-        let rest_w = d - tasks_w;
-        let status_w = (rest_w as f64 * 0.65).floor() as i64;
-        hstack(vec![
-            status_panel(s, status_w, STATUS_H, frame, now),
-            token_panel(s, rest_w - status_w, STATUS_H),
-            tasks_panel(s, tasks_w, STATUS_H, frame, VAlign::Evenly),
-        ])
-    } else {
-        status_panel(s, d, STATUS_H, frame, now)
     };
     let usage_h = if open_todos(s) > 0 {
         USAGE_MAX_H
     } else {
         USAGE_YEAR_H
     };
-    let mid = if with_usage && h - STATUS_H - usage_h >= 24 {
+    let mid = if with_usage && h - top_h - usage_h >= 24 {
         usage_panel(s, d, usage_h, VAlign::Evenly, UsageView::Auto, now)
     } else {
         vec![]
     };
     let mut tasks_block: Lines = vec![];
     if !wide && open_todos(s) > 0 {
-        let avail = h - STATUS_H - mid.len() as i64 - AGENT_MIN_H;
+        let avail = h - top_h - mid.len() as i64 - AGENT_MIN_H;
         let tasks_h = (todos_len + 3).min(8).min(avail.max(0));
         if tasks_h >= 4 {
             tasks_block = tasks_panel(s, d, tasks_h, frame, VAlign::Evenly);
         }
     }
-    let agent_h = h - STATUS_H - mid.len() as i64 - tasks_block.len() as i64;
+    let agent_h = h - top_h - mid.len() as i64 - tasks_block.len() as i64;
     cx.local_rect = Some(Rect {
         x: 0,
         y: (top.len() + mid.len() + tasks_block.len()) as i64,
@@ -3170,7 +3228,12 @@ pub fn render_frame(
     let rule = h >= 30;
     let body_h = h - 2 - i64::from(rule);
     let header_rows = 1 + i64::from(rule);
-    let layout = layout_for(w, h);
+    // no Topology and no Usage: the chat spans to the right edge
+    let layout = if s.view.hidden.topology && s.view.hidden.usage {
+        Layout::None
+    } else {
+        layout_for(w, h)
+    };
     // Narrow terminals: chat only; the sidebar would leave ~38 columns for the conversation (QA B-25).
     let side_w = if s.agent.is_some() && w < 80 {
         0

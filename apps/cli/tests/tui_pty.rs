@@ -1294,6 +1294,59 @@ fn frames(raw: &str) -> Vec<std::collections::BTreeMap<usize, String>> {
     out
 }
 
+/// `synt.tui.panels` in the temp SYNT_HOME's settings file at 160x48: the hidden panels are not
+/// drawn and their neighbours take the space. Returns the settled screen (row 1 first).
+fn screen_with_panels(panels: Value) -> Vec<String> {
+    let mut rig = Rig::new(json!([{"text": "x"}]));
+    rig.size = (48, 160);
+    rig.write(
+        "settings.json",
+        &json!({"synt": {"tui": {"panels": panels}}}).to_string(),
+    );
+    rig.drive(json!([expect("Enter send"), quiet()]));
+    let mut rows = std::collections::BTreeMap::new();
+    for f in frames(&rig.raw()) {
+        rows.extend(f);
+    }
+    let screen: Vec<String> = (1..=48)
+        .map(|r| rows.get(&r).cloned().unwrap_or_default())
+        .collect();
+    eprintln!("--- {panels} ---\n{}", screen.join("\n"));
+    screen
+}
+
+#[test]
+fn hidden_panels_from_the_settings_file_re_flow_the_screen() {
+    let row_of = |s: &[String], t: &str| s.iter().position(|l| l.contains(t));
+    // all optional left panels: Workspace and Running split the column
+    let s = screen_with_panels(
+        json!({"session": false, "mcp": false, "tools": false, "activity": false}),
+    );
+    for t in ["Session", "MCP", "Tools & Skil", "Activity"] {
+        assert!(row_of(&s, &format!("◆ {t}")).is_none(), "{t}");
+    }
+    let (w, r) = (
+        row_of(&s, "◆ Workspace").unwrap(),
+        row_of(&s, "◆ Running").unwrap(),
+    );
+    assert!(
+        (21..=23).contains(&(r - w)),
+        "Workspace at {w}, Running at {r}"
+    );
+    // Status + Tokens: the chat starts at the first body row
+    let s = screen_with_panels(json!({"status": false, "tokens": false}));
+    assert!(row_of(&s, "◆ Status").is_none() && row_of(&s, "Tokens").is_none());
+    assert_eq!(row_of(&s, "◆ SYNTHESIS ·"), Some(2));
+    // Topology + Usage: the chat reaches the right edge
+    let s = screen_with_panels(json!({"topology": false, "usage": false}));
+    assert!(row_of(&s, "TOPOLOGY").is_none() && row_of(&s, "Usage").is_none());
+    let t = &s[row_of(&s, "◆ SYNTHESIS ·").unwrap()];
+    assert!(
+        t.trim_end().ends_with('┓') && t.chars().count() == 160,
+        "{t}"
+    );
+}
+
 /// The terminal bytes of a relaunch (`mark` .. `cut`) must not flash: no clear, no leaving the
 /// alternate screen, and the right-hand panels (Topology, Usage) of the first full frame are
 /// already what they stay (the model name in the topology card aside).

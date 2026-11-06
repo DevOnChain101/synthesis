@@ -262,6 +262,7 @@ fn a_hidden_panel_disappears_and_the_others_take_its_rows() {
             mcp: true,
             tools: true,
             activity: true,
+            ..Hidden::default()
         },
     );
     for t in ["Session", "Tools & Skil", "Activity"] {
@@ -400,5 +401,148 @@ fn workspace_and_running_list_five_rows_and_degrade_without_overlap() {
         let (w, q) = (r.workspace_rect.unwrap(), r.session_rect.unwrap());
         assert_eq!(q.y, w.y + w.h, "{rows} rows");
         assert!(q.y + q.h <= rows as i64, "{rows} rows: {} {}", w.h, q.h);
+    }
+}
+
+fn side_hidden() -> Hidden {
+    Hidden {
+        session: true,
+        mcp: true,
+        tools: true,
+        activity: true,
+        ..Hidden::default()
+    }
+}
+
+fn rects_of(
+    cols: usize,
+    rows: usize,
+    hidden: Hidden,
+    n: usize,
+) -> synthesis_tui_render::dash::Rects {
+    raw_frame_n(cols, rows, hidden, &[], false, Focus::Agent, 0, 0, n).rects
+}
+
+/// Only Workspace and Running left in the sidebar: they split the whole column (heights differ by
+/// at most 1), each lists what fits, and both stay clickable. Some hidden: the old sizing.
+#[test]
+fn workspace_and_running_split_the_left_column_when_nothing_else_is_shown() {
+    for rows in [24usize, 30, 47, 60] {
+        let r = rects_of(160, rows, side_hidden(), 7);
+        let (w, q) = (r.workspace_rect.unwrap(), r.session_rect.unwrap());
+        assert!((w.h - q.h).abs() <= 1, "{rows} rows: {} vs {}", w.h, q.h);
+        assert_eq!(q.y, w.y + w.h, "{rows} rows");
+        assert_eq!(
+            w.h + q.h,
+            r.sidebar_rect.unwrap().h,
+            "{rows} rows: the whole column"
+        );
+        assert!(!r.workspace_rows.is_empty() && !r.session_rows.is_empty());
+    }
+    // more rows than the old fixed size when the terminal is tall
+    let tall = rects_of(160, 60, side_hidden(), 12);
+    assert!(
+        tall.workspace_rows.len() > 7,
+        "{}",
+        tall.workspace_rows.len()
+    );
+    // one optional panel still shown: Workspace keeps its capped height
+    let some = rects_of(
+        160,
+        47,
+        Hidden {
+            session: true,
+            mcp: true,
+            tools: true,
+            ..Hidden::default()
+        },
+        7,
+    );
+    assert!(some.workspace_rect.unwrap().h <= 9);
+}
+
+/// Each new panel hidden: it is gone and its neighbours take the space.
+#[test]
+fn status_tokens_topology_and_usage_can_be_hidden() {
+    let chat = |hidden| rects_of(200, 47, hidden, 1).chat_rect.unwrap();
+    let all = chat(Hidden::default());
+    let only = |f: fn(&mut Hidden)| {
+        let mut h = Hidden::default();
+        f(&mut h);
+        h
+    };
+    let txt = |h| frame(200, 47, h);
+    assert!(has(&txt(Hidden::default()), "Tokens") && has(&txt(Hidden::default()), "Status"));
+
+    let no_status = txt(only(|h| h.status = true));
+    assert!(!has(&no_status, "◆ Status") && has(&no_status, "Tokens"));
+    let no_tokens = txt(only(|h| h.tokens = true));
+    assert!(!has(&no_tokens, "Tokens") && has(&no_tokens, "◆ Status"));
+    // Status + Tokens: the chat takes their rows
+    let none = only(|h| {
+        h.status = true;
+        h.tokens = true;
+    });
+    let top = txt(none);
+    assert!(!has(&top, "◆ Status") && !has(&top, "Tokens"));
+    let c = chat(none);
+    assert_eq!(
+        (c.y, c.h),
+        (2, all.h + all.y - 2),
+        "chat starts at the first body row"
+    );
+    assert_eq!((c.x, c.w), (all.x, all.w));
+    assert_eq!(top.len(), 47);
+
+    // Topology hidden: Usage fills the right column from the top; Usage hidden: Topology does
+    let no_topo = txt(only(|h| h.topology = true));
+    assert!(!has(&no_topo, "TOPOLOGY") && has(&no_topo, "Usage"));
+    let usage_row = no_topo.iter().position(|l| l.contains("Usage")).unwrap();
+    assert_eq!(usage_row, 2, "Usage starts the right column");
+    let no_usage = txt(only(|h| h.usage = true));
+    assert!(has(&no_usage, "TOPOLOGY") && !has(&no_usage, "Usage"));
+    assert!(
+        no_usage[45].contains('┛'),
+        "Topology reaches the bottom of the body"
+    );
+    for l in no_topo.iter().chain(&no_usage) {
+        assert!(l.chars().count() <= 200);
+    }
+}
+
+/// Topology and Usage both hidden: no empty column, the chat reaches the right edge.
+#[test]
+fn without_topology_and_usage_the_chat_spans_to_the_right_edge() {
+    let hidden = Hidden {
+        topology: true,
+        usage: true,
+        ..Hidden::default()
+    };
+    for (cols, rows) in [(160usize, 48usize), (200, 47), (100, 30), (60, 16)] {
+        let r = rects_of(cols, rows, hidden, 1);
+        let c = r.chat_rect.unwrap();
+        assert_eq!(c.x + c.w, cols as i64, "{cols}x{rows} {c:?}");
+        let lines = frame(cols, rows, hidden);
+        assert!(!has(&lines, "TOPOLOGY") && !has(&lines, "Usage"));
+        assert_eq!(lines.len(), rows);
+    }
+    // everything optional hidden on small terminals: still a frame with the locked panels
+    let all = Hidden {
+        session: true,
+        mcp: true,
+        tools: true,
+        activity: true,
+        status: true,
+        tokens: true,
+        topology: true,
+        usage: true,
+    };
+    for (cols, rows) in [(60usize, 16usize), (80, 24), (120, 30), (200, 60)] {
+        let lines = frame(cols, rows, all);
+        assert_eq!(lines.len(), rows, "{cols}x{rows}");
+        assert!(
+            has(&lines, "SYNTHESIS") && (cols < 80 || has(&lines, "Running")),
+            "{cols}x{rows}"
+        );
     }
 }

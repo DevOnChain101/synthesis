@@ -825,13 +825,17 @@ impl Settings {
 
 // ---------------------------------------------------------------- synt.tui (USER file only)
 
-/// Panels of the dash sidebar that can be switched off (Workspace, Running sessions and the chat
-/// are always on).
-pub const TUI_PANELS: [(&str, &str); 4] = [
+/// Panels of the dash that can be switched off (Workspace, Running sessions and the chat are
+/// always on).
+pub const TUI_PANELS: [(&str, &str); 8] = [
     ("session", "Session info (model, mode, effort, cwd, uptime)"),
     ("mcp", "MCP servers"),
     ("tools", "Tools & Skills used in this session"),
     ("activity", "Activity feed"),
+    ("status", "Status box above the chat"),
+    ("tokens", "Tokens box above the chat"),
+    ("topology", "Topology graph (right column)"),
+    ("usage", "Usage history"),
 ];
 
 /// `synt.tui` of the USER settings.json: what the interactive app shows and how it behaves.
@@ -839,8 +843,8 @@ pub const TUI_PANELS: [(&str, &str); 4] = [
 /// set it (a diagnostic says so).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TuiSettings {
-    /// `[session, mcp, tools, activity]`: shown.
-    pub panels: [bool; 4],
+    /// One flag per `TUI_PANELS` entry, in that order: shown.
+    pub panels: [bool; 8],
     /// `logo`: `art` (the braille symbol on the welcome) or `off`.
     pub logo: bool,
     pub show_thinking: bool,
@@ -862,7 +866,7 @@ pub struct TuiSettings {
 impl Default for TuiSettings {
     fn default() -> Self {
         Self {
-            panels: [true; 4],
+            panels: [true; 8],
             logo: true,
             show_thinking: true,
             verbose: false,

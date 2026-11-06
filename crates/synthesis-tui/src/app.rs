@@ -3671,6 +3671,10 @@ impl App {
                 mcp: !self.tui.panels[1],
                 tools: !self.tui.panels[2],
                 activity: !self.tui.panels[3],
+                status: !self.tui.panels[4],
+                tokens: !self.tui.panels[5],
+                topology: !self.tui.panels[6],
+                usage: !self.tui.panels[7],
             },
             ..DashView::default()
         };
