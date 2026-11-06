@@ -1,0 +1,21 @@
+[package]
+name = "synthesis-settings-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+synthesis-config = { path = "../synthesis-config" }
+# AutoCompact, ToolSearchMode, ShellSettings: the loaders' own validators (harness depends on
+# synthesis-settings, so this cannot live inside it)
+synthesis-harness = { path = "../synthesis-harness" }
+synthesis-mcp = { path = "../synthesis-mcp" }
+synthesis-settings = { path = "../synthesis-settings" }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

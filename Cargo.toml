@@ -22,6 +22,7 @@ default-members = [
     "crates/synthesis-sandbox",
     "crates/synthesis-session",
     "crates/synthesis-settings",
+    "crates/synthesis-settings-ui",
     "crates/synthesis-terminal",
     "crates/synthesis-tools",
     "crates/synthesis-tui",
