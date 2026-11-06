@@ -163,3 +163,26 @@ fn a_question_dialog_is_answered_and_the_tool_result_carries_the_choice() {
     drop(r.engine);
     synthesis_desktop::engine::close_shared(engine);
 }
+
+#[test]
+fn an_other_answer_reaches_the_model_as_typed() {
+    let mut r = rig(serde_json::json!([
+        {"text": "", "tools": [{"id": "q1", "name": "AskUserQuestion", "input": {"questions": [
+            {"question": "Which colour?", "header": "Colour", "multiSelect": false,
+             "options": [{"label": "red"}, {"label": "blue"}]}]}}]},
+        {"text": "Thanks."}
+    ]));
+    r.send("pick a colour");
+    r.pump("question", |l| !l.dialogs.is_empty());
+    let t = r.live.dialogs[0].armed_until;
+    assert_eq!(r.live.pick(2, t), None, "Other opens the text field");
+    assert!(r.live.type_other("teal"));
+    r.live.commit_other();
+    let k = r.live.pick(3, t).expect("send answers");
+    r.live.answer(&k, t);
+    r.pump("task end", |l| !l.busy);
+    assert!(r.live.view.convo.items.iter().any(|i| matches!(i, Item::Tool { name, output, .. } if name == "AskUserQuestion" && output.contains("teal"))), "{:?}", r.live.view.convo.items);
+    let engine = r.live.engine.take().unwrap();
+    drop(r.engine);
+    synthesis_desktop::engine::close_shared(engine);
+}

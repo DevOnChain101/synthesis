@@ -1120,10 +1120,12 @@ impl Live {
             } else {
                 String::new()
             };
-            lines.push(format!(
-                "  /{} {}: {}{tag}",
-                c.name, c.argument_hint, c.description
-            ));
+            let hint = if c.argument_hint.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", c.argument_hint)
+            };
+            lines.push(format!("  /{}{hint}: {}{tag}", c.name, c.description));
         }
         self.note(lines.join("\n"), false);
     }

@@ -784,4 +784,53 @@ mod tests {
             );
         }
     }
+
+    /// A throwaway live view (no engine): the conversation is whatever the test pushes.
+    fn live_cfg() -> driver::LiveCfg {
+        use clap::Parser as _;
+        let dir = std::env::temp_dir();
+        driver::LiveCfg {
+            env: synthesis_config::Env::from_pairs([("HOME", "/nonexistent")]),
+            args: crate::engine::Args::try_parse_from(["synthesis-desktop"]).unwrap(),
+            project: dir.clone(),
+            granted: dir.clone(),
+            synthesis_home: dir,
+            home: None,
+            tz_min: 0,
+            tui: Default::default(),
+        }
+    }
+
+    #[gpui::test]
+    fn a_long_chat_builds_only_the_rows_near_the_viewport(cx: &mut TestAppContext) {
+        use crate::live::Live;
+        use synthesis_view::convo::Item;
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let mut l = Live::new();
+        l.starting = false;
+        l.view.convo.items = (0..2000)
+            .map(|i| Item::Notice {
+                warning: false,
+                text: format!("row {i}"),
+            })
+            .collect();
+        view.update(vcx, |t, _| t.set_live(l));
+        vcx.simulate_resize(size(px(1400.), px(900.)));
+        vcx.run_until_parked();
+        let list = view.read_with(vcx, |t, _| t.live.as_ref().unwrap().list.clone());
+        assert_eq!(list.item_count(), 2000);
+        // stuck to the newest row: the tail is built, the head is not
+        assert!(
+            list.bounds_for_item(1999).is_some(),
+            "the newest row is drawn"
+        );
+        assert!(
+            list.bounds_for_item(0).is_none(),
+            "the oldest row is not built"
+        );
+        assert!(list.bounds_for_item(1000).is_none());
+    }
 }

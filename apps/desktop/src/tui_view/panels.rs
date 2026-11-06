@@ -375,9 +375,13 @@ pub fn level(v: f32, max: f32) -> usize {
     }
 }
 
-/// Weeks (columns) of 11px cells with 3px gaps that fit in `w` px.
-pub fn heat_weeks(w: f32) -> usize {
-    (((w + 3.) / 14.).floor() as usize).max(1)
+/// (weeks, cell px, gap px) of the Usage grid in `w` px: all 53 weeks, the cells shrinking to fit
+/// (never under 4 px; a narrower panel shows the newest weeks that fit).
+pub fn heat_grid(w: f32) -> (usize, f32, f32) {
+    let gap = 2.;
+    let cell = ((w + gap) / 53. - gap).floor().clamp(4., 11.);
+    let weeks = (((w + gap) / (cell + gap)).floor() as usize).clamp(1, 53);
+    (weeks, cell, gap)
 }
 
 /// The levels of every cell of a `weeks`-wide grid (column-major, 7 rows): the newest days at the
@@ -392,27 +396,32 @@ pub fn heat_levels(days: &[f32], weeks: usize) -> Vec<usize> {
 }
 
 pub fn heat_body(s: &Snapshot, inner_w: f32) -> Div {
-    let weeks = heat_weeks(inner_w);
+    let (weeks, size, gap) = heat_grid(inner_w);
     let levels = heat_levels(&s.usage.days, weeks);
+    // an empty day is a faint cell, not the panel's own colour: the whole grid is visible
     let cell = |lvl: usize| {
         div()
-            .size(px(11.))
+            .size(px(size))
             .flex_none()
             .rounded(px(2.))
-            .bg(hsla(t::HEAT[lvl]))
+            .bg(if lvl == 0 {
+                hsla(t::BORDER)
+            } else {
+                hsla(t::HEAT[lvl])
+            })
     };
     let cols = (0..weeks).map(|c| {
         div()
             .flex()
             .flex_col()
-            .gap(px(3.))
+            .gap(px(gap))
             .children((0..7).map(|r| cell(levels[c * 7 + r])))
     });
     div()
         .flex()
         .flex_col()
         .gap(px(6.))
-        .child(div().flex().gap(px(3.)).children(cols))
+        .child(div().flex().gap(px(gap)).children(cols))
         .child(
             div()
                 .flex()
@@ -449,9 +458,10 @@ mod tests {
         assert_eq!(level(100., 100.), 4);
         assert_eq!(level(50., 100.), 2);
         assert_eq!(level(5., 0.), 0);
-        // 500px right column: 500 - 2 border - 24 padding = 474 wide
-        assert_eq!(heat_weeks(474.), 34);
-        assert_eq!(heat_weeks(1.), 1);
+        // 500px right column: 500 - 2 border - 24 padding = 474 wide: all 53 weeks, 6px cells
+        assert_eq!(heat_grid(474.), (53, 6., 2.));
+        assert_eq!(heat_grid(234.), (39, 4., 2.));
+        assert_eq!(heat_grid(1.).0, 1);
         // a sparse history still fills the grid: empty cells first, the days at the end
         let v = heat_levels(&[0., 5.], 53);
         assert_eq!(
