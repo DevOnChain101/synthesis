@@ -89,6 +89,8 @@ pub enum Action {
     Close,
     Clear,
     Compact(Option<String>),
+    /// `/config`: the shell shows the Settings view.
+    OpenSettings,
 }
 
 /// An image waiting for the next message (the TUI's chip).
@@ -178,7 +180,7 @@ pub enum Submitted {
 pub const NOT_YET: &str = "not available in the desktop app yet";
 
 /// Built-in commands the desktop app carries out (the others answer [`NOT_YET`]).
-pub const WIRED: [&str; 18] = [
+pub const WIRED: [&str; 19] = [
     "help",
     "clear",
     "compact",
@@ -197,6 +199,7 @@ pub const WIRED: [&str; 18] = [
     "terminal",
     "browser",
     "verbose",
+    "config",
 ];
 
 pub fn is_wired(name: &str) -> bool {
@@ -814,6 +817,7 @@ impl Live {
             "compact" => {
                 return Submitted::Do(Action::Compact((!arg.is_empty()).then(|| arg.into())));
             }
+            "config" => return Submitted::Do(Action::OpenSettings),
             "new" => return Submitted::Do(Action::New),
             "close" => return Submitted::Do(Action::Close),
             "resume" if arg.is_empty() => self.open_resume_picker(now_ms()),
@@ -855,7 +859,7 @@ impl Live {
                     false,
                 );
             }
-            // the rest: /config (the Settings view), /files, /diff, /focus, /peers, /name and
+            // the rest: /files, /diff, /focus, /peers, /name and
             // /permissions allow|remove
             _ => self.note(format!("/{name}: {NOT_YET}"), false),
         }
@@ -1493,10 +1497,7 @@ mod tests {
             .filter(|n| !is_wired(n))
             .collect();
         unwired.sort();
-        assert_eq!(
-            unwired,
-            ["config", "diff", "files", "focus", "name", "peers"]
-        );
+        assert_eq!(unwired, ["diff", "files", "focus", "name", "peers"]);
         // the wired ones are all real commands, and the unwired ones answer with the notice
         let mut l = live_with_commands();
         for c in synthesis_tui::local_commands() {
@@ -1516,6 +1517,7 @@ mod tests {
                 .all(|w| synthesis_tui::local_commands().iter().any(|c| c.name == *w))
         );
         // the actions the window carries out
+        assert_eq!(l.submit("/config"), Submitted::Do(Action::OpenSettings));
         assert_eq!(l.submit("/new"), Submitted::Do(Action::New));
         assert_eq!(l.submit("/close"), Submitted::Do(Action::Close));
         assert_eq!(l.submit("/clear"), Submitted::Do(Action::Clear));

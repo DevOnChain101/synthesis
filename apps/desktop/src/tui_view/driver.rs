@@ -49,6 +49,11 @@ pub enum Target {
     Close,
 }
 
+/// `/config`: asks the shell to show the Settings view.
+pub struct OpenSettings;
+
+impl gpui::EventEmitter<OpenSettings> for TuiView {}
+
 /// Rows at the end of the chat measured again after every change.
 const TAIL_REMEASURE: usize = 12;
 
@@ -926,6 +931,7 @@ impl TuiView {
                 }
             }
             Action::Close => return self.switch(Target::Close, "close".into(), cx),
+            Action::OpenSettings => cx.emit(OpenSettings),
         }
         lu.dirty = true;
         cx.notify();
