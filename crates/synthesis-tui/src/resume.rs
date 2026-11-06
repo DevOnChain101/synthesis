@@ -7,8 +7,6 @@ use synthesis_events::{Envelope, Record};
 use synthesis_providers::{Content, Message, Role};
 use synthesis_session::{Reader, SessionRecord};
 
-use crate::SavedSession;
-
 /// A saved session ready to continue: its events fill the screen, its messages are the history
 /// of the next task.
 #[derive(Debug)]
@@ -16,52 +14,6 @@ pub struct Resume {
     pub record: SessionRecord,
     pub events: Vec<Envelope>,
     pub history: Vec<Message>,
-}
-
-fn saved(r: &SessionRecord) -> SavedSession {
-    let ms = synthesis_tui_render::model::parse_ts(&r.updated_at).unwrap_or(0);
-    SavedSession {
-        id: r.id.clone(),
-        cwd: r.cwd.clone(),
-        title: r.title.clone().unwrap_or_default(),
-        updated_at: r.updated_at.clone(),
-        mtime: ms,
-    }
-}
-
-/// Newest first; `cwd` limits it to one folder. Sessions without a message or task are left out.
-pub fn list_saved(synthesis_home: &Path, cwd: Option<&str>) -> Result<Vec<SavedSession>, String> {
-    let r = Reader::open(synthesis_home).map_err(|e| e.to_string())?;
-    Ok(r.list_used_sessions(cwd)
-        .map_err(|e| e.to_string())?
-        .iter()
-        .enumerate()
-        .map(|(i, rec)| {
-            let mut s = saved(rec);
-            // sessions have no stored title: the first prompt names them (newest 100 only)
-            if s.title.trim().is_empty() && i < 100 {
-                s.title = first_prompt(&r, &rec.id).unwrap_or_default();
-            }
-            s
-        })
-        .collect())
-}
-
-/// First thing the person typed in a session, one line.
-fn first_prompt(r: &Reader, id: &str) -> Option<String> {
-    for rec in r.read_events(id, 0, 40).ok()? {
-        if let Record::Known(e) = rec
-            && let synthesis_events::Event::UserMessage {
-                text, display_text, ..
-            } = e.event
-        {
-            let t = display_text.filter(|d| !d.is_empty()).unwrap_or(text);
-            if !t.trim().is_empty() && !t.starts_with("[Synthesis") {
-                return Some(t.split_whitespace().collect::<Vec<_>>().join(" "));
-            }
-        }
-    }
-    None
 }
 
 /// `id` is a full id or a unique prefix. Unreadable events or messages are an error, not a

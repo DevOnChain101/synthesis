@@ -47,8 +47,10 @@ use crate::links::{
 };
 use crate::route::{self, Known, Route};
 use crate::sanitize::{clean_input, clean_input_lines, clean_line, clean_text};
+use crate::status::ContextText;
 use crate::status::{SandboxStatus, StatusExtra, status_line_with};
 use crate::{ExitReason, SavedSession};
+use synthesis_view::workspaces::fold_dir;
 
 const QUIT_ARM_MS: i64 = 1500;
 const SCROLL_STEP: usize = 10;
@@ -490,17 +492,6 @@ fn local_commands() -> Vec<CmdDef> {
 /// A built-in command name (or alias): a skill or MCP prompt of the same name never shadows it.
 pub(crate) fn is_local_command(name: &str) -> bool {
     matches!(name, "quit" | "perms") || local_commands().iter().any(|c| c.name == name)
-}
-
-/// Canonical, case-folded where the file system folds case (macOS, Windows): the key of a folder.
-fn fold_dir(p: &str) -> String {
-    let c = std::fs::canonicalize(p)
-        .map_or_else(|_| p.to_string(), |p| p.to_string_lossy().into_owned());
-    if cfg!(any(windows, target_os = "macos")) {
-        c.to_lowercase()
-    } else {
-        c
-    }
 }
 
 /// Same folder, through symlinks (macOS /var -> /private/var) and, where the file system folds

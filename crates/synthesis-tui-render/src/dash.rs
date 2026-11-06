@@ -41,17 +41,7 @@ pub struct SessionRow {
     pub title: String,
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct HistoryDay {
-    /// Instant (ms) inside the day; the calendar day is taken in the state's UTC offset.
-    pub date_ms: i64,
-    pub tokens: f64,
-    pub output: f64,
-    pub messages: f64,
-    pub tools: f64,
-    pub agents: f64,
-    pub sessions: f64,
-}
+pub use synthesis_view::usage::HistoryDay;
 
 #[derive(Clone, Debug, Default)]
 pub struct Tap {

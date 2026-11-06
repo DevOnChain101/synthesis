@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 synthesis-events = { path = "../synthesis-events" }
 synthesis-tui-base = { path = "../synthesis-tui-base" }
+synthesis-view = { path = "../synthesis-view" }
 regex = "1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
