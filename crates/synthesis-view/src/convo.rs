@@ -237,6 +237,11 @@ impl Convo {
                 self.tokens = self.tokens.max(usage.input_tokens + usage.output_tokens);
                 self.cost_usd = self.cost_usd.max(usage.cost_usd.unwrap_or(0.0));
             }
+            // an empty display text marks the harness's own follow-up note to the model
+            Event::UserMessage {
+                display_text: Some(d),
+                ..
+            } if d.is_empty() || d == "verification feedback" || d == "stop hook feedback" => {}
             Event::UserMessage {
                 text, display_text, ..
             } if main => self.items.push(Item::User(
@@ -321,12 +326,15 @@ impl Convo {
                     }
                 }
             }
+            // unverified and blocked runs are said by the task end line; failed and passed are shown
             Event::VerificationCompleted {
                 status, summary, ..
-            } if main => self.items.push(Item::Verification {
-                status: status.clone(),
-                summary: summary.clone(),
-            }),
+            } if main && matches!(status.as_str(), "passed" | "failed") => {
+                self.items.push(Item::Verification {
+                    status: status.clone(),
+                    summary: summary.clone(),
+                })
+            }
             Event::ToolRequested {
                 tool_call_id,
                 name,
@@ -623,5 +631,19 @@ mod tests {
         assert!(
             matches!(&c.items[2], Item::TaskEnd { ok: true, text } if text.starts_with("Done \u{b7} 1 turn"))
         );
+    }
+
+    #[test]
+    fn harness_follow_ups_and_unverified_reports_stay_out_of_the_chat() {
+        let mut c = Convo::default();
+        c.apply(&ev(
+            "user.message",
+            json!({"text": "verification feedback ...", "display_text": "verification feedback", "images": []}),
+        ));
+        c.apply(&ev(
+            "verification.completed",
+            json!({"report_id": "r", "status": "unverified", "attempt": 1, "summary": "s"}),
+        ));
+        assert!(c.items.is_empty(), "{:?}", c.items);
     }
 }

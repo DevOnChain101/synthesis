@@ -145,6 +145,14 @@ impl TuiView {
         me
     }
 
+    /// Replaces the live state wholesale (offscreen shots and tests feed a conversation this way).
+    pub fn set_live(&mut self, live: Live) {
+        if let Some(lu) = &mut self.live {
+            lu.live = live;
+            lu.dirty = true;
+        }
+    }
+
     /// Launches the engine, the clock and the keyboard.
     pub fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
@@ -316,32 +324,7 @@ impl TuiView {
                 lu.live.note(startup_failure(&e), true);
             }
             Ok((engine, rx, replay)) => {
-                let l = &mut lu.live;
-                if let Some(v) = replay {
-                    // the stored conversation and panels; the store panels reload below
-                    l.view.convo = v.convo;
-                    l.view.session = v.session;
-                    l.view.status = v.status;
-                } else {
-                    l.view.convo = Default::default();
-                    l.view.session = synthesis_view::model::Session::new(&engine.sid);
-                    l.view.status = Default::default();
-                }
-                if let Some(w) = engine.context_window {
-                    l.view.status.context.set_window(w);
-                }
-                for n in &engine.notices {
-                    l.note(n.clone(), false);
-                }
-                l.sid = engine.sid.clone();
-                l.cwd = engine.cwd.clone();
-                l.trusted = engine.trusted;
-                l.commands = engine.commands.clone();
-                l.mcp = engine.mcp_status();
-                l.queue.clear();
-                l.dialogs.clear();
-                l.busy = false;
-                l.engine = Some(Arc::new(engine));
+                lu.live.attach(Arc::new(engine), replay);
                 lu.follow = true;
                 let pump = cx.spawn(async move |this, cx| pump(this, rx, cx).await);
                 lu.pump_task = Some(pump);
@@ -397,23 +380,7 @@ impl TuiView {
         let Some(lu) = &mut self.live else { return };
         let cfg = lu.cfg.clone();
         let root = lu.live.engine.as_ref().map(|e| e.root.clone());
-        let job = cx.background_spawn(async move {
-            let r =
-                synthesis_session::Reader::open(&cfg.synthesis_home).map_err(|e| e.to_string())?;
-            let home = cfg.synthesis_home.clone();
-            let live = move |id: &str| !synthesis_app::peers::session_lock_free(&home, id);
-            let (granted, trust) = (cfg.granted.clone(), cfg.args.common.trust_project);
-            // the git scan runs only where `--trust-project` was granted
-            let trusted = move |root: &str| trust && engine::root_of(Path::new(root)) == granted;
-            let opts = LoadOpts {
-                is_live: Some(&live),
-                trusted: Some(&trusted),
-                env: Some(&cfg.env),
-            };
-            let ws = WorkspaceList::load(&r, root.as_deref().map(Path::new), &opts)?;
-            let usage = synthesis_view::usage::load_from(&r, now_ms(), cfg.tz_min);
-            Ok::<_, String>((ws, usage))
-        });
+        let job = cx.background_spawn(async move { read_store(&cfg, root.as_deref()) });
         let t = cx.spawn(async move |this, cx| {
             let r = job.await;
             this.update(cx, |t, cx| t.store_loaded(r, cx)).ok();
@@ -458,7 +425,7 @@ impl TuiView {
         lu.dirty = true;
         if let Some(e) = lu.live.engine.clone() {
             lu.live.mcp = e.mcp_status();
-            if n % 5 == 0 {
+            if n.is_multiple_of(5) {
                 let job = cx.background_spawn(async move { e.peer_rows() });
                 let t = cx.spawn(async move |this, cx| {
                     let rows = job.await;
@@ -941,6 +908,28 @@ impl LiveUi {
     fn add_sub(&mut self, s: Subscription) {
         self._subs.push(s);
     }
+}
+
+/// The workspace list (with the trust-gated git scan), the sessions a process holds, and the usage
+/// history. Blocking (reads the store, runs git): off the UI thread.
+pub fn read_store(
+    cfg: &LiveCfg,
+    root: Option<&str>,
+) -> Result<(WorkspaceList, Vec<synthesis_view::usage::HistoryDay>), String> {
+    let r = synthesis_session::Reader::open(&cfg.synthesis_home).map_err(|e| e.to_string())?;
+    let home = cfg.synthesis_home.clone();
+    let live = move |id: &str| !synthesis_app::peers::session_lock_free(&home, id);
+    let (granted, trust) = (cfg.granted.clone(), cfg.args.common.trust_project);
+    // the git scan runs only where `--trust-project` was granted
+    let trusted = move |root: &str| trust && engine::root_of(Path::new(root)) == granted;
+    let opts = LoadOpts {
+        is_live: Some(&live),
+        trusted: Some(&trusted),
+        env: Some(&cfg.env),
+    };
+    let ws = WorkspaceList::load(&r, root.map(Path::new), &opts)?;
+    let usage = synthesis_view::usage::load_from(&r, now_ms(), cfg.tz_min);
+    Ok((ws, usage))
 }
 
 /// The message pump: everything that arrived is applied in one go, then at most one redraw per 16 ms.

@@ -180,6 +180,40 @@ impl Live {
         }
     }
 
+    /// Takes over a started engine: its identity, commands and notices. `replay`: the stored
+    /// conversation of a resumed session.
+    pub fn attach(&mut self, engine: Arc<Engine>, replay: Option<ViewState>) {
+        match replay {
+            // the stored conversation and panels; the store panels load separately
+            Some(v) => {
+                self.view.convo = v.convo;
+                self.view.session = v.session;
+                self.view.status = v.status;
+            }
+            None => {
+                self.view.convo = Default::default();
+                self.view.session = synthesis_view::model::Session::new(&engine.sid);
+                self.view.status = Default::default();
+            }
+        }
+        if let Some(w) = engine.context_window {
+            self.view.status.context.set_window(w);
+        }
+        for n in &engine.notices {
+            self.note(n.clone(), false);
+        }
+        self.sid = engine.sid.clone();
+        self.cwd = engine.cwd.clone();
+        self.trusted = engine.trusted;
+        self.commands = engine.commands.clone();
+        self.mcp = engine.mcp_status();
+        self.queue.clear();
+        self.dialogs.clear();
+        self.busy = false;
+        self.starting = false;
+        self.engine = Some(engine);
+    }
+
     /// A line in the chat that is not from the model.
     pub fn note(&mut self, text: impl Into<String>, warning: bool) {
         self.view.convo.items.push(Item::Notice {
@@ -192,7 +226,18 @@ impl Live {
     /// store panels and sends the next queued line).
     pub fn on_msg(&mut self, m: UiMsg, now: i64) -> bool {
         match m {
-            UiMsg::Event(e) => self.view.apply(&e),
+            UiMsg::Event(e) => {
+                self.view.apply(&e);
+                // a start-up note the harness also emits as an event shows once
+                let items = &mut self.view.convo.items;
+                if let Some(Item::Notice { text, .. }) = items.last()
+                    && items[..items.len() - 1]
+                        .iter()
+                        .any(|i| matches!(i, Item::Notice { text: t, .. } if t == text))
+                {
+                    items.pop();
+                }
+            }
             UiMsg::BadEvent(t) => self.note(t, true),
             UiMsg::Approval(a) => self.on_approval(*a, now),
             UiMsg::Input(i) => self.on_input(i.id, i.req, now),

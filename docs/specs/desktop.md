@@ -78,6 +78,15 @@ Views are placeholders; `InputProvider` answers nothing; no stored-session resum
 plan/question dialogs, browser or verification UI; Linux/Windows unbuilt (no ConPTY need any more);
 no CI job for the desktop crate.
 
+TUI view is LIVE (phase 2b-1): `engine.rs` mirrors `synt tui` (prepare + `round` + `Host`), `live.rs` holds the
+dialogs/queue/history/focus rules, `tui_view/snapshot.rs` builds the painted `Snapshot` from `ViewState`,
+`driver.rs` pumps engine messages (batched, one redraw per 16 ms), handles keys, completion, resume and
+store refresh, `chat.rs`/`dialog.rs` paint the conversation and the permission/plan/question dialogs.
+`--sample` keeps the sample data; `--shot ... --live SCRIPT --prompt T [--answer once|deny|always]` renders a
+scripted (fake provider, `--features shot,test-provider`) conversation on the real engine. Not yet: model/resume
+pickers and slash commands beyond /help and /exit (a notice says so), image paste, "Other" free text in
+question dialogs, keyboard scroll-into-view in Workspace/Running, Linux/Windows/IME verification.
+
 TUI view (`src/tui_view/`, phase 2): native panels on a sample `Snapshot` (`sample.rs`; the real view-model
 replaces it), metrics from `cli.html` `#view1` (`layout.rs`), topology wires (`topo.rs`). Layout tests use
 gpui test support. Offscreen PNG: `cargo run -p synthesis-desktop --features shot -- --shot out.png --size 1400x900
