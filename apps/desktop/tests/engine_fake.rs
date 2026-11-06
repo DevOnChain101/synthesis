@@ -44,6 +44,8 @@ fn rig() -> Rig {
         &env,
         None,
         Some(&format!("fake:{}", script_path.display())),
+        // no bubblewrap on CI Linux; the sandbox is not what this test is about
+        Some("off"),
     )
     .expect("engine starts");
     Rig {
@@ -70,6 +72,12 @@ impl Rig {
         }
     }
 
+    /// The approval event reaches the reducer a moment before the approver registers its reply
+    /// slot (the harness emits, then asks), so a fast answer can land first: retry until it takes.
+    fn answer(&mut self, id: &str, choice: Choice) {
+        self.pump("approval slot", |r| r.engine.answer(id, choice));
+    }
+
     fn pending_id(&self) -> String {
         self.convo
             .items
@@ -93,7 +101,7 @@ fn allow_once_runs_the_write_and_the_task_finishes() {
     r.pump("approval", |r| r.convo.needs_you() == 1);
     assert!(!r.target.exists(), "nothing is written before the answer");
     let id = r.pending_id();
-    assert!(r.engine.answer(&id, Choice::Once));
+    r.answer(&id, Choice::Once);
     r.pump("task end", |r| r.done.is_some());
     assert_eq!(r.done, Some(Ok(())));
     assert_eq!(std::fs::read_to_string(&r.target).unwrap(), "hi\n");
@@ -113,7 +121,7 @@ fn deny_leaves_the_file_uncreated() {
     r.engine.send("make hello.txt".into()).unwrap();
     r.pump("approval", |r| r.convo.needs_you() == 1);
     let id = r.pending_id();
-    assert!(r.engine.answer(&id, Choice::Deny));
+    r.answer(&id, Choice::Deny);
     r.pump("task end", |r| r.done.is_some());
     assert!(!r.target.exists());
     assert!(r.convo.items.iter().any(|i| matches!(

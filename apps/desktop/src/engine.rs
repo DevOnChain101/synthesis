@@ -160,10 +160,14 @@ impl Engine {
         env: &Env,
         model: Option<&str>,
         provider: Option<&str>,
+        sandbox: Option<&str>,
     ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
         let (tx, rx) = unbounded();
         let pending: PendingMap = PendingMap::default();
-        let mut common = Defaults::parse_from(["synthesis-desktop"]).c;
+        // `sandbox` is `--sandbox`'s value (enforce|best-effort|off); `None` keeps the default (enforce).
+        let mut args = vec!["synthesis-desktop"];
+        args.extend(sandbox.into_iter().flat_map(|m| ["--sandbox", m]));
+        let mut common = Defaults::try_parse_from(args).map_err(|e| e.to_string())?.c;
         common.model = model.map(str::to_string);
         common.provider = provider.map(str::to_string);
         let native = Native {
