@@ -21,6 +21,7 @@ mod setup;
 mod status;
 mod tty;
 
+pub use app::local_commands;
 pub use link::{EventWriter, UiLink};
 pub use links::{OpenTarget, Opener, PathTarget, SystemOpener};
 pub use resume::{Resume, load_resume};

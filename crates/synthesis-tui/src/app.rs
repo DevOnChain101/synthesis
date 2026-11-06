@@ -397,7 +397,8 @@ pub(crate) struct App {
     switch_armed: Option<(String, i64)>,
 }
 
-fn local_commands() -> Vec<CmdDef> {
+/// The built-in slash commands, for hosts that offer completion of their own.
+pub fn local_commands() -> Vec<CmdDef> {
     let c = |name: &str, d: &str, hint: &str| CmdDef {
         name: name.into(),
         aliases: vec![],
