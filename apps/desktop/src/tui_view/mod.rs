@@ -326,7 +326,7 @@ impl TuiView {
                     head("p-mcp", "MCP", "network"),
                     Some(meta(text(), s.mcp.len().to_string())),
                     true,
-                    Some(72.),
+                    Some(layout::whole_rows_h(72.)),
                     panels::mcp_rows(&s.mcp),
                 )
                 .flex_initial()
@@ -340,7 +340,7 @@ impl TuiView {
                     head("p-tools", "Tools & Skills", "settings-2"),
                     None,
                     true,
-                    Some(72.),
+                    Some(layout::body_h(4)),
                     panels::kv(&s.tools, 62.),
                 )
                 .flex_initial()

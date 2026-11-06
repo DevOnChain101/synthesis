@@ -92,7 +92,13 @@ impl TuiView {
             .overflow_y_scroll()
             .track_scroll(&lu.scroll)
             .child(body);
-        let mut wrap = div().relative().flex_1().min_h(px(0.)).child(scroll);
+        // the padding is outside the scroll area: a row scrolled to the top edge stops below it
+        let mut wrap = div()
+            .relative()
+            .flex_1()
+            .min_h(px(0.))
+            .pt(px(8.))
+            .child(scroll);
         if !lu.follow {
             wrap = wrap.child(
                 div()

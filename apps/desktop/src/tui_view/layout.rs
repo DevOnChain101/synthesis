@@ -22,6 +22,19 @@ pub const HEAD_PAD_LEFT: (f32, f32) = (7., 4.);
 pub const HEAD_LINE: f32 = 18.6;
 pub const BODY_PAD: (f32, f32) = (2., 10.);
 pub const BODY_PAD_LEFT_BOTTOM: f32 = 6.;
+/// One text line of the panels (12.5px at 1.55): kv and MCP rows are this tall, so a capped body
+/// ends on a whole row.
+pub const KV_ROW: f32 = 19.375;
+
+/// Body height (top padding + `rows` lines) of a panel capped at `rows` rows.
+pub fn body_h(rows: usize) -> f32 {
+    BODY_PAD.0 + rows as f32 * KV_ROW
+}
+
+/// The most whole rows that fit under `max` px of body.
+pub fn whole_rows_h(max: f32) -> f32 {
+    body_h(((max - BODY_PAD.0) / KV_ROW).floor().max(1.) as usize)
+}
 
 /// Column widths for a viewport width: `250 | minmax(320,1fr) | 500`, then 200|300|380 below 1400,
 /// 190|300|300 below 1200, 180|300|260 below 1000.

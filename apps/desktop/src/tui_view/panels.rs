@@ -8,7 +8,7 @@ use gpui::{
 use synthesis_tui_render::theme as t;
 
 use super::layout::{
-    BODY_PAD, BODY_PAD_LEFT_BOTTOM, HEAD_LINE, HEAD_PAD, HEAD_PAD_LEFT, PANEL_RADIUS, ROW_H,
+    BODY_PAD, BODY_PAD_LEFT_BOTTOM, HEAD_LINE, HEAD_PAD, HEAD_PAD_LEFT, KV_ROW, PANEL_RADIUS, ROW_H,
 };
 use super::sample::{Activity, McpRow, McpState, Running, Snapshot, Tokens, Workspace};
 use super::tracked;
@@ -127,6 +127,8 @@ pub fn kv(rows: &[(String, String)], label_w: f32) -> Div {
     div().flex().flex_col().children(rows.iter().map(|(k, v)| {
         div()
             .flex()
+            .h(px(KV_ROW))
+            .flex_none()
             .gap(px(12.))
             .child(
                 div()
@@ -231,6 +233,8 @@ pub fn mcp_rows(rows: &[McpRow]) -> Div {
         };
         div()
             .flex()
+            .h(px(KV_ROW))
+            .flex_none()
             .items_center()
             .gap(px(8.))
             .child(dot(c, m.state == McpState::Connected))
@@ -339,14 +343,20 @@ pub fn heat_weeks(w: f32) -> usize {
     (((w + 3.) / 14.).floor() as usize).max(1)
 }
 
-pub fn heat_body(s: &Snapshot, inner_w: f32) -> Div {
-    let weeks = heat_weeks(inner_w);
-    let days = &s.usage.days;
+/// The levels of every cell of a `weeks`-wide grid (column-major, 7 rows): the newest days at the
+/// end, empty cells before a short history, so the grid is always drawn in full.
+pub fn heat_levels(days: &[f32], weeks: usize) -> Vec<usize> {
     let n = (weeks * 7).min(days.len());
     let shown = &days[days.len() - n..];
     let max = shown.iter().cloned().fold(0., f32::max);
-    // the oldest column may be partial: pad it at the top
-    let pad = weeks * 7 - n;
+    let mut v = vec![0; weeks * 7 - n];
+    v.extend(shown.iter().map(|d| level(*d, max)));
+    v
+}
+
+pub fn heat_body(s: &Snapshot, inner_w: f32) -> Div {
+    let weeks = heat_weeks(inner_w);
+    let levels = heat_levels(&s.usage.days, weeks);
     let cell = |lvl: usize| {
         div()
             .size(px(11.))
@@ -359,13 +369,7 @@ pub fn heat_body(s: &Snapshot, inner_w: f32) -> Div {
             .flex()
             .flex_col()
             .gap(px(3.))
-            .children((0..7).map(|r| {
-                let i = c * 7 + r;
-                match i.checked_sub(pad) {
-                    Some(j) => cell(level(shown[j], max)),
-                    None => div().size(px(11.)).flex_none(),
-                }
-            }))
+            .children((0..7).map(|r| cell(levels[c * 7 + r])))
     });
     div()
         .flex()
@@ -411,5 +415,16 @@ mod tests {
         // 500px right column: 500 - 2 border - 24 padding = 474 wide
         assert_eq!(heat_weeks(474.), 34);
         assert_eq!(heat_weeks(1.), 1);
+        // a sparse history still fills the grid: empty cells first, the days at the end
+        let v = heat_levels(&[0., 5.], 53);
+        assert_eq!(
+            (
+                v.len(),
+                v[..v.len() - 1].iter().sum::<usize>(),
+                v[v.len() - 1]
+            ),
+            (371, 0, 4)
+        );
+        assert_eq!(heat_levels(&[], 4), vec![0; 28]);
     }
 }
