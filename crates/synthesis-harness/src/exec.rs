@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use futures_util::future::join_all;
 use serde_json::{Value, json};
-use synthesis_events::{Event, Todo, ToolStatus};
+use synthesis_events::{Event, ProcessInfo, Todo, ToolStatus};
 use synthesis_hooks::{Decision as HookDecision, HookEvent};
 use synthesis_permissions::automode::ClassifierDecision;
 use synthesis_permissions::{Decision, Mode, Suggestion, Verdict};
@@ -1179,6 +1179,78 @@ impl Harness {
         }
     }
 
+    /// The redacted command line of a Bash or `terminal_spawn` call, at most 1000 chars.
+    fn command_of(&self, name: &str, input: &Value) -> Option<String> {
+        let shown = self.tools.redact_input(name, input);
+        let c = shown.get("command")?.as_str()?;
+        Some(c.chars().take(1000).collect())
+    }
+
+    /// `process.spawned` / `process.exited` for the commands a tool call started or reported on.
+    /// `meta` is the tool's own metadata (`None`: the call was cut short, so a foreground
+    /// command was killed with it). A background process that nobody asks about again is not
+    /// reported as exited.
+    fn process_events(
+        &self,
+        task: &TaskRun,
+        agent: &AgentCtx,
+        turn: &str,
+        (id, name, input): (&str, &str, &Value),
+        meta: Option<&Value>,
+        took: std::time::Duration,
+    ) {
+        let get = |k: &str| meta.and_then(|m| m.get(k));
+        let send = |e: fn(ProcessInfo) -> Event, info| self.emit(task, agent, Some(turn), e(info));
+        let spawned = |process_id: String| ProcessInfo {
+            process_id,
+            name: input
+                .get("description")
+                .or(input.get("name"))
+                .and_then(Value::as_str)
+                .map(Into::into),
+            pid: get("pid").and_then(Value::as_i64),
+            tool_call_id: Some(id.into()),
+            command: self.command_of(name, input),
+            ..Default::default()
+        };
+        let bg_id = get("bash_id").or(get("process_id")).and_then(Value::as_str);
+        match name {
+            "Bash" if input["run_in_background"] != true => {
+                send(
+                    Event::ProcessExited,
+                    ProcessInfo {
+                        process_id: id.into(),
+                        exit_code: get("exit_code").and_then(Value::as_i64),
+                        signal: get("signal_name").and_then(Value::as_str).map(Into::into),
+                        tool_call_id: Some(id.into()),
+                        duration_ms: Some(took.as_millis() as u64),
+                        ..Default::default()
+                    },
+                );
+                // Timed out into the background: the command lives on under its runtime id.
+                if let Some(b) = bg_id {
+                    send(Event::ProcessSpawned, spawned(b.into()));
+                }
+            }
+            "Bash" | "terminal_spawn" => {
+                if let Some(b) = bg_id {
+                    send(Event::ProcessSpawned, spawned(b.into()));
+                }
+            }
+            _ => {
+                let Some(p) = get("process").filter(|_| get("running") == Some(&json!(false)))
+                else {
+                    return;
+                };
+                if let Ok(info) = serde_json::from_value::<ProcessInfo>(p.clone())
+                    && lock(&self.procs_exited).insert(info.process_id.clone())
+                {
+                    send(Event::ProcessExited, info);
+                }
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn exec_call(
         &self,
@@ -1204,7 +1276,7 @@ impl Harness {
         );
         let t0 = Instant::now();
         let deadline = task.deadline;
-        let live = Live::new(
+        let mut live = Live::new(
             self.sink.clone(),
             Scope {
                 task_id: Some(task.task_id.clone()),
@@ -1214,6 +1286,18 @@ impl Harness {
             id,
             None,
         );
+        let foreground = name == "Bash" && input["run_in_background"] != true;
+        if foreground {
+            // A foreground command has no runtime process id of its own: the call id stands in.
+            live = live.with_process(id);
+            let info = ProcessInfo {
+                process_id: id.into(),
+                tool_call_id: Some(id.into()),
+                command: self.command_of(name, &input),
+                ..Default::default()
+            };
+            self.emit(task, agent, Some(turn), Event::ProcessSpawned(info));
+        }
         let run = synthesis_tools::LIVE_OUTPUT.scope(
             live.output_sink(),
             self.tools.execute(name, input.clone(), &ctx),
@@ -1230,6 +1314,14 @@ impl Harness {
             o = run => Ok(o),
         };
         live.finish();
+        self.process_events(
+            task,
+            agent,
+            turn,
+            (id, name, &input),
+            out.as_ref().ok().map(|o| &o.meta),
+            t0.elapsed(),
+        );
         let out = match out {
             Ok(o) => o,
             Err(status) => {
@@ -1282,6 +1374,22 @@ impl Harness {
                 }
             }
             _ => {}
+        }
+        if name == "browser_screenshot"
+            && let (Some(path), Some(f)) = (
+                out.meta.get("artifact_path").and_then(Value::as_str),
+                out.meta.get("frame"),
+            )
+        {
+            let n = |k: &str| f.get(k).and_then(Value::as_u64).unwrap_or(0);
+            let frame = Event::BrowserFrame {
+                path: path.into(),
+                url: f.get("url").and_then(Value::as_str).unwrap_or("").into(),
+                w: n("w") as u32,
+                h: n("h") as u32,
+                bytes: n("bytes"),
+            };
+            self.emit(task, agent, Some(turn), frame);
         }
         if name == "verify_run" && !out.is_error {
             self.register_model_checks(task, &out.meta);

@@ -611,13 +611,28 @@ async fn wait(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
     Ok(ToolOutput::text("Done waiting."))
 }
 
+/// Width and height from the IHDR chunk of a PNG; 0, 0 when the bytes are not one.
+fn png_size(png: &[u8]) -> (u32, u32) {
+    let be = |i: usize| {
+        png.get(i..i + 4)
+            .map_or(0, |b| u32::from_be_bytes(b.try_into().unwrap()))
+    };
+    if png.starts_with(b"\x89PNG") {
+        (be(16), be(20))
+    } else {
+        (0, 0)
+    }
+}
+
 async fn shot(rt: &BrowserRuntime, input: &Value, sh: &Shared) -> Res {
     if input.get("ref").is_some() {
         return Err("element screenshots (ref) are not supported yet.".into());
     }
     let s = rt.screenshot(input["full_page"] == true).await?;
     let path = s.path.display().to_string();
-    let meta = json!({"artifact_path": path});
+    let (w, h) = png_size(&s.png);
+    let frame = json!({"url": rt.page_origin().await.unwrap_or_default(), "w": w, "h": h, "bytes": s.png.len()});
+    let meta = json!({"artifact_path": path, "frame": frame});
     if lock(&sh.browser_cfg).supports_images {
         return Ok(ToolOutput {
             content: Content::Blocks(vec![
@@ -794,5 +809,16 @@ mod tests {
         c.cancel();
         let e = await_person(&Hang, &req(Duration::from_secs(60)), &c).await;
         assert!(matches!(e, Err(BrowserError::Refused(m)) if m.contains("cancelled")));
+    }
+}
+
+#[cfg(test)]
+mod png_tests {
+    #[test]
+    fn png_size_reads_ihdr() {
+        let mut p = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        p.extend([0, 0, 5, 0, 0, 0, 2, 208]);
+        assert_eq!(super::png_size(&p), (1280, 720));
+        assert_eq!(super::png_size(b"nope"), (0, 0));
     }
 }

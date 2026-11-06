@@ -382,13 +382,19 @@ impl ProcessStatus {
             name: self.name.clone(),
             pid: Some(self.pid.into()),
             exit_code: self.exit_code.map(Into::into),
-            signal: self.signal.map(|s| match s {
-                2 => "SIGINT".into(),
-                9 => "SIGKILL".into(),
-                15 => "SIGTERM".into(),
-                n => format!("SIG{n}"),
-            }),
+            signal: self.signal.map(signal_name),
+            ..Default::default()
         }
+    }
+}
+
+/// `SIGKILL` for 9, ... (the `signal` of `process.exited`).
+pub fn signal_name(n: i32) -> String {
+    match n {
+        2 => "SIGINT".into(),
+        9 => "SIGKILL".into(),
+        15 => "SIGTERM".into(),
+        n => format!("SIG{n}"),
     }
 }
 
