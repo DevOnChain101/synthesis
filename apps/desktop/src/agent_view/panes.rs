@@ -2,8 +2,6 @@
 //! reports, the browser calls and the project files. All read-only, all from `synthesis_view` state
 //! (`AgentPanes`, the stored reports, `project::scan`); none is a terminal.
 
-use std::path::PathBuf;
-
 use gpui::{
     Context, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement as _, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, div, prelude::*, px,
@@ -16,9 +14,6 @@ use synthesis_view::project;
 use super::{AgentView, Tab, with_alpha};
 use crate::theme::hsla;
 use crate::tui_view::panels::{dim, dot, icon, strong, text};
-
-/// Screenshots larger than this are not loaded (the browser tool writes PNGs of a page).
-const MAX_SHOT_BYTES: u64 = 8 << 20;
 
 /// `1.2s` / `340 ms`.
 pub fn fmt_ms(ms: u64) -> String {
@@ -553,8 +548,12 @@ impl AgentView {
                         }),
                 ),
         );
-        let shot = b.screenshot.as_ref().map(PathBuf::from).filter(|p| {
-            std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() <= MAX_SHOT_BYTES)
+        // only a PNG inside this session's artifact directory is opened
+        let shot = s.live.engine.as_ref().and_then(|e| {
+            let root = e.synthesis_home.join("sessions").join(&e.sid);
+            b.screenshot
+                .as_deref()
+                .and_then(|p| synthesis_view::agent::viewable_screenshot(&root, p))
         });
         if let Some(p) = shot {
             col = col.child(

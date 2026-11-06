@@ -227,13 +227,34 @@ fn state_of(status: ToolStatus, not_run: bool) -> CmdState {
     }
 }
 
-/// `Screenshot saved as artifact <path>` in a `browser_screenshot` result.
+/// `Screenshot saved as artifact <path>` in a `browser_screenshot` result. The path is whatever the
+/// OS prints (`C:\...\shot.png` on Windows), so it is only checked with `Path::is_absolute`; it is not
+/// rewritten. Whether it may be opened is [`viewable_screenshot`]'s decision.
 fn screenshot_path(output: &str) -> Option<String> {
     let rest = output.split("saved as artifact ").nth(1)?;
     let line = rest.lines().next()?;
-    // the text version continues with " (images are not supported ...)"
-    let path = line.split(" (").next()?.trim();
-    (path.ends_with(".png") && std::path::Path::new(path).is_absolute()).then(|| path.to_string())
+    // the text version continues with " (images are not supported ...)"; a path may hold " (" itself
+    let path = line.split(" (images are not supported").next()?.trim();
+    let is_png = std::path::Path::new(path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("png"));
+    (is_png && std::path::Path::new(path).is_absolute()).then(|| path.to_string())
+}
+
+/// Screenshots larger than this are not loaded.
+pub const MAX_SHOT_BYTES: u64 = 8 << 20;
+
+/// The screenshot to draw: a PNG file of at most [`MAX_SHOT_BYTES`] that lies inside `root` (the
+/// session's artifact directory). Both sides are canonicalized, so `..`, symlinks and, on Windows,
+/// the verbatim `\\?\` prefix and the letter case compare as the file system sees them.
+pub fn viewable_screenshot(root: &std::path::Path, path: &str) -> Option<std::path::PathBuf> {
+    let real = std::fs::canonicalize(path).ok()?;
+    let root = std::fs::canonicalize(root).ok()?;
+    let md = std::fs::metadata(&real).ok()?;
+    let png = real
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("png"));
+    (png && md.is_file() && md.len() <= MAX_SHOT_BYTES && real.starts_with(&root)).then_some(real)
 }
 
 impl AgentPanes {
@@ -807,6 +828,7 @@ mod tests {
 
     #[test]
     fn browser_calls_keep_the_url_and_the_screenshot_path() {
+        let shot = std::env::temp_dir().join("x").join("shot-1.png");
         let p = run(vec![
             ev(
                 1,
@@ -835,7 +857,7 @@ mod tests {
                     "w2",
                     "browser_screenshot",
                     "ok",
-                    "Screenshot saved as artifact /tmp/x/shot-1.png",
+                    &format!("Screenshot saved as artifact {}", shot.display()),
                     None,
                 ),
             ),
@@ -843,14 +865,46 @@ mod tests {
         assert_eq!(p.url, "https://example.com");
         assert_eq!(p.browser.len(), 2);
         assert_eq!(p.browser[0].summary, "https://example.com");
-        assert_eq!(p.screenshot.as_deref(), Some("/tmp/x/shot-1.png"));
-        assert_eq!(
-            screenshot_path(
-                "Screenshot saved as artifact /a/b.png (images are not supported by this model; page summary follows).\nx"
-            ),
-            Some("/a/b.png".into())
+        assert_eq!(p.screenshot.as_deref(), shot.to_str());
+        let spaced = std::env::temp_dir().join("a (b)").join("c.PNG");
+        let text = format!(
+            "Screenshot saved as artifact {} (images are not supported by this model; page summary follows).\nx",
+            spaced.display()
         );
+        assert_eq!(screenshot_path(&text).as_deref(), spaced.to_str());
         assert_eq!(screenshot_path("saved as artifact rel.png"), None);
+    }
+
+    #[test]
+    fn only_a_small_png_inside_the_artifact_dir_is_viewable() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("session");
+        std::fs::create_dir_all(root.join("browser")).unwrap();
+        let inside = root.join("browser").join("s.png");
+        std::fs::write(&inside, b"png").unwrap();
+        let outside = t.path().join("other.png");
+        std::fs::write(&outside, b"png").unwrap();
+        let text = root.join("browser").join("t.txt");
+        std::fs::write(&text, b"x").unwrap();
+        let s = |p: &std::path::Path| p.to_str().unwrap().to_string();
+        assert!(viewable_screenshot(&root, &s(&inside)).is_some());
+        assert!(
+            viewable_screenshot(&root, &s(&outside)).is_none(),
+            "outside the root"
+        );
+        assert!(viewable_screenshot(&root, &s(&text)).is_none(), "not a png");
+        let escape = root.join("browser").join("..").join("..").join("other.png");
+        assert!(
+            viewable_screenshot(&root, &s(&escape)).is_none(),
+            "dot-dot escape"
+        );
+        assert!(viewable_screenshot(&root, &s(&root.join("browser").join("gone.png"))).is_none());
+        let big = root.join("big.png");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(MAX_SHOT_BYTES + 1)
+            .unwrap();
+        assert!(viewable_screenshot(&root, &s(&big)).is_none(), "size cap");
     }
 
     #[test]
