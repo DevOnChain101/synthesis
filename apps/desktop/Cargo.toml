@@ -28,6 +28,9 @@ path = "src/main.rs"
 [features]
 # Development only: a scripted model for the engine test.
 test-provider = ["synthesis-app/test-provider"]
+# Development only: `--shot out.png --size WxH` renders the TUI view offscreen (headless Metal/wgpu, no window
+# server, no screen recording) to a PNG.
+shot = ["gpui/test-support", "gpui_platform/test-support", "dep:image"]
 
 [dependencies]
 # Exact pins (ADR: docs/specs/desktop.md section 3). `gpui-pre` is the maintainers' snapshot of
@@ -52,6 +55,7 @@ synthesis-tui = { path = "../../crates/synthesis-tui" }
 synthesis-tui-render = { path = "../../crates/synthesis-tui-render" }
 synthesis-view = { path = "../../crates/synthesis-view" }
 serde_json = "1.0.154"
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "time", "sync", "macros"] }
 tokio-util = { version = "0.7.20", default-features = false }
 
@@ -60,6 +64,8 @@ tokio-util = { version = "0.7.20", default-features = false }
 gpui-pre-apple = { version = "=0.3.10", features = ["runtime_shaders"] }
 
 [dev-dependencies]
+# bounds assertions (`VisualTestContext::debug_bounds`) for the layout tests
+gpui = { package = "gpui-pre", version = "=0.3.10", features = ["test-support"] }
 tempfile = "3.27.0"
 # scripted model for the engine test (tests only; never in a release build)
 synthesis-app = { path = "../../crates/synthesis-app", features = ["test-provider"] }

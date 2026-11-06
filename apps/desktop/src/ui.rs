@@ -4,10 +4,11 @@
 use std::borrow::Cow;
 
 use gpui::{
-    App, Context, FontWeight, IntoElement, ParentElement as _, Render, Styled as _, Window, div,
-    prelude::*, px, svg,
+    App, Context, Entity, FontWeight, IntoElement, ParentElement as _, Render, Styled as _, Window,
+    div, prelude::*, px, svg,
 };
 
+use crate::tui_view::{TuiView, layout};
 use crate::{brand, theme};
 use synthesis_tui_render::theme as t;
 
@@ -45,8 +46,12 @@ impl View {
     }
 }
 
+/// Width of the rail; the TUI view takes the rest and lays itself out on that width.
+pub const RAIL_W: f32 = 72.;
+
 pub struct Shell {
     view: View,
+    tui: Entity<TuiView>,
 }
 
 impl Shell {
@@ -88,7 +93,7 @@ impl Render for Shell {
         let rail = div()
             .flex()
             .flex_col()
-            .w(px(72.))
+            .w(px(RAIL_W))
             .h_full()
             .flex_none()
             .bg(theme::hsla(t::SURFACE))
@@ -125,6 +130,11 @@ impl Render for Shell {
                     .text_color(theme::hsla(t::MUTED))
                     .child(v.blurb()),
             );
+        let content = if v == View::Tui {
+            div().flex_1().min_w(px(0.)).child(self.tui.clone())
+        } else {
+            body
+        };
         div()
             .size_full()
             .flex()
@@ -133,7 +143,7 @@ impl Render for Shell {
             .text_size(px(13.))
             .font_family(brand::UI_FONT)
             .child(rail)
-            .child(body)
+            .child(content)
     }
 }
 
@@ -168,9 +178,18 @@ pub fn open(cx: &mut App) {
             gpui::size(px(1280.), px(800.)),
             cx,
         ))),
+        // the design's minimum app size (cli.html `#app`) plus the rail
+        window_min_size: Some(gpui::size(px(layout::MIN_W + RAIL_W), px(layout::MIN_H))),
         ..Default::default()
     };
-    if let Err(e) = cx.open_window(opts, |_, cx| cx.new(|_| Shell { view: View::Tui })) {
+    let opened = cx.open_window(opts, |_, cx| {
+        let tui = cx.new(|_| TuiView::new(RAIL_W, layout::Hidden::default()));
+        cx.new(|_| Shell {
+            view: View::Tui,
+            tui,
+        })
+    });
+    if let Err(e) = opened {
         eprintln!("synthesis-desktop: cannot open the window: {e}");
     }
 }

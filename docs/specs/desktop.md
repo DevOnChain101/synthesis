@@ -76,7 +76,12 @@ of the classic TUI design, in this repo, running the Rust engine in process.
 
 Views are placeholders; `InputProvider` answers nothing; no stored-session resume; no
 plan/question dialogs, browser or verification UI; Linux/Windows unbuilt (no ConPTY need any more);
-no CI job for the desktop crate; no screenshot tooling (the archived offscreen `--shot` feature was dropped).
+no CI job for the desktop crate.
+
+TUI view (`src/tui_view/`, phase 2): native panels on a sample `Snapshot` (`sample.rs`; the real view-model
+replaces it), metrics from `cli.html` `#view1` (`layout.rs`), topology wires (`topo.rs`). Layout tests use
+gpui test support. Offscreen PNG: `cargo run -p synthesis-desktop --features shot -- --shot out.png --size 1400x900
+[--hide session,tools,...]` (headless Metal/wgpu, no window server). Topology mode L (tall and narrow) is not ported.
 
 ### Feature gaps against the TUI (view-model status)
 
