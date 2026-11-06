@@ -9,6 +9,7 @@ pub mod panels;
 pub mod sample;
 #[cfg(feature = "shot")]
 pub mod shot;
+pub mod snapshot;
 pub mod topo;
 
 use gpui::{

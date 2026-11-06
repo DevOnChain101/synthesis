@@ -5,6 +5,8 @@
 
 #[derive(Clone, Debug)]
 pub struct Workspace {
+    /// What a click selects (`WorkspaceRow::key`; empty in the sample).
+    pub key: String,
     pub name: String,
     pub path: String,
     pub sessions: u32,
@@ -13,6 +15,10 @@ pub struct Workspace {
 
 #[derive(Clone, Debug)]
 pub struct Running {
+    /// What a click opens (the session id; empty in the sample).
+    pub id: String,
+    /// Another process's session (the peers listing): not clickable.
+    pub peer: bool,
     pub title: String,
     pub branch: String,
     pub age: String,
@@ -139,12 +145,15 @@ fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
 
 pub fn sample() -> Snapshot {
     let ws = |n: &str, p: &str, c: u32, sel: bool| Workspace {
+        key: String::new(),
         name: s(n),
         path: s(p),
         sessions: c,
         selected: sel,
     };
     let run = |t: &str, b: &str, a: &str, live: bool, sel: bool| Running {
+        id: String::new(),
+        peer: false,
         title: s(t),
         branch: s(b),
         age: s(a),
