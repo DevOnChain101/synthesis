@@ -242,7 +242,8 @@ pub fn load_settings_with_file(
     load_settings_layers(ctx, trust, &managed_settings_path(), extra)
 }
 
-fn load_settings_layers(
+/// All layers with an explicit managed file and an optional `--settings` file.
+pub fn load_settings_layers(
     ctx: &LoadContext<'_>,
     trust: ProjectTrust,
     managed: &Path,
@@ -551,7 +552,7 @@ mod tmp_tests {
 }
 
 /// `Ok(None)`: no such file. `Err`: it exists but is unusable (names the file, never a value).
-fn read_json(path: &Path, what: &str) -> Result<Option<Value>, String> {
+pub fn read_json(path: &Path, what: &str) -> Result<Option<Value>, String> {
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),

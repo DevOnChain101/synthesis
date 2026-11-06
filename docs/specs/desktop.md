@@ -91,8 +91,7 @@ tools and skills, conversation. Not done, with where the data would come from:
 - Browser screenshot stream: TODO. There is no screenshot event today; the source would be
   `synthesis-browser` (a new `browser.screenshot` event with an `ArtifactRef`, read back through
   `Reader::artifact_bytes`). `Event::BrowserLoginRequired` is already in the stream and can be shown.
-- Settings write API (phase 2): TODO. Reads and `persist_user_tui` live in `synthesis-settings`; a
-  `SettingsModel` with typed edits and validation would sit next to it, then be re-exported here.
+- Settings write API: done in `crates/synthesis-settings-ui` (section 6). The GPUI form is not built.
 - Multi-session tabs: TODO. `ViewState` is one session; tabs are a `Vec<ViewState>` keyed by session id
   in the desktop, fed by one event channel per `engine` run. Needs the engine to host several sessions.
 - Peers refresh: `ViewState::set_peers` takes the harness rows; the desktop must poll
@@ -100,3 +99,95 @@ tools and skills, conversation. Not done, with where the data would come from:
 - Uncommitted `+N -N` needs the host's trust decision per folder (`LoadOpts::trusted`) and runs git
   with a 5 s limit per call, so load off the UI thread.
 - Interactive PTY: not wanted (owner decision).
+
+## 6. Settings (backend: `crates/synthesis-settings-ui`)
+
+**What the design has.** `cli.html` has no settings form with these sections. USER & PROMPT, MEMORY,
+EXECUTION, GUARDS, HOOKS, MCP, SKILLS and SUB-AGENTS are the status cards of the topology (`topology1`,
+`topology2`); its only settings hook is the `synthesis-settings` message (theme, font, font size, opacity), which is
+appearance and has no backend key (the desktop owns it). The sections below are the same titles, filled with the real keys.
+
+**Crate.** Pure data, no UI dependency. Separate from `synthesis-settings` because it reuses the validators of
+`synthesis-harness` (`AutoCompact`, `ToolSearchMode`, `ShellSettings`), and the harness depends on `synthesis-settings`.
+- `SettingsSchema::new()`: `Field { key (dotted path), section, label, kind (Bool | Enum | Int{min,max} | Float{min,max} |
+  List | ReadOnly), default, help, scope (UserOnly | Layered | Tighten), restart, edit (Yes | Confirm(reason) | No(reason)) }`.
+- `SettingsStore::open(&LoadContext, ProjectTrust, managed_path, --settings file)`: `entries` (value in force, `Origin`
+  Default/User/Project/Local/Flag/Managed, the USER file's own value, and the layers that hold the key but may not set it, each
+  with the reason), plus the loader's `diagnostics` and `errors`.
+- `set(key, value)` / `set_confirmed` (for `Edit::Confirm` keys) / `unset(key)` write the USER `settings.json` only, with
+  `synthesis_settings::edit_json_atomic` (temp file and rename, mode kept, 0600 when new, a file that cannot be parsed or a parent that
+  is not an object is never overwritten, every other key and the key order stay). Checks, in order: known key, edit policy,
+  managed lock (`SetError::Locked`), the kind (type, enum, range), a credential-shaped literal, then the loaders' own validators on the
+  document about to be written. Errors name the key and never echo a refused secret. Returns the diagnostics after the write.
+- MCP servers are not in the store. Add and remove call `synthesis_app::mcp::{add_server, remove_server}`, the code `synt mcp add|remove`
+  runs (name check, URL/header/env/args credential guards, closed-schema validation, atomic 0600 write); `synt mcp` now calls them too.
+- The TUI `/config` still writes `synt.tui` through `persist_user_tui`; switching it was not zero-risk (it writes the whole subtree and the
+  TUI would gain a dependency on this crate). Both produce the same file.
+
+**Sections and keys.** Scope: `user file only` = project, local, `--settings` and managed copies are ignored (shown refused with that
+reason); `layered` = user, `--settings`, managed, and project/local only with a trusted project; `may tighten` = an untrusted project may
+also set it. Restart: a running session keeps the old value. Editable = the UI may write it (always to the user file).
+
+| Key | Section | Scope | Restart | Editable from the UI |
+|---|---|---|---|---|
+| `synt.memory.enabled` | MEMORY | user file only | yes | yes |
+| `synt.memory.reflection` | MEMORY | user file only | yes | yes, after confirm: this sends task digests to your model provider |
+| `synt.memory.daily_budget_usd` | MEMORY | user file only | yes | yes |
+| `synt.memory.disabled_workspaces` | MEMORY | user file only | yes | yes |
+| `synt.images.retentionDays` | MEMORY | user file only | yes | yes |
+| `synt.budget.max_turns` | EXECUTION | layered (project if trusted) | yes | yes |
+| `synt.budget.max_tool_calls` | EXECUTION | layered (project if trusted) | yes | yes |
+| `synt.budget.max_verify_attempts` | EXECUTION | layered (project if trusted) | yes | yes |
+| `synt.verification.max_attempts` | EXECUTION | layered (project if trusted) | yes | yes |
+| `synt.verification.inferred_only` | EXECUTION | layered (project if trusted) | yes | yes, after confirm: allow_passed lets inferred checks alone mark a task passed |
+| `synt.verification.checks` | EXECUTION | layered (project if trusted) | yes | no: each check is a shell command the verifier runs; edit settings.json by hand |
+| `synt.context.auto_compact` | EXECUTION | user file only | yes | yes |
+| `synt.context.auto_compact_threshold` | EXECUTION | user file only | yes | yes |
+| `synt.shell.user_commands_model_turn` | EXECUTION | user file only | yes | yes |
+| `synt.shell.user_commands_unsandboxed` | EXECUTION | user file only | yes | yes, after confirm: this runs your `!` commands without the OS sandbox |
+| `synt.modelInfo.fetch` | EXECUTION | user file only | yes | yes |
+| `synt.compat.write_node_transcripts` | EXECUTION | layered (project if trusted) | yes | yes |
+| `synt.browser.login_timeout_sec` | EXECUTION | user file only | yes | yes |
+| `synt.browser.allow_unsandboxed` | EXECUTION | user file only | yes | no: turns the browser sandbox off; edit settings.json by hand |
+| `synt.browser.secrets` | EXECUTION | user file only | yes | no: references to credentials; edit settings.json by hand ({env:} / {file:} only) |
+| `synt.browser.profiles` | EXECUTION | user file only | yes | no: decides which domains a login may browse; edit settings.json by hand |
+| `synt.browser.approved` | EXECUTION | user file only | yes | no: pre-approves logins for unattended runs; edit settings.json by hand |
+| `synt.pricing` | EXECUTION | user file only | yes | no: a table keyed by provider/model; edit settings.json by hand |
+| `env` | EXECUTION | layered (project if trusted) | yes | no: variables for Bash, hooks and verification; secret-shaped names are refused by the loader, edit settings.json by hand |
+| `permissions.defaultMode` | GUARDS | layered (project may tighten) | yes | yes, after confirm: a mode other than default changes what runs without asking |
+| `permissions.blockReadsOutsideWorkingDirectories` | GUARDS | user file only | yes | yes, after confirm: turning this off lets the agent read outside the workspace |
+| `permissions.allow` | GUARDS | layered (project if trusted) | yes | no: an allow rule grants a tool without asking; add them through the approval prompt (allow always) or by hand |
+| `permissions.deny` | GUARDS | layered (project may tighten) | yes | no: rule syntax is validated by synthesis-permissions, not wired here yet; edit by hand |
+| `permissions.ask` | GUARDS | layered (project may tighten) | yes | no: rule syntax is validated by synthesis-permissions, not wired here yet; edit by hand |
+| `permissions.additionalDirectories` | GUARDS | layered (project if trusted) | yes | no: widens the filesystem the agent may touch; edit by hand |
+| `autoMode` | GUARDS | user file only | yes | no: steers the classifier that approves without asking; edit settings.json by hand |
+| `hooks` | HOOKS | layered (project if trusted) | yes | no: hooks are commands run with your privileges; edit settings.json by hand |
+| `disableAllHooks` | HOOKS | layered (project if trusted) | yes | yes, after confirm: this also switches off hooks you rely on as safeguards |
+| `synt.mcp.toolSearch` | MCP | user file only | yes | yes |
+| `synt.mcp.env_passthrough` | MCP | user file only | yes | no: names of variables handed to stdio servers, secrets included; edit settings.json by hand |
+| `synt.mcp.servers` | MCP | user file only | yes | no: per-server write_tools/read_tools; read_tools weakens the guard, edit by hand |
+| `enabledMcpjsonServers` | MCP | layered (project if trusted) | yes | no: approving a project server lets a repository start a process; use --approve-mcp NAME@HASH |
+| `enableAllProjectMcpServers` | MCP | layered (project if trusted) | yes | no: lets any repository start processes; edit by hand |
+| `disabledMcpjsonServers` | MCP | layered (project may tighten) | yes | yes |
+| `synt.peers` | SUB-AGENTS | user file only | yes | no: messaging between sessions (off by default); edit settings.json by hand |
+| `synt.tui.logo` | INTERFACE | user file only | no | yes |
+| `synt.tui.show_thinking` | INTERFACE | user file only | no | yes |
+| `synt.tui.verbose` | INTERFACE | user file only | no | yes |
+| `synt.tui.diffs_expanded` | INTERFACE | user file only | no | yes |
+| `synt.tui.queue_indicators` | INTERFACE | user file only | no | yes |
+| `synt.tui.motion` | INTERFACE | user file only | no | yes |
+| `synt.tui.mouse_capture` | INTERFACE | user file only | no | yes |
+| `synt.tui.copy_on_select` | INTERFACE | user file only | no | yes |
+| `synt.tui.panels.{session,mcp,tools,activity,status,tokens,topology,usage}` | INTERFACE | user file only | no | yes |
+
+Why the "no" keys: an `allow` rule, an extra directory, a project MCP approval, `env_passthrough` and `read_tools` widen what the agent
+may do or leak; hooks, verification checks and `autoMode` run or steer commands; browser secrets/profiles/pre-approvals are credential
+adjacent (ADR-011: only `{env:}`/`{file:}` references, written by hand); `deny` and `ask` would be safe to add but their rule syntax is
+validated in `synthesis-permissions`, not wired here yet (follow-up). A managed file that sets a key locks it (`Locked`).
+
+**Design controls with no backend key** (shown read-only or not at all): the user name and task text (USER & PROMPT: session state);
+model and effort (`synt.json` / `state.json`, `/model` `/effort`); safety, policy, sandbox and network toggles (GUARDS: `--sandbox` and
+`--network` flags of the run); approval "granular" (only `permissions.defaultMode` and rules); proxy (standard `HTTP(S)_PROXY` variables);
+per-skill on/off and planner/coder/reviewer toggles (SKILLS, SUB-AGENTS: files in `skills/` and `agents/`); per-event hook toggles
+(pre-tool, post-tool, on-error, on-done: hooks are defined per event, only `disableAllHooks` exists); MEMORY learned/feedback counters
+(data, not settings); EXECUTION tool-call, error and success counters (live status); theme, font, opacity (desktop appearance).

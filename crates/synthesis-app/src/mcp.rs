@@ -675,27 +675,27 @@ pub enum ScopeArg {
 
 #[derive(clap::Args)]
 pub struct AddArgs {
-    name: String,
+    pub name: String,
     #[arg(long, value_enum, default_value = "user")]
-    scope: ScopeArg,
+    pub scope: ScopeArg,
     #[arg(long)]
-    url: Option<String>,
+    pub url: Option<String>,
     /// `http` (streamable, default) or `sse` (legacy).
     #[arg(long, default_value = "http")]
-    transport: String,
+    pub transport: String,
     /// `KEY=VALUE`; secret-looking keys need a `${VAR}` value.
     #[arg(long)]
-    env: Vec<String>,
+    pub env: Vec<String>,
     /// `Name: value`; Authorization and similar need a `${VAR}` value.
     #[arg(long)]
-    header: Vec<String>,
+    pub header: Vec<String>,
     #[arg(long)]
-    cwd: Option<std::path::PathBuf>,
+    pub cwd: Option<std::path::PathBuf>,
     /// Replace a server of the same name (otherwise `add` refuses).
     #[arg(long)]
-    force: bool,
+    pub force: bool,
     #[arg(last = true)]
-    command: Vec<String>,
+    pub command: Vec<String>,
 }
 
 /// Name split into lowercase words at `_ - . ` and other punctuation, camelCase and digits:
@@ -1337,6 +1337,32 @@ fn list_prompts(env: &Env, h: &crate::Homes, a: &PromptsArgs) -> Result<u8, Stri
     })
 }
 
+/// `synt mcp add` on `file` (`<home>/synt.json` or `<cwd>/.mcp.json`): name check, no overwrite
+/// unless `a.force`, the credential guards (`entry`, `check_url`) and the atomic private write.
+/// Also what a settings UI calls, so the guards exist once.
+pub fn add_server(file: &Path, a: &AddArgs) -> Result<(), String> {
+    if !synthesis_mcp::valid_server_name(&a.name) {
+        return Err("invalid server name (allowed: 1-64 of A-Z a-z 0-9 _ . -)".into());
+    }
+    if !a.force && server_exists(file, &a.name) {
+        return Err(format!(
+            "server {:?} already exists in {}; use --force to replace it",
+            a.name,
+            file.display()
+        ));
+    }
+    edit_file(file, &a.name, Some(entry(a)?)).map(drop)
+}
+
+/// `synt mcp remove` on `file`; an error when the server is not there.
+pub fn remove_server(file: &Path, name: &str) -> Result<(), String> {
+    if edit_file(file, name, None)? {
+        Ok(())
+    } else {
+        Err(format!("no server {name:?} in {}", file.display()))
+    }
+}
+
 pub fn run_cmd(env: &Env, cmd: McpCmd) -> Result<u8, String> {
     let h = crate::homes(env)?;
     // `.` is the process directory; project scope writes `./.mcp.json`
@@ -1350,18 +1376,8 @@ pub fn run_cmd(env: &Env, cmd: McpCmd) -> Result<u8, String> {
         McpCmd::Prompts(a) => list_prompts(env, &h, &a),
         McpCmd::Add(a) => {
             let cwd = cwd_of(&a.cwd)?;
-            if !synthesis_mcp::valid_server_name(&a.name) {
-                return Err("invalid server name (allowed: 1-64 of A-Z a-z 0-9 _ . -)".into());
-            }
             let f = scope_file(a.scope, &h.synthesis, &cwd);
-            if !a.force && server_exists(&f, &a.name) {
-                return Err(format!(
-                    "server {:?} already exists in {}; use --force to replace it",
-                    a.name,
-                    f.display()
-                ));
-            }
-            edit_file(&f, &a.name, Some(entry(&a)?))?;
+            add_server(&f, &a)?;
             out!("added {} to {}", a.name, f.display());
             if matches!(a.scope, ScopeArg::Project) {
                 out!(
@@ -1372,12 +1388,9 @@ pub fn run_cmd(env: &Env, cmd: McpCmd) -> Result<u8, String> {
         }
         McpCmd::Remove { name, scope, cwd } => {
             let f = scope_file(scope, &h.synthesis, &cwd_of(&cwd)?);
-            if edit_file(&f, &name, None)? {
-                out!("removed {name} from {}", f.display());
-                Ok(0)
-            } else {
-                Err(format!("no server {name:?} in {}", f.display()))
-            }
+            remove_server(&f, &name)?;
+            out!("removed {name} from {}", f.display());
+            Ok(0)
         }
     }
 }
@@ -1463,6 +1476,44 @@ mod tests {
             "could not reach the server (is the url right and the server running?)"
         );
         assert_eq!(plain_connect_error("a [x] b"), "a b");
+    }
+
+    #[test]
+    fn add_and_remove_server_keep_the_guards() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("synt.json");
+        let args = |name: &str, header: &[&str]| AddArgs {
+            name: name.into(),
+            scope: ScopeArg::User,
+            url: Some("https://example.com/mcp".into()),
+            transport: "http".into(),
+            env: vec![],
+            header: header.iter().map(|s| s.to_string()).collect(),
+            cwd: None,
+            force: false,
+            command: vec![],
+        };
+        add_server(&f, &args("ok", &["Authorization: Bearer ${TOK}"])).unwrap();
+        let before = std::fs::read(&f).unwrap();
+        assert!(
+            add_server(&f, &args("ok", &[]))
+                .unwrap_err()
+                .contains("already exists")
+        );
+        let e = add_server(&f, &args("bad", &["Authorization: Bearer abcdefgh12345"])).unwrap_err();
+        assert!(e.contains("credential"), "{e}");
+        assert!(
+            add_server(&f, &args("bad name", &[]))
+                .unwrap_err()
+                .contains("invalid server name")
+        );
+        assert_eq!(
+            std::fs::read(&f).unwrap(),
+            before,
+            "a refused add writes nothing"
+        );
+        remove_server(&f, "ok").unwrap();
+        assert!(remove_server(&f, "ok").is_err());
     }
 
     #[test]

@@ -7248,6 +7248,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "synthesis-settings-ui"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "synthesis-config",
+ "synthesis-harness",
+ "synthesis-mcp",
+ "synthesis-settings",
+ "tempfile",
+]
+
+[[package]]
 name = "synthesis-terminal"
 version = "0.1.0"
 dependencies = [
