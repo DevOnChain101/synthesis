@@ -326,7 +326,7 @@ fn node_colour(p: Pos) -> t::Rgb {
     }
 }
 
-fn with_alpha(c: Hsla, a: f32) -> Hsla {
+pub(super) fn with_alpha(c: Hsla, a: f32) -> Hsla {
     Hsla { a, ..c }
 }
 

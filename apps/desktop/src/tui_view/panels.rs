@@ -1,8 +1,9 @@
 //! Panel building blocks and the panel bodies of the TUI view (`cli.html` `.panel`, `.rows`, `.kv`).
 
 use gpui::{
-    AnyElement, Div, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _,
-    div, prelude::*, px, svg,
+    AnyElement, App, ClickEvent, Div, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div, prelude::*, px,
+    svg,
 };
 use synthesis_tui_render::theme as t;
 
@@ -183,27 +184,42 @@ fn two_lines(top: String, sub: String, selected: bool) -> Div {
         )
 }
 
-pub fn workspace_rows(ws: &[Workspace]) -> Div {
-    div().flex().flex_col().children(ws.iter().map(|w| {
-        row_box(w.selected)
-            .child(icon("folder", 14., hsla(t::ACCENT)))
-            .child(two_lines(w.name.clone(), w.path.clone(), w.selected))
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(dim())
-                    .child(w.sessions.to_string()),
-            )
-    }))
+/// A click on row `i`.
+pub type OnClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+
+pub fn workspace_rows(ws: &[Workspace], on_click: Option<&dyn Fn(usize) -> OnClick>) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .children(ws.iter().enumerate().map(|(i, w)| {
+            row_box(w.selected)
+                .id(("ws-row", i))
+                .when_some(on_click, |d, f| d.cursor_pointer().on_click(f(i)))
+                .child(icon("folder", 14., hsla(t::ACCENT)))
+                .child(two_lines(w.name.clone(), w.path.clone(), w.selected))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(dim())
+                        .child(w.sessions.to_string()),
+                )
+        }))
 }
 
-pub fn running_rows(rs: &[Running]) -> Div {
-    div().flex().flex_col().children(rs.iter().map(|r| {
-        row_box(r.selected)
-            .child(dot(hsla(t::SUCCESS), r.live).when(!r.live, |d| d.border_color(dim())))
-            .child(two_lines(r.title.clone(), r.branch.clone(), r.selected))
-            .child(div().flex_none().text_color(dim()).child(r.age.clone()))
-    }))
+pub fn running_rows(rs: &[Running], on_click: Option<&dyn Fn(usize) -> OnClick>) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .children(rs.iter().enumerate().map(|(i, r)| {
+            row_box(r.selected)
+                .id(("run-row", i))
+                .when_some(on_click.filter(|_| !r.peer), |d, f| {
+                    d.cursor_pointer().on_click(f(i))
+                })
+                .child(dot(hsla(t::SUCCESS), r.live).when(!r.live, |d| d.border_color(dim())))
+                .child(two_lines(r.title.clone(), r.branch.clone(), r.selected))
+                .child(div().flex_none().text_color(dim()).child(r.age.clone()))
+        }))
 }
 
 pub fn mcp_rows(rows: &[McpRow]) -> Div {

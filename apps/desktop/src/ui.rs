@@ -8,6 +8,7 @@ use gpui::{
     div, prelude::*, px, svg,
 };
 
+use crate::tui_view::driver::LiveCfg;
 use crate::tui_view::{TuiView, layout};
 use crate::{brand, theme};
 use synthesis_tui_render::theme as t;
@@ -163,8 +164,8 @@ pub fn register_fonts(cx: &App) {
     }
 }
 
-/// Opens the main window.
-pub fn open(cx: &mut App) {
+/// Opens the main window: the live view when `live` is given, else the sample.
+pub fn open(cx: &mut App, live: Option<LiveCfg>) {
     let mac = cfg!(target_os = "macos");
     let opts = gpui::WindowOptions {
         titlebar: Some(gpui::TitlebarOptions {
@@ -182,8 +183,12 @@ pub fn open(cx: &mut App) {
         window_min_size: Some(gpui::size(px(layout::MIN_W + RAIL_W), px(layout::MIN_H))),
         ..Default::default()
     };
-    let opened = cx.open_window(opts, |_, cx| {
-        let tui = cx.new(|_| TuiView::new(RAIL_W, layout::Hidden::default()));
+    let opened = cx.open_window(opts, |window, cx| {
+        let tui = cx.new(|cx| match live {
+            Some(cfg) => TuiView::live(window, cx, cfg, layout::Hidden::default(), RAIL_W),
+            None => TuiView::new(RAIL_W, layout::Hidden::default()),
+        });
+        tui.update(cx, |t, cx| t.start(window, cx));
         cx.new(|_| Shell {
             view: View::Tui,
             tui,

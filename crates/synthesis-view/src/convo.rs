@@ -32,8 +32,26 @@ pub enum Item {
         summary: String,
         state: ToolState,
         preview: String,
+        /// The result text (whole up to 64 KiB); while a command runs, its live output.
+        output: String,
+        duration_ms: u64,
         /// The file a Write/Edit-style tool changes (an evidence card with its diff).
         file: Option<String>,
+        /// Structured line diff of that change (`ToolCompleted.diff`).
+        diff: Option<Value>,
+    },
+    /// The model's reasoning; the window shows it only with `show_thinking`.
+    Thinking(String),
+    /// A background sub-agent (foreground ones show as their Task row).
+    Agent {
+        id: String,
+        kind: String,
+        running: bool,
+    },
+    /// How a task ended: `ok` for completed, else the status word and the reason.
+    TaskEnd {
+        ok: bool,
+        text: String,
     },
     /// A verification report: `status` is `passed`, `failed`, ... and `summary` one check per line.
     Verification {
@@ -76,6 +94,9 @@ pub struct Convo {
     pub plan: Vec<Step>,
     /// Sub-agents that started and have not stopped (`agent_type`).
     pub agents: Vec<(String, String)>,
+    /// Turns of the task in progress (for its end line).
+    turns: u32,
+    started_ms: Option<i64>,
 }
 
 /// The file a Write/Edit-style tool call changes.
@@ -180,18 +201,58 @@ impl Convo {
         // sub-agent chatter is shown on the Activity page, not in the main conversation
         let main = e.agent_id.is_none();
         match &e.event {
-            Event::TaskStarted { .. } => self.running = true,
-            Event::TaskEnded { usage, .. } => {
+            Event::TaskStarted { .. } => {
+                self.running = true;
+                self.turns = 0;
+                self.started_ms = crate::model::parse_ts(&e.ts);
+            }
+            Event::TurnStarted { .. } if main => self.turns += 1,
+            Event::TaskEnded {
+                status,
+                reason,
+                usage,
+                ..
+            } => {
                 self.running = false;
                 self.close_stream();
+                let secs = crate::model::parse_ts(&e.ts)
+                    .zip(self.started_ms)
+                    .map_or(0, |(end, start)| ((end - start) / 1000).max(0));
+                self.items
+                    .push(if *status == synthesis_events::TaskStatus::Completed {
+                        Item::TaskEnd {
+                            ok: true,
+                            text: format!(
+                                "Done \u{b7} {} turn{} \u{b7} {secs}s",
+                                self.turns,
+                                if self.turns == 1 { "" } else { "s" }
+                            ),
+                        }
+                    } else {
+                        Item::TaskEnd {
+                            ok: false,
+                            text: format!("task {status:?}: {reason}").to_lowercase(),
+                        }
+                    });
                 self.tokens = self.tokens.max(usage.input_tokens + usage.output_tokens);
                 self.cost_usd = self.cost_usd.max(usage.cost_usd.unwrap_or(0.0));
             }
+            // an empty display text marks the harness's own follow-up note to the model
+            Event::UserMessage {
+                display_text: Some(d),
+                ..
+            } if d.is_empty() || d == "verification feedback" || d == "stop hook feedback" => {}
             Event::UserMessage {
                 text, display_text, ..
             } if main => self.items.push(Item::User(
                 display_text.clone().unwrap_or_else(|| text.clone()),
             )),
+            Event::ModelDelta { kind, text, .. } if main && kind == "thinking" => {
+                match self.items.last_mut() {
+                    Some(Item::Thinking(t)) => t.push_str(text),
+                    _ => self.items.push(Item::Thinking(text.clone())),
+                }
+            }
             Event::ModelDelta { kind, text, .. } if main && kind == "text" => {
                 match self.items.last_mut() {
                     Some(Item::Assistant {
@@ -246,15 +307,34 @@ impl Convo {
                     .collect();
             }
             Event::SubagentStarted(i) => {
-                self.agents.push((i.agent_id.clone(), i.agent_type.clone()))
+                self.agents.push((i.agent_id.clone(), i.agent_type.clone()));
+                if i.background {
+                    self.items.push(Item::Agent {
+                        id: i.agent_id.clone(),
+                        kind: i.agent_type.clone(),
+                        running: true,
+                    });
+                }
             }
-            Event::SubagentStopped(i) => self.agents.retain(|(id, _)| *id != i.agent_id),
+            Event::SubagentStopped(i) => {
+                self.agents.retain(|(id, _)| *id != i.agent_id);
+                for it in &mut self.items {
+                    if let Item::Agent { id, running, .. } = it
+                        && *id == i.agent_id
+                    {
+                        *running = false;
+                    }
+                }
+            }
+            // unverified and blocked runs are said by the task end line; failed and passed are shown
             Event::VerificationCompleted {
                 status, summary, ..
-            } if main => self.items.push(Item::Verification {
-                status: status.clone(),
-                summary: summary.clone(),
-            }),
+            } if main && matches!(status.as_str(), "passed" | "failed") => {
+                self.items.push(Item::Verification {
+                    status: status.clone(),
+                    summary: summary.clone(),
+                })
+            }
             Event::ToolRequested {
                 tool_call_id,
                 name,
@@ -268,7 +348,10 @@ impl Convo {
                     summary: summarize_input(name, input),
                     state: ToolState::Running,
                     preview: String::new(),
+                    output: String::new(),
+                    duration_ms: 0,
                     file: changed_file(name, input),
+                    diff: None,
                 });
             }
             Event::ToolCompleted {
@@ -276,12 +359,25 @@ impl Convo {
                 status,
                 not_run,
                 preview,
+                output: full,
+                duration_ms: ms,
+                diff: d,
                 ..
             } => {
                 if let Some(Item::Tool {
-                    state, preview: p, ..
+                    state,
+                    preview: p,
+                    output,
+                    duration_ms,
+                    diff,
+                    ..
                 }) = self.tool(tool_call_id)
                 {
+                    if let Some(f) = full {
+                        output.clone_from(f);
+                    }
+                    *duration_ms = *ms;
+                    diff.clone_from(d);
                     *state = if *not_run {
                         ToolState::NotRun
                     } else if *status == ToolStatus::Ok {
@@ -290,6 +386,19 @@ impl Convo {
                         ToolState::Failed
                     };
                     p.clone_from(preview);
+                }
+            }
+            // live output of a running command; the completed event replaces it with the result
+            Event::ToolOutput {
+                tool_call_id, text, ..
+            } => {
+                if let Some(Item::Tool {
+                    output,
+                    state: ToolState::Running,
+                    ..
+                }) = self.tool(tool_call_id)
+                {
+                    output.push_str(text);
                 }
             }
             Event::ToolApprovalRequired {
@@ -477,5 +586,64 @@ mod tests {
         let mut c = Convo::default();
         c.apply(&e);
         assert!(c.items.is_empty());
+    }
+
+    #[test]
+    fn thinking_tool_output_diff_and_the_task_end_line() {
+        let mut c = Convo::default();
+        c.apply(&ev(
+            "task.started",
+            json!({"request":"r","acceptance_criteria":[],"budget":{"max_turns":5,"max_tool_calls":5,"max_verify_attempts":1}}),
+        ));
+        c.apply(&ev(
+            "turn.started",
+            json!({"model":"m","provider":"p","iteration":1}),
+        ));
+        for t in ["hm", "mm"] {
+            c.apply(&ev(
+                "model.delta",
+                json!({"block_index":0,"kind":"thinking","text":t}),
+            ));
+        }
+        c.apply(&ev(
+            "tool.requested",
+            json!({"tool_call_id":"t1","name":"Edit","input":{"file_path":"/a/b.rs"},"input_truncated":false}),
+        ));
+        c.apply(&ev(
+            "tool.output",
+            json!({"tool_call_id":"t1","stream":"merged","text":"live","seq":1}),
+        ));
+        assert!(matches!(&c.items[1], Item::Tool { output, .. } if output == "live"));
+        c.apply(&ev(
+            "tool.completed",
+            json!({"tool_call_id":"t1","name":"Edit","status":"ok","is_error":false,"not_run":false,
+                "duration_ms":7,"preview":"p","bytes":4,"truncated":false,"output":"whole","diff":{"added":1}}),
+        ));
+        c.apply(&ev(
+            "task.ended",
+            json!({"status":"completed","reason":"done","usage":{"input_tokens":1,"output_tokens":1},
+                "changed_files":[],"artifacts_root":"/x"}),
+        ));
+        assert_eq!(c.items[0], Item::Thinking("hmmm".into()));
+        assert!(
+            matches!(&c.items[1], Item::Tool { output, duration_ms: 7, diff: Some(_), .. } if output == "whole")
+        );
+        assert!(
+            matches!(&c.items[2], Item::TaskEnd { ok: true, text } if text.starts_with("Done \u{b7} 1 turn"))
+        );
+    }
+
+    #[test]
+    fn harness_follow_ups_and_unverified_reports_stay_out_of_the_chat() {
+        let mut c = Convo::default();
+        c.apply(&ev(
+            "user.message",
+            json!({"text": "verification feedback ...", "display_text": "verification feedback", "images": []}),
+        ));
+        c.apply(&ev(
+            "verification.completed",
+            json!({"report_id": "r", "status": "unverified", "attempt": 1, "summary": "s"}),
+        ));
+        assert!(c.items.is_empty(), "{:?}", c.items);
     }
 }

@@ -4,11 +4,15 @@
 //! right Topology and Usage; top bar and key hint bar. It reads a `Snapshot` (see `sample`); no
 //! terminal, no PTY. Panels hide with the TUI's `panels.*` keys (`layout::Hidden`).
 
+pub mod chat;
+pub mod dialog;
+pub mod driver;
 pub mod layout;
 pub mod panels;
 pub mod sample;
 #[cfg(feature = "shot")]
 pub mod shot;
+pub mod snapshot;
 pub mod topo;
 
 use gpui::{
@@ -23,6 +27,7 @@ use self::layout::{
 use self::panels::{Head, dim, icon, panel, strong, text};
 use self::sample::{Snapshot, sample};
 use crate::{brand, theme::hsla};
+use gpui::prelude::FluentBuilder as _;
 
 /// The TUI view's font (bundled, SIL OFL).
 pub const MONO: &str = "JetBrains Mono";
@@ -54,6 +59,8 @@ pub fn tracked(s: &str, size: f32, em: f32, c: Hsla) -> Div {
 
 pub struct TuiView {
     snap: Snapshot,
+    /// The engine, the chat and the prompt; `None` draws the sample (layout tests, `--sample`, `--shot`).
+    live: Option<driver::LiveUi>,
     hidden: layout::Hidden,
     /// Width taken by chrome beside the view (the shell's rail): breakpoints use the view's own width.
     inset: f32,
@@ -63,8 +70,38 @@ impl TuiView {
     pub fn new(inset: f32, hidden: layout::Hidden) -> Self {
         Self {
             snap: sample(),
+            live: None,
             hidden,
             inset,
+        }
+    }
+
+    /// Before drawing: rebuild the snapshot from the live state when it changed, and keep the chat
+    /// stuck to the newest row unless the person scrolled up.
+    fn refresh(&mut self, window: &mut Window) {
+        let Some(lu) = &mut self.live else { return };
+        let _ = window;
+        if lu.dirty {
+            lu.dirty = false;
+            self.snap = snapshot::build(
+                &lu.live,
+                crate::live::now_ms(),
+                lu.cfg.tz_min,
+                lu.cfg.home.as_deref(),
+            );
+        }
+        let (o, mx) = (lu.scroll.offset().y, lu.scroll.max_offset().y);
+        if lu.follow {
+            // wheel or PgUp moved it above where we left it: the person is reading
+            if o > lu.last_y + px(1.) {
+                lu.follow = false;
+            }
+        } else if mx > px(0.) && o <= -mx + px(2.) {
+            lu.follow = true;
+        }
+        lu.last_y = o;
+        if lu.follow {
+            lu.scroll.scroll_to_bottom();
         }
     }
 
@@ -179,7 +216,7 @@ impl TuiView {
             )
     }
 
-    fn left(&self, tier: layout::Tiers, w: f32) -> Div {
+    fn left(&self, tier: layout::Tiers, w: f32, cx: &mut Context<Self>) -> Div {
         let (s, h) = (&self.snap, &self.hidden);
         let split = h.left_is_split();
         let head = |id, title, icon| Head {
@@ -204,14 +241,23 @@ impl TuiView {
         } else {
             None
         };
-        let list = |id, title, ic, m, body: Div| {
+        let ws_click = |i: usize| -> panels::OnClick {
+            Box::new(cx.listener(move |this, _, _, cx| this.click_workspace(i, cx)))
+        };
+        let run_click = |i: usize| -> panels::OnClick {
+            Box::new(cx.listener(move |this, _, _, cx| this.click_running(i, cx)))
+        };
+        let live = self.live.as_ref();
+        let focus = live.map(|l| l.live.focus);
+        let list = |id, title, ic, m, body: Div, focused: bool| {
             let p = panel(
                 head(id, title, ic),
                 Some(m),
                 !split,
                 (!split).then(list_body_h),
                 body,
-            );
+            )
+            .when(focused, |d| d.border_color(hsla(t::ACCENT)));
             if split {
                 p.flex_1().min_h(px(0.))
             } else {
@@ -232,7 +278,11 @@ impl TuiView {
                 "Workspace",
                 "folder",
                 meta(text(), s.workspaces.len().to_string()),
-                panels::workspace_rows(&s.workspaces),
+                panels::workspace_rows(
+                    &s.workspaces,
+                    live.map(|_| &ws_click as &dyn Fn(usize) -> panels::OnClick),
+                ),
+                focus == Some(crate::live::Focus::Workspace),
             ))
             .child(list(
                 "p-running",
@@ -242,7 +292,11 @@ impl TuiView {
                     hsla(t::SUCCESS),
                     s.running.iter().filter(|r| r.live).count().to_string(),
                 ),
-                panels::running_rows(&s.running),
+                panels::running_rows(
+                    &s.running,
+                    live.map(|_| &run_click as &dyn Fn(usize) -> panels::OnClick),
+                ),
+                focus == Some(crate::live::Focus::Running),
             ));
         let grown = |key: &str, p: Div| {
             if grow_last == Some(key) {
@@ -309,7 +363,7 @@ impl TuiView {
         )
     }
 
-    fn centre(&self, w: f32) -> Div {
+    fn centre(&self, w: f32, cx: &mut Context<Self>) -> Div {
         let (s, h) = (&self.snap, &self.hidden);
         let head = |id, title, icon| Head {
             id,
@@ -358,60 +412,36 @@ impl TuiView {
             }
             col = col.child(cards);
         }
-        col.child(self.chat())
+        col.child(self.chat(cx))
     }
 
-    fn chat(&self) -> Div {
+    fn chat(&self, cx: &mut Context<Self>) -> Div {
         let s = &self.snap;
-        let welcome = div()
-            .flex_1()
-            .min_h(px(0.))
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(6.))
-            .child(gpui::img(brand::mark()).size(px(72.)))
-            .child(tracked("SYNTHESIS", 16., 0.32, strong()))
-            .child(div().text_color(dim()).child("autonomous coding agent"))
-            .child(
-                div()
-                    .mt(px(12.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .w_full()
-                    .max_w(px(560.))
-                    .px(px(16.))
-                    .children(s.tips.iter().map(|tip| {
-                        div()
-                            .flex()
-                            .gap(px(8.))
-                            .child(div().text_color(hsla(t::ACCENT)).child("\u{00B7}"))
-                            .child(div().child(tip.clone()))
-                    })),
-            );
-        let prompt = div()
-            .flex_none()
-            .mx(px(12.))
-            .h(px(40.))
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .px(px(12.))
-            .border_1()
-            .border_color(hsla(t::RULE))
-            .rounded(px(layout::PANEL_RADIUS))
-            .child(div().text_color(strong()).child(">"))
-            .child(
-                div()
-                    .flex_1()
-                    .truncate()
-                    .text_color(dim())
-                    .child("Ask Synthesis anything... (Ctrl+L for history)"),
-            )
-            .child(icon("arrow-up", 14., dim()));
+        let (body, prompt) = if self.live.is_some() {
+            (self.conversation(cx), self.live_prompt(cx))
+        } else {
+            let prompt = div()
+                .flex_none()
+                .mx(px(12.))
+                .h(px(40.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(12.))
+                .border_1()
+                .border_color(hsla(t::RULE))
+                .rounded(px(layout::PANEL_RADIUS))
+                .child(div().text_color(strong()).child(">"))
+                .child(
+                    div()
+                        .flex_1()
+                        .truncate()
+                        .text_color(dim())
+                        .child("Ask Synthesis anything... (Ctrl+L for history)"),
+                )
+                .child(icon("arrow-up", 14., dim()));
+            (self.welcome().into_any_element(), prompt)
+        };
         let mode = div()
             .flex_none()
             .h(px(28.))
@@ -449,7 +479,7 @@ impl TuiView {
             .border_1()
             .border_color(hsla(t::BORDER))
             .rounded(px(layout::PANEL_RADIUS))
-            .child(welcome)
+            .child(body)
             .child(prompt)
             .child(mode)
     }
@@ -518,7 +548,8 @@ impl TuiView {
 }
 
 impl Render for TuiView {
-    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh(window);
         let vp = window.viewport_size();
         let w = f32::from(vp.width) - self.inset;
         let h = f32::from(vp.height);
@@ -529,13 +560,15 @@ impl Render for TuiView {
             .flex()
             .gap(px(GAP))
             .p(px(PAD))
-            .child(self.left(tier, w))
-            .child(self.centre(w));
+            .child(self.left(tier, w, cx))
+            .child(self.centre(w, cx));
         if self.hidden.has_right() {
             body = body.child(self.right(tier, w));
         }
+        let dialog = self.dialog_overlay(cx);
         div()
             .debug_selector(|| "view".to_string())
+            .relative()
             .size_full()
             .min_w(px(MIN_W))
             .min_h(px(MIN_H))
@@ -551,6 +584,7 @@ impl Render for TuiView {
             .child(self.top_bar())
             .child(body)
             .child(self.footer())
+            .children(dialog)
     }
 }
 
