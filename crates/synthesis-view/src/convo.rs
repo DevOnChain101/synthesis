@@ -585,7 +585,7 @@ mod tests {
         let mut c = Convo::default();
         c.apply(&ev(
             "task.started",
-            json!({"request":"r","acceptance_criteria":[],"budget":{}}),
+            json!({"request":"r","acceptance_criteria":[],"budget":{"max_turns":5,"max_tool_calls":5,"max_verify_attempts":1}}),
         ));
         c.apply(&ev(
             "turn.started",
