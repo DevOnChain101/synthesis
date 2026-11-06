@@ -293,6 +293,39 @@ pub fn common_for(c: &Common, granted: &Path, cwd: &Path) -> (Common, Option<Str
     (c, note)
 }
 
+/// `--resume ID` (id or unique prefix) or `--continue` (newest session of the start folder).
+pub fn requested_resume(
+    c: &Common,
+    start: &Path,
+    synthesis_home: &Path,
+) -> Result<Option<Resume>, String> {
+    if c.fork_session {
+        return Err("--fork-session is only for `synt run`".into());
+    }
+    let id = match (&c.resume, c.continue_session) {
+        (Some(id), _) => id.clone(),
+        (None, true) => synthesis_tui::list_saved(synthesis_home, Some(&start.to_string_lossy()))?
+            .into_iter()
+            .next()
+            .map(|s| s.id)
+            .ok_or("--continue: no saved session for this directory")?,
+        (None, false) => return Ok(None),
+    };
+    load_resume_in_place(synthesis_home, &id).map(Some)
+}
+
+/// `load_resume`, and the session's folder must still exist.
+pub fn load_resume_in_place(home: &Path, id: &str) -> Result<Resume, String> {
+    let r = synthesis_tui::load_resume(home, id)?;
+    if !Path::new(&r.record.cwd).is_dir() {
+        return Err(format!(
+            "cannot resume {id}: its folder {} no longer exists",
+            r.record.cwd
+        ));
+    }
+    Ok(r)
+}
+
 /// Everything `start_with` needs besides the environment.
 pub struct StartOpts {
     pub project: PathBuf,
@@ -393,6 +426,8 @@ pub struct Engine {
     pub effort_tiers: Vec<String>,
     pub notices: Vec<String>,
     pub cwd: String,
+    /// The workspace root (what the Workspace panel lists).
+    pub root: String,
     /// Slash commands: the local list, skills and MCP prompts.
     pub commands: Vec<Command>,
     pub context_window: Option<u64>,
@@ -536,6 +571,7 @@ impl Engine {
             ));
         }
         let cwd = session.workspace.cwd.to_string_lossy().into_owned();
+        let root = session.workspace.root.to_string_lossy().into_owned();
         let workspace = session.workspace.clone();
         let commands: Vec<Command> = synthesis_tui::local_commands()
             .into_iter()
@@ -592,6 +628,7 @@ impl Engine {
             effort_tiers,
             notices: all_notices,
             cwd,
+            root,
             commands,
             context_window,
             trusted,
@@ -798,6 +835,21 @@ impl Engine {
         // store's write lock: the restarted session (resume, new folder) must be able to open it
         synthesis_tools::set_learned_skills(None);
     }
+}
+
+/// Ends an engine other threads may still hold for a moment (a peer poll): waits for them, then
+/// [`Engine::close`]. Blocking; call it off the UI thread.
+pub fn close_shared(mut e: Arc<Engine>) {
+    for _ in 0..250 {
+        match Arc::try_unwrap(e) {
+            Ok(e) => return e.close(),
+            Err(back) => {
+                e = back;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    }
+    eprintln!("synthesis-desktop: the engine is still in use; its session was not closed cleanly");
 }
 
 #[cfg(test)]
