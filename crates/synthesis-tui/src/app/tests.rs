@@ -2547,7 +2547,7 @@ fn settings_change_what_is_drawn() {
     let mut a = app();
     let t = synthesis_settings::TuiSettings {
         logo: false,
-        panels: [false, true, false, false],
+        panels: [false, true, false, false, true, true, true, true],
         ..Default::default()
     };
     a.set_tui(

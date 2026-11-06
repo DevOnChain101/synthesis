@@ -475,9 +475,21 @@ fn synthesis_tui_parses_validates_and_names_the_key_not_the_value() {
         "logo": "off", "show_thinking": false, "verbose": true, "diffs_expanded": true,
         "queue_indicators": false, "motion": false, "mouse_capture": false, "copy_on_select": false}}}));
     assert_eq!(diag, Vec::<String>::new());
-    assert_eq!(s.panels, [true, true, false, false]);
+    assert_eq!(s.panels, [true, true, false, false, true, true, true, true]);
     assert!(!s.logo && !s.show_thinking && s.diffs_expanded && s.verbose);
     assert!(!TuiSettings::default().verbose);
+    // the four panels of the dash: status, tokens, topology, usage (default on)
+    let (p, diag) = TuiSettings::from_settings(&json!({"synt": {"tui": {
+        "panels": {"status": false, "tokens": false, "topology": false, "usage": false}}}}));
+    assert_eq!(
+        (p.panels, diag),
+        ([true, true, true, true, false, false, false, false], vec![])
+    );
+    let (p, diag) =
+        TuiSettings::from_settings(&json!({"synt": {"tui": {"panels": {"usage": "no"}}}}));
+    assert_eq!(p, TuiSettings::default());
+    assert!(diag[0].contains("tui.panels.usage"), "{diag:?}");
+    assert_eq!(p.to_value()["panels"]["topology"], true);
     assert!(!s.queue_indicators && !s.motion && !s.mouse_capture && !s.copy_on_select);
     // wrong types and unknown names keep the defaults and say which key
     let (s, diag) = TuiSettings::from_settings(&json!({"synt": {"tui": {
@@ -533,7 +545,7 @@ fn persisting_tui_keeps_everything_else_never_overwrites_a_bad_file_and_writes_n
     let f = fx();
     let home = f.home.path();
     let t = TuiSettings {
-        panels: [true, true, false, true],
+        panels: [true, true, false, true, true, true, true, true],
         motion: false,
         ..TuiSettings::default()
     };
