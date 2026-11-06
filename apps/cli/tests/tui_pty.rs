@@ -1336,6 +1336,10 @@ fn model_switch_first_frame_is_the_settled_frame_and_nothing_clears() {
         send("hi\r"),
         expect_new("first reply"),
         expect_new("tokens \u{b7}"),
+        // the Topology user wire carries a conveyor dot for PROMPT_FLASH_MS (5 s) after a
+        // prompt: let that flash end first, or its expiry lands in the middle of the relaunch
+        // and the wire cell changes after the first frame (a real animation, not stale state)
+        json!(["wait", 6]),
         quiet(),
         json!(["mark"]),
         send("/model fake/other\r"),
