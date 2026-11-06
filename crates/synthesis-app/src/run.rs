@@ -332,6 +332,16 @@ pub enum Front {
     },
     /// Events go to the interactive app; the person approves.
     Tui,
+    /// A native front end (the desktop window): the host supplies the event writer, approver and
+    /// input provider instead of the TUI's `UiLink`. Behaves like `Tui` otherwise.
+    Native(Native),
+}
+
+/// The host side of [`Front::Native`].
+pub struct Native {
+    pub out: Box<dyn std::io::Write + Send>,
+    pub approver: Arc<dyn Approver>,
+    pub input: Arc<dyn synthesis_harness::InputProvider>,
 }
 
 /// Everything a front end needs, built once by [`prepare`].
@@ -624,7 +634,7 @@ pub fn prepare(
         rules_arg(&c.allow, "--allow")?,
         rules_arg(&c.deny, "--deny")?,
     );
-    let is_tui = matches!(front, Front::Tui);
+    let is_tui = matches!(front, Front::Tui | Front::Native(_));
     let h = homes(env)?;
     let mut synthesis_deny = synthesis_sandbox::synthesis_state_paths(&h.synthesis);
     // Before anything is created (worktree, store): a bad grant is a usage error.
@@ -1021,6 +1031,7 @@ pub fn prepare(
         _ => None,
     };
     let cancel = CancellationToken::new();
+    let mut native_input = None;
     let (out, tee, prompt, link, approver, closed): (
         Box<dyn std::io::Write + Send>,
         _,
@@ -1029,6 +1040,10 @@ pub fn prepare(
         Arc<dyn Approver>,
         _,
     ) = match front {
+        Front::Native(n) => {
+            native_input = Some(n.input);
+            (n.out, None, String::new(), None, n.approver, None)
+        }
         Front::Headless {
             prompt,
             tee,
@@ -1473,6 +1488,9 @@ pub fn prepare(
         }));
     if let Some(l) = &link {
         harness = harness.with_input(l.input());
+    }
+    if let Some(i) = native_input {
+        harness = harness.with_input(i);
     }
     if let Some(l) = peer_link {
         harness = harness.with_peers(l);
