@@ -167,6 +167,18 @@ pub struct BrowserCall {
     pub duration_ms: u64,
 }
 
+/// A screenshot the browser saved (`browser.frame`): metadata only, the file is the artifact.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Frame {
+    pub path: String,
+    /// Origin of the page.
+    pub url: String,
+    pub w: u32,
+    pub h: u32,
+    pub bytes: u64,
+    pub ts: Option<i64>,
+}
+
 /// A file the session changed: the sum of its edits and the latest diff.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChangedFile {
@@ -188,6 +200,8 @@ pub struct AgentPanes {
     pub url: String,
     /// Path of the newest screenshot the browser tool saved.
     pub screenshot: Option<String>,
+    /// Every `browser.frame`, oldest first (at most [`FRAME_LIMIT`]).
+    pub frames: Vec<Frame>,
     pub files: Vec<ChangedFile>,
     /// Tool call id -> index in `commands` / `browser` / agent id, to match the completion.
     pending: Vec<(String, Pending)>,
@@ -200,6 +214,8 @@ enum Pending {
     /// A tool call of a sub-agent: (agent id, entry index).
     Sub(String, usize),
 }
+
+const FRAME_LIMIT: usize = 50;
 
 /// `[exit code N]` at the end of a failed Bash result.
 fn exit_code_of(output: &str) -> Option<i64> {
@@ -495,7 +511,8 @@ impl AgentPanes {
                             c.duration_ms = *duration_ms;
                             c.exit_code = match state {
                                 CmdState::Ok => Some(0),
-                                CmdState::Failed => exit_code_of(out),
+                                // `process.exited` (sent before this) knows it; old logs do not
+                                CmdState::Failed => c.exit_code.or_else(|| exit_code_of(out)),
                                 _ => None,
                             };
                             if !out.is_empty() {
@@ -525,31 +542,85 @@ impl AgentPanes {
                     self.note_file(d);
                 }
             }
-            Event::ProcessSpawned(p) => self.commands.push(CommandRun {
-                id: p.process_id.clone(),
-                command: p.name.clone().unwrap_or_else(|| p.process_id.clone()),
-                source: CmdSource::Process,
-                agent: agent.clone(),
-                state: CmdState::Running,
-                exit_code: None,
-                started: ts,
-                duration_ms: 0,
-                tail: vec![],
-            }),
+            // A foreground Bash call is `process_id == tool_call_id`: its row exists already.
+            Event::ProcessSpawned(p) if p.tool_call_id.as_ref() != Some(&p.process_id) => {
+                self.commands.push(CommandRun {
+                    id: p.process_id.clone(),
+                    command: p
+                        .command
+                        .clone()
+                        .or_else(|| p.name.clone())
+                        .unwrap_or_else(|| p.process_id.clone()),
+                    source: CmdSource::Process,
+                    agent: agent.clone(),
+                    state: CmdState::Running,
+                    exit_code: None,
+                    started: ts,
+                    duration_ms: 0,
+                    tail: vec![],
+                })
+            }
+            Event::ProcessOutput {
+                process_id, text, ..
+            } => {
+                // Foreground rows already follow `tool.output`.
+                if let Some(c) = self
+                    .commands
+                    .iter_mut()
+                    .rev()
+                    .find(|c| c.source == CmdSource::Process && c.id == *process_id)
+                {
+                    let mut all = c.tail.join("\n");
+                    all.push_str(text);
+                    c.tail = tail_of(&all);
+                }
+            }
             Event::ProcessExited(p) => {
                 if let Some(c) = self
+                    .commands
+                    .iter_mut()
+                    .rev()
+                    .find(|c| c.id == p.process_id && c.source != CmdSource::Process)
+                    .filter(|_| p.tool_call_id.as_ref() == Some(&p.process_id))
+                {
+                    // the real exit code, instead of `[exit code N]` in the result text
+                    c.exit_code = p.exit_code;
+                } else if let Some(c) = self
                     .commands
                     .iter_mut()
                     .rev()
                     .find(|c| c.source == CmdSource::Process && c.id == p.process_id)
                 {
                     c.exit_code = p.exit_code;
-                    c.duration_ms = ts.zip(c.started).map_or(0, |(e, s)| (e - s).max(0) as u64);
+                    c.duration_ms = p
+                        .duration_ms
+                        .or_else(|| ts.zip(c.started).map(|(e, s)| (e - s).max(0) as u64))
+                        .unwrap_or(0);
                     c.state = if p.exit_code == Some(0) {
                         CmdState::Ok
                     } else {
                         CmdState::Failed
                     };
+                }
+            }
+            Event::BrowserFrame {
+                path,
+                url,
+                w,
+                h,
+                bytes,
+            } => {
+                self.screenshot = Some(path.clone());
+                self.frames.push(Frame {
+                    path: path.clone(),
+                    url: url.clone(),
+                    w: *w,
+                    h: *h,
+                    bytes: *bytes,
+                    ts,
+                });
+                if self.frames.len() > FRAME_LIMIT {
+                    self.frames.remove(0);
                 }
             }
             Event::VerificationCompleted {
@@ -787,6 +858,86 @@ mod tests {
             (CmdSource::Process, CmdState::Failed, Some(1))
         );
         assert_eq!(c.duration_ms, 2000);
+    }
+
+    #[test]
+    fn process_events_give_the_exit_code_and_background_rows() {
+        let p = run(vec![
+            ev(
+                1,
+                None,
+                "tool.requested",
+                json!({"tool_call_id": "b1", "name": "Bash", "input": {"command": "exit 7"},
+                    "input_truncated": false}),
+            ),
+            ev(
+                2,
+                None,
+                "process.spawned",
+                json!({"process_id": "b1", "tool_call_id": "b1", "command": "exit 7"}),
+            ),
+            ev(
+                3,
+                None,
+                "process.exited",
+                json!({"process_id": "b1", "tool_call_id": "b1", "exit_code": 7, "duration_ms": 5}),
+            ),
+            // no `[exit code N]` in the text: only the event knows
+            ev(
+                4,
+                None,
+                "tool.completed",
+                completed("b1", "Bash", "error", "boom", None),
+            ),
+            ev(
+                5,
+                None,
+                "process.spawned",
+                json!({"process_id": "proc_2", "tool_call_id": "b2", "command": "npm run dev"}),
+            ),
+            ev(
+                6,
+                None,
+                "process.output",
+                json!({"process_id": "proc_2", "tool_call_id": "b2", "text": "ready\n", "seq": 1}),
+            ),
+            ev(
+                7,
+                None,
+                "process.exited",
+                json!({"process_id": "proc_2", "signal": "SIGKILL", "duration_ms": 900}),
+            ),
+        ]);
+        assert_eq!(p.commands.len(), 2, "the foreground call is one row");
+        assert_eq!(
+            (p.commands[0].state, p.commands[0].exit_code),
+            (CmdState::Failed, Some(7))
+        );
+        let bg = &p.commands[1];
+        assert_eq!(
+            (bg.source, bg.state),
+            (CmdSource::Process, CmdState::Failed)
+        );
+        assert_eq!((bg.command.as_str(), bg.duration_ms), ("npm run dev", 900));
+        assert_eq!(bg.tail, ["ready"]);
+    }
+
+    #[test]
+    fn browser_frames_are_kept_and_the_latest_is_the_screenshot() {
+        let frame = |n: u32| {
+            json!({"path": format!("/a/screenshot-{n}.png"), "url": "https://example.com",
+                "w": 1280, "h": 720, "bytes": 99})
+        };
+        let p = run(vec![
+            ev(1, None, "browser.frame", frame(1)),
+            ev(2, None, "browser.frame", frame(2)),
+        ]);
+        assert_eq!(p.frames.len(), 2);
+        assert_eq!(p.screenshot.as_deref(), Some("/a/screenshot-2.png"));
+        assert_eq!(
+            (p.frames[0].w, p.frames[0].h, p.frames[0].bytes),
+            (1280, 720, 99)
+        );
     }
 
     #[test]

@@ -97,9 +97,12 @@ gpui test support. Offscreen PNG: `cargo run -p synthesis-desktop --features sho
 Done in `synthesis-view`: workspaces and sessions, running/peers, usage, status, topology, activity,
 tools and skills, conversation. Not done, with where the data would come from:
 
-- Browser screenshot stream: TODO. There is no screenshot event today; the source would be
-  `synthesis-browser` (a new `browser.screenshot` event with an `ArtifactRef`, read back through
-  `Reader::artifact_bytes`). `Event::BrowserLoginRequired` is already in the stream and can be shown.
+- Browser screenshots: done as history, not a live stream. `browser.frame` (path, origin, w, h, bytes) feeds
+  `AgentPanes.frames` and `.screenshot`; the file is opened only through `viewable_screenshot`.
+  `Event::BrowserLoginRequired` is already in the stream and can be shown. Page title changes are not an event.
+- Commands tab: `process.spawned|output|exited` (Bash, terminal_spawn) give the real exit code and background
+  rows; `[exit code N]` parsing stays as the fallback for old sessions. A background process nobody polls
+  again never gets `process.exited`. Verification has only `verification.completed` (no per-check progress).
 - Settings write API: done in `crates/synthesis-settings-ui` (section 6). The GPUI form is not built.
 - Multi-session tabs: TODO. `ViewState` is one session; tabs are a `Vec<ViewState>` keyed by session id
   in the desktop, fed by one event channel per `engine` run. Needs the engine to host several sessions.
