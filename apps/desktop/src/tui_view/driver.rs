@@ -298,6 +298,9 @@ impl TuiView {
         match r {
             Err(e) => {
                 lu.live.note(startup_failure(&e), true);
+                if e.starts_with("no model configured") {
+                    lu.live.open_setup(&e, now_ms());
+                }
             }
             Ok(l) => {
                 lu.model_override = l.model;
@@ -330,6 +333,18 @@ impl TuiView {
     /// A task ended: reload the store panels (the usage, the session list) and start what was queued.
     fn after_task(&mut self, cx: &mut Context<Self>) {
         self.refresh_store(cx);
+        // the model reads a `!cmd`'s output before anything queued starts
+        let Some(lu) = &mut self.live else { return };
+        if let Some(e) = lu.live.engine.clone()
+            && e.take_followup()
+        {
+            lu.live.busy = true;
+            if let Err(why) = e.send_followup() {
+                lu.live.busy = false;
+                lu.live.note(why, true);
+            }
+            return;
+        }
         self.send_queued(cx);
     }
 
@@ -346,8 +361,18 @@ impl TuiView {
         let Some(e) = lu.live.engine.clone() else {
             return;
         };
-        let images = lu.live.take_images();
-        if let Err(why) = e.send_images(text, images) {
+        let started = match text.strip_prefix('!') {
+            // `!cmd` / `!!cmd` (record only), as in the TUI
+            Some(rest) => {
+                let (record_only, cmd) = match rest.strip_prefix('!') {
+                    Some(c) => (true, c),
+                    None => (false, rest),
+                };
+                e.user_command(cmd.trim().to_string(), record_only)
+            }
+            None => e.send_images(text, lu.live.take_images()),
+        };
+        if let Err(why) = started {
             lu.live.busy = false;
             lu.live.note(why, true);
         }
@@ -979,6 +1004,11 @@ impl TuiView {
             }
             Action::Close => return self.switch(Target::Close, "close".into(), cx),
             Action::OpenSettings => cx.emit(OpenSettings),
+            Action::Quit => return self.quit(cx),
+            Action::Recheck => {
+                let project = lu.cfg.project.clone();
+                return self.launch(project, None, vec![], cx);
+            }
             Action::ShowFiles => return self.show_tab(super::ChatTab::Files, None, cx),
             Action::ShowDiff(f) => return self.show_tab(super::ChatTab::Diff, f, cx),
             Action::Peers => {
@@ -1081,14 +1111,21 @@ impl TuiView {
     /// Files dropped on the window: images are attached, anything else is said.
     pub fn drop_files(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
+        let Some(e) = lu.live.engine.clone() else {
+            return;
+        };
         for p in paths {
-            let r = read_image_file(p).and_then(|(png, bytes)| {
-                if png {
-                    attach_png(&mut lu.live, bytes)
-                } else {
-                    attach_jpeg(&mut lu.live, bytes)
-                }
-            });
+            // the TUI's `@file` rule: inside the workspace, no secret file, links resolved
+            let r = e
+                .image_path(p)
+                .and_then(|p| read_image_file(&p))
+                .and_then(|(png, bytes)| {
+                    if png {
+                        attach_png(&mut lu.live, bytes)
+                    } else {
+                        attach_jpeg(&mut lu.live, bytes)
+                    }
+                });
             lu.report_image(r.map_err(|e| format!("{}: {e}", p.display())));
         }
         cx.notify();
@@ -1225,7 +1262,7 @@ fn attach_jpeg(l: &mut Live, bytes: Vec<u8>) -> Result<String, String> {
 }
 
 /// A dropped file: (is PNG, bytes). Only `.png`, `.jpg` and `.jpeg`, read up to the cap.
-fn read_image_file(p: &Path) -> Result<(bool, Vec<u8>), String> {
+pub fn read_image_file(p: &Path) -> Result<(bool, Vec<u8>), String> {
     use std::io::Read as _;
     let ext = p
         .extension()
@@ -1237,9 +1274,23 @@ fn read_image_file(p: &Path) -> Result<(bool, Vec<u8>), String> {
         _ => return Err("not an image (png, jpg)".into()),
     };
     let cap = synthesis_tui_base::imgclip::MAX_PNG as u64;
+    // `p` is the resolved path from `Engine::image_path`; a link swapped in since then is refused
+    // by the open itself (O_NOFOLLOW / FILE_FLAG_OPEN_REPARSE_POINT), and the opened handle is
+    // checked to be a regular file within the cap.
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut o, libc::O_NOFOLLOW);
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::custom_flags(&mut o, 0x0020_0000);
+    let f = o.open(p).map_err(|e| e.to_string())?;
+    let md = f.metadata().map_err(|e| e.to_string())?;
+    if !md.is_file() || md.len() > cap {
+        return Err("not a regular image file within the 4 MB cap".into());
+    }
     let mut v = vec![];
-    std::fs::File::open(p)
-        .and_then(|f| f.take(cap + 1).read_to_end(&mut v))
+    f.take(cap + 1)
+        .read_to_end(&mut v)
         .map_err(|e| e.to_string())?;
     Ok((png, v))
 }

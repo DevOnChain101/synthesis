@@ -75,6 +75,10 @@ pub enum DialogKind {
 pub enum PickerKind {
     Model,
     Resume,
+    /// `#note`: which instruction file gets it (or none).
+    Remember,
+    /// No model configured: the TUI's setup card (check again, Settings, quit).
+    Setup,
 }
 
 /// What the window does after a command or a picker (it restarts the engine, talks to it).
@@ -95,6 +99,10 @@ pub enum Action {
     ShowFiles,
     /// `/diff [file]`: the centre panel shows its diff tab, with `file` open when one is named.
     ShowDiff(Option<String>),
+    /// Setup card: build the engine again (the person set a model and a key meanwhile).
+    Recheck,
+    /// Setup card: quit the app.
+    Quit,
     /// `/peers`: the listing is read off the UI thread; the text comes back through [`Live::peers_done`].
     Peers,
 }
@@ -272,6 +280,8 @@ pub struct Live {
     pub focus_view: bool,
     /// The Usage & Metrics period (7 or 30 days).
     pub usage_days: usize,
+    /// The `#note` the open "Remember this note?" dialog is about.
+    pending_note: Option<String>,
 }
 
 impl Live {
@@ -304,6 +314,7 @@ impl Live {
             image_busy: false,
             focus_view: false,
             usage_days: 7,
+            pending_note: None,
         }
     }
 
@@ -527,6 +538,7 @@ impl Live {
         }) = self.dialogs.first()
         {
             self.dialogs.remove(0);
+            self.pending_note = None;
             return None;
         }
         if let Some(Dialog {
@@ -599,6 +611,17 @@ impl Live {
         }
         let d = self.dialogs.remove(0);
         if let DialogKind::Picker { kind, .. } = d.kind {
+            if kind == PickerKind::Remember {
+                if let (Some(e), Some(text), "user" | "project") =
+                    (&self.engine, self.pending_note.take(), key)
+                {
+                    match e.notes.save(key == "user", &text) {
+                        Ok(done) => self.note(done, false),
+                        Err(err) => self.note(format!("# note not saved: {err}"), true),
+                    }
+                }
+                return None;
+            }
             let current = self.engine.as_ref().map(|e| e.label.as_str());
             return match kind {
                 PickerKind::Model if current == Some(key) => {
@@ -607,6 +630,12 @@ impl Live {
                 }
                 PickerKind::Model => Some(Action::Model(key.to_string())),
                 PickerKind::Resume => Some(Action::Resume(key.to_string())),
+                PickerKind::Remember => None,
+                PickerKind::Setup => Some(match key {
+                    "recheck" => Action::Recheck,
+                    "settings" => Action::OpenSettings,
+                    _ => Action::Quit,
+                }),
             };
         }
         if let Some(e) = &self.engine {
@@ -794,14 +823,11 @@ impl Live {
                     return Submitted::Nothing;
                 }
             }
-        } else if text.starts_with('!') || text.starts_with('#') {
-            let what = if text.starts_with('!') {
-                "!command"
-            } else {
-                "#note"
-            };
-            self.note(format!("{what}: {NOT_YET}"), false);
+        } else if let Some(note) = text.strip_prefix('#') {
+            self.ask_where_to_remember(note.trim());
             return Submitted::Nothing;
+        } else if text.starts_with('!') && text.trim_start_matches('!').trim().is_empty() {
+            return Submitted::Nothing; // `!` with no command
         }
         if self.busy || self.engine.is_none() || !self.dialogs.is_empty() {
             // the TUI queues a line typed while a task runs; it starts when that one ends
@@ -810,6 +836,83 @@ impl Live {
         }
         self.busy = true;
         Submitted::Send(text.to_string())
+    }
+
+    /// The setup card (`apps/cli/src/tui.rs` `first_run`) as a dialog: re-check, Settings, quit.
+    /// No key is asked for here; Settings shows which providers have one.
+    pub fn open_setup(&mut self, why: &str, now: i64) {
+        self.push_dialog(
+            Dialog {
+                kind: DialogKind::Picker {
+                    kind: PickerKind::Setup,
+                    title: "Synthesis needs a model and an API key before it can run a task".into(),
+                    headers: vec![(
+                        0,
+                        format!(
+                            "why: {}\nKeep the key in an environment variable you manage (never in a repository); Settings shows each provider's key status.",
+                            sanitize_for_display(why)
+                        ),
+                    )],
+                },
+                options: vec![
+                    ("recheck".into(), "Check again (after setting a model and a key)".into()),
+                    ("settings".into(), "Open Settings: provider key status".into()),
+                    ("quit".into(), "Quit".into()),
+                ],
+                sel: 0,
+                armed_until: 0,
+            },
+            now,
+        );
+    }
+
+    /// `#note`: nothing is saved before the person picks the file (the TUI's confirmation).
+    fn ask_where_to_remember(&mut self, note: &str) {
+        if note.is_empty() {
+            return;
+        }
+        let Some(e) = self.engine.clone() else {
+            return self.note("# note: the session is still starting, try again", true);
+        };
+        if self.dialogs.iter().any(|d| {
+            matches!(
+                &d.kind,
+                DialogKind::Picker {
+                    kind: PickerKind::Remember,
+                    ..
+                }
+            )
+        }) {
+            return self.note("# note: answer the open question first", true);
+        }
+        self.pending_note = Some(note.to_string());
+        let preview = sanitize_for_display(&e.notes.preview(note));
+        self.push_dialog(
+            Dialog {
+                kind: DialogKind::Picker {
+                    kind: PickerKind::Remember,
+                    title: "Remember this note?".into(),
+                    headers: vec![(
+                        0,
+                        format!("will be saved as: - {preview} (part of the instructions of later sessions)"),
+                    )],
+                },
+                options: vec![
+                    ("no".into(), "No, do not save (esc also cancels)".into()),
+                    (
+                        "project".into(),
+                        format!("Save to the project file  {}", e.notes.project.display()),
+                    ),
+                    (
+                        "user".into(),
+                        format!("Save to the user file  {}", e.notes.user.display()),
+                    ),
+                ],
+                sel: 0,
+                armed_until: 0,
+            },
+            now_ms(),
+        );
     }
 
     /// The next queued line once the task ended and nothing waits for an answer.
@@ -1293,13 +1396,14 @@ impl Live {
         })
     }
 
-    /// Shift+Tab: default -> acceptEdits -> plan -> default. Bypass and auto take their own
-    /// confirmation and are not on this cycle.
+    /// Shift+Tab: the TUI's cycle (default, acceptEdits, plan, auto) without its last step:
+    /// bypassPermissions is not reachable from the desktop app.
     pub fn cycle_mode(&mut self) {
         let Some(e) = &self.engine else { return };
         let next = match e.mode() {
             Mode::Default => Mode::AcceptEdits,
             Mode::AcceptEdits => Mode::Plan,
+            Mode::Plan => Mode::Auto,
             _ => Mode::Default,
         };
         e.set_mode(next);
@@ -1491,10 +1595,11 @@ mod tests {
         assert!(
             matches!(l.view.convo.items.last(), Some(Item::Notice { text, .. }) if text == "unknown command /nope")
         );
+        // `!cmd` is a line like any other (queued while there is no engine); `!` alone is nothing
+        assert_eq!(l.submit("!"), Submitted::Nothing);
+        assert!(l.queue.is_empty());
         assert_eq!(l.submit("!ls"), Submitted::Nothing);
-        assert!(
-            matches!(l.view.convo.items.last(), Some(Item::Notice { text, .. }) if text.starts_with("!command"))
-        );
+        assert_eq!(l.queue.pop_back().as_deref(), Some("!ls"));
         assert_eq!(l.submit("/help"), Submitted::Nothing);
         assert!(
             matches!(l.view.convo.items.last(), Some(Item::Notice { text, .. }) if text.contains("/model"))
