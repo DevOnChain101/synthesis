@@ -78,7 +78,11 @@ fn dropped_images_follow_the_workspace_and_secret_rules() {
     let outside = std::fs::canonicalize(outside.path()).unwrap();
     let ok = r.ws.join("shot.png");
     std::fs::write(&ok, png()).unwrap();
-    assert_eq!(r.engine.image_path(&ok).unwrap(), ok);
+    // the engine's realpath has no `\\?\` prefix on Windows, which `std::fs::canonicalize` adds
+    assert_eq!(
+        r.engine.image_path(&ok).unwrap(),
+        synthesis_core::canonicalize(&ok).unwrap()
+    );
 
     let far = outside.join("far.png");
     std::fs::write(&far, png()).unwrap();
