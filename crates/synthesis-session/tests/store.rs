@@ -1380,3 +1380,14 @@ fn close_hides_a_session_from_the_lists_but_keeps_it_and_its_messages() {
     assert_eq!(r.list_sessions(None).unwrap().len(), 1);
     assert_eq!(r.read_messages("to-close").unwrap().len(), 1);
 }
+
+#[test]
+fn set_title_replaces_the_title_and_the_list_shows_it() {
+    let e = env();
+    let mut w = create(&e, "s-title", &e.dir("w"));
+    assert_eq!(w.get_session("s-title").unwrap().title, None);
+    w.set_title("Fix the build").unwrap();
+    w.set_title("Renamed").unwrap();
+    let listed = w.list_sessions(None).unwrap();
+    assert_eq!(listed[0].title.as_deref(), Some("Renamed"));
+}

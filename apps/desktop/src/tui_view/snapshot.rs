@@ -238,7 +238,10 @@ fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Run
             0,
             SessionRow {
                 id: l.sid.clone(),
-                title: "(new session)".into(),
+                title: match l.title_shown() {
+                    t if t.is_empty() => "(new session)".into(),
+                    t => t,
+                },
                 status: synthesis_core::SessionStatus::Idle,
                 updated_at: String::new(),
                 mtime: now,

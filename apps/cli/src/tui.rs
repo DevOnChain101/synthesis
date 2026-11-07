@@ -704,6 +704,13 @@ impl TaskHost for Host {
             }
         })
     }
+
+    fn rename(&self, title: &str) -> Result<String, String> {
+        match &self.store {
+            Some(s) => synthesis_app::rename::rename(s, title),
+            None => Err("/rename: this session is not stored (--no-session-store)".into()),
+        }
+    }
 }
 
 /// `/mcp`: one block per server with state, tools and the last error.

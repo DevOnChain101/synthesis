@@ -41,6 +41,7 @@ pub mod memcmd;
 pub mod memory;
 mod memtools;
 pub mod peers;
+pub mod rename;
 pub mod rewind;
 pub mod run;
 pub mod taskdb;

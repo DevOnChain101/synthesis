@@ -41,6 +41,7 @@ cut for `synt run --resume` consumers.
 | /peers | other sessions on this machine (needs `--peers` or `synt.peers.enabled`) |
 | /agents --all | the session's agents, then the other sessions' table |
 | /name | the name other sessions address this one by (fixed for the run: `--name`) |
+| /rename <title> | rename this session (its stored title, max 120 characters; no control, bidi or zero-width characters, nothing that looks like a secret); without a title it shows the current one |
 | /memory | instruction files loaded, long-term memory on/off, where `#` notes go |
 | /agents | agents of this session and the definitions `@agent:name` can start |
 | /permissions [allow\|remove RULE] | mode and rules; allow / remove a rule |

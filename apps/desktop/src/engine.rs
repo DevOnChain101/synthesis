@@ -904,6 +904,14 @@ impl Engine {
         }
     }
 
+    /// `/rename TITLE`: validates and stores the title of this session; `Ok` is the stored title.
+    pub fn rename(&self, title: &str) -> Result<String, String> {
+        match &self.host.store {
+            Some(s) => synthesis_app::rename::rename(s, title),
+            None => Err("/rename: this session is not stored (--no-session-store)".into()),
+        }
+    }
+
     /// `/name`: the name other sessions address this one by; `None` when peers are off.
     pub fn peer_name(&self) -> Option<Option<String>> {
         self.harness.peer_summary().map(|(n, _)| n)
