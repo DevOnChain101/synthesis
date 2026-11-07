@@ -125,7 +125,7 @@ impl AgentView {
             .items
             .iter()
             .enumerate()
-            .filter(|(_, it)| visible(it, l.show_thinking, l.verbose))
+            .filter(|(_, it)| visible(it, l.show_thinking, l.verbose, l.focus_view))
             .map(|(i, it)| self.item(i, it, cx))
             .collect();
         if rows.is_empty() && !c.running {

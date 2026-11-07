@@ -879,6 +879,36 @@ impl Engine {
         v
     }
 
+    /// `/permissions allow RULE`: a session-only rule, the TUI's check and wording (`Err`: an error line).
+    pub fn allow_rule(&self, rule: &str) -> Result<String, String> {
+        if !synthesis_permissions::Permissions::is_well_formed_rule(rule) {
+            return Err(
+                "expected a rule like Bash(cargo test:*), Edit or mcp__server__tool".into(),
+            );
+        }
+        if !lock(&self.harness.permissions()).add_allow(rule) {
+            return Err("that allow rule already exists".into());
+        }
+        Ok(format!(
+            "allowed for this session: {}",
+            sanitize_for_display(rule)
+        ))
+    }
+
+    /// `/permissions remove RULE`: from allow, ask and deny of this session only.
+    pub fn remove_rule(&self, rule: &str) -> Result<String, String> {
+        let shown = sanitize_for_display(rule);
+        match lock(&self.harness.permissions()).remove_rule(rule) {
+            0 => Err(format!("no rule {shown}")),
+            n => Ok(format!("removed {n} rule(s): {shown}")),
+        }
+    }
+
+    /// `/name`: the name other sessions address this one by; `None` when peers are off.
+    pub fn peer_name(&self) -> Option<Option<String>> {
+        self.harness.peer_summary().map(|(n, _)| n)
+    }
+
     /// `/mcp`: one block per server with state, transport, tools and the last error.
     pub fn mcp_report(&self) -> Vec<String> {
         let Some(m) = &self.mcp else {

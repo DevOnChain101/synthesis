@@ -98,6 +98,14 @@ scripted (fake provider, `--features shot,test-provider`) conversation on the re
 pickers and slash commands beyond /help and /exit (a notice says so), image paste, "Other" free text in
 question dialogs, keyboard scroll-into-view in Workspace/Running, Linux/Windows/IME verification.
 
+Slash commands (all built-ins are wired; `live.rs` `WIRED`, the TUI's semantics): `/files` and `/diff [file]` run the
+read-only git scan off the UI thread (`live::project_text`, trusted folder only, same refusal as the TUI) and post
+the text into the chat; the agent view also opens its Files tab for `/files`. `/peers` posts the TUI's table.
+`/name` shows the name peers address the session by; it is fixed for the run (`--name`), as in the TUI, so it
+does not rename the stored title. `/focus [on|off]` hides tools, thinking, approvals and agent rows (user,
+assistant, result and notices stay). `/permissions allow|remove RULE` edits the rules of this session only
+(`is_well_formed_rule`, nothing is written to settings, as in the TUI; `remove` also drops deny/ask entries).
+
 TUI view (`src/tui_view/`), rebuilt 1:1 on the owner's design `~/Vibe/synthesis-cli-ui/cli.html` (owner decision
 2026-11-07, "dung lai dung cli.html"): geometry and typography are the design's (Fira Code 500, 12.5px / 1.55,
 panels radius 8, the breakpoints 1400/1200/1000 and the height tiers 750/610/860, the `fitRight` rules, the
