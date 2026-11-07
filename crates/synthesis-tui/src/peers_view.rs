@@ -10,7 +10,7 @@ fn s<'a>(v: &'a Value, path: &[&str]) -> &'a str {
         .unwrap_or("")
 }
 
-pub(crate) fn table(rows: &[Value]) -> Vec<String> {
+pub fn table(rows: &[Value]) -> Vec<String> {
     let cells: Vec<[String; 6]> = rows
         .iter()
         .map(|r| {

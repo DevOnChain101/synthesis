@@ -308,3 +308,56 @@ fn pickers_and_info_commands() {
     assert!(e.compact(None).is_err());
     finish(e, &mut live);
 }
+
+#[test]
+fn files_diff_focus_peers_name_and_permission_rules() {
+    let r = rig();
+    let a = start(&r, None, None, None);
+    let (mut live, e, _rx) = live_on(a.engine, a.rx, &r.cfg);
+
+    // the folder is not trusted: no git, the TUI's wording
+    for c in ["/files", "/diff"] {
+        assert_eq!(live.submit(c), Submitted::Nothing);
+        assert!(
+            last_note(&live).contains("not trusted"),
+            "{}",
+            last_note(&live)
+        );
+    }
+    live.trusted = true;
+    assert_eq!(live.submit("/files"), Submitted::Do(Action::Project(None)));
+    live.project_done("a.rs".into());
+    assert_eq!(last_note(&live), "a.rs");
+
+    // peers are off in this run
+    assert_eq!(live.submit("/peers"), Submitted::Nothing);
+    assert!(last_note(&live).starts_with("peers are off"));
+    live.submit("/name beta");
+    assert!(last_note(&live).starts_with("/name: peers are off"));
+
+    live.submit("/focus");
+    assert!(live.focus_view);
+
+    // session-only rules, the TUI's check
+    live.submit("/permissions allow Bash(git status:*)");
+    assert_eq!(
+        last_note(&live),
+        "allowed for this session: Bash(git status:*)"
+    );
+    assert!(
+        e.permissions_report()
+            .iter()
+            .any(|l| l.trim() == "Bash(git status:*)")
+    );
+    live.submit("/permissions allow Bash(git status:*)");
+    assert_eq!(last_note(&live), "that allow rule already exists");
+    live.submit("/permissions allow not a rule(");
+    assert!(last_note(&live).starts_with("expected a rule like"));
+    live.submit("/permissions allow");
+    assert!(last_note(&live).starts_with("usage:"));
+    live.submit("/permissions remove Bash(git status:*)");
+    assert_eq!(last_note(&live), "removed 1 rule(s): Bash(git status:*)");
+    live.submit("/permissions remove Bash(git status:*)");
+    assert_eq!(last_note(&live), "no rule Bash(git status:*)");
+    finish(e, &mut live);
+}
