@@ -157,7 +157,9 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: archive-${{ matrix.target }}
-          path: dist/synthesis-*.*
+          path: |
+            dist/synthesis-*.zip
+            dist/synthesis-*.tar.gz
           if-no-files-found: error
       - name: Keep raw binaries for the npm generator
         run: |
@@ -230,7 +232,9 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: desktop-${{ matrix.target }}
-          path: dist/synthesis-desktop-*.*
+          path: |
+            dist/synthesis-desktop-*.zip
+            dist/synthesis-desktop-*.tar.gz
           if-no-files-found: error
 
   sbom:
