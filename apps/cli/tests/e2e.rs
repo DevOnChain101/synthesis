@@ -1393,7 +1393,13 @@ fn outputs(ev: &[Value], name: &str) -> Vec<String> {
 }
 
 fn ok(d: &Done) {
-    assert_eq!(d.0.code(), Some(0), "stderr: {}", d.2);
+    let last: Vec<&Value> = d.1.iter().rev().take(5).rev().collect();
+    assert_eq!(
+        d.0.code(),
+        Some(0),
+        "stderr: {}\nlast events: {last:?}",
+        d.2
+    );
 }
 
 /// Windows runners start processes slowly: the fixed `delay_ms` that keeps one peer alive for the
