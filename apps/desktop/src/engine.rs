@@ -1014,9 +1014,7 @@ impl Engine {
             outcome.status = synthesis_events::TaskStatus::Failed;
             outcome.reason = "session_start_failed".into();
         }
-        let Some(rt) = self.tokio.take() else {
-            return None;
-        };
+        let rt = self.tokio.take()?;
         if self.began {
             rt.block_on(self.harness.session_hook(
                 HookEvent::SessionEnd,
