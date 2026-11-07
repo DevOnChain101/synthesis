@@ -28,6 +28,12 @@ pub struct Args {
     open: Option<String>,
     /// `--view tui|settings`: the view shown.
     view: crate::ui::View,
+    /// `--inject FILE`: a JSONL of events applied to the live conversation after the task (rows a
+    /// scripted model cannot make: budget, peers, memory, task end states); `--verbose` and
+    /// `--focus` set the chat switches of the same names.
+    inject: Option<PathBuf>,
+    verbose: bool,
+    focus: bool,
     /// `--check`: reopen the written PNG and fail unless it is the asked size (times a whole scale) and not blank.
     check: bool,
     w: f32,
@@ -100,6 +106,9 @@ pub fn parse(args: &[String]) -> Option<Args> {
             Some("settings") => crate::ui::View::Settings,
             _ => crate::ui::View::Tui,
         },
+        inject: val("--inject").map(PathBuf::from),
+        verbose: args.iter().any(|a| a == "--verbose"),
+        focus: args.iter().any(|a| a == "--focus"),
         check: args.iter().any(|a| a == "--check"),
         w,
         h,
@@ -237,6 +246,17 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (live, engine, tmp) = match fixture {
         Some((mut l, c, e, t)) => {
             prepare_tabs(&mut l, &e, &t, a.tab)?;
+            l.verbose = a.verbose;
+            l.focus_view = a.focus;
+            if let Some(f) = &a.inject {
+                for line in std::fs::read_to_string(f)?
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                {
+                    l.view
+                        .apply(&serde_json::from_str::<synthesis_events::Envelope>(line)?);
+                }
+            }
             (Some((l, c)), Some(e), Some(t))
         }
         None => (None, None, None),

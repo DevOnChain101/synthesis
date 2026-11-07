@@ -656,6 +656,14 @@ impl Engine {
             workspace,
         });
         let mut all_notices = notices;
+        // the worktree's place is the first thing to know (the finish report comes at the end)
+        if let Some(w) = &worktree {
+            all_notices.push(format!(
+                "working in worktree {} on branch {}",
+                w.info.worktree.display(),
+                w.info.branch
+            ));
+        }
         all_notices.extend(notes);
         let engine = Self {
             sid,
@@ -714,6 +722,12 @@ impl Engine {
                 })
                 .collect()
         })
+    }
+
+    /// `(path, branch)` of the worktree this session works in (`--worktree`).
+    pub fn worktree_info(&self) -> Option<(String, String)> {
+        let i = &self.worktree.as_ref()?.info;
+        Some((i.worktree.display().to_string(), i.branch.clone()))
     }
 
     /// Rows of the sessions other processes advertise (`/peers`); `None` when peers are off.
@@ -974,8 +988,9 @@ impl Engine {
     }
 
     /// Ends the session like the TUI host does (`round`): the `SessionEnd` hook, the stored usage,
-    /// `session.completed`, the MCP servers, the worktree; then stops the runtime.
-    pub fn close(mut self) {
+    /// `session.completed`, the MCP servers, the worktree; then stops the runtime. Returns what the
+    /// worktree finish found (path, branch, changes, cleanup), for the caller to show.
+    pub fn close(mut self) -> Option<String> {
         self.cancel();
         let outcome = lock(&self.last).take();
         let mut outcome = outcome.unwrap_or(TaskOutcome {
@@ -999,7 +1014,9 @@ impl Engine {
             outcome.status = synthesis_events::TaskStatus::Failed;
             outcome.reason = "session_start_failed".into();
         }
-        let Some(rt) = self.tokio.take() else { return };
+        let Some(rt) = self.tokio.take() else {
+            return None;
+        };
         if self.began {
             rt.block_on(self.harness.session_hook(
                 HookEvent::SessionEnd,
@@ -1019,19 +1036,21 @@ impl Engine {
         if let Some(m) = &self.mcp {
             rt.block_on(m.close());
         }
-        if let Some(w) = &self.worktree {
-            eprintln!("synthesis-desktop: {}", w.finish(self.cleanup_worktree));
-        }
+        let finished = self
+            .worktree
+            .as_ref()
+            .map(|w| w.finish(self.cleanup_worktree));
         rt.shutdown_background();
         // the global hook holds the memory run, and with it the event sink and the session
         // store's write lock: the restarted session (resume, new folder) must be able to open it
         synthesis_tools::set_learned_skills(None);
+        finished
     }
 }
 
 /// Ends an engine other threads may still hold for a moment (a peer poll): waits for them, then
 /// [`Engine::close`]. Blocking; call it off the UI thread.
-pub fn close_shared(mut e: Arc<Engine>) {
+pub fn close_shared(mut e: Arc<Engine>) -> Option<String> {
     for _ in 0..250 {
         match Arc::try_unwrap(e) {
             Ok(e) => return e.close(),
@@ -1042,6 +1061,7 @@ pub fn close_shared(mut e: Arc<Engine>) {
         }
     }
     eprintln!("synthesis-desktop: the engine is still in use; its session was not closed cleanly");
+    None
 }
 
 #[cfg(test)]
