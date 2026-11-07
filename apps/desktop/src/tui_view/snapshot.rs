@@ -502,12 +502,26 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
                 ),
                 ("tools".into(), format!("{} used", tools.tools.len())),
                 ("cwd".into(), tilde(&l.cwd, home)),
-                (
-                    "uptime".into(),
-                    st.uptime_ms(now)
-                        .map_or_else(|| "-".into(), |m| uptime(m / 1000)),
-                ),
-            ],
+            ]
+            .into_iter()
+            .chain(
+                l.engine
+                    .as_ref()
+                    .and_then(|e| e.worktree_info())
+                    .into_iter()
+                    .flat_map(|(path, branch)| {
+                        [
+                            ("worktree".into(), tilde(&path, home)),
+                            ("branch".into(), branch),
+                        ]
+                    }),
+            )
+            .chain([(
+                "uptime".into(),
+                st.uptime_ms(now)
+                    .map_or_else(|| "-".into(), |m| uptime(m / 1000)),
+            )])
+            .collect(),
         },
         tools: ToolsInfo {
             count: total.to_string(),
@@ -608,6 +622,13 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
                     dot: false,
                 });
             }
+            if let Some(b) = &st.budget_exceeded {
+                c.push(StatusChip {
+                    text: format!("budget exceeded: {b}"),
+                    warn: true,
+                    dot: false,
+                });
+            }
             c.push(StatusChip {
                 text: format!("{n_files} files changed"),
                 warn: n_files > 0,
@@ -698,6 +719,23 @@ mod tests {
         assert_eq!(age(3 * 3_600_000 + 60_000, 60_000), "3h");
         assert_eq!(tilde("/Users/a/x", Some("/Users/a")), "~/x");
         assert_eq!(tilde("/Users/ab", Some("/Users/a")), "/Users/ab");
+    }
+
+    #[test]
+    fn an_exceeded_budget_is_a_warning_chip() {
+        let mut l = Live::new();
+        l.starting = false;
+        let chips = |l: &Live| build(l, 0, 0, None).status;
+        assert!(chips(&l).iter().all(|c| !c.text.starts_with("budget")));
+        l.view.apply(&ev(
+            1,
+            "2026-11-07T10:00:00Z",
+            "budget.exceeded",
+            json!({"budget": "turns", "limit": 5.0, "used": 5.0}),
+        ));
+        let c = chips(&l);
+        let b = c.iter().find(|c| c.text.starts_with("budget")).unwrap();
+        assert!(b.warn && b.text == "budget exceeded: turns 5 / 5", "{b:?}");
     }
 
     #[test]

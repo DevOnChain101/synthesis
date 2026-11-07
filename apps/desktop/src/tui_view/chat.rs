@@ -21,9 +21,8 @@ use crate::theme::hsla;
 /// Lines of a tool's output shown before "ctrl+o" (the TUI's default).
 pub const COLLAPSED_LINES: usize = 6;
 
-/// One row of the quiet chat, or `None` when it is not shown. `verbose` is the TUI's switch for
-/// the internal rows; none of the kinds the reducer keeps today is internal, so it only widens
-/// what approvals show.
+/// Whether a row of the quiet chat is shown. `verbose` is the TUI's switch for the internal rows
+/// (`Item::Internal`: memory, peer and hook bookkeeping) and widens what approvals show.
 pub fn visible(it: &Item, show_thinking: bool, verbose: bool, focus: bool) -> bool {
     // `/focus`: prompts, answers, results and notices only (the TUI's focus kinds)
     if focus
@@ -38,6 +37,7 @@ pub fn visible(it: &Item, show_thinking: bool, verbose: bool, focus: bool) -> bo
         Item::Thinking(t) => show_thinking && !t.trim().is_empty(),
         // a granted permission is bookkeeping; waiting and denied ones are what a person needs
         Item::Approval { state, .. } => verbose || *state != ApprovalState::Allowed,
+        Item::Internal(_) => verbose,
         Item::Agent { .. } => true,
         Item::Assistant { text, streaming } => *streaming || !text.trim().is_empty(),
         _ => true,
@@ -486,14 +486,27 @@ impl TuiView {
                     }
                 ))
                 .into_any_element(),
-            Item::TaskEnd { ok, text: s } => div()
-                .text_color(if *ok {
-                    hsla(t::SUCCESS)
-                } else {
-                    hsla(t::ERROR)
-                })
-                .child(format!("{} {s}", if *ok { "\u{2713}" } else { "\u{2717}" }))
-                .into_any_element(),
+            Item::Internal(s) => div().text_color(dim()).child(s.clone()).into_any_element(),
+            Item::TaskEnd {
+                ok,
+                text: s,
+                word,
+                checks,
+            } => {
+                // unverified / blocked / cancelled are a warning, failed is an error, never green
+                let (mark, c) = match (*ok, word.as_str()) {
+                    (true, _) => ("\u{2713}", hsla(t::SUCCESS)),
+                    (_, "unverified" | "blocked" | "cancelled") => ("!", hsla(t::WARN)),
+                    _ => ("\u{2717}", hsla(t::ERROR)),
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(div().text_color(c).child(format!("{mark} {s}")))
+                    .children(checks.lines().map(|l| line_box(l, dim())))
+                    .into_any_element()
+            }
         }
     }
 
@@ -907,6 +920,17 @@ mod tests {
         // /focus keeps the conversation and drops the work
         assert!(visible(&Item::User("x".into()), false, false, true));
         assert!(!visible(&Item::Thinking("hm".into()), true, false, true));
+        // internal rows: verbose only, and never in /focus
+        let internal = Item::Internal("memory: 1 note(s) retrieved (12 tokens)".into());
+        assert!(!visible(&internal, false, false, false));
+        assert!(visible(&internal, false, true, false));
+        assert!(!visible(&internal, false, true, true));
+        // what needs the person stays in the quiet chat and in /focus
+        let warn = Item::Notice {
+            warning: true,
+            text: "budget exceeded: turns 5 / 5".into(),
+        };
+        assert!(visible(&warn, false, false, false) && visible(&warn, false, false, true));
     }
 
     #[test]
@@ -919,5 +943,99 @@ mod tests {
         assert_eq!(r.len(), 4);
         assert_eq!(r[0].0, "a.rs  +1 -1");
         assert!(r[1].2.is_some() && r[2].2.is_some() && r[3].2.is_none());
+    }
+
+    /// The row list of one conversation under the quiet-chat and /focus switches.
+    #[test]
+    fn the_row_list_of_a_conversation_with_every_new_row_kind() {
+        use synthesis_view::convo::Convo;
+        let ev = |t: &str, p: serde_json::Value| -> synthesis_events::Envelope {
+            serde_json::from_value(
+                serde_json::json!({"v":1,"seq":1,"ts":"2026-01-01T00:00:00Z",
+                "session_id":"s","task_id":null,"turn_id":null,"type":t,"payload":p}),
+            )
+            .unwrap()
+        };
+        let addr = serde_json::json!({"workspace_key":"k","workspace_label":"api","session_id":"s2","session_name":"backend","instance":"i"});
+        let mut c = Convo::default();
+        for e in [
+            ev(
+                "user.message",
+                serde_json::json!({"text":"ship it","images":[]}),
+            ),
+            ev(
+                "memory.retrieved",
+                serde_json::json!({"ids":["m"],"tokens":9,"candidates":1}),
+            ),
+            ev(
+                "hook.ran",
+                serde_json::json!({"event":"Stop","hook_name":"lint","exit_code":0,"outcome":"success","duration_ms":1}),
+            ),
+            ev(
+                "hook.ran",
+                serde_json::json!({"event":"Stop","hook_name":"lint","exit_code":1,"outcome":"error","duration_ms":1}),
+            ),
+            ev(
+                "browser.login_required",
+                serde_json::json!({"origin":"https://x.test","profile":"p"}),
+            ),
+            ev(
+                "peer.delegation.accepted",
+                serde_json::json!({"delegation_id":"d","request_id":"r","from":addr,"mode":"plan","cap":"plan"}),
+            ),
+            ev(
+                "peer.reply",
+                serde_json::json!({"request_id":"r","status":"answered","text":"42","bytes":2,"duration_ms":1}),
+            ),
+            ev(
+                "budget.exceeded",
+                serde_json::json!({"budget":"turns","limit":5.0,"used":5.0}),
+            ),
+            ev(
+                "verification.completed",
+                serde_json::json!({"report_id":"r","status":"unverified","attempt":1,"summary":"cargo test: not run"}),
+            ),
+            ev(
+                "task.ended",
+                serde_json::json!({"status":"unverified","reason":"no_check_ran","usage":{"input_tokens":0,"output_tokens":0},"changed_files":[],"artifacts_root":"/x"}),
+            ),
+        ] {
+            c.apply(&e);
+        }
+        let rows = |verbose, focus| -> Vec<String> {
+            c.items
+                .iter()
+                .filter(|i| visible(i, false, verbose, focus))
+                .map(|i| match i {
+                    Item::User(s) => format!("user: {s}"),
+                    Item::Notice { warning, text } => {
+                        format!("{}: {text}", if *warning { "warn" } else { "note" })
+                    }
+                    Item::Internal(t) => format!("internal: {t}"),
+                    Item::TaskEnd { text, checks, .. } => format!("end: {text} [{checks}]"),
+                    o => format!("{o:?}"),
+                })
+                .collect()
+        };
+        let quiet = [
+            "user: ship it",
+            "warn: hook lint (Stop): error",
+            "warn: log in to https://x.test in the browser window, then confirm",
+            "note: working for peer backend (plan mode)",
+            "note: peer reply: answered  42",
+            "warn: budget exceeded: turns 5 / 5",
+            "end: task unverified: no_check_ran [cargo test: not run]",
+        ];
+        assert_eq!(rows(false, false), quiet);
+        let verbose = rows(true, false);
+        assert_eq!(verbose.len(), quiet.len() + 2);
+        assert_eq!(
+            verbose[1],
+            "internal: memory: 1 note(s) retrieved (9 tokens)"
+        );
+        assert_eq!(verbose[2], "internal: hook lint (Stop): success");
+        // /focus: the conversation and what needs the person; the same with verbose
+        assert_eq!(rows(false, true), quiet);
+        assert_eq!(rows(true, true), quiet);
     }
 }

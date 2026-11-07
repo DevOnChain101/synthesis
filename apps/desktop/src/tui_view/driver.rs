@@ -431,7 +431,10 @@ impl TuiView {
         if let Some(lu) = &mut self.live
             && let Some(e) = lu.live.engine.take()
         {
-            engine::close_shared(e);
+            // nothing of the window is left to show it in
+            if let Some(m) = engine::close_shared(e) {
+                eprintln!("synthesis-desktop: {m}");
+            }
         }
     }
 
@@ -1254,7 +1257,8 @@ pub fn build(
     let first_start = prior.is_none() && target.is_none();
     let prior_sid = prior.as_ref().map(|p| p.sid.clone());
     if let Some(p) = prior {
-        engine::close_shared(p);
+        // a worktree session's end report (path, branch, changes, cleanup) is a notice of the next chat
+        notes.extend(engine::close_shared(p));
     }
     let home = cfg.synthesis_home.clone();
     let mut model = model;
