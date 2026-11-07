@@ -1277,6 +1277,33 @@ fn usage_by_day_sums_across_sessions_and_cuts_days_at_the_offset() {
 }
 
 #[test]
+fn usage_by_day_classifies_tool_starts() {
+    let e = env();
+    let d = e.dir("a");
+    let mut a = create(&e, "sa", &d);
+    for (i, name) in ["Bash", "Bash", "Edit", "Write", "browser_navigate", "mcp__gh__issue", "Read"]
+        .iter()
+        .enumerate()
+    {
+        a.append_event(Event::ToolStarted {
+            tool_call_id: format!("t{i}"),
+            name: (*name).into(),
+            side_effect: "read".into(),
+            cwd: ".".into(),
+        })
+        .unwrap();
+    }
+    drop(a);
+    let r = synthesis_session::Reader::open(&e.home).unwrap();
+    let days = r.usage_by_day(0, 0).unwrap();
+    let t = &days[0];
+    assert_eq!(
+        (t.tools, t.commands, t.files, t.browser, t.mcp),
+        (7, 2, 2, 1, 1)
+    );
+}
+
+#[test]
 fn prune_removes_only_old_unlocked_empty_sessions_and_listing_hides_empty_ones() {
     let e = env();
     let d = e.dir("w");
