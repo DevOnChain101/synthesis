@@ -20,29 +20,29 @@ pub const LINE: f32 = 19.375;
 /// One line of the compact Agent Status / Context bodies (`line-height:1.35`).
 pub const LINE_TIGHT: f32 = 16.875;
 
-/// Column widths for a viewport width: `250 | minmax(320,1fr) | 500`, then 200|300|380 below 1400,
-/// 190|300|300 below 1200, 180|300|260 below 1000.
+/// Owner rule (2026-11-07), a deliberate deviation from the proportions of `cli.html`: the chat column is at least
+/// 55% of the window width at every width. Left column: 250 from 1400, else 220. Right column:
+/// clamp(300, 24% of the width, 420). The right column is inline from 1280 and a slide-over drawer below it; the left
+/// column is inline from 1000 and a drawer below it. The chat takes the rest (79% at 3440), and the share of
+/// the smallest inline layout is 55.7% (1280: 713 of 1280). Hidden panels give their space to the chat.
+pub const RIGHT_INLINE_MIN: f32 = 1280.;
+pub const LEFT_INLINE_MIN: f32 = 1000.;
+
+/// Column widths for a viewport width. `left`/`right` are the widths of the column inline and of its drawer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cols {
     pub left: f32,
-    pub centre_min: f32,
     pub right: f32,
+    pub left_inline: bool,
+    pub right_inline: bool,
 }
 
 pub fn cols(width: f32) -> Cols {
-    let (left, centre_min, right) = if width < 1000. {
-        (180., 300., 260.)
-    } else if width < 1200. {
-        (190., 300., 300.)
-    } else if width < 1400. {
-        (200., 300., 380.)
-    } else {
-        (250., 320., 500.)
-    };
     Cols {
-        left,
-        centre_min,
-        right,
+        left: if width < 1400. { 220. } else { 250. },
+        right: (width * 0.24).clamp(300., 420.),
+        left_inline: width >= LEFT_INLINE_MIN,
+        right_inline: width >= RIGHT_INLINE_MIN,
     }
 }
 
@@ -141,19 +141,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn breakpoints_are_the_designs() {
-        let w = |x| {
-            let c = cols(x);
-            (c.left, c.right)
-        };
-        assert_eq!(w(1920.), (250., 500.));
-        assert_eq!(w(1400.), (250., 500.));
-        assert_eq!(w(1399.), (200., 380.));
-        assert_eq!(w(1200.), (200., 380.));
-        assert_eq!(w(1199.), (190., 300.));
-        assert_eq!(w(1000.), (190., 300.));
-        assert_eq!(w(999.), (180., 260.));
-        assert_eq!(w(900.), (180., 260.));
+    fn chat_is_the_majority_at_every_width() {
+        for w in (900..=3440).step_by(10).map(|w| w as f32) {
+            let c = cols(w);
+            let side = |inline: bool, x: f32| if inline { x + GAP } else { 0. };
+            let centre = w - 2. * PAD - side(c.left_inline, c.left) - side(c.right_inline, c.right);
+            assert!(centre / w >= 0.55, "{w}: {}", centre / w);
+        }
+        assert_eq!((cols(1400.).left, cols(1399.).left), (250., 220.));
+        assert_eq!((cols(1400.).right, cols(1920.).right), (336., 420.));
+        assert_eq!((cols(3440.).right, cols(1250.).right), (420., 300.));
+        assert!(cols(1280.).right_inline && !cols(1279.).right_inline);
+        assert!(cols(1000.).left_inline && !cols(999.).left_inline);
     }
 
     #[test]

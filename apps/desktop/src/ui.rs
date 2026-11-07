@@ -17,7 +17,7 @@ use gpui::{
 
 use crate::settings_view::{self, Close, SettingsView};
 use crate::tui_view::driver::{LiveCfg, OpenSettings};
-use crate::tui_view::{TuiView, layout};
+use crate::tui_view::{Side, TuiView, layout};
 use crate::widgets::chrome::{icon, tracked, with_alpha};
 use crate::{brand, theme};
 use synthesis_tui_render::theme as t;
@@ -288,6 +288,15 @@ impl Render for Shell {
                     "," => s.go(View::Settings, window, cx),
                     "1" => s.go(View::Tui, window, cx),
                     "2" => s.go(View::Agent, window, cx),
+                    // the collapsed side columns of the TUI view (narrow windows): sidebar, inspector
+                    "b" | "i" if s.view == View::Tui => {
+                        let side = if k.key == "b" {
+                            Side::Left
+                        } else {
+                            Side::Right
+                        };
+                        s.tui.update(cx, |t, cx| t.toggle_drawer(side, cx));
+                    }
                     _ => return,
                 }
                 cx.stop_propagation();
@@ -455,10 +464,11 @@ mod tests {
         assert_eq!(f.0 + f.1, 930.);
         let g = v.debug_bounds("col-left").unwrap();
         assert_eq!(f32::from(g.origin.x), 10.);
-        // the content under the bar is the 1400x900 design: the same columns as the browser's
+        // the content under the bar is the 1400x900 layout with the owner's column rule (`layout::cols`)
         let r = v.debug_bounds("col-right").unwrap();
-        assert_eq!(f32::from(r.size.width), 500.);
-        assert_eq!(f32::from(r.origin.x), 1400. - 10. - 500.);
+        let rw = layout::cols(1400.).right;
+        assert_eq!(f32::from(r.size.width), rw);
+        assert_eq!(f32::from(r.origin.x), 1400. - 10. - rw);
     }
 
     #[gpui::test]

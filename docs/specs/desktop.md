@@ -110,7 +110,7 @@ assistant, result and notices stay). `/permissions allow|remove RULE` edits the 
 
 TUI view (`src/tui_view/`), rebuilt 1:1 on the owner's design `~/Vibe/synthesis-cli-ui/cli.html` (owner decision
 2026-11-07, "dung lai dung cli.html"): geometry and typography are the design's (Fira Code 500, 12.5px / 1.55,
-panels radius 8, the breakpoints 1400/1200/1000 and the height tiers 750/610/860, the `fitRight` rules, the
+panels radius 8, the height tiers (column breakpoints: see the column rule below) 750/610/860, the `fitRight` rules, the
 topology modes A, B and T), only the colours are the platinum tokens. Panels: top bar; left Workspace, Running,
 Session, Tools & Skills, Recent Activity, User Prompt; centre header (status, latest prompt, context bar, folder,
 files | LOC), tabs chat | diff | terminal | browser | file explorer, conversation, prompt, transcript switch, mode
@@ -137,6 +137,17 @@ lays the sample out in GPUI at the same sizes and compares (1px; 1.5px for panel
 synthesis-desktop --features shot -- --shot out.png --size 1400x900 [--hide session,tools,...]` (headless
 Metal/wgpu, no window server); `node scripts/design-compare.mjs <ref-dir> <shots-dir> <out-dir>` writes
 [design | app | difference] images from Chrome renders of `cli.html` (`ref-WxH.png`) and the shots.
+Column rule (owner decision 2026-11-07, an approved DEVIATION from the proportions of `cli.html`, whose 250|1fr|500 gave
+the chat 43% of a 1400px window): the chat column (tabs, conversation, prompt, mode bar) is at least 55% of the window
+width at every width and fills the content height. `layout::cols`: left column 250 from 1400, else 220; right column
+clamp(300, 24% of the width, 420), so the side columns stop growing at 670px and the chat takes the rest (63% at 1920,
+79% at 3440). The right column is inline from 1280 and below that a slide-over drawer (button with the topology icon at
+the right end of the top bar, Cmd/Ctrl+I, click on the dimmed chat closes it); the left column is inline from 1000 and
+below that a drawer too (folder icon, Cmd/Ctrl+B). Drawers are closed by default, one at a time, drawn over the chat
+(`--drawer left|right` for `--shot`). Hidden `synt.tui.panels.*` panels give their space to the chat. All other
+metrics are the design's; `design_tests.rs` keeps the Chrome rects as the reference for everything except column
+x/width (and the wrapping of the right cards in the narrower column), and `chat_share`, `drawers` and
+`topology_fits_the_narrow_column` encode the rule. Known: at 300-336px the Context card clips a long `tokens` row.
 Not ported: topology mode L (tall and narrow falls back to T). The "Latest user prompt" scrolls (16s, repeating,
 `synt.tui.motion`) only when it does not fit.
 
