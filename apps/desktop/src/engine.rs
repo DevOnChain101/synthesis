@@ -486,6 +486,10 @@ pub struct Engine {
     pub memory_on: bool,
     /// Lines of `/memory`: the instruction files loaded at start and where `#` notes go.
     pub memory_report: Vec<String>,
+    /// Where `#` notes go (the TUI's `MemoryHook`).
+    pub notes: synthesis_app::memory::Notes,
+    /// A `!cmd` ended and the model should read its output (the window starts that turn).
+    followup: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Engine {
@@ -686,7 +690,9 @@ impl Engine {
             began: started.is_ok(),
             sandbox,
             memory_on: memory.is_some(),
-            memory_report: (memory_notes.hook().report)(),
+            memory_report: (memory_notes.clone().hook().report)(),
+            notes: memory_notes,
+            followup: Arc::default(),
         };
         match started {
             Ok(()) => Ok((engine, rx)),
@@ -753,6 +759,21 @@ impl Engine {
         text: String,
         images: Vec<ImageAttachment>,
     ) -> Result<(), &'static str> {
+        self.start_task(text, images, false)
+    }
+
+    /// The model turn after a `!cmd` (see [`Engine::take_followup`]): the harness's own note,
+    /// not shown in the chat.
+    pub fn send_followup(&self) -> Result<(), &'static str> {
+        self.start_task(synthesis_harness::user_command_note().into(), vec![], true)
+    }
+
+    fn start_task(
+        &self,
+        text: String,
+        images: Vec<ImageAttachment>,
+        hidden: bool,
+    ) -> Result<(), &'static str> {
         let Some(mut session) = lock(&self.session).take() else {
             return Err("a task is already running");
         };
@@ -781,7 +802,9 @@ impl Engine {
             let before = host.before(&text, &token).await;
             let r = match before {
                 Ok(request) => {
-                    if request != text {
+                    if hidden {
+                        req.display_text = Some(String::new());
+                    } else if request != text {
                         req.display_text = Some(text.clone());
                     }
                     req.request = request;
@@ -805,6 +828,90 @@ impl Engine {
             let _ = tx.unbounded_send(UiMsg::TaskDone(done));
         });
         Ok(())
+    }
+
+    /// `!cmd` (`record_only`: `!!cmd`): the harness runs it through the same Bash permission check,
+    /// sandbox, hooks and redaction as the TUI's, and appends it with its output to the history.
+    /// Plan mode refuses it (stricter than the TUI, which lets a typed command through in plan).
+    /// `TaskDone` follows. `Err`: a task is running, or the command was refused before it started.
+    pub fn user_command(&self, command: String, record_only: bool) -> Result<(), &'static str> {
+        if self.mode() == Mode::Plan {
+            return Err("plan mode does not run shell commands: Shift+Tab leaves it first");
+        }
+        let Some(session) = lock(&self.session).take() else {
+            return Err("a task is already running");
+        };
+        let Some(rt) = &self.tokio else {
+            *lock(&self.session) = Some(session);
+            return Err("the engine is closed");
+        };
+        let token = CancellationToken::new();
+        *lock(&self.cancel) = Some(token.clone());
+        let (h, tx) = (self.harness.clone(), self.tx.clone());
+        let (slot, history, followup) = (
+            self.session.clone(),
+            self.history.clone(),
+            self.followup.clone(),
+        );
+        rt.spawn(async move {
+            let before = lock(&history).clone();
+            let done = match h.run_user_command(&session, before, &command, token).await {
+                Ok((messages, out)) => {
+                    *lock(&history) = messages;
+                    // the model reads the result unless `!!`, the settings or Esc say not to
+                    followup.store(
+                        out.ran
+                            && !out.cancelled
+                            && !record_only
+                            && h.shell_settings().user_commands_model_turn,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    Ok(())
+                }
+                Err(e) => Err(e.to_string()),
+            };
+            *lock(&slot) = Some(session);
+            let _ = tx.unbounded_send(UiMsg::TaskDone(done));
+        });
+        Ok(())
+    }
+
+    /// True once after a `!cmd` whose output the model should read.
+    pub fn take_followup(&self) -> bool {
+        self.followup
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// An image the person dropped: its resolved path, when the session may read it. The TUI's
+    /// `@file` rule (`WorkspaceContext::resolve`): inside the workspace or an additional
+    /// directory with links resolved (a link out is outside), never a secret file, no read-deny
+    /// rule. Read the returned path, not the one given.
+    pub fn image_path(&self, p: &Path) -> Result<PathBuf, String> {
+        let real = self
+            .host
+            .workspace
+            .resolve(&p.to_string_lossy())
+            .map_err(|_| {
+                "outside the workspace: only files inside it can be attached".to_string()
+            })?;
+        let real = synthesis_core::canonicalize(&real).map_err(|e| e.to_string())?;
+        if synthesis_core::secrets::is_secret_path(p)
+            || synthesis_core::secrets::is_secret_path(&real)
+        {
+            return Err("a secret file is never attached".into());
+        }
+        let denied = lock(&self.harness.permissions())
+            .check(
+                "Read",
+                &json!({ "file_path": real }),
+                Mode::BypassPermissions,
+            )
+            .decision
+            == synthesis_permissions::Decision::Deny;
+        if denied {
+            return Err("blocked by a permission rule".into());
+        }
+        Ok(real)
     }
 
     /// `/clear`: the next task starts without the earlier conversation.

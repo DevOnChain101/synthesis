@@ -945,10 +945,10 @@ pub fn prepare(
             "bypassPermissions: tool calls run without approval; only deny rules, ask rules, critical removals and destructive MCP asks still stop them; protected paths are not stopped"
                 .to_string(),
         ),
-        Mode::Auto => notices.push(
-            "auto mode: a model call judges each call the rules leave open (allow / deny / ask); an unclear answer is an ask, which this run denies"
-                .to_string(),
-        ),
+        Mode::Auto => notices.push(format!(
+            "auto mode: a model call judges each call the rules leave open (allow / deny / ask); an unclear answer is an ask, which {}",
+            if is_tui { "you answer in a dialog" } else { "this run denies" }
+        )),
         _ => {}
     }
     for n in &notices {

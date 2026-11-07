@@ -10,6 +10,7 @@ use synthesis_events::Redactor;
 const NOTE_CAP: usize = 2048;
 
 /// What the TUI needs to save `#` notes and to answer `/memory`.
+#[derive(Clone)]
 pub struct Notes {
     pub user: PathBuf,
     pub project: PathBuf,
@@ -36,6 +37,26 @@ pub fn describe(files: &[InstructionFile]) -> Vec<String> {
 }
 
 impl Notes {
+    /// Appends the note (`user` = user file) after the person confirmed; `Ok` is the text to show.
+    pub fn save(&self, user: bool, text: &str) -> Result<String, String> {
+        let (path, root) = if user {
+            (&self.user, None)
+        } else {
+            (&self.project, Some(&self.root))
+        };
+        let masked = append_note(path, root, text, &Redactor::new(self.secrets.clone()))?;
+        Ok(format!(
+            "saved to {}{} · applies to new sessions",
+            path.display(),
+            if masked { " (secrets masked)" } else { "" }
+        ))
+    }
+
+    /// The note as it will be written (one line, secrets masked).
+    pub fn preview(&self, text: &str) -> String {
+        final_note(text, &Redactor::new(self.secrets.clone())).0
+    }
+
     pub fn hook(self) -> synthesis_tui::MemoryHook {
         let report = {
             let mut v = vec!["Instruction files loaded at start:".to_string()];
@@ -63,19 +84,7 @@ impl Notes {
                 let secrets = self.secrets.clone();
                 std::rc::Rc::new(move |text| final_note(text, &Redactor::new(secrets.clone())).0)
             },
-            save: Box::new(move |user, text| {
-                let (path, root) = if user {
-                    (&self.user, None)
-                } else {
-                    (&self.project, Some(&self.root))
-                };
-                let masked = append_note(path, root, text, &Redactor::new(self.secrets.clone()))?;
-                Ok(format!(
-                    "saved to {}{} · applies to new sessions",
-                    path.display(),
-                    if masked { " (secrets masked)" } else { "" }
-                ))
-            }),
+            save: Box::new(move |user, text| self.save(user, text)),
         }
     }
 }

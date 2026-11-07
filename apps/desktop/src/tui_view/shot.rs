@@ -48,6 +48,10 @@ pub struct LiveShot {
     /// `--earlier TEXT`: a first session of the same folder and home that ran this prompt and
     /// ended (what `/resume` lists).
     earlier: Option<String>,
+    /// `--setup`: the first-run card (no model configured) is open.
+    setup: bool,
+    /// `--outside-read`: an `outside_read` approval dialog is open.
+    outside_read: bool,
 }
 
 /// `None` when `--shot` is absent.
@@ -79,6 +83,8 @@ pub fn parse(args: &[String]) -> Option<Args> {
         },
         cmd: val("--cmd").cloned(),
         earlier: val("--earlier").cloned(),
+        setup: args.iter().any(|a| a == "--setup"),
+        outside_read: args.iter().any(|a| a == "--outside-read"),
     });
     let tab = match val("--tab").map(String::as_str) {
         Some("diff") => super::ChatTab::Diff,
@@ -216,6 +222,23 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
     }
     if let Some(c) = &l.cmd {
         live.submit(c);
+    }
+    if l.setup {
+        live.open_setup("no model configured: set `model` in synt.json", now_ms());
+    }
+    if l.outside_read {
+        let ask = crate::engine::AskApproval {
+            id: "shot-outside".into(),
+            agent_id: None,
+            tool: "Read".into(),
+            input: serde_json::json!({"file_path": "/etc/hosts"}),
+            dialog: "outside_read",
+            prompt: String::new(),
+            reason: "read outside the working directories".into(),
+            origin: None,
+            suggestions: vec![],
+        };
+        live.on_msg(UiMsg::Approval(Box::new(ask)), now_ms());
     }
     Ok((live, cfg, engine, tmp))
 }

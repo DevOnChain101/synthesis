@@ -298,6 +298,9 @@ impl TuiView {
         match r {
             Err(e) => {
                 lu.live.note(startup_failure(&e), true);
+                if e.starts_with("no model configured") {
+                    lu.live.open_setup(&e, now_ms());
+                }
             }
             Ok(l) => {
                 lu.model_override = l.model;
@@ -330,6 +333,18 @@ impl TuiView {
     /// A task ended: reload the store panels (the usage, the session list) and start what was queued.
     fn after_task(&mut self, cx: &mut Context<Self>) {
         self.refresh_store(cx);
+        // the model reads a `!cmd`'s output before anything queued starts
+        let Some(lu) = &mut self.live else { return };
+        if let Some(e) = lu.live.engine.clone()
+            && e.take_followup()
+        {
+            lu.live.busy = true;
+            if let Err(why) = e.send_followup() {
+                lu.live.busy = false;
+                lu.live.note(why, true);
+            }
+            return;
+        }
         self.send_queued(cx);
     }
 
@@ -346,8 +361,18 @@ impl TuiView {
         let Some(e) = lu.live.engine.clone() else {
             return;
         };
-        let images = lu.live.take_images();
-        if let Err(why) = e.send_images(text, images) {
+        let started = match text.strip_prefix('!') {
+            // `!cmd` / `!!cmd` (record only), as in the TUI
+            Some(rest) => {
+                let (record_only, cmd) = match rest.strip_prefix('!') {
+                    Some(c) => (true, c),
+                    None => (false, rest),
+                };
+                e.user_command(cmd.trim().to_string(), record_only)
+            }
+            None => e.send_images(text, lu.live.take_images()),
+        };
+        if let Err(why) = started {
             lu.live.busy = false;
             lu.live.note(why, true);
         }
@@ -976,6 +1001,11 @@ impl TuiView {
             }
             Action::Close => return self.switch(Target::Close, "close".into(), cx),
             Action::OpenSettings => cx.emit(OpenSettings),
+            Action::Quit => return self.quit(cx),
+            Action::Recheck => {
+                let project = lu.cfg.project.clone();
+                return self.launch(project, None, vec![], cx);
+            }
             Action::ShowFiles => return self.show_tab(super::ChatTab::Files, None, cx),
             Action::ShowDiff(f) => return self.show_tab(super::ChatTab::Diff, f, cx),
             Action::Peers => {
@@ -1078,14 +1108,21 @@ impl TuiView {
     /// Files dropped on the window: images are attached, anything else is said.
     pub fn drop_files(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
+        let Some(e) = lu.live.engine.clone() else {
+            return;
+        };
         for p in paths {
-            let r = read_image_file(p).and_then(|(png, bytes)| {
-                if png {
-                    attach_png(&mut lu.live, bytes)
-                } else {
-                    attach_jpeg(&mut lu.live, bytes)
-                }
-            });
+            // the TUI's `@file` rule: inside the workspace, no secret file, links resolved
+            let r = e
+                .image_path(p)
+                .and_then(|p| read_image_file(&p))
+                .and_then(|(png, bytes)| {
+                    if png {
+                        attach_png(&mut lu.live, bytes)
+                    } else {
+                        attach_jpeg(&mut lu.live, bytes)
+                    }
+                });
             lu.report_image(r.map_err(|e| format!("{}: {e}", p.display())));
         }
         cx.notify();
