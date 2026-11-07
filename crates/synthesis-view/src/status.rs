@@ -212,6 +212,8 @@ pub struct StatusModel {
     pub cache_create: u64,
     /// `None` until a turn reported a cost (an unknown cost is not zero).
     pub cost_usd: Option<f64>,
+    /// `budget turns 5 / 5` once the task in progress (or the last one) hit a budget.
+    pub budget_exceeded: Option<String>,
 }
 
 impl StatusModel {
@@ -234,6 +236,12 @@ impl StatusModel {
                 self.effort.clone_from(effort);
             }
             Event::SessionModeChanged { to, .. } => self.mode.clone_from(to),
+            Event::TaskStarted { .. } => self.budget_exceeded = None,
+            Event::BudgetExceeded {
+                budget,
+                limit,
+                used,
+            } => self.budget_exceeded = Some(format!("{budget} {used} / {limit}")),
             Event::TurnStarted { .. } => self.turns += 1,
             Event::ToolRequested { .. } => self.tools += 1,
             Event::TurnCompleted { usage: Some(u), .. } if main => {
@@ -354,6 +362,29 @@ mod tests {
             None,
             "unknown cost is not zero"
         );
+    }
+
+    #[test]
+    fn a_budget_that_ran_out_shows_until_the_next_task() {
+        let mut m = StatusModel::default();
+        m.apply(
+            &env(Event::BudgetExceeded {
+                budget: "turns".into(),
+                limit: 5.0,
+                used: 5.0,
+            }),
+            0,
+        );
+        assert_eq!(m.budget_exceeded.as_deref(), Some("turns 5 / 5"));
+        m.apply(
+            &env(Event::TaskStarted {
+                request: "r".into(),
+                acceptance_criteria: vec![],
+                budget: Default::default(),
+            }),
+            0,
+        );
+        assert_eq!(m.budget_exceeded, None);
     }
 
     #[test]

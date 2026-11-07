@@ -26,7 +26,7 @@ of the classic TUI design, in this repo, running the Rust engine in process.
 - `engine.rs`: `synthesis_app::run::prepare(.., Front::Native(Native { out, approver, input }))` builds
   the harness in process. The host supplies the JSONL event writer (parsed to typed `Envelope`s and sent
   to the window over a channel), the `Approver` (pending map answered by the UI) and the
-  `InputProvider` (questions; `NoInput` for now). `Front::Native` behaves like `Front::Tui` otherwise.
+  `InputProvider` (`ChanInput`: plan and question dialogs, answered by the window). `Front::Native` behaves like `Front::Tui` otherwise.
 - `crates/synthesis-view` (`synthesis-view`): UI-agnostic view models and reducers, no terminal, no
   GPUI, no drawing. The classic TUI and the desktop both depend on it. One `state::ViewState` per
   session: `apply(&Envelope)` folds an event into every panel; `load_from_store(&Reader,
@@ -94,17 +94,29 @@ of the classic TUI design, in this repo, running the Rust engine in process.
 
 ## 5. Known gaps
 
-Views are placeholders; `InputProvider` answers nothing; no stored-session resume; no
-plan/question dialogs, browser or verification UI; Linux/Windows run in CI but no maintainer has used them on a real machine (no ConPTY need any more).
+Wired: the input provider (plan and question dialogs, with "Other" free text), stored-session resume and the
+model/resume pickers, every built-in slash command, image paste, and peer polling (`tui_view/driver.rs` `tick`
+calls `Engine::peer_rows` every fifth second into `ViewState::set_peers`). Linux/Windows run in CI but no
+maintainer has used them on a real machine (no ConPTY need any more).
+
+Chat rows follow the classic TUI's quiet-chat rules (`tui_view/chat.rs` `visible`, reducer in
+`synthesis-view/src/convo.rs`, wording from `synthesis-tui` `chat.rs`). Always shown: budget exceeded, failed
+hooks, a browser login to confirm, a refused peer request, work a peer asked for, peer replies and agent
+messages, a memory note waiting for review, a failed memory reflection. Internal rows (successful hooks,
+memory retrieved/written/quarantined, peer listening/requests/threads/tool calls) are `Item::Internal`: drawn
+only with `synt.tui.verbose`, never in `/focus`. A task that did not complete ends with a warning line
+(`task unverified|blocked|cancelled`, `interrupted`) or an error line (`task failed`), followed by the checks of its
+last verification report; `Done` is the only green end. An exceeded budget also shows as a status chip until the
+next task. With `--worktree`, a chat notice and the Session panel (`worktree`, `branch`) give the path and branch;
+the finish report (changes, cleanup) is a notice of the next session's chat (stderr on quit).
 
 TUI view is LIVE (phase 2b-1): `engine.rs` mirrors `synt tui` (prepare + `round` + `Host`), `live.rs` holds the
 dialogs/queue/history/focus rules, `tui_view/snapshot.rs` builds the painted `Snapshot` from `ViewState`,
 `driver.rs` pumps engine messages (batched, one redraw per 16 ms), handles keys, completion, resume and
 store refresh, `chat.rs`/`dialog.rs` paint the conversation and the permission/plan/question dialogs.
 `--sample` keeps the sample data; `--shot ... --live SCRIPT --prompt T [--answer once|deny|always]` renders a
-scripted (fake provider, `--features shot,test-provider`) conversation on the real engine. Not yet: model/resume
-pickers and slash commands beyond /help and /exit (a notice says so), image paste, "Other" free text in
-question dialogs, keyboard scroll-into-view in Workspace/Running, Linux/Windows/IME verification.
+scripted (fake provider, `--features shot,test-provider`) conversation on the real engine. Not yet: Linux/Windows/IME
+verification.
 
 Slash commands (all built-ins are wired; `live.rs` `WIRED`, the TUI's semantics): `/files` and `/diff [file]` switch
 the centre panel to its file explorer or diff tab (`/diff FILE` opens that file's diff) and post nothing in the chat;
@@ -195,8 +207,8 @@ tools and skills, conversation. Not done, with where the data would come from:
 - Settings write API: done in `crates/synthesis-settings-ui` (section 6). The GPUI form is not built.
 - Multi-session tabs: TODO. `ViewState` is one session; tabs are a `Vec<ViewState>` keyed by session id
   in the desktop, fed by one event channel per `engine` run. Needs the engine to host several sessions.
-- Peers refresh: `ViewState::set_peers` takes the harness rows; the desktop must poll
-  `synthesis-harness` `peer` listing (not wired).
+- Peers refresh: done. `ViewState::set_peers` takes the harness rows; the desktop polls the `peer` listing every
+  fifth second (`driver.rs` `tick`, `Engine::peer_rows`).
 - Uncommitted `+N -N` needs the host's trust decision per folder (`LoadOpts::trusted`) and runs git
   with a 5 s limit per call, so load off the UI thread.
 - Interactive PTY: not wanted (owner decision).
