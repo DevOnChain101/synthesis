@@ -323,7 +323,20 @@ fn check_png(path: &std::path::Path, w: u32, h: u32) -> Result<(), Err> {
     if colours.len() < 16 {
         return Err(format!("frame is blank ({} distinct colours)", colours.len()).into());
     }
-    eprintln!("check ok: scale {k}, {} distinct colours", colours.len());
+    // Text is what a broken text system drops (no-op text system: layout and icons still draw, 0.5% edges (Settings with text: 1.1%)
+    // against 2.5% with text): sharp horizontal green-channel steps per pixel.
+    let edges = (0..img.height())
+        .flat_map(|y| (1..img.width()).map(move |x| (x, y)))
+        .filter(|&(x, y)| img.get_pixel(x, y).0[1].abs_diff(img.get_pixel(x - 1, y).0[1]) > 40)
+        .count();
+    let density = edges as f64 / (img.width() * img.height()) as f64;
+    if density < 0.007 {
+        return Err(format!("no text drawn (edge density {density:.4})").into());
+    }
+    eprintln!(
+        "check ok: scale {k}, {} distinct colours, edge density {density:.4}",
+        colours.len()
+    );
     Ok(())
 }
 
