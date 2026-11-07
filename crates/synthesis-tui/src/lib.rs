@@ -12,7 +12,7 @@ mod app;
 mod chat;
 mod link;
 pub mod links;
-mod peers_view;
+pub mod peers_view;
 mod preview;
 mod resume;
 mod route;

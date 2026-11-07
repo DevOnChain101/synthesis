@@ -23,7 +23,16 @@ pub const COLLAPSED_LINES: usize = 6;
 /// One row of the quiet chat, or `None` when it is not shown. `verbose` is the TUI's switch for
 /// the internal rows; none of the kinds the reducer keeps today is internal, so it only widens
 /// what approvals show.
-pub fn visible(it: &Item, show_thinking: bool, verbose: bool) -> bool {
+pub fn visible(it: &Item, show_thinking: bool, verbose: bool, focus: bool) -> bool {
+    // `/focus`: prompts, answers, results and notices only (the TUI's focus kinds)
+    if focus
+        && !matches!(
+            it,
+            Item::User(_) | Item::Assistant { .. } | Item::TaskEnd { .. } | Item::Notice { .. }
+        )
+    {
+        return false;
+    }
     match it {
         Item::Thinking(t) => show_thinking && !t.trim().is_empty(),
         // a granted permission is bookkeeping; waiting and denied ones are what a person needs
@@ -597,26 +606,30 @@ mod tests {
     #[test]
     fn the_quiet_chat_hides_what_a_person_does_not_need() {
         let thinking = Item::Thinking("hm".into());
-        assert!(!visible(&thinking, false, false));
-        assert!(visible(&thinking, true, false));
+        assert!(!visible(&thinking, false, false, false));
+        assert!(visible(&thinking, true, false, false));
         let ap = |state| Item::Approval {
             id: "a".into(),
             tool_call_id: "t".into(),
             prompt: "p".into(),
             state,
         };
-        assert!(!visible(&ap(ApprovalState::Allowed), false, false));
-        assert!(visible(&ap(ApprovalState::Allowed), false, true));
-        assert!(visible(&ap(ApprovalState::Pending), false, false));
-        assert!(visible(&ap(ApprovalState::Denied), false, false));
+        assert!(!visible(&ap(ApprovalState::Allowed), false, false, false));
+        assert!(visible(&ap(ApprovalState::Allowed), false, true, false));
+        assert!(visible(&ap(ApprovalState::Pending), false, false, false));
+        assert!(visible(&ap(ApprovalState::Denied), false, false, false));
         assert!(!visible(
             &Item::Assistant {
                 text: " ".into(),
                 streaming: false
             },
             false,
+            false,
             false
         ));
+        // /focus keeps the conversation and drops the work
+        assert!(visible(&Item::User("x".into()), false, false, true));
+        assert!(!visible(&Item::Thinking("hm".into()), true, false, true));
     }
 
     #[test]

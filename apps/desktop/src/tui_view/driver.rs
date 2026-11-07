@@ -890,6 +890,16 @@ impl TuiView {
         self.launch_with(project, prior, Some(target), vec![], cx);
     }
 
+    /// Runs `f` on the live state, then redraws and scrolls to the new row.
+    fn live_do(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Live)) {
+        if let Some(lu) = &mut self.live {
+            f(&mut lu.live);
+            lu.stick();
+            lu.dirty = true;
+        }
+        cx.notify();
+    }
+
     /// What a command or picker asked the window to do.
     pub(super) fn run_action(&mut self, a: Action, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
@@ -943,6 +953,30 @@ impl TuiView {
             }
             Action::Close => return self.switch(Target::Close, "close".into(), cx),
             Action::OpenSettings => cx.emit(OpenSettings),
+            Action::Project(diff) => {
+                let (cwd, env) = (lu.live.cwd.clone(), lu.cfg.env.clone());
+                let job = cx.background_spawn(async move {
+                    crate::live::project_text(&cwd, &env, diff.as_deref())
+                });
+                cx.spawn(async move |this, cx| {
+                    let text = job.await;
+                    this.update(cx, |t, cx| t.live_do(cx, |l| l.project_done(text)))
+                        .ok();
+                })
+                .detach();
+            }
+            Action::Peers => {
+                let Some(e) = lu.live.engine.clone() else {
+                    return;
+                };
+                let job = cx.background_spawn(async move { e.peer_rows() });
+                cx.spawn(async move |this, cx| {
+                    let rows = job.await;
+                    this.update(cx, |t, cx| t.live_do(cx, |l| l.peers_done(rows)))
+                        .ok();
+                })
+                .detach();
+            }
         }
         lu.dirty = true;
         cx.notify();
@@ -1100,7 +1134,7 @@ impl LiveUi {
             .items
             .iter()
             .enumerate()
-            .filter(|(_, it)| super::chat::visible(it, l.show_thinking, l.verbose))
+            .filter(|(_, it)| super::chat::visible(it, l.show_thinking, l.verbose, l.focus_view))
             .map(|(i, _)| Row::Item(i))
             .collect();
         if !c.plan.is_empty() {

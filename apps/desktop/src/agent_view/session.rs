@@ -14,7 +14,7 @@ use gpui::{
 use synthesis_view::agent as panes;
 use synthesis_view::project::{self, ProjectData};
 
-use super::AgentView;
+use super::{AgentView, Tab};
 use crate::engine::{self, Engine, StartOpts, UiMsg};
 use crate::live::{Action, Live, Submitted, now_ms};
 use crate::tui_view::driver::{read_store, startup_failure};
@@ -328,6 +328,47 @@ impl AgentView {
                 );
             }
             Action::OpenSettings => s.live.note("open Settings from the rail", false),
+            Action::Project(diff) => {
+                let Some(cfg) = self.cfg.clone() else { return };
+                let (cwd, files) = (s.live.cwd.clone(), diff.is_none());
+                let job = cx.background_spawn(async move {
+                    crate::live::project_text(&cwd, &cfg.env, diff.as_deref())
+                });
+                cx.spawn(async move |this, cx| {
+                    let text = job.await;
+                    this.update(cx, |t, cx| {
+                        if let Some(i) = t.index_of(uid) {
+                            t.sessions[i].live.project_done(text);
+                            t.sessions[i].dirty = true;
+                        }
+                        // the Files tab has the same tree, in its own pane
+                        if files && t.active_session().is_some_and(|s| s.uid == uid) {
+                            t.set_tab(Tab::Files, cx);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            Action::Peers => {
+                let Some(e) = s.live.engine.clone() else {
+                    return;
+                };
+                let job = cx.background_spawn(async move { e.peer_rows() });
+                cx.spawn(async move |this, cx| {
+                    let rows = job.await;
+                    this.update(cx, |t, cx| {
+                        if let Some(i) = t.index_of(uid) {
+                            t.sessions[i].live.peers_done(rows);
+                            t.sessions[i].dirty = true;
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
         }
         s.dirty = true;
         cx.notify();
