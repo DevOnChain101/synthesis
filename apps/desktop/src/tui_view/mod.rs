@@ -202,13 +202,14 @@ impl TuiView {
         let _ = window;
         // the tabs belong to the session: leaving one keeps them, coming back finds them
         if lu.live.sid != self.tab_sid && !lu.live.sid.is_empty() {
-            let old = std::mem::take(&mut self.ts);
             let prev = std::mem::replace(&mut self.tab_sid, lu.live.sid.clone());
+            // the first session keeps what was set before it existed (a shot's tab); a later one swaps
             if !prev.is_empty() {
+                let old = std::mem::take(&mut self.ts);
                 self.tabs_saved.insert(prev, old);
+                self.ts = self.tabs_saved.remove(&self.tab_sid).unwrap_or_default();
+                self.tree = Default::default();
             }
-            self.ts = self.tabs_saved.remove(&self.tab_sid).unwrap_or_default();
-            self.tree = Default::default();
         }
         if lu.dirty {
             lu.dirty = false;
@@ -784,6 +785,36 @@ mod tests {
             tz_min: 0,
             tui: Default::default(),
         }
+    }
+
+    #[gpui::test]
+    fn the_tabs_belong_to_the_session(cx: &mut TestAppContext) {
+        use crate::live::Live;
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let live = |sid: &str| {
+            let mut l = Live::new();
+            l.starting = false;
+            l.sid = sid.into();
+            l
+        };
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.simulate_resize(size(px(1400.), px(900.)));
+            vcx.run_until_parked();
+        };
+        view.update(vcx, |t, _| t.set_live(live("a")));
+        draw(vcx);
+        view.update(vcx, |t, cx| t.show_tab(ChatTab::Diff, None, cx));
+        assert_eq!(view.read_with(vcx, |t, _| t.ts.tab), ChatTab::Diff);
+        // another session starts on the chat, the first one keeps its diff tab
+        view.update(vcx, |t, _| t.set_live(live("b")));
+        draw(vcx);
+        assert_eq!(view.read_with(vcx, |t, _| t.ts.tab), ChatTab::Chat);
+        view.update(vcx, |t, _| t.set_live(live("a")));
+        draw(vcx);
+        assert_eq!(view.read_with(vcx, |t, _| t.ts.tab), ChatTab::Diff);
     }
 
     #[gpui::test]

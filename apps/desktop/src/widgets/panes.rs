@@ -184,6 +184,15 @@ pub fn git_line(l: &str) -> Div {
         .child(if l.is_empty() { " " } else { l }.to_string())
 }
 
+/// `path` relative to the session's folder when it lies inside it.
+pub fn rel(cwd: &str, path: &str) -> String {
+    let dir = cwd.trim_end_matches(['/', '\\']);
+    path.strip_prefix(dir)
+        .and_then(|r| r.strip_prefix(['/', '\\']))
+        .unwrap_or(path)
+        .to_string()
+}
+
 /// The files the session changed, each with its diff when open (`open` holds the paths); `toggle(path)` is
 /// the click handler of a file header. Shared by the TUI view's diff tab and the Agent view's.
 pub fn diff(live: &Live, open: &HashSet<String>, toggle: &dyn Fn(String) -> OnClick) -> Div {
@@ -229,7 +238,7 @@ pub fn diff(live: &Live, open: &HashSet<String>, toggle: &dyn Fn(String) -> OnCl
                                 .min_w(px(0.))
                                 .truncate()
                                 .text_color(strong())
-                                .child(f.path.clone()),
+                                .child(rel(&live.cwd, &f.path)),
                         )
                         .child(
                             div()
@@ -344,6 +353,12 @@ pub fn browser(
     pick: &dyn Fn(usize) -> OnClick,
 ) -> Div {
     let b = &live.view.panes;
+    // the page the agent navigated to, else the page of the latest saved frame
+    let page = if b.url.is_empty() {
+        b.frames.last().map_or(String::new(), |f| f.url.clone())
+    } else {
+        b.url.clone()
+    };
     let mut col = div().flex().flex_col().gap(px(10.)).child(
         div()
             .flex()
@@ -360,11 +375,11 @@ pub fn browser(
                     .flex_1()
                     .min_w(px(0.))
                     .truncate()
-                    .text_color(if b.url.is_empty() { dim() } else { strong() })
-                    .child(if b.url.is_empty() {
+                    .text_color(if page.is_empty() { dim() } else { strong() })
+                    .child(if page.is_empty() {
                         "no page opened yet".to_string()
                     } else {
-                        b.url.clone()
+                        page.clone()
                     }),
             ),
     );
@@ -474,4 +489,17 @@ pub fn browser(
                     })
             })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_path_inside_the_folder_is_shown_relative() {
+        assert_eq!(rel("/w/proj", "/w/proj/src/a.rs"), "src/a.rs");
+        assert_eq!(rel("/w/proj/", "/w/proj/a.rs"), "a.rs");
+        assert_eq!(rel("/w/proj", "/w/other/a.rs"), "/w/other/a.rs");
+        assert_eq!(rel("/w/proj", "/w/project/a.rs"), "/w/project/a.rs");
+    }
 }

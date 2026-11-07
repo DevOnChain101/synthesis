@@ -20,6 +20,10 @@ use crate::live::{Live, Submitted, now_ms};
 
 pub struct Args {
     path: PathBuf,
+    /// `--tab chat|diff|terminal|browser|files`: the centre tab shown.
+    tab: super::ChatTab,
+    /// `--open FILE`: the file selected in the file explorer.
+    open: Option<String>,
     w: f32,
     h: f32,
     hidden: Hidden,
@@ -70,8 +74,17 @@ pub fn parse(args: &[String]) -> Option<Args> {
         cmd: val("--cmd").cloned(),
         earlier: val("--earlier").cloned(),
     });
+    let tab = match val("--tab").map(String::as_str) {
+        Some("diff") => super::ChatTab::Diff,
+        Some("terminal") => super::ChatTab::Terminal,
+        Some("browser") => super::ChatTab::Browser,
+        Some("files") => super::ChatTab::Files,
+        _ => super::ChatTab::Chat,
+    };
     Some(Args {
         path,
+        tab,
+        open: val("--open").cloned(),
         w,
         h,
         hidden,
@@ -139,15 +152,13 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
         engine.send(t).map_err(|e| e.to_string())?;
     }
     let t0 = Instant::now();
-    let mut answered = false;
     loop {
         drain(&mut live, &mut rx);
         if !live.dialogs.is_empty() {
-            match l.answer.filter(|_| !answered) {
+            match l.answer {
                 Some(c) => {
                     let id = live.dialogs[0].id().to_string();
                     engine.answer(&id, c);
-                    answered = true;
                     live.dialogs.clear();
                 }
                 None => break,
@@ -208,19 +219,60 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let hidden = a.hidden;
     let fixture = a.live.as_ref().map(run_live).transpose()?;
     let (live, engine, tmp) = match fixture {
-        Some((l, c, e, t)) => (Some((l, c)), Some(e), Some(t)),
+        Some((mut l, c, e, t)) => {
+            prepare_tabs(&mut l, &e, &t, a.tab)?;
+            (Some((l, c)), Some(e), Some(t))
+        }
         None => (None, None, None),
     };
+    let tui_slot: std::rc::Rc<std::cell::RefCell<Option<gpui::Entity<TuiView>>>> =
+        Default::default();
+    let slot = tui_slot.clone();
+    let tab = a.tab;
     let win = cx.open_window(size(px(a.w), px(a.h)), |window, cx| {
-        cx.new(|cx| match live {
+        let tui = cx.new(|cx| match live {
             Some((l, c)) => {
                 let mut v = TuiView::live(window, cx, c, hidden, 0.);
                 v.set_live(l);
                 v
             }
             None => TuiView::new(0., hidden),
-        })
+        });
+        tui.update(cx, |t, _| t.ts.tab = tab);
+        *slot.borrow_mut() = Some(tui.clone());
+        cx.new(|cx| crate::ui::Shell::around(window, cx, tui, Err("--shot".into())))
     })?;
+    cx.run_until_parked();
+    if let Some(tui) = tui_slot.borrow().clone() {
+        if a.tab == super::ChatTab::Browser {
+            // the saved screenshot loads off the thread
+            for _ in 0..40 {
+                cx.run_until_parked();
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        if a.tab == super::ChatTab::Files {
+            // the project tree is read off the thread: wait for it, then open the asked file
+            for _ in 0..100 {
+                cx.run_until_parked();
+                if tui.read_with(&cx, |t, _| t.tree_loaded()) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            if let Some(f) = &a.open {
+                tui.update(&mut cx, |t, cx| t.select_file(f, cx));
+                for _ in 0..40 {
+                    cx.run_until_parked();
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                eprintln!(
+                    "selected: {:?}",
+                    tui.read_with(&cx, |t, _| t.ts.tree_sel.clone())
+                );
+            }
+        }
+    }
     cx.run_until_parked();
     let img = cx.capture_screenshot(win.into())?;
     img.save(&a.path)?;
@@ -237,5 +289,86 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         img.width(),
         img.height()
     );
+    Ok(())
+}
+
+/// What the tabs need to have something to show in a shot: a git repository with a changed file and a trusted
+/// folder for the file explorer; two saved browser frames (generated PNGs inside the session's artifact
+/// directory) for the browser tab.
+fn prepare_tabs(
+    live: &mut Live,
+    engine: &Engine,
+    tmp: &std::path::Path,
+    tab: super::ChatTab,
+) -> Result<(), Err> {
+    let ws = tmp.join("ws");
+    match tab {
+        super::ChatTab::Files => {
+            std::fs::create_dir_all(ws.join("src"))?;
+            std::fs::create_dir_all(ws.join("tests"))?;
+            std::fs::write(
+                ws.join("src/main.rs"),
+                "fn main() {\n    println!(\"hello\");\n}\n",
+            )?;
+            std::fs::write(
+                ws.join("src/lib.rs"),
+                "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n",
+            )?;
+            std::fs::write(
+                ws.join("tests/add.rs"),
+                "#[test]\nfn adds() {\n    assert_eq!(1 + 1, 2);\n}\n",
+            )?;
+            std::fs::write(ws.join("README.md"), "# demo\n\nA small project.\n")?;
+            let git = |args: &[&str]| {
+                std::process::Command::new("git")
+                    .args(["-c", "user.email=a@b.c", "-c", "user.name=shot"])
+                    .args(args)
+                    .current_dir(&ws)
+                    .output()
+            };
+            git(&["init", "-q"])?;
+            git(&["add", "-A"])?;
+            git(&["commit", "-q", "-m", "init"])?;
+            std::fs::write(
+                ws.join("src/main.rs"),
+                "fn main() {\n    println!(\"hello, world\");\n    let n = 3;\n}\n",
+            )?;
+            live.trusted = true;
+        }
+        super::ChatTab::Browser => {
+            let dir = engine
+                .synthesis_home
+                .join("sessions")
+                .join(&engine.sid)
+                .join("artifacts");
+            std::fs::create_dir_all(&dir)?;
+            for (i, (url, shade)) in [
+                ("http://localhost:3000/login", 40u8),
+                ("http://localhost:3000/dashboard", 90u8),
+            ]
+            .iter()
+            .enumerate()
+            {
+                let path = dir.join(format!("shot-{}.png", i + 1));
+                let img = image::RgbaImage::from_fn(640, 400, |x, y| {
+                    image::Rgba([
+                        shade.saturating_add((x / 4) as u8),
+                        60 + (y / 4) as u8,
+                        120,
+                        255,
+                    ])
+                });
+                img.save(&path)?;
+                let ev: synthesis_events::Envelope = serde_json::from_value(serde_json::json!({
+                    "v": 1, "seq": 90_000 + i, "ts": "2026-11-07T10:00:0".to_string() + &i.to_string() + "Z",
+                    "session_id": engine.sid, "task_id": null, "turn_id": null, "type": "browser.frame",
+                    "payload": {"path": path.to_string_lossy(), "url": url, "w": 640, "h": 400,
+                                "bytes": std::fs::metadata(&path)?.len()}
+                }))?;
+                live.view.apply(&ev);
+            }
+        }
+        _ => {}
+    }
     Ok(())
 }

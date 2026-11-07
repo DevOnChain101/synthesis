@@ -381,6 +381,16 @@ impl Shell {
             Some(cfg) => TuiView::live(window, cx, cfg, hidden, 0.),
             None => TuiView::new(0., hidden),
         });
+        Self::around(window, cx, tui, settings_cfg)
+    }
+
+    /// The shell over a TUI view the caller built (the offscreen shots fill it before it is drawn).
+    pub fn around(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        tui: Entity<TuiView>,
+        settings_cfg: Result<settings_view::model::Cfg, String>,
+    ) -> Self {
         tui.update(cx, |t, cx| {
             t.set_top_inset(TITLEBAR_H);
             t.start(window, cx)

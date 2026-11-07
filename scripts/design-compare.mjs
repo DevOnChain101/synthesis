@@ -2,6 +2,8 @@
 // Side-by-side comparison of the design (cli.html rendered by headless Chrome) with the desktop app's offscreen
 // shot, for the five sizes of docs/specs/desktop.md "Design acceptance": [design | app | difference] in one PNG.
 //   node scripts/design-compare.mjs <design-dir> <shots-dir> <out-dir>
+// The shots are taken `--size Wx(H+30)`: the app's 30px title bar sits above the design's content, which is
+// cropped to Wx H here before it is compared.
 // <design-dir> holds ref-WxH.png (1x), <shots-dir> tui-WxH.png (`synthesis-desktop --shot ... --size WxH`, 2x),
 // both produced as in docs/specs/desktop.md. Needs Google Chrome (headless, remote debugging on 127.0.0.1 only).
 import { spawn } from 'node:child_process';
@@ -27,10 +29,12 @@ const send = (method, params = {}) => new Promise((r) => { const i = ++id; pend.
 for (const s of SIZES) {
   const [w, h] = s.split('x').map(Number);
   const a = `file://${ref}/ref-${s}.png`, b = `file://${shots}/tui-${s}.png`;
+  const T = 30; // the title bar
+  const crop = (extra = '') => `<div style="position:relative;width:${w}px;height:${h}px;overflow:hidden;background:#000"><img src="${b}" width="${w}" height="${h + T}" style="position:absolute;left:0;top:-${T}px;${extra}"></div>`;
   const html = `<body style="margin:0;background:#222"><div style="display:flex;gap:8px">
-    <img src="${a}" width="${w}" height="${h}"><img src="${b}" width="${w}" height="${h}">
-    <div style="position:relative;width:${w}px;height:${h}px;background:#000"><img src="${a}" width="${w}" height="${h}" style="position:absolute;left:0;top:0">
-    <img src="${b}" width="${w}" height="${h}" style="position:absolute;left:0;top:0;mix-blend-mode:difference"></div></div>`;
+    <img src="${a}" width="${w}" height="${h}">${crop()}
+    <div style="position:relative;width:${w}px;height:${h}px;overflow:hidden;background:#000"><img src="${a}" width="${w}" height="${h}" style="position:absolute;left:0;top:0">
+    <img src="${b}" width="${w}" height="${h + T}" style="position:absolute;left:0;top:-${T}px;mix-blend-mode:difference"></div></div>`;
   const file = path.join(prof, `${s}.html`); fs.writeFileSync(file, html);
   await send('Emulation.setDeviceMetricsOverride', { width: 3 * w + 16, height: h, deviceScaleFactor: 1, mobile: false });
   await send('Page.navigate', { url: `file://${file}` });

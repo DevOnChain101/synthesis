@@ -89,7 +89,7 @@ pub fn read_preview(root: &Path, rel: &str) -> Result<PreviewText, String> {
     let text = String::from_utf8_lossy(&buf);
     let mut lines: Vec<String> = text
         .lines()
-        .map(|l| synthesis_harness::sanitize_for_display(l))
+        .map(synthesis_harness::sanitize_for_display)
         .collect();
     let cut_lines = lines.len() > PREVIEW_LINES;
     lines.truncate(PREVIEW_LINES);
@@ -212,12 +212,13 @@ impl TuiView {
     pub(super) fn tabs_tick(&mut self, cx: &mut Context<Self>) {
         let Some(lu) = &self.live else { return };
         let changes = lu.live.view.panes.files.len();
-        if self.ts.tab == ChatTab::Diff && !self.ts.diff_init {
-            if let Some(f) = lu.live.view.panes.files.last() {
-                let p = f.path.clone();
-                self.ts.diff_open.insert(p);
-                self.ts.diff_init = true;
-            }
+        if self.ts.tab == ChatTab::Diff
+            && !self.ts.diff_init
+            && let Some(f) = lu.live.view.panes.files.last()
+        {
+            let p = f.path.clone();
+            self.ts.diff_open.insert(p);
+            self.ts.diff_init = true;
         }
         if self.ts.tab == ChatTab::Files {
             let stale = self.tree.for_cwd != lu.live.cwd || self.tree.at_changes != changes;
@@ -286,6 +287,16 @@ impl TuiView {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Whether the file explorer has read the tree (the offscreen shots wait for it).
+    pub fn tree_loaded(&self) -> bool {
+        self.tree.data.is_some() && !self.tree.loading
+    }
+
+    /// Selects `path` in the file explorer and reads it for the preview.
+    pub fn select_file(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.open_preview(path.to_string(), cx);
     }
 
     /// The counters of the tab strip: changed files, commands, browser calls.

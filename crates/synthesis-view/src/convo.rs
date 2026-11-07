@@ -468,6 +468,18 @@ mod tests {
     }
 
     #[test]
+    fn every_row_keeps_the_time_of_its_event() {
+        let mut c = Convo::default();
+        c.apply(&ev("user.message", json!({"text": "hi", "images": []})));
+        let mut e = ev("notice", json!({"level": "info", "text": "n"}));
+        e.ts = "2026-01-01T00:00:07Z".into();
+        c.apply(&e);
+        assert_eq!(c.time_of(0), crate::model::parse_ts("2026-01-01T00:00:00Z"));
+        assert_eq!(c.time_of(1), crate::model::parse_ts("2026-01-01T00:00:07Z"));
+        assert_eq!(c.time_of(5), None, "a row added locally has none");
+    }
+
+    #[test]
     fn deltas_stream_into_one_assistant_item_and_the_final_message_replaces_them() {
         let mut c = Convo::default();
         for t in ["Hel", "lo"] {
