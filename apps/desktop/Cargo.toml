@@ -68,6 +68,9 @@ tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-th
 tokio-util = { version = "0.7.20", default-features = false }
 
 # Command Line Tools only (no Xcode): compile Metal shaders at runtime instead of `xcrun metal`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui-pre-apple = { version = "=0.3.10", features = ["runtime_shaders"] }
 

@@ -1262,7 +1262,7 @@ fn attach_jpeg(l: &mut Live, bytes: Vec<u8>) -> Result<String, String> {
 }
 
 /// A dropped file: (is PNG, bytes). Only `.png`, `.jpg` and `.jpeg`, read up to the cap.
-fn read_image_file(p: &Path) -> Result<(bool, Vec<u8>), String> {
+pub fn read_image_file(p: &Path) -> Result<(bool, Vec<u8>), String> {
     use std::io::Read as _;
     let ext = p
         .extension()
@@ -1274,9 +1274,23 @@ fn read_image_file(p: &Path) -> Result<(bool, Vec<u8>), String> {
         _ => return Err("not an image (png, jpg)".into()),
     };
     let cap = synthesis_tui_base::imgclip::MAX_PNG as u64;
+    // `p` is the resolved path from `Engine::image_path`; a link swapped in since then is refused
+    // by the open itself (O_NOFOLLOW / FILE_FLAG_OPEN_REPARSE_POINT), and the opened handle is
+    // checked to be a regular file within the cap.
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut o, libc::O_NOFOLLOW);
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::custom_flags(&mut o, 0x0020_0000);
+    let f = o.open(p).map_err(|e| e.to_string())?;
+    let md = f.metadata().map_err(|e| e.to_string())?;
+    if !md.is_file() || md.len() > cap {
+        return Err("not a regular image file within the 4 MB cap".into());
+    }
     let mut v = vec![];
-    std::fs::File::open(p)
-        .and_then(|f| f.take(cap + 1).read_to_end(&mut v))
+    f.take(cap + 1)
+        .read_to_end(&mut v)
         .map_err(|e| e.to_string())?;
     Ok((png, v))
 }

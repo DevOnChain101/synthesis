@@ -182,6 +182,8 @@ fn hash_asks_which_file_and_saves_only_after_the_pick() {
     assert!(!file.exists());
     r.live.submit("# prefer tabs");
     let t = r.live.dialogs[0].armed_until;
+    assert!(t > 0, "armed against type-ahead like the approval dialogs");
+    assert_eq!(r.live.pick(1, t - 1), None, "refused while arming");
     let k = r.live.pick(1, t).unwrap();
     assert_eq!(k, "project");
     r.live.answer(&k, t);
@@ -212,4 +214,40 @@ fn shift_tab_cycles_to_auto_and_never_to_bypass() {
             Mode::AcceptEdits
         ]
     );
+}
+
+#[test]
+fn hash_without_an_engine_says_so_and_esc_forgets_the_note() {
+    let mut l = Live::new();
+    assert_eq!(l.submit("# hello"), Submitted::Nothing);
+    assert!(l.dialogs.is_empty());
+    assert!(matches!(
+        l.view.convo.items.last(),
+        Some(Item::Notice { warning: true, .. })
+    ));
+    let mut r = rig();
+    r.live.submit("# a note");
+    r.live.reject();
+    assert!(r.live.dialogs.is_empty());
+    // a later pick of a stale dialog cannot save the old note: nothing is pending
+    r.live.submit("# other");
+    r.live.reject();
+    assert!(!r.engine.notes.project.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_swapped_in_after_the_check_is_not_read() {
+    use synthesis_desktop::tui_view::driver::read_image_file;
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("a.png");
+    std::fs::write(&real, png()).unwrap();
+    assert_eq!(read_image_file(&real).unwrap(), (true, png()));
+    let link = dir.path().join("b.png");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert!(read_image_file(&link).is_err(), "O_NOFOLLOW refuses a link");
+    let big = dir.path().join("big.png");
+    std::fs::write(&big, vec![0u8; (4 << 20) + 10]).unwrap();
+    assert!(read_image_file(&big).is_err(), "over the cap");
+    assert!(read_image_file(dir.path()).is_err(), "a directory");
 }

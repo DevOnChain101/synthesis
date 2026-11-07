@@ -7297,6 +7297,7 @@ dependencies = [
  "gpui-pre-apple",
  "gpui-pre-platform",
  "image",
+ "libc",
  "serde_json",
  "synthesis-app",
  "synthesis-config",

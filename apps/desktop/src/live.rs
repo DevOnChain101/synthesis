@@ -538,6 +538,7 @@ impl Live {
         }) = self.dialogs.first()
         {
             self.dialogs.remove(0);
+            self.pending_note = None;
             return None;
         }
         if let Some(Dialog {
@@ -867,8 +868,11 @@ impl Live {
 
     /// `#note`: nothing is saved before the person picks the file (the TUI's confirmation).
     fn ask_where_to_remember(&mut self, note: &str) {
-        let Some(e) = self.engine.clone().filter(|_| !note.is_empty()) else {
+        if note.is_empty() {
             return;
+        }
+        let Some(e) = self.engine.clone() else {
+            return self.note("# note: the session is still starting, try again", true);
         };
         if self.dialogs.iter().any(|d| {
             matches!(
@@ -907,7 +911,7 @@ impl Live {
                 sel: 0,
                 armed_until: 0,
             },
-            0,
+            now_ms(),
         );
     }
 
