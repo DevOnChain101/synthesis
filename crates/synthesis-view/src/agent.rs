@@ -200,7 +200,7 @@ pub struct AgentPanes {
     pub url: String,
     /// Path of the newest screenshot the browser tool saved.
     pub screenshot: Option<String>,
-    /// Every `browser.frame`, oldest first (at most [`FRAME_LIMIT`]).
+    /// Every `browser.frame`, oldest first (the newest 50).
     pub frames: Vec<Frame>,
     pub files: Vec<ChangedFile>,
     /// Tool call id -> index in `commands` / `browser` / agent id, to match the completion.
