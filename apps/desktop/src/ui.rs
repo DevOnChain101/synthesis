@@ -91,7 +91,7 @@ pub struct Shell {
 impl Shell {
     /// Switches the view; the TUI view's window-wide key hook is told whether it is shown. Settings slides
     /// over the view it was opened from (`back`).
-    fn go(&mut self, v: View, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn go(&mut self, v: View, window: &mut Window, cx: &mut Context<Self>) {
         if v == View::Settings && self.view != View::Settings {
             self.back = self.view;
             self.settings.update(cx, |p, cx| p.focus(window, cx));

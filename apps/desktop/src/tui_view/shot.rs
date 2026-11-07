@@ -24,6 +24,10 @@ pub struct Args {
     tab: super::ChatTab,
     /// `--open FILE`: the file selected in the file explorer.
     open: Option<String>,
+    /// `--view tui|settings`: the view shown.
+    view: crate::ui::View,
+    /// `--check`: reopen the written PNG and fail unless it is the asked size (times a whole scale) and not blank.
+    check: bool,
     w: f32,
     h: f32,
     hidden: Hidden,
@@ -85,6 +89,11 @@ pub fn parse(args: &[String]) -> Option<Args> {
         path,
         tab,
         open: val("--open").cloned(),
+        view: match val("--view").map(String::as_str) {
+            Some("settings") => crate::ui::View::Settings,
+            _ => crate::ui::View::Tui,
+        },
+        check: args.iter().any(|a| a == "--check"),
         w,
         h,
         hidden,
@@ -273,9 +282,15 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         }
     }
+    if a.view != crate::ui::View::Tui {
+        win.update(&mut cx, |s, window, cx| s.go(a.view, window, cx))?;
+    }
     cx.run_until_parked();
     let img = cx.capture_screenshot(win.into())?;
     img.save(&a.path)?;
+    if a.check {
+        check_png(&a.path, a.w as u32, a.h as u32)?;
+    }
     drop(cx);
     if let Some(e) = engine {
         crate::engine::close_shared(e);
@@ -288,6 +303,39 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         a.path.display(),
         img.width(),
         img.height()
+    );
+    Ok(())
+}
+
+/// CI smoke check of the file on disk: `w`x`h` times a whole scale (HiDPI), more than a few distinct colours.
+fn check_png(path: &std::path::Path, w: u32, h: u32) -> Result<(), Err> {
+    let img = image::open(path)?.to_rgba8();
+    let k = img.width() / w;
+    if k == 0 || img.width() != w * k || img.height() != h * k {
+        return Err(format!(
+            "{}x{} is not {w}x{h} at a whole scale",
+            img.width(),
+            img.height()
+        )
+        .into());
+    }
+    let colours: std::collections::HashSet<_> = img.pixels().map(|p| p.0).take(2_000_000).collect();
+    if colours.len() < 16 {
+        return Err(format!("frame is blank ({} distinct colours)", colours.len()).into());
+    }
+    // Text is what a broken text system drops (no-op text system: layout and icons still draw, 0.5% edges (Settings with text: 1.1%)
+    // against 2.5% with text): sharp horizontal green-channel steps per pixel.
+    let edges = (0..img.height())
+        .flat_map(|y| (1..img.width()).map(move |x| (x, y)))
+        .filter(|&(x, y)| img.get_pixel(x, y).0[1].abs_diff(img.get_pixel(x - 1, y).0[1]) > 40)
+        .count();
+    let density = edges as f64 / (img.width() * img.height()) as f64;
+    if density < 0.007 {
+        return Err(format!("no text drawn (edge density {density:.4})").into());
+    }
+    eprintln!(
+        "check ok: scale {k}, {} distinct colours, edge density {density:.4}",
+        colours.len()
     );
     Ok(())
 }

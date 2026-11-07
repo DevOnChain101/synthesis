@@ -37,8 +37,9 @@ shot = ["gpui/test-support", "gpui_platform/test-support", "dep:image"]
 # Zed's gpui, `gpui-component` pins the same one; never mix with a git `gpui`.
 gpui-component = "=0.8.1"
 gpui = { package = "gpui-pre", version = "=0.3.10" }
-# `font-kit` is what gives the window a text system; without it gpui draws no text at all.
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit"] }
+# `font-kit` is what gives the window a text system; without it gpui draws no text at all. `wayland` and `x11` are
+# the Linux backends (gpui-pre-linux has them off by default: without them Linux gets a no-op text system and no window).
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit", "wayland", "x11"] }
 gpui-kit-assets = "=0.8.1"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 synthesis-app = { path = "../../crates/synthesis-app" }

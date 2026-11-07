@@ -64,6 +64,12 @@ of the classic TUI design, in this repo, running the Rust engine in process.
 - CI (`ci.yml` job `desktop`, required by `ci-ok`): `cargo build`, `clippy -D warnings`, `test` on ubuntu, macos and windows. Linux needs the
   gpui-pre-linux system libraries (xcb, xkbcommon, wayland, fontconfig/freetype, Vulkan loader/headers for the wgpu renderer; the apt list is in
   the job); Windows is gpui-pre-windows (DirectX 11/DirectWrite). Client-side window controls (minimise/maximise/close) are missing for Windows and Linux.
+- CI runtime smoke (same job, `scripts/desktop-smoke.sh`, build with `--features shot,test-provider`; artifact `desktop-shots-<OS>`: download it from the
+  run's Summary page, unzip, open the PNGs). macOS and Linux render offscreen `tui-1400x900.png`, `tui-1000x700.png`, `settings-1400x900.png`
+  (`--shot ... --view settings --check`: size is the asked one times a whole scale, more than 16 distinct colours, and a text edge density of at least 0.7%: a frame with layout and icons but no glyphs fails; a no-op text system gave 0.5%, real frames 1.1% to 3.2%); macOS uses headless Metal,
+  Linux wgpu on lavapipe (`mesa-vulkan-drivers`). gpui-pre-windows has no headless renderer, so Windows launches the real app on `--sample` with
+  `--exit-after-first-frame` and requires the "first frame drawn" line (log in the artifact; no PNG). Not proven: real window on macOS/Linux, a real GPU,
+  HiDPI beyond the runner's scale, IME, input events, Windows pixels and Windows text (first frame only proves a draw). `gpui_platform` needs the `wayland` and `x11` features on Linux (off by default in gpui-pre-linux: without them the Linux build has a no-op text system and no window backend).
 - Release (`release.yml` job `desktop`, `scripts/package-desktop.mjs`): archives `synthesis-desktop-<version>-<target>`; docs/RELEASE.md "Desktop".
 
   | Target | Runner | Archive | Contents | Status |

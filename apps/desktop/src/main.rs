@@ -48,7 +48,8 @@ fn main() {
         }
         return;
     }
-    let args = Args::parse();
+    // `--exit-after-first-frame` is read below (dev feature `shot`), not by clap
+    let args = Args::parse_from(std::env::args().filter(|a| a != "--exit-after-first-frame"));
     let live = if args.sample {
         None
     } else {
@@ -67,6 +68,20 @@ fn main() {
             synthesis_desktop::ui::register_fonts(cx);
             synthesis_desktop::theme::apply("JetBrains Mono", cx);
             synthesis_desktop::ui::open(cx, live);
+            // CI smoke (no offscreen renderer on Windows): prove a real window drew, then exit
+            #[cfg(feature = "shot")]
+            if std::env::args().any(|a| a == "--exit-after-first-frame") {
+                for w in cx.windows() {
+                    let _ = w.update(cx, |_, window, _| {
+                        window.on_next_frame(|window, _| {
+                            window.on_next_frame(|_, cx| {
+                                eprintln!("synthesis-desktop: first frame drawn");
+                                cx.quit();
+                            })
+                        })
+                    });
+                }
+            }
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
