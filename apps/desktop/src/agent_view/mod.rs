@@ -690,7 +690,7 @@ impl Render for AgentView {
             .overflow_hidden()
             .bg(hsla(t::BG))
             .font_family(MONO)
-            .font_weight(FontWeight::NORMAL)
+            .font_weight(FontWeight::MEDIUM)
             .text_size(px(12.5))
             .line_height(gpui::relative(1.55))
             .text_color(text())

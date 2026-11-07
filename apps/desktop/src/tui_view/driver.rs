@@ -135,9 +135,7 @@ impl TuiView {
     ) -> Self {
         let prompt = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder(
-                    "Ask Synthesis anything...  (/ commands, @ files, Shift+Enter for a new line)",
-                )
+                .placeholder("Ask Synthesis anything... (Ctrl+R for history)")
                 .auto_grow(1, 8)
                 .submit_on_enter(true)
         });

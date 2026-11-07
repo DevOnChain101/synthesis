@@ -14,6 +14,7 @@ use synthesis_view::convo::{ApprovalState, Item, StepState, ToolState};
 
 use super::panels::{dim, icon, strong, text};
 use super::topo::with_alpha;
+use super::tracked;
 use super::{TuiView, layout};
 use crate::theme::hsla;
 
@@ -31,6 +32,46 @@ pub fn visible(it: &Item, show_thinking: bool, verbose: bool) -> bool {
         Item::Agent { .. } => true,
         Item::Assistant { text, streaming } => *streaming || !text.trim().is_empty(),
         _ => true,
+    }
+}
+
+/// `.msg`: a 32px avatar (radius 7) and, beside it, the tracked who label over the body (`cli.html`).
+fn msg(avatar: Div, who: &str, who_colour: gpui::Hsla, body: Div) -> Div {
+    div()
+        .flex()
+        .gap(px(10.))
+        .px(px(10.))
+        .py(px(8.))
+        .child(
+            div()
+                .size(px(32.))
+                .flex_none()
+                .rounded(px(7.))
+                .border_1()
+                .border_color(hsla(t::BORDER))
+                .overflow_hidden()
+                .child(avatar),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(tracked(who, 12.5, 0.06, who_colour).font_weight(FontWeight::SEMIBOLD))
+                .child(body),
+        )
+}
+
+/// The icon and title colour of a tool card (`.tool .th`): by what the tool does.
+fn tool_look(name: &str) -> (&'static str, gpui::Hsla) {
+    match name {
+        "Read" => ("book-open", hsla(t::INFO)),
+        "Grep" | "Glob" => ("search", hsla(t::ACCENT_LIGHT)),
+        "Bash" => ("square-terminal", hsla(t::WARN)),
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => ("replace", hsla(t::DIFF_REMOVE)),
+        _ => ("wrench", hsla(t::SUCCESS)),
     }
 }
 
@@ -170,26 +211,33 @@ impl TuiView {
             return div().into_any_element();
         }
         match it {
-            Item::User(s) => div()
-                .flex()
-                .gap(px(10.))
-                .p(px(10.))
-                .rounded(px(layout::PANEL_RADIUS))
-                .bg(hsla(t::ELEVATED))
-                .child(div().text_color(hsla(t::ACCENT)).child("\u{276F}"))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .text_color(strong())
-                        .child(s.clone()),
-                )
-                .into_any_element(),
-            Item::Assistant { text: s, .. } => div()
-                .min_w(px(0.))
-                .text_color(text())
-                .child(TextView::markdown(("assistant", idx), s.clone()))
-                .into_any_element(),
+            Item::User(s) => msg(
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(hsla(t::INFO))
+                    .child(icon("user", 14., hsla(t::BG))),
+                "USER",
+                hsla(t::INFO),
+                div().text_color(strong()).child(s.clone()),
+            )
+            .into_any_element(),
+            Item::Assistant { text: s, .. } => msg(
+                div().size_full().bg(gpui::black()).child(
+                    gpui::img(crate::brand::mark())
+                        .size_full()
+                        .object_fit(gpui::ObjectFit::Cover),
+                ),
+                "SYNTHESIS",
+                hsla(t::ACCENT),
+                div()
+                    .min_w(px(0.))
+                    .text_color(strong())
+                    .child(TextView::markdown(("assistant", idx), s.clone())),
+            )
+            .into_any_element(),
             Item::Thinking(s) => div()
                 .pl(px(10.))
                 .border_l_2()
@@ -303,23 +351,24 @@ impl TuiView {
             .flex_col()
             .border_1()
             .border_color(hsla(t::BORDER))
-            .rounded(px(layout::PANEL_RADIUS))
+            .rounded(px(6.))
+            .bg(super::with_alpha_black(0.6))
             .overflow_hidden()
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
+                    .gap(px(10.))
                     .px(px(10.))
-                    .py(px(4.))
-                    .bg(hsla(t::ELEVATED))
-                    .child(div().text_color(c).child(mark))
+                    .py(px(7.))
+                    .child(icon(tool_look(name).0, 16., tool_look(name).1))
                     .child(
                         div()
-                            .text_color(strong())
+                            .text_color(tool_look(name).1)
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(name.clone()),
                     )
+                    .child(div().flex_none().text_color(c).child(mark))
                     .child(
                         div()
                             .flex_1()

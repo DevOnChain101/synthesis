@@ -33,11 +33,19 @@ use gpui::prelude::FluentBuilder as _;
 
 pub use crate::widgets::chrome::tracked;
 
+/// Black at `a` alpha (the tool card's `rgba(9,10,13,.6)`).
+pub(crate) fn with_alpha_black(a: f32) -> Hsla {
+    chrome::black_a(a)
+}
+
 /// The TUI view's font: `cli.html` `--mono` (bundled Fira Code, SIL OFL), at its body weight 500.
 pub const MONO: &str = crate::brand::MONO_FONT;
 
 /// Icons the view draws (checked by a test).
-pub const ICONS: [&str; 24] = [
+pub const ICONS: [&str; 27] = [
+    "book-open",
+    "search",
+    "replace",
     "folder",
     "plus",
     "git-branch",
@@ -123,6 +131,8 @@ pub struct TuiView {
     inset: f32,
     /// The pane under the centre header.
     pub(crate) tab: ChatTab,
+    /// Files of the diff tab that are expanded.
+    diff_open: std::collections::HashSet<String>,
     /// Width of the centre column, from the last render (the tab strip wraps when it is narrower).
     centre_w: f32,
     /// False while another view of the shell is shown: the window-wide key hook then leaves the keys alone.
@@ -157,6 +167,7 @@ impl TuiView {
             hidden,
             inset,
             tab: ChatTab::Chat,
+            diff_open: Default::default(),
             centre_w: 600.,
         }
     }
@@ -492,25 +503,57 @@ impl TuiView {
                 .min_w(px(0.))
                 .truncate()
                 .text_color(dim())
-                .child("Ask Synthesis anything... (\u{2318}L for history)"),
+                .child("Ask Synthesis anything... (Ctrl+R for history)"),
             false,
             false,
             None,
         )
     }
 
-    /// The body of a tab other than chat.
+    /// The body of a tab other than chat: the Agent view's read-only panes (`widgets::panes`) on this
+    /// session's state. The terminal tab is the command history, not a terminal.
     fn pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let _ = cx;
+        use crate::widgets::panes;
+        let empty;
+        let live = match &self.live {
+            Some(l) => &l.live,
+            None => {
+                empty = crate::live::Live::new();
+                &empty
+            }
+        };
+        let toggle = |path: String| -> panels::OnClick {
+            Box::new(cx.listener(move |this, _, _, cx| {
+                if !this.diff_open.remove(&path) {
+                    this.diff_open.insert(path.clone());
+                }
+                cx.notify();
+            }))
+        };
+        let inner = match self.tab {
+            ChatTab::Chat => div(),
+            ChatTab::Diff => panes::diff(live, &self.diff_open, &toggle),
+            ChatTab::Terminal => panes::commands(live),
+            ChatTab::Browser => panes::browser(live),
+            // the project tree itself needs the Agent view's scanner: here the files the session changed
+            ChatTab::Files => div()
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .child(div().text_color(dim()).child(
+                    "Files changed in this session. The whole project tree is in the Agent view (file explorer).",
+                ))
+                .child(panes::diff(live, &std::collections::HashSet::new(), &toggle)),
+        };
         div()
             .id("pane")
+            .debug_selector(|| "tab-body".to_string())
             .flex_1()
             .min_h(px(0.))
             .overflow_y_scroll()
             .px(px(14.))
             .py(px(10.))
-            .text_color(dim())
-            .child(format!("{:?}", self.tab))
+            .child(inner)
             .into_any_element()
     }
 

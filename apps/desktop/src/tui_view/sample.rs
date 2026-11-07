@@ -269,7 +269,7 @@ pub fn sample() -> Snapshot {
         running: vec![
             run(
                 "Investigate why login redirects loop in auth.ts and fix it.",
-                "nemo-cli",
+                "auth-service",
                 "feature/auth-flow",
                 "42m",
                 true,
@@ -363,7 +363,7 @@ pub fn sample() -> Snapshot {
             status: s("ready"),
             prompt: s("Investigate why login redirects loop in auth.ts and fix it."),
             ctx_pct: 38.,
-            path: s("~/dev/nemo-cli"),
+            path: s("~/dev/auth-service"),
             stats: s("12 files | 3.2k LOC"),
         },
         topology: vec![

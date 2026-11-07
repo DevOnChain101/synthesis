@@ -48,7 +48,7 @@ of the classic TUI design, in this repo, running the Rust engine in process.
   the bounded process runner `imgclip::RealExec` that `project` runs git with) and on
   `synthesis-harness` (only `sanitize_for_display`); moving both into a small base crate is follow-up.
 - `theme.rs` reads the TUI's own tokens (`synthesis-tui-render::theme`), so palette changes land in
-  both UIs at once. Fonts: Inter (UI sans) and JetBrains Mono (TUI view), SIL OFL, licences in
+  both UIs at once. Fonts: Inter (UI sans), Fira Code (TUI and Agent views, the design's `--mono`) and JetBrains Mono (settings font choice), SIL OFL, licences in
   `apps/desktop/assets/fonts/*-OFL.txt`; icons: Lucide through `gpui-kit-assets`.
 - Pins (exact): `gpui-pre =0.3.10` (the maintainers' snapshot of Zed's gpui), `gpui-component =0.8.1`,
   `gpui-pre-platform =0.3.10` with `font-kit`, `gpui-kit-assets =0.8.1`; macOS adds `gpui-pre-apple`
@@ -98,10 +98,38 @@ scripted (fake provider, `--features shot,test-provider`) conversation on the re
 pickers and slash commands beyond /help and /exit (a notice says so), image paste, "Other" free text in
 question dialogs, keyboard scroll-into-view in Workspace/Running, Linux/Windows/IME verification.
 
-TUI view (`src/tui_view/`, phase 2): native panels on a sample `Snapshot` (`sample.rs`; the real view-model
-replaces it), metrics from `cli.html` `#view1` (`layout.rs`), topology wires (`topo.rs`). Layout tests use
-gpui test support. Offscreen PNG: `cargo run -p synthesis-desktop --features shot -- --shot out.png --size 1400x900
-[--hide session,tools,...]` (headless Metal/wgpu, no window server). Topology mode L (tall and narrow) is not ported.
+TUI view (`src/tui_view/`), rebuilt 1:1 on the owner's design `~/Vibe/synthesis-cli-ui/cli.html` (owner decision
+2026-11-07, "dung lai dung cli.html"): geometry and typography are the design's (Fira Code 500, 12.5px / 1.55,
+panels radius 8, the breakpoints 1400/1200/1000 and the height tiers 750/610/860, the `fitRight` rules, the
+topology modes A, B and T), only the colours are the platinum tokens. Panels: top bar; left Workspace, Running,
+Session, Tools & Skills, Recent Activity, User Prompt; centre header (status, latest prompt, context bar, folder,
+files | LOC), tabs chat | diff | terminal | browser | file explorer, conversation, prompt, transcript switch, mode
+bar; right Synthesis Topology, Agent Status + Context, Usage & Metrics; key hint footer. Shared chrome
+(`widgets/chrome.rs`: top bar, panel, tabs, footer, chat header) is used by the TUI and the Agent view; the diff,
+terminal (command history, read-only, no PTY) and browser panes are `widgets/panes.rs` in both.
+
+`synt.tui.panels.*` keys (unchanged, so no settings.json breaks): `session` = Session, `tools` = Tools & Skills,
+`activity` = Recent Activity and User Prompt, `status` = Agent Status, `tokens` = Context, `topology` = Synthesis
+Topology, `usage` = Usage & Metrics; `mcp` has no panel any more (MCP is in the Topology card and the Tools &
+Skills row) and is ignored. Workspace, Running and the chat cannot be hidden. The labels in
+`synthesis-settings::TUI_PANELS` name both the terminal and the desktop panel.
+
+Data: `sample.rs` is the design's own sample (`STATE`), `snapshot.rs` builds the same `Snapshot` from the live
+`ViewState`. Usage & Metrics rows come from `synthesis-view::usage` (`UsageHistory::metrics`: tokens, tool calls,
+files modified, commands run, browser requests, MCP calls over the last 7 days; the bar is that week's share of the
+last 30 days), counted per day from `tool.started` in `synt.db` (`synthesis-session::UsageDay`).
+
+Design acceptance: `tests/design/cli-rects.json` holds `getBoundingClientRect` of the design's panels at 900x520,
+1000x700, 1200x800, 1400x900 and 1920x1080 (headless Chrome, `cli.html` copied beside its assets); `design_tests.rs`
+lays the sample out in GPUI at the same sizes and compares (1px; 1.5px for panels of text rows, because gpui rounds a
+19.375px line box up to 19.5px; wider only where Chrome and gpui wrap text differently, listed in `tol`). Run
+`cargo test -p synthesis-desktop --lib design_ -- --nocapture` for the table. Offscreen PNG: `cargo run -p
+synthesis-desktop --features shot -- --shot out.png --size 1400x900 [--hide session,tools,...]` (headless
+Metal/wgpu, no window server); `node scripts/design-compare.mjs <ref-dir> <shots-dir> <out-dir>` writes
+[design | app | difference] images from Chrome renders of `cli.html` (`ref-WxH.png`) and the shots.
+Not ported: topology mode L (tall and narrow falls back to T), the marquee of the "Latest user prompt" (drawn
+clipped, not scrolling), the period select of Usage (7 days only), a clickable transcript switch, the file explorer
+tab's project tree (the TUI view lists the session's changed files; the tree is in the Agent view).
 
 ### Feature gaps against the TUI (view-model status)
 

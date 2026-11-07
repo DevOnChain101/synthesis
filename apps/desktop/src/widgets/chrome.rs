@@ -28,12 +28,17 @@ pub fn rule() -> Hsla {
 /// A click on a row or a button.
 pub type OnClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
-pub fn icon(name: &str, size: f32, c: Hsla) -> impl IntoElement {
-    svg()
-        .path(format!("icons/{name}.svg"))
-        .size(px(size))
-        .flex_none()
-        .text_color(c)
+/// An icon: the design's own shape when `cli.html` has it (`widgets::icons`), else the Lucide one.
+pub fn icon(name: &str, size: f32, c: Hsla) -> gpui::AnyElement {
+    match super::icons::for_lucide(name).and_then(|d| super::icons::svg_of(d, size, c)) {
+        Some(s) => s.flex_none().into_any_element(),
+        None => svg()
+            .path(format!("icons/{name}.svg"))
+            .size(px(size))
+            .flex_none()
+            .text_color(c)
+            .into_any_element(),
+    }
 }
 
 pub fn dot(c: Hsla, filled: bool) -> Div {
