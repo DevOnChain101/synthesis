@@ -342,6 +342,24 @@ pub fn commands(live: &Live) -> Div {
     col
 }
 
+/// The screenshot to draw, or why not (shown in place of the image).
+fn viewable(root: Option<&std::path::Path>, path: &str) -> Result<std::path::PathBuf, String> {
+    let root = root.ok_or("no session folder")?;
+    if let Some(p) = synthesis_view::agent::viewable_screenshot(root, path) {
+        return Ok(p);
+    }
+    Err(match std::fs::metadata(path) {
+        Err(_) => "the file is missing".into(),
+        Ok(m) if m.len() > synthesis_view::agent::MAX_SHOT_BYTES => {
+            format!(
+                "the file is larger than {} MiB",
+                synthesis_view::agent::MAX_SHOT_BYTES >> 20
+            )
+        }
+        Ok(_) => "the file is not a PNG inside the session's artifact folder".into(),
+    })
+}
+
 /// The browser tab: the page the agent is on, the selected screenshot (the latest by default), the history of
 /// saved frames (`browser.frame`, newest first; `pick(i)` selects the frame `i` of `AgentPanes::frames`) and the
 /// list of browser calls with their state and duration. There is no live page stream: screenshots are the files
@@ -350,6 +368,7 @@ pub fn browser(
     live: &Live,
     sel: Option<usize>,
     tz_min: i32,
+    home: Option<&std::path::Path>,
     pick: &dyn Fn(usize) -> OnClick,
 ) -> Div {
     let b = &live.view.panes;
@@ -383,10 +402,8 @@ pub fn browser(
                     }),
             ),
     );
-    let root = live
-        .engine
-        .as_ref()
-        .map(|e| e.synthesis_home.join("sessions").join(&e.sid));
+    // the session id outlives the engine (`Live::sid`): the image must not vanish while the engine restarts
+    let root = home.map(|h| h.join("sessions").join(&live.sid));
     let shown = sel
         .filter(|i| *i < b.frames.len())
         .or(b.frames.len().checked_sub(1));
@@ -394,22 +411,22 @@ pub fn browser(
         .and_then(|i| b.frames.get(i))
         .map(|f| f.path.as_str())
         .or(b.screenshot.as_deref());
-    let shot = root
-        .as_ref()
-        .zip(frame_path)
-        .and_then(|(r, p)| synthesis_view::agent::viewable_screenshot(r, p));
-    if let Some(p) = shot {
-        col = col.child(
-            card().child(
-                div().p(px(6.)).child(
-                    gpui::img(p)
-                        .max_h(px(300.))
-                        .w_full()
-                        .object_fit(gpui::ObjectFit::Contain),
-                ),
-            ),
-        );
-    }
+    col = col.child(
+        card().child(
+            div().p(px(6.)).child(match frame_path {
+                None => note("No screenshot saved yet."),
+                Some(p) => match viewable(root.as_deref(), p) {
+                    // fit inside the panel width and 300 px of height, aspect ratio kept
+                    Ok(p) => div().h(px(300.)).child(
+                        gpui::img(p)
+                            .size_full()
+                            .object_fit(gpui::ObjectFit::Contain),
+                    ),
+                    Err(why) => note(format!("Screenshot not shown: {why}")),
+                },
+            }),
+        ),
+    );
     if !b.frames.is_empty() {
         col = col.child(
             div()
