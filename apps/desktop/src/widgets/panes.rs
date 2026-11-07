@@ -1,6 +1,6 @@
-//! Read-only panes both views show under their tabs: the diff of the files the session changed, the command
+//! Read-only panes the TUI view shows under its tabs: the diff of the files the session changed, the command
 //! history (the "terminal" tab: it is not a terminal) and the browser calls. They read `Live`
-//! (`synthesis_view::agent::AgentPanes`) and own no state; the caller keeps which diff files are open.
+//! (`synthesis_view::agent::AgentPanes`) and own no state; the caller keeps what is open or selected.
 
 use std::collections::HashSet;
 
@@ -333,8 +333,16 @@ pub fn commands(live: &Live) -> Div {
     col
 }
 
-/// The browser calls of the session, the page it is on and the latest saved screenshot.
-pub fn browser(live: &Live) -> Div {
+/// The browser tab: the page the agent is on, the selected screenshot (the latest by default), the history of
+/// saved frames (`browser.frame`, newest first; `pick(i)` selects the frame `i` of `AgentPanes::frames`) and the
+/// list of browser calls with their state and duration. There is no live page stream: screenshots are the files
+/// `browser_screenshot` saved in the session's artifact directory, opened only through `viewable_screenshot`.
+pub fn browser(
+    live: &Live,
+    sel: Option<usize>,
+    tz_min: i32,
+    pick: &dyn Fn(usize) -> OnClick,
+) -> Div {
     let b = &live.view.panes;
     let mut col = div().flex().flex_col().gap(px(10.)).child(
         div()
@@ -360,53 +368,96 @@ pub fn browser(live: &Live) -> Div {
                     }),
             ),
     );
-    // only a PNG inside this session's artifact directory is opened
-    let shot = live.engine.as_ref().and_then(|e| {
-        let root = e.synthesis_home.join("sessions").join(&e.sid);
-        b.screenshot
-            .as_deref()
-            .and_then(|p| synthesis_view::agent::viewable_screenshot(&root, p))
-    });
+    let root = live
+        .engine
+        .as_ref()
+        .map(|e| e.synthesis_home.join("sessions").join(&e.sid));
+    let shown = sel
+        .filter(|i| *i < b.frames.len())
+        .or(b.frames.len().checked_sub(1));
+    let frame_path = shown
+        .and_then(|i| b.frames.get(i))
+        .map(|f| f.path.as_str())
+        .or(b.screenshot.as_deref());
+    let shot = root
+        .as_ref()
+        .zip(frame_path)
+        .and_then(|(r, p)| synthesis_view::agent::viewable_screenshot(r, p));
     if let Some(p) = shot {
         col = col.child(
             card().child(
                 div().p(px(6.)).child(
                     gpui::img(p)
-                        .max_h(px(260.))
+                        .max_h(px(300.))
                         .w_full()
                         .object_fit(gpui::ObjectFit::Contain),
                 ),
             ),
         );
     }
-    if let Some(f) = b.frames.last() {
-        col = col.child(div().text_color(dim()).child(format!(
-            "latest of {} frames: {}x{}, {} KB, {}",
-            b.frames.len(),
-            f.w,
-            f.h,
-            f.bytes.div_ceil(1024),
-            f.url
-        )));
+    if !b.frames.is_empty() {
+        col = col.child(
+            div()
+                .flex()
+                .flex_col()
+                .child(div().mb(px(4.)).text_color(dim()).child(format!(
+                    "{} saved frame{}",
+                    b.frames.len(),
+                    if b.frames.len() == 1 { "" } else { "s" }
+                )))
+                .children(b.frames.iter().enumerate().rev().map(|(i, f)| {
+                    let on = shown == Some(i);
+                    div()
+                        .id(("frame", i))
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .px(px(8.))
+                        .h(px(21.))
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .when(on, |d| d.bg(hsla(t::ELEVATED)).text_color(strong()))
+                        .hover(|d| d.bg(with_alpha(hsla(t::TEXT_STRONG), 0.05)))
+                        .on_click(pick(i))
+                        .child(div().w(px(64.)).flex_none().text_color(dim()).child(
+                            f.ts.map_or(String::new(), |ms| {
+                                crate::tui_view::snapshot::clock(ms, tz_min)
+                            }),
+                        ))
+                        .child(div().flex_1().min_w(px(0.)).truncate().child(f.url.clone()))
+                        .child(div().flex_none().text_color(dim()).child(format!(
+                            "{}x{} \u{b7} {} KB",
+                            f.w,
+                            f.h,
+                            f.bytes.div_ceil(1024)
+                        )))
+                })),
+        );
     }
     if b.browser.is_empty() {
         return col.child(note(
-            "No browser call yet. Calls of the browser tools list here; a screenshot shows when the model takes one.",
+            "No browser call yet. The agent's browser tools list here; a screenshot shows when it takes one.",
         ));
     }
     col.child(
         div()
             .flex()
             .flex_col()
+            .child(div().mb(px(4.)).text_color(dim()).child(format!(
+                "{} call{}",
+                b.browser.len(),
+                if b.browser.len() == 1 { "" } else { "s" }
+            )))
             .children(b.browser.iter().rev().map(|c| {
                 div()
                     .flex()
                     .items_center()
                     .gap(px(10.))
+                    .h(px(21.))
                     .child(dot(state_colour(c.state), c.state != CmdState::Running))
                     .child(
                         div()
-                            .w(px(150.))
+                            .w(px(130.))
                             .flex_none()
                             .text_color(strong())
                             .child(c.name.trim_start_matches("browser_").to_string()),
@@ -423,7 +474,4 @@ pub fn browser(live: &Live) -> Div {
                     })
             })),
     )
-    .child(note(
-        "Screenshots come from the saved artifact of browser_screenshot; there is no live page stream.",
-    ))
 }

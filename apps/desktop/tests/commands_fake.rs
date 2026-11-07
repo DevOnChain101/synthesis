@@ -315,19 +315,19 @@ fn files_diff_focus_peers_name_and_permission_rules() {
     let a = start(&r, None, None, None);
     let (mut live, e, _rx) = live_on(a.engine, a.rx, &r.cfg);
 
-    // the folder is not trusted: no git, the TUI's wording
-    for c in ["/files", "/diff"] {
-        assert_eq!(live.submit(c), Submitted::Nothing);
-        assert!(
-            last_note(&live).contains("not trusted"),
-            "{}",
-            last_note(&live)
-        );
-    }
-    live.trusted = true;
-    assert_eq!(live.submit("/files"), Submitted::Do(Action::Project(None)));
-    live.project_done("a.rs".into());
-    assert_eq!(last_note(&live), "a.rs");
+    // /files and /diff show the centre panel's tabs and post nothing (an untrusted folder is said by the tab)
+    let before = live.view.convo.items.len();
+    assert_eq!(live.submit("/files"), Submitted::Do(Action::ShowFiles));
+    assert_eq!(live.submit("/diff"), Submitted::Do(Action::ShowDiff(None)));
+    assert_eq!(
+        live.submit("/diff a.rs"),
+        Submitted::Do(Action::ShowDiff(Some("a.rs".into())))
+    );
+    assert_eq!(
+        live.view.convo.items.len(),
+        before,
+        "nothing posted in the chat"
+    );
 
     // peers are off in this run
     assert_eq!(live.submit("/peers"), Submitted::Nothing);

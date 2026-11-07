@@ -91,9 +91,10 @@ pub enum Action {
     Compact(Option<String>),
     /// `/config`: the shell shows the Settings view.
     OpenSettings,
-    /// `/files` (`None`) or `/diff [file]`: the scan runs off the UI thread; the text comes back
-    /// through [`Live::project_done`].
-    Project(Option<String>),
+    /// `/files`: the centre panel shows its file explorer tab (the project tree and the changes).
+    ShowFiles,
+    /// `/diff [file]`: the centre panel shows its diff tab, with `file` open when one is named.
+    ShowDiff(Option<String>),
     /// `/peers`: the listing is read off the UI thread; the text comes back through [`Live::peers_done`].
     Peers,
 }
@@ -218,16 +219,6 @@ pub fn is_wired(name: &str) -> bool {
     WIRED.contains(&name)
 }
 
-/// The text of `/files` (`diff` is `None`) or `/diff [file]`. Runs `git`: call it off the UI thread.
-pub fn project_text(cwd: &str, env: &synthesis_config::Env, diff: Option<&str>) -> String {
-    let p = synthesis_view::project::scan(std::path::Path::new(cwd), env);
-    match diff {
-        None => synthesis_view::project::tree_lines(&p),
-        Some(f) => synthesis_view::project::diff_lines(&p, f.trim()),
-    }
-    .join("\n")
-}
-
 /// `5m ago`, `3h ago`, `2d ago` (the TUI's wording).
 pub fn age(ms: i64) -> String {
     let m = ms.max(0) / 60_000;
@@ -276,8 +267,8 @@ pub struct Live {
     pub image_busy: bool,
     /// `/focus`: only the prompts, answers, results and notices show (the TUI's focus view).
     pub focus_view: bool,
-    /// A `/files` or `/diff` scan is running.
-    pub project_busy: bool,
+    /// The Usage & Metrics period (7 or 30 days).
+    pub usage_days: usize,
 }
 
 impl Live {
@@ -308,7 +299,7 @@ impl Live {
             images: vec![],
             image_busy: false,
             focus_view: false,
-            project_busy: false,
+            usage_days: 7,
         }
     }
 
@@ -890,18 +881,11 @@ impl Live {
                 );
             }
             "permissions" => self.permissions_edit(arg),
-            "files" | "diff" => {
-                if !self.trusted {
-                    self.note(
-                        format!("/{name}: this folder is not trusted, so git is not run in it (its .git/config can name programs). Start with --trust-project to allow it."),
-                        true,
-                    );
-                } else if self.project_busy {
-                    self.note(format!("/{name}: the last scan is still running"), true);
-                } else {
-                    self.project_busy = true;
-                    return Submitted::Do(Action::Project((name == "diff").then(|| arg.into())));
-                }
+            // the file explorer and diff tabs of the centre panel are the views of these two; nothing is posted
+            "files" => return Submitted::Do(Action::ShowFiles),
+            "diff" => {
+                let f = arg.trim();
+                return Submitted::Do(Action::ShowDiff((!f.is_empty()).then(|| f.to_string())));
             }
             "peers"
                 if self
@@ -967,12 +951,6 @@ impl Live {
                 true,
             );
         }
-    }
-
-    /// The scan of `/files` or `/diff` ended: its text goes into the chat.
-    pub fn project_done(&mut self, text: String) {
-        self.project_busy = false;
-        self.note(text, false);
     }
 
     /// The `/peers` listing (`None`: peers are off).
@@ -1446,17 +1424,11 @@ mod tests {
     fn slash_commands_are_never_dropped_silently() {
         let mut l = live_with_commands();
         assert_eq!(l.submit("/exit"), Submitted::Quit);
-        assert_eq!(l.submit("/files"), Submitted::Nothing);
-        assert!(
-            matches!(l.view.convo.items.last(), Some(Item::Notice { text, .. }) if text.starts_with("/files: this folder is not trusted"))
-        );
-        l.trusted = true;
-        assert_eq!(l.submit("/files"), Submitted::Do(Action::Project(None)));
-        assert_eq!(l.submit("/diff"), Submitted::Nothing, "the scan is running");
-        l.project_done("x".into());
+        assert_eq!(l.submit("/files"), Submitted::Do(Action::ShowFiles));
+        assert_eq!(l.submit("/diff"), Submitted::Do(Action::ShowDiff(None)));
         assert_eq!(
             l.submit("/diff a.rs"),
-            Submitted::Do(Action::Project(Some("a.rs".into())))
+            Submitted::Do(Action::ShowDiff(Some("a.rs".into())))
         );
         assert_eq!(l.submit("/peers"), Submitted::Do(Action::Peers));
         assert!(!l.focus_view);

@@ -450,8 +450,10 @@ pub fn context_body(c: &ContextInfo, rows_shown: usize) -> Div {
         .child(kv(&rows, 62., 10., 1.))
 }
 
-pub fn usage_meta(u: &Usage) -> gpui::AnyElement {
+/// The period select of Usage & Metrics: a click toggles 7 and 30 days.
+pub fn usage_meta(u: &Usage, on_click: Option<OnClick>) -> gpui::AnyElement {
     div()
+        .id("usage-range")
         .flex()
         .items_center()
         .gap(px(10.))
@@ -462,6 +464,11 @@ pub fn usage_meta(u: &Usage) -> gpui::AnyElement {
         .rounded(px(5.))
         .bg(hsla(t::SURFACE))
         .text_color(strong())
+        .when_some(on_click, |d, f| {
+            d.cursor_pointer()
+                .hover(|d| d.border_color(hsla(t::ACCENT)))
+                .on_click(f)
+        })
         .child(u.range.clone())
         .child(icon("chevron-down", 14., strong()))
         .into_any_element()

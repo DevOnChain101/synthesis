@@ -610,6 +610,12 @@ impl TuiView {
             return true;
         }
         match (key, ctrl) {
+            // Ctrl+1..5: the centre tabs (chat, diff, terminal, browser, file explorer)
+            (k @ ("1" | "2" | "3" | "4" | "5"), true) if !ks.modifiers.shift => {
+                self.ts.tab = super::ChatTab::ALL[usize::from(k.as_bytes()[0] - b'1')];
+                cx.notify();
+                return true;
+            }
             ("n", true) => {
                 self.pick_folder(cx);
                 return true;
@@ -641,6 +647,18 @@ impl TuiView {
             ("r", true) => {
                 lu.search = Some((String::new(), 0));
                 self.show_search_hit(window, cx);
+                return true;
+            }
+            ("pageup", _) | ("pagedown", _) if self.ts.tab != super::ChatTab::Chat => {
+                // the pane under another tab scrolls by a page
+                let h = f32::from(self.pane_scroll.bounds().size.height);
+                let step = (h - 40.).max(40.);
+                let max = f32::from(self.pane_scroll.max_offset().y);
+                let cur = -f32::from(self.pane_scroll.offset().y);
+                let to = (cur + if key == "pageup" { -step } else { step }).clamp(0., max);
+                self.pane_scroll
+                    .set_offset(gpui::point(self.pane_scroll.offset().x, gpui::px(-to)));
+                cx.notify();
                 return true;
             }
             ("pageup", _) | ("pagedown", _) => {
@@ -698,6 +716,12 @@ impl TuiView {
             "escape" => {
                 if lu.live.interrupt() {
                     lu.dirty = true;
+                    cx.notify();
+                    return true;
+                }
+                // out of another tab, back to the chat
+                if self.ts.tab != super::ChatTab::Chat {
+                    self.ts.tab = super::ChatTab::Chat;
                     cx.notify();
                     return true;
                 }
@@ -948,18 +972,8 @@ impl TuiView {
             }
             Action::Close => return self.switch(Target::Close, "close".into(), cx),
             Action::OpenSettings => cx.emit(OpenSettings),
-            Action::Project(diff) => {
-                let (cwd, env) = (lu.live.cwd.clone(), lu.cfg.env.clone());
-                let job = cx.background_spawn(async move {
-                    crate::live::project_text(&cwd, &env, diff.as_deref())
-                });
-                cx.spawn(async move |this, cx| {
-                    let text = job.await;
-                    this.update(cx, |t, cx| t.live_do(cx, |l| l.project_done(text)))
-                        .ok();
-                })
-                .detach();
-            }
+            Action::ShowFiles => return self.show_tab(super::ChatTab::Files, None, cx),
+            Action::ShowDiff(f) => return self.show_tab(super::ChatTab::Diff, f, cx),
             Action::Peers => {
                 let Some(e) = lu.live.engine.clone() else {
                     return;

@@ -427,8 +427,12 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
         .find(|s| s.kind == StepKind::Todo)
         .map_or_else(|| "nothing queued".to_string(), |s| s.text.clone());
 
-    // Usage & Metrics: the last 7 days; a bar is that week's share of the last 30 days
-    let (w7, w30) = (v.usage.metrics(7), v.usage.metrics(30));
+    // Usage & Metrics: the last 7 (or 30) days; a bar is that period's share of the last 28 (or 90) days
+    let days = if l.usage_days == 30 { 30 } else { 7 };
+    let (w7, w30) = (
+        v.usage.metrics(days),
+        v.usage.metrics(days * if days == 7 { 4 } else { 3 }),
+    );
     let metric = |label: &str, a: f64, b: f64, tokens: bool| Metric {
         label: label.into(),
         value: if tokens {
@@ -566,7 +570,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
         topology: nodes,
         core,
         usage: Usage {
-            range: "7 days".into(),
+            range: format!("{days} days"),
             rows: vec![
                 metric("Tokens", w7.tokens, w30.tokens, true),
                 metric("Tool calls", w7.tool_calls, w30.tool_calls, false),

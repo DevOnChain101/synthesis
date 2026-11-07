@@ -465,7 +465,44 @@ pub fn with_alpha(c: Hsla, a: f32) -> Hsla {
 
 /// `#chead`: icon, "Synthesis", the status word, the latest prompt (clipped), the context bar and `tail`
 /// (folder and change counts). 36.4px: 8px padding around one line, and the 1px rule.
-pub fn chat_head(status: &str, status_colour: Hsla, prompt: &str, ctx_pct: f32, tail: &str) -> Div {
+pub fn chat_head(
+    status: &str,
+    status_colour: Hsla,
+    prompt: &str,
+    ctx_pct: f32,
+    tail: &str,
+    width: f32,
+    motion: bool,
+) -> Div {
+    // the prompt's room: the header minus the 2px border, its padding, gaps and the fixed parts (monospace 7.5px)
+    let fixed = 24.
+        + 14.
+        + 67.5
+        + (status.chars().count() as f32 + 2.) * 7.5
+        + 7.5
+        + 54.
+        + tail.chars().count() as f32 * 7.5
+        + 6. * 10.;
+    let room = (width - 2. - fixed).max(0.);
+    let label = format!("Latest user prompt: {prompt}");
+    let tw = label.chars().count() as f32 * 7.5;
+    // `prompt-scroll`: a prompt that does not fit enters from the right and runs through (16s, repeating)
+    let prompt_el: gpui::AnyElement = if motion && tw > room {
+        div()
+            .absolute()
+            .top_0()
+            .whitespace_nowrap()
+            .child(label)
+            .with_animation(
+                "chead-marquee",
+                gpui::Animation::new(std::time::Duration::from_secs(16)).repeat(),
+                move |el, d| el.left(px(room - d * (room + tw))),
+            )
+            .into_any_element()
+    } else {
+        div().child(label).into_any_element()
+    };
+    use gpui::AnimationExt as _;
     div()
         .debug_selector(|| "chead".to_string())
         .flex()
@@ -488,11 +525,13 @@ pub fn chat_head(status: &str, status_colour: Hsla, prompt: &str, ctx_pct: f32, 
         .child(div().text_color(dim()).child("|"))
         .child(
             div()
+                .relative()
                 .flex_1()
                 .min_w(px(0.))
+                .h(px(19.375))
                 .overflow_hidden()
                 .text_color(dim())
-                .child(format!("Latest user prompt: {prompt}")),
+                .child(prompt_el),
         )
         .child(
             div()

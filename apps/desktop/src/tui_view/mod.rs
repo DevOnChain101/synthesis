@@ -16,6 +16,7 @@ pub mod sample;
 #[cfg(feature = "shot")]
 pub mod shot;
 pub mod snapshot;
+pub mod tabs;
 pub mod topo;
 
 use gpui::{
@@ -36,6 +37,10 @@ pub use crate::widgets::chrome::tracked;
 /// Black at `a` alpha (the tool card's `rgba(9,10,13,.6)`).
 pub(crate) fn with_alpha_black(a: f32) -> Hsla {
     chrome::black_a(a)
+}
+
+pub(crate) fn with_alpha_white(a: f32) -> Hsla {
+    chrome::with_alpha(gpui::white(), a)
 }
 
 /// The TUI view's font: `cli.html` `--mono` (bundled Fira Code, SIL OFL), at its body weight 500.
@@ -73,8 +78,9 @@ pub const ICONS: [&str; 27] = [
 ];
 
 /// The tabs of the centre panel (`STATE.bottomTabs`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ChatTab {
+    #[default]
     Chat,
     Diff,
     Terminal,
@@ -129,10 +135,17 @@ pub struct TuiView {
     hidden: layout::Hidden,
     /// Width taken by chrome beside the view (the shell's rail): breakpoints use the view's own width.
     inset: f32,
-    /// The pane under the centre header.
-    pub(crate) tab: ChatTab,
-    /// Files of the diff tab that are expanded.
-    diff_open: std::collections::HashSet<String>,
+    /// Height taken above the view by the window's title bar; the height tiers use the view's own height.
+    top: f32,
+    /// The tabs of the session shown (the pane under the centre header and what it has open), and those of the
+    /// sessions left, kept by session id.
+    pub(crate) ts: tabs::TabState,
+    tab_sid: String,
+    tabs_saved: std::collections::HashMap<String, tabs::TabState>,
+    /// The project tree of the file explorer tab.
+    tree: tabs::Tree,
+    pane_scroll: gpui::ScrollHandle,
+    sub_scroll: gpui::ScrollHandle,
     /// Width of the centre column, from the last render (the tab strip wraps when it is narrower).
     centre_w: f32,
     /// False while another view of the shell is shown: the window-wide key hook then leaves the keys alone.
@@ -166,10 +179,20 @@ impl TuiView {
             live: None,
             hidden,
             inset,
-            tab: ChatTab::Chat,
-            diff_open: Default::default(),
+            top: 0.,
+            ts: Default::default(),
+            tab_sid: String::new(),
+            tabs_saved: Default::default(),
+            tree: Default::default(),
+            pane_scroll: gpui::ScrollHandle::new(),
+            sub_scroll: gpui::ScrollHandle::new(),
             centre_w: 600.,
         }
+    }
+
+    /// The title bar above the view (see `ui::TITLEBAR_H`).
+    pub fn set_top_inset(&mut self, h: f32) {
+        self.top = h;
     }
 
     /// Before drawing: rebuild the snapshot from the live state when it changed, and keep the chat
@@ -177,6 +200,16 @@ impl TuiView {
     fn refresh(&mut self, window: &mut Window) {
         let Some(lu) = &mut self.live else { return };
         let _ = window;
+        // the tabs belong to the session: leaving one keeps them, coming back finds them
+        if lu.live.sid != self.tab_sid && !lu.live.sid.is_empty() {
+            let old = std::mem::take(&mut self.ts);
+            let prev = std::mem::replace(&mut self.tab_sid, lu.live.sid.clone());
+            if !prev.is_empty() {
+                self.tabs_saved.insert(prev, old);
+            }
+            self.ts = self.tabs_saved.remove(&self.tab_sid).unwrap_or_default();
+            self.tree = Default::default();
+        }
         if lu.dirty {
             lu.dirty = false;
             self.snap = snapshot::build(
@@ -355,11 +388,34 @@ impl TuiView {
             &h.prompt,
             h.ctx_pct,
             &format!("{} | {}", h.path, h.stats),
+            self.centre_w,
+            self.live.as_ref().is_some_and(|l| l.cfg.tui.motion),
         )
     }
 
-    /// `.agent-switch`: the transcript views, `main` first; the chosen one is marked with `*`.
-    fn agent_switch(&self) -> Div {
+    /// `.agent-switch`: the transcript views, `main` first, then the sub-agents of the session; the chosen one is
+    /// marked with `*`, and picking one opens its transcript beside the chat.
+    fn agent_switch(&self, cx: &mut Context<Self>) -> Div {
+        // (id, label, state)
+        let mut rows: Vec<(Option<String>, String, String)> =
+            vec![(None, "main".into(), String::new())];
+        match &self.live {
+            Some(lu) => rows.extend(
+                lu.live
+                    .view
+                    .panes
+                    .subs
+                    .iter()
+                    .map(|a| (Some(a.id.clone()), a.name.clone(), a.status.clone())),
+            ),
+            None => rows.extend(
+                self.snap
+                    .agents
+                    .iter()
+                    .skip(1)
+                    .map(|a| (Some(a.clone()), a.clone(), String::new())),
+            ),
+        }
         div()
             .debug_selector(|| "agent-switch".to_string())
             .flex_none()
@@ -371,22 +427,34 @@ impl TuiView {
             .flex_col()
             .items_start()
             .gap(px(1.))
-            .children(self.snap.agents.iter().enumerate().map(|(i, a)| {
+            .children(rows.into_iter().enumerate().map(|(i, (id, name, state))| {
+                let on = self.ts.sub == id;
+                let pick = id.clone();
                 div()
+                    .id(("agent-opt", i))
                     .flex()
                     .items_center()
                     .gap(px(6.))
                     .h(px(20.))
-                    .text_color(if i == 0 { strong() } else { text() })
+                    .rounded(px(3.))
+                    .cursor_pointer()
+                    .text_color(if on { strong() } else { text() })
+                    .hover(|d| d.text_color(strong()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.ts.sub = pick.clone();
+                        this.ts.tab = ChatTab::Chat;
+                        cx.notify();
+                    }))
                     .child(
                         div()
                             .w(px(8.))
                             .flex_none()
                             .font_weight(FontWeight::BOLD)
                             .text_color(hsla(t::ACCENT))
-                            .child(if i == 0 { "*" } else { "" }),
+                            .child(if on { "*" } else { "" }),
                     )
-                    .child(a.clone())
+                    .child(name)
+                    .child(div().text_color(dim()).child(state))
             }))
     }
 
@@ -449,10 +517,16 @@ impl TuiView {
 
     fn chat(&self, cx: &mut Context<Self>) -> Div {
         let s = &self.snap;
-        let tabs: Vec<chrome::Tab> = ChatTab::ALL.iter().map(|t| t.tab()).collect();
+        let tabs: Vec<chrome::Tab> = ChatTab::ALL
+            .iter()
+            .map(|t| chrome::Tab {
+                badge: self.badge(*t),
+                ..t.tab()
+            })
+            .collect();
         let tab_click = |i: usize| -> panels::OnClick {
             Box::new(cx.listener(move |this, _, _, cx| {
-                this.tab = ChatTab::ALL[i];
+                this.ts.tab = ChatTab::ALL[i];
                 cx.notify();
             }))
         };
@@ -460,18 +534,23 @@ impl TuiView {
             &tabs,
             ChatTab::ALL
                 .iter()
-                .position(|t| *t == self.tab)
+                .position(|t| *t == self.ts.tab)
                 .unwrap_or(0),
             true,
             self.centre_w - 2.,
             &tab_click,
         );
-        let (body, prompt) = if self.tab != ChatTab::Chat {
-            (self.pane(cx), self.input_bar(cx))
+        let body = if self.ts.tab != ChatTab::Chat {
+            self.pane(cx)
         } else if self.live.is_some() {
-            (self.conversation(cx), self.live_prompt(cx))
+            self.chat_stage(cx)
         } else {
-            (self.welcome().into_any_element(), self.input_bar(cx))
+            self.welcome().into_any_element()
+        };
+        let prompt = if self.live.is_some() {
+            self.live_prompt(cx)
+        } else {
+            self.input_bar(cx)
         };
         let _ = s;
         div()
@@ -490,7 +569,7 @@ impl TuiView {
             .child(strip)
             .child(body)
             .child(prompt)
-            .child(self.agent_switch())
+            .child(self.agent_switch(cx))
             .child(self.mode_bar())
     }
 
@@ -510,54 +589,7 @@ impl TuiView {
         )
     }
 
-    /// The body of a tab other than chat: the Agent view's read-only panes (`widgets::panes`) on this
-    /// session's state. The terminal tab is the command history, not a terminal.
-    fn pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        use crate::widgets::panes;
-        let empty;
-        let live = match &self.live {
-            Some(l) => &l.live,
-            None => {
-                empty = crate::live::Live::new();
-                &empty
-            }
-        };
-        let toggle = |path: String| -> panels::OnClick {
-            Box::new(cx.listener(move |this, _, _, cx| {
-                if !this.diff_open.remove(&path) {
-                    this.diff_open.insert(path.clone());
-                }
-                cx.notify();
-            }))
-        };
-        let inner = match self.tab {
-            ChatTab::Chat => div(),
-            ChatTab::Diff => panes::diff(live, &self.diff_open, &toggle),
-            ChatTab::Terminal => panes::commands(live),
-            ChatTab::Browser => panes::browser(live),
-            // the project tree itself needs the Agent view's scanner: here the files the session changed
-            ChatTab::Files => div()
-                .flex()
-                .flex_col()
-                .gap(px(10.))
-                .child(div().text_color(dim()).child(
-                    "Files changed in this session. The whole project tree is in the Agent view (file explorer).",
-                ))
-                .child(panes::diff(live, &std::collections::HashSet::new(), &toggle)),
-        };
-        div()
-            .id("pane")
-            .debug_selector(|| "tab-body".to_string())
-            .flex_1()
-            .min_h(px(0.))
-            .overflow_y_scroll()
-            .px(px(14.))
-            .py(px(10.))
-            .child(inner)
-            .into_any_element()
-    }
-
-    fn right(&self, tier: layout::Tiers, w: f32, h: f32) -> Div {
+    fn right(&self, tier: layout::Tiers, w: f32, h: f32, cx: &mut Context<Self>) -> Div {
         let (s, hid) = (&self.snap, &self.hidden);
         // the column's own height decides what gives way (`fitRight`): Usage goes under 500, the cards
         // are compacted under 400
@@ -640,7 +672,19 @@ impl TuiView {
             col = col.child(
                 panel(
                     head,
-                    Some(panels::usage_meta(&s.usage)),
+                    Some(panels::usage_meta(
+                        &s.usage,
+                        self.live.as_ref().map(|_| -> panels::OnClick {
+                            Box::new(cx.listener(|this, _, _, cx| {
+                                if let Some(lu) = &mut this.live {
+                                    lu.live.usage_days =
+                                        if lu.live.usage_days == 7 { 30 } else { 7 };
+                                    lu.dirty = true;
+                                }
+                                cx.notify();
+                            }))
+                        }),
+                    )),
                     panels::usage_body(&s.usage),
                 )
                 .flex_initial()
@@ -654,9 +698,10 @@ impl TuiView {
 impl Render for TuiView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.refresh(window);
+        self.tabs_tick(cx);
         let vp = window.viewport_size();
         let w = f32::from(vp.width) - self.inset;
-        let h = f32::from(vp.height);
+        let h = f32::from(vp.height) - self.top;
         let tier = tiers(h);
         let c = cols(w);
         let right_w = if self.hidden.has_right() {
@@ -675,7 +720,7 @@ impl Render for TuiView {
             .child(self.left(tier, w, cx))
             .child(self.centre(cx));
         if self.hidden.has_right() {
-            body = body.child(self.right(tier, w, h));
+            body = body.child(self.right(tier, w, h, cx));
         }
         let dialog = self.dialog_overlay(cx);
         div()

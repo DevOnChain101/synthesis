@@ -67,6 +67,17 @@ pub fn body(name: &str) -> Option<&'static str> {
         "cpu" => {
             r#"<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>"#
         }
+        // the Tauri app's title bar (`index.html` `#chrome`)
+        "tui" => r#"<path d="M4 6h16M4 12h10M4 18h16"/><circle cx="19" cy="12" r="1.6"/>"#,
+        "agent" => {
+            r#"<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM18 16l.8 2.2L21 19l-2.2.8L18 22l-.8-2.2L15 19l2.2-.8z"/>"#
+        }
+        "gear" => {
+            r#"<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>"#
+        }
+        "win-min" => r#"<path d="M5 12h14"/>"#,
+        "win-max" => r#"<rect x="5" y="5" width="14" height="14" rx="1"/>"#,
+        "win-close" => r#"<path d="M6 6l12 12M18 6L6 18"/>"#,
         _ => return None,
     })
 }
@@ -100,6 +111,16 @@ pub fn for_lucide(name: &str) -> Option<&'static str> {
         "file" => "file",
         "cpu" => "cpu",
         "clock" => "clock",
+        "tui" | "agent" | "gear" | "win-min" | "win-max" | "win-close" => {
+            return Some(match name {
+                "tui" => "tui",
+                "agent" => "agent",
+                "gear" => "gear",
+                "win-min" => "win-min",
+                "win-max" => "win-max",
+                _ => "win-close",
+            });
+        }
         _ => return None,
     })
 }
