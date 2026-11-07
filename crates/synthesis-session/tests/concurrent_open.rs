@@ -70,3 +70,38 @@ fn usage_reader_never_writes() {
         .unwrap();
     assert!(c.execute("DELETE FROM sessions", []).is_err());
 }
+
+/// Another process holds the write lock past the 5 s busy timeout: the append waits and goes
+/// through instead of breaking the run ("event sink failed").
+#[test]
+fn append_outlasts_a_write_lock_held_longer_than_the_busy_timeout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = synthesis_core::canonicalize(tmp.path()).unwrap();
+    let home = base.join("home");
+    let ws = WorkspaceContext::open("w1", &base, &base, &[], base.join(".art"), "pg").unwrap();
+    let store = Store::open(&home, StoreOptions::default()).unwrap();
+    let mut w = store
+        .create_session(NewSession {
+            id: Some("s1".into()),
+            workspace: &ws,
+            model_config_id: "m".into(),
+            permission_mode: PermissionMode::Default,
+            permission_policy_id: "default".into(),
+            budget: Budget::default(),
+            parent: None,
+            title: None,
+        })
+        .unwrap();
+    let c = rusqlite::Connection::open(home.join("synt.db")).unwrap();
+    c.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(6));
+        c.execute_batch("COMMIT").unwrap();
+    });
+    w.append_event(synthesis_events::Event::Notice {
+        level: "info".into(),
+        text: "x".into(),
+    })
+    .unwrap();
+    holder.join().unwrap();
+}

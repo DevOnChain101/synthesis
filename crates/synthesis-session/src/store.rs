@@ -1582,7 +1582,11 @@ impl SessionWriter {
 
     /// Untyped append, used for store-owned types such as `legacy.imported`.
     pub(crate) fn append_parts(&mut self, kind: &str, payload: Value) -> Result<RawEnvelope> {
-        let r = self.append_parts_inner(kind, payload);
+        // A busy/locked write (another peer on the same synt.db, slow Windows disk) rolled back
+        // whole, so it is safe to run again; the event sink would otherwise break the task.
+        let r = retry_busy(Duration::from_secs(15), || {
+            self.append_parts_inner(kind, payload.clone())
+        });
         if r.is_err() {
             self.sweep_orphan_artifacts(); // the failed transaction is rolled back by now
         }
@@ -1650,7 +1654,7 @@ impl SessionWriter {
     /// Validated against the `synthesis_core` state machine; emits `session.status_changed` in the
     /// same transaction. Returns the new event cursor.
     pub fn update_status(&mut self, to: SessionStatus, reason: Option<&str>) -> Result<u64> {
-        self.set_status(to, reason)
+        retry_busy(Duration::from_secs(15), || self.set_status(to, reason))
     }
 
     /// `validate = false` skips the state machine; only [`Self::repair_cancelling`] uses it.
