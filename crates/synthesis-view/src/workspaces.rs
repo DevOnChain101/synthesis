@@ -123,6 +123,15 @@ fn changes(root: &str, opts: &LoadOpts) -> Option<Changes> {
 }
 
 impl WorkspaceList {
+    /// A renamed session shows its new title without reading the store again.
+    pub fn set_title(&mut self, id: &str, title: &str) {
+        for s in self.workspaces.iter_mut().flat_map(|w| &mut w.sessions) {
+            if s.id == id {
+                s.title = title.into();
+            }
+        }
+    }
+
     /// `current`: the folder of the running session, listed even before it has a session.
     pub fn load(r: &Reader, current: Option<&Path>, opts: &LoadOpts) -> Result<Self, String> {
         let recs = r.list_used_sessions(None).map_err(|e| e.to_string())?;

@@ -51,6 +51,11 @@ CREATE TABLE sessions(
   parent_session_id TEXT REFERENCES sessions(id), parent_tool_call_id TEXT,  -- sub-agents
   legacy_transcript_path TEXT,            -- Node JSONL this session mirrors/imports
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+```
+
+`sessions.title` holds only a title a person set (`/rename`, `SessionWriter::set_title`: the row, `updated_at`, and a Node `summary` line; the value is redacted). It is `NULL` otherwise: the first prompt that names an untitled session in the lists is derived when they are read (`synthesis-view`) and never written, so it cannot overwrite a set title. No schema change (no `session.renamed` event: the lists read the store).
+
+```sql
 CREATE TABLE tasks(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
   request TEXT NOT NULL, acceptance_criteria TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL,
   reason TEXT, started_at TEXT NOT NULL, ended_at TEXT);

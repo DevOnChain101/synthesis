@@ -188,7 +188,7 @@ const PEERS_OFF: &str = "peers are off (synt.peers.enabled in user settings, or 
 pub const NOT_YET: &str = "not available in the desktop app yet";
 
 /// Built-in commands the desktop app carries out (the others answer [`NOT_YET`]).
-pub const WIRED: [&str; 24] = [
+pub const WIRED: [&str; 25] = [
     "help",
     "clear",
     "compact",
@@ -213,6 +213,7 @@ pub const WIRED: [&str; 24] = [
     "focus",
     "peers",
     "name",
+    "rename",
 ];
 
 pub fn is_wired(name: &str) -> bool {
@@ -259,6 +260,8 @@ pub struct Live {
     pub peer_rows: Vec<Value>,
     pub commands: Vec<Command>,
     pub sid: String,
+    /// The title `/rename` stored for this session id (before the lists have it).
+    pub renamed: Option<(String, String)>,
     pub cwd: String,
     pub trusted: bool,
     /// Images for the next message.
@@ -294,6 +297,7 @@ impl Live {
             peer_rows: vec![],
             commands: vec![],
             sid: String::new(),
+            renamed: None,
             cwd: String::new(),
             trusted: false,
             images: vec![],
@@ -845,7 +849,7 @@ impl Live {
             "model" if arg.is_empty() => self.open_model_picker(),
             "model" => return Submitted::Do(Action::Model(arg.into())),
             "effort" => self.set_effort(arg),
-            "mcp" | "memory" | "agents" | "permissions" | "status" | "name"
+            "mcp" | "memory" | "agents" | "permissions" | "status" | "name" | "rename"
                 if self.engine.is_none() =>
             {
                 self.note(format!("/{name}: the session is still starting"), true)
@@ -897,6 +901,7 @@ impl Live {
             }
             "peers" => return Submitted::Do(Action::Peers),
             "name" => self.name(arg),
+            "rename" => self.rename(arg),
             "focus" => {
                 self.focus_view = match arg {
                     "on" => true,
@@ -950,6 +955,48 @@ impl Live {
                 ),
                 true,
             );
+        }
+    }
+
+    /// `/rename TITLE`: stores the title of this session; the lists show it at once.
+    fn rename(&mut self, arg: &str) {
+        let Some(e) = self.engine.clone() else { return };
+        if arg.is_empty() {
+            let shown = match self.title_shown() {
+                t if t.is_empty() => "(untitled)".into(),
+                t => sanitize_for_display(&t),
+            };
+            return self.note(
+                format!("Session title: {shown}\nusage: /rename <title>"),
+                false,
+            );
+        }
+        match e.rename(arg) {
+            Ok(t) => {
+                self.view.workspaces.set_title(&self.sid, &t);
+                self.renamed = Some((self.sid.clone(), t.clone()));
+                self.note(
+                    format!("Session renamed: {}", sanitize_for_display(&t)),
+                    false,
+                );
+            }
+            Err(why) => self.note(why, true),
+        }
+    }
+
+    /// The open session's title: the one just set, else the listed one.
+    pub fn title_shown(&self) -> String {
+        match &self.renamed {
+            Some((id, t)) if *id == self.sid => t.clone(),
+            _ => self
+                .view
+                .workspaces
+                .workspaces
+                .iter()
+                .flat_map(|w| &w.sessions)
+                .find(|s| s.id == self.sid && s.title != "(untitled)")
+                .map(|s| s.title.clone())
+                .unwrap_or_default(),
         }
     }
 

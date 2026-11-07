@@ -361,3 +361,73 @@ fn files_diff_focus_peers_name_and_permission_rules() {
     assert_eq!(last_note(&live), "no rule Bash(git status:*)");
     finish(e, &mut live);
 }
+
+fn titles(r: &Rig, e: &Engine) -> Vec<String> {
+    let (w, _) = read_store(&r.cfg, Some(&e.root)).unwrap();
+    w.workspaces
+        .iter()
+        .flat_map(|w| w.sessions.iter().map(|s| s.title.clone()))
+        .collect()
+}
+
+#[test]
+fn rename_sets_the_stored_title_and_the_first_prompt_never_overwrites_it() {
+    let r = rig();
+    let a = start(&r, None, None, None);
+    let (mut live, e, mut rx) = live_on(a.engine, a.rx, &r.cfg);
+
+    // refused: empty, hidden characters, too long, secret-shaped; nothing is stored
+    for bad in [
+        "/rename \u{202e}evil",
+        "/rename a\u{200b}b",
+        &format!("/rename {}", "x".repeat(121)),
+        "/rename sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789",
+    ] {
+        live.submit(bad);
+        assert!(
+            matches!(
+                live.view.convo.items.last(),
+                Some(Item::Notice { warning: true, .. })
+            ),
+            "{bad}"
+        );
+    }
+    // no argument: shows the title and the usage, clears nothing
+    live.submit("/rename");
+    assert!(last_note(&live).contains("usage: /rename <title>"));
+
+    live.submit("/rename   Fix   the build ");
+    assert_eq!(last_note(&live), "Session renamed: Fix the build");
+    assert_eq!(live.title_shown(), "Fix the build");
+    live.submit("/rename");
+    assert!(last_note(&live).starts_with("Session title: Fix the build"));
+
+    // a prompt after the rename: the lists keep the person's title, not the first prompt
+    e.send("a different first prompt".into()).unwrap();
+    let t0 = Instant::now();
+    loop {
+        assert!(t0.elapsed() < Duration::from_secs(30), "timed out");
+        match rx.try_recv() {
+            Ok(UiMsg::TaskDone(r)) => break r.unwrap(),
+            Ok(m) => {
+                live.on_msg(m, 0);
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(10)),
+        };
+    }
+    assert_eq!(titles(&r, &e), ["Fix the build"]);
+    let rd = synthesis_session::Reader::open(&r.cfg.synthesis_home).unwrap();
+    assert_eq!(
+        rd.get_session(&e.sid).unwrap().title.as_deref(),
+        Some("Fix the build")
+    );
+    // the open Workspace/Running lists change at once
+    live.view.workspaces = read_store(&r.cfg, Some(&e.root)).unwrap().0;
+    live.submit("/rename Second name");
+    assert_eq!(
+        live.view.workspaces.workspaces[0].sessions[0].title,
+        "Second name"
+    );
+    assert_eq!(titles(&r, &e), ["Second name"]);
+    finish(e, &mut live);
+}

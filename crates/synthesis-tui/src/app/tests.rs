@@ -1822,6 +1822,12 @@ fn new_slash_commands_ask_the_host_and_status_has_no_debug_output() {
         [Cmd::Info(Info::Peers)]
     ));
     assert!(matches!(&keys(&mut a, "/name beta\r")[..], [Cmd::Info(Info::Name(n))] if n == "beta"));
+    // /rename: the title goes to the host; no argument shows the title and clears nothing
+    assert!(matches!(&keys(&mut a, "/rename  Fix it \r")[..], [Cmd::Rename(t)] if t == "Fix it"));
+    a.set_title("Fix it".into());
+    assert!(keys(&mut a, "/rename\r").is_empty());
+    let last = a.chat.agent.items.last().unwrap().clone();
+    assert!(last.text.contains("Session title: Fix it") && last.text.contains("usage: /rename"));
     assert!(matches!(
         &keys(&mut a, "/permissions\r")[..],
         [Cmd::Info(Info::Permissions(PermAction::List))]

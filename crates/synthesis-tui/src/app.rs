@@ -196,6 +196,8 @@ pub(crate) enum Cmd {
     Compact {
         instructions: Option<String>,
     },
+    /// `/rename TITLE`: the host validates and stores it, then calls [`App::set_title`].
+    Rename(String),
 }
 
 #[derive(Debug)]
@@ -318,6 +320,8 @@ pub(crate) type NotePreview = std::rc::Rc<dyn Fn(&str) -> String>;
 
 pub(crate) struct App {
     pub cfg: AppConfig,
+    /// Title of the open session (stored, else first prompt); `/rename` replaces it.
+    session_title: String,
     pub quit: Option<ExitReason>,
     pub mode: Mode,
     pub model: String,
@@ -467,6 +471,11 @@ pub fn local_commands() -> Vec<CmdDef> {
             "[name]",
         ),
         c(
+            "rename",
+            "rename this session (its stored title)",
+            "<title>",
+        ),
+        c(
             "permissions",
             "mode and rules; allow / remove a rule",
             "[allow|remove RULE]",
@@ -600,7 +609,14 @@ impl App {
             .iter()
             .any(|e| matches!(e.event, Event::TaskEnded { .. }));
         let groups = panels::group_sessions(&cfg.cwd, &cfg.session_id, &cfg.saved);
+        let session_title = cfg
+            .saved
+            .iter()
+            .find(|s| s.id == cfg.session_id)
+            .map(|s| s.title.clone())
+            .unwrap_or_default();
         Self {
+            session_title,
             mode: cfg.mode,
             model: cfg.model.clone(),
             cfg,
@@ -1597,6 +1613,11 @@ impl App {
 
     // ------------------------------------------------------------------ slash commands
 
+    /// The title `/rename` stored: the live row of the Running panel shows it at once.
+    pub fn set_title(&mut self, title: String) {
+        self.session_title = title;
+    }
+
     pub fn output(&mut self, text: String, error: bool) {
         self.out_item(text, error);
     }
@@ -1733,6 +1754,12 @@ impl App {
             })),
             "peers" => out.push(Cmd::Info(Info::Peers)),
             "name" => out.push(Cmd::Info(Info::Name(arg.trim().to_string()))),
+            "rename" if arg.trim().is_empty() => {
+                let t = clean_line(&self.session_title);
+                let t = if t.is_empty() { "(untitled)" } else { &t };
+                self.out_item(format!("Session title: {t}\nusage: /rename <title>"), false);
+            }
+            "rename" => out.push(Cmd::Rename(arg.trim().to_string())),
             "permissions" | "perms" => {
                 let (sub, rule) = arg.split_once(char::is_whitespace).unwrap_or((arg, ""));
                 let rule = rule.trim();
@@ -3506,7 +3533,7 @@ impl App {
             ctx_pct: None,
             waiting: !self.dialogs.is_empty(),
             mode: Some(mode_str(self.mode).into()),
-            title: String::new(),
+            title: clean_line(&self.session_title),
         }];
         // the stored sessions of the selected workspace, newest first
         rows.extend(g.sessions.iter().map(|s| SessionRow {

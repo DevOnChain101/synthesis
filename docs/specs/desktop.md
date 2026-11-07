@@ -110,7 +110,10 @@ Slash commands (all built-ins are wired; `live.rs` `WIRED`, the TUI's semantics)
 the centre panel to its file explorer or diff tab (`/diff FILE` opens that file's diff) and post nothing in the chat;
 an untrusted folder is said by the file explorer itself. `/peers` posts the TUI's table.
 `/name` shows the name peers address the session by; it is fixed for the run (`--name`), as in the TUI, so it
-does not rename the stored title. `/focus [on|off]` hides tools, thinking, approvals and agent rows (user,
+does not rename the stored title. `/rename <title>` does (`synthesis_app::rename`, one validator for both frontends):
+the title is trimmed, newlines collapse to a space, 1-120 characters, control/bidi/zero-width characters and
+secret-shaped text are refused; it is stored with `Store::set_title` and shows at once in the Workspace and
+Running lists; without an argument it shows the current title and the usage. `/focus [on|off]` hides tools, thinking, approvals and agent rows (user,
 assistant, result and notices stay). `/permissions allow|remove RULE` edits the rules of this session only
 (`is_well_formed_rule`, nothing is written to settings, as in the TUI; `remove` also drops deny/ask entries).
 

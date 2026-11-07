@@ -93,6 +93,10 @@ pub trait TaskHost: Send + Sync {
         out: &'a TaskOutcome,
         session: &'a AgentSession,
     ) -> BoxFut<'a, ()>;
+    /// `/rename TITLE`: validates and stores the title of this session; `Ok` is the stored title.
+    fn rename(&self, _title: &str) -> Result<String, String> {
+        Err("/rename: not available in this session".into())
+    }
 }
 
 /// Where the terminal guard waits between two runs of the app (a `/model`, session or folder switch): the screen
@@ -1195,6 +1199,17 @@ fn exec(
             let (lines, error) = runner.info(i);
             app.output(lines.join("\n"), error);
         }
+        Cmd::Rename(t) => match runner.host.as_ref().map(|h| h.rename(&t)) {
+            Some(Ok(t)) => {
+                app.output(
+                    format!("Session renamed: {}", crate::sanitize::clean_line(&t)),
+                    false,
+                );
+                app.set_title(t);
+            }
+            Some(Err(e)) => app.output(e, true),
+            None => app.output("/rename: not available in this session".into(), true),
+        },
         Cmd::Remember { user, text } => match runner.memory.as_ref().map(|m| (m.save)(user, &text))
         {
             Some(Ok(done)) => app.output(done, false),
