@@ -256,3 +256,24 @@ fn the_diff_terminal_and_browser_tabs_read_the_session() {
     drop(r.engine);
     synthesis_desktop::engine::close_shared(engine);
 }
+
+/// The saved screenshot of a session lives in `<home>/sessions/<sid>/artifacts` and the browser tab opens it through
+/// `viewable_screenshot` with that folder as the root: a PNG written there is viewable, one elsewhere is not.
+#[test]
+fn a_frame_saved_in_the_session_artifacts_is_viewable() {
+    let r = rig(serde_json::json!([{"text": "ok"}]));
+    let session = r.engine.synthesis_home.join("sessions").join(&r.engine.sid);
+    let dir = session.join("artifacts");
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = dir.join("shot-1.png");
+    std::fs::write(&png, b"\x89PNG").unwrap();
+    let elsewhere = r.target.with_file_name("other.png");
+    std::fs::write(&elsewhere, b"\x89PNG").unwrap();
+    let s = |p: &std::path::Path| p.to_str().unwrap().to_string();
+    assert!(synthesis_view::agent::viewable_screenshot(&session, &s(&png)).is_some());
+    assert!(synthesis_view::agent::viewable_screenshot(&session, &s(&elsewhere)).is_none());
+    let mut r = r;
+    let engine = r.live.engine.take().unwrap();
+    drop(r.engine);
+    synthesis_desktop::engine::close_shared(engine);
+}

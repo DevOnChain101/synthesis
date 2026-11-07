@@ -712,6 +712,10 @@ impl TuiView {
             let s = lu.prompt.read(cx);
             (s.value().to_string(), s.cursor())
         };
+        // the file explorer is walked with Up/Down while the prompt is empty
+        if self.ts.tab == super::ChatTab::Files && text.is_empty() && matches!(key, "up" | "down") {
+            return self.step_tree(key == "down", cx);
+        }
         match key {
             "escape" => {
                 if lu.live.interrupt() {

@@ -289,6 +289,32 @@ impl TuiView {
         cx.notify();
     }
 
+    /// Up/Down in the file explorer: the next visible row; a file opens its preview, a directory is only marked.
+    pub(super) fn step_tree(&mut self, down: bool, cx: &mut Context<Self>) -> bool {
+        let Some(d) = &self.tree.data else {
+            return false;
+        };
+        let paths = row_paths(d);
+        let vis = visible_rows(d, &self.ts.tree_open);
+        let at = vis
+            .iter()
+            .position(|i| self.ts.tree_sel.as_deref() == Some(paths[*i].as_str()));
+        let next = match (at, down) {
+            (None, _) => vis.first(),
+            (Some(a), true) => vis.get(a + 1),
+            (Some(a), false) => a.checked_sub(1).and_then(|a| vis.get(a)),
+        };
+        let Some(&i) = next else { return true };
+        let path = paths[i].clone();
+        if d.rows[i].dir {
+            self.ts.tree_sel = Some(path);
+            cx.notify();
+        } else {
+            self.open_preview(path, cx);
+        }
+        true
+    }
+
     /// Whether the file explorer has read the tree (the offscreen shots wait for it).
     pub fn tree_loaded(&self) -> bool {
         self.tree.data.is_some() && !self.tree.loading
@@ -337,13 +363,14 @@ impl TuiView {
             }
             ChatTab::Terminal => panes::commands(live),
             ChatTab::Browser => {
+                let home = self.live.as_ref().map(|l| l.cfg.synthesis_home.clone());
                 let pick = |i: usize| -> OnClick {
                     Box::new(cx.listener(move |this, _, _, cx| {
                         this.ts.frame = Some(i);
                         cx.notify();
                     }))
                 };
-                panes::browser(live, self.ts.frame, tz, &pick)
+                panes::browser(live, self.ts.frame, tz, home.as_deref(), &pick)
             }
             ChatTab::Files => return self.files_tab(cx),
         };
