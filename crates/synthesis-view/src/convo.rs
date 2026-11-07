@@ -86,6 +86,8 @@ pub struct Step {
 #[derive(Debug, Default, Clone)]
 pub struct Convo {
     pub items: Vec<Item>,
+    /// `items[i]` came at `times[i]` (epoch ms); shorter than `items` when rows were added locally.
+    pub times: Vec<Option<i64>>,
     /// A task is between `task.started` and `task.ended`.
     pub running: bool,
     pub tokens: u64,
@@ -198,6 +200,20 @@ impl Convo {
     }
 
     pub fn apply(&mut self, e: &Envelope) {
+        self.apply_event(e);
+        // every row the event added carries the event's time (a row streamed into later keeps its first)
+        let ts = crate::model::parse_ts(&e.ts);
+        while self.times.len() < self.items.len() {
+            self.times.push(ts);
+        }
+    }
+
+    /// Epoch ms of row `i`, when it came from an event (a local notice has none).
+    pub fn time_of(&self, i: usize) -> Option<i64> {
+        self.times.get(i).copied().flatten()
+    }
+
+    fn apply_event(&mut self, e: &Envelope) {
         // sub-agent chatter is shown on the Activity page, not in the main conversation
         let main = e.agent_id.is_none();
         match &e.event {
@@ -449,6 +465,18 @@ mod tests {
         let mut v = json!({"v":1,"seq":1,"ts":"2026-01-01T00:00:00Z","session_id":"s","task_id":null,"turn_id":null,"type":t});
         v["payload"] = payload;
         serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn every_row_keeps_the_time_of_its_event() {
+        let mut c = Convo::default();
+        c.apply(&ev("user.message", json!({"text": "hi", "images": []})));
+        let mut e = ev("notice", json!({"level": "info", "text": "n"}));
+        e.ts = "2026-01-01T00:00:07Z".into();
+        c.apply(&e);
+        assert_eq!(c.time_of(0), crate::model::parse_ts("2026-01-01T00:00:00Z"));
+        assert_eq!(c.time_of(1), crate::model::parse_ts("2026-01-01T00:00:07Z"));
+        assert_eq!(c.time_of(5), None, "a row added locally has none");
     }
 
     #[test]

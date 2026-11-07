@@ -126,13 +126,9 @@ fn prompt_tool_approval_answer_round_trip() {
     let ended = items.iter().any(|i| matches!(i, Item::TaskEnd { .. }));
     assert!(ended, "{items:?}");
     let snap = snapshot::build(&r.live, 1_000_000, 0, None);
-    assert!(
-        snap.activity
-            .iter()
-            .any(|a| a.prompt && a.text == "make hello.txt")
-    );
-    assert_eq!(snap.top.health, "all systems normal");
-    assert!(snap.tokens.input != "0");
+    assert!(snap.prompts.iter().any(|p| p.text == "make hello.txt"));
+    assert_eq!(snap.top.health, "system healthy");
+    assert!(snap.context.input != "0");
     let engine = r.live.engine.take().unwrap();
     drop(r.engine);
     synthesis_desktop::engine::close_shared(engine);
@@ -182,6 +178,80 @@ fn an_other_answer_reaches_the_model_as_typed() {
     r.live.answer(&k, t);
     r.pump("task end", |l| !l.busy);
     assert!(r.live.view.convo.items.iter().any(|i| matches!(i, Item::Tool { name, output, .. } if name == "AskUserQuestion" && output.contains("teal"))), "{:?}", r.live.view.convo.items);
+    let engine = r.live.engine.take().unwrap();
+    drop(r.engine);
+    synthesis_desktop::engine::close_shared(engine);
+}
+
+/// Answers every permission dialog (once) until the task ends.
+fn run_to_end(r: &mut Rig) {
+    let t0 = Instant::now();
+    loop {
+        r.pump("dialog or task end", |l| !l.dialogs.is_empty() || !l.busy);
+        if r.live.dialogs.is_empty() {
+            break;
+        }
+        let armed = r.live.dialogs[0].armed_until;
+        let k = r.live.pick(0, armed).unwrap();
+        r.live.answer(&k, armed);
+        assert!(t0.elapsed() < Duration::from_secs(60), "too many dialogs");
+    }
+}
+
+/// The data behind the diff, terminal and browser tabs: a Bash run, a Write and a browser_screenshot on the
+/// real engine, then a `browser.frame` event as `browser_screenshot` would emit it.
+#[test]
+fn the_diff_terminal_and_browser_tabs_read_the_session() {
+    let mut r = rig(serde_json::json!([
+        {"text": "Running it.", "tools": [{"id": "b1", "name": "Bash", "input": {"command": "echo hello"}}]},
+        {"text": "Writing.", "tools": [{"id": "w1", "name": "Write", "input": {"file_path": "{TARGET}", "content": "hi\nthere\n"}}]},
+        {"text": "A shot.", "tools": [{"id": "s1", "name": "browser_screenshot", "input": {}}]},
+        {"text": "Finished."},
+        {"text": "Nothing to verify here."}
+    ]));
+    r.send("do the three things");
+    run_to_end(&mut r);
+    let p = &r.live.view.panes;
+    // terminal: the command, finished, with its output
+    let c = p
+        .commands
+        .iter()
+        .find(|c| c.command == "echo hello")
+        .expect("the Bash run is in the history");
+    assert_eq!(c.state, synthesis_view::agent::CmdState::Ok, "{c:?}");
+    assert!(c.tail.iter().any(|l| l.contains("hello")), "{:?}", c.tail);
+    // diff: the written file with +2 -0 and its diff
+    let f = p
+        .files
+        .iter()
+        .find(|f| f.path.ends_with("hello.txt"))
+        .expect("the Write is a changed file");
+    assert_eq!((f.added, f.removed), (2, 0));
+    assert!(f.diff.is_some());
+    // browser: the call is listed, and whatever frame the run saved is kept
+    let frames_before = p.frames.len();
+    assert!(
+        p.browser.iter().any(|b| b.name == "browser_screenshot"),
+        "{:?}",
+        p.browser
+    );
+    // a saved frame arrives as an event; the tab keeps the history and the latest
+    let ev: synthesis_events::Envelope = serde_json::from_value(serde_json::json!({
+        "v": 1, "seq": 9999, "ts": "2026-11-07T10:00:05Z", "session_id": "s", "task_id": null, "turn_id": null,
+        "type": "browser.frame",
+        "payload": {"path": "artifacts/shot-1.png", "url": "http://localhost:3000", "w": 1280, "h": 800, "bytes": 52_000}
+    }))
+    .unwrap();
+    r.live.view.apply(&ev);
+    let p = &r.live.view.panes;
+    assert_eq!(p.frames.len(), frames_before + 1);
+    assert_eq!(p.screenshot.as_deref(), Some("artifacts/shot-1.png"));
+    // the counters of the tab strip and the usage numbers come from the same state
+    let snap = snapshot::build(&r.live, 1_000_000, 0, None);
+    assert_eq!(
+        snap.head.stats,
+        "1 files | 0 LOC".replace("0 LOC", &format!("{} LOC", snapshot::tok(2)))
+    );
     let engine = r.live.engine.take().unwrap();
     drop(r.engine);
     synthesis_desktop::engine::close_shared(engine);

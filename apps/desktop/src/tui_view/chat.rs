@@ -14,6 +14,7 @@ use synthesis_view::convo::{ApprovalState, Item, StepState, ToolState};
 
 use super::panels::{dim, icon, strong, text};
 use super::topo::with_alpha;
+use super::tracked;
 use super::{TuiView, layout};
 use crate::theme::hsla;
 
@@ -43,6 +44,71 @@ pub fn visible(it: &Item, show_thinking: bool, verbose: bool, focus: bool) -> bo
     }
 }
 
+/// Left edge of what sits under a speaker's text: the row's 10px padding, the 34px avatar column, the 10px gap.
+const INDENT: f32 = 54.;
+
+/// `.msg`: a 32px avatar (radius 7) and, beside it, the tracked who label over the body (`cli.html`).
+fn msg(avatar: Div, who: &str, who_colour: gpui::Hsla, time: &str, body: Div) -> Div {
+    div()
+        .flex()
+        .gap(px(10.))
+        .px(px(10.))
+        .py(px(8.))
+        .child(
+            div()
+                .size(px(32.))
+                .flex_none()
+                .rounded(px(7.))
+                .border_1()
+                .border_color(hsla(t::BORDER))
+                .overflow_hidden()
+                .child(avatar),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(10.))
+                        .child(
+                            tracked(who, 12.5, 0.06, who_colour).font_weight(FontWeight::SEMIBOLD),
+                        )
+                        .child(div().text_color(dim()).child(time.to_string())),
+                )
+                .child(body),
+        )
+}
+
+/// The title of a tool card (`cli.html`: "Reading file", "Searching", "Running", "Applying patch").
+fn tool_title(name: &str) -> String {
+    match name {
+        "Read" => "Reading file".into(),
+        "Grep" | "Glob" | "WebSearch" | "WebFetch" => "Searching".into(),
+        "Bash" | "BashOutput" | "KillShell" => "Running".into(),
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => "Applying patch".into(),
+        "Task" => "Agent".into(),
+        n if n.starts_with("browser_") => format!("Browser {}", n.trim_start_matches("browser_")),
+        n => n.to_string(),
+    }
+}
+
+/// The icon and title colour of a tool card (`.tool .th`): by what the tool does.
+fn tool_look(name: &str) -> (&'static str, gpui::Hsla) {
+    match name {
+        "Read" => ("book-open", hsla(t::INFO)),
+        "Grep" | "Glob" => ("search", hsla(t::ACCENT_LIGHT)),
+        "Bash" => ("square-terminal", hsla(t::WARN)),
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => ("replace", hsla(t::DIFF_REMOVE)),
+        _ => ("wrench", hsla(t::SUCCESS)),
+    }
+}
+
 fn line_box(s: &str, c: gpui::Hsla) -> Div {
     div()
         .min_w(px(0.))
@@ -56,6 +122,141 @@ fn line_box(s: &str, c: gpui::Hsla) -> Div {
 }
 
 impl TuiView {
+    /// The conversation, with the picked sub-agent's transcript beside it (`.chatstage.with-subagent`: the
+    /// conversation takes 2fr, the sub-agent 1fr, at least 220px).
+    pub(super) fn chat_stage(&self, cx: &mut Context<Self>) -> AnyElement {
+        let inner = self.centre_w - 2.;
+        let sub_w = (inner / 3.).max(220.).min(inner);
+        let sub = self
+            .ts
+            .sub
+            .as_deref()
+            .and_then(|id| self.sub_pane(id, sub_w));
+        if sub.is_none() {
+            return self.conversation(cx);
+        }
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .flex()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .min_h(px(0.))
+                    .flex()
+                    .flex_col()
+                    .child(self.conversation(cx)),
+            )
+            .children(sub)
+            .into_any_element()
+    }
+
+    /// `.subagent-view`: the transcript of one sub-agent, its model and its state.
+    fn sub_pane(&self, id: &str, w: f32) -> Option<Div> {
+        let lu = self.live.as_ref()?;
+        let a = lu.live.view.panes.sub(id)?;
+        let tz = lu.cfg.tz_min;
+        let live = a.live();
+        Some(
+            div()
+                .debug_selector(|| "subagent".to_string())
+                .w(px(w))
+                .flex_none()
+                .min_h(px(0.))
+                .my(px(10.))
+                .mr(px(12.))
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .border_1()
+                .border_color(hsla(t::ACCENT))
+                .rounded(px(7.))
+                .bg(super::with_alpha_black(0.72))
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .justify_between()
+                        .gap(px(8.))
+                        .px(px(10.))
+                        .py(px(8.))
+                        .border_b_1()
+                        .border_color(hsla(t::RULE))
+                        .whitespace_nowrap()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .text_color(hsla(t::ACCENT))
+                                .font_weight(FontWeight::BOLD)
+                                .child(super::panels::dot(hsla(t::ACCENT), live))
+                                .child(format!("@{}", a.name)),
+                        )
+                        .child(
+                            div().min_w(px(0.)).truncate().text_color(text()).child(
+                                div()
+                                    .flex()
+                                    .gap(px(5.))
+                                    .child(div().text_color(hsla(t::INFO)).child(
+                                        if a.model.is_empty() {
+                                            a.kind.clone()
+                                        } else {
+                                            a.model.clone()
+                                        },
+                                    ))
+                                    .child("*")
+                                    .child(
+                                        div().text_color(hsla(t::ACCENT)).child(a.status.clone()),
+                                    ),
+                            ),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("subagent-log")
+                        .flex_1()
+                        .min_h(px(0.))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.sub_scroll)
+                        .px(px(10.))
+                        .py(px(8.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(9.))
+                        .children(a.entries.iter().map(|e| {
+                            let tool = e.kind == synthesis_view::agent::EntryKind::Tool;
+                            let c = if e.failed {
+                                hsla(t::ERROR)
+                            } else if tool {
+                                text()
+                            } else {
+                                strong()
+                            };
+                            div()
+                                .pl(px(8.))
+                                .border_l_2()
+                                .border_color(hsla(t::ACCENT))
+                                .child(div().text_size(px(11.)).text_color(dim()).child(
+                                    e.ts.map_or(String::new(), |ms| super::snapshot::clock(ms, tz)),
+                                ))
+                                .child(line_box(
+                                    &if tool {
+                                        format!("\u{25B8} {}", e.text)
+                                    } else {
+                                        e.text.clone()
+                                    },
+                                    c,
+                                ))
+                        }))
+                        .when(a.entries.is_empty(), |d| {
+                            d.child(div().text_color(dim()).child("nothing yet"))
+                        }),
+                ),
+        )
+    }
+
     /// The scrolling conversation (or the welcome screen when there is nothing yet). A virtual
     /// list: only the rows near the viewport are built, so a 2000-row session costs what a short
     /// one does.
@@ -71,14 +272,14 @@ impl TuiView {
             cx.processor(|this: &mut Self, ix: usize, _window, cx| this.row(ix, cx)),
         )
         .size_full()
-        .px(px(16.))
-        .pb(px(12.));
+        .px(px(12.))
+        .pb(px(10.));
         // the padding is outside the list: a row scrolled to the top edge stops below it
         let mut wrap = div()
             .relative()
             .flex_1()
             .min_h(px(0.))
-            .pt(px(8.))
+            .pt(px(10.))
             .debug_selector(|| "chat-scroll".to_string())
             .child(rows);
         if !lu.follow {
@@ -114,13 +315,17 @@ impl TuiView {
             return div().into_any_element();
         };
         let c = &lu.live.view.convo;
+        // everything but the messages sits under the speaker's text (avatar column + gap)
+        let under = |d: AnyElement| div().ml(px(INDENT)).child(d).into_any_element();
         let el = match lu.rows.get(ix) {
             Some(super::driver::Row::Item(i)) => match c.items.get(*i) {
-                Some(it) => self.item(*i, it, cx),
+                Some(it @ (Item::User(_) | Item::Assistant { .. })) => self.item(*i, it, cx),
+                Some(it) => under(self.item(*i, it, cx)),
                 None => div().into_any_element(),
             },
-            Some(super::driver::Row::Plan) => self.plan_card().into_any_element(),
+            Some(super::driver::Row::Plan) => under(self.plan_card().into_any_element()),
             Some(super::driver::Row::Activity) => div()
+                .ml(px(INDENT))
                 .flex()
                 .items_center()
                 .gap(px(8.))
@@ -175,30 +380,43 @@ impl TuiView {
     }
 
     fn item(&self, idx: usize, it: &Item, cx: &mut Context<Self>) -> AnyElement {
-        if self.live.is_none() {
+        let Some(lu) = &self.live else {
             return div().into_any_element();
-        }
+        };
+        // `HH:MM` of the event that made the row
+        let time = lu.live.view.convo.time_of(idx).map_or(String::new(), |ms| {
+            super::snapshot::clock(ms, lu.cfg.tz_min)[..5].to_string()
+        });
         match it {
-            Item::User(s) => div()
-                .flex()
-                .gap(px(10.))
-                .p(px(10.))
-                .rounded(px(layout::PANEL_RADIUS))
-                .bg(hsla(t::ELEVATED))
-                .child(div().text_color(hsla(t::ACCENT)).child("\u{276F}"))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .text_color(strong())
-                        .child(s.clone()),
-                )
-                .into_any_element(),
-            Item::Assistant { text: s, .. } => div()
-                .min_w(px(0.))
-                .text_color(text())
-                .child(TextView::markdown(("assistant", idx), s.clone()))
-                .into_any_element(),
+            Item::User(s) => msg(
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(hsla(t::INFO))
+                    .child(icon("user", 14., hsla(t::BG))),
+                "USER",
+                hsla(t::INFO),
+                &time,
+                div().text_color(strong()).child(s.clone()),
+            )
+            .into_any_element(),
+            Item::Assistant { text: s, .. } => msg(
+                div().size_full().bg(gpui::black()).child(
+                    gpui::img(crate::brand::mark())
+                        .size_full()
+                        .object_fit(gpui::ObjectFit::Cover),
+                ),
+                "SYNTHESIS",
+                hsla(t::ACCENT),
+                &time,
+                div()
+                    .min_w(px(0.))
+                    .text_color(strong())
+                    .child(TextView::markdown(("assistant", idx), s.clone())),
+            )
+            .into_any_element(),
             Item::Thinking(s) => div()
                 .pl(px(10.))
                 .border_l_2()
@@ -307,27 +525,64 @@ impl TuiView {
         let body = if output.is_empty() { preview } else { output };
         let diff_lines = diff.as_ref().map(diff_rows).unwrap_or_default();
         let shown_diff = !diff_lines.is_empty();
+        let (ic, kind_col) = tool_look(name);
+        // the numbers on the right of the header: lines read, results, +/- of a patch, else the duration
+        let n_lines = body.lines().count();
+        let count = |k: &str| {
+            diff.as_ref()
+                .and_then(|d| d.get(k))
+                .and_then(serde_json::Value::as_u64)
+        };
+        let meta: Vec<(String, gpui::Hsla)> =
+            match (name.as_str(), count("added"), count("removed")) {
+                ("Edit" | "Write" | "MultiEdit" | "NotebookEdit", Some(a), Some(r)) => {
+                    vec![
+                        (format!("+{a}"), hsla(t::SUCCESS)),
+                        (format!("\u{2212}{r}"), hsla(t::ERROR)),
+                    ]
+                }
+                ("Read", _, _) if n_lines > 0 => vec![(format!("{n_lines} lines"), dim())],
+                ("Grep" | "Glob", _, _) if n_lines > 0 => {
+                    vec![(format!("{n_lines} results"), dim())]
+                }
+                _ if *duration_ms > 0 => vec![(crate::widgets::panes::fmt_ms(*duration_ms), dim())],
+                _ => vec![],
+            };
+        let tid0 = id.clone();
         let mut card = div()
             .flex()
             .flex_col()
             .border_1()
             .border_color(hsla(t::BORDER))
-            .rounded(px(layout::PANEL_RADIUS))
+            .rounded(px(6.))
+            .bg(super::with_alpha_black(0.6))
             .overflow_hidden()
             .child(
                 div()
+                    .id(("tool-head", idx))
                     .flex()
                     .items_center()
-                    .gap(px(8.))
+                    .gap(px(10.))
                     .px(px(10.))
-                    .py(px(4.))
-                    .bg(hsla(t::ELEVATED))
-                    .child(div().text_color(c).child(mark))
+                    .py(px(7.))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(super::with_alpha_white(0.03)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(lu) = &mut this.live {
+                            let e = &mut lu.live.expanded;
+                            if !e.remove(&tid0) {
+                                e.insert(tid0.clone());
+                            }
+                        }
+                        cx.notify();
+                    }))
+                    .child(icon(ic, 16., kind_col))
                     .child(
                         div()
-                            .text_color(strong())
+                            .flex_none()
+                            .text_color(kind_col)
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(name.clone()),
+                            .child(tool_title(name)),
                     )
                     .child(
                         div()
@@ -337,9 +592,11 @@ impl TuiView {
                             .text_color(text())
                             .child(summary.clone()),
                     )
-                    .when(*duration_ms > 0, |d| {
-                        d.child(div().text_color(dim()).child(format!("{duration_ms} ms")))
-                    }),
+                    .children(
+                        meta.into_iter()
+                            .map(|(m, c)| div().flex_none().text_color(c).child(m)),
+                    )
+                    .child(div().flex_none().text_color(c).child(mark)),
             );
         let mut lines: Vec<(String, gpui::Hsla, Option<gpui::Hsla>)> = vec![];
         if shown_diff {
@@ -516,44 +773,64 @@ impl TuiView {
             );
         }
         let busy = l.busy || l.starting;
-        col.child(
+        col.child(input_box(
             div()
-                .debug_selector(|| "prompt".to_string())
-                .mx(px(12.))
-                .min_h(px(40.))
-                .flex()
-                .items_start()
-                .gap(px(10.))
-                .px(px(12.))
-                .py(px(6.))
-                .border_1()
-                .border_color(hsla(if l.focus == crate::live::Focus::Chat {
-                    t::ACCENT
-                } else {
-                    t::RULE
-                }))
-                .rounded(px(layout::PANEL_RADIUS))
-                .child(div().mt(px(1.)).text_color(strong()).child(if busy {
-                    "\u{2026}"
-                } else {
-                    ">"
-                }))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .child(Textarea::new(&lu.prompt).appearance(false).bordered(false)),
-                )
-                .child(
-                    div()
-                        .id("send")
-                        .mt(px(2.))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, window, cx| this.submit_prompt(window, cx)))
-                        .child(icon("arrow-up", 14., dim())),
-                ),
-        )
+                .flex_1()
+                .min_w(px(0.))
+                .child(Textarea::new(&lu.prompt).appearance(false).bordered(false)),
+            l.focus == crate::live::Focus::Chat,
+            busy,
+            Some(Box::new(cx.listener(|this, _, window, cx| {
+                this.submit_prompt(window, cx)
+            }))),
+        ))
     }
+}
+
+/// `.inputbar`: 46px box (border + 44px form), margin 0 12px 12px, the `>` prompt mark, `content`, and the
+/// 28px send button. The border takes the accent while the prompt has the keys.
+pub fn input_box(
+    content: impl IntoElement,
+    focused: bool,
+    busy: bool,
+    send: Option<super::panels::OnClick>,
+) -> Div {
+    div()
+        .debug_selector(|| "prompt".to_string())
+        .flex_none()
+        .mx(px(12.))
+        .mb(px(12.))
+        .min_h(px(46.))
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .px(px(12.))
+        .border_1()
+        .border_color(hsla(if focused { t::ACCENT } else { t::BORDER }))
+        .rounded(px(layout::PANEL_RADIUS))
+        .bg(hsla(t::SURFACE))
+        .child(
+            div()
+                .text_color(strong())
+                .child(if busy { "\u{2026}" } else { ">" }),
+        )
+        .child(content)
+        .child(
+            div()
+                .id("send")
+                .debug_selector(|| "send".to_string())
+                .size(px(28.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(hsla(t::BORDER))
+                .cursor_pointer()
+                .when_some(send, |d, f| d.on_click(f))
+                .child(icon("send", 14., hsla(t::ACCENT))),
+        )
 }
 
 /// Diff rows (text, colour, background) of a `ToolCompleted.diff`. A secret file's diff carries

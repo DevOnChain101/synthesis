@@ -827,16 +827,26 @@ impl Settings {
 // ---------------------------------------------------------------- synt.tui (USER file only)
 
 /// Panels of the dash that can be switched off (Workspace, Running sessions and the chat are
-/// always on).
+/// always on). The desktop app maps the same keys onto the panels of its `cli.html` layout (the label
+/// names that panel); the keys never change, so no settings.json breaks.
 pub const TUI_PANELS: [(&str, &str); 8] = [
     ("session", "Session info (model, mode, effort, cwd, uptime)"),
-    ("mcp", "MCP servers"),
+    (
+        "mcp",
+        "MCP servers (terminal TUI; the desktop shows them in Topology and Tools & Skills)",
+    ),
     ("tools", "Tools & Skills used in this session"),
-    ("activity", "Activity feed"),
-    ("status", "Status box above the chat"),
-    ("tokens", "Tokens box above the chat"),
+    (
+        "activity",
+        "Activity feed (desktop: Recent Activity and User Prompt)",
+    ),
+    (
+        "status",
+        "Status box above the chat (desktop: Agent Status)",
+    ),
+    ("tokens", "Tokens box above the chat (desktop: Context)"),
     ("topology", "Topology graph (right column)"),
-    ("usage", "Usage history"),
+    ("usage", "Usage history (desktop: Usage & Metrics)"),
 ];
 
 /// `synt.tui` of the USER settings.json: what the interactive app shows and how it behaves.

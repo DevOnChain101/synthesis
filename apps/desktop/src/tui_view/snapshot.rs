@@ -7,10 +7,12 @@ use synthesis_view::topology::{Group, Topology, is_busy};
 use synthesis_view::workspaces::{SessionRow, fold_dir};
 
 use super::sample::{
-    Activity, Core, McpRow, McpState, NodeState, Pos, Running, Snapshot, Tokens, Top, TopoNode,
+    ActivityRow, AgentStatus, ChatHead, ContextInfo, Core, Metric, NodeState, Pos, PromptRow,
+    Running, SessionInfo, Snapshot, StatusChip, Step, StepKind, ToolRow, ToolsInfo, Top, TopoNode,
     Usage, Workspace,
 };
 use crate::live::{Focus, Live};
+use synthesis_view::convo::StepState;
 
 /// `124000` -> `124k`, `1_300_000` -> `1.3M`.
 pub fn tok(n: u64) -> String {
@@ -114,7 +116,7 @@ fn topology(l: &Live, t: &Topology) -> (Vec<TopoNode>, Core) {
     let nodes = vec![
         node(
             Pos::User,
-            "User",
+            "User & Prompt",
             vec![
                 if t.user.last_prompt.is_empty() {
                     "no prompt yet".into()
@@ -157,7 +159,7 @@ fn topology(l: &Live, t: &Topology) -> (Vec<TopoNode>, Core) {
         ),
         node(
             Pos::Sub,
-            "Sub-agents",
+            "Subagents",
             vec![format!("{} running", t.agents.busy), names(&t.agents, 2)],
             state_of(&t.agents),
         ),
@@ -213,23 +215,17 @@ fn topology(l: &Live, t: &Topology) -> (Vec<TopoNode>, Core) {
             },
         ),
     ];
-    let tag = match (t.stage, l.busy) {
-        (Some(s), _) => s.label().to_lowercase(),
-        (None, true) => "working".into(),
-        (None, false) if l.starting => "starting".into(),
-        (None, false) => "ready".into(),
-    };
     (
         nodes,
         Core {
-            title: "Synthesis".into(),
+            title: "SYNTHESIS".into(),
             sub: "CORE".into(),
-            tag,
+            tag: "Reason \u{2022} Act \u{2022} Verify".into(),
         },
     )
 }
 
-fn session_rows(l: &Live, now: i64, home: Option<&str>) -> Vec<Running> {
+fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Running> {
     let v = &l.view;
     let Some(ws) = v.workspaces.workspaces.iter().find(|w| w.key == l.ws_key) else {
         return vec![];
@@ -257,7 +253,13 @@ fn session_rows(l: &Live, now: i64, home: Option<&str>) -> Vec<Running> {
             id: r.id.clone(),
             peer: false,
             title: r.title.clone(),
-            branch: format!("{:?}", r.status).to_lowercase(),
+            folder: folder.to_string(),
+            // the open session shows its git branch; a stored one only has its status
+            branch: if r.is_live && !v.session.git_branch.is_empty() {
+                v.session.git_branch.clone()
+            } else {
+                format!("{:?}", r.status).to_lowercase()
+            },
             age: if r.is_live {
                 "now".into()
             } else {
@@ -275,12 +277,49 @@ fn session_rows(l: &Live, now: i64, home: Option<&str>) -> Vec<Running> {
         } else {
             p.task.clone()
         },
-        branch: format!("{} \u{b7} {}", tilde(&p.workspace_label, home), p.status),
+        folder: tilde(&p.workspace_label, home),
+        branch: p.status.to_string(),
         age: String::new(),
         live: true,
         selected: false,
     }));
     out
+}
+
+/// `3725` seconds -> `1h 02m 05s`, `2540` -> `42m 20s`.
+pub fn uptime(secs: i64) -> String {
+    let s = secs.max(0);
+    if s >= 3600 {
+        format!("{}h {:02}m {:02}s", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{}m {:02}s", s / 60, s % 60)
+    }
+}
+
+/// `2m ago`, `3h ago`, `now`.
+pub fn ago(now: i64, then: i64) -> String {
+    match age(now, then).as_str() {
+        "" => String::new(),
+        a @ ("now" | "yesterday") => a.to_string(),
+        a => format!("{a} ago"),
+    }
+}
+
+/// `124000` -> `124,000`.
+fn grouped(n: u64) -> String {
+    let d = n.to_string();
+    let mut out = String::new();
+    for (i, c) in d.chars().enumerate() {
+        if i > 0 && (d.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn first_line(s: &str, n: usize) -> String {
+    s.lines().next().unwrap_or("").chars().take(n).collect()
 }
 
 /// What the view paints, from the live state. `now` is epoch ms, `tz_min` minutes east of UTC.
@@ -289,25 +328,9 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
     let st = &v.status;
     let topo = v.topology(now);
     let (used, window) = st.context.numbers();
-    let ctx = st.context.label(now).map_or_else(
-        || "n/a".to_string(),
-        |(s, _)| s.trim_start_matches("ctx ").to_string(),
-    );
+    let ctx_pct = pct_of(used, window);
+    let max = if window > 0 { tok(window) } else { "?".into() };
     let tools = v.tools_skills();
-    let running: String = tools
-        .running
-        .iter()
-        .map(|r| r.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
-        .chars()
-        .take(40)
-        .collect();
-    let running = if running.is_empty() {
-        "none".into()
-    } else {
-        running
-    };
     let mode = mode_name(Some(&st.mode));
     let cur_ws = v
         .workspaces
@@ -325,14 +348,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
     let prompt = if topo.user.last_prompt.is_empty() {
         "(new session)".to_string()
     } else {
-        topo.user
-            .last_prompt
-            .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(40)
-            .collect()
+        first_line(&topo.user.last_prompt, 40)
     };
     let needs = l.dialogs.len();
     let live_n = v.running.live.len().max(usize::from(l.engine.is_some()));
@@ -347,34 +363,107 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
             if topo.errors == 1 { "" } else { "s" }
         )
     } else {
-        "all systems normal".to_string()
+        "system healthy".to_string()
     };
     let (nodes, core) = topology(l, &topo);
-    let days: Vec<f32> = v.usage.days.iter().map(|d| d.tokens as f32).collect();
+    let model = if st.model.is_empty() {
+        "no model".to_string()
+    } else {
+        st.model.clone()
+    };
+    let effort = st.effort.clone().unwrap_or_else(|| "auto".into());
+    let (n_files, (added, removed)) = (v.panes.files.len(), v.panes.totals());
+    let branch = v.session.git_branch.clone();
+    let log = v.activity().log;
+
+    // Tools & Skills: what the session used, then the fixed capabilities
+    let mcp_up = l.mcp.iter().filter(|m| m.state == "connected").count();
+    let mut trows: Vec<ToolRow> = vec![
+        ToolRow {
+            name: "mcp".into(),
+            value: format!("{mcp_up} server{}", if mcp_up == 1 { "" } else { "s" }),
+            plain: true,
+        },
+        ToolRow {
+            name: "memory".into(),
+            value: if l.engine.as_ref().is_some_and(|e| e.memory_on) {
+                "on"
+            } else {
+                "off"
+            }
+            .into(),
+            plain: false,
+        },
+        ToolRow {
+            name: "skills".into(),
+            value: format!("{} used", tools.skills.len()),
+            plain: true,
+        },
+    ];
+    trows.extend(tools.tools.iter().map(|(n, c)| ToolRow {
+        name: n.to_lowercase(),
+        value: format!("{c} calls"),
+        plain: false,
+    }));
+    let total = trows.len();
+    trows.truncate(7);
+
+    let steps: Vec<Step> = v
+        .convo
+        .plan
+        .iter()
+        .map(|p| Step {
+            text: p.text.clone(),
+            kind: match p.state {
+                StepState::Done => StepKind::Done,
+                StepState::Active => StepKind::Now,
+                StepState::Todo => StepKind::Todo,
+            },
+            note: String::new(),
+        })
+        .collect();
+    let next = steps
+        .iter()
+        .find(|s| s.kind == StepKind::Todo)
+        .map_or_else(|| "nothing queued".to_string(), |s| s.text.clone());
+
+    // Usage & Metrics: the last 7 (or 30) days; a bar is that period's share of the last 28 (or 90) days
+    let days = if l.usage_days == 30 { 30 } else { 7 };
+    let (w7, w30) = (
+        v.usage.metrics(days),
+        v.usage.metrics(days * if days == 7 { 4 } else { 3 }),
+    );
+    let metric = |label: &str, a: f64, b: f64, tokens: bool| Metric {
+        label: label.into(),
+        value: if tokens {
+            tok(a as u64)
+        } else {
+            (a as u64).to_string()
+        },
+        pct: if b > 0. { (a / b * 100.) as f32 } else { 0. },
+    };
     let n_sessions: usize = v
         .workspaces
         .workspaces
         .iter()
         .map(|w| w.sessions.len())
         .sum();
-    let sandbox = l
-        .engine
-        .as_ref()
-        .map_or_else(|| "unknown".to_string(), |e| e.sandbox.mode.clone());
+    let _ = n_sessions;
 
     Snapshot {
         top: Top {
             live: live_n as u32,
-            workspace: cur_ws,
+            workspace: cur_ws.clone(),
             session: prompt,
-            model: if st.model.is_empty() {
-                "no model".into()
+            model: model.clone(),
+            effort: effort.clone(),
+            ctx: if window > 0 {
+                tok(window)
             } else {
-                st.model.clone()
+                "n/a".into()
             },
-            ctx: ctx.clone(),
             health,
-            clock: clock(now, tz_min),
+            clock: clock_text(now, tz_min),
         },
         workspaces: v
             .workspaces
@@ -388,142 +477,108 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
                 selected: w.key == l.ws_key,
             })
             .collect(),
-        running: session_rows(l, now, home),
-        session: vec![
-            ("id".into(), l.sid.chars().take(8).collect()),
-            ("cwd".into(), tilde(&l.cwd, home)),
-            ("mode".into(), mode.clone()),
-            ("sandbox".into(), sandbox),
-            (
-                "uptime".into(),
-                st.uptime_ms(now)
-                    .map_or_else(|| "-".into(), |m| hms(m / 1000)),
-            ),
-        ],
-        mcp: l
-            .mcp
-            .iter()
-            .map(|m| McpRow {
-                name: m.name.clone(),
-                state: match m.state.as_str() {
-                    "connected" => McpState::Connected,
-                    "connecting" => McpState::Connecting,
-                    _ => McpState::Failed,
-                },
-                tools: m.tools as u32,
-            })
-            .collect(),
-        tools: vec![
-            (
-                "tools".into(),
-                format!("{} calls", tools.tools.iter().map(|t| t.1).sum::<u32>()),
-            ),
-            (
-                "skills".into(),
-                format!("{} used", tools.skills.iter().map(|t| t.1).sum::<u32>()),
-            ),
-            ("running".into(), running),
-            ("errors".into(), tools.errors.to_string()),
-        ],
-        // newest first, like the sample: the log keeps tools and hooks, the panel shows them all
-        activity: v
-            .activity()
-            .log
+        running: session_rows(l, now, home, &cur_ws),
+        session: SessionInfo {
+            status: if l.starting {
+                "starting".into()
+            } else if l.busy {
+                "running".into()
+            } else {
+                "idle".into()
+            },
+            rows: vec![
+                ("mode".into(), mode.clone()),
+                ("model".into(), model.clone()),
+                (
+                    "context".into(),
+                    if window > 0 {
+                        format!("{} tokens", grouped(window))
+                    } else {
+                        "n/a".into()
+                    },
+                ),
+                ("tools".into(), format!("{} used", tools.tools.len())),
+                ("cwd".into(), tilde(&l.cwd, home)),
+                (
+                    "uptime".into(),
+                    st.uptime_ms(now)
+                        .map_or_else(|| "-".into(), |m| uptime(m / 1000)),
+                ),
+            ],
+        },
+        tools: ToolsInfo {
+            count: total.to_string(),
+            more: total.saturating_sub(7) as u32,
+            rows: trows,
+        },
+        // newest first; prompts have their own panel
+        activity: log
             .iter()
             .rev()
+            .filter(|r| r.kind != ActivityKind::Prompt)
             .take(200)
-            .map(|r| Activity {
-                time: r.ts.map_or_else(String::new, |t| {
-                    let s = clock(t, tz_min);
-                    s[..5].to_string()
-                }),
-                text: r.text.lines().next().unwrap_or("").to_string(),
-                prompt: r.kind == ActivityKind::Prompt,
+            .map(|r| ActivityRow {
+                text: first_line(&r.text, 200),
+                ago: r.ts.map_or_else(String::new, |t| ago(now, t)),
             })
             .collect(),
-        status: vec![
-            (
-                "phase".into(),
-                topo.stage.map_or_else(
-                    || {
-                        if l.busy {
-                            "working".into()
-                        } else {
-                            "idle".into()
-                        }
-                    },
-                    |s| s.label().to_lowercase(),
-                ),
-            ),
-            (
-                "task".into(),
-                if topo.user.last_prompt.is_empty() {
-                    "none".into()
-                } else {
-                    topo.user
-                        .last_prompt
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                        .chars()
-                        .take(40)
-                        .collect()
-                },
-            ),
-            (
-                "agents".into(),
-                if topo.agents.busy > 0 {
-                    format!("{} running", topo.agents.busy)
-                } else {
-                    "none".into()
-                },
-            ),
-            ("turns".into(), st.turns.to_string()),
-            (
-                "verify".into(),
-                topo.memory.verify.as_ref().map_or_else(
-                    || "none".into(),
-                    |x| {
-                        if x.ok {
-                            "passed".into()
-                        } else {
-                            "failed".into()
-                        }
-                    },
-                ),
-            ),
-        ],
-        tokens: Tokens {
-            input: tok(st.input_tokens),
-            output: tok(st.output_tokens),
-            cache: match st.cache_hit() {
-                Some(h) => format!(
-                    "{} ({:.0}% hit)",
-                    tok(st.cache_read + st.cache_create),
-                    h * 100.
-                ),
-                None => "-".into(),
-            },
-            cost: st
-                .cost_usd
-                .map_or_else(|| "n/a".into(), |c| format!("${c:.2}")),
-            ctx_pct: pct_of(used, window),
-            ctx_label: if window > 0 {
-                format!("{}/{}", tok(used), tok(window))
+        prompts: log
+            .iter()
+            .filter(|r| r.kind == ActivityKind::Prompt)
+            .take(200)
+            .map(|r| PromptRow {
+                time: r.ts.map_or_else(String::new, |t| clock(t, tz_min)),
+                text: first_line(&r.text, 200),
+            })
+            .collect(),
+        agent: AgentStatus {
+            working: if topo.user.last_prompt.is_empty() {
+                "idle".into()
             } else {
-                format!("{}/?", tok(used))
+                first_line(&topo.user.last_prompt, 120)
             },
+            next,
+            steps,
+        },
+        context: ContextInfo {
+            used: tok(used),
+            max,
+            pct: ctx_pct,
+            model: model.clone(),
+            turns: st.turns.to_string(),
+            input: tok(st.input_tokens),
+            files: n_files.to_string(),
+            output: tok(st.output_tokens),
+            cache: tok(st.cache_read + st.cache_create),
+            hit: st
+                .cache_hit()
+                .map_or_else(|| "-".into(), |h| format!("{:.0}%", h * 100.)),
+        },
+        head: ChatHead {
+            status: if l.starting {
+                "starting".into()
+            } else if l.busy {
+                "working".into()
+            } else {
+                "ready".into()
+            },
+            prompt: first_line(&topo.user.last_prompt, 200),
+            ctx_pct,
+            path: tilde(&l.cwd, home),
+            stats: format!("{n_files} files | {} LOC", tok(added + removed)),
         },
         topology: nodes,
         core,
         usage: Usage {
-            range: format!("{}w", days.len().div_ceil(7)),
+            range: format!("{days} days"),
             rows: vec![
-                ("today".into(), tok(v.usage.tokens_last(1) as u64)),
-                ("7 days".into(), tok(v.usage.tokens_last(7) as u64)),
-                ("sessions".into(), n_sessions.to_string()),
+                metric("Tokens", w7.tokens, w30.tokens, true),
+                metric("Tool calls", w7.tool_calls, w30.tool_calls, false),
+                metric("Files modified", w7.files, w30.files, false),
+                metric("Commands run", w7.commands, w30.commands, false),
+                metric("Browser requests", w7.browser, w30.browser, false),
+                metric("MCP calls", w7.mcp, w30.mcp, false),
             ],
-            days,
         },
         tips: vec![
             "Ask for a change in plain words; Shift+Tab cycles the permission mode.".into(),
@@ -532,9 +587,59 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
             "Click a session in Running to continue it where it stopped.".into(),
         ],
         mode,
-        effort: st.effort.clone().unwrap_or_else(|| "auto".into()),
+        effort,
+        agents: std::iter::once("main".to_string())
+            .chain(v.convo.agents.iter().map(|a| a.0.clone()))
+            .collect(),
         hints: hints(l),
+        status: {
+            let mut c = vec![StatusChip {
+                text: cur_ws,
+                warn: false,
+                dot: false,
+            }];
+            if !branch.is_empty() {
+                c.push(StatusChip {
+                    text: format!("\u{2387} {branch}"),
+                    warn: false,
+                    dot: false,
+                });
+            }
+            c.push(StatusChip {
+                text: format!("{n_files} files changed"),
+                warn: n_files > 0,
+                dot: true,
+            });
+            c
+        },
     }
+}
+
+/// `Sat Nov 07  07:54:38`, the top bar's clock.
+fn clock_text(ms: i64, tz_min: i32) -> String {
+    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let local = ms / 1000 + i64::from(tz_min) * 60;
+    let days = local.div_euclid(86_400);
+    // civil date from days since 1970-01-01 (Howard Hinnant's algorithm)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let _ = era;
+    format!(
+        "{} {} {:02}\u{a0}\u{a0}{}",
+        DAYS[days.rem_euclid(7) as usize],
+        MONS[(m - 1) as usize],
+        d,
+        clock(ms, tz_min)
+    )
 }
 
 /// The key hint bar for what has the keys now.
@@ -619,32 +724,49 @@ mod tests {
         ));
         let s = build(&l, parse_ts("2026-11-07T10:00:03Z").unwrap(), 0, None);
         assert_eq!(s.top.session, "run the tests");
-        assert_eq!(s.top.ctx, "62% 124k/200k");
-        assert!((s.tokens.ctx_pct - 62.0).abs() < 0.01);
-        assert_eq!(s.tokens.ctx_label, "124k/200k");
-        assert!(
-            s.activity
-                .iter()
-                .any(|a| a.prompt && a.text == "run the tests")
+        assert_eq!(s.top.ctx, "200k");
+        assert!((s.context.pct - 62.0).abs() < 0.01);
+        assert_eq!(
+            (s.context.used.as_str(), s.context.max.as_str()),
+            ("124k", "200k")
+        );
+        assert_eq!(
+            s.session.rows[2],
+            ("context".to_string(), "200,000 tokens".to_string())
         );
         assert!(
-            s.activity
+            s.prompts
                 .iter()
-                .any(|a| !a.prompt && a.text.contains("cargo test"))
+                .any(|p| p.text == "run the tests" && p.time == "10:00:00")
         );
+        assert!(s.activity.iter().any(|a| a.text.contains("cargo test")));
+        assert!(s.activity.iter().all(|a| a.text != "run the tests"));
         assert_eq!(s.topology.len(), 8);
         let tools = s.topology.iter().find(|n| n.pos == Pos::Tools).unwrap();
         assert_eq!(tools.state, NodeState::Active, "{tools:?}");
         assert!(tools.lines[0].contains("Bash"));
-        assert_eq!(s.usage.days.len(), 0, "no store loaded yet");
-        assert_eq!(s.session[0].1, "s1abcdef");
+        assert_eq!(s.usage.rows.len(), 6);
+        assert_eq!(s.usage.rows[1].label, "Tool calls");
+        assert_eq!(s.agents, ["main"]);
+        assert_eq!(s.head.stats, "0 files | 0 LOC");
+    }
+
+    #[test]
+    fn clock_and_uptime_text() {
+        // 2026-11-07 is a Saturday
+        let ms = parse_ts("2026-11-07T07:54:38Z").unwrap();
+        assert_eq!(clock_text(ms, 0), "Sat Nov 07\u{a0}\u{a0}07:54:38");
+        assert_eq!(uptime(2540), "42m 20s");
+        assert_eq!(uptime(3725), "1h 02m 05s");
+        assert_eq!(grouped(128_000), "128,000");
+        assert_eq!(ago(10 * 60_000 + 60_000, 60_000), "10m ago");
     }
 
     #[test]
     fn health_chip_words() {
         let mut l = Live::new();
         l.starting = false;
-        assert_eq!(build(&l, 0, 0, None).top.health, "all systems normal");
+        assert_eq!(build(&l, 0, 0, None).top.health, "system healthy");
         l.starting = true;
         assert_eq!(build(&l, 0, 0, None).top.health, "starting");
     }

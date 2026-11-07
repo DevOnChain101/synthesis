@@ -1,10 +1,13 @@
-//! The TUI view: the classic TUI's dashboard drawn natively (docs/specs/desktop.md), 1:1 with
-//! `cli.html` `#view1` in the platinum palette. Left column Workspace / Running / Session / MCP /
-//! Tools & Skills / Activity; centre Status + Tokens boxes over the chat (welcome, prompt, mode line);
-//! right Topology and Usage; top bar and key hint bar. It reads a `Snapshot` (see `sample`); no
-//! terminal, no PTY. Panels hide with the TUI's `panels.*` keys (`layout::Hidden`).
+//! The TUI view: the classic TUI's dashboard drawn natively (docs/specs/desktop.md), rebuilt 1:1 from
+//! `cli.html` in the platinum palette. Top bar; left column Workspace / Running / Session / Tools & Skills /
+//! Recent Activity / User Prompt; centre panel (header, tabs chat | diff | terminal | browser | file
+//! explorer, conversation, prompt, transcript switch, mode bar); right column Synthesis Topology, Agent
+//! Status + Context, Usage & Metrics; key hint footer. It reads a `Snapshot` (see `sample`); no terminal, no
+//! PTY. Panels hide with the TUI's `panels.*` keys (`layout::Hidden`).
 
 pub mod chat;
+#[cfg(test)]
+mod design_tests;
 pub mod dialog;
 pub mod driver;
 pub mod layout;
@@ -13,48 +16,116 @@ pub mod sample;
 #[cfg(feature = "shot")]
 pub mod shot;
 pub mod snapshot;
+pub mod tabs;
 pub mod topo;
 
 use gpui::{
     Context, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, Styled as _, Window, div, px,
+    Render, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use synthesis_tui_render::theme as t;
 
-use self::layout::{
-    FOOTER_H, GAP, HEADER_H, LEFT_GAP, MIN_H, MIN_W, PAD, cols, list_body_h, tiers,
-};
-use self::panels::{Head, dim, icon, panel, strong, text};
+use self::layout::{CARD_GAP, FOOTER_H, GAP, HEADER_H, LEFT_GAP, MIN_H, MIN_W, PAD, cols, tiers};
+use self::panels::{dim, icon, strong, text};
 use self::sample::{Snapshot, sample};
-use crate::{brand, theme::hsla};
+use crate::theme::hsla;
+use crate::widgets::chrome::{self, Chip, Head, Pad, panel, panel_scroll};
 use gpui::prelude::FluentBuilder as _;
 
-/// The TUI view's font (bundled, SIL OFL).
-pub const MONO: &str = "JetBrains Mono";
+pub use crate::widgets::chrome::tracked;
+
+/// Black at `a` alpha (the tool card's `rgba(9,10,13,.6)`).
+pub(crate) fn with_alpha_black(a: f32) -> Hsla {
+    chrome::black_a(a)
+}
+
+pub(crate) fn with_alpha_white(a: f32) -> Hsla {
+    chrome::with_alpha(gpui::white(), a)
+}
+
+/// The TUI view's font: `cli.html` `--mono` (bundled Fira Code, SIL OFL), at its body weight 500.
+pub const MONO: &str = crate::brand::MONO_FONT;
 
 /// Icons the view draws (checked by a test).
-pub const ICONS: [&str; 10] = [
+pub const ICONS: [&str; 27] = [
+    "book-open",
+    "search",
+    "replace",
     "folder",
-    "bot",
+    "plus",
+    "git-branch",
+    "chevron-down",
+    "chevrons-right",
+    "activity",
     "square-terminal",
+    "wrench",
+    "clock",
     "network",
-    "settings-2",
-    "gallery-vertical-end",
+    "sparkles",
     "cpu",
-    "memory-stick",
-    "layout-dashboard",
-    "chart-pie",
+    "chart-bar",
+    "message-square",
+    "globe",
+    "send",
+    "user",
+    "webhook",
+    "shield",
+    "users",
+    "layers",
+    "link",
+    "database",
+    "arrow-up",
 ];
 
-/// Text with letter-spacing (`em` of the size): gpui has none, so one box per character.
-pub fn tracked(s: &str, size: f32, em: f32, c: Hsla) -> Div {
-    div()
-        .flex()
-        .flex_none()
-        .gap(px(size * em))
-        .text_size(px(size))
-        .text_color(c)
-        .children(s.chars().map(|ch| div().child(ch.to_string())))
+/// The tabs of the centre panel (`STATE.bottomTabs`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ChatTab {
+    #[default]
+    Chat,
+    Diff,
+    Terminal,
+    Browser,
+    Files,
+}
+
+impl ChatTab {
+    pub const ALL: [ChatTab; 5] = [
+        ChatTab::Chat,
+        ChatTab::Diff,
+        ChatTab::Terminal,
+        ChatTab::Browser,
+        ChatTab::Files,
+    ];
+
+    fn tab(self) -> chrome::Tab {
+        match self {
+            ChatTab::Chat => chrome::Tab {
+                label: "chat",
+                icon: "message-square",
+                badge: None,
+            },
+            ChatTab::Diff => chrome::Tab {
+                label: "diff",
+                icon: "git-branch",
+                badge: None,
+            },
+            ChatTab::Terminal => chrome::Tab {
+                label: "terminal",
+                icon: "square-terminal",
+                badge: None,
+            },
+            ChatTab::Browser => chrome::Tab {
+                label: "browser",
+                icon: "globe",
+                badge: None,
+            },
+            ChatTab::Files => chrome::Tab {
+                label: "file explorer",
+                icon: "folder",
+                badge: None,
+            },
+        }
+    }
 }
 
 pub struct TuiView {
@@ -64,8 +135,40 @@ pub struct TuiView {
     hidden: layout::Hidden,
     /// Width taken by chrome beside the view (the shell's rail): breakpoints use the view's own width.
     inset: f32,
+    /// Height taken above the view by the window's title bar; the height tiers use the view's own height.
+    top: f32,
+    /// The tabs of the session shown (the pane under the centre header and what it has open), and those of the
+    /// sessions left, kept by session id.
+    pub(crate) ts: tabs::TabState,
+    tab_sid: String,
+    tabs_saved: std::collections::HashMap<String, tabs::TabState>,
+    /// The project tree of the file explorer tab.
+    tree: tabs::Tree,
+    pane_scroll: gpui::ScrollHandle,
+    sub_scroll: gpui::ScrollHandle,
+    /// Width of the centre column, from the last render (the tab strip wraps when it is narrower).
+    centre_w: f32,
     /// False while another view of the shell is shown: the window-wide key hook then leaves the keys alone.
     pub active: bool,
+}
+
+/// The top bar's chips: live count, workspace, session, model, effort, context on the left; health and the
+/// clock on the right (shared with the Agent view).
+pub fn top_chips(top: &sample::Top) -> (Vec<Chip>, Vec<Chip>) {
+    (
+        vec![
+            Chip::new("", format!("{} live", top.live), hsla(t::SUCCESS)).dotted(),
+            Chip::new("workspace:", top.workspace.clone(), hsla(t::INFO)),
+            Chip::new("session:", top.session.clone(), hsla(t::ACCENT)),
+            Chip::new("model:", top.model.clone(), hsla(t::INFO)),
+            Chip::new("effort:", top.effort.clone(), hsla(t::ACCENT_LIGHT)),
+            Chip::new("context:", top.ctx.clone(), hsla(t::SUCCESS)),
+        ],
+        vec![
+            Chip::new("", top.health.clone(), hsla(t::SUCCESS)).dotted(),
+            Chip::new("", top.clock.clone(), text()),
+        ],
+    )
 }
 
 impl TuiView {
@@ -76,7 +179,20 @@ impl TuiView {
             live: None,
             hidden,
             inset,
+            top: 0.,
+            ts: Default::default(),
+            tab_sid: String::new(),
+            tabs_saved: Default::default(),
+            tree: Default::default(),
+            pane_scroll: gpui::ScrollHandle::new(),
+            sub_scroll: gpui::ScrollHandle::new(),
+            centre_w: 600.,
         }
+    }
+
+    /// The title bar above the view (see `ui::TITLEBAR_H`).
+    pub fn set_top_inset(&mut self, h: f32) {
+        self.top = h;
     }
 
     /// Before drawing: rebuild the snapshot from the live state when it changed, and keep the chat
@@ -84,6 +200,17 @@ impl TuiView {
     fn refresh(&mut self, window: &mut Window) {
         let Some(lu) = &mut self.live else { return };
         let _ = window;
+        // the tabs belong to the session: leaving one keeps them, coming back finds them
+        if lu.live.sid != self.tab_sid && !lu.live.sid.is_empty() {
+            let prev = std::mem::replace(&mut self.tab_sid, lu.live.sid.clone());
+            // the first session keeps what was set before it existed (a shot's tab); a later one swaps
+            if !prev.is_empty() {
+                let old = std::mem::take(&mut self.ts);
+                self.tabs_saved.insert(prev, old);
+                self.ts = self.tabs_saved.remove(&self.tab_sid).unwrap_or_default();
+                self.tree = Default::default();
+            }
+        }
         if lu.dirty {
             lu.dirty = false;
             self.snap = snapshot::build(
@@ -98,171 +225,82 @@ impl TuiView {
     }
 
     fn top_bar(&self) -> Div {
-        let top = &self.snap.top;
-        let chip = |label: &str, value: String, c: Hsla| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .px(px(14.))
-                .h(px(22.))
-                .border_l_1()
-                .border_color(hsla(t::RULE))
-                .whitespace_nowrap()
-                .child(div().child(label.to_string()))
-                .child(div().text_color(c).child(value))
-        };
-        div()
-            .debug_selector(|| "header".to_string())
-            .h(px(HEADER_H))
-            .flex_none()
-            .flex()
-            .items_center()
-            .px(px(16.))
-            .border_b_1()
-            .border_color(hsla(t::RULE))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(gpui::img(brand::mark()).size(px(32.)).flex_none())
-                    .child(tracked("SYNTHESIS", 14., 0.32, strong())),
-            )
-            .child(
-                div()
-                    .flex()
-                    .ml(px(28.))
-                    .min_w(px(0.))
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .px(px(14.))
-                            .h(px(22.))
-                            .text_color(hsla(t::SUCCESS))
-                            .child(panels::dot(hsla(t::SUCCESS), true))
-                            .child(
-                                div()
-                                    .text_color(strong())
-                                    .child(format!("{} live", top.live)),
-                            ),
-                    )
-                    .child(chip("workspace:", top.workspace.clone(), hsla(t::INFO)))
-                    .child(chip("session:", top.session.clone(), hsla(t::ACCENT)))
-                    .child(chip("model:", top.model.clone(), hsla(t::INFO)))
-                    .child(chip("ctx:", top.ctx.clone(), hsla(t::SUCCESS))),
-            )
-            .child(div().flex_1())
-            .child(chip("", top.health.clone(), hsla(t::SUCCESS)))
-            .child(chip("", top.clock.clone(), text()))
+        let (left, right) = top_chips(&self.snap.top);
+        chrome::top_bar(&left, &right)
     }
 
     fn footer(&self) -> Div {
-        let hint = |(k, d): &(String, String)| {
-            div()
-                .flex()
-                .gap(px(6.))
-                .px(px(10.))
-                .border_l_1()
-                .border_color(hsla(t::RULE))
-                .child(div().text_color(strong()).child(k.clone()))
-                .child(div().child(d.clone()))
-        };
-        div()
-            .debug_selector(|| "footer".to_string())
-            .h(px(FOOTER_H))
-            .flex_none()
-            .flex()
-            .items_center()
-            .px(px(12.))
-            .border_t_1()
-            .border_color(hsla(t::RULE))
-            .text_color(text())
-            .whitespace_nowrap()
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .overflow_hidden()
-                    .children(self.snap.hints.iter().map(hint)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .child(
-                        div()
-                            .px(px(10.))
-                            .child(format!("ctx {}", self.snap.top.ctx)),
-                    )
-                    .child(
-                        div()
-                            .px(px(10.))
-                            .border_l_1()
-                            .border_color(hsla(t::RULE))
-                            .child(format!("{} mode", self.snap.mode)),
-                    ),
-            )
+        let chips: Vec<Chip> = self
+            .snap
+            .status
+            .iter()
+            .map(|c| {
+                if c.dot {
+                    Chip::new("", c.text.clone(), strong()).dot_colour(hsla(t::WARN))
+                } else {
+                    Chip::new("", c.text.clone(), text())
+                }
+            })
+            .collect();
+        chrome::footer(&self.snap.hints, &chips)
     }
 
     fn left(&self, tier: layout::Tiers, w: f32, cx: &mut Context<Self>) -> Div {
         let (s, h) = (&self.snap, &self.hidden);
         let split = h.left_is_split();
-        let head = |id, title, icon| Head {
-            id,
-            title,
-            icon,
-            left: true,
-            compact: false,
-        };
         let min = px(tier.left_min);
-        let meta = |c: Hsla, s: String| div().text_color(c).child(s).into_any_element();
-        // Activity grows; with it hidden the last panel below Running takes the rest
-        let grow_last = if h.activity {
-            [
-                (!h.tools, "tools"),
-                (!h.mcp, "mcp"),
-                (!h.session, "session"),
-            ]
-            .iter()
-            .find(|(shown, _)| *shown)
-            .map(|(_, k)| *k)
-        } else {
-            None
-        };
+        let live = self.live.as_ref();
+        let focus = live.map(|l| l.live.focus);
         let ws_click = |i: usize| -> panels::OnClick {
             Box::new(cx.listener(move |this, _, _, cx| this.click_workspace(i, cx)))
         };
         let run_click = |i: usize| -> panels::OnClick {
             Box::new(cx.listener(move |this, _, _, cx| this.click_running(i, cx)))
         };
-        let live = self.live.as_ref();
-        let focus = live.map(|l| l.live.focus);
-        let list = |id, title, ic, m, body: Div, focused: bool| {
-            let p = panels::panel_scroll(
-                head(id, title, ic),
-                Some(m),
-                !split,
-                (!split).then(list_body_h),
-                body,
-                live.map(|l| {
-                    if id == "p-workspace" {
-                        &l.ws_scroll
-                    } else {
-                        &l.run_scroll
-                    }
-                }),
-            )
-            .when(focused, |d| d.border_color(hsla(t::ACCENT)));
-            if split {
-                p.flex_1().min_h(px(0.))
-            } else {
-                p.flex_initial().min_h(min)
-            }
-        };
+        let new_ws: Option<panels::OnClick> = live.map(|_| -> panels::OnClick {
+            Box::new(cx.listener(|this, _, _, cx| this.new_workspace(cx)))
+        });
+        let new_run: Option<panels::OnClick> = live.map(|_| -> panels::OnClick {
+            Box::new(cx.listener(|this, _, window, cx| this.new_session(window, cx)))
+        });
+        let meta = |c: Hsla, v: String| div().text_color(c).child(v).into_any_element();
+        let pick = |p: Div, focused: bool| p.when(focused, |d| d.border_color(hsla(t::ACCENT)));
+        let ws = pick(
+            panel_scroll(
+                Head::new("p-workspace", "Workspace", "folder", Pad::LEFT),
+                Some(meta(text(), s.workspaces.len().to_string())),
+                panels::workspace_body(
+                    &s.workspaces,
+                    live.map(|_| &ws_click as &dyn Fn(usize) -> panels::OnClick),
+                    new_ws,
+                ),
+                live.map(|l| &l.ws_scroll),
+            ),
+            focus == Some(crate::live::Focus::Workspace),
+        );
+        let running_n = s.running.iter().filter(|r| r.live).count();
+        let run = pick(
+            panel_scroll(
+                Head::new("p-running", "Running", "activity", Pad::LEFT),
+                Some(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_color(hsla(t::SUCCESS))
+                        .child(panels::dot(hsla(t::SUCCESS), true))
+                        .child(running_n.to_string())
+                        .into_any_element(),
+                ),
+                panels::running_body(
+                    &s.running,
+                    live.map(|_| &run_click as &dyn Fn(usize) -> panels::OnClick),
+                    new_run,
+                ),
+                live.map(|l| &l.run_scroll),
+            ),
+            focus == Some(crate::live::Focus::Running),
+        );
         let mut col = div()
             .debug_selector(|| "col-left".to_string())
             .w(px(cols(w).left))
@@ -271,201 +309,251 @@ impl TuiView {
             .flex_col()
             .gap(px(LEFT_GAP))
             .min_h(px(0.))
-            .overflow_hidden()
-            .child(list(
-                "p-workspace",
-                "Workspace",
-                "folder",
-                meta(text(), s.workspaces.len().to_string()),
-                panels::workspace_rows(
-                    &s.workspaces,
-                    live.map(|_| &ws_click as &dyn Fn(usize) -> panels::OnClick),
-                ),
-                focus == Some(crate::live::Focus::Workspace),
-            ))
-            .child(list(
-                "p-running",
-                "Running",
-                "bot",
-                meta(
-                    hsla(t::SUCCESS),
-                    s.running.iter().filter(|r| r.live).count().to_string(),
-                ),
-                panels::running_rows(
-                    &s.running,
-                    live.map(|_| &run_click as &dyn Fn(usize) -> panels::OnClick),
-                ),
-                focus == Some(crate::live::Focus::Running),
-            ));
-        let grown = |key: &str, p: Div| {
-            if grow_last == Some(key) {
-                p.flex_1().min_h(px(0.))
-            } else {
-                p
-            }
-        };
+            .overflow_hidden();
+        // `#view1 .col.l>.panel{flex:0 1 auto;min-height:84px}`; Workspace and Running split the column
+        // in halves when everything below them is hidden
+        col = col.child(if split {
+            ws.flex_1().min_h(px(0.))
+        } else {
+            ws.flex_initial().min_h(min)
+        });
+        col = col.child(if split {
+            run.flex_1().min_h(px(0.))
+        } else {
+            run.flex_initial().min_h(min)
+        });
         if !h.session {
-            col = col.child(grown(
-                "session",
-                // Session always shows all its rows (`#view1 .col.l>.panel:has(#h-sess){flex:0 0 auto}`)
+            // Session always shows all its rows (`:has(#h-sess){flex:0 0 auto;min-height:0}`)
+            col = col.child(
                 panel(
-                    head("p-session", "Session", "square-terminal"),
-                    None,
-                    true,
-                    None,
-                    panels::kv(&s.session, 62.),
+                    Head::new("p-session", "Session", "square-terminal", Pad::LEFT),
+                    Some(panels::session_meta(&s.session)),
+                    panels::session_body(&s.session),
                 )
                 .flex_none(),
-            ));
-        }
-        if !h.mcp {
-            col = col.child(grown(
-                "mcp",
-                panel(
-                    head("p-mcp", "MCP", "network"),
-                    Some(meta(text(), s.mcp.len().to_string())),
-                    true,
-                    Some(layout::whole_rows_h(72.)),
-                    panels::mcp_rows(&s.mcp),
-                )
-                .flex_initial()
-                .min_h(min),
-            ));
+            );
         }
         if !h.tools {
-            col = col.child(grown(
-                "tools",
+            col = col.child(
                 panel(
-                    head("p-tools", "Tools & Skills", "settings-2"),
-                    None,
-                    true,
-                    Some(layout::body_h(4)),
-                    panels::kv(&s.tools, 62.),
+                    Head::new("p-tools", "Tools & Skills", "wrench", Pad::LEFT).max_body(72.),
+                    Some(meta(text(), s.tools.count.clone())),
+                    panels::tools_body(&s.tools),
                 )
                 .flex_initial()
                 .min_h(min),
-            ));
+            );
         }
-        if h.activity {
-            return col;
+        if !h.activity {
+            // `.grow` panels: flex 1 1 0, grow 1.4 and 2.4
+            col = col.child(
+                panel(
+                    Head::new("p-activity", "Recent Activity", "activity", Pad::LEFT),
+                    None,
+                    panels::activity_body(&s.activity),
+                )
+                .flex_1()
+                .flex_grow(1.4)
+                .min_h(min),
+            );
+            col = col.child(
+                panel(
+                    Head::new("p-history", "User Prompt", "clock", Pad::LEFT),
+                    Some(meta(text(), s.prompts.len().to_string())),
+                    panels::prompts_body(&s.prompts),
+                )
+                .flex_1()
+                .flex_grow(2.4)
+                .min_h(px(tier.history_min)),
+            );
         }
-        col.child(
-            panel(
-                head("p-activity", "Activity", "gallery-vertical-end"),
-                Some(meta(text(), s.activity.len().to_string())),
-                false,
-                None,
-                panels::activity_rows(&s.activity),
-            )
+        col
+    }
+
+    fn centre(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .debug_selector(|| "col-centre".to_string())
             .flex_1()
-            .min_h(min),
+            .flex()
+            .flex_col()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .child(self.chat(cx))
+    }
+
+    fn chat_head(&self) -> Div {
+        let h = &self.snap.head;
+        chrome::chat_head(
+            &h.status,
+            hsla(t::SUCCESS),
+            &h.prompt,
+            h.ctx_pct,
+            &format!("{} | {}", h.path, h.stats),
+            self.centre_w,
+            self.live.as_ref().is_some_and(|l| l.cfg.tui.motion),
         )
     }
 
-    fn centre(&self, w: f32, cx: &mut Context<Self>) -> Div {
-        let (s, h) = (&self.snap, &self.hidden);
-        let head = |id, title, icon| Head {
-            id,
-            title,
-            icon,
-            left: false,
-            compact: false,
-        };
-        let mut col = div()
-            .debug_selector(|| "col-centre".to_string())
-            .flex_1()
-            .min_w(px(cols(w).centre_min))
+    /// `.agent-switch`: the transcript views, `main` first, then the sub-agents of the session; the chosen one is
+    /// marked with `*`, and picking one opens its transcript beside the chat.
+    fn agent_switch(&self, cx: &mut Context<Self>) -> Div {
+        // (id, label, state)
+        let mut rows: Vec<(Option<String>, String, String)> =
+            vec![(None, "main".into(), String::new())];
+        match &self.live {
+            Some(lu) => rows.extend(
+                lu.live
+                    .view
+                    .panes
+                    .subs
+                    .iter()
+                    .map(|a| (Some(a.id.clone()), a.name.clone(), a.status.clone())),
+            ),
+            None => rows.extend(
+                self.snap
+                    .agents
+                    .iter()
+                    .skip(1)
+                    .map(|a| (Some(a.clone()), a.clone(), String::new())),
+            ),
+        }
+        div()
+            .debug_selector(|| "agent-switch".to_string())
+            .flex_none()
+            .mx(px(14.))
+            .mt(px(-4.))
+            .mb(px(8.))
+            .p(px(4.))
             .flex()
             .flex_col()
-            .gap(px(GAP))
-            .min_h(px(0.));
-        if h.has_cards() {
-            // `.cards{grid-template-columns:minmax(0,1fr) 224px;gap:10px}`
-            let mut cards = div().flex().flex_none().gap(px(GAP)).items_start();
-            if !h.status {
-                cards = cards.child(
-                    panel(
-                        head("p-status", "Status", "cpu"),
-                        None,
-                        true,
-                        None,
-                        panels::status_body(s),
+            .items_start()
+            .gap(px(1.))
+            .children(rows.into_iter().enumerate().map(|(i, (id, name, state))| {
+                let on = self.ts.sub == id;
+                let pick = id.clone();
+                div()
+                    .id(("agent-opt", i))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .h(px(20.))
+                    .rounded(px(3.))
+                    .cursor_pointer()
+                    .text_color(if on { strong() } else { text() })
+                    .hover(|d| d.text_color(strong()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.ts.sub = pick.clone();
+                        this.ts.tab = ChatTab::Chat;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .w(px(8.))
+                            .flex_none()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(hsla(t::ACCENT))
+                            .child(if on { "*" } else { "" }),
                     )
-                    .flex_1()
-                    .min_w(px(0.)),
-                );
-            }
-            if !h.tokens {
-                let p = panel(
-                    head("p-tokens", "Tokens", "memory-stick"),
-                    None,
-                    true,
-                    None,
-                    panels::tokens_body(&s.tokens),
-                );
-                cards = cards.child(if h.status {
-                    p.flex_1().min_w(px(0.))
-                } else {
-                    p.w(px(224.)).flex_none()
-                });
-            }
-            col = col.child(cards);
-        }
-        col.child(self.chat(cx))
+                    .child(name)
+                    .child(div().text_color(dim()).child(state))
+            }))
+    }
+
+    fn mode_bar(&self) -> Div {
+        let s = &self.snap;
+        div()
+            .debug_selector(|| "modebar".to_string())
+            .flex_none()
+            .mx(px(14.))
+            .mt(px(-6.))
+            .mb(px(10.))
+            .px(px(12.))
+            .h(px(22.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_size(px(11.5))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .min_w(px(0.))
+                    .text_color(hsla(t::WARN))
+                    .child(icon("chevrons-right", 14., hsla(t::WARN)))
+                    .child(div().flex_none().child(format!("{} mode on", s.mode)))
+                    .child(
+                        div()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_color(dim())
+                            .child("(shift+tab to cycle)"),
+                    ),
+            )
+            .child(div().flex_1().min_w(px(6.)))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .gap(px(4.))
+                    .child(div().text_color(dim()).child("model"))
+                    .child(div().text_color(hsla(t::INFO)).child(s.top.model.clone())),
+            )
+            .child(div().text_color(dim()).child("\u{00B7}"))
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .gap(px(4.))
+                    .child(div().text_color(dim()).child("effort"))
+                    .child(
+                        div()
+                            .text_color(hsla(t::ACCENT_LIGHT))
+                            .child(s.effort.clone()),
+                    ),
+            )
     }
 
     fn chat(&self, cx: &mut Context<Self>) -> Div {
         let s = &self.snap;
-        let (body, prompt) = if self.live.is_some() {
-            (self.conversation(cx), self.live_prompt(cx))
-        } else {
-            let prompt = div()
-                .flex_none()
-                .mx(px(12.))
-                .h(px(40.))
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .px(px(12.))
-                .border_1()
-                .border_color(hsla(t::RULE))
-                .rounded(px(layout::PANEL_RADIUS))
-                .child(div().text_color(strong()).child(">"))
-                .child(
-                    div()
-                        .flex_1()
-                        .truncate()
-                        .text_color(dim())
-                        .child("Ask Synthesis anything... (Ctrl+L for history)"),
-                )
-                .child(icon("arrow-up", 14., dim()));
-            (self.welcome().into_any_element(), prompt)
+        let tabs: Vec<chrome::Tab> = ChatTab::ALL
+            .iter()
+            .map(|t| chrome::Tab {
+                badge: self.badge(*t),
+                ..t.tab()
+            })
+            .collect();
+        let tab_click = |i: usize| -> panels::OnClick {
+            Box::new(cx.listener(move |this, _, _, cx| {
+                this.ts.tab = ChatTab::ALL[i];
+                cx.notify();
+            }))
         };
-        let mode = div()
-            .flex_none()
-            .h(px(28.))
-            .px(px(14.))
-            .flex()
-            .items_center()
-            .gap(px(5.))
-            .whitespace_nowrap()
-            .child(
-                div()
-                    .text_color(hsla(t::WARN))
-                    .child(format!("\u{23F5}\u{23F5} {} mode on", s.mode)),
-            )
-            .child(
-                div()
-                    .min_w(px(0.))
-                    .truncate()
-                    .text_color(dim())
-                    .child("(shift+tab to cycle)"),
-            )
-            .child(div().flex_1())
-            .child(div().text_color(dim()).child("model"))
-            .child(div().text_color(hsla(t::INFO)).child(s.top.model.clone()))
-            .child(div().text_color(dim()).child("\u{00B7} effort"))
-            .child(div().text_color(hsla(t::ACCENT)).child(s.effort.clone()));
+        let strip = chrome::tabs(
+            &tabs,
+            ChatTab::ALL
+                .iter()
+                .position(|t| *t == self.ts.tab)
+                .unwrap_or(0),
+            true,
+            self.centre_w - 2.,
+            &tab_click,
+        );
+        let body = if self.ts.tab != ChatTab::Chat {
+            self.pane(cx)
+        } else if self.live.is_some() {
+            self.chat_stage(cx)
+        } else {
+            self.welcome().into_any_element()
+        };
+        let prompt = if self.live.is_some() {
+            self.live_prompt(cx)
+        } else {
+            self.input_bar(cx)
+        };
+        let _ = s;
         div()
             .debug_selector(|| "p-chat".to_string())
             .flex_1()
@@ -478,30 +566,50 @@ impl TuiView {
             .border_1()
             .border_color(hsla(t::BORDER))
             .rounded(px(layout::PANEL_RADIUS))
+            .child(self.chat_head())
+            .child(strip)
             .child(body)
             .child(prompt)
-            .child(mode)
+            .child(self.agent_switch(cx))
+            .child(self.mode_bar())
     }
 
-    fn right(&self, tier: layout::Tiers, w: f32) -> Div {
-        let (s, h) = (&self.snap, &self.hidden);
-        let right_w = cols(w).right;
+    /// The input bar of a view without an engine (sample, `--shot`) or under another tab: placeholder,
+    /// send button. The live one is `live_prompt`.
+    fn input_bar(&self, _cx: &mut Context<Self>) -> Div {
+        chat::input_box(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .truncate()
+                .text_color(dim())
+                .child("Ask Synthesis anything... (Ctrl+R for history)"),
+            false,
+            false,
+            None,
+        )
+    }
+
+    fn right(&self, tier: layout::Tiers, w: f32, h: f32, cx: &mut Context<Self>) -> Div {
+        let (s, hid) = (&self.snap, &self.hidden);
+        // the column's own height decides what gives way (`fitRight`): Usage goes under 500, the cards
+        // are compacted under 400
+        let col_h = h - HEADER_H - FOOTER_H - 2. * PAD;
+        let (nousage, tight) = (col_h < 500., col_h < 400.);
         let mut col = div()
             .debug_selector(|| "col-right".to_string())
-            .w(px(right_w))
+            .w(px(cols(w).right))
             .flex_none()
             .flex()
             .flex_col()
             .gap(px(GAP))
             .min_h(px(0.))
             .overflow_hidden();
-        if !h.topology {
-            let head = Head {
-                id: "p-topology",
-                title: "Synthesis Topology",
-                icon: "layout-dashboard",
-                left: false,
-                compact: tier.compact_head,
+        if !hid.topology {
+            let pad = if tier.compact_head {
+                Pad::COMPACT
+            } else {
+                Pad::NORMAL
             };
             let online = div()
                 .flex()
@@ -513,34 +621,76 @@ impl TuiView {
                 .into_any_element();
             // the canvas fills the body; its own size picks the mode (A, B or T)
             let body = div().relative().size_full().child(topo::graph(s));
-            let p = panel(head, Some(online), false, None, body);
-            // `.grow` (flex 1 1 0); alone in the column it takes everything
+            let p = panel(
+                Head::new("p-topology", "Synthesis Topology", "network", pad),
+                Some(online),
+                body,
+            );
+            // `.grow` (flex 1 1 0)
             col = col.child(p.flex_1().min_h(px(tier.topo_min)));
         }
-        if !h.usage {
-            let head = Head {
-                id: "p-usage",
-                title: "Usage",
-                icon: "chart-pie",
-                left: false,
-                compact: false,
-            };
-            let range = div()
-                .px(px(8.))
-                .border_1()
-                .border_color(hsla(t::BORDER))
-                .rounded(px(5.))
-                .bg(hsla(t::SURFACE))
-                .text_color(strong())
-                .child(s.usage.range.clone())
-                .into_any_element();
-            let inner = right_w - 2. - 24.;
-            let p = panel(head, Some(range), true, None, panels::heat_body(s, inner));
-            col = col.child(if h.topology {
-                p.flex_1().min_h(px(tier.usage_min))
-            } else {
-                p.flex_initial().min_h(px(tier.usage_min))
-            });
+        if hid.has_cards() {
+            let card_min = if tight { 84. } else { 110. };
+            let mut row = div()
+                .debug_selector(|| "status-context".to_string())
+                .flex()
+                .gap(px(CARD_GAP))
+                .flex_initial()
+                .min_h(px(card_min));
+            if !hid.status {
+                row = row.child(
+                    panel(
+                        Head::new("p-agent", "Agent Status", "sparkles", Pad::CARD),
+                        None,
+                        div()
+                            .line_height(px(layout::LINE_TIGHT))
+                            .child(panels::agent_body(&s.agent, if tight { 3 } else { 8 })),
+                    )
+                    .flex_1()
+                    .min_w(px(0.))
+                    .min_h(px(0.)),
+                );
+            }
+            if !hid.tokens {
+                row = row.child(
+                    panel(
+                        Head::new("p-context", "Context", "cpu", Pad::CARD),
+                        None,
+                        div()
+                            .line_height(px(layout::LINE_TIGHT))
+                            .child(panels::context_body(&s.context, if tight { 4 } else { 6 })),
+                    )
+                    .flex_1()
+                    .min_w(px(0.))
+                    .min_h(px(0.)),
+                );
+            }
+            col = col.child(row);
+        }
+        if !hid.usage && !nousage {
+            let mut head = Head::new("p-usage", "Usage & Metrics", "chart-bar", Pad::NORMAL);
+            head.meta_h = 22.6;
+            col = col.child(
+                panel(
+                    head,
+                    Some(panels::usage_meta(
+                        &s.usage,
+                        self.live.as_ref().map(|_| -> panels::OnClick {
+                            Box::new(cx.listener(|this, _, _, cx| {
+                                if let Some(lu) = &mut this.live {
+                                    lu.live.usage_days =
+                                        if lu.live.usage_days == 7 { 30 } else { 7 };
+                                    lu.dirty = true;
+                                }
+                                cx.notify();
+                            }))
+                        }),
+                    )),
+                    panels::usage_body(&s.usage),
+                )
+                .flex_initial()
+                .min_h(px(tier.usage_min)),
+            );
         }
         col
     }
@@ -549,20 +699,29 @@ impl TuiView {
 impl Render for TuiView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.refresh(window);
+        self.tabs_tick(cx);
         let vp = window.viewport_size();
         let w = f32::from(vp.width) - self.inset;
-        let h = f32::from(vp.height);
+        let h = f32::from(vp.height) - self.top;
         let tier = tiers(h);
+        let c = cols(w);
+        let right_w = if self.hidden.has_right() {
+            c.right + GAP
+        } else {
+            0.
+        };
+        self.centre_w = w - 2. * PAD - GAP - c.left - right_w;
         let mut body = div()
+            .debug_selector(|| "grid".to_string())
             .flex_1()
             .min_h(px(0.))
             .flex()
             .gap(px(GAP))
             .p(px(PAD))
             .child(self.left(tier, w, cx))
-            .child(self.centre(w, cx));
+            .child(self.centre(cx));
         if self.hidden.has_right() {
-            body = body.child(self.right(tier, w));
+            body = body.child(self.right(tier, w, h, cx));
         }
         let dialog = self.dialog_overlay(cx);
         div()
@@ -580,7 +739,7 @@ impl Render for TuiView {
             .overflow_hidden()
             .bg(hsla(t::BG))
             .font_family(MONO)
-            .font_weight(FontWeight::NORMAL)
+            .font_weight(FontWeight::MEDIUM)
             .text_size(px(12.5))
             .line_height(gpui::relative(1.55))
             .text_color(text())
@@ -595,184 +754,8 @@ impl Render for TuiView {
 mod tests {
     use super::layout::*;
     use super::*;
-    use gpui::{Bounds, Pixels, TestAppContext, VisualTestContext, px, size};
-
-    const SIZES: [(f32, f32); 5] = [
-        (900., 520.),
-        (1000., 700.),
-        (1200., 800.),
-        (1400., 900.),
-        (1920., 1080.),
-    ];
-
-    fn open(cx: &mut TestAppContext, w: f32, h: f32, hidden: Hidden) -> &mut VisualTestContext {
-        let (_, vcx) = cx.add_window_view(|_, _| TuiView::new(0., hidden));
-        vcx.simulate_resize(size(px(w), px(h)));
-        vcx.run_until_parked();
-        vcx
-    }
-
-    fn b(cx: &mut VisualTestContext, sel: &'static str) -> Bounds<Pixels> {
-        cx.debug_bounds(sel)
-            .unwrap_or_else(|| panic!("no element {sel}"))
-    }
-    fn f(p: Pixels) -> f32 {
-        f32::from(p)
-    }
-    fn near(a: f32, e: f32, what: &str) {
-        assert!((a - e).abs() < 0.6, "{what}: {a} != {e}");
-    }
-
-    #[gpui::test]
-    fn columns_and_bands_match_the_design(cx: &mut TestAppContext) {
-        for (w, h) in SIZES {
-            let c = cols(w);
-            let v = open(cx, w, h, Hidden::default());
-            let at = format!("{w}x{h}");
-            near(
-                f(b(v, "header").size.height),
-                HEADER_H,
-                &format!("{at} header"),
-            );
-            near(
-                f(b(v, "footer").size.height),
-                FOOTER_H,
-                &format!("{at} footer"),
-            );
-            near(
-                f(b(v, "footer").origin.y),
-                h - FOOTER_H,
-                &format!("{at} footer y"),
-            );
-            let (l, m, r) = (b(v, "col-left"), b(v, "col-centre"), b(v, "col-right"));
-            near(f(l.size.width), c.left, &format!("{at} left"));
-            near(f(r.size.width), c.right, &format!("{at} right"));
-            near(
-                f(m.size.width),
-                w - 2. * PAD - 2. * GAP - c.left - c.right,
-                &format!("{at} centre"),
-            );
-            assert!(f(m.size.width) >= c.centre_min, "{at} centre min");
-            near(f(l.origin.x), PAD, &format!("{at} left x"));
-            near(f(m.origin.x), PAD + c.left + GAP, &format!("{at} centre x"));
-            near(f(r.origin.x), w - PAD - c.right, &format!("{at} right x"));
-            for col in [l, m, r] {
-                near(f(col.origin.y), HEADER_H + PAD, &format!("{at} col y"));
-                near(
-                    f(col.size.height),
-                    h - HEADER_H - FOOTER_H - 2. * PAD,
-                    &format!("{at} col h"),
-                );
-            }
-        }
-    }
-
-    #[gpui::test]
-    fn panel_heights_respect_the_design_minimums(cx: &mut TestAppContext) {
-        for (w, h) in SIZES {
-            let t = tiers(h);
-            let v = open(cx, w, h, Hidden::default());
-            let at = format!("{w}x{h}");
-            let col = b(v, "col-left");
-            let mut bottom = 0.;
-            for id in ["p-workspace", "p-running", "p-mcp", "p-tools", "p-activity"] {
-                let p = b(v, id);
-                assert!(
-                    f(p.size.height) >= t.left_min - 0.6,
-                    "{at} {id} {} < {}",
-                    f(p.size.height),
-                    t.left_min
-                );
-                bottom = f(p.bottom());
-            }
-            assert!(
-                bottom <= f(col.bottom()) + 0.6,
-                "{at} left column overflows: {bottom} > {}",
-                f(col.bottom())
-            );
-            let (tp, us) = (b(v, "p-topology"), b(v, "p-usage"));
-            assert!(
-                f(tp.size.height) >= t.topo_min - 0.6,
-                "{at} topology {}",
-                f(tp.size.height)
-            );
-            assert!(
-                f(us.size.height) >= t.usage_min - 0.6,
-                "{at} usage {}",
-                f(us.size.height)
-            );
-            near(
-                f(tp.size.height) + GAP + f(us.size.height),
-                f(b(v, "col-right").size.height),
-                &format!("{at} right fill"),
-            );
-            // Workspace and Running list at most 5 rows before they scroll
-            for id in ["p-workspace-body", "p-running-body"] {
-                assert!(f(b(v, id).size.height) <= list_body_h() + 0.6, "{at} {id}");
-            }
-        }
-    }
-
-    #[gpui::test]
-    fn tall_window_lists_five_rows(cx: &mut TestAppContext) {
-        let v = open(cx, 1920., 1080., Hidden::default());
-        near(
-            f(b(v, "p-workspace-body").size.height),
-            list_body_h(),
-            "workspace body",
-        );
-        near(
-            f(b(v, "p-running-body").size.height),
-            list_body_h(),
-            "running body",
-        );
-    }
-
-    #[gpui::test]
-    fn hiding_panels_gives_their_space_away(cx: &mut TestAppContext) {
-        let mut h = Hidden::default();
-        for k in ["session", "mcp", "tools", "activity"] {
-            h.hide(k);
-        }
-        let v = open(cx, 1400., 900., h);
-        let (ws, run) = (b(v, "p-workspace"), b(v, "p-running"));
-        near(f(ws.size.height), f(run.size.height), "50/50 split");
-        near(
-            f(ws.size.height) + LEFT_GAP + f(run.size.height),
-            f(b(v, "col-left").size.height),
-            "split fills",
-        );
-
-        let mut h = Hidden::default();
-        h.hide("status");
-        h.hide("tokens");
-        let v = open(cx, 1400., 900., h);
-        near(
-            f(b(v, "p-chat").origin.y),
-            HEADER_H + PAD,
-            "chat takes the card rows",
-        );
-
-        let mut h = Hidden::default();
-        h.hide("topology");
-        h.hide("usage");
-        let v = open(cx, 1400., 900., h);
-        assert!(v.debug_bounds("col-right").is_none());
-        near(
-            f(b(v, "col-centre").bottom_right().x),
-            1400. - PAD,
-            "chat spans to the right edge",
-        );
-
-        let mut h = Hidden::default();
-        h.hide("usage");
-        let v = open(cx, 1400., 900., h);
-        near(
-            f(b(v, "p-topology").size.height),
-            f(b(v, "col-right").size.height),
-            "topology takes the column",
-        );
-    }
+    use crate::brand;
+    use gpui::{TestAppContext, px, size};
 
     #[test]
     fn every_icon_the_view_draws_loads() {
@@ -802,6 +785,36 @@ mod tests {
             tz_min: 0,
             tui: Default::default(),
         }
+    }
+
+    #[gpui::test]
+    fn the_tabs_belong_to_the_session(cx: &mut TestAppContext) {
+        use crate::live::Live;
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let live = |sid: &str| {
+            let mut l = Live::new();
+            l.starting = false;
+            l.sid = sid.into();
+            l
+        };
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.simulate_resize(size(px(1400.), px(900.)));
+            vcx.run_until_parked();
+        };
+        view.update(vcx, |t, _| t.set_live(live("a")));
+        draw(vcx);
+        view.update(vcx, |t, cx| t.show_tab(ChatTab::Diff, None, cx));
+        assert_eq!(view.read_with(vcx, |t, _| t.ts.tab), ChatTab::Diff);
+        // another session starts on the chat, the first one keeps its diff tab
+        view.update(vcx, |t, _| t.set_live(live("b")));
+        draw(vcx);
+        assert_eq!(view.read_with(vcx, |t, _| t.ts.tab), ChatTab::Chat);
+        view.update(vcx, |t, _| t.set_live(live("a")));
+        draw(vcx);
+        assert_eq!(view.read_with(vcx, |t, _| t.ts.tab), ChatTab::Diff);
     }
 
     #[gpui::test]

@@ -8,10 +8,12 @@ onboarding, OS credential store). Owner request 2026-11-06; CLAUDE.md "Status" h
 A native GPUI app (not Tauri, no webview) for macOS, Linux and Windows that is the desktop version
 of the classic TUI design, in this repo, running the Rust engine in process.
 
-- Exactly two views, plus Settings: **TUI** (the classic TUI design drawn natively from engine data),
-  **Agent** (conversation, tool calls, approvals, plan/questions) and **Settings** (slide-in in
-  `cli.html`; a view in the rail for now). The design reference is `~/Vibe/synthesis-cli-ui/cli.html`
-  (`#view1` TUI, `#view2` Agent) with the platinum palette (`docs/tui-palette.md`), not its blue/green.
+- One interface, plus a placeholder and Settings: **TUI** (the classic TUI design drawn natively from engine
+  data, `cli.html` exactly), **Agent** (a different design, later: the page says "Coming soon") and **Settings**
+  (slide-in over the current view). The design reference is `~/Vibe/synthesis-cli-ui/cli.html` with the platinum
+  palette (`docs/tui-palette.md`), not its blue/green. The first Agent view (`agent_view/`, built on `#view2`) was
+  removed on 2026-11-07 by owner decision; its chat pane, diff/terminal/browser panes and project tree live on in
+  the TUI view's centre panel.
 - Non-goals (owner decisions): no launchpad/landing/Ask page; no embedded terminal emulator and no
   PTY pane (the TUI view is panels fed by backend events, not alacritty/xterm/vt100); no desktop-control
   feature; no keychain or credential storage (ADR-011: API keys via `SYNT_*` env, `{env:}`/`{file:}`).
@@ -48,7 +50,7 @@ of the classic TUI design, in this repo, running the Rust engine in process.
   the bounded process runner `imgclip::RealExec` that `project` runs git with) and on
   `synthesis-harness` (only `sanitize_for_display`); moving both into a small base crate is follow-up.
 - `theme.rs` reads the TUI's own tokens (`synthesis-tui-render::theme`), so palette changes land in
-  both UIs at once. Fonts: Inter (UI sans) and JetBrains Mono (TUI view), SIL OFL, licences in
+  both UIs at once. Fonts: Inter (UI sans), Fira Code (TUI and Agent views, the design's `--mono`) and JetBrains Mono (settings font choice), SIL OFL, licences in
   `apps/desktop/assets/fonts/*-OFL.txt`; icons: Lucide through `gpui-kit-assets`.
 - Pins (exact): `gpui-pre =0.3.10` (the maintainers' snapshot of Zed's gpui), `gpui-component =0.8.1`,
   `gpui-pre-platform =0.3.10` with `font-kit`, `gpui-kit-assets =0.8.1`; macOS adds `gpui-pre-apple`
@@ -78,7 +80,7 @@ of the classic TUI design, in this repo, running the Rust engine in process.
 
 ## 4. Phases
 
-0. Shell (done): window, rail (TUI, Agent, Settings), placeholders, palette, fonts, `Front::Native`,
+0. Shell (done): window, title bar (TUI, Agent, Settings icons), placeholders, palette, fonts, `Front::Native`,
    engine and reducer restored and green against the current crates.
 1. Agent view on `engine` + `synthesis_view::convo` (send, stream, approve/deny), then TUI view panels from the same state.
 2. Settings from `synthesis-settings` (model, permissions, appearance), stored-session resume.
@@ -98,18 +100,66 @@ scripted (fake provider, `--features shot,test-provider`) conversation on the re
 pickers and slash commands beyond /help and /exit (a notice says so), image paste, "Other" free text in
 question dialogs, keyboard scroll-into-view in Workspace/Running, Linux/Windows/IME verification.
 
-Slash commands (all built-ins are wired; `live.rs` `WIRED`, the TUI's semantics): `/files` and `/diff [file]` run the
-read-only git scan off the UI thread (`live::project_text`, trusted folder only, same refusal as the TUI) and post
-the text into the chat; the agent view also opens its Files tab for `/files`. `/peers` posts the TUI's table.
+Slash commands (all built-ins are wired; `live.rs` `WIRED`, the TUI's semantics): `/files` and `/diff [file]` switch
+the centre panel to its file explorer or diff tab (`/diff FILE` opens that file's diff) and post nothing in the chat;
+an untrusted folder is said by the file explorer itself. `/peers` posts the TUI's table.
 `/name` shows the name peers address the session by; it is fixed for the run (`--name`), as in the TUI, so it
 does not rename the stored title. `/focus [on|off]` hides tools, thinking, approvals and agent rows (user,
 assistant, result and notices stay). `/permissions allow|remove RULE` edits the rules of this session only
 (`is_well_formed_rule`, nothing is written to settings, as in the TUI; `remove` also drops deny/ask entries).
 
-TUI view (`src/tui_view/`, phase 2): native panels on a sample `Snapshot` (`sample.rs`; the real view-model
-replaces it), metrics from `cli.html` `#view1` (`layout.rs`), topology wires (`topo.rs`). Layout tests use
-gpui test support. Offscreen PNG: `cargo run -p synthesis-desktop --features shot -- --shot out.png --size 1400x900
-[--hide session,tools,...]` (headless Metal/wgpu, no window server). Topology mode L (tall and narrow) is not ported.
+TUI view (`src/tui_view/`), rebuilt 1:1 on the owner's design `~/Vibe/synthesis-cli-ui/cli.html` (owner decision
+2026-11-07, "dung lai dung cli.html"): geometry and typography are the design's (Fira Code 500, 12.5px / 1.55,
+panels radius 8, the breakpoints 1400/1200/1000 and the height tiers 750/610/860, the `fitRight` rules, the
+topology modes A, B and T), only the colours are the platinum tokens. Panels: top bar; left Workspace, Running,
+Session, Tools & Skills, Recent Activity, User Prompt; centre header (status, latest prompt, context bar, folder,
+files | LOC), tabs chat | diff | terminal | browser | file explorer, conversation, prompt, transcript switch, mode
+bar; right Synthesis Topology, Agent Status + Context, Usage & Metrics; key hint footer. Shared chrome
+(`widgets/chrome.rs`: top bar, panel, tabs, footer, chat header); the diff, terminal (command history, read-only, no
+PTY) and browser panes are `widgets/panes.rs`, the file explorer `tui_view/tabs.rs`.
+
+`synt.tui.panels.*` keys (unchanged, so no settings.json breaks): `session` = Session, `tools` = Tools & Skills,
+`activity` = Recent Activity and User Prompt, `status` = Agent Status, `tokens` = Context, `topology` = Synthesis
+Topology, `usage` = Usage & Metrics; `mcp` has no panel any more (MCP is in the Topology card and the Tools &
+Skills row) and is ignored. Workspace, Running and the chat cannot be hidden. The labels in
+`synthesis-settings::TUI_PANELS` name both the terminal and the desktop panel.
+
+Data: `sample.rs` is the design's own sample (`STATE`), `snapshot.rs` builds the same `Snapshot` from the live
+`ViewState`. Usage & Metrics rows come from `synthesis-view::usage` (`UsageHistory::metrics`: tokens, tool calls,
+files modified, commands run, browser requests, MCP calls over the last 7 days; the bar is that week's share of the
+last 30 days), counted per day from `tool.started` in `synt.db` (`synthesis-session::UsageDay`).
+
+Design acceptance: `tests/design/cli-rects.json` holds `getBoundingClientRect` of the design's panels at 900x520,
+1000x700, 1200x800, 1400x900 and 1920x1080 (headless Chrome, `cli.html` copied beside its assets); `design_tests.rs`
+lays the sample out in GPUI at the same sizes and compares (1px; 1.5px for panels of text rows, because gpui rounds a
+19.375px line box up to 19.5px; wider only where Chrome and gpui wrap text differently, listed in `tol`). Run
+`cargo test -p synthesis-desktop --lib design_ -- --nocapture` for the table. Offscreen PNG: `cargo run -p
+synthesis-desktop --features shot -- --shot out.png --size 1400x900 [--hide session,tools,...]` (headless
+Metal/wgpu, no window server); `node scripts/design-compare.mjs <ref-dir> <shots-dir> <out-dir>` writes
+[design | app | difference] images from Chrome renders of `cli.html` (`ref-WxH.png`) and the shots.
+Not ported: topology mode L (tall and narrow falls back to T). The "Latest user prompt" scrolls (16s, repeating,
+`synt.tui.motion`) only when it does not fit.
+
+Window shell (`ui.rs`): a 30px title bar over the content, no side rail. The bar follows the Tauri app's chrome
+(`#chrome`: `.cb` buttons 26x22, radius 6, hover and pressed backgrounds): the app mark and drag region on the left,
+the TUI and Agent icons in a group, then the Settings gear; each has a tooltip with its shortcut (Cmd/Ctrl+1,
+Cmd/Ctrl+2, Cmd/Ctrl+,). The content below is the design's 1400x900 etc. exactly (the bound tests lay the view out
+without the bar; `ui::tests` checks that the bar adds 30px above it and nothing beside it). macOS: transparent
+native title bar with the traffic lights at (14, 9) and 78px reserved for them. Windows and Linux: client-side
+decorations, the bar is the drag region (`WindowControlArea::Drag`) and draws minimise / maximise / close
+(`WindowControlArea::Min|Max|Close`, close hovers red). Not verified without a real window on each OS.
+
+Centre tabs (`TabState`, kept per session id, so a session left and resumed finds its tabs as they were; the strip
+shows counters; Ctrl+1..5 switch, Esc returns to the chat, PageUp/PageDown scroll the pane):
+- diff: the session's changed files (`AgentPanes.files`) with `+N -N`; the newest opens by itself, a click expands a
+  file's syntax-coloured diff; `/diff FILE` opens that file.
+- terminal: the command history (`AgentPanes.commands`, from `process.*` and Bash tool events): command, exit code,
+  duration, output tail, running state. Read-only, not a terminal.
+- browser: the page, the selected saved screenshot (`browser.frame`; the latest by default, history rows select
+  another; a PNG inside the session's artifact folder only, <= 8 MiB) and the browser calls with state and duration.
+- file explorer: `project::scan` (git's file list; trusted folders only), directories open on demand (the parents of
+  changed files open first), changed files marked M/A/D/?, a click previews a text file read-only (<= 256 KB and 2000
+  lines; refuses paths outside the folder, links out of it, secret files and binary content).
 
 ### Feature gaps against the TUI (view-model status)
 
@@ -131,38 +181,13 @@ tools and skills, conversation. Not done, with where the data would come from:
   with a 5 s limit per call, so load off the UI thread.
 - Interactive PTY: not wanted (owner decision).
 
-### Agent view (phase 3, `src/agent_view/`)
+### Agent view (removed)
 
-`cli.html` `#view2` (`.parts/p5.js`; the current `cli.html` folded it into view 1 with the bottom tabs): grid
-`260 | 1fr | 430`, sub-agent split `2fr | 1fr` (min 220). The design has no breakpoints; `agent_view/layout.rs`
-extends them like the TUI view's (230|320|360 below 1400, 210|300|320 below 1200, 180|300|260 below 1000) and
-re-uses its header/footer/height-tier tokens. Elements and their data:
-
-| Element | Source |
-|---|---|
-| Conversation, tool cards, inline approval rows | `Convo` (same reducer as the TUI view) |
-| Approval / plan / question dialog | `widgets::dialog` (shared with the TUI view), `Live.dialogs` |
-| Sub-agent switch + transcript pane | `AgentPanes.subs` (new): `subagent.*` + events carrying `agent_id` |
-| Plan (todo list) | `Convo.plan` |
-| Commands tab (read-only history) | `AgentPanes.commands` (new): Bash tool calls (`tool.output` tail, exit code from `[exit code N]`) and `process.*` |
-| Verify tab | `AgentPanes.verify` (new) + stored report (`Reader::verification_reports`) read off-thread |
-| Browser tab | `AgentPanes.browser` (new): `browser_*` calls, last URL, newest screenshot path |
-| Diff tab | `AgentPanes.files` (new): `ToolCompleted.diff` summed per file (+N -N), click expands the diff |
-| Files tab | `project::scan`, trusted folders only (`--trust-project`); a changed file shows its `git diff` |
-| Topology, Usage, Session, Tools, Activity, status line | `snapshot::build` (shared with the TUI view) |
-| Session tabs | one engine + `Live` per tab (max 4), "+" opens a new one, a Workspace session row resumes one |
-
-Backend added: `synthesis_view::agent` (`AgentPanes`, `read_report`) with tests, fed by `ViewState::apply`.
-
-Known gaps / TODO:
-- Browser: events do not carry image bytes, only the artifact path in the `browser_screenshot` result; the tab
-  shows that PNG (<= 8 MiB) and the call list. TODO: a live page stream needs a browser-runtime event with frames.
-- `process.*` events are handled but the terminal runtime does not emit them yet; the commands tab lists Bash calls.
-- Concurrent engines share process-global state (`set_learned_skills`): closing one tab resets learned skills for
-  the others until their next task. The Agent view ignores `--resume/--continue` (the TUI view owns them).
-- The Agent view has no completion popup, history search or sidebar focus (TUI-only keys); Ctrl+C interrupts, it does not quit.
-- The sub-agent switch appears only when a sub-agent exists. At 900x520 the conversation keeps little room.
-- The key hook of the hidden view is off (`TuiView.active`, `AgentView.shown`), set by the shell.
+The first Agent view (phase 3) is gone; the Agent page is "Coming soon". What it built on `synthesis_view::agent`
+(`AgentPanes`: sub-agents, commands, verification, browser calls and frames, changed files) is used by the TUI view's
+tabs and its sub-agent transcript (the `* main / developer` switch under the prompt opens a transcript beside the chat).
+Known gaps: browser events carry no image bytes (screenshots are the saved artifacts, no live stream); concurrent
+engines share process-global state (`set_learned_skills`), which no longer matters with one session on screen.
 
 ## 6. Settings (backend: `crates/synthesis-settings-ui`)
 

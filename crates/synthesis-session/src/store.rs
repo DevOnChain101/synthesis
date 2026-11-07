@@ -286,6 +286,14 @@ pub struct UsageDay {
     pub tools: u64,
     pub agents: u64,
     pub sessions: u64,
+    /// `tool.started` of `Bash`.
+    pub commands: u64,
+    /// `tool.started` of a file-writing tool (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`).
+    pub files: u64,
+    /// `tool.started` of a `browser_*` tool.
+    pub browser: u64,
+    /// `tool.started` of an MCP tool (`mcp__server__tool`).
+    pub mcp: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1091,7 +1099,11 @@ impl Reader {
                SUM(CASE WHEN type='turn.completed'
                    THEN COALESCE(json_extract(payload,'$.usage.output_tokens'),0) ELSE 0 END),
                SUM(type='user.message'), SUM(type='tool.started'), SUM(type='subagent.started'),
-               COUNT(DISTINCT session_id)
+               COUNT(DISTINCT session_id),
+               SUM(type='tool.started' AND json_extract(payload,'$.name')='Bash'),
+               SUM(type='tool.started' AND json_extract(payload,'$.name') IN ('Write','Edit','MultiEdit','NotebookEdit')),
+               SUM(type='tool.started' AND substr(json_extract(payload,'$.name'),1,8)='browser_'),
+               SUM(type='tool.started' AND substr(json_extract(payload,'$.name'),1,5)='mcp__')
              FROM events
              WHERE type IN ('turn.completed','user.message','tool.started','subagent.started')
                AND payload IS NOT NULL AND CAST(strftime('%s', ts) AS INTEGER) >= ?1 / 1000
@@ -1110,6 +1122,10 @@ impl Reader {
                 tools: n(4)?,
                 agents: n(5)?,
                 sessions: n(6)?,
+                commands: n(7)?,
+                files: n(8)?,
+                browser: n(9)?,
+                mcp: n(10)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

@@ -13,28 +13,12 @@ pub const MIN_H: f32 = 520.;
 pub const PANEL_RADIUS: f32 = 8.;
 /// Left column gap (`#view1 .col.l{gap:8px}`).
 pub const LEFT_GAP: f32 = 8.;
-/// Rows a Workspace / Running panel lists before it scrolls (docs/TUI.md), each `ROW_H` tall.
-pub const LIST_ROWS: usize = 5;
-pub const ROW_H: f32 = 36.;
-/// Panel chrome: header (padding + one 12px line at 1.55) and body padding.
-pub const HEAD_PAD: (f32, f32) = (9., 6.);
-pub const HEAD_PAD_LEFT: (f32, f32) = (7., 4.);
-pub const HEAD_LINE: f32 = 18.6;
-pub const BODY_PAD: (f32, f32) = (2., 10.);
-pub const BODY_PAD_LEFT_BOTTOM: f32 = 6.;
-/// One text line of the panels (12.5px at 1.55): kv and MCP rows are this tall, so a capped body
-/// ends on a whole row.
-pub const KV_ROW: f32 = 19.375;
-
-/// Body height (top padding + `rows` lines) of a panel capped at `rows` rows.
-pub fn body_h(rows: usize) -> f32 {
-    BODY_PAD.0 + rows as f32 * KV_ROW
-}
-
-/// The most whole rows that fit under `max` px of body.
-pub fn whole_rows_h(max: f32) -> f32 {
-    body_h(((max - BODY_PAD.0) / KV_ROW).floor().max(1.) as usize)
-}
+/// Gap between the Agent Status and Context cards (`.status-context{gap:8px}`).
+pub const CARD_GAP: f32 = 8.;
+/// One text line of the panels (12.5px at 1.55).
+pub const LINE: f32 = 19.375;
+/// One line of the compact Agent Status / Context bodies (`line-height:1.35`).
+pub const LINE_TIGHT: f32 = 16.875;
 
 /// Column widths for a viewport width: `250 | minmax(320,1fr) | 500`, then 200|300|380 below 1400,
 /// 190|300|300 below 1200, 180|300|260 below 1000.
@@ -70,8 +54,10 @@ pub struct Tiers {
     /// Minimum height of the Topology panel (230, 150 below 750) and whether its header is tightened.
     pub topo_min: f32,
     pub compact_head: bool,
-    /// Minimum height of the Usage panel (84, 140 from 860).
+    /// Minimum height of the Usage & Metrics panel and the Agent Status / Context row.
     pub usage_min: f32,
+    /// Minimum height of the User Prompt panel (140 from 860, else `left_min`).
+    pub history_min: f32,
 }
 
 pub fn tiers(height: f32) -> Tiers {
@@ -85,11 +71,25 @@ pub fn tiers(height: f32) -> Tiers {
         },
         topo_min: if height < 750. { 150. } else { 230. },
         compact_head: height < 750.,
-        usage_min: if height >= 860. { 140. } else { 84. },
+        usage_min: 84.,
+        history_min: if height >= 860. {
+            140.
+        } else if height < 610. {
+            38.
+        } else if height < 750. {
+            56.
+        } else {
+            84.
+        },
     }
 }
 
-/// The `panels.*` settings keys (docs/TUI.md "Settings"). Workspace, Running and the chat cannot be hidden.
+/// The `synt.tui.panels.*` settings keys (docs/TUI.md "Settings"), mapped onto the panels of `cli.html`:
+/// `session` = Session, `tools` = Tools & Skills, `activity` = Recent Activity and User Prompt,
+/// `status` = Agent Status, `tokens` = Context, `topology` = Synthesis Topology, `usage` = Usage & Metrics.
+/// `mcp` has no panel of its own any more (MCP servers are the Topology MCP card and the Tools & Skills
+/// `mcp` row); the key is accepted and ignored so no user's settings.json breaks.
+/// Workspace, Running and the chat cannot be hidden.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Hidden {
     pub session: bool,
@@ -122,22 +122,18 @@ impl Hidden {
 
     /// Workspace and Running split the left column in halves when everything below them is hidden.
     pub fn left_is_split(&self) -> bool {
-        self.session && self.mcp && self.tools && self.activity
+        self.session && self.tools && self.activity
     }
 
-    /// The right column (Topology, Usage) exists at all.
+    /// The right column (Topology, Agent Status / Context, Usage & Metrics) exists at all.
     pub fn has_right(&self) -> bool {
-        !(self.topology && self.usage)
+        !(self.topology && self.usage && !self.has_cards())
     }
 
+    /// The Agent Status / Context row exists.
     pub fn has_cards(&self) -> bool {
         !(self.status && self.tokens)
     }
-}
-
-/// Height of a list body that shows `LIST_ROWS` rows (Workspace, Running).
-pub fn list_body_h() -> f32 {
-    LIST_ROWS as f32 * ROW_H + BODY_PAD.0
 }
 
 #[cfg(test)]
@@ -163,8 +159,9 @@ mod tests {
     #[test]
     fn height_tiers() {
         assert_eq!(tiers(900.).left_min, 84.);
-        assert_eq!(tiers(900.).usage_min, 140.);
-        assert_eq!(tiers(800.).usage_min, 84.);
+        assert_eq!(tiers(900.).history_min, 140.);
+        assert_eq!(tiers(800.).history_min, 84.);
+        assert_eq!(tiers(700.).history_min, 56.);
         assert_eq!(tiers(749.).left_min, 56.);
         assert_eq!(tiers(749.).topo_min, 150.);
         assert_eq!(tiers(609.).left_min, 38.);
@@ -182,8 +179,10 @@ mod tests {
         assert!(h.hide("activity"));
         assert!(h.left_is_split());
         h.hide("topology");
-        assert!(h.has_right());
         h.hide("usage");
+        assert!(h.has_right(), "the cards remain");
+        h.hide("status");
+        h.hide("tokens");
         assert!(!h.has_right());
     }
 }

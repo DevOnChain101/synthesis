@@ -5,13 +5,14 @@
 use std::collections::HashMap;
 
 use gpui::{
-    AnyElement, App, Bounds, Hsla, IntoElement, ParentElement as _, PathBuilder, Pixels, Point,
-    Styled as _, Window, canvas, div, fill, point, px, size,
+    AnyElement, App, Bounds, IntoElement, ParentElement as _, PathBuilder, Pixels, Point,
+    Styled as _, Window, canvas, div, fill, point, prelude::*, px, size,
 };
 use synthesis_tui_render::theme as t;
 
+use super::MONO;
 use super::sample::{Core, NodeState, Pos, Snapshot, TopoNode};
-use super::{MONO, tracked};
+use crate::widgets::chrome::{icon, tracked};
 use crate::{brand, theme::hsla};
 
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
@@ -154,8 +155,11 @@ pub fn geometry(aw: f32, ah: f32) -> Geo {
     };
     let w = aw - 2. * px_;
     let third = (w - 2. * cg) / 3.1;
-    // minmax(184px, 1.1fr) in the middle, the sides share the rest
-    let (side, mid) = if 1.1 * third >= 184. {
+    // A: minmax(184px, 1.1fr) in the middle, the sides share the rest; B: three equal columns
+    let (side, mid) = if !a {
+        let c = (w - 2. * cg) / 3.;
+        (c, c)
+    } else if 1.1 * third >= 184. {
         (third, 1.1 * third)
     } else {
         ((w - 2. * cg - 184.) / 2., 184.)
@@ -164,7 +168,8 @@ pub fn geometry(aw: f32, ah: f32) -> Geo {
     let col_x = [px_, px_ + side + cg, px_ + side + cg + mid + cg];
     let col_w = [side, mid, side];
     let row_y = |i: usize| py + i as f32 * (row_h + rg);
-    let card_h: f32 = if a { 86. } else { 44. };
+    // B: 5 + 5 padding, 2 border, 10.5px title line (1.55) + 2, one 10.5px line (1.35)
+    let card_h: f32 = if a { 86. } else { 44.45 };
     let mut nodes = Vec::new();
     for (ri, row) in GRID.iter().enumerate() {
         for (ci, p) in row.iter().enumerate() {
@@ -268,14 +273,16 @@ fn geometry_t(aw: f32, ah: f32) -> Geo {
     } else {
         (24., 10., 19.)
     };
+    // `max-width:100%` of the 22px-padded list clips the core's stretched width (the -20px margin) to it
     let core = R {
         x: 2.,
         y: 2.,
-        w: aw - 4.,
+        w: aw - 24.,
         h: core_h,
     };
     let x = 22.;
-    let mut y = core.b() + core_gap;
+    // the column's `gap:2px` comes on top of the core's bottom margin
+    let mut y = core.b() + core_gap + 2.;
     let mut nodes = Vec::new();
     for p in T_ORDER {
         nodes.push((
@@ -326,8 +333,19 @@ fn node_colour(p: Pos) -> t::Rgb {
     }
 }
 
-pub(super) fn with_alpha(c: Hsla, a: f32) -> Hsla {
-    Hsla { a, ..c }
+pub(super) use crate::widgets::chrome::with_alpha;
+
+fn node_icon(p: Pos) -> &'static str {
+    match p {
+        Pos::User => "user",
+        Pos::Hooks => "webhook",
+        Pos::Guards => "shield",
+        Pos::Sub => "users",
+        Pos::Skills => "layers",
+        Pos::Mcp => "link",
+        Pos::Tools => "wrench",
+        Pos::Mem => "database",
+    }
 }
 
 fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool) -> AnyElement {
@@ -352,7 +370,25 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool) -> AnyElement {
         .overflow_hidden()
         .font_family(MONO)
         .text_color(hsla(t::TEXT));
-    let title = tracked(&n.title.to_uppercase(), title_size, 0.03, col);
+    let ic = if a {
+        16.
+    } else if mode == Mode::B {
+        12.
+    } else {
+        11.
+    };
+    let title = div()
+        .flex()
+        .items_center()
+        .gap(px(if a {
+            6.
+        } else if mode == Mode::B {
+            4.
+        } else {
+            5.
+        }))
+        .child(icon(node_icon(n.pos), ic, col))
+        .child(tracked(&n.title.to_uppercase(), title_size, 0.03, col));
     let lines = n.lines.iter().take(nlines).map(|l| {
         div()
             .truncate()
@@ -373,7 +409,8 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool) -> AnyElement {
     } else {
         let mut d = d
             .flex_col()
-            .justify_center()
+            .when(!a, |d| d.justify_center())
+            .when(a, |d| d.pt(px(9.)))
             .px(px(if a { 10. } else { 7. }))
             .border_1()
             .border_color(with_alpha(
@@ -394,7 +431,7 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool) -> AnyElement {
     d.into_any_element()
 }
 
-fn core_card(c: &Core, r: R, mode: Mode) -> AnyElement {
+fn core_card(c: &Core, r: R, mode: Mode, large: bool) -> AnyElement {
     let ink = hsla(t::TEXT_STRONG);
     let logo = |s: f32| {
         gpui::img(brand::mark())
@@ -419,7 +456,7 @@ fn core_card(c: &Core, r: R, mode: Mode) -> AnyElement {
             .border_1()
             .rounded(px(6.))
             .child(logo(14.))
-            .child(tracked(&c.title.to_uppercase(), 10.5, 0.14, ink))
+            .child(tracked(&c.title, 10.5, 0.14, ink))
             .child(div().ml_auto().text_size(px(10.)).child(c.tag.clone())),
         Mode::B => d
             .flex_col()
@@ -435,24 +472,18 @@ fn core_card(c: &Core, r: R, mode: Mode) -> AnyElement {
             ),
         Mode::A => {
             // the logo shrinks with the card (`min(76px, 100% - 44px)`)
-            let l = 76f32.min(r.h - 44.).max(24.);
+            let l = 76f32.min(r.h - if large { 44. } else { 30. }).max(24.);
             let mut d = d
                 .flex_col()
                 .justify_center()
-                .gap(px(2.))
                 .border_2()
                 .rounded(px(12.))
                 .child(logo(l))
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .text_color(ink)
-                        .child(c.title.clone()),
-                );
-            if r.h >= 150. {
+                .child(div().mt(px(4.)).child(tracked(&c.title, 14., 0.2, ink)));
+            if large {
                 d = d
-                    .child(tracked(&c.sub, 11., 0.25, ink))
-                    .child(div().pt(px(4.)).text_size(px(11.)).child(c.tag.clone()));
+                    .child(tracked(&c.sub, 12., 0.25, ink))
+                    .child(div().mt(px(6.)).text_size(px(12.)).child(c.tag.clone()));
             }
             d
         }
@@ -476,7 +507,9 @@ pub fn graph(s: &Snapshot) -> impl IntoElement {
         move |b: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
             let geo = geometry(f32::from(b.size.width), f32::from(b.size.height));
             let by: HashMap<Pos, &TopoNode> = s.topology.iter().map(|n| (n.pos, n)).collect();
-            let mut els = vec![(geo.core, core_card(&s.core, geo.core, geo.mode))];
+            // `data-core`: the sub line and the tag show when a third of the body is 150px or more
+            let large = (f32::from(b.size.height) - 56.) / 3. >= 150.;
+            let mut els = vec![(geo.core, core_card(&s.core, geo.core, geo.mode, large))];
             for (p, r) in &geo.nodes {
                 if let Some(n) = by.get(p) {
                     els.push((*r, card(n, *r, geo.mode, geo.tmin)));

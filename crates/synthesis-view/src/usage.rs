@@ -18,6 +18,10 @@ pub struct HistoryDay {
     pub tools: f64,
     pub agents: f64,
     pub sessions: f64,
+    pub commands: f64,
+    pub files: f64,
+    pub browser: f64,
+    pub mcp: f64,
 }
 
 const MS_DAY: i64 = 86_400_000;
@@ -40,6 +44,10 @@ fn fill(days: &[UsageDay], today: i64, tz: i32) -> Vec<HistoryDay> {
                 tools: f(|d| d.tools),
                 agents: f(|d| d.agents),
                 sessions: f(|d| d.sessions),
+                commands: f(|d| d.commands),
+                files: f(|d| d.files),
+                browser: f(|d| d.browser),
+                mcp: f(|d| d.mcp),
             }
         })
         .collect()
@@ -66,6 +74,17 @@ pub fn load_from(r: &Reader, now_ms: i64, tz: i32) -> Vec<HistoryDay> {
         .unwrap_or_else(|_| fill(&[], today, tz))
 }
 
+/// Sums of [`HistoryDay`] fields over a range of days.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Metrics {
+    pub tokens: f64,
+    pub tool_calls: f64,
+    pub files: f64,
+    pub commands: f64,
+    pub browser: f64,
+    pub mcp: f64,
+}
+
 /// The Usage panel's data: [`HistoryDay`]s, oldest first, ending today.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct UsageHistory {
@@ -77,6 +96,20 @@ impl UsageHistory {
         Self {
             days: load(home, now_ms, tz),
         }
+    }
+
+    /// The Usage & Metrics rows over the last `n` days (today included).
+    pub fn metrics(&self, n: usize) -> Metrics {
+        let mut m = Metrics::default();
+        for d in self.days.iter().rev().take(n) {
+            m.tokens += d.tokens;
+            m.tool_calls += d.tools;
+            m.files += d.files;
+            m.commands += d.commands;
+            m.browser += d.browser;
+            m.mcp += d.mcp;
+        }
+        m
     }
 
     /// Tokens of the last `n` days (today included).
@@ -98,6 +131,10 @@ mod tests {
             tools: 3,
             agents: 4,
             sessions: 5,
+            commands: 6,
+            files: 7,
+            browser: 8,
+            mcp: 9,
         }
     }
 
@@ -129,6 +166,18 @@ mod tests {
             (h.tokens_last(1), h.tokens_last(2), h.tokens_last(3)),
             (0.0, 9.0, 16.0)
         );
+    }
+
+    #[test]
+    fn metrics_sum_the_last_days() {
+        let mut days = fill(&[], 103, 0);
+        let n = days.len();
+        days[n - 1].commands = 2.0;
+        days[n - 1].mcp = 1.0;
+        days[n - 8].commands = 5.0; // 8 days back: outside 7, inside 30
+        let h = UsageHistory { days };
+        assert_eq!((h.metrics(7).commands, h.metrics(30).commands), (2.0, 7.0));
+        assert_eq!(h.metrics(7).mcp, 1.0);
     }
 
     #[test]

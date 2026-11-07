@@ -133,7 +133,10 @@ A picker (Ctrl+N, `/resume`, `/model`, `/config`, ...) closes with Esc; an appro
 `panels.{session,mcp,tools,activity,status,tokens,topology,usage}` (Workspace, Running sessions and
 the chat are always shown; the other panels take the rows of a hidden one. With session, mcp, tools
 and activity all hidden, Workspace and Running split the whole left column in halves. `status` and
-`tokens` are the boxes above the chat: with both hidden the chat takes their rows. `topology` is
+`tokens` are the boxes above the chat: with both hidden the chat takes their rows. (The desktop app maps the same
+keys onto the panels of its `cli.html` layout: `session` Session, `tools` Tools & Skills, `activity` Recent Activity
+and User Prompt, `status` Agent Status, `tokens` Context, `topology`, `usage` Usage & Metrics, `mcp` none; see
+`docs/specs/desktop.md`.) `topology` is
 the right-hand graph and `usage` the history panel: hiding one gives its space to the other, and
 with both hidden the chat spans to the right edge), `logo` (`art` | `off`), `show_thinking`, `verbose`
 (internal rows in the chat, see Events), `diffs_expanded`

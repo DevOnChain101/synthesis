@@ -166,6 +166,7 @@ fn gen_history(g: &Value) -> Vec<HistoryDay> {
             tools: 2.0,
             agents: if n % 3 == 0 { 1.0 } else { 0.0 },
             sessions: 1.0,
+            ..Default::default()
         })
         .collect()
 }

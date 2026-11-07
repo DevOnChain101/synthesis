@@ -1,22 +1,29 @@
-//! The window: a left rail (TUI view, Agent view, Settings) and the content of the active view.
-//! Phase 0: the views are placeholders; later phases fill them from `engine` / `synthesis_view`.
+//! The window: a title bar with the view icons (TUI, Agent, Settings) over the content of the active view.
+//!
+//! The title bar follows the Tauri app's chrome (`synthesis-cli-ui` `#chrome`): a 30px row above the content,
+//! the icon group (`.cb` 26x22, radius 6, hover and pressed backgrounds) at the right, the gear after it. macOS
+//! keeps the native traffic lights over a transparent title bar (the bar reserves 78px for them); Windows and
+//! Linux draw their own minimise / maximise / close buttons (`WindowControlArea`) and the bar is the drag
+//! region (client-side decorations). The content below is exactly the TUI view of `cli.html`: its 46px top bar,
+//! columns and footer, on the whole window width.
 
 use std::borrow::Cow;
 
 use gpui::{
-    App, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Window, div,
-    prelude::*, px, svg,
+    AnyView, App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, StatefulInteractiveElement as _, Styled as _, Window, WindowControlArea, div,
+    prelude::*, px,
 };
 
-use crate::agent_view::AgentView;
 use crate::settings_view::{self, Close, SettingsView};
 use crate::tui_view::driver::{LiveCfg, OpenSettings};
 use crate::tui_view::{TuiView, layout};
+use crate::widgets::chrome::{icon, tracked, with_alpha};
 use crate::{brand, theme};
 use synthesis_tui_render::theme as t;
 
-/// Icons the shell draws (checked by a test in `brand`).
-pub const ICONS: [&str; 3] = ["square-terminal", "bot", "settings"];
+/// Icons the shell draws that are Lucide (checked by a test in `brand`); the title bar's own are the design's.
+pub const ICONS: [&str; 1] = ["square-terminal"];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
@@ -29,34 +36,61 @@ impl View {
     fn label(self) -> &'static str {
         match self {
             View::Tui => "TUI",
-            View::Agent => "Agent",
+            View::Agent => "Agent (coming soon)",
             View::Settings => "Settings",
         }
     }
     fn icon(self) -> &'static str {
         match self {
-            View::Tui => ICONS[0],
-            View::Agent => ICONS[1],
-            View::Settings => ICONS[2],
+            View::Tui => "tui",
+            View::Agent => "agent",
+            View::Settings => "gear",
+        }
+    }
+    /// The shortcut shown in the tooltip.
+    fn keys(self) -> &'static str {
+        match self {
+            View::Tui => "1",
+            View::Agent => "2",
+            View::Settings => ",",
         }
     }
 }
 
-/// Width of the rail; the TUI view takes the rest and lays itself out on that width.
-pub const RAIL_W: f32 = 72.;
+/// Height of the title bar (`--chrome-h`).
+pub const TITLEBAR_H: f32 = 30.;
+/// Room kept for the macOS traffic lights (`.mac #chrome{padding-left:78px}`).
+const TRAFFIC_LIGHTS_W: f32 = 78.;
+
+/// A tooltip: the name and the shortcut.
+struct Tip(String);
+
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(theme::hsla(t::BORDER))
+            .bg(theme::hsla(t::ELEVATED))
+            .text_size(px(12.))
+            .text_color(theme::hsla(t::TEXT_STRONG))
+            .child(self.0.clone())
+    }
+}
 
 pub struct Shell {
     view: View,
     /// The view the Settings panel returns to when it closes.
     back: View,
     tui: Entity<TuiView>,
-    agent: Entity<AgentView>,
     settings: Entity<SettingsView>,
 }
 
 impl Shell {
-    /// Switches the view; the views that keep a window-wide key hook are told whether they are shown.
-    /// Settings slides over the view it was opened from (`back`).
+    /// Switches the view; the TUI view's window-wide key hook is told whether it is shown. Settings slides
+    /// over the view it was opened from (`back`).
     fn go(&mut self, v: View, window: &mut Window, cx: &mut Context<Self>) {
         if v == View::Settings && self.view != View::Settings {
             self.back = self.view;
@@ -71,26 +105,43 @@ impl Shell {
                 t.focus_prompt(window, cx);
             }
         });
-        self.agent
-            .update(cx, |a, cx| a.set_shown(v == View::Agent, window, cx));
         cx.notify();
     }
 
-    fn rail_button(&self, v: View, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A button of the icon group: 26x22, radius 6; hover lightens, the open view is pressed.
+    fn icon_button(&self, v: View, cx: &mut Context<Self>) -> impl IntoElement {
         let on = self.view == v;
-        let fg = theme::hsla(if on { t::ACCENT } else { t::TEXT });
+        let fg = if on {
+            theme::hsla(t::TEXT_STRONG)
+        } else {
+            theme::hsla(t::MUTED)
+        };
+        let tip = format!(
+            "{}  ({}{})",
+            v.label(),
+            if cfg!(target_os = "macos") {
+                "\u{2318}"
+            } else {
+                "Ctrl+"
+            },
+            v.keys()
+        );
         div()
             .id(v.label())
+            .w(px(26.))
+            .h(px(22.))
             .flex()
-            .flex_col()
             .items_center()
-            .gap_1()
-            .py_2()
-            .w_full()
+            .justify_center()
+            .rounded(px(6.))
             .cursor_pointer()
             .text_color(fg)
-            .when(on, |d| d.bg(theme::hsla(t::ELEVATED)))
-            .hover(|d| d.bg(theme::hsla(t::ELEVATED)))
+            .when(on, |d| d.bg(with_alpha(theme::hsla(t::TEXT_STRONG), 0.16)))
+            .hover(|d| {
+                d.bg(with_alpha(theme::hsla(t::TEXT_STRONG), 0.10))
+                    .text_color(theme::hsla(t::TEXT_STRONG))
+            })
+            .tooltip(move |_, cx| -> AnyView { cx.new(|_| Tip(tip.clone())).into() })
             .on_click(cx.listener(move |s, _, window, cx| {
                 let to = if v == View::Settings && s.view == View::Settings {
                     s.back
@@ -99,71 +150,163 @@ impl Shell {
                 };
                 s.go(to, window, cx);
             }))
+            .child(icon(v.icon(), 14., fg))
+    }
+
+    /// Minimise / maximise / close of the Windows and Linux title bar.
+    fn window_button(area: WindowControlArea) -> impl IntoElement {
+        let (name, glyph, danger) = match area {
+            WindowControlArea::Min => ("win-min", "win-min", false),
+            WindowControlArea::Max => ("win-max", "win-max", false),
+            _ => ("win-close", "win-close", true),
+        };
+        div()
+            .id(name)
+            .w(px(40.))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .window_control_area(area)
+            .text_color(theme::hsla(t::TEXT))
+            .hover(move |d| {
+                if danger {
+                    d.bg(theme::hsla(t::ERROR)).text_color(theme::hsla(t::BG))
+                } else {
+                    d.bg(with_alpha(theme::hsla(t::TEXT_STRONG), 0.10))
+                }
+            })
+            .child(icon(glyph, 12., theme::hsla(t::TEXT)))
+    }
+
+    fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mac = cfg!(target_os = "macos");
+        div()
+            .debug_selector(|| "titlebar".to_string())
+            .h(px(TITLEBAR_H))
+            .w_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .pl(px(if mac { TRAFFIC_LIGHTS_W } else { 10. }))
+            .pr(px(if mac { 10. } else { 0. }))
+            .border_b_1()
+            .border_color(with_alpha(theme::hsla(t::TEXT), 0.12))
+            .bg(theme::hsla(t::BG))
             .child(
-                svg()
-                    .path(format!("icons/{}.svg", v.icon()))
-                    .size(px(20.))
-                    .text_color(fg),
+                // the drag region: the whole bar except the buttons
+                div()
+                    .h_full()
+                    .flex_1()
+                    .min_w(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .window_control_area(WindowControlArea::Drag)
+                    .when(!mac, |d| {
+                        d.child(gpui::img(brand::mark()).size(px(16.)).flex_none())
+                            .child(tracked("SYNTHESIS", 10., 0.3, theme::hsla(t::TEXT_STRONG)))
+                    }),
             )
-            .child(div().text_size(px(11.)).child(v.label()))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(1.))
+                    .p(px(2.))
+                    .mr(px(6.))
+                    .rounded(px(8.))
+                    .bg(with_alpha(theme::hsla(t::TEXT_STRONG), 0.07))
+                    .child(self.icon_button(View::Tui, cx))
+                    .child(self.icon_button(View::Agent, cx)),
+            )
+            .child(self.icon_button(View::Settings, cx))
+            .when(!mac, |d| {
+                d.child(div().w(px(8.)))
+                    .child(Self::window_button(WindowControlArea::Min))
+                    .child(Self::window_button(WindowControlArea::Max))
+                    .child(Self::window_button(WindowControlArea::Close))
+            })
+    }
+
+    /// The Agent page: not built yet (a different design is planned).
+    fn coming_soon() -> impl IntoElement {
+        div()
+            .debug_selector(|| "coming-soon".to_string())
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(10.))
+            .child(gpui::img(brand::mark()).size(px(72.)))
+            .child(tracked("AGENT", 16., 0.32, theme::hsla(t::TEXT_STRONG)))
+            .child(
+                div()
+                    .px(px(10.))
+                    .py(px(2.))
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(theme::hsla(t::BORDER))
+                    .text_color(theme::hsla(t::TEXT))
+                    .child("Coming soon"),
+            )
     }
 }
 
 impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let rail = div()
-            .flex()
-            .flex_col()
-            .w(px(RAIL_W))
-            .h_full()
-            .flex_none()
-            .bg(theme::hsla(t::SURFACE))
-            .border_r_1()
-            .border_color(theme::hsla(t::BORDER))
-            // room for the macOS traffic lights
-            .pt(px(if cfg!(target_os = "macos") { 40. } else { 12. }))
-            .child(self.rail_button(View::Tui, cx))
-            .child(self.rail_button(View::Agent, cx))
-            .child(div().flex_1())
-            .child(self.rail_button(View::Settings, cx));
-        let v = self.view;
-        let content = if v == View::Settings {
+        let content = match self.view {
+            View::Tui => div().size_full().child(self.tui.clone()),
+            View::Agent => div().size_full().child(Self::coming_soon()),
             // the panel slides over the view it was opened from
-            let under = match self.back {
-                View::Tui => div().size_full().child(self.tui.clone()),
-                View::Agent => div().size_full().child(self.agent.clone()),
-                View::Settings => div().size_full(),
-            };
-            div()
-                .relative()
-                .flex_1()
-                .min_w(px(0.))
-                .child(under)
-                .child(div().absolute().inset_0().child(self.settings.clone()))
-        } else if v == View::Tui {
-            div().flex_1().min_w(px(0.)).child(self.tui.clone())
-        } else {
-            div().flex_1().min_w(px(0.)).child(self.agent.clone())
+            View::Settings => {
+                let under = match self.back {
+                    View::Agent => div().size_full().child(Self::coming_soon()),
+                    _ => div().size_full().child(self.tui.clone()),
+                };
+                div()
+                    .size_full()
+                    .relative()
+                    .child(under)
+                    .child(div().absolute().inset_0().child(self.settings.clone()))
+            }
         };
         div()
             .size_full()
             .flex()
-            .flex_row()
+            .flex_col()
             .bg(theme::hsla(t::BG))
             .text_size(px(13.))
             .font_family(brand::UI_FONT)
-            .child(rail)
-            .child(content)
+            .on_key_down(cx.listener(|s, ev: &gpui::KeyDownEvent, window, cx| {
+                let k = &ev.keystroke;
+                if !k.modifiers.secondary(cx) {
+                    return;
+                }
+                match k.key.as_str() {
+                    "," => s.go(View::Settings, window, cx),
+                    "1" => s.go(View::Tui, window, cx),
+                    "2" => s.go(View::Agent, window, cx),
+                    _ => return,
+                }
+                cx.stop_propagation();
+            }))
+            .child(self.title_bar(cx))
+            .child(div().flex_1().min_h(px(0.)).child(content))
     }
 }
 
 /// The bundled fonts: the UI sans and the TUI view's monospace (SIL OFL, `assets/fonts`).
 pub fn register_fonts(cx: &App) {
-    let fonts: [&'static [u8]; 4] = [
+    let fonts: [&'static [u8]; 7] = [
         include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
         brand::UI_FONT_FILES[0],
         brand::UI_FONT_FILES[1],
         brand::UI_FONT_FILES[2],
+        brand::MONO_FONT_FILES[0],
+        brand::MONO_FONT_FILES[1],
+        brand::MONO_FONT_FILES[2],
     ];
     if let Err(e) = cx
         .text_system()
@@ -179,17 +322,22 @@ pub fn open(cx: &mut App, live: Option<LiveCfg>) {
     let opts = gpui::WindowOptions {
         titlebar: Some(gpui::TitlebarOptions {
             title: Some("Synthesis".into()),
-            // macOS: full-bleed, the traffic lights sit over the rail
-            appears_transparent: mac,
-            traffic_light_position: mac.then(|| gpui::point(px(16.), px(18.))),
+            // a custom title bar everywhere: the traffic lights sit in it on macOS (its 30px row, so centred)
+            appears_transparent: true,
+            traffic_light_position: mac.then(|| gpui::point(px(14.), px(9.))),
         }),
+        // Windows and Linux draw their own controls
+        window_decorations: (!mac).then_some(gpui::WindowDecorations::Client),
         window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::centered(
             None,
             gpui::size(px(1280.), px(800.)),
             cx,
         ))),
-        // the design's minimum app size (cli.html `#app`) plus the rail
-        window_min_size: Some(gpui::size(px(layout::MIN_W + RAIL_W), px(layout::MIN_H))),
+        // the design's minimum app size (cli.html `#app`) plus the title bar
+        window_min_size: Some(gpui::size(
+            px(layout::MIN_W),
+            px(layout::MIN_H + TITLEBAR_H),
+        )),
         ..Default::default()
     };
     // `--sample` reads and writes nothing, so its Settings view has no files to open
@@ -213,49 +361,128 @@ pub fn open(cx: &mut App, live: Option<LiveCfg>) {
         .map(|c| settings_view::hidden_from(&c.tui))
         .unwrap_or_default();
     let opened = cx.open_window(opts, |window, cx| {
-        let agent = cx.new(|cx| match &live {
-            // the engine starts when the view is first shown
-            Some(cfg) => AgentView::live(window, cx, cfg.clone(), RAIL_W),
-            None => AgentView::with_sessions(
-                window,
-                cx,
-                vec![crate::agent_view::sample::live()],
-                RAIL_W,
-            ),
-        });
-        let tui = cx.new(|cx| match live {
-            Some(cfg) => TuiView::live(window, cx, cfg, hidden, RAIL_W),
-            None => TuiView::new(RAIL_W, hidden),
-        });
-        tui.update(cx, |t, cx| t.start(window, cx));
-        let settings = cx.new(|cx| SettingsView::new(window, cx, settings_cfg, RAIL_W));
-        cx.new(|cx| {
-            cx.subscribe_in(
-                &settings,
-                window,
-                |s: &mut Shell, _, _: &Close, window, cx| s.go(s.back, window, cx),
-            )
-            .detach();
-            cx.subscribe_in(
-                &tui,
-                window,
-                |s: &mut Shell, _, _: &OpenSettings, window, cx| {
-                    if s.view != View::Settings {
-                        s.go(View::Settings, window, cx);
-                    }
-                },
-            )
-            .detach();
-            Shell {
-                view: View::Tui,
-                back: View::Tui,
-                tui,
-                agent,
-                settings,
-            }
-        })
+        cx.new(|cx| Shell::new(window, cx, live, hidden, settings_cfg))
     });
     if let Err(e) = opened {
         eprintln!("synthesis-desktop: cannot open the window: {e}");
+    }
+}
+
+impl Shell {
+    /// The shell over the TUI view and the Settings slide-in. `live` `None` draws the sample.
+    pub fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        live: Option<LiveCfg>,
+        hidden: layout::Hidden,
+        settings_cfg: Result<settings_view::model::Cfg, String>,
+    ) -> Self {
+        let tui = cx.new(|cx| match live {
+            Some(cfg) => TuiView::live(window, cx, cfg, hidden, 0.),
+            None => TuiView::new(0., hidden),
+        });
+        Self::around(window, cx, tui, settings_cfg)
+    }
+
+    /// The shell over a TUI view the caller built (the offscreen shots fill it before it is drawn).
+    pub fn around(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        tui: Entity<TuiView>,
+        settings_cfg: Result<settings_view::model::Cfg, String>,
+    ) -> Self {
+        tui.update(cx, |t, cx| {
+            t.set_top_inset(TITLEBAR_H);
+            t.start(window, cx)
+        });
+        let settings = cx.new(|cx| SettingsView::new(window, cx, settings_cfg, 0.));
+        cx.subscribe_in(
+            &settings,
+            window,
+            |s: &mut Shell, _, _: &Close, window, cx| s.go(s.back, window, cx),
+        )
+        .detach();
+        cx.subscribe_in(
+            &tui,
+            window,
+            |s: &mut Shell, _, _: &OpenSettings, window, cx| {
+                if s.view != View::Settings {
+                    s.go(View::Settings, window, cx);
+                }
+            },
+        )
+        .detach();
+        Shell {
+            view: View::Tui,
+            back: View::Tui,
+            tui,
+            settings,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, size};
+
+    fn open(
+        cx: &mut TestAppContext,
+        w: f32,
+        h: f32,
+    ) -> (Entity<Shell>, &mut gpui::VisualTestContext) {
+        cx.update(gpui_component::init);
+        let (shell, v) = cx.add_window_view(|window, cx| {
+            Shell::new(window, cx, None, Default::default(), Err("test".into()))
+        });
+        v.simulate_resize(size(px(w), px(h)));
+        v.run_until_parked();
+        (shell, v)
+    }
+
+    fn y(v: &mut gpui::VisualTestContext, sel: &'static str) -> Option<(f32, f32)> {
+        v.debug_bounds(sel)
+            .map(|b| (f32::from(b.origin.y), f32::from(b.size.height)))
+    }
+
+    #[gpui::test]
+    fn the_title_bar_sits_above_the_design_content(cx: &mut TestAppContext) {
+        let (_, v) = open(cx, 1400., 930.);
+        // no rail: the TUI view takes the whole width, below the 30px title bar
+        assert_eq!(y(v, "titlebar"), Some((0., TITLEBAR_H)));
+        assert_eq!(y(v, "header"), Some((TITLEBAR_H, 46.)));
+        let f = y(v, "footer").unwrap();
+        assert_eq!(f.0 + f.1, 930.);
+        let g = v.debug_bounds("col-left").unwrap();
+        assert_eq!(f32::from(g.origin.x), 10.);
+        // the content under the bar is the 1400x900 design: the same columns as the browser's
+        let r = v.debug_bounds("col-right").unwrap();
+        assert_eq!(f32::from(r.size.width), 500.);
+        assert_eq!(f32::from(r.origin.x), 1400. - 10. - 500.);
+    }
+
+    #[gpui::test]
+    fn the_icons_switch_views_and_agent_is_coming_soon(cx: &mut TestAppContext) {
+        let (shell, v) = open(cx, 1400., 930.);
+        shell.update(v, |s, cx| {
+            assert_eq!(s.view, View::Tui);
+            let _ = cx;
+        });
+        shell.update_in(v, |s, window, cx| s.go(View::Agent, window, cx));
+        v.run_until_parked();
+        assert!(
+            v.debug_bounds("header").is_none(),
+            "the TUI view is not drawn on the Agent page"
+        );
+        assert!(v.debug_bounds("titlebar").is_some(), "the title bar stays");
+        shell.update_in(v, |s, window, cx| s.go(View::Tui, window, cx));
+        v.run_until_parked();
+        assert!(v.debug_bounds("header").is_some());
+        // Settings slides over the view it was opened from, and the same button closes it
+        shell.update_in(v, |s, window, cx| s.go(View::Settings, window, cx));
+        assert_eq!(
+            shell.read_with(v, |s, _| (s.view, s.back)),
+            (View::Settings, View::Tui)
+        );
     }
 }

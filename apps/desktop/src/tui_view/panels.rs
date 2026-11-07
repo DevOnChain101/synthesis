@@ -1,348 +1,505 @@
-//! Panel building blocks and the panel bodies of the TUI view (`cli.html` `.panel`, `.rows`, `.kv`).
+//! The panel bodies of the TUI view, 1:1 with `cli.html` (`.rows`, `.ws-item`, `.run-item`, `.kv`, `.chk`,
+//! `.bars`): Workspace, Running, Session, Tools & Skills, Recent Activity, User Prompt, Agent Status, Context
+//! and Usage & Metrics. The panel chrome itself is `widgets::chrome`.
 
 use gpui::{
-    AnyElement, App, ClickEvent, Div, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div, prelude::*, px,
-    svg,
+    Div, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
+    Styled as _, div, prelude::*, px,
 };
 use synthesis_tui_render::theme as t;
 
-use super::layout::{
-    BODY_PAD, BODY_PAD_LEFT_BOTTOM, HEAD_LINE, HEAD_PAD, HEAD_PAD_LEFT, KV_ROW, PANEL_RADIUS, ROW_H,
+use super::sample::{
+    ActivityRow, AgentStatus, ContextInfo, PromptRow, Running, SessionInfo, StepKind, ToolsInfo,
+    Usage, Workspace,
 };
-use super::sample::{Activity, McpRow, McpState, Running, Snapshot, Tokens, Workspace};
-use super::tracked;
 use crate::theme::hsla;
+pub use crate::widgets::chrome::{OnClick, dim, dot, icon, strong, text, with_alpha};
 
-pub fn text() -> Hsla {
-    hsla(t::TEXT)
-}
-pub fn strong() -> Hsla {
-    hsla(t::TEXT_STRONG)
-}
-pub fn dim() -> Hsla {
-    hsla(t::MUTED)
-}
+/// Height of one Workspace row (`li` 1px padding + a two-line `.ws-item`: 2 + 2 + 16.25 + 14.95 + 2).
+pub const WS_ROW_H: f32 = 37.19;
+/// Height of one Running row (`li` padding + `.run-item`: 10 + 2 + 19.375 + 2 + 17.825 + 2).
+pub const RUN_ROW_H: f32 = 53.19;
 
-pub fn icon(name: &str, size: f32, c: Hsla) -> impl IntoElement {
-    svg()
-        .path(format!("icons/{name}.svg"))
-        .size(px(size))
-        .flex_none()
-        .text_color(c)
+/// A `.rows li` with the design's 1px vertical padding.
+fn li() -> Div {
+    div().py(px(1.))
 }
 
-#[derive(Clone, Copy)]
-pub struct Head {
-    pub id: &'static str,
-    pub title: &'static str,
-    pub icon: &'static str,
-    /// Left column panels use the tighter header (`#view1 .col.l .panel>header`).
-    pub left: bool,
-    /// Short windows tighten the Topology header (`max-height: 749px`).
-    pub compact: bool,
-}
-
-/// A panel: bordered, rounded, header (icon + uppercase tracked title + optional meta) and a body.
-/// `fit` bodies size to their content (capped by `max_h`); the others fill the panel.
-pub fn panel(
-    h: Head,
-    meta: Option<AnyElement>,
-    fit: bool,
-    max_h: Option<f32>,
-    body: impl IntoElement,
-) -> Div {
-    panel_scroll(h, meta, fit, max_h, body, None)
-}
-
-/// [`panel`] whose body scroll position the caller can move (keyboard selection kept in view).
-pub fn panel_scroll(
-    h: Head,
-    meta: Option<AnyElement>,
-    fit: bool,
-    max_h: Option<f32>,
-    body: impl IntoElement,
-    scroll: Option<&gpui::ScrollHandle>,
-) -> Div {
-    let (pt, pb) = if h.left { HEAD_PAD_LEFT } else { HEAD_PAD };
-    let (pt, pb, size, px_) = if h.compact {
-        (4., 2., 11., 10.)
-    } else {
-        (pt, pb, 12., 12.)
-    };
-    let bottom = if h.left {
-        BODY_PAD_LEFT_BOTTOM
-    } else {
-        BODY_PAD.1
-    };
-    let mut b = div()
-        .id(h.id)
-        .debug_selector(|| format!("{}-body", h.id))
-        .min_h(px(0.))
-        .px(px(12.))
-        .pt(px(BODY_PAD.0))
-        .overflow_y_scroll();
-    b = if fit { b.flex_initial() } else { b.flex_1() };
-    let mut b = match scroll {
-        Some(h) => b.track_scroll(h),
-        None => b,
-    };
-    if let Some(m) = max_h {
-        b = b.max_h(px(m));
-    }
-    let mut head = div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .gap(px(8.))
-        .px(px(px_))
-        .pt(px(pt))
-        .pb(px(pb))
-        .h(px(pt + pb + HEAD_LINE))
-        .child(icon(h.icon, 14., hsla(t::ACCENT)))
-        .child(tracked(&h.title.to_uppercase(), size, 0.16, strong()));
-    if let Some(m) = meta {
-        head = head.child(
-            div()
-                .ml_auto()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .text_size(px(12.))
-                .text_color(text())
-                .child(m),
-        );
-    }
-    div()
-        .debug_selector(|| h.id.to_string())
-        .flex()
-        .flex_col()
-        .min_w(px(0.))
-        .overflow_hidden()
-        .bg(hsla(t::SURFACE))
-        .border_1()
-        .border_color(hsla(t::BORDER))
-        .rounded(px(PANEL_RADIUS))
-        .child(head)
-        .child(b.child(body))
-        // bottom padding outside the scroll area, or the next row shows through it
-        .child(div().h(px(bottom)).flex_none())
-}
-
-pub fn dot(c: Hsla, filled: bool) -> Div {
-    let d = div().size(px(7.)).flex_none().rounded_full().mt(px(1.));
-    if filled {
-        d.bg(c)
-    } else {
-        d.border_1().border_color(c)
-    }
-}
-
-/// `.kv`: dim label, strong value.
-pub fn kv(rows: &[(String, String)], label_w: f32) -> Div {
-    div().flex().flex_col().children(rows.iter().map(|(k, v)| {
-        div()
-            .flex()
-            .h(px(KV_ROW))
-            .flex_none()
-            .gap(px(12.))
-            .child(
-                div()
-                    .w(px(label_w))
-                    .flex_none()
-                    .text_color(dim())
-                    .child(k.clone()),
-            )
-            .child(
-                div()
-                    .min_w(px(0.))
-                    .truncate()
-                    .text_color(strong())
-                    .child(v.clone()),
-            )
-    }))
-}
-
-fn row_box(selected: bool) -> Div {
+/// The `.ws-item`/`.run-item` box: 1px transparent border, radius 5; selected: elevated, a rule border and
+/// the accent bar on the left edge (gpui has no per-side border colour, so the bar is a child).
+fn item_box(selected: bool, pad: (f32, f32, f32, f32)) -> Div {
     let d = div()
-        .h(px(ROW_H))
-        .flex_none()
+        .relative()
         .flex()
-        .items_center()
+        .w_full()
         .gap(px(8.))
-        .px(px(8.))
+        .pt(px(pad.0))
+        .pr(px(pad.1))
+        .pb(px(pad.2))
+        .pl(px(pad.3))
         .rounded(px(5.))
         .border_1()
         .border_color(gpui::transparent_black());
     if selected {
-        // gpui has no per-side border colour: the accent edge is a bar
         d.bg(hsla(t::ELEVATED))
             .border_color(hsla(t::BORDER))
             .text_color(strong())
-            .child(div().w(px(3.)).h_full().flex_none().bg(hsla(t::ACCENT)))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(-1.))
+                    .top(px(-1.))
+                    .bottom(px(-1.))
+                    .w(px(3.))
+                    .rounded_l(px(5.))
+                    .bg(hsla(t::ACCENT)),
+            )
     } else {
         d.text_color(text())
     }
 }
 
-fn two_lines(top: String, sub: String, selected: bool) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .min_w(px(0.))
-        .flex_1()
-        .child(div().truncate().line_height(px(16.)).child(top))
-        .child(
-            div()
-                .truncate()
-                .line_height(px(15.))
-                .text_size(px(11.5))
-                .text_color(if selected { text() } else { dim() })
-                .child(sub),
-        )
+pub fn workspace_body(
+    ws: &[Workspace],
+    on_click: Option<&dyn Fn(usize) -> OnClick>,
+    on_new: Option<OnClick>,
+) -> Div {
+    let mut col = div().flex().flex_col();
+    for (i, w) in ws.iter().enumerate() {
+        col = col.child(
+            li().child(
+                item_box(w.selected, (1., 8., 1., 8.))
+                    .id(("ws-row", i))
+                    .items_center()
+                    .when_some(on_click, |d, f| d.cursor_pointer().on_click(f(i)))
+                    .child(icon(
+                        "folder",
+                        14.,
+                        if w.selected { strong() } else { text() },
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .min_w(px(0.))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .line_height(px(16.25))
+                                    .child(w.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .line_height(px(14.95))
+                                    .text_size(px(11.5))
+                                    .text_color(if w.selected { text() } else { dim() })
+                                    .child(w.path.clone()),
+                            ),
+                    ),
+            ),
+        );
+    }
+    col.child(
+        li().child(
+            item_box(false, (1., 8., 1., 8.))
+                .id("ws-new")
+                .items_center()
+                .text_color(dim())
+                .when_some(on_new, |d, f| d.cursor_pointer().on_click(f))
+                .child(icon("plus", 14., dim()))
+                .child("new workspace..."),
+        ),
+    )
 }
 
-/// A click on row `i`.
-pub type OnClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+pub fn running_body(
+    rs: &[Running],
+    on_click: Option<&dyn Fn(usize) -> OnClick>,
+    on_new: Option<OnClick>,
+) -> Div {
+    let mut col = div().flex().flex_col();
+    for (i, r) in rs.iter().enumerate() {
+        col = col.child(
+            li().child(
+                item_box(r.selected, (5., 7., 5., 6.))
+                    .id(("run-row", i))
+                    .when_some(on_click.filter(|_| !r.peer), |d, f| {
+                        d.cursor_pointer().on_click(f(i))
+                    })
+                    .child(
+                        dot(hsla(t::SUCCESS), r.live)
+                            .mt(px(5.))
+                            .when(!r.live, |d| d.border_color(dim())),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(8.))
+                                    .min_w(px(0.))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.))
+                                            .truncate()
+                                            .text_color(strong())
+                                            .child(r.title.clone()),
+                                    )
+                                    .child(
+                                        div().flex_none().text_color(dim()).child(r.age.clone()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .min_w(px(0.))
+                                    .text_size(px(11.5))
+                                    .text_color(if r.selected { text() } else { dim() })
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(hsla(t::INFO))
+                                            .child(r.folder.clone()),
+                                    )
+                                    .when(!r.branch.is_empty(), |d| {
+                                        d.child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(3.))
+                                                .min_w(px(0.))
+                                                .overflow_hidden()
+                                                .child(icon("git-branch", 12., dim()))
+                                                .child(div().truncate().child(r.branch.clone())),
+                                        )
+                                    }),
+                            ),
+                    ),
+            ),
+        );
+    }
+    col.child(
+        li().child(
+            div()
+                .id("run-new")
+                .flex()
+                .w_full()
+                .items_center()
+                .gap(px(7.))
+                .px(px(4.))
+                .py(px(1.))
+                .border_1()
+                .border_color(gpui::transparent_black())
+                .rounded(px(4.))
+                .text_color(dim())
+                .when_some(on_new, |d, f| d.cursor_pointer().on_click(f))
+                .child(icon("plus", 14., dim()))
+                .child("new session..."),
+        ),
+    )
+}
 
-pub fn workspace_rows(ws: &[Workspace], on_click: Option<&dyn Fn(usize) -> OnClick>) -> Div {
+/// `.kv`: dim label column, strong value; rows `row_gap` apart.
+pub fn kv(rows: &[(String, String)], label_w: f32, col_gap: f32, row_gap: f32) -> Div {
     div()
         .flex()
         .flex_col()
-        .children(ws.iter().enumerate().map(|(i, w)| {
-            row_box(w.selected)
-                .id(("ws-row", i))
-                .when_some(on_click, |d, f| d.cursor_pointer().on_click(f(i)))
-                .child(icon("folder", 14., hsla(t::ACCENT)))
-                .child(two_lines(w.name.clone(), w.path.clone(), w.selected))
+        .gap(px(row_gap))
+        .children(rows.iter().map(|(k, v)| {
+            div()
+                .flex()
+                .gap(px(col_gap))
                 .child(
                     div()
+                        .w(px(label_w))
                         .flex_none()
                         .text_color(dim())
-                        .child(w.sessions.to_string()),
+                        .child(k.clone()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .text_color(strong())
+                        .child(v.clone()),
                 )
         }))
 }
 
-pub fn running_rows(rs: &[Running], on_click: Option<&dyn Fn(usize) -> OnClick>) -> Div {
+pub fn session_meta(s: &SessionInfo) -> gpui::AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .text_color(hsla(t::SUCCESS))
+        .child(dot(hsla(t::SUCCESS), true))
+        .child(s.status.clone())
+        .into_any_element()
+}
+
+pub fn session_body(s: &SessionInfo) -> Div {
+    kv(&s.rows, 62., 12., 3.)
+}
+
+pub fn tools_body(k: &ToolsInfo) -> Div {
     div()
         .flex()
         .flex_col()
-        .children(rs.iter().enumerate().map(|(i, r)| {
-            row_box(r.selected)
-                .id(("run-row", i))
-                .when_some(on_click.filter(|_| !r.peer), |d, f| {
-                    d.cursor_pointer().on_click(f(i))
-                })
-                .child(dot(hsla(t::SUCCESS), r.live).when(!r.live, |d| d.border_color(dim())))
-                .child(two_lines(r.title.clone(), r.branch.clone(), r.selected))
-                .child(div().flex_none().text_color(dim()).child(r.age.clone()))
+        .children(k.rows.iter().map(|r| {
+            li().flex()
+                .items_center()
+                .gap(px(8.))
+                .child(dot(hsla(t::SUCCESS), true))
+                .child(div().child(r.name.clone()))
+                .child(
+                    div()
+                        .ml_auto()
+                        .flex_none()
+                        .text_color(if r.plain { dim() } else { hsla(t::SUCCESS) })
+                        .child(r.value.clone()),
+                )
         }))
+        .child(
+            li().flex()
+                .items_center()
+                .gap(px(8.))
+                .text_color(dim())
+                .child(div().w(px(7.)).flex_none())
+                .child(format!("+ {} more...", k.more)),
+        )
 }
 
-pub fn mcp_rows(rows: &[McpRow]) -> Div {
-    div().flex().flex_col().children(rows.iter().map(|m| {
-        let c = match m.state {
-            McpState::Connected => hsla(t::SUCCESS),
-            McpState::Connecting => hsla(t::WARN),
-            McpState::Failed => hsla(t::ERROR),
-        };
-        div()
+/// `.circ`: the 11px ring of a list row or a checklist step.
+fn circ(kind: Option<StepKind>) -> Div {
+    let d = div().size(px(11.)).flex_none().rounded_full().border_1();
+    match kind {
+        Some(StepKind::Done) => d
+            .border_color(hsla(t::SUCCESS))
             .flex()
-            .h(px(KV_ROW))
-            .flex_none()
+            .items_center()
+            .justify_center()
+            .child(div().size(px(6.)).rounded_full().bg(hsla(t::SUCCESS))),
+        Some(StepKind::Now) => d.border_color(hsla(t::ACCENT)),
+        _ => d.border_color(dim()),
+    }
+}
+
+pub fn activity_body(rows: &[ActivityRow]) -> Div {
+    div().flex().flex_col().children(rows.iter().map(|a| {
+        li().flex()
             .items_center()
             .gap(px(8.))
-            .child(dot(c, m.state == McpState::Connected))
+            .child(circ(None))
             .child(
                 div()
+                    .flex_1()
                     .min_w(px(0.))
                     .truncate()
-                    .flex_1()
-                    .child(m.name.clone()),
+                    .child(a.text.clone()),
             )
-            .child(div().flex_none().text_color(dim()).child(match m.state {
-                McpState::Connected => format!("{} tools", m.tools),
-                McpState::Connecting => "connecting".to_string(),
-                McpState::Failed => "failed".to_string(),
-            }))
+            .child(div().flex_none().text_color(dim()).child(a.ago.clone()))
     }))
 }
 
-pub fn activity_rows(rows: &[Activity]) -> Div {
-    div().flex().flex_col().children(rows.iter().map(|a| {
-        div()
-            .flex()
+pub fn prompts_body(rows: &[PromptRow]) -> Div {
+    if rows.is_empty() {
+        return div().text_color(dim()).child("No messages yet");
+    }
+    div().flex().flex_col().children(rows.iter().map(|p| {
+        li().flex()
+            .items_center()
             .gap(px(8.))
             .child(
                 div()
-                    .w(px(40.))
+                    .w(px(64.))
                     .flex_none()
-                    .whitespace_nowrap()
                     .text_color(dim())
-                    .child(a.time.clone()),
+                    .child(p.time.clone()),
             )
             .child(
                 div()
-                    .flex_none()
-                    .w(px(10.))
-                    .text_color(hsla(t::ACCENT))
-                    .child(if a.prompt { "\u{276F}" } else { "" }),
-            )
-            .child(
-                div()
-                    .min_w(px(0.))
                     .flex_1()
+                    .min_w(px(0.))
                     .truncate()
-                    .text_color(if a.prompt { strong() } else { text() })
-                    .child(a.text.clone()),
+                    .child(p.text.clone()),
             )
     }))
 }
 
-pub fn status_body(s: &Snapshot) -> Div {
-    kv(&s.status, 58.)
-}
-
-pub fn tokens_body(k: &Tokens) -> Div {
-    let rows = vec![
-        ("input".to_string(), k.input.clone()),
-        ("output".to_string(), k.output.clone()),
-        ("cache".to_string(), k.cache.clone()),
-        ("cost".to_string(), k.cost.clone()),
-    ];
+pub fn agent_body(a: &AgentStatus, steps_shown: usize) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap(px(4.))
-        .child(kv(&rows, 58.))
         .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .mb(px(4.))
+                .pb(px(3.))
+                .border_b_1()
+                .border_color(hsla(t::RULE))
+                .child(
+                    div()
+                        .truncate()
+                        .text_color(strong())
+                        .child(a.working.clone()),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_color(dim())
+                        .child(format!("next: {}", a.next)),
+                ),
+        )
+        .children(a.steps.iter().take(steps_shown).map(|s| {
             div()
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(div().w(px(58.)).flex_none().text_color(dim()).child("ctx"))
+                .child(circ(Some(s.kind)))
                 .child(
                     div()
-                        .flex_1()
-                        .h(px(5.))
-                        .rounded(px(3.))
-                        .bg(hsla(t::BORDER))
+                        .flex()
+                        .gap(px(7.5))
+                        .min_w(px(0.))
                         .child(
                             div()
-                                .h_full()
-                                .w(gpui::relative(k.ctx_pct.clamp(0., 100.) / 100.))
-                                .rounded(px(3.))
-                                .bg(hsla(t::ACCENT)),
-                        ),
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_color(if s.kind == StepKind::Todo {
+                                    dim()
+                                } else {
+                                    strong()
+                                })
+                                .child(s.text.clone()),
+                        )
+                        .when(!s.note.is_empty(), |d| {
+                            d.child(div().flex_none().text_color(dim()).child(s.note.clone()))
+                        }),
+                )
+        }))
+}
+
+/// The 5px progress bar (`.bar`): a faint track and an accent fill.
+pub fn bar(pct: f32) -> Div {
+    div()
+        .h(px(5.))
+        .rounded(px(3.))
+        .overflow_hidden()
+        .bg(with_alpha(gpui::white(), 0.08))
+        .child(
+            div()
+                .h_full()
+                .w(gpui::relative(pct.clamp(0., 100.) / 100.))
+                .rounded(px(3.))
+                .bg(hsla(t::ACCENT)),
+        )
+}
+
+/// `n` rows of the Context kv list beyond the tokens line are dropped when the row is tight (`r-tight`).
+pub fn context_body(c: &ContextInfo, rows_shown: usize) -> Div {
+    let rows: Vec<(String, String)> = [
+        ("model", c.model.clone()),
+        ("turns", c.turns.clone()),
+        ("input", c.input.clone()),
+        ("files", c.files.clone()),
+        ("output", c.output.clone()),
+        ("cache", format!("{} ({} hit)", c.cache, c.hit)),
+    ]
+    .into_iter()
+    .take(rows_shown)
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .flex()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .w(px(48.))
+                        .flex_none()
+                        .text_color(dim())
+                        .child("tokens"),
                 )
                 .child(
                     div()
-                        .flex_none()
+                        .text_color(hsla(t::SUCCESS))
+                        .child(format!("{} / {}", c.used, c.max)),
+                )
+                .child(
+                    div()
+                        .ml_auto()
                         .text_color(strong())
-                        .child(format!("{:.0}%", k.ctx_pct)),
+                        .child(format!("{:.0}%", c.pct)),
                 ),
         )
+        .child(div().my(px(4.)).mb(px(6.)).child(bar(c.pct)))
+        .child(kv(&rows, 62., 10., 1.))
+}
+
+/// The period select of Usage & Metrics: a click toggles 7 and 30 days.
+pub fn usage_meta(u: &Usage, on_click: Option<OnClick>) -> gpui::AnyElement {
+    div()
+        .id("usage-range")
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .px(px(8.))
+        .py(px(1.))
+        .border_1()
+        .border_color(hsla(t::BORDER))
+        .rounded(px(5.))
+        .bg(hsla(t::SURFACE))
+        .text_color(strong())
+        .when_some(on_click, |d, f| {
+            d.cursor_pointer()
+                .hover(|d| d.border_color(hsla(t::ACCENT)))
+                .on_click(f)
+        })
+        .child(u.range.clone())
+        .child(icon("chevron-down", 14., strong()))
+        .into_any_element()
+}
+
+pub fn usage_body(u: &Usage) -> Div {
+    div().flex().flex_col().children(u.rows.iter().map(|r| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .py(px(3.))
+            .child(
+                div()
+                    .w(px(118.))
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .child(r.label.clone()),
+            )
+            .child(div().flex_1().min_w(px(0.)).child(bar(r.pct)))
+            .child(
+                div()
+                    .w(px(92.))
+                    .flex_none()
+                    .flex()
+                    .justify_end()
+                    .whitespace_nowrap()
+                    .text_color(strong())
+                    .child(r.value.clone()),
+            )
+    }))
 }
 
 /// The scroll offset (px from the top) that brings the row `[top, top + row)` into a view of
@@ -357,94 +514,13 @@ pub fn reveal_offset(cur: f32, top: f32, row: f32, view: f32) -> Option<f32> {
     }
 }
 
-/// Keeps list row `i` (rows of `ROW_H`) in view of `h`.
-pub fn reveal_row(h: &gpui::ScrollHandle, i: usize) {
+/// Keeps list row `i` (rows of `row_h`) in view of `h`.
+pub fn reveal_row(h: &gpui::ScrollHandle, i: usize, row_h: f32) {
     let (cur, view) = (-f32::from(h.offset().y), f32::from(h.bounds().size.height));
-    let top = BODY_PAD.0 + i as f32 * ROW_H;
-    if let Some(next) = reveal_offset(cur, top, ROW_H, view) {
+    let top = 2. + i as f32 * row_h;
+    if let Some(next) = reveal_offset(cur, top, row_h, view) {
         h.set_offset(gpui::point(h.offset().x, px(-next)));
     }
-}
-
-/// Heat level 0..=4 of a day relative to the busiest one shown.
-pub fn level(v: f32, max: f32) -> usize {
-    if v <= 0. || max <= 0. {
-        0
-    } else {
-        ((v / max * 4.).ceil() as usize).clamp(1, 4)
-    }
-}
-
-/// (weeks, cell px, gap px) of the Usage grid in `w` px: all 53 weeks, the cells shrinking to fit
-/// (never under 4 px; a narrower panel shows the newest weeks that fit).
-pub fn heat_grid(w: f32) -> (usize, f32, f32) {
-    let gap = 2.;
-    let cell = ((w + gap) / 53. - gap).floor().clamp(4., 11.);
-    let weeks = (((w + gap) / (cell + gap)).floor() as usize).clamp(1, 53);
-    (weeks, cell, gap)
-}
-
-/// The levels of every cell of a `weeks`-wide grid (column-major, 7 rows): the newest days at the
-/// end, empty cells before a short history, so the grid is always drawn in full.
-pub fn heat_levels(days: &[f32], weeks: usize) -> Vec<usize> {
-    let n = (weeks * 7).min(days.len());
-    let shown = &days[days.len() - n..];
-    let max = shown.iter().cloned().fold(0., f32::max);
-    let mut v = vec![0; weeks * 7 - n];
-    v.extend(shown.iter().map(|d| level(*d, max)));
-    v
-}
-
-pub fn heat_body(s: &Snapshot, inner_w: f32) -> Div {
-    let (weeks, size, gap) = heat_grid(inner_w);
-    let levels = heat_levels(&s.usage.days, weeks);
-    // an empty day is a faint cell, not the panel's own colour: the whole grid is visible
-    let cell = |lvl: usize| {
-        div()
-            .size(px(size))
-            .flex_none()
-            .rounded(px(2.))
-            .bg(if lvl == 0 {
-                hsla(t::BORDER)
-            } else {
-                hsla(t::HEAT[lvl])
-            })
-    };
-    let cols = (0..weeks).map(|c| {
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(gap))
-            .children((0..7).map(|r| cell(levels[c * 7 + r])))
-    });
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(6.))
-        .child(div().flex().gap(px(gap)).children(cols))
-        .child(
-            div()
-                .flex()
-                .gap(px(12.))
-                .children(s.usage.rows.iter().map(|(k, v)| {
-                    div()
-                        .flex()
-                        .gap(px(6.))
-                        .child(div().text_color(dim()).child(k.clone()))
-                        .child(div().text_color(strong()).child(v.clone()))
-                })),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(3.))
-                .text_size(px(11.))
-                .text_color(dim())
-                .child("less")
-                .children((0..5).map(cell))
-                .child("more"),
-        )
 }
 
 #[cfg(test)]
@@ -452,28 +528,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn heat_levels_and_weeks() {
-        assert_eq!(level(0., 100.), 0);
-        assert_eq!(level(1., 100.), 1);
-        assert_eq!(level(100., 100.), 4);
-        assert_eq!(level(50., 100.), 2);
-        assert_eq!(level(5., 0.), 0);
-        // 500px right column: 500 - 2 border - 24 padding = 474 wide: all 53 weeks, 6px cells
-        assert_eq!(heat_grid(474.), (53, 6., 2.));
-        assert_eq!(heat_grid(234.), (39, 4., 2.));
-        assert_eq!(heat_grid(1.).0, 1);
-        // a sparse history still fills the grid: empty cells first, the days at the end
-        let v = heat_levels(&[0., 5.], 53);
-        assert_eq!(
-            (
-                v.len(),
-                v[..v.len() - 1].iter().sum::<usize>(),
-                v[v.len() - 1]
-            ),
-            (371, 0, 4)
-        );
-        assert_eq!(heat_levels(&[], 4), vec![0; 28]);
-        // a row below the view scrolls up to it, one above scrolls back, one in view stays
+    fn a_row_below_the_view_scrolls_up_to_it() {
         assert_eq!(reveal_offset(0., 150., 36., 100.), Some(86.));
         assert_eq!(reveal_offset(100., 36., 36., 100.), Some(36.));
         assert_eq!(reveal_offset(0., 36., 36., 100.), None);
