@@ -70,6 +70,10 @@ tokio-util = { version = "0.7.20", default-features = false }
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui-pre-apple = { version = "=0.3.10", features = ["runtime_shaders"] }
 
+# Windows: icon resource (build.rs). gpui already links the manifest. Already in the lock through gpui.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
+
 [dev-dependencies]
 # bounds assertions (`VisualTestContext::debug_bounds`) for the layout tests
 gpui = { package = "gpui-pre", version = "=0.3.10", features = ["test-support"] }

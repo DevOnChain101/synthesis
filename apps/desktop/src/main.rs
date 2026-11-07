@@ -1,4 +1,6 @@
 //! `synthesis-desktop`: the native desktop app (docs/specs/desktop.md).
+// Release builds on Windows use the GUI subsystem (no console window); debug builds keep the console.
+#![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 use clap::Parser as _;
 use synthesis_app::{homes, launch_dir};
@@ -11,7 +13,11 @@ use synthesis_desktop::tui_view::driver::LiveCfg;
 fn live_cfg(args: Args, env: Env) -> Result<LiveCfg, String> {
     let dir = match &args.cwd {
         Some(d) => d.clone(),
-        None => launch_dir()?,
+        // A Finder launch starts in `/`; never make the filesystem root the workspace.
+        None => match launch_dir()? {
+            d if d.parent().is_none() => homes(&env)?.user,
+            d => d,
+        },
     };
     let project =
         synthesis_core::canonicalize(&dir).map_err(|e| format!("--cwd {}: {e}", dir.display()))?;

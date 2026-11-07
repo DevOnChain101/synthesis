@@ -78,12 +78,9 @@ jobs:
         run: DIGEST_ENV=1 bash scripts/ci-digest.sh test.log "cargo test (${{ matrix.os }})"
 
   desktop:
-    # The GPUI desktop app (docs/specs/desktop.md). Not in ci-ok yet: macOS is verified locally,
-    # Linux and Windows have never run, so those two may fail without turning the run red. Add it
-    # to ci-ok `needs` (and drop continue-on-error) once all three are green.
+    # The GPUI desktop app (docs/specs/desktop.md); required by ci-ok on all three OSes.
     name: desktop (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.os != 'macos-latest' }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -343,7 +340,7 @@ jobs:
   ci-ok:
     # Single required status check for branch protection.
     if: always()
-    needs: [test, evals-selftest, browser, sandbox-linux, msrv, docs, deny, audit, shell-scripts]
+    needs: [test, desktop, evals-selftest, browser, sandbox-linux, msrv, docs, deny, audit, shell-scripts]
     runs-on: ubuntu-latest
     env:
       NEEDS: ${{ toJSON(needs) }}
