@@ -309,6 +309,108 @@ async fn model_bash_calls_stream_output_and_complete_with_the_whole_text() {
 }
 
 #[tokio::test]
+async fn a_foreground_command_has_process_events_with_redacted_output_and_its_exit_code() {
+    let mut rig = Rig::new(
+        Opts {
+            allow: vec!["Bash".into()],
+            ..bash_opts()
+        },
+        vec![
+            Turn::tool(
+                "b1",
+                "Bash",
+                json!({"command": format!("echo token {SECRET}; exit 3")}),
+            ),
+            Turn::text("done"),
+        ],
+    );
+    rig.run("go").await;
+    let kinds = rig.types();
+    let at = |t: &str| kinds.iter().position(|k| k == t).unwrap();
+    assert!(at("process.spawned") < at("process.output"));
+    assert!(at("process.output") < at("process.exited"));
+    assert!(at("process.exited") < at("tool.completed"));
+    let spawned = rig.find(|e| match e {
+        Event::ProcessSpawned(i) => Some(i.clone()),
+        _ => None,
+    });
+    assert_eq!(spawned[0].tool_call_id.as_deref(), Some("b1"));
+    assert!(
+        spawned[0]
+            .command
+            .as_deref()
+            .unwrap()
+            .starts_with("echo token ")
+    );
+    assert!(
+        !spawned[0]
+            .command
+            .as_deref()
+            .unwrap()
+            .contains("TOPSECRETVALUE"),
+        "{spawned:?}"
+    );
+    let out: String = rig
+        .find(|e| match e {
+            Event::ProcessOutput { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .concat();
+    assert!(
+        out.contains("[REDACTED:secret]") && !out.contains("TOPSECRETVALUE"),
+        "{out}"
+    );
+    let exited = rig.find(|e| match e {
+        Event::ProcessExited(i) => Some(i.clone()),
+        _ => None,
+    });
+    assert_eq!(exited.len(), 1);
+    assert_eq!(
+        (exited[0].exit_code, exited[0].process_id.as_str()),
+        (Some(3), "b1")
+    );
+    assert!(exited[0].duration_ms.is_some());
+    assert!(!rig.buf.text().contains("TOPSECRETVALUE"));
+    check_stream(&rig.events());
+}
+
+#[tokio::test]
+async fn a_background_command_is_spawned_once_and_exited_when_killed() {
+    let mut rig = Rig::new(
+        Opts {
+            allow: vec!["Bash".into(), "KillShell".into(), "BashOutput".into()],
+            ..bash_opts()
+        },
+        vec![
+            Turn::tool(
+                "b1",
+                "Bash",
+                json!({"command": "sleep 30", "run_in_background": true}),
+            ),
+            Turn::tool("k1", "KillShell", json!({"shell_id": "proc_1"})),
+            Turn::tool("o1", "BashOutput", json!({"bash_id": "proc_1"})),
+            Turn::text("done"),
+        ],
+    );
+    rig.run("go").await;
+    let spawned = rig.find(|e| match e {
+        Event::ProcessSpawned(i) => Some(i.clone()),
+        _ => None,
+    });
+    assert_eq!(spawned.len(), 1, "{spawned:?}");
+    assert_eq!(spawned[0].process_id, "proc_1");
+    assert_eq!(spawned[0].tool_call_id.as_deref(), Some("b1"));
+    assert!(spawned[0].pid.is_some());
+    let exited = rig.find(|e| match e {
+        Event::ProcessExited(i) => Some(i.clone()),
+        _ => None,
+    });
+    assert_eq!(exited.len(), 1, "reported once: {exited:?}");
+    assert_eq!(exited[0].process_id, "proc_1");
+    assert_eq!(exited[0].signal.as_deref(), Some("SIGKILL"));
+}
+
+#[tokio::test]
 async fn secrets_are_masked_in_live_output_and_in_the_completed_output() {
     let mut rig = Rig::new(
         Opts {

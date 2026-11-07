@@ -170,7 +170,10 @@ fn quiet(e: &Event) -> bool {
             | Event::ContextUsage { .. }
             | Event::ContextCompacting { .. }
             | Event::ToolOutput { .. }
-    )
+            | Event::ProcessOutput { .. }
+            | Event::BrowserFrame { .. }
+    ) || matches!(e, Event::ProcessSpawned(i) | Event::ProcessReady(i) | Event::ProcessExited(i)
+        if i.tool_call_id.is_some()) // the Bash tool row already shows these
 }
 
 /// One readable line for an event the chat does not need to show, and whether it is shown anyway
@@ -1132,6 +1135,7 @@ mod tests {
             pid: Some(7),
             exit_code: None,
             signal: None,
+            ..Default::default()
         });
         assert_eq!(rows_of(true, e), ["process p1 started"]);
     }

@@ -151,7 +151,7 @@ pub struct SessionEnd {
 }
 
 /// Payload of `process.spawned|ready|exited`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProcessInfo {
     pub process_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,6 +162,15 @@ pub struct ProcessInfo {
     pub exit_code: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal: Option<String>,
+    /// The tool call that started (or, for a background process, first started) it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// `process.spawned` of a Bash command: the command line, redacted like `tool.requested`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// `process.exited` of a command the harness timed: wall time of the call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// Payload of `subagent.started|stopped`.
@@ -445,6 +454,16 @@ pub enum Event {
     ProcessReady(ProcessInfo),
     #[serde(rename = "process.exited")]
     ProcessExited(ProcessInfo),
+    /// Output of a foreground command, coalesced and redacted like `tool.output`, but capped
+    /// lower (the live pane needs a tail, the artifact has the log).
+    #[serde(rename = "process.output")]
+    ProcessOutput {
+        process_id: String,
+        tool_call_id: String,
+        text: String,
+        /// 1, 2, ... per process.
+        seq: u64,
+    },
     #[serde(rename = "artifact.created")]
     ArtifactCreated {
         #[serde(flatten)]
@@ -656,6 +675,17 @@ pub enum Event {
     /// confirm. Names only: no cookie, token or page content ever appears in an event.
     #[serde(rename = "browser.login_required")]
     BrowserLoginRequired { origin: String, profile: String },
+    /// `browser_screenshot` wrote a PNG artifact. Metadata only: no image bytes in the stream.
+    #[serde(rename = "browser.frame")]
+    BrowserFrame {
+        /// The artifact file, as `browser_screenshot` reports it.
+        path: String,
+        /// Origin of the page (scheme, host, port; no path or query).
+        url: String,
+        w: u32,
+        h: u32,
+        bytes: u64,
+    },
     #[serde(rename = "notice")]
     Notice { level: String, text: String },
 }

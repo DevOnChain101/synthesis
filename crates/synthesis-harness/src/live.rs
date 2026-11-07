@@ -19,6 +19,10 @@ pub(crate) const LIVE_CAP: usize = 256 * 1024;
 const HOLD: usize = 4096;
 /// Bytes of a force-flushed long line kept for the next push, so a token cannot straddle events.
 const TAIL: usize = 256;
+/// Most `process.output` text, and chunks, one process may put in the stream (a tail for the live
+/// pane; `tool.output` and the artifact have more).
+const PROC_CAP: usize = 64 * 1024;
+const PROC_CHUNKS: u64 = 256;
 const KEY_MARK: &str = "[private key redacted]\n";
 const CUT_MARK: &str = "\n[live output cut here; the full log is in the artifact]\n";
 
@@ -28,6 +32,8 @@ struct State {
     seq: u64,
     sent: usize,
     capped: bool,
+    proc_sent: usize,
+    proc_seq: u64,
     /// Inside a `-----BEGIN ... PRIVATE KEY-----` block: lines are dropped until its END line.
     in_key: bool,
 }
@@ -38,6 +44,8 @@ pub(crate) struct Live {
     scope: Scope,
     id: String,
     origin: Option<&'static str>,
+    /// Also send the text as `process.output` of this process id.
+    process: Option<String>,
     st: Arc<Mutex<State>>,
 }
 
@@ -48,8 +56,14 @@ impl Live {
             scope,
             id: id.into(),
             origin,
+            process: None,
             st: Arc::default(),
         }
+    }
+
+    pub fn with_process(mut self, process_id: &str) -> Self {
+        self.process = Some(process_id.into());
+        self
     }
 
     /// For `synthesis_tools::LIVE_OUTPUT`.
@@ -99,6 +113,26 @@ impl Live {
         }
         st.sent += chunk.len();
         st.seq += 1;
+        if let Some(pid) = &self.process
+            && st.proc_sent < PROC_CAP
+            && st.proc_seq < PROC_CHUNKS
+        {
+            let mut keep = chunk.len().min(PROC_CAP - st.proc_sent);
+            while !chunk.is_char_boundary(keep) {
+                keep -= 1;
+            }
+            st.proc_sent += keep;
+            st.proc_seq += 1;
+            self.sink.emit(
+                &self.scope,
+                Event::ProcessOutput {
+                    process_id: pid.clone(),
+                    tool_call_id: self.id.clone(),
+                    text: chunk[..keep].to_string(),
+                    seq: st.proc_seq,
+                },
+            );
+        }
         self.sink.emit(
             &self.scope,
             Event::ToolOutput {
@@ -229,6 +263,32 @@ mod tests {
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
             .filter_map(|v| v["payload"]["text"].as_str().map(String::from))
             .collect()
+    }
+
+    #[test]
+    fn process_output_is_capped_and_never_carries_a_private_key() {
+        let buf = Buf::default();
+        let live = Live::new(
+            EventSink::new(buf.clone(), "s", []),
+            Scope::default(),
+            "c",
+            None,
+        )
+        .with_process("p");
+        live.push("-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n");
+        for _ in 0..4 {
+            live.push(&format!("{}\n", "x".repeat(PROC_CAP / 2)));
+        }
+        live.finish();
+        let raw = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let texts: Vec<String> = raw
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["type"] == "process.output")
+            .map(|v| v["payload"]["text"].as_str().unwrap().to_string())
+            .collect();
+        assert!(!texts.concat().contains("AAAA"));
+        assert_eq!(texts.concat().len(), PROC_CAP);
     }
 
     #[test]

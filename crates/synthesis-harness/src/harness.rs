@@ -498,6 +498,8 @@ pub struct Harness {
     /// Called with the allow rules a person accepted with "allow always" (to persist them).
     pub(crate) rule_store: Option<RuleStore>,
     pub(crate) verify_ok: Mutex<std::collections::HashSet<String>>,
+    /// Background processes whose `process.exited` was sent (BashOutput etc. report it again).
+    pub(crate) procs_exited: Mutex<std::collections::HashSet<String>>,
     /// Sub-agents of this session and their inboxes (messaging.md Part A).
     pub(crate) hub: crate::hub::Hub,
     /// Cross-session peers (messaging.md Part B); `None` = off.
@@ -549,6 +551,7 @@ impl Harness {
             reasoning_effort: Mutex::default(),
             window_noted: AtomicBool::new(false),
             verify_ok: Mutex::default(),
+            procs_exited: Mutex::default(),
             rule_store: None,
             hub: crate::hub::Hub::default(),
             peers: None,

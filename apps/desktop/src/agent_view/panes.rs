@@ -567,6 +567,16 @@ impl AgentView {
                 ),
             );
         }
+        if let Some(f) = b.frames.last() {
+            col = col.child(div().text_color(dim()).child(format!(
+                "latest of {} frames: {}x{}, {} KB, {}",
+                b.frames.len(),
+                f.w,
+                f.h,
+                f.bytes.div_ceil(1024),
+                f.url
+            )));
+        }
         if b.browser.is_empty() {
             return col.child(note(
                 "No browser call yet. Calls of the browser tools list here; a screenshot shows when the model takes one.",

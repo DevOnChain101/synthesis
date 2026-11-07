@@ -210,6 +210,9 @@ mod tests {
             pid: Some(1),
             exit_code: None,
             signal: None,
+            tool_call_id: Some("t".into()),
+            command: Some("ls".into()),
+            duration_ms: Some(3),
         }
     }
     fn sub() -> SubagentInfo {
@@ -424,6 +427,19 @@ mod tests {
             Event::ProcessSpawned(proc()),
             Event::ProcessReady(proc()),
             Event::ProcessExited(proc()),
+            Event::ProcessOutput {
+                process_id: s("p"),
+                tool_call_id: s("t"),
+                text: s("hi\n"),
+                seq: 1,
+            },
+            Event::BrowserFrame {
+                path: s("/a/screenshot-1.png"),
+                url: s("https://example.com"),
+                w: 1280,
+                h: 720,
+                bytes: 1234,
+            },
             Event::ArtifactCreated {
                 artifact: aref(),
                 kind: s("log"),
