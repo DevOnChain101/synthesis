@@ -22,6 +22,8 @@ pub struct Args {
     path: PathBuf,
     /// `--tab chat|diff|terminal|browser|files`: the centre tab shown.
     tab: super::ChatTab,
+    /// `--drawer left|right`: the slide-over column of a narrow window, open.
+    drawer: Option<super::Side>,
     /// `--open FILE`: the file selected in the file explorer.
     open: Option<String>,
     /// `--view tui|settings`: the view shown.
@@ -88,6 +90,11 @@ pub fn parse(args: &[String]) -> Option<Args> {
     Some(Args {
         path,
         tab,
+        drawer: match val("--drawer").map(String::as_str) {
+            Some("left") => Some(super::Side::Left),
+            Some("right") => Some(super::Side::Right),
+            _ => None,
+        },
         open: val("--open").cloned(),
         view: match val("--view").map(String::as_str) {
             Some("settings") => crate::ui::View::Settings,
@@ -247,7 +254,10 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
             None => TuiView::new(0., hidden),
         });
-        tui.update(cx, |t, _| t.ts.tab = tab);
+        tui.update(cx, |t, _| {
+            t.ts.tab = tab;
+            t.drawer = a.drawer;
+        });
         *slot.borrow_mut() = Some(tui.clone());
         cx.new(|cx| crate::ui::Shell::around(window, cx, tui, Err("--shot".into())))
     })?;

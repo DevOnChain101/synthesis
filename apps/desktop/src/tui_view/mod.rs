@@ -150,6 +150,15 @@ pub struct TuiView {
     centre_w: f32,
     /// False while another view of the shell is shown: the window-wide key hook then leaves the keys alone.
     pub active: bool,
+    /// The slide-over column that is open (only a collapsed column has one; closed by default).
+    pub(crate) drawer: Option<Side>,
+}
+
+/// A side column of the view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
 }
 
 /// The top bar's chips: live count, workspace, session, model, effort, context on the left; health and the
@@ -187,7 +196,18 @@ impl TuiView {
             pane_scroll: gpui::ScrollHandle::new(),
             sub_scroll: gpui::ScrollHandle::new(),
             centre_w: 600.,
+            drawer: None,
         }
+    }
+
+    /// Opens the drawer of `side`, or closes it when it is the open one.
+    pub fn toggle_drawer(&mut self, side: Side, cx: &mut Context<Self>) {
+        self.drawer = if self.drawer == Some(side) {
+            None
+        } else {
+            Some(side)
+        };
+        cx.notify();
     }
 
     /// The title bar above the view (see `ui::TITLEBAR_H`).
@@ -224,9 +244,33 @@ impl TuiView {
         lu.follow = lu.list.is_following_tail();
     }
 
-    fn top_bar(&self) -> Div {
+    /// The top bar; a collapsed side column gets a button at the right end that opens its drawer.
+    fn top_bar(&self, left_btn: bool, right_btn: bool, cx: &mut Context<Self>) -> Div {
         let (left, right) = top_chips(&self.snap.top);
+        let btn = |side: Side, id: &'static str, glyph: &'static str, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .debug_selector(|| id.to_string())
+                .w(px(26.))
+                .h(px(22.))
+                .ml(px(6.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .when(self.drawer == Some(side), |d| d.bg(chrome::black_a(0.25)))
+                .hover(|d| d.bg(chrome::black_a(0.25)))
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_drawer(side, cx)))
+                .child(icon(glyph, 14., text()))
+        };
         chrome::top_bar(&left, &right)
+            .when(left_btn, |d| {
+                d.child(btn(Side::Left, "drawer-left", "folder", cx))
+            })
+            .when(right_btn, |d| {
+                d.child(btn(Side::Right, "drawer-right", "network", cx))
+            })
     }
 
     fn footer(&self) -> Div {
@@ -705,12 +749,16 @@ impl Render for TuiView {
         let h = f32::from(vp.height) - self.top;
         let tier = tiers(h);
         let c = cols(w);
-        let right_w = if self.hidden.has_right() {
-            c.right + GAP
-        } else {
-            0.
-        };
-        self.centre_w = w - 2. * PAD - GAP - c.left - right_w;
+        let has_right = self.hidden.has_right();
+        let (right_in, right_btn) = (c.right_inline && has_right, !c.right_inline && has_right);
+        let left_in = c.left_inline;
+        let side = |on: bool, x: f32| if on { x + GAP } else { 0. };
+        self.centre_w = w - 2. * PAD - side(left_in, c.left) - side(right_in, c.right);
+        // a collapsed column that was open when the window grew has no drawer any more
+        let drawer = self.drawer.filter(|s| match s {
+            Side::Left => !left_in,
+            Side::Right => right_btn,
+        });
         let mut body = div()
             .debug_selector(|| "grid".to_string())
             .flex_1()
@@ -718,11 +766,36 @@ impl Render for TuiView {
             .flex()
             .gap(px(GAP))
             .p(px(PAD))
-            .child(self.left(tier, w, cx))
+            .when(left_in, |d| d.child(self.left(tier, w, cx)))
             .child(self.centre(cx));
-        if self.hidden.has_right() {
+        if right_in {
             body = body.child(self.right(tier, w, h, cx));
         }
+        let drawer = drawer.map(|side| {
+            let col = match side {
+                Side::Left => self.left(tier, w, cx),
+                Side::Right => self.right(tier, w, h, cx),
+            };
+            // between the header and the footer; a click on the dimmed rest closes it
+            div()
+                .debug_selector(|| "drawer".to_string())
+                .absolute()
+                .top(px(HEADER_H))
+                .bottom(px(FOOTER_H))
+                .left_0()
+                .right_0()
+                .flex()
+                .when(side == Side::Right, |d| d.justify_end())
+                .bg(chrome::black_a(0.5))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.drawer = None;
+                        cx.notify();
+                    }),
+                )
+                .child(div().occlude().flex().p(px(PAD)).bg(hsla(t::BG)).child(col))
+        });
         let dialog = self.dialog_overlay(cx);
         div()
             .debug_selector(|| "view".to_string())
@@ -743,9 +816,10 @@ impl Render for TuiView {
             .text_size(px(12.5))
             .line_height(gpui::relative(1.55))
             .text_color(text())
-            .child(self.top_bar())
+            .child(self.top_bar(!left_in, right_btn, cx))
             .child(body)
             .child(self.footer())
+            .children(drawer)
             .children(dialog)
     }
 }
