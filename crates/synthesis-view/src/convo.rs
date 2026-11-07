@@ -2,7 +2,8 @@
 //! (`synthesis-events`), the same events `synt run` writes as JSONL. Pure state, no GPUI.
 
 use serde_json::Value;
-use synthesis_events::{Envelope, Event, ToolStatus};
+use synthesis_events::{Envelope, Event, PeerAddr, TaskStatus, ToolStatus};
+use synthesis_harness::sanitize_for_display;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolState {
@@ -48,10 +49,14 @@ pub enum Item {
         kind: String,
         running: bool,
     },
-    /// How a task ended: `ok` for completed, else the status word and the reason.
+    /// How a task ended: `ok` for completed, else the status word (`failed`, `cancelled`,
+    /// `blocked`, `unverified`, `ended`) and the reason; `checks` is the last verification report
+    /// of that task (one check per line), kept only for a task that did not complete.
     TaskEnd {
         ok: bool,
         text: String,
+        word: String,
+        checks: String,
     },
     /// A verification report: `status` is `passed`, `failed`, ... and `summary` one check per line.
     Verification {
@@ -68,6 +73,8 @@ pub enum Item {
         warning: bool,
         text: String,
     },
+    /// An internal row (memory, peer and hook bookkeeping): drawn only with `synt.tui.verbose`.
+    Internal(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,6 +106,8 @@ pub struct Convo {
     /// Turns of the task in progress (for its end line).
     turns: u32,
     started_ms: Option<i64>,
+    /// Summary of the last verification report of the task in progress.
+    checks: Option<String>,
 }
 
 /// The file a Write/Edit-style tool call changes.
@@ -112,6 +121,16 @@ pub fn changed_file(name: &str, input: &Value) -> Option<String> {
                 .map(str::to_string)
         })
         .flatten()
+}
+
+/// A peer as a person knows it: its session name, else its workspace.
+fn peer_name(a: &PeerAddr) -> String {
+    sanitize_for_display(a.session_name.as_deref().unwrap_or(&a.workspace_label))
+}
+
+/// One line of a peer-supplied text, safe to draw.
+fn peer_text(s: &str) -> String {
+    sanitize_for_display(&crate::text::short(s, 100))
 }
 
 /// One line for a tool row: the command, the path, or the start of the JSON input.
@@ -186,6 +205,14 @@ impl Convo {
             .count()
     }
 
+    fn notice(&mut self, warning: bool, text: String) {
+        self.items.push(Item::Notice { warning, text });
+    }
+
+    fn internal(&mut self, text: String) {
+        self.items.push(Item::Internal(text));
+    }
+
     fn close_stream(&mut self) {
         if let Some(Item::Assistant { streaming, .. }) = self.items.last_mut() {
             *streaming = false;
@@ -220,6 +247,7 @@ impl Convo {
             Event::TaskStarted { .. } => {
                 self.running = true;
                 self.turns = 0;
+                self.checks = None;
                 self.started_ms = crate::model::parse_ts(&e.ts);
             }
             Event::TurnStarted { .. } if main => self.turns += 1,
@@ -234,22 +262,41 @@ impl Convo {
                 let secs = crate::model::parse_ts(&e.ts)
                     .zip(self.started_ms)
                     .map_or(0, |(end, start)| ((end - start) / 1000).max(0));
-                self.items
-                    .push(if *status == synthesis_events::TaskStatus::Completed {
-                        Item::TaskEnd {
-                            ok: true,
-                            text: format!(
-                                "Done \u{b7} {} turn{} \u{b7} {secs}s",
-                                self.turns,
-                                if self.turns == 1 { "" } else { "s" }
-                            ),
-                        }
+                let checks = self.checks.take();
+                self.items.push(if *status == TaskStatus::Completed {
+                    Item::TaskEnd {
+                        ok: true,
+                        text: format!(
+                            "Done \u{b7} {} turn{} \u{b7} {secs}s",
+                            self.turns,
+                            if self.turns == 1 { "" } else { "s" }
+                        ),
+                        word: "completed".into(),
+                        checks: String::new(),
+                    }
+                } else {
+                    // wording of the classic TUI: a task that is not `completed` is never a success
+                    let word = match status {
+                        TaskStatus::Failed => "failed",
+                        TaskStatus::Cancelled => "cancelled",
+                        TaskStatus::Blocked => "blocked",
+                        TaskStatus::Unverified => "unverified",
+                        _ => "ended",
+                    };
+                    let text = if *status == TaskStatus::Cancelled && reason == "cancelled" {
+                        "interrupted".into()
+                    } else if reason.is_empty() || reason == word {
+                        format!("task {word}")
                     } else {
-                        Item::TaskEnd {
-                            ok: false,
-                            text: format!("task {status:?}: {reason}").to_lowercase(),
-                        }
-                    });
+                        format!("task {word}: {}", sanitize_for_display(reason))
+                    };
+                    Item::TaskEnd {
+                        ok: false,
+                        text,
+                        word: word.into(),
+                        checks: checks.unwrap_or_default(),
+                    }
+                });
                 self.tokens = self.tokens.max(usage.input_tokens + usage.output_tokens);
                 self.cost_usd = self.cost_usd.max(usage.cost_usd.unwrap_or(0.0));
             }
@@ -340,14 +387,18 @@ impl Convo {
                     }
                 }
             }
-            // unverified and blocked runs are said by the task end line; failed and passed are shown
+            // unverified and blocked runs are said by the task end line (with these checks);
+            // failed and passed are shown
             Event::VerificationCompleted {
                 status, summary, ..
-            } if main && matches!(status.as_str(), "passed" | "failed") => {
-                self.items.push(Item::Verification {
-                    status: status.clone(),
-                    summary: summary.clone(),
-                })
+            } if main => {
+                self.checks = Some(summary.clone());
+                if matches!(status.as_str(), "passed" | "failed") {
+                    self.items.push(Item::Verification {
+                        status: status.clone(),
+                        summary: summary.clone(),
+                    })
+                }
             }
             Event::ToolRequested {
                 tool_call_id,
@@ -451,6 +502,139 @@ impl Convo {
                 warning: level != "info",
                 text: text.clone(),
             }),
+            // The rows below are the classic TUI's wording (`synthesis-tui` chat.rs): what a person
+            // must see is a notice, bookkeeping is an `Internal` row (verbose only).
+            Event::BudgetExceeded {
+                budget,
+                limit,
+                used,
+            } => self.notice(true, format!("budget exceeded: {budget} {used} / {limit}")),
+            Event::HookRan {
+                event,
+                hook_name,
+                outcome,
+                ..
+            } => {
+                let t = sanitize_for_display(&format!("hook {hook_name} ({event}): {outcome}"));
+                if outcome == "success" {
+                    self.internal(t)
+                } else {
+                    self.notice(true, t)
+                }
+            }
+            Event::BrowserLoginRequired { origin, .. } => self.notice(
+                true,
+                format!(
+                    "log in to {} in the browser window, then confirm",
+                    sanitize_for_display(origin)
+                ),
+            ),
+            Event::MemoryProposalCreated { .. } => {
+                self.notice(true, "a memory note is waiting for your review".into())
+            }
+            Event::MemoryReflectionFailed { error, .. } => self.notice(
+                true,
+                format!("memory reflection failed: {}", sanitize_for_display(error)),
+            ),
+            Event::MemoryRetrieved { ids, tokens, .. } => self.internal(format!(
+                "memory: {} note(s) retrieved ({tokens} tokens)",
+                ids.len()
+            )),
+            Event::MemoryWritten { op, kind, .. } => {
+                self.internal(sanitize_for_display(&format!("memory: {kind} note {op}")))
+            }
+            Event::MemoryQuarantined { rule, .. } => self.internal(sanitize_for_display(&format!(
+                "memory: a note was quarantined ({rule})"
+            ))),
+            Event::MemoryReflectionStarted { .. } => {
+                self.internal("memory: reflection started".into())
+            }
+            Event::MemoryReflectionCompleted { ops, .. } => {
+                self.internal(format!("memory: reflection saved {ops} note(s)"))
+            }
+            Event::PeerListening { .. } => self.internal("peers: listening for requests".into()),
+            Event::PeerStopped { .. } => self.internal("peers: stopped listening".into()),
+            Event::PeerRequestSent { to, summary, .. } => self.internal(format!(
+                "peer request sent to {}: {}",
+                peer_name(to),
+                peer_text(summary)
+            )),
+            Event::PeerRequestReceived {
+                from,
+                summary,
+                decision,
+                ..
+            } => self.internal(format!(
+                "peer request {decision} from {}: {}",
+                peer_name(from),
+                peer_text(summary)
+            )),
+            // the `<peer_reply>` block the model reads arrives with this event
+            Event::PeerReply { status, text, .. } => self.notice(
+                status != "answered",
+                format!(
+                    "peer reply: {}  {}",
+                    sanitize_for_display(status),
+                    peer_text(text)
+                ),
+            ),
+            Event::PeerThreadClosed { reason, .. } => self.internal(sanitize_for_display(
+                &format!("peer thread closed ({reason})"),
+            )),
+            Event::PeerDelegationDenied { from, reason, .. } => self.notice(
+                true,
+                format!(
+                    "peer request from {} refused: {}",
+                    peer_name(from),
+                    sanitize_for_display(reason)
+                ),
+            ),
+            // work another session asked this one to do: always named, with who asked
+            Event::PeerDelegationAccepted { from, mode, .. } => self.notice(
+                false,
+                format!(
+                    "working for peer {} ({} mode)",
+                    peer_name(from),
+                    sanitize_for_display(mode)
+                ),
+            ),
+            Event::PeerDelegationTool { name, from, .. } => self.internal(format!(
+                "peer work: {} for {}",
+                sanitize_for_display(name),
+                sanitize_for_display(from)
+            )),
+            Event::PeerDelegationCompleted {
+                status, tool_calls, ..
+            } => self.internal(format!(
+                "peer work {}: {tool_calls} tool call(s)",
+                sanitize_for_display(status)
+            )),
+            Event::MessageSent {
+                from,
+                to,
+                origin,
+                kind,
+                summary,
+                text,
+                ..
+            } if origin != "user" => {
+                let what = peer_text(summary.as_deref().unwrap_or(text));
+                let (from, to) = (sanitize_for_display(from), sanitize_for_display(to));
+                if origin == "system" {
+                    self.notice(true, format!("\u{26a0} {what}"))
+                } else if from == "main" {
+                    self.notice(false, format!("\u{2192} @{to} {what}"))
+                } else if to == "main" {
+                    let label = if kind == "result" { " result:" } else { ":" };
+                    self.notice(false, format!("\u{2190} @{from}{label} {what}"))
+                } else {
+                    self.notice(false, format!("@{from} \u{2192} @{to}: {what}"))
+                }
+            }
+            Event::MessageDropped { reason, .. } => self.notice(
+                true,
+                format!("\u{26a0} message dropped: {}", sanitize_for_display(reason)),
+            ),
             _ => {}
         }
     }
@@ -655,7 +839,7 @@ mod tests {
             matches!(&c.items[1], Item::Tool { output, duration_ms: 7, diff: Some(_), .. } if output == "whole")
         );
         assert!(
-            matches!(&c.items[2], Item::TaskEnd { ok: true, text } if text.starts_with("Done \u{b7} 1 turn"))
+            matches!(&c.items[2], Item::TaskEnd { ok: true, text, .. } if text.starts_with("Done \u{b7} 1 turn"))
         );
     }
 
@@ -682,5 +866,238 @@ mod tests {
         assert_eq!(v.session.prompts, 1);
         assert_eq!(v.session.last_prompt, "fix it");
         assert_eq!(v.convo.items.len(), 1);
+    }
+
+    fn texts(c: &Convo) -> Vec<String> {
+        c.items
+            .iter()
+            .map(|i| match i {
+                Item::Notice { text, .. } | Item::Internal(text) => text.clone(),
+                o => format!("{o:?}"),
+            })
+            .collect()
+    }
+
+    fn one(t: &str, payload: Value) -> Convo {
+        let mut c = Convo::default();
+        c.apply(&ev(t, payload));
+        c
+    }
+
+    #[test]
+    fn every_task_end_state_says_what_it_is_with_the_checks_that_ran() {
+        let ended = |status: &str, reason: &str| {
+            json!({"status":status,"reason":reason,"usage":{"input_tokens":0,"output_tokens":0},
+                "changed_files":[],"artifacts_root":"/x"})
+        };
+        let word = |c: &Convo| match c.items.last() {
+            Some(Item::TaskEnd {
+                ok,
+                text,
+                word,
+                checks,
+            }) => (*ok, text.clone(), word.clone(), checks.clone()),
+            o => panic!("{o:?}"),
+        };
+        // unverified: the report is not a row of its own, the end line carries its checks
+        let mut c = Convo::default();
+        c.apply(&ev(
+            "verification.completed",
+            json!({"report_id":"r","status":"unverified","attempt":1,"summary":"cargo test: not run"}),
+        ));
+        c.apply(&ev("task.ended", ended("unverified", "no_check_ran")));
+        assert_eq!(c.items.len(), 1);
+        assert_eq!(
+            word(&c),
+            (
+                false,
+                "task unverified: no_check_ran".into(),
+                "unverified".into(),
+                "cargo test: not run".into()
+            )
+        );
+        // the checks belong to one task only
+        c.apply(&ev("task.ended", ended("blocked", "needs a login")));
+        assert_eq!(
+            word(&c),
+            (
+                false,
+                "task blocked: needs a login".into(),
+                "blocked".into(),
+                String::new()
+            )
+        );
+        c.apply(&ev("task.ended", ended("failed", "failed")));
+        assert_eq!(word(&c).1, "task failed");
+        c.apply(&ev("task.ended", ended("cancelled", "cancelled")));
+        assert_eq!(word(&c).1, "interrupted");
+        // failed verification is its own row, then the failed end line repeats its checks
+        let mut c = Convo::default();
+        c.apply(&ev(
+            "verification.completed",
+            json!({"report_id":"r","status":"failed","attempt":1,"summary":"tests: 2 failed"}),
+        ));
+        c.apply(&ev("task.ended", ended("failed", "verification_failed")));
+        assert!(matches!(&c.items[0], Item::Verification { status, .. } if status == "failed"));
+        assert_eq!(word(&c).3, "tests: 2 failed");
+        // passed: a green Done line, no checks repeated
+        let mut c = Convo::default();
+        c.apply(&ev(
+            "verification.completed",
+            json!({"report_id":"r","status":"passed","attempt":1,"summary":"tests ok"}),
+        ));
+        c.apply(&ev("task.ended", ended("completed", "done")));
+        assert!(matches!(&c.items[0], Item::Verification { status, .. } if status == "passed"));
+        assert!(word(&c).0 && word(&c).3.is_empty());
+    }
+
+    #[test]
+    fn budget_hook_and_login_rows_are_notices() {
+        let c = one(
+            "budget.exceeded",
+            json!({"budget":"turns","limit":5.0,"used":5.0}),
+        );
+        assert_eq!(texts(&c), ["budget exceeded: turns 5 / 5"]);
+        assert!(matches!(&c.items[0], Item::Notice { warning: true, .. }));
+        let hook = |outcome: &str| {
+            one(
+                "hook.ran",
+                json!({"event":"Stop","hook_name":"lint","exit_code":1,"outcome":outcome,"duration_ms":1}),
+            )
+        };
+        let failed = hook("error");
+        assert_eq!(texts(&failed), ["hook lint (Stop): error"]);
+        assert!(matches!(
+            &failed.items[0],
+            Item::Notice { warning: true, .. }
+        ));
+        assert!(
+            matches!(&hook("success").items[0], Item::Internal(t) if t == "hook lint (Stop): success")
+        );
+        let c = one(
+            "browser.login_required",
+            json!({"origin":"https://x.test\u{1b}[2J","profile":"p"}),
+        );
+        let t = texts(&c).remove(0);
+        assert!(
+            t.starts_with("log in to https://x.test")
+                && t.ends_with("in the browser window, then confirm")
+        );
+        assert!(!t.contains('\u{1b}'), "{t:?}");
+    }
+
+    #[test]
+    fn peer_rows_name_the_peer_and_hide_bookkeeping() {
+        let addr = json!({"workspace_key":"k","workspace_label":"api","session_id":"s2","session_name":"backend","instance":"i"});
+        let c = one(
+            "peer.delegation.accepted",
+            json!({"delegation_id":"d","request_id":"r","from":addr,"mode":"plan","cap":"plan"}),
+        );
+        assert_eq!(texts(&c), ["working for peer backend (plan mode)"]);
+        let c = one(
+            "peer.delegation.denied",
+            json!({"request_id":"r","from":addr,"reason":"rejected: busy"}),
+        );
+        assert_eq!(
+            texts(&c),
+            ["peer request from backend refused: rejected: busy"]
+        );
+        assert!(matches!(&c.items[0], Item::Notice { warning: true, .. }));
+        let c = one(
+            "peer.reply",
+            json!({"request_id":"r","status":"answered","text":"JWT_TTL sets it","bytes":3,"duration_ms":1}),
+        );
+        assert_eq!(texts(&c), ["peer reply: answered  JWT_TTL sets it"]);
+        assert!(matches!(&c.items[0], Item::Notice { warning: false, .. }));
+        let c = one(
+            "peer.reply",
+            json!({"request_id":"r","status":"timeout","text":"","bytes":0,"duration_ms":1}),
+        );
+        assert!(matches!(&c.items[0], Item::Notice { warning: true, .. }));
+        for (t, p, line) in [
+            (
+                "peer.listening",
+                json!({"endpoint_kind":"unix"}),
+                "peers: listening for requests",
+            ),
+            (
+                "peer.thread_closed",
+                json!({"thread_id":"t","reason":"cap"}),
+                "peer thread closed (cap)",
+            ),
+            (
+                "peer.request_sent",
+                json!({"request_id":"r","from":addr,"to":addr,"summary":"ask","bytes":1,"chain_len":1}),
+                "peer request sent to backend: ask",
+            ),
+            (
+                "peer.delegation.tool",
+                json!({"delegation_id":"d","tool_call_id":"t","name":"Read","origin":"peer","from":"api/backend"}),
+                "peer work: Read for api/backend",
+            ),
+        ] {
+            let c = one(t, p);
+            assert!(
+                matches!(&c.items[..], [Item::Internal(x)] if x == line),
+                "{t}: {:?}",
+                c.items
+            );
+        }
+    }
+
+    #[test]
+    fn agent_messages_read_as_arrows_and_a_user_line_is_not_repeated() {
+        let sent = |from: &str, to: &str, origin: &str, kind: &str| {
+            texts(&one(
+                "message.sent",
+                json!({"message_id":"m","from":from,"to":to,"origin":origin,"kind":kind,"text":"hi","bytes":2}),
+            ))
+        };
+        assert_eq!(
+            sent("main", "dev", "agent", "message"),
+            ["\u{2192} @dev hi"]
+        );
+        assert_eq!(
+            sent("dev", "main", "agent", "result"),
+            ["\u{2190} @dev result: hi"]
+        );
+        assert_eq!(sent("a", "b", "agent", "message"), ["@a \u{2192} @b: hi"]);
+        assert_eq!(sent("x", "main", "system", "message"), ["\u{26a0} hi"]);
+        assert!(sent("user", "dev", "user", "message").is_empty());
+    }
+
+    #[test]
+    fn memory_rows_are_verbose_only_except_what_needs_the_person() {
+        let internal = |t: &str, p: Value, line: &str| {
+            let c = one(t, p);
+            assert!(
+                matches!(&c.items[..], [Item::Internal(x)] if x == line),
+                "{t}: {:?}",
+                c.items
+            );
+        };
+        internal(
+            "memory.written",
+            json!({"id":"m1","op":"added","kind":"episode","scope":"workspace","trust":"untrusted","status":"active"}),
+            "memory: episode note added",
+        );
+        internal(
+            "memory.retrieved",
+            json!({"ids":["m1"],"tokens":12,"candidates":3}),
+            "memory: 1 note(s) retrieved (12 tokens)",
+        );
+        internal(
+            "memory.quarantined",
+            json!({"id":"m","rule":"r1"}),
+            "memory: a note was quarantined (r1)",
+        );
+        let c = one("memory.proposal.created", json!({"id":"p-1"}));
+        assert_eq!(texts(&c), ["a memory note is waiting for your review"]);
+        let c = one(
+            "memory.reflection.failed",
+            json!({"job_id":"j","error":"boom"}),
+        );
+        assert_eq!(texts(&c), ["memory reflection failed: boom"]);
+        assert!(matches!(&c.items[0], Item::Notice { warning: true, .. }));
     }
 }
