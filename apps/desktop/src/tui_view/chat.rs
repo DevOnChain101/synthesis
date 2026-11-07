@@ -62,14 +62,14 @@ impl TuiView {
             cx.processor(|this: &mut Self, ix: usize, _window, cx| this.row(ix, cx)),
         )
         .size_full()
-        .px(px(16.))
-        .pb(px(12.));
+        .px(px(12.))
+        .pb(px(10.));
         // the padding is outside the list: a row scrolled to the top edge stops below it
         let mut wrap = div()
             .relative()
             .flex_1()
             .min_h(px(0.))
-            .pt(px(8.))
+            .pt(px(10.))
             .debug_selector(|| "chat-scroll".to_string())
             .child(rows);
         if !lu.follow {
@@ -507,44 +507,64 @@ impl TuiView {
             );
         }
         let busy = l.busy || l.starting;
-        col.child(
+        col.child(input_box(
             div()
-                .debug_selector(|| "prompt".to_string())
-                .mx(px(12.))
-                .min_h(px(40.))
-                .flex()
-                .items_start()
-                .gap(px(10.))
-                .px(px(12.))
-                .py(px(6.))
-                .border_1()
-                .border_color(hsla(if l.focus == crate::live::Focus::Chat {
-                    t::ACCENT
-                } else {
-                    t::RULE
-                }))
-                .rounded(px(layout::PANEL_RADIUS))
-                .child(div().mt(px(1.)).text_color(strong()).child(if busy {
-                    "\u{2026}"
-                } else {
-                    ">"
-                }))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .child(Textarea::new(&lu.prompt).appearance(false).bordered(false)),
-                )
-                .child(
-                    div()
-                        .id("send")
-                        .mt(px(2.))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, window, cx| this.submit_prompt(window, cx)))
-                        .child(icon("arrow-up", 14., dim())),
-                ),
-        )
+                .flex_1()
+                .min_w(px(0.))
+                .child(Textarea::new(&lu.prompt).appearance(false).bordered(false)),
+            l.focus == crate::live::Focus::Chat,
+            busy,
+            Some(Box::new(cx.listener(|this, _, window, cx| {
+                this.submit_prompt(window, cx)
+            }))),
+        ))
     }
+}
+
+/// `.inputbar`: 46px box (border + 44px form), margin 0 12px 12px, the `>` prompt mark, `content`, and the
+/// 28px send button. The border takes the accent while the prompt has the keys.
+pub fn input_box(
+    content: impl IntoElement,
+    focused: bool,
+    busy: bool,
+    send: Option<super::panels::OnClick>,
+) -> Div {
+    div()
+        .debug_selector(|| "prompt".to_string())
+        .flex_none()
+        .mx(px(12.))
+        .mb(px(12.))
+        .min_h(px(46.))
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .px(px(12.))
+        .border_1()
+        .border_color(hsla(if focused { t::ACCENT } else { t::BORDER }))
+        .rounded(px(layout::PANEL_RADIUS))
+        .bg(hsla(t::SURFACE))
+        .child(
+            div()
+                .text_color(strong())
+                .child(if busy { "\u{2026}" } else { ">" }),
+        )
+        .child(content)
+        .child(
+            div()
+                .id("send")
+                .debug_selector(|| "send".to_string())
+                .size(px(28.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(hsla(t::BORDER))
+                .cursor_pointer()
+                .when_some(send, |d, f| d.on_click(f))
+                .child(icon("send", 14., hsla(t::ACCENT))),
+        )
 }
 
 /// Diff rows (text, colour, background) of a `ToolCompleted.diff`. A secret file's diff carries

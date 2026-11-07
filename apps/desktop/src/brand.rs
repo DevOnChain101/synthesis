@@ -19,14 +19,63 @@ pub const UI_FONT_FILES: [&[u8]; 3] = [
     include_bytes!("../assets/fonts/Inter-SemiBold.otf"),
 ];
 
+/// Family name of the monospace of the TUI and Agent views (`cli.html` `--mono`, first choice).
+pub const MONO_FONT: &str = "Fira Code";
+
+/// Fira Code regular, medium (the design's body weight) and bold, SIL OFL.
+pub const MONO_FONT_FILES: [&[u8]; 3] = [
+    include_bytes!("../assets/fonts/FiraCode-Regular.ttf"),
+    include_bytes!("../assets/fonts/FiraCode-Medium.ttf"),
+    include_bytes!("../assets/fonts/FiraCode-Bold.ttf"),
+];
+
 pub fn mark() -> Arc<Image> {
     static MARK: OnceLock<Arc<Image>> = OnceLock::new();
     MARK.get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Png, MARK_PNG.to_vec())))
         .clone()
 }
 
-/// The app's asset source: the default gpui-kit (Lucide) icon set.
-pub use gpui_kit_assets::Assets;
+gpui_kit_assets::icon_assets!(
+    Extra,
+    [
+        GitBranch,
+        ChevronsRight,
+        Activity,
+        Wrench,
+        Clock,
+        Sparkles,
+        ChartBar,
+        MessageSquare,
+        Send,
+        Webhook,
+        Shield,
+        Users,
+        Layers,
+        Database,
+        GitCompare,
+        Link,
+    ]
+);
+
+/// The app's asset source: the default gpui-kit (Lucide) icon set plus the few icons of the
+/// `cli.html` chrome that the default set lacks (embedded one by one, not the whole 7 MB catalogue).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Assets;
+
+impl gpui::AssetSource for Assets {
+    fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        match Extra.load(path)? {
+            Some(b) => Ok(Some(b)),
+            None => gpui_kit_assets::Assets.load(path),
+        }
+    }
+
+    fn list(&self, path: &str) -> gpui::Result<Vec<gpui::SharedString>> {
+        let mut v = gpui_kit_assets::Assets.list(path)?;
+        v.extend(Extra.list(path)?);
+        Ok(v)
+    }
+}
 
 /// What a piece of text is: decides the family.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

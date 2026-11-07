@@ -7,30 +7,16 @@ use gpui::{
 use synthesis_tui_render::theme as t;
 use synthesis_view::convo::StepState;
 
+use super::AgentView;
 use super::layout::{GAP, LEFT_GAP, Tiers, cols};
-use super::{AgentView, with_alpha};
 use crate::theme::hsla;
-use crate::tui_view::layout::list_body_h;
-use crate::tui_view::panels::{
-    Head, OnClick, activity_rows, dim, dot, icon, kv, mcp_rows, panel, running_rows, strong, text,
-};
+use crate::tui_view::panels::{self, OnClick, dim, dot, icon, strong, text};
 use crate::tui_view::sample::Snapshot;
 use crate::tui_view::topo;
+use crate::widgets::chrome::{Head, Pad, panel};
 
-fn head(
-    id: &'static str,
-    title: &'static str,
-    icon: &'static str,
-    left: bool,
-    compact: bool,
-) -> Head {
-    Head {
-        id,
-        title,
-        icon,
-        left,
-        compact,
-    }
+fn head(id: &'static str, title: &'static str, icon: &'static str, pad: Pad) -> Head {
+    Head::new(id, title, icon, pad)
 }
 
 impl AgentView {
@@ -113,9 +99,10 @@ impl AgentView {
                     .truncate()
                     .child(path),
             )
-            .child(running_rows(
+            .child(panels::running_body(
                 &rows,
                 (self.cfg.is_some()).then_some(&click as &dyn Fn(usize) -> OnClick),
+                None,
             ))
             .children(files.map(|f| {
                 div()
@@ -147,10 +134,8 @@ impl AgentView {
             }));
         col = col.child(
             panel(
-                head("p-workspace", "Workspace", "folder", true, false),
+                head("p-workspace", "Workspace", "folder", Pad::LEFT),
                 None,
-                true,
-                Some(list_body_h() + 60.),
                 ws_body,
             )
             .flex_initial()
@@ -161,10 +146,8 @@ impl AgentView {
             .map_or_else(String::new, |s| s.title());
         col = col.child(
             panel(
-                head("p-session", "Session", "gallery-vertical-end", true, false),
-                Some(dot(hsla(t::SUCCESS), true).into_any_element()),
-                true,
-                None,
+                head("p-session", "Session", "square-terminal", Pad::LEFT),
+                Some(panels::session_meta(&s.session)),
                 div()
                     .flex()
                     .flex_col()
@@ -182,29 +165,25 @@ impl AgentView {
                                     .child(format!("#{}", self.active + 1)),
                             ),
                     )
-                    .child(kv(&s.session, 62.)),
+                    .child(panels::session_body(&s.session)),
             )
             .flex_initial()
             .min_h(min),
         );
         col = col.child(
             panel(
-                head("p-tools", "Tools & Skills", "settings-2", true, false),
-                None,
-                true,
-                Some(110.),
-                div().child(kv(&s.tools, 62.)).child(mcp_rows(&s.mcp)),
+                head("p-tools", "Tools & Skills", "wrench", Pad::LEFT).max_body(110.),
+                Some(div().child(s.tools.count.clone()).into_any_element()),
+                panels::tools_body(&s.tools),
             )
             .flex_initial()
             .min_h(min),
         );
         col.child(
             panel(
-                head("p-activity", "Activity", "play", true, false),
-                Some(div().child(s.activity.len().to_string()).into_any_element()),
-                false,
+                head("p-activity", "Recent Activity", "activity", Pad::LEFT),
                 None,
-                activity_rows(&s.activity),
+                panels::activity_body(&s.activity),
             )
             .flex_1()
             .min_h(min),
@@ -231,20 +210,21 @@ impl AgentView {
             .gap(px(6.))
             .text_color(hsla(t::SUCCESS))
             .child(dot(hsla(t::SUCCESS), true))
-            .child(s.core.tag.clone())
+            .child("online")
             .into_any_element();
         col = col.child(
             panel(
                 head(
                     "p-topology",
-                    "Capability Topology",
-                    "layout-dashboard",
-                    false,
-                    tier.compact_head,
+                    "Synthesis Topology",
+                    "network",
+                    if tier.compact_head {
+                        Pad::COMPACT
+                    } else {
+                        Pad::NORMAL
+                    },
                 ),
                 Some(online),
-                false,
-                None,
                 div().relative().size_full().child(topo::graph(s)),
             )
             .flex_1()
@@ -285,68 +265,24 @@ impl AgentView {
         };
         col = col.child(
             panel(
-                head("p-plan", "Plan", "check", false, false),
+                head("p-plan", "Plan", "sparkles", Pad::NORMAL).max_body(112.),
                 Some(
                     div()
                         .child(format!("{done}/{}", plan.len()))
                         .into_any_element(),
                 ),
-                true,
-                Some(112.),
                 body,
             )
             .flex_initial()
             .min_h(px(56.)),
         );
-        // `.usage2`: tokens with a bar, sessions, runtime, cost
-        let row = |k: &str, v: String| {
-            div()
-                .flex()
-                .gap(px(10.))
-                .child(div().w(px(70.)).flex_none().child(k.to_string()))
-                .child(div().text_color(strong()).child(v))
-        };
-        let runtime = s
-            .session
-            .iter()
-            .find(|(k, _)| k == "uptime")
-            .map_or("-".to_string(), |(_, v)| v.clone());
-        let pct = s.tokens.ctx_pct.clamp(0., 100.);
-        let usage = div()
-            .flex()
-            .flex_col()
-            .child(
-                div().flex().justify_between().child("tokens").child(
-                    div()
-                        .text_color(strong())
-                        .child(format!("{} ({:.0}%)", s.tokens.ctx_label, pct)),
-                ),
-            )
-            .child(
-                div()
-                    .my(px(6.))
-                    .h(px(4.))
-                    .rounded(px(2.))
-                    .bg(with_alpha(hsla(t::TEXT_STRONG), 0.12))
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .h_full()
-                            .w(gpui::relative(pct / 100.))
-                            .rounded(px(2.))
-                            .bg(hsla(t::SUCCESS)),
-                    ),
-            )
-            .child(row("sessions", self.sessions.len().to_string()))
-            .child(row("runtime", runtime))
-            .child(row("cost", s.tokens.cost.clone()));
+        let mut h = head("p-usage", "Usage & Metrics", "chart-bar", Pad::NORMAL);
+        h.meta_h = 22.6;
         col.child(
             panel(
-                head("p-usage", "Usage", "chart-pie", false, false),
-                None,
-                true,
-                None,
-                usage,
+                h,
+                Some(panels::usage_meta(&s.usage)),
+                panels::usage_body(&s.usage),
             )
             .flex_initial()
             .min_h(px(84.)),

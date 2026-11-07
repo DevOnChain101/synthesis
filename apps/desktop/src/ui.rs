@@ -159,11 +159,14 @@ impl Render for Shell {
 
 /// The bundled fonts: the UI sans and the TUI view's monospace (SIL OFL, `assets/fonts`).
 pub fn register_fonts(cx: &App) {
-    let fonts: [&'static [u8]; 4] = [
+    let fonts: [&'static [u8]; 7] = [
         include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf"),
         brand::UI_FONT_FILES[0],
         brand::UI_FONT_FILES[1],
         brand::UI_FONT_FILES[2],
+        brand::MONO_FONT_FILES[0],
+        brand::MONO_FONT_FILES[1],
+        brand::MONO_FONT_FILES[2],
     ];
     if let Err(e) = cx
         .text_system()

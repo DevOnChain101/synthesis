@@ -1,7 +1,6 @@
 //! The data the TUI view draws, as plain structs shaped like the engine-side models (docs/specs/desktop.md
-//! section 2: workspaces, sessions, running, usage, status, tokens, topology nodes, activity, tools),
-//! plus a SAMPLE. Wiring the real view-model later means building a `Snapshot` from it; no painting
-//! code changes.
+//! section 2), plus a SAMPLE that is the design's own sample data (`cli.html` `STATE`). `snapshot::build`
+//! fills a `Snapshot` from the live `ViewState`; no painting code reads anything else.
 
 #[derive(Clone, Debug)]
 pub struct Workspace {
@@ -20,32 +19,108 @@ pub struct Running {
     /// Another process's session (the peers listing): not clickable.
     pub peer: bool,
     pub title: String,
+    /// The folder the session runs in (blue in the design).
+    pub folder: String,
     pub branch: String,
     pub age: String,
     pub live: bool,
     pub selected: bool,
 }
 
+/// The Session panel: the status pill and the key/value rows (uptime last).
 #[derive(Clone, Debug)]
-pub struct McpRow {
+pub struct SessionInfo {
+    pub status: String,
+    pub rows: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolRow {
     pub name: String,
-    pub state: McpState,
-    pub tools: u32,
+    pub value: String,
+    /// A plain value (not the green "on").
+    pub plain: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolsInfo {
+    pub count: String,
+    pub rows: Vec<ToolRow>,
+    pub more: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct ActivityRow {
+    pub text: String,
+    pub ago: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct PromptRow {
+    pub time: String,
+    pub text: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum McpState {
-    Connected,
-    Connecting,
-    Failed,
+pub enum StepKind {
+    Done,
+    Now,
+    Todo,
 }
 
 #[derive(Clone, Debug)]
-pub struct Activity {
-    pub time: String,
+pub struct Step {
     pub text: String,
-    /// A `❯` row: a user prompt.
-    pub prompt: bool,
+    pub kind: StepKind,
+    pub note: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct AgentStatus {
+    pub working: String,
+    pub next: String,
+    pub steps: Vec<Step>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ContextInfo {
+    pub used: String,
+    pub max: String,
+    /// 0..=100.
+    pub pct: f32,
+    pub model: String,
+    pub turns: String,
+    pub input: String,
+    pub files: String,
+    pub output: String,
+    pub cache: String,
+    pub hit: String,
+}
+
+/// The centre panel header (`#chead`).
+#[derive(Clone, Debug)]
+pub struct ChatHead {
+    pub status: String,
+    pub prompt: String,
+    pub ctx_pct: f32,
+    pub path: String,
+    /// `12 files | 3.2k LOC`.
+    pub stats: String,
+}
+
+/// A row of Usage & Metrics.
+#[derive(Clone, Debug)]
+pub struct Metric {
+    pub label: String,
+    pub value: String,
+    /// Bar fill, 0..=100.
+    pub pct: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct Usage {
+    pub range: String,
+    pub rows: Vec<Metric>,
 }
 
 /// Topology node state; maps to the card border colour.
@@ -85,33 +160,25 @@ pub struct Core {
 }
 
 #[derive(Clone, Debug)]
-pub struct Usage {
-    /// Tokens per local day, oldest first; the last entry is today.
-    pub days: Vec<f32>,
-    pub range: String,
-    pub rows: Vec<(String, String)>,
-}
-
-#[derive(Clone, Debug)]
-pub struct Tokens {
-    pub input: String,
-    pub output: String,
-    pub cache: String,
-    pub cost: String,
-    /// Context fill, 0..=100.
-    pub ctx_pct: f32,
-    pub ctx_label: String,
-}
-
-#[derive(Clone, Debug)]
 pub struct Top {
     pub live: u32,
     pub workspace: String,
     pub session: String,
     pub model: String,
+    pub effort: String,
     pub ctx: String,
     pub health: String,
+    /// `Sat Nov 07  07:54:38`.
     pub clock: String,
+}
+
+/// A chip of the footer's right side.
+#[derive(Clone, Debug)]
+pub struct StatusChip {
+    pub text: String,
+    /// Dot colour: warn for pending changes.
+    pub warn: bool,
+    pub dot: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -119,30 +186,30 @@ pub struct Snapshot {
     pub top: Top,
     pub workspaces: Vec<Workspace>,
     pub running: Vec<Running>,
-    pub session: Vec<(String, String)>,
-    pub mcp: Vec<McpRow>,
-    /// "Tools & Skills": counts per kind.
-    pub tools: Vec<(String, String)>,
-    pub activity: Vec<Activity>,
-    pub status: Vec<(String, String)>,
-    pub tokens: Tokens,
+    pub session: SessionInfo,
+    pub tools: ToolsInfo,
+    pub activity: Vec<ActivityRow>,
+    pub prompts: Vec<PromptRow>,
+    pub agent: AgentStatus,
+    pub context: ContextInfo,
+    pub head: ChatHead,
     pub topology: Vec<TopoNode>,
     pub core: Core,
     pub usage: Usage,
     pub tips: Vec<String>,
     pub mode: String,
     pub effort: String,
+    /// Sub-agents offered by the transcript switch under the prompt (`main` first).
+    pub agents: Vec<String>,
     pub hints: Vec<(String, String)>,
+    pub status: Vec<StatusChip>,
 }
 
 fn s(x: &str) -> String {
     x.to_string()
 }
 
-fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
-    v.iter().map(|(a, b)| (s(a), s(b))).collect()
-}
-
+/// The design's sample (`cli.html` `STATE`), for the layout tests, `--sample` and `--shot`.
 pub fn sample() -> Snapshot {
     let ws = |n: &str, p: &str, c: u32, sel: bool| Workspace {
         key: String::new(),
@@ -151,19 +218,15 @@ pub fn sample() -> Snapshot {
         sessions: c,
         selected: sel,
     };
-    let run = |t: &str, b: &str, a: &str, live: bool, sel: bool| Running {
+    let run = |t: &str, f: &str, b: &str, a: &str, sel: bool| Running {
         id: String::new(),
         peer: false,
         title: s(t),
+        folder: s(f),
         branch: s(b),
         age: s(a),
-        live,
+        live: true,
         selected: sel,
-    };
-    let act = |t: &str, x: &str, p: bool| Activity {
-        time: s(t),
-        text: s(x),
-        prompt: p,
     };
     let node = |pos, title: &str, lines: &[&str], state| TopoNode {
         pos,
@@ -171,171 +234,211 @@ pub fn sample() -> Snapshot {
         lines: lines.iter().map(|l| s(l)).collect(),
         state,
     };
+    let tool = |n: &str, v: &str, plain: bool| ToolRow {
+        name: s(n),
+        value: s(v),
+        plain,
+    };
+    let step = |t: &str, kind, note: &str| Step {
+        text: s(t),
+        kind,
+        note: s(note),
+    };
+    let metric = |l: &str, v: &str, pct: f32| Metric {
+        label: s(l),
+        value: s(v),
+        pct,
+    };
     Snapshot {
         top: Top {
-            live: 2,
+            live: 1,
             workspace: s("synthesis"),
-            session: s("fix flaky retry test"),
-            model: s("claude-sonnet-5-5"),
-            ctx: s("62% 124k/200k"),
-            health: s("all systems normal"),
-            clock: s("14:32:07"),
+            session: s("feature/auth-flow"),
+            model: s("claude-3.5-sonnet"),
+            effort: s("high"),
+            ctx: s("128k"),
+            health: s("system healthy"),
+            clock: s("Sat Nov 07\u{a0}\u{a0}07:54:38"),
         },
         workspaces: vec![
-            ws("synthesis", "~/Vibe/synthesis", 12, true),
-            ws("legacy-cli", "~/Vibe/legacy-cli", 4, false),
-            ws(
-                "synthesis-view-model",
-                "~/Vibe/synthesis-view-model",
-                2,
-                false,
-            ),
-            ws("design", "~/Vibe/synthesis-cli-ui", 3, false),
-            ws("scratch", "~/tmp/scratch", 1, false),
-            ws("dotfiles", "~/dotfiles", 1, false),
-            ws("site", "~/Vibe/site", 6, false),
+            ws("synthesis", "~/dev/synthesis", 3, true),
+            ws("platform", "~/dev/platform", 2, false),
+            ws("web-app", "~/dev/web-app", 1, false),
+            ws("infra", "~/dev/infra", 0, false),
         ],
         running: vec![
-            run("fix flaky retry test", "main", "now", true, true),
             run(
-                "port the topology wires",
-                "feat/desktop-tui-view",
-                "12m",
-                false,
+                "Investigate why login redirects loop in auth.ts and fix it.",
+                "nemo-cli",
+                "feature/auth-flow",
+                "42m",
+                true,
+            ),
+            run(
+                "Fix the redirect loop after sign-in on staging.",
+                "synthesis",
+                "fix/login-redirect",
+                "18m",
                 false,
             ),
             run(
-                "review the sandbox policy",
-                "feat/sandbox",
-                "1h",
-                false,
+                "Upgrade the runtime to Node 22 and fix breakages.",
+                "platform",
+                "chore/runtime",
+                "9m",
                 false,
             ),
-            run("why does resume lose the mode", "main", "3h", false, false),
-            run("add heat map legend", "main", "yesterday", false, false),
-            run("bump gpui pins", "chore/pins", "2d", false, false),
-            run("draft the release notes", "main", "3d", false, false),
         ],
-        session: pairs(&[
-            ("id", "9f3c2a71"),
-            ("cwd", "~/Vibe/synthesis"),
-            ("branch", "main"),
-            ("mode", "default"),
-            ("uptime", "00:41:18"),
-        ]),
-        mcp: vec![
-            McpRow {
-                name: s("github"),
-                state: McpState::Connected,
-                tools: 38,
-            },
-            McpRow {
-                name: s("playwright"),
-                state: McpState::Connecting,
-                tools: 0,
-            },
-            McpRow {
-                name: s("sentry"),
-                state: McpState::Failed,
-                tools: 0,
-            },
-        ],
-        tools: pairs(&[
-            ("tools", "24 builtin"),
-            ("skills", "7 loaded"),
-            ("hooks", "3 active"),
-        ]),
-        activity: vec![
-            act("14:31", "fix the flaky retry test", true),
-            act("14:31", "Read crates/synthesis-core/src/retry.rs", false),
-            act("14:31", "Grep backoff_ms", false),
-            act("14:32", "Edit retry.rs (+8 -3)", false),
-            act("14:32", "Bash cargo test -p synthesis-core retry", false),
-            act("14:32", "tests passed (12)", false),
-            act("14:30", "run the whole suite", true),
-            act("14:29", "Bash cargo clippy --workspace", false),
-            act("14:28", "Edit lib.rs (+2 -0)", false),
-        ],
-        status: pairs(&[
-            ("phase", "act"),
-            ("task", "fix flaky retry test"),
-            ("agents", "1 running"),
-            ("elapsed", "00:03:12"),
-            ("verify", "pending"),
-        ]),
-        tokens: Tokens {
-            input: s("84.2k"),
-            output: s("12.6k"),
-            cache: s("210k (71% hit)"),
-            cost: s("$0.42"),
-            ctx_pct: 62.0,
-            ctx_label: s("124k/200k"),
+        session: SessionInfo {
+            status: s("running"),
+            rows: [
+                ("mode", "agent"),
+                ("model", "claude-3.5-sonnet"),
+                ("context", "128,000 tokens"),
+                ("tools", "12 enabled"),
+                ("cwd", "~/dev/synthesis"),
+                ("uptime", "42m 20s"),
+            ]
+            .iter()
+            .map(|(a, b)| (s(a), s(b)))
+            .collect(),
+        },
+        tools: ToolsInfo {
+            count: s("12"),
+            rows: vec![
+                tool("file system", "on", false),
+                tool("shell", "on", false),
+                tool("browser", "on", false),
+                tool("search", "on", false),
+                tool("git", "on", false),
+                tool("mcp", "2 servers", true),
+                tool("memory", "on", false),
+            ],
+            more: 5,
+        },
+        activity: [
+            ("Edited auth.ts", "2m ago"),
+            ("Ran tests", "4m ago"),
+            ("Searched codebase", "6m ago"),
+            ("Read architecture.md", "9m ago"),
+            ("Updated plan", "12m ago"),
+            ("Used browser", "15m ago"),
+            ("Committed changes", "18m ago"),
+            ("Checked diagnostics", "22m ago"),
+        ]
+        .iter()
+        .map(|(t, a)| ActivityRow {
+            text: s(t),
+            ago: s(a),
+        })
+        .collect(),
+        prompts: vec![PromptRow {
+            time: s("23:04:00"),
+            text: s("Investigate why login redirects loop in auth.ts and fix it."),
+        }],
+        agent: AgentStatus {
+            working: s("Implementing secure authentication flow with session management"),
+            next: s("Run tests and verify edge cases"),
+            steps: vec![
+                step("Plan updated", StepKind::Done, "2m ago"),
+                step("Implementing changes...", StepKind::Now, ""),
+                step("Running tests...", StepKind::Todo, ""),
+                step("Verifying results...", StepKind::Todo, ""),
+                step("Updating documentation...", StepKind::Todo, ""),
+            ],
+        },
+        context: ContextInfo {
+            used: s("48.2k"),
+            max: s("128k"),
+            pct: 38.,
+            model: s("claude-sonnet-5.5"),
+            turns: s("24"),
+            input: s("42.1k"),
+            files: s("12"),
+            output: s("6.1k"),
+            cache: s("12.3k"),
+            hit: s("92%"),
+        },
+        head: ChatHead {
+            status: s("ready"),
+            prompt: s("Investigate why login redirects loop in auth.ts and fix it."),
+            ctx_pct: 38.,
+            path: s("~/dev/nemo-cli"),
+            stats: s("12 files | 3.2k LOC"),
         },
         topology: vec![
             node(
                 Pos::User,
-                "User",
-                &["fix flaky retry test", "queued 0"],
+                "User & Prompt",
+                &["hunghq", "auth-flow", "fix redirect loop"],
                 NodeState::Active,
             ),
             node(
                 Pos::Hooks,
                 "Hooks",
-                &["3 active", "last: pre-commit ok"],
+                &["pre-tool-use", "post-edit", "stop"],
                 NodeState::Idle,
             ),
             node(
                 Pos::Guards,
                 "Guards",
-                &["permission: default", "sandbox on"],
+                &[
+                    "sandbox \u{b7} workspace",
+                    "network \u{b7} proxy",
+                    "approval \u{b7} granular",
+                ],
                 NodeState::Idle,
             ),
             node(
                 Pos::Sub,
-                "Sub-agents",
-                &["1 running", "explorer idle"],
+                "Subagents",
+                &[
+                    "developer \u{b7} active",
+                    "tester \u{b7} idle",
+                    "explorer \u{b7} ready",
+                ],
                 NodeState::Active,
             ),
             node(
                 Pos::Skills,
                 "Skills",
-                &["7 loaded", "tdd, review"],
+                &["ponytail", "graphify", "openai-docs"],
                 NodeState::Idle,
             ),
             node(
                 Pos::Mcp,
                 "MCP",
-                &["2 of 3 connected", "sentry failed"],
-                NodeState::Blocked,
+                &["filesystem", "browser", "codex_apps"],
+                NodeState::Idle,
             ),
             node(
                 Pos::Tools,
                 "Tools",
-                &["Bash running", "24 builtin"],
+                &["exec_command", "apply_patch", "view_image"],
                 NodeState::Active,
             ),
             node(
                 Pos::Mem,
                 "Memory",
-                &["12 episodes", "reflect off"],
+                &["session.md", "project facts", "8 memories"],
                 NodeState::Idle,
             ),
         ],
         core: Core {
-            title: s("Synthesis"),
+            title: s("SYNTHESIS"),
             sub: s("CORE"),
-            tag: s("ready"),
+            tag: s("Reason \u{2022} Act \u{2022} Verify"),
         },
         usage: Usage {
-            // 53 weeks of days; a deterministic pattern stands in for the store's history
-            days: (0..371)
-                .map(|i| {
-                    let v = ((i * 37 + 11) % 23) as f32;
-                    if i % 9 == 4 { 0.0 } else { v * 41.0 }
-                })
-                .collect(),
-            range: s("53w"),
-            rows: pairs(&[("today", "412k"), ("7 days", "2.9M"), ("sessions", "31")]),
+            range: s("7 days"),
+            rows: vec![
+                metric("Tokens", "48.2k / 128k", 38.),
+                metric("Tool calls", "37", 24.),
+                metric("Files modified", "6", 12.),
+                metric("Commands run", "14", 22.),
+                metric("Browser requests", "3", 9.),
+                metric("MCP calls", "12", 20.),
+            ],
         },
         tips: vec![
             s("Ask for a change in plain words; Shift+Tab cycles the permission mode."),
@@ -343,15 +446,34 @@ pub fn sample() -> Snapshot {
             s("/model picks a model, /resume opens a stored session."),
             s("Ctrl+N opens another folder as a workspace."),
         ],
-        mode: s("default"),
+        mode: s("auto"),
         effort: s("high"),
-        hints: pairs(&[
-            ("Tab", "focus"),
-            ("\u{2191}\u{2193}", "select"),
-            ("Enter", "open"),
-            ("Ctrl+N", "workspace"),
-            ("/help", "commands"),
-            ("Ctrl+D", "quit"),
-        ]),
+        agents: vec![s("main"), s("developer")],
+        hints: [
+            ("\u{2318}/Ctrl+L", "focus input"),
+            ("Esc", "leave input"),
+            ("", "/tools /memory /shell /browser /diff"),
+            ("Enter", "send"),
+        ]
+        .iter()
+        .map(|(a, b)| (s(a), s(b)))
+        .collect(),
+        status: vec![
+            StatusChip {
+                text: s("synthesis"),
+                warn: false,
+                dot: false,
+            },
+            StatusChip {
+                text: s("\u{2387} feature/auth-flow"),
+                warn: false,
+                dot: false,
+            },
+            StatusChip {
+                text: s("6 files changed"),
+                warn: true,
+                dot: true,
+            },
+        ],
     }
 }

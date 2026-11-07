@@ -800,14 +800,11 @@ impl TuiView {
             }
             _ => lu.live.run_sel = i,
         }
-        panels::reveal_row(
-            if lu.live.focus == Focus::Workspace {
-                &lu.ws_scroll
-            } else {
-                &lu.run_scroll
-            },
-            i,
-        );
+        if lu.live.focus == Focus::Workspace {
+            panels::reveal_row(&lu.ws_scroll, i, panels::WS_ROW_H);
+        } else {
+            panels::reveal_row(&lu.run_scroll, i, panels::RUN_ROW_H);
+        }
         lu.dirty = true;
         cx.notify();
     }
@@ -946,6 +943,16 @@ impl TuiView {
         }
         lu.dirty = true;
         cx.notify();
+    }
+
+    /// "new workspace..." of the Workspace panel.
+    pub fn new_workspace(&mut self, cx: &mut Context<Self>) {
+        self.pick_folder(cx);
+    }
+
+    /// "new session..." of the Running panel: a fresh session in the selected workspace.
+    pub fn new_session(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.run_action(Action::New, cx);
     }
 
     /// Ctrl+N: the system folder picker; the folder gets a fresh session.

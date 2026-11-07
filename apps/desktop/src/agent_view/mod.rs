@@ -27,16 +27,16 @@ use gpui_component::input::{InputEvent, TextareaState};
 use synthesis_tui_render::theme as t;
 
 use self::layout::{
-    CHEAD_H, FOOTER_H, GAP, HEADER_H, INPUT_H, INPUT_MARGIN, MIN_H, MIN_W, MODEBAR_H, PAD,
-    PANEL_RADIUS, SWITCH_ROW_H, TABS_H, cols, tiers,
+    CHEAD_H, GAP, INPUT_H, INPUT_MARGIN, MIN_H, MIN_W, MODEBAR_H, PAD, PANEL_RADIUS, SWITCH_ROW_H,
+    cols, tiers,
 };
 pub use self::session::{AgentSession, MAX_SESSIONS, Tree};
 use crate::live::Live;
 use crate::theme::hsla;
+use crate::tui_view::MONO;
 use crate::tui_view::driver::LiveCfg;
 use crate::tui_view::panels::{dim, dot, icon, strong, text};
-use crate::tui_view::{MONO, tracked};
-use crate::{brand, ui};
+use crate::ui;
 
 /// Icons the view draws (checked by a test).
 pub const ICONS: [&str; 30] = [
@@ -98,10 +98,10 @@ impl Tab {
         match self {
             Tab::Chat => "chat",
             Tab::Diff => "diff",
-            Tab::Commands => "commands",
+            Tab::Commands => "terminal",
             Tab::Verify => "verify",
             Tab::Browser => "browser",
-            Tab::Files => "files",
+            Tab::Files => "file explorer",
         }
     }
 
@@ -148,6 +148,8 @@ pub struct AgentView {
     pub(crate) dlg_scroll: gpui::ScrollHandle,
     /// The view is narrower than 1000px: tabs drop their icons.
     narrow: bool,
+    /// Width of the conversation column (the tab strip wraps when it is narrower).
+    tabs_w: f32,
     /// Files of the diff tab that are expanded (the newest one when none was picked).
     pub(crate) diff_open: HashSet<String>,
     _tick: Option<Task<()>>,
@@ -184,6 +186,7 @@ impl AgentView {
             .collect();
         Self {
             narrow: false,
+            tabs_w: 600.,
             dlg_scroll: gpui::ScrollHandle::new(),
             next_uid: sessions.len() as u64,
             sessions,
@@ -269,94 +272,21 @@ impl AgentView {
     }
 
     fn top_bar(&self) -> Div {
-        let s = self.active_session();
-        let snap = s.and_then(|s| s.snap.as_ref());
-        let chip = |ic: &'static str, k: &str, v: String| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .px(px(14.))
-                .h(px(22.))
-                .whitespace_nowrap()
-                .child(icon(ic, 14., hsla(t::ACCENT)))
-                .child(div().child(k.to_string()))
-                .child(div().text_color(strong()).child(v))
+        let Some(top) = self
+            .active_session()
+            .and_then(|s| s.snap.as_ref())
+            .map(|n| &n.top)
+        else {
+            return crate::widgets::chrome::top_bar(&[], &[]);
         };
-        let (ws, model, tokens, health, clock) = snap.map_or_else(Default::default, |s| {
-            (
-                s.top.workspace.clone(),
-                s.top.model.clone(),
-                s.tokens.ctx_label.clone(),
-                s.top.health.clone(),
-                s.top.clock.clone(),
-            )
-        });
-        div()
-            .debug_selector(|| "header".to_string())
-            .h(px(HEADER_H))
-            .flex_none()
-            .flex()
-            .items_center()
-            .px(px(16.))
-            .border_b_1()
-            .border_color(hsla(t::RULE))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(gpui::img(brand::mark()).size(px(32.)).flex_none())
-                    .child(tracked("SYNTHESIS", 14., 0.32, strong())),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .flex()
-                    .min_w(px(0.))
-                    .overflow_hidden()
-                    .child(chip("folder", "workspace", ws))
-                    .child(chip(
-                        "gallery-vertical-end",
-                        "session",
-                        self.sessions.len().to_string(),
-                    ))
-                    .child(chip("cpu", "model", model))
-                    .child(chip("chart-pie", "tokens", tokens)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .px(px(14.))
-                    .h(px(22.))
-                    .text_color(hsla(t::SUCCESS))
-                    .child(dot(hsla(t::SUCCESS), true))
-                    .child(health),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .px(px(14.))
-                    .child(icon("calendar", 14., hsla(t::ACCENT)))
-                    .child(div().text_color(text()).child(clock)),
-            )
+        let mut top = top.clone();
+        top.live = self.sessions.len() as u32;
+        let (left, right) = crate::tui_view::top_chips(&top);
+        crate::widgets::chrome::top_bar(&left, &right)
     }
 
     fn footer(&self) -> Div {
-        let hint = |k: &str, d: &str| {
-            div()
-                .flex()
-                .gap(px(6.))
-                .px(px(10.))
-                .border_l_1()
-                .border_color(hsla(t::RULE))
-                .child(div().text_color(strong()).child(k.to_string()))
-                .child(div().child(d.to_string()))
-        };
+        use crate::widgets::chrome::{Chip, footer};
         let s = self.active_session();
         let (files, added, removed) = s.map_or((0, 0, 0), |s| {
             let p = &s.live.view.panes;
@@ -371,74 +301,36 @@ impl AgentView {
                 s.live.view.session.git_branch.clone(),
             )
         });
-        div()
-            .debug_selector(|| "footer".to_string())
-            .h(px(FOOTER_H))
-            .flex_none()
-            .flex()
-            .items_center()
-            .px(px(12.))
-            .border_t_1()
-            .border_color(hsla(t::RULE))
-            .text_color(text())
-            .whitespace_nowrap()
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .overflow_hidden()
-                    .child(hint("Enter", "send"))
-                    .child(hint("Shift+Enter", "newline"))
-                    .child(hint("Esc", "interrupt"))
-                    .child(hint("Shift+Tab", "mode"))
-                    .child(hint("Ctrl+O", "expand output"))
-                    .child(hint("PgUp/PgDn", "scroll")),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .child(div().px(px(10.)).child(ws))
-                    .when(!branch.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .px(px(10.))
-                                .border_l_1()
-                                .border_color(hsla(t::RULE))
-                                .child(format!("\u{2387} {branch}")),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .px(px(10.))
-                            .border_l_1()
-                            .border_color(hsla(t::RULE))
-                            .child(dot(
-                                hsla(if files > 0 { t::WARN } else { t::SUCCESS }),
-                                true,
-                            ))
-                            .child(div().text_color(strong()).child(format!(
-                                "{files} file{} changed",
-                                if files == 1 { "" } else { "s" }
-                            )))
-                            .when(files > 0, |d| {
-                                d.child(
-                                    div()
-                                        .text_color(hsla(t::SUCCESS))
-                                        .child(format!("+{added}")),
-                                )
-                                .child(
-                                    div()
-                                        .text_color(hsla(t::ERROR))
-                                        .child(format!("\u{2212}{removed}")),
-                                )
-                            }),
-                    ),
-            )
+        let hint = |k: &str, d: &str| (k.to_string(), d.to_string());
+        let hints = [
+            hint("Enter", "send"),
+            hint("Shift+Enter", "newline"),
+            hint("Esc", "interrupt"),
+            hint("Shift+Tab", "mode"),
+            hint("Ctrl+O", "expand output"),
+            hint("PgUp/PgDn", "scroll"),
+        ];
+        let mut chips = vec![Chip::new("", ws, text())];
+        if !branch.is_empty() {
+            chips.push(Chip::new("", format!("\u{2387} {branch}"), text()));
+        }
+        let changed = format!(
+            "{files} file{} changed{}",
+            if files == 1 { "" } else { "s" },
+            if files > 0 {
+                format!(" +{added} \u{2212}{removed}")
+            } else {
+                String::new()
+            }
+        );
+        chips.push(
+            Chip::new("", changed, strong()).dot_colour(hsla(if files > 0 {
+                t::WARN
+            } else {
+                t::SUCCESS
+            })),
+        );
+        footer(&hints, &chips)
     }
 
     /// The header of the conversation panel (`.chead`).
@@ -466,64 +358,11 @@ impl AgentView {
                 _ => None,
             })
             .map_or_else(|| "No prompt yet".to_string(), str::to_string);
-        let pct = snap.map_or(0., |n| n.tokens.ctx_pct).clamp(0., 100.);
-        let ctx = snap.map_or(String::new(), |n| n.top.ctx.clone());
-        let cwd = snap.map_or(String::new(), |n| {
-            n.session
-                .iter()
-                .find(|(k, _)| k == "cwd")
-                .map_or(String::new(), |(_, v)| v.clone())
+        let pct = snap.map_or(0., |n| n.context.pct);
+        let tail = snap.map_or(String::new(), |n| {
+            format!("{} | {}", n.head.path, n.head.stats)
         });
-        div()
-            .debug_selector(|| "chead".to_string())
-            .h(px(CHEAD_H))
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .px(px(12.))
-            .border_b_1()
-            .border_color(hsla(t::RULE))
-            .whitespace_nowrap()
-            .child(icon("star", 14., hsla(t::ACCENT)))
-            .child(
-                div()
-                    .text_color(hsla(t::ACCENT))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Synthesis"),
-            )
-            .child(div().text_color(hsla(t::SUCCESS)).child(status))
-            .child(div().text_color(dim()).child("|"))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .truncate()
-                    .text_color(dim())
-                    .child(format!("Latest user prompt: {prompt}")),
-            )
-            .child(
-                div()
-                    .w(px(54.))
-                    .h(px(4.))
-                    .flex_none()
-                    .rounded(px(2.))
-                    .bg(with_alpha(hsla(t::TEXT_STRONG), 0.12))
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .h_full()
-                            .w(gpui::relative(pct / 100.))
-                            .rounded(px(2.))
-                            .bg(hsla(t::SUCCESS)),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(dim())
-                    .child(format!("{cwd} | {ctx}")),
-            )
+        crate::widgets::chrome::chat_head(status, hsla(t::SUCCESS), &prompt, pct, &tail)
     }
 
     /// One tab per open session, and "+" for another.
@@ -599,9 +438,9 @@ impl AgentView {
         row
     }
 
-    /// `.bottomtabs`
+    /// `.bottomtabs` (the shared `chrome::tabs`).
     fn tab_strip(&self, cx: &mut Context<Self>) -> Div {
-        let pending = |tab: Tab| -> Option<String> {
+        let count = |tab: Tab| -> Option<String> {
             let p = &self.active_session()?.live.view.panes;
             match tab {
                 Tab::Diff if !p.files.is_empty() => Some(p.files.len().to_string()),
@@ -611,42 +450,19 @@ impl AgentView {
                 _ => None,
             }
         };
-        div()
-            .debug_selector(|| "tabs".to_string())
-            .h(px(TABS_H))
-            .flex_none()
-            .flex()
-            .border_b_1()
-            .border_color(hsla(t::RULE))
-            .bg(with_alpha(hsla(t::BG), 0.18))
-            .children(Tab::ALL.into_iter().map(|tab| {
-                let on = self.tab == tab;
-                div()
-                    .id(tab.label())
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .px(px(10.))
-                    .cursor_pointer()
-                    .whitespace_nowrap()
-                    .border_r_1()
-                    .border_color(hsla(t::RULE))
-                    .text_color(if on { strong() } else { text() })
-                    .when(on, |d| {
-                        d.bg(hsla(t::ELEVATED))
-                            .border_b_2()
-                            .border_color(hsla(t::ACCENT))
-                    })
-                    .hover(|d| d.text_color(strong()))
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_tab(tab, cx)))
-                    .child(icon(
-                        tab.icon(),
-                        14.,
-                        hsla(if on { t::ACCENT } else { t::MUTED }),
-                    ))
-                    .child(tab.label())
-                    .children(pending(tab).map(|n| div().text_color(dim()).child(n)))
-            }))
+        let items: Vec<crate::widgets::chrome::Tab> = Tab::ALL
+            .iter()
+            .map(|t| crate::widgets::chrome::Tab {
+                label: t.label(),
+                icon: t.icon(),
+                badge: count(*t),
+            })
+            .collect();
+        let click = |i: usize| -> crate::widgets::chrome::OnClick {
+            Box::new(cx.listener(move |this, _, _, cx| this.set_tab(Tab::ALL[i], cx)))
+        };
+        let on = Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
+        crate::widgets::chrome::tabs(&items, on, !self.narrow, self.tabs_w, &click)
     }
 
     /// `.agent-switch`: main and the sub-agents; picking one opens its transcript beside the chat.
@@ -847,6 +663,8 @@ impl Render for AgentView {
         let h = f32::from(vp.height);
         let tier = tiers(h);
         self.narrow = w < 1000.;
+        let c = cols(w);
+        self.tabs_w = w - 2. * PAD - 2. * GAP - c.left - c.right - 2.;
         let body = div()
             .flex_1()
             .min_h(px(0.))
@@ -890,6 +708,7 @@ pub const RAIL_W: f32 = ui::RAIL_W;
 mod tests {
     use super::layout::*;
     use super::*;
+    use crate::brand;
     use gpui::{Bounds, Pixels, TestAppContext, VisualTestContext, px, size};
 
     const SIZES: [(f32, f32); 5] = [

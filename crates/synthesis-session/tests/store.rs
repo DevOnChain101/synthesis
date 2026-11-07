@@ -1281,9 +1281,17 @@ fn usage_by_day_classifies_tool_starts() {
     let e = env();
     let d = e.dir("a");
     let mut a = create(&e, "sa", &d);
-    for (i, name) in ["Bash", "Bash", "Edit", "Write", "browser_navigate", "mcp__gh__issue", "Read"]
-        .iter()
-        .enumerate()
+    for (i, name) in [
+        "Bash",
+        "Bash",
+        "Edit",
+        "Write",
+        "browser_navigate",
+        "mcp__gh__issue",
+        "Read",
+    ]
+    .iter()
+    .enumerate()
     {
         a.append_event(Event::ToolStarted {
             tool_call_id: format!("t{i}"),
