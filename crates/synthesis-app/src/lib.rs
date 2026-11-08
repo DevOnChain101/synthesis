@@ -40,6 +40,7 @@ pub mod mcpinput;
 pub mod memcmd;
 pub mod memory;
 mod memtools;
+pub mod models;
 pub mod peers;
 pub mod rename;
 pub mod rewind;

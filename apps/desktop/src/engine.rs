@@ -467,6 +467,10 @@ pub struct Engine {
     pub sid: String,
     pub label: String,
     pub models: Vec<String>,
+    /// The picker's rows with what the cache knows of each model.
+    pub model_rows: Vec<crate::models::ModelRow>,
+    /// The stored model that could not be used (the session runs on `label`; the stored id is kept).
+    pub stale_model: Option<String>,
     pub effort_tiers: Vec<String>,
     pub notices: Vec<String>,
     pub cwd: String,
@@ -586,6 +590,7 @@ impl Engine {
             memory,
             resumed_from_seq,
             model_changed,
+            stale_model,
             worktree,
             label,
             models,
@@ -626,6 +631,14 @@ impl Engine {
         let workspace = session.workspace.clone();
         let commands: Vec<Command> = synthesis_tui::local_commands()
             .into_iter()
+            // desktop only: a typed folder path as a new workspace
+            .chain(std::iter::once(Command {
+                name: "open".into(),
+                aliases: vec![],
+                description: "open a folder as a new workspace".into(),
+                argument_hint: "<path>".into(),
+                local: true,
+            }))
             .chain(std::iter::once(crate::live::send_command()))
             .chain(
                 skills
@@ -685,6 +698,8 @@ impl Engine {
             sid,
             label,
             models,
+            model_rows: crate::models::rows(env, &project),
+            stale_model,
             effort_tiers,
             notices: all_notices,
             cwd,

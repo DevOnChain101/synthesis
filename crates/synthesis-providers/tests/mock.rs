@@ -27,6 +27,8 @@ enum Reply {
     },
     /// Sends headers, then nothing.
     Stall,
+    /// 400 with no length and a body that never ends (until the client hangs up).
+    Flood,
     /// Reads the request, then sends nothing at all (not even headers).
     Silent,
 }
@@ -128,6 +130,13 @@ async fn start(replies: Vec<Reply>) -> Mock {
                         if *cut {
                             let _ = sock.write_all(b"ff\r\npartial").await; // promised 255 bytes, dies
                         }
+                    }
+                    Reply::Flood => {
+                        let _ = sock
+                            .write_all(b"HTTP/1.1 400 X\r\nconnection: close\r\n\r\n")
+                            .await;
+                        let chunk = vec![b'x'; 16 << 10];
+                        while sock.write_all(&chunk).await.is_ok() {}
                     }
                     Reply::Silent => tokio::time::sleep(Duration::from_secs(30)).await,
                     Reply::Stall => {
@@ -1147,4 +1156,24 @@ async fn ids_with_terminal_escapes_are_not_listed_and_after_id_is_encoded() {
         second.starts_with("GET /v1/models?limit=1000&after_id=x%26limit%3D1%20%23 "),
         "{second}"
     );
+}
+
+#[tokio::test]
+async fn an_endless_error_body_is_cut_and_the_error_still_arrives() {
+    let mock = start(vec![Reply::Flood]).await;
+    let p = provider(
+        Protocol::OpenAi,
+        &mock,
+        Auth::Bearer(Secret::new(KEY)),
+        fast_retry(0),
+    );
+    let e = tokio::time::timeout(
+        Duration::from_secs(10),
+        p.list_models(&CancellationToken::new()),
+    )
+    .await
+    .expect("the read must stop at its cap, not wait for the end")
+    .unwrap_err();
+    assert_eq!(e.status, Some(400));
+    assert!(e.to_string().len() < 2000, "{}", e.to_string().len());
 }

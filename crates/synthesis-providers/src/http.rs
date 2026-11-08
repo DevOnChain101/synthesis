@@ -14,6 +14,22 @@ use tokio_util::sync::CancellationToken;
 
 pub type EventStream = BoxStream<'static, Result<StreamEvent, ProviderError>>;
 
+/// Most of an error response's body that is read; a provider may not stream one forever.
+const MAX_ERROR_BODY: usize = 64 << 10;
+
+/// The body of an error response, cut at [`MAX_ERROR_BODY`] with a marker.
+async fn error_text(mut resp: reqwest::Response) -> Result<String, reqwest::Error> {
+    let mut body = Vec::new();
+    while let Some(c) = resp.chunk().await? {
+        let room = MAX_ERROR_BODY - body.len();
+        body.extend_from_slice(&c[..c.len().min(room)]);
+        if c.len() >= room {
+            return Ok(format!("{}...[truncated]", String::from_utf8_lossy(&body)));
+        }
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
 #[derive(Debug, Clone)]
 pub struct NetSettings {
     pub connect_timeout: Duration,
@@ -189,7 +205,9 @@ impl Endpoint {
                     return Ok(resp);
                 }
                 let ra = retry_after(resp.headers());
-                let text = resp.text().await.map_err(|e| self.redaction.transport(e))?;
+                let text = error_text(resp)
+                    .await
+                    .map_err(|e| self.redaction.transport(e))?;
                 Err(self.redaction.api_error(Some(status.as_u16()), &text, ra))
             })
             .await
