@@ -19,7 +19,7 @@ use super::{TuiView, layout};
 use crate::theme::hsla;
 
 /// Lines of a tool's output shown before "ctrl+o" (the TUI's default).
-pub const COLLAPSED_LINES: usize = 6;
+pub const COLLAPSED_LINES: usize = 5;
 
 /// Whether a row of the quiet chat is shown. `verbose` is the TUI's switch for the internal rows
 /// (`Item::Internal`: memory, peer and hook bookkeeping) and widens what approvals show.
@@ -47,6 +47,18 @@ pub fn visible(it: &Item, show_thinking: bool, verbose: bool, focus: bool) -> bo
 /// Left edge of what sits under a speaker's text: the row's 10px padding, the 34px avatar column, the 10px gap.
 const INDENT: f32 = 54.;
 
+/// The toggle under a clipped tool output.
+fn toggle_label(cut: bool, more: usize) -> String {
+    if cut {
+        format!(
+            "Show more ({more} more line{})",
+            if more == 1 { "" } else { "s" }
+        )
+    } else {
+        "Show less".to_string()
+    }
+}
+
 /// `.msg`: a 32px avatar (radius 7) and, beside it, the tracked who label over the body (`cli.html`).
 fn msg(avatar: Div, who: &str, who_colour: gpui::Hsla, time: &str, body: Div) -> Div {
     div()
@@ -62,7 +74,7 @@ fn msg(avatar: Div, who: &str, who_colour: gpui::Hsla, time: &str, body: Div) ->
                 .border_1()
                 .border_color(hsla(t::BORDER))
                 .overflow_hidden()
-                .child(avatar),
+                .child(avatar.rounded(px(6.))),
         )
         .child(
             div()
@@ -281,6 +293,18 @@ impl TuiView {
             .min_h(px(0.))
             .pt(px(10.))
             .debug_selector(|| "chat-scroll".to_string())
+            // a click anywhere on the chat gives the prompt the keys (rows and buttons handle theirs first)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if let Some(lu) = &mut this.live {
+                        lu.live.focus = crate::live::Focus::Chat;
+                        lu.dirty = true;
+                        lu.prompt.update(cx, |s, cx| s.focus(window, cx));
+                        cx.notify();
+                    }
+                }),
+            )
             .child(rows);
         if !lu.follow {
             wrap = wrap.child(
@@ -406,6 +430,7 @@ impl TuiView {
                 div().size_full().bg(gpui::black()).child(
                     gpui::img(crate::brand::mark())
                         .size_full()
+                        .rounded(px(6.))
                         .object_fit(gpui::ObjectFit::Cover),
                 ),
                 "SYNTHESIS",
@@ -646,14 +671,7 @@ impl TuiView {
                                 .id(("tool-more", idx))
                                 .cursor_pointer()
                                 .text_color(hsla(t::ACCENT))
-                                .child(if cut {
-                                    format!(
-                                        "\u{2026} {more} more line{} (click or Ctrl+O)",
-                                        if more == 1 { "" } else { "s" }
-                                    )
-                                } else {
-                                    "show less".to_string()
-                                })
+                                .child(toggle_label(cut, more))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if let Some(lu) = &mut this.live {
                                         let e = &mut lu.live.expanded;
@@ -788,9 +806,11 @@ impl TuiView {
         let busy = l.busy || l.starting;
         col.child(input_box(
             div()
+                .relative()
                 .flex_1()
                 .min_w(px(0.))
-                .child(Textarea::new(&lu.prompt).appearance(false).bordered(false)),
+                .child(Textarea::new(&lu.prompt).appearance(false).bordered(false))
+                .child(block_cursor(lu.prompt.clone())),
             l.focus == crate::live::Focus::Chat,
             busy,
             Some(Box::new(cx.listener(|this, _, window, cx| {
@@ -798,6 +818,38 @@ impl TuiView {
             }))),
         ))
     }
+}
+
+/// The prompt's caret: a block as high as a capital letter, standing on the baseline. The input's own
+/// caret is made transparent in the TUI view (`ui.rs`); this paints over its place.
+fn block_cursor(prompt: gpui::Entity<gpui_component::input::TextareaState>) -> impl IntoElement {
+    gpui::canvas(
+        |_, _, _| (),
+        move |_, (), window, cx| {
+            let Some((cb, _)) = prompt.read(cx).cursor_layout() else {
+                return;
+            };
+            if !gpui::Focusable::focus_handle(prompt.read(cx), cx).is_focused(window) {
+                return;
+            }
+            let st = window.text_style();
+            let sys = window.text_system().clone();
+            let id = sys.resolve_font(&st.font());
+            let size = st.font_size.to_pixels(window.rem_size());
+            let (asc, desc) = (sys.ascent(id, size), sys.descent(id, size).abs());
+            let baseline = cb.center().y + (asc - desc) / 2.;
+            let cap = sys.cap_height(id, size);
+            window.paint_quad(gpui::fill(
+                gpui::Bounds::new(
+                    gpui::point(cb.left(), baseline - cap),
+                    gpui::size(size * 0.6, cap),
+                ),
+                hsla(t::PEARL),
+            ));
+        },
+    )
+    .absolute()
+    .size_full()
 }
 
 /// `.inputbar`: 46px box (border + 44px form), margin 0 12px 12px, the `>` prompt mark, `content`, and the
@@ -892,6 +944,13 @@ pub fn diff_rows(d: &Value) -> Vec<(String, gpui::Hsla, Option<gpui::Hsla>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_toggle_names_what_it_does() {
+        assert_eq!(toggle_label(true, 1), "Show more (1 more line)");
+        assert_eq!(toggle_label(true, 7), "Show more (7 more lines)");
+        assert_eq!(toggle_label(false, 7), "Show less");
+    }
 
     #[test]
     fn the_quiet_chat_hides_what_a_person_does_not_need() {

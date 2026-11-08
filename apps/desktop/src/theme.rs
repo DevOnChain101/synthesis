@@ -9,6 +9,19 @@ pub fn hsla(c: t::Rgb) -> Hsla {
     gpui::rgb(u32::from_be_bytes([0, c[0], c[1], c[2]])).into()
 }
 
+/// Colour token and icon of a permission mode (the mode bar). One place; every `Mode` differs.
+pub fn mode_look(m: synthesis_permissions::Mode) -> (t::Rgb, &'static str) {
+    use synthesis_permissions::Mode::*;
+    match m {
+        Default => (t::INFO, "shield"),
+        AcceptEdits => (t::ACCENT_LIGHT, "file"),
+        Plan => (t::SUCCESS, "layers"),
+        Auto => (t::WARN, "chevrons-right"),
+        DontAsk => (t::CYAN, "cpu"),
+        BypassPermissions => (t::ERROR, "wrench"),
+    }
+}
+
 /// Dark mode with the platinum tokens. Chrome uses the bundled UI sans (`brand::UI_FONT`); `mono`
 /// is the monospace of the TUI view and of code.
 pub fn apply(mono: &str, cx: &mut App) {
@@ -52,6 +65,31 @@ pub fn apply(mono: &str, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_mode_has_its_own_label_colour_and_icon() {
+        use synthesis_permissions::Mode;
+        let looks: Vec<_> = Mode::ALL
+            .iter()
+            .map(|m| {
+                let (c, i) = mode_look(*m);
+                assert!(
+                    crate::widgets::icons::body(crate::widgets::icons::for_lucide(i).unwrap())
+                        .is_some()
+                );
+                (
+                    synthesis_tui_render::dialogs::mode_name(Some(m.as_str())),
+                    c,
+                    i,
+                )
+            })
+            .collect();
+        for (a, x) in looks.iter().enumerate() {
+            for y in &looks[a + 1..] {
+                assert!(x.0 != y.0 && x.1 != y.1 && x.2 != y.2, "{x:?} {y:?}");
+            }
+        }
+    }
 
     #[test]
     fn tokens_are_the_documented_hex() {

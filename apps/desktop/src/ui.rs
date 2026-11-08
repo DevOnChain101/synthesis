@@ -204,6 +204,17 @@ impl Shell {
                     .items_center()
                     .gap(px(8.))
                     .window_control_area(WindowControlArea::Drag)
+                    .id("titlebar-drag")
+                    // double-click: zoom (macOS, per the system setting) / maximize and restore
+                    .on_click(|ev, window, _| {
+                        if ev.click_count() == 2 {
+                            if cfg!(target_os = "macos") {
+                                window.titlebar_double_click();
+                            } else {
+                                window.zoom_window();
+                            }
+                        }
+                    })
                     .when(!mac, |d| {
                         d.child(gpui::img(brand::mark()).size(px(16.)).flex_none())
                             .child(tracked("SYNTHESIS", 10., 0.3, theme::hsla(t::TEXT_STRONG)))
@@ -256,6 +267,12 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // the TUI prompt paints its own block caret; other inputs keep the library's line
+        cx.global_mut::<gpui_component::Theme>().caret = if self.view == View::Tui {
+            gpui::transparent_black()
+        } else {
+            theme::hsla(t::PEARL)
+        };
         let content = match self.view {
             View::Tui => div().size_full().child(self.tui.clone()),
             View::Agent => div().size_full().child(Self::coming_soon()),

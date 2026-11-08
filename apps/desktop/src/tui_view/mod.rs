@@ -88,6 +88,10 @@ pub enum ChatTab {
     Files,
 }
 
+fn t_mode_name(m: synthesis_permissions::Mode) -> String {
+    synthesis_tui_render::dialogs::mode_name(Some(m.as_str()))
+}
+
 impl ChatTab {
     pub const ALL: [ChatTab; 5] = [
         ChatTab::Chat,
@@ -505,6 +509,19 @@ impl TuiView {
 
     fn mode_bar(&self) -> Div {
         let s = &self.snap;
+        // the mode the engine runs (read back, not the snapshot's copy); no engine: the sample's
+        let engine_mode = self
+            .live
+            .as_ref()
+            .and_then(|l| l.live.engine.as_ref())
+            .map(|e| e.mode());
+        let (mode_col, mode_icon, mode_label) = match engine_mode {
+            Some(m) => {
+                let (c, i) = crate::theme::mode_look(m);
+                (hsla(c), i, t_mode_name(m))
+            }
+            None => (hsla(t::WARN), "chevrons-right", s.mode.clone()),
+        };
         div()
             .debug_selector(|| "modebar".to_string())
             .flex_none()
@@ -525,9 +542,9 @@ impl TuiView {
                     .items_center()
                     .gap(px(5.))
                     .min_w(px(0.))
-                    .text_color(hsla(t::WARN))
-                    .child(icon("chevrons-right", 14., hsla(t::WARN)))
-                    .child(div().flex_none().child(format!("{} mode on", s.mode)))
+                    .text_color(mode_col)
+                    .child(icon(mode_icon, 14., mode_col))
+                    .child(div().flex_none().child(format!("{mode_label} mode on")))
                     .child(
                         div()
                             .min_w(px(0.))

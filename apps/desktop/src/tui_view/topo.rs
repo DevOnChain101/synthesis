@@ -434,9 +434,20 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool) -> AnyElement {
 fn core_card(c: &Core, r: R, mode: Mode, large: bool) -> AnyElement {
     let ink = hsla(t::TEXT_STRONG);
     let logo = |s: f32| {
-        gpui::img(brand::mark())
+        // a soft platinum halo behind the mark (two layers); it stays inside the card, which clips
+        let halo = |a: f32, blur: f32| gpui::BoxShadow {
+            color: with_alpha(hsla(t::ACCENT_GLOW), a),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(blur),
+            spread_radius: px(0.),
+            inset: false,
+        };
+        div()
             .size(px(s))
             .flex_none()
+            .rounded_full()
+            .shadow(vec![halo(0.28, s * 0.35), halo(0.14, s * 0.2)])
+            .child(gpui::img(brand::mark()).size(px(s)))
             .into_any_element()
     };
     let d = div()

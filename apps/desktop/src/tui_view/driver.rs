@@ -472,7 +472,21 @@ impl TuiView {
 
     pub(super) fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
-        let text = text_of(&lu.prompt, cx);
+        let mut text = text_of(&lu.prompt, cx);
+        // Enter on a typed prefix (`/mo`) completes the highlighted command first
+        if let Some(run) = lu
+            .comp
+            .as_ref()
+            .and_then(|c| enter_completes(&text, c, &lu.live.commands))
+        {
+            self.accept_completion(window, cx);
+            if !run {
+                return;
+            }
+            let Some(lu) = &mut self.live else { return };
+            text = text_of(&lu.prompt, cx);
+        }
+        let Some(lu) = &mut self.live else { return };
         lu.comp = None;
         lu.hist = None;
         lu.search = None;
@@ -1503,6 +1517,30 @@ fn editor_at(text: &str, cursor: usize) -> LineEditor {
     ed
 }
 
+/// Enter with the popup open on a slash prefix: `Some(run)` completes the highlighted command (and
+/// runs it when `run`, i.e. it takes no argument). `None`: the text already names a command.
+fn enter_completes(
+    text: &str,
+    c: &Comp,
+    cmds: &[synthesis_tui_base::complete::Command],
+) -> Option<bool> {
+    if c.token.kind != complete::TokenKind::Command {
+        return None;
+    }
+    let typed = text.trim().trim_start_matches('/');
+    if cmds
+        .iter()
+        .any(|x| x.name == typed || x.aliases.iter().any(|a| a == typed))
+    {
+        return None;
+    }
+    let name = c.inserts.get(c.sel)?.insert.trim().trim_start_matches('/');
+    Some(
+        cmds.iter()
+            .any(|x| x.name == name && x.argument_hint.is_empty()),
+    )
+}
+
 /// The completion for the token under the cursor: `/` commands and `@` files.
 pub fn suggest(text: &str, cursor: usize, live: &Live, cwd: &Path) -> Option<Comp> {
     let ed = editor_at(text, cursor);
@@ -1531,6 +1569,18 @@ pub fn suggest(text: &str, cursor: usize, live: &Live, cwd: &Path) -> Option<Com
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enter_on_a_prefix_completes_and_runs_only_without_args() {
+        let mut l = Live::new();
+        l.commands = synthesis_tui::local_commands();
+        let c = suggest("/mo", 3, &l, Path::new("/")).unwrap();
+        assert!(enter_completes("/mo", &c, &l.commands).is_some());
+        let c = suggest("/model", 6, &l, Path::new("/")).unwrap();
+        assert_eq!(enter_completes("/model", &c, &l.commands), None);
+        let c = suggest("/hel", 4, &l, Path::new("/")).unwrap();
+        assert_eq!(enter_completes("/hel", &c, &l.commands), Some(true));
+    }
 
     #[test]
     fn a_slash_offers_commands_and_the_cursor_is_in_chars() {
