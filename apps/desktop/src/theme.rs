@@ -29,6 +29,11 @@ pub fn fill(c: t::Rgb) -> Hsla {
     }
 }
 
+/// A surface that must stay readable at any window opacity (the approval dock, the Settings popup): always opaque.
+pub fn solid(c: t::Rgb) -> Hsla {
+    hsla(c)
+}
+
 /// What the window asks the platform for: nothing behind it at 100 %, else see-through, blurred if wanted
 /// and supported.
 pub fn background(tui: &synthesis_settings::TuiSettings) -> WindowBackgroundAppearance {
@@ -131,6 +136,12 @@ mod tests {
         assert_eq!(hsla(t::BG).a, 1., "text colours stay opaque");
         set_opacity(1);
         assert_eq!(fill(t::BG).a, 0.30);
+        set_opacity(30);
+        assert_eq!(
+            solid(t::SURFACE).a,
+            1.,
+            "the approval dock and the popup ignore the opacity"
+        );
         set_opacity(100);
         assert_eq!(fill(t::BG), hsla(t::BG));
     }

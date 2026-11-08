@@ -1073,6 +1073,22 @@ impl TuiView {
         self.pick_folder(cx);
     }
 
+    /// Why the session cannot be restarted now (a restart drops the running task, queued prompts and open dialogs).
+    pub fn restart_blocker(&self) -> Option<&'static str> {
+        let Some(lu) = &self.live else {
+            return Some("there is no live session in this window");
+        };
+        if lu.live.busy || !lu.live.dialogs.is_empty() || !lu.live.queue.is_empty() {
+            Some(
+                "a task is running, or approvals or queued prompts are pending: finish or cancel first",
+            )
+        } else if lu.live.engine.is_none() {
+            Some("the session is still starting")
+        } else {
+            None
+        }
+    }
+
     /// The dash panels switched off now.
     pub fn hidden_panels(&self) -> super::layout::Hidden {
         self.hidden

@@ -94,7 +94,11 @@ impl Shell {
     pub(crate) fn go(&mut self, v: View, window: &mut Window, cx: &mut Context<Self>) {
         if v == View::Settings && self.view != View::Settings {
             self.back = self.view;
-            self.settings.update(cx, |p, cx| p.focus(window, cx));
+            let block = self.tui.read(cx).restart_blocker().map(String::from);
+            self.settings.update(cx, |p, cx| {
+                p.set_restart_block(block, cx);
+                p.focus(window, cx)
+            });
         }
         self.view = v;
         let tui_on = v == View::Tui || (v == View::Settings && self.back == View::Tui);
@@ -113,6 +117,19 @@ impl Shell {
     #[cfg(feature = "shot")]
     pub(crate) fn settings(&self) -> &Entity<SettingsView> {
         &self.settings
+    }
+
+    /// "Restart session" of the popup: only when nothing would be dropped (no task, approval or queued prompt).
+    /// The popup keeps its pending-change badge and stays open until the fresh session has been started.
+    fn restart_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let block = self.tui.read(cx).restart_blocker().map(String::from);
+        let ok = block.is_none();
+        self.settings
+            .update(cx, |p, cx| p.set_restart_block(block, cx));
+        if ok {
+            self.tui.update(cx, |t, cx| t.new_session(window, cx));
+            self.settings.update(cx, |p, cx| p.restarted(window, cx));
+        }
     }
 
     /// `synt.tui` changed in the Settings popup: the window's opacity and blur, and what the TUI view reads, apply at once.
@@ -480,9 +497,7 @@ impl Shell {
         cx.subscribe_in(
             &settings,
             window,
-            |s: &mut Shell, _, _: &Restart, window, cx| {
-                s.tui.update(cx, |t, cx| t.new_session(window, cx))
-            },
+            |s: &mut Shell, _, _: &Restart, window, cx| s.restart_session(window, cx),
         )
         .detach();
         cx.subscribe_in(
@@ -590,5 +605,55 @@ mod tests {
             s.apply_look(Default::default(), window, cx)
         });
         assert_eq!(theme::fill(t::BG).a, 1.);
+    }
+
+    #[gpui::test]
+    fn restart_session_is_refused_while_it_would_drop_work_and_keeps_the_badge(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            theme::apply("JetBrains Mono", cx);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (home, ws) = (root.join("home"), root.join("ws"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+        let cfg = settings_view::model::Cfg {
+            env: synthesis_config::Env::from_pairs([
+                ("HOME", home.to_string_lossy().into_owned()),
+                ("SYNT_HOME", home.to_string_lossy().into_owned()),
+            ]),
+            user_home: home.clone(),
+            home,
+            cwd: ws,
+            managed: root.join("managed.json"),
+            trust: synthesis_config::ProjectTrust::Untrusted,
+        };
+        let (shell, v) = cx.add_window_view(|window, cx| {
+            Shell::new(window, cx, None, Default::default(), Ok(cfg))
+        });
+        v.simulate_resize(size(px(1000.), px(800.)));
+        shell.update_in(v, |s, window, cx| {
+            s.go(View::Settings, window, cx);
+            let st = s.settings.clone();
+            st.update(cx, |p, cx| {
+                p.apply(
+                    "synt.memory.enabled",
+                    settings_view::model::Change::Bool(false),
+                    window,
+                    cx,
+                );
+                cx.emit(Restart);
+            });
+        });
+        v.run_until_parked();
+        // no live session here: nothing to restart, so the popup stays, says why, and the change is still pending
+        assert_eq!(shell.read_with(v, |s, _| s.view), View::Settings);
+        assert!(v.debug_bounds("restart-blocked").is_some());
+        assert!(shell.read_with(v, |s, cx| {
+            s.settings.read(cx).model().unwrap().restart_pending() == 1
+        }));
     }
 }

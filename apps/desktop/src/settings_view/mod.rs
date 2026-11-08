@@ -191,6 +191,8 @@ pub struct SettingsView {
     scroll: ScrollHandle,
     /// The tab shown (a search shows every section).
     tab: Section,
+    /// Why "Restart session" cannot be used now (the shell says).
+    restart_block: Option<String>,
     /// One slider per percentage field, by key.
     sliders: HashMap<String, Entity<SliderState>>,
     /// Width taken by chrome beside the view (the shell's rail).
@@ -316,6 +318,7 @@ impl SettingsView {
             notice: None,
             scroll: ScrollHandle::new(),
             tab: TABS[0],
+            restart_block: None,
             sliders,
             inset,
             _subs: subs,
@@ -339,6 +342,37 @@ impl SettingsView {
             .unwrap_or_default()
     }
 
+    /// The window and the sliders follow the file, not a preview.
+    fn show_persisted(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let t = self.tui_now();
+        for sl in self.sliders.values() {
+            let v = f32::from(t.opacity);
+            sl.update(cx, |s, cx| s.set_value(v, window, cx));
+        }
+        cx.emit(Applied(t));
+    }
+
+    /// Closes the popup; a drag that was never released does not stay on the window.
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_persisted(window, cx);
+        cx.emit(Close);
+    }
+
+    /// The shell says whether a restart is possible (`None`) or why not.
+    pub fn set_restart_block(&mut self, why: Option<String>, cx: &mut Context<Self>) {
+        self.restart_block = why;
+        cx.notify();
+    }
+
+    /// The shell started the fresh session: the changes that waited for one are in force now.
+    pub fn restarted(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(m) = &mut self.model {
+            m.changed.clear();
+        }
+        self.restart_block = None;
+        self.close(window, cx);
+    }
+
     /// A slider being dragged: the window follows, nothing is written yet.
     fn preview(&mut self, key: &str, v: u64, cx: &mut Context<Self>) {
         if key == "synt.tui.opacity" {
@@ -349,20 +383,11 @@ impl SettingsView {
         }
     }
 
-    /// "Restart session": the shell opens a fresh session; the changes that waited for one are in force there.
-    fn restart(&mut self, cx: &mut Context<Self>) {
-        if let Some(m) = &mut self.model {
-            m.changed.clear();
-        }
-        cx.emit(Restart);
-        cx.emit(Close);
-    }
-
     /// Esc: the open confirmation first, then the popup.
-    fn escape(&mut self, cx: &mut Context<Self>) {
+    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.model.as_mut().filter(|m| m.pending.is_some()) {
             Some(m) => m.cancel(),
-            None => cx.emit(Close),
+            None => self.close(window, cx),
         }
         cx.notify();
     }
@@ -395,7 +420,13 @@ impl SettingsView {
         self.apply(key, c, window, cx);
     }
 
-    fn apply(&mut self, key: &str, c: Change, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn apply(
+        &mut self,
+        key: &str,
+        c: Change,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(m) = &mut self.model else { return };
         let is_add = matches!(c, Change::Add(_));
         let out = m.change(key, c);
@@ -418,14 +449,13 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         self.notice = None;
+        // a refused or failed write puts the window back to what the file holds (a slider drag had previewed)
+        if out != Outcome::Saved && key.starts_with("synt.tui.") {
+            self.show_persisted(window, cx);
+        }
         if out == Outcome::Saved {
             if key.starts_with("synt.tui.") {
-                let t = self.tui_now();
-                if let Some(sl) = self.sliders.get(key) {
-                    let v = f32::from(t.opacity);
-                    sl.update(cx, |s, cx| s.set_value(v, window, cx));
-                }
-                cx.emit(Applied(t));
+                self.show_persisted(window, cx);
             }
             let text =
                 self.model
@@ -1103,6 +1133,25 @@ impl Render for SettingsView {
             }
             let n = m.restart_pending();
             if n > 0 {
+                let blocked = self.restart_block.clone();
+                let mut msg = div().flex_1().min_w(px(0.)).child(small(
+                    format!("{n} change{} apply to the next session. The running one keeps the old values until you restart it (its conversation is kept in the session list).", if n == 1 { "" } else { "s" }),
+                    t::WARN,
+                ));
+                if let Some(why) = &blocked {
+                    msg = msg.child(
+                        small(format!("Restart is not possible now: {why}."), t::ERROR)
+                            .debug_selector(|| "restart-blocked".to_string()),
+                    );
+                }
+                let mut button = btn("restart-session", "Restart session", true);
+                button = if blocked.is_some() {
+                    button.opacity(0.45).cursor_default()
+                } else {
+                    button
+                        .debug_selector(|| "restart-session".to_string())
+                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(Restart)))
+                };
                 restart_note = Some(
                     div()
                         .flex()
@@ -1114,19 +1163,8 @@ impl Render for SettingsView {
                         .rounded(px(6.))
                         .border_1()
                         .border_color(alpha(t::WARN, 0.55))
-                        .child(
-                            small(
-                                format!("{n} change{} apply to the next session. The running one keeps the old values until you restart it (its conversation is kept in the session list).", if n == 1 { "" } else { "s" }),
-                                t::WARN,
-                            )
-                            .flex_1()
-                            .min_w(px(0.)),
-                        )
-                        .child(
-                            btn("restart-session", "Restart session", true)
-                                .debug_selector(|| "restart-session".to_string())
-                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.restart(cx))),
-                        ),
+                        .child(msg)
+                        .child(button),
                 );
             }
         } else if let Some(e) = &self.err {
@@ -1155,7 +1193,7 @@ impl Render for SettingsView {
                     .text_size(px(18.))
                     .text_color(hsla(t::MUTED))
                     .hover(|d| d.text_color(hsla(t::TEXT_STRONG)))
-                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(Close)))
+                    .on_click(cx.listener(|this, _: &ClickEvent, w, cx| this.close(w, cx)))
                     .child("\u{d7}"),
             );
         let popup = div()
@@ -1169,7 +1207,7 @@ impl Render for SettingsView {
             .pb(px(14.))
             .px(px(pad))
             .rounded(px(12.))
-            .bg(hsla(t::SURFACE))
+            .bg(crate::theme::solid(t::SURFACE))
             .border_1()
             .border_color(hsla(t::BORDER))
             .shadow_lg()
@@ -1204,9 +1242,9 @@ impl Render for SettingsView {
             .overflow_hidden()
             .font_family(crate::brand::UI_FONT)
             .text_size(px(13.))
-            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, w, cx| {
                 if ev.keystroke.key == "escape" {
-                    this.escape(cx);
+                    this.escape(w, cx);
                     cx.stop_propagation();
                 }
             }))
@@ -1216,7 +1254,7 @@ impl Render for SettingsView {
                     .absolute()
                     .inset_0()
                     .bg(alpha([0, 0, 0], 0.5))
-                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(Close))),
+                    .on_click(cx.listener(|this, _: &ClickEvent, w, cx| this.close(w, cx))),
             )
             .child(
                 div()
@@ -1352,6 +1390,45 @@ mod tests {
     }
 
     #[gpui::test]
+    fn closing_mid_drag_or_a_failed_write_puts_the_window_back_to_the_file(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::theme::apply("JetBrains Mono", cx);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path());
+        let (ent, v) = cx.add_window_view(|window, cx| SettingsView::new(window, cx, Ok(c), 0.));
+        v.simulate_resize(size(px(900.), px(700.)));
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        v.update(|window, cx| {
+            let s = seen.clone();
+            cx.subscribe(&ent, move |_, a: &Applied, _| {
+                s.borrow_mut().push(a.0.opacity)
+            })
+            .detach();
+            ent.update(cx, |s, cx| {
+                s.apply("synt.tui.opacity", Change::Text("80".into()), window, cx);
+                // a drag, then the popup closes before the thumb is released
+                s.preview("synt.tui.opacity", 40, cx);
+                s.close(window, cx);
+                // a write that fails (the file is not JSON): the preview is undone and the row says why
+                std::fs::write(dir.path().join("home/settings.json"), "{ nope").unwrap();
+                s.model.as_mut().unwrap().store.reload();
+                s.preview("synt.tui.opacity", 35, cx);
+                s.apply("synt.tui.opacity", Change::Text("35".into()), window, cx);
+            })
+        });
+        // 80 saved, 40 previewed, back to 80 on close, 35 previewed, then the file's value again (100: unreadable file)
+        assert_eq!(*seen.borrow(), vec![80, 40, 80, 35, 100]);
+        ent.read_with(v, |s, _| {
+            let m = s.model().unwrap();
+            assert!(m.errors.contains_key("synt.tui.opacity"));
+        });
+    }
+
+    #[gpui::test]
     fn escape_cancels_a_confirmation_first_then_closes(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
@@ -1411,17 +1488,42 @@ mod tests {
                 s.apply("synt.memory.enabled", Change::Bool(false), window, cx);
             })
         });
-        let seen = seen.borrow();
+        let seen = seen.borrow().clone();
         assert_eq!(seen.len(), 3, "the memory key is not a window setting");
         assert_eq!((seen[0].opacity, seen[0].motion), (60, true));
         assert_eq!((seen[1].opacity, seen[1].motion), (60, false));
         assert_eq!((seen[2].opacity, seen[2].motion), (45, false));
         let on_disk = synthesis_settings::read_user_tui(&dir.path().join("home")).0;
         assert_eq!(on_disk.opacity, 60, "the preview wrote nothing");
-        // the memory change waits for a session: the banner has a working button
+        // the memory change waits for a session: the banner has a working button. Clicking only asks the shell:
+        // nothing is cleared and the popup stays until the shell says the session was restarted
         v.run_until_parked();
         click(v, "restart-session");
         assert_eq!(restarts.get(), 1);
+        ent.read_with(v, |s, _| {
+            assert_eq!(s.model().unwrap().restart_pending(), 1)
+        });
+        // the shell refuses (a task is running): the button is off and says why
+        v.update(|_, cx| {
+            ent.update(cx, |s, cx| {
+                s.set_restart_block(Some("a task is running".into()), cx)
+            })
+        });
+        v.run_until_parked();
+        assert!(v.debug_bounds("restart-blocked").is_some());
+        assert!(
+            v.debug_bounds("restart-session").is_none(),
+            "no live button"
+        );
+        // the restart happened: now the badge goes and the popup closes
+        let closed = std::rc::Rc::new(std::cell::Cell::new(0));
+        v.update(|window, cx| {
+            let n = closed.clone();
+            cx.subscribe(&ent, move |_, _: &Close, _| n.set(n.get() + 1))
+                .detach();
+            ent.update(cx, |s, cx| s.restarted(window, cx))
+        });
+        assert_eq!(closed.get(), 1);
         ent.read_with(v, |s, _| {
             assert_eq!(s.model().unwrap().restart_pending(), 0)
         });

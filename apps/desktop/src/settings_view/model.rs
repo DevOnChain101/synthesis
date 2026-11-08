@@ -540,6 +540,11 @@ impl Model {
 
     /// Back to the default (or the lower layer): removes the key from the USER file.
     pub fn reset(&mut self, key: &str) -> Outcome {
+        if let Some(why) = self.lock_reason(key).filter(|_| key == "synt.tui.blur") {
+            self.errors
+                .insert(key.into(), format!("{key}: not editable here: {why}"));
+            return Outcome::Rejected;
+        }
         let r = self.store.unset(key);
         self.done(key, r)
     }
