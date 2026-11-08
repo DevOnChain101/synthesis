@@ -350,7 +350,9 @@ impl TuiView {
             Box::new(cx.listener(|this, _, _, cx| this.new_workspace(cx)))
         });
         let new_run: Option<panels::OnClick> = live.map(|_| -> panels::OnClick {
-            Box::new(cx.listener(|this, _, window, cx| this.new_session(window, cx)))
+            Box::new(cx.listener(|this, _, window, cx| {
+                this.new_session(window, cx);
+            }))
         });
         let meta = |c: Hsla, v: String| div().text_color(c).child(v).into_any_element();
         // the session that waits for approval is marked red in both lists
@@ -676,7 +678,7 @@ impl TuiView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(hsla(t::SURFACE))
+            .bg(crate::theme::fill(t::SURFACE))
             .border_1()
             // one focus frame around the whole chat panel (the border is always there, only its colour
             // changes); a waiting approval's red wins over it
@@ -944,7 +946,7 @@ impl Render for TuiView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(hsla(t::BG))
+            .bg(crate::theme::fill(t::BG))
             .font_family(MONO)
             .font_weight(FontWeight::MEDIUM)
             .text_size(px(12.5))

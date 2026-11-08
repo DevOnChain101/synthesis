@@ -19,10 +19,12 @@ pub enum Section {
     SubAgents,
     /// Not a card in the design: the `synt.tui` toggles the classic TUI already has.
     Interface,
+    /// Not a card in the design: how the desktop window looks (`synt.tui.opacity`, `blur`, logo, motion).
+    Appearance,
 }
 
 impl Section {
-    pub const ALL: [Section; 9] = [
+    pub const ALL: [Section; 10] = [
         Section::UserPrompt,
         Section::Memory,
         Section::Execution,
@@ -32,6 +34,7 @@ impl Section {
         Section::Skills,
         Section::SubAgents,
         Section::Interface,
+        Section::Appearance,
     ];
 
     pub fn title(self) -> &'static str {
@@ -45,6 +48,7 @@ impl Section {
             Section::Skills => "SKILLS",
             Section::SubAgents => "SUB-AGENTS",
             Section::Interface => "INTERFACE",
+            Section::Appearance => "APPEARANCE",
         }
     }
 
@@ -87,6 +91,11 @@ pub enum Kind {
     Float {
         min: f64,
         max: f64,
+    },
+    /// A whole percentage shown as a slider.
+    Percent {
+        min: u64,
+        max: u64,
     },
     List(ListItem),
     /// An object or list the UI shows but never writes.
@@ -292,7 +301,26 @@ impl SettingsSchema {
             Field::new("synt.peers", SubAgents, "Peer sessions", ReadOnly)
                 .shown("messaging between sessions (off by default); edit settings.json by hand"),
         ];
-        // ---- INTERFACE
+        // ---- APPEARANCE
+        f.push(
+            Field::new(
+                "synt.tui.opacity",
+                Appearance,
+                "Window opacity",
+                Percent {
+                    min: u64::from(synthesis_settings::TUI_OPACITY_MIN),
+                    max: 100,
+                },
+            )
+            .def(json!(100))
+            .live()
+            .help("How solid the window's backgrounds are, the title bar included. Text always stays opaque; below 30 % the window is too faint to read."),
+        );
+        f.push(
+            b("synt.tui.blur", Appearance, "Background blur", false)
+                .live()
+                .help("Blur what is behind the window. It shows only when opacity is under 100 %."),
+        );
         f.push(
             Field::new(
                 "synt.tui.logo",
@@ -304,6 +332,7 @@ impl SettingsSchema {
             .live()
             .help("The braille symbol on the welcome screen."),
         );
+        // ---- INTERFACE
         for (k, l, d, h) in [
             (
                 "show_thinking",
@@ -380,6 +409,10 @@ pub fn validate_kind(kind: Kind, v: &Value) -> Result<(), String> {
             _ => Err(format!("must be one of {}", opts.join(", "))),
         },
         Kind::Int { min, max } => match v.as_u64() {
+            Some(n) if (min..=max).contains(&n) => Ok(()),
+            _ => Err(format!("must be a whole number from {min} to {max}")),
+        },
+        Kind::Percent { min, max } => match v.as_u64() {
             Some(n) if (min..=max).contains(&n) => Ok(()),
             _ => Err(format!("must be a whole number from {min} to {max}")),
         },

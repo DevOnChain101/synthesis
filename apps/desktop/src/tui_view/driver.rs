@@ -55,6 +55,11 @@ pub struct OpenSettings;
 
 impl gpui::EventEmitter<OpenSettings> for TuiView {}
 
+/// A new engine is live (the session the person asked for has started).
+pub struct SessionStarted;
+
+impl gpui::EventEmitter<SessionStarted> for TuiView {}
+
 /// Rows at the end of the chat measured again after every change.
 const TAIL_REMEASURE: usize = 12;
 
@@ -336,6 +341,7 @@ impl TuiView {
                 let pump = cx.spawn(async move |this, cx| pump(this, rx, cx).await);
                 lu.pump_task = Some(pump);
                 self.refresh_store(cx);
+                cx.emit(SessionStarted);
             }
         }
         cx.notify();
@@ -1297,9 +1303,51 @@ impl TuiView {
         self.pick_folder(cx);
     }
 
+    /// Why the session cannot be restarted now (a restart drops the running task, queued prompts and open dialogs).
+    pub fn restart_blocker(&self) -> Option<&'static str> {
+        let Some(lu) = &self.live else {
+            return Some("there is no live session in this window");
+        };
+        if lu.live.busy || !lu.live.dialogs.is_empty() || !lu.live.queue.is_empty() {
+            Some(
+                "a task is running, or approvals or queued prompts are pending: finish or cancel first",
+            )
+        } else if lu.live.engine.is_none() {
+            Some("the session is still starting")
+        } else {
+            None
+        }
+    }
+
+    /// The dash panels switched off now.
+    pub fn hidden_panels(&self) -> super::layout::Hidden {
+        self.hidden
+    }
+
+    /// The Settings popup saved `synt.tui`: what this view reads (panels, thinking, verbose rows, motion) applies now.
+    pub fn apply_settings(&mut self, tui: synthesis_settings::TuiSettings, cx: &mut Context<Self>) {
+        let mut hidden = super::layout::Hidden::default();
+        for (shown, (key, _)) in tui.panels.iter().zip(synthesis_settings::TUI_PANELS) {
+            if !shown {
+                hidden.hide(key);
+            }
+        }
+        self.hidden = hidden;
+        if let Some(lu) = &mut self.live {
+            lu.live.show_thinking = tui.show_thinking;
+            lu.live.verbose = tui.verbose;
+            Arc::make_mut(&mut lu.cfg).tui = tui;
+            lu.dirty = true;
+            lu.list_reset = true;
+        }
+        cx.notify();
+    }
+
     /// "new session..." of the Running panel: a fresh session in the selected workspace.
-    pub fn new_session(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    /// True when a fresh session is being started ([`SessionStarted`] follows when it is live).
+    pub fn new_session(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.run_action(Action::New, cx);
+        self.live.as_ref().is_some_and(|l| l.live.starting)
     }
 
     /// Ctrl+N: the system folder picker; the folder gets a fresh session.
