@@ -48,6 +48,8 @@ pub enum Target {
     New(PathBuf),
     /// Hide the session we came from and open a fresh one in its folder.
     Close,
+    /// The same session, its folder trusted for project config (the Trust dialog; this session only).
+    Trust,
 }
 
 /// `/config`: asks the shell to show the Settings view.
@@ -117,6 +119,9 @@ pub struct LiveUi {
     pub dlg_scroll: ScrollHandle,
     /// The model chosen with `/model`, applied to every relaunch until a resume.
     pub model_override: Option<String>,
+    /// The project root the person trusted for THIS session (Trust dialog): kept over the restarts that
+    /// continue the session (`/model`), dropped by any other launch. Never stored.
+    pub session_trust: Option<PathBuf>,
     pub dirty: bool,
     pub comp: Option<Comp>,
     pub hist: Option<HistNav>,
@@ -201,6 +206,7 @@ impl TuiView {
             flash: None,
             dlg_scroll: ScrollHandle::new(),
             model_override: None,
+            session_trust: None,
             dirty: true,
             comp: None,
             hist: None,
@@ -304,7 +310,18 @@ impl TuiView {
         lu.live.starting = true;
         lu.live.engine = None;
         lu.dirty = true;
-        let (cfg, model) = (lu.cfg.clone(), lu.model_override.clone());
+        // trust follows only a restart of the same session
+        if !matches!(target, Some(Target::Model(_) | Target::Trust)) {
+            lu.session_trust = None;
+        }
+        let mut cfg = lu.cfg.clone();
+        if let Some(root) = &lu.session_trust {
+            let mut c = (*cfg).clone();
+            c.args.common.trust_project = true;
+            c.granted.clone_from(root);
+            cfg = Arc::new(c);
+        }
+        let model = lu.model_override.clone();
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
             let _ = tx.send(build(&cfg, project, prior, target, model, notes));
@@ -1197,6 +1214,27 @@ impl TuiView {
         cx.notify();
     }
 
+    /// The Trust dialog was accepted: restarts this session (same conversation) with its folder trusted. The
+    /// restart drops a running task, queued prompts and open dialogs, so it waits for an idle session.
+    fn trust_folder(&mut self, cx: &mut Context<Self>) {
+        let why = self.restart_blocker();
+        let Some(lu) = &mut self.live else { return };
+        let cwd = lu.live.engine.as_ref().map(|e| e.cwd.clone());
+        let (Some(cwd), None) = (cwd, why) else {
+            lu.live.note(
+                format!(
+                    "trust not applied ({}): open the Files tab again when the session is idle",
+                    why.unwrap_or("the session is still starting")
+                ),
+                true,
+            );
+            lu.dirty = true;
+            return cx.notify();
+        };
+        lu.session_trust = Some(engine::root_of(Path::new(&cwd)));
+        self.switch(Target::Trust, "trust".into(), cx);
+    }
+
     /// What a command or picker asked the window to do.
     pub(super) fn run_action(&mut self, a: Action, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
@@ -1230,6 +1268,7 @@ impl TuiView {
                 true,
             ),
             Action::Model(m) => return self.switch(Target::Model(m), "model".into(), cx),
+            Action::TrustFolder => return self.trust_folder(cx),
             Action::Resume(id) => return self.open_session(&id, cx),
             Action::New => {
                 let l = &lu.live;
@@ -1638,6 +1677,7 @@ pub fn build(
             model = Some(m.clone());
             prior_sid.clone().map(Ok)
         }
+        Some(Target::Trust) => prior_sid.clone().map(Ok),
         Some(Target::New(p)) => {
             project.clone_from(p);
             None

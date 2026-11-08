@@ -81,6 +81,9 @@ pub enum PickerKind {
     Setup,
     /// Shift+Tab reached bypassPermissions: the confirmation (Cancel is the first option and the default).
     Bypass,
+    /// The Files tab was opened in an untrusted folder: trust it for this session? ("Not now" is first and the
+    /// default.)
+    Trust,
 }
 
 /// What the window does after a command or a picker (it restarts the engine, talks to it).
@@ -103,6 +106,8 @@ pub enum Action {
     ShowFiles,
     /// `/diff [file]`: the centre panel shows its diff tab, with `file` open when one is named.
     ShowDiff(Option<String>),
+    /// The Trust dialog was accepted: the window restarts this session with the folder trusted.
+    TrustFolder,
     /// Setup card: build the engine again (the person set a model and a key meanwhile).
     Recheck,
     /// Setup card: quit the app.
@@ -165,7 +170,9 @@ impl Dialog {
     /// the bypass confirmation is.
     pub fn needs_person(&self) -> bool {
         match &self.kind {
-            DialogKind::Picker { kind, .. } => *kind == PickerKind::Bypass,
+            DialogKind::Picker { kind, .. } => {
+                matches!(kind, PickerKind::Bypass | PickerKind::Trust)
+            }
             _ => true,
         }
     }
@@ -188,6 +195,9 @@ impl Dialog {
         }
     }
 }
+
+/// What the Trust dialog says: what trust enables, what it risks, how long it lasts.
+const TRUST_TEXT: &str = "Opening the file explorer reads this folder's git file list. Trusting it also turns on what the folder itself configures: project settings, MCP servers (each still needs its own approval), agents, skills, hooks, memory and instruction files. A repository you did not write can carry hooks, MCP servers or provider endpoints that run commands or send data. Trust lasts for this session only (nothing is saved); the session restarts with the same conversation. Not now keeps the folder untrusted: no git runs and nothing from it is loaded.";
 
 /// The suggestion in the shape `permission_options` reads (the TUI's `suggestion_view`).
 fn suggestion_view(s: &Suggestion) -> Value {
@@ -745,6 +755,9 @@ impl Live {
                 }
                 return None;
             }
+            if kind == PickerKind::Trust {
+                return (key == "session").then_some(Action::TrustFolder);
+            }
             if kind == PickerKind::Remember {
                 if let (Some(e), Some(text), "user" | "project") =
                     (&self.engine, self.pending_note.take(), key)
@@ -764,7 +777,7 @@ impl Live {
                 }
                 PickerKind::Model => Some(Action::Model(key.to_string())),
                 PickerKind::Resume => Some(Action::Resume(key.to_string())),
-                PickerKind::Remember | PickerKind::Bypass => None,
+                PickerKind::Remember | PickerKind::Bypass | PickerKind::Trust => None,
                 PickerKind::Setup => Some(match key {
                     "recheck" => Action::Recheck,
                     "settings" => Action::OpenSettings,
@@ -1754,6 +1767,43 @@ impl Live {
             _ => Mode::Default,
         };
         e.set_mode(next);
+    }
+
+    /// The Files tab was opened in a folder that is not trusted: asks whether to trust it for this session.
+    /// Nothing is read from the folder before the answer. "Not now" is first (selected) and Esc declines; the
+    /// dialog needs a deliberate engage and waits out the arming delay like an approval. Returns whether a
+    /// dialog was raised (not for a trusted folder, a starting session or one already asked).
+    pub fn ask_trust(&mut self, now: i64) -> bool {
+        let asked = self.dialogs.iter().any(|d| {
+            matches!(
+                &d.kind,
+                DialogKind::Picker {
+                    kind: PickerKind::Trust,
+                    ..
+                }
+            )
+        });
+        if self.trusted || self.engine.is_none() || asked {
+            return false;
+        }
+        self.push_dialog(
+            Dialog {
+                kind: DialogKind::Picker {
+                    kind: PickerKind::Trust,
+                    title: "Trust this folder?".into(),
+                    headers: vec![(0, TRUST_TEXT.into())],
+                },
+                options: vec![
+                    ("no".into(), "Not now (keep the folder untrusted)".into()),
+                    ("session".into(), "Trust for this session".into()),
+                ],
+                sel: 0,
+                armed_until: 0,
+                engaged: false,
+            },
+            now,
+        );
+        true
     }
 
     /// The bypassPermissions confirmation. Cancel is first (the selected option); Esc cancels too. The mode
