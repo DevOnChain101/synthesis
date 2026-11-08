@@ -3477,3 +3477,21 @@ async fn a_peer_listing_only_carries_plain_tokens_in_its_address() {
             .any(|r| r["address"].as_str().unwrap().contains("hi"))
     );
 }
+
+#[tokio::test]
+async fn the_size_cap_counts_the_text_after_redaction() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let (a, ea) = side("sess-a", "alpha", &run, Some(on()), a_answers(), 10);
+    let (b, _) = side("sess-b", "beta", &run, Some(on()), idle(), 10);
+    let _reg = serve(&a, &run, ea);
+    // 9 bytes per key raw, 18 once masked as [REDACTED:sk-ant]: under 32 KiB raw, over it masked
+    let text = "sk-ant-x ".repeat(3000);
+    assert!(text.len() < 32 * 1024);
+    let e =
+        b.h.peer_ask_user("ws:alpha/sess:sess-a", &text)
+            .await
+            .unwrap_err();
+    assert!(e.starts_with("too_large"), "{e}");
+    assert!(sent_ids(&b).is_empty());
+}

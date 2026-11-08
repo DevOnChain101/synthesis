@@ -1268,7 +1268,9 @@ impl Harness {
                 addr.instance
             ));
         }
-        if text.len() > MAX_BYTES {
+        // the cap is on what goes on the wire: redaction can make the text longer
+        let masked = self.sink.redact(text);
+        if masked.len() > MAX_BYTES {
             return Err("too_large: a message is at most 32 KiB".into());
         }
         let all = link.entries();
@@ -1282,7 +1284,7 @@ impl Harness {
             return Err("unreachable: the registry entry names a foreign endpoint".into());
         }
         let _slot = UserSend::take(&link)?;
-        let masked = self.sink.redact(text);
+        // approximate: the redactor does not report its replacements, so the marks are counted
         let n = masked
             .matches("[REDACTED")
             .count()
