@@ -51,11 +51,41 @@ pub fn mode_look(m: synthesis_permissions::Mode) -> (t::Rgb, &'static str) {
     use synthesis_permissions::Mode::*;
     match m {
         Default => (t::INFO, "shield"),
-        AcceptEdits => (t::ACCENT_LIGHT, "file"),
+        AcceptEdits => (t::ACCENT_LIGHT, "pencil-check"),
         Plan => (t::SUCCESS, "layers"),
         Auto => (t::WARN, "chevrons-right"),
         DontAsk => (t::CYAN, "cpu"),
         BypassPermissions => (t::ERROR, "wrench"),
+    }
+}
+
+/// Colours of the values in the Session and Context panels (labels stay dim). One place, platinum tokens only.
+pub mod value {
+    use synthesis_tui_render::theme as t;
+    pub const MODE: t::Rgb = t::CYAN;
+    pub const MODEL: t::Rgb = t::ACCENT_LIGHT;
+    pub const PATH: t::Rgb = t::INFO;
+    pub const NUMBER: t::Rgb = t::ACCENT;
+}
+
+/// Context use: green below 60 percent, amber from 60, red from 85.
+pub fn ctx_level(pct: f32) -> t::Rgb {
+    if pct >= 85. {
+        t::ERROR
+    } else if pct >= 60. {
+        t::WARN
+    } else {
+        t::SUCCESS
+    }
+}
+
+/// The colour of a session status word.
+pub fn status_colour(word: &str) -> t::Rgb {
+    match word {
+        "running" | "working" | "verifying" => t::SUCCESS,
+        "starting" | "waiting approval" => t::WARN,
+        "failed" | "blocked" | "interrupted" => t::ERROR,
+        _ => t::INFO,
     }
 }
 
@@ -165,6 +195,25 @@ mod tests {
         assert_eq!(background(&s), want);
         s.blur = false;
         assert_eq!(background(&s), WindowBackgroundAppearance::Transparent);
+    }
+
+    #[test]
+    fn context_and_status_colours_follow_the_level() {
+        assert_eq!(ctx_level(0.), t::SUCCESS);
+        assert_eq!(ctx_level(59.9), t::SUCCESS);
+        assert_eq!(ctx_level(60.), t::WARN);
+        assert_eq!(ctx_level(84.9), t::WARN);
+        assert_eq!(ctx_level(85.), t::ERROR);
+        assert_eq!(status_colour("running"), t::SUCCESS);
+        assert_eq!(status_colour("starting"), t::WARN);
+        assert_eq!(status_colour("idle"), t::INFO);
+        let v = [value::MODE, value::MODEL, value::PATH, value::NUMBER];
+        for (i, a) in v.iter().enumerate() {
+            assert!(
+                v[i + 1..].iter().all(|b| a != b),
+                "names and numbers differ"
+            );
+        }
     }
 
     #[test]

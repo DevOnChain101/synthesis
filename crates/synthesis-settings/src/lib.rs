@@ -838,7 +838,7 @@ pub const TUI_PANELS: [(&str, &str); 8] = [
     ("tools", "Tools & Skills used in this session"),
     (
         "activity",
-        "Activity feed (desktop: Recent Activity and User Prompt)",
+        "Activity feed (desktop: Recent Activity, with the latest user prompt)",
     ),
     (
         "status",

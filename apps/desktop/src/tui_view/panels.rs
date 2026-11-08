@@ -1,5 +1,5 @@
 //! The panel bodies of the TUI view, 1:1 with `cli.html` (`.rows`, `.ws-item`, `.run-item`, `.kv`, `.chk`,
-//! `.bars`): Workspace, Running, Session, Tools & Skills, Recent Activity, User Prompt, Agent Status, Context
+//! `.bars`): Workspace, Running, Session, Tools & Skills, Recent Activity (prompts and agent activity), Agent Status, Context
 //! and Usage & Metrics. The panel chrome itself is `widgets::chrome`.
 
 use gpui::{
@@ -8,9 +8,9 @@ use gpui::{
 };
 use synthesis_tui_render::theme as t;
 
-use super::activity::RunState;
+use super::activity::{Presence, RunState, presence};
 use super::sample::{
-    ActivityRow, AgentStatus, ContextInfo, PromptRow, Running, SessionInfo, StepKind, ToolsInfo,
+    ActKind, ActivityRow, AgentStatus, ContextInfo, Running, SessionInfo, StepKind, ToolsInfo,
     Usage, Workspace,
 };
 use crate::theme::hsla;
@@ -141,12 +141,14 @@ fn run_mark(r: &Running, attn: Option<gpui::Hsla>, motion: bool, now: i64) -> Di
             "!",
         ),
         RunState::Error => dot(hsla(t::ERROR), true).mt(px(5.)),
-        RunState::Idle => dot(
-            attn.filter(|_| r.selected).unwrap_or(hsla(t::SUCCESS)),
-            r.live,
-        )
-        .mt(px(5.))
-        .when(!r.live, |d| d.border_color(dim())),
+        RunState::Idle => match (attn.filter(|_| r.selected), presence(now, r.last)) {
+            (Some(c), _) => dot(c, true),
+            (None, Presence::Active) => dot(hsla(t::SUCCESS), true),
+            // a ring: green border, transparent inside
+            (None, Presence::Recent) => dot(hsla(t::SUCCESS), false),
+            (None, Presence::Inactive) => dot(dim(), true),
+        }
+        .mt(px(5.)),
     }
 }
 
@@ -161,6 +163,8 @@ pub fn running_body(
     let waiting = crate::widgets::chrome::blink(hsla(t::WARN), motion, now);
     let mut col = div().flex().flex_col();
     for (i, r) in rs.iter().enumerate() {
+        // inactive for over an hour: gray text as well as the gray dot
+        let stale = r.state == RunState::Idle && presence(now, r.last) == Presence::Inactive;
         col = col.child(
             li().child(
                 item_box(r.selected, (5., 7., 5., 6.))
@@ -187,7 +191,7 @@ pub fn running_body(
                                             .flex_1()
                                             .min_w(px(0.))
                                             .truncate()
-                                            .text_color(strong())
+                                            .text_color(if stale { dim() } else { strong() })
                                             .child(r.title.clone()),
                                     )
                                     .child(
@@ -205,7 +209,7 @@ pub fn running_body(
                                     .child(
                                         div()
                                             .flex_none()
-                                            .text_color(hsla(t::INFO))
+                                            .text_color(if stale { dim() } else { hsla(t::INFO) })
                                             .child(r.folder.clone()),
                                     )
                                     // waiting for approval: the yellow status word (blinking unless motion
@@ -256,7 +260,21 @@ pub fn running_body(
     )
 }
 
-/// `.kv`: dim label column, strong value; rows `row_gap` apart.
+/// The colour of a Session / Context value by what it means: names, numbers, paths; "n/a", "?" and "-" are dim.
+fn value_colour(key: &str, v: &str) -> gpui::Hsla {
+    use crate::theme::value;
+    if matches!(v, "n/a" | "?" | "-" | "no model") {
+        return dim();
+    }
+    hsla(match key {
+        "mode" => value::MODE,
+        "model" => value::MODEL,
+        "cwd" | "worktree" | "branch" => value::PATH,
+        _ => value::NUMBER,
+    })
+}
+
+/// `.kv`: dim label column, value coloured by meaning; rows `row_gap` apart.
 pub fn kv(rows: &[(String, String)], label_w: f32, col_gap: f32, row_gap: f32) -> Div {
     div()
         .flex()
@@ -277,19 +295,20 @@ pub fn kv(rows: &[(String, String)], label_w: f32, col_gap: f32, row_gap: f32) -
                     div()
                         .flex_1()
                         .min_w(px(0.))
-                        .text_color(strong())
+                        .text_color(value_colour(k, v))
                         .child(v.clone()),
                 )
         }))
 }
 
 pub fn session_meta(s: &SessionInfo) -> gpui::AnyElement {
+    let c = hsla(crate::theme::status_colour(&s.status));
     div()
         .flex()
         .items_center()
         .gap(px(6.))
-        .text_color(hsla(t::SUCCESS))
-        .child(dot(hsla(t::SUCCESS), true))
+        .text_color(c)
+        .child(dot(c, true))
         .child(s.status.clone())
         .into_any_element()
 }
@@ -341,46 +360,53 @@ fn circ(kind: Option<StepKind>) -> Div {
     }
 }
 
-pub fn activity_body(rows: &[ActivityRow]) -> Div {
-    div().flex().flex_col().children(rows.iter().map(|a| {
-        li().flex()
-            .items_center()
-            .gap(px(8.))
-            .child(circ(None))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .truncate()
-                    .child(a.text.clone()),
-            )
-            .child(div().flex_none().text_color(dim()).child(a.ago.clone()))
-    }))
-}
-
-pub fn prompts_body(rows: &[PromptRow]) -> Div {
+/// Recent Activity: `time  mark  text` per entry, one line each. Prompts are strong text behind a blue mark, the
+/// agent's doings plain text behind their own mark; an entry the chat no longer shows is dimmed and not clickable.
+pub fn activity_body(rows: &[ActivityRow], on_click: Option<&dyn Fn(usize) -> OnClick>) -> Div {
     if rows.is_empty() {
-        return div().text_color(dim()).child("No messages yet");
+        return div().text_color(dim()).child("No activity yet");
     }
-    div().flex().flex_col().children(rows.iter().map(|p| {
-        li().flex()
-            .items_center()
-            .gap(px(8.))
-            .child(
+    div()
+        .flex()
+        .flex_col()
+        .children(rows.iter().enumerate().map(|(i, a)| {
+            let (mark, fg) = match a.kind {
+                ActKind::Prompt => (hsla(t::INFO), strong()),
+                ActKind::Tool => (dim(), text()),
+                ActKind::Agent => (hsla(t::ACCENT), text()),
+                ActKind::Approval => (hsla(t::WARN), text()),
+                ActKind::Error => (hsla(t::ERROR), hsla(t::ERROR)),
+            };
+            let fg = if a.shown { fg } else { dim() };
+            li().child(
                 div()
-                    .w(px(64.))
-                    .flex_none()
-                    .text_color(dim())
-                    .child(p.time.clone()),
+                    .id(("act-row", i))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(3.))
+                    .text_color(fg)
+                    .when(a.shown, |d| {
+                        d.when_some(on_click, |d, f| {
+                            d.cursor_pointer()
+                                .hover(|d| d.bg(with_alpha(gpui::white(), 0.05)))
+                                .on_click(f(i))
+                        })
+                    })
+                    .child(div().flex_none().text_color(dim()).child(a.time.clone()))
+                    .child(dot(
+                        if a.shown { mark } else { dim() },
+                        a.kind == ActKind::Prompt,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .child(a.text.clone()),
+                    ),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .truncate()
-                    .child(p.text.clone()),
-            )
-    }))
+        }))
 }
 
 pub fn agent_body(a: &AgentStatus, steps_shown: usize) -> Div {
@@ -484,13 +510,21 @@ pub fn context_body(c: &ContextInfo, rows_shown: usize) -> Div {
                 )
                 .child(
                     div()
-                        .text_color(hsla(t::SUCCESS))
+                        .text_color(if c.max == "?" {
+                            dim()
+                        } else {
+                            hsla(crate::theme::value::NUMBER)
+                        })
                         .child(format!("{} / {}", c.used, c.max)),
                 )
                 .child(
                     div()
                         .ml_auto()
-                        .text_color(strong())
+                        .text_color(if c.max == "?" {
+                            dim()
+                        } else {
+                            hsla(crate::theme::ctx_level(c.pct))
+                        })
                         .child(format!("{:.0}%", c.pct)),
                 ),
         )
