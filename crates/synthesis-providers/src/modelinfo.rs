@@ -143,11 +143,37 @@ pub fn is_fresh(f: &CacheFile, now: u64) -> bool {
         .is_some_and(|age| age < TTL_SECS)
 }
 
+/// One model's `raw_capabilities` above this is dropped (the useful facts are separate fields).
+const MAX_RAW_CAPS_BYTES: usize = 4 << 10;
+/// What is written stays under this, below [`MAX_CACHE_BYTES`], so a valid cache is never ignored
+/// on read.
+const MAX_CACHE_WRITE_BYTES: usize = 3 << 20;
+
 pub fn write_cache(path: &Path, f: &CacheFile) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    synthesis_config::write_private_atomic(path, &serde_json::to_vec_pretty(f)?)
+    let mut f = f.clone();
+    for m in f.models.values_mut() {
+        let big = m
+            .raw_capabilities
+            .as_ref()
+            .is_some_and(|r| serde_json::to_vec(r).map_or(0, |v| v.len()) > MAX_RAW_CAPS_BYTES);
+        if big {
+            m.raw_capabilities = None;
+        }
+    }
+    let mut bytes = serde_json::to_vec_pretty(&f)?;
+    // still too big (a huge list): keep the first models that fit, not a file nobody can read
+    while bytes.len() > MAX_CACHE_WRITE_BYTES && !f.models.is_empty() {
+        let keep = f.models.len() * MAX_CACHE_WRITE_BYTES / bytes.len() * 9 / 10;
+        f.models = std::mem::take(&mut f.models)
+            .into_iter()
+            .take(keep)
+            .collect();
+        bytes = serde_json::to_vec_pretty(&f)?;
+    }
+    synthesis_config::write_private_atomic(path, &bytes)
 }
 
 fn supported(v: Option<&Value>) -> Option<bool> {
@@ -217,6 +243,44 @@ impl ModelInfoStore {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_written_cache_stays_readable_whatever_the_provider_sent() {
+        let dir = std::env::temp_dir().join(format!("synt-mi-{}", std::process::id()));
+        let path = dir.join("c.json");
+        let mut f = file("http://x", 1);
+        let big = |n: usize| json!({"blob": "x".repeat(n)}).as_object().cloned();
+        f.models.get_mut("m").unwrap().raw_capabilities = big(10 << 10);
+        f.models.insert(
+            "small".into(),
+            ModelFacts {
+                raw_capabilities: big(100),
+                ..Default::default()
+            },
+        );
+        write_cache(&path, &f).unwrap();
+        let r = read_cache(&path, "http://x", Protocol::Anthropic).unwrap();
+        assert!(
+            r.models["m"].raw_capabilities.is_none(),
+            "over 4 KiB: dropped"
+        );
+        assert!(r.models["small"].raw_capabilities.is_some());
+        // 40k models with 3 KiB each: over the limit as a whole, still written and readable
+        for i in 0..40_000 {
+            f.models.insert(
+                format!("model-{i:05}"),
+                ModelFacts {
+                    raw_capabilities: big(3 << 10),
+                    ..Default::default()
+                },
+            );
+        }
+        write_cache(&path, &f).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() <= MAX_CACHE_BYTES);
+        let r = read_cache(&path, "http://x", Protocol::Anthropic).expect("not ignored");
+        assert!(!r.models.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     fn file(base: &str, at: u64) -> CacheFile {
         CacheFile {

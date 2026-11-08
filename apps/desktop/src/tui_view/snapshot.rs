@@ -741,10 +741,15 @@ fn clock_text(ms: i64, tz_min: i32) -> String {
 fn hints(l: &Live) -> Vec<(String, String)> {
     let h = |k: &str, d: &str| (k.to_string(), d.to_string());
     if !l.dialogs.is_empty() {
+        let digits = l.dialogs[0].digits_pick();
         return vec![
             h("\u{2191}\u{2193}", "choose"),
             h("Enter", "confirm"),
-            h("1-9", "pick"),
+            if digits {
+                h("1-9", "pick")
+            } else {
+                h("type", "filter")
+            },
             h("Esc", "reject"),
         ];
     }
