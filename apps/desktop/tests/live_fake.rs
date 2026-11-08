@@ -277,3 +277,121 @@ fn a_frame_saved_in_the_session_artifacts_is_viewable() {
     drop(r.engine);
     synthesis_desktop::engine::close_shared(engine);
 }
+
+#[test]
+fn send_now_routing() {
+    let mut r = rig(serde_json::json!([]));
+    let inject = |to: &str, text: &str| Submitted::Inject {
+        to: to.into(),
+        text: text.into(),
+    };
+    // idle: starts a task, send now or not
+    assert_eq!(r.live.submit_as("a", true), Submitted::Send("a".into()));
+    // busy: Enter queues, Cmd+Enter injects into the running turn
+    assert_eq!(r.live.submit("b"), Submitted::Nothing);
+    assert_eq!(r.live.submit_as("c", true), inject("main", "c"));
+    assert_eq!(r.live.queue, ["b"]);
+    // commands and shell lines are never injected; they queue as today
+    for t in ["!ls", "!!ls"] {
+        assert_eq!(r.live.submit_as(t, true), Submitted::Nothing, "{t}");
+    }
+    assert!(!matches!(
+        r.live.submit_as("/help", true),
+        Submitted::Inject { .. }
+    ));
+    assert_eq!(r.live.queue.len(), 3);
+    // "Send now" on a queued row takes it out of the queue; a command row stays
+    assert_eq!(r.live.send_queued_now(0), inject("main", "b"));
+    assert_eq!(r.live.send_queued_now(0), Submitted::Nothing);
+    assert_eq!(r.live.queue.len(), 2);
+    // a sub-agent target delivers with plain Enter, and falls back to main when it is gone
+    r.live.agents = vec!["worker".into()];
+    r.live.cycle_target();
+    assert_eq!(r.live.target, "worker");
+    assert_eq!(r.live.submit("d"), inject("worker", "d"));
+    r.live.agents.clear();
+    // the agent is gone: nothing is sent or queued, the text stays in the prompt
+    assert_eq!(r.live.submit("e"), Submitted::Held);
+    assert_eq!(r.live.target, "main");
+    assert_eq!(r.live.queue.len(), 2);
+    assert_eq!(
+        r.live.submit("e"),
+        Submitted::Nothing,
+        "main target: queued"
+    );
+    r.live.queue.pop_back();
+    // a multi-line message is a legitimate send now; only a first line with `/` or `!` is a command
+    assert_eq!(
+        r.live.submit_as("one\n/two", true),
+        inject("main", "one\n/two")
+    );
+    assert_eq!(r.live.submit_as("/x\nmore", true), Submitted::Nothing);
+    assert!(
+        r.engine
+            .send_now("main".into(), "!ls\nmore".into())
+            .is_err()
+    );
+    // an open dialog holds delivery: the line stays queued (main) or in the prompt (sub-agent)
+    r.live.queue.clear();
+    r.live.open_setup("test", 0);
+    assert_eq!(r.live.submit_as("f", true), Submitted::Nothing);
+    assert_eq!(r.live.queue, ["f"]);
+    r.live.agents = vec!["worker".into()];
+    r.live.cycle_target();
+    assert_eq!(r.live.submit("g"), Submitted::Held);
+    assert_eq!(r.live.queue, ["f"]);
+    let engine = r.live.engine.take().unwrap();
+    drop(r.engine);
+    synthesis_desktop::engine::close_shared(engine);
+}
+
+#[test]
+fn a_send_now_during_an_approval_is_delivered_after_the_tool_result_and_leaves_the_queue_alone() {
+    let mut r = rig(serde_json::json!([
+        {"text": "Writing the file.", "tools": [{"id": "w1", "name": "Write", "input": {"file_path": "{TARGET}", "content": "hi\n"}}]},
+        {"text": "Finished."},
+        {"text": "Nothing to verify here."}
+    ]));
+    r.send("make hello.txt");
+    r.pump("dialog", |l| !l.dialogs.is_empty());
+    r.live.queue.push_back("later".into());
+    // the window queues a line sent now while the dialog is open ...
+    assert_eq!(
+        r.live.submit_as("queued by the window", true),
+        Submitted::Nothing
+    );
+    r.live.queue.pop_back();
+    // ... but the engine still holds a line that gets through (a race) until the answer
+    r.live
+        .injected
+        .push(("main".into(), "also add a note".into()));
+    r.engine
+        .send_now("main".into(), "also add a note".into())
+        .unwrap();
+    r.pump("accepted", |l| !l.pending.is_empty());
+    let user_rows = |l: &Live| {
+        l.view
+            .convo
+            .items
+            .iter()
+            .filter(|i| matches!(i, Item::User(t) if t == "also add a note"))
+            .count()
+    };
+    assert_eq!(user_rows(&r.live), 0, "an approval holds delivery");
+    assert!(!r.target.exists());
+    let t0 = r.live.dialogs[0].armed_until;
+    let k = r.live.pick(0, t0).unwrap();
+    r.live.answer(&k, t0);
+    r.pump("task end", |l| !l.busy);
+    let items = &r.live.view.convo.items;
+    let at = |f: &dyn Fn(&Item) -> bool| items.iter().position(f).unwrap();
+    let tool = at(&|i| matches!(i, Item::Tool { name, .. } if name == "Write"));
+    let user = at(&|i| matches!(i, Item::User(t) if t == "also add a note"));
+    assert!(user > tool, "delivered after the tool result: {items:?}");
+    assert!(matches!(&items[user + 1], Item::Notice { text, .. } if text.contains("sent now")));
+    assert!(r.live.pending.is_empty());
+    assert_eq!(r.live.queue, ["later"], "the queue is untouched");
+    let engine = r.live.engine.take().unwrap();
+    drop(r.engine);
+    synthesis_desktop::engine::close_shared(engine);
+}

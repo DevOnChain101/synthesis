@@ -671,7 +671,7 @@ async fn a_mid_task_line_runs_the_user_prompt_hook_and_is_refused_when_it_blocks
             Turn::text("finished")
         })
     });
-    let mut rig = Rig::build(opts(&slow(400), responder), vec![], |h, r| {
+    let mut rig = Rig::build(opts(&slow(1000), responder), vec![], |h, r| {
         h.with_agents(agents())
             .with_hooks(Arc::new(synthesis_hooks::Hooks::new(
                 r.rt.clone(),
@@ -705,7 +705,51 @@ async fn a_mid_task_line_runs_the_user_prompt_hook_and_is_refused_when_it_blocks
     );
     res.unwrap();
     assert!(sent.0.unwrap_err().contains("nope"));
-    assert!(sent.1.is_ok());
+    assert!(sent.1.is_ok(), "{:?}", sent.1);
     assert!(!rig.requests().iter().any(|r| saw(r, "BLOCKME")));
     assert!(rig.requests().iter().any(|r| saw(r, "fine line")));
+}
+
+/// The hook is awaited before the line is posted: when the task ended meanwhile the line is
+/// refused (the window queues it) instead of reaching a later task.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_mid_task_line_whose_task_ended_during_the_hook_is_refused() {
+    let responder: Responder = Arc::new(|r| {
+        Some(if !done(r, "sl") {
+            Turn::tool("sl", "Slow", json!({}))
+        } else {
+            Turn::text("finished")
+        })
+    });
+    let mut rig = Rig::build(opts(&slow(100), responder), vec![], |h, r| {
+        h.with_agents(agents())
+            .with_hooks(Arc::new(synthesis_hooks::Hooks::new(
+                r.rt.clone(),
+                "s1",
+                r.ws.clone(),
+                serde_json::from_value(json!({"UserPromptSubmit": [{"hooks": [{"type": "command",
+                "command": "if grep -q late; then sleep 2; fi"}]}]}))
+                .unwrap(),
+            )))
+    });
+    rig.harness
+        .start_session(&mut rig.session, "startup")
+        .unwrap();
+    let (res, sent) = tokio::join!(
+        rig.harness.run_task(
+            &mut rig.session,
+            TaskRequest::new("go"),
+            CancellationToken::new()
+        ),
+        async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            rig.harness
+                .send_user_message("main", "late line".into())
+                .await
+        }
+    );
+    res.unwrap();
+    assert!(sent.unwrap_err().contains("task ended"));
+    assert!(!rig.requests().iter().any(|r| saw(r, "late line")));
 }

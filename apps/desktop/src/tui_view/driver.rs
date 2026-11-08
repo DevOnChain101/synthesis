@@ -122,6 +122,8 @@ pub struct LiveUi {
     pub hist: Option<HistNav>,
     /// Ctrl+R: the needle typed so far and the entry shown.
     pub search: Option<(String, usize)>,
+    /// The placeholder shows the busy hint (Enter queue, send now) rather than the idle one.
+    busy_hint: bool,
     tick_task: Option<Task<()>>,
     pump_task: Option<Task<()>>,
     engine_task: Option<Task<()>>,
@@ -161,7 +163,11 @@ impl TuiView {
                 InputEvent::PressEnter {
                     secondary: false,
                     shift: false,
-                } => this.submit_prompt(window, cx),
+                } => this.submit_prompt(false, window, cx),
+                InputEvent::PressEnter {
+                    secondary: true,
+                    shift: false,
+                } => this.submit_prompt(true, window, cx),
                 InputEvent::Change => this.on_prompt_changed(cx),
                 _ => {}
             },
@@ -205,6 +211,7 @@ impl TuiView {
             fixture: false,
             store_task: None,
             peer_task: None,
+            busy_hint: false,
             blink: Default::default(),
             _subs: subs,
         });
@@ -494,7 +501,7 @@ impl TuiView {
 
     // ---- the prompt ----
 
-    pub(super) fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn submit_prompt(&mut self, now: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
         let mut text = text_of(&lu.prompt, cx);
         // Enter on a typed prefix (`/mo`) completes the highlighted command first
@@ -514,7 +521,15 @@ impl TuiView {
         lu.comp = None;
         lu.hist = None;
         lu.search = None;
-        match lu.live.submit(&text) {
+        match lu.live.submit_as(&text, now) {
+            Submitted::Held => {
+                lu.dirty = true;
+                return cx.notify();
+            }
+            Submitted::Inject { to, text } => {
+                self.set_prompt("", window, cx);
+                return self.inject(to, text, cx);
+            }
             Submitted::Quit => return self.quit(cx),
             Submitted::Send(t) => {
                 self.set_prompt("", window, cx);
@@ -534,6 +549,64 @@ impl TuiView {
         lu.stick();
         lu.dirty = true;
         cx.notify();
+    }
+
+    /// Send now: the harness takes the line at the next safe point (`UiMsg::SendFailed` if not).
+    pub(super) fn inject(&mut self, to: String, text: String, cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        // refused before it was sent (engine closed): the line goes back to the queue, never lost
+        if let Some(Err(why)) = lu
+            .live
+            .engine
+            .clone()
+            .map(|e| e.send_now(to.clone(), text.clone()))
+        {
+            let why = why.to_string();
+            lu.live
+                .on_msg(UiMsg::SendFailed { to, text, why }, now_ms());
+        }
+        lu.stick();
+        lu.dirty = true;
+        cx.notify();
+    }
+
+    /// The queued row's "Send now" and remove controls.
+    pub(super) fn queue_row(&mut self, i: usize, send_now: bool, cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        if !send_now {
+            lu.live.queue.remove(i);
+            lu.dirty = true;
+            return cx.notify();
+        }
+        match lu.live.send_queued_now(i) {
+            Submitted::Inject { to, text } => self.inject(to, text, cx),
+            _ => {
+                lu.dirty = true;
+                cx.notify();
+            }
+        }
+    }
+
+    /// The prompt's hint follows the task: while one runs, Enter queues and Cmd/Ctrl+Enter sends now.
+    pub(super) fn sync_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        let busy = lu.live.busy;
+        if busy == lu.busy_hint {
+            return;
+        }
+        lu.busy_hint = busy;
+        let mod_key = if cfg!(target_os = "macos") {
+            "\u{2318}"
+        } else {
+            "Ctrl+"
+        };
+        let hint = if busy {
+            format!("Enter queue \u{b7} {mod_key}\u{21b5} send now \u{b7} Ctrl+T target")
+        } else {
+            "Ask Synthesis anything... (Ctrl+R for history)".into()
+        };
+        lu.prompt
+            .update(cx, |s, cx| s.set_placeholder(hint, window, cx));
     }
 
     fn set_prompt(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -610,7 +683,7 @@ impl TuiView {
             if lu.live.typing_other() {
                 // the free-text "Other" answer of a question
                 match key {
-                    "enter" => lu.live.commit_other(),
+                    "enter" if enter_answers(ctrl, cmd, true) => lu.live.commit_other(),
                     "escape" => {
                         lu.live.reject();
                     }
@@ -635,7 +708,7 @@ impl TuiView {
                 "tab" => lu.live.move_sel(!shift),
                 // Enter and digits answer only a dialog the person has engaged (arrows, Tab, a click); before
                 // that they are swallowed (they were meant for the prompt) and the footer says how to choose
-                "enter" if lu.live.dialogs[0].answerable() => {
+                "enter" if enter_answers(ctrl, cmd, lu.live.dialogs[0].answerable()) => {
                     let sel = lu.live.dialogs[0].sel;
                     out = lu.live.pick(sel, now);
                 }
@@ -695,6 +768,12 @@ impl TuiView {
             }
             ("n", true) => {
                 self.pick_folder(cx);
+                return true;
+            }
+            ("t", true) => {
+                lu.live.cycle_target();
+                lu.dirty = true;
+                cx.notify();
                 return true;
             }
             ("v", _) if ctrl || ks.modifiers.platform || ks.modifiers.alt => {
@@ -919,7 +998,6 @@ impl TuiView {
         self.select_row(i, cx);
     }
 
-    /// Click on a Running row: open that session (the open one: nothing happens).
     /// A click on entry `i` of Recent Activity: the chat scrolls to its row (a collapsed tool card opens) and the
     /// row flashes. An entry whose row is gone does nothing.
     pub fn click_activity(&mut self, i: usize, cx: &mut Context<Self>) {
@@ -949,7 +1027,35 @@ impl TuiView {
         cx.notify();
     }
 
-    pub fn click_running(&mut self, i: usize, cx: &mut Context<Self>) {
+    /// Click on a Running row: open that session (the open one: nothing happens); another
+    /// process's session starts a `/send` to it in the prompt.
+    pub fn click_running(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(row) = self
+            .snap
+            .running
+            .get(i)
+            .filter(|r| r.peer && !r.id.is_empty())
+        {
+            let text = format!("/send {} ", row.id);
+            if let Some(lu) = &mut self.live {
+                lu.live.focus = Focus::Chat;
+                // a draft being typed is never overwritten
+                if !text_of(&lu.prompt, cx).trim().is_empty() {
+                    lu.live.note(
+                        "finish or clear the message first, then pick the session again",
+                        false,
+                    );
+                    lu.dirty = true;
+                    cx.notify();
+                    return;
+                }
+            }
+            self.set_prompt(&text, window, cx);
+            if let Some(lu) = &self.live {
+                lu.prompt.update(cx, |s, cx| s.focus(window, cx));
+            }
+            return;
+        }
         let Some(lu) = &mut self.live else { return };
         lu.live.focus = Focus::Running;
         lu.live.run_sel = i;
@@ -1092,6 +1198,18 @@ impl TuiView {
             }
             Action::ShowFiles => return self.show_tab(super::ChatTab::Files, None, cx),
             Action::ShowDiff(f) => return self.show_tab(super::ChatTab::Diff, f, cx),
+            Action::Send { to, text } => {
+                let Some(e) = lu.live.engine.clone() else {
+                    return;
+                };
+                let job = cx.background_spawn(async move { e.peer_ask(&to, &text) });
+                cx.spawn(async move |this, cx| {
+                    let r = job.await;
+                    this.update(cx, |t, cx| t.live_do(cx, |l| l.send_done(r)))
+                        .ok();
+                })
+                .detach();
+            }
             Action::Peers => {
                 let Some(e) = lu.live.engine.clone() else {
                     return;
@@ -1627,6 +1745,11 @@ fn editor_at(text: &str, cursor: usize) -> LineEditor {
     ed
 }
 
+/// Plain Enter answers an engaged dialog; Cmd/Ctrl+Enter (send now) never does.
+fn enter_answers(ctrl: bool, cmd: bool, answerable: bool) -> bool {
+    answerable && !ctrl && !cmd
+}
+
 /// Enter with the popup open on a slash prefix: `Some(run)` completes the highlighted command (and
 /// runs it when `run`, i.e. it takes no argument). `None`: the text already names a command.
 fn enter_completes(
@@ -1679,6 +1802,14 @@ pub fn suggest(text: &str, cursor: usize, live: &Live, cwd: &Path) -> Option<Com
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cmd_or_ctrl_enter_never_answers_a_dialog() {
+        assert!(enter_answers(false, false, true));
+        assert!(!enter_answers(true, false, true));
+        assert!(!enter_answers(false, true, true));
+        assert!(!enter_answers(false, false, false));
+    }
 
     #[test]
     fn enter_on_a_prefix_completes_and_runs_only_without_args() {

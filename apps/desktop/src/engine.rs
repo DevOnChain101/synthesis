@@ -34,6 +34,11 @@ use synthesis_tui_base::complete::Command;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+/// A `/command` or `!shell` line (its first line starts with the mark): never a send-now delivery.
+pub fn is_command(text: &str) -> bool {
+    text.starts_with('/') || text.starts_with('!')
+}
+
 /// What the engine sends to the window.
 pub enum UiMsg {
     Event(Box<Envelope>),
@@ -47,6 +52,12 @@ pub enum UiMsg {
     Withdraw(String),
     /// The task ended (`Err`: it could not run, or the session did not return to idle).
     TaskDone(Result<(), String>),
+    /// [`Engine::send_now`] was refused (inbox full, hook block, no task running yet).
+    SendFailed {
+        to: String,
+        text: String,
+        why: String,
+    },
     /// `/compact` between tasks ended (`Err`: the reason, history unchanged).
     Compacted(Result<(), String>),
 }
@@ -615,6 +626,7 @@ impl Engine {
         let workspace = session.workspace.clone();
         let commands: Vec<Command> = synthesis_tui::local_commands()
             .into_iter()
+            .chain(std::iter::once(crate::live::send_command()))
             .chain(
                 skills
                     .iter()
@@ -749,6 +761,13 @@ impl Engine {
             .and_then(|rt| rt.block_on(self.harness.peer_rows(true)))
     }
 
+    /// `/send`: the user's message to another session's main agent; the reply text, or why not.
+    /// Blocking (waits for the answer): call it off the UI thread.
+    pub fn peer_ask(&self, to: &str, text: &str) -> Result<String, String> {
+        let rt = self.tokio.as_ref().ok_or("peers are off")?;
+        rt.block_on(self.harness.peer_ask_user(to, text))
+    }
+
     pub fn mode(&self) -> Mode {
         lock(&self.harness.permissions()).mode()
     }
@@ -852,6 +871,24 @@ impl Engine {
             };
             *lock(&slot) = Some(session);
             let _ = tx.unbounded_send(UiMsg::TaskDone(done));
+        });
+        Ok(())
+    }
+
+    /// Send now: delivers `text` to `to` (`main` or a sub-agent instance) at its next safe point
+    /// (after the tool batch, never during an approval); `UiMsg::SendFailed` follows when refused.
+    pub fn send_now(&self, to: String, text: String) -> Result<(), &'static str> {
+        if is_command(&text) {
+            return Err("commands are not sent now");
+        }
+        let Some(rt) = &self.tokio else {
+            return Err("the engine is closed");
+        };
+        let (h, tx) = (self.harness.clone(), self.tx.clone());
+        rt.spawn(async move {
+            if let Err(why) = h.send_user_message(&to, text.clone()).await {
+                let _ = tx.unbounded_send(UiMsg::SendFailed { to, text, why });
+            }
         });
         Ok(())
     }
