@@ -31,7 +31,7 @@ use crate::widgets::panes::{self, note};
 pub const PREVIEW_BYTES: usize = 256 * 1024;
 pub const PREVIEW_LINES: usize = 2000;
 
-pub const UNTRUSTED: &str = "The project tree is listed in a trusted folder only (git runs nowhere else): start with --trust-project";
+pub const UNTRUSTED: &str = "This folder is not trusted, so the project tree is not listed (git runs only in a trusted folder). Click the Files tab to be asked again, or start with --trust-project";
 
 /// A file read for the preview.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -186,9 +186,22 @@ pub fn dirs_of_changes(d: &ProjectData) -> HashSet<String> {
 }
 
 impl TuiView {
+    /// A click or key on a tab. Opening Files in an untrusted folder raises the Trust dialog (nothing is read
+    /// from the folder until it is accepted); every opening asks again after a "Not now".
+    pub(super) fn select_tab(&mut self, tab: ChatTab, cx: &mut Context<Self>) {
+        self.ts.tab = tab;
+        if tab == ChatTab::Files
+            && let Some(lu) = &mut self.live
+            && lu.live.ask_trust(crate::live::now_ms())
+        {
+            lu.dirty = true;
+        }
+        cx.notify();
+    }
+
     /// Sets the tab and, when asked, what it shows (`/diff FILE`).
     pub(super) fn show_tab(&mut self, tab: ChatTab, file: Option<String>, cx: &mut Context<Self>) {
-        self.ts.tab = tab;
+        self.select_tab(tab, cx);
         if let (ChatTab::Diff, Some(f)) = (tab, file) {
             let found = self.live.as_ref().and_then(|l| {
                 l.live
@@ -221,7 +234,10 @@ impl TuiView {
             self.ts.diff_init = true;
         }
         if self.ts.tab == ChatTab::Files {
-            let stale = self.tree.for_cwd != lu.live.cwd || self.tree.at_changes != changes;
+            // a note from before the folder was trusted gives way to the real listing
+            let stale = self.tree.for_cwd != lu.live.cwd
+                || self.tree.at_changes != changes
+                || (lu.live.trusted && self.tree.data.as_ref().is_some_and(|d| d.note.is_some()));
             if (self.tree.data.is_none() || stale) && !self.tree.loading {
                 self.request_scan(cx);
             }

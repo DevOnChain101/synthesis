@@ -779,8 +779,7 @@ impl TuiView {
         match (key, ctrl) {
             // Ctrl+1..5: the centre tabs (chat, diff, terminal, browser, file explorer)
             (k @ ("1" | "2" | "3" | "4" | "5"), true) if !ks.modifiers.shift => {
-                self.ts.tab = super::ChatTab::ALL[usize::from(k.as_bytes()[0] - b'1')];
-                cx.notify();
+                self.select_tab(super::ChatTab::ALL[usize::from(k.as_bytes()[0] - b'1')], cx);
                 return true;
             }
             ("n", true) => {
