@@ -776,7 +776,12 @@ impl TuiView {
         };
         let lu = self.live.as_ref();
         let open = lu.is_some_and(|lu| lu.live.expand_all || lu.live.expanded.contains(id));
-        let Some(card) = toolview::shape(it, open, cols_for(self.centre_w - INDENT - 40.)) else {
+        // shaped once per change of the call, not on every paint
+        thread_local! {
+            static CARDS: std::cell::RefCell<toolview::CardCache> = std::cell::RefCell::default();
+        }
+        let cols = cols_for(self.centre_w - INDENT - 40.);
+        let Some(card) = CARDS.with(|c| c.borrow_mut().get(it, open, cols)) else {
             return div().into_any_element();
         };
         let (mark, c) = match card.glyph {
@@ -910,9 +915,14 @@ impl TuiView {
                 }),
             ));
         }
-        // the sub-agent's pane, when it exists (the Agent row of this call, found by its name)
-        let pane = card.link.as_deref().and_then(|n| {
-            lu.and_then(|lu| lu.live.view.panes.subs.iter().find(|a| a.name == n))
+        // the sub-agent this very call started (`subagent.started.tool_call_id`), if its pane exists
+        let pane = lu.and_then(|lu| {
+            lu.live
+                .view
+                .panes
+                .subs
+                .iter()
+                .find(|a| a.tool_call_id.as_deref() == Some(id))
                 .map(|a| a.id.clone())
         });
         if card.collapsible || pane.is_some() {

@@ -69,6 +69,5 @@ fn states_and_badges_come_from_the_events() {
     assert_eq!(card("int1").glyph, Glyph::Interrupted);
     assert_eq!(badges("edit1")[..2], ["+2", "\u{2212}1"]);
     assert_eq!(badges("read1")[0], "lines 10\u{2013}17");
-    assert_eq!(card("agent1").link.as_deref(), Some("rev-1"));
     assert_eq!(card("mcp1").head, "github:get_issue");
 }

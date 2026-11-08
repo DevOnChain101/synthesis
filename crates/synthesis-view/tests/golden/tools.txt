@@ -141,13 +141,13 @@
  | Text   "state": "open"
  | Text }
 == web1 collapsed
-✓ Web https://example.com/docs  [Example Docs]  <HTTP 200>  <900ms>
+✓ Web https://example.com/docs  [~ Example Docs]  <~HTTP 200>  <900ms>
  | Text HTTP 200
  | Text # Example Docs
  | Text Welcome to the docs.
  | Text Second line.
 == web1 open
-✓ Web https://example.com/docs  [Example Docs]  <HTTP 200>  <900ms>
+✓ Web https://example.com/docs  [~ Example Docs]  <~HTTP 200>  <900ms>
  | Text HTTP 200
  | Text # Example Docs
  | Text Welcome to the docs.
@@ -163,11 +163,11 @@
  | Text 2. Zed blog https://zed.dev/blog
  | Text 3. Docs https://docs.rs/gpui
 == agent1 collapsed
-✓ Agent rev-1  [reviewer]  <done>  <45.0s>  -> agent rev-1
+✓ Agent rev-1  [reviewer]  <done>  <45.0s>
  | Text Done.
 +2 lines
 == agent1 open
-✓ Agent rev-1  [reviewer]  <done>  <45.0s>  -> agent rev-1
+✓ Agent rev-1  [reviewer]  <done>  <45.0s>
  | Text Found two issues.
  | Text Fix the token check in auth.rs.
  | Text Done.

