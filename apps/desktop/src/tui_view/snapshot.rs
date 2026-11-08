@@ -907,12 +907,42 @@ mod tests {
         };
         let tool = |id: &str, cmd: &str| json!({"tool_call_id": id, "name": "Bash", "input": {"command": cmd}, "input_truncated": false});
         let done = |id: &str, status: &str, err: bool| json!({"tool_call_id": id, "name": "Bash", "status": status, "is_error": err, "not_run": false, "duration_ms": 3, "preview": "p", "bytes": 1, "truncated": false});
-        send(&mut l, "2026-11-07T10:00:00Z", "user.message", json!({"text": "first", "images": []}));
-        send(&mut l, "2026-11-07T10:01:00Z", "tool.requested", tool("a", "ls"));
-        send(&mut l, "2026-11-07T10:01:05Z", "tool.completed", done("a", "ok", false));
-        send(&mut l, "2026-11-07T10:02:00Z", "user.message", json!({"text": "second", "images": []}));
-        send(&mut l, "2026-11-07T10:03:00Z", "tool.requested", tool("b", "make"));
-        send(&mut l, "2026-11-07T10:03:05Z", "tool.completed", done("b", "error", true));
+        send(
+            &mut l,
+            "2026-11-07T10:00:00Z",
+            "user.message",
+            json!({"text": "first", "images": []}),
+        );
+        send(
+            &mut l,
+            "2026-11-07T10:01:00Z",
+            "tool.requested",
+            tool("a", "ls"),
+        );
+        send(
+            &mut l,
+            "2026-11-07T10:01:05Z",
+            "tool.completed",
+            done("a", "ok", false),
+        );
+        send(
+            &mut l,
+            "2026-11-07T10:02:00Z",
+            "user.message",
+            json!({"text": "second", "images": []}),
+        );
+        send(
+            &mut l,
+            "2026-11-07T10:03:00Z",
+            "tool.requested",
+            tool("b", "make"),
+        );
+        send(
+            &mut l,
+            "2026-11-07T10:03:05Z",
+            "tool.completed",
+            done("b", "error", true),
+        );
         let rows = build(&l, 0, 0, None).activity;
         let got: Vec<_> = rows.iter().map(|r| (r.kind, r.time.as_str())).collect();
         assert_eq!(
@@ -924,10 +954,18 @@ mod tests {
                 (ActKind::Prompt, "10:00"),
             ]
         );
-        assert!(rows[0].text.starts_with("Bash failed: make"), "{:?}", rows[0]);
+        assert!(
+            rows[0].text.starts_with("Bash failed: make"),
+            "{:?}",
+            rows[0]
+        );
         // /focus hides the tool rows from the chat: their entries stay, dimmed and not clickable
         l.focus_view = true;
-        let shown: Vec<_> = build(&l, 0, 0, None).activity.iter().map(|r| r.shown).collect();
+        let shown: Vec<_> = build(&l, 0, 0, None)
+            .activity
+            .iter()
+            .map(|r| r.shown)
+            .collect();
         assert_eq!(shown, [false, true, false, true]);
     }
 
@@ -969,7 +1007,11 @@ mod tests {
             ("context".to_string(), "200,000 tokens".to_string())
         );
         assert_eq!(
-            (s.activity[0].kind, s.activity[0].text.as_str(), s.activity[0].anchor),
+            (
+                s.activity[0].kind,
+                s.activity[0].text.as_str(),
+                s.activity[0].anchor
+            ),
             (ActKind::Prompt, "run the tests", 0)
         );
         assert_eq!(s.topology.len(), 8);

@@ -344,7 +344,11 @@ pub fn sample() -> Snapshot {
             (ActKind::Tool, "Ran tests", "23:00"),
             (ActKind::Tool, "Searched codebase", "22:58"),
             (ActKind::Tool, "Read architecture.md", "22:55"),
-            (ActKind::Prompt, "Investigate why login redirects loop in auth.ts and fix it.", "22:54"),
+            (
+                ActKind::Prompt,
+                "Investigate why login redirects loop in auth.ts and fix it.",
+                "22:54",
+            ),
         ]
         .iter()
         .enumerate()

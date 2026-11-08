@@ -260,7 +260,21 @@ pub fn running_body(
     )
 }
 
-/// `.kv`: dim label column, strong value; rows `row_gap` apart.
+/// The colour of a Session / Context value by what it means: names, numbers, paths; "n/a", "?" and "-" are dim.
+fn value_colour(key: &str, v: &str) -> gpui::Hsla {
+    use crate::theme::value;
+    if matches!(v, "n/a" | "?" | "-" | "no model") {
+        return dim();
+    }
+    hsla(match key {
+        "mode" => value::MODE,
+        "model" => value::MODEL,
+        "cwd" | "worktree" | "branch" => value::PATH,
+        _ => value::NUMBER,
+    })
+}
+
+/// `.kv`: dim label column, value coloured by meaning; rows `row_gap` apart.
 pub fn kv(rows: &[(String, String)], label_w: f32, col_gap: f32, row_gap: f32) -> Div {
     div()
         .flex()
@@ -281,19 +295,20 @@ pub fn kv(rows: &[(String, String)], label_w: f32, col_gap: f32, row_gap: f32) -
                     div()
                         .flex_1()
                         .min_w(px(0.))
-                        .text_color(strong())
+                        .text_color(value_colour(k, v))
                         .child(v.clone()),
                 )
         }))
 }
 
 pub fn session_meta(s: &SessionInfo) -> gpui::AnyElement {
+    let c = hsla(crate::theme::status_colour(&s.status));
     div()
         .flex()
         .items_center()
         .gap(px(6.))
-        .text_color(hsla(t::SUCCESS))
-        .child(dot(hsla(t::SUCCESS), true))
+        .text_color(c)
+        .child(dot(c, true))
         .child(s.status.clone())
         .into_any_element()
 }
@@ -351,35 +366,47 @@ pub fn activity_body(rows: &[ActivityRow], on_click: Option<&dyn Fn(usize) -> On
     if rows.is_empty() {
         return div().text_color(dim()).child("No activity yet");
     }
-    div().flex().flex_col().children(rows.iter().enumerate().map(|(i, a)| {
-        let (mark, fg) = match a.kind {
-            ActKind::Prompt => (hsla(t::INFO), strong()),
-            ActKind::Tool => (dim(), text()),
-            ActKind::Agent => (hsla(t::ACCENT), text()),
-            ActKind::Approval => (hsla(t::WARN), text()),
-            ActKind::Error => (hsla(t::ERROR), hsla(t::ERROR)),
-        };
-        let fg = if a.shown { fg } else { dim() };
-        li().child(
-            div()
-                .id(("act-row", i))
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .rounded(px(3.))
-                .text_color(fg)
-                .when(a.shown, |d| {
-                    d.when_some(on_click, |d, f| {
-                        d.cursor_pointer()
-                            .hover(|d| d.bg(with_alpha(gpui::white(), 0.05)))
-                            .on_click(f(i))
+    div()
+        .flex()
+        .flex_col()
+        .children(rows.iter().enumerate().map(|(i, a)| {
+            let (mark, fg) = match a.kind {
+                ActKind::Prompt => (hsla(t::INFO), strong()),
+                ActKind::Tool => (dim(), text()),
+                ActKind::Agent => (hsla(t::ACCENT), text()),
+                ActKind::Approval => (hsla(t::WARN), text()),
+                ActKind::Error => (hsla(t::ERROR), hsla(t::ERROR)),
+            };
+            let fg = if a.shown { fg } else { dim() };
+            li().child(
+                div()
+                    .id(("act-row", i))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(3.))
+                    .text_color(fg)
+                    .when(a.shown, |d| {
+                        d.when_some(on_click, |d, f| {
+                            d.cursor_pointer()
+                                .hover(|d| d.bg(with_alpha(gpui::white(), 0.05)))
+                                .on_click(f(i))
+                        })
                     })
-                })
-                .child(div().flex_none().text_color(dim()).child(a.time.clone()))
-                .child(dot(if a.shown { mark } else { dim() }, a.kind == ActKind::Prompt))
-                .child(div().flex_1().min_w(px(0.)).truncate().child(a.text.clone())),
-        )
-    }))
+                    .child(div().flex_none().text_color(dim()).child(a.time.clone()))
+                    .child(dot(
+                        if a.shown { mark } else { dim() },
+                        a.kind == ActKind::Prompt,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .child(a.text.clone()),
+                    ),
+            )
+        }))
 }
 
 pub fn agent_body(a: &AgentStatus, steps_shown: usize) -> Div {
@@ -483,13 +510,21 @@ pub fn context_body(c: &ContextInfo, rows_shown: usize) -> Div {
                 )
                 .child(
                     div()
-                        .text_color(hsla(t::SUCCESS))
+                        .text_color(if c.max == "?" {
+                            dim()
+                        } else {
+                            hsla(crate::theme::value::NUMBER)
+                        })
                         .child(format!("{} / {}", c.used, c.max)),
                 )
                 .child(
                     div()
                         .ml_auto()
-                        .text_color(strong())
+                        .text_color(if c.max == "?" {
+                            dim()
+                        } else {
+                            hsla(crate::theme::ctx_level(c.pct))
+                        })
                         .child(format!("{:.0}%", c.pct)),
                 ),
         )

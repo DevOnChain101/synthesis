@@ -463,7 +463,8 @@ impl TuiView {
             );
             // as tall at least as the design's two panels it replaces (Recent Activity and User Prompt)
             col = col.child(self.fit(p, "p-activity", |p| {
-                p.flex_1().min_h(px(tier.left_min + LEFT_GAP + tier.activity_min))
+                p.flex_1()
+                    .min_h(px(tier.left_min + LEFT_GAP + tier.activity_min))
             }));
         }
         col
