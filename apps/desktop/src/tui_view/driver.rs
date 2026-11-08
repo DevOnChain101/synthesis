@@ -446,6 +446,9 @@ impl TuiView {
     fn tick(&mut self, n: u64, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
         lu.dirty = true;
+        if lu.live.model_pick.as_ref().is_some_and(|p| p.refreshing) {
+            lu.live.rebuild_model_dialog(false);
+        }
         if let Some(e) = lu.live.engine.clone() {
             lu.live.mcp = e.mcp_status();
             if n.is_multiple_of(5) {
@@ -622,6 +625,15 @@ impl TuiView {
                 lu.dirty = true;
                 cx.notify();
                 return true;
+            }
+            // the model picker filters as you type (model ids hold digits, so they are text there)
+            if !ctrl && !cmd && (key == "backspace" || ks.key_char.is_some()) {
+                let typed = ks.key_char.as_deref().filter(|_| key != "backspace");
+                if lu.live.model_filter_key(typed, key == "backspace") {
+                    lu.dirty = true;
+                    cx.notify();
+                    return true;
+                }
             }
             match key {
                 "up" => lu.live.move_sel(false),
@@ -1057,6 +1069,37 @@ impl TuiView {
             ),
             Action::Model(m) => return self.switch(Target::Model(m), "model".into(), cx),
             Action::Resume(id) => return self.open_session(&id, cx),
+            Action::RefreshModels => {
+                let (env, project) = (lu.cfg.env.clone(), lu.cfg.project.clone());
+                let job =
+                    cx.background_spawn(async move { crate::models::refresh(&env, &project) });
+                cx.spawn(async move |this, cx| {
+                    let (rows, errors) = job.await;
+                    this.update(cx, |t, cx| {
+                        t.live_do(cx, |l| l.models_refreshed(rows, errors))
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            Action::Open(typed) => {
+                let l = &lu.live;
+                let home = synthesis_app::homes(&lu.cfg.env).ok().map(|h| h.user);
+                let cwd = PathBuf::from(&l.cwd);
+                let open: Vec<PathBuf> = l
+                    .view
+                    .workspaces
+                    .workspaces
+                    .iter()
+                    .map(|w| PathBuf::from(&w.root))
+                    .collect();
+                match crate::folder::parse(&typed, home.as_deref(), &cwd)
+                    .and_then(|p| crate::folder::validate(&p, &open))
+                {
+                    Ok(p) => return self.open_folder(&p, cx),
+                    Err(e) => lu.live.note(e, true),
+                }
+            }
             Action::New => {
                 let l = &lu.live;
                 let root = l

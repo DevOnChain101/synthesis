@@ -16,6 +16,7 @@ use synthesis_view::convo::Item;
 use synthesis_view::state::ViewState;
 
 use crate::engine::{AskApproval, Choice, Engine, McpInfo, UiMsg};
+use crate::models::ModelRow;
 
 /// Enter and digits are ignored this long after a dialog comes to the front: a key typed before it
 /// appeared must not answer it (the TUI's `ARM_MS`). Esc still rejects.
@@ -88,6 +89,11 @@ pub enum PickerKind {
 pub enum Action {
     /// Restart on the same session with this `provider/model`.
     Model(String),
+    /// The model picker's Refresh row: `synt models --refresh` off the UI thread; the result comes
+    /// back through [`Live::models_refreshed`].
+    RefreshModels,
+    /// `/open <path>`: a typed folder path as a new workspace.
+    Open(String),
     Resume(String),
     /// A fresh session in the selected workspace.
     New,
@@ -243,8 +249,15 @@ pub const WIRED: [&str; 25] = [
     "rename",
 ];
 
+/// One frame of the refresh spinner (120 ms each).
+fn spinner(ms: i64) -> &'static str {
+    const F: [&str; 4] = ["|", "/", "-", "\\"];
+    F[(ms.max(0) / 120) as usize % F.len()]
+}
+
 pub fn is_wired(name: &str) -> bool {
-    WIRED.contains(&name)
+    // `open` exists only in the desktop app
+    WIRED.contains(&name) || name == "open"
 }
 
 /// `5m ago`, `3h ago`, `2d ago` (the TUI's wording).
@@ -303,6 +316,23 @@ pub struct Live {
     pub usage_days: usize,
     /// The `#note` the open "Remember this note?" dialog is about.
     pending_note: Option<String>,
+    /// The open model picker's rows, filter and refresh state.
+    pub model_pick: Option<ModelPick>,
+    /// The stored model was not available: the first prompt opens the model picker.
+    pub stale_model: bool,
+    /// The first prompt, kept while that picker is open (sent when it closes).
+    held_prompt: Option<String>,
+}
+
+/// State behind the `/model` picker; the dialog's options are rebuilt from it.
+#[derive(Clone, Debug, Default)]
+pub struct ModelPick {
+    pub rows: Vec<ModelRow>,
+    pub filter: String,
+    /// A refresh runs in the background.
+    pub refreshing: bool,
+    /// The last refresh's failures, one line per provider.
+    pub errors: Vec<String>,
 }
 
 impl Live {
@@ -337,6 +367,9 @@ impl Live {
             focus_view: false,
             usage_days: 7,
             pending_note: None,
+            model_pick: None,
+            stale_model: false,
+            held_prompt: None,
         }
     }
 
@@ -362,6 +395,8 @@ impl Live {
         for n in &engine.notices {
             self.note(n.clone(), false);
         }
+        self.stale_model = engine.stale_model.is_some();
+        self.model_pick = None;
         self.sid = engine.sid.clone();
         self.cwd = engine.cwd.clone();
         self.trusted = engine.trusted;
@@ -369,6 +404,8 @@ impl Live {
         self.mcp = engine.mcp_status();
         self.queue.clear();
         self.dialogs.clear();
+        // the prompt that waited for a model choice goes out on the model now in use
+        self.queue.extend(self.held_prompt.take());
         self.busy = false;
         self.starting = false;
         self.engine = Some(engine);
@@ -568,6 +605,7 @@ impl Live {
         {
             self.dialogs.remove(0);
             self.pending_note = None;
+            self.close_model_pick();
             return None;
         }
         if let Some(Dialog {
@@ -638,6 +676,17 @@ impl Live {
         if self.dialogs.is_empty() {
             return None;
         }
+        // the model picker's Refresh and error rows act without closing it
+        if matches!(
+            self.dialogs[0].kind,
+            DialogKind::Picker {
+                kind: PickerKind::Model,
+                ..
+            }
+        ) && matches!(key, "refresh" | "info")
+        {
+            return (key == "refresh" && self.start_refresh()).then_some(Action::RefreshModels);
+        }
         let d = self.dialogs.remove(0);
         // the next dialog waits out its arming delay whichever branch below answers this one
         self.arm(now);
@@ -660,6 +709,9 @@ impl Live {
                     }
                 }
                 return None;
+            }
+            if kind == PickerKind::Model {
+                self.close_model_pick();
             }
             let current = self.engine.as_ref().map(|e| e.label.as_str());
             return match kind {
@@ -873,6 +925,16 @@ impl Live {
             self.queue.push_back(text.to_string());
             return Submitted::Nothing;
         }
+        if self.stale_model {
+            self.stale_model = false;
+            self.held_prompt = Some(text.to_string());
+            self.note(
+                "the stored model is not available: pick a model (Esc keeps the one in use and sends your prompt)",
+                true,
+            );
+            self.open_model_picker();
+            return Submitted::Nothing;
+        }
         self.busy = true;
         Submitted::Send(text.to_string())
     }
@@ -992,6 +1054,8 @@ impl Live {
             "model" if self.busy => return busy_err(self, "model"),
             "model" if arg.is_empty() => self.open_model_picker(),
             "model" => return Submitted::Do(Action::Model(arg.into())),
+            "open" if arg.is_empty() => self.note("/open: type a folder path", true),
+            "open" => return Submitted::Do(Action::Open(arg.into())),
             "effort" => self.set_effort(arg),
             "mcp" | "memory" | "agents" | "permissions" | "status" | "name" | "rename"
                 if self.engine.is_none() =>
@@ -1337,45 +1401,187 @@ impl Live {
         self.view.status.effort = next;
     }
 
-    /// `/model`: the models of the config (and aliases), the one in use marked.
+    /// `/model`: the models of the config (and aliases) with what is known of each, the one in use
+    /// marked; typing filters, the first row refreshes the list from the providers.
     fn open_model_picker(&mut self) {
         let Some(e) = &self.engine else { return };
-        let mut options: Vec<(String, String)> = e
-            .models
-            .iter()
-            .map(|m| {
-                let label = if *m == e.label {
-                    let ctx = e
-                        .context_window
-                        .map_or("?".into(), |w| format!("{}k", w / 1000));
-                    let tiers = if e.effort_tiers.is_empty() {
-                        "none".into()
-                    } else {
-                        e.effort_tiers.join("|")
-                    };
-                    format!("{m}  (current \u{b7} context {ctx} \u{b7} effort {tiers})")
-                } else {
-                    m.clone()
-                };
-                (m.clone(), label)
-            })
-            .collect();
-        // the one in use is not listed twice, and is always there
-        if !e.models.contains(&e.label) {
-            options.insert(0, (e.label.clone(), format!("{}  (current)", e.label)));
+        let mut rows = e.model_rows.clone();
+        for m in &e.models {
+            if !rows.iter().any(|r| r.value == *m) {
+                rows.push(ModelRow {
+                    value: m.clone(),
+                    detail: crate::models::detail(None, None),
+                });
+            }
         }
-        let sel = options.iter().position(|(k, _)| *k == e.label).unwrap_or(0);
-        self.dialogs.push(Dialog {
-            kind: DialogKind::Picker {
-                kind: PickerKind::Model,
-                title: "Model".into(),
-                headers: vec![],
-            },
-            options,
-            sel,
-            armed_until: 0,
-            engaged: false,
+        // the one in use is always there; its window is the provider's live answer
+        if !rows.iter().any(|r| r.value == e.label) {
+            rows.insert(
+                0,
+                ModelRow {
+                    value: e.label.clone(),
+                    detail: crate::models::detail(None, None),
+                },
+            );
+        }
+        self.model_pick = Some(ModelPick {
+            rows,
+            ..Default::default()
         });
+        self.dialogs.insert(
+            0,
+            Dialog {
+                kind: DialogKind::Picker {
+                    kind: PickerKind::Model,
+                    title: "Model".into(),
+                    headers: vec![],
+                },
+                options: vec![],
+                sel: 0,
+                armed_until: 0,
+                engaged: false,
+            },
+        );
+        self.rebuild_model_dialog(true);
+    }
+
+    /// The model picker's options from `model_pick`: Refresh row, error rows, then the models that
+    /// match the filter. `reselect`: put the highlight on the model in use (or the first match).
+    pub fn rebuild_model_dialog(&mut self, reselect: bool) {
+        let (Some(pick), Some(e)) = (&self.model_pick, &self.engine) else {
+            return;
+        };
+        let current = e.label.clone();
+        let needle = pick.filter.to_lowercase();
+        let shown: Vec<&ModelRow> = pick
+            .rows
+            .iter()
+            .filter(|r| r.value.to_lowercase().contains(&needle))
+            .collect();
+        let w = shown
+            .iter()
+            .map(|r| r.value.chars().count())
+            .max()
+            .unwrap_or(0);
+        let mut options: Vec<(String, String)> = vec![if pick.refreshing {
+            (
+                "refresh".into(),
+                format!("{} Refreshing the model list...", spinner(now_ms())),
+            )
+        } else {
+            (
+                "refresh".into(),
+                "Refresh the model list (asks each provider)".into(),
+            )
+        }];
+        options.extend(
+            pick.errors
+                .iter()
+                .map(|x| ("info".to_string(), format!("! refresh failed - {x}"))),
+        );
+        let first = options.len();
+        options.extend(shown.iter().map(|r| {
+            let mark = if r.value == current { "*" } else { " " };
+            (
+                r.value.clone(),
+                format!(
+                    "{mark} {:<w$}  {}{}",
+                    r.value,
+                    r.detail,
+                    if mark == "*" { "  (current)" } else { "" }
+                ),
+            )
+        }));
+        if shown.is_empty() {
+            options.push(("info".into(), "no model matches the filter".into()));
+        }
+        let header = format!(
+            "filter: {}_   (type to filter \u{b7} * marks the one in use \u{b7} ? = the provider did not say)",
+            pick.filter
+        );
+        let at = options
+            .iter()
+            .position(|(k, _)| *k == current)
+            .filter(|_| reselect)
+            .unwrap_or(first.min(options.len() - 1));
+        if let Some(d) = self.dialogs.first_mut()
+            && let DialogKind::Picker {
+                kind: PickerKind::Model,
+                headers,
+                ..
+            } = &mut d.kind
+        {
+            *headers = vec![(0, header)];
+            d.options = options;
+            d.sel = if reselect {
+                at
+            } else {
+                first.min(d.options.len() - 1)
+            };
+        }
+    }
+
+    fn close_model_pick(&mut self) {
+        if self.model_pick.take().is_some() {
+            // Esc (or a pick) ends the wait: the prompt goes out on the model now in use
+            self.queue.extend(self.held_prompt.take());
+        }
+    }
+
+    /// A printable key (or Backspace) typed into the model picker's filter. False: not the model
+    /// picker, the key is the dialog's.
+    pub fn model_filter_key(&mut self, text: Option<&str>, backspace: bool) -> bool {
+        let Some(pick) = &mut self.model_pick else {
+            return false;
+        };
+        if !matches!(
+            self.dialogs.first().map(|d| &d.kind),
+            Some(DialogKind::Picker {
+                kind: PickerKind::Model,
+                ..
+            })
+        ) {
+            return false;
+        }
+        if backspace {
+            pick.filter.pop();
+        } else if let Some(t) = text.filter(|t| !t.chars().any(char::is_control)) {
+            pick.filter.push_str(t);
+        } else {
+            return false;
+        }
+        if let Some(d) = self.dialogs.first_mut() {
+            d.engaged = true;
+        }
+        self.rebuild_model_dialog(false);
+        true
+    }
+
+    /// The Refresh row: false when one is already running.
+    fn start_refresh(&mut self) -> bool {
+        let Some(p) = &mut self.model_pick else {
+            return false;
+        };
+        if p.refreshing {
+            return false;
+        }
+        p.refreshing = true;
+        p.errors.clear();
+        self.rebuild_model_dialog(false);
+        true
+    }
+
+    /// The refresh ended: the rows as the cache now has them and one line per failed provider.
+    pub fn models_refreshed(&mut self, rows: Vec<ModelRow>, errors: Vec<String>) {
+        let Some(p) = &mut self.model_pick else {
+            return;
+        };
+        p.refreshing = false;
+        if !rows.is_empty() {
+            p.rows = rows;
+        }
+        p.errors = errors;
+        self.rebuild_model_dialog(false);
     }
 
     /// `/resume`: the stored sessions, grouped by workspace; a session without a prompt, the open

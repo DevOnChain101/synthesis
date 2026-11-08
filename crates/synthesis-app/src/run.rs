@@ -386,6 +386,8 @@ pub struct Prepared {
     pub resumed_from_seq: Option<u64>,
     /// Set with `resumed_from_seq` when the session continues on another model than the stored one.
     pub model_changed: Option<String>,
+    /// The stored model that could not be used (the session runs on `label`; the stored id is kept).
+    pub stale_model: Option<String>,
 }
 
 /// The stored session `--resume ID` / `--continue` names and its live (non-compacted) messages.
@@ -730,6 +732,7 @@ pub fn prepare(
     // a stored model that cannot be used is kept as it is (warned about, not overwritten)
     let mut stored_unbuildable = false;
     let mut model_warning = None;
+    let mut stale_model = None;
     let res = match (default, stored) {
         (Ok(r), Some(m)) if r.label != m => {
             let stored_res = match stored_model_gone(&cfg, &m) {
@@ -749,6 +752,7 @@ pub fn prepare(
                     .replace(['\n', '\t'], " ");
                     eprintln!("synt: warning: {w}");
                     model_warning = Some(w);
+                    stale_model = Some(m.clone());
                     stored_unbuildable = true;
                     r
                 }
@@ -1579,6 +1583,7 @@ pub fn prepare(
         history: resume.map(|(_, hist)| hist).unwrap_or_default(),
         resumed_from_seq,
         model_changed,
+        stale_model,
     })
 }
 
@@ -2344,6 +2349,28 @@ mod tests {
             }
         });
         (url, n)
+    }
+
+    #[test]
+    fn stored_model_gone_only_when_the_provider_lists_models_without_it() {
+        let cfg = |models: &[&str]| {
+            let mut c = Config::default();
+            c.providers.insert(
+                "p".into(),
+                synthesis_config::Provider {
+                    models: Some(models.iter().map(|m| m.to_string()).collect()),
+                    ..Default::default()
+                },
+            );
+            c
+        };
+        assert!(stored_model_gone(&cfg(&["a"]), "p/cx/b").is_some());
+        assert!(stored_model_gone(&cfg(&["a", "cx/b"]), "p/cx/b").is_none());
+        assert!(
+            stored_model_gone(&cfg(&[]), "p/b").is_none(),
+            "no list: not checked"
+        );
+        assert!(stored_model_gone(&cfg(&["a"]), "other/b").is_none());
     }
 
     #[test]

@@ -277,3 +277,53 @@ fn a_frame_saved_in_the_session_artifacts_is_viewable() {
     drop(r.engine);
     synthesis_desktop::engine::close_shared(engine);
 }
+
+#[test]
+fn a_stale_stored_model_opens_the_picker_on_the_first_prompt_and_keeps_the_prompt() {
+    let mut r = rig(serde_json::json!([]));
+    r.live.stale_model = true;
+    assert_eq!(r.live.submit("hello"), Submitted::Nothing);
+    assert_eq!(r.live.dialogs.len(), 1, "the model picker is open");
+    assert!(!r.live.busy, "nothing was sent");
+    // the Refresh row is first; typing filters; a filter with no match says so
+    assert_eq!(r.live.dialogs[0].options[0].0, "refresh");
+    assert!(r.live.model_filter_key(Some("zzz"), false));
+    let last = r.live.dialogs[0].options.last().unwrap();
+    assert_eq!(last.0, "info");
+    assert!(r.live.model_filter_key(None, true));
+    // Esc keeps the model in use and the prompt goes out
+    assert_eq!(r.live.reject(), None);
+    assert!(r.live.dialogs.is_empty() && r.live.model_pick.is_none());
+    assert_eq!(r.live.next_queued().as_deref(), Some("hello"));
+    // asked once
+    r.live.busy = false;
+    assert_eq!(r.live.submit("again"), Submitted::Send("again".into()));
+    let _ = &r.engine;
+}
+
+#[test]
+fn a_refresh_row_runs_once_and_its_failure_shows_as_a_row() {
+    use synthesis_desktop::live::Action;
+    let mut r = rig(serde_json::json!([]));
+    assert_eq!(r.live.submit("/model"), Submitted::Nothing);
+    let now = 1_000_000;
+    let key = r.live.pick(0, now).unwrap();
+    assert_eq!(r.live.answer(&key, now), Some(Action::RefreshModels));
+    assert_eq!(
+        r.live.dialogs.len(),
+        1,
+        "the picker stays open while it refreshes"
+    );
+    // a second press while one runs starts nothing
+    let key = r.live.pick(0, now).unwrap();
+    assert_eq!(r.live.answer(&key, now), None);
+    r.live
+        .models_refreshed(vec![], vec!["omniroute: no answer in time".into()]);
+    let d = &r.live.dialogs[0];
+    assert!(
+        d.options[1]
+            .1
+            .contains("refresh failed - omniroute: no answer in time")
+    );
+    assert!(!r.live.model_pick.as_ref().unwrap().refreshing);
+}
