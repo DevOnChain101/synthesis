@@ -232,6 +232,12 @@ impl TuiView {
         cx.notify();
     }
 
+    /// Settings changed `synt.tui.panels.*`: the panels follow at once.
+    pub fn set_hidden(&mut self, hidden: layout::Hidden, cx: &mut Context<Self>) {
+        self.hidden = hidden;
+        cx.notify();
+    }
+
     /// The title bar above the view (see `ui::TITLEBAR_H`).
     pub fn set_top_inset(&mut self, h: f32) {
         self.top = h;

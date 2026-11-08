@@ -445,6 +445,14 @@ impl Shell {
             |s: &mut Shell, _, _: &Close, window, cx| s.go(s.back, window, cx),
         )
         .detach();
+        cx.subscribe(
+            &settings,
+            |s: &mut Shell, _, ev: &settings_view::PanelsChanged, cx| {
+                let h = ev.0;
+                s.tui.update(cx, |t, cx| t.set_hidden(h, cx));
+            },
+        )
+        .detach();
         cx.subscribe_in(
             &tui,
             window,

@@ -49,6 +49,9 @@ pub fn hidden_from(tui: &synthesis_settings::TuiSettings) -> Hidden {
     h
 }
 
+/// `synt.tui.panels.*` changed in the store: the TUI view applies it live.
+pub struct PanelsChanged(pub Hidden);
+
 /// The person closed the panel (x button or a click on the dimmed area).
 pub struct Close;
 
@@ -156,6 +159,7 @@ pub struct SettingsView {
 }
 
 impl EventEmitter<Close> for SettingsView {}
+impl EventEmitter<PanelsChanged> for SettingsView {}
 
 const MCP_LABELS: [(&str, &str); 5] = [
     ("Name", "docs"),
@@ -306,6 +310,18 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         self.notice = None;
+        if out == Outcome::Saved && key.starts_with("synt.tui.panels.") {
+            if let Some(m) = &self.model {
+                let mut h = Hidden::default();
+                for (k, _) in synthesis_settings::TUI_PANELS {
+                    let v = m.store.entry(&format!("synt.tui.panels.{k}"));
+                    if v.is_some_and(|e| e.value == serde_json::Value::Bool(false)) {
+                        h.hide(k);
+                    }
+                }
+                cx.emit(PanelsChanged(h));
+            }
+        }
         if out == Outcome::Saved {
             let text =
                 self.model
@@ -680,7 +696,34 @@ impl SettingsView {
                 }
             }
             Section::Mcp => out.extend(self.mcp_block(m, cx)),
+            Section::Interface => out.extend(self.panels_block(cx)),
             _ => {}
+        }
+        out
+    }
+
+    /// Hide all / Show all for the panels, and the panels that are never hidden with the reason.
+    fn panels_block(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        use crate::tui_view::layout::{ALWAYS, HIDEABLE};
+        let set_all = |show: bool| {
+            cx.listener(move |this, _: &ClickEvent, w, cx| {
+                for (k, _) in HIDEABLE {
+                    this.apply(&format!("synt.tui.panels.{k}"), Change::Bool(show), w, cx);
+                }
+            })
+        };
+        let mut out: Vec<AnyElement> = vec![
+            small("Panels", t::TEXT).mt(px(6.)).into_any_element(),
+            div()
+                .flex()
+                .gap(px(8.))
+                .my(px(4.))
+                .child(btn("panels-hide-all", "Hide all", false).on_click(set_all(false)))
+                .child(btn("panels-show-all", "Show all", false).on_click(set_all(true)))
+                .into_any_element(),
+        ];
+        for (name, why) in ALWAYS {
+            out.push(small(format!("{name}: {why}"), t::MUTED).into_any_element());
         }
         out
     }
@@ -1154,5 +1197,28 @@ mod tests {
         v.run_until_parked();
         assert!(v.debug_bounds("confirm").is_none());
         assert!(!dir.path().join("home/settings.json").exists());
+    }
+
+    #[gpui::test]
+    fn a_panel_toggle_reaches_the_tui_view_at_once(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::theme::apply("JetBrains Mono", cx);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path());
+        let (ent, v) = cx.add_window_view(|window, cx| SettingsView::new(window, cx, Ok(c), 0.));
+        let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+        let s2 = seen.clone();
+        v.update(|window, cx| {
+            cx.subscribe(&ent, move |_, ev: &PanelsChanged, _| s2.set(Some(ev.0)))
+                .detach();
+            ent.update(cx, |s, cx| {
+                s.apply("synt.tui.panels.usage", Change::Bool(false), window, cx)
+            });
+        });
+        let h = seen.get().expect("PanelsChanged emitted");
+        assert!(h.usage && !h.session);
+        assert!(dir.path().join("home/settings.json").exists());
     }
 }
