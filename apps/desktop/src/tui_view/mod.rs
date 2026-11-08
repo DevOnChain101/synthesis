@@ -338,6 +338,8 @@ impl TuiView {
             Box::new(cx.listener(|this, _, window, cx| this.new_session(window, cx)))
         });
         let meta = |c: Hsla, v: String| div().text_color(c).child(v).into_any_element();
+        // the session that waits for approval is marked red in both lists
+        let attn = self.attention_colour();
         let pick = |p: Div, focused: bool| p.when(focused, |d| d.border_color(hsla(t::ACCENT)));
         let ws = pick(
             panel_scroll(
@@ -348,6 +350,7 @@ impl TuiView {
                 Some(meta(text(), s.workspaces.len().to_string())),
                 panels::workspace_body(
                     &s.workspaces,
+                    attn,
                     live.map(|_| &ws_click as &dyn Fn(usize) -> panels::OnClick),
                     new_ws,
                 ),
@@ -372,6 +375,7 @@ impl TuiView {
                 ),
                 panels::running_body(
                     &s.running,
+                    attn,
                     live.map(|_| &run_click as &dyn Fn(usize) -> panels::OnClick),
                     new_run,
                 ),
@@ -639,6 +643,7 @@ impl TuiView {
         } else {
             self.welcome().into_any_element()
         };
+        let dock = self.dialog_dock(cx);
         let prompt = if self.live.is_some() {
             self.live_prompt(cx)
         } else {
@@ -660,6 +665,7 @@ impl TuiView {
             .child(self.chat_head())
             .child(strip)
             .child(body)
+            .children(dock)
             .child(prompt)
             .child(self.agent_switch(cx))
             .child(self.mode_bar())
@@ -792,6 +798,10 @@ impl TuiView {
 
 impl Render for TuiView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // a blinking red is repainted every frame while an approval waits
+        if self.attention() == Some(true) {
+            window.request_animation_frame();
+        }
         self.refresh(window);
         self.tabs_tick(cx);
         let vp = window.viewport_size();
@@ -846,7 +856,6 @@ impl Render for TuiView {
                 )
                 .child(div().occlude().flex().p(px(PAD)).bg(hsla(t::BG)).child(col))
         });
-        let dialog = self.dialog_overlay(cx);
         div()
             .debug_selector(|| "view".to_string())
             // an image file dropped anywhere on the window is attached
@@ -870,7 +879,6 @@ impl Render for TuiView {
             .child(body)
             .child(self.footer())
             .children(drawer)
-            .children(dialog)
     }
 }
 
@@ -1058,5 +1066,45 @@ mod tests {
             vcx.run_until_parked();
             assert!(vcx.debug_bounds(body).is_some(), "{id}: not reopened");
         }
+    }
+
+    /// A dialog is a panel in the chat column right above the prompt (not a window-wide modal), and while it
+    /// waits the view reports the red "needs you" signal.
+    #[gpui::test]
+    fn a_dialog_docks_above_the_prompt(cx: &mut TestAppContext) {
+        use crate::live::{Dialog, DialogKind, Live};
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let mut l = Live::new();
+        l.starting = false;
+        l.dialogs.push(Dialog {
+            kind: DialogKind::Plan {
+                id: "p".into(),
+                plan: "do it".into(),
+            },
+            options: vec![("yes".into(), "Yes".into()), ("no".into(), "No".into())],
+            sel: 1,
+            armed_until: 0,
+        });
+        view.update(vcx, |t, _| t.set_live(l));
+        vcx.simulate_resize(size(px(1400.), px(900.)));
+        vcx.run_until_parked();
+        let (dlg, prompt, chat) = (
+            vcx.debug_bounds("dialog").expect("dialog drawn"),
+            vcx.debug_bounds("prompt").expect("prompt drawn"),
+            vcx.debug_bounds("p-chat").expect("chat drawn"),
+        );
+        assert!(dlg.bottom() <= prompt.top(), "above the prompt");
+        assert!(
+            dlg.left() >= chat.left() && dlg.right() <= chat.right(),
+            "inside the chat column"
+        );
+        assert!(
+            dlg.size.width < px(1400.) - px(400.),
+            "not a window-wide modal"
+        );
+        assert!(view.read_with(vcx, |t, _| t.attention()).is_some());
     }
 }

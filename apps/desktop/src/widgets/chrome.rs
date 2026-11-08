@@ -479,6 +479,16 @@ pub fn tabs(
         }))
 }
 
+/// The red of the "needs your approval" signal: with `motion` it blinks (on for 530 ms, dim for 530 ms),
+/// without it it is steady.
+pub fn attention_red(motion: bool, ms: i64) -> Hsla {
+    let on = !motion || (ms.max(0) / 530) % 2 == 0;
+    Hsla {
+        a: if on { 1. } else { 0.25 },
+        ..hsla(t::ERROR)
+    }
+}
+
 pub fn black_a(a: f32) -> Hsla {
     Hsla { a, ..gpui::black() }
 }
@@ -602,6 +612,19 @@ pub fn chat_head(
                 ),
         )
         .child(div().flex_none().text_color(dim()).child(tail.to_string()))
+}
+
+#[cfg(test)]
+mod attention_tests {
+    use super::*;
+
+    #[test]
+    fn the_red_blinks_with_motion_and_stays_without() {
+        assert_eq!(attention_red(true, 0).a, 1.);
+        assert_eq!(attention_red(true, 530).a, 0.25);
+        assert_eq!(attention_red(true, 1060).a, 1.);
+        assert_eq!(attention_red(false, 530).a, 1.);
+    }
 }
 
 #[cfg(test)]

@@ -61,6 +61,7 @@ fn item_box(selected: bool, pad: (f32, f32, f32, f32)) -> Div {
 
 pub fn workspace_body(
     ws: &[Workspace],
+    attn: Option<gpui::Hsla>,
     on_click: Option<&dyn Fn(usize) -> OnClick>,
     on_new: Option<OnClick>,
 ) -> Div {
@@ -69,6 +70,7 @@ pub fn workspace_body(
         col = col.child(
             li().child(
                 item_box(w.selected, (1., 8., 1., 8.))
+                    .when_some(attn.filter(|_| w.selected), |d, c| d.border_color(c))
                     .id(("ws-row", i))
                     .items_center()
                     .when_some(on_click, |d, f| d.cursor_pointer().on_click(f(i)))
@@ -115,6 +117,7 @@ pub fn workspace_body(
 
 pub fn running_body(
     rs: &[Running],
+    attn: Option<gpui::Hsla>,
     on_click: Option<&dyn Fn(usize) -> OnClick>,
     on_new: Option<OnClick>,
 ) -> Div {
@@ -123,14 +126,18 @@ pub fn running_body(
         col = col.child(
             li().child(
                 item_box(r.selected, (5., 7., 5., 6.))
+                    .when_some(attn.filter(|_| r.selected), |d, c| d.border_color(c))
                     .id(("run-row", i))
                     .when_some(on_click.filter(|_| !r.peer), |d, f| {
                         d.cursor_pointer().on_click(f(i))
                     })
                     .child(
-                        dot(hsla(t::SUCCESS), r.live)
-                            .mt(px(5.))
-                            .when(!r.live, |d| d.border_color(dim())),
+                        dot(
+                            attn.filter(|_| r.selected).unwrap_or(hsla(t::SUCCESS)),
+                            r.live,
+                        )
+                        .mt(px(5.))
+                        .when(!r.live, |d| d.border_color(dim())),
                     )
                     .child(
                         div()

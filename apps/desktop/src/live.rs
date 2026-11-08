@@ -151,6 +151,15 @@ impl Dialog {
         Some(self.sel + headers.iter().filter(|(i, _)| *i <= self.sel).count())
     }
 
+    /// The person's permission or answer is awaited (the red "needs you" signal); a picker they opened is not,
+    /// the bypass confirmation is.
+    pub fn needs_person(&self) -> bool {
+        match &self.kind {
+            DialogKind::Picker { kind, .. } => *kind == PickerKind::Bypass,
+            _ => true,
+        }
+    }
+
     /// The headline.
     pub fn title(&self) -> String {
         match &self.kind {

@@ -17,27 +17,29 @@ use crate::tui_view::panels::{OnClick, dim, strong, text};
 /// Lines of the tool input a permission dialog shows before the count of the rest.
 const INPUT_LINES: usize = 40;
 
-/// The front dialog over the whole window, or `None`. `click(i)` is the handler of option `i`;
-/// `scroll` keeps the option list's position (the pickers scroll to the selected row).
-pub fn overlay(
+/// The front dialog as a panel for the chat column, docked above the prompt, or `None`. `click(i)` is the
+/// handler of option `i`; `scroll` keeps the option list's position (the pickers scroll to the selected row);
+/// `border` is the panel's border (the red of the approval signal, or the accent).
+pub fn dock(
     live: &Live,
     scroll: &ScrollHandle,
     click: &dyn Fn(usize) -> OnClick,
+    border: gpui::Hsla,
 ) -> Option<AnyElement> {
     let d = live.dialogs.first()?;
     let queued = live.dialogs.len() - 1;
     let mut card = div()
         .debug_selector(|| "dialog".to_string())
-        .w(px(680.))
-        .max_w_full()
-        .max_h_full()
+        .flex_none()
+        .mx(px(12.))
+        .mb(px(8.))
         .flex()
         .flex_col()
         .gap(px(10.))
-        .p(px(16.))
+        .p(px(12.))
         .bg(hsla(t::SURFACE))
         .border_1()
-        .border_color(hsla(t::ACCENT))
+        .border_color(border)
         .rounded(px(10.))
         .child(
             div()
@@ -62,7 +64,7 @@ pub fn overlay(
             card = card.child(
                 div()
                     .id("dialog-input")
-                    .max_h(px(280.))
+                    .max_h(px(150.))
                     .overflow_y_scroll()
                     .p(px(8.))
                     .rounded(px(6.))
@@ -82,7 +84,7 @@ pub fn overlay(
             card = card.child(
                 div()
                     .id("dialog-plan")
-                    .max_h(px(360.))
+                    .max_h(px(200.))
                     .overflow_y_scroll()
                     .text_color(text())
                     .child(TextView::markdown("plan", plan.clone())),
@@ -181,7 +183,7 @@ pub fn overlay(
             .debug_selector(|| "dialog-list".to_string())
             .flex()
             .flex_col()
-            .max_h(px(420.))
+            .max_h(px(180.))
             .overflow_y_scroll()
             .track_scroll(scroll)
             .children(list),
@@ -199,18 +201,5 @@ pub fn overlay(
             String::new()
         }
     )));
-    Some(
-        div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .p(px(24.))
-            .bg(gpui::hsla(0., 0., 0., 0.55))
-            // a click on the backdrop answers nothing, and nothing underneath gets it
-            .occlude()
-            .child(card)
-            .into_any_element(),
-    )
+    Some(card.into_any_element())
 }

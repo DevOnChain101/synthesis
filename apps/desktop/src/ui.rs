@@ -218,6 +218,11 @@ impl Shell {
                     .when(!mac, |d| {
                         d.child(gpui::img(brand::mark()).size(px(16.)).flex_none())
                             .child(tracked("SYNTHESIS", 10., 0.3, theme::hsla(t::TEXT_STRONG)))
+                    })
+                    // a dialog waits for the person: a red dot and word, blinking unless motion is off
+                    .when_some(self.tui.read(cx).attention_colour(), |d, red| {
+                        d.child(div().size(px(8.)).flex_none().rounded_full().bg(red))
+                            .child(div().text_color(red).child("approval needed"))
                     }),
             )
             .child(
@@ -266,7 +271,11 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // the title bar's red signal repaints with the view it belongs to
+        if self.tui.read(cx).attention() == Some(true) {
+            window.request_animation_frame();
+        }
         let content = match self.view {
             View::Tui => div().size_full().child(self.tui.clone()),
             View::Agent => div().size_full().child(Self::coming_soon()),
