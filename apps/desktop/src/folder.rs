@@ -214,7 +214,7 @@ mod tests {
         );
         assert_eq!(
             c("al").as_deref(),
-            Some("al"),
+            Some("alp"),
             "two matches: the common start; the file is not offered"
         );
         assert_eq!(c("alph").as_deref(), Some("alpha/"));
