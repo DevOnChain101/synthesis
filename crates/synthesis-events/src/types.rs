@@ -686,6 +686,29 @@ pub enum Event {
         h: u32,
         bytes: u64,
     },
+    /// A browser tool acted on the page (the agent mouse cursor of the desktop Browser tab). Position and
+    /// a short target only: NEVER typed text, a key, a secret value or page content (`browser_fill_secret`
+    /// reports the target `secret`). Sent after the action ran, so a viewer lags the page.
+    #[serde(rename = "browser.action")]
+    BrowserAction {
+        /// `click`, `type`, `press`, `navigate`, `hover`, `scroll`, ...
+        action: String,
+        /// Where, in CSS pixels of the viewport of size `w` x `h`; absent when the action has no point.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        w: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        h: Option<u32>,
+        /// Role and name, or the element ref, clipped to 80 chars.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        /// Screenshot the point belongs to (absent: the reader uses its newest `browser.frame`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame: Option<String>,
+    },
     #[serde(rename = "notice")]
     Notice { level: String, text: String },
 }

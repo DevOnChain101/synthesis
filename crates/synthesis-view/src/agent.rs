@@ -179,6 +179,36 @@ pub struct Frame {
     pub ts: Option<i64>,
 }
 
+/// The agent's last action in the browser (`browser.action`): where, as a point of a `w` x `h` viewport.
+/// Never what was typed. The screenshot it is drawn on is not live, so the cursor can lag the page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pointer {
+    pub action: String,
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    pub w: Option<u32>,
+    pub h: Option<u32>,
+    pub target: Option<String>,
+    pub ts: Option<i64>,
+}
+
+impl Pointer {
+    /// The point as fractions (0..=1) of the viewport, for any image of the same aspect; clamped, since a
+    /// point can lie outside the viewport (element scrolled out). `None` without a point or a viewport.
+    pub fn frac(&self) -> Option<(f32, f32)> {
+        let (x, y, w, h) = (
+            self.x?,
+            self.y?,
+            self.w.filter(|w| *w > 0)?,
+            self.h.filter(|h| *h > 0)?,
+        );
+        Some((
+            (x as f32 / w as f32).clamp(0.0, 1.0),
+            (y as f32 / h as f32).clamp(0.0, 1.0),
+        ))
+    }
+}
+
 /// A file the session changed: the sum of its edits and the latest diff.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChangedFile {
@@ -202,6 +232,8 @@ pub struct AgentPanes {
     pub screenshot: Option<String>,
     /// Every `browser.frame`, oldest first (the newest 50).
     pub frames: Vec<Frame>,
+    /// The latest `browser.action`.
+    pub pointer: Option<Pointer>,
     pub files: Vec<ChangedFile>,
     /// Tool call id -> index in `commands` / `browser` / agent id, to match the completion.
     pending: Vec<(String, Pending)>,
@@ -603,6 +635,25 @@ impl AgentPanes {
                     };
                 }
             }
+            Event::BrowserAction {
+                action,
+                x,
+                y,
+                w,
+                h,
+                target,
+                ..
+            } => {
+                self.pointer = Some(Pointer {
+                    action: action.clone(),
+                    x: *x,
+                    y: *y,
+                    w: *w,
+                    h: *h,
+                    target: target.clone(),
+                    ts,
+                });
+            }
             Event::BrowserFrame {
                 path,
                 url,
@@ -920,6 +971,54 @@ mod tests {
         );
         assert_eq!((bg.command.as_str(), bg.duration_ms), ("npm run dev", 900));
         assert_eq!(bg.tail, ["ready"]);
+    }
+
+    #[test]
+    fn the_latest_browser_action_is_the_pointer_and_scales_to_the_viewport() {
+        let act = |action: &str, x: Value, y: Value| json!({"action": action, "x": x, "y": y, "w": 1280, "h": 800, "target": "button \"Go\""});
+        let p = run(vec![
+            ev(
+                1,
+                None,
+                "browser.action",
+                act("click", json!(10), json!(20)),
+            ),
+            ev(
+                2,
+                None,
+                "browser.action",
+                act("click", json!(640), json!(200)),
+            ),
+        ]);
+        let ptr = p.pointer.as_ref().unwrap();
+        assert_eq!(
+            (ptr.action.as_str(), ptr.target.as_deref()),
+            ("click", Some("button \"Go\""))
+        );
+        assert_eq!(ptr.frac(), Some((0.5, 0.25)));
+        // outside the viewport (scrolled out): clamped, never off the image
+        let p = run(vec![ev(
+            1,
+            None,
+            "browser.action",
+            act("click", json!(5000), json!(-30)),
+        )]);
+        assert_eq!(p.pointer.unwrap().frac(), Some((1.0, 0.0)));
+        // navigate / press carry no point; a missing viewport gives none either
+        let p = run(vec![ev(
+            1,
+            None,
+            "browser.action",
+            json!({"action": "navigate"}),
+        )]);
+        assert_eq!(p.pointer.unwrap().frac(), None);
+        let p = run(vec![ev(
+            1,
+            None,
+            "browser.action",
+            json!({"action": "click", "x": 1, "y": 1, "w": 0, "h": 0}),
+        )]);
+        assert_eq!(p.pointer.unwrap().frac(), None);
     }
 
     #[test]

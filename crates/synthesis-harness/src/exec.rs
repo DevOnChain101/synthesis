@@ -1391,6 +1391,36 @@ impl Harness {
             };
             self.emit(task, agent, Some(turn), frame);
         }
+        if name.starts_with("browser_")
+            && !out.is_error
+            && let Some(a) = out.meta.get("action").filter(|a| a.is_object())
+        {
+            // only the whitelisted fields leave: where, and a short target (the word "secret" for a secret)
+            let num = |k: &str| a.get(k).and_then(Value::as_i64);
+            let target = if name == "browser_fill_secret" {
+                Some("secret".to_string())
+            } else {
+                a.get("target")
+                    .and_then(Value::as_str)
+                    .map(|t| t.chars().take(80).collect())
+            };
+            let ev = Event::BrowserAction {
+                action: a
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .unwrap_or("other")
+                    .chars()
+                    .take(20)
+                    .collect(),
+                x: num("x").map(|v| v as i32),
+                y: num("y").map(|v| v as i32),
+                w: num("w").map(|v| v as u32),
+                h: num("h").map(|v| v as u32),
+                target,
+                frame: None,
+            };
+            self.emit(task, agent, Some(turn), ev);
+        }
         if name == "verify_run" && !out.is_error {
             self.register_model_checks(task, &out.meta);
         }

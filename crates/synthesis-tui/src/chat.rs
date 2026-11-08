@@ -172,6 +172,7 @@ fn quiet(e: &Event) -> bool {
             | Event::ToolOutput { .. }
             | Event::ProcessOutput { .. }
             | Event::BrowserFrame { .. }
+            | Event::BrowserAction { .. }
     ) || matches!(e, Event::ProcessSpawned(i) | Event::ProcessReady(i) | Event::ProcessExited(i)
         if i.tool_call_id.is_some()) // the Bash tool row already shows these
 }
