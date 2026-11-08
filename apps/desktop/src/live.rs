@@ -479,7 +479,7 @@ impl Live {
                 }
                 if to == "main" {
                     self.note(format!("not delivered ({why}): queued instead"), true);
-                    self.queue.push_front(text);
+                    self.requeue_main(text);
                 } else {
                     self.note(
                         format!(
@@ -1017,6 +1017,12 @@ impl Live {
         self.target = order[i % order.len()].clone();
     }
 
+    /// A main line that was not delivered goes back to the front of the queue; a burst keeps its order.
+    fn requeue_main(&mut self, text: String) {
+        self.queue.insert(self.requeued.min(self.queue.len()), text);
+        self.requeued += 1;
+    }
+
     /// Sent-now bookkeeping off the event stream (UI-only until `message.delivered`), and the
     /// sub-agent names a line can be addressed to.
     fn track_messages(&mut self, e: &synthesis_events::Envelope) {
@@ -1046,7 +1052,12 @@ impl Live {
                 if let Some(i) = self
                     .injected
                     .iter()
-                    .position(|p| p.0 == *to && text.starts_with(&p.1))
+                    .position(|p| p.0 == *to && p.1 == *text)
+                    .or_else(|| {
+                        self.injected
+                            .iter()
+                            .position(|p| p.0 == *to && text.starts_with(&p.1))
+                    })
                 {
                     self.injected.remove(i);
                     self.pending
@@ -1074,9 +1085,7 @@ impl Live {
                 if let Some(i) = self.pending.iter().position(|p| p.0 == *message_id) {
                     let (_, to, text) = self.pending.remove(i);
                     if to == "main" {
-                        // a burst of drops keeps the lines' order
-                        self.queue.insert(self.requeued.min(self.queue.len()), text);
-                        self.requeued += 1;
+                        self.requeue_main(text);
                     } else {
                         self.note(
                             format!("not delivered to @{}: {}", label(&to), clip(&text, 80)),
@@ -1985,6 +1994,23 @@ mod tests {
         l.on_msg(UiMsg::TaskDone(Ok(())), 0);
         l.on_msg(sent("9", "main", "user", "late"), 0);
         assert!(l.pending.is_empty());
+    }
+
+    #[test]
+    fn an_exact_line_is_matched_before_a_prefix_and_failed_lines_requeue_in_order() {
+        let mut l = Live::new();
+        l.injected = vec![("main".into(), "abc".into()), ("main".into(), "a".into())];
+        l.on_msg(sent("1", "main", "user", "a"), 0);
+        assert_eq!(l.pending[0].2, "a");
+        assert_eq!(l.injected, [("main".to_string(), "abc".to_string())]);
+        l.queue.push_back("later".into());
+        l.injected = vec![("main".into(), "one".into()), ("main".into(), "two".into())];
+        for t in ["one", "two"] {
+            let (to, text, why) = ("main".to_string(), t.to_string(), "closed".to_string());
+            l.on_msg(UiMsg::SendFailed { to, text, why }, 0);
+        }
+        assert_eq!(l.queue, ["one", "two", "later"]);
+        assert!(l.injected.is_empty(), "a refused line is no longer awaited");
     }
 
     #[test]

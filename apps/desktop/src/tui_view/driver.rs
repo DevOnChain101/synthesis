@@ -542,8 +542,16 @@ impl TuiView {
     /// Send now: the harness takes the line at the next safe point (`UiMsg::SendFailed` if not).
     pub(super) fn inject(&mut self, to: String, text: String, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
-        if let Some(Err(why)) = lu.live.engine.clone().map(|e| e.send_now(to, text)) {
-            lu.live.note(why, true);
+        // refused before it was sent (engine closed): the line goes back to the queue, never lost
+        if let Some(Err(why)) = lu
+            .live
+            .engine
+            .clone()
+            .map(|e| e.send_now(to.clone(), text.clone()))
+        {
+            let why = why.to_string();
+            lu.live
+                .on_msg(UiMsg::SendFailed { to, text, why }, now_ms());
         }
         lu.stick();
         lu.dirty = true;
@@ -663,7 +671,7 @@ impl TuiView {
             if lu.live.typing_other() {
                 // the free-text "Other" answer of a question
                 match key {
-                    "enter" => lu.live.commit_other(),
+                    "enter" if enter_answers(ctrl, cmd, true) => lu.live.commit_other(),
                     "escape" => {
                         lu.live.reject();
                     }
