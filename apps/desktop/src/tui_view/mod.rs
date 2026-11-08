@@ -677,7 +677,21 @@ impl TuiView {
             .overflow_hidden()
             .bg(hsla(t::SURFACE))
             .border_1()
-            .border_color(hsla(t::BORDER))
+            // one focus frame around the whole chat panel (the border is always there, only its colour
+            // changes); a waiting approval's red wins over it
+            .border_color(self.attention_colour().unwrap_or_else(|| {
+                hsla(
+                    if self
+                        .live
+                        .as_ref()
+                        .is_some_and(|l| l.live.focus == crate::live::Focus::Chat)
+                    {
+                        t::ACCENT
+                    } else {
+                        t::BORDER
+                    },
+                )
+            }))
             .rounded(px(layout::PANEL_RADIUS))
             .child(self.chat_head())
             .child(strip)

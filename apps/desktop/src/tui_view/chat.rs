@@ -336,7 +336,10 @@ impl TuiView {
                 }),
             )
             .child(rows);
-        if !lu.follow {
+        // only when the content is taller than the viewport and the person has scrolled up away from the end
+        let max = f32::from(lu.list.max_offset_for_scrollbar().y);
+        let at = -f32::from(lu.list.scroll_px_offset_for_scrollbar().y);
+        if jump_visible(max, at) {
             wrap = wrap.child(
                 div()
                     .id("jump-latest")
@@ -1000,6 +1003,13 @@ impl TuiView {
     }
 }
 
+/// The "Jump to latest" pill shows only when there is something to scroll (`max` px of scroll range) and the view
+/// is more than a few px above the end (`at` px from the top); new output below the fold keeps it shown.
+fn jump_visible(max: f32, at: f32) -> bool {
+    const TOLERANCE: f32 = 4.;
+    max > TOLERANCE && at < max - TOLERANCE
+}
+
 const SPINNER: [&str; 10] = [
     "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
     "\u{2807}", "\u{280f}",
@@ -1153,7 +1163,12 @@ pub fn input_box(
         .gap(px(10.))
         .px(px(12.))
         .border_1()
-        .border_color(hsla(if focused { t::ACCENT } else { t::BORDER }))
+        // the focus frame is the chat panel's own border now; the box only keeps a quiet tint while focused
+        .border_color(if focused {
+            with_alpha(hsla(t::ACCENT), 0.35)
+        } else {
+            hsla(t::BORDER)
+        })
         .rounded(px(layout::PANEL_RADIUS))
         .bg(hsla(t::SURFACE))
         .child(
@@ -1254,6 +1269,19 @@ mod tests {
         assert_eq!(toggle_label(true, 1), "Show more (1 more line)");
         assert_eq!(toggle_label(true, 7), "Show more (7 more lines)");
         assert_eq!(toggle_label(false, 7), "Show less");
+    }
+
+    #[test]
+    fn the_jump_pill_shows_only_when_scrolled_up_from_a_longer_content() {
+        // everything fits: nothing to scroll, no pill
+        assert!(!jump_visible(0., 0.));
+        // at the bottom (or within a few px of it)
+        assert!(!jump_visible(500., 500.));
+        assert!(!jump_visible(500., 497.));
+        // scrolled up
+        assert!(jump_visible(500., 200.));
+        // new output arrived below the fold while scrolled up: the range grew, still scrolled up
+        assert!(jump_visible(900., 200.));
     }
 
     #[test]
