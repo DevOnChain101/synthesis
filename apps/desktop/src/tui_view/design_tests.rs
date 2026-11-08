@@ -346,38 +346,17 @@ fn hiding_panels_gives_their_space_away(cx: &mut TestAppContext) {
     );
     assert!(get(v, "p-activity").is_none());
 
+    // Agent Status cannot be hidden: hiding Context leaves it the whole row
     let mut h = Hidden::default();
-    h.hide("status");
+    assert!(!h.hide("status"));
     h.hide("tokens");
     let v = open_with(cx, 1400., 900., h);
-    assert!(get(v, "status-context").is_none());
-    let (t, u) = (bounds(v, "p-topology"), bounds(v, "p-usage"));
     near(
-        f(t.size.height) + 10. + f(u.size.height),
-        f(bounds(v, "col-right").size.height),
-        "right column fills",
-    );
-
-    let mut h = Hidden::default();
-    h.hide("status");
-    let v = open_with(cx, 1400., 900., h);
-    near(
-        f(bounds(v, "p-context").size.width),
+        f(bounds(v, "p-agent").size.width),
         f(bounds(v, "status-context").size.width),
-        "Context takes the whole row",
+        "Agent Status takes the whole row",
     );
-
-    let mut h = Hidden::default();
-    for k in ["topology", "usage", "status", "tokens"] {
-        h.hide(k);
-    }
-    let v = open_with(cx, 1400., 900., h);
-    assert!(get(v, "col-right").is_none());
-    near(
-        f(bounds(v, "col-centre").bottom_right().x),
-        1400. - 10.,
-        "the chat spans to the right edge",
-    );
+    assert!(get(v, "p-context").is_none());
 
     let mut h = Hidden::default();
     h.hide("usage");
@@ -388,6 +367,100 @@ fn hiding_panels_gives_their_space_away(cx: &mut TestAppContext) {
         f(bounds(v, "col-right").size.height),
         "topology takes the rest",
     );
+}
+
+fn all_hidden() -> Hidden {
+    let mut h = Hidden::default();
+    for (k, _) in super::layout::HIDEABLE {
+        h.hide(k);
+    }
+    h
+}
+
+fn overlaps(a: gpui::Bounds<gpui::Pixels>, b: gpui::Bounds<gpui::Pixels>) -> bool {
+    f(a.right()) > f(b.left()) + 0.5
+        && f(b.right()) > f(a.left()) + 0.5
+        && f(a.bottom()) > f(b.top()) + 0.5
+        && f(b.bottom()) > f(a.top()) + 0.5
+}
+
+/// `/panels hide-all`: only Workspace, Running, the chat, Agent Status and Subagents remain; `show-all` is the default.
+#[gpui::test]
+fn hide_all_keeps_the_always_shown_panels(cx: &mut TestAppContext) {
+    for (w, h) in [(1400., 900.), (1920., 1080.), (1280., 700.)] {
+        let v = open_with(cx, w, h, all_hidden());
+        for gone in [
+            "p-session",
+            "p-tools",
+            "p-activity",
+            "p-context",
+            "p-topology",
+            "p-usage",
+        ] {
+            assert!(get(v, gone).is_none(), "{gone} at {w}x{h}");
+        }
+        let (ws, run) = (bounds(v, "p-workspace"), bounds(v, "p-running"));
+        near(
+            f(ws.size.height),
+            f(run.size.height),
+            "Workspace and Running split 50/50",
+        );
+        near(
+            f(ws.size.height) + 8. + f(run.size.height),
+            f(bounds(v, "col-left").size.height),
+            "the split fills the left column",
+        );
+        let ids = [
+            "p-workspace",
+            "p-running",
+            "p-agent",
+            "p-subagents",
+            "col-centre",
+        ];
+        let rs: Vec<_> = ids.iter().map(|i| bounds(v, i)).collect();
+        for i in 0..rs.len() {
+            for j in i + 1..rs.len() {
+                assert!(
+                    !overlaps(rs[i], rs[j]),
+                    "{} overlaps {} at {w}x{h}",
+                    ids[i],
+                    ids[j]
+                );
+            }
+        }
+        assert!(
+            f(bounds(v, "p-agent").bottom()) <= f(bounds(v, "col-right").bottom()) + 0.5,
+            "Agent Status inside the column"
+        );
+    }
+    let v = open_with(cx, 1400., 900., Hidden::default());
+    for shown in [
+        "p-session",
+        "p-tools",
+        "p-activity",
+        "p-context",
+        "p-topology",
+        "p-usage",
+        "p-agent",
+    ] {
+        assert!(get(v, shown).is_some(), "{shown}");
+    }
+    assert!(
+        get(v, "p-subagents").is_none(),
+        "Topology shows the Subagents card"
+    );
+    // only the left column hidden: the right column is untouched
+    let mut h = Hidden::default();
+    for k in ["session", "tools", "activity"] {
+        h.hide(k);
+    }
+    let v = open_with(cx, 1400., 900., h);
+    near(
+        f(bounds(v, "p-workspace").size.height),
+        f(bounds(v, "p-running").size.height),
+        "left-only hidden: 50/50",
+    );
+    assert!(get(v, "p-topology").is_some() && get(v, "p-usage").is_some());
 }
 
 /// Under 500px of column height Usage goes, under 400 the cards drop rows (`fitRight`), as in the design.
@@ -546,18 +619,6 @@ fn drawers(cx: &mut TestAppContext) {
         v.run_until_parked();
         assert!(get(v, "drawer").is_none() && get(v, "col-right").is_some());
     }
-    // a hidden right column has no button
-    let mut hid = Hidden::default();
-    for k in ["topology", "usage", "status", "tokens"] {
-        hid.hide(k);
-    }
-    let v = open_with(cx, 900., 520., hid);
-    assert!(get(v, "drawer-right").is_none() && get(v, "drawer-left").is_some());
-    near(
-        f(bounds(v, "col-centre").size.width),
-        880.,
-        "chat takes the hidden column's space",
-    );
 }
 
 /// Topology and Usage inside the narrower right column (inline from 1280, or as a drawer at 300px): no card

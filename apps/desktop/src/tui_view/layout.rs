@@ -85,55 +85,118 @@ pub fn tiers(height: f32) -> Tiers {
 }
 
 /// The `synt.tui.panels.*` settings keys (docs/TUI.md "Settings"), mapped onto the panels of `cli.html`:
-/// `session` = Session, `tools` = Tools & Skills, `activity` = Recent Activity (the old User Prompt panel is merged into it; the key keeps hiding it),
-/// `status` = Agent Status, `tokens` = Context, `topology` = Synthesis Topology, `usage` = Usage & Metrics.
+/// `session` = Session, `tools` = Tools & Skills, `activity` = Recent Activity (prompts and agent activity in one
+/// panel), `tokens` = Context, `topology` = Synthesis Topology, `usage` = Usage & Metrics.
+/// Never hideable (owner decision 2026-11-09): Workspace, Running, the chat (with the sub-agent transcript beside
+/// it), Agent Status (the task list; `status` is accepted and ignored) and the sub-agents (the Topology Subagents
+/// card, or a compact Subagents block in its place while Topology is hidden). So the right column always exists.
 /// `mcp` has no panel of its own any more (MCP servers are the Topology MCP card and the Tools & Skills
 /// `mcp` row); the key is accepted and ignored so no user's settings.json breaks.
-/// Workspace, Running and the chat cannot be hidden.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Hidden {
     pub session: bool,
     pub mcp: bool,
     pub tools: bool,
     pub activity: bool,
-    pub status: bool,
     pub tokens: bool,
     pub topology: bool,
     pub usage: bool,
 }
 
+/// The panels `/panels` and Settings can switch: (settings key, name shown).
+pub const HIDEABLE: [(&str, &str); 6] = [
+    ("session", "Session"),
+    ("tools", "Tools & Skills"),
+    ("activity", "Recent Activity"),
+    ("tokens", "Context"),
+    ("topology", "Synthesis Topology"),
+    ("usage", "Usage & Metrics"),
+];
+
+/// The panels that stay when everything else is hidden, with the reason (docs/TUI.md).
+pub const ALWAYS: [(&str, &str); 5] = [
+    ("Workspace", "always shown"),
+    ("Running", "always shown"),
+    ("Chat", "always shown"),
+    ("Agent Status", "the task list stays visible"),
+    (
+        "Subagents",
+        "shown in Topology, or as a compact block when Topology is hidden",
+    ),
+];
+
 impl Hidden {
-    /// Hides the panel with this settings key; false for a key that is not a panel.
-    pub fn hide(&mut self, key: &str) -> bool {
-        let f = match key {
+    fn flag(&mut self, key: &str) -> Option<&mut bool> {
+        Some(match key {
             "session" => &mut self.session,
             "mcp" => &mut self.mcp,
             "tools" => &mut self.tools,
             "activity" => &mut self.activity,
-            "status" => &mut self.status,
             "tokens" => &mut self.tokens,
             "topology" => &mut self.topology,
             "usage" => &mut self.usage,
-            _ => return false,
-        };
-        *f = true;
-        true
+            _ => return None,
+        })
+    }
+
+    /// Hides or shows the panel with this settings key; false for a key that cannot be switched (`status` too).
+    pub fn set_hidden(&mut self, key: &str, hidden: bool) -> bool {
+        self.flag(key).map(|f| *f = hidden).is_some()
+    }
+
+    /// Hides the panel with this settings key; false for a key that is not a hideable panel.
+    pub fn hide(&mut self, key: &str) -> bool {
+        self.set_hidden(key, true)
+    }
+
+    pub fn is_hidden(&self, key: &str) -> bool {
+        let mut c = *self;
+        c.flag(key).is_some_and(|f| *f)
     }
 
     /// Workspace and Running split the left column in halves when everything below them is hidden.
     pub fn left_is_split(&self) -> bool {
         self.session && self.tools && self.activity
     }
+}
 
-    /// The right column (Topology, Agent Status / Context, Usage & Metrics) exists at all.
-    pub fn has_right(&self) -> bool {
-        !(self.topology && self.usage && !self.has_cards())
-    }
+/// What `/panels` asks for.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PanelsCmd {
+    List,
+    HideAll,
+    ShowAll,
+    Set(&'static str, bool),
+}
 
-    /// The Agent Status / Context row exists.
-    pub fn has_cards(&self) -> bool {
-        !(self.status && self.tokens)
+/// `/panels [hide-all | show-all | <name> on|off]`. Names are the settings keys, or the panel's name without
+/// spaces ("recent-activity" is not needed: `activity`).
+pub fn parse_panels(arg: &str) -> Result<PanelsCmd, String> {
+    let w: Vec<&str> = arg.split_whitespace().collect();
+    match w.as_slice() {
+        [] | ["list"] => Ok(PanelsCmd::List),
+        ["hide-all"] => Ok(PanelsCmd::HideAll),
+        ["show-all"] => Ok(PanelsCmd::ShowAll),
+        [name, state @ ("on" | "off")] => {
+            let key = HIDEABLE.iter().find(|(k, _)| k == name).map(|(k, _)| *k);
+            match (key, *name) {
+                (Some(k), _) => Ok(PanelsCmd::Set(k, *state == "off")),
+                (None, "status" | "workspace" | "running" | "chat" | "subagents") => {
+                    Err(format!("{name} is always shown"))
+                }
+                (None, _) => Err(format!("{name} is not a panel ({})", keys())),
+            }
+        }
+        _ => Err("usage: /panels [hide-all | show-all | <name> on|off]".into()),
     }
+}
+
+fn keys() -> String {
+    HIDEABLE
+        .iter()
+        .map(|(k, _)| *k)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -170,18 +233,30 @@ mod tests {
     #[test]
     fn panel_keys() {
         let mut h = Hidden::default();
-        assert!(!h.hide("workspace") && !h.hide("running") && !h.hide("chat"));
+        assert!(!h.hide("workspace") && !h.hide("running") && !h.hide("chat") && !h.hide("status"));
         for k in ["session", "mcp", "tools"] {
             assert!(h.hide(k));
         }
         assert!(!h.left_is_split());
-        assert!(h.hide("activity"));
+        assert!(h.hide("activity") && h.is_hidden("activity"));
         assert!(h.left_is_split());
-        h.hide("topology");
-        h.hide("usage");
-        assert!(h.has_right(), "the cards remain");
-        h.hide("status");
-        h.hide("tokens");
-        assert!(!h.has_right());
+        assert!(h.set_hidden("activity", false) && !h.is_hidden("activity"));
+    }
+
+    #[test]
+    fn panels_command_parsing() {
+        use PanelsCmd::*;
+        assert_eq!(parse_panels(""), Ok(List));
+        assert_eq!(parse_panels(" hide-all "), Ok(HideAll));
+        assert_eq!(parse_panels("show-all"), Ok(ShowAll));
+        assert_eq!(parse_panels("usage off"), Ok(Set("usage", true)));
+        assert_eq!(parse_panels("tokens  on"), Ok(Set("tokens", false)));
+        assert!(
+            parse_panels("status off")
+                .unwrap_err()
+                .contains("always shown")
+        );
+        assert!(parse_panels("nope on").unwrap_err().contains("not a panel"));
+        assert!(parse_panels("usage maybe").is_err() && parse_panels("hide-all x").is_err());
     }
 }
