@@ -350,7 +350,9 @@ impl TuiView {
             Box::new(cx.listener(|this, _, _, cx| this.new_workspace(cx)))
         });
         let new_run: Option<panels::OnClick> = live.map(|_| -> panels::OnClick {
-            Box::new(cx.listener(|this, _, window, cx| this.new_session(window, cx)))
+            Box::new(cx.listener(|this, _, window, cx| {
+                this.new_session(window, cx);
+            }))
         });
         let meta = |c: Hsla, v: String| div().text_color(c).child(v).into_any_element();
         // the session that waits for approval is marked red in both lists

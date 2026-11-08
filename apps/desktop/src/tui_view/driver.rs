@@ -55,6 +55,11 @@ pub struct OpenSettings;
 
 impl gpui::EventEmitter<OpenSettings> for TuiView {}
 
+/// A new engine is live (the session the person asked for has started).
+pub struct SessionStarted;
+
+impl gpui::EventEmitter<SessionStarted> for TuiView {}
+
 /// Rows at the end of the chat measured again after every change.
 const TAIL_REMEASURE: usize = 12;
 
@@ -329,6 +334,7 @@ impl TuiView {
                 let pump = cx.spawn(async move |this, cx| pump(this, rx, cx).await);
                 lu.pump_task = Some(pump);
                 self.refresh_store(cx);
+                cx.emit(SessionStarted);
             }
         }
         cx.notify();
@@ -1149,8 +1155,10 @@ impl TuiView {
     }
 
     /// "new session..." of the Running panel: a fresh session in the selected workspace.
-    pub fn new_session(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    /// True when a fresh session is being started ([`SessionStarted`] follows when it is live).
+    pub fn new_session(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.run_action(Action::New, cx);
+        self.live.as_ref().is_some_and(|l| l.live.starting)
     }
 
     /// Ctrl+N: the system folder picker; the folder gets a fresh session.

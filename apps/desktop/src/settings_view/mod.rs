@@ -343,7 +343,7 @@ impl SettingsView {
     }
 
     /// The window and the sliders follow the file, not a preview.
-    fn show_persisted(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show_persisted(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let t = self.tui_now();
         for sl in self.sliders.values() {
             let v = f32::from(t.opacity);
@@ -360,17 +360,19 @@ impl SettingsView {
 
     /// The shell says whether a restart is possible (`None`) or why not.
     pub fn set_restart_block(&mut self, why: Option<String>, cx: &mut Context<Self>) {
-        self.restart_block = why;
-        cx.notify();
+        if self.restart_block != why {
+            self.restart_block = why;
+            cx.notify();
+        }
     }
 
-    /// The shell started the fresh session: the changes that waited for one are in force now.
-    pub fn restarted(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The fresh session is live: the changes that waited for one are in force now.
+    pub fn restarted(&mut self, cx: &mut Context<Self>) {
         if let Some(m) = &mut self.model {
             m.changed.clear();
         }
         self.restart_block = None;
-        self.close(window, cx);
+        cx.notify();
     }
 
     /// A slider being dragged: the window follows, nothing is written yet.
@@ -1515,15 +1517,8 @@ mod tests {
             v.debug_bounds("restart-session").is_none(),
             "no live button"
         );
-        // the restart happened: now the badge goes and the popup closes
-        let closed = std::rc::Rc::new(std::cell::Cell::new(0));
-        v.update(|window, cx| {
-            let n = closed.clone();
-            cx.subscribe(&ent, move |_, _: &Close, _| n.set(n.get() + 1))
-                .detach();
-            ent.update(cx, |s, cx| s.restarted(window, cx))
-        });
-        assert_eq!(closed.get(), 1);
+        // the new session is live: now the badge goes
+        v.update(|_, cx| ent.update(cx, |s, cx| s.restarted(cx)));
         ent.read_with(v, |s, _| {
             assert_eq!(s.model().unwrap().restart_pending(), 0)
         });

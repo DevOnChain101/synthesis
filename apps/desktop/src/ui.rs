@@ -16,7 +16,7 @@ use gpui::{
 };
 
 use crate::settings_view::{self, Applied, Close, Restart, SettingsView};
-use crate::tui_view::driver::{LiveCfg, OpenSettings};
+use crate::tui_view::driver::{LiveCfg, OpenSettings, SessionStarted};
 use crate::tui_view::{Side, TuiView, layout};
 use crate::widgets::chrome::{icon, tracked, with_alpha};
 use crate::{brand, theme};
@@ -86,12 +86,19 @@ pub struct Shell {
     back: View,
     tui: Entity<TuiView>,
     settings: Entity<SettingsView>,
+    /// A restart was asked from Settings and the new session is not live yet.
+    restarting: bool,
 }
 
 impl Shell {
     /// Switches the view; the TUI view's window-wide key hook is told whether it is shown. Settings slides
     /// over the view it was opened from (`back`).
     pub(crate) fn go(&mut self, v: View, window: &mut Window, cx: &mut Context<Self>) {
+        if self.view == View::Settings && v != View::Settings {
+            // whichever way Settings is left, a slider drag never released does not stay on the window
+            self.settings
+                .update(cx, |p, cx| p.show_persisted(window, cx));
+        }
         if v == View::Settings && self.view != View::Settings {
             self.back = self.view;
             let block = self.tui.read(cx).restart_blocker().map(String::from);
@@ -127,8 +134,15 @@ impl Shell {
         self.settings
             .update(cx, |p, cx| p.set_restart_block(block, cx));
         if ok {
-            self.tui.update(cx, |t, cx| t.new_session(window, cx));
-            self.settings.update(cx, |p, cx| p.restarted(window, cx));
+            // the badge goes when the new session is live (`SessionStarted`), not before
+            self.restarting = self.tui.update(cx, |t, cx| t.new_session(window, cx));
+            if self.restarting {
+                self.go(self.back, window, cx);
+            } else {
+                self.settings.update(cx, |p, cx| {
+                    p.set_restart_block(Some("the new session could not be started".into()), cx)
+                });
+            }
         }
     }
 
@@ -356,6 +370,7 @@ impl Render for Shell {
                     return;
                 }
                 match k.key.as_str() {
+                    "," if s.view == View::Settings => s.go(s.back, window, cx),
                     "," => s.go(View::Settings, window, cx),
                     "1" => s.go(View::Tui, window, cx),
                     "2" => s.go(View::Agent, window, cx),
@@ -503,6 +518,25 @@ impl Shell {
         cx.subscribe_in(
             &tui,
             window,
+            |s: &mut Shell, _, _: &SessionStarted, _, cx| {
+                if std::mem::take(&mut s.restarting) {
+                    s.settings.update(cx, |p, cx| p.restarted(cx));
+                }
+            },
+        )
+        .detach();
+        // a task that ends while the popup is open enables the button
+        cx.observe(&tui, |s: &mut Shell, tui, cx| {
+            if s.view == View::Settings {
+                let block = tui.read(cx).restart_blocker().map(String::from);
+                s.settings
+                    .update(cx, |p, cx| p.set_restart_block(block, cx));
+            }
+        })
+        .detach();
+        cx.subscribe_in(
+            &tui,
+            window,
             |s: &mut Shell, _, _: &OpenSettings, window, cx| {
                 if s.view != View::Settings {
                     s.go(View::Settings, window, cx);
@@ -515,6 +549,7 @@ impl Shell {
             back: View::Tui,
             tui,
             settings,
+            restarting: false,
         }
     }
 }
@@ -655,5 +690,34 @@ mod tests {
         assert!(shell.read_with(v, |s, cx| {
             s.settings.read(cx).model().unwrap().restart_pending() == 1
         }));
+    }
+
+    #[gpui::test]
+    fn leaving_settings_by_any_route_undoes_an_unreleased_opacity_drag(cx: &mut TestAppContext) {
+        let (shell, v) = open(cx, 1000., 800.);
+        for leave in [View::Tui, View::Agent] {
+            theme::set_opacity(100);
+            shell.update_in(v, |s, window, cx| s.go(View::Settings, window, cx));
+            // a drag in progress (the preview reaches the shell as `Applied`), never released
+            shell.update_in(v, |s, window, cx| {
+                s.apply_look(
+                    synthesis_settings::TuiSettings {
+                        opacity: 40,
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                )
+            });
+            assert_eq!(theme::fill(t::BG).a, 0.4);
+            // the title-bar icons and Cmd+1/Cmd+2 all end in `go`
+            shell.update_in(v, |s, window, cx| s.go(leave, window, cx));
+            v.run_until_parked();
+            assert_eq!(
+                theme::fill(t::BG).a,
+                1.,
+                "{leave:?}: back to the file's value"
+            );
+        }
     }
 }
