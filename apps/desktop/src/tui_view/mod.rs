@@ -852,6 +852,7 @@ impl Render for TuiView {
         let motion = self.live.as_ref().is_some_and(|l| l.cfg.tui.motion);
         // a spinner or a blink in the Running list is repainted every frame too
         if self.attention() == Some(true)
+            || self.pointer_animating()
             || self
                 .live
                 .as_ref()

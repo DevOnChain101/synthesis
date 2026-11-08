@@ -504,6 +504,14 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Stops a background process of this session (the Terminal tab's Kill button). The runtime knows only this
+    /// session's processes, so another id is refused.
+    pub fn kill_process(&self, process_id: &str) -> Result<(), String> {
+        self.rt
+            .signal(&self.sid, process_id, synthesis_terminal::Signal::Kill)
+            .map_err(|e| sanitize_for_display(&e.to_string()))
+    }
+
     /// Tests and tools: defaults plus a model, provider and sandbox mode. Blocking, like `start_with`.
     pub fn start(
         project: &Path,

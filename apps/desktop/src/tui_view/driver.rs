@@ -1021,6 +1021,11 @@ impl TuiView {
             return;
         };
         let anchor = a.anchor;
+        self.jump_to_item(anchor, cx);
+    }
+
+    /// Scrolls the chat to item `anchor` (a collapsed tool card opens) and flashes it. Nothing if its row is gone.
+    pub(super) fn jump_to_item(&mut self, anchor: usize, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
         let Some(pos) = lu.rows.iter().position(|r| *r == Row::Item(anchor)) else {
             return;
