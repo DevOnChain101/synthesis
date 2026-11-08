@@ -170,6 +170,8 @@ pub fn geometry(aw: f32, ah: f32) -> Geo {
     let row_y = |i: usize| py + i as f32 * (row_h + rg);
     // B: 5 + 5 padding, 2 border, 10.5px title line (1.55) + 2, one 10.5px line (1.35)
     let card_h: f32 = if a { 86. } else { 44.45 };
+    // owner request: every card has the same width (the middle column's is centred in its wider cell)
+    let node_w = side.min(mid);
     let mut nodes = Vec::new();
     for (ri, row) in GRID.iter().enumerate() {
         for (ci, p) in row.iter().enumerate() {
@@ -179,9 +181,9 @@ pub fn geometry(aw: f32, ah: f32) -> Geo {
             nodes.push((
                 *p,
                 R {
-                    x: col_x[ci],
+                    x: col_x[ci] + (col_w[ci] - node_w) / 2.,
                     y: row_y(ri) + (row_h - card_h) / 2.,
-                    w: col_w[ci],
+                    w: node_w,
                     h: card_h,
                 },
             ));
@@ -377,6 +379,16 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool) -> AnyElement {
     } else {
         11.
     };
+    // a grid card's title is cut with an ellipsis where the card ends (T rows have room)
+    let mut name = n.title.to_uppercase();
+    if mode != Mode::T {
+        let max = ((r.w - 14. - ic - 6.) / (title_size * 0.63))
+            .floor()
+            .max(2.) as usize;
+        if name.chars().count() > max {
+            name = name.chars().take(max - 1).collect::<String>() + "\u{2026}";
+        }
+    }
     let title = div()
         .flex()
         .items_center()
@@ -388,7 +400,7 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool) -> AnyElement {
             5.
         }))
         .child(icon(node_icon(n.pos), ic, col))
-        .child(tracked(&n.title.to_uppercase(), title_size, 0.03, col));
+        .child(tracked(&name, title_size, 0.03, col));
     let lines = n.lines.iter().take(nlines).map(|l| {
         div()
             .truncate()
