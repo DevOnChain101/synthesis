@@ -2,18 +2,19 @@
 //! section 2). Every number comes from `synthesis-view`; this file only picks words and formats.
 
 use synthesis_tui_render::dialogs::mode_name;
-use synthesis_view::activity::ActivityKind;
 use synthesis_view::topology::{Group, Topology, is_busy};
 use synthesis_view::workspaces::{SessionRow, fold_dir};
 
-use super::activity::{Activity, activity_of, run_state_of_live, run_state_of_status, status_word};
+use super::activity::{
+    Activity, RunState, activity_of, run_state_of_live, run_state_of_status, status_word,
+};
 use super::sample::{
-    ActivityRow, AgentStatus, ChatHead, ContextInfo, Core, Metric, NodeState, Pos, PromptRow,
+    ActKind, ActivityRow, AgentStatus, ChatHead, ContextInfo, Core, Metric, NodeState, Pos,
     Running, SessionInfo, Snapshot, StatusChip, Step, StepKind, ToolRow, ToolsInfo, Top, TopoNode,
     Usage, Workspace,
 };
 use crate::live::{Focus, Live};
-use synthesis_view::convo::StepState;
+use synthesis_view::convo::{ApprovalState, Item, StepState, ToolState};
 
 /// `124000` -> `124k`, `1_300_000` -> `1.3M`.
 pub fn tok(n: u64) -> String {
@@ -46,7 +47,7 @@ pub fn age(now: i64, then: i64) -> String {
     let m = ((now - then) / 60_000).max(0);
     match m {
         0 => "now".into(),
-        1..=59 => format!("{m}m"),
+        m if m < super::activity::INACTIVE_MIN => format!("{m}m"),
         60..=1439 => format!("{}h", m / 60),
         1440..=2879 => "yesterday".into(),
         _ => format!("{}d", m / 1440),
@@ -249,10 +250,7 @@ fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Run
             0,
             SessionRow {
                 id: l.sid.clone(),
-                title: match l.title_shown() {
-                    t if t.is_empty() => "(new session)".into(),
-                    t => t,
-                },
+                title: l.session_name(),
                 status: synthesis_core::SessionStatus::Idle,
                 updated_at: String::new(),
                 mtime: now,
@@ -260,38 +258,59 @@ fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Run
             },
         );
     }
+    let last_event = v.convo.times.iter().flatten().copied().max().unwrap_or(0);
     let mut out: Vec<Running> = rows
         .iter()
         .enumerate()
-        .map(|(i, r)| Running {
-            id: r.id.clone(),
-            peer: false,
-            title: r.title.clone(),
-            folder: folder.to_string(),
-            // the open session shows its git branch; a stored one only has its status
-            branch: if r.is_live && !v.session.git_branch.is_empty() {
-                v.session.git_branch.clone()
-            } else {
-                status_word(r.status).to_string()
-            },
-            // the open session is known first-hand, the others by their status column in the store
-            state: if r.is_live {
+        .map(|(i, r)| {
+            // the open session is known first-hand, the others by their status column in the store; a stored
+            // "running" or "waiting approval" counts only while a process holds the session (a dead one leaves it behind)
+            let open = r.id == l.sid;
+            let state = if open {
                 run_state_of_live(l)
             } else {
-                run_state_of_status(r.status)
-            },
-            status: if r.is_live {
-                activity_word(l)
+                match run_state_of_status(r.status) {
+                    RunState::Running | RunState::Approval if !r.is_live => RunState::Idle,
+                    s => s,
+                }
+            };
+            let last = if open && matches!(state, RunState::Running | RunState::Approval) {
+                now
+            } else if open {
+                r.mtime.max(last_event)
             } else {
-                status_word(r.status).to_string()
-            },
-            age: if r.is_live {
-                "now".into()
-            } else {
-                age(now, r.mtime)
-            },
-            live: r.is_live,
-            selected: l.focus == Focus::Running && i == l.run_sel,
+                r.mtime
+            };
+            Running {
+                id: r.id.clone(),
+                peer: false,
+                title: if open {
+                    l.session_name()
+                } else {
+                    r.title.clone()
+                },
+                folder: folder.to_string(),
+                // the open session shows its git branch; a stored one only has its status
+                branch: if open && !v.session.git_branch.is_empty() {
+                    v.session.git_branch.clone()
+                } else {
+                    status_word(r.status).to_string()
+                },
+                state,
+                status: if open {
+                    activity_word(l)
+                } else {
+                    status_word(r.status).to_string()
+                },
+                age: if open && last >= now {
+                    "now".into()
+                } else {
+                    age(now, last)
+                },
+                last,
+                live: r.is_live,
+                selected: l.focus == Focus::Running && i == l.run_sel,
+            }
         })
         .collect();
     out.extend(v.running.peers.iter().map(|p| Running {
@@ -305,6 +324,7 @@ fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Run
         folder: tilde(&p.workspace_label, home),
         branch: p.status.to_string(),
         age: String::new(),
+        last: now,
         live: true,
         selected: false,
         state: super::activity::RunState::Running,
@@ -349,6 +369,58 @@ fn first_line(s: &str, n: usize) -> String {
     s.lines().next().unwrap_or("").chars().take(n).collect()
 }
 
+/// Recent Activity: the person's prompts and the agent's runs, approvals and errors from the conversation,
+/// strictly newest first by event time. A row with no event time (a local notice) is not an event and is left out.
+fn activity_rows(l: &Live, tz_min: i32) -> Vec<ActivityRow> {
+    let c = &l.view.convo;
+    let mut v: Vec<(i64, ActivityRow)> = vec![];
+    // newest first, so the stable sort keeps the later of two events of the same instant on top
+    for (i, it) in c.items.iter().enumerate().rev() {
+        let Some(ts) = c.time_of(i) else { continue };
+        let (kind, text) = match it {
+            Item::User(t) => (ActKind::Prompt, t.clone()),
+            Item::Tool {
+                name,
+                summary,
+                state: ToolState::Failed,
+                ..
+            } => (ActKind::Error, format!("{name} failed: {summary}")),
+            Item::Tool { name, summary, .. } if name == "Agent" || name == "Task" => {
+                (ActKind::Agent, format!("Delegate: {summary}"))
+            }
+            Item::Tool { name, summary, .. } => (ActKind::Tool, format!("{name} {summary}")),
+            Item::Agent { kind, .. } => (ActKind::Agent, format!("{kind} agent")),
+            Item::Approval { prompt, state, .. } => (
+                ActKind::Approval,
+                format!(
+                    "{} {prompt}",
+                    match state {
+                        ApprovalState::Pending => "Asked",
+                        ApprovalState::Allowed => "Allowed",
+                        ApprovalState::Denied => "Denied",
+                    }
+                ),
+            ),
+            Item::TaskEnd {
+                ok: false, text, ..
+            } => (ActKind::Error, text.clone()),
+            _ => continue,
+        };
+        v.push((
+            ts,
+            ActivityRow {
+                kind,
+                text: first_line(&text, 200),
+                time: clock(ts, tz_min)[..5].to_string(),
+                anchor: i,
+                shown: super::chat::visible(it, l.show_thinking, l.verbose, l.focus_view),
+            },
+        ));
+    }
+    v.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
+    v.into_iter().take(200).map(|(_, r)| r).collect()
+}
+
 /// What the view paints, from the live state. `now` is epoch ms, `tz_min` minutes east of UTC.
 pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
     let v = &l.view;
@@ -372,11 +444,6 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
             },
             |w| w.label.clone(),
         );
-    let prompt = if topo.user.last_prompt.is_empty() {
-        "(new session)".to_string()
-    } else {
-        first_line(&topo.user.last_prompt, 40)
-    };
     let needs = l.dialogs.len();
     let live_n = v.running.live.len().max(usize::from(l.engine.is_some()));
     let health = if l.starting {
@@ -401,7 +468,6 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
     let effort = st.effort.clone().unwrap_or_else(|| "auto".into());
     let (n_files, (added, removed)) = (v.panes.files.len(), v.panes.totals());
     let branch = v.session.git_branch.clone();
-    let log = v.activity().log;
 
     // Tools & Skills: what the session used, then the fixed capabilities
     let mcp_up = l.mcp.iter().filter(|m| m.state == "connected").count();
@@ -481,7 +547,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
         top: Top {
             live: live_n as u32,
             workspace: cur_ws.clone(),
-            session: prompt,
+            session: l.session_name(),
             model: model.clone(),
             effort: effort.clone(),
             ctx: if window > 0 {
@@ -552,26 +618,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
             more: total.saturating_sub(7) as u32,
             rows: trows,
         },
-        // newest first; prompts have their own panel
-        activity: log
-            .iter()
-            .rev()
-            .filter(|r| r.kind != ActivityKind::Prompt)
-            .take(200)
-            .map(|r| ActivityRow {
-                text: first_line(&r.text, 200),
-                ago: r.ts.map_or_else(String::new, |t| ago(now, t)),
-            })
-            .collect(),
-        prompts: log
-            .iter()
-            .filter(|r| r.kind == ActivityKind::Prompt)
-            .take(200)
-            .map(|r| PromptRow {
-                time: r.ts.map_or_else(String::new, |t| clock(t, tz_min)),
-                text: first_line(&r.text, 200),
-            })
-            .collect(),
+        activity: activity_rows(l, tz_min),
         agent: AgentStatus {
             working: if topo.user.last_prompt.is_empty() {
                 "idle".into()
@@ -763,6 +810,166 @@ mod tests {
     }
 
     #[test]
+    fn the_top_bar_names_the_session_like_its_running_row() {
+        use synthesis_view::workspaces::{WorkspaceRow, fold_dir};
+        let mut l = Live::new();
+        l.starting = false;
+        l.cwd = "/w/proj".into();
+        l.sid = "s1".into();
+        l.ws_key = fold_dir("/w/proj");
+        l.view.workspaces.workspaces.push(WorkspaceRow {
+            root: "/w/proj".into(),
+            key: l.ws_key.clone(),
+            label: "proj".into(),
+            sessions: vec![],
+            available: true,
+            changes: None,
+        });
+        let names = |l: &Live| {
+            let s = build(l, 0, 0, None);
+            let r = s.running.iter().find(|r| r.live).unwrap().title.clone();
+            (s.top.session, r)
+        };
+        let user = |l: &mut Live, n: u64, t: &str| {
+            l.view.apply(&ev(
+                n,
+                "2026-11-07T10:00:00Z",
+                "user.message",
+                json!({"text": t, "images": []}),
+            ))
+        };
+        assert_eq!(names(&l), ("(new session)".into(), "(new session)".into()));
+        user(&mut l, 1, "first  prompt");
+        assert_eq!(names(&l), ("first prompt".into(), "first prompt".into()));
+        user(&mut l, 2, "second prompt");
+        assert_eq!(names(&l), ("first prompt".into(), "first prompt".into()));
+        l.renamed = Some(("s1".into(), "My name".into()));
+        assert_eq!(names(&l), ("My name".into(), "My name".into()));
+    }
+
+    #[test]
+    fn a_stored_running_status_counts_only_while_a_process_holds_the_session() {
+        use synthesis_core::SessionStatus::*;
+        use synthesis_view::workspaces::{SessionRow, WorkspaceRow, fold_dir};
+        let mut l = Live::new();
+        l.starting = false;
+        l.cwd = "/w/proj".into();
+        l.sid = "open".into();
+        l.ws_key = fold_dir("/w/proj");
+        let now = 10 * 3_600_000;
+        let row = |id: &str, status, is_live, age_min: i64| SessionRow {
+            id: id.into(),
+            title: id.into(),
+            status,
+            updated_at: String::new(),
+            mtime: now - age_min * 60_000,
+            is_live,
+        };
+        l.view.workspaces.workspaces.push(WorkspaceRow {
+            root: "/w/proj".into(),
+            key: l.ws_key.clone(),
+            label: "proj".into(),
+            sessions: vec![
+                row("held", Running, true, 1),
+                row("dead", Running, false, 1),
+                row("ask", WaitingApproval, true, 1),
+                row("stale-ask", WaitingApproval, false, 1),
+                row("bad", Failed, false, 120),
+                row("blocked", Blocked, false, 5),
+                row("idle", Completed, false, 45),
+            ],
+            available: true,
+            changes: None,
+        });
+        let st = |s: &Snapshot, id: &str| s.running.iter().find(|r| r.id == id).unwrap().state;
+        let s = build(&l, now, 0, None);
+        assert_eq!(st(&s, "held"), RunState::Running);
+        assert_eq!(st(&s, "dead"), RunState::Idle);
+        assert_eq!(st(&s, "ask"), RunState::Approval);
+        assert_eq!(st(&s, "stale-ask"), RunState::Idle);
+        assert_eq!(st(&s, "bad"), RunState::Error);
+        assert_eq!(st(&s, "blocked"), RunState::Error);
+        assert_eq!(st(&s, "idle"), RunState::Idle);
+        assert_eq!(
+            s.running.iter().find(|r| r.id == "idle").unwrap().age,
+            "45m"
+        );
+    }
+
+    #[test]
+    fn recent_activity_interleaves_prompts_and_agent_runs_newest_first() {
+        let mut l = Live::new();
+        l.starting = false;
+        let mut n = 0;
+        let mut send = |l: &mut Live, ts: &str, ty: &str, p: serde_json::Value| {
+            n += 1;
+            l.view.apply(&ev(n, ts, ty, p));
+        };
+        let tool = |id: &str, cmd: &str| json!({"tool_call_id": id, "name": "Bash", "input": {"command": cmd}, "input_truncated": false});
+        let done = |id: &str, status: &str, err: bool| json!({"tool_call_id": id, "name": "Bash", "status": status, "is_error": err, "not_run": false, "duration_ms": 3, "preview": "p", "bytes": 1, "truncated": false});
+        send(
+            &mut l,
+            "2026-11-07T10:00:00Z",
+            "user.message",
+            json!({"text": "first", "images": []}),
+        );
+        send(
+            &mut l,
+            "2026-11-07T10:01:00Z",
+            "tool.requested",
+            tool("a", "ls"),
+        );
+        send(
+            &mut l,
+            "2026-11-07T10:01:05Z",
+            "tool.completed",
+            done("a", "ok", false),
+        );
+        send(
+            &mut l,
+            "2026-11-07T10:02:00Z",
+            "user.message",
+            json!({"text": "second", "images": []}),
+        );
+        send(
+            &mut l,
+            "2026-11-07T10:03:00Z",
+            "tool.requested",
+            tool("b", "make"),
+        );
+        send(
+            &mut l,
+            "2026-11-07T10:03:05Z",
+            "tool.completed",
+            done("b", "error", true),
+        );
+        let rows = build(&l, 0, 0, None).activity;
+        let got: Vec<_> = rows.iter().map(|r| (r.kind, r.time.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                (ActKind::Error, "10:03"),
+                (ActKind::Prompt, "10:02"),
+                (ActKind::Tool, "10:01"),
+                (ActKind::Prompt, "10:00"),
+            ]
+        );
+        assert!(
+            rows[0].text.starts_with("Bash failed: make"),
+            "{:?}",
+            rows[0]
+        );
+        // /focus hides the tool rows from the chat: their entries stay, dimmed and not clickable
+        l.focus_view = true;
+        let shown: Vec<_> = build(&l, 0, 0, None)
+            .activity
+            .iter()
+            .map(|r| r.shown)
+            .collect();
+        assert_eq!(shown, [false, true, false, true]);
+    }
+
+    #[test]
     fn a_live_stream_fills_the_panels() {
         let mut l = Live::new();
         l.starting = false;
@@ -799,13 +1006,14 @@ mod tests {
             s.session.rows[2],
             ("context".to_string(), "200,000 tokens".to_string())
         );
-        assert!(
-            s.prompts
-                .iter()
-                .any(|p| p.text == "run the tests" && p.time == "10:00:00")
+        assert_eq!(
+            (
+                s.activity[0].kind,
+                s.activity[0].text.as_str(),
+                s.activity[0].anchor
+            ),
+            (ActKind::Prompt, "run the tests", 0)
         );
-        assert!(s.activity.iter().any(|a| a.text.contains("cargo test")));
-        assert!(s.activity.iter().all(|a| a.text != "run the tests"));
         assert_eq!(s.topology.len(), 8);
         let tools = s.topology.iter().find(|n| n.pos == Pos::Tools).unwrap();
         assert_eq!(tools.state, NodeState::Active, "{tools:?}");
