@@ -18,6 +18,17 @@ impl TuiView {
             &lu.dlg_scroll,
             &|i| Box::new(cx.listener(move |this, _, _, cx| this.click_option(i, cx))),
             border,
+            (self.win_h * 0.4).clamp(150., 420.),
+            // a press on the panel engages it: Enter and digits answer from then on
+            Box::new(cx.listener(|this, _, _, cx| {
+                if let Some(lu) = &mut this.live
+                    && let Some(d) = lu.live.dialogs.first_mut()
+                {
+                    d.engaged = true;
+                    lu.dirty = true;
+                }
+                cx.notify();
+            })),
         )
     }
 

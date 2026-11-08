@@ -571,7 +571,12 @@ impl TuiView {
     // ---- keys ----
 
     /// Handles a keystroke before the focused input sees it. True: consumed.
-    fn on_key(&mut self, ks: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(super) fn on_key(
+        &mut self,
+        ks: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.active {
             return false;
         }
@@ -583,7 +588,11 @@ impl TuiView {
         let (ctrl, shift) = (ks.modifiers.control, ks.modifiers.shift);
         let cmd = ks.modifiers.platform || ks.modifiers.alt;
         let digit = key.len() == 1 && key.as_bytes()[0].is_ascii_digit() && key != "0";
-        // a dialog owns the keyboard
+        // a dialog owns the keyboard, but only while the TUI view is the one on screen: under Settings the keys
+        // are Settings', and must never answer the hidden approval
+        if !lu.live.dialogs.is_empty() && !self.shown {
+            return false;
+        }
         if !lu.live.dialogs.is_empty() {
             let mut out = None;
             if lu.live.typing_other() {
@@ -612,13 +621,15 @@ impl TuiView {
                 "up" => lu.live.move_sel(false),
                 "down" => lu.live.move_sel(true),
                 "tab" => lu.live.move_sel(!shift),
-                "enter" => {
+                // Enter and digits answer only a dialog the person has engaged (arrows, Tab, a click); before
+                // that they are swallowed (they were meant for the prompt) and the footer says how to choose
+                "enter" if lu.live.dialogs[0].answerable() => {
                     let sel = lu.live.dialogs[0].sel;
                     out = lu.live.pick(sel, now);
                 }
                 "escape" => out = lu.live.reject(),
                 "c" if ctrl => out = lu.live.reject(),
-                _ if digit && !ctrl && !cmd => {
+                _ if digit && !ctrl && !cmd && lu.live.dialogs[0].answerable() => {
                     out = lu.live.pick(usize::from(key.as_bytes()[0] - b'1'), now);
                 }
                 _ => {}

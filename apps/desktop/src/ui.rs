@@ -101,6 +101,7 @@ impl Shell {
         self.tui.update(cx, |t, cx| {
             let was = t.active;
             t.active = tui_on;
+            t.shown = v == View::Tui;
             if tui_on && !was {
                 t.focus_prompt(window, cx);
             }
@@ -221,8 +222,21 @@ impl Shell {
                     })
                     // a dialog waits for the person: a red dot and word, blinking unless motion is off
                     .when_some(self.tui.read(cx).attention_colour(), |d, red| {
-                        d.child(div().size(px(8.)).flex_none().rounded_full().bg(red))
-                            .child(div().text_color(red).child("approval needed"))
+                        // a click leads back to the TUI view, where the dialog is
+                        d.child(
+                            div()
+                                .id("attention")
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|s, _, window, cx| {
+                                    cx.stop_propagation();
+                                    s.go(View::Tui, window, cx)
+                                }))
+                                .child(div().size(px(8.)).flex_none().rounded_full().bg(red))
+                                .child(div().text_color(red).child("approval needed")),
+                        )
                     }),
             )
             .child(

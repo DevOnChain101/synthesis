@@ -154,6 +154,10 @@ pub struct TuiView {
     centre_w: f32,
     /// False while another view of the shell is shown: the window-wide key hook then leaves the keys alone.
     pub active: bool,
+    /// True while the TUI view itself is on screen (not under Settings): the only time a dialog gets keys.
+    pub shown: bool,
+    /// Height of the window from the last render (the dialog panel's input box takes up to 40% of it).
+    win_h: f32,
     /// The slide-over column that is open (only a collapsed column has one; closed by default).
     pub(crate) drawer: Option<Side>,
     /// Side-panel sections folded to their header (by panel id), kept for the session.
@@ -190,6 +194,8 @@ impl TuiView {
     pub fn new(inset: f32, hidden: layout::Hidden) -> Self {
         Self {
             active: true,
+            shown: true,
+            win_h: 900.,
             snap: sample(),
             live: None,
             hidden,
@@ -209,6 +215,14 @@ impl TuiView {
 
     /// Opens the drawer of `side`, or closes it when it is the open one.
     pub fn toggle_drawer(&mut self, side: Side, cx: &mut Context<Self>) {
+        // not while a dialog is pending: the panel above the prompt must stay in reach
+        if self
+            .live
+            .as_ref()
+            .is_some_and(|l| !l.live.dialogs.is_empty())
+        {
+            return;
+        }
         self.drawer = if self.drawer == Some(side) {
             None
         } else {
@@ -807,6 +821,15 @@ impl Render for TuiView {
         let vp = window.viewport_size();
         let w = f32::from(vp.width) - self.inset;
         let h = f32::from(vp.height) - self.top;
+        self.win_h = f32::from(vp.height);
+        // a dialog waits: no slide-over column covering or dimming it
+        if self
+            .live
+            .as_ref()
+            .is_some_and(|l| !l.live.dialogs.is_empty())
+        {
+            self.drawer = None;
+        }
         let tier = tiers(h);
         let c = cols(w);
         let has_right = self.hidden.has_right();
@@ -1087,6 +1110,7 @@ mod tests {
             options: vec![("yes".into(), "Yes".into()), ("no".into(), "No".into())],
             sel: 1,
             armed_until: 0,
+            engaged: false,
         });
         view.update(vcx, |t, _| t.set_live(l));
         vcx.simulate_resize(size(px(1400.), px(900.)));
@@ -1106,5 +1130,54 @@ mod tests {
             "not a window-wide modal"
         );
         assert!(view.read_with(vcx, |t, _| t.attention()).is_some());
+    }
+
+    /// The keys of a pending approval: ignored under Settings, and Enter or a digit answers only after the
+    /// person engaged the dialog (arrow, Tab or a click); Esc rejects at once.
+    #[gpui::test]
+    fn dialog_keys_need_the_tui_view_and_an_engaged_dialog(cx: &mut TestAppContext) {
+        use crate::live::{Dialog, DialogKind, Live};
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let mut l = Live::new();
+        l.starting = false;
+        l.dialogs.push(Dialog {
+            kind: DialogKind::Plan {
+                id: "p".into(),
+                plan: "do it".into(),
+            },
+            options: vec![("yes".into(), "Yes".into()), ("no".into(), "No".into())],
+            sel: 0,
+            armed_until: 0,
+            engaged: false,
+        });
+        view.update(vcx, |t, _| t.set_live(l));
+        let pending = |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext| {
+            view.read_with(vcx, |t, _| t.live.as_ref().unwrap().live.dialogs.len())
+        };
+        let press =
+            |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext, k: &'static str| {
+                let ks = gpui::Keystroke::parse(k).unwrap();
+                view.update_in(vcx, |t, window, cx| t.on_key(&ks, window, cx))
+            };
+        // under Settings: not consumed, nothing answered
+        view.update(vcx, |t, _| t.shown = false);
+        assert!(!press(&view, vcx, "enter"));
+        assert!(!press(&view, vcx, "1"));
+        assert_eq!(pending(&view, vcx), 1);
+        // on screen but untouched: swallowed, nothing answered
+        view.update(vcx, |t, _| t.shown = true);
+        assert!(press(&view, vcx, "enter"));
+        assert!(press(&view, vcx, "1"));
+        assert_eq!(pending(&view, vcx), 1);
+        // no slide-over column while a dialog waits
+        view.update(vcx, |t, cx| t.toggle_drawer(Side::Left, cx));
+        assert!(view.read_with(vcx, |t, _| t.drawer.is_none()));
+        // engaged by an arrow key: Enter answers
+        press(&view, vcx, "down");
+        press(&view, vcx, "enter");
+        assert_eq!(pending(&view, vcx), 0);
     }
 }

@@ -131,6 +131,9 @@ pub struct Dialog {
     pub sel: usize,
     /// Enter and digits do nothing before this (ms).
     pub armed_until: i64,
+    /// The person has deliberately engaged the dialog (arrow keys, Tab, a click on it). Until then digits and
+    /// Enter do not answer a dialog that needs the person: they were probably meant for the prompt.
+    pub engaged: bool,
 }
 
 impl Dialog {
@@ -158,6 +161,11 @@ impl Dialog {
             DialogKind::Picker { kind, .. } => *kind == PickerKind::Bypass,
             _ => true,
         }
+    }
+
+    /// Digits and Enter may answer this dialog: it is a picker the person opened, or they engaged it.
+    pub fn answerable(&self) -> bool {
+        self.engaged || !self.needs_person()
     }
 
     /// The headline.
@@ -476,6 +484,7 @@ impl Live {
                 kind: DialogKind::Approval(a),
                 sel: 0,
                 armed_until: 0,
+                engaged: false,
             },
             now,
         );
@@ -495,6 +504,7 @@ impl Live {
                 },
                 sel: 0,
                 armed_until: 0,
+                engaged: false,
             },
             NeedsUser::AskUserQuestion { questions } => {
                 let n = questions.len();
@@ -511,6 +521,7 @@ impl Live {
                     },
                     sel: 0,
                     armed_until: 0,
+                    engaged: false,
                 };
                 d.options = question_options(&d);
                 d
@@ -522,6 +533,7 @@ impl Live {
     /// Up/Down in the front dialog.
     pub fn move_sel(&mut self, down: bool) {
         if let Some(d) = self.dialogs.first_mut() {
+            d.engaged = true;
             let n = d.options.len().max(1);
             d.sel = if down {
                 (d.sel + 1) % n
@@ -882,6 +894,7 @@ impl Live {
                 ],
                 sel: 0,
                 armed_until: 0,
+                engaged: false,
             },
             now,
         );
@@ -931,6 +944,7 @@ impl Live {
                 ],
                 sel: 0,
                 armed_until: 0,
+                engaged: false,
             },
             now_ms(),
         );
@@ -1334,6 +1348,7 @@ impl Live {
             options,
             sel,
             armed_until: 0,
+            engaged: false,
         });
     }
 
@@ -1374,6 +1389,7 @@ impl Live {
             options,
             sel: 0,
             armed_until: 0,
+            engaged: false,
         });
     }
 
@@ -1463,6 +1479,7 @@ impl Live {
                 ],
                 sel: 0,
                 armed_until: 0,
+                engaged: false,
             },
             now_ms(),
         );
@@ -1629,6 +1646,7 @@ mod tests {
             options: vec![("a".into(), "a".into())],
             sel: 0,
             armed_until: 0,
+            engaged: false,
         };
         l.push_dialog(picker(PickerKind::Bypass), 0);
         l.push_dialog(picker(PickerKind::Model), 0);
@@ -1986,6 +2004,7 @@ mod tests {
             ],
             sel: 2,
             armed_until: 0,
+            engaged: false,
         });
         // the third option is the fifth child: two group headers come before it
         assert_eq!(l.dialogs[0].scroll_child(), Some(4));
