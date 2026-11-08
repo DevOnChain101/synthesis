@@ -390,9 +390,11 @@ pub struct Live {
     /// The open model picker's rows, filter and refresh state.
     pub model_pick: Option<ModelPick>,
     /// The stored model was not available: the first prompt opens the model picker.
-    pub stale_model: bool,
-    /// The first prompt, kept while that picker is open (sent when it closes).
-    held_prompt: Option<String>,
+    pub stale_model: Option<String>,
+    /// The first prompt, kept while that picker is open: it is sent only by picking a model there.
+    pub held_prompt: Option<String>,
+    /// A prompt handed back unsent (Esc in that picker, a failed switch): the window puts it in the input box.
+    pub returned_prompt: Option<String>,
 }
 
 /// State behind the `/model` picker; the dialog's options are rebuilt from it.
@@ -445,8 +447,9 @@ impl Live {
             usage_days: 7,
             pending_note: None,
             model_pick: None,
-            stale_model: false,
+            stale_model: None,
             held_prompt: None,
+            returned_prompt: None,
         }
     }
 
@@ -472,7 +475,7 @@ impl Live {
         for n in &engine.notices {
             self.note(n.clone(), false);
         }
-        self.stale_model = engine.stale_model.is_some();
+        self.stale_model = engine.stale_model.clone();
         self.model_pick = None;
         self.sid = engine.sid.clone();
         self.cwd = engine.cwd.clone();
@@ -481,8 +484,15 @@ impl Live {
         self.mcp = engine.mcp_status();
         self.queue.clear();
         self.dialogs.clear();
-        // the prompt that waited for a model choice goes out on the model now in use
-        self.queue.extend(self.held_prompt.take());
+        // the prompt that waited for a model choice goes out on the model that was picked; if the
+        // switch failed (the stored model is still unavailable) it goes back to the input box
+        if let Some(t) = self.held_prompt.take() {
+            if engine.stale_model.is_none() {
+                self.queue.push_back(t);
+            } else {
+                self.returned_prompt = Some(t);
+            }
+        }
         self.busy = false;
         self.starting = false;
         self.engine = Some(engine);
@@ -705,6 +715,10 @@ impl Live {
         {
             self.dialogs.remove(0);
             self.pending_note = None;
+            // Esc: nothing is sent; the prompt returns to the input box
+            if self.model_pick.is_some() {
+                self.returned_prompt = self.held_prompt.take();
+            }
             self.close_model_pick();
             return None;
         }
@@ -816,6 +830,8 @@ impl Live {
             let current = self.engine.as_ref().map(|e| e.label.as_str());
             return match kind {
                 PickerKind::Model if current == Some(key) => {
+                    // a deliberate pick of the model in use: the held prompt goes to it
+                    self.queue.extend(self.held_prompt.take());
                     self.note(format!("model: already {key}"), false);
                     None
                 }
@@ -1047,13 +1063,14 @@ impl Live {
             self.queue.push_back(text.to_string());
             return Submitted::Nothing;
         }
-        if self.stale_model {
-            self.stale_model = false;
+        if let Some(stored) = self.stale_model.take() {
             self.held_prompt = Some(text.to_string());
-            self.note(
-                "the stored model is not available: pick a model (Esc keeps the one in use and sends your prompt)",
-                true,
+            let using = self.engine.as_ref().map_or("?", |e| e.label.as_str());
+            let msg = format!(
+                "the stored model {} is not available. Your prompt is held, not sent: pick a model to send it (choosing {using} sends it there); Esc returns it to the input box",
+                sanitize_for_display(&stored)
             );
+            self.note(msg, true);
             self.open_model_picker();
             return Submitted::Nothing;
         }
@@ -1719,7 +1736,7 @@ impl Live {
             Dialog {
                 kind: DialogKind::Picker {
                     kind: PickerKind::Model,
-                    title: "Model".into(),
+                    title: format!("Model \u{b7} in use: {}", sanitize_for_display(&e.label)),
                     headers: vec![],
                 },
                 options: vec![],
@@ -1728,7 +1745,13 @@ impl Live {
                 engaged: false,
             },
         );
-        self.rebuild_model_dialog(true);
+        self.rebuild_model_dialog(self.held_prompt.is_none());
+        // a held prompt is sent only by a deliberate pick: Enter must not land on the fallback model
+        if self.held_prompt.is_some()
+            && let Some(d) = self.dialogs.first_mut()
+        {
+            d.sel = 0;
+        }
     }
 
     /// The model picker's options from `model_pick`: Refresh row, error rows, then the models that
@@ -1815,10 +1838,7 @@ impl Live {
     }
 
     fn close_model_pick(&mut self) {
-        if self.model_pick.take().is_some() {
-            // Esc (or a pick) ends the wait: the prompt goes out on the model now in use
-            self.queue.extend(self.held_prompt.take());
-        }
+        self.model_pick = None;
     }
 
     /// A printable key (or Backspace) typed into the model picker's filter. False: not the model

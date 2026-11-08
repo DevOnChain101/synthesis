@@ -96,10 +96,20 @@ pub fn refresh(env: &Env, project: &Path) -> (Vec<ModelRow>, Vec<String>) {
     (rows(env, project), errors(results))
 }
 
+/// Longest refresh error row, in characters.
+const MAX_ERROR_ROW: usize = 300;
+
 fn errors(results: Vec<(String, Result<(), String>)>) -> Vec<String> {
     results
         .into_iter()
-        .filter_map(|(id, r)| Some(format!("{}: {}", san(&id), san(&r.err()?))))
+        .filter_map(|(id, r)| {
+            let line = format!("{}: {}", san(&id), san(&r.err()?));
+            // one row must stay a row: a provider can send any length
+            Some(match line.char_indices().nth(MAX_ERROR_ROW) {
+                Some((i, _)) => format!("{}...", &line[..i]),
+                None => line,
+            })
+        })
         .collect()
 }
 
@@ -125,6 +135,26 @@ mod tests {
             "ctx 200k \u{b7} out 8k \u{b7} vision no \u{b7} effort low|high \u{b7} $3/$15"
         );
         assert_eq!(k(1_000_000), "1m");
+    }
+
+    #[test]
+    fn an_error_row_is_short_and_carries_no_key_from_the_provider_body() {
+        let key = "sk-test-SECRETSECRETSECRET1234";
+        let redaction = synthesis_providers::Redaction::new([key.to_string()]);
+        let body = format!(
+            r#"{{"error":{{"message":"bad key {key} {}"}}}}"#,
+            "x".repeat(5000)
+        );
+        let e = redaction.api_error(Some(401), &body, None);
+        let rows = errors(vec![("gw".into(), Err(e.message().to_string()))]);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].contains(key), "{}", rows[0]);
+        assert!(
+            rows[0].chars().count() <= MAX_ERROR_ROW + 3,
+            "{}",
+            rows[0].len()
+        );
+        assert!(rows[0].starts_with("gw: bad key "));
     }
 
     #[test]

@@ -830,6 +830,16 @@ impl TuiView {
 
 impl Render for TuiView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // a prompt handed back unsent (Esc in the model picker) returns to the input box
+        if let Some(t) = self
+            .live
+            .as_mut()
+            .and_then(|lu| lu.live.returned_prompt.take())
+        {
+            cx.defer_in(window, move |this, window, cx| {
+                this.set_prompt(&t, window, cx)
+            });
+        }
         // the refresh spinner of the model picker turns every frame
         if let Some(lu) = &mut self.live
             && lu.cfg.tui.motion

@@ -735,12 +735,17 @@ pub fn prepare(
     let mut stale_model = None;
     let res = match (default, stored) {
         (Ok(r), Some(m)) if r.label != m => {
-            let stored_res = match stored_model_gone(
-                &cfg,
-                &h.synthesis,
-                &m,
-                synthesis_providers::modelinfo::unix_now(),
-            ) {
+            // judged on the user's own config only: a repository must not decide that a model is gone
+            let user_only = load_config(env, &h, None, ProjectTrust::Untrusted).ok();
+            let gone = user_only.as_ref().and_then(|u| {
+                stored_model_gone(
+                    u,
+                    &h.synthesis,
+                    &m,
+                    synthesis_providers::modelinfo::unix_now(),
+                )
+            });
+            let stored_res = match gone {
                 Some(why) => Err(why),
                 None => resolve_provider(c.provider.as_deref(), Some(&m), &cfg, &h.synthesis, env),
             };
@@ -2090,7 +2095,8 @@ const STALE_CHECK_MAX_AGE_SECS: u64 = 7 * 24 * 3600;
 /// Why a stored `provider/model` can no longer be used although its provider is still configured:
 /// the provider's declared model list lacks it, or (no declared list, discovery on) a non-empty
 /// cached list younger than a week lacks it. No list, an empty or old cache: not checked. An
-/// unknown provider is an error of `resolve_provider`.
+/// unknown provider is an error of `resolve_provider`. `cfg` must be the user's own config (no
+/// project layer: a repository must not decide that a model is gone).
 fn stored_model_gone(cfg: &Config, home: &Path, label: &str, now: u64) -> Option<String> {
     let (p, m) = label.split_once('/')?;
     let prov = cfg.providers.get(p)?;

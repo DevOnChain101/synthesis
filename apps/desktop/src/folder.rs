@@ -16,6 +16,25 @@ enum Style {
     Relative,
 }
 
+/// A network path: `\\host\share`, `\\?\UNC\...`, `\\.\device`, any `\\`-prefixed form, and on
+/// Windows the `//host/share` spelling. Touching one can send the user's NTLM hash to that host and
+/// block on the network, so nothing here probes them.
+pub fn is_unc(s: &str) -> bool {
+    let b = s.as_bytes();
+    let sep = |c: u8| c == b'\\' || (cfg!(windows) && c == b'/');
+    b.len() >= 2 && sep(b[0]) && sep(b[1])
+}
+
+/// A path as the OS resolved it (Windows gives `\\?\C:\x` for a local folder): network only for
+/// `\\?\UNC\`, `\\.\` and a plain `\\host` form.
+fn is_network_resolved(s: &str) -> bool {
+    s.starts_with("\\\\?\\UNC\\")
+        || s.starts_with("\\\\.\\")
+        || (s.starts_with("\\\\") && !s.starts_with("\\\\?\\"))
+}
+
+pub const UNC_REFUSED: &str = "/open: network (UNC) paths are not opened from here: reaching a network share can hand your Windows credentials to that host and freeze the app; use a mapped drive letter or a local folder";
+
 fn style(s: &str) -> Style {
     let b = s.as_bytes();
     if s == "~" || s.starts_with("~/") || s.starts_with("~\\") {
@@ -51,7 +70,10 @@ pub fn parse(input: &str, home: Option<&Path>, cwd: &Path) -> Result<PathBuf, St
     if t.contains(['\0', '\n', '\r']) {
         return Err("/open: the path has a control character".into());
     }
-    match style(t) {
+    if is_unc(t) {
+        return Err(UNC_REFUSED.into());
+    }
+    let out = match style(t) {
         Style::Home => {
             let home =
                 home.ok_or("/open: ~ needs a home directory (HOME or USERPROFILE is not set)")?;
@@ -65,12 +87,15 @@ pub fn parse(input: &str, home: Option<&Path>, cwd: &Path) -> Result<PathBuf, St
         Style::Drive | Style::Unc if !cfg!(windows) => Err(format!(
             "/open: {t} is a Windows path and this is not Windows"
         )),
-        Style::Posix if cfg!(windows) => Err(format!(
-            "/open: {t} has no drive; type C:\\folder or \\\\server\\share\\folder"
-        )),
+        Style::Posix if cfg!(windows) => Err(format!("/open: {t} has no drive; type C:\\folder")),
         Style::Relative => Ok(cwd.join(t)),
         _ => Ok(PathBuf::from(t)),
+    }?;
+    // a home or cwd that is itself a network path
+    if is_network_resolved(&out.to_string_lossy()) {
+        return Err(UNC_REFUSED.into());
     }
+    Ok(out)
 }
 
 /// What `/open` does with a typed line: the real path, or the error row's text.
@@ -83,6 +108,22 @@ pub fn resolve(
     validate(&parse(input, home, cwd)?, open)
 }
 
+/// [`resolve`] on its own thread with a time limit: a dead mount must not freeze the window.
+pub fn resolve_bounded(
+    input: String,
+    home: Option<PathBuf>,
+    cwd: PathBuf,
+    open: Vec<PathBuf>,
+    limit: std::time::Duration,
+) -> Result<PathBuf, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(resolve(&input, home.as_deref(), &cwd, &open));
+    });
+    rx.recv_timeout(limit)
+        .unwrap_or_else(|_| Err("/open: the folder did not answer in time".into()))
+}
+
 /// Tab on `/open <arg>`: `arg` extended to the longest common start of the folders that match its
 /// last part (a lone match gets a trailing separator). `None`: nothing matches.
 pub fn complete(arg: &str, home: Option<&Path>, cwd: &Path) -> Option<String> {
@@ -93,11 +134,15 @@ pub fn complete(arg: &str, home: Option<&Path>, cwd: &Path) -> Option<String> {
     let dir = if dir_part.is_empty() {
         cwd.to_path_buf()
     } else {
-        parse(dir_part, home, cwd).ok()?
+        parse(dir_part, home, cwd).ok()? // refuses network paths
     };
+    if is_unc(arg) || is_network_resolved(&dir.to_string_lossy()) {
+        return None;
+    }
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .ok()?
         .flatten()
+        .take(500) // a huge folder must not stall the key press
         .filter(|e| e.path().is_dir())
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|n| n.starts_with(prefix) && (prefix.starts_with('.') || !n.starts_with('.')))
@@ -123,11 +168,18 @@ pub fn complete(arg: &str, home: Option<&Path>, cwd: &Path) -> Option<String> {
 /// Exists, is a directory, can be read, and is not one of the `open` workspaces. Returns the real path.
 pub fn validate(p: &Path, open: &[PathBuf]) -> Result<PathBuf, String> {
     let shown = p.display();
+    if is_unc(&p.to_string_lossy()) {
+        return Err(UNC_REFUSED.into());
+    }
     let c = std::fs::canonicalize(p).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => format!("/open: {shown} does not exist"),
         std::io::ErrorKind::PermissionDenied => format!("/open: {shown} is not readable"),
         _ => format!("/open: {shown}: {e}"),
     })?;
+    // a mapped drive that resolves to a network path
+    if is_network_resolved(&c.to_string_lossy()) {
+        return Err(UNC_REFUSED.into());
+    }
     if !c.is_dir() {
         return Err(format!("/open: {shown} is not a folder"));
     }
@@ -195,7 +247,10 @@ mod tests {
         let (home, cwd) = (None, Path::new("/w"));
         let win = cfg!(windows);
         assert_eq!(parse("C:\\a", home, cwd).is_ok(), win);
-        assert_eq!(parse("\\\\srv\\sh\\a", home, cwd).is_ok(), win);
+        assert!(
+            parse("\\\\srv\\sh\\a", home, cwd).is_err(),
+            "UNC is refused on every OS"
+        );
         assert_eq!(parse("/a/b", home, cwd).is_ok(), !win);
     }
 
@@ -238,6 +293,40 @@ mod tests {
                 .unwrap_err()
                 .contains("type a folder path")
         );
+    }
+
+    #[test]
+    fn network_paths_are_refused_before_anything_touches_them() {
+        for p in [
+            "\\\\srv\\share\\x",
+            "\\\\?\\UNC\\srv\\share\\x",
+            "\\\\.\\pipe\\x",
+            "\"\\\\srv\\share\"",
+        ] {
+            let e = parse(p, None, Path::new("/w")).unwrap_err();
+            assert!(e.contains("network (UNC)"), "{p}: {e}");
+            assert!(complete(p, None, Path::new("/w")).is_none(), "{p}");
+            assert!(
+                validate(Path::new(p.trim_matches('"')), &[]).is_err(),
+                "{p}"
+            );
+        }
+        assert!(is_unc("\\\\h\\s") && !is_unc("C:\\x") && !is_unc("/x") && !is_unc("rel\\x"));
+        // what Windows resolves a local folder to is not a network path
+        assert!(!is_network_resolved("\\\\?\\C:\\Users\\a"));
+        assert!(is_network_resolved("\\\\?\\UNC\\h\\s\\x") && is_network_resolved("\\\\h\\s"));
+    }
+
+    #[test]
+    fn a_slow_check_is_cut_off_and_a_fast_one_answers() {
+        let tmp = std::env::temp_dir();
+        let t = std::time::Duration::from_secs(10);
+        let e = resolve_bounded("zz-not-here".into(), None, tmp.clone(), vec![], t).unwrap_err();
+        assert!(e.contains("does not exist"), "{e}");
+        let zero = std::time::Duration::ZERO;
+        // no time at all: the answer is the timeout, never a hang
+        let r = resolve_bounded("zz-not-here".into(), None, tmp, vec![], zero);
+        assert!(r.is_err());
     }
 
     #[test]

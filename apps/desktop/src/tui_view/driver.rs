@@ -603,7 +603,7 @@ impl TuiView {
             .update(cx, |s, cx| s.set_placeholder(hint, window, cx));
     }
 
-    fn set_prompt(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn set_prompt(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
         lu.prompt.update(cx, |s, cx| {
             s.set_value(text.to_string(), window, cx);
@@ -1213,10 +1213,26 @@ impl TuiView {
                     .iter()
                     .map(|w| PathBuf::from(&w.root))
                     .collect();
-                match crate::folder::resolve(&typed, home.as_deref(), &cwd, &open) {
-                    Ok(p) => return self.open_folder(&p, cx),
-                    Err(e) => lu.live.note(e, true),
-                }
+                // the disk is touched off the UI thread, with a time limit
+                let job = cx.background_spawn(async move {
+                    crate::folder::resolve_bounded(
+                        typed,
+                        home,
+                        cwd,
+                        open,
+                        std::time::Duration::from_secs(5),
+                    )
+                });
+                cx.spawn(async move |this, cx| {
+                    let r = job.await;
+                    this.update(cx, |t, cx| match r {
+                        Ok(p) => t.open_folder(&p, cx),
+                        Err(e) => t.live_do(cx, |l| l.note(e, true)),
+                    })
+                    .ok();
+                })
+                .detach();
+                return;
             }
             Action::New => {
                 let l = &lu.live;
@@ -1307,6 +1323,13 @@ impl TuiView {
     /// A folder chosen as a new workspace: it must be a readable directory.
     pub fn open_folder(&mut self, p: &Path, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
+        // the system picker can return a network path too: not probed here either
+        if crate::folder::is_unc(&p.to_string_lossy()) {
+            lu.live.note(crate::folder::UNC_REFUSED, true);
+            lu.dirty = true;
+            cx.notify();
+            return;
+        }
         match synthesis_core::canonicalize(p) {
             Ok(c) if c.is_dir() => {
                 let key = format!("folder:{}", c.display());
