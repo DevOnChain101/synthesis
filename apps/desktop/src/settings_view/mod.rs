@@ -310,17 +310,17 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         self.notice = None;
-        if out == Outcome::Saved && key.starts_with("synt.tui.panels.") {
-            if let Some(m) = &self.model {
-                let mut h = Hidden::default();
-                for (k, _) in synthesis_settings::TUI_PANELS {
-                    let v = m.store.entry(&format!("synt.tui.panels.{k}"));
-                    if v.is_some_and(|e| e.value == serde_json::Value::Bool(false)) {
-                        h.hide(k);
-                    }
+        if let (Outcome::Saved, true, Some(m)) =
+            (&out, key.starts_with("synt.tui.panels."), &self.model)
+        {
+            let mut h = Hidden::default();
+            for (k, _) in synthesis_settings::TUI_PANELS {
+                let v = m.store.entry(&format!("synt.tui.panels.{k}"));
+                if v.is_some_and(|e| e.value == serde_json::Value::Bool(false)) {
+                    h.hide(k);
                 }
-                cx.emit(PanelsChanged(h));
             }
+            cx.emit(PanelsChanged(h));
         }
         if out == Outcome::Saved {
             let text =
