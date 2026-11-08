@@ -467,9 +467,10 @@ pub fn with_alpha(c: Hsla, a: f32) -> Hsla {
 const MARQUEE_GAP: f32 = 48.;
 const MARQUEE_PX_S: f32 = 40.;
 
-/// Distance after which the scroll repeats: one copy and the gap.
-fn marquee_unit(text_w: f32) -> f32 {
-    text_w + MARQUEE_GAP
+/// Distance after which the scroll repeats: one copy and the gap, but never less than the slot, so the
+/// next copy enters from the right edge only after the last one has left (`slot_w` is an upper bound).
+fn marquee_unit(text_w: f32, slot_w: f32) -> f32 {
+    (text_w + MARQUEE_GAP).max(slot_w)
 }
 
 /// Left edge of the scrolling pair at progress `d` (0..1 of one loop): runs left by one `unit`, where the
@@ -486,32 +487,44 @@ pub fn chat_head(
     prompt: &str,
     ctx_pct: f32,
     tail: &str,
-    _width: f32,
+    width: f32,
     motion: bool,
 ) -> Div {
     let label = format!("Latest user prompt: {prompt}");
     let tw = label.chars().count() as f32 * 7.5;
-    // `prompt-scroll`: with a prompt the text always runs right to left, two copies a gap apart so the loop
-    // has no jump; the slot clips it and the layout does not change
+    // `prompt-scroll`: with a prompt the text starts at the slot's right edge and runs left, two copies a
+    // unit apart so the loop has no jump; the slot clips it and the layout does not change
     let prompt_el: gpui::AnyElement = if motion && !prompt.is_empty() {
-        let unit = marquee_unit(tw);
+        let unit = marquee_unit(tw, width);
         div()
             .absolute()
             .top_0()
-            .flex()
-            .gap(px(MARQUEE_GAP))
-            .whitespace_nowrap()
-            .child(div().flex_none().child(label.clone()))
-            .child(div().flex_none().child(label))
-            .with_animation(
-                "chead-marquee",
-                gpui::Animation::new(std::time::Duration::from_secs_f32(unit / MARQUEE_PX_S))
-                    .repeat(),
-                move |el, d| el.left(px(marquee_left(d, unit))),
+            .left(gpui::relative(1.))
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .gap(px(MARQUEE_GAP))
+                    .whitespace_nowrap()
+                    .child(div().flex_none().child(label.clone()))
+                    .child(div().flex_none().child(label))
+                    .with_animation(
+                        "chead-marquee",
+                        gpui::Animation::new(std::time::Duration::from_secs_f32(
+                            unit / MARQUEE_PX_S,
+                        ))
+                        .repeat(),
+                        move |el, d| el.left(px(marquee_left(d, unit))),
+                    ),
             )
             .into_any_element()
     } else {
-        div().child(label).into_any_element()
+        div()
+            .absolute()
+            .top_0()
+            .right_0()
+            .child(label)
+            .into_any_element()
     };
     use gpui::AnimationExt as _;
     div()
@@ -569,8 +582,9 @@ mod marquee_tests {
 
     #[test]
     fn the_marquee_runs_left_one_copy_and_gap_per_loop() {
-        let unit = marquee_unit(100.);
+        let unit = marquee_unit(100., 0.);
         assert_eq!(unit, 148.);
+        assert_eq!(marquee_unit(100., 300.), 300.);
         assert_eq!(marquee_left(0., unit), 0.);
         assert_eq!(marquee_left(0.5, unit), -74.);
         assert_eq!(marquee_left(1., unit), -unit);

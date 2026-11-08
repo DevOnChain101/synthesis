@@ -759,9 +759,9 @@ impl TuiView {
             .items_center()
             .justify_center()
             .gap(px(6.))
-            .child(gpui::img(crate::brand::mark()).size(px(72.)))
+            .child(gpui::img(crate::brand::mark()).size(px(128.)))
             .child(super::tracked("SYNTHESIS", 16., 0.32, strong()))
-            .child(div().text_color(dim()).child("autonomous coding agent"))
+            .child(div().text_color(dim()).child("Autonomous coding agent"))
             .child(
                 div()
                     .mt(px(12.))
