@@ -378,18 +378,62 @@ impl TuiView {
                 None => div().into_any_element(),
             },
             Some(super::driver::Row::Plan) => under(self.plan_card().into_any_element()),
-            Some(super::driver::Row::Activity) => div()
-                .ml(px(INDENT))
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .text_color(dim())
-                .child(super::panels::dot(hsla(t::ACCENT), true))
-                .children(c.activity())
-                .into_any_element(),
+            Some(super::driver::Row::Activity) => under(self.activity_line(lu)),
             None => div().into_any_element(),
         };
         div().pb(px(10.)).child(el).into_any_element()
+    }
+
+    /// The working line, as the Claude Code CLI draws it: a spinner glyph, a verb, then (elapsed, tokens, esc
+    /// hint). Elapsed is from the task's start event, tokens from the usage of its finished turns (left out
+    /// while there are none); a running tool or sub-agent names itself instead of the verb.
+    fn activity_line(&self, lu: &super::driver::LiveUi) -> AnyElement {
+        let c = &lu.live.view.convo;
+        let motion = lu.cfg.tui.motion;
+        let now = crate::live::now_ms();
+        let secs = c
+            .task_started_ms()
+            .map_or(0, |t0| ((now - t0) / 1000).max(0) as u64);
+        let what = match (c.agents.last(), c.running_tool()) {
+            (Some((_, kind)), _) => format!("{kind} agent working\u{2026}"),
+            (None, Some(tool)) => format!("Running {tool}\u{2026}"),
+            (None, None) => format!("{}\u{2026}", activity_verb(secs)),
+        };
+        let mut meta = vec![elapsed_label(secs)];
+        if c.task_tokens() > 0 {
+            meta.push(format!("\u{2193} {} tokens", token_label(c.task_tokens())));
+        }
+        meta.push("esc to interrupt".to_string());
+        let line = div()
+            .id("activity-line")
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                div()
+                    .w(px(14.))
+                    .flex_none()
+                    .text_color(hsla(t::ACCENT))
+                    .child(if motion { spinner_glyph(now) } else { "*" }),
+            )
+            .child(div().text_color(hsla(t::ACCENT)).child(what))
+            .child(
+                div()
+                    .text_color(dim())
+                    .child(format!("({})", meta.join(" \u{b7} "))),
+            );
+        if motion {
+            // frames while busy: the glyph and the clock are read again on every one
+            use gpui::AnimationExt as _;
+            line.with_animation(
+                "activity-frames",
+                gpui::Animation::new(std::time::Duration::from_millis(800)).repeat(),
+                |el, _| el,
+            )
+            .into_any_element()
+        } else {
+            line.into_any_element()
+        }
     }
 
     fn plan_card(&self) -> Div {
@@ -933,6 +977,50 @@ impl TuiView {
     }
 }
 
+const SPINNER: [&str; 10] = [
+    "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
+    "\u{2807}", "\u{280f}",
+];
+const VERBS: [&str; 8] = [
+    "Thinking",
+    "Reasoning",
+    "Pondering",
+    "Analyzing",
+    "Synthesizing",
+    "Working",
+    "Considering",
+    "Planning",
+];
+
+/// Braille spinner frame at `ms` (one frame per 80 ms).
+fn spinner_glyph(ms: i64) -> &'static str {
+    SPINNER[(ms.max(0) / 80) as usize % SPINNER.len()]
+}
+
+/// The verb of the working line: a new one every 4 s of the task.
+fn activity_verb(elapsed_s: u64) -> &'static str {
+    VERBS[(elapsed_s / 4) as usize % VERBS.len()]
+}
+
+/// `45s`, `2m 05s`.
+fn elapsed_label(s: u64) -> String {
+    if s < 60 {
+        format!("{s}s")
+    } else {
+        format!("{}m {:02}s", s / 60, s % 60)
+    }
+}
+
+/// `850`, `1.2k`, `12k`, `1.5M`.
+fn token_label(n: u64) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=9_999 => format!("{:.1}k", n as f64 / 1e3),
+        10_000..=999_999 => format!("{}k", n / 1000),
+        _ => format!("{:.1}M", n as f64 / 1e6),
+    }
+}
+
 /// Blink state of the prompt's block caret: where the caret was when it last moved (or the text last
 /// changed) and whether a repaint timer is already waiting.
 #[derive(Clone, Default)]
@@ -1143,6 +1231,19 @@ mod tests {
         assert_eq!(toggle_label(true, 1), "Show more (1 more line)");
         assert_eq!(toggle_label(true, 7), "Show more (7 more lines)");
         assert_eq!(toggle_label(false, 7), "Show less");
+    }
+
+    #[test]
+    fn the_working_line_reads_real_numbers() {
+        assert_eq!(elapsed_label(45), "45s");
+        assert_eq!(elapsed_label(125), "2m 05s");
+        assert_eq!(token_label(850), "850");
+        assert_eq!(token_label(1234), "1.2k");
+        assert_eq!(token_label(12_345), "12k");
+        assert_eq!(activity_verb(0), "Thinking");
+        assert_eq!(activity_verb(4), "Reasoning");
+        assert_ne!(spinner_glyph(0), spinner_glyph(80));
+        assert_eq!(spinner_glyph(0), spinner_glyph(800));
     }
 
     #[test]

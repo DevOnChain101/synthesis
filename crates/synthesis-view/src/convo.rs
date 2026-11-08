@@ -106,6 +106,8 @@ pub struct Convo {
     /// Turns of the task in progress (for its end line).
     turns: u32,
     started_ms: Option<i64>,
+    /// `tokens` when the task in progress started.
+    task_tokens0: u64,
     /// Summary of the last verification report of the task in progress.
     checks: Option<String>,
 }
@@ -167,6 +169,28 @@ impl Convo {
             c.apply(e);
         }
         c
+    }
+
+    /// When the task in progress started (epoch ms).
+    pub fn task_started_ms(&self) -> Option<i64> {
+        self.started_ms.filter(|_| self.running)
+    }
+
+    /// Tokens the task in progress has used so far (from the usage of its finished turns).
+    pub fn task_tokens(&self) -> u64 {
+        self.tokens.saturating_sub(self.task_tokens0)
+    }
+
+    /// The tool that is running now, if one is.
+    pub fn running_tool(&self) -> Option<&str> {
+        self.items.iter().rev().find_map(|i| match i {
+            Item::Tool {
+                state: ToolState::Running,
+                name,
+                ..
+            } => Some(name.as_str()),
+            _ => None,
+        })
     }
 
     /// What the agent is doing right now, for the activity line (None when no task runs).
@@ -249,6 +273,7 @@ impl Convo {
                 self.turns = 0;
                 self.checks = None;
                 self.started_ms = crate::model::parse_ts(&e.ts);
+                self.task_tokens0 = self.tokens;
             }
             Event::TurnStarted { .. } if main => self.turns += 1,
             Event::TaskEnded {
