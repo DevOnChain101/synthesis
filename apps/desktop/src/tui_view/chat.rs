@@ -128,6 +128,7 @@ fn tool_title(name: &str) -> String {
         "Bash" | "BashOutput" | "KillShell" => "Running".into(),
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => "Applying patch".into(),
         "Task" => "Agent".into(),
+        n if n.starts_with("mcp__") => "MCP".into(),
         n if n.starts_with("browser_") => format!("Browser {}", n.trim_start_matches("browser_")),
         n => n.to_string(),
     }
@@ -827,11 +828,25 @@ impl TuiView {
                 div()
                     .flex_1()
                     .min_w(px(0.))
-                    .truncate()
-                    .text_color(text())
-                    .child(card.head.clone())
+                    .flex()
+                    .gap(px(8.))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w_full()
+                            .truncate()
+                            .text_color(text())
+                            .child(card.head.clone()),
+                    )
                     .when(!card.sub.is_empty(), |d| {
-                        d.child(div().ml(px(8.)).text_color(dim()).child(card.sub.clone()))
+                        d.child(
+                            div()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_color(dim())
+                                .child(card.sub.clone()),
+                        )
                     }),
             )
             .children(card.badges.iter().map(|b| {
