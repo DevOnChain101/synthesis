@@ -49,6 +49,10 @@ pub fn body(name: &str) -> Option<&'static str> {
         "search" => r#"<circle cx="11" cy="11" r="6"/><path d="M21 21l-5-5"/>"#,
         "pencil" => r#"<path d="M4 20l1-4L16 5l3 3L8 19z"/>"#,
         "file" => r#"<path d="M6 3h8l4 4v14H6zM14 3v4h4"/>"#,
+        // a pencil with a check: edits are accepted without asking
+        "editok" => {
+            r#"<path d="M3 16l1-3.5L13 3.5 16 6.5 7 15.5z"/><path d="M12.5 18.5l3 3 6-7"/>"#
+        }
         "branch" => {
             r#"<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10M18 10c0 4-6 3-12 7"/>"#
         }
@@ -109,6 +113,7 @@ pub fn for_lucide(name: &str) -> Option<&'static str> {
         "link" => "link",
         "globe" => "globe",
         "file" => "file",
+        "pencil-check" => "editok",
         "cpu" => "cpu",
         "clock" => "clock",
         "tui" | "agent" | "gear" | "win-min" | "win-max" | "win-close" => {
@@ -172,6 +177,7 @@ mod tests {
             "link",
             "globe",
             "file",
+            "pencil-check",
             "cpu",
             "clock",
         ] {

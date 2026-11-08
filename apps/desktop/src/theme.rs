@@ -14,7 +14,7 @@ pub fn mode_look(m: synthesis_permissions::Mode) -> (t::Rgb, &'static str) {
     use synthesis_permissions::Mode::*;
     match m {
         Default => (t::INFO, "shield"),
-        AcceptEdits => (t::ACCENT_LIGHT, "file"),
+        AcceptEdits => (t::ACCENT_LIGHT, "pencil-check"),
         Plan => (t::SUCCESS, "layers"),
         Auto => (t::WARN, "chevrons-right"),
         DontAsk => (t::CYAN, "cpu"),

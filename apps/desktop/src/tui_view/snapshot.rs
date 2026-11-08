@@ -6,7 +6,9 @@ use synthesis_view::activity::ActivityKind;
 use synthesis_view::topology::{Group, Topology, is_busy};
 use synthesis_view::workspaces::{SessionRow, fold_dir};
 
-use super::activity::{Activity, activity_of, run_state_of_live, run_state_of_status, status_word};
+use super::activity::{
+    Activity, RunState, activity_of, run_state_of_live, run_state_of_status, status_word,
+};
 use super::sample::{
     ActivityRow, AgentStatus, ChatHead, ContextInfo, Core, Metric, NodeState, Pos, PromptRow,
     Running, SessionInfo, Snapshot, StatusChip, Step, StepKind, ToolRow, ToolsInfo, Top, TopoNode,
@@ -46,7 +48,7 @@ pub fn age(now: i64, then: i64) -> String {
     let m = ((now - then) / 60_000).max(0);
     match m {
         0 => "now".into(),
-        1..=59 => format!("{m}m"),
+        m if m < super::activity::INACTIVE_MIN => format!("{m}m"),
         60..=1439 => format!("{}h", m / 60),
         1440..=2879 => "yesterday".into(),
         _ => format!("{}d", m / 1440),
@@ -249,10 +251,7 @@ fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Run
             0,
             SessionRow {
                 id: l.sid.clone(),
-                title: match l.title_shown() {
-                    t if t.is_empty() => "(new session)".into(),
-                    t => t,
-                },
+                title: l.session_name(),
                 status: synthesis_core::SessionStatus::Idle,
                 updated_at: String::new(),
                 mtime: now,
@@ -260,38 +259,59 @@ fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Run
             },
         );
     }
+    let last_event = v.convo.times.iter().flatten().copied().max().unwrap_or(0);
     let mut out: Vec<Running> = rows
         .iter()
         .enumerate()
-        .map(|(i, r)| Running {
-            id: r.id.clone(),
-            peer: false,
-            title: r.title.clone(),
-            folder: folder.to_string(),
-            // the open session shows its git branch; a stored one only has its status
-            branch: if r.is_live && !v.session.git_branch.is_empty() {
-                v.session.git_branch.clone()
-            } else {
-                status_word(r.status).to_string()
-            },
-            // the open session is known first-hand, the others by their status column in the store
-            state: if r.is_live {
+        .map(|(i, r)| {
+            // the open session is known first-hand, the others by their status column in the store; a stored
+            // "running" or "waiting approval" counts only while a process holds the session (a dead one leaves it behind)
+            let open = r.id == l.sid;
+            let state = if open {
                 run_state_of_live(l)
             } else {
-                run_state_of_status(r.status)
-            },
-            status: if r.is_live {
-                activity_word(l)
+                match run_state_of_status(r.status) {
+                    RunState::Running | RunState::Approval if !r.is_live => RunState::Idle,
+                    s => s,
+                }
+            };
+            let last = if open && matches!(state, RunState::Running | RunState::Approval) {
+                now
+            } else if open {
+                r.mtime.max(last_event)
             } else {
-                status_word(r.status).to_string()
-            },
-            age: if r.is_live {
-                "now".into()
-            } else {
-                age(now, r.mtime)
-            },
-            live: r.is_live,
-            selected: l.focus == Focus::Running && i == l.run_sel,
+                r.mtime
+            };
+            Running {
+                id: r.id.clone(),
+                peer: false,
+                title: if open {
+                    l.session_name()
+                } else {
+                    r.title.clone()
+                },
+                folder: folder.to_string(),
+                // the open session shows its git branch; a stored one only has its status
+                branch: if open && !v.session.git_branch.is_empty() {
+                    v.session.git_branch.clone()
+                } else {
+                    status_word(r.status).to_string()
+                },
+                state,
+                status: if open {
+                    activity_word(l)
+                } else {
+                    status_word(r.status).to_string()
+                },
+                age: if open && last >= now {
+                    "now".into()
+                } else {
+                    age(now, last)
+                },
+                last,
+                live: r.is_live,
+                selected: l.focus == Focus::Running && i == l.run_sel,
+            }
         })
         .collect();
     out.extend(v.running.peers.iter().map(|p| Running {
@@ -305,6 +325,7 @@ fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Run
         folder: tilde(&p.workspace_label, home),
         branch: p.status.to_string(),
         age: String::new(),
+        last: now,
         live: true,
         selected: false,
         state: super::activity::RunState::Running,
@@ -372,11 +393,6 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
             },
             |w| w.label.clone(),
         );
-    let prompt = if topo.user.last_prompt.is_empty() {
-        "(new session)".to_string()
-    } else {
-        first_line(&topo.user.last_prompt, 40)
-    };
     let needs = l.dialogs.len();
     let live_n = v.running.live.len().max(usize::from(l.engine.is_some()));
     let health = if l.starting {
@@ -481,7 +497,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
         top: Top {
             live: live_n as u32,
             workspace: cur_ws.clone(),
-            session: prompt,
+            session: l.session_name(),
             model: model.clone(),
             effort: effort.clone(),
             ctx: if window > 0 {
@@ -760,6 +776,93 @@ mod tests {
         let c = chips(&l);
         let b = c.iter().find(|c| c.text.starts_with("budget")).unwrap();
         assert!(b.warn && b.text == "budget exceeded: turns 5 / 5", "{b:?}");
+    }
+
+    #[test]
+    fn the_top_bar_names_the_session_like_its_running_row() {
+        use synthesis_view::workspaces::{WorkspaceRow, fold_dir};
+        let mut l = Live::new();
+        l.starting = false;
+        l.cwd = "/w/proj".into();
+        l.sid = "s1".into();
+        l.ws_key = fold_dir("/w/proj");
+        l.view.workspaces.workspaces.push(WorkspaceRow {
+            root: "/w/proj".into(),
+            key: l.ws_key.clone(),
+            label: "proj".into(),
+            sessions: vec![],
+            available: true,
+            changes: None,
+        });
+        let names = |l: &Live| {
+            let s = build(l, 0, 0, None);
+            let r = s.running.iter().find(|r| r.live).unwrap().title.clone();
+            (s.top.session, r)
+        };
+        let user = |l: &mut Live, n: u64, t: &str| {
+            l.view.apply(&ev(
+                n,
+                "2026-11-07T10:00:00Z",
+                "user.message",
+                json!({"text": t, "images": []}),
+            ))
+        };
+        assert_eq!(names(&l), ("(new session)".into(), "(new session)".into()));
+        user(&mut l, 1, "first  prompt");
+        assert_eq!(names(&l), ("first prompt".into(), "first prompt".into()));
+        user(&mut l, 2, "second prompt");
+        assert_eq!(names(&l), ("first prompt".into(), "first prompt".into()));
+        l.renamed = Some(("s1".into(), "My name".into()));
+        assert_eq!(names(&l), ("My name".into(), "My name".into()));
+    }
+
+    #[test]
+    fn a_stored_running_status_counts_only_while_a_process_holds_the_session() {
+        use synthesis_core::SessionStatus::*;
+        use synthesis_view::workspaces::{SessionRow, WorkspaceRow, fold_dir};
+        let mut l = Live::new();
+        l.starting = false;
+        l.cwd = "/w/proj".into();
+        l.sid = "open".into();
+        l.ws_key = fold_dir("/w/proj");
+        let now = 10 * 3_600_000;
+        let row = |id: &str, status, is_live, age_min: i64| SessionRow {
+            id: id.into(),
+            title: id.into(),
+            status,
+            updated_at: String::new(),
+            mtime: now - age_min * 60_000,
+            is_live,
+        };
+        l.view.workspaces.workspaces.push(WorkspaceRow {
+            root: "/w/proj".into(),
+            key: l.ws_key.clone(),
+            label: "proj".into(),
+            sessions: vec![
+                row("held", Running, true, 1),
+                row("dead", Running, false, 1),
+                row("ask", WaitingApproval, true, 1),
+                row("stale-ask", WaitingApproval, false, 1),
+                row("bad", Failed, false, 120),
+                row("blocked", Blocked, false, 5),
+                row("idle", Completed, false, 45),
+            ],
+            available: true,
+            changes: None,
+        });
+        let st = |s: &Snapshot, id: &str| s.running.iter().find(|r| r.id == id).unwrap().state;
+        let s = build(&l, now, 0, None);
+        assert_eq!(st(&s, "held"), RunState::Running);
+        assert_eq!(st(&s, "dead"), RunState::Idle);
+        assert_eq!(st(&s, "ask"), RunState::Approval);
+        assert_eq!(st(&s, "stale-ask"), RunState::Idle);
+        assert_eq!(st(&s, "bad"), RunState::Error);
+        assert_eq!(st(&s, "blocked"), RunState::Error);
+        assert_eq!(st(&s, "idle"), RunState::Idle);
+        assert_eq!(
+            s.running.iter().find(|r| r.id == "idle").unwrap().age,
+            "45m"
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@ use gpui::{
 };
 use synthesis_tui_render::theme as t;
 
-use super::activity::RunState;
+use super::activity::{Presence, RunState, presence};
 use super::sample::{
     ActivityRow, AgentStatus, ContextInfo, PromptRow, Running, SessionInfo, StepKind, ToolsInfo,
     Usage, Workspace,
@@ -141,12 +141,14 @@ fn run_mark(r: &Running, attn: Option<gpui::Hsla>, motion: bool, now: i64) -> Di
             "!",
         ),
         RunState::Error => dot(hsla(t::ERROR), true).mt(px(5.)),
-        RunState::Idle => dot(
-            attn.filter(|_| r.selected).unwrap_or(hsla(t::SUCCESS)),
-            r.live,
-        )
-        .mt(px(5.))
-        .when(!r.live, |d| d.border_color(dim())),
+        RunState::Idle => match (attn.filter(|_| r.selected), presence(now, r.last)) {
+            (Some(c), _) => dot(c, true),
+            (None, Presence::Active) => dot(hsla(t::SUCCESS), true),
+            // a ring: green border, transparent inside
+            (None, Presence::Recent) => dot(hsla(t::SUCCESS), false),
+            (None, Presence::Inactive) => dot(dim(), true),
+        }
+        .mt(px(5.)),
     }
 }
 
@@ -161,6 +163,8 @@ pub fn running_body(
     let waiting = crate::widgets::chrome::blink(hsla(t::WARN), motion, now);
     let mut col = div().flex().flex_col();
     for (i, r) in rs.iter().enumerate() {
+        // inactive for over an hour: gray text as well as the gray dot
+        let stale = r.state == RunState::Idle && presence(now, r.last) == Presence::Inactive;
         col = col.child(
             li().child(
                 item_box(r.selected, (5., 7., 5., 6.))
@@ -187,7 +191,7 @@ pub fn running_body(
                                             .flex_1()
                                             .min_w(px(0.))
                                             .truncate()
-                                            .text_color(strong())
+                                            .text_color(if stale { dim() } else { strong() })
                                             .child(r.title.clone()),
                                     )
                                     .child(
@@ -205,7 +209,7 @@ pub fn running_body(
                                     .child(
                                         div()
                                             .flex_none()
-                                            .text_color(hsla(t::INFO))
+                                            .text_color(if stale { dim() } else { hsla(t::INFO) })
                                             .child(r.folder.clone()),
                                     )
                                     // waiting for approval: the yellow status word (blinking unless motion

@@ -23,6 +23,8 @@ pub struct Running {
     pub folder: String,
     pub branch: String,
     pub age: String,
+    /// Epoch ms of its last activity; the dot's colour follows the clock from it.
+    pub last: i64,
     pub live: bool,
     pub selected: bool,
     /// The mark of the row (spinner, yellow "!", ...) and the status word that goes with it.
@@ -228,6 +230,7 @@ pub fn sample() -> Snapshot {
         folder: s(f),
         branch: s(b),
         age: s(a),
+        last: i64::MAX,
         live: true,
         selected: sel,
         state: Default::default(),
