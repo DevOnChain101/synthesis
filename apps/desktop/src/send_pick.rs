@@ -18,7 +18,12 @@ pub struct PeerPick {
     /// Display only (sanitised and clipped): the registry file is another process's.
     pub workspace: String,
     pub session: String,
-    pub short_id: String,
+    /// `ws:<key prefix>` and `sess:<id prefix>`, cut from the ADDRESS (the only identity that resolves), long
+    /// enough that no two listed peers share one.
+    pub ws_short: String,
+    pub sess_short: String,
+    /// The peer's own JSON claims another key or id than its address: shown flagged, never trusted.
+    pub mismatch: bool,
     /// Last activity seen, epoch ms; 0 = none seen.
     pub last: i64,
 }
@@ -29,15 +34,28 @@ impl PeerPick {
         self.address.split("/sess:").next().unwrap_or("")
     }
 
+    /// `api (ws:3fa91c) › main (sess:12ab34cd)`: names for reading, ids for telling apart.
+    pub fn chip(&self) -> String {
+        format!(
+            "{} ({}) \u{203a} {} ({})",
+            self.workspace, self.ws_short, self.session, self.sess_short
+        )
+    }
+
     pub fn row_label(&self, now: i64) -> String {
         let when = if self.last > 0 {
             age(now - self.last)
         } else {
             "no activity seen".into()
         };
+        let flag = if self.mismatch {
+            " \u{b7} ! the peer reports another id than its address"
+        } else {
+            ""
+        };
         format!(
-            "{} \u{b7} {} \u{b7} {} \u{b7} {when}",
-            self.session, self.workspace, self.short_id
+            "{} \u{b7} {} \u{b7} {}{flag} \u{b7} {when}",
+            self.session, self.workspace, self.sess_short
         )
     }
 
@@ -92,42 +110,96 @@ impl Seen {
     }
 }
 
+/// A label from the peer's registry file: one clean clipped line with no `ws:` / `sess:` token, so it
+/// cannot pass for the id suffix the picker adds.
+fn name(raw: &str) -> String {
+    let mut s = label(raw);
+    // removing one token can join the pieces around it into another: go on until none is left
+    while let Some((at, n)) = ["ws:", "sess:"]
+        .iter()
+        .find_map(|t| s.to_ascii_lowercase().find(t).map(|at| (at, t.len())))
+    {
+        s.replace_range(at..at + n, "");
+    }
+    s
+}
+
+/// The shortest prefix length from `min` that tells every distinct value in `all` apart.
+fn unique_len<'a>(all: impl Iterator<Item = &'a str> + Clone, min: usize) -> usize {
+    let mut vals: Vec<&str> = all.collect();
+    vals.sort_unstable();
+    vals.dedup();
+    let cut = |v: &str, n: usize| v.char_indices().nth(n).map_or(v.len(), |(i, _)| i);
+    (min..)
+        .find(|&n| {
+            let mut seen: Vec<&str> = vals.iter().map(|v| &v[..cut(v, n)]).collect();
+            seen.sort_unstable();
+            seen.dedup();
+            seen.len() == vals.len() || vals.iter().all(|v| v.chars().count() <= n)
+        })
+        .unwrap_or(min)
+}
+
 /// The reachable main agents of the other sessions, by workspace then session.
 pub fn picks(rows: &[Value], own_sid: &str, seen: &Seen) -> Vec<PeerPick> {
-    let mut out: Vec<PeerPick> = rows
+    // (address, row, key, id) of what can be offered
+    let found: Vec<(PeerRow, &Value)> = rows
         .iter()
         .filter(|v| v["agent"]["status"] != "unreachable")
-        .map(|v| (v, PeerRow::from_json(v)))
-        .filter(|(_, r)| {
+        .map(|v| (PeerRow::from_json(v), v))
+        .filter(|(r, _)| {
             !r.address.is_empty()
                 && (own_sid.is_empty() || !r.address.ends_with(&format!("/sess:{own_sid}")))
         })
-        .map(|(_, r)| {
-            let short = label(&r.session_short_id);
+        .collect();
+    let ids = |a: &str| {
+        let (ws, sess) = a.split_once("/sess:").unwrap_or((a, ""));
+        (
+            ws.strip_prefix("ws:").unwrap_or(ws).to_string(),
+            sess.to_string(),
+        )
+    };
+    let ids_of: Vec<(String, String)> = found.iter().map(|(r, _)| ids(&r.address)).collect();
+    let kn = unique_len(ids_of.iter().map(|(k, _)| k.as_str()), 6);
+    let sn = unique_len(ids_of.iter().map(|(_, i)| i.as_str()), 8);
+    let mut out: Vec<PeerPick> = found
+        .iter()
+        .zip(&ids_of)
+        .map(|((r, v), (key, id))| {
+            let (ws_short, sess_short) = (
+                format!("ws:{}", key.chars().take(kn).collect::<String>()),
+                format!("sess:{}", id.chars().take(sn).collect::<String>()),
+            );
+            // what the peer says about itself must agree with the address it is reached by
+            let claims = |got: &str, want: &str| !got.is_empty() && got != want;
+            let mismatch = claims(&r.session_short_id, &id.chars().take(8).collect::<String>())
+                || claims(v["workspace"]["key"].as_str().unwrap_or(""), key);
             let session = if r.session_name.is_empty() {
-                short.clone()
+                "(unnamed)".into()
             } else {
-                label(&r.session_name)
+                name(&r.session_name)
             };
-            let workspace = match label(&r.workspace_label) {
+            let workspace = match name(&r.workspace_label) {
                 w if w.is_empty() => "(unnamed)".into(),
                 w => w,
             };
             PeerPick {
                 last: seen.last(&r.address),
-                address: r.address,
+                address: r.address.clone(),
                 workspace,
                 session,
-                short_id: short,
+                ws_short,
+                sess_short,
+                mismatch,
             }
         })
         .collect();
     out.sort_by(|a, b| {
-        (&a.workspace, a.ws(), &a.session, &a.short_id).cmp(&(
+        (&a.workspace, a.ws(), &a.session, &a.sess_short).cmp(&(
             &b.workspace,
             b.ws(),
             &b.session,
-            &b.short_id,
+            &b.sess_short,
         ))
     });
     out
@@ -138,7 +210,11 @@ pub fn visible<'a>(rows: &'a [PeerPick], filter: &str) -> Vec<&'a PeerPick> {
     let words: Vec<String> = filter.split_whitespace().map(str::to_lowercase).collect();
     rows.iter()
         .filter(|r| {
-            let hay = format!("{} {} {}", r.session, r.workspace, r.short_id).to_lowercase();
+            let hay = format!(
+                "{} {} {} {}",
+                r.session, r.workspace, r.ws_short, r.sess_short
+            )
+            .to_lowercase();
             words.iter().all(|w| hay.contains(w))
         })
         .collect()
@@ -202,6 +278,37 @@ mod tests {
         );
         assert_ne!(p[0].row_label(0), p[1].row_label(0));
         assert!(p[0].row_label(0).contains("11111111"));
+    }
+
+    #[test]
+    fn a_hostile_duplicate_cannot_pass_for_the_real_peer() {
+        // same name, same label, the same first 6 key and 8 id characters: only longer prefixes differ
+        let real = row("3fa91c0000aa", "12ab34cd-1111", "api", "main", "idle");
+        let mut fake = row(
+            "3fa91c0000bb",
+            "12ab34cd-2222",
+            "api ws:3fa91c0000aa",
+            "main",
+            "idle",
+        );
+        // and it claims the real peer's short id and key
+        fake["session"]["short_id"] = json!("12ab34cd");
+        fake["workspace"]["key"] = json!("3fa91c0000aa");
+        let p = picks(&[real, fake], "", &Seen::default());
+        assert_ne!(p[0].sess_short, p[1].sess_short);
+        assert_ne!(p[0].ws_short, p[1].ws_short);
+        assert_ne!(p[0].chip(), p[1].chip());
+        // ids come from the address; the label cannot hold a `ws:` token
+        let f = p.iter().find(|p| p.address.contains("0000bb")).unwrap();
+        assert!(f.mismatch && f.row_label(0).contains("reports another id"));
+        assert!(!f.workspace.contains("ws:"));
+        assert!(f.ws_short.starts_with("ws:3fa91c0000b"));
+        assert!(
+            p.iter()
+                .any(|p| p.address.contains("0000aa") && !p.mismatch)
+        );
+        // pieces that join into a token after a strip are stripped too
+        assert_eq!(name("wsess:s:x"), "x");
     }
 
     #[test]

@@ -1336,10 +1336,11 @@ impl TuiView {
                 let Some(e) = lu.live.engine.clone() else {
                     return;
                 };
+                let addr = to.clone();
                 let job = cx.background_spawn(async move { e.peer_ask(&to, &text) });
                 cx.spawn(async move |this, cx| {
                     let r = job.await;
-                    this.update(cx, |t, cx| t.live_do(cx, |l| l.send_done(r)))
+                    this.update(cx, |t, cx| t.live_do(cx, |l| l.send_done(&addr, r)))
                         .ok();
                 })
                 .detach();

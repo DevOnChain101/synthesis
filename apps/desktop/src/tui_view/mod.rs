@@ -1284,6 +1284,7 @@ mod tests {
             0,
         );
         l.submit("/send");
+        l.dialogs[0].armed_until = 0;
         view.update(vcx, |t, _| t.set_live(l));
         let state = |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext| {
             view.read_with(vcx, |t, _| {
@@ -1306,6 +1307,10 @@ mod tests {
         }
         assert_eq!(state(&view, vcx), (1, false, Some(String::new())));
         view.update(vcx, |t, _| t.shown = true);
+        // untouched: an Enter typed ahead picks nothing
+        press(&view, vcx, "enter");
+        assert_eq!(state(&view, vcx), (1, false, Some(String::new())));
+        press(&view, vcx, "down");
         press(&view, vcx, "enter");
         assert_eq!(
             state(&view, vcx),

@@ -155,8 +155,19 @@ pub fn dock(
                 div()
                     .px(px(10.))
                     .pt(px(8.))
+                    .flex()
+                    .gap(px(8.))
                     .text_color(hsla(t::ACCENT))
-                    .child(h.clone())
+                    .child(match h.split_once('\u{1f}') {
+                        // a label and the id after it, painted apart so a name cannot pass for the id
+                        Some((name, id)) => div()
+                            .flex()
+                            .gap(px(8.))
+                            .child(name.to_string())
+                            .child(div().text_color(dim()).child(id.to_string()))
+                            .into_any_element(),
+                        None => div().child(h.clone()).into_any_element(),
+                    })
                     .into_any_element(),
             );
         }

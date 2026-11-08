@@ -181,7 +181,14 @@ impl Dialog {
 
     /// Digits and Enter may answer this dialog: it is a picker the person opened, or they engaged it.
     pub fn answerable(&self) -> bool {
-        self.engaged || !self.needs_person()
+        let send = matches!(
+            self.kind,
+            DialogKind::Picker {
+                kind: PickerKind::Send,
+                ..
+            }
+        );
+        self.engaged || !(self.needs_person() || send)
     }
 
     /// Digits pick option 1-9. Not in the model and send pickers: there they type into the filter.
@@ -503,6 +510,8 @@ impl Live {
         }
         self.stale_model = engine.stale_model.clone();
         self.model_pick = None;
+        self.send_pick = None;
+        self.send_to = None;
         self.sid = engine.sid.clone();
         self.cwd = engine.cwd.clone();
         self.trusted = engine.trusted;
@@ -640,6 +649,19 @@ impl Live {
     }
 
     fn push_dialog(&mut self, d: Dialog, now: i64) {
+        // an approval, plan or question never waits behind a model or send picker: it goes in front
+        // (the picker is armed again when it is answered)
+        let front_picker = matches!(
+            self.dialogs.first().map(|f| &f.kind),
+            Some(DialogKind::Picker {
+                kind: PickerKind::Model | PickerKind::Send,
+                ..
+            })
+        );
+        if front_picker && !matches!(d.kind, DialogKind::Picker { .. }) {
+            self.dialogs.insert(0, d);
+            return self.arm(now);
+        }
         self.dialogs.push(d);
         if self.dialogs.len() == 1 {
             self.arm(now);
@@ -857,7 +879,7 @@ impl Live {
                 let pick = self.send_pick.take();
                 if let Some(r) = pick.and_then(|p| p.rows.into_iter().find(|r| r.address == key)) {
                     self.send_to = Some(SendTo {
-                        label: format!("{} \u{203a} {}", r.workspace, r.session),
+                        label: r.chip(),
                         address: r.address,
                     });
                 }
@@ -1093,7 +1115,9 @@ impl Live {
                 self.note(format!("{} is gone, nothing sent", to.label), true);
                 return Submitted::Held;
             }
-            self.note(send_pick::echo(&to.address), false);
+            if !self.images.is_empty() {
+                self.note("images are not sent to another session", true);
+            }
             return Submitted::Do(Action::Send {
                 to: to.address,
                 text: text.into(),
@@ -1594,10 +1618,11 @@ impl Live {
         }
     }
 
-    /// The outcome of `/send`. The reply itself arrives as the `peer.reply` row; only a failure is said here.
-    pub fn send_done(&mut self, r: Result<String, String>) {
-        if let Err(e) = r {
-            self.note(format!("/send: {e}"), true);
+    /// The outcome of `/send`. The reply itself arrives as the `peer.reply` row; a delivery is echoed with the ids it went to, a failure is said.
+    pub fn send_done(&mut self, to: &str, r: Result<String, String>) {
+        match r {
+            Ok(_) => self.note(send_pick::echo(to), false),
+            Err(e) => self.note(format!("/send: {e}"), true),
         }
     }
 
@@ -1960,17 +1985,22 @@ impl Live {
     /// nothing to pick the only row says why.
     fn open_send_picker(&mut self) {
         self.send_pick = Some(SendPick::default());
-        self.dialogs.push(Dialog {
-            kind: DialogKind::Picker {
-                kind: PickerKind::Send,
-                title: "Send to a session \u{b7} then type the message".into(),
-                headers: vec![],
+        // armed like the approvals: an Enter typed before it appeared picks nothing, and Enter picks only
+        // once the person engaged it (arrows, Tab, a click, typing in the filter)
+        self.push_dialog(
+            Dialog {
+                kind: DialogKind::Picker {
+                    kind: PickerKind::Send,
+                    title: "Send to a session \u{b7} then type the message".into(),
+                    headers: vec![],
+                },
+                options: vec![],
+                sel: 0,
+                armed_until: 0,
+                engaged: false,
             },
-            options: vec![],
-            sel: 0,
-            armed_until: 0,
-            engaged: false,
-        });
+            now_ms(),
+        );
         self.rebuild_send_dialog();
     }
 
@@ -1987,8 +2017,11 @@ impl Live {
         for r in &shown {
             if r.ws() != group {
                 group = r.ws();
-                let key: String = group.chars().take(9).collect();
-                headers.push((options.len(), format!("{}  {key}", r.workspace)));
+                // the id comes from the address, after a separator a name cannot hold (the card paints it apart)
+                headers.push((
+                    options.len(),
+                    format!("{}\u{1f}{}", r.workspace, r.ws_short),
+                ));
             }
             options.push((r.address.clone(), r.row_label(now)));
         }
@@ -2848,15 +2881,21 @@ mod tests {
         let d = &l.dialogs[0];
         assert_eq!(d.options.len(), 2, "same name twice, told apart by id");
         assert_eq!(d.options[0].0, "ws:aaaa1111bbbb/sess:11111111-0000");
-        assert!(!d.digits_pick() && d.answerable());
+        assert!(
+            !d.digits_pick() && !d.answerable(),
+            "engaged by typing or arrows first"
+        );
         // digits are text in the filter (ids are hex)
         assert!(l.model_filter_key(Some("2"), false));
         assert!(l.model_filter_key(Some("2"), false));
         assert_eq!(l.dialogs[0].options.len(), 1);
-        let key = l.pick(0, 0).unwrap();
+        let key = l.pick(0, i64::MAX).unwrap();
         assert_eq!(l.answer(&key, 0), None);
         let chip = l.send_to.clone().unwrap();
-        assert_eq!(chip.label, "web \u{203a} backend");
+        assert_eq!(
+            chip.label,
+            "web (ws:cccc22) \u{203a} backend (sess:22222222)"
+        );
         // the line goes to the id address, whatever the names are, and spends the chip
         assert_eq!(
             l.submit("what sets the TTL?"),
@@ -2866,6 +2905,11 @@ mod tests {
             })
         );
         assert!(l.send_to.is_none());
+        // the echo comes with the result, not before it
+        assert!(
+            !matches!(l.view.convo.items.last(), Some(Item::Notice { text, .. }) if text.starts_with("sent to"))
+        );
+        l.send_done("ws:cccc2222dddd/sess:22222222-0000", Ok(String::new()));
         assert!(
             matches!(l.view.convo.items.last(), Some(Item::Notice { warning: false, text })
             if text == "sent to ws:cccc2222../sess:22222222..")
@@ -2882,7 +2926,7 @@ mod tests {
         let arm = |l: &mut Live| {
             l.submit("/send");
             l.model_filter_key(Some("web"), false);
-            let k = l.pick(0, 0).unwrap();
+            let k = l.pick(0, i64::MAX).unwrap();
             l.answer(&k, 0);
             assert!(l.send_to.is_some());
         };
@@ -2903,8 +2947,45 @@ mod tests {
         assert!(l.send_to.is_none());
         assert!(
             matches!(l.view.convo.items.last(), Some(Item::Notice { warning: true, text })
-            if text == "web \u{203a} backend is gone, nothing sent")
+            if text == "web (ws:cccc22) \u{203a} backend (sess:22222222) is gone, nothing sent")
         );
+    }
+
+    #[test]
+    fn an_enter_typed_ahead_picks_nothing_and_an_approval_goes_in_front_of_the_picker() {
+        let mut l = live_with_commands();
+        l.set_peer_rows(
+            vec![peer("aaaa1111bbbb", "11111111-0000", "api", "backend")],
+            0,
+        );
+        l.submit("/send");
+        let d = &l.dialogs[0];
+        // armed against type-ahead, and Enter answers only after the person engaged it
+        assert!(d.armed_until > 0 && !d.answerable());
+        assert_eq!(l.pick(0, 0), None, "still arming");
+        assert!(l.pick(0, now_ms() + ARM_MS + 1).is_some());
+        l.move_sel(true);
+        assert!(l.dialogs[0].answerable());
+        // an approval arrives: it is the front dialog, the picker's keys do nothing
+        l.on_approval(
+            AskApproval {
+                id: "a".into(),
+                agent_id: None,
+                tool: "Bash".into(),
+                input: json!({"command": "ls"}),
+                dialog: "permission",
+                prompt: String::new(),
+                reason: String::new(),
+                origin: None,
+                suggestions: vec![],
+            },
+            0,
+        );
+        assert!(matches!(l.dialogs[0].kind, DialogKind::Approval(_)));
+        assert_eq!(l.dialogs.len(), 2);
+        assert!(!l.model_filter_key(Some("x"), false));
+        assert_eq!(l.send_pick.as_ref().unwrap().filter, "");
+        assert!(l.send_to.is_none());
     }
 
     #[test]
@@ -2914,7 +2995,7 @@ mod tests {
         let d = &l.dialogs[0];
         assert_eq!(d.options.len(), 1);
         assert!(d.options[0].1.contains("no other live session"));
-        let k = l.pick(0, 0).unwrap();
+        let k = l.pick(0, i64::MAX).unwrap();
         assert_eq!(l.answer(&k, 0), None);
         assert!(l.send_to.is_none() && l.dialogs.is_empty());
         assert!(send_pick::empty_note(true, false).contains("--peers"));
