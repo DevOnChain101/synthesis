@@ -55,6 +55,11 @@ pub struct OpenSettings;
 
 impl gpui::EventEmitter<OpenSettings> for TuiView {}
 
+/// A new engine is live (the session the person asked for has started).
+pub struct SessionStarted;
+
+impl gpui::EventEmitter<SessionStarted> for TuiView {}
+
 /// Rows at the end of the chat measured again after every change.
 const TAIL_REMEASURE: usize = 12;
 
@@ -336,6 +341,7 @@ impl TuiView {
                 let pump = cx.spawn(async move |this, cx| pump(this, rx, cx).await);
                 lu.pump_task = Some(pump);
                 self.refresh_store(cx);
+                cx.emit(SessionStarted);
             }
         }
         cx.notify();
@@ -1129,6 +1135,68 @@ impl TuiView {
         cx.notify();
     }
 
+    /// `/panels`: lists, hides or shows panels at once and saves the choice to the user settings file.
+    fn panels_command(&mut self, arg: &str, cx: &mut Context<Self>) {
+        use super::layout::{ALWAYS, HIDEABLE, PanelsCmd, parse_panels};
+        let Some(lu) = &mut self.live else { return };
+        let cmd = match parse_panels(arg) {
+            Ok(c) => c,
+            Err(e) => {
+                lu.live.note(format!("/panels: {e}"), true);
+                lu.dirty = true;
+                return cx.notify();
+            }
+        };
+        let want: Vec<(&'static str, bool)> = match cmd {
+            PanelsCmd::List => vec![],
+            PanelsCmd::HideAll => HIDEABLE.iter().map(|(k, _)| (*k, true)).collect(),
+            PanelsCmd::ShowAll => HIDEABLE.iter().map(|(k, _)| (*k, false)).collect(),
+            PanelsCmd::Set(k, off) => vec![(k, off)],
+        };
+        let changes: Vec<_> = want
+            .into_iter()
+            .filter(|(k, off)| self.hidden.is_hidden(k) != *off)
+            .collect();
+        let saved = if changes.is_empty() {
+            Ok(())
+        } else {
+            let (home, cwd) = (&lu.cfg.synthesis_home, &lu.cfg.project);
+            save_panels(home, cwd, &changes)
+        };
+        let mut warn = false;
+        if let Err(e) = &saved {
+            warn = true;
+            lu.live.note(
+                format!("/panels: not saved ({e}); applied for this run only"),
+                true,
+            );
+        }
+        for (k, off) in &changes {
+            self.hidden.set_hidden(k, *off);
+        }
+        if matches!(cmd, PanelsCmd::List) || !warn {
+            let mut t = String::from("panels (/panels hide-all | show-all | <name> on|off):");
+            for (k, name) in HIDEABLE {
+                let on = if self.hidden.is_hidden(k) {
+                    "off"
+                } else {
+                    "on "
+                };
+                t += &format!("\n  {on}  {k:<9} {name}");
+            }
+            for (name, why) in ALWAYS {
+                t += &format!("\n  on   {name}: {why}");
+            }
+            if let Some(lu) = &mut self.live {
+                lu.live.note(t, false);
+            }
+        }
+        if let Some(lu) = &mut self.live {
+            lu.dirty = true;
+        }
+        cx.notify();
+    }
+
     /// What a command or picker asked the window to do.
     pub(super) fn run_action(&mut self, a: Action, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
@@ -1185,6 +1253,7 @@ impl TuiView {
             }
             Action::Close => return self.switch(Target::Close, "close".into(), cx),
             Action::OpenSettings => cx.emit(OpenSettings),
+            Action::Panels(arg) => return self.panels_command(&arg, cx),
             Action::Quit => return self.quit(cx),
             Action::Recheck => {
                 let project = lu.cfg.project.clone();
@@ -1226,9 +1295,51 @@ impl TuiView {
         self.pick_folder(cx);
     }
 
+    /// Why the session cannot be restarted now (a restart drops the running task, queued prompts and open dialogs).
+    pub fn restart_blocker(&self) -> Option<&'static str> {
+        let Some(lu) = &self.live else {
+            return Some("there is no live session in this window");
+        };
+        if lu.live.busy || !lu.live.dialogs.is_empty() || !lu.live.queue.is_empty() {
+            Some(
+                "a task is running, or approvals or queued prompts are pending: finish or cancel first",
+            )
+        } else if lu.live.engine.is_none() {
+            Some("the session is still starting")
+        } else {
+            None
+        }
+    }
+
+    /// The dash panels switched off now.
+    pub fn hidden_panels(&self) -> super::layout::Hidden {
+        self.hidden
+    }
+
+    /// The Settings popup saved `synt.tui`: what this view reads (panels, thinking, verbose rows, motion) applies now.
+    pub fn apply_settings(&mut self, tui: synthesis_settings::TuiSettings, cx: &mut Context<Self>) {
+        let mut hidden = super::layout::Hidden::default();
+        for (shown, (key, _)) in tui.panels.iter().zip(synthesis_settings::TUI_PANELS) {
+            if !shown {
+                hidden.hide(key);
+            }
+        }
+        self.hidden = hidden;
+        if let Some(lu) = &mut self.live {
+            lu.live.show_thinking = tui.show_thinking;
+            lu.live.verbose = tui.verbose;
+            Arc::make_mut(&mut lu.cfg).tui = tui;
+            lu.dirty = true;
+            lu.list_reset = true;
+        }
+        cx.notify();
+    }
+
     /// "new session..." of the Running panel: a fresh session in the selected workspace.
-    pub fn new_session(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    /// True when a fresh session is being started ([`SessionStarted`] follows when it is live).
+    pub fn new_session(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.run_action(Action::New, cx);
+        self.live.as_ref().is_some_and(|l| l.live.starting)
     }
 
     /// Ctrl+N: the system folder picker; the folder gets a fresh session.
@@ -1751,6 +1862,33 @@ pub fn suggest(text: &str, cursor: usize, live: &Live, cwd: &Path) -> Option<Com
     })
 }
 
+/// Writes `synt.tui.panels.<key>` (true = shown) to the USER settings file, one atomic edit per key.
+pub(super) fn save_panels(home: &Path, cwd: &Path, changes: &[(&str, bool)]) -> Result<(), String> {
+    use synthesis_config::{LoadContext, ProjectTrust};
+    let env = Env::default();
+    let ctx = LoadContext {
+        cwd,
+        synthesis_home: home,
+        user_home: home,
+        env: &env,
+    };
+    let mut store = synthesis_settings_ui::SettingsStore::open(
+        &ctx,
+        ProjectTrust::Untrusted,
+        &synthesis_settings::managed_settings_path(),
+        None,
+    );
+    for (k, off) in changes {
+        store
+            .set(
+                &format!("synt.tui.panels.{k}"),
+                serde_json::Value::Bool(!off),
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1801,5 +1939,23 @@ mod tests {
             "{:?}",
             c.items
         );
+    }
+
+    #[test]
+    fn panels_persist_to_the_user_file_only() {
+        let home = tempfile::tempdir().unwrap();
+        let proj = tempfile::tempdir().unwrap();
+        save_panels(
+            home.path(),
+            proj.path(),
+            &[("usage", true), ("session", true), ("usage", false)],
+        )
+        .unwrap();
+        let (t, d) = synthesis_settings::read_user_tui(home.path());
+        assert!(d.is_empty(), "{d:?}");
+        let h = crate::settings_view::hidden_from(&t);
+        assert!(h.session && !h.usage && !h.tools);
+        assert!(!proj.path().join(".synt").exists());
+        assert!(save_panels(home.path(), proj.path(), &[("status_x", true)]).is_err());
     }
 }

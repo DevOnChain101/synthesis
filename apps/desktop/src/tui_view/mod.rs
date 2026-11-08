@@ -350,7 +350,9 @@ impl TuiView {
             Box::new(cx.listener(|this, _, _, cx| this.new_workspace(cx)))
         });
         let new_run: Option<panels::OnClick> = live.map(|_| -> panels::OnClick {
-            Box::new(cx.listener(|this, _, window, cx| this.new_session(window, cx)))
+            Box::new(cx.listener(|this, _, window, cx| {
+                this.new_session(window, cx);
+            }))
         });
         let meta = |c: Hsla, v: String| div().text_color(c).child(v).into_any_element();
         // the session that waits for approval is marked red in both lists
@@ -676,7 +678,7 @@ impl TuiView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(hsla(t::SURFACE))
+            .bg(crate::theme::fill(t::SURFACE))
             .border_1()
             // one focus frame around the whole chat panel (the border is always there, only its colour
             // changes); a waiting approval's red wins over it
@@ -758,8 +760,25 @@ impl TuiView {
             );
             // `.grow` (flex 1 1 0)
             col = col.child(self.fit(p, "p-topology", |p| p.flex_1().min_h(px(tier.topo_min))));
+        } else if let Some(n) = s.topology.iter().find(|n| n.pos == sample::Pos::Sub) {
+            // Topology is hidden: the sub-agents stay visible as a compact block (never hideable)
+            let body = div().flex().flex_col().children(n.lines.iter().map(|l| {
+                div()
+                    .py(px(1.))
+                    .truncate()
+                    .text_color(text())
+                    .child(l.clone())
+            }));
+            col = col.child(
+                panel(
+                    Head::new("p-subagents", "Subagents", "users", Pad::CARD),
+                    None,
+                    body,
+                )
+                .flex_none(),
+            );
         }
-        if hid.has_cards() {
+        {
             let card_min = if tight { 84. } else { 110. };
             let mut row = div()
                 .debug_selector(|| "status-context".to_string())
@@ -767,7 +786,7 @@ impl TuiView {
                 .gap(px(CARD_GAP))
                 .flex_initial()
                 .min_h(px(card_min));
-            if !hid.status {
+            {
                 row = row.child(
                     panel(
                         Head::new("p-agent", "Agent Status", "sparkles", Pad::CARD)
@@ -866,8 +885,7 @@ impl Render for TuiView {
         }
         let tier = tiers(h);
         let c = cols(w);
-        let has_right = self.hidden.has_right();
-        let (right_in, right_btn) = (c.right_inline && has_right, !c.right_inline && has_right);
+        let (right_in, right_btn) = (c.right_inline, !c.right_inline);
         let left_in = c.left_inline;
         let side = |on: bool, x: f32| if on { x + GAP } else { 0. };
         self.centre_w = w - 2. * PAD - side(left_in, c.left) - side(right_in, c.right);
@@ -926,7 +944,7 @@ impl Render for TuiView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(hsla(t::BG))
+            .bg(crate::theme::fill(t::BG))
             .font_family(MONO)
             .font_weight(FontWeight::MEDIUM)
             .text_size(px(12.5))

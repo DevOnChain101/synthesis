@@ -225,7 +225,7 @@ pub fn panel_scroll(
         .flex_col()
         .min_w(px(0.))
         .overflow_hidden()
-        .bg(hsla(t::SURFACE))
+        .bg(crate::theme::fill(t::SURFACE))
         .border_1()
         .border_color(hsla(t::BORDER))
         .rounded(px(8.))

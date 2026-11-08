@@ -838,11 +838,11 @@ pub const TUI_PANELS: [(&str, &str); 8] = [
     ("tools", "Tools & Skills used in this session"),
     (
         "activity",
-        "Activity feed (desktop: Recent Activity and User Prompt)",
+        "Activity feed (desktop: Recent Activity, with the latest user prompt)",
     ),
     (
         "status",
-        "Status box above the chat (desktop: Agent Status)",
+        "Status box above the chat (desktop: Agent Status, never hidden)",
     ),
     ("tokens", "Tokens box above the chat (desktop: Context)"),
     ("topology", "Topology graph (right column)"),
@@ -872,7 +872,15 @@ pub struct TuiSettings {
     pub mouse_capture: bool,
     /// Drag-select copies when the button is released.
     pub copy_on_select: bool,
+    /// Desktop app: opacity of the window's backgrounds in percent, `TUI_OPACITY_MIN` to 100. Text stays opaque.
+    pub opacity: u8,
+    /// Desktop app: blur what is behind the window (only visible below 100 % opacity, and only where the
+    /// platform supports it).
+    pub blur: bool,
 }
+
+/// Lowest `synt.tui.opacity`: under it the window is too faint to read.
+pub const TUI_OPACITY_MIN: u8 = 30;
 
 impl Default for TuiSettings {
     fn default() -> Self {
@@ -886,6 +894,8 @@ impl Default for TuiSettings {
             motion: true,
             mouse_capture: true,
             copy_on_select: true,
+            opacity: 100,
+            blur: false,
         }
     }
 }
@@ -915,6 +925,19 @@ impl TuiSettings {
         flag("motion", &mut s.motion);
         flag("mouse_capture", &mut s.mouse_capture);
         flag("copy_on_select", &mut s.copy_on_select);
+        flag("blur", &mut s.blur);
+        match tui.get("opacity") {
+            None => {}
+            Some(v) => match v
+                .as_u64()
+                .filter(|n| (u64::from(TUI_OPACITY_MIN)..=100).contains(n))
+            {
+                Some(n) => s.opacity = n as u8,
+                None => diags.push(format!(
+                    "synt.tui.opacity must be a whole number from {TUI_OPACITY_MIN} to 100, kept"
+                )),
+            },
+        }
         match tui.get("logo").map(Value::as_str) {
             None => {}
             Some(Some("art")) => s.logo = true,
@@ -948,6 +971,8 @@ impl TuiSettings {
                 "motion",
                 "mouse_capture",
                 "copy_on_select",
+                "opacity",
+                "blur",
             ]
             .contains(&k.as_str())
             {
@@ -974,6 +999,8 @@ impl TuiSettings {
             "motion": self.motion,
             "mouse_capture": self.mouse_capture,
             "copy_on_select": self.copy_on_select,
+            "opacity": self.opacity,
+            "blur": self.blur,
         })
     }
 }

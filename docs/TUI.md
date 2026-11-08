@@ -135,15 +135,18 @@ A picker (Ctrl+N, `/resume`, `/model`, `/config`, ...) closes with Esc; an appro
 the chat are always shown; the other panels take the rows of a hidden one. With session, mcp, tools
 and activity all hidden, Workspace and Running split the whole left column in halves. `status` and
 `tokens` are the boxes above the chat: with both hidden the chat takes their rows. (The desktop app maps the same
-keys onto the panels of its `cli.html` layout: `session` Session, `tools` Tools & Skills, `activity` Recent Activity
-and User Prompt, `status` Agent Status, `tokens` Context, `topology`, `usage` Usage & Metrics, `mcp` none; see
+keys onto the panels of its `cli.html` layout: `session` Session, `tools` Tools & Skills, `activity` Recent Activity,
+`status` Agent Status (never hidden), `tokens` Context, `topology`, `usage` Usage & Metrics, `mcp` none; see
 `docs/specs/desktop.md`.) `topology` is
-the right-hand graph and `usage` the history panel: hiding one gives its space to the other, and
-with both hidden the chat spans to the right edge), `logo` (`art` | `off`), `show_thinking`, `verbose`
+the right-hand graph and `usage` the history panel: hiding one gives its space to the other. In the desktop app
+`status` (Agent Status) and the sub-agents are never hidden, so its right column always exists; the desktop `/panels`
+command lists the panels, `/panels hide-all|show-all` and `/panels <name> on|off` apply at once and save here), `logo` (`art` | `off`), `show_thinking`, `verbose`
 (internal rows in the chat, see Events), `diffs_expanded`
 (long output starts whole, like ctrl+o), `queue_indicators`, `motion` (spinners drawn still when off),
-`mouse_capture` (off: the terminal's own selection; applies at start), `copy_on_select`. Defaults:
-everything on, `diffs_expanded` and `verbose` off. A project, local or managed settings file that sets `synt.tui`
+`mouse_capture` (off: the terminal's own selection; applies at start), `copy_on_select`, and two the
+desktop app reads (the terminal ignores them): `opacity` (window background opacity, whole percent 30 to 100) and `blur`
+(blur behind the window; macOS and Windows). Defaults: everything on, `diffs_expanded` and `verbose` off, `opacity` 100,
+`blur` off. A project, local or managed settings file that sets `synt.tui`
 is ignored with a diagnostic; a wrong value keeps the default and the diagnostic names the key.
 `/config` edits these and writes the USER file atomically, keeping every other key; it can write
 nothing else, so never a credential. First run without a configured model shows a setup card
