@@ -592,11 +592,19 @@ impl Convo {
                 summary,
                 decision,
                 ..
-            } => self.internal(format!(
-                "peer request {decision} from {}: {}",
-                peer_name(from),
-                peer_text(summary)
-            )),
+            } => {
+                let t = format!(
+                    "peer request {decision} from {}: {}",
+                    peer_name(from),
+                    peer_text(summary)
+                );
+                // an accepted ask is something the user must see; a refusal is bookkeeping
+                if decision == "accepted" {
+                    self.notice(false, t)
+                } else {
+                    self.internal(t)
+                }
+            }
             // the `<peer_reply>` block the model reads arrives with this event
             Event::PeerReply { status, text, .. } => self.notice(
                 status != "answered",
@@ -1042,6 +1050,20 @@ mod tests {
             json!({"request_id":"r","status":"timeout","text":"","bytes":0,"duration_ms":1}),
         );
         assert!(matches!(&c.items[0], Item::Notice { warning: true, .. }));
+        let c = one(
+            "peer.request_received",
+            json!({"request_id":"r","from":addr,"to":addr,"summary":"ask","bytes":1,"decision":"accepted"}),
+        );
+        assert!(
+            matches!(&c.items[..], [Item::Notice { warning: false, text }] if text == "peer request accepted from backend: ask"),
+            "{:?}",
+            c.items
+        );
+        let c = one(
+            "peer.request_received",
+            json!({"request_id":"r","from":addr,"to":addr,"summary":"ask","bytes":1,"decision":"rejected","reason":"busy"}),
+        );
+        assert!(matches!(&c.items[..], [Item::Internal(_)]));
         for (t, p, line) in [
             (
                 "peer.listening",
