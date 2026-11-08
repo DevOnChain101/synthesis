@@ -15,7 +15,7 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::settings_view::{self, Close, SettingsView};
+use crate::settings_view::{self, Applied, Close, Restart, SettingsView};
 use crate::tui_view::driver::{LiveCfg, OpenSettings};
 use crate::tui_view::{Side, TuiView, layout};
 use crate::widgets::chrome::{icon, tracked, with_alpha};
@@ -109,6 +109,25 @@ impl Shell {
         cx.notify();
     }
 
+    /// The Settings popup (the offscreen shots seed it).
+    #[cfg(feature = "shot")]
+    pub(crate) fn settings(&self) -> &Entity<SettingsView> {
+        &self.settings
+    }
+
+    /// `synt.tui` changed in the Settings popup: the window's opacity and blur, and what the TUI view reads, apply at once.
+    fn apply_look(
+        &mut self,
+        tui: synthesis_settings::TuiSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        theme::set_opacity(tui.opacity);
+        window.set_background_appearance(theme::background(&tui));
+        self.tui.update(cx, |v, cx| v.apply_settings(tui, cx));
+        cx.notify();
+    }
+
     /// A button of the icon group: 26x22, radius 6; hover lightens, the open view is pressed.
     fn icon_button(&self, v: View, cx: &mut Context<Self>) -> impl IntoElement {
         let on = self.view == v;
@@ -194,7 +213,8 @@ impl Shell {
             .pr(px(if mac { 10. } else { 0. }))
             .border_b_1()
             .border_color(with_alpha(theme::hsla(t::TEXT), 0.12))
-            .bg(theme::hsla(t::BG))
+            // translucent like the surface under it (the window opacity), so no opaque strip
+            .bg(theme::fill(t::BG))
             .child(
                 // the drag region: the whole bar except the buttons
                 div()
@@ -310,7 +330,7 @@ impl Render for Shell {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme::hsla(t::BG))
+            .bg(theme::fill(t::BG))
             .text_size(px(13.))
             .font_family(brand::UI_FONT)
             .on_key_down(cx.listener(|s, ev: &gpui::KeyDownEvent, window, cx| {
@@ -362,6 +382,9 @@ pub fn register_fonts(cx: &App) {
 /// Opens the main window: the live view when `live` is given, else the sample.
 pub fn open(cx: &mut App, live: Option<LiveCfg>) {
     let mac = cfg!(target_os = "macos");
+    if let Some(c) = &live {
+        theme::set_opacity(c.tui.opacity);
+    }
     let opts = gpui::WindowOptions {
         titlebar: Some(gpui::TitlebarOptions {
             title: Some("Synthesis".into()),
@@ -376,6 +399,9 @@ pub fn open(cx: &mut App, live: Option<LiveCfg>) {
             gpui::size(px(1280.), px(800.)),
             cx,
         ))),
+        window_background: live
+            .as_ref()
+            .map_or(Default::default(), |c| theme::background(&c.tui)),
         // the design's minimum app size (cli.html `#app`) plus the title bar
         window_min_size: Some(gpui::size(
             px(layout::MIN_W),
@@ -443,6 +469,20 @@ impl Shell {
             &settings,
             window,
             |s: &mut Shell, _, _: &Close, window, cx| s.go(s.back, window, cx),
+        )
+        .detach();
+        cx.subscribe_in(
+            &settings,
+            window,
+            |s: &mut Shell, _, a: &Applied, window, cx| s.apply_look(a.0, window, cx),
+        )
+        .detach();
+        cx.subscribe_in(
+            &settings,
+            window,
+            |s: &mut Shell, _, _: &Restart, window, cx| {
+                s.tui.update(cx, |t, cx| t.new_session(window, cx))
+            },
         )
         .detach();
         cx.subscribe_in(
@@ -528,5 +568,27 @@ mod tests {
             shell.read_with(v, |s, _| (s.view, s.back)),
             (View::Settings, View::Tui)
         );
+    }
+
+    #[gpui::test]
+    fn settings_opacity_reaches_the_title_bar_and_the_tui_view(cx: &mut TestAppContext) {
+        let (shell, v) = open(cx, 1400., 930.);
+        let tui = synthesis_settings::TuiSettings {
+            opacity: 60,
+            blur: true,
+            panels: [true, true, false, true, true, true, true, true],
+            ..Default::default()
+        };
+        shell.update_in(v, |s, window, cx| s.apply_look(tui, window, cx));
+        v.run_until_parked();
+        // the title bar and the surfaces paint `theme::fill`; text colours stay opaque
+        assert_eq!(theme::fill(t::BG).a, 0.6);
+        assert_eq!(theme::hsla(t::TEXT_STRONG).a, 1.);
+        // the TUI view hid the Tools panel at once
+        assert!(shell.read_with(v, |s, cx| s.tui.read(cx).hidden_panels().tools));
+        shell.update_in(v, |s, window, cx| {
+            s.apply_look(Default::default(), window, cx)
+        });
+        assert_eq!(theme::fill(t::BG).a, 1.);
     }
 }

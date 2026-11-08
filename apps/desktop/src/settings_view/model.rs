@@ -89,6 +89,12 @@ pub enum Control {
         range: String,
     },
     List(Vec<String>),
+    /// A whole percentage dragged on a slider.
+    Slider {
+        min: u64,
+        max: u64,
+        value: u64,
+    },
     /// A value shown, never written (summary only: no object contents).
     Static(String),
 }
@@ -101,6 +107,10 @@ pub struct Row {
     pub control: Control,
     pub origin: Origin,
     pub restart: bool,
+    /// The default, as text.
+    pub default: String,
+    /// Read by the terminal TUI only: the desktop view has nothing to apply.
+    pub terminal_only: bool,
     /// Written in this run and a running session keeps the old value.
     pub changed: bool,
     pub resettable: bool,
@@ -163,6 +173,23 @@ pub struct Model {
     pub agents_md: Vec<(PathBuf, bool)>,
     /// `(name, description, source)`.
     pub skills: Vec<(String, String, String)>,
+}
+
+/// `synt.tui` keys the terminal TUI reads and the desktop view does not (it has no mouse mode or queue lines,
+/// and its welcome and cards are the design's).
+const TERMINAL_ONLY: [&str; 5] = [
+    "synt.tui.logo",
+    "synt.tui.diffs_expanded",
+    "synt.tui.queue_indicators",
+    "synt.tui.mouse_capture",
+    "synt.tui.copy_on_select",
+];
+
+/// Why the window cannot blur what is behind it on this platform (`None`: it can). GPUI blurs on macOS
+/// (NSVisualEffectView) and Windows (acrylic); on Linux only some Wayland compositors do, and X11 never.
+pub fn blur_unsupported() -> Option<&'static str> {
+    (!cfg!(any(target_os = "macos", target_os = "windows")))
+        .then_some("window blur is not available on Linux (it depends on the compositor)")
 }
 
 fn matches(f: &Field, q: &str) -> bool {
@@ -360,14 +387,29 @@ impl Model {
                 text: value.as_f64().map(|n| n.to_string()).unwrap_or_default(),
                 range: format!("{min} to {max}"),
             },
+            Kind::Percent { min, max } => Control::Slider {
+                min,
+                max,
+                value: value.as_u64().unwrap_or(max),
+            },
             Kind::List(_) => Control::List(self.list_items(&f.key)),
             Kind::ReadOnly => Control::Static(show_value(value)),
         }
     }
 
+    /// Why the UI must not edit `key`: the schema, the managed file, or this platform.
+    fn lock_reason(&self, key: &str) -> Option<String> {
+        self.store.read_only_reason(key).or_else(|| {
+            (key == "synt.tui.blur")
+                .then(blur_unsupported)
+                .flatten()
+                .map(Into::into)
+        })
+    }
+
     pub fn row(&self, f: &Field) -> Row {
         let e = self.store.entry(&f.key);
-        let reason = self.store.read_only_reason(&f.key);
+        let reason = self.lock_reason(&f.key);
         let value = e.map_or(Value::Null, |e| e.value.clone());
         Row {
             key: f.key.clone(),
@@ -376,6 +418,11 @@ impl Model {
             control: self.control_of(f, &value, reason.is_some()),
             origin: e.map_or(Origin::Default, |e| e.origin),
             restart: f.restart,
+            default: f
+                .default
+                .as_ref()
+                .map_or_else(|| "unset".into(), show_value),
+            terminal_only: TERMINAL_ONLY.contains(&f.key.as_str()),
             changed: self.changed.contains(&f.key),
             resettable: reason.is_none() && e.is_some_and(|e| e.user_value.is_some()),
             locked: reason,
@@ -420,11 +467,16 @@ impl Model {
         let Some(f) = self.store.schema.field(key).cloned() else {
             return Outcome::Rejected;
         };
+        if let Some(why) = self.lock_reason(key).filter(|_| key == "synt.tui.blur") {
+            self.errors
+                .insert(key.into(), format!("{key}: not editable here: {why}"));
+            return Outcome::Rejected;
+        }
         let value = match (c, f.kind) {
             (Change::Bool(b), _) => json!(b),
             (Change::Choice(s), _) => json!(s),
             // an unparsable text goes on as a string: the schema's own message says what is expected
-            (Change::Text(t), Kind::Int { .. }) => t
+            (Change::Text(t), Kind::Int { .. } | Kind::Percent { .. }) => t
                 .trim()
                 .parse::<u64>()
                 .map_or(Value::String(t), |n| json!(n)),
@@ -875,5 +927,99 @@ mod tests {
         assert_eq!(m.agents_md.len(), 3);
         assert_eq!(m.agents_md.iter().filter(|(_, there)| *there).count(), 1);
         assert!(!m.skills.is_empty(), "bundled skills are listed");
+    }
+
+    /// The user file of the owner's machine has this shape (`synt.tui` with four panel keys, the rest of the
+    /// settings beside it); tests run on a copy, never on `~/.synt`.
+    const REAL_SHAPE: &str = r#"{"permissions":{"deny":["Bash(rm:*)"]},"env":{"FOO":"1"},"synt":{"budget":{"max_turns":50},"tui":{"panels":{"session":true,"mcp":true,"tools":true,"activity":true},"logo":"art","show_thinking":true,"verbose":true,"diffs_expanded":true,"queue_indicators":true,"motion":true,"mouse_capture":true,"copy_on_select":true}}}"#;
+
+    #[test]
+    fn opacity_on_the_real_file_shape_validates_persists_and_resets() {
+        let (_t, mut m) = model();
+        std::fs::write(m.cfg.home.join("settings.json"), REAL_SHAPE).unwrap();
+        m.store.reload();
+        let k = "synt.tui.opacity";
+        let r = row(&m, k);
+        assert_eq!(
+            r.control,
+            Control::Slider {
+                min: 30,
+                max: 100,
+                value: 100
+            }
+        );
+        assert_eq!(
+            (r.origin, r.default.as_str(), r.resettable, r.restart),
+            (Origin::Default, "100", false, false)
+        );
+        assert_eq!(m.change(k, Change::Text("55".into())), Outcome::Saved);
+        let f = user_file(&m);
+        assert_eq!(f["synt"]["tui"]["opacity"], json!(55));
+        // everything else in the file is as it was
+        let mut want: Value = serde_json::from_str(REAL_SHAPE).unwrap();
+        want["synt"]["tui"]["opacity"] = json!(55);
+        assert_eq!(f, want);
+        let r = row(&m, k);
+        assert_eq!((r.origin, r.resettable), (Origin::User, true));
+        let (tui, diag) = synthesis_settings::read_user_tui(&m.cfg.home);
+        assert_eq!((tui.opacity, diag), (55, vec![]));
+        // under the minimum, over 100, not a number: refused with the range, the file keeps 55
+        for bad in ["29", "101", "abc", "50.5", ""] {
+            assert_eq!(
+                m.change(k, Change::Text(bad.into())),
+                Outcome::Rejected,
+                "{bad}"
+            );
+            assert!(row(&m, k).error.unwrap().contains("30 to 100"));
+        }
+        assert_eq!(user_file(&m)["synt"]["tui"]["opacity"], json!(55));
+        assert_eq!(m.reset(k), Outcome::Saved);
+        assert!(user_file(&m)["synt"]["tui"].get("opacity").is_none());
+        assert_eq!(row(&m, k).origin, Origin::Default);
+    }
+
+    #[test]
+    fn blur_is_a_switch_where_the_platform_blurs_and_locked_with_the_reason_elsewhere() {
+        let (_t, mut m) = model();
+        let k = "synt.tui.blur";
+        match blur_unsupported() {
+            None => {
+                assert_eq!(row(&m, k).control, Control::Switch(false));
+                assert!(row(&m, k).locked.is_none());
+                assert_eq!(m.change(k, Change::Bool(true)), Outcome::Saved);
+                assert_eq!(user_file(&m)["synt"]["tui"]["blur"], json!(true));
+            }
+            Some(why) => {
+                assert_eq!(row(&m, k).locked.as_deref(), Some(why));
+                assert_eq!(m.change(k, Change::Bool(true)), Outcome::Rejected);
+                assert!(m.errors[k].contains(why));
+                assert!(!m.cfg.home.join("settings.json").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn rows_say_when_a_change_applies() {
+        let (_t, m) = model();
+        // the desktop applies these now
+        for k in [
+            "synt.tui.opacity",
+            "synt.tui.verbose",
+            "synt.tui.motion",
+            "synt.tui.panels.usage",
+        ] {
+            let r = row(&m, k);
+            assert!(!r.restart && !r.terminal_only, "{k}");
+        }
+        // the terminal TUI reads these; the desktop view has nothing to apply
+        for k in [
+            "synt.tui.logo",
+            "synt.tui.mouse_capture",
+            "synt.tui.copy_on_select",
+        ] {
+            assert!(row(&m, k).terminal_only, "{k}");
+        }
+        // engine settings wait for a session
+        assert!(row(&m, "synt.memory.enabled").restart);
     }
 }

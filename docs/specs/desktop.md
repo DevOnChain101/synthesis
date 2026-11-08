@@ -10,7 +10,7 @@ of the classic TUI design, in this repo, running the Rust engine in process.
 
 - One interface, plus a placeholder and Settings: **TUI** (the classic TUI design drawn natively from engine
   data, `cli.html` exactly), **Agent** (a different design, later: the page says "Coming soon") and **Settings**
-  (slide-in over the current view). The design reference is `~/Vibe/synthesis-cli-ui/cli.html` with the platinum
+  (a centred popup over the TUI view, section 6). The design reference is `~/Vibe/synthesis-cli-ui/cli.html` with the platinum
   palette (`docs/tui-palette.md`), not its blue/green. The first Agent view (`agent_view/`, built on `#view2`) was
   removed on 2026-11-07 by owner decision; its chat pane, diff/terminal/browser panes and project tree live on in
   the TUI view's centre panel.
@@ -204,7 +204,7 @@ tools and skills, conversation. Not done, with where the data would come from:
 - Commands tab: `process.spawned|output|exited` (Bash, terminal_spawn) give the real exit code and background
   rows; `[exit code N]` parsing stays as the fallback for old sessions. A background process nobody polls
   again never gets `process.exited`. Verification has only `verification.completed` (no per-check progress).
-- Settings write API: done in `crates/synthesis-settings-ui` (section 6). The GPUI form is not built.
+- Settings: done. Write API in `crates/synthesis-settings-ui`, the popup in `apps/desktop/src/settings_view` (section 6).
 - Multi-session tabs: TODO. `ViewState` is one session; tabs are a `Vec<ViewState>` keyed by session id
   in the desktop, fed by one event channel per `engine` run. Needs the engine to host several sessions.
 - Peers refresh: done. `ViewState::set_peers` takes the harness rows; the desktop polls the `peer` listing every
@@ -231,7 +231,7 @@ appearance and has no backend key (the desktop owns it). The sections below are 
 **Crate.** Pure data, no UI dependency. Separate from `synthesis-settings` because it reuses the validators of
 `synthesis-harness` (`AutoCompact`, `ToolSearchMode`, `ShellSettings`), and the harness depends on `synthesis-settings`.
 - `SettingsSchema::new()`: `Field { key (dotted path), section, label, kind (Bool | Enum | Int{min,max} | Float{min,max} |
-  List | ReadOnly), default, help, scope (UserOnly | Layered | Tighten), restart, edit (Yes | Confirm(reason) | No(reason)) }`.
+  Percent{min,max} (a slider) | List | ReadOnly), default, help, scope (UserOnly | Layered | Tighten), restart, edit (Yes | Confirm(reason) | No(reason)) }`.
 - `SettingsStore::open(&LoadContext, ProjectTrust, managed_path, --settings file)`: `entries` (value in force, `Origin`
   Default/User/Project/Local/Flag/Managed, the USER file's own value, and the layers that hold the key but may not set it, each
   with the reason), plus the loader's `diagnostics` and `errors`.
@@ -297,6 +297,8 @@ also set it. Restart: a running session keeps the old value. Editable = the UI m
 | `synt.tui.diffs_expanded` | INTERFACE | user file only | no | yes |
 | `synt.tui.queue_indicators` | INTERFACE | user file only | no | yes |
 | `synt.tui.motion` | INTERFACE | user file only | no | yes |
+| `synt.tui.opacity` | APPEARANCE | user file only | no | yes (slider 30 to 100 %, default 100) |
+| `synt.tui.blur` | APPEARANCE | user file only | no | yes where the platform blurs (default off) |
 | `synt.tui.mouse_capture` | INTERFACE | user file only | no | yes |
 | `synt.tui.copy_on_select` | INTERFACE | user file only | no | yes |
 | `synt.tui.panels.{session,mcp,tools,activity,status,tokens,topology,usage}` | INTERFACE | user file only | no | yes |
@@ -311,4 +313,26 @@ model and effort (`synt.json` / `state.json`, `/model` `/effort`); safety, polic
 `--network` flags of the run); approval "granular" (only `permissions.defaultMode` and rules); proxy (standard `HTTP(S)_PROXY` variables);
 per-skill on/off and planner/coder/reviewer toggles (SKILLS, SUB-AGENTS: files in `skills/` and `agents/`); per-event hook toggles
 (pre-tool, post-tool, on-error, on-done: hooks are defined per event, only `disableAllHooks` exists); MEMORY learned/feedback counters
-(data, not settings); EXECUTION tool-call, error and success counters (live status); theme, font, opacity (desktop appearance).
+(data, not settings); EXECUTION tool-call, error and success counters (live status); theme and font (desktop appearance; opacity
+and blur are `synt.tui.opacity` / `synt.tui.blur`).
+
+**The popup** (`settings_view`). Cmd/Ctrl+`,`, the gear in the title bar and `/config` open it; Esc (the open confirmation first), the x
+and a click on the backdrop close it. It is a centred panel over the TUI view (no sidebar, no view of its own): at most 720 x 640, a
+16 px margin to the window, scrolling inside. Tabs group the sections (Appearance, Interface, Memory, Execution, Guards, Hooks, MCP,
+Skills, Sub-agents, User & prompt); a search shows the matching rows of every tab. Each row shows the value, where it comes from
+(default / user / project / local / flag / managed), its default, a reset link (removes the key from the USER file), the validation
+error of a refused edit, and when it applies: `applies now` (panels, thinking, verbose rows, motion, opacity, blur), `applies to the next
+session` with a banner and a working **Restart session** button (a fresh session in the same folder, which reads the files again), or
+`terminal TUI only` (logo, expanded diffs, queue lines, mouse capture, copy on select: the desktop view has nothing to apply). Keys that
+widen what the agent may do stay read-only with the reason; there is no field for an API key (ADR-011). Every write goes through
+`SettingsStore` (atomic, USER `settings.json`, every other key kept). While the popup is open the TUI view is not `shown`, so it never
+answers a pending approval (the title bar keeps the red "approval needed", a click on it returns to the TUI view).
+
+**Window opacity and blur.** `synt.tui.opacity` (whole percent, 30 to 100, default 100; under 30 the window is too faint to read, so
+the loader and the slider refuse it) and `synt.tui.blur` (default off). Opacity scales the alpha of the window's background fills
+only (`theme::fill`: the shell, the title bar, the TUI view, the panels); text, borders and the Settings popup stay opaque. The window
+asks GPUI for `Opaque` at 100 %, else `Blurred` (blur on and supported) or `Transparent` (`WindowBackgroundAppearance`, set at open
+and on every change). Blur: macOS (NSVisualEffectView) and Windows (acrylic) support it; on Linux GPUI blurs only on some Wayland
+compositors and never on X11, so the control is disabled there with that reason. Blur shows only under 100 % opacity. Dragging the
+slider previews at once; the file is written when the thumb is released. Only a real window shows the result (headless shots draw no
+desktop behind the window).

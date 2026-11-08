@@ -1,7 +1,8 @@
 //! Development only (feature `shot`): `synthesis-desktop --shot out.png --view settings [--size WxH]
-//! [--search TEXT] [--confirm] [--scroll PX]` draws the Settings panel over the TUI sample, offscreen,
-//! on a throwaway `SYNT_HOME` (never `~/.synt`). `--seed` writes a few user values so origins, reset
-//! links and the restart badge show.
+//! [--search TEXT] [--confirm] [--scroll PX] [--tab NAME] [--opacity PCT]` draws the whole shell (title bar,
+//! TUI sample) with the Settings popup over it, offscreen, on a throwaway `SYNT_HOME` (never `~/.synt`), and
+//! writes a few user values so origins, reset links and the restart badge show. `--opacity` paints the window
+//! over coloured stripes (the desktop behind a real window) so the translucency can be seen.
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -20,6 +21,10 @@ pub struct Args {
     confirm: bool,
     /// Scroll the panel down by this many pixels.
     scroll: f32,
+    /// The tab to open (its label, e.g. `Memory`).
+    tab: Option<String>,
+    /// Window opacity in percent.
+    opacity: Option<u8>,
 }
 
 /// `None` unless `--view settings` is given with `--shot`.
@@ -43,6 +48,8 @@ pub fn parse(args: &[String]) -> Option<Args> {
         search: val("--search").cloned().unwrap_or_default(),
         confirm: args.iter().any(|a| a == "--confirm"),
         scroll: val("--scroll").and_then(|s| s.parse().ok()).unwrap_or(0.),
+        tab: val("--tab").cloned(),
+        opacity: val("--opacity").and_then(|s| s.parse().ok()),
     })
 }
 
@@ -83,14 +90,24 @@ pub fn render(a: Args) -> Result<(), Err> {
         crate::ui::register_fonts(cx);
         crate::theme::apply("JetBrains Mono", cx);
     });
+    let (tab, opacity) = (a.tab.clone(), a.opacity);
+    crate::theme::set_opacity(opacity.unwrap_or(100));
     let win = cx.open_window(size(px(a.w), px(a.h)), |window, cx| {
         let tui = cx.new(|_| TuiView::new(0., Hidden::default()));
-        let st = cx.new(|cx| {
-            let mut v = SettingsView::new(window, cx, Ok(cfg), 0.);
-            v.seed(&a.search, a.confirm, a.scroll, window, cx);
-            v
+        let shell = cx.new(|cx| crate::ui::Shell::around(window, cx, tui, Ok(cfg)));
+        shell.update(cx, |s, cx| {
+            s.go(crate::ui::View::Settings, window, cx);
+            s.settings().update(cx, |v, cx| {
+                v.seed(&a.search, a.confirm, a.scroll, tab.as_deref(), window, cx);
+                if let Some(o) = opacity {
+                    v.apply("synt.tui.opacity", Change::Text(o.to_string()), window, cx);
+                }
+            });
         });
-        cx.new(|_| Both { tui, st })
+        cx.new(|_| Behind {
+            shell,
+            stripes: opacity.is_some(),
+        })
     })?;
     cx.run_until_parked();
     let img = cx.capture_screenshot(win.into())?;
@@ -106,24 +123,26 @@ pub fn render(a: Args) -> Result<(), Err> {
     Ok(())
 }
 
-/// The TUI sample with the panel over it, as the shell composes them.
-struct Both {
-    tui: gpui::Entity<TuiView>,
-    st: gpui::Entity<SettingsView>,
+/// The shell, over coloured stripes when the opacity is being looked at.
+struct Behind {
+    shell: gpui::Entity<crate::ui::Shell>,
+    stripes: bool,
 }
 
-impl gpui::Render for Both {
+impl gpui::Render for Behind {
     fn render(
         &mut self,
         _: &mut gpui::Window,
         _: &mut gpui::Context<Self>,
     ) -> impl gpui::IntoElement {
         use gpui::{ParentElement as _, Styled as _, div};
-        div()
-            .relative()
-            .size_full()
-            .child(self.tui.clone())
-            .child(div().absolute().inset_0().child(self.st.clone()))
+        let mut d = div().relative().size_full().flex();
+        if self.stripes {
+            for c in [0xd94a4a, 0xe8c547, 0x3fa7d6, 0x59c47a, 0xb06ad9] {
+                d = d.child(div().h_full().flex_1().bg(gpui::rgb(c)));
+            }
+        }
+        d.child(div().absolute().inset_0().child(self.shell.clone()))
     }
 }
 
@@ -134,6 +153,7 @@ impl SettingsView {
         search: &str,
         confirm: bool,
         scroll: f32,
+        tab: Option<&str>,
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) {
@@ -167,6 +187,11 @@ impl SettingsView {
             if let Some(m) = &mut self.model {
                 m.filter = search.into();
             }
+        }
+        if let Some(t) =
+            tab.and_then(|t| super::TABS.into_iter().find(|s| super::tab_label(*s) == t))
+        {
+            self.tab = t;
         }
         self.scroll.set_offset(gpui::point(px(0.), px(-scroll)));
         if confirm {

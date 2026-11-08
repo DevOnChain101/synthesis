@@ -1073,6 +1073,30 @@ impl TuiView {
         self.pick_folder(cx);
     }
 
+    /// The dash panels switched off now.
+    pub fn hidden_panels(&self) -> super::layout::Hidden {
+        self.hidden
+    }
+
+    /// The Settings popup saved `synt.tui`: what this view reads (panels, thinking, verbose rows, motion) applies now.
+    pub fn apply_settings(&mut self, tui: synthesis_settings::TuiSettings, cx: &mut Context<Self>) {
+        let mut hidden = super::layout::Hidden::default();
+        for (shown, (key, _)) in tui.panels.iter().zip(synthesis_settings::TUI_PANELS) {
+            if !shown {
+                hidden.hide(key);
+            }
+        }
+        self.hidden = hidden;
+        if let Some(lu) = &mut self.live {
+            lu.live.show_thinking = tui.show_thinking;
+            lu.live.verbose = tui.verbose;
+            Arc::make_mut(&mut lu.cfg).tui = tui;
+            lu.dirty = true;
+            lu.list_reset = true;
+        }
+        cx.notify();
+    }
+
     /// "new session..." of the Running panel: a fresh session in the selected workspace.
     pub fn new_session(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.run_action(Action::New, cx);
