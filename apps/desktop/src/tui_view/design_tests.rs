@@ -275,15 +275,27 @@ fn topology_cards(cx: &mut TestAppContext) {
             let want = [want[0] - gx, want[1] - gy, want[2], want[3]];
             let got = pos.map_or(geo.core, |p| geo.rect(p));
             let have = [got.x, got.y, got.w, got.h];
-            // owner request (departs from cli.html): every card is as wide as the side cards, so the middle
-            // column's (design 184 px) is compared by y and height only
-            let wide = matches!(pos, Some(Pos::Hooks | Pos::Tools)) && geo.mode != Mode::T;
-            let cmp: &[usize] = if wide { &[1, 3] } else { &[0, 1, 2, 3] };
+            // owner request (departs from cli.html): in the A/B grids the cards fill the panel (three equal
+            // columns, rows share the height, the core fills the middle cell), all eight the same size. So the
+            // left column is compared by x only; the rest must just be equal to each other.
+            let grid = geo.mode != Mode::T;
+            let side = matches!(pos, Some(Pos::User | Pos::Sub | Pos::Mcp));
+            let cmp: &[usize] = match (grid, side, pos.is_some()) {
+                (false, ..) => &[0, 1, 2, 3],
+                (true, true, _) => &[0],
+                (true, false, _) => &[],
+            };
             let mx = cmp
                 .iter()
                 .fold(0f32, |a, &i| a.max((have[i] - want[i]).abs()));
-            if wide && (got.w - geo.rect(Pos::User).w).abs() > 0.01 {
-                bad.push(format!("{key} {name}: width {} != the other cards'", got.w));
+            if grid && pos.is_some() {
+                let u = geo.rect(Pos::User);
+                if (got.w - u.w).abs() > 0.01 || (got.h - u.h).abs() > 0.01 {
+                    bad.push(format!(
+                        "{key} {name}: size {}x{} != the other cards'",
+                        got.w, got.h
+                    ));
+                }
             }
             println!("{name:8} design {want:.1?} gpui {have:.1?} dev {mx:.2}");
             if mx > 1.5 {

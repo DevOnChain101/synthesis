@@ -154,24 +154,17 @@ pub fn geometry(aw: f32, ah: f32) -> Geo {
         (2f32, 4f32, 10f32, 12f32, 46f32)
     };
     let w = aw - 2. * px_;
-    let third = (w - 2. * cg) / 3.1;
-    // A: minmax(184px, 1.1fr) in the middle, the sides share the rest; B: three equal columns
-    let (side, mid) = if !a {
-        let c = (w - 2. * cg) / 3.;
-        (c, c)
-    } else if 1.1 * third >= 184. {
-        (third, 1.1 * third)
-    } else {
-        ((w - 2. * cg - 184.) / 2., 184.)
-    };
+    // owner request: three equal columns and cards that fill their cell (all the same size), the core filling
+    // the middle cell; so the grid follows the panel's width and height instead of leaving it empty
+    let col = (w - 2. * cg) / 3.;
     let row_h = row_min.max((ah - 2. * py - 2. * rg) / 3.);
-    let col_x = [px_, px_ + side + cg, px_ + side + cg + mid + cg];
-    let col_w = [side, mid, side];
+    let col_x = [px_, px_ + col + cg, px_ + 2. * (col + cg)];
     let row_y = |i: usize| py + i as f32 * (row_h + rg);
-    // B: 5 + 5 padding, 2 border, 10.5px title line (1.55) + 2, one 10.5px line (1.35)
-    let card_h: f32 = if a { 86. } else { 44.45 };
-    // owner request: every card has the same width (the middle column's is centred in its wider cell)
-    let node_w = side.min(mid);
+    let card_h = if a {
+        row_h.clamp(86., 150.)
+    } else {
+        row_h.clamp(44.45, 70.)
+    };
     let mut nodes = Vec::new();
     for (ri, row) in GRID.iter().enumerate() {
         for (ci, p) in row.iter().enumerate() {
@@ -181,21 +174,21 @@ pub fn geometry(aw: f32, ah: f32) -> Geo {
             nodes.push((
                 *p,
                 R {
-                    x: col_x[ci] + (col_w[ci] - node_w) / 2.,
+                    x: col_x[ci],
                     y: row_y(ri) + (row_h - card_h) / 2.,
-                    w: node_w,
+                    w: col,
                     h: card_h,
                 },
             ));
         }
     }
     let (cw, ch) = if a {
-        (172f32.min(mid), 172f32.min(row_h))
+        (col.min(240.), row_h.min(240.))
     } else {
-        (150f32.min(mid), row_h)
+        (col.min(200.), row_h)
     };
     let core = R {
-        x: col_x[1] + (mid - cw) / 2.,
+        x: col_x[1] + (col - cw) / 2.,
         y: row_y(1) + (row_h - ch) / 2.,
         w: cw,
         h: ch,
@@ -270,7 +263,7 @@ pub fn geometry(aw: f32, ah: f32) -> Geo {
 
 fn geometry_t(aw: f32, ah: f32) -> Geo {
     let tmin = ah < 232.;
-    let (core_h, core_gap, row_h) = if tmin {
+    let (core_h, core_gap, row_h): (f32, f32, f32) = if tmin {
         (20., 8., 15.)
     } else {
         (24., 10., 19.)
@@ -285,6 +278,8 @@ fn geometry_t(aw: f32, ah: f32) -> Geo {
     let x = 22.;
     // the column's `gap:2px` comes on top of the core's bottom margin
     let mut y = core.b() + core_gap + 2.;
+    // owner request: the rows share the height left (up to 34 px each) instead of leaving the panel empty
+    let row_h = row_h.max(((ah - y - 2. - 7. * 2.) / 8.).min(34.));
     let mut nodes = Vec::new();
     for p in T_ORDER {
         nodes.push((
