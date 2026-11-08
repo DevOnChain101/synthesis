@@ -314,7 +314,7 @@ fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Run
         })
         .collect();
     out.extend(v.running.peers.iter().map(|p| Running {
-        id: String::new(),
+        id: p.address.clone(),
         peer: true,
         title: if p.task.is_empty() {
             format!("{} \u{b7} {}", p.session_short_id, p.agent)

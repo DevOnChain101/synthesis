@@ -344,7 +344,7 @@ impl TuiView {
             Box::new(cx.listener(move |this, _, _, cx| this.click_workspace(i, cx)))
         };
         let run_click = |i: usize| -> panels::OnClick {
-            Box::new(cx.listener(move |this, _, _, cx| this.click_running(i, cx)))
+            Box::new(cx.listener(move |this, _, window, cx| this.click_running(i, window, cx)))
         };
         let new_ws: Option<panels::OnClick> = live.map(|_| -> panels::OnClick {
             Box::new(cx.listener(|this, _, _, cx| this.new_workspace(cx)))
@@ -858,6 +858,7 @@ impl Render for TuiView {
             window.request_animation_frame();
         }
         self.refresh(window);
+        self.sync_placeholder(window, cx);
         self.tabs_tick(cx);
         let vp = window.viewport_size();
         let w = f32::from(vp.width) - self.inset;
