@@ -14,6 +14,7 @@ pub mod sessions;
 pub mod state;
 pub mod status;
 pub mod text;
+pub mod toolview;
 pub mod topology;
 pub mod usage;
 pub mod workspaces;

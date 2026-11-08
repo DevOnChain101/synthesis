@@ -34,6 +34,8 @@ pub struct Args {
     inject: Option<PathBuf>,
     verbose: bool,
     focus: bool,
+    /// `--expand`: every tool card open (Ctrl+O).
+    expand: bool,
     /// `--check`: reopen the written PNG and fail unless it is the asked size (times a whole scale) and not blank.
     check: bool,
     w: f32,
@@ -118,6 +120,7 @@ pub fn parse(args: &[String]) -> Option<Args> {
         inject: val("--inject").map(PathBuf::from),
         verbose: args.iter().any(|a| a == "--verbose"),
         focus: args.iter().any(|a| a == "--focus"),
+        expand: args.iter().any(|a| a == "--expand"),
         check: args.iter().any(|a| a == "--check"),
         w,
         h,
@@ -278,6 +281,7 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             prepare_tabs(&mut l, &e, &t, a.tab)?;
             l.verbose = a.verbose;
             l.focus_view = a.focus;
+            l.expand_all = a.expand;
             if let Some(f) = &a.inject {
                 for line in std::fs::read_to_string(f)?
                     .lines()
