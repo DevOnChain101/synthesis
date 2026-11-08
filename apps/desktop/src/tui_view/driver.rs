@@ -467,7 +467,7 @@ impl TuiView {
                     let rows = job.await;
                     this.update(cx, |t, cx| {
                         if let Some(lu) = &mut t.live {
-                            lu.live.peer_rows = rows.unwrap_or_default();
+                            lu.live.set_peer_rows(rows.unwrap_or_default(), now_ms());
                             let rows = lu.live.peer_rows.clone();
                             lu.live.view.set_peers(&rows);
                             lu.dirty = true;

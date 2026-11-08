@@ -1050,6 +1050,18 @@ impl TuiView {
                     )),
             );
         }
+        if let Some(to) = &l.send_to {
+            col = col.child(
+                div()
+                    .mx(px(12.))
+                    .mb(px(2.))
+                    .text_color(strong())
+                    .child(format!(
+                        "to {} (Enter sends once, Esc or Ctrl+T clears)",
+                        to.label
+                    )),
+            );
+        }
         let busy = l.busy || l.starting;
         col.child(input_box(
             div()
