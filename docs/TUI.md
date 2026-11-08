@@ -142,8 +142,10 @@ the right-hand graph and `usage` the history panel: hiding one gives its space t
 with both hidden the chat spans to the right edge), `logo` (`art` | `off`), `show_thinking`, `verbose`
 (internal rows in the chat, see Events), `diffs_expanded`
 (long output starts whole, like ctrl+o), `queue_indicators`, `motion` (spinners drawn still when off),
-`mouse_capture` (off: the terminal's own selection; applies at start), `copy_on_select`. Defaults:
-everything on, `diffs_expanded` and `verbose` off. A project, local or managed settings file that sets `synt.tui`
+`mouse_capture` (off: the terminal's own selection; applies at start), `copy_on_select`, and two the
+desktop app reads (the terminal ignores them): `opacity` (window background opacity, whole percent 30 to 100) and `blur`
+(blur behind the window; macOS and Windows). Defaults: everything on, `diffs_expanded` and `verbose` off, `opacity` 100,
+`blur` off. A project, local or managed settings file that sets `synt.tui`
 is ignored with a diagnostic; a wrong value keeps the default and the diagnostic names the key.
 `/config` edits these and writes the USER file atomically, keeping every other key; it can write
 nothing else, so never a credential. First run without a configured model shows a setup card
