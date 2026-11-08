@@ -1034,11 +1034,12 @@ mod tests {
         l.starting = false;
         l.view.convo.items = vec![
             tool("read", "Read", numbered(72)),
-            tool("grep", "Grep", numbered(30)),
             tool("bash", "Bash", numbered(40)),
             // one very long line is the rows it fills on screen
             tool("long", "Bash", "x".repeat(6000)),
             tool("short", "Bash", numbered(3)),
+            // last, and short enough that its header stays on screen once opened
+            tool("grep", "Grep", numbered(30)),
         ];
         view.update(vcx, |t, _| t.set_live(l));
         vcx.simulate_resize(size(px(1400.), px(1400.)));
@@ -1047,12 +1048,25 @@ mod tests {
             assert!(vcx.debug_bounds(id).is_some(), "{id}: no Show more");
         }
         assert!(vcx.debug_bounds("more-short").is_none());
-        // a double click opens the card whole: its control becomes "Show less" and the clip is gone
-        view.update(vcx, |t, cx| t.toggle_card("read", cx));
+        // one click on a header opens the card whole, the next clips it again
+        let head = vcx.debug_bounds("tool-head-grep").expect("header drawn");
+        let at = gpui::point(head.left() + px(60.), head.center().y);
+        let open = |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext| {
+            view.read_with(vcx, |t, _| {
+                t.live.as_ref().unwrap().live.expanded.contains("grep")
+            })
+        };
+        vcx.simulate_click(at, gpui::Modifiers::default());
         vcx.run_until_parked();
-        assert!(view.read_with(vcx, |t, _| {
-            t.live.as_ref().unwrap().live.expanded.contains("read")
-        }));
+        assert!(open(&view, vcx), "first click expands");
+        // the list measures the taller card, then the header is looked up where it now is
+        vcx.simulate_resize(size(px(1400.), px(1401.)));
+        vcx.run_until_parked();
+        let head = vcx.debug_bounds("tool-head-grep").unwrap();
+        let at = gpui::point(head.left() + px(60.), head.center().y);
+        vcx.simulate_click(at, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert!(!open(&view, vcx), "second click collapses");
     }
 
     /// A click on a section's title folds it to its header, a second click opens it again.

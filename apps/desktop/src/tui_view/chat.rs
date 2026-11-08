@@ -777,6 +777,10 @@ impl TuiView {
             .child(
                 div()
                     .id(("tool-head", idx))
+                    .debug_selector({
+                        let k = format!("tool-head-{id}");
+                        move || k.clone()
+                    })
                     .flex()
                     .items_center()
                     .gap(px(10.))
@@ -784,12 +788,9 @@ impl TuiView {
                     .py(px(7.))
                     .cursor_pointer()
                     .hover(|d| d.bg(super::with_alpha_white(0.03)))
-                    // a double click on the header toggles the card; the chevron below is one click
-                    .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| {
-                        if ev.click_count() >= 2 {
-                            this.toggle_card(&tid0, cx);
-                        }
-                    }))
+                    // one click on the header opens a clipped card, the next clips it again (the chevron is part
+                    // of the header; the body, where text is selected, is not)
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_card(&tid0, cx)))
                     .child(icon(ic, 16., kind_col))
                     .child(
                         div()

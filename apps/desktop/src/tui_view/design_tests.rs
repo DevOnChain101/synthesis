@@ -288,6 +288,9 @@ fn topology_cards(cx: &mut TestAppContext) {
             let mx = cmp
                 .iter()
                 .fold(0f32, |a, &i| a.max((have[i] - want[i]).abs()));
+            if grid && pos.is_none() && (got.w - got.h).abs() > 0.01 {
+                bad.push(format!("{key} core: {}x{} is not a square", got.w, got.h));
+            }
             if grid && pos.is_some() {
                 let u = geo.rect(Pos::User);
                 if (got.w - u.w).abs() > 0.01 || (got.h - u.h).abs() > 0.01 {

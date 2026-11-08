@@ -182,11 +182,9 @@ pub fn geometry(aw: f32, ah: f32) -> Geo {
             ));
         }
     }
-    let (cw, ch) = if a {
-        (col.min(240.), row_h.min(240.))
-    } else {
-        (col.min(200.), row_h)
-    };
+    // the core is a square (owner rule): the shorter side of its cell, centred in it
+    let side = col.min(row_h).min(if a { 240. } else { 200. });
+    let (cw, ch) = (side, side);
     let core = R {
         x: col_x[1] + (col - cw) / 2.,
         y: row_y(1) + (row_h - ch) / 2.,
