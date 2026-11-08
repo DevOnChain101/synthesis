@@ -36,6 +36,8 @@ pub struct SubAgent {
     /// The instance name when the session gave one, else the type.
     pub name: String,
     pub kind: String,
+    /// The `Task` call that started it (`subagent.started.tool_call_id`).
+    pub tool_call_id: Option<String>,
     pub background: bool,
     /// `running`, `waiting_approval`, `idle`, `cancelled`, `evicted` (the status events) or `stopped`.
     pub status: String,
@@ -352,6 +354,7 @@ impl AgentPanes {
                         id: i.agent_id.clone(),
                         name: i.name.clone().unwrap_or_else(|| i.agent_type.clone()),
                         kind: i.agent_type.clone(),
+                        tool_call_id: i.tool_call_id.clone(),
                         background: i.background,
                         status: "running".into(),
                         model: String::new(),

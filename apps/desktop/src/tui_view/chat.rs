@@ -8,9 +8,9 @@ use gpui::{
 };
 use gpui_component::input::Textarea;
 use gpui_component::text::TextView;
-use serde_json::Value;
 use synthesis_tui_render::theme as t;
-use synthesis_view::convo::{ApprovalState, Item, StepState, ToolState};
+use synthesis_view::convo::{ApprovalState, Item, StepState};
+use synthesis_view::toolview::{self, Glyph, Tone};
 
 use super::panels::{dim, icon, strong, text};
 use super::topo::with_alpha;
@@ -18,6 +18,7 @@ use super::tracked;
 use super::{TuiView, layout};
 use crate::live::{clip, label};
 use crate::theme::hsla;
+use crate::widgets::syntax;
 
 /// Lines of a tool's output shown before "ctrl+o" (the TUI's default).
 pub const COLLAPSED_LINES: usize = 5;
@@ -127,6 +128,7 @@ fn tool_title(name: &str) -> String {
         "Bash" | "BashOutput" | "KillShell" => "Running".into(),
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => "Applying patch".into(),
         "Task" => "Agent".into(),
+        n if n.starts_with("mcp__") => "MCP".into(),
         n if n.starts_with("browser_") => format!("Browser {}", n.trim_start_matches("browser_")),
         n => n.to_string(),
     }
@@ -140,6 +142,29 @@ fn tool_look(name: &str) -> (&'static str, gpui::Hsla) {
         "Bash" => ("square-terminal", hsla(t::WARN)),
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => ("replace", hsla(t::DIFF_REMOVE)),
         _ => ("wrench", hsla(t::SUCCESS)),
+    }
+}
+
+/// Text colour of a [`Tone`] of a tool card.
+fn tone_fg(tone: Tone) -> gpui::Hsla {
+    match tone {
+        Tone::Text => text(),
+        Tone::Dim => dim(),
+        Tone::Strong => strong(),
+        Tone::Accent => hsla(t::ACCENT_LIGHT),
+        Tone::Ok | Tone::Add => hsla(t::SUCCESS),
+        Tone::Err | Tone::Del => hsla(t::ERROR),
+        Tone::Warn => hsla(t::WARN),
+        Tone::Hunk => hsla(t::INFO),
+    }
+}
+
+/// Background of a diff row.
+fn tone_bg(tone: Tone) -> Option<gpui::Hsla> {
+    match tone {
+        Tone::Add => Some(with_alpha(hsla(t::SUCCESS), 0.10)),
+        Tone::Del => Some(with_alpha(hsla(t::ERROR), 0.10)),
+        _ => None,
     }
 }
 
@@ -743,71 +768,115 @@ impl TuiView {
         cx.notify();
     }
 
+    /// One tool call: the header (icon, title, what it did, badges, state glyph, chevron) and the rows
+    /// `toolview::shape` made for its kind. A click on the header opens or clips the body.
     fn tool_card(&self, idx: usize, it: &Item, cx: &mut Context<Self>) -> AnyElement {
-        let Item::Tool {
-            id,
-            name,
-            summary,
-            state,
-            preview,
-            output,
-            duration_ms,
-            diff,
-            ..
-        } = it
-        else {
+        let Item::Tool { id, name, .. } = it else {
             return div().into_any_element();
         };
-        let (mark, c) = match state {
-            ToolState::Running => ("\u{25CF}", hsla(t::WARN)),
-            ToolState::Ok => ("\u{2713}", hsla(t::SUCCESS)),
-            ToolState::Failed => ("\u{2717}", hsla(t::ERROR)),
-            ToolState::NotRun => ("\u{2013}", dim()),
-        };
-        let body = if output.is_empty() { preview } else { output };
-        let diff_lines = diff.as_ref().map(diff_rows).unwrap_or_default();
-        let shown_diff = !diff_lines.is_empty();
-        let (ic, kind_col) = tool_look(name);
-        // the numbers on the right of the header: lines read, results, +/- of a patch, else the duration
-        let n_lines = body.lines().count();
-        let count = |k: &str| {
-            diff.as_ref()
-                .and_then(|d| d.get(k))
-                .and_then(serde_json::Value::as_u64)
-        };
-        let meta: Vec<(String, gpui::Hsla)> =
-            match (name.as_str(), count("added"), count("removed")) {
-                ("Edit" | "Write" | "MultiEdit" | "NotebookEdit", Some(a), Some(r)) => {
-                    vec![
-                        (format!("+{a}"), hsla(t::SUCCESS)),
-                        (format!("\u{2212}{r}"), hsla(t::ERROR)),
-                    ]
-                }
-                ("Read", _, _) if n_lines > 0 => vec![(format!("{n_lines} lines"), dim())],
-                ("Grep" | "Glob", _, _) if n_lines > 0 => {
-                    vec![(format!("{n_lines} results"), dim())]
-                }
-                _ if *duration_ms > 0 => vec![(crate::widgets::panes::fmt_ms(*duration_ms), dim())],
-                _ => vec![],
-            };
-        let tid0 = id.clone();
+        let lu = self.live.as_ref();
+        let open = lu.is_some_and(|lu| lu.live.expand_all || lu.live.expanded.contains(id));
+        // shaped once per change of the call, not on every paint
+        thread_local! {
+            static CARDS: std::cell::RefCell<toolview::CardCache> = std::cell::RefCell::default();
+        }
         let cols = cols_for(self.centre_w - INDENT - 40.);
-        let total_rows = if shown_diff {
-            diff_lines.len()
-        } else {
-            wrap_rows(body, cols).len()
+        let Some(card) = CARDS.with(|c| c.borrow_mut().get(it, open, cols)) else {
+            return div().into_any_element();
         };
-        let collapsible = total_rows > COLLAPSED_LINES;
-        let open = self
-            .live
-            .as_ref()
-            .is_some_and(|lu| lu.live.expand_all || lu.live.expanded.contains(id));
+        let (mark, c) = match card.glyph {
+            Glyph::Running => (
+                if lu.is_some_and(|lu| lu.cfg.tui.motion) {
+                    spinner_glyph(crate::live::now_ms())
+                } else {
+                    card.glyph.mark()
+                },
+                hsla(t::WARN),
+            ),
+            Glyph::Ok => (card.glyph.mark(), hsla(t::SUCCESS)),
+            Glyph::Error => (card.glyph.mark(), hsla(t::ERROR)),
+            Glyph::Denied | Glyph::Interrupted => (card.glyph.mark(), dim()),
+        };
+        let (ic, kind_col) = tool_look(name);
+        let tid0 = id.clone();
         let chev = if open {
             "chevron-down"
         } else {
             "chevron-right"
         };
-        let mut card = div()
+        let gutter_w = card.gutter as f32 * 7.5 + 10.;
+        let mut head = div()
+            .id(("tool-head", idx))
+            .debug_selector({
+                let k = format!("tool-head-{id}");
+                move || k.clone()
+            })
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .px(px(10.))
+            .py(px(7.))
+            .cursor_pointer()
+            .hover(|d| d.bg(super::with_alpha_white(0.03)))
+            // one click on the header opens a clipped card, the next clips it again (the chevron is part
+            // of the header; the body, where text is selected, is not)
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_card(&tid0, cx)))
+            .child(icon(ic, 16., kind_col))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(kind_col)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(tool_title(name)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .gap(px(8.))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w_full()
+                            .truncate()
+                            .text_color(text())
+                            .child(card.head.clone()),
+                    )
+                    .when(!card.sub.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_color(dim())
+                                .child(card.sub.clone()),
+                        )
+                    }),
+            )
+            .children(card.badges.iter().map(|b| {
+                div()
+                    .flex_none()
+                    .text_color(tone_fg(b.tone))
+                    .child(b.text.clone())
+            }))
+            .child(div().flex_none().text_color(c).child(mark));
+        if card.collapsible {
+            let tid1 = id.clone();
+            head = head.child(
+                div()
+                    .id(("tool-chev", idx))
+                    .flex_none()
+                    .cursor_pointer()
+                    .text_color(dim())
+                    .child(icon(chev, 14., dim()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.toggle_card(&tid1, cx);
+                    })),
+            );
+        }
+        let mut card_el = div()
             .flex()
             .flex_col()
             .border_1()
@@ -815,74 +884,95 @@ impl TuiView {
             .rounded(px(6.))
             .bg(super::with_alpha_black(0.6))
             .overflow_hidden()
-            .child(
+            .child(head);
+        if !card.rows.is_empty() {
+            card_el = card_el.child(div().px(px(10.)).py(px(4.)).flex().flex_col().children(
+                card.rows.iter().map(|r| {
+                    let (fg, bg) = (tone_fg(r.tone), tone_bg(r.tone));
+                    let line = if r.text.is_empty() {
+                        div().child(" ")
+                    } else if r.code {
+                        div().child(syntax::styled(&r.text))
+                    } else {
+                        div().child(r.text.clone())
+                    };
+                    div()
+                        .flex()
+                        .text_color(fg)
+                        .when_some(bg, |d, b| d.bg(b))
+                        .when(card.gutter > 0, |d| {
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .w(px(gutter_w))
+                                    .pr(px(8.))
+                                    .text_right()
+                                    .text_color(dim())
+                                    .child(r.no.map(|n| n.to_string()).unwrap_or_default()),
+                            )
+                        })
+                        .child(line.flex_1().min_w(px(0.)).whitespace_normal())
+                }),
+            ));
+        }
+        // the sub-agent this very call started (`subagent.started.tool_call_id`), if its pane exists
+        let pane = lu.and_then(|lu| {
+            lu.live
+                .view
+                .panes
+                .subs
+                .iter()
+                .find(|a| a.tool_call_id.as_deref() == Some(id))
+                .map(|a| a.id.clone())
+        });
+        if card.collapsible || pane.is_some() {
+            let more = card.hidden;
+            card_el = card_el.child(
                 div()
-                    .id(("tool-head", idx))
-                    .debug_selector({
-                        let k = format!("tool-head-{id}");
-                        move || k.clone()
-                    })
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
                     .px(px(10.))
-                    .py(px(7.))
-                    .cursor_pointer()
-                    .hover(|d| d.bg(super::with_alpha_white(0.03)))
-                    // one click on the header opens a clipped card, the next clips it again (the chevron is part
-                    // of the header; the body, where text is selected, is not)
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_card(&tid0, cx)))
-                    .child(icon(ic, 16., kind_col))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(kind_col)
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(tool_title(name)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .truncate()
-                            .text_color(text())
-                            .child(summary.clone()),
-                    )
-                    .children(
-                        meta.into_iter()
-                            .map(|(m, c)| div().flex_none().text_color(c).child(m)),
-                    )
-                    .child(div().flex_none().text_color(c).child(mark))
-                    .when(collapsible, |d| {
-                        let tid1 = id.clone();
+                    .pb(px(4.))
+                    .flex()
+                    .gap(px(14.))
+                    .when(card.collapsible, |d| {
+                        let key = id.clone();
                         d.child(
                             div()
-                                .id(("tool-chev", idx))
-                                .flex_none()
+                                .id(gpui::SharedString::from(format!("more-{id}")))
+                                .debug_selector({
+                                    let k = format!("more-{id}");
+                                    move || k.clone()
+                                })
                                 .cursor_pointer()
-                                .text_color(dim())
-                                .child(icon(chev, 14., dim()))
+                                .text_color(hsla(t::ACCENT))
+                                .child(match (open, more) {
+                                    (false, n) => {
+                                        format!("+{n} line{}", if n == 1 { "" } else { "s" })
+                                    }
+                                    (true, 0) => "Show less".to_string(),
+                                    (true, n) => format!("Show less (+{n} not shown)"),
+                                })
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.toggle_card(&key, cx)),
+                                ),
+                        )
+                    })
+                    .when_some(pane, |d, sub| {
+                        d.child(
+                            div()
+                                .id(("tool-pane", idx))
+                                .cursor_pointer()
+                                .text_color(hsla(t::ACCENT))
+                                .child("Open agent pane")
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.toggle_card(&tid1, cx);
+                                    this.ts.sub = Some(sub.clone());
+                                    this.ts.tab = super::ChatTab::Chat;
+                                    cx.notify();
                                 })),
                         )
                     }),
             );
-        let mut lines: Vec<(String, gpui::Hsla, Option<gpui::Hsla>)> = vec![];
-        if shown_diff {
-            lines.extend(diff_lines);
-        } else {
-            lines.extend(wrap_rows(body, cols).into_iter().map(|l| (l, text(), None)));
         }
-        if !lines.is_empty() {
-            card = card.child(div().px(px(10.)).py(px(4.)).child(self.clamped(
-                id.clone(),
-                lines,
-                cx,
-            )));
-        }
-        card.into_any_element()
+        card_el.into_any_element()
     }
 
     pub(super) fn welcome(&self) -> Div {
@@ -1273,49 +1363,6 @@ pub fn input_box(
         )
 }
 
-/// Diff rows (text, colour, background) of a `ToolCompleted.diff`. A secret file's diff carries
-/// counts only (`hidden`): then there is nothing to draw.
-pub fn diff_rows(d: &Value) -> Vec<(String, gpui::Hsla, Option<gpui::Hsla>)> {
-    if d.get("hidden").and_then(Value::as_bool) == Some(true) {
-        return vec![];
-    }
-    let mut out = vec![];
-    let n = |k: &str| d.get(k).and_then(Value::as_u64).unwrap_or(0);
-    if let Some(p) = d.get("path").and_then(Value::as_str) {
-        out.push((
-            format!("{p}  +{} -{}", n("added"), n("removed")),
-            strong(),
-            None,
-        ));
-    }
-    for h in d
-        .get("hunks")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        for l in h
-            .get("lines")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let tag = l.get("tag").and_then(Value::as_str).unwrap_or(" ");
-            let tx = l.get("text").and_then(Value::as_str).unwrap_or("");
-            let (fg, bg) = match tag {
-                "+" => (hsla(t::SUCCESS), Some(with_alpha(hsla(t::SUCCESS), 0.10))),
-                "-" => (hsla(t::ERROR), Some(with_alpha(hsla(t::ERROR), 0.10))),
-                _ => (dim(), None),
-            };
-            out.push((format!("{tag} {tx}"), fg, bg));
-        }
-    }
-    if d.get("truncated").and_then(Value::as_bool) == Some(true) {
-        out.push(("\u{2026} diff cut".into(), dim(), None));
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1413,18 +1460,6 @@ mod tests {
             text: "budget exceeded: turns 5 / 5".into(),
         };
         assert!(visible(&warn, false, false, false) && visible(&warn, false, false, true));
-    }
-
-    #[test]
-    fn a_hidden_diff_draws_nothing() {
-        let d = serde_json::json!({"path": ".env", "added": 1, "removed": 0, "hunks": [], "hidden": true});
-        assert!(diff_rows(&d).is_empty());
-        let d = serde_json::json!({"path": "a.rs", "added": 1, "removed": 1, "truncated": false,
-            "hunks": [{"lines": [{"tag": "-", "text": "x"}, {"tag": "+", "text": "y"}, {"tag": " ", "text": "z"}]}]});
-        let r = diff_rows(&d);
-        assert_eq!(r.len(), 4);
-        assert_eq!(r[0].0, "a.rs  +1 -1");
-        assert!(r[1].2.is_some() && r[2].2.is_some() && r[3].2.is_none());
     }
 
     /// The row list of one conversation under the quiet-chat and /focus switches.
