@@ -97,6 +97,8 @@ pub enum Action {
     Compact(Option<String>),
     /// `/config`: the shell shows the Settings view.
     OpenSettings,
+    /// `/panels [arg]`: the view lists, hides or shows panels and saves the choice.
+    Panels(String),
     /// `/files`: the centre panel shows its file explorer tab (the project tree and the changes).
     ShowFiles,
     /// `/diff [file]`: the centre panel shows its diff tab, with `file` open when one is named.
@@ -243,8 +245,19 @@ pub const WIRED: [&str; 25] = [
     "rename",
 ];
 
+/// Desktop-only commands (not in the terminal TUI's list): `/panels`, added to the engine's commands.
+pub fn panels_command() -> Command {
+    Command {
+        name: "panels".into(),
+        description: "show or hide dashboard panels (synt.tui.panels)".into(),
+        argument_hint: "[hide-all|show-all|<name> on|off]".into(),
+        local: true,
+        ..Command::default()
+    }
+}
+
 pub fn is_wired(name: &str) -> bool {
-    WIRED.contains(&name)
+    WIRED.contains(&name) || name == "panels"
 }
 
 /// `5m ago`, `3h ago`, `2d ago` (the TUI's wording).
@@ -366,6 +379,7 @@ impl Live {
         self.cwd = engine.cwd.clone();
         self.trusted = engine.trusted;
         self.commands = engine.commands.clone();
+        self.commands.push(panels_command());
         self.mcp = engine.mcp_status();
         self.queue.clear();
         self.dialogs.clear();
@@ -985,6 +999,7 @@ impl Live {
                 return Submitted::Do(Action::Compact((!arg.is_empty()).then(|| arg.into())));
             }
             "config" => return Submitted::Do(Action::OpenSettings),
+            "panels" => return Submitted::Do(Action::Panels(arg.into())),
             "new" => return Submitted::Do(Action::New),
             "close" => return Submitted::Do(Action::Close),
             "resume" if arg.is_empty() => self.open_resume_picker(now_ms()),
@@ -1685,6 +1700,7 @@ mod tests {
     fn live_with_commands() -> Live {
         let mut l = Live::new();
         l.commands = synthesis_tui::local_commands();
+        l.commands.push(panels_command());
         l.commands.push(Command {
             name: "tdd".into(),
             description: "skill: tdd".into(),
@@ -1896,6 +1912,10 @@ mod tests {
         );
         // the actions the window carries out
         assert_eq!(l.submit("/config"), Submitted::Do(Action::OpenSettings));
+        assert_eq!(
+            l.submit("/panels usage off"),
+            Submitted::Do(Action::Panels("usage off".into()))
+        );
         assert_eq!(l.submit("/new"), Submitted::Do(Action::New));
         assert_eq!(l.submit("/close"), Submitted::Do(Action::Close));
         assert_eq!(l.submit("/clear"), Submitted::Do(Action::Clear));

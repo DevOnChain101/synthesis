@@ -140,9 +140,15 @@ bar; right Synthesis Topology, Agent Status + Context, Usage & Metrics; key hint
 PTY) and browser panes are `widgets/panes.rs`, the file explorer `tui_view/tabs.rs`.
 
 `synt.tui.panels.*` keys (unchanged, so no settings.json breaks): `session` = Session, `tools` = Tools & Skills,
-`activity` = Recent Activity and User Prompt, `status` = Agent Status, `tokens` = Context, `topology` = Synthesis
+`activity` = Recent Activity (prompts and agent activity merged), `tokens` = Context, `topology` = Synthesis
 Topology, `usage` = Usage & Metrics; `mcp` has no panel any more (MCP is in the Topology card and the Tools &
-Skills row) and is ignored. Workspace, Running and the chat cannot be hidden. The labels in
+Skills row) and is ignored. Workspace, Running, the chat (with the sub-agent transcript beside it), Agent Status
+(the task list; its `status` key is accepted and ignored) and the sub-agents cannot be hidden (owner decision
+2026-11-09). The sub-agents are the Subagents card of Topology; while Topology is hidden a compact Subagents block
+(`p-subagents`) takes its place, so the right column always exists and the chat no longer spans to the right edge.
+`/panels` lists the panels with their state, `/panels hide-all` hides every hideable one, `/panels show-all`
+shows them, `/panels <name> on|off` switches one; it applies at once and saves to `synt.tui.panels` in the user file
+(atomic, via `SettingsStore`). The labels in
 `synthesis-settings::TUI_PANELS` name both the terminal and the desktop panel.
 
 Data: `sample.rs` is the design's own sample (`STATE`), `snapshot.rs` builds the same `Snapshot` from the live
