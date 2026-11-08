@@ -188,6 +188,8 @@ struct PeerState {
     /// `notify_on_end` requests this session sent and still waits on: request id to the target's
     /// session id (a subscription from that session would be a cycle).
     waiting_on: HashMap<String, String>,
+    /// The user's own `/send` calls waiting for an answer.
+    user_sends: usize,
     /// A delegate worker is running (one at a time per receiver).
     delegating: bool,
     /// What the last task ended with, for `notify_on_end` subscribers (redacted, <= 8 KiB).
@@ -254,6 +256,32 @@ impl PeerLink {
         let mut a = self.me.addr(instance, kind);
         a.agent_id = agent_id;
         a
+    }
+}
+
+/// At most this many `/send` calls wait for an answer at once.
+const MAX_USER_SENDS: usize = 4;
+
+/// One of the user's sends in flight; released when the call ends or is dropped.
+struct UserSend(Arc<PeerLink>);
+
+impl UserSend {
+    fn take(link: &Arc<PeerLink>) -> Result<Self, String> {
+        let mut st = lock(&link.state);
+        if st.user_sends >= MAX_USER_SENDS {
+            return Err(format!(
+                "busy: {MAX_USER_SENDS} of your messages are already waiting for an answer"
+            ));
+        }
+        st.user_sends += 1;
+        Ok(Self(link.clone()))
+    }
+}
+
+impl Drop for UserSend {
+    fn drop(&mut self) {
+        let mut st = lock(&self.0.state);
+        st.user_sends = st.user_sends.saturating_sub(1);
     }
 }
 
@@ -1234,6 +1262,12 @@ impl Harness {
         let Some(addr) = parse(to) else {
             return Err("not_found: not a peer address (ws:<workspace>/sess:<session>)".into());
         };
+        if addr.instance != MAIN {
+            return Err(format!(
+                "not_found: /send reaches a session's main agent only; drop `agent:{}`",
+                addr.instance
+            ));
+        }
         if text.len() > MAX_BYTES {
             return Err("too_large: a message is at most 32 KiB".into());
         }
@@ -1247,7 +1281,22 @@ impl Harness {
         if !synthesis_peers::endpoint_ok(&link.run_dir, &entry.endpoint) {
             return Err("unreachable: the registry entry names a foreign endpoint".into());
         }
-        let text = self.sink.redact(text);
+        let _slot = UserSend::take(&link)?;
+        let masked = self.sink.redact(text);
+        let n = masked
+            .matches("[REDACTED")
+            .count()
+            .saturating_sub(text.matches("[REDACTED").count());
+        let text = masked;
+        if n > 0 {
+            self.sink.emit(
+                &Scope::default(),
+                Event::Notice {
+                    level: "info".into(),
+                    text: format!("{n} secret value(s) masked before sending"),
+                },
+            );
+        }
         let id = uuid();
         let from = link.addr(MAIN, MAIN, None);
         let chain = [link.me.session_id.clone()];
@@ -1363,14 +1412,17 @@ impl Harness {
         agents
             .iter()
             .filter(|a| !only_main || a["instance"] == MAIN)
+            // the instance and kind come from the peer's status frame: only plain tokens are listed
+            .filter(|a| a["instance"].as_str().is_none_or(synthesis_peers::is_token))
             .map(|a| {
-                let ad = entry.addr(a["instance"].as_str().unwrap_or(MAIN), a["kind"].as_str().unwrap_or(""));
+                let kind = a["kind"].as_str().filter(|k| synthesis_peers::is_token(k)).unwrap_or("");
+                let ad = entry.addr(a["instance"].as_str().unwrap_or(MAIN), kind);
                 json!({
                     "address": ad.canonical(),
                     "display": ad.display(),
                     "workspace": {"label": entry.workspace_label, "key": entry.workspace_key, "root": entry.workspace_root},
                     "session": {"short_id": entry.session_id.chars().take(8).collect::<String>(), "name": entry.session_name, "about": entry.about, "status": session_status},
-                    "agent": {"instance": a["instance"], "kind": a["kind"], "status": a["status"], "queued": a["queued"]},
+                    "agent": {"instance": a["instance"], "kind": kind, "status": a["status"], "queued": a["queued"]},
                     "task_summary": a["task_summary"],
                 })
             })

@@ -919,6 +919,16 @@ impl TuiView {
             let text = format!("/send {} ", row.id);
             if let Some(lu) = &mut self.live {
                 lu.live.focus = Focus::Chat;
+                // a draft being typed is never overwritten
+                if !text_of(&lu.prompt, cx).trim().is_empty() {
+                    lu.live.note(
+                        "finish or clear the message first, then pick the session again",
+                        false,
+                    );
+                    lu.dirty = true;
+                    cx.notify();
+                    return;
+                }
             }
             self.set_prompt(&text, window, cx);
             if let Some(lu) = &self.live {

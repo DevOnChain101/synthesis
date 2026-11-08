@@ -611,7 +611,11 @@ impl Convo {
                 format!(
                     "peer reply: {}  {}",
                     sanitize_for_display(status),
-                    peer_text(text)
+                    // the whole answer, line by line (the front end clamps the card)
+                    text.lines()
+                        .map(sanitize_for_display)
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 ),
             ),
             Event::PeerThreadClosed { reason, .. } => self.internal(sanitize_for_display(
@@ -1044,6 +1048,18 @@ mod tests {
             json!({"request_id":"r","status":"answered","text":"JWT_TTL sets it","bytes":3,"duration_ms":1}),
         );
         assert_eq!(texts(&c), ["peer reply: answered  JWT_TTL sets it"]);
+        // the whole answer is the row (the front end clamps it), not its first 100 characters
+        let long = format!("{}\nsecond line\u{1b}[2J", "x".repeat(150));
+        let c = one(
+            "peer.reply",
+            json!({"request_id":"r","status":"answered","text":long,"bytes":3,"duration_ms":1}),
+        );
+        let t = texts(&c).remove(0);
+        assert!(
+            t.contains(&"x".repeat(150)) && t.contains("\nsecond line"),
+            "{t:?}"
+        );
+        assert!(!t.contains('\u{1b}'));
         assert!(matches!(&c.items[0], Item::Notice { warning: false, .. }));
         let c = one(
             "peer.reply",

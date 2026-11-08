@@ -3393,3 +3393,87 @@ async fn a_user_send_goes_out_redacted_shows_rows_and_keeps_the_reply_from_the_m
     assert!(!all_text(&b).contains("A-ANSWER"));
     assert!(!all_text(&b).contains("peer_reply"));
 }
+
+#[tokio::test]
+async fn a_user_send_reaches_main_only_masks_are_said_and_at_most_four_wait() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let (b, _) = side("sess-b", "beta", &run, Some(on()), idle(), 10);
+    // a peer that is listed and listening but never answers
+    let l = Listener::bind(&run).unwrap();
+    let e = entry("sess-a", "sess-a", "alpha", &run, &l.endpoint());
+    let _reg = Registration::create(&run, &e).unwrap();
+    // another agent of that session is never silently swapped for its main agent
+    let e =
+        b.h.peer_ask_user("ws:alpha/sess:sess-a/agent:worker", "hi")
+            .await
+            .unwrap_err();
+    assert!(e.contains("main agent only"), "{e}");
+    assert!(sent_ids(&b).is_empty());
+    let mut waiting = vec![];
+    for i in 0..4 {
+        let h = b.h.clone();
+        let text = if i == 0 {
+            format!("with {SECRET}")
+        } else {
+            format!("q{i}")
+        };
+        waiting.push(tokio::spawn(async move {
+            h.peer_ask_user("ws:alpha/sess:sess-a", &text).await
+        }));
+    }
+    until(|| sent_ids(&b).len() == 4).await;
+    let e =
+        b.h.peer_ask_user("ws:alpha/sess:sess-a", "fifth")
+            .await
+            .unwrap_err();
+    assert!(
+        e.starts_with("busy") && e.contains("already waiting"),
+        "{e}"
+    );
+    assert_eq!(sent_ids(&b).len(), 4, "the refused one never went out");
+    let notes = b.rig.find(|e| match e {
+        Event::Notice { text, .. } if text.contains("masked") => Some(text.clone()),
+        _ => None,
+    });
+    assert_eq!(notes, ["1 secret value(s) masked before sending"]);
+    // a send that ends (here: dropped) frees its slot
+    waiting.remove(0).abort();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let r = tokio::time::timeout(
+        Duration::from_millis(500),
+        b.h.peer_ask_user("ws:alpha/sess:sess-a", "again"),
+    )
+    .await;
+    assert!(
+        r.is_err(),
+        "it waits for an answer instead of being refused: {r:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_peer_listing_only_carries_plain_tokens_in_its_address() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let (b, _) = side("sess-b", "beta", &run, Some(on()), idle(), 10);
+    // a registry file written by another process with blanks and a newline in its ids
+    let mut e = entry("sess-x", "x", "alpha", &run, "unix:/nowhere");
+    e.session_id = "sess-x\nhi".into();
+    std::fs::write(run.join("evil.json"), serde_json::to_vec(&e).unwrap()).unwrap();
+    let mut e = entry("sess-y", "y", "alpha", &run, "unix:/nowhere");
+    e.workspace_key = "k ey".into();
+    std::fs::write(run.join("evil2.json"), serde_json::to_vec(&e).unwrap()).unwrap();
+    let rows = b.h.peer_rows(true).await.unwrap();
+    assert!(
+        rows.iter().all(|r| {
+            let a = r["address"].as_str().unwrap();
+            !a.chars().any(|c| c.is_whitespace() || c.is_control())
+        }),
+        "{rows:?}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|r| r["address"].as_str().unwrap().contains("hi"))
+    );
+}
