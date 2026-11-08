@@ -327,3 +327,18 @@ fn a_refresh_row_runs_once_and_its_failure_shows_as_a_row() {
     );
     assert!(!r.live.model_pick.as_ref().unwrap().refreshing);
 }
+
+#[test]
+fn open_is_a_known_command_that_hands_the_typed_path_to_the_window() {
+    use synthesis_desktop::live::Action;
+    let mut r = rig(serde_json::json!([]));
+    assert_eq!(
+        r.live.submit("/open ~/work"),
+        Submitted::Do(Action::Open("~/work".into()))
+    );
+    assert_eq!(
+        r.live.submit("/open"),
+        Submitted::Nothing,
+        "no path: an error row"
+    );
+}

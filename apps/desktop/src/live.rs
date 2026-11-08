@@ -174,6 +174,17 @@ impl Dialog {
         self.engaged || !self.needs_person()
     }
 
+    /// Digits pick option 1-9. Not in the model picker: there they type into the filter.
+    pub fn digits_pick(&self) -> bool {
+        !matches!(
+            self.kind,
+            DialogKind::Picker {
+                kind: PickerKind::Model,
+                ..
+            }
+        )
+    }
+
     /// The headline.
     pub fn title(&self) -> String {
         match &self.kind {
@@ -248,6 +259,14 @@ pub const WIRED: [&str; 25] = [
     "name",
     "rename",
 ];
+
+fn refresh_label(p: &ModelPick, now: i64) -> String {
+    if p.refreshing {
+        format!("{} Refreshing the model list...", spinner(now))
+    } else {
+        "Refresh the model list (asks each provider)".into()
+    }
+}
 
 /// One frame of the refresh spinner (120 ms each).
 fn spinner(ms: i64) -> &'static str {
@@ -1463,17 +1482,8 @@ impl Live {
             .map(|r| r.value.chars().count())
             .max()
             .unwrap_or(0);
-        let mut options: Vec<(String, String)> = vec![if pick.refreshing {
-            (
-                "refresh".into(),
-                format!("{} Refreshing the model list...", spinner(now_ms())),
-            )
-        } else {
-            (
-                "refresh".into(),
-                "Refresh the model list (asks each provider)".into(),
-            )
-        }];
+        let mut options: Vec<(String, String)> =
+            vec![("refresh".into(), refresh_label(pick, now_ms()))];
         options.extend(
             pick.errors
                 .iter()
@@ -1519,6 +1529,22 @@ impl Live {
                 first.min(d.options.len() - 1)
             };
         }
+    }
+
+    /// Moves the refresh spinner one frame (only the first row's text; the highlight stays).
+    /// True while a refresh runs, so the window keeps repainting.
+    pub fn spin_refresh(&mut self, now: i64) -> bool {
+        let Some(p) = self.model_pick.as_ref().filter(|p| p.refreshing) else {
+            return false;
+        };
+        let label = refresh_label(p, now);
+        if let Some(d) = self.dialogs.first_mut()
+            && let Some(o) = d.options.first_mut()
+            && o.0 == "refresh"
+        {
+            o.1 = label;
+        }
+        true
     }
 
     fn close_model_pick(&mut self) {

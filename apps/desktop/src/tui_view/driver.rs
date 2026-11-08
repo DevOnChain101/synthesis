@@ -446,9 +446,6 @@ impl TuiView {
     fn tick(&mut self, n: u64, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
         lu.dirty = true;
-        if lu.live.model_pick.as_ref().is_some_and(|p| p.refreshing) {
-            lu.live.rebuild_model_dialog(false);
-        }
         if let Some(e) = lu.live.engine.clone() {
             lu.live.mcp = e.mcp_status();
             if n.is_multiple_of(5) {
@@ -814,6 +811,23 @@ impl TuiView {
                 }
                 false
             }
+            // Tab on `/open <path>` completes folder names
+            "tab" if text.starts_with("/open ") && cursor >= text.len() => {
+                let home = synthesis_app::homes(&lu.cfg.env).ok().map(|h| h.user);
+                let arg = &text["/open ".len()..];
+                if let Some(new) =
+                    crate::folder::complete(arg, home.as_deref(), Path::new(&lu.live.cwd))
+                {
+                    let t = format!("/open {new}");
+                    let end = t.len();
+                    lu.prompt.update(cx, |s, cx| {
+                        s.set_value(t, window, cx);
+                        s.set_selected_range(end..end, cx);
+                    });
+                    self.on_prompt_changed(cx);
+                }
+                true
+            }
             "tab" if text.is_empty() => {
                 lu.live.focus = lu.live.focus.next();
                 lu.dirty = true;
@@ -1093,9 +1107,7 @@ impl TuiView {
                     .iter()
                     .map(|w| PathBuf::from(&w.root))
                     .collect();
-                match crate::folder::parse(&typed, home.as_deref(), &cwd)
-                    .and_then(|p| crate::folder::validate(&p, &open))
-                {
+                match crate::folder::resolve(&typed, home.as_deref(), &cwd, &open) {
                     Ok(p) => return self.open_folder(&p, cx),
                     Err(e) => lu.live.note(e, true),
                 }

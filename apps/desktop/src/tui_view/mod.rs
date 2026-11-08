@@ -830,6 +830,14 @@ impl TuiView {
 
 impl Render for TuiView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // the refresh spinner of the model picker turns every frame
+        if let Some(lu) = &mut self.live
+            && lu.cfg.tui.motion
+            && lu.live.spin_refresh(crate::live::now_ms())
+        {
+            lu.dirty = true;
+            window.request_animation_frame();
+        }
         // a blinking red is repainted every frame while an approval waits
         let motion = self.live.as_ref().is_some_and(|l| l.cfg.tui.motion);
         // a spinner or a blink in the Running list is repainted every frame too

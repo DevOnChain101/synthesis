@@ -620,6 +620,14 @@ impl Engine {
         let workspace = session.workspace.clone();
         let commands: Vec<Command> = synthesis_tui::local_commands()
             .into_iter()
+            // desktop only: a typed folder path as a new workspace
+            .chain(std::iter::once(Command {
+                name: "open".into(),
+                aliases: vec![],
+                description: "open a folder as a new workspace".into(),
+                argument_hint: "<path>".into(),
+                local: true,
+            }))
             .chain(
                 skills
                     .iter()

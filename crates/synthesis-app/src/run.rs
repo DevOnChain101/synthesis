@@ -735,7 +735,12 @@ pub fn prepare(
     let mut stale_model = None;
     let res = match (default, stored) {
         (Ok(r), Some(m)) if r.label != m => {
-            let stored_res = match stored_model_gone(&cfg, &m) {
+            let stored_res = match stored_model_gone(
+                &cfg,
+                &h.synthesis,
+                &m,
+                synthesis_providers::modelinfo::unix_now(),
+            ) {
                 Some(why) => Err(why),
                 None => resolve_provider(c.provider.as_deref(), Some(&m), &cfg, &h.synthesis, env),
             };
@@ -2079,17 +2084,26 @@ pub fn start_model_info(
     }
 }
 
+/// A cached model list older than this no longer proves a stored model is gone.
+const STALE_CHECK_MAX_AGE_SECS: u64 = 7 * 24 * 3600;
+
 /// Why a stored `provider/model` can no longer be used although its provider is still configured:
-/// the provider's model list no longer has it (a provider without a list is not checked; an
-/// unknown provider is an error of `resolve_provider`).
-fn stored_model_gone(cfg: &Config, label: &str) -> Option<String> {
+/// the provider's declared model list lacks it, or (no declared list, discovery on) a non-empty
+/// cached list younger than a week lacks it. No list, an empty or old cache: not checked. An
+/// unknown provider is an error of `resolve_provider`.
+fn stored_model_gone(cfg: &Config, home: &Path, label: &str, now: u64) -> Option<String> {
     let (p, m) = label.split_once('/')?;
-    cfg.providers
-        .get(p)?
-        .models
-        .as_ref()
-        .filter(|l| !l.is_empty() && !l.iter().any(|x| x == m))
-        .map(|_| format!("not in the models of provider \"{p}\""))
+    let prov = cfg.providers.get(p)?;
+    let why = || format!("not in the models of provider \"{p}\"");
+    match prov.models.as_ref().filter(|l| !l.is_empty()) {
+        Some(l) => (!l.iter().any(|x| x == m)).then(why),
+        None if prov.discover == Some(false) => None,
+        None => {
+            let c = crate::models::cache_of(home, p, prov)?;
+            let recent = now.saturating_sub(c.fetched_at) < STALE_CHECK_MAX_AGE_SECS;
+            (recent && !c.models.is_empty() && !c.models.contains_key(m)).then(why)
+        }
+    }
 }
 
 pub struct Resolved {
@@ -2352,25 +2366,63 @@ mod tests {
     }
 
     #[test]
-    fn stored_model_gone_only_when_the_provider_lists_models_without_it() {
-        let cfg = |models: &[&str]| {
+    fn stored_model_gone_by_declared_list_or_a_recent_nonempty_cache() {
+        use synthesis_providers::modelinfo::{self, CacheFile};
+        let home = tempfile::tempdir().unwrap();
+        let cfg = |models: &[&str], discover: Option<bool>| {
             let mut c = Config::default();
             c.providers.insert(
                 "p".into(),
                 synthesis_config::Provider {
                     models: Some(models.iter().map(|m| m.to_string()).collect()),
+                    discover,
                     ..Default::default()
                 },
             );
             c
         };
-        assert!(stored_model_gone(&cfg(&["a"]), "p/cx/b").is_some());
-        assert!(stored_model_gone(&cfg(&["a", "cx/b"]), "p/cx/b").is_none());
+        let now = 1_000_000_000;
+        let gone = |c: &Config, l: &str| stored_model_gone(c, home.path(), l, now).is_some();
+        let cache = |ids: &[&str], at: u64| {
+            let p = synthesis_config::Provider::default();
+            let base = match p.protocol {
+                synthesis_config::Protocol::Anthropic => {
+                    synthesis_providers::anthropic::base_url(p.base_url.as_deref())
+                }
+                synthesis_config::Protocol::OpenAi => {
+                    synthesis_providers::openai::base_url(p.base_url.as_deref())
+                }
+            };
+            let f = CacheFile {
+                schema_version: modelinfo::SCHEMA_VERSION,
+                base_url: base.trim_end_matches('/').into(),
+                protocol: modelinfo::protocol_name(p.protocol).into(),
+                fetched_at: at,
+                models: ids
+                    .iter()
+                    .map(|i| (i.to_string(), Default::default()))
+                    .collect(),
+            };
+            modelinfo::write_cache(&modelinfo::cache_path(home.path(), "p"), &f).unwrap();
+        };
+        // declared list
+        assert!(gone(&cfg(&["a"], None), "p/cx/b"));
+        assert!(!gone(&cfg(&["a", "cx/b"], None), "p/cx/b"));
+        assert!(!gone(&cfg(&["a"], None), "other/b"));
+        // discover-only: no cache -> not checked
+        let d = cfg(&[], None);
+        assert!(!gone(&d, "p/cx/b"), "no cache: not flagged");
+        cache(&["a"], now - 60);
+        assert!(gone(&d, "p/cx/b"), "recent list without the id");
+        assert!(!gone(&d, "p/a"));
         assert!(
-            stored_model_gone(&cfg(&[]), "p/b").is_none(),
-            "no list: not checked"
+            !gone(&cfg(&[], Some(false)), "p/cx/b"),
+            "discover:false is not asked"
         );
-        assert!(stored_model_gone(&cfg(&["a"]), "other/b").is_none());
+        cache(&[], now - 60);
+        assert!(!gone(&d, "p/cx/b"), "empty cache: not flagged");
+        cache(&["a"], now - 30 * 24 * 3600);
+        assert!(!gone(&d, "p/cx/b"), "old cache: not flagged");
     }
 
     #[test]

@@ -221,8 +221,10 @@ pub fn dock(
     };
     card = card.child(div().text_color(dim()).child(format!(
         "{}{verb}{}",
-        if d.answerable() {
+        if d.answerable() && d.digits_pick() {
             "\u{2191}\u{2193} or 1-9 choose \u{b7} "
+        } else if d.answerable() {
+            "\u{2191}\u{2193} choose \u{b7} type to filter \u{b7} "
         } else {
             ""
         },
