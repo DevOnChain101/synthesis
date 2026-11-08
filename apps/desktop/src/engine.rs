@@ -615,6 +615,7 @@ impl Engine {
         let workspace = session.workspace.clone();
         let commands: Vec<Command> = synthesis_tui::local_commands()
             .into_iter()
+            .chain(std::iter::once(crate::live::send_command()))
             .chain(
                 skills
                     .iter()
@@ -747,6 +748,13 @@ impl Engine {
         self.tokio
             .as_ref()
             .and_then(|rt| rt.block_on(self.harness.peer_rows(true)))
+    }
+
+    /// `/send`: the user's message to another session's main agent; the reply text, or why not.
+    /// Blocking (waits for the answer): call it off the UI thread.
+    pub fn peer_ask(&self, to: &str, text: &str) -> Result<String, String> {
+        let rt = self.tokio.as_ref().ok_or("peers are off")?;
+        rt.block_on(self.harness.peer_ask_user(to, text))
     }
 
     pub fn mode(&self) -> Mode {

@@ -9,6 +9,8 @@ use crate::workspaces::{SessionRow, WorkspaceList};
 /// One row of the harness's peer listing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct PeerRow {
+    /// `ws:<label>/sess:<id>`: what `/send` takes.
+    pub address: String,
     pub workspace_label: String,
     pub workspace_root: String,
     pub session_short_id: String,
@@ -27,9 +29,22 @@ fn s(v: &Value, path: &[&str]) -> String {
         .to_string()
 }
 
+/// What `/send` is prefilled with: the canonical address of the main agent, without its agent part.
+/// Anything with a blank or control character (the text comes from another process) gives "".
+fn send_address(canonical: &str) -> String {
+    canonical
+        .strip_suffix("/agent:main")
+        .filter(|a| {
+            a.starts_with("ws:") && a.chars().all(|c| !c.is_whitespace() && !c.is_control())
+        })
+        .unwrap_or("")
+        .to_string()
+}
+
 impl PeerRow {
     pub fn from_json(v: &Value) -> Self {
         Self {
+            address: send_address(&s(v, &["address"])),
             workspace_label: s(v, &["workspace", "label"]),
             workspace_root: s(v, &["workspace", "root"]),
             session_short_id: s(v, &["session", "short_id"]),
@@ -89,6 +104,16 @@ mod tests {
         );
         assert_eq!(r.session_name, "");
         assert_eq!(PeerRow::from_json(&json!({})), PeerRow::default());
+    }
+
+    #[test]
+    fn the_send_address_targets_main_and_refuses_blanks_and_controls() {
+        let a = |x: &str| PeerRow::from_json(&json!({"address": x})).address;
+        assert_eq!(a("ws:k1/sess:s1/agent:main"), "ws:k1/sess:s1");
+        assert_eq!(a("ws:k1/sess:s1/agent:worker"), "");
+        assert_eq!(a("ws:k1/sess:s1 x/agent:main"), "");
+        assert_eq!(a("ws:k1/sess:s1\nhi/agent:main"), "");
+        assert_eq!(a("ws:k1/sess:s1\u{1b}/agent:main"), "");
     }
 
     #[test]
