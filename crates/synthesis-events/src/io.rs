@@ -451,6 +451,22 @@ mod tests {
                 attempt: 1,
                 summary: s("ok"),
             },
+            Event::VerificationCheckStarted {
+                check_id: s("k1"),
+                name: s("k1"),
+                command: Some(s("cargo test")),
+                index: 0,
+                total: 2,
+            },
+            Event::VerificationCheckFinished {
+                check_id: s("k1"),
+                name: s("k1"),
+                command: None,
+                status: s("failed"),
+                duration_ms: 12,
+                exit_code: Some(101),
+                output_tail: s("boom"),
+            },
             Event::TodoUpdated {
                 todos: vec![Todo {
                     id: None,

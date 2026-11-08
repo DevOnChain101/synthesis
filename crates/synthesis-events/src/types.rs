@@ -478,6 +478,31 @@ pub enum Event {
         attempt: i64,
         summary: String,
     },
+    /// A completion-gate check is about to run (after the person's or policy's approval of it).
+    /// `index` counts from 0 within the evaluation; `command` is None for a check nothing can run.
+    #[serde(rename = "verification.check.started")]
+    VerificationCheckStarted {
+        check_id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        index: u32,
+        total: u32,
+    },
+    /// The check ended: `status` is `passed|failed|unverified|blocked`; `output_tail` is the last
+    /// part of its output (capped, redacted like every event).
+    #[serde(rename = "verification.check.finished")]
+    VerificationCheckFinished {
+        check_id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        status: String,
+        duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i64>,
+        output_tail: String,
+    },
     #[serde(rename = "todo.updated")]
     TodoUpdated { todos: Vec<Todo> },
     #[serde(rename = "subagent.started")]

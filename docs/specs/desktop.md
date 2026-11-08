@@ -209,7 +209,7 @@ tools and skills, conversation. Not done, with where the data would come from:
   `Event::BrowserLoginRequired` is already in the stream and can be shown. Page title changes are not an event.
 - Commands tab: `process.spawned|output|exited` (Bash, terminal_spawn) give the real exit code and background
   rows; `[exit code N]` parsing stays as the fallback for old sessions. A background process nobody polls
-  again never gets `process.exited`. Verification has only `verification.completed` (no per-check progress).
+  again never gets `process.exited`. Verification: `verification.check.started|finished` give per-check progress (a card in the chat with one row per check, 5-line clamp for the output tail of a check that did not pass; a line in Recent Activity); sessions recorded before them show the one-line `verification.completed` as before.
 - Settings: done. Write API in `crates/synthesis-settings-ui`, the popup in `apps/desktop/src/settings_view` (section 6).
 - Multi-session tabs: TODO. `ViewState` is one session; tabs are a `Vec<ViewState>` keyed by session id
   in the desktop, fed by one event channel per `engine` run. Needs the engine to host several sessions.

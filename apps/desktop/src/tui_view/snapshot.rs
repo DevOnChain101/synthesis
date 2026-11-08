@@ -14,7 +14,7 @@ use super::sample::{
     Usage, Workspace,
 };
 use crate::live::{Focus, Live};
-use synthesis_view::convo::{ApprovalState, Item, StepState, ToolState};
+use synthesis_view::convo::{ApprovalState, CheckState, Item, StepState, ToolState};
 
 /// `124000` -> `124k`, `1_300_000` -> `1.3M`.
 pub fn tok(n: u64) -> String {
@@ -401,6 +401,32 @@ fn activity_rows(l: &Live, tz_min: i32) -> Vec<ActivityRow> {
                     }
                 ),
             ),
+            Item::Checks {
+                rows, total, done, ..
+            } => {
+                let failed = rows
+                    .iter()
+                    .filter(|r| r.state == CheckState::Failed)
+                    .count();
+                let ran = rows
+                    .iter()
+                    .filter(|r| r.state != CheckState::Running)
+                    .count();
+                let word = match done.as_deref() {
+                    _ if failed > 0 => format!("{failed} failed"),
+                    Some("passed") => "passed".to_string(),
+                    Some(w) => w.to_string(),
+                    None => format!("{ran}/{total} done"),
+                };
+                (
+                    if failed > 0 {
+                        ActKind::Error
+                    } else {
+                        ActKind::Tool
+                    },
+                    format!("Verification: {word}"),
+                )
+            }
             Item::TaskEnd {
                 ok: false, text, ..
             } => (ActKind::Error, text.clone()),

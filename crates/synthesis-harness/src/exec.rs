@@ -18,8 +18,8 @@ use synthesis_tools::{
     Block as ToolBlock, Content as ToolContent, NeedsUser, SideEffectClass, ToolRuntime, ToolSpec,
 };
 use synthesis_verification::{
-    Check, CheckAuth, CheckAuthorizer, CheckKind, DEFAULT_TIMEOUT_MS, Declarer, NEEDS_APPROVAL,
-    is_verification_command,
+    Check, CheckAuth, CheckAuthorizer, CheckKind, CheckResult, DEFAULT_TIMEOUT_MS, Declarer,
+    NEEDS_APPROVAL, is_verification_command,
 };
 
 use crate::agent::{Call, Problem};
@@ -89,6 +89,53 @@ impl CheckAuthorizer for GateAuth<'_> {
                 .authorize_check(self.task, self.agent, check, &self.denied),
         )
     }
+
+    fn started(&self, c: &Check, index: usize, total: usize) {
+        let n = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
+        self.harness.emit(
+            self.task,
+            self.agent,
+            None,
+            Event::VerificationCheckStarted {
+                check_id: c.id.clone(),
+                name: c.id.clone(),
+                command: c.command.clone(),
+                index: n(index),
+                total: n(total),
+            },
+        );
+    }
+
+    fn finished(&self, r: &CheckResult) {
+        self.harness.emit(
+            self.task,
+            self.agent,
+            None,
+            Event::VerificationCheckFinished {
+                check_id: r.id.clone(),
+                name: r.id.clone(),
+                command: r.command.clone(),
+                status: r.status.as_str().into(),
+                duration_ms: r.duration_ms,
+                exit_code: r.exit_code.map(i64::from),
+                output_tail: check_tail(&r.summary),
+            },
+        );
+    }
+}
+
+const CHECK_TAIL_LINES: usize = 12;
+const CHECK_TAIL_BYTES: usize = 1500;
+
+/// The end of a check's summary (its first line is the `exit N` head the state already says).
+fn check_tail(summary: &str) -> String {
+    let lines: Vec<&str> = summary.lines().skip(1).collect();
+    let t = lines[lines.len().saturating_sub(CHECK_TAIL_LINES)..].join("\n");
+    let mut i = t.len().saturating_sub(CHECK_TAIL_BYTES);
+    while !t.is_char_boundary(i) {
+        i += 1;
+    }
+    t[i..].to_string()
 }
 
 /// A harness-inferred check that is a recognised verification command runs without an explicit

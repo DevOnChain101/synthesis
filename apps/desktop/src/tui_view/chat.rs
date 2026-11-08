@@ -9,7 +9,7 @@ use gpui::{
 use gpui_component::input::Textarea;
 use gpui_component::text::TextView;
 use synthesis_tui_render::theme as t;
-use synthesis_view::convo::{ApprovalState, Item, StepState};
+use synthesis_view::convo::{ApprovalState, CheckRow, CheckState, Item, StepState};
 use synthesis_view::toolview::{self, Glyph, Tone};
 
 use super::panels::{dim, icon, strong, text};
@@ -617,6 +617,12 @@ impl TuiView {
                     )
                     .into_any_element()
             }
+            Item::Checks {
+                rows,
+                total,
+                done,
+                summary,
+            } => self.checks_card(idx, rows, *total, done.as_deref(), summary, cx),
             Item::Approval { prompt, state, .. } => {
                 let (word, c) = match state {
                     ApprovalState::Pending => ("waiting for you", hsla(t::WARN)),
@@ -755,6 +761,98 @@ impl TuiView {
                         })),
                 )
             })
+    }
+
+    /// The completion gate's checks: a title, then one row per check (spinner while it runs, the
+    /// result mark after it, its duration) and under a check that did not pass the end of its output,
+    /// clipped like every output block.
+    fn checks_card(
+        &self,
+        idx: usize,
+        rows: &[CheckRow],
+        total: usize,
+        done: Option<&str>,
+        summary: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let motion = self.live.as_ref().is_some_and(|lu| lu.cfg.tui.motion);
+        let cols = cols_for(self.centre_w - INDENT - 40.);
+        let finished = rows
+            .iter()
+            .filter(|r| r.state != CheckState::Running)
+            .count();
+        let (word, c) = match done {
+            Some("passed") => ("passed".to_string(), hsla(t::SUCCESS)),
+            Some("failed") => ("failed".to_string(), hsla(t::ERROR)),
+            Some("ended") => ("interrupted".to_string(), dim()),
+            Some(w) => (w.to_string(), hsla(t::WARN)),
+            None => (format!("{finished}/{total}"), hsla(t::WARN)),
+        };
+        div()
+            .id(("checks", idx))
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(div().text_color(c).child(format!("verification {word}")))
+            .children(rows.iter().enumerate().map(|(i, r)| {
+                let (mark, fg) = match r.state {
+                    CheckState::Running if motion => {
+                        (spinner_glyph(crate::live::now_ms()), hsla(t::WARN))
+                    }
+                    CheckState::Running => ("*", hsla(t::WARN)),
+                    CheckState::Passed => ("\u{2713}", hsla(t::SUCCESS)),
+                    CheckState::Failed => ("\u{2717}", hsla(t::ERROR)),
+                    CheckState::Unverified | CheckState::Blocked => ("!", hsla(t::WARN)),
+                };
+                let secs = if r.state == CheckState::Running {
+                    String::new()
+                } else {
+                    format!("  {:.1}s", r.duration_ms as f64 / 1000.)
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(8.))
+                            .child(div().flex_none().text_color(fg).child(mark))
+                            .child(div().flex_none().text_color(text()).child(r.name.clone()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .text_color(dim())
+                                    .child(format!(
+                                        "{}{secs}",
+                                        r.command.as_deref().unwrap_or("(nothing to run)")
+                                    )),
+                            ),
+                    )
+                    .when(
+                        !matches!(r.state, CheckState::Running | CheckState::Passed)
+                            && !r.tail.trim().is_empty(),
+                        |d| {
+                            d.child(
+                                div().pl(px(20.)).child(
+                                    self.clamped(
+                                        format!("row-{idx}-{i}"),
+                                        wrap_rows(&r.tail, cols.saturating_sub(3).max(20))
+                                            .into_iter()
+                                            .map(|l| (l, dim(), None))
+                                            .collect(),
+                                        cx,
+                                    ),
+                                ),
+                            )
+                        },
+                    )
+            }))
+            .when(done.is_some() && !summary.is_empty(), |d| {
+                d.child(div().text_color(dim()).child(summary.to_string()))
+            })
+            .into_any_element()
     }
 
     /// Opens a clipped card whole, or clips it again (the state of its "Show more" too).
