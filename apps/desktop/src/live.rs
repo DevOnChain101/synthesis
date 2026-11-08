@@ -266,6 +266,8 @@ pub struct Live {
     pub starting: bool,
     /// A task is running (from `send` to the engine's `TaskDone`).
     pub busy: bool,
+    /// `/compact` between tasks is running (until `UiMsg::Compacted`).
+    pub compacting: bool,
     pub dialogs: Vec<Dialog>,
     pub queue: VecDeque<String>,
     pub show_thinking: bool,
@@ -310,6 +312,7 @@ impl Live {
             engine: None,
             starting: true,
             busy: false,
+            compacting: false,
             dialogs: vec![],
             queue: VecDeque::new(),
             show_thinking: false,
@@ -437,10 +440,13 @@ impl Live {
                     self.arm(now);
                 }
             }
-            UiMsg::Compacted(r) => match r {
-                Ok(()) => self.note("conversation compacted", false),
-                Err(e) => self.note(format!("/compact: {e}"), true),
-            },
+            UiMsg::Compacted(r) => {
+                self.compacting = false;
+                match r {
+                    Ok(()) => self.note("conversation compacted", false),
+                    Err(e) => self.note(format!("/compact: {e}"), true),
+                }
+            }
             UiMsg::TaskDone(r) => {
                 self.busy = false;
                 self.dialogs.clear();

@@ -25,6 +25,9 @@ pub struct Running {
     pub age: String,
     pub live: bool,
     pub selected: bool,
+    /// The mark of the row (spinner, yellow "!", ...) and the status word that goes with it.
+    pub state: super::activity::RunState,
+    pub status: String,
 }
 
 /// The Session panel: the status pill and the key/value rows (uptime last).
@@ -227,6 +230,8 @@ pub fn sample() -> Snapshot {
         age: s(a),
         live: true,
         selected: sel,
+        state: Default::default(),
+        status: String::new(),
     };
     let node = |pos, title: &str, lines: &[&str], state| TopoNode {
         pos,

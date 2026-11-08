@@ -6,6 +6,7 @@ use synthesis_view::activity::ActivityKind;
 use synthesis_view::topology::{Group, Topology, is_busy};
 use synthesis_view::workspaces::{SessionRow, fold_dir};
 
+use super::activity::{Activity, activity_of, run_state_of_live, run_state_of_status, status_word};
 use super::sample::{
     ActivityRow, AgentStatus, ChatHead, ContextInfo, Core, Metric, NodeState, Pos, PromptRow,
     Running, SessionInfo, Snapshot, StatusChip, Step, StepKind, ToolRow, ToolsInfo, Top, TopoNode,
@@ -225,6 +226,16 @@ fn topology(l: &Live, t: &Topology) -> (Vec<TopoNode>, Core) {
     )
 }
 
+/// The word beside the open session's mark.
+fn activity_word(l: &Live) -> String {
+    match activity_of(l) {
+        Some(Activity::Approval) => "waiting approval",
+        Some(_) => "running",
+        None => "idle",
+    }
+    .to_string()
+}
+
 fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Running> {
     let v = &l.view;
     let Some(ws) = v.workspaces.workspaces.iter().find(|w| w.key == l.ws_key) else {
@@ -261,7 +272,18 @@ fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Run
             branch: if r.is_live && !v.session.git_branch.is_empty() {
                 v.session.git_branch.clone()
             } else {
-                format!("{:?}", r.status).to_lowercase()
+                status_word(r.status).to_string()
+            },
+            // the open session is known first-hand, the others by their status column in the store
+            state: if r.is_live {
+                run_state_of_live(l)
+            } else {
+                run_state_of_status(r.status)
+            },
+            status: if r.is_live {
+                activity_word(l)
+            } else {
+                status_word(r.status).to_string()
             },
             age: if r.is_live {
                 "now".into()
@@ -285,6 +307,8 @@ fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Run
         age: String::new(),
         live: true,
         selected: false,
+        state: super::activity::RunState::Running,
+        status: p.status.to_string(),
     }));
     out
 }

@@ -5,6 +5,7 @@
 //! Status + Context, Usage & Metrics; key hint footer. It reads a `Snapshot` (see `sample`); no terminal, no
 //! PTY. Panels hide with the TUI's `panels.*` keys (`layout::Hidden`).
 
+pub mod activity;
 pub mod chat;
 #[cfg(test)]
 mod design_tests;
@@ -390,6 +391,8 @@ impl TuiView {
                 panels::running_body(
                     &s.running,
                     attn,
+                    self.live.as_ref().is_none_or(|l| l.cfg.tui.motion),
+                    crate::live::now_ms(),
                     live.map(|_| &run_click as &dyn Fn(usize) -> panels::OnClick),
                     new_run,
                 ),
@@ -813,7 +816,17 @@ impl TuiView {
 impl Render for TuiView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // a blinking red is repainted every frame while an approval waits
-        if self.attention() == Some(true) {
+        let motion = self.live.as_ref().is_some_and(|l| l.cfg.tui.motion);
+        // a spinner or a blink in the Running list is repainted every frame too
+        if self.attention() == Some(true)
+            || (motion
+                && self.snap.running.iter().any(|r| {
+                    matches!(
+                        r.state,
+                        activity::RunState::Running | activity::RunState::Approval
+                    )
+                }))
+        {
             window.request_animation_frame();
         }
         self.refresh(window);

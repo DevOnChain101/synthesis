@@ -108,6 +108,8 @@ pub struct Convo {
     started_ms: Option<i64>,
     /// `tokens` when the task in progress started.
     task_tokens0: u64,
+    /// The session's latest status (`session.status_changed` `to`: `running`, `verifying`, `waiting_approval`...).
+    pub session_status: String,
     /// Summary of the last verification report of the task in progress.
     checks: Option<String>,
 }
@@ -275,6 +277,7 @@ impl Convo {
                 self.started_ms = crate::model::parse_ts(&e.ts);
                 self.task_tokens0 = self.tokens;
             }
+            Event::SessionStatusChanged { to, .. } if main => self.session_status = to.clone(),
             Event::TurnStarted { .. } if main => self.turns += 1,
             Event::TaskEnded {
                 status,

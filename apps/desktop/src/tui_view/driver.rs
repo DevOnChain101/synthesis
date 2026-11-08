@@ -1008,7 +1008,10 @@ impl TuiView {
                         "compaction requested: it runs before the next model request",
                         false,
                     ),
-                    Some(Ok(false)) => lu.live.note("compacting the conversation...", false),
+                    Some(Ok(false)) => {
+                        lu.live.compacting = true;
+                        lu.live.note("compacting the conversation...", false)
+                    }
                     Some(Err(e)) => lu.live.note(format!("/compact: {e}"), true),
                     None => {}
                 }
@@ -1240,7 +1243,8 @@ impl LiveUi {
         if !c.plan.is_empty() {
             rows.push(Row::Plan);
         }
-        if c.activity().is_some() && l.dialogs.is_empty() {
+        // every busy state has its line: thinking, a tool, a sub-agent, verifying, compacting, an approval
+        if super::activity::activity_of(l).is_some() {
             rows.push(Row::Activity);
         }
         rows

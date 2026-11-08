@@ -482,10 +482,15 @@ pub fn tabs(
 /// The red of the "needs your approval" signal: with `motion` it blinks (on for 530 ms, dim for 530 ms),
 /// without it it is steady.
 pub fn attention_red(motion: bool, ms: i64) -> Hsla {
+    blink(hsla(t::ERROR), motion, ms)
+}
+
+/// `c` blinking: full for 530 ms, dim for 530 ms; steady without `motion`.
+pub fn blink(c: Hsla, motion: bool, ms: i64) -> Hsla {
     let on = !motion || (ms.max(0) / 530) % 2 == 0;
     Hsla {
         a: if on { 1. } else { 0.25 },
-        ..hsla(t::ERROR)
+        ..c
     }
 }
 

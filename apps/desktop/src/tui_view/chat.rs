@@ -394,16 +394,38 @@ impl TuiView {
         let secs = c
             .task_started_ms()
             .map_or(0, |t0| ((now - t0) / 1000).max(0) as u64);
-        let what = match (c.agents.last(), c.running_tool()) {
-            (Some((_, kind)), _) => format!("{kind} agent working\u{2026}"),
-            (None, Some(tool)) => format!("Running {tool}\u{2026}"),
-            (None, None) => format!("{}\u{2026}", activity_verb(secs)),
+        use super::activity::{Activity, activity_of};
+        let act = activity_of(&lu.live).unwrap_or(Activity::Thinking);
+        let waiting = act == Activity::Approval;
+        let what = match &act {
+            Activity::Approval => "waiting for your approval".to_string(),
+            Activity::Compacting => "Compacting the conversation\u{2026}".to_string(),
+            Activity::Agent(kind) => format!("{kind} agent working\u{2026}"),
+            Activity::Tool(tool) => format!("Running {tool}\u{2026}"),
+            Activity::Verifying => "Verifying the result\u{2026}".to_string(),
+            Activity::Starting => "Starting the session\u{2026}".to_string(),
+            Activity::Thinking => format!("{}\u{2026}", activity_verb(secs)),
         };
-        let mut meta = vec![elapsed_label(secs)];
+        let tone = if waiting {
+            hsla(t::WARN)
+        } else {
+            hsla(t::ACCENT)
+        };
+        let mut meta = vec![];
+        if c.task_started_ms().is_some() {
+            meta.push(elapsed_label(secs));
+        }
         if c.task_tokens() > 0 {
             meta.push(format!("\u{2193} {} tokens", token_label(c.task_tokens())));
         }
-        meta.push("esc to interrupt".to_string());
+        meta.push(
+            if waiting {
+                "answer below"
+            } else {
+                "esc to interrupt"
+            }
+            .to_string(),
+        );
         let line = div()
             .id("activity-line")
             .flex()
@@ -413,10 +435,10 @@ impl TuiView {
                 div()
                     .w(px(14.))
                     .flex_none()
-                    .text_color(hsla(t::ACCENT))
+                    .text_color(tone)
                     .child(if motion { spinner_glyph(now) } else { "*" }),
             )
-            .child(div().text_color(hsla(t::ACCENT)).child(what))
+            .child(div().text_color(tone).child(what))
             .child(
                 div()
                     .text_color(dim())
@@ -994,7 +1016,7 @@ const VERBS: [&str; 8] = [
 ];
 
 /// Braille spinner frame at `ms` (one frame per 80 ms).
-fn spinner_glyph(ms: i64) -> &'static str {
+pub(super) fn spinner_glyph(ms: i64) -> &'static str {
     SPINNER[(ms.max(0) / 80) as usize % SPINNER.len()]
 }
 

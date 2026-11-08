@@ -8,6 +8,7 @@ use gpui::{
 };
 use synthesis_tui_render::theme as t;
 
+use super::activity::RunState;
 use super::sample::{
     ActivityRow, AgentStatus, ContextInfo, PromptRow, Running, SessionInfo, StepKind, ToolsInfo,
     Usage, Workspace,
@@ -115,12 +116,49 @@ pub fn workspace_body(
     )
 }
 
+/// The mark at the left of a Running row: a spinner while the session works (a steady glyph without motion), a
+/// yellow "!" that blinks while it waits for approval, a red dot after a failure, else the design's dot.
+fn run_mark(r: &Running, attn: Option<gpui::Hsla>, motion: bool, now: i64) -> Div {
+    let glyph = |c: gpui::Hsla, s: &'static str| {
+        div()
+            .w(px(7.))
+            .mt(px(1.))
+            .flex_none()
+            .text_color(c)
+            .child(s)
+    };
+    match r.state {
+        RunState::Running => glyph(
+            hsla(t::SUCCESS),
+            if motion {
+                super::chat::spinner_glyph(now)
+            } else {
+                "*"
+            },
+        ),
+        RunState::Approval => glyph(
+            crate::widgets::chrome::blink(hsla(t::WARN), motion, now),
+            "!",
+        ),
+        RunState::Error => dot(hsla(t::ERROR), true).mt(px(5.)),
+        RunState::Idle => dot(
+            attn.filter(|_| r.selected).unwrap_or(hsla(t::SUCCESS)),
+            r.live,
+        )
+        .mt(px(5.))
+        .when(!r.live, |d| d.border_color(dim())),
+    }
+}
+
 pub fn running_body(
     rs: &[Running],
     attn: Option<gpui::Hsla>,
+    motion: bool,
+    now: i64,
     on_click: Option<&dyn Fn(usize) -> OnClick>,
     on_new: Option<OnClick>,
 ) -> Div {
+    let waiting = crate::widgets::chrome::blink(hsla(t::WARN), motion, now);
     let mut col = div().flex().flex_col();
     for (i, r) in rs.iter().enumerate() {
         col = col.child(
@@ -131,14 +169,7 @@ pub fn running_body(
                     .when_some(on_click.filter(|_| !r.peer), |d, f| {
                         d.cursor_pointer().on_click(f(i))
                     })
-                    .child(
-                        dot(
-                            attn.filter(|_| r.selected).unwrap_or(hsla(t::SUCCESS)),
-                            r.live,
-                        )
-                        .mt(px(5.))
-                        .when(!r.live, |d| d.border_color(dim())),
-                    )
+                    .child(run_mark(r, attn, motion, now))
                     .child(
                         div()
                             .flex()
@@ -177,18 +208,28 @@ pub fn running_body(
                                             .text_color(hsla(t::INFO))
                                             .child(r.folder.clone()),
                                     )
-                                    .when(!r.branch.is_empty(), |d| {
-                                        d.child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(3.))
-                                                .min_w(px(0.))
-                                                .overflow_hidden()
-                                                .child(icon("git-branch", 12., dim()))
-                                                .child(div().truncate().child(r.branch.clone())),
-                                        )
-                                    }),
+                                    // waiting for approval: the yellow status word (blinking unless motion
+                                    // is off) takes the place of the branch
+                                    .when(r.state == RunState::Approval, |d| {
+                                        d.child(div().text_color(waiting).child(r.status.clone()))
+                                    })
+                                    .when(
+                                        !r.branch.is_empty() && r.state != RunState::Approval,
+                                        |d| {
+                                            d.child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(3.))
+                                                    .min_w(px(0.))
+                                                    .overflow_hidden()
+                                                    .child(icon("git-branch", 12., dim()))
+                                                    .child(
+                                                        div().truncate().child(r.branch.clone()),
+                                                    ),
+                                            )
+                                        },
+                                    ),
                             ),
                     ),
             ),
