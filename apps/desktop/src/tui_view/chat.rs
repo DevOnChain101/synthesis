@@ -908,7 +908,9 @@ impl RenderOnce for NativeCaret {
         cx.global_mut::<gpui_component::Theme>().caret = if self.0 {
             hsla(t::PEARL)
         } else {
-            gpui::transparent_black()
+            // not fully transparent: the input's own view re-resolves an alpha-0 caret to its text colour
+            // whenever it re-renders (blink, focus), which brought the thin bar back
+            gpui::hsla(0., 0., 0., 0.001)
         };
         div().size_0()
     }
