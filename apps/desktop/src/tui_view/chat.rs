@@ -552,7 +552,16 @@ impl TuiView {
                     }
                 ))
                 .into_any_element(),
-            Item::Internal(s) => div().text_color(dim()).child(s.clone()).into_any_element(),
+            Item::Internal(s) => self
+                .clamped(
+                    format!("row-{idx}"),
+                    wrap_rows(s, cols_for(self.centre_w - INDENT - 40.))
+                        .into_iter()
+                        .map(|l| (l, dim(), None))
+                        .collect(),
+                    cx,
+                )
+                .into_any_element(),
             Item::TaskEnd {
                 ok,
                 text: s,
@@ -618,6 +627,10 @@ impl TuiView {
                 d.child(
                     div()
                         .id(gpui::SharedString::from(format!("more-{key}")))
+                        .debug_selector({
+                            let k = format!("more-{key}");
+                            move || k.clone()
+                        })
                         .cursor_pointer()
                         .text_color(hsla(t::ACCENT))
                         .child(toggle_label(cut, more))
@@ -632,6 +645,17 @@ impl TuiView {
                         })),
                 )
             })
+    }
+
+    /// Opens a clipped card whole, or clips it again (the state of its "Show more" too).
+    pub(super) fn toggle_card(&mut self, key: &str, cx: &mut Context<Self>) {
+        if let Some(lu) = &mut self.live {
+            let e = &mut lu.live.expanded;
+            if !e.remove(key) {
+                e.insert(key.to_string());
+            }
+        }
+        cx.notify();
     }
 
     fn tool_card(&self, idx: usize, it: &Item, cx: &mut Context<Self>) -> AnyElement {
@@ -682,6 +706,22 @@ impl TuiView {
                 _ => vec![],
             };
         let tid0 = id.clone();
+        let cols = cols_for(self.centre_w - INDENT - 40.);
+        let total_rows = if shown_diff {
+            diff_lines.len()
+        } else {
+            wrap_rows(body, cols).len()
+        };
+        let collapsible = total_rows > COLLAPSED_LINES;
+        let open = self
+            .live
+            .as_ref()
+            .is_some_and(|lu| lu.live.expand_all || lu.live.expanded.contains(id));
+        let chev = if open {
+            "chevron-down"
+        } else {
+            "chevron-right"
+        };
         let mut card = div()
             .flex()
             .flex_col()
@@ -700,14 +740,11 @@ impl TuiView {
                     .py(px(7.))
                     .cursor_pointer()
                     .hover(|d| d.bg(super::with_alpha_white(0.03)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(lu) = &mut this.live {
-                            let e = &mut lu.live.expanded;
-                            if !e.remove(&tid0) {
-                                e.insert(tid0.clone());
-                            }
+                    // a double click on the header toggles the card; the chevron below is one click
+                    .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _, cx| {
+                        if ev.click_count() >= 2 {
+                            this.toggle_card(&tid0, cx);
                         }
-                        cx.notify();
                     }))
                     .child(icon(ic, 16., kind_col))
                     .child(
@@ -729,13 +766,27 @@ impl TuiView {
                         meta.into_iter()
                             .map(|(m, c)| div().flex_none().text_color(c).child(m)),
                     )
-                    .child(div().flex_none().text_color(c).child(mark)),
+                    .child(div().flex_none().text_color(c).child(mark))
+                    .when(collapsible, |d| {
+                        let tid1 = id.clone();
+                        d.child(
+                            div()
+                                .id(("tool-chev", idx))
+                                .flex_none()
+                                .cursor_pointer()
+                                .text_color(dim())
+                                .child(icon(chev, 14., dim()))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_card(&tid1, cx);
+                                })),
+                        )
+                    }),
             );
         let mut lines: Vec<(String, gpui::Hsla, Option<gpui::Hsla>)> = vec![];
         if shown_diff {
             lines.extend(diff_lines);
         } else {
-            let cols = cols_for(self.centre_w - INDENT - 40.);
             lines.extend(wrap_rows(body, cols).into_iter().map(|l| (l, text(), None)));
         }
         if !lines.is_empty() {

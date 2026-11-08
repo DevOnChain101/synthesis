@@ -940,4 +940,54 @@ mod tests {
         );
         assert!(list.bounds_for_item(1000).is_none());
     }
+
+    /// Every kind of long output goes through the real row builder and ends clipped, with a "Show more".
+    #[gpui::test]
+    fn long_tool_output_is_clipped_to_five_lines(cx: &mut TestAppContext) {
+        use crate::live::Live;
+        use synthesis_view::convo::{Item, ToolState};
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let numbered = |n: usize| {
+            (1..=n)
+                .map(|i| format!("{i:>4}  line {i}\n"))
+                .collect::<String>()
+        };
+        let tool = |id: &str, name: &str, output: String| Item::Tool {
+            id: id.into(),
+            name: name.into(),
+            summary: "x".into(),
+            state: ToolState::Ok,
+            preview: String::new(),
+            output,
+            duration_ms: 1,
+            file: None,
+            diff: None,
+        };
+        let mut l = Live::new();
+        l.starting = false;
+        l.view.convo.items = vec![
+            tool("read", "Read", numbered(72)),
+            tool("grep", "Grep", numbered(30)),
+            tool("bash", "Bash", numbered(40)),
+            // one very long line is the rows it fills on screen
+            tool("long", "Bash", "x".repeat(6000)),
+            tool("short", "Bash", numbered(3)),
+        ];
+        view.update(vcx, |t, _| t.set_live(l));
+        vcx.simulate_resize(size(px(1400.), px(1400.)));
+        vcx.run_until_parked();
+        for id in ["more-read", "more-grep", "more-bash", "more-long"] {
+            assert!(vcx.debug_bounds(id).is_some(), "{id}: no Show more");
+        }
+        assert!(vcx.debug_bounds("more-short").is_none());
+        // a double click opens the card whole: its control becomes "Show less" and the clip is gone
+        view.update(vcx, |t, cx| t.toggle_card("read", cx));
+        vcx.run_until_parked();
+        assert!(view.read_with(vcx, |t, _| {
+            t.live.as_ref().unwrap().live.expanded.contains("read")
+        }));
+    }
 }

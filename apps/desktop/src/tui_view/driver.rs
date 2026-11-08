@@ -159,7 +159,8 @@ impl TuiView {
         let mut live = Live::new();
         live.show_thinking = cfg.tui.show_thinking;
         live.verbose = cfg.tui.verbose;
-        live.expand_all = cfg.tui.diffs_expanded;
+        // not `cfg.tui.diffs_expanded`: with it every card started whole (the owner's settings.json has it on); the
+        // desktop view always starts clamped to 5 lines and Ctrl+O still expands them all
         let mut hidden = hidden;
         for (shown, (key, _)) in cfg.tui.panels.iter().zip(synthesis_settings::TUI_PANELS) {
             if !shown {
