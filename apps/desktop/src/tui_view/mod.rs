@@ -156,6 +156,8 @@ pub struct TuiView {
     pub active: bool,
     /// The slide-over column that is open (only a collapsed column has one; closed by default).
     pub(crate) drawer: Option<Side>,
+    /// Side-panel sections folded to their header (by panel id), kept for the session.
+    folded: std::collections::HashSet<&'static str>,
 }
 
 /// A side column of the view.
@@ -201,6 +203,7 @@ impl TuiView {
             sub_scroll: gpui::ScrollHandle::new(),
             centre_w: 600.,
             drawer: None,
+            folded: Default::default(),
         }
     }
 
@@ -293,6 +296,29 @@ impl TuiView {
         chrome::footer(&self.snap.hints, &chips)
     }
 
+    fn is_folded(&self, id: &str) -> bool {
+        self.folded.contains(id)
+    }
+
+    /// The click on a section's title: folds it, or opens it again.
+    fn fold_cb(&self, id: &'static str, cx: &Context<Self>) -> panels::OnClick {
+        Box::new(cx.listener(move |this, _, _, cx| {
+            if !this.folded.remove(id) {
+                this.folded.insert(id);
+            }
+            cx.notify();
+        }))
+    }
+
+    /// A folded section is just its header; an open one gets its usual flex.
+    fn fit(&self, p: Div, id: &str, open: impl FnOnce(Div) -> Div) -> Div {
+        if self.is_folded(id) {
+            p.flex_none().min_h(px(0.))
+        } else {
+            open(p)
+        }
+    }
+
     fn left(&self, tier: layout::Tiers, w: f32, cx: &mut Context<Self>) -> Div {
         let (s, h) = (&self.snap, &self.hidden);
         let split = h.left_is_split();
@@ -315,7 +341,10 @@ impl TuiView {
         let pick = |p: Div, focused: bool| p.when(focused, |d| d.border_color(hsla(t::ACCENT)));
         let ws = pick(
             panel_scroll(
-                Head::new("p-workspace", "Workspace", "folder", Pad::LEFT),
+                Head::new("p-workspace", "Workspace", "folder", Pad::LEFT).fold(
+                    self.is_folded("p-workspace"),
+                    self.fold_cb("p-workspace", cx),
+                ),
                 Some(meta(text(), s.workspaces.len().to_string())),
                 panels::workspace_body(
                     &s.workspaces,
@@ -329,7 +358,8 @@ impl TuiView {
         let running_n = s.running.iter().filter(|r| r.live).count();
         let run = pick(
             panel_scroll(
-                Head::new("p-running", "Running", "activity", Pad::LEFT),
+                Head::new("p-running", "Running", "activity", Pad::LEFT)
+                    .fold(self.is_folded("p-running"), self.fold_cb("p-running", cx)),
                 Some(
                     div()
                         .flex()
@@ -360,21 +390,26 @@ impl TuiView {
             .overflow_hidden();
         // `#view1 .col.l>.panel{flex:0 1 auto;min-height:84px}`; Workspace and Running split the column
         // in halves when everything below them is hidden
-        col = col.child(if split {
-            ws.flex_1().min_h(px(0.))
-        } else {
-            ws.flex_initial().min_h(min)
-        });
-        col = col.child(if split {
-            run.flex_1().min_h(px(0.))
-        } else {
-            run.flex_initial().min_h(min)
-        });
+        col = col.child(self.fit(ws, "p-workspace", |p| {
+            if split {
+                p.flex_1().min_h(px(0.))
+            } else {
+                p.flex_initial().min_h(min)
+            }
+        }));
+        col = col.child(self.fit(run, "p-running", |p| {
+            if split {
+                p.flex_1().min_h(px(0.))
+            } else {
+                p.flex_initial().min_h(min)
+            }
+        }));
         if !h.session {
             // Session always shows all its rows (`:has(#h-sess){flex:0 0 auto;min-height:0}`)
             col = col.child(
                 panel(
-                    Head::new("p-session", "Session", "square-terminal", Pad::LEFT),
+                    Head::new("p-session", "Session", "square-terminal", Pad::LEFT)
+                        .fold(self.is_folded("p-session"), self.fold_cb("p-session", cx)),
                     Some(panels::session_meta(&s.session)),
                     panels::session_body(&s.session),
                 )
@@ -382,38 +417,33 @@ impl TuiView {
             );
         }
         if !h.tools {
-            col = col.child(
-                panel(
-                    Head::new("p-tools", "Tools & Skills", "wrench", Pad::LEFT).max_body(72.),
-                    Some(meta(text(), s.tools.count.clone())),
-                    panels::tools_body(&s.tools),
-                )
-                .flex_initial()
-                .min_h(min),
+            let p = panel(
+                Head::new("p-tools", "Tools & Skills", "wrench", Pad::LEFT)
+                    .max_body(72.)
+                    .fold(self.is_folded("p-tools"), self.fold_cb("p-tools", cx)),
+                Some(meta(text(), s.tools.count.clone())),
+                panels::tools_body(&s.tools),
             );
+            col = col.child(self.fit(p, "p-tools", |p| p.flex_initial().min_h(min)));
         }
         if !h.activity {
             // `.grow` panels: flex 1 1 0, grow 1.4 and 2.4
-            col = col.child(
-                panel(
-                    Head::new("p-activity", "Recent Activity", "activity", Pad::LEFT),
-                    None,
-                    panels::activity_body(&s.activity),
-                )
-                .flex_1()
-                .flex_grow(1.4)
-                .min_h(min),
+            let p = panel(
+                Head::new("p-activity", "Recent Activity", "activity", Pad::LEFT)
+                    .fold(self.is_folded("p-activity"), self.fold_cb("p-activity", cx)),
+                None,
+                panels::activity_body(&s.activity),
             );
-            col = col.child(
-                panel(
-                    Head::new("p-history", "User Prompt", "clock", Pad::LEFT),
-                    Some(meta(text(), s.prompts.len().to_string())),
-                    panels::prompts_body(&s.prompts),
-                )
-                .flex_1()
-                .flex_grow(2.4)
-                .min_h(px(tier.history_min)),
+            col = col.child(self.fit(p, "p-activity", |p| p.flex_1().flex_grow(1.4).min_h(min)));
+            let p = panel(
+                Head::new("p-history", "User Prompt", "clock", Pad::LEFT)
+                    .fold(self.is_folded("p-history"), self.fold_cb("p-history", cx)),
+                Some(meta(text(), s.prompts.len().to_string())),
+                panels::prompts_body(&s.prompts),
             );
+            col = col.child(self.fit(p, "p-history", |p| {
+                p.flex_1().flex_grow(2.4).min_h(px(tier.history_min))
+            }));
         }
         col
     }
@@ -683,12 +713,13 @@ impl TuiView {
             // the canvas fills the body; its own size picks the mode (A, B or T)
             let body = div().relative().size_full().child(topo::graph(s));
             let p = panel(
-                Head::new("p-topology", "Synthesis Topology", "network", pad),
+                Head::new("p-topology", "Synthesis Topology", "network", pad)
+                    .fold(self.is_folded("p-topology"), self.fold_cb("p-topology", cx)),
                 Some(online),
                 body,
             );
             // `.grow` (flex 1 1 0)
-            col = col.child(p.flex_1().min_h(px(tier.topo_min)));
+            col = col.child(self.fit(p, "p-topology", |p| p.flex_1().min_h(px(tier.topo_min))));
         }
         if hid.has_cards() {
             let card_min = if tight { 84. } else { 110. };
@@ -701,7 +732,8 @@ impl TuiView {
             if !hid.status {
                 row = row.child(
                     panel(
-                        Head::new("p-agent", "Agent Status", "sparkles", Pad::CARD),
+                        Head::new("p-agent", "Agent Status", "sparkles", Pad::CARD)
+                            .fold(self.is_folded("p-agent"), self.fold_cb("p-agent", cx)),
                         None,
                         div()
                             .line_height(px(layout::LINE_TIGHT))
@@ -709,13 +741,16 @@ impl TuiView {
                     )
                     .flex_1()
                     .min_w(px(0.))
-                    .min_h(px(0.)),
+                    .min_h(px(0.))
+                    // folded: just the header, not as tall as its neighbour
+                    .when(self.is_folded("p-agent"), |p| p.self_start()),
                 );
             }
             if !hid.tokens {
                 row = row.child(
                     panel(
-                        Head::new("p-context", "Context", "cpu", Pad::CARD),
+                        Head::new("p-context", "Context", "cpu", Pad::CARD)
+                            .fold(self.is_folded("p-context"), self.fold_cb("p-context", cx)),
                         None,
                         div()
                             .line_height(px(layout::LINE_TIGHT))
@@ -723,35 +758,33 @@ impl TuiView {
                     )
                     .flex_1()
                     .min_w(px(0.))
-                    .min_h(px(0.)),
+                    .min_h(px(0.))
+                    .when(self.is_folded("p-context"), |p| p.self_start()),
                 );
             }
             col = col.child(row);
         }
         if !hid.usage && !nousage {
-            let mut head = Head::new("p-usage", "Usage & Metrics", "chart-bar", Pad::NORMAL);
+            let mut head = Head::new("p-usage", "Usage & Metrics", "chart-bar", Pad::NORMAL)
+                .fold(self.is_folded("p-usage"), self.fold_cb("p-usage", cx));
             head.meta_h = 22.6;
-            col = col.child(
-                panel(
-                    head,
-                    Some(panels::usage_meta(
-                        &s.usage,
-                        self.live.as_ref().map(|_| -> panels::OnClick {
-                            Box::new(cx.listener(|this, _, _, cx| {
-                                if let Some(lu) = &mut this.live {
-                                    lu.live.usage_days =
-                                        if lu.live.usage_days == 7 { 30 } else { 7 };
-                                    lu.dirty = true;
-                                }
-                                cx.notify();
-                            }))
-                        }),
-                    )),
-                    panels::usage_body(&s.usage),
-                )
-                .flex_initial()
-                .min_h(px(tier.usage_min)),
+            let p = panel(
+                head,
+                Some(panels::usage_meta(
+                    &s.usage,
+                    self.live.as_ref().map(|_| -> panels::OnClick {
+                        Box::new(cx.listener(|this, _, _, cx| {
+                            if let Some(lu) = &mut this.live {
+                                lu.live.usage_days = if lu.live.usage_days == 7 { 30 } else { 7 };
+                                lu.dirty = true;
+                            }
+                            cx.notify();
+                        }))
+                    }),
+                )),
+                panels::usage_body(&s.usage),
             );
+            col = col.child(self.fit(p, "p-usage", |p| p.flex_initial().min_h(px(tier.usage_min))));
         }
         col
     }
@@ -989,5 +1022,41 @@ mod tests {
         assert!(view.read_with(vcx, |t, _| {
             t.live.as_ref().unwrap().live.expanded.contains("read")
         }));
+    }
+
+    /// A click on a section's title folds it to its header, a second click opens it again.
+    #[gpui::test]
+    fn a_click_on_a_panel_title_folds_it(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (_view, vcx) = cx.add_window_view(|_, _| TuiView::new(0., Hidden::default()));
+        vcx.simulate_resize(size(px(1400.), px(900.)));
+        vcx.run_until_parked();
+        for id in ["p-session", "p-tools", "p-topology", "p-usage"] {
+            let head_id = match id {
+                "p-session" => "p-session-head",
+                "p-tools" => "p-tools-head",
+                "p-topology" => "p-topology-head",
+                _ => "p-usage-head",
+            };
+            let head = vcx.debug_bounds(head_id);
+            let body = match id {
+                "p-session" => "p-session-body",
+                "p-tools" => "p-tools-body",
+                "p-topology" => "p-topology-body",
+                _ => "p-usage-body",
+            };
+            let head = head.unwrap_or_else(|| panic!("{id}: no header"));
+            assert!(vcx.debug_bounds(body).is_some(), "{id}: body before");
+            let at = gpui::point(head.left() + px(40.), head.center().y);
+            vcx.simulate_click(at, gpui::Modifiers::default());
+            vcx.run_until_parked();
+            assert!(vcx.debug_bounds(body).is_none(), "{id}: still open");
+            // the column re-flows: look the header up again
+            let head = vcx.debug_bounds(head_id).unwrap();
+            let at = gpui::point(head.left() + px(40.), head.center().y);
+            vcx.simulate_click(at, gpui::Modifiers::default());
+            vcx.run_until_parked();
+            assert!(vcx.debug_bounds(body).is_some(), "{id}: not reopened");
+        }
     }
 }

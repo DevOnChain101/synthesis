@@ -119,6 +119,8 @@ pub struct Head {
     pub meta_h: f32,
     /// `max-height` of the body (the Tools & Skills list: 72), padding included.
     pub max_body: Option<f32>,
+    /// Folding: whether the section is folded and what a click on its title does (no handler: not foldable).
+    pub fold: Option<(bool, OnClick)>,
 }
 
 impl Head {
@@ -130,7 +132,14 @@ impl Head {
             pad,
             meta_h: HEAD_LINE,
             max_body: None,
+            fold: None,
         }
+    }
+
+    /// The header's chevron and title fold the section; the meta on the right keeps its own clicks.
+    pub fn fold(mut self, folded: bool, on_toggle: OnClick) -> Self {
+        self.fold = Some((folded, on_toggle));
+        self
     }
 
     pub fn max_body(mut self, h: f32) -> Self {
@@ -168,6 +177,25 @@ pub fn panel_scroll(
     if let Some(m) = h.max_body {
         b = b.max_h(px(m - h.pad.body_bottom));
     }
+    let folded = h.fold.as_ref().is_some_and(|f| f.0);
+    let (id, title, icon_name, pad_title) = (h.id, h.title, h.icon, h.pad.title);
+    let mut label = div()
+        .id(format!("{id}-fold"))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(icon(icon_name, 14., hsla(t::ACCENT)))
+        .child(tracked(&title.to_uppercase(), pad_title, 0.16, strong()));
+    if let Some((f, on_toggle)) = h.fold {
+        label = label
+            .cursor_pointer()
+            .child(icon(
+                if f { "chevron-right" } else { "chevron-down" },
+                12.,
+                dim(),
+            ))
+            .on_click(move |e, w, cx| on_toggle(e, w, cx));
+    }
     let mut head = div()
         .debug_selector(|| format!("{}-head", h.id))
         .flex()
@@ -178,13 +206,7 @@ pub fn panel_scroll(
         .pt(px(pt))
         .pb(px(pb))
         .h(px(pt + pb + h.meta_h))
-        .child(icon(h.icon, 14., hsla(t::ACCENT)))
-        .child(tracked(
-            &h.title.to_uppercase(),
-            h.pad.title,
-            0.16,
-            strong(),
-        ));
+        .child(label);
     if let Some(m) = meta {
         head = head.child(
             div()
@@ -208,9 +230,11 @@ pub fn panel_scroll(
         .border_color(hsla(t::BORDER))
         .rounded(px(8.))
         .child(head)
-        .child(b.child(body))
-        // the bottom padding sits outside the scroll area, or the next row shows through it
-        .child(div().h(px(h.pad.body_bottom)).flex_none())
+        .when(!folded, |d| {
+            d.child(b.child(body))
+                // the bottom padding sits outside the scroll area, or the next row shows through it
+                .child(div().h(px(h.pad.body_bottom)).flex_none())
+        })
 }
 
 /// One `.tchip` of the top bar or `.footer .st` span: optional dot, label, value.
