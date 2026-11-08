@@ -54,6 +54,8 @@ pub struct LiveShot {
     /// `--earlier TEXT`: a first session of the same folder and home that ran this prompt and
     /// ended (what `/resume` lists).
     earlier: Option<String>,
+    /// `--queue 'a|b'`: a task is running and these lines wait behind it (rows above the prompt).
+    queue: Vec<String>,
     /// `--setup`: the first-run card (no model configured) is open.
     setup: bool,
     /// `--outside-read`: an `outside_read` approval dialog is open.
@@ -89,6 +91,7 @@ pub fn parse(args: &[String]) -> Option<Args> {
         },
         cmd: val("--cmd").cloned(),
         earlier: val("--earlier").cloned(),
+        queue: val("--queue").map_or_else(Vec::new, |q| q.split('|').map(String::from).collect()),
         setup: args.iter().any(|a| a == "--setup"),
         outside_read: args.iter().any(|a| a == "--outside-read"),
     });
@@ -231,6 +234,10 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
     }
     if let Some(c) = &l.cmd {
         live.submit(c);
+    }
+    if !l.queue.is_empty() {
+        live.busy = true;
+        live.queue.extend(l.queue.iter().cloned());
     }
     if l.setup {
         live.open_setup("no model configured: set `model` in synt.json", now_ms());

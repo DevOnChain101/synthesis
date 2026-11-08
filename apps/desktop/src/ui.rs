@@ -15,8 +15,8 @@ use gpui::{
     prelude::*, px,
 };
 
-use crate::settings_view::{self, Close, SettingsView};
-use crate::tui_view::driver::{LiveCfg, OpenSettings};
+use crate::settings_view::{self, Applied, Close, Restart, SettingsView};
+use crate::tui_view::driver::{LiveCfg, OpenSettings, SessionStarted};
 use crate::tui_view::{Side, TuiView, layout};
 use crate::widgets::chrome::{icon, tracked, with_alpha};
 use crate::{brand, theme};
@@ -86,15 +86,26 @@ pub struct Shell {
     back: View,
     tui: Entity<TuiView>,
     settings: Entity<SettingsView>,
+    /// A restart was asked from Settings and the new session is not live yet.
+    restarting: bool,
 }
 
 impl Shell {
     /// Switches the view; the TUI view's window-wide key hook is told whether it is shown. Settings slides
     /// over the view it was opened from (`back`).
     pub(crate) fn go(&mut self, v: View, window: &mut Window, cx: &mut Context<Self>) {
+        if self.view == View::Settings && v != View::Settings {
+            // whichever way Settings is left, a slider drag never released does not stay on the window
+            self.settings
+                .update(cx, |p, cx| p.show_persisted(window, cx));
+        }
         if v == View::Settings && self.view != View::Settings {
             self.back = self.view;
-            self.settings.update(cx, |p, cx| p.focus(window, cx));
+            let block = self.tui.read(cx).restart_blocker().map(String::from);
+            self.settings.update(cx, |p, cx| {
+                p.set_restart_block(block, cx);
+                p.focus(window, cx)
+            });
         }
         self.view = v;
         let tui_on = v == View::Tui || (v == View::Settings && self.back == View::Tui);
@@ -106,6 +117,45 @@ impl Shell {
                 t.focus_prompt(window, cx);
             }
         });
+        cx.notify();
+    }
+
+    /// The Settings popup (the offscreen shots seed it).
+    #[cfg(feature = "shot")]
+    pub(crate) fn settings(&self) -> &Entity<SettingsView> {
+        &self.settings
+    }
+
+    /// "Restart session" of the popup: only when nothing would be dropped (no task, approval or queued prompt).
+    /// The popup keeps its pending-change badge and stays open until the fresh session has been started.
+    fn restart_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let block = self.tui.read(cx).restart_blocker().map(String::from);
+        let ok = block.is_none();
+        self.settings
+            .update(cx, |p, cx| p.set_restart_block(block, cx));
+        if ok {
+            // the badge goes when the new session is live (`SessionStarted`), not before
+            self.restarting = self.tui.update(cx, |t, cx| t.new_session(window, cx));
+            if self.restarting {
+                self.go(self.back, window, cx);
+            } else {
+                self.settings.update(cx, |p, cx| {
+                    p.set_restart_block(Some("the new session could not be started".into()), cx)
+                });
+            }
+        }
+    }
+
+    /// `synt.tui` changed in the Settings popup: the window's opacity and blur, and what the TUI view reads, apply at once.
+    fn apply_look(
+        &mut self,
+        tui: synthesis_settings::TuiSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        theme::set_opacity(tui.opacity);
+        window.set_background_appearance(theme::background(&tui));
+        self.tui.update(cx, |v, cx| v.apply_settings(tui, cx));
         cx.notify();
     }
 
@@ -194,7 +244,8 @@ impl Shell {
             .pr(px(if mac { 10. } else { 0. }))
             .border_b_1()
             .border_color(with_alpha(theme::hsla(t::TEXT), 0.12))
-            .bg(theme::hsla(t::BG))
+            // translucent like the surface under it (the window opacity), so no opaque strip
+            .bg(theme::fill(t::BG))
             .child(
                 // the drag region: the whole bar except the buttons
                 div()
@@ -310,7 +361,7 @@ impl Render for Shell {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme::hsla(t::BG))
+            .bg(theme::fill(t::BG))
             .text_size(px(13.))
             .font_family(brand::UI_FONT)
             .on_key_down(cx.listener(|s, ev: &gpui::KeyDownEvent, window, cx| {
@@ -319,6 +370,7 @@ impl Render for Shell {
                     return;
                 }
                 match k.key.as_str() {
+                    "," if s.view == View::Settings => s.go(s.back, window, cx),
                     "," => s.go(View::Settings, window, cx),
                     "1" => s.go(View::Tui, window, cx),
                     "2" => s.go(View::Agent, window, cx),
@@ -362,6 +414,9 @@ pub fn register_fonts(cx: &App) {
 /// Opens the main window: the live view when `live` is given, else the sample.
 pub fn open(cx: &mut App, live: Option<LiveCfg>) {
     let mac = cfg!(target_os = "macos");
+    if let Some(c) = &live {
+        theme::set_opacity(c.tui.opacity);
+    }
     let opts = gpui::WindowOptions {
         titlebar: Some(gpui::TitlebarOptions {
             title: Some("Synthesis".into()),
@@ -376,6 +431,9 @@ pub fn open(cx: &mut App, live: Option<LiveCfg>) {
             gpui::size(px(1280.), px(800.)),
             cx,
         ))),
+        window_background: live
+            .as_ref()
+            .map_or(Default::default(), |c| theme::background(&c.tui)),
         // the design's minimum app size (cli.html `#app`) plus the title bar
         window_min_size: Some(gpui::size(
             px(layout::MIN_W),
@@ -445,13 +503,36 @@ impl Shell {
             |s: &mut Shell, _, _: &Close, window, cx| s.go(s.back, window, cx),
         )
         .detach();
-        cx.subscribe(
+        cx.subscribe_in(
             &settings,
-            |s: &mut Shell, _, ev: &settings_view::PanelsChanged, cx| {
-                let h = ev.0;
-                s.tui.update(cx, |t, cx| t.set_hidden(h, cx));
+            window,
+            |s: &mut Shell, _, a: &Applied, window, cx| s.apply_look(a.0, window, cx),
+        )
+        .detach();
+        cx.subscribe_in(
+            &settings,
+            window,
+            |s: &mut Shell, _, _: &Restart, window, cx| s.restart_session(window, cx),
+        )
+        .detach();
+        cx.subscribe_in(
+            &tui,
+            window,
+            |s: &mut Shell, _, _: &SessionStarted, _, cx| {
+                if std::mem::take(&mut s.restarting) {
+                    s.settings.update(cx, |p, cx| p.restarted(cx));
+                }
             },
         )
+        .detach();
+        // a task that ends while the popup is open enables the button
+        cx.observe(&tui, |s: &mut Shell, tui, cx| {
+            if s.view == View::Settings {
+                let block = tui.read(cx).restart_blocker().map(String::from);
+                s.settings
+                    .update(cx, |p, cx| p.set_restart_block(block, cx));
+            }
+        })
         .detach();
         cx.subscribe_in(
             &tui,
@@ -468,6 +549,7 @@ impl Shell {
             back: View::Tui,
             tui,
             settings,
+            restarting: false,
         }
     }
 }
@@ -498,6 +580,7 @@ mod tests {
 
     #[gpui::test]
     fn the_title_bar_sits_above_the_design_content(cx: &mut TestAppContext) {
+        let _g = theme::opacity_guard();
         let (_, v) = open(cx, 1400., 930.);
         // no rail: the TUI view takes the whole width, below the 30px title bar
         assert_eq!(y(v, "titlebar"), Some((0., TITLEBAR_H)));
@@ -515,6 +598,7 @@ mod tests {
 
     #[gpui::test]
     fn the_icons_switch_views_and_agent_is_coming_soon(cx: &mut TestAppContext) {
+        let _g = theme::opacity_guard();
         let (shell, v) = open(cx, 1400., 930.);
         shell.update(v, |s, cx| {
             assert_eq!(s.view, View::Tui);
@@ -536,5 +620,109 @@ mod tests {
             shell.read_with(v, |s, _| (s.view, s.back)),
             (View::Settings, View::Tui)
         );
+    }
+
+    #[gpui::test]
+    fn settings_opacity_reaches_the_title_bar_and_the_tui_view(cx: &mut TestAppContext) {
+        let _g = theme::opacity_guard();
+        let (shell, v) = open(cx, 1400., 930.);
+        let tui = synthesis_settings::TuiSettings {
+            opacity: 60,
+            blur: true,
+            panels: [true, true, false, true, true, true, true, true],
+            ..Default::default()
+        };
+        shell.update_in(v, |s, window, cx| s.apply_look(tui, window, cx));
+        v.run_until_parked();
+        // the title bar and the surfaces paint `theme::fill`; text colours stay opaque
+        assert_eq!(theme::fill(t::BG).a, 0.6);
+        assert_eq!(theme::hsla(t::TEXT_STRONG).a, 1.);
+        // the TUI view hid the Tools panel at once
+        assert!(shell.read_with(v, |s, cx| s.tui.read(cx).hidden_panels().tools));
+        shell.update_in(v, |s, window, cx| {
+            s.apply_look(Default::default(), window, cx)
+        });
+        assert_eq!(theme::fill(t::BG).a, 1.);
+    }
+
+    #[gpui::test]
+    fn restart_session_is_refused_while_it_would_drop_work_and_keeps_the_badge(
+        cx: &mut TestAppContext,
+    ) {
+        let _g = theme::opacity_guard();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            theme::apply("JetBrains Mono", cx);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (home, ws) = (root.join("home"), root.join("ws"));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+        let cfg = settings_view::model::Cfg {
+            env: synthesis_config::Env::from_pairs([
+                ("HOME", home.to_string_lossy().into_owned()),
+                ("SYNT_HOME", home.to_string_lossy().into_owned()),
+            ]),
+            user_home: home.clone(),
+            home,
+            cwd: ws,
+            managed: root.join("managed.json"),
+            trust: synthesis_config::ProjectTrust::Untrusted,
+        };
+        let (shell, v) = cx.add_window_view(|window, cx| {
+            Shell::new(window, cx, None, Default::default(), Ok(cfg))
+        });
+        v.simulate_resize(size(px(1000.), px(800.)));
+        shell.update_in(v, |s, window, cx| {
+            s.go(View::Settings, window, cx);
+            let st = s.settings.clone();
+            st.update(cx, |p, cx| {
+                p.apply(
+                    "synt.memory.enabled",
+                    settings_view::model::Change::Bool(false),
+                    window,
+                    cx,
+                );
+                cx.emit(Restart);
+            });
+        });
+        v.run_until_parked();
+        // no live session here: nothing to restart, so the popup stays, says why, and the change is still pending
+        assert_eq!(shell.read_with(v, |s, _| s.view), View::Settings);
+        assert!(v.debug_bounds("restart-blocked").is_some());
+        assert!(shell.read_with(v, |s, cx| {
+            s.settings.read(cx).model().unwrap().restart_pending() == 1
+        }));
+    }
+
+    #[gpui::test]
+    fn leaving_settings_by_any_route_undoes_an_unreleased_opacity_drag(cx: &mut TestAppContext) {
+        let _g = theme::opacity_guard();
+        let (shell, v) = open(cx, 1000., 800.);
+        for leave in [View::Tui, View::Agent] {
+            theme::set_opacity(100);
+            shell.update_in(v, |s, window, cx| s.go(View::Settings, window, cx));
+            // a drag in progress (the preview reaches the shell as `Applied`), never released
+            shell.update_in(v, |s, window, cx| {
+                s.apply_look(
+                    synthesis_settings::TuiSettings {
+                        opacity: 40,
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                )
+            });
+            assert_eq!(theme::fill(t::BG).a, 0.4);
+            // the title-bar icons and Cmd+1/Cmd+2 all end in `go`
+            shell.update_in(v, |s, window, cx| s.go(leave, window, cx));
+            v.run_until_parked();
+            assert_eq!(
+                theme::fill(t::BG).a,
+                1.,
+                "{leave:?}: back to the file's value"
+            );
+        }
     }
 }

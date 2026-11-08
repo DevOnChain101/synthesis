@@ -3267,3 +3267,231 @@ async fn the_responder_looks_up_workspace_facts_with_read_grep_glob() {
     }
     assert!(tool_result(last, "r").unwrap().0.contains("4821"));
 }
+
+// ---- the user's own send (`/send`) and the redacted wire ---------------------------------------
+
+fn a_answers() -> Responder {
+    Arc::new(|r| {
+        Some(if is_responder(r) {
+            Turn::text("A-ANSWER")
+        } else {
+            Turn::text("A idle")
+        })
+    })
+}
+
+fn idle() -> Responder {
+    Arc::new(|_| Some(Turn::text("B idle")))
+}
+
+fn on() -> serde_json::Value {
+    json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]})
+}
+
+#[tokio::test]
+async fn the_models_send_is_redacted_before_it_goes_on_the_wire() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let (a, ea) = side("sess-a", "alpha", &run, Some(on()), a_answers(), 10);
+    let leaky: Responder = Arc::new(|r| {
+        Some(if tool_result(r, "ask").is_none() {
+            Turn::tool(
+                "ask",
+                "SendMessage",
+                json!({"to": "ws:alpha/sess:sess-a", "message": format!("use {SECRET} please")}),
+            )
+        } else {
+            Turn::text("B done")
+        })
+    });
+    let (mut b, _) = side_x(
+        "sess-b",
+        "beta",
+        &run,
+        Some(on()),
+        leaky,
+        10,
+        true,
+        None,
+        &[],
+        SideX {
+            mode: PermissionMode::BypassPermissions,
+            interactive: false,
+            hooks: None,
+        },
+    );
+    let _reg = serve(&a, &run, ea);
+    go(&mut b, "go").await;
+    until(|| all_text(&a).contains("please")).await;
+    let seen = all_text(&a);
+    assert!(!seen.contains(SECRET), "{seen}");
+    assert!(seen.contains("[REDACTED"), "{seen}");
+}
+
+#[tokio::test]
+async fn a_user_send_is_refused_when_peers_are_off_unknown_or_ambiguous() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let (off, _) = side("sess-o", "omega", &run, None, idle(), 10);
+    let e = off
+        .h
+        .peer_ask_user("ws:alpha/sess:x", "hi")
+        .await
+        .unwrap_err();
+    assert!(e.starts_with("disabled"), "{e}");
+
+    let (b, _) = side("sess-b", "beta", &run, Some(on()), idle(), 10);
+    let e = b.h.peer_ask_user("nonsense", "hi").await.unwrap_err();
+    assert!(e.starts_with("not_found"), "{e}");
+    let e =
+        b.h.peer_ask_user("ws:alpha/sess:x", "hi")
+            .await
+            .unwrap_err();
+    assert!(e.starts_with("not_found"), "{e}");
+
+    // two live sessions share a name: the caller must pick, nothing is sent
+    let _regs: Vec<_> = ["sess-t1", "sess-t2"]
+        .map(|sid| {
+            let mut e = entry(sid, "twin", "alpha", &run, "unix:/nowhere");
+            e.session_name = Some("twin".into());
+            Registration::create(&run, &e).unwrap()
+        })
+        .into();
+    let e =
+        b.h.peer_ask_user("ws:alpha/sess:twin", "hi")
+            .await
+            .unwrap_err();
+    assert!(e.starts_with("ambiguous") && e.contains("sess-t1"), "{e}");
+    assert!(sent_ids(&b).is_empty());
+}
+
+#[tokio::test]
+async fn a_user_send_goes_out_redacted_shows_rows_and_keeps_the_reply_from_the_model() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let (a, ea) = side("sess-a", "alpha", &run, Some(on()), a_answers(), 10);
+    let (mut b, _) = side("sess-b", "beta", &run, Some(on()), idle(), 10);
+    let _reg = serve(&a, &run, ea);
+    let reply =
+        b.h.peer_ask_user("ws:alpha/sess:sess-a", &format!("what is {SECRET} for?"))
+            .await
+            .unwrap();
+    assert_eq!(reply, "A-ANSWER");
+    let seen = all_text(&a);
+    assert!(
+        seen.contains("[REDACTED") && !seen.contains(SECRET),
+        "{seen}"
+    );
+    assert_eq!(sent_ids(&b).len(), 1);
+    let replies = b.rig.find(|e| match e {
+        Event::PeerReply { status, .. } => Some(status.clone()),
+        _ => None,
+    });
+    assert_eq!(replies, ["answered"]);
+    // the reply is the user's: the model never sees it
+    go(&mut b, "next").await;
+    assert!(!all_text(&b).contains("A-ANSWER"));
+    assert!(!all_text(&b).contains("peer_reply"));
+}
+
+#[tokio::test]
+async fn a_user_send_reaches_main_only_masks_are_said_and_at_most_four_wait() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let (b, _) = side("sess-b", "beta", &run, Some(on()), idle(), 10);
+    // a peer that is listed and listening but never answers
+    let l = Listener::bind(&run).unwrap();
+    let e = entry("sess-a", "sess-a", "alpha", &run, &l.endpoint());
+    let _reg = Registration::create(&run, &e).unwrap();
+    // another agent of that session is never silently swapped for its main agent
+    let e =
+        b.h.peer_ask_user("ws:alpha/sess:sess-a/agent:worker", "hi")
+            .await
+            .unwrap_err();
+    assert!(e.contains("main agent only"), "{e}");
+    assert!(sent_ids(&b).is_empty());
+    let mut waiting = vec![];
+    for i in 0..4 {
+        let h = b.h.clone();
+        let text = if i == 0 {
+            format!("with {SECRET}")
+        } else {
+            format!("q{i}")
+        };
+        waiting.push(tokio::spawn(async move {
+            h.peer_ask_user("ws:alpha/sess:sess-a", &text).await
+        }));
+    }
+    until(|| sent_ids(&b).len() == 4).await;
+    let e =
+        b.h.peer_ask_user("ws:alpha/sess:sess-a", "fifth")
+            .await
+            .unwrap_err();
+    assert!(
+        e.starts_with("busy") && e.contains("already waiting"),
+        "{e}"
+    );
+    assert_eq!(sent_ids(&b).len(), 4, "the refused one never went out");
+    let notes = b.rig.find(|e| match e {
+        Event::Notice { text, .. } if text.contains("masked") => Some(text.clone()),
+        _ => None,
+    });
+    assert_eq!(notes, ["1 secret value(s) masked before sending"]);
+    // a send that ends (here: dropped) frees its slot
+    waiting.remove(0).abort();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let r = tokio::time::timeout(
+        Duration::from_millis(500),
+        b.h.peer_ask_user("ws:alpha/sess:sess-a", "again"),
+    )
+    .await;
+    assert!(
+        r.is_err(),
+        "it waits for an answer instead of being refused: {r:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_peer_listing_only_carries_plain_tokens_in_its_address() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let (b, _) = side("sess-b", "beta", &run, Some(on()), idle(), 10);
+    // a registry file written by another process with blanks and a newline in its ids
+    let mut e = entry("sess-x", "x", "alpha", &run, "unix:/nowhere");
+    e.session_id = "sess-x\nhi".into();
+    std::fs::write(run.join("evil.json"), serde_json::to_vec(&e).unwrap()).unwrap();
+    let mut e = entry("sess-y", "y", "alpha", &run, "unix:/nowhere");
+    e.workspace_key = "k ey".into();
+    std::fs::write(run.join("evil2.json"), serde_json::to_vec(&e).unwrap()).unwrap();
+    let rows = b.h.peer_rows(true).await.unwrap();
+    assert!(
+        rows.iter().all(|r| {
+            let a = r["address"].as_str().unwrap();
+            !a.chars().any(|c| c.is_whitespace() || c.is_control())
+        }),
+        "{rows:?}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|r| r["address"].as_str().unwrap().contains("hi"))
+    );
+}
+
+#[tokio::test]
+async fn the_size_cap_counts_the_text_after_redaction() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let (a, ea) = side("sess-a", "alpha", &run, Some(on()), a_answers(), 10);
+    let (b, _) = side("sess-b", "beta", &run, Some(on()), idle(), 10);
+    let _reg = serve(&a, &run, ea);
+    // 9 bytes per key raw, 18 once masked as [REDACTED:sk-ant]: under 32 KiB raw, over it masked
+    let text = "sk-ant-x ".repeat(3000);
+    assert!(text.len() < 32 * 1024);
+    let e =
+        b.h.peer_ask_user("ws:alpha/sess:sess-a", &text)
+            .await
+            .unwrap_err();
+    assert!(e.starts_with("too_large"), "{e}");
+    assert!(sent_ids(&b).is_empty());
+}

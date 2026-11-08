@@ -1,9 +1,9 @@
-//! The Settings view (phase 4b): a slide-in panel over the content area, 400 px on wide windows and
-//! the full width up to 700 px (the panel of the design's shell, `synthesis-cli-ui/web/shell.css`
-//! `#settings`: padding 44/24, 10 px section titles with .18em tracking, 34x20 switches, 6 px radius
-//! inputs). The design has no form for these sections, so it is filled with the real schema of
-//! `synthesis-settings-ui` (docs/specs/desktop.md section 6). `model` holds all the logic and is
-//! tested without a window; this file only paints it.
+//! Settings: a centred popup over the TUI view (backdrop, tabs of sections, search, scrolling body), not a view of
+//! its own. Every field reads and writes the real USER settings file (`SettingsStore`, atomic write); what the
+//! desktop reads applies at once (the shell gets [`Applied`]), the rest says "next session" and offers
+//! [`Restart`]. The design has no form for these sections, so it is filled with the real schema of
+//! `synthesis-settings-ui` (docs/specs/desktop.md section 6). `model` holds all the logic and is tested without
+//! a window; this file only paints it.
 
 pub mod model;
 #[cfg(feature = "shot")]
@@ -17,6 +17,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, prelude::*, px,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use synthesis_settings_ui::{Kind, Origin, Section};
 use synthesis_tui_render::theme as t;
 
@@ -25,16 +26,48 @@ use crate::tui_view::layout::Hidden;
 use crate::tui_view::tracked;
 use model::{Cfg, Change, Control, McpForm, Model, Outcome, Row};
 
-/// Width of the panel (`#settings{width:400px}`) and the window width under which it takes it all.
-pub const PANEL_W: f32 = 400.;
-pub const NARROW: f32 = 700.;
+/// Largest popup, and the margin kept round it.
+pub const POPUP_W: f32 = 720.;
+pub const POPUP_H: f32 = 640.;
+const MARGIN: f32 = 16.;
+/// Below this width the popup is as wide as the window allows and the tabs wrap.
+const MIN_W: f32 = 280.;
+const MIN_H: f32 = 240.;
 
-/// Width of the panel in a content area `avail` wide.
-pub fn panel_w(avail: f32) -> f32 {
-    if avail <= NARROW {
-        avail
-    } else {
-        PANEL_W.min(avail)
+/// Size of the popup in a content area `w` x `h`: the largest size, shrunk to leave a margin, never over the area.
+pub fn popup_size(w: f32, h: f32) -> (f32, f32) {
+    (
+        (w - 2. * MARGIN).clamp(MIN_W, POPUP_W).min(w),
+        (h - 2. * MARGIN).clamp(MIN_H, POPUP_H).min(h),
+    )
+}
+
+/// The tabs, in order.
+const TABS: [Section; 10] = [
+    Section::Appearance,
+    Section::Interface,
+    Section::Memory,
+    Section::Execution,
+    Section::Guards,
+    Section::Hooks,
+    Section::Mcp,
+    Section::Skills,
+    Section::SubAgents,
+    Section::UserPrompt,
+];
+
+fn tab_label(s: Section) -> &'static str {
+    match s {
+        Section::Appearance => "Appearance",
+        Section::Interface => "Interface",
+        Section::Memory => "Memory",
+        Section::Execution => "Execution",
+        Section::Guards => "Guards",
+        Section::Hooks => "Hooks",
+        Section::Mcp => "MCP",
+        Section::Skills => "Skills",
+        Section::SubAgents => "Sub-agents",
+        Section::UserPrompt => "User & prompt",
     }
 }
 
@@ -49,11 +82,14 @@ pub fn hidden_from(tui: &synthesis_settings::TuiSettings) -> Hidden {
     h
 }
 
-/// `synt.tui.panels.*` changed in the store: the TUI view applies it live.
-pub struct PanelsChanged(pub Hidden);
-
-/// The person closed the panel (x button or a click on the dimmed area).
+/// The person closed the popup (x button, Esc or a click on the backdrop).
 pub struct Close;
+
+/// `synt.tui` changed (a saved edit, or a slider being dragged): the shell applies it to the window and the TUI view.
+pub struct Applied(pub synthesis_settings::TuiSettings);
+
+/// "Restart session": the shell opens a fresh session, which reads the settings again.
+pub struct Restart;
 
 fn alpha(c: t::Rgb, a: f32) -> Hsla {
     Hsla { a, ..hsla(c) }
@@ -153,13 +189,20 @@ pub struct SettingsView {
     mcp_error: Option<String>,
     notice: Option<String>,
     scroll: ScrollHandle,
+    /// The tab shown (a search shows every section).
+    tab: Section,
+    /// Why "Restart session" cannot be used now (the shell says).
+    restart_block: Option<String>,
+    /// One slider per percentage field, by key.
+    sliders: HashMap<String, Entity<SliderState>>,
     /// Width taken by chrome beside the view (the shell's rail).
     inset: f32,
     _subs: Vec<Subscription>,
 }
 
 impl EventEmitter<Close> for SettingsView {}
-impl EventEmitter<PanelsChanged> for SettingsView {}
+impl EventEmitter<Applied> for SettingsView {}
+impl EventEmitter<Restart> for SettingsView {}
 
 const MCP_LABELS: [(&str, &str); 5] = [
     ("Name", "docs"),
@@ -193,8 +236,37 @@ impl SettingsView {
             }),
         );
         let mut inputs = HashMap::new();
+        let mut sliders = HashMap::new();
         if let Some(m) = &model {
             for f in &m.store.schema.fields {
+                if let Kind::Percent { min, max } = f.kind {
+                    let Control::Slider { value, .. } = m.row(f).control else {
+                        continue;
+                    };
+                    let st = cx.new(|_| {
+                        SliderState::new()
+                            .min(min as f32)
+                            .max(max as f32)
+                            .step(1.)
+                            .default_value(value as f32)
+                    });
+                    let key = f.key.clone();
+                    subs.push(cx.subscribe_in(
+                        &st,
+                        window,
+                        move |this, _, ev: &SliderEvent, window, cx| match ev {
+                            // dragging shows the value at once; the file is written when the thumb is released
+                            SliderEvent::Change(v) => this.preview(&key, v.end() as u64, cx),
+                            SliderEvent::Release(v) => this.apply(
+                                &key,
+                                Change::Text((v.end().round() as u64).to_string()),
+                                window,
+                                cx,
+                            ),
+                        },
+                    ));
+                    sliders.insert(f.key.clone(), st);
+                }
                 if f.sensitive() && !matches!(f.edit, synthesis_settings_ui::Edit::Confirm(_)) {
                     continue;
                 }
@@ -245,6 +317,9 @@ impl SettingsView {
             mcp_error: None,
             notice: None,
             scroll: ScrollHandle::new(),
+            tab: TABS[0],
+            restart_block: None,
+            sliders,
             inset,
             _subs: subs,
         }
@@ -257,6 +332,66 @@ impl SettingsView {
     /// Puts the cursor in the search box (the shell does it when the view opens).
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.search.update(cx, |s, cx| s.focus(window, cx));
+    }
+
+    /// `synt.tui` as the file holds it now (what the shell applies).
+    fn tui_now(&self) -> synthesis_settings::TuiSettings {
+        self.model
+            .as_ref()
+            .map(|m| synthesis_settings::read_user_tui(&m.cfg.home).0)
+            .unwrap_or_default()
+    }
+
+    /// The window and the sliders follow the file, not a preview.
+    pub(crate) fn show_persisted(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let t = self.tui_now();
+        for sl in self.sliders.values() {
+            let v = f32::from(t.opacity);
+            sl.update(cx, |s, cx| s.set_value(v, window, cx));
+        }
+        cx.emit(Applied(t));
+    }
+
+    /// Closes the popup; a drag that was never released does not stay on the window.
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_persisted(window, cx);
+        cx.emit(Close);
+    }
+
+    /// The shell says whether a restart is possible (`None`) or why not.
+    pub fn set_restart_block(&mut self, why: Option<String>, cx: &mut Context<Self>) {
+        if self.restart_block != why {
+            self.restart_block = why;
+            cx.notify();
+        }
+    }
+
+    /// The fresh session is live: the changes that waited for one are in force now.
+    pub fn restarted(&mut self, cx: &mut Context<Self>) {
+        if let Some(m) = &mut self.model {
+            m.changed.clear();
+        }
+        self.restart_block = None;
+        cx.notify();
+    }
+
+    /// A slider being dragged: the window follows, nothing is written yet.
+    fn preview(&mut self, key: &str, v: u64, cx: &mut Context<Self>) {
+        if key == "synt.tui.opacity" {
+            let mut t = self.tui_now();
+            t.opacity = v.clamp(u64::from(synthesis_settings::TUI_OPACITY_MIN), 100) as u8;
+            cx.emit(Applied(t));
+            cx.notify();
+        }
+    }
+
+    /// Esc: the open confirmation first, then the popup.
+    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.model.as_mut().filter(|m| m.pending.is_some()) {
+            Some(m) => m.cancel(),
+            None => self.close(window, cx),
+        }
+        cx.notify();
     }
 
     fn commit(
@@ -287,7 +422,13 @@ impl SettingsView {
         self.apply(key, c, window, cx);
     }
 
-    fn apply(&mut self, key: &str, c: Change, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn apply(
+        &mut self,
+        key: &str,
+        c: Change,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(m) = &mut self.model else { return };
         let is_add = matches!(c, Change::Add(_));
         let out = m.change(key, c);
@@ -310,19 +451,14 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) {
         self.notice = None;
-        if let (Outcome::Saved, true, Some(m)) =
-            (&out, key.starts_with("synt.tui.panels."), &self.model)
-        {
-            let mut h = Hidden::default();
-            for (k, _) in synthesis_settings::TUI_PANELS {
-                let v = m.store.entry(&format!("synt.tui.panels.{k}"));
-                if v.is_some_and(|e| e.value == serde_json::Value::Bool(false)) {
-                    h.hide(k);
-                }
-            }
-            cx.emit(PanelsChanged(h));
+        // a refused or failed write puts the window back to what the file holds (a slider drag had previewed)
+        if out != Outcome::Saved && key.starts_with("synt.tui.") {
+            self.show_persisted(window, cx);
         }
         if out == Outcome::Saved {
+            if key.starts_with("synt.tui.") {
+                self.show_persisted(window, cx);
+            }
             let text =
                 self.model
                     .as_ref()
@@ -512,6 +648,29 @@ impl SettingsView {
                     below.push(Input::new(inp).into_any_element());
                 }
             }
+            Control::Slider { min, max, value } => {
+                if let Some(sl) = self.sliders.get(&key) {
+                    let now = sl.read(cx).value().end().round() as u64;
+                    head = head.child(small(format!("{now} %"), t::TEXT_STRONG));
+                    below.push(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(small(format!("{min} %"), t::MUTED))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .child(Slider::new(sl).horizontal().disabled(locked)),
+                            )
+                            .child(small(format!("{max} %"), t::MUTED).ml(px(6.)))
+                            .into_any_element(),
+                    );
+                } else {
+                    head = head.child(small(format!("{value} %"), t::MUTED));
+                }
+            }
             Control::Static(v) => {
                 head = head.child(
                     div()
@@ -529,15 +688,22 @@ impl SettingsView {
             .items_center()
             .gap(px(6.))
             .child(badge(model::origin_label(r.origin), origin_color(r.origin)));
-        if r.restart {
+        if r.terminal_only {
+            tags = tags.child(badge("terminal TUI only", t::MUTED));
+        } else if r.restart {
             tags = tags.child(if r.changed {
-                badge("restart required", t::WARN)
+                badge("applies to the next session (changed)", t::WARN)
             } else {
-                badge("restart", t::MUTED)
+                badge("applies to the next session", t::MUTED)
             });
+        } else {
+            tags = tags.child(badge("applies now", t::SUCCESS));
         }
         if r.confirm {
             tags = tags.child(badge("asks first", t::MUTED));
+        }
+        if !matches!(r.control, Control::Static(_)) {
+            tags = tags.child(small(format!("default: {}", r.default), t::MUTED));
         }
         if r.resettable {
             let k = key.clone();
@@ -932,22 +1098,60 @@ impl SettingsView {
     }
 }
 
+impl SettingsView {
+    fn tabs(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let mut row = div().flex().flex_wrap().gap(px(2.));
+        for t in TABS {
+            let on = t == self.tab;
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("tab-{}", tab_label(t))))
+                    .debug_selector(move || format!("tab-{}", tab_label(t)))
+                    .px(px(8.))
+                    .py(px(4.))
+                    .rounded(px(7.))
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .text_color(hsla(if on { t::TEXT_STRONG } else { t::MUTED }))
+                    .when(on, |d| d.bg(alpha(t::ACCENT, 0.24)))
+                    .hover(|d| d.text_color(hsla(t::TEXT_STRONG)))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.tab = t;
+                        this.scroll.set_offset(gpui::point(px(0.), px(0.)));
+                        cx.notify();
+                    }))
+                    .child(tab_label(t)),
+            );
+        }
+        row
+    }
+}
+
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let avail = f32::from(window.viewport_size().width) - self.inset;
-        let pw = panel_w(avail);
-        let pad = if pw < PANEL_W { 16. } else { 24. };
+        let vp = window.viewport_size();
+        let (pw, ph) = popup_size(
+            f32::from(vp.width) - self.inset,
+            f32::from(vp.height) - crate::ui::TITLEBAR_H,
+        );
+        let pad = if pw < 480. { 14. } else { 22. };
         let mut body = div().flex().flex_col();
         let mut restart_note = None;
         if let Some(m) = &self.model {
+            let searching = !m.filter.trim().is_empty();
             let mut first = true;
             for g in m.groups() {
-                body = body.child(self.section_title(g.section, first));
+                if !searching && g.section != self.tab {
+                    continue;
+                }
+                if searching {
+                    body = body.child(self.section_title(g.section, first));
+                }
                 first = false;
                 for r in &g.rows {
                     body = body.child(self.field_row(r, cx));
                 }
-                if m.filter.trim().is_empty() {
+                if !searching {
                     for e in self.info_block(g.section, m, cx) {
                         body = body.child(e);
                     }
@@ -958,18 +1162,38 @@ impl Render for SettingsView {
             }
             let n = m.restart_pending();
             if n > 0 {
+                let blocked = self.restart_block.clone();
+                let mut msg = div().flex_1().min_w(px(0.)).child(small(
+                    format!("{n} change{} apply to the next session. The running one keeps the old values until you restart it (its conversation is kept in the session list).", if n == 1 { "" } else { "s" }),
+                    t::WARN,
+                ));
+                if let Some(why) = &blocked {
+                    msg = msg.child(
+                        small(format!("Restart is not possible now: {why}."), t::ERROR)
+                            .debug_selector(|| "restart-blocked".to_string()),
+                    );
+                }
+                let mut button = btn("restart-session", "Restart session", true);
+                button = if blocked.is_some() {
+                    button.opacity(0.45).cursor_default()
+                } else {
+                    button
+                        .debug_selector(|| "restart-session".to_string())
+                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(Restart)))
+                };
                 restart_note = Some(
                     div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
                         .mt(px(10.))
                         .px(px(10.))
                         .py(px(6.))
                         .rounded(px(6.))
                         .border_1()
                         .border_color(alpha(t::WARN, 0.55))
-                        .child(small(
-                            format!("{n} change{} take effect in a new session. A running session keeps the old values; restart it from the TUI view (/exit, then start again).", if n == 1 { "" } else { "s" }),
-                            t::WARN,
-                        )),
+                        .child(msg)
+                        .child(button),
                 );
             }
         } else if let Some(e) = &self.err {
@@ -982,7 +1206,7 @@ impl Render for SettingsView {
             .flex()
             .items_center()
             .justify_between()
-            .mb(px(12.))
+            .mb(px(10.))
             .child(
                 div()
                     .text_size(px(15.))
@@ -998,25 +1222,26 @@ impl Render for SettingsView {
                     .text_size(px(18.))
                     .text_color(hsla(t::MUTED))
                     .hover(|d| d.text_color(hsla(t::TEXT_STRONG)))
-                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(Close)))
+                    .on_click(cx.listener(|this, _: &ClickEvent, w, cx| this.close(w, cx)))
                     .child("\u{d7}"),
             );
-        let panel = div()
+        let popup = div()
             .debug_selector(|| "settings-panel".to_string())
-            .absolute()
-            .top_0()
-            .right_0()
-            .bottom_0()
+            .relative()
             .w(px(pw))
+            .h(px(ph))
             .flex()
             .flex_col()
-            .pt(px(44.))
-            .pb(px(16.))
+            .pt(px(16.))
+            .pb(px(14.))
             .px(px(pad))
-            .bg(alpha(t::BG, 0.97))
-            .border_l_1()
+            .rounded(px(12.))
+            .bg(crate::theme::solid(t::SURFACE))
+            .border_1()
             .border_color(hsla(t::BORDER))
             .shadow_lg()
+            .overflow_hidden()
+            // the popup swallows clicks; the backdrop under it closes
             .occlude()
             .child(header)
             .child(
@@ -1024,6 +1249,7 @@ impl Render for SettingsView {
                     .debug_selector(|| "settings-search".to_string())
                     .child(Input::new(&self.search)),
             )
+            .child(div().mt(px(10.)).child(self.tabs(cx)))
             .children(restart_note)
             .children(self.notice.clone().map(|n| small(n, t::SUCCESS).mt(px(6.))))
             .child(
@@ -1031,7 +1257,7 @@ impl Render for SettingsView {
                     .id("settings-scroll")
                     .flex_1()
                     .min_h(px(0.))
-                    .mt(px(14.))
+                    .mt(px(12.))
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     .child(body),
@@ -1045,15 +1271,29 @@ impl Render for SettingsView {
             .overflow_hidden()
             .font_family(crate::brand::UI_FONT)
             .text_size(px(13.))
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, w, cx| {
+                if ev.keystroke.key == "escape" {
+                    this.escape(w, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .child(
                 div()
                     .id("settings-scrim")
                     .absolute()
                     .inset_0()
-                    .bg(alpha([0, 0, 0], 0.45))
-                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(Close))),
+                    .bg(alpha([0, 0, 0], 0.5))
+                    .on_click(cx.listener(|this, _: &ClickEvent, w, cx| this.close(w, cx))),
             )
-            .child(panel)
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(popup),
+            )
     }
 }
 
@@ -1064,12 +1304,12 @@ mod tests {
     use synthesis_config::{Env, ProjectTrust};
 
     #[test]
-    fn panel_is_400_wide_and_full_width_under_700() {
-        assert_eq!(panel_w(1400.), 400.);
-        assert_eq!(panel_w(701.), 400.);
-        assert_eq!(panel_w(700.), 700.);
-        assert_eq!(panel_w(699.), 699.);
-        assert_eq!(panel_w(320.), 320.);
+    fn popup_is_720_by_640_at_most_and_keeps_a_margin() {
+        assert_eq!(popup_size(1400., 900.), (720., 640.));
+        assert_eq!(popup_size(700., 600.), (668., 568.));
+        assert_eq!(popup_size(480., 300.), (448., 268.));
+        // never over the area, even tiny ones
+        assert_eq!(popup_size(260., 200.), (260., 200.));
     }
 
     #[test]
@@ -1118,49 +1358,197 @@ mod tests {
         vcx
     }
 
+    fn click(cx: &mut VisualTestContext, sel: &'static str) {
+        let at = b(cx, sel).center();
+        cx.simulate_click(at, gpui::Modifiers::none());
+    }
+
     fn b(cx: &mut VisualTestContext, sel: &'static str) -> Bounds<Pixels> {
         cx.debug_bounds(sel)
             .unwrap_or_else(|| panic!("no element {sel}"))
     }
 
     #[gpui::test]
-    fn panel_bounds_at_several_widths(cx: &mut TestAppContext) {
+    fn popup_is_centred_inside_the_window_at_several_sizes(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         for (w, h) in [
             (1400., 900.),
             (1000., 700.),
             (700., 800.),
-            (699., 800.),
             (480., 700.),
+            (360., 420.),
         ] {
             let v = open(cx, dir.path(), w, h);
             let p = b(v, "settings-panel");
-            let want = panel_w(w);
-            assert!(
-                (f32::from(p.size.width) - want).abs() < 0.6,
-                "{w}: panel {} != {want}",
-                f32::from(p.size.width)
-            );
-            assert!(
-                (f32::from(p.origin.x) - (w - want)).abs() < 0.6,
-                "{w}: panel x"
-            );
-            assert!(
-                (f32::from(p.size.height) - h).abs() < 0.6,
-                "{w}: panel height"
-            );
-            // the search box and the first rows stay inside the panel
+            let (pw, ph) = popup_size(w, h - crate::ui::TITLEBAR_H);
+            let near = |a: Pixels, want: f32, what: &str| {
+                assert!(
+                    (f32::from(a) - want).abs() < 0.6,
+                    "{w}x{h}: {what} {a:?} != {want}"
+                )
+            };
+            near(p.size.width, pw, "width");
+            near(p.size.height, ph, "height");
+            near(p.origin.x, (w - pw) / 2., "x");
+            near(p.origin.y, (h - ph) / 2., "y");
+            // the search box, the tabs and the first row stay inside the popup
             let s = b(v, "settings-search");
             assert!(
                 s.origin.x >= p.origin.x && s.right() <= p.right() + px(0.5),
                 "{w}: search inside"
             );
-            let r = b(v, "row-synt.memory.enabled");
+            let r = b(v, "row-synt.tui.opacity");
             assert!(
                 r.origin.x >= p.origin.x && r.right() <= p.right() + px(0.5),
                 "{w}: row inside"
             );
         }
+    }
+
+    #[gpui::test]
+    fn tabs_show_one_section_and_a_search_shows_all(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let v = open(cx, dir.path(), 1000., 800.);
+        // Appearance is the first tab: opacity and blur, not the memory rows
+        assert!(v.debug_bounds("row-synt.tui.opacity").is_some());
+        assert!(v.debug_bounds("row-synt.tui.blur").is_some());
+        assert!(v.debug_bounds("row-synt.memory.enabled").is_none());
+        click(v, "tab-Memory");
+        assert!(v.debug_bounds("row-synt.memory.enabled").is_some());
+        assert!(v.debug_bounds("row-synt.tui.opacity").is_none());
+    }
+
+    #[gpui::test]
+    fn closing_mid_drag_or_a_failed_write_puts_the_window_back_to_the_file(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::theme::apply("JetBrains Mono", cx);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path());
+        let (ent, v) = cx.add_window_view(|window, cx| SettingsView::new(window, cx, Ok(c), 0.));
+        v.simulate_resize(size(px(900.), px(700.)));
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        v.update(|window, cx| {
+            let s = seen.clone();
+            cx.subscribe(&ent, move |_, a: &Applied, _| {
+                s.borrow_mut().push(a.0.opacity)
+            })
+            .detach();
+            ent.update(cx, |s, cx| {
+                s.apply("synt.tui.opacity", Change::Text("80".into()), window, cx);
+                // a drag, then the popup closes before the thumb is released
+                s.preview("synt.tui.opacity", 40, cx);
+                s.close(window, cx);
+                // a write that fails (the file is not JSON): the preview is undone and the row says why
+                std::fs::write(dir.path().join("home/settings.json"), "{ nope").unwrap();
+                s.model.as_mut().unwrap().store.reload();
+                s.preview("synt.tui.opacity", 35, cx);
+                s.apply("synt.tui.opacity", Change::Text("35".into()), window, cx);
+            })
+        });
+        // 80 saved, 40 previewed, back to 80 on close, 35 previewed, then the file's value again (100: unreadable file)
+        assert_eq!(*seen.borrow(), vec![80, 40, 80, 35, 100]);
+        ent.read_with(v, |s, _| {
+            let m = s.model().unwrap();
+            assert!(m.errors.contains_key("synt.tui.opacity"));
+        });
+    }
+
+    #[gpui::test]
+    fn escape_cancels_a_confirmation_first_then_closes(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::theme::apply("JetBrains Mono", cx);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path());
+        let (ent, v) = cx.add_window_view(|window, cx| SettingsView::new(window, cx, Ok(c), 0.));
+        v.simulate_resize(size(px(900.), px(700.)));
+        let closed = std::rc::Rc::new(std::cell::Cell::new(0));
+        v.update(|window, cx| {
+            let n = closed.clone();
+            cx.subscribe(&ent, move |_, _: &Close, _| n.set(n.get() + 1))
+                .detach();
+            ent.update(cx, |s, cx| {
+                s.focus(window, cx);
+                s.apply("synt.memory.reflection", Change::Bool(true), window, cx)
+            })
+        });
+        v.run_until_parked();
+        assert!(v.debug_bounds("confirm").is_some());
+        v.simulate_keystrokes("escape");
+        assert!(
+            v.debug_bounds("confirm").is_none(),
+            "the dialog is cancelled"
+        );
+        assert_eq!(closed.get(), 0, "and the popup stays");
+        v.simulate_keystrokes("escape");
+        assert_eq!(closed.get(), 1);
+    }
+
+    #[gpui::test]
+    fn a_saved_tui_key_is_applied_live_and_a_session_key_asks_for_a_restart(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::theme::apply("JetBrains Mono", cx);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path());
+        let (ent, v) = cx.add_window_view(|window, cx| SettingsView::new(window, cx, Ok(c), 0.));
+        v.simulate_resize(size(px(900.), px(700.)));
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        let restarts = std::rc::Rc::new(std::cell::Cell::new(0));
+        v.update(|window, cx| {
+            let (s, r) = (seen.clone(), restarts.clone());
+            cx.subscribe(&ent, move |_, a: &Applied, _| s.borrow_mut().push(a.0))
+                .detach();
+            cx.subscribe(&ent, move |_, _: &Restart, _| r.set(r.get() + 1))
+                .detach();
+            ent.update(cx, |s, cx| {
+                s.apply("synt.tui.opacity", Change::Text("60".into()), window, cx);
+                s.apply("synt.tui.motion", Change::Bool(false), window, cx);
+                // a drag shows the value without writing it
+                s.preview("synt.tui.opacity", 45, cx);
+                s.apply("synt.memory.enabled", Change::Bool(false), window, cx);
+            })
+        });
+        let seen = seen.borrow().clone();
+        assert_eq!(seen.len(), 3, "the memory key is not a window setting");
+        assert_eq!((seen[0].opacity, seen[0].motion), (60, true));
+        assert_eq!((seen[1].opacity, seen[1].motion), (60, false));
+        assert_eq!((seen[2].opacity, seen[2].motion), (45, false));
+        let on_disk = synthesis_settings::read_user_tui(&dir.path().join("home")).0;
+        assert_eq!(on_disk.opacity, 60, "the preview wrote nothing");
+        // the memory change waits for a session: the banner has a working button. Clicking only asks the shell:
+        // nothing is cleared and the popup stays until the shell says the session was restarted
+        v.run_until_parked();
+        click(v, "restart-session");
+        assert_eq!(restarts.get(), 1);
+        ent.read_with(v, |s, _| {
+            assert_eq!(s.model().unwrap().restart_pending(), 1)
+        });
+        // the shell refuses (a task is running): the button is off and says why
+        v.update(|_, cx| {
+            ent.update(cx, |s, cx| {
+                s.set_restart_block(Some("a task is running".into()), cx)
+            })
+        });
+        v.run_until_parked();
+        assert!(v.debug_bounds("restart-blocked").is_some());
+        assert!(
+            v.debug_bounds("restart-session").is_none(),
+            "no live button"
+        );
+        // the new session is live: now the badge goes
+        v.update(|_, cx| ent.update(cx, |s, cx| s.restarted(cx)));
+        ent.read_with(v, |s, _| {
+            assert_eq!(s.model().unwrap().restart_pending(), 0)
+        });
     }
 
     #[gpui::test]
@@ -1201,6 +1589,7 @@ mod tests {
 
     #[gpui::test]
     fn a_panel_toggle_reaches_the_tui_view_at_once(cx: &mut TestAppContext) {
+        let _g = crate::theme::opacity_guard();
         cx.update(|cx| {
             gpui_component::init(cx);
             crate::theme::apply("JetBrains Mono", cx);
@@ -1211,13 +1600,14 @@ mod tests {
         let seen = std::rc::Rc::new(std::cell::Cell::new(None));
         let s2 = seen.clone();
         v.update(|window, cx| {
-            cx.subscribe(&ent, move |_, ev: &PanelsChanged, _| s2.set(Some(ev.0)))
+            cx.subscribe(&ent, move |_, ev: &Applied, _| s2.set(Some(ev.0)))
                 .detach();
             ent.update(cx, |s, cx| {
                 s.apply("synt.tui.panels.usage", Change::Bool(false), window, cx)
             });
         });
-        let h = seen.get().expect("PanelsChanged emitted");
+        let t: synthesis_settings::TuiSettings = seen.get().expect("Applied emitted");
+        let h = hidden_from(&t);
         assert!(h.usage && !h.session);
         assert!(dir.path().join("home/settings.json").exists());
     }

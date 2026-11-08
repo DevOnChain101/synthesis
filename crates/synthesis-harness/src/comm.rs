@@ -738,6 +738,10 @@ impl Harness {
                 text = format!("{text}\n\n{extra}");
             }
         }
+        // the hook awaited: the task may have ended meanwhile, and the line would reach the next one
+        if self.hub.task_id().as_deref() != Some(task_id.as_str()) {
+            return Err("the task ended before the line was delivered".into());
+        }
         let m = Msg {
             id: uuid(),
             from: "user".into(),
