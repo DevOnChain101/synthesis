@@ -267,12 +267,6 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // the TUI prompt paints its own block caret; other inputs keep the library's line
-        cx.global_mut::<gpui_component::Theme>().caret = if self.view == View::Tui {
-            gpui::transparent_black()
-        } else {
-            theme::hsla(t::PEARL)
-        };
         let content = match self.view {
             View::Tui => div().size_full().child(self.tui.clone()),
             View::Agent => div().size_full().child(Self::coming_soon()),

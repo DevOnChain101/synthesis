@@ -117,6 +117,8 @@ pub struct LiveUi {
     engine_task: Option<Task<()>>,
     store_task: Option<Task<()>>,
     peer_task: Option<Task<()>>,
+    /// Blink state of the prompt's block caret.
+    pub blink: super::chat::Blink,
     _subs: Vec<Subscription>,
 }
 
@@ -188,6 +190,7 @@ impl TuiView {
             engine_task: None,
             store_task: None,
             peer_task: None,
+            blink: Default::default(),
             _subs: subs,
         });
         me

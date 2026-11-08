@@ -79,6 +79,8 @@ pub enum PickerKind {
     Remember,
     /// No model configured: the TUI's setup card (check again, Settings, quit).
     Setup,
+    /// Shift+Tab reached bypassPermissions: the confirmation (Cancel is the first option and the default).
+    Bypass,
 }
 
 /// What the window does after a command or a picker (it restarts the engine, talks to it).
@@ -611,6 +613,14 @@ impl Live {
         }
         let d = self.dialogs.remove(0);
         if let DialogKind::Picker { kind, .. } = d.kind {
+            if kind == PickerKind::Bypass {
+                if let (Some(e), "enable") = (&self.engine, key)
+                    && let Err(why) = e.enable_bypass()
+                {
+                    self.note(format!("bypass permissions not enabled: {why}"), true);
+                }
+                return None;
+            }
             if kind == PickerKind::Remember {
                 if let (Some(e), Some(text), "user" | "project") =
                     (&self.engine, self.pending_note.take(), key)
@@ -630,7 +640,7 @@ impl Live {
                 }
                 PickerKind::Model => Some(Action::Model(key.to_string())),
                 PickerKind::Resume => Some(Action::Resume(key.to_string())),
-                PickerKind::Remember => None,
+                PickerKind::Remember | PickerKind::Bypass => None,
                 PickerKind::Setup => Some(match key {
                     "recheck" => Action::Recheck,
                     "settings" => Action::OpenSettings,
@@ -1404,9 +1414,47 @@ impl Live {
             Mode::Default => Mode::AcceptEdits,
             Mode::AcceptEdits => Mode::Plan,
             Mode::Plan => Mode::Auto,
+            // bypass is reached only through its confirmation dialog; leaving it needs none
+            Mode::Auto => return self.ask_bypass(),
             _ => Mode::Default,
         };
         e.set_mode(next);
+    }
+
+    /// The bypassPermissions confirmation. Cancel is first (the selected option); Esc cancels too. The mode
+    /// changes only in [`Live::answer`], after the core took it.
+    fn ask_bypass(&mut self) {
+        let open = self.dialogs.iter().any(|d| {
+            matches!(
+                &d.kind,
+                DialogKind::Picker {
+                    kind: PickerKind::Bypass,
+                    ..
+                }
+            )
+        });
+        if open {
+            return;
+        }
+        self.push_dialog(
+            Dialog {
+                kind: DialogKind::Picker {
+                    kind: PickerKind::Bypass,
+                    title: "Enable bypass permissions?".into(),
+                    headers: vec![(
+                        0,
+                        "Bypass skips every tool permission prompt: file edits and commands run unattended, without asking you. Deny rules, ask rules and protected-path safeguards still apply. It lasts for this session only.".into(),
+                    )],
+                },
+                options: vec![
+                    ("cancel".into(), "Cancel (keep the current mode)".into()),
+                    ("enable".into(), "Enable bypass".into()),
+                ],
+                sel: 0,
+                armed_until: 0,
+            },
+            now_ms(),
+        );
     }
 }
 

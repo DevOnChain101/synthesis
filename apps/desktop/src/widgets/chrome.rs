@@ -463,6 +463,21 @@ pub fn with_alpha(c: Hsla, a: f32) -> Hsla {
     Hsla { a, ..c }
 }
 
+/// Gap between the two copies of the scrolling prompt, and its speed.
+const MARQUEE_GAP: f32 = 48.;
+const MARQUEE_PX_S: f32 = 40.;
+
+/// Distance after which the scroll repeats: one copy and the gap.
+fn marquee_unit(text_w: f32) -> f32 {
+    text_w + MARQUEE_GAP
+}
+
+/// Left edge of the scrolling pair at progress `d` (0..1 of one loop): runs left by one `unit`, where the
+/// second copy stands exactly where the first began.
+fn marquee_left(d: f32, unit: f32) -> f32 {
+    -d * unit
+}
+
 /// `#chead`: icon, "Synthesis", the status word, the latest prompt (clipped), the context bar and `tail`
 /// (folder and change counts). 36.4px: 8px padding around one line, and the 1px rule.
 pub fn chat_head(
@@ -471,32 +486,28 @@ pub fn chat_head(
     prompt: &str,
     ctx_pct: f32,
     tail: &str,
-    width: f32,
+    _width: f32,
     motion: bool,
 ) -> Div {
-    // the prompt's room: the header minus the 2px border, its padding, gaps and the fixed parts (monospace 7.5px)
-    let fixed = 24.
-        + 14.
-        + 67.5
-        + (status.chars().count() as f32 + 2.) * 7.5
-        + 7.5
-        + 54.
-        + tail.chars().count() as f32 * 7.5
-        + 6. * 10.;
-    let room = (width - 2. - fixed).max(0.);
     let label = format!("Latest user prompt: {prompt}");
     let tw = label.chars().count() as f32 * 7.5;
-    // `prompt-scroll`: a prompt that does not fit enters from the right and runs through (16s, repeating)
-    let prompt_el: gpui::AnyElement = if motion && tw > room {
+    // `prompt-scroll`: with a prompt the text always runs right to left, two copies a gap apart so the loop
+    // has no jump; the slot clips it and the layout does not change
+    let prompt_el: gpui::AnyElement = if motion && !prompt.is_empty() {
+        let unit = marquee_unit(tw);
         div()
             .absolute()
             .top_0()
+            .flex()
+            .gap(px(MARQUEE_GAP))
             .whitespace_nowrap()
-            .child(label)
+            .child(div().flex_none().child(label.clone()))
+            .child(div().flex_none().child(label))
             .with_animation(
                 "chead-marquee",
-                gpui::Animation::new(std::time::Duration::from_secs(16)).repeat(),
-                move |el, d| el.left(px(room - d * (room + tw))),
+                gpui::Animation::new(std::time::Duration::from_secs_f32(unit / MARQUEE_PX_S))
+                    .repeat(),
+                move |el, d| el.left(px(marquee_left(d, unit))),
             )
             .into_any_element()
     } else {
@@ -550,4 +561,18 @@ pub fn chat_head(
                 ),
         )
         .child(div().flex_none().text_color(dim()).child(tail.to_string()))
+}
+
+#[cfg(test)]
+mod marquee_tests {
+    use super::*;
+
+    #[test]
+    fn the_marquee_runs_left_one_copy_and_gap_per_loop() {
+        let unit = marquee_unit(100.);
+        assert_eq!(unit, 148.);
+        assert_eq!(marquee_left(0., unit), 0.);
+        assert_eq!(marquee_left(0.5, unit), -74.);
+        assert_eq!(marquee_left(1., unit), -unit);
+    }
 }
