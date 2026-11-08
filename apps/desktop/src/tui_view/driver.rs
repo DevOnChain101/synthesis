@@ -1161,6 +1161,68 @@ impl TuiView {
         cx.notify();
     }
 
+    /// `/panels`: lists, hides or shows panels at once and saves the choice to the user settings file.
+    fn panels_command(&mut self, arg: &str, cx: &mut Context<Self>) {
+        use super::layout::{ALWAYS, HIDEABLE, PanelsCmd, parse_panels};
+        let Some(lu) = &mut self.live else { return };
+        let cmd = match parse_panels(arg) {
+            Ok(c) => c,
+            Err(e) => {
+                lu.live.note(format!("/panels: {e}"), true);
+                lu.dirty = true;
+                return cx.notify();
+            }
+        };
+        let want: Vec<(&'static str, bool)> = match cmd {
+            PanelsCmd::List => vec![],
+            PanelsCmd::HideAll => HIDEABLE.iter().map(|(k, _)| (*k, true)).collect(),
+            PanelsCmd::ShowAll => HIDEABLE.iter().map(|(k, _)| (*k, false)).collect(),
+            PanelsCmd::Set(k, off) => vec![(k, off)],
+        };
+        let changes: Vec<_> = want
+            .into_iter()
+            .filter(|(k, off)| self.hidden.is_hidden(k) != *off)
+            .collect();
+        let saved = if changes.is_empty() {
+            Ok(())
+        } else {
+            let (home, cwd) = (&lu.cfg.synthesis_home, &lu.cfg.project);
+            save_panels(home, cwd, &changes)
+        };
+        let mut warn = false;
+        if let Err(e) = &saved {
+            warn = true;
+            lu.live.note(
+                format!("/panels: not saved ({e}); applied for this run only"),
+                true,
+            );
+        }
+        for (k, off) in &changes {
+            self.hidden.set_hidden(k, *off);
+        }
+        if matches!(cmd, PanelsCmd::List) || !warn {
+            let mut t = String::from("panels (/panels hide-all | show-all | <name> on|off):");
+            for (k, name) in HIDEABLE {
+                let on = if self.hidden.is_hidden(k) {
+                    "off"
+                } else {
+                    "on "
+                };
+                t += &format!("\n  {on}  {k:<9} {name}");
+            }
+            for (name, why) in ALWAYS {
+                t += &format!("\n  on   {name}: {why}");
+            }
+            if let Some(lu) = &mut self.live {
+                lu.live.note(t, false);
+            }
+        }
+        if let Some(lu) = &mut self.live {
+            lu.dirty = true;
+        }
+        cx.notify();
+    }
+
     /// What a command or picker asked the window to do.
     pub(super) fn run_action(&mut self, a: Action, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
@@ -1262,6 +1324,7 @@ impl TuiView {
             }
             Action::Close => return self.switch(Target::Close, "close".into(), cx),
             Action::OpenSettings => cx.emit(OpenSettings),
+            Action::Panels(arg) => return self.panels_command(&arg, cx),
             Action::Quit => return self.quit(cx),
             Action::Recheck => {
                 let project = lu.cfg.project.clone();
@@ -1877,6 +1940,33 @@ pub fn suggest(text: &str, cursor: usize, live: &Live, cwd: &Path) -> Option<Com
     })
 }
 
+/// Writes `synt.tui.panels.<key>` (true = shown) to the USER settings file, one atomic edit per key.
+pub(super) fn save_panels(home: &Path, cwd: &Path, changes: &[(&str, bool)]) -> Result<(), String> {
+    use synthesis_config::{LoadContext, ProjectTrust};
+    let env = Env::default();
+    let ctx = LoadContext {
+        cwd,
+        synthesis_home: home,
+        user_home: home,
+        env: &env,
+    };
+    let mut store = synthesis_settings_ui::SettingsStore::open(
+        &ctx,
+        ProjectTrust::Untrusted,
+        &synthesis_settings::managed_settings_path(),
+        None,
+    );
+    for (k, off) in changes {
+        store
+            .set(
+                &format!("synt.tui.panels.{k}"),
+                serde_json::Value::Bool(!off),
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1927,5 +2017,23 @@ mod tests {
             "{:?}",
             c.items
         );
+    }
+
+    #[test]
+    fn panels_persist_to_the_user_file_only() {
+        let home = tempfile::tempdir().unwrap();
+        let proj = tempfile::tempdir().unwrap();
+        save_panels(
+            home.path(),
+            proj.path(),
+            &[("usage", true), ("session", true), ("usage", false)],
+        )
+        .unwrap();
+        let (t, d) = synthesis_settings::read_user_tui(home.path());
+        assert!(d.is_empty(), "{d:?}");
+        let h = crate::settings_view::hidden_from(&t);
+        assert!(h.session && !h.usage && !h.tools);
+        assert!(!proj.path().join(".synt").exists());
+        assert!(save_panels(home.path(), proj.path(), &[("status_x", true)]).is_err());
     }
 }

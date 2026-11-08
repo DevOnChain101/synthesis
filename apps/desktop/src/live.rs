@@ -103,6 +103,8 @@ pub enum Action {
     Compact(Option<String>),
     /// `/config`: the shell shows the Settings view.
     OpenSettings,
+    /// `/panels [arg]`: the view lists, hides or shows panels and saves the choice.
+    Panels(String),
     /// `/files`: the centre panel shows its file explorer tab (the project tree and the changes).
     ShowFiles,
     /// `/diff [file]`: the centre panel shows its diff tab, with `file` open when one is named.
@@ -286,9 +288,20 @@ fn spinner(ms: i64) -> &'static str {
     F[(ms.max(0) / 120) as usize % F.len()]
 }
 
+/// Desktop-only commands (not in the terminal TUI's list): `/panels`, added to the engine's commands.
+pub fn panels_command() -> Command {
+    Command {
+        name: "panels".into(),
+        description: "show or hide dashboard panels (synt.tui.panels)".into(),
+        argument_hint: "[hide-all|show-all|<name> on|off]".into(),
+        local: true,
+        ..Command::default()
+    }
+}
+
 pub fn is_wired(name: &str) -> bool {
-    // `open` and `send` exist only in the desktop app
-    WIRED.contains(&name) || name == "open" || name == "send"
+    // `open`, `send` and `panels` exist only in the desktop app
+    WIRED.contains(&name) || matches!(name, "open" | "send" | "panels")
 }
 
 /// `/send` is the desktop's own command (the classic TUI has none), so it is not in [`WIRED`].
@@ -481,6 +494,7 @@ impl Live {
         self.cwd = engine.cwd.clone();
         self.trusted = engine.trusted;
         self.commands = engine.commands.clone();
+        self.commands.push(panels_command());
         self.mcp = engine.mcp_status();
         self.queue.clear();
         self.dialogs.clear();
@@ -1323,6 +1337,7 @@ impl Live {
                 return Submitted::Do(Action::Compact((!arg.is_empty()).then(|| arg.into())));
             }
             "config" => return Submitted::Do(Action::OpenSettings),
+            "panels" => return Submitted::Do(Action::Panels(arg.into())),
             "new" => return Submitted::Do(Action::New),
             "close" => return Submitted::Do(Action::Close),
             "resume" if arg.is_empty() => self.open_resume_picker(now_ms()),
@@ -2204,6 +2219,7 @@ mod tests {
     fn live_with_commands() -> Live {
         let mut l = Live::new();
         l.commands = synthesis_tui::local_commands();
+        l.commands.push(panels_command());
         l.commands.push(send_command());
         l.commands.push(Command {
             name: "tdd".into(),
@@ -2506,6 +2522,10 @@ mod tests {
         );
         // the actions the window carries out
         assert_eq!(l.submit("/config"), Submitted::Do(Action::OpenSettings));
+        assert_eq!(
+            l.submit("/panels usage off"),
+            Submitted::Do(Action::Panels("usage off".into()))
+        );
         assert_eq!(l.submit("/new"), Submitted::Do(Action::New));
         assert_eq!(l.submit("/close"), Submitted::Do(Action::Close));
         assert_eq!(l.submit("/clear"), Submitted::Do(Action::Clear));

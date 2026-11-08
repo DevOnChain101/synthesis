@@ -842,7 +842,7 @@ pub const TUI_PANELS: [(&str, &str); 8] = [
     ),
     (
         "status",
-        "Status box above the chat (desktop: Agent Status)",
+        "Status box above the chat (desktop: Agent Status, never hidden)",
     ),
     ("tokens", "Tokens box above the chat (desktop: Context)"),
     ("topology", "Topology graph (right column)"),
