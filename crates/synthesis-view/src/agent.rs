@@ -218,6 +218,8 @@ pub struct ChangedFile {
     pub edits: u32,
     /// `ToolCompleted.diff` of the latest edit (`hidden` for a secret file).
     pub diff: Option<Value>,
+    /// The tool call of that edit (the chat row it came from).
+    pub call_id: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -228,6 +230,8 @@ pub struct AgentPanes {
     pub browser: Vec<BrowserCall>,
     /// The last URL a `browser_navigate` named.
     pub url: String,
+    /// The page title the last navigate/snapshot result reported (page content: clipped, shown sanitized).
+    pub title: String,
     /// Path of the newest screenshot the browser tool saved.
     pub screenshot: Option<String>,
     /// Every `browser.frame`, oldest first (the newest 50).
@@ -348,7 +352,7 @@ impl AgentPanes {
         Some(self.pending.remove(at).1)
     }
 
-    fn note_file(&mut self, d: &Value) {
+    fn note_file(&mut self, d: &Value, call_id: &str) {
         if d.get("hidden").and_then(Value::as_bool) == Some(true) && d.get("path").is_none() {
             return;
         }
@@ -363,6 +367,7 @@ impl AgentPanes {
                 f.removed += r;
                 f.edits += 1;
                 f.diff = Some(d.clone());
+                f.call_id = call_id.to_string();
             }
             None => self.files.push(ChangedFile {
                 path: path.to_string(),
@@ -370,6 +375,7 @@ impl AgentPanes {
                 removed: r,
                 edits: 1,
                 diff: Some(d.clone()),
+                call_id: call_id.to_string(),
             }),
         }
     }
@@ -561,6 +567,9 @@ impl AgentPanes {
                             {
                                 self.screenshot = Some(p);
                             }
+                            if let Some(t) = title_of(out) {
+                                self.title = t;
+                            }
                         }
                     }
                     Some(Pending::Sub(a, i)) => {
@@ -571,7 +580,7 @@ impl AgentPanes {
                     None => {}
                 }
                 if let Some(d) = diff {
-                    self.note_file(d);
+                    self.note_file(d, tool_call_id);
                 }
             }
             // A foreground Bash call is `process_id == tool_call_id`: its row exists already.
@@ -726,6 +735,12 @@ pub fn read_report(
         .position(|(_, _, v)| v.get("id").and_then(Value::as_str) == Some(report_id));
     let at = by_id.or_else(|| all.iter().rposition(|(a, _, _)| *a == attempt))?;
     Some(all.into_iter().nth(at)?.2)
+}
+
+/// The `title: ...` line of a page-info result (`browser_navigate`, `browser_snapshot`), clipped to 120 chars.
+fn title_of(out: &str) -> Option<String> {
+    let t = out.lines().find_map(|l| l.strip_prefix("title: "))?.trim();
+    (!t.is_empty()).then(|| t.chars().take(120).collect())
 }
 
 fn browser_summary(name: &str, input: &Value) -> String {
@@ -1074,6 +1089,11 @@ mod tests {
             (5, 1, 2)
         );
         assert_eq!(p.totals(), (10, 1));
+        // the chat row to jump to is the latest edit's tool call
+        assert_eq!(
+            (p.files[0].call_id.as_str(), p.files[1].call_id.as_str()),
+            ("e2", "e3")
+        );
     }
 
     #[test]
@@ -1091,7 +1111,13 @@ mod tests {
                 2,
                 None,
                 "tool.completed",
-                completed("w1", "browser_navigate", "ok", "ok", None),
+                completed(
+                    "w1",
+                    "browser_navigate",
+                    "ok",
+                    "Navigated.\nurl: https://example.com/\ntitle: Example Domain",
+                    None,
+                ),
             ),
             ev(
                 3,
@@ -1113,6 +1139,7 @@ mod tests {
             ),
         ]);
         assert_eq!(p.url, "https://example.com");
+        assert_eq!(p.title, "Example Domain");
         assert_eq!(p.browser.len(), 2);
         assert_eq!(p.browser[0].summary, "https://example.com");
         assert_eq!(p.screenshot.as_deref(), shot.to_str());
