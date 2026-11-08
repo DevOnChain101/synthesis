@@ -1368,6 +1368,26 @@ impl Live {
         }
     }
 
+    /// The name of the open session, the same in the Running row and the top bar: its title (set by /rename or
+    /// stored), else the first thing the person typed, else "(new session)".
+    pub fn session_name(&self) -> String {
+        let t = self.title_shown();
+        if !t.is_empty() {
+            return t;
+        }
+        self.view
+            .convo
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::User(u) if !u.trim().is_empty() => {
+                    Some(u.split_whitespace().collect::<Vec<_>>().join(" "))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| "(new session)".into())
+    }
+
     /// The `/peers` listing (`None`: peers are off).
     pub fn peers_done(&mut self, rows: Option<Vec<Value>>) {
         match rows {

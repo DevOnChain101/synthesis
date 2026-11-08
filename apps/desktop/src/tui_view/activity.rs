@@ -66,6 +66,32 @@ pub enum RunState {
     Error,
 }
 
+/// A session whose last activity is younger than this is active (solid green dot), minutes.
+pub const ACTIVE_MIN: i64 = 30;
+/// From here on a session is inactive (gray dot and text); between the two it is recent (green ring). The time
+/// column switches from minutes to hours here too.
+pub const INACTIVE_MIN: i64 = 60;
+
+/// How recent a session's last activity is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Presence {
+    Active,
+    Recent,
+    Inactive,
+}
+
+/// The presence from the last activity (epoch ms; 0 = unknown, inactive) at `now`.
+pub fn presence(now: i64, then: i64) -> Presence {
+    if then <= 0 {
+        return Presence::Inactive;
+    }
+    match ((now - then) / 60_000).max(0) {
+        m if m < ACTIVE_MIN => Presence::Active,
+        m if m < INACTIVE_MIN => Presence::Recent,
+        _ => Presence::Inactive,
+    }
+}
+
 /// A stored session's state from its status column (what the other rows of the list have).
 pub fn run_state_of_status(s: SessionStatus) -> RunState {
     use SessionStatus::*;
@@ -115,6 +141,21 @@ pub fn status_word(s: SessionStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presence_flips_at_30_and_60_minutes() {
+        let at = |m: i64, extra_ms: i64| {
+            presence(1_000_000_000_000, 1_000_000_000_000 - m * 60_000 - extra_ms)
+        };
+        assert_eq!(at(0, 0), Presence::Active);
+        assert_eq!(at(29, 59_999), Presence::Active);
+        assert_eq!(at(30, 0), Presence::Recent);
+        assert_eq!(at(59, 59_999), Presence::Recent);
+        assert_eq!(at(60, 0), Presence::Inactive);
+        assert_eq!(presence(5, 0), Presence::Inactive);
+        // the clock alone moves a session from one to the next
+        assert_eq!(presence(31 * 60_000, 60_000), Presence::Recent);
+    }
 
     #[test]
     fn a_stored_status_maps_to_a_row_state() {

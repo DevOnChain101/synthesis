@@ -126,7 +126,7 @@ fn prompt_tool_approval_answer_round_trip() {
     let ended = items.iter().any(|i| matches!(i, Item::TaskEnd { .. }));
     assert!(ended, "{items:?}");
     let snap = snapshot::build(&r.live, 1_000_000, 0, None);
-    assert!(snap.prompts.iter().any(|p| p.text == "make hello.txt"));
+    assert!(snap.activity.iter().any(|p| p.text == "make hello.txt"));
     assert_eq!(snap.top.health, "system healthy");
     assert!(snap.context.input != "0");
     let engine = r.live.engine.take().unwrap();

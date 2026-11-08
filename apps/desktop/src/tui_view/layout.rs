@@ -56,8 +56,8 @@ pub struct Tiers {
     pub compact_head: bool,
     /// Minimum height of the Usage & Metrics panel and the Agent Status / Context row.
     pub usage_min: f32,
-    /// Minimum height of the User Prompt panel (140 from 860, else `left_min`).
-    pub history_min: f32,
+    /// Minimum height of the Recent Activity panel (140 from 860, else `left_min`).
+    pub activity_min: f32,
 }
 
 pub fn tiers(height: f32) -> Tiers {
@@ -72,7 +72,7 @@ pub fn tiers(height: f32) -> Tiers {
         topo_min: if height < 750. { 150. } else { 230. },
         compact_head: height < 750.,
         usage_min: 84.,
-        history_min: if height >= 860. {
+        activity_min: if height >= 860. {
             140.
         } else if height < 610. {
             38.
@@ -85,7 +85,7 @@ pub fn tiers(height: f32) -> Tiers {
 }
 
 /// The `synt.tui.panels.*` settings keys (docs/TUI.md "Settings"), mapped onto the panels of `cli.html`:
-/// `session` = Session, `tools` = Tools & Skills, `activity` = Recent Activity and User Prompt,
+/// `session` = Session, `tools` = Tools & Skills, `activity` = Recent Activity (the old User Prompt panel is merged into it; the key keeps hiding it),
 /// `status` = Agent Status, `tokens` = Context, `topology` = Synthesis Topology, `usage` = Usage & Metrics.
 /// `mcp` has no panel of its own any more (MCP servers are the Topology MCP card and the Tools & Skills
 /// `mcp` row); the key is accepted and ignored so no user's settings.json breaks.
@@ -158,9 +158,9 @@ mod tests {
     #[test]
     fn height_tiers() {
         assert_eq!(tiers(900.).left_min, 84.);
-        assert_eq!(tiers(900.).history_min, 140.);
-        assert_eq!(tiers(800.).history_min, 84.);
-        assert_eq!(tiers(700.).history_min, 56.);
+        assert_eq!(tiers(900.).activity_min, 140.);
+        assert_eq!(tiers(800.).activity_min, 84.);
+        assert_eq!(tiers(700.).activity_min, 56.);
         assert_eq!(tiers(749.).left_min, 56.);
         assert_eq!(tiers(749.).topo_min, 150.);
         assert_eq!(tiers(609.).left_min, 38.);
