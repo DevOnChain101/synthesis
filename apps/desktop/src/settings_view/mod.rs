@@ -831,6 +831,28 @@ impl SettingsView {
                             .into_any_element(),
                     );
                 }
+                out.push(small("Doctor", t::TEXT).mt(px(10.)).into_any_element());
+                out.push(
+                    div()
+                        .id("doctor-summary")
+                        .text_size(px(11.5))
+                        .text_color(hsla(t::TEXT))
+                        .child(synthesis_app::doctor::summary(&m.doctor))
+                        .into_any_element(),
+                );
+                for r in m
+                    .doctor
+                    .iter()
+                    .filter(|r| r.level != synthesis_app::doctor::Level::Ok)
+                {
+                    let colour = if r.level == synthesis_app::doctor::Level::Fail {
+                        t::ERROR
+                    } else {
+                        t::WARN
+                    };
+                    out.push(small(crate::doctor_ui::line(r), colour).into_any_element());
+                }
+                out.push(small("Read-only. /doctor in the chat lists every check; names of variables are shown, never values.", t::MUTED).into_any_element());
                 out.push(
                     small("Keys are environment variables you manage (ADR-011). This view shows whether one is set, never its value, and has no field for a key.", t::MUTED)
                         .mt(px(4.))

@@ -171,6 +171,8 @@ pub struct Model {
     pub mcp_error: Option<String>,
     pub providers: Vec<KeyStatus>,
     pub agents_md: Vec<(PathBuf, bool)>,
+    /// The checks of `/doctor`, read-only.
+    pub doctor: Vec<synthesis_app::doctor::Row>,
     /// `(name, description, source)`.
     pub skills: Vec<(String, String, String)>,
 }
@@ -257,6 +259,7 @@ impl Model {
             mcp_error: None,
             providers: vec![],
             agents_md: vec![],
+            doctor: vec![],
             skills: vec![],
         };
         m.refresh_info();
@@ -277,6 +280,7 @@ impl Model {
             (p, there)
         })
         .collect();
+        self.doctor = synthesis_app::doctor::rows(&c.env, &c.cwd, c.trust == ProjectTrust::Trusted);
         self.skills = synthesis_tools::discover_skills(&c.env, &c.cwd)
             .into_iter()
             .map(|s| {

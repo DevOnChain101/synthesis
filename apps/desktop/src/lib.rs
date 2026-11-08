@@ -2,9 +2,11 @@
 //! unit-tested without a window.
 
 pub mod brand;
+pub mod doctor_ui;
 pub mod engine;
 pub mod folder;
 pub mod live;
+pub mod memory_ui;
 pub mod models;
 pub mod settings_view;
 pub mod theme;
