@@ -967,7 +967,7 @@ impl RenderOnce for NativeCaret {
     }
 }
 
-/// The prompt's caret: a block as high as a capital letter, standing on the baseline, blinking while the
+/// The prompt's caret: a block as high as the text's line box, one cell wide, blinking while the
 /// prompt has the keys. The input's own thin bar is hidden by [`NativeCaret`].
 fn block_cursor(
     prompt: gpui::Entity<gpui_component::input::TextareaState>,
@@ -1010,19 +1010,11 @@ fn block_cursor(
             if !blink_on(ms) {
                 return;
             }
+            // a terminal block: one cell wide and as high as the text's whole line box
             let ts = window.text_style();
-            let sys = window.text_system().clone();
-            let id = sys.resolve_font(&ts.font());
-            let size = ts.font_size.to_pixels(window.rem_size());
-            let (asc, desc) = (sys.ascent(id, size), sys.descent(id, size).abs());
-            // the line box is centred on the caret's own box; the baseline sits `(asc - desc) / 2` below it
-            let baseline = cb.center().y + (asc - desc) / 2.;
-            let cap = sys.cap_height(id, size);
+            let w = ts.font_size.to_pixels(window.rem_size()) * 0.6;
             window.paint_quad(gpui::fill(
-                gpui::Bounds::new(
-                    gpui::point(cb.left(), baseline - cap),
-                    gpui::size(size * 0.6, cap),
-                ),
+                gpui::Bounds::new(cb.origin, gpui::size(w, cb.size.height)),
                 hsla(t::PEARL),
             ));
         },
