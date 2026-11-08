@@ -166,9 +166,7 @@ pub fn running_body(
                 item_box(r.selected, (5., 7., 5., 6.))
                     .when_some(attn.filter(|_| r.selected), |d, c| d.border_color(c))
                     .id(("run-row", i))
-                    .when_some(on_click.filter(|_| !r.peer), |d, f| {
-                        d.cursor_pointer().on_click(f(i))
-                    })
+                    .when_some(on_click, |d, f| d.cursor_pointer().on_click(f(i)))
                     .child(run_mark(r, attn, motion, now))
                     .child(
                         div()

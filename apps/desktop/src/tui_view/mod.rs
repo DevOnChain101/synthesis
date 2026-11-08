@@ -344,7 +344,7 @@ impl TuiView {
             Box::new(cx.listener(move |this, _, _, cx| this.click_workspace(i, cx)))
         };
         let run_click = |i: usize| -> panels::OnClick {
-            Box::new(cx.listener(move |this, _, _, cx| this.click_running(i, cx)))
+            Box::new(cx.listener(move |this, _, window, cx| this.click_running(i, window, cx)))
         };
         let new_ws: Option<panels::OnClick> = live.map(|_| -> panels::OnClick {
             Box::new(cx.listener(|this, _, _, cx| this.new_workspace(cx)))

@@ -907,8 +907,25 @@ impl TuiView {
         self.select_row(i, cx);
     }
 
-    /// Click on a Running row: open that session (the open one: nothing happens).
-    pub fn click_running(&mut self, i: usize, cx: &mut Context<Self>) {
+    /// Click on a Running row: open that session (the open one: nothing happens); another
+    /// process's session starts a `/send` to it in the prompt.
+    pub fn click_running(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(row) = self
+            .snap
+            .running
+            .get(i)
+            .filter(|r| r.peer && !r.id.is_empty())
+        {
+            let text = format!("/send {} ", row.id);
+            if let Some(lu) = &mut self.live {
+                lu.live.focus = Focus::Chat;
+            }
+            self.set_prompt(&text, window, cx);
+            if let Some(lu) = &self.live {
+                lu.prompt.update(cx, |s, cx| s.focus(window, cx));
+            }
+            return;
+        }
         let Some(lu) = &mut self.live else { return };
         lu.live.focus = Focus::Running;
         lu.live.run_sel = i;
@@ -1051,6 +1068,18 @@ impl TuiView {
             }
             Action::ShowFiles => return self.show_tab(super::ChatTab::Files, None, cx),
             Action::ShowDiff(f) => return self.show_tab(super::ChatTab::Diff, f, cx),
+            Action::Send { to, text } => {
+                let Some(e) = lu.live.engine.clone() else {
+                    return;
+                };
+                let job = cx.background_spawn(async move { e.peer_ask(&to, &text) });
+                cx.spawn(async move |this, cx| {
+                    let r = job.await;
+                    this.update(cx, |t, cx| t.live_do(cx, |l| l.send_done(r)))
+                        .ok();
+                })
+                .detach();
+            }
             Action::Peers => {
                 let Some(e) = lu.live.engine.clone() else {
                     return;

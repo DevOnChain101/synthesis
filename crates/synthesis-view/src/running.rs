@@ -9,6 +9,8 @@ use crate::workspaces::{SessionRow, WorkspaceList};
 /// One row of the harness's peer listing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct PeerRow {
+    /// `ws:<label>/sess:<id>`: what `/send` takes.
+    pub address: String,
     pub workspace_label: String,
     pub workspace_root: String,
     pub session_short_id: String,
@@ -30,6 +32,7 @@ fn s(v: &Value, path: &[&str]) -> String {
 impl PeerRow {
     pub fn from_json(v: &Value) -> Self {
         Self {
+            address: s(v, &["address"]),
             workspace_label: s(v, &["workspace", "label"]),
             workspace_root: s(v, &["workspace", "root"]),
             session_short_id: s(v, &["session", "short_id"]),

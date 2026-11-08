@@ -107,6 +107,11 @@ pub enum Action {
     Quit,
     /// `/peers`: the listing is read off the UI thread; the text comes back through [`Live::peers_done`].
     Peers,
+    /// `/send ADDRESS TEXT`: runs off the UI thread; the outcome comes back through [`Live::send_done`].
+    Send {
+        to: String,
+        text: String,
+    },
 }
 
 /// An image waiting for the next message (the TUI's chip).
@@ -244,7 +249,18 @@ pub const WIRED: [&str; 25] = [
 ];
 
 pub fn is_wired(name: &str) -> bool {
-    WIRED.contains(&name)
+    WIRED.contains(&name) || name == "send"
+}
+
+/// `/send` is the desktop's own command (the classic TUI has none), so it is not in [`WIRED`].
+pub fn send_command() -> Command {
+    Command {
+        name: "send".into(),
+        aliases: vec![],
+        description: "message a session in another workspace or process (see /peers)".into(),
+        argument_hint: "<ws:workspace/sess:session> <message>".into(),
+        local: true,
+    }
 }
 
 /// `5m ago`, `3h ago`, `2d ago` (the TUI's wording).
@@ -1044,6 +1060,26 @@ impl Live {
                 self.note(PEERS_OFF, true)
             }
             "peers" => return Submitted::Do(Action::Peers),
+            "send"
+                if self
+                    .engine
+                    .as_ref()
+                    .is_some_and(|e| e.peer_name().is_none()) =>
+            {
+                self.note(PEERS_OFF, true)
+            }
+            "send" => match arg.trim().split_once(char::is_whitespace) {
+                Some((to, text)) if !text.trim().is_empty() => {
+                    return Submitted::Do(Action::Send {
+                        to: to.into(),
+                        text: text.trim().into(),
+                    });
+                }
+                _ => self.note(
+                    "usage: /send ws:<workspace>/sess:<session> <message>   (see /peers)",
+                    true,
+                ),
+            },
             "name" => self.name(arg),
             "rename" => self.rename(arg),
             "focus" => {
@@ -1149,6 +1185,13 @@ impl Live {
         match rows {
             Some(r) => self.note(synthesis_tui::peers_view::table(&r).join("\n"), false),
             None => self.note(PEERS_OFF, true),
+        }
+    }
+
+    /// The outcome of `/send`. The reply itself arrives as the `peer.reply` row; only a failure is said here.
+    pub fn send_done(&mut self, r: Result<String, String>) {
+        if let Err(e) = r {
+            self.note(format!("/send: {e}"), true);
         }
     }
 
@@ -1665,6 +1708,7 @@ mod tests {
     fn live_with_commands() -> Live {
         let mut l = Live::new();
         l.commands = synthesis_tui::local_commands();
+        l.commands.push(send_command());
         l.commands.push(Command {
             name: "tdd".into(),
             description: "skill: tdd".into(),
@@ -1685,6 +1729,18 @@ mod tests {
             Submitted::Do(Action::ShowDiff(Some("a.rs".into())))
         );
         assert_eq!(l.submit("/peers"), Submitted::Do(Action::Peers));
+        assert_eq!(
+            l.submit("/send ws:api/sess:backend  what sets the TTL? "),
+            Submitted::Do(Action::Send {
+                to: "ws:api/sess:backend".into(),
+                text: "what sets the TTL?".into()
+            })
+        );
+        assert_eq!(l.submit("/send ws:api/sess:backend"), Submitted::Nothing);
+        assert_eq!(l.submit("/send"), Submitted::Nothing);
+        assert!(
+            matches!(l.view.convo.items.last(), Some(Item::Notice { warning: true, text }) if text.starts_with("usage: /send"))
+        );
         assert!(!l.focus_view);
         assert_eq!(l.submit("/focus"), Submitted::Nothing);
         assert!(l.focus_view);

@@ -16,7 +16,7 @@ pub struct Workspace {
 pub struct Running {
     /// What a click opens (the session id; empty in the sample).
     pub id: String,
-    /// Another process's session (the peers listing): not clickable.
+    /// Another process's session (the peers listing): a click starts `/send <address> `, `id` is the address.
     pub peer: bool,
     pub title: String,
     /// The folder the session runs in (blue in the design).
