@@ -580,6 +580,7 @@ mod tests {
 
     #[gpui::test]
     fn the_title_bar_sits_above_the_design_content(cx: &mut TestAppContext) {
+        let _g = theme::opacity_guard();
         let (_, v) = open(cx, 1400., 930.);
         // no rail: the TUI view takes the whole width, below the 30px title bar
         assert_eq!(y(v, "titlebar"), Some((0., TITLEBAR_H)));
@@ -597,6 +598,7 @@ mod tests {
 
     #[gpui::test]
     fn the_icons_switch_views_and_agent_is_coming_soon(cx: &mut TestAppContext) {
+        let _g = theme::opacity_guard();
         let (shell, v) = open(cx, 1400., 930.);
         shell.update(v, |s, cx| {
             assert_eq!(s.view, View::Tui);
@@ -622,6 +624,7 @@ mod tests {
 
     #[gpui::test]
     fn settings_opacity_reaches_the_title_bar_and_the_tui_view(cx: &mut TestAppContext) {
+        let _g = theme::opacity_guard();
         let (shell, v) = open(cx, 1400., 930.);
         let tui = synthesis_settings::TuiSettings {
             opacity: 60,
@@ -646,6 +649,7 @@ mod tests {
     fn restart_session_is_refused_while_it_would_drop_work_and_keeps_the_badge(
         cx: &mut TestAppContext,
     ) {
+        let _g = theme::opacity_guard();
         cx.update(|cx| {
             gpui_component::init(cx);
             theme::apply("JetBrains Mono", cx);
@@ -694,6 +698,7 @@ mod tests {
 
     #[gpui::test]
     fn leaving_settings_by_any_route_undoes_an_unreleased_opacity_drag(cx: &mut TestAppContext) {
+        let _g = theme::opacity_guard();
         let (shell, v) = open(cx, 1000., 800.);
         for leave in [View::Tui, View::Agent] {
             theme::set_opacity(100);

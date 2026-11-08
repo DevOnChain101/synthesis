@@ -129,6 +129,16 @@ pub fn apply(mono: &str, cx: &mut App) {
     th.mono_font_family = SharedString::from(mono.to_string());
 }
 
+/// Tests that read or write the opacity global (any test with a `Shell`, which applies settings) hold this for their whole
+/// run: the global is per process and tests run on parallel threads. It starts each of them at 100 %.
+#[cfg(test)]
+pub(crate) fn opacity_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    set_opacity(100);
+    g
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,7 +170,7 @@ mod tests {
 
     #[test]
     fn fill_follows_the_opacity_and_never_goes_under_the_minimum() {
-        // the only test that touches the global; it puts it back
+        let _g = opacity_guard();
         set_opacity(55);
         assert_eq!(fill(t::BG).a, 0.55);
         assert_eq!(hsla(t::BG).a, 1., "text colours stay opaque");
