@@ -688,7 +688,7 @@ impl TuiView {
                 "tab" => lu.live.move_sel(!shift),
                 // Enter and digits answer only a dialog the person has engaged (arrows, Tab, a click); before
                 // that they are swallowed (they were meant for the prompt) and the footer says how to choose
-                "enter" if lu.live.dialogs[0].answerable() => {
+                "enter" if enter_answers(ctrl, cmd, lu.live.dialogs[0].answerable()) => {
                     let sel = lu.live.dialogs[0].sel;
                     out = lu.live.pick(sel, now);
                 }
@@ -1615,6 +1615,11 @@ fn editor_at(text: &str, cursor: usize) -> LineEditor {
     ed
 }
 
+/// Plain Enter answers an engaged dialog; Cmd/Ctrl+Enter (send now) never does.
+fn enter_answers(ctrl: bool, cmd: bool, answerable: bool) -> bool {
+    answerable && !ctrl && !cmd
+}
+
 /// Enter with the popup open on a slash prefix: `Some(run)` completes the highlighted command (and
 /// runs it when `run`, i.e. it takes no argument). `None`: the text already names a command.
 fn enter_completes(
@@ -1667,6 +1672,14 @@ pub fn suggest(text: &str, cursor: usize, live: &Live, cwd: &Path) -> Option<Com
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cmd_or_ctrl_enter_never_answers_a_dialog() {
+        assert!(enter_answers(false, false, true));
+        assert!(!enter_answers(true, false, true));
+        assert!(!enter_answers(false, true, true));
+        assert!(!enter_answers(false, false, false));
+    }
 
     #[test]
     fn enter_on_a_prefix_completes_and_runs_only_without_args() {

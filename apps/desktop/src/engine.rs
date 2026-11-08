@@ -34,6 +34,11 @@ use synthesis_tui_base::complete::Command;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+/// A `/command` or `!shell` line (its first line starts with the mark): never a send-now delivery.
+pub fn is_command(text: &str) -> bool {
+    text.starts_with('/') || text.starts_with('!')
+}
+
 /// What the engine sends to the window.
 pub enum UiMsg {
     Event(Box<Envelope>),
@@ -865,6 +870,9 @@ impl Engine {
     /// Send now: delivers `text` to `to` (`main` or a sub-agent instance) at its next safe point
     /// (after the tool batch, never during an approval); `UiMsg::SendFailed` follows when refused.
     pub fn send_now(&self, to: String, text: String) -> Result<(), &'static str> {
+        if is_command(&text) {
+            return Err("commands are not sent now");
+        }
         let Some(rt) = &self.tokio else {
             return Err("the engine is closed");
         };

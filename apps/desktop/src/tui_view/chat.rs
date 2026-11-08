@@ -16,7 +16,7 @@ use super::panels::{dim, icon, strong, text};
 use super::topo::with_alpha;
 use super::tracked;
 use super::{TuiView, layout};
-use crate::live::clip;
+use crate::live::{clip, label};
 use crate::theme::hsla;
 
 /// Lines of a tool's output shown before "ctrl+o" (the TUI's default).
@@ -1017,11 +1017,10 @@ impl TuiView {
                     .flex()
                     .gap(px(8.))
                     .text_color(dim())
-                    .child(
-                        div()
-                            .flex_none()
-                            .child(format!("sent now to @{to}, delivered at the next step")),
-                    )
+                    .child(div().flex_none().child(format!(
+                        "sent now to @{}, delivered at the next step",
+                        label(to)
+                    )))
                     .child(div().flex_1().min_w(px(0.)).truncate().child(clip(q, 200)))
             }));
         if l.busy && l.target != "main" {

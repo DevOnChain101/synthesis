@@ -310,12 +310,27 @@ fn send_now_routing() {
     assert_eq!(r.live.target, "worker");
     assert_eq!(r.live.submit("d"), inject("worker", "d"));
     r.live.agents.clear();
+    // the agent is gone: nothing is sent or queued, the text stays in the prompt
+    assert_eq!(r.live.submit("e"), Submitted::Held);
+    assert_eq!(r.live.target, "main");
+    assert_eq!(r.live.queue.len(), 2);
     assert_eq!(
         r.live.submit("e"),
         Submitted::Nothing,
         "main target: queued"
     );
-    assert_eq!(r.live.target, "main");
+    r.live.queue.pop_back();
+    // a multi-line message is a legitimate send now; only a first line with `/` or `!` is a command
+    assert_eq!(
+        r.live.submit_as("one\n/two", true),
+        inject("main", "one\n/two")
+    );
+    assert_eq!(r.live.submit_as("/x\nmore", true), Submitted::Nothing);
+    assert!(
+        r.engine
+            .send_now("main".into(), "!ls\nmore".into())
+            .is_err()
+    );
     // an open dialog holds delivery: the line stays queued (main) or in the prompt (sub-agent)
     r.live.queue.clear();
     r.live.open_setup("test", 0);
@@ -347,6 +362,9 @@ fn a_send_now_during_an_approval_is_delivered_after_the_tool_result_and_leaves_t
     );
     r.live.queue.pop_back();
     // ... but the engine still holds a line that gets through (a race) until the answer
+    r.live
+        .injected
+        .push(("main".into(), "also add a note".into()));
     r.engine
         .send_now("main".into(), "also add a note".into())
         .unwrap();

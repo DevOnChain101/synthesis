@@ -15,7 +15,7 @@ use synthesis_tui_render::dialogs::permission_options;
 use synthesis_view::convo::Item;
 use synthesis_view::state::ViewState;
 
-use crate::engine::{AskApproval, Choice, Engine, McpInfo, UiMsg};
+use crate::engine::{AskApproval, Choice, Engine, McpInfo, UiMsg, is_command};
 
 /// Enter and digits are ignored this long after a dialog comes to the front: a key typed before it
 /// appeared must not answer it (the TUI's `ARM_MS`). Esc still rejects.
@@ -265,6 +265,11 @@ pub fn age(ms: i64) -> String {
     }
 }
 
+/// A sub-agent name as shown: control characters removed, at most 40 chars.
+pub fn label(name: &str) -> String {
+    clip(&sanitize_for_display(name), 40)
+}
+
 /// `s` on one line, at most `n` chars.
 pub fn clip(s: &str, n: usize) -> String {
     let one = s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -293,6 +298,10 @@ pub struct Live {
     pub target: String,
     /// Instance names of the sub-agents that can be addressed (from `subagent.*` events).
     pub agents: Vec<String>,
+    /// Lines this window handed to `Engine::send_now` that no `message.sent` has answered yet: (to, text).
+    pub injected: Vec<(String, String)>,
+    /// Dropped main lines put back at the front of the queue by the current burst of drops.
+    requeued: usize,
     /// Sent-now lines the harness accepted and has not delivered yet: (message id, to, text).
     pub pending: Vec<(String, String, String)>,
     /// The next `user.message` of main is a sent-now line being delivered.
@@ -345,6 +354,8 @@ impl Live {
             target: "main".into(),
             agents: vec![],
             pending: vec![],
+            injected: vec![],
+            requeued: 0,
             mark_delivered: false,
             show_thinking: false,
             verbose: false,
@@ -463,12 +474,19 @@ impl Live {
             }
             UiMsg::BadEvent(t) => self.note(t, true),
             UiMsg::SendFailed { to, text, why } => {
+                if let Some(i) = self.injected.iter().position(|p| p.0 == to && p.1 == text) {
+                    self.injected.remove(i);
+                }
                 if to == "main" {
                     self.note(format!("not delivered ({why}): queued instead"), true);
                     self.queue.push_front(text);
                 } else {
                     self.note(
-                        format!("not delivered to @{to} ({why}): {}", clip(&text, 80)),
+                        format!(
+                            "not delivered to @{} ({why}): {}",
+                            label(&to),
+                            clip(&text, 80)
+                        ),
                         true,
                     );
                 }
@@ -494,6 +512,8 @@ impl Live {
                 self.busy = false;
                 self.target = "main".into();
                 self.pending.clear();
+                self.injected.clear();
+                self.agents.clear();
                 self.dialogs.clear();
                 if let Err(e) = r {
                     self.note(format!("task failed to run: {e}"), true);
@@ -920,7 +940,10 @@ impl Live {
             return Submitted::Nothing; // `!` with no command
         }
         if self.target != "main" && !self.agents.contains(&self.target) {
-            self.target = "main".into(); // the agent is gone
+            let gone = label(&self.target);
+            self.target = "main".into();
+            self.note(format!("@{gone} is gone, nothing sent"), true);
+            return Submitted::Held;
         }
         if self.busy && self.engine.is_some() && (now || self.target != "main") {
             match self.inject(text) {
@@ -944,7 +967,7 @@ impl Live {
     /// The line as a send-now delivery to the target, or why it cannot be one. Commands (`/`, `!`)
     /// are never delivered; an open dialog holds delivery (the harness drains only after the answer).
     fn inject(&mut self, text: &str) -> Result<Submitted, &'static str> {
-        if text.starts_with('/') || text.starts_with('!') {
+        if is_command(text) {
             return Err("commands are not sent now");
         }
         if !self.dialogs.is_empty() {
@@ -953,6 +976,7 @@ impl Live {
         if !self.images.is_empty() {
             return Err("images go with a started line");
         }
+        self.injected.push((self.target.clone(), text.to_string()));
         Ok(Submitted::Inject {
             to: self.target.clone(),
             text: text.to_string(),
@@ -981,6 +1005,9 @@ impl Live {
 
     /// Ctrl+T: main, then each sub-agent in turn.
     pub fn cycle_target(&mut self) {
+        if !self.busy {
+            return; // the target applies while a task runs
+        }
         let mut order = vec!["main".to_string()];
         order.extend(self.agents.iter().cloned());
         let i = order
@@ -994,6 +1021,9 @@ impl Live {
     /// sub-agent names a line can be addressed to.
     fn track_messages(&mut self, e: &synthesis_events::Envelope) {
         use synthesis_events::Event;
+        if !matches!(e.event, Event::MessageDropped { .. }) {
+            self.requeued = 0;
+        }
         match &e.event {
             Event::SubagentStarted(i) => {
                 if let Some(n) = &i.name
@@ -1012,8 +1042,16 @@ impl Live {
                 text,
                 ..
             } if origin == "user" => {
-                self.pending
-                    .push((message_id.clone(), to.clone(), text.clone()))
+                // only a line this window sent (a sent-now that is still wanted) counts
+                if let Some(i) = self
+                    .injected
+                    .iter()
+                    .position(|p| p.0 == *to && text.starts_with(&p.1))
+                {
+                    self.injected.remove(i);
+                    self.pending
+                        .push((message_id.clone(), to.clone(), text.clone()));
+                }
             }
             Event::MessageDelivered { message_id, .. } => {
                 if let Some(i) = self.pending.iter().position(|p| p.0 == *message_id) {
@@ -1023,7 +1061,8 @@ impl Live {
                     } else {
                         self.note(
                             format!(
-                                "sent now to @{to}, delivered at its next step: {}",
+                                "sent now to @{}, delivered at its next step: {}",
+                                label(&to),
                                 clip(&text, 80)
                             ),
                             false,
@@ -1035,7 +1074,14 @@ impl Live {
                 if let Some(i) = self.pending.iter().position(|p| p.0 == *message_id) {
                     let (_, to, text) = self.pending.remove(i);
                     if to == "main" {
-                        self.queue.push_front(text);
+                        // a burst of drops keeps the lines' order
+                        self.queue.insert(self.requeued.min(self.queue.len()), text);
+                        self.requeued += 1;
+                    } else {
+                        self.note(
+                            format!("not delivered to @{}: {}", label(&to), clip(&text, 80)),
+                            true,
+                        );
                     }
                 }
             }
@@ -1884,6 +1930,67 @@ mod tests {
         );
         assert_eq!(l.queue.len(), 1);
         assert!(l.history.contains(&"/tdd now".to_string()));
+    }
+
+    fn event(t: &str, payload: Value) -> UiMsg {
+        let mut v = json!({"v":1,"seq":1,"ts":"2026-01-01T00:00:00Z","session_id":"s","task_id":null,"turn_id":null,"type":t});
+        v["payload"] = payload;
+        UiMsg::Event(Box::new(serde_json::from_value(v).unwrap()))
+    }
+
+    fn sent(id: &str, to: &str, origin: &str, text: &str) -> UiMsg {
+        event(
+            "message.sent",
+            json!({"message_id": id, "from": "user", "to": to, "origin": origin, "kind": "message", "text": text, "bytes": 1}),
+        )
+    }
+
+    fn dropped(id: &str) -> UiMsg {
+        event(
+            "message.dropped",
+            json!({"message_id": id, "reason": "cancelled"}),
+        )
+    }
+
+    #[test]
+    fn only_lines_this_window_sent_are_pending_and_dropped_ones_keep_their_order() {
+        let mut l = Live::new();
+        // a user-origin message this window never sent is not a pending send-now
+        l.on_msg(sent("x", "main", "user", "from elsewhere"), 0);
+        assert!(l.pending.is_empty());
+        l.injected = vec![
+            ("main".into(), "one".into()),
+            ("main".into(), "two".into()),
+            ("worker".into(), "three".into()),
+        ];
+        l.queue.push_back("later".into());
+        for (id, to, t) in [
+            ("1", "main", "one"),
+            ("2", "main", "two"),
+            ("3", "worker", "three"),
+        ] {
+            l.on_msg(sent(id, to, "user", t), 0);
+        }
+        assert_eq!(l.pending.len(), 3);
+        for id in ["1", "2", "3"] {
+            l.on_msg(dropped(id), 0);
+        }
+        assert_eq!(l.queue, ["one", "two", "later"]);
+        assert!(l.pending.is_empty());
+        assert!(
+            matches!(l.view.convo.items.last(), Some(Item::Notice { warning: true, text }) if text.contains("@worker"))
+        );
+        // the task ending forgets what was never answered: a late message.sent is ignored
+        l.injected = vec![("main".into(), "late".into())];
+        l.on_msg(UiMsg::TaskDone(Ok(())), 0);
+        l.on_msg(sent("9", "main", "user", "late"), 0);
+        assert!(l.pending.is_empty());
+    }
+
+    #[test]
+    fn a_sub_agent_name_is_shown_clean_and_short() {
+        let n = label(&format!("a\u{1b}[31mb{}", "x".repeat(100)));
+        assert!(!n.contains('\u{1b}') && n.chars().count() <= 40, "{n}");
     }
 
     #[test]
