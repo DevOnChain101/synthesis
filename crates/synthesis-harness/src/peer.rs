@@ -16,8 +16,8 @@ use synthesis_events::{Event, PeerAddr, SubagentInfo, TaskStatus};
 use synthesis_peers::address::{candidates, parse, resolve};
 use synthesis_peers::mailbox::{Envelope, MailError, Mailbox, now_s};
 use synthesis_peers::serve::{
-    Answered, BoxFut, Down, Extra, Outgoing, PeerError, Reply, Request, Responder, Server, begin,
-    deliver, discover,
+    Answered, BoxFut, Down, Extra, Outgoing, PeerError, Reply, Request, Responder, Server, ask,
+    begin, deliver, discover,
 };
 use synthesis_peers::{Addr, Config, Entry, Key, Registration, read_entries, remove_entry};
 use synthesis_permissions::Mode;
@@ -981,7 +981,9 @@ impl Harness {
         let Some(addr) = parse(s("to")) else {
             return fail("not_found: not a peer address".into());
         };
-        let text = s("message");
+        // Secrets never go on the wire: the receiver's own redactor is not a substitute.
+        let redacted = self.sink.redact(s("message"));
+        let text = redacted.as_str();
         // `thread:true` starts a thread (this side makes the id), `thread_id` continues one.
         let thread_id = match input.get("thread_id").and_then(Value::as_str) {
             Some(t) if synthesis_peers::serve::valid_thread_id(t) => Some(t.to_string()),
@@ -1217,6 +1219,88 @@ impl Harness {
             false,
             ToolStatus::Ok,
         )
+    }
+
+    /// A message the user typed (`/send`) to another session's main agent; the reply is returned,
+    /// not queued for the model. The receiver's gates (allow list, permits, rate limit,
+    /// read-only responder, `confirm_replies`) apply unchanged; no delegate, notify or thread.
+    pub async fn peer_ask_user(&self, to: &str, text: &str) -> Result<String, String> {
+        let Some(link) = self.peers.clone().filter(|p| p.on()) else {
+            return Err(
+                "disabled: cross-session messaging is off (start with --peers, or synt.peers.enabled)"
+                    .into(),
+            );
+        };
+        let Some(addr) = parse(to) else {
+            return Err("not_found: not a peer address (ws:<workspace>/sess:<session>)".into());
+        };
+        if text.len() > MAX_BYTES {
+            return Err("too_large: a message is at most 32 KiB".into());
+        }
+        let all = link.entries();
+        let entry = resolve(&all, &link.config, &link.me.session_id, &addr)
+            .map_err(|e| e.to_string())?
+            .clone();
+        if entry.endpoint.is_empty() {
+            return Err("offline: that session has ended".into());
+        }
+        if !synthesis_peers::endpoint_ok(&link.run_dir, &entry.endpoint) {
+            return Err("unreachable: the registry entry names a foreign endpoint".into());
+        }
+        let text = self.sink.redact(text);
+        let id = uuid();
+        let from = link.addr(MAIN, MAIN, None);
+        let chain = [link.me.session_id.clone()];
+        let scope = Scope::default();
+        self.sink.emit(
+            &scope,
+            Event::PeerRequestSent {
+                request_id: id.clone(),
+                from: ev_addr(&from),
+                to: ev_addr(&entry.addr(MAIN, MAIN)),
+                summary: one_line(&text, 120),
+                bytes: text.len() as u64,
+                chain_len: 1,
+            },
+        );
+        let started = Instant::now();
+        let out = Outgoing {
+            id: &id,
+            from: &from,
+            to_agent: MAIN,
+            text: &text,
+            chain: &chain,
+            timeout_s: REQUEST_TIMEOUT_S,
+            extra: Extra::default(),
+        };
+        let r = ask(&entry.endpoint, &link.key, &out, |_, _| {}).await;
+        let (status, reply) = match r {
+            Ok(f) => (f.status, f.text),
+            Err(PeerError::Rejected(r)) => (
+                "failed".into(),
+                format!("{r}: the peer refused the request"),
+            ),
+            Err(_) => (
+                "failed".into(),
+                "unreachable: the session did not answer".into(),
+            ),
+        };
+        let shown = self.sink.redact(&reply);
+        self.sink.emit(
+            &scope,
+            Event::PeerReply {
+                request_id: id,
+                status: status.clone(),
+                text: shown.chars().take(4096).collect(),
+                bytes: shown.len() as u64,
+                duration_ms: started.elapsed().as_millis() as u64,
+            },
+        );
+        if status == "answered" {
+            Ok(shown)
+        } else {
+            Err(format!("{status}: {shown}"))
+        }
     }
 
     /// R10c: the target is dead. Store the question in its mailbox; it is answered when the

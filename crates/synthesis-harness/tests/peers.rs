@@ -3267,3 +3267,129 @@ async fn the_responder_looks_up_workspace_facts_with_read_grep_glob() {
     }
     assert!(tool_result(last, "r").unwrap().0.contains("4821"));
 }
+
+// ---- the user's own send (`/send`) and the redacted wire ---------------------------------------
+
+fn a_answers() -> Responder {
+    Arc::new(|r| {
+        Some(if is_responder(r) {
+            Turn::text("A-ANSWER")
+        } else {
+            Turn::text("A idle")
+        })
+    })
+}
+
+fn idle() -> Responder {
+    Arc::new(|_| Some(Turn::text("B idle")))
+}
+
+fn on() -> serde_json::Value {
+    json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"]})
+}
+
+#[tokio::test]
+async fn the_models_send_is_redacted_before_it_goes_on_the_wire() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let (a, ea) = side("sess-a", "alpha", &run, Some(on()), a_answers(), 10);
+    let leaky: Responder = Arc::new(|r| {
+        Some(if tool_result(r, "ask").is_none() {
+            Turn::tool(
+                "ask",
+                "SendMessage",
+                json!({"to": "ws:alpha/sess:sess-a", "message": format!("use {SECRET} please")}),
+            )
+        } else {
+            Turn::text("B done")
+        })
+    });
+    let (mut b, _) = side_x(
+        "sess-b",
+        "beta",
+        &run,
+        Some(on()),
+        leaky,
+        10,
+        true,
+        None,
+        &[],
+        SideX {
+            mode: PermissionMode::BypassPermissions,
+            interactive: false,
+            hooks: None,
+        },
+    );
+    let _reg = serve(&a, &run, ea);
+    go(&mut b, "go").await;
+    until(|| all_text(&a).contains("please")).await;
+    let seen = all_text(&a);
+    assert!(!seen.contains(SECRET), "{seen}");
+    assert!(seen.contains("[REDACTED"), "{seen}");
+}
+
+#[tokio::test]
+async fn a_user_send_is_refused_when_peers_are_off_unknown_or_ambiguous() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let (off, _) = side("sess-o", "omega", &run, None, idle(), 10);
+    let e = off
+        .h
+        .peer_ask_user("ws:alpha/sess:x", "hi")
+        .await
+        .unwrap_err();
+    assert!(e.starts_with("disabled"), "{e}");
+
+    let (b, _) = side("sess-b", "beta", &run, Some(on()), idle(), 10);
+    let e = b.h.peer_ask_user("nonsense", "hi").await.unwrap_err();
+    assert!(e.starts_with("not_found"), "{e}");
+    let e =
+        b.h.peer_ask_user("ws:alpha/sess:x", "hi")
+            .await
+            .unwrap_err();
+    assert!(e.starts_with("not_found"), "{e}");
+
+    // two live sessions share a name: the caller must pick, nothing is sent
+    let _regs: Vec<_> = ["sess-t1", "sess-t2"]
+        .map(|sid| {
+            let mut e = entry(sid, "twin", "alpha", &run, "unix:/nowhere");
+            e.session_name = Some("twin".into());
+            Registration::create(&run, &e).unwrap()
+        })
+        .into();
+    let e =
+        b.h.peer_ask_user("ws:alpha/sess:twin", "hi")
+            .await
+            .unwrap_err();
+    assert!(e.starts_with("ambiguous") && e.contains("sess-t1"), "{e}");
+    assert!(sent_ids(&b).is_empty());
+}
+
+#[tokio::test]
+async fn a_user_send_goes_out_redacted_shows_rows_and_keeps_the_reply_from_the_model() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let (a, ea) = side("sess-a", "alpha", &run, Some(on()), a_answers(), 10);
+    let (mut b, _) = side("sess-b", "beta", &run, Some(on()), idle(), 10);
+    let _reg = serve(&a, &run, ea);
+    let reply =
+        b.h.peer_ask_user("ws:alpha/sess:sess-a", &format!("what is {SECRET} for?"))
+            .await
+            .unwrap();
+    assert_eq!(reply, "A-ANSWER");
+    let seen = all_text(&a);
+    assert!(
+        seen.contains("[REDACTED") && !seen.contains(SECRET),
+        "{seen}"
+    );
+    assert_eq!(sent_ids(&b).len(), 1);
+    let replies = b.rig.find(|e| match e {
+        Event::PeerReply { status, .. } => Some(status.clone()),
+        _ => None,
+    });
+    assert_eq!(replies, ["answered"]);
+    // the reply is the user's: the model never sees it
+    go(&mut b, "next").await;
+    assert!(!all_text(&b).contains("A-ANSWER"));
+    assert!(!all_text(&b).contains("peer_reply"));
+}
