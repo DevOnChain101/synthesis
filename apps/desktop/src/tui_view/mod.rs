@@ -5,6 +5,7 @@
 //! Status + Context, Usage & Metrics; key hint footer. It reads a `Snapshot` (see `sample`); no terminal, no
 //! PTY. Panels hide with the TUI's `panels.*` keys (`layout::Hidden`).
 
+pub mod activity;
 pub mod chat;
 #[cfg(test)]
 mod design_tests;
@@ -88,6 +89,10 @@ pub enum ChatTab {
     Files,
 }
 
+fn t_mode_name(m: synthesis_permissions::Mode) -> String {
+    synthesis_tui_render::dialogs::mode_name(Some(m.as_str()))
+}
+
 impl ChatTab {
     pub const ALL: [ChatTab; 5] = [
         ChatTab::Chat,
@@ -150,8 +155,14 @@ pub struct TuiView {
     centre_w: f32,
     /// False while another view of the shell is shown: the window-wide key hook then leaves the keys alone.
     pub active: bool,
+    /// True while the TUI view itself is on screen (not under Settings): the only time a dialog gets keys.
+    pub shown: bool,
+    /// Height of the window from the last render (the dialog panel's input box takes up to 40% of it).
+    win_h: f32,
     /// The slide-over column that is open (only a collapsed column has one; closed by default).
     pub(crate) drawer: Option<Side>,
+    /// Side-panel sections folded to their header (by panel id), kept for the session.
+    folded: std::collections::HashSet<&'static str>,
 }
 
 /// A side column of the view.
@@ -184,6 +195,8 @@ impl TuiView {
     pub fn new(inset: f32, hidden: layout::Hidden) -> Self {
         Self {
             active: true,
+            shown: true,
+            win_h: 900.,
             snap: sample(),
             live: None,
             hidden,
@@ -197,11 +210,20 @@ impl TuiView {
             sub_scroll: gpui::ScrollHandle::new(),
             centre_w: 600.,
             drawer: None,
+            folded: Default::default(),
         }
     }
 
     /// Opens the drawer of `side`, or closes it when it is the open one.
     pub fn toggle_drawer(&mut self, side: Side, cx: &mut Context<Self>) {
+        // not while a dialog is pending: the panel above the prompt must stay in reach
+        if self
+            .live
+            .as_ref()
+            .is_some_and(|l| !l.live.dialogs.is_empty())
+        {
+            return;
+        }
         self.drawer = if self.drawer == Some(side) {
             None
         } else {
@@ -289,6 +311,29 @@ impl TuiView {
         chrome::footer(&self.snap.hints, &chips)
     }
 
+    fn is_folded(&self, id: &str) -> bool {
+        self.folded.contains(id)
+    }
+
+    /// The click on a section's title: folds it, or opens it again.
+    fn fold_cb(&self, id: &'static str, cx: &Context<Self>) -> panels::OnClick {
+        Box::new(cx.listener(move |this, _, _, cx| {
+            if !this.folded.remove(id) {
+                this.folded.insert(id);
+            }
+            cx.notify();
+        }))
+    }
+
+    /// A folded section is just its header; an open one gets its usual flex.
+    fn fit(&self, p: Div, id: &str, open: impl FnOnce(Div) -> Div) -> Div {
+        if self.is_folded(id) {
+            p.flex_none().min_h(px(0.))
+        } else {
+            open(p)
+        }
+    }
+
     fn left(&self, tier: layout::Tiers, w: f32, cx: &mut Context<Self>) -> Div {
         let (s, h) = (&self.snap, &self.hidden);
         let split = h.left_is_split();
@@ -308,13 +353,19 @@ impl TuiView {
             Box::new(cx.listener(|this, _, window, cx| this.new_session(window, cx)))
         });
         let meta = |c: Hsla, v: String| div().text_color(c).child(v).into_any_element();
+        // the session that waits for approval is marked red in both lists
+        let attn = self.attention_colour();
         let pick = |p: Div, focused: bool| p.when(focused, |d| d.border_color(hsla(t::ACCENT)));
         let ws = pick(
             panel_scroll(
-                Head::new("p-workspace", "Workspace", "folder", Pad::LEFT),
+                Head::new("p-workspace", "Workspace", "folder", Pad::LEFT).fold(
+                    self.is_folded("p-workspace"),
+                    self.fold_cb("p-workspace", cx),
+                ),
                 Some(meta(text(), s.workspaces.len().to_string())),
                 panels::workspace_body(
                     &s.workspaces,
+                    attn,
                     live.map(|_| &ws_click as &dyn Fn(usize) -> panels::OnClick),
                     new_ws,
                 ),
@@ -325,7 +376,8 @@ impl TuiView {
         let running_n = s.running.iter().filter(|r| r.live).count();
         let run = pick(
             panel_scroll(
-                Head::new("p-running", "Running", "activity", Pad::LEFT),
+                Head::new("p-running", "Running", "activity", Pad::LEFT)
+                    .fold(self.is_folded("p-running"), self.fold_cb("p-running", cx)),
                 Some(
                     div()
                         .flex()
@@ -338,6 +390,9 @@ impl TuiView {
                 ),
                 panels::running_body(
                     &s.running,
+                    attn,
+                    self.live.as_ref().is_none_or(|l| l.cfg.tui.motion),
+                    crate::live::now_ms(),
                     live.map(|_| &run_click as &dyn Fn(usize) -> panels::OnClick),
                     new_run,
                 ),
@@ -356,21 +411,26 @@ impl TuiView {
             .overflow_hidden();
         // `#view1 .col.l>.panel{flex:0 1 auto;min-height:84px}`; Workspace and Running split the column
         // in halves when everything below them is hidden
-        col = col.child(if split {
-            ws.flex_1().min_h(px(0.))
-        } else {
-            ws.flex_initial().min_h(min)
-        });
-        col = col.child(if split {
-            run.flex_1().min_h(px(0.))
-        } else {
-            run.flex_initial().min_h(min)
-        });
+        col = col.child(self.fit(ws, "p-workspace", |p| {
+            if split {
+                p.flex_1().min_h(px(0.))
+            } else {
+                p.flex_initial().min_h(min)
+            }
+        }));
+        col = col.child(self.fit(run, "p-running", |p| {
+            if split {
+                p.flex_1().min_h(px(0.))
+            } else {
+                p.flex_initial().min_h(min)
+            }
+        }));
         if !h.session {
             // Session always shows all its rows (`:has(#h-sess){flex:0 0 auto;min-height:0}`)
             col = col.child(
                 panel(
-                    Head::new("p-session", "Session", "square-terminal", Pad::LEFT),
+                    Head::new("p-session", "Session", "square-terminal", Pad::LEFT)
+                        .fold(self.is_folded("p-session"), self.fold_cb("p-session", cx)),
                     Some(panels::session_meta(&s.session)),
                     panels::session_body(&s.session),
                 )
@@ -378,38 +438,33 @@ impl TuiView {
             );
         }
         if !h.tools {
-            col = col.child(
-                panel(
-                    Head::new("p-tools", "Tools & Skills", "wrench", Pad::LEFT).max_body(72.),
-                    Some(meta(text(), s.tools.count.clone())),
-                    panels::tools_body(&s.tools),
-                )
-                .flex_initial()
-                .min_h(min),
+            let p = panel(
+                Head::new("p-tools", "Tools & Skills", "wrench", Pad::LEFT)
+                    .max_body(72.)
+                    .fold(self.is_folded("p-tools"), self.fold_cb("p-tools", cx)),
+                Some(meta(text(), s.tools.count.clone())),
+                panels::tools_body(&s.tools),
             );
+            col = col.child(self.fit(p, "p-tools", |p| p.flex_initial().min_h(min)));
         }
         if !h.activity {
             // `.grow` panels: flex 1 1 0, grow 1.4 and 2.4
-            col = col.child(
-                panel(
-                    Head::new("p-activity", "Recent Activity", "activity", Pad::LEFT),
-                    None,
-                    panels::activity_body(&s.activity),
-                )
-                .flex_1()
-                .flex_grow(1.4)
-                .min_h(min),
+            let p = panel(
+                Head::new("p-activity", "Recent Activity", "activity", Pad::LEFT)
+                    .fold(self.is_folded("p-activity"), self.fold_cb("p-activity", cx)),
+                None,
+                panels::activity_body(&s.activity),
             );
-            col = col.child(
-                panel(
-                    Head::new("p-history", "User Prompt", "clock", Pad::LEFT),
-                    Some(meta(text(), s.prompts.len().to_string())),
-                    panels::prompts_body(&s.prompts),
-                )
-                .flex_1()
-                .flex_grow(2.4)
-                .min_h(px(tier.history_min)),
+            col = col.child(self.fit(p, "p-activity", |p| p.flex_1().flex_grow(1.4).min_h(min)));
+            let p = panel(
+                Head::new("p-history", "User Prompt", "clock", Pad::LEFT)
+                    .fold(self.is_folded("p-history"), self.fold_cb("p-history", cx)),
+                Some(meta(text(), s.prompts.len().to_string())),
+                panels::prompts_body(&s.prompts),
             );
+            col = col.child(self.fit(p, "p-history", |p| {
+                p.flex_1().flex_grow(2.4).min_h(px(tier.history_min))
+            }));
         }
         col
     }
@@ -505,6 +560,19 @@ impl TuiView {
 
     fn mode_bar(&self) -> Div {
         let s = &self.snap;
+        // the mode the engine runs (read back, not the snapshot's copy); no engine: the sample's
+        let engine_mode = self
+            .live
+            .as_ref()
+            .and_then(|l| l.live.engine.as_ref())
+            .map(|e| e.mode());
+        let (mode_col, mode_icon, mode_label) = match engine_mode {
+            Some(m) => {
+                let (c, i) = crate::theme::mode_look(m);
+                (hsla(c), i, t_mode_name(m))
+            }
+            None => (hsla(t::WARN), "chevrons-right", s.mode.clone()),
+        };
         div()
             .debug_selector(|| "modebar".to_string())
             .flex_none()
@@ -525,9 +593,9 @@ impl TuiView {
                     .items_center()
                     .gap(px(5.))
                     .min_w(px(0.))
-                    .text_color(hsla(t::WARN))
-                    .child(icon("chevrons-right", 14., hsla(t::WARN)))
-                    .child(div().flex_none().child(format!("{} mode on", s.mode)))
+                    .text_color(mode_col)
+                    .child(icon(mode_icon, 14., mode_col))
+                    .child(div().flex_none().child(format!("{mode_label} mode on")))
                     .child(
                         div()
                             .min_w(px(0.))
@@ -592,6 +660,7 @@ impl TuiView {
         } else {
             self.welcome().into_any_element()
         };
+        let dock = self.dialog_dock(cx);
         let prompt = if self.live.is_some() {
             self.live_prompt(cx)
         } else {
@@ -608,11 +677,26 @@ impl TuiView {
             .overflow_hidden()
             .bg(hsla(t::SURFACE))
             .border_1()
-            .border_color(hsla(t::BORDER))
+            // one focus frame around the whole chat panel (the border is always there, only its colour
+            // changes); a waiting approval's red wins over it
+            .border_color(self.attention_colour().unwrap_or_else(|| {
+                hsla(
+                    if self
+                        .live
+                        .as_ref()
+                        .is_some_and(|l| l.live.focus == crate::live::Focus::Chat)
+                    {
+                        t::ACCENT
+                    } else {
+                        t::BORDER
+                    },
+                )
+            }))
             .rounded(px(layout::PANEL_RADIUS))
             .child(self.chat_head())
             .child(strip)
             .child(body)
+            .children(dock)
             .child(prompt)
             .child(self.agent_switch(cx))
             .child(self.mode_bar())
@@ -666,12 +750,13 @@ impl TuiView {
             // the canvas fills the body; its own size picks the mode (A, B or T)
             let body = div().relative().size_full().child(topo::graph(s));
             let p = panel(
-                Head::new("p-topology", "Synthesis Topology", "network", pad),
+                Head::new("p-topology", "Synthesis Topology", "network", pad)
+                    .fold(self.is_folded("p-topology"), self.fold_cb("p-topology", cx)),
                 Some(online),
                 body,
             );
             // `.grow` (flex 1 1 0)
-            col = col.child(p.flex_1().min_h(px(tier.topo_min)));
+            col = col.child(self.fit(p, "p-topology", |p| p.flex_1().min_h(px(tier.topo_min))));
         }
         if hid.has_cards() {
             let card_min = if tight { 84. } else { 110. };
@@ -684,7 +769,8 @@ impl TuiView {
             if !hid.status {
                 row = row.child(
                     panel(
-                        Head::new("p-agent", "Agent Status", "sparkles", Pad::CARD),
+                        Head::new("p-agent", "Agent Status", "sparkles", Pad::CARD)
+                            .fold(self.is_folded("p-agent"), self.fold_cb("p-agent", cx)),
                         None,
                         div()
                             .line_height(px(layout::LINE_TIGHT))
@@ -692,13 +778,16 @@ impl TuiView {
                     )
                     .flex_1()
                     .min_w(px(0.))
-                    .min_h(px(0.)),
+                    .min_h(px(0.))
+                    // folded: just the header, not as tall as its neighbour
+                    .when(self.is_folded("p-agent"), |p| p.self_start()),
                 );
             }
             if !hid.tokens {
                 row = row.child(
                     panel(
-                        Head::new("p-context", "Context", "cpu", Pad::CARD),
+                        Head::new("p-context", "Context", "cpu", Pad::CARD)
+                            .fold(self.is_folded("p-context"), self.fold_cb("p-context", cx)),
                         None,
                         div()
                             .line_height(px(layout::LINE_TIGHT))
@@ -706,35 +795,33 @@ impl TuiView {
                     )
                     .flex_1()
                     .min_w(px(0.))
-                    .min_h(px(0.)),
+                    .min_h(px(0.))
+                    .when(self.is_folded("p-context"), |p| p.self_start()),
                 );
             }
             col = col.child(row);
         }
         if !hid.usage && !nousage {
-            let mut head = Head::new("p-usage", "Usage & Metrics", "chart-bar", Pad::NORMAL);
+            let mut head = Head::new("p-usage", "Usage & Metrics", "chart-bar", Pad::NORMAL)
+                .fold(self.is_folded("p-usage"), self.fold_cb("p-usage", cx));
             head.meta_h = 22.6;
-            col = col.child(
-                panel(
-                    head,
-                    Some(panels::usage_meta(
-                        &s.usage,
-                        self.live.as_ref().map(|_| -> panels::OnClick {
-                            Box::new(cx.listener(|this, _, _, cx| {
-                                if let Some(lu) = &mut this.live {
-                                    lu.live.usage_days =
-                                        if lu.live.usage_days == 7 { 30 } else { 7 };
-                                    lu.dirty = true;
-                                }
-                                cx.notify();
-                            }))
-                        }),
-                    )),
-                    panels::usage_body(&s.usage),
-                )
-                .flex_initial()
-                .min_h(px(tier.usage_min)),
+            let p = panel(
+                head,
+                Some(panels::usage_meta(
+                    &s.usage,
+                    self.live.as_ref().map(|_| -> panels::OnClick {
+                        Box::new(cx.listener(|this, _, _, cx| {
+                            if let Some(lu) = &mut this.live {
+                                lu.live.usage_days = if lu.live.usage_days == 7 { 30 } else { 7 };
+                                lu.dirty = true;
+                            }
+                            cx.notify();
+                        }))
+                    }),
+                )),
+                panels::usage_body(&s.usage),
             );
+            col = col.child(self.fit(p, "p-usage", |p| p.flex_initial().min_h(px(tier.usage_min))));
         }
         col
     }
@@ -742,11 +829,34 @@ impl TuiView {
 
 impl Render for TuiView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // a blinking red is repainted every frame while an approval waits
+        let motion = self.live.as_ref().is_some_and(|l| l.cfg.tui.motion);
+        // a spinner or a blink in the Running list is repainted every frame too
+        if self.attention() == Some(true)
+            || (motion
+                && self.snap.running.iter().any(|r| {
+                    matches!(
+                        r.state,
+                        activity::RunState::Running | activity::RunState::Approval
+                    )
+                }))
+        {
+            window.request_animation_frame();
+        }
         self.refresh(window);
         self.tabs_tick(cx);
         let vp = window.viewport_size();
         let w = f32::from(vp.width) - self.inset;
         let h = f32::from(vp.height) - self.top;
+        self.win_h = f32::from(vp.height);
+        // a dialog waits: no slide-over column covering or dimming it
+        if self
+            .live
+            .as_ref()
+            .is_some_and(|l| !l.live.dialogs.is_empty())
+        {
+            self.drawer = None;
+        }
         let tier = tiers(h);
         let c = cols(w);
         let has_right = self.hidden.has_right();
@@ -796,7 +906,6 @@ impl Render for TuiView {
                 )
                 .child(div().occlude().flex().p(px(PAD)).bg(hsla(t::BG)).child(col))
         });
-        let dialog = self.dialog_overlay(cx);
         div()
             .debug_selector(|| "view".to_string())
             // an image file dropped anywhere on the window is attached
@@ -820,7 +929,6 @@ impl Render for TuiView {
             .child(body)
             .child(self.footer())
             .children(drawer)
-            .children(dialog)
     }
 }
 
@@ -922,5 +1030,195 @@ mod tests {
             "the oldest row is not built"
         );
         assert!(list.bounds_for_item(1000).is_none());
+    }
+
+    /// Every kind of long output goes through the real row builder and ends clipped, with a "Show more".
+    #[gpui::test]
+    fn long_tool_output_is_clipped_to_five_lines(cx: &mut TestAppContext) {
+        use crate::live::Live;
+        use synthesis_view::convo::{Item, ToolState};
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let numbered = |n: usize| {
+            (1..=n)
+                .map(|i| format!("{i:>4}  line {i}\n"))
+                .collect::<String>()
+        };
+        let tool = |id: &str, name: &str, output: String| Item::Tool {
+            id: id.into(),
+            name: name.into(),
+            summary: "x".into(),
+            state: ToolState::Ok,
+            preview: String::new(),
+            output,
+            duration_ms: 1,
+            file: None,
+            diff: None,
+        };
+        let mut l = Live::new();
+        l.starting = false;
+        l.view.convo.items = vec![
+            tool("read", "Read", numbered(72)),
+            tool("bash", "Bash", numbered(40)),
+            // one very long line is the rows it fills on screen
+            tool("long", "Bash", "x".repeat(6000)),
+            tool("short", "Bash", numbered(3)),
+            // last, and short enough that its header stays on screen once opened
+            tool("grep", "Grep", numbered(30)),
+        ];
+        view.update(vcx, |t, _| t.set_live(l));
+        vcx.simulate_resize(size(px(1400.), px(1400.)));
+        vcx.run_until_parked();
+        for id in ["more-read", "more-grep", "more-bash", "more-long"] {
+            assert!(vcx.debug_bounds(id).is_some(), "{id}: no Show more");
+        }
+        assert!(vcx.debug_bounds("more-short").is_none());
+        // one click on a header opens the card whole, the next clips it again
+        let head = vcx.debug_bounds("tool-head-grep").expect("header drawn");
+        let at = gpui::point(head.left() + px(60.), head.center().y);
+        let open = |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext| {
+            view.read_with(vcx, |t, _| {
+                t.live.as_ref().unwrap().live.expanded.contains("grep")
+            })
+        };
+        vcx.simulate_click(at, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert!(open(&view, vcx), "first click expands");
+        // the list measures the taller card, then the header is looked up where it now is
+        vcx.simulate_resize(size(px(1400.), px(1401.)));
+        vcx.run_until_parked();
+        let head = vcx.debug_bounds("tool-head-grep").unwrap();
+        let at = gpui::point(head.left() + px(60.), head.center().y);
+        vcx.simulate_click(at, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert!(!open(&view, vcx), "second click collapses");
+    }
+
+    /// A click on a section's title folds it to its header, a second click opens it again.
+    #[gpui::test]
+    fn a_click_on_a_panel_title_folds_it(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (_view, vcx) = cx.add_window_view(|_, _| TuiView::new(0., Hidden::default()));
+        vcx.simulate_resize(size(px(1400.), px(900.)));
+        vcx.run_until_parked();
+        for id in ["p-session", "p-tools", "p-topology", "p-usage"] {
+            let head_id = match id {
+                "p-session" => "p-session-head",
+                "p-tools" => "p-tools-head",
+                "p-topology" => "p-topology-head",
+                _ => "p-usage-head",
+            };
+            let head = vcx.debug_bounds(head_id);
+            let body = match id {
+                "p-session" => "p-session-body",
+                "p-tools" => "p-tools-body",
+                "p-topology" => "p-topology-body",
+                _ => "p-usage-body",
+            };
+            let head = head.unwrap_or_else(|| panic!("{id}: no header"));
+            assert!(vcx.debug_bounds(body).is_some(), "{id}: body before");
+            let at = gpui::point(head.left() + px(40.), head.center().y);
+            vcx.simulate_click(at, gpui::Modifiers::default());
+            vcx.run_until_parked();
+            assert!(vcx.debug_bounds(body).is_none(), "{id}: still open");
+            // the column re-flows: look the header up again
+            let head = vcx.debug_bounds(head_id).unwrap();
+            let at = gpui::point(head.left() + px(40.), head.center().y);
+            vcx.simulate_click(at, gpui::Modifiers::default());
+            vcx.run_until_parked();
+            assert!(vcx.debug_bounds(body).is_some(), "{id}: not reopened");
+        }
+    }
+
+    /// A dialog is a panel in the chat column right above the prompt (not a window-wide modal), and while it
+    /// waits the view reports the red "needs you" signal.
+    #[gpui::test]
+    fn a_dialog_docks_above_the_prompt(cx: &mut TestAppContext) {
+        use crate::live::{Dialog, DialogKind, Live};
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let mut l = Live::new();
+        l.starting = false;
+        l.dialogs.push(Dialog {
+            kind: DialogKind::Plan {
+                id: "p".into(),
+                plan: "do it".into(),
+            },
+            options: vec![("yes".into(), "Yes".into()), ("no".into(), "No".into())],
+            sel: 1,
+            armed_until: 0,
+            engaged: false,
+        });
+        view.update(vcx, |t, _| t.set_live(l));
+        vcx.simulate_resize(size(px(1400.), px(900.)));
+        vcx.run_until_parked();
+        let (dlg, prompt, chat) = (
+            vcx.debug_bounds("dialog").expect("dialog drawn"),
+            vcx.debug_bounds("prompt").expect("prompt drawn"),
+            vcx.debug_bounds("p-chat").expect("chat drawn"),
+        );
+        assert!(dlg.bottom() <= prompt.top(), "above the prompt");
+        assert!(
+            dlg.left() >= chat.left() && dlg.right() <= chat.right(),
+            "inside the chat column"
+        );
+        assert!(
+            dlg.size.width < px(1400.) - px(400.),
+            "not a window-wide modal"
+        );
+        assert!(view.read_with(vcx, |t, _| t.attention()).is_some());
+    }
+
+    /// The keys of a pending approval: ignored under Settings, and Enter or a digit answers only after the
+    /// person engaged the dialog (arrow, Tab or a click); Esc rejects at once.
+    #[gpui::test]
+    fn dialog_keys_need_the_tui_view_and_an_engaged_dialog(cx: &mut TestAppContext) {
+        use crate::live::{Dialog, DialogKind, Live};
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let mut l = Live::new();
+        l.starting = false;
+        l.dialogs.push(Dialog {
+            kind: DialogKind::Plan {
+                id: "p".into(),
+                plan: "do it".into(),
+            },
+            options: vec![("yes".into(), "Yes".into()), ("no".into(), "No".into())],
+            sel: 0,
+            armed_until: 0,
+            engaged: false,
+        });
+        view.update(vcx, |t, _| t.set_live(l));
+        let pending = |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext| {
+            view.read_with(vcx, |t, _| t.live.as_ref().unwrap().live.dialogs.len())
+        };
+        let press =
+            |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext, k: &'static str| {
+                let ks = gpui::Keystroke::parse(k).unwrap();
+                view.update_in(vcx, |t, window, cx| t.on_key(&ks, window, cx))
+            };
+        // under Settings: not consumed, nothing answered
+        view.update(vcx, |t, _| t.shown = false);
+        assert!(!press(&view, vcx, "enter"));
+        assert!(!press(&view, vcx, "1"));
+        assert_eq!(pending(&view, vcx), 1);
+        // on screen but untouched: swallowed, nothing answered
+        view.update(vcx, |t, _| t.shown = true);
+        assert!(press(&view, vcx, "enter"));
+        assert!(press(&view, vcx, "1"));
+        assert_eq!(pending(&view, vcx), 1);
+        // no slide-over column while a dialog waits
+        view.update(vcx, |t, cx| t.toggle_drawer(Side::Left, cx));
+        assert!(view.read_with(vcx, |t, _| t.drawer.is_none()));
+        // engaged by an arrow key: Enter answers
+        press(&view, vcx, "down");
+        press(&view, vcx, "enter");
+        assert_eq!(pending(&view, vcx), 0);
     }
 }

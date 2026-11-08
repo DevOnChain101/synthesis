@@ -154,22 +154,17 @@ pub fn geometry(aw: f32, ah: f32) -> Geo {
         (2f32, 4f32, 10f32, 12f32, 46f32)
     };
     let w = aw - 2. * px_;
-    let third = (w - 2. * cg) / 3.1;
-    // A: minmax(184px, 1.1fr) in the middle, the sides share the rest; B: three equal columns
-    let (side, mid) = if !a {
-        let c = (w - 2. * cg) / 3.;
-        (c, c)
-    } else if 1.1 * third >= 184. {
-        (third, 1.1 * third)
-    } else {
-        ((w - 2. * cg - 184.) / 2., 184.)
-    };
+    // owner request: three equal columns and cards that fill their cell (all the same size), the core filling
+    // the middle cell; so the grid follows the panel's width and height instead of leaving it empty
+    let col = (w - 2. * cg) / 3.;
     let row_h = row_min.max((ah - 2. * py - 2. * rg) / 3.);
-    let col_x = [px_, px_ + side + cg, px_ + side + cg + mid + cg];
-    let col_w = [side, mid, side];
+    let col_x = [px_, px_ + col + cg, px_ + 2. * (col + cg)];
     let row_y = |i: usize| py + i as f32 * (row_h + rg);
-    // B: 5 + 5 padding, 2 border, 10.5px title line (1.55) + 2, one 10.5px line (1.35)
-    let card_h: f32 = if a { 86. } else { 44.45 };
+    let card_h = if a {
+        row_h.clamp(86., 150.)
+    } else {
+        row_h.clamp(44.45, 70.)
+    };
     let mut nodes = Vec::new();
     for (ri, row) in GRID.iter().enumerate() {
         for (ci, p) in row.iter().enumerate() {
@@ -181,19 +176,17 @@ pub fn geometry(aw: f32, ah: f32) -> Geo {
                 R {
                     x: col_x[ci],
                     y: row_y(ri) + (row_h - card_h) / 2.,
-                    w: col_w[ci],
+                    w: col,
                     h: card_h,
                 },
             ));
         }
     }
-    let (cw, ch) = if a {
-        (172f32.min(mid), 172f32.min(row_h))
-    } else {
-        (150f32.min(mid), row_h)
-    };
+    // the core is a square (owner rule): the shorter side of its cell, centred in it
+    let side = col.min(row_h).min(if a { 240. } else { 200. });
+    let (cw, ch) = (side, side);
     let core = R {
-        x: col_x[1] + (mid - cw) / 2.,
+        x: col_x[1] + (col - cw) / 2.,
         y: row_y(1) + (row_h - ch) / 2.,
         w: cw,
         h: ch,
@@ -268,7 +261,7 @@ pub fn geometry(aw: f32, ah: f32) -> Geo {
 
 fn geometry_t(aw: f32, ah: f32) -> Geo {
     let tmin = ah < 232.;
-    let (core_h, core_gap, row_h) = if tmin {
+    let (core_h, core_gap, row_h): (f32, f32, f32) = if tmin {
         (20., 8., 15.)
     } else {
         (24., 10., 19.)
@@ -283,6 +276,8 @@ fn geometry_t(aw: f32, ah: f32) -> Geo {
     let x = 22.;
     // the column's `gap:2px` comes on top of the core's bottom margin
     let mut y = core.b() + core_gap + 2.;
+    // owner request: the rows share the height left (up to 34 px each) instead of leaving the panel empty
+    let row_h = row_h.max(((ah - y - 2. - 7. * 2.) / 8.).min(34.));
     let mut nodes = Vec::new();
     for p in T_ORDER {
         nodes.push((
@@ -377,6 +372,16 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool) -> AnyElement {
     } else {
         11.
     };
+    // a grid card's title is cut with an ellipsis where the card ends (T rows have room)
+    let mut name = n.title.to_uppercase();
+    if mode != Mode::T {
+        let max = ((r.w - 14. - ic - 6.) / (title_size * 0.63))
+            .floor()
+            .max(2.) as usize;
+        if name.chars().count() > max {
+            name = name.chars().take(max - 1).collect::<String>() + "\u{2026}";
+        }
+    }
     let title = div()
         .flex()
         .items_center()
@@ -388,7 +393,7 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool) -> AnyElement {
             5.
         }))
         .child(icon(node_icon(n.pos), ic, col))
-        .child(tracked(&n.title.to_uppercase(), title_size, 0.03, col));
+        .child(tracked(&name, title_size, 0.03, col));
     let lines = n.lines.iter().take(nlines).map(|l| {
         div()
             .truncate()
@@ -434,9 +439,20 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool) -> AnyElement {
 fn core_card(c: &Core, r: R, mode: Mode, large: bool) -> AnyElement {
     let ink = hsla(t::TEXT_STRONG);
     let logo = |s: f32| {
-        gpui::img(brand::mark())
+        // a soft platinum halo behind the mark (two layers); it stays inside the card, which clips
+        let halo = |a: f32, blur: f32| gpui::BoxShadow {
+            color: with_alpha(hsla(t::ACCENT_GLOW), a),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(blur),
+            spread_radius: px(0.),
+            inset: false,
+        };
+        div()
             .size(px(s))
             .flex_none()
+            .rounded_full()
+            .shadow(vec![halo(0.28, s * 0.35), halo(0.14, s * 0.2)])
+            .child(gpui::img(brand::mark()).size(px(s)))
             .into_any_element()
     };
     let d = div()

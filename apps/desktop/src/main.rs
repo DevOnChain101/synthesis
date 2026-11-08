@@ -39,6 +39,20 @@ fn live_cfg(args: Args, env: Env) -> Result<LiveCfg, String> {
 }
 
 fn main() {
+    // `--view settings` without `--live` is the Settings panel's own shot (throwaway home, real cfg)
+    #[cfg(feature = "shot")]
+    if let Some(a) = (!std::env::args().any(|a| a == "--live"))
+        .then(|| {
+            synthesis_desktop::settings_view::shot::parse(&std::env::args().collect::<Vec<_>>())
+        })
+        .flatten()
+    {
+        if let Err(e) = synthesis_desktop::settings_view::shot::render(a) {
+            eprintln!("synthesis-desktop: shot: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     #[cfg(feature = "shot")]
     if let Some(a) = synthesis_desktop::tui_view::shot::parse(&std::env::args().collect::<Vec<_>>())
     {

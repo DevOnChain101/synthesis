@@ -115,8 +115,12 @@ pub struct LiveUi {
     tick_task: Option<Task<()>>,
     pump_task: Option<Task<()>>,
     engine_task: Option<Task<()>>,
+    /// `set_live` fed the conversation: no engine is launched.
+    fixture: bool,
     store_task: Option<Task<()>>,
     peer_task: Option<Task<()>>,
+    /// Blink state of the prompt's block caret.
+    pub blink: super::chat::Blink,
     _subs: Vec<Subscription>,
 }
 
@@ -155,7 +159,8 @@ impl TuiView {
         let mut live = Live::new();
         live.show_thinking = cfg.tui.show_thinking;
         live.verbose = cfg.tui.verbose;
-        live.expand_all = cfg.tui.diffs_expanded;
+        // not `cfg.tui.diffs_expanded`: with it every card started whole (the owner's settings.json has it on); the
+        // desktop view always starts clamped to 5 lines and Ctrl+O still expands them all
         let mut hidden = hidden;
         for (shown, (key, _)) in cfg.tui.panels.iter().zip(synthesis_settings::TUI_PANELS) {
             if !shown {
@@ -186,8 +191,10 @@ impl TuiView {
             tick_task: None,
             pump_task: None,
             engine_task: None,
+            fixture: false,
             store_task: None,
             peer_task: None,
+            blink: Default::default(),
             _subs: subs,
         });
         me
@@ -198,6 +205,8 @@ impl TuiView {
         if let Some(lu) = &mut self.live {
             lu.live = live;
             lu.dirty = true;
+            // the conversation is a fixture: `start` must not launch an engine over it (it has no model)
+            lu.fixture = true;
         }
     }
 
@@ -270,6 +279,9 @@ impl TuiView {
         cx: &mut Context<Self>,
     ) {
         let Some(lu) = &mut self.live else { return };
+        if lu.fixture {
+            return;
+        }
         // the old conversation stays on screen until the new engine replaces it: no blank frame
         lu.live.starting = true;
         lu.live.engine = None;
@@ -472,7 +484,21 @@ impl TuiView {
 
     pub(super) fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
-        let text = text_of(&lu.prompt, cx);
+        let mut text = text_of(&lu.prompt, cx);
+        // Enter on a typed prefix (`/mo`) completes the highlighted command first
+        if let Some(run) = lu
+            .comp
+            .as_ref()
+            .and_then(|c| enter_completes(&text, c, &lu.live.commands))
+        {
+            self.accept_completion(window, cx);
+            if !run {
+                return;
+            }
+            let Some(lu) = &mut self.live else { return };
+            text = text_of(&lu.prompt, cx);
+        }
+        let Some(lu) = &mut self.live else { return };
         lu.comp = None;
         lu.hist = None;
         lu.search = None;
@@ -545,7 +571,12 @@ impl TuiView {
     // ---- keys ----
 
     /// Handles a keystroke before the focused input sees it. True: consumed.
-    fn on_key(&mut self, ks: &Keystroke, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(super) fn on_key(
+        &mut self,
+        ks: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.active {
             return false;
         }
@@ -557,7 +588,11 @@ impl TuiView {
         let (ctrl, shift) = (ks.modifiers.control, ks.modifiers.shift);
         let cmd = ks.modifiers.platform || ks.modifiers.alt;
         let digit = key.len() == 1 && key.as_bytes()[0].is_ascii_digit() && key != "0";
-        // a dialog owns the keyboard
+        // a dialog owns the keyboard, but only while the TUI view is the one on screen: under Settings the keys
+        // are Settings', and must never answer the hidden approval
+        if !lu.live.dialogs.is_empty() && !self.shown {
+            return false;
+        }
         if !lu.live.dialogs.is_empty() {
             let mut out = None;
             if lu.live.typing_other() {
@@ -586,13 +621,15 @@ impl TuiView {
                 "up" => lu.live.move_sel(false),
                 "down" => lu.live.move_sel(true),
                 "tab" => lu.live.move_sel(!shift),
-                "enter" => {
+                // Enter and digits answer only a dialog the person has engaged (arrows, Tab, a click); before
+                // that they are swallowed (they were meant for the prompt) and the footer says how to choose
+                "enter" if lu.live.dialogs[0].answerable() => {
                     let sel = lu.live.dialogs[0].sel;
                     out = lu.live.pick(sel, now);
                 }
                 "escape" => out = lu.live.reject(),
                 "c" if ctrl => out = lu.live.reject(),
-                _ if digit && !ctrl && !cmd => {
+                _ if digit && !ctrl && !cmd && lu.live.dialogs[0].answerable() => {
                     out = lu.live.pick(usize::from(key.as_bytes()[0] - b'1'), now);
                 }
                 _ => {}
@@ -971,7 +1008,10 @@ impl TuiView {
                         "compaction requested: it runs before the next model request",
                         false,
                     ),
-                    Some(Ok(false)) => lu.live.note("compacting the conversation...", false),
+                    Some(Ok(false)) => {
+                        lu.live.compacting = true;
+                        lu.live.note("compacting the conversation...", false)
+                    }
                     Some(Err(e)) => lu.live.note(format!("/compact: {e}"), true),
                     None => {}
                 }
@@ -1203,7 +1243,8 @@ impl LiveUi {
         if !c.plan.is_empty() {
             rows.push(Row::Plan);
         }
-        if c.activity().is_some() && l.dialogs.is_empty() {
+        // every busy state has its line: thinking, a tool, a sub-agent, verifying, compacting, an approval
+        if super::activity::activity_of(l).is_some() {
             rows.push(Row::Activity);
         }
         rows
@@ -1503,6 +1544,30 @@ fn editor_at(text: &str, cursor: usize) -> LineEditor {
     ed
 }
 
+/// Enter with the popup open on a slash prefix: `Some(run)` completes the highlighted command (and
+/// runs it when `run`, i.e. it takes no argument). `None`: the text already names a command.
+fn enter_completes(
+    text: &str,
+    c: &Comp,
+    cmds: &[synthesis_tui_base::complete::Command],
+) -> Option<bool> {
+    if c.token.kind != complete::TokenKind::Command {
+        return None;
+    }
+    let typed = text.trim().trim_start_matches('/');
+    if cmds
+        .iter()
+        .any(|x| x.name == typed || x.aliases.iter().any(|a| a == typed))
+    {
+        return None;
+    }
+    let name = c.inserts.get(c.sel)?.insert.trim().trim_start_matches('/');
+    Some(
+        cmds.iter()
+            .any(|x| x.name == name && x.argument_hint.is_empty()),
+    )
+}
+
 /// The completion for the token under the cursor: `/` commands and `@` files.
 pub fn suggest(text: &str, cursor: usize, live: &Live, cwd: &Path) -> Option<Comp> {
     let ed = editor_at(text, cursor);
@@ -1531,6 +1596,18 @@ pub fn suggest(text: &str, cursor: usize, live: &Live, cwd: &Path) -> Option<Com
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enter_on_a_prefix_completes_and_runs_only_without_args() {
+        let mut l = Live::new();
+        l.commands = synthesis_tui::local_commands();
+        let c = suggest("/mo", 3, &l, Path::new("/")).unwrap();
+        assert!(enter_completes("/mo", &c, &l.commands).is_some());
+        let c = suggest("/model", 6, &l, Path::new("/")).unwrap();
+        assert_eq!(enter_completes("/model", &c, &l.commands), None);
+        let c = suggest("/hel", 4, &l, Path::new("/")).unwrap();
+        assert_eq!(enter_completes("/hel", &c, &l.commands), Some(true));
+    }
 
     #[test]
     fn a_slash_offers_commands_and_the_cursor_is_in_chars() {

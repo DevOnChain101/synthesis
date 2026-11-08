@@ -119,6 +119,8 @@ pub struct Head {
     pub meta_h: f32,
     /// `max-height` of the body (the Tools & Skills list: 72), padding included.
     pub max_body: Option<f32>,
+    /// Folding: whether the section is folded and what a click on its title does (no handler: not foldable).
+    pub fold: Option<(bool, OnClick)>,
 }
 
 impl Head {
@@ -130,7 +132,14 @@ impl Head {
             pad,
             meta_h: HEAD_LINE,
             max_body: None,
+            fold: None,
         }
+    }
+
+    /// The header's chevron and title fold the section; the meta on the right keeps its own clicks.
+    pub fn fold(mut self, folded: bool, on_toggle: OnClick) -> Self {
+        self.fold = Some((folded, on_toggle));
+        self
     }
 
     pub fn max_body(mut self, h: f32) -> Self {
@@ -168,6 +177,25 @@ pub fn panel_scroll(
     if let Some(m) = h.max_body {
         b = b.max_h(px(m - h.pad.body_bottom));
     }
+    let folded = h.fold.as_ref().is_some_and(|f| f.0);
+    let (id, title, icon_name, pad_title) = (h.id, h.title, h.icon, h.pad.title);
+    let mut label = div()
+        .id(format!("{id}-fold"))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(icon(icon_name, 14., hsla(t::ACCENT)))
+        .child(tracked(&title.to_uppercase(), pad_title, 0.16, strong()));
+    if let Some((f, on_toggle)) = h.fold {
+        label = label
+            .cursor_pointer()
+            .child(icon(
+                if f { "chevron-right" } else { "chevron-down" },
+                12.,
+                dim(),
+            ))
+            .on_click(move |e, w, cx| on_toggle(e, w, cx));
+    }
     let mut head = div()
         .debug_selector(|| format!("{}-head", h.id))
         .flex()
@@ -178,13 +206,7 @@ pub fn panel_scroll(
         .pt(px(pt))
         .pb(px(pb))
         .h(px(pt + pb + h.meta_h))
-        .child(icon(h.icon, 14., hsla(t::ACCENT)))
-        .child(tracked(
-            &h.title.to_uppercase(),
-            h.pad.title,
-            0.16,
-            strong(),
-        ));
+        .child(label);
     if let Some(m) = meta {
         head = head.child(
             div()
@@ -208,9 +230,11 @@ pub fn panel_scroll(
         .border_color(hsla(t::BORDER))
         .rounded(px(8.))
         .child(head)
-        .child(b.child(body))
-        // the bottom padding sits outside the scroll area, or the next row shows through it
-        .child(div().h(px(h.pad.body_bottom)).flex_none())
+        .when(!folded, |d| {
+            d.child(b.child(body))
+                // the bottom padding sits outside the scroll area, or the next row shows through it
+                .child(div().h(px(h.pad.body_bottom)).flex_none())
+        })
 }
 
 /// One `.tchip` of the top bar or `.footer .st` span: optional dot, label, value.
@@ -455,12 +479,49 @@ pub fn tabs(
         }))
 }
 
+/// The red of the "needs your approval" signal: with `motion` it blinks (on for 530 ms, dim for 530 ms),
+/// without it it is steady.
+pub fn attention_red(motion: bool, ms: i64) -> Hsla {
+    blink(hsla(t::ERROR), motion, ms)
+}
+
+/// `c` blinking: full for 530 ms, dim for 530 ms; steady without `motion`.
+pub fn blink(c: Hsla, motion: bool, ms: i64) -> Hsla {
+    let on = !motion || (ms.max(0) / 530) % 2 == 0;
+    Hsla {
+        a: if on { 1. } else { 0.25 },
+        ..c
+    }
+}
+
 pub fn black_a(a: f32) -> Hsla {
     Hsla { a, ..gpui::black() }
 }
 
 pub fn with_alpha(c: Hsla, a: f32) -> Hsla {
     Hsla { a, ..c }
+}
+
+/// Speed of the scrolling prompt (px/s) and the pause with the slot empty between two runs.
+const MARQUEE_PX_S: f32 = 40.;
+const MARQUEE_PAUSE_S: f32 = 1.;
+
+/// One run of the scroll: the text starts with its left edge at the slot's right edge and has left through the
+/// left edge after `slot_w + text_w` px.
+fn marquee_travel(text_w: f32, slot_w: f32) -> f32 {
+    text_w + slot_w
+}
+
+/// Seconds of one loop: the run, then the pause.
+fn marquee_period(travel: f32) -> f32 {
+    travel / MARQUEE_PX_S + MARQUEE_PAUSE_S
+}
+
+/// Offset from the slot's right edge at progress `d` (0..1 of one loop): runs left by `travel`, then stays
+/// out of sight for the pause (only ever one copy of the text).
+fn marquee_left(d: f32, travel: f32) -> f32 {
+    let moving = (travel / MARQUEE_PX_S) / marquee_period(travel);
+    -(d / moving).min(1.) * travel
 }
 
 /// `#chead`: icon, "Synthesis", the status word, the latest prompt (clipped), the context bar and `tail`
@@ -474,33 +535,39 @@ pub fn chat_head(
     width: f32,
     motion: bool,
 ) -> Div {
-    // the prompt's room: the header minus the 2px border, its padding, gaps and the fixed parts (monospace 7.5px)
-    let fixed = 24.
-        + 14.
-        + 67.5
-        + (status.chars().count() as f32 + 2.) * 7.5
-        + 7.5
-        + 54.
-        + tail.chars().count() as f32 * 7.5
-        + 6. * 10.;
-    let room = (width - 2. - fixed).max(0.);
     let label = format!("Latest user prompt: {prompt}");
     let tw = label.chars().count() as f32 * 7.5;
-    // `prompt-scroll`: a prompt that does not fit enters from the right and runs through (16s, repeating)
-    let prompt_el: gpui::AnyElement = if motion && tw > room {
+    // what else the row holds (icon, "Synthesis", status, rule, context bar, tail, gaps) leaves the slot
+    let fixed =
+        14. + 7.5 * (9 + status.chars().count() + 1 + tail.chars().count()) as f32 + 54. + 84.;
+    let slot_w = (width - fixed).max(0.);
+    // `prompt-scroll`: only once a prompt was sent. With motion one copy enters at the slot's right edge, runs
+    // left and leaves through its left edge, then the next run starts; without motion it is plain clipped text.
+    let prompt_el: gpui::AnyElement = if prompt.is_empty() {
+        div().into_any_element()
+    } else if motion {
+        let travel = marquee_travel(tw, slot_w);
         div()
             .absolute()
             .top_0()
-            .whitespace_nowrap()
-            .child(label)
-            .with_animation(
-                "chead-marquee",
-                gpui::Animation::new(std::time::Duration::from_secs(16)).repeat(),
-                move |el, d| el.left(px(room - d * (room + tw))),
+            .left(gpui::relative(1.))
+            .child(
+                div()
+                    .relative()
+                    .whitespace_nowrap()
+                    .child(label)
+                    .with_animation(
+                        "chead-marquee",
+                        gpui::Animation::new(std::time::Duration::from_secs_f32(marquee_period(
+                            travel,
+                        )))
+                        .repeat(),
+                        move |el, d| el.left(px(marquee_left(d, travel))),
+                    ),
             )
             .into_any_element()
     } else {
-        div().child(label).into_any_element()
+        div().truncate().child(label).into_any_element()
     };
     use gpui::AnimationExt as _;
     div()
@@ -550,4 +617,38 @@ pub fn chat_head(
                 ),
         )
         .child(div().flex_none().text_color(dim()).child(tail.to_string()))
+}
+
+#[cfg(test)]
+mod attention_tests {
+    use super::*;
+
+    #[test]
+    fn the_red_blinks_with_motion_and_stays_without() {
+        assert_eq!(attention_red(true, 0).a, 1.);
+        assert_eq!(attention_red(true, 530).a, 0.25);
+        assert_eq!(attention_red(true, 1060).a, 1.);
+        assert_eq!(attention_red(false, 530).a, 1.);
+    }
+}
+
+#[cfg(test)]
+mod marquee_tests {
+    use super::*;
+
+    #[test]
+    fn one_copy_runs_from_the_right_edge_out_through_the_left_then_pauses() {
+        let travel = marquee_travel(100., 300.);
+        assert_eq!(travel, 400.);
+        // starts at the right edge of the slot
+        assert_eq!(marquee_left(0., travel), 0.);
+        // gone (its end past the left edge) when the run is over, and stays gone for the pause
+        let moving = (travel / MARQUEE_PX_S) / marquee_period(travel);
+        assert_eq!(marquee_left(moving, travel), -travel);
+        assert_eq!(marquee_left(1., travel), -travel);
+        // halfway through the run: half the way
+        assert!((marquee_left(moving / 2., travel) + travel / 2.).abs() < 1e-3);
+        // period = (slot + text) / speed + pause
+        assert_eq!(marquee_period(travel), 400. / 40. + 1.);
+    }
 }

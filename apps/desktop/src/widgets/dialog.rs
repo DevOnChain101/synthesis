@@ -14,30 +14,38 @@ use crate::live::{DialogKind, Live, input_lines};
 use crate::theme::hsla;
 use crate::tui_view::panels::{OnClick, dim, strong, text};
 
-/// Lines of the tool input a permission dialog shows before the count of the rest.
-const INPUT_LINES: usize = 40;
+/// Lines of the tool input a permission dialog lists before the count of the rest (shown prominently).
+const INPUT_LINES: usize = 200;
 
-/// The front dialog over the whole window, or `None`. `click(i)` is the handler of option `i`;
-/// `scroll` keeps the option list's position (the pickers scroll to the selected row).
-pub fn overlay(
+/// A mouse press on the panel.
+pub type OnMouseDown =
+    Box<dyn Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static>;
+
+/// The front dialog as a panel for the chat column, docked above the prompt, or `None`. `click(i)` is the
+/// handler of option `i`; `scroll` keeps the option list's position (the pickers scroll to the selected row);
+/// `border` is the panel's border (the red of the approval signal, or the accent).
+pub fn dock(
     live: &Live,
     scroll: &ScrollHandle,
     click: &dyn Fn(usize) -> OnClick,
+    border: gpui::Hsla,
+    max_input_h: f32,
+    engage: OnMouseDown,
 ) -> Option<AnyElement> {
     let d = live.dialogs.first()?;
     let queued = live.dialogs.len() - 1;
     let mut card = div()
         .debug_selector(|| "dialog".to_string())
-        .w(px(680.))
-        .max_w_full()
-        .max_h_full()
+        .flex_none()
+        .mx(px(12.))
+        .mb(px(8.))
         .flex()
         .flex_col()
         .gap(px(10.))
-        .p(px(16.))
+        .p(px(12.))
         .bg(hsla(t::SURFACE))
         .border_1()
-        .border_color(hsla(t::ACCENT))
+        .border_color(border)
         .rounded(px(10.))
         .child(
             div()
@@ -58,11 +66,16 @@ pub fn overlay(
                         .child(format!("asked by agent {id}")),
                 );
             }
-            let lines = input_lines(&a.tool, &a.input, INPUT_LINES);
+            let all = input_lines(&a.tool, &a.input, usize::MAX);
+            let hidden = all.len().saturating_sub(INPUT_LINES);
+            let lines: Vec<String> = all.into_iter().take(INPUT_LINES).collect();
+            // what the box can show at once: when the input is longer (or wraps), say so
+            let scrolls = lines.len() as f32 * 19. > max_input_h
+                || lines.iter().any(|l| l.chars().count() > 100);
             card = card.child(
                 div()
                     .id("dialog-input")
-                    .max_h(px(280.))
+                    .max_h(px(max_input_h))
                     .overflow_y_scroll()
                     .p(px(8.))
                     .rounded(px(6.))
@@ -77,12 +90,23 @@ pub fn overlay(
                         })
                     })),
             );
+            if scrolls {
+                card = card.child(div().text_color(hsla(t::WARN)).child(
+                    "\u{2195} more than fits: scroll the box to read all of it before answering",
+                ));
+            }
+            if hidden > 0 {
+                card = card.child(div().text_color(hsla(t::ERROR)).child(format!(
+                    "\u{2026} {hidden} more line{} NOT shown here: this is not the whole input",
+                    if hidden == 1 { "" } else { "s" }
+                )));
+            }
         }
         DialogKind::Plan { plan, .. } => {
             card = card.child(
                 div()
                     .id("dialog-plan")
-                    .max_h(px(360.))
+                    .max_h(px(200.))
                     .overflow_y_scroll()
                     .text_color(text())
                     .child(TextView::markdown("plan", plan.clone())),
@@ -181,36 +205,36 @@ pub fn overlay(
             .debug_selector(|| "dialog-list".to_string())
             .flex()
             .flex_col()
-            .max_h(px(420.))
+            .max_h(px(180.))
             .overflow_y_scroll()
             .track_scroll(scroll)
             .children(list),
     );
     let verb = match (&d.kind, typing.is_some()) {
         (_, true) => "Enter keeps the text \u{b7} Esc drops it",
-        (DialogKind::Picker { .. }, _) => "Enter selects \u{b7} Esc closes",
+        (DialogKind::Picker { .. }, _) if d.answerable() => "Enter selects \u{b7} Esc closes",
+        // a dialog nobody has touched ignores Enter and digits: they were probably meant for the prompt
+        _ if !d.answerable() => {
+            "\u{2191}/\u{2193} or click to choose, then Enter \u{b7} Esc rejects"
+        }
         _ => "Enter confirms \u{b7} Esc rejects",
     };
     card = card.child(div().text_color(dim()).child(format!(
-        "\u{2191}\u{2193} or 1-9 choose \u{b7} {verb}{}",
+        "{}{verb}{}",
+        if d.answerable() {
+            "\u{2191}\u{2193} or 1-9 choose \u{b7} "
+        } else {
+            ""
+        },
         if queued > 0 {
             format!(" \u{b7} {queued} more waiting")
         } else {
             String::new()
         }
     )));
+    // any press on the panel engages it: from then on Enter and digits answer
     Some(
-        div()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .p(px(24.))
-            .bg(gpui::hsla(0., 0., 0., 0.55))
-            // a click on the backdrop answers nothing, and nothing underneath gets it
-            .occlude()
-            .child(card)
+        card.on_mouse_down(gpui::MouseButton::Left, engage)
             .into_any_element(),
     )
 }

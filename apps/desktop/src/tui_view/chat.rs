@@ -19,7 +19,7 @@ use super::{TuiView, layout};
 use crate::theme::hsla;
 
 /// Lines of a tool's output shown before "ctrl+o" (the TUI's default).
-pub const COLLAPSED_LINES: usize = 6;
+pub const COLLAPSED_LINES: usize = 5;
 
 /// Whether a row of the quiet chat is shown. `verbose` is the TUI's switch for the internal rows
 /// (`Item::Internal`: memory, peer and hook bookkeeping) and widens what approvals show.
@@ -38,6 +38,8 @@ pub fn visible(it: &Item, show_thinking: bool, verbose: bool, focus: bool) -> bo
         // a granted permission is bookkeeping; waiting and denied ones are what a person needs
         Item::Approval { state, .. } => verbose || *state != ApprovalState::Allowed,
         Item::Internal(_) => verbose,
+        // `!cmd`: the Bash card below it already names the command
+        Item::User(t) => !t.starts_with('!'),
         Item::Agent { .. } => true,
         Item::Assistant { text, streaming } => *streaming || !text.trim().is_empty(),
         _ => true,
@@ -46,6 +48,37 @@ pub fn visible(it: &Item, show_thinking: bool, verbose: bool, focus: bool) -> bo
 
 /// Left edge of what sits under a speaker's text: the row's 10px padding, the 34px avatar column, the 10px gap.
 const INDENT: f32 = 54.;
+
+/// Characters of monospace text (7.5 px each) that fit in `avail` px.
+fn cols_for(avail: f32) -> usize {
+    ((avail / 7.5) as usize).max(20)
+}
+
+/// `text` as the rows it takes on screen: split at line ends, each line cut every `cols` characters, so
+/// one very long line counts as the rows it fills.
+fn wrap_rows(text: &str, cols: usize) -> Vec<String> {
+    let mut out = vec![];
+    for l in text.replace("\r\n", "\n").replace('\r', "\n").lines() {
+        let cs: Vec<char> = l.chars().collect();
+        if cs.is_empty() {
+            out.push(String::new());
+        }
+        out.extend(cs.chunks(cols).map(|c| c.iter().collect::<String>()));
+    }
+    out
+}
+
+/// The toggle under a clipped tool output.
+fn toggle_label(cut: bool, more: usize) -> String {
+    if cut {
+        format!(
+            "Show more ({more} more line{})",
+            if more == 1 { "" } else { "s" }
+        )
+    } else {
+        "Show less".to_string()
+    }
+}
 
 /// `.msg`: a 32px avatar (radius 7) and, beside it, the tracked who label over the body (`cli.html`).
 fn msg(avatar: Div, who: &str, who_colour: gpui::Hsla, time: &str, body: Div) -> Div {
@@ -62,7 +95,7 @@ fn msg(avatar: Div, who: &str, who_colour: gpui::Hsla, time: &str, body: Div) ->
                 .border_1()
                 .border_color(hsla(t::BORDER))
                 .overflow_hidden()
-                .child(avatar),
+                .child(avatar.rounded(px(6.))),
         )
         .child(
             div()
@@ -131,7 +164,7 @@ impl TuiView {
             .ts
             .sub
             .as_deref()
-            .and_then(|id| self.sub_pane(id, sub_w));
+            .and_then(|id| self.sub_pane(id, sub_w, cx));
         if sub.is_none() {
             return self.conversation(cx);
         }
@@ -153,7 +186,7 @@ impl TuiView {
     }
 
     /// `.subagent-view`: the transcript of one sub-agent, its model and its state.
-    fn sub_pane(&self, id: &str, w: f32) -> Option<Div> {
+    fn sub_pane(&self, id: &str, w: f32, cx: &mut Context<Self>) -> Option<Div> {
         let lu = self.live.as_ref()?;
         let a = lu.live.view.panes.sub(id)?;
         let tz = lu.cfg.tz_min;
@@ -225,7 +258,7 @@ impl TuiView {
                         .flex()
                         .flex_col()
                         .gap(px(9.))
-                        .children(a.entries.iter().map(|e| {
+                        .children(a.entries.iter().enumerate().map(|(i, e)| {
                             let tool = e.kind == synthesis_view::agent::EntryKind::Tool;
                             let c = if e.failed {
                                 hsla(t::ERROR)
@@ -241,14 +274,23 @@ impl TuiView {
                                 .child(div().text_size(px(11.)).text_color(dim()).child(
                                     e.ts.map_or(String::new(), |ms| super::snapshot::clock(ms, tz)),
                                 ))
-                                .child(line_box(
-                                    &if tool {
-                                        format!("\u{25B8} {}", e.text)
-                                    } else {
-                                        e.text.clone()
-                                    },
-                                    c,
-                                ))
+                                .child(
+                                    self.clamped(
+                                        format!("sub-{id}-{i}"),
+                                        wrap_rows(
+                                            &if tool {
+                                                format!("\u{25B8} {}", e.text)
+                                            } else {
+                                                e.text.clone()
+                                            },
+                                            cols_for(w - 60.),
+                                        )
+                                        .into_iter()
+                                        .map(|l| (l, c, None))
+                                        .collect(),
+                                        cx,
+                                    ),
+                                )
                         }))
                         .when(a.entries.is_empty(), |d| {
                             d.child(div().text_color(dim()).child("nothing yet"))
@@ -281,8 +323,23 @@ impl TuiView {
             .min_h(px(0.))
             .pt(px(10.))
             .debug_selector(|| "chat-scroll".to_string())
+            // a click anywhere on the chat gives the prompt the keys (rows and buttons handle theirs first)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if let Some(lu) = &mut this.live {
+                        lu.live.focus = crate::live::Focus::Chat;
+                        lu.dirty = true;
+                        lu.prompt.update(cx, |s, cx| s.focus(window, cx));
+                        cx.notify();
+                    }
+                }),
+            )
             .child(rows);
-        if !lu.follow {
+        // only when the content is taller than the viewport and the person has scrolled up away from the end
+        let max = f32::from(lu.list.max_offset_for_scrollbar().y);
+        let at = -f32::from(lu.list.scroll_px_offset_for_scrollbar().y);
+        if jump_visible(max, at) {
             wrap = wrap.child(
                 div()
                     .id("jump-latest")
@@ -324,18 +381,84 @@ impl TuiView {
                 None => div().into_any_element(),
             },
             Some(super::driver::Row::Plan) => under(self.plan_card().into_any_element()),
-            Some(super::driver::Row::Activity) => div()
-                .ml(px(INDENT))
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .text_color(dim())
-                .child(super::panels::dot(hsla(t::ACCENT), true))
-                .children(c.activity())
-                .into_any_element(),
+            Some(super::driver::Row::Activity) => under(self.activity_line(lu)),
             None => div().into_any_element(),
         };
         div().pb(px(10.)).child(el).into_any_element()
+    }
+
+    /// The working line, as the Claude Code CLI draws it: a spinner glyph, a verb, then (elapsed, tokens, esc
+    /// hint). Elapsed is from the task's start event, tokens from the usage of its finished turns (left out
+    /// while there are none); a running tool or sub-agent names itself instead of the verb.
+    fn activity_line(&self, lu: &super::driver::LiveUi) -> AnyElement {
+        let c = &lu.live.view.convo;
+        let motion = lu.cfg.tui.motion;
+        let now = crate::live::now_ms();
+        let secs = c
+            .task_started_ms()
+            .map_or(0, |t0| ((now - t0) / 1000).max(0) as u64);
+        use super::activity::{Activity, activity_of};
+        let act = activity_of(&lu.live).unwrap_or(Activity::Thinking);
+        let waiting = act == Activity::Approval;
+        let what = match &act {
+            Activity::Approval => "waiting for your approval".to_string(),
+            Activity::Compacting => "Compacting the conversation\u{2026}".to_string(),
+            Activity::Agent(kind) => format!("{kind} agent working\u{2026}"),
+            Activity::Tool(tool) => format!("Running {tool}\u{2026}"),
+            Activity::Verifying => "Verifying the result\u{2026}".to_string(),
+            Activity::Starting => "Starting the session\u{2026}".to_string(),
+            Activity::Thinking => format!("{}\u{2026}", activity_verb(secs)),
+        };
+        let tone = if waiting {
+            hsla(t::WARN)
+        } else {
+            hsla(t::ACCENT)
+        };
+        let mut meta = vec![];
+        if c.task_started_ms().is_some() {
+            meta.push(elapsed_label(secs));
+        }
+        if c.task_tokens() > 0 {
+            meta.push(format!("\u{2193} {} tokens", token_label(c.task_tokens())));
+        }
+        meta.push(
+            if waiting {
+                "answer below"
+            } else {
+                "esc to interrupt"
+            }
+            .to_string(),
+        );
+        let line = div()
+            .id("activity-line")
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                div()
+                    .w(px(14.))
+                    .flex_none()
+                    .text_color(tone)
+                    .child(if motion { spinner_glyph(now) } else { "*" }),
+            )
+            .child(div().text_color(tone).child(what))
+            .child(
+                div()
+                    .text_color(dim())
+                    .child(format!("({})", meta.join(" \u{b7} "))),
+            );
+        if motion {
+            // frames while busy: the glyph and the clock are read again on every one
+            use gpui::AnimationExt as _;
+            line.with_animation(
+                "activity-frames",
+                gpui::Animation::new(std::time::Duration::from_millis(800)).repeat(),
+                |el, _| el,
+            )
+            .into_any_element()
+        } else {
+            line.into_any_element()
+        }
     }
 
     fn plan_card(&self) -> Div {
@@ -406,6 +529,7 @@ impl TuiView {
                 div().size_full().bg(gpui::black()).child(
                     gpui::img(crate::brand::mark())
                         .size_full()
+                        .rounded(px(6.))
                         .object_fit(gpui::ObjectFit::Cover),
                 ),
                 "SYNTHESIS",
@@ -440,7 +564,16 @@ impl TuiView {
                                 if ok { "\u{2713}" } else { "!" }
                             )),
                     )
-                    .children(summary.lines().map(|s| line_box(s, dim())))
+                    .child(
+                        self.clamped(
+                            format!("row-{idx}"),
+                            wrap_rows(summary, cols_for(self.centre_w - INDENT - 40.))
+                                .into_iter()
+                                .map(|l| (l, dim(), None))
+                                .collect(),
+                            cx,
+                        ),
+                    )
                     .into_any_element()
             }
             Item::Approval { prompt, state, .. } => {
@@ -462,15 +595,17 @@ impl TuiView {
                     )
                     .into_any_element()
             }
-            Item::Notice { warning, text: s } => div()
-                .flex()
-                .flex_col()
-                .text_color(if *warning { hsla(t::WARN) } else { dim() })
-                .children(
-                    s.lines()
-                        .map(|l| line_box(l, if *warning { hsla(t::WARN) } else { dim() })),
+            Item::Notice { warning, text: s } => {
+                let c = if *warning { hsla(t::WARN) } else { dim() };
+                let rows = wrap_rows(s, cols_for(self.centre_w - INDENT - 40.));
+                self.clamped(
+                    format!("row-{idx}"),
+                    rows.into_iter().map(|l| (l, c, None)).collect(),
+                    cx,
                 )
-                .into_any_element(),
+                .text_color(c)
+                .into_any_element()
+            }
             Item::Agent { kind, running, .. } => div()
                 .flex()
                 .items_center()
@@ -486,7 +621,16 @@ impl TuiView {
                     }
                 ))
                 .into_any_element(),
-            Item::Internal(s) => div().text_color(dim()).child(s.clone()).into_any_element(),
+            Item::Internal(s) => self
+                .clamped(
+                    format!("row-{idx}"),
+                    wrap_rows(s, cols_for(self.centre_w - INDENT - 40.))
+                        .into_iter()
+                        .map(|l| (l, dim(), None))
+                        .collect(),
+                    cx,
+                )
+                .into_any_element(),
             Item::TaskEnd {
                 ok,
                 text: s,
@@ -504,16 +648,86 @@ impl TuiView {
                     .flex_col()
                     .gap(px(2.))
                     .child(div().text_color(c).child(format!("{mark} {s}")))
-                    .children(checks.lines().map(|l| line_box(l, dim())))
+                    .child(
+                        self.clamped(
+                            format!("row-{idx}"),
+                            wrap_rows(checks, cols_for(self.centre_w - INDENT - 40.))
+                                .into_iter()
+                                .map(|l| (l, dim(), None))
+                                .collect(),
+                            cx,
+                        ),
+                    )
                     .into_any_element()
             }
         }
     }
 
+    /// Output rows clipped to [`COLLAPSED_LINES`] with a "Show more" / "Show less" toggle (state kept in
+    /// `expanded` under `key`). Every block of command or tool output in the chat goes through here.
+    fn clamped(
+        &self,
+        key: String,
+        rows: Vec<(String, gpui::Hsla, Option<gpui::Hsla>)>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let open = self
+            .live
+            .as_ref()
+            .is_some_and(|lu| lu.live.expand_all || lu.live.expanded.contains(&key));
+        let total = rows.len();
+        let cut = !open && total > COLLAPSED_LINES;
+        let more = total - COLLAPSED_LINES.min(total);
+        div()
+            .flex()
+            .flex_col()
+            .children(
+                rows.into_iter()
+                    .take(if cut { COLLAPSED_LINES } else { usize::MAX })
+                    .map(|(s, fg, bg)| {
+                        let d = line_box(&s, fg);
+                        match bg {
+                            Some(b) => d.bg(b),
+                            None => d,
+                        }
+                    }),
+            )
+            .when(cut || (open && total > COLLAPSED_LINES), |d| {
+                d.child(
+                    div()
+                        .id(gpui::SharedString::from(format!("more-{key}")))
+                        .debug_selector({
+                            let k = format!("more-{key}");
+                            move || k.clone()
+                        })
+                        .cursor_pointer()
+                        .text_color(hsla(t::ACCENT))
+                        .child(toggle_label(cut, more))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(lu) = &mut this.live {
+                                let e = &mut lu.live.expanded;
+                                if !e.remove(&key) {
+                                    e.insert(key.clone());
+                                }
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
+    }
+
+    /// Opens a clipped card whole, or clips it again (the state of its "Show more" too).
+    pub(super) fn toggle_card(&mut self, key: &str, cx: &mut Context<Self>) {
+        if let Some(lu) = &mut self.live {
+            let e = &mut lu.live.expanded;
+            if !e.remove(key) {
+                e.insert(key.to_string());
+            }
+        }
+        cx.notify();
+    }
+
     fn tool_card(&self, idx: usize, it: &Item, cx: &mut Context<Self>) -> AnyElement {
-        let Some(lu) = &self.live else {
-            return div().into_any_element();
-        };
         let Item::Tool {
             id,
             name,
@@ -534,7 +748,6 @@ impl TuiView {
             ToolState::Failed => ("\u{2717}", hsla(t::ERROR)),
             ToolState::NotRun => ("\u{2013}", dim()),
         };
-        let open = lu.live.expand_all || lu.live.expanded.contains(id);
         let body = if output.is_empty() { preview } else { output };
         let diff_lines = diff.as_ref().map(diff_rows).unwrap_or_default();
         let shown_diff = !diff_lines.is_empty();
@@ -562,6 +775,22 @@ impl TuiView {
                 _ => vec![],
             };
         let tid0 = id.clone();
+        let cols = cols_for(self.centre_w - INDENT - 40.);
+        let total_rows = if shown_diff {
+            diff_lines.len()
+        } else {
+            wrap_rows(body, cols).len()
+        };
+        let collapsible = total_rows > COLLAPSED_LINES;
+        let open = self
+            .live
+            .as_ref()
+            .is_some_and(|lu| lu.live.expand_all || lu.live.expanded.contains(id));
+        let chev = if open {
+            "chevron-down"
+        } else {
+            "chevron-right"
+        };
         let mut card = div()
             .flex()
             .flex_col()
@@ -573,6 +802,10 @@ impl TuiView {
             .child(
                 div()
                     .id(("tool-head", idx))
+                    .debug_selector({
+                        let k = format!("tool-head-{id}");
+                        move || k.clone()
+                    })
                     .flex()
                     .items_center()
                     .gap(px(10.))
@@ -580,15 +813,9 @@ impl TuiView {
                     .py(px(7.))
                     .cursor_pointer()
                     .hover(|d| d.bg(super::with_alpha_white(0.03)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(lu) = &mut this.live {
-                            let e = &mut lu.live.expanded;
-                            if !e.remove(&tid0) {
-                                e.insert(tid0.clone());
-                            }
-                        }
-                        cx.notify();
-                    }))
+                    // one click on the header opens a clipped card, the next clips it again (the chevron is part
+                    // of the header; the body, where text is selected, is not)
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_card(&tid0, cx)))
                     .child(icon(ic, 16., kind_col))
                     .child(
                         div()
@@ -609,63 +836,35 @@ impl TuiView {
                         meta.into_iter()
                             .map(|(m, c)| div().flex_none().text_color(c).child(m)),
                     )
-                    .child(div().flex_none().text_color(c).child(mark)),
+                    .child(div().flex_none().text_color(c).child(mark))
+                    .when(collapsible, |d| {
+                        let tid1 = id.clone();
+                        d.child(
+                            div()
+                                .id(("tool-chev", idx))
+                                .flex_none()
+                                .cursor_pointer()
+                                .text_color(dim())
+                                .child(icon(chev, 14., dim()))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_card(&tid1, cx);
+                                })),
+                        )
+                    }),
             );
         let mut lines: Vec<(String, gpui::Hsla, Option<gpui::Hsla>)> = vec![];
         if shown_diff {
             lines.extend(diff_lines);
         } else {
-            lines.extend(body.lines().map(|l| (l.to_string(), text(), None)));
+            lines.extend(wrap_rows(body, cols).into_iter().map(|l| (l, text(), None)));
         }
         if !lines.is_empty() {
-            let total = lines.len();
-            let cut = !open && total > COLLAPSED_LINES;
-            let more = total - COLLAPSED_LINES.min(total);
-            let tid = id.clone();
-            card = card.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .px(px(10.))
-                    .py(px(4.))
-                    .children(
-                        lines
-                            .into_iter()
-                            .take(if cut { COLLAPSED_LINES } else { usize::MAX })
-                            .map(|(s, fg, bg)| {
-                                let d = line_box(&s, fg);
-                                match bg {
-                                    Some(b) => d.bg(b),
-                                    None => d,
-                                }
-                            }),
-                    )
-                    .when(cut || (open && total > COLLAPSED_LINES), |d| {
-                        d.child(
-                            div()
-                                .id(("tool-more", idx))
-                                .cursor_pointer()
-                                .text_color(hsla(t::ACCENT))
-                                .child(if cut {
-                                    format!(
-                                        "\u{2026} {more} more line{} (click or Ctrl+O)",
-                                        if more == 1 { "" } else { "s" }
-                                    )
-                                } else {
-                                    "show less".to_string()
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(lu) = &mut this.live {
-                                        let e = &mut lu.live.expanded;
-                                        if !e.remove(&tid) {
-                                            e.insert(tid.clone());
-                                        }
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                    }),
-            );
+            card = card.child(div().px(px(10.)).py(px(4.)).child(self.clamped(
+                id.clone(),
+                lines,
+                cx,
+            )));
         }
         card.into_any_element()
     }
@@ -681,9 +880,9 @@ impl TuiView {
             .items_center()
             .justify_center()
             .gap(px(6.))
-            .child(gpui::img(crate::brand::mark()).size(px(72.)))
+            .child(gpui::img(crate::brand::mark()).size(px(128.)))
             .child(super::tracked("SYNTHESIS", 16., 0.32, strong()))
-            .child(div().text_color(dim()).child("autonomous coding agent"))
+            .child(div().text_color(dim()).child("Autonomous coding agent"))
             .child(
                 div()
                     .mt(px(12.))
@@ -788,9 +987,13 @@ impl TuiView {
         let busy = l.busy || l.starting;
         col.child(input_box(
             div()
+                .relative()
                 .flex_1()
                 .min_w(px(0.))
-                .child(Textarea::new(&lu.prompt).appearance(false).bordered(false)),
+                .child(NativeCaret(false))
+                .child(Textarea::new(&lu.prompt).appearance(false).bordered(false))
+                .child(NativeCaret(true))
+                .child(block_cursor(lu.prompt.clone(), lu.blink.clone())),
             l.focus == crate::live::Focus::Chat,
             busy,
             Some(Box::new(cx.listener(|this, _, window, cx| {
@@ -798,6 +1001,147 @@ impl TuiView {
             }))),
         ))
     }
+}
+
+/// The "Jump to latest" pill shows only when there is something to scroll (`max` px of scroll range) and the view
+/// is more than a few px above the end (`at` px from the top); new output below the fold keeps it shown.
+fn jump_visible(max: f32, at: f32) -> bool {
+    const TOLERANCE: f32 = 4.;
+    max > TOLERANCE && at < max - TOLERANCE
+}
+
+const SPINNER: [&str; 10] = [
+    "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
+    "\u{2807}", "\u{280f}",
+];
+const VERBS: [&str; 8] = [
+    "Thinking",
+    "Reasoning",
+    "Pondering",
+    "Analyzing",
+    "Synthesizing",
+    "Working",
+    "Considering",
+    "Planning",
+];
+
+/// Braille spinner frame at `ms` (one frame per 80 ms).
+pub(super) fn spinner_glyph(ms: i64) -> &'static str {
+    SPINNER[(ms.max(0) / 80) as usize % SPINNER.len()]
+}
+
+/// The verb of the working line: a new one every 4 s of the task.
+fn activity_verb(elapsed_s: u64) -> &'static str {
+    VERBS[(elapsed_s / 4) as usize % VERBS.len()]
+}
+
+/// `45s`, `2m 05s`.
+fn elapsed_label(s: u64) -> String {
+    if s < 60 {
+        format!("{s}s")
+    } else {
+        format!("{}m {:02}s", s / 60, s % 60)
+    }
+}
+
+/// `850`, `1.2k`, `12k`, `1.5M`.
+fn token_label(n: u64) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=9_999 => format!("{:.1}k", n as f64 / 1e3),
+        10_000..=999_999 => format!("{}k", n / 1000),
+        _ => format!("{:.1}M", n as f64 / 1e6),
+    }
+}
+
+/// Blink state of the prompt's block caret: where the caret was when it last moved (or the text last
+/// changed) and whether a repaint timer is already waiting.
+#[derive(Clone, Default)]
+pub struct Blink {
+    seen: std::rc::Rc<std::cell::Cell<Option<(usize, usize, std::time::Instant)>>>,
+    armed: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+const BLINK_MS: u128 = 530;
+
+/// Whether the caret shows `elapsed_ms` after it last moved: on for 530 ms, off for 530 ms, ...
+fn blink_on(elapsed_ms: u128) -> bool {
+    (elapsed_ms / BLINK_MS).is_multiple_of(2)
+}
+
+/// Sets the theme's caret colour when the tree is built: the elements after it (in tree order) get that
+/// colour, since the input reads it when its own `render` runs. Used as a pair around the prompt so only the
+/// prompt loses the library's thin bar; every other input keeps it.
+#[derive(IntoElement)]
+struct NativeCaret(bool);
+
+impl RenderOnce for NativeCaret {
+    fn render(self, _: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
+        cx.global_mut::<gpui_component::Theme>().caret = if self.0 {
+            hsla(t::PEARL)
+        } else {
+            // not fully transparent: the input's own view re-resolves an alpha-0 caret to its text colour
+            // whenever it re-renders (blink, focus), which brought the thin bar back
+            gpui::hsla(0., 0., 0., 0.001)
+        };
+        div().size_0()
+    }
+}
+
+/// The prompt's caret: a block as high as the text's line box, one cell wide, blinking while the
+/// prompt has the keys. The input's own thin bar is hidden by [`NativeCaret`].
+fn block_cursor(
+    prompt: gpui::Entity<gpui_component::input::TextareaState>,
+    blink: Blink,
+) -> impl IntoElement {
+    gpui::canvas(
+        |_, _, _| (),
+        move |_, (), window, cx| {
+            let st = prompt.read(cx);
+            let Some((cb, _)) = st.cursor_layout() else {
+                return;
+            };
+            if !gpui::Focusable::focus_handle(st, cx).is_focused(window) {
+                blink.seen.set(None);
+                return;
+            }
+            let (cur, len) = (st.cursor(), st.value().len());
+            let now = std::time::Instant::now();
+            let since = match blink.seen.get() {
+                Some((c, l, t0)) if (c, l) == (cur, len) => t0,
+                _ => {
+                    blink.seen.set(Some((cur, len, now)));
+                    now
+                }
+            };
+            let ms = now.duration_since(since).as_millis();
+            if !blink.armed.replace(true) {
+                let wait = (BLINK_MS - ms % BLINK_MS) as u64;
+                let armed = blink.armed.clone();
+                window
+                    .spawn(cx, async move |cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(wait))
+                            .await;
+                        armed.set(false);
+                        cx.update(|window, _| window.refresh()).ok();
+                    })
+                    .detach();
+            }
+            if !blink_on(ms) {
+                return;
+            }
+            // a terminal block: one cell wide and as high as the text's whole line box
+            let ts = window.text_style();
+            let w = ts.font_size.to_pixels(window.rem_size()) * 0.6;
+            window.paint_quad(gpui::fill(
+                gpui::Bounds::new(cb.origin, gpui::size(w, cb.size.height)),
+                hsla(t::PEARL),
+            ));
+        },
+    )
+    .absolute()
+    .size_full()
 }
 
 /// `.inputbar`: 46px box (border + 44px form), margin 0 12px 12px, the `>` prompt mark, `content`, and the
@@ -819,7 +1163,12 @@ pub fn input_box(
         .gap(px(10.))
         .px(px(12.))
         .border_1()
-        .border_color(hsla(if focused { t::ACCENT } else { t::BORDER }))
+        // the focus frame is the chat panel's own border now; the box only keeps a quiet tint while focused
+        .border_color(if focused {
+            with_alpha(hsla(t::ACCENT), 0.35)
+        } else {
+            hsla(t::BORDER)
+        })
         .rounded(px(layout::PANEL_RADIUS))
         .bg(hsla(t::SURFACE))
         .child(
@@ -892,6 +1241,61 @@ pub fn diff_rows(d: &Value) -> Vec<(String, gpui::Hsla, Option<gpui::Hsla>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_caret_blinks_530_ms_on_530_ms_off() {
+        assert!(blink_on(0) && blink_on(529));
+        assert!(!blink_on(530) && !blink_on(1059));
+        assert!(blink_on(1060));
+    }
+
+    #[test]
+    fn wrap_rows_counts_what_a_line_takes_on_screen() {
+        assert_eq!(wrap_rows("a\r\nb\n\nc", 10), ["a", "b", "", "c"]);
+        // a one-line file as long as ten rows is ten rows, not one
+        assert_eq!(wrap_rows(&"x".repeat(100), 10).len(), 10);
+        assert_eq!(wrap_rows("a\rb", 10), ["a", "b"]);
+        assert!(wrap_rows("", 10).is_empty());
+    }
+
+    #[test]
+    fn a_users_bang_line_is_not_repeated_above_its_card() {
+        assert!(!visible(&Item::User("!ls -la".into()), false, false, false));
+        assert!(visible(&Item::User("ls -la".into()), false, false, false));
+    }
+
+    #[test]
+    fn the_toggle_names_what_it_does() {
+        assert_eq!(toggle_label(true, 1), "Show more (1 more line)");
+        assert_eq!(toggle_label(true, 7), "Show more (7 more lines)");
+        assert_eq!(toggle_label(false, 7), "Show less");
+    }
+
+    #[test]
+    fn the_jump_pill_shows_only_when_scrolled_up_from_a_longer_content() {
+        // everything fits: nothing to scroll, no pill
+        assert!(!jump_visible(0., 0.));
+        // at the bottom (or within a few px of it)
+        assert!(!jump_visible(500., 500.));
+        assert!(!jump_visible(500., 497.));
+        // scrolled up
+        assert!(jump_visible(500., 200.));
+        // new output arrived below the fold while scrolled up: the range grew, still scrolled up
+        assert!(jump_visible(900., 200.));
+    }
+
+    #[test]
+    fn the_working_line_reads_real_numbers() {
+        assert_eq!(elapsed_label(45), "45s");
+        assert_eq!(elapsed_label(125), "2m 05s");
+        assert_eq!(token_label(850), "850");
+        assert_eq!(token_label(1234), "1.2k");
+        assert_eq!(token_label(12_345), "12k");
+        assert_eq!(activity_verb(0), "Thinking");
+        assert_eq!(activity_verb(4), "Reasoning");
+        assert_ne!(spinner_glyph(0), spinner_glyph(80));
+        assert_eq!(spinner_glyph(0), spinner_glyph(800));
+    }
 
     #[test]
     fn the_quiet_chat_hides_what_a_person_does_not_need() {

@@ -79,6 +79,8 @@ pub enum PickerKind {
     Remember,
     /// No model configured: the TUI's setup card (check again, Settings, quit).
     Setup,
+    /// Shift+Tab reached bypassPermissions: the confirmation (Cancel is the first option and the default).
+    Bypass,
 }
 
 /// What the window does after a command or a picker (it restarts the engine, talks to it).
@@ -129,6 +131,9 @@ pub struct Dialog {
     pub sel: usize,
     /// Enter and digits do nothing before this (ms).
     pub armed_until: i64,
+    /// The person has deliberately engaged the dialog (arrow keys, Tab, a click on it). Until then digits and
+    /// Enter do not answer a dialog that needs the person: they were probably meant for the prompt.
+    pub engaged: bool,
 }
 
 impl Dialog {
@@ -147,6 +152,20 @@ impl Dialog {
             return None;
         };
         Some(self.sel + headers.iter().filter(|(i, _)| *i <= self.sel).count())
+    }
+
+    /// The person's permission or answer is awaited (the red "needs you" signal); a picker they opened is not,
+    /// the bypass confirmation is.
+    pub fn needs_person(&self) -> bool {
+        match &self.kind {
+            DialogKind::Picker { kind, .. } => *kind == PickerKind::Bypass,
+            _ => true,
+        }
+    }
+
+    /// Digits and Enter may answer this dialog: it is a picker the person opened, or they engaged it.
+    pub fn answerable(&self) -> bool {
+        self.engaged || !self.needs_person()
     }
 
     /// The headline.
@@ -247,6 +266,8 @@ pub struct Live {
     pub starting: bool,
     /// A task is running (from `send` to the engine's `TaskDone`).
     pub busy: bool,
+    /// `/compact` between tasks is running (until `UiMsg::Compacted`).
+    pub compacting: bool,
     pub dialogs: Vec<Dialog>,
     pub queue: VecDeque<String>,
     pub show_thinking: bool,
@@ -291,6 +312,7 @@ impl Live {
             engine: None,
             starting: true,
             busy: false,
+            compacting: false,
             dialogs: vec![],
             queue: VecDeque::new(),
             show_thinking: false,
@@ -418,10 +440,13 @@ impl Live {
                     self.arm(now);
                 }
             }
-            UiMsg::Compacted(r) => match r {
-                Ok(()) => self.note("conversation compacted", false),
-                Err(e) => self.note(format!("/compact: {e}"), true),
-            },
+            UiMsg::Compacted(r) => {
+                self.compacting = false;
+                match r {
+                    Ok(()) => self.note("conversation compacted", false),
+                    Err(e) => self.note(format!("/compact: {e}"), true),
+                }
+            }
             UiMsg::TaskDone(r) => {
                 self.busy = false;
                 self.dialogs.clear();
@@ -465,6 +490,7 @@ impl Live {
                 kind: DialogKind::Approval(a),
                 sel: 0,
                 armed_until: 0,
+                engaged: false,
             },
             now,
         );
@@ -484,6 +510,7 @@ impl Live {
                 },
                 sel: 0,
                 armed_until: 0,
+                engaged: false,
             },
             NeedsUser::AskUserQuestion { questions } => {
                 let n = questions.len();
@@ -500,6 +527,7 @@ impl Live {
                     },
                     sel: 0,
                     armed_until: 0,
+                    engaged: false,
                 };
                 d.options = question_options(&d);
                 d
@@ -511,6 +539,7 @@ impl Live {
     /// Up/Down in the front dialog.
     pub fn move_sel(&mut self, down: bool) {
         if let Some(d) = self.dialogs.first_mut() {
+            d.engaged = true;
             let n = d.options.len().max(1);
             d.sel = if down {
                 (d.sel + 1) % n
@@ -610,7 +639,17 @@ impl Live {
             return None;
         }
         let d = self.dialogs.remove(0);
+        // the next dialog waits out its arming delay whichever branch below answers this one
+        self.arm(now);
         if let DialogKind::Picker { kind, .. } = d.kind {
+            if kind == PickerKind::Bypass {
+                if let (Some(e), "enable") = (&self.engine, key)
+                    && let Err(why) = e.enable_bypass()
+                {
+                    self.note(format!("bypass permissions not enabled: {why}"), true);
+                }
+                return None;
+            }
             if kind == PickerKind::Remember {
                 if let (Some(e), Some(text), "user" | "project") =
                     (&self.engine, self.pending_note.take(), key)
@@ -630,7 +669,7 @@ impl Live {
                 }
                 PickerKind::Model => Some(Action::Model(key.to_string())),
                 PickerKind::Resume => Some(Action::Resume(key.to_string())),
-                PickerKind::Remember => None,
+                PickerKind::Remember | PickerKind::Bypass => None,
                 PickerKind::Setup => Some(match key {
                     "recheck" => Action::Recheck,
                     "settings" => Action::OpenSettings,
@@ -861,6 +900,7 @@ impl Live {
                 ],
                 sel: 0,
                 armed_until: 0,
+                engaged: false,
             },
             now,
         );
@@ -910,6 +950,7 @@ impl Live {
                 ],
                 sel: 0,
                 armed_until: 0,
+                engaged: false,
             },
             now_ms(),
         );
@@ -1313,6 +1354,7 @@ impl Live {
             options,
             sel,
             armed_until: 0,
+            engaged: false,
         });
     }
 
@@ -1353,6 +1395,7 @@ impl Live {
             options,
             sel: 0,
             armed_until: 0,
+            engaged: false,
         });
     }
 
@@ -1404,9 +1447,48 @@ impl Live {
             Mode::Default => Mode::AcceptEdits,
             Mode::AcceptEdits => Mode::Plan,
             Mode::Plan => Mode::Auto,
+            // bypass is reached only through its confirmation dialog; leaving it needs none
+            Mode::Auto => return self.ask_bypass(),
             _ => Mode::Default,
         };
         e.set_mode(next);
+    }
+
+    /// The bypassPermissions confirmation. Cancel is first (the selected option); Esc cancels too. The mode
+    /// changes only in [`Live::answer`], after the core took it.
+    fn ask_bypass(&mut self) {
+        let open = self.dialogs.iter().any(|d| {
+            matches!(
+                &d.kind,
+                DialogKind::Picker {
+                    kind: PickerKind::Bypass,
+                    ..
+                }
+            )
+        });
+        if open {
+            return;
+        }
+        self.push_dialog(
+            Dialog {
+                kind: DialogKind::Picker {
+                    kind: PickerKind::Bypass,
+                    title: "Enable bypass permissions?".into(),
+                    headers: vec![(
+                        0,
+                        "Bypass skips every tool permission prompt: file edits and commands run unattended, without asking you. Deny rules, ask rules and critical deletions (root, home, working directory) still ask. Protected files such as .env are NOT guarded. It lasts for this session only.".into(),
+                    )],
+                },
+                options: vec![
+                    ("cancel".into(), "Cancel (keep the current mode)".into()),
+                    ("enable".into(), "Enable bypass".into()),
+                ],
+                sel: 0,
+                armed_until: 0,
+                engaged: false,
+            },
+            now_ms(),
+        );
     }
 }
 
@@ -1557,6 +1639,27 @@ pub fn zone_minutes(t: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dialog_queued_behind_a_picker_is_armed_when_the_picker_is_answered() {
+        let mut l = Live::new();
+        let picker = |kind| Dialog {
+            kind: DialogKind::Picker {
+                kind,
+                title: String::new(),
+                headers: vec![],
+            },
+            options: vec![("a".into(), "a".into())],
+            sel: 0,
+            armed_until: 0,
+            engaged: false,
+        };
+        l.push_dialog(picker(PickerKind::Bypass), 0);
+        l.push_dialog(picker(PickerKind::Model), 0);
+        l.answer("cancel", 1_000_000);
+        assert_eq!(l.dialogs.len(), 1);
+        assert!(l.dialogs[0].armed_until >= 1_000_000 + ARM_MS);
+    }
     use serde_json::json;
 
     fn live_with_commands() -> Live {
@@ -1907,6 +2010,7 @@ mod tests {
             ],
             sel: 2,
             armed_until: 0,
+            engaged: false,
         });
         // the third option is the fifth child: two group headers come before it
         assert_eq!(l.dialogs[0].scroll_child(), Some(4));

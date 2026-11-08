@@ -101,6 +101,7 @@ impl Shell {
         self.tui.update(cx, |t, cx| {
             let was = t.active;
             t.active = tui_on;
+            t.shown = v == View::Tui;
             if tui_on && !was {
                 t.focus_prompt(window, cx);
             }
@@ -204,9 +205,38 @@ impl Shell {
                     .items_center()
                     .gap(px(8.))
                     .window_control_area(WindowControlArea::Drag)
+                    .id("titlebar-drag")
+                    // double-click: zoom (macOS, per the system setting) / maximize and restore
+                    .on_click(|ev, window, _| {
+                        if ev.click_count() == 2 {
+                            if cfg!(target_os = "macos") {
+                                window.titlebar_double_click();
+                            } else {
+                                window.zoom_window();
+                            }
+                        }
+                    })
                     .when(!mac, |d| {
                         d.child(gpui::img(brand::mark()).size(px(16.)).flex_none())
                             .child(tracked("SYNTHESIS", 10., 0.3, theme::hsla(t::TEXT_STRONG)))
+                    })
+                    // a dialog waits for the person: a red dot and word, blinking unless motion is off
+                    .when_some(self.tui.read(cx).attention_colour(), |d, red| {
+                        // a click leads back to the TUI view, where the dialog is
+                        d.child(
+                            div()
+                                .id("attention")
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|s, _, window, cx| {
+                                    cx.stop_propagation();
+                                    s.go(View::Tui, window, cx)
+                                }))
+                                .child(div().size(px(8.)).flex_none().rounded_full().bg(red))
+                                .child(div().text_color(red).child("approval needed")),
+                        )
                     }),
             )
             .child(
@@ -255,7 +285,11 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // the title bar's red signal repaints with the view it belongs to
+        if self.tui.read(cx).attention() == Some(true) {
+            window.request_animation_frame();
+        }
         let content = match self.view {
             View::Tui => div().size_full().child(self.tui.clone()),
             View::Agent => div().size_full().child(Self::coming_soon()),

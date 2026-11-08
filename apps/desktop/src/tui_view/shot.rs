@@ -335,6 +335,26 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         }
     }
+    if let Some(tui) = tui_slot.borrow().clone() {
+        // the prompt has the keys, as in the real window (the block caret shows only then)
+        win.update(&mut cx, |_, window, cx| {
+            tui.update(cx, |t, cx| {
+                if let Some(lu) = &t.live {
+                    lu.prompt.update(cx, |s, cx| s.focus(window, cx));
+                }
+            })
+        })?;
+        cx.run_until_parked();
+        // a second frame: the input's own view re-renders (blink, focus) and must not bring its bar back
+        win.update(&mut cx, |_, _, cx| {
+            tui.update(cx, |t, cx| {
+                if let Some(lu) = &t.live {
+                    lu.prompt.update(cx, |_, cx| cx.notify());
+                }
+            })
+        })?;
+        cx.run_until_parked();
+    }
     if a.view != crate::ui::View::Tui {
         win.update(&mut cx, |s, window, cx| s.go(a.view, window, cx))?;
     }

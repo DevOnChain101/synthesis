@@ -702,6 +702,10 @@ impl Engine {
             notes: memory_notes,
             followup: Arc::default(),
         };
+        // a session never starts in bypassPermissions, whatever a stored session or a setting carried
+        if engine.mode() == Mode::BypassPermissions {
+            engine.set_mode(Mode::Default);
+        }
         match started {
             Ok(()) => Ok((engine, rx)),
             // a start that failed still ends the session and closes what `prepare` opened
@@ -751,6 +755,14 @@ impl Engine {
 
     pub fn set_mode(&self, mode: Mode) {
         let _ = self.harness.set_mode(mode, false);
+    }
+
+    /// Enters bypassPermissions after the person said yes to the confirmation dialog; the core still takes the
+    /// flag from here only and answers with its own error otherwise.
+    pub fn enable_bypass(&self) -> Result<(), String> {
+        self.harness
+            .set_mode(Mode::BypassPermissions, true)
+            .map_err(|e| e.to_string())
     }
 
     pub fn set_effort(&self, effort: Option<String>) {

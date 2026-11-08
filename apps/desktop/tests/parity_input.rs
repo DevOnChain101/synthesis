@@ -200,24 +200,37 @@ fn hash_asks_which_file_and_saves_only_after_the_pick() {
 }
 
 #[test]
-fn shift_tab_cycles_to_auto_and_never_to_bypass() {
+fn shift_tab_reaches_bypass_only_through_its_confirmation() {
     let mut r = rig();
-    let mut seen = vec![r.engine.mode()];
-    for _ in 0..5 {
+    for _ in 0..3 {
         r.live.cycle_mode();
-        seen.push(r.engine.mode());
     }
-    assert_eq!(
-        seen,
-        [
-            Mode::Default,
-            Mode::AcceptEdits,
-            Mode::Plan,
-            Mode::Auto,
-            Mode::Default,
-            Mode::AcceptEdits
-        ]
-    );
+    assert_eq!(r.engine.mode(), Mode::Auto);
+    // the fourth press asks; the mode does not move
+    r.live.cycle_mode();
+    assert_eq!(r.engine.mode(), Mode::Auto);
+    assert_eq!(r.live.dialogs.len(), 1);
+    // a second press while it is open does not stack another
+    r.live.cycle_mode();
+    assert_eq!(r.live.dialogs.len(), 1);
+    // Esc cancels: still auto
+    r.live.reject();
+    assert!(r.live.dialogs.is_empty());
+    assert_eq!(r.engine.mode(), Mode::Auto);
+    // Enter on the default (first) option is Cancel
+    r.live.cycle_mode();
+    assert_eq!(r.live.dialogs[0].sel, 0);
+    assert_eq!(r.live.dialogs[0].options[0].0, "cancel");
+    r.live.answer("cancel", 0);
+    assert_eq!(r.engine.mode(), Mode::Auto);
+    // the explicit option enables it, read back from the engine
+    r.live.cycle_mode();
+    r.live.answer("enable", 0);
+    assert_eq!(r.engine.mode(), Mode::BypassPermissions);
+    // leaving it needs no dialog
+    r.live.cycle_mode();
+    assert_eq!(r.engine.mode(), Mode::Default);
+    assert!(r.live.dialogs.is_empty());
 }
 
 #[test]
