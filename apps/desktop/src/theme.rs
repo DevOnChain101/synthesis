@@ -1,12 +1,49 @@
 //! Platinum palette (docs/tui-palette.md) as GPUI colours. The values are the TUI's own tokens
 //! (`synthesis-tui-render::theme`), so the two views cannot drift apart.
 
-use gpui::{App, Hsla, SharedString};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+use gpui::{App, Hsla, SharedString, WindowBackgroundAppearance};
 use gpui_component::{Theme, ThemeMode};
 use synthesis_tui_render::theme as t;
 
 pub fn hsla(c: t::Rgb) -> Hsla {
     gpui::rgb(u32::from_be_bytes([0, c[0], c[1], c[2]])).into()
+}
+
+static OPACITY: AtomicU8 = AtomicU8::new(100);
+
+/// Sets the window opacity (percent) that [`fill`] paints with. One window per process, so a global.
+pub fn set_opacity(pct: u8) {
+    OPACITY.store(
+        pct.clamp(synthesis_settings::TUI_OPACITY_MIN, 100),
+        Ordering::Relaxed,
+    );
+}
+
+/// A background fill at the window opacity. Text and borders use [`hsla`], never this, so they stay opaque.
+pub fn fill(c: t::Rgb) -> Hsla {
+    Hsla {
+        a: f32::from(OPACITY.load(Ordering::Relaxed)) / 100.,
+        ..hsla(c)
+    }
+}
+
+/// A surface that must stay readable at any window opacity (the approval dock, the Settings popup): always opaque.
+pub fn solid(c: t::Rgb) -> Hsla {
+    hsla(c)
+}
+
+/// What the window asks the platform for: nothing behind it at 100 %, else see-through, blurred if wanted
+/// and supported.
+pub fn background(tui: &synthesis_settings::TuiSettings) -> WindowBackgroundAppearance {
+    if tui.opacity >= 100 {
+        WindowBackgroundAppearance::Opaque
+    } else if tui.blur && crate::settings_view::model::blur_unsupported().is_none() {
+        WindowBackgroundAppearance::Blurred
+    } else {
+        WindowBackgroundAppearance::Transparent
+    }
 }
 
 /// Colour token and icon of a permission mode (the mode bar). One place; every `Mode` differs.
@@ -92,6 +129,16 @@ pub fn apply(mono: &str, cx: &mut App) {
     th.mono_font_family = SharedString::from(mono.to_string());
 }
 
+/// Tests that read or write the opacity global (any test with a `Shell`, which applies settings) hold this for their whole
+/// run: the global is per process and tests run on parallel threads. It starts each of them at 100 %.
+#[cfg(test)]
+pub(crate) fn opacity_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    set_opacity(100);
+    g
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,6 +166,45 @@ mod tests {
                 assert!(x.0 != y.0 && x.1 != y.1 && x.2 != y.2, "{x:?} {y:?}");
             }
         }
+    }
+
+    #[test]
+    fn fill_follows_the_opacity_and_never_goes_under_the_minimum() {
+        let _g = opacity_guard();
+        set_opacity(55);
+        assert_eq!(fill(t::BG).a, 0.55);
+        assert_eq!(hsla(t::BG).a, 1., "text colours stay opaque");
+        set_opacity(1);
+        assert_eq!(fill(t::BG).a, 0.30);
+        set_opacity(30);
+        assert_eq!(
+            solid(t::SURFACE).a,
+            1.,
+            "the approval dock and the popup ignore the opacity"
+        );
+        set_opacity(100);
+        assert_eq!(fill(t::BG), hsla(t::BG));
+    }
+
+    #[test]
+    fn background_asks_for_what_the_settings_and_platform_allow() {
+        let mut s = synthesis_settings::TuiSettings::default();
+        assert_eq!(background(&s), WindowBackgroundAppearance::Opaque);
+        s.blur = true;
+        assert_eq!(
+            background(&s),
+            WindowBackgroundAppearance::Opaque,
+            "nothing to see through"
+        );
+        s.opacity = 80;
+        let want = if cfg!(any(target_os = "macos", target_os = "windows")) {
+            WindowBackgroundAppearance::Blurred
+        } else {
+            WindowBackgroundAppearance::Transparent
+        };
+        assert_eq!(background(&s), want);
+        s.blur = false;
+        assert_eq!(background(&s), WindowBackgroundAppearance::Transparent);
     }
 
     #[test]

@@ -43,7 +43,7 @@ pub fn dock(
         .flex_col()
         .gap(px(10.))
         .p(px(12.))
-        .bg(hsla(t::SURFACE))
+        .bg(crate::theme::solid(t::SURFACE))
         .border_1()
         .border_color(border)
         .rounded(px(10.))
