@@ -1,6 +1,6 @@
 //! The TUI view: the classic TUI's dashboard drawn natively (docs/specs/desktop.md), rebuilt 1:1 from
 //! `cli.html` in the platinum palette. Top bar; left column Workspace / Running / Session / Tools & Skills /
-//! Recent Activity / User Prompt; centre panel (header, tabs chat | diff | terminal | browser | file
+//! Recent Activity (prompts and agent activity in one list); centre panel (header, tabs chat | diff | terminal | browser | file
 //! explorer, conversation, prompt, transcript switch, mode bar); right column Synthesis Topology, Agent
 //! Status + Context, Usage & Metrics; key hint footer. It reads a `Snapshot` (see `sample`); no terminal, no
 //! PTY. Panels hide with the TUI's `panels.*` keys (`layout::Hidden`).
@@ -448,22 +448,22 @@ impl TuiView {
             col = col.child(self.fit(p, "p-tools", |p| p.flex_initial().min_h(min)));
         }
         if !h.activity {
-            // `.grow` panels: flex 1 1 0, grow 1.4 and 2.4
+            // one `.grow` panel (flex 1 1 0) for the prompts and the agent's activity together
+            let act_click = |i: usize| -> panels::OnClick {
+                Box::new(cx.listener(move |this, _, _, cx| this.click_activity(i, cx)))
+            };
             let p = panel(
                 Head::new("p-activity", "Recent Activity", "activity", Pad::LEFT)
                     .fold(self.is_folded("p-activity"), self.fold_cb("p-activity", cx)),
-                None,
-                panels::activity_body(&s.activity),
+                Some(meta(text(), s.activity.len().to_string())),
+                panels::activity_body(
+                    &s.activity,
+                    live.map(|_| &act_click as &dyn Fn(usize) -> panels::OnClick),
+                ),
             );
-            col = col.child(self.fit(p, "p-activity", |p| p.flex_1().flex_grow(1.4).min_h(min)));
-            let p = panel(
-                Head::new("p-history", "User Prompt", "clock", Pad::LEFT)
-                    .fold(self.is_folded("p-history"), self.fold_cb("p-history", cx)),
-                Some(meta(text(), s.prompts.len().to_string())),
-                panels::prompts_body(&s.prompts),
-            );
-            col = col.child(self.fit(p, "p-history", |p| {
-                p.flex_1().flex_grow(2.4).min_h(px(tier.history_min))
+            // as tall at least as the design's two panels it replaces (Recent Activity and User Prompt)
+            col = col.child(self.fit(p, "p-activity", |p| {
+                p.flex_1().min_h(px(tier.left_min + LEFT_GAP + tier.activity_min))
             }));
         }
         col
@@ -833,6 +833,11 @@ impl Render for TuiView {
         let motion = self.live.as_ref().is_some_and(|l| l.cfg.tui.motion);
         // a spinner or a blink in the Running list is repainted every frame too
         if self.attention() == Some(true)
+            || self
+                .live
+                .as_ref()
+                .and_then(|l| l.flash)
+                .is_some_and(|(_, until)| crate::live::now_ms() < until)
             || (motion
                 && self.snap.running.iter().any(|r| {
                     matches!(

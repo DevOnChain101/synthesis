@@ -384,7 +384,22 @@ impl TuiView {
             Some(super::driver::Row::Activity) => under(self.activity_line(lu)),
             None => div().into_any_element(),
         };
-        div().pb(px(10.)).child(el).into_any_element()
+        // the row a click in Recent Activity jumped to glows for a moment
+        let flash = match (lu.rows.get(ix), lu.flash) {
+            (Some(super::driver::Row::Item(i)), Some((f, until))) => {
+                *i == f && crate::live::now_ms() < until
+            }
+            _ => false,
+        };
+        div()
+            .pb(px(10.))
+            .child(
+                div()
+                    .rounded(px(6.))
+                    .when(flash, |d| d.bg(with_alpha(hsla(t::ACCENT), 0.22)))
+                    .child(el),
+            )
+            .into_any_element()
     }
 
     /// The working line, as the Claude Code CLI draws it: a spinner glyph, a verb, then (elapsed, tokens, esc

@@ -54,16 +54,32 @@ pub struct ToolsInfo {
     pub more: u32,
 }
 
-#[derive(Clone, Debug)]
-pub struct ActivityRow {
-    pub text: String,
-    pub ago: String,
+/// What a row of Recent Activity is, for its mark and colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActKind {
+    /// What the person typed.
+    Prompt,
+    /// A tool or command run.
+    Tool,
+    /// A sub-agent.
+    Agent,
+    /// A permission asked.
+    Approval,
+    /// A failed tool or task.
+    Error,
 }
 
+/// One entry of Recent Activity: a prompt or something the agent did, at `time`.
 #[derive(Clone, Debug)]
-pub struct PromptRow {
-    pub time: String,
+pub struct ActivityRow {
+    pub kind: ActKind,
     pub text: String,
+    /// `HH:MM` of the event.
+    pub time: String,
+    /// The chat item (`convo.items`) this entry points at.
+    pub anchor: usize,
+    /// The chat shows that row; false when it is gone (compacted away, hidden by `/focus`): dimmed, not clickable.
+    pub shown: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,7 +210,6 @@ pub struct Snapshot {
     pub session: SessionInfo,
     pub tools: ToolsInfo,
     pub activity: Vec<ActivityRow>,
-    pub prompts: Vec<PromptRow>,
     pub agent: AgentStatus,
     pub context: ContextInfo,
     pub head: ChatHead,
@@ -325,25 +340,22 @@ pub fn sample() -> Snapshot {
             more: 5,
         },
         activity: [
-            ("Edited auth.ts", "2m ago"),
-            ("Ran tests", "4m ago"),
-            ("Searched codebase", "6m ago"),
-            ("Read architecture.md", "9m ago"),
-            ("Updated plan", "12m ago"),
-            ("Used browser", "15m ago"),
-            ("Committed changes", "18m ago"),
-            ("Checked diagnostics", "22m ago"),
+            (ActKind::Tool, "Edited auth.ts", "23:02"),
+            (ActKind::Tool, "Ran tests", "23:00"),
+            (ActKind::Tool, "Searched codebase", "22:58"),
+            (ActKind::Tool, "Read architecture.md", "22:55"),
+            (ActKind::Prompt, "Investigate why login redirects loop in auth.ts and fix it.", "22:54"),
         ]
         .iter()
-        .map(|(t, a)| ActivityRow {
+        .enumerate()
+        .map(|(i, (kind, t, time))| ActivityRow {
+            kind: *kind,
             text: s(t),
-            ago: s(a),
+            time: s(time),
+            anchor: i,
+            shown: true,
         })
         .collect(),
-        prompts: vec![PromptRow {
-            time: s("23:04:00"),
-            text: s("Investigate why login redirects loop in auth.ts and fix it."),
-        }],
         agent: AgentStatus {
             working: s("Implementing secure authentication flow with session management"),
             next: s("Run tests and verify edge cases"),

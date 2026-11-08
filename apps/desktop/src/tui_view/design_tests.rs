@@ -25,7 +25,7 @@ const SIZES: [(f32, f32); 5] = [
 ];
 
 /// (design key, selector in the view).
-const MAP: [(&str, &str); 29] = [
+const MAP: [(&str, &str); 28] = [
     ("topbar", "header"),
     ("col.l", "col-left"),
     ("col.c", "col-centre"),
@@ -35,7 +35,6 @@ const MAP: [(&str, &str); 29] = [
     ("panel:sess", "p-session"),
     ("panel:tools", "p-tools"),
     ("panel:act", "p-activity"),
-    ("panel:history", "p-history"),
     ("panel:topo1", "p-topology"),
     ("status-context", "status-context"),
     ("panel:agent", "p-agent"),
@@ -83,7 +82,7 @@ fn tol(key: &str, w: f32) -> (f32, f32) {
     match key {
         // Session wraps its values ("claude-3.5-sonnet" breaks at the hyphen in Chrome, not in GPUI) in the
         // columns narrower than 250px, and its height feeds the panels below it and Agent Status.
-        "panel:sess" | "panel:tools" | "panel:act" | "panel:history" if w < 1400. => (1., 40.),
+        "panel:sess" | "panel:tools" | "panel:act" if w < 1400. => (1., 40.),
         // the Agent Status / Context row is as tall as the taller card, and both wrap in the narrow right
         // column (260-380px)
         "status-context" | "panel:agent" | "panel:ctx" | "panel:topo1" | "panel:use1"
@@ -97,8 +96,7 @@ fn tol(key: &str, w: f32) -> (f32, f32) {
         // text rows: a 19.375px line box comes out 19.5px, so a panel of six rows is 0.75px taller and the
         // panels sharing the column with it give that back
         "panel:topo1" | "status-context" | "panel:agent" | "panel:ctx" | "panel:use1"
-        | "panel:ws" | "panel:running" | "panel:sess" | "panel:tools" | "panel:act"
-        | "panel:history" => (1., 1.5),
+        | "panel:ws" | "panel:running" | "panel:sess" | "panel:tools" | "panel:act" => (1., 1.5),
         _ => (1., 1.),
     }
 }
@@ -145,7 +143,14 @@ fn design_rects(cx: &mut TestAppContext) {
             let Some(r) = d.get(dk).and_then(Value::as_array) else {
                 continue;
             };
-            let want: Vec<f32> = r.iter().map(|x| x.as_f64().unwrap() as f32).collect();
+            let mut want: Vec<f32> = r.iter().map(|x| x.as_f64().unwrap() as f32).collect();
+            // Recent Activity and the design's User Prompt panel are one panel here: it spans both of them
+            if dk == "panel:act"
+                && let Some(h) = d.get("panel:history").and_then(Value::as_array)
+                && h[3].as_f64().unwrap() > 0.
+            {
+                want[3] = (h[1].as_f64().unwrap() + h[3].as_f64().unwrap()) as f32 - want[1];
+            }
             let hidden = want[2] == 0. && want[3] == 0.;
             let c = cols(w);
             let grp = group(dk);
@@ -175,7 +180,6 @@ fn design_rects(cx: &mut TestAppContext) {
                 f(g.size.width),
                 f(g.size.height),
             ];
-            let mut want = want;
             // the left column is 220px (design: 180/190/200 below 1400): its panels are wider by the difference
             if grp == Group::Left {
                 want[2] += c.left - d["col.l"][2].as_f64().unwrap() as f32;
@@ -340,7 +344,7 @@ fn hiding_panels_gives_their_space_away(cx: &mut TestAppContext) {
         f(bounds(v, "col-left").size.height),
         "the split fills the column",
     );
-    assert!(get(v, "p-history").is_none() && get(v, "p-activity").is_none());
+    assert!(get(v, "p-activity").is_none());
 
     let mut h = Hidden::default();
     h.hide("status");

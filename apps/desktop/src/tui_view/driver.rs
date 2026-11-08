@@ -58,6 +58,9 @@ impl gpui::EventEmitter<OpenSettings> for TuiView {}
 /// Rows at the end of the chat measured again after every change.
 const TAIL_REMEASURE: usize = 12;
 
+/// How long the row a click in Recent Activity jumped to stays highlighted.
+pub const FLASH_MS: i64 = 1500;
+
 /// One row of the chat list: an item of the conversation, the plan card or the working line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Row {
@@ -104,6 +107,8 @@ pub struct LiveUi {
     /// Scroll handles of the Workspace and Running bodies and of a picker dialog.
     pub ws_scroll: ScrollHandle,
     pub run_scroll: ScrollHandle,
+    /// The chat item a click in Recent Activity jumped to, and when its highlight ends (epoch ms).
+    pub flash: Option<(usize, i64)>,
     pub dlg_scroll: ScrollHandle,
     /// The model chosen with `/model`, applied to every relaunch until a resume.
     pub model_override: Option<String>,
@@ -182,6 +187,7 @@ impl TuiView {
             follow: true,
             ws_scroll: ScrollHandle::new(),
             run_scroll: ScrollHandle::new(),
+            flash: None,
             dlg_scroll: ScrollHandle::new(),
             model_override: None,
             dirty: true,
@@ -908,6 +914,35 @@ impl TuiView {
     }
 
     /// Click on a Running row: open that session (the open one: nothing happens).
+    /// A click on entry `i` of Recent Activity: the chat scrolls to its row (a collapsed tool card opens) and the
+    /// row flashes. An entry whose row is gone does nothing.
+    pub fn click_activity(&mut self, i: usize, cx: &mut Context<Self>) {
+        let Some(a) = self.snap.activity.get(i).filter(|a| a.shown) else {
+            return;
+        };
+        let anchor = a.anchor;
+        let Some(lu) = &mut self.live else { return };
+        let Some(pos) = lu.rows.iter().position(|r| *r == Row::Item(anchor)) else {
+            return;
+        };
+        if let Some(synthesis_view::convo::Item::Tool { id, .. }) =
+            lu.live.view.convo.items.get(anchor)
+        {
+            lu.live.expanded.insert(id.clone());
+        }
+        self.ts.tab = super::ChatTab::Chat;
+        lu.follow = false;
+        lu.list.set_follow_mode(FollowMode::Normal);
+        lu.list.remeasure_items(pos..pos + 1);
+        lu.list.scroll_to(gpui::ListOffset {
+            item_ix: pos,
+            offset_in_item: gpui::px(0.),
+        });
+        lu.flash = Some((anchor, crate::live::now_ms() + FLASH_MS));
+        lu.dirty = true;
+        cx.notify();
+    }
+
     pub fn click_running(&mut self, i: usize, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
         lu.live.focus = Focus::Running;

@@ -1,5 +1,5 @@
 //! The panel bodies of the TUI view, 1:1 with `cli.html` (`.rows`, `.ws-item`, `.run-item`, `.kv`, `.chk`,
-//! `.bars`): Workspace, Running, Session, Tools & Skills, Recent Activity, User Prompt, Agent Status, Context
+//! `.bars`): Workspace, Running, Session, Tools & Skills, Recent Activity (prompts and agent activity), Agent Status, Context
 //! and Usage & Metrics. The panel chrome itself is `widgets::chrome`.
 
 use gpui::{
@@ -10,7 +10,7 @@ use synthesis_tui_render::theme as t;
 
 use super::activity::{Presence, RunState, presence};
 use super::sample::{
-    ActivityRow, AgentStatus, ContextInfo, PromptRow, Running, SessionInfo, StepKind, ToolsInfo,
+    ActKind, ActivityRow, AgentStatus, ContextInfo, Running, SessionInfo, StepKind, ToolsInfo,
     Usage, Workspace,
 };
 use crate::theme::hsla;
@@ -345,45 +345,40 @@ fn circ(kind: Option<StepKind>) -> Div {
     }
 }
 
-pub fn activity_body(rows: &[ActivityRow]) -> Div {
-    div().flex().flex_col().children(rows.iter().map(|a| {
-        li().flex()
-            .items_center()
-            .gap(px(8.))
-            .child(circ(None))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .truncate()
-                    .child(a.text.clone()),
-            )
-            .child(div().flex_none().text_color(dim()).child(a.ago.clone()))
-    }))
-}
-
-pub fn prompts_body(rows: &[PromptRow]) -> Div {
+/// Recent Activity: `time  mark  text` per entry, one line each. Prompts are strong text behind a blue mark, the
+/// agent's doings plain text behind their own mark; an entry the chat no longer shows is dimmed and not clickable.
+pub fn activity_body(rows: &[ActivityRow], on_click: Option<&dyn Fn(usize) -> OnClick>) -> Div {
     if rows.is_empty() {
-        return div().text_color(dim()).child("No messages yet");
+        return div().text_color(dim()).child("No activity yet");
     }
-    div().flex().flex_col().children(rows.iter().map(|p| {
-        li().flex()
-            .items_center()
-            .gap(px(8.))
-            .child(
-                div()
-                    .w(px(64.))
-                    .flex_none()
-                    .text_color(dim())
-                    .child(p.time.clone()),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .truncate()
-                    .child(p.text.clone()),
-            )
+    div().flex().flex_col().children(rows.iter().enumerate().map(|(i, a)| {
+        let (mark, fg) = match a.kind {
+            ActKind::Prompt => (hsla(t::INFO), strong()),
+            ActKind::Tool => (dim(), text()),
+            ActKind::Agent => (hsla(t::ACCENT), text()),
+            ActKind::Approval => (hsla(t::WARN), text()),
+            ActKind::Error => (hsla(t::ERROR), hsla(t::ERROR)),
+        };
+        let fg = if a.shown { fg } else { dim() };
+        li().child(
+            div()
+                .id(("act-row", i))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .rounded(px(3.))
+                .text_color(fg)
+                .when(a.shown, |d| {
+                    d.when_some(on_click, |d, f| {
+                        d.cursor_pointer()
+                            .hover(|d| d.bg(with_alpha(gpui::white(), 0.05)))
+                            .on_click(f(i))
+                    })
+                })
+                .child(div().flex_none().text_color(dim()).child(a.time.clone()))
+                .child(dot(if a.shown { mark } else { dim() }, a.kind == ActKind::Prompt))
+                .child(div().flex_1().min_w(px(0.)).truncate().child(a.text.clone())),
+        )
     }))
 }
 
