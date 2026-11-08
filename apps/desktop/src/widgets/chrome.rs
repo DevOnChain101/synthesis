@@ -463,20 +463,26 @@ pub fn with_alpha(c: Hsla, a: f32) -> Hsla {
     Hsla { a, ..c }
 }
 
-/// Gap between the two copies of the scrolling prompt, and its speed.
-const MARQUEE_GAP: f32 = 48.;
+/// Speed of the scrolling prompt (px/s) and the pause with the slot empty between two runs.
 const MARQUEE_PX_S: f32 = 40.;
+const MARQUEE_PAUSE_S: f32 = 1.;
 
-/// Distance after which the scroll repeats: one copy and the gap, but never less than the slot, so the
-/// next copy enters from the right edge only after the last one has left (`slot_w` is an upper bound).
-fn marquee_unit(text_w: f32, slot_w: f32) -> f32 {
-    (text_w + MARQUEE_GAP).max(slot_w)
+/// One run of the scroll: the text starts with its left edge at the slot's right edge and has left through the
+/// left edge after `slot_w + text_w` px.
+fn marquee_travel(text_w: f32, slot_w: f32) -> f32 {
+    text_w + slot_w
 }
 
-/// Left edge of the scrolling pair at progress `d` (0..1 of one loop): runs left by one `unit`, where the
-/// second copy stands exactly where the first began.
-fn marquee_left(d: f32, unit: f32) -> f32 {
-    -d * unit
+/// Seconds of one loop: the run, then the pause.
+fn marquee_period(travel: f32) -> f32 {
+    travel / MARQUEE_PX_S + MARQUEE_PAUSE_S
+}
+
+/// Offset from the slot's right edge at progress `d` (0..1 of one loop): runs left by `travel`, then stays
+/// out of sight for the pause (only ever one copy of the text).
+fn marquee_left(d: f32, travel: f32) -> f32 {
+    let moving = (travel / MARQUEE_PX_S) / marquee_period(travel);
+    -(d / moving).min(1.) * travel
 }
 
 /// `#chead`: icon, "Synthesis", the status word, the latest prompt (clipped), the context bar and `tail`
@@ -492,10 +498,16 @@ pub fn chat_head(
 ) -> Div {
     let label = format!("Latest user prompt: {prompt}");
     let tw = label.chars().count() as f32 * 7.5;
-    // `prompt-scroll`: with a prompt the text starts at the slot's right edge and runs left, two copies a
-    // unit apart so the loop has no jump; the slot clips it and the layout does not change
-    let prompt_el: gpui::AnyElement = if motion && !prompt.is_empty() {
-        let unit = marquee_unit(tw, width);
+    // what else the row holds (icon, "Synthesis", status, rule, context bar, tail, gaps) leaves the slot
+    let fixed =
+        14. + 7.5 * (9 + status.chars().count() + 1 + tail.chars().count()) as f32 + 54. + 84.;
+    let slot_w = (width - fixed).max(0.);
+    // `prompt-scroll`: only once a prompt was sent. With motion one copy enters at the slot's right edge, runs
+    // left and leaves through its left edge, then the next run starts; without motion it is plain clipped text.
+    let prompt_el: gpui::AnyElement = if prompt.is_empty() {
+        div().into_any_element()
+    } else if motion {
+        let travel = marquee_travel(tw, slot_w);
         div()
             .absolute()
             .top_0()
@@ -503,28 +515,20 @@ pub fn chat_head(
             .child(
                 div()
                     .relative()
-                    .flex()
-                    .gap(px(MARQUEE_GAP))
                     .whitespace_nowrap()
-                    .child(div().flex_none().child(label.clone()))
-                    .child(div().flex_none().child(label))
+                    .child(label)
                     .with_animation(
                         "chead-marquee",
-                        gpui::Animation::new(std::time::Duration::from_secs_f32(
-                            unit / MARQUEE_PX_S,
-                        ))
+                        gpui::Animation::new(std::time::Duration::from_secs_f32(marquee_period(
+                            travel,
+                        )))
                         .repeat(),
-                        move |el, d| el.left(px(marquee_left(d, unit))),
+                        move |el, d| el.left(px(marquee_left(d, travel))),
                     ),
             )
             .into_any_element()
     } else {
-        div()
-            .absolute()
-            .top_0()
-            .right_0()
-            .child(label)
-            .into_any_element()
+        div().truncate().child(label).into_any_element()
     };
     use gpui::AnimationExt as _;
     div()
@@ -581,12 +585,18 @@ mod marquee_tests {
     use super::*;
 
     #[test]
-    fn the_marquee_runs_left_one_copy_and_gap_per_loop() {
-        let unit = marquee_unit(100., 0.);
-        assert_eq!(unit, 148.);
-        assert_eq!(marquee_unit(100., 300.), 300.);
-        assert_eq!(marquee_left(0., unit), 0.);
-        assert_eq!(marquee_left(0.5, unit), -74.);
-        assert_eq!(marquee_left(1., unit), -unit);
+    fn one_copy_runs_from_the_right_edge_out_through_the_left_then_pauses() {
+        let travel = marquee_travel(100., 300.);
+        assert_eq!(travel, 400.);
+        // starts at the right edge of the slot
+        assert_eq!(marquee_left(0., travel), 0.);
+        // gone (its end past the left edge) when the run is over, and stays gone for the pause
+        let moving = (travel / MARQUEE_PX_S) / marquee_period(travel);
+        assert_eq!(marquee_left(moving, travel), -travel);
+        assert_eq!(marquee_left(1., travel), -travel);
+        // halfway through the run: half the way
+        assert!((marquee_left(moving / 2., travel) + travel / 2.).abs() < 1e-3);
+        // period = (slot + text) / speed + pause
+        assert_eq!(marquee_period(travel), 400. / 40. + 1.);
     }
 }
