@@ -612,6 +612,8 @@ impl Live {
             return None;
         }
         let d = self.dialogs.remove(0);
+        // the next dialog waits out its arming delay whichever branch below answers this one
+        self.arm(now);
         if let DialogKind::Picker { kind, .. } = d.kind {
             if kind == PickerKind::Bypass {
                 if let (Some(e), "enable") = (&self.engine, key)
@@ -1443,7 +1445,7 @@ impl Live {
                     title: "Enable bypass permissions?".into(),
                     headers: vec![(
                         0,
-                        "Bypass skips every tool permission prompt: file edits and commands run unattended, without asking you. Deny rules, ask rules and protected-path safeguards still apply. It lasts for this session only.".into(),
+                        "Bypass skips every tool permission prompt: file edits and commands run unattended, without asking you. Deny rules, ask rules and critical deletions (root, home, working directory) still ask. Protected files such as .env are NOT guarded. It lasts for this session only.".into(),
                     )],
                 },
                 options: vec![
@@ -1605,6 +1607,26 @@ pub fn zone_minutes(t: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dialog_queued_behind_a_picker_is_armed_when_the_picker_is_answered() {
+        let mut l = Live::new();
+        let picker = |kind| Dialog {
+            kind: DialogKind::Picker {
+                kind,
+                title: String::new(),
+                headers: vec![],
+            },
+            options: vec![("a".into(), "a".into())],
+            sel: 0,
+            armed_until: 0,
+        };
+        l.push_dialog(picker(PickerKind::Bypass), 0);
+        l.push_dialog(picker(PickerKind::Model), 0);
+        l.answer("cancel", 1_000_000);
+        assert_eq!(l.dialogs.len(), 1);
+        assert!(l.dialogs[0].armed_until >= 1_000_000 + ARM_MS);
+    }
     use serde_json::json;
 
     fn live_with_commands() -> Live {
