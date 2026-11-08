@@ -115,6 +115,8 @@ pub struct LiveUi {
     tick_task: Option<Task<()>>,
     pump_task: Option<Task<()>>,
     engine_task: Option<Task<()>>,
+    /// `set_live` fed the conversation: no engine is launched.
+    fixture: bool,
     store_task: Option<Task<()>>,
     peer_task: Option<Task<()>>,
     /// Blink state of the prompt's block caret.
@@ -188,6 +190,7 @@ impl TuiView {
             tick_task: None,
             pump_task: None,
             engine_task: None,
+            fixture: false,
             store_task: None,
             peer_task: None,
             blink: Default::default(),
@@ -201,6 +204,8 @@ impl TuiView {
         if let Some(lu) = &mut self.live {
             lu.live = live;
             lu.dirty = true;
+            // the conversation is a fixture: `start` must not launch an engine over it (it has no model)
+            lu.fixture = true;
         }
     }
 
@@ -273,6 +278,9 @@ impl TuiView {
         cx: &mut Context<Self>,
     ) {
         let Some(lu) = &mut self.live else { return };
+        if lu.fixture {
+            return;
+        }
         // the old conversation stays on screen until the new engine replaces it: no blank frame
         lu.live.starting = true;
         lu.live.engine = None;
