@@ -112,6 +112,8 @@ pub struct LiveUi {
     pub hist: Option<HistNav>,
     /// Ctrl+R: the needle typed so far and the entry shown.
     pub search: Option<(String, usize)>,
+    /// The placeholder shows the busy hint (Enter queue, send now) rather than the idle one.
+    busy_hint: bool,
     tick_task: Option<Task<()>>,
     pump_task: Option<Task<()>>,
     engine_task: Option<Task<()>>,
@@ -151,7 +153,11 @@ impl TuiView {
                 InputEvent::PressEnter {
                     secondary: false,
                     shift: false,
-                } => this.submit_prompt(window, cx),
+                } => this.submit_prompt(false, window, cx),
+                InputEvent::PressEnter {
+                    secondary: true,
+                    shift: false,
+                } => this.submit_prompt(true, window, cx),
                 InputEvent::Change => this.on_prompt_changed(cx),
                 _ => {}
             },
@@ -194,6 +200,7 @@ impl TuiView {
             fixture: false,
             store_task: None,
             peer_task: None,
+            busy_hint: false,
             blink: Default::default(),
             _subs: subs,
         });
@@ -482,7 +489,7 @@ impl TuiView {
 
     // ---- the prompt ----
 
-    pub(super) fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn submit_prompt(&mut self, now: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
         let mut text = text_of(&lu.prompt, cx);
         // Enter on a typed prefix (`/mo`) completes the highlighted command first
@@ -502,7 +509,15 @@ impl TuiView {
         lu.comp = None;
         lu.hist = None;
         lu.search = None;
-        match lu.live.submit(&text) {
+        match lu.live.submit_as(&text, now) {
+            Submitted::Held => {
+                lu.dirty = true;
+                return cx.notify();
+            }
+            Submitted::Inject { to, text } => {
+                self.set_prompt("", window, cx);
+                return self.inject(to, text, cx);
+            }
             Submitted::Quit => return self.quit(cx),
             Submitted::Send(t) => {
                 self.set_prompt("", window, cx);
@@ -522,6 +537,56 @@ impl TuiView {
         lu.stick();
         lu.dirty = true;
         cx.notify();
+    }
+
+    /// Send now: the harness takes the line at the next safe point (`UiMsg::SendFailed` if not).
+    pub(super) fn inject(&mut self, to: String, text: String, cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        if let Some(Err(why)) = lu.live.engine.clone().map(|e| e.send_now(to, text)) {
+            lu.live.note(why, true);
+        }
+        lu.stick();
+        lu.dirty = true;
+        cx.notify();
+    }
+
+    /// The queued row's "Send now" and remove controls.
+    pub(super) fn queue_row(&mut self, i: usize, send_now: bool, cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        if !send_now {
+            lu.live.queue.remove(i);
+            lu.dirty = true;
+            return cx.notify();
+        }
+        match lu.live.send_queued_now(i) {
+            Submitted::Inject { to, text } => self.inject(to, text, cx),
+            _ => {
+                lu.dirty = true;
+                cx.notify();
+            }
+        }
+    }
+
+    /// The prompt's hint follows the task: while one runs, Enter queues and Cmd/Ctrl+Enter sends now.
+    pub(super) fn sync_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        let busy = lu.live.busy;
+        if busy == lu.busy_hint {
+            return;
+        }
+        lu.busy_hint = busy;
+        let mod_key = if cfg!(target_os = "macos") {
+            "\u{2318}"
+        } else {
+            "Ctrl+"
+        };
+        let hint = if busy {
+            format!("Enter queue \u{b7} {mod_key}\u{21b5} send now \u{b7} Ctrl+T target")
+        } else {
+            "Ask Synthesis anything... (Ctrl+R for history)".into()
+        };
+        lu.prompt
+            .update(cx, |s, cx| s.set_placeholder(hint, window, cx));
     }
 
     fn set_prompt(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -683,6 +748,12 @@ impl TuiView {
             }
             ("n", true) => {
                 self.pick_folder(cx);
+                return true;
+            }
+            ("t", true) => {
+                lu.live.cycle_target();
+                lu.dirty = true;
+                cx.notify();
                 return true;
             }
             ("v", _) if ctrl || ks.modifiers.platform || ks.modifiers.alt => {

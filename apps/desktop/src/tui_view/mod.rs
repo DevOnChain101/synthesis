@@ -844,6 +844,7 @@ impl Render for TuiView {
             window.request_animation_frame();
         }
         self.refresh(window);
+        self.sync_placeholder(window, cx);
         self.tabs_tick(cx);
         let vp = window.viewport_size();
         let w = f32::from(vp.width) - self.inset;

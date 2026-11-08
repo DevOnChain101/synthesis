@@ -16,6 +16,7 @@ use super::panels::{dim, icon, strong, text};
 use super::topo::with_alpha;
 use super::tracked;
 use super::{TuiView, layout};
+use crate::live::clip;
 use crate::theme::hsla;
 
 /// Lines of a tool's output shown before "ctrl+o" (the TUI's default).
@@ -972,15 +973,66 @@ impl TuiView {
                     .child(div().text_color(dim()).child("/images clear drops them")),
             );
         }
-        if !l.queue.is_empty() {
+        // queued lines: one clipped row each, with "Send now" and remove; accepted sent-now lines wait below them
+        let small = |id: String, label: &'static str| {
+            div()
+                .id(gpui::SharedString::from(id))
+                .flex_none()
+                .px(px(6.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(hsla(t::BORDER))
+                .text_color(strong())
+                .cursor_pointer()
+                .child(label)
+        };
+        col = col
+            .children(l.queue.iter().enumerate().map(|(i, q)| {
+                let command = q.starts_with('/') || q.starts_with('!');
+                div()
+                    .debug_selector(move || format!("queued-{i}"))
+                    .mx(px(12.))
+                    .mb(px(2.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_color(dim())
+                    .child(div().flex_none().child("queued"))
+                    .child(div().flex_1().min_w(px(0.)).truncate().child(clip(q, 200)))
+                    .when(!command, |d| {
+                        d.child(small(format!("send-now-{i}"), "Send now").on_click(
+                            cx.listener(move |this, _, _, cx| this.queue_row(i, true, cx)),
+                        ))
+                    })
+                    .child(
+                        small(format!("unqueue-{i}"), "\u{d7}").on_click(
+                            cx.listener(move |this, _, _, cx| this.queue_row(i, false, cx)),
+                        ),
+                    )
+            }))
+            .children(l.pending.iter().map(|(_, to, q)| {
+                div()
+                    .mx(px(12.))
+                    .mb(px(2.))
+                    .flex()
+                    .gap(px(8.))
+                    .text_color(dim())
+                    .child(
+                        div()
+                            .flex_none()
+                            .child(format!("sent now to @{to}, delivered at the next step")),
+                    )
+                    .child(div().flex_1().min_w(px(0.)).truncate().child(clip(q, 200)))
+            }));
+        if l.busy && l.target != "main" {
             col = col.child(
                 div()
                     .mx(px(12.))
                     .mb(px(2.))
-                    .text_color(dim())
+                    .text_color(strong())
                     .child(format!(
-                        "{} queued: starts when the task ends (Esc drops it)",
-                        l.queue.len()
+                        "to @{} (Ctrl+T cycles, Esc cancels the task)",
+                        l.target
                     )),
             );
         }
@@ -997,7 +1049,7 @@ impl TuiView {
             l.focus == crate::live::Focus::Chat,
             busy,
             Some(Box::new(cx.listener(|this, _, window, cx| {
-                this.submit_prompt(window, cx)
+                this.submit_prompt(false, window, cx)
             }))),
         ))
     }

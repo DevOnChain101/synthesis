@@ -47,6 +47,12 @@ pub enum UiMsg {
     Withdraw(String),
     /// The task ended (`Err`: it could not run, or the session did not return to idle).
     TaskDone(Result<(), String>),
+    /// [`Engine::send_now`] was refused (inbox full, hook block, no task running yet).
+    SendFailed {
+        to: String,
+        text: String,
+        why: String,
+    },
     /// `/compact` between tasks ended (`Err`: the reason, history unchanged).
     Compacted(Result<(), String>),
 }
@@ -852,6 +858,21 @@ impl Engine {
             };
             *lock(&slot) = Some(session);
             let _ = tx.unbounded_send(UiMsg::TaskDone(done));
+        });
+        Ok(())
+    }
+
+    /// Send now: delivers `text` to `to` (`main` or a sub-agent instance) at its next safe point
+    /// (after the tool batch, never during an approval); `UiMsg::SendFailed` follows when refused.
+    pub fn send_now(&self, to: String, text: String) -> Result<(), &'static str> {
+        let Some(rt) = &self.tokio else {
+            return Err("the engine is closed");
+        };
+        let (h, tx) = (self.harness.clone(), self.tx.clone());
+        rt.spawn(async move {
+            if let Err(why) = h.send_user_message(&to, text.clone()).await {
+                let _ = tx.unbounded_send(UiMsg::SendFailed { to, text, why });
+            }
         });
         Ok(())
     }

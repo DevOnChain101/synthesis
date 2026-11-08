@@ -205,6 +205,13 @@ pub enum Submitted {
     Nothing,
     /// Hand it to the engine.
     Send(String),
+    /// Send now: deliver the line to `to` (`main` or a sub-agent) at its next safe point.
+    Inject {
+        to: String,
+        text: String,
+    },
+    /// Refused and explained in a notice; the prompt keeps its text.
+    Held,
     /// A command the window carries out.
     Do(Action),
     Quit,
@@ -258,6 +265,18 @@ pub fn age(ms: i64) -> String {
     }
 }
 
+/// `s` on one line, at most `n` chars.
+pub fn clip(s: &str, n: usize) -> String {
+    let one = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.chars().count() <= n {
+        return one;
+    }
+    one.chars()
+        .take(n.saturating_sub(1))
+        .chain(['\u{2026}'])
+        .collect()
+}
+
 /// The chat's own state beyond the events.
 pub struct Live {
     pub view: ViewState,
@@ -270,6 +289,14 @@ pub struct Live {
     pub compacting: bool,
     pub dialogs: Vec<Dialog>,
     pub queue: VecDeque<String>,
+    /// Who a line sent now goes to while a task runs: `main` or a sub-agent instance (Ctrl+T).
+    pub target: String,
+    /// Instance names of the sub-agents that can be addressed (from `subagent.*` events).
+    pub agents: Vec<String>,
+    /// Sent-now lines the harness accepted and has not delivered yet: (message id, to, text).
+    pub pending: Vec<(String, String, String)>,
+    /// The next `user.message` of main is a sent-now line being delivered.
+    mark_delivered: bool,
     pub show_thinking: bool,
     /// Internal rows (`docs/TUI.md` Events) show up in the chat.
     pub verbose: bool,
@@ -315,6 +342,10 @@ impl Live {
             compacting: false,
             dialogs: vec![],
             queue: VecDeque::new(),
+            target: "main".into(),
+            agents: vec![],
+            pending: vec![],
+            mark_delivered: false,
             show_thinking: false,
             verbose: false,
             expand_all: false,
@@ -419,6 +450,7 @@ impl Live {
         match m {
             UiMsg::Event(e) => {
                 self.view.apply(&e);
+                self.track_messages(&e);
                 // a start-up note the harness also emits as an event shows once
                 let items = &mut self.view.convo.items;
                 if let Some(Item::Notice { text, .. }) = items.last()
@@ -430,6 +462,17 @@ impl Live {
                 }
             }
             UiMsg::BadEvent(t) => self.note(t, true),
+            UiMsg::SendFailed { to, text, why } => {
+                if to == "main" {
+                    self.note(format!("not delivered ({why}): queued instead"), true);
+                    self.queue.push_front(text);
+                } else {
+                    self.note(
+                        format!("not delivered to @{to} ({why}): {}", clip(&text, 80)),
+                        true,
+                    );
+                }
+            }
             UiMsg::Approval(a) => self.on_approval(*a, now),
             UiMsg::Input(i) => self.on_input(i.id, i.req, now),
             UiMsg::Withdraw(id) => {
@@ -449,6 +492,8 @@ impl Live {
             }
             UiMsg::TaskDone(r) => {
                 self.busy = false;
+                self.target = "main".into();
+                self.pending.clear();
                 self.dialogs.clear();
                 if let Err(e) = r {
                     self.note(format!("task failed to run: {e}"), true);
@@ -841,6 +886,12 @@ impl Live {
     /// Classifies what the person typed (same rules as the TUI's prompt) and adds it to the
     /// history; the host sends `Submitted::Send`.
     pub fn submit(&mut self, text: &str) -> Submitted {
+        self.submit_as(text, false)
+    }
+
+    /// [`Live::submit`]; `now` (Cmd/Ctrl+Enter) delivers the line to the running task instead of
+    /// queueing it. A sub-agent target (Ctrl+T) always delivers: the queue is for main only.
+    pub fn submit_as(&mut self, text: &str, now: bool) -> Submitted {
         let text = text.trim_end();
         if text.trim().is_empty() {
             return Submitted::Nothing;
@@ -868,6 +919,19 @@ impl Live {
         } else if text.starts_with('!') && text.trim_start_matches('!').trim().is_empty() {
             return Submitted::Nothing; // `!` with no command
         }
+        if self.target != "main" && !self.agents.contains(&self.target) {
+            self.target = "main".into(); // the agent is gone
+        }
+        if self.busy && self.engine.is_some() && (now || self.target != "main") {
+            match self.inject(text) {
+                Ok(s) => return s,
+                Err(why) if self.target != "main" => {
+                    self.note(why, true);
+                    return Submitted::Held;
+                }
+                Err(why) => self.note(format!("{why}: queued instead"), false),
+            }
+        }
         if self.busy || self.engine.is_none() || !self.dialogs.is_empty() {
             // the TUI queues a line typed while a task runs; it starts when that one ends
             self.queue.push_back(text.to_string());
@@ -875,6 +939,111 @@ impl Live {
         }
         self.busy = true;
         Submitted::Send(text.to_string())
+    }
+
+    /// The line as a send-now delivery to the target, or why it cannot be one. Commands (`/`, `!`)
+    /// are never delivered; an open dialog holds delivery (the harness drains only after the answer).
+    fn inject(&mut self, text: &str) -> Result<Submitted, &'static str> {
+        if text.starts_with('/') || text.starts_with('!') {
+            return Err("commands are not sent now");
+        }
+        if !self.dialogs.is_empty() {
+            return Err("an approval is open and holds delivery");
+        }
+        if !self.images.is_empty() {
+            return Err("images go with a started line");
+        }
+        Ok(Submitted::Inject {
+            to: self.target.clone(),
+            text: text.to_string(),
+        })
+    }
+
+    /// "Send now" on queued row `i`. The row stays queued when it cannot be delivered.
+    pub fn send_queued_now(&mut self, i: usize) -> Submitted {
+        if !self.busy || self.engine.is_none() {
+            return Submitted::Nothing;
+        }
+        let Some(t) = self.queue.get(i).cloned() else {
+            return Submitted::Nothing;
+        };
+        match self.inject(&t) {
+            Ok(s) => {
+                self.queue.remove(i);
+                s
+            }
+            Err(why) => {
+                self.note(format!("{why}: it stays queued"), false);
+                Submitted::Nothing
+            }
+        }
+    }
+
+    /// Ctrl+T: main, then each sub-agent in turn.
+    pub fn cycle_target(&mut self) {
+        let mut order = vec!["main".to_string()];
+        order.extend(self.agents.iter().cloned());
+        let i = order
+            .iter()
+            .position(|n| *n == self.target)
+            .map_or(0, |i| i + 1);
+        self.target = order[i % order.len()].clone();
+    }
+
+    /// Sent-now bookkeeping off the event stream (UI-only until `message.delivered`), and the
+    /// sub-agent names a line can be addressed to.
+    fn track_messages(&mut self, e: &synthesis_events::Envelope) {
+        use synthesis_events::Event;
+        match &e.event {
+            Event::SubagentStarted(i) => {
+                if let Some(n) = &i.name
+                    && !self.agents.contains(n)
+                {
+                    self.agents.push(n.clone());
+                }
+            }
+            Event::SubagentStatusChanged { name, to, .. } if to == "evicted" => {
+                self.agents.retain(|n| n != name);
+            }
+            Event::MessageSent {
+                message_id,
+                to,
+                origin,
+                text,
+                ..
+            } if origin == "user" => {
+                self.pending
+                    .push((message_id.clone(), to.clone(), text.clone()))
+            }
+            Event::MessageDelivered { message_id, .. } => {
+                if let Some(i) = self.pending.iter().position(|p| p.0 == *message_id) {
+                    let (_, to, text) = self.pending.remove(i);
+                    if to == "main" {
+                        self.mark_delivered = true; // the user row follows this event
+                    } else {
+                        self.note(
+                            format!(
+                                "sent now to @{to}, delivered at its next step: {}",
+                                clip(&text, 80)
+                            ),
+                            false,
+                        );
+                    }
+                }
+            }
+            Event::MessageDropped { message_id, .. } => {
+                if let Some(i) = self.pending.iter().position(|p| p.0 == *message_id) {
+                    let (_, to, text) = self.pending.remove(i);
+                    if to == "main" {
+                        self.queue.push_front(text);
+                    }
+                }
+            }
+            Event::UserMessage { .. } if std::mem::take(&mut self.mark_delivered) => {
+                self.note("sent now, delivered at the next step", false);
+            }
+            _ => {}
+        }
     }
 
     /// The setup card (`apps/cli/src/tui.rs` `first_run`) as a dialog: re-check, Settings, quit.
