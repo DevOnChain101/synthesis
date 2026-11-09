@@ -80,7 +80,7 @@ pub(crate) enum Msg {
     /// A `!cmd` finished (the model turn that follows is started by the runtime).
     UserCommandDone(Box<UserDone>),
     /// A line typed to an agent was refused (text, why).
-    SendFailed(String, String),
+    SendFailed(String, String, String),
     /// `/compact` between tasks finished: the compacted history, or why not.
     Compacted(Result<Vec<synthesis_providers::Message>, String>),
 }
