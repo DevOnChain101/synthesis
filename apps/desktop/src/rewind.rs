@@ -246,7 +246,11 @@ impl Live {
     pub fn rewind_blocker(&self) -> Option<&'static str> {
         if self.busy || self.compacting {
             Some("a task is running \u{b7} esc cancels it first")
-        } else if !self.dialogs.is_empty() || !self.queue.is_empty() || self.rewinding {
+        } else if !self.dialogs.is_empty()
+            || !self.queue.is_empty()
+            || self.rewinding
+            || self.cleaning
+        {
             Some(
                 "approvals, questions or queued prompts are pending, or a rewind is open: answer them first",
             )
@@ -271,8 +275,12 @@ impl Live {
     /// Why the engine must not be switched or restarted now (`/resume`, `/model`, `/new`, `/close`,
     /// `/open`, a restart): a rewind is open, and its answer belongs to this session.
     pub fn engine_switch_blocker(&self) -> Option<&'static str> {
-        self.rewinding
-            .then_some("a /rewind is open or writing: finish or cancel it first")
+        if self.cleaning {
+            Some("a /clean is open or deleting: finish or cancel it first")
+        } else {
+            self.rewinding
+                .then_some("a /rewind is open or writing: finish or cancel it first")
+        }
     }
 
     /// A step (list, dry run, apply) was handed to a background job: its token, for [`Live::rewind_timeout`].

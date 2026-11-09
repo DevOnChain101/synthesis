@@ -106,5 +106,6 @@ Each file entry of a checkpoint may carry `post_sha256`: the state of the file a
 
 ## Open
 - Empty sessions (no `messages` and no `tasks` row): `Reader::list_used_sessions` leaves them out of listings (TUI panels, `/resume`); `Store::prune_empty_sessions` deletes those older than 1 hour at TUI start (all dependent rows and `sessions/<id>/`), skipping the session being resumed, any session with a child session, and any whose `lock` is held by a live process.
+- `Store::clean_plan` / `clean` / `backup_db` (desktop `/clean`, see desktop.md): permanent deletion of sessions by scope (closed and empty, inactive 30 days, all) with the same row list as `prune_empty_sessions`; never the kept ids, lock-held sessions or their parent/child tree; directories only under `sessions/<id>`, links never followed; optional `VACUUM INTO backups/clean-<time>/synt.db`.
 - Artifact retention default and size cap (proposal: keep for the session's lifetime, `synt gc --older-than 30d`).
 - Store full raw provider responses for debugging? Not in v1 (cost, secrets).

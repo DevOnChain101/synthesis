@@ -218,6 +218,55 @@ pub fn dock(
                     })),
             );
         }
+        DialogKind::Clean(c) => {
+            let lines = c.lines();
+            card = card.child(
+                div()
+                    .id("dialog-clean")
+                    .max_h(px(max_input_h))
+                    .overflow_y_scroll()
+                    .p(px(8.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(hsla(t::BORDER))
+                    .bg(hsla(t::BG))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .children(lines.into_iter().enumerate().map(|(i, l)| {
+                        let col = match i {
+                            1 => hsla(t::ERROR),
+                            3 => dim(),
+                            _ => text(),
+                        };
+                        div().text_color(col).child(l)
+                    })),
+            );
+            if c.needs_word() {
+                let ok = c.word_ok();
+                card = card.child(
+                    div()
+                        .id("clean-word")
+                        .flex()
+                        .gap(px(8.))
+                        .p(px(8.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(if ok { hsla(t::ERROR) } else { hsla(t::ACCENT) })
+                        .bg(hsla(t::BG))
+                        .child(div().text_color(dim()).child(if d.answerable() {
+                            "Type delete (or clean) to enable the delete row:"
+                        } else {
+                            "Press Tab or click here first, then type delete (or clean):"
+                        }))
+                        .child(
+                            div()
+                                .text_color(strong())
+                                .child(format!("{}\u{258F}", c.typed)),
+                        ),
+                );
+            }
+        }
     }
     let typing = match &d.kind {
         DialogKind::Question { typing, .. } => typing.clone(),

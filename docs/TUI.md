@@ -28,6 +28,7 @@ cut for `synt run --resume` consumers.
 | /compact [instructions] | summarise the conversation (`Harness::request_compact` / compact now) |
 | /new | a fresh session in the SELECTED workspace (the one highlighted in the Workspace panel; no picker). When that is not the live workspace the app switches to it. A running task needs a second `/new` within 5 s (it cancels the task and says so). For a different folder use Ctrl+N |
 | /close | closes THIS session: it is marked closed (`sessions.closed_at`, schema v2; nothing is deleted) and leaves the Running / Workspace / `/resume` lists, but `/resume <id>` still opens it. The app then starts a fresh session in the same folder. A running task needs a second `/close` within 5 s (it cancels the task and says so) |
+| /clean | desktop app only (`docs/specs/desktop.md`): permanently deletes stored sessions by scope, with a confirmation; this terminal app has no `/clean` |
 | /resume [id] | continue a saved session (picker: this folder first); an unknown id is a notice, the app stays |
 | /model [name] | pick or set a model; restarts on the same session (like every relaunch, /new, /close, /resume and the Running panel, without leaving the alternate screen: no blank frame, the Usage history is read before the first frame); the choice is stored (`model.changed`, `sessions.model_config`) and `--resume` continues on it unless `--model` is given |
 | /effort [auto\|low\|...] | reasoning effort, only when the model declares `effort_tiers` (in `synt.json` or in its `/v1/models` entry, cached) |
