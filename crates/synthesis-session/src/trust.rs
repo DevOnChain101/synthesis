@@ -373,7 +373,8 @@ fn put(home: &Path, rec: &TrustRecord, policy: &Policy) -> Result<()> {
             // this call made a new key: rows that do not verify under it (everything from before it) are
             // dropped, in one transaction, and rows another process already signed with it stay
             Some(k) => {
-                let tx = conn.transaction()?;
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 let rows: Vec<(TrustRecord, String)> = {
                     let mut st = tx.prepare(
                         "SELECT root, scope, trusted_at, fingerprint, mac FROM trusted_roots",
@@ -393,7 +394,11 @@ fn put(home: &Path, rec: &TrustRecord, policy: &Policy) -> Result<()> {
                 };
                 for (rec, mac) in rows {
                     if !mac_ok(&k, &rec, &mac) {
-                        tx.execute("DELETE FROM trusted_roots WHERE root=?1", [&rec.root])?;
+                        // `AND mac=?`: a row rewritten meanwhile (and so signed) is not the one that failed
+                        tx.execute(
+                            "DELETE FROM trusted_roots WHERE root=?1 AND mac=?2",
+                            [&rec.root, &mac],
+                        )?;
                     }
                 }
                 tx.commit()?;
@@ -541,7 +546,12 @@ impl Walk {
             return Err(Unfit::LinkOutside(name.to_string()));
         }
         let Ok(m) = fs::metadata(&real) else {
-            return Ok(()); // a dangling link: nothing to hash
+            // a link that dangles has no content to hash: refuse (a missing plain file never gets here)
+            return if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+                Err(Unfit::LinkOutside(name.to_string()))
+            } else {
+                Ok(())
+            };
         };
         if m.is_dir() {
             if depth >= MAX_DEPTH {
@@ -632,41 +642,68 @@ fn imports_of(text: &str) -> Vec<String> {
 }
 
 /// The words a hook or MCP server launches: every whitespace-separated word of the strings under `command`
-/// keys and of the `args` arrays in the project's settings and `.mcp.json`. Which of them name a file is decided
-/// by the caller (a word that names none is skipped). The code those scripts run in turn is NOT covered.
-fn command_words(v: &serde_json::Value, out: &mut Vec<String>) {
+/// keys and of the `args` arrays in the project's settings and `.mcp.json`, with `$SYNT_PROJECT_DIR`,
+/// `${SYNT_PROJECT_DIR}`, `$CLAUDE_PROJECT_DIR` and `${CLAUDE_PROJECT_DIR}` (what the hooks crate sets) replaced
+/// by the project root. Which of them name a file is decided by the caller. Too many words, or one that is
+/// too long, is an error (a repository must not hide a script behind padding): no trust by fingerprint.
+/// BEST EFFORT only: shell operators, `--opt=path`, directories and what a script runs in turn are not followed.
+fn command_words(
+    v: &serde_json::Value,
+    root: &Path,
+    out: &mut Vec<String>,
+) -> std::result::Result<(), Unfit> {
     use serde_json::Value;
-    fn take(s: &str, out: &mut Vec<String>) {
+    fn take(s: &str, root: &Path, out: &mut Vec<String>) -> std::result::Result<(), Unfit> {
+        let root = root.to_string_lossy();
         for tok in s.split_whitespace() {
             let tok = tok.trim_matches(|c| c == '"' || c == '\'');
-            if !tok.is_empty() && !tok.starts_with('-') && tok.len() <= 4096 && out.len() < 400 {
-                out.push(tok.to_string());
+            let tok = [
+                "${SYNT_PROJECT_DIR}",
+                "$SYNT_PROJECT_DIR",
+                "${CLAUDE_PROJECT_DIR}",
+                "$CLAUDE_PROJECT_DIR",
+            ]
+            .iter()
+            .fold(tok.to_string(), |t, v| t.replace(v, &root));
+            // the shell would strip quotes, wherever they sit
+            let tok = tok.replace(['"', '\''], "");
+            if tok.is_empty() || tok.starts_with('-') {
+                continue;
             }
+            if tok.len() > 4096 || out.len() >= MAX_WORDS {
+                return Err(Unfit::TooBig);
+            }
+            out.push(tok);
         }
+        Ok(())
     }
     match v {
         Value::Object(o) => {
             for (k, v) in o {
                 match (k.as_str(), v) {
-                    ("command", Value::String(s)) => take(s, out),
+                    ("command", Value::String(s)) => take(s, root, out)?,
                     ("args", Value::Array(a)) => {
                         for s in a.iter().filter_map(Value::as_str) {
-                            take(s, out);
+                            take(s, root, out)?;
                         }
                     }
                     _ => {}
                 }
-                command_words(v, out);
+                command_words(v, root, out)?;
             }
         }
         Value::Array(a) => {
             for v in a {
-                command_words(v, out);
+                command_words(v, root, out)?;
             }
         }
         _ => {}
     }
+    Ok(())
 }
+
+/// Words one manifest looks at.
+const MAX_WORDS: usize = 2000;
 
 /// The manifest (`name\thash\n` lines, sorted) of what a trusted project can switch on:
 /// - settings, config and `.mcp.json` of the root and of `cwd` (`cwd/...` names) when it is another folder;
@@ -759,7 +796,7 @@ pub fn fingerprint(root: &Path, cwd: &Path) -> std::result::Result<String, Unfit
                 if f.take(MAX_FILE).read_to_string(&mut text).is_ok()
                     && let Ok(v) = serde_json::from_str(&text)
                 {
-                    command_words(&v, &mut words);
+                    command_words(&v, &w.root, &mut words)?;
                 }
             }
         }
@@ -770,6 +807,13 @@ pub fn fingerprint(root: &Path, cwd: &Path) -> std::result::Result<String, Unfit
     for tok in words {
         for base in [root, cwd] {
             let p = base.join(&tok);
+            // a link that dangles or leaves the project cannot be trusted by content: refuse, do not skip
+            if fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) {
+                let real = canon(&p);
+                if !real.starts_with(&w.root) || fs::metadata(&real).is_err() {
+                    return Err(Unfit::LinkOutside(tok));
+                }
+            }
             let real = canon(&p);
             if real.starts_with(&w.root) && fs::metadata(&real).is_ok_and(|m| m.is_file()) {
                 found.insert((real, p));
@@ -1509,6 +1553,77 @@ mod tests {
                 .all(|r| r.scope != CHILD && r.root != parent.to_string_lossy()),
             "{l:?}"
         );
+    }
+
+    #[test]
+    fn project_dir_variables_are_expanded_padding_fails_closed_and_a_bad_link_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let r = &fs::canonicalize(d.path()).unwrap();
+        fs::create_dir_all(r.join("hooks")).unwrap();
+        fs::create_dir_all(r.join(".synt")).unwrap();
+        fs::write(r.join("hooks/x.sh"), "1").unwrap();
+        fs::write(r.join("hooks/y.sh"), "1").unwrap();
+        let write = |c: &str| fs::write(r.join(".synt/settings.json"), c).unwrap();
+        write(
+            r#"{"hooks":{"E":[{"hooks":[{"command":"$CLAUDE_PROJECT_DIR/hooks/x.sh"},{"command":"\"${SYNT_PROJECT_DIR}\"/hooks/y.sh"}]}]}}"#,
+        );
+        for (file, shown) in [
+            ("hooks/x.sh", "script:hooks/x.sh"),
+            ("hooks/y.sh", "script:hooks/y.sh"),
+        ] {
+            let base = fp(r);
+            fs::write(r.join(file), "changed").unwrap();
+            assert_eq!(changed_files(&base, &fp(r)), [shown], "{file}");
+        }
+        // 2000+ words of padding before the real script: refused, not truncated
+        let pad = (0..MAX_WORDS + 5)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        write(&format!(
+            r#"{{"hooks":{{"E":[{{"hooks":[{{"command":"{pad} ./hooks/x.sh"}}]}}]}}}}"#
+        ));
+        assert_eq!(fingerprint_root(r), Err(Unfit::TooBig));
+        // one very long word as well
+        write(&format!(
+            r#"{{"hooks":{{"E":[{{"hooks":[{{"command":"{}"}}]}}]}}}}"#,
+            "a".repeat(5000)
+        ));
+        assert_eq!(fingerprint_root(r), Err(Unfit::TooBig));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_or_outside_link_named_as_a_script_is_refused_not_skipped() {
+        let d = tempfile::tempdir().unwrap();
+        let r = &fs::canonicalize(d.path()).unwrap();
+        fs::create_dir_all(r.join(".synt")).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        fs::write(out.path().join("evil.sh"), "x").unwrap();
+        let hook = |name: &str| {
+            fs::write(
+                r.join(".synt/settings.json"),
+                format!(r#"{{"hooks":{{"E":[{{"hooks":[{{"command":"./{name}"}}]}}]}}}}"#),
+            )
+            .unwrap();
+        };
+        std::os::unix::fs::symlink(out.path().join("evil.sh"), r.join("out.sh")).unwrap();
+        hook("out.sh");
+        assert!(
+            matches!(fingerprint_root(r), Err(Unfit::LinkOutside(_))),
+            "a link out"
+        );
+        std::os::unix::fs::symlink(r.join("nowhere.sh"), r.join("dangling.sh")).unwrap();
+        hook("dangling.sh");
+        assert!(
+            matches!(fingerprint_root(r), Err(Unfit::LinkOutside(_))),
+            "a dangling link"
+        );
+        // a dangling link inside a config folder is refused too
+        fs::write(r.join(".synt/settings.json"), "{}").unwrap();
+        fs::create_dir_all(r.join(".synt/agents")).unwrap();
+        std::os::unix::fs::symlink(r.join("nowhere.md"), r.join(".synt/agents/a.md")).unwrap();
+        assert!(matches!(fingerprint_root(r), Err(Unfit::LinkOutside(_))));
     }
 
     #[test]

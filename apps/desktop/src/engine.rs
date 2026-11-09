@@ -344,6 +344,16 @@ pub fn session_trusted(c: &Common) -> Common {
     let mut c = c.clone();
     c.trust_project = true;
     c.approve_mcp.clear();
+    c.project_exec_inert = false;
+    c
+}
+
+/// The flags of a REMEMBERED trust (and of "Trust this folder (remember)" for the run that follows it): the
+/// project's settings, rules, instructions, agents, skills and memory load, but its hooks and MCP servers stay
+/// inert as when untrusted. Only a trust given for this run (session-only, or `--trust-project`) runs them.
+pub fn remembered_trusted(c: &Common) -> Common {
+    let mut c = session_trusted(c);
+    c.project_exec_inert = true;
     c
 }
 
@@ -430,7 +440,7 @@ pub fn remembered_trust(
 pub fn launch_common(
     c: &Common,
     granted: &Path,
-    trust: Option<&(PathBuf, Option<String>)>,
+    trust: Option<&(PathBuf, Option<String>, bool)>,
     remembered: bool,
     project: &Path,
     synt_home: &Path,
@@ -442,9 +452,14 @@ pub fn launch_common(
         manifest,
         before_compare: None,
     };
-    if let Some((root, manifest)) = trust.filter(|(root, _)| root_of(project) == *root) {
+    if let Some((root, manifest, exec)) = trust.filter(|(root, _, _)| root_of(project) == *root) {
         let chk = manifest.clone().map(|m| check(root, m));
-        return (session_trusted(c), vec![], chk);
+        let c = if *exec {
+            session_trusted(c)
+        } else {
+            remembered_trusted(c)
+        };
+        return (c, vec![], chk);
     }
     let (mut c, note) = common_for(c, granted, project);
     let mut notes: Vec<String> = note.into_iter().collect();
@@ -461,7 +476,7 @@ pub fn launch_common(
             "remembered trust of {shown} is not honoured: the sandbox is not enforcing (a command that can run unconfined could have written it); start with --sandbox enforce, or trust the folder for this session only"
         )),
         Remembered::Trusted(m) => {
-            c = session_trusted(&c);
+            c = remembered_trusted(&c);
             chk = Some(check(&root, m));
         }
         Remembered::Changed { files, since } => notes.push(format!(
@@ -1658,7 +1673,7 @@ mod trust_tests {
             launch_common(
                 &c,
                 Path::new("/none"),
-                Some(&(root.clone(), None)),
+                Some(&(root.clone(), None, true)),
                 true,
                 &a,
                 dir.path(),
@@ -1671,7 +1686,7 @@ mod trust_tests {
             !launch_common(
                 &c,
                 Path::new("/none"),
-                Some(&(root.clone(), None)),
+                Some(&(root.clone(), None, true)),
                 true,
                 &b,
                 dir.path(),

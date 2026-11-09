@@ -146,7 +146,8 @@ fn the_dialog_names_the_root_and_says_when_it_is_not_the_folder_you_are_in() {
     );
     assert!(t.contains("fresh session") && t.contains("hooks"), "{t}");
     assert!(
-        t.contains("is NOT covered") && t.contains("EVERY future start"),
+        t.contains("is NOT covered")
+            && t.contains("never starts the project's hooks or MCP servers"),
         "{t}"
     );
     // a subfolder of a repository: the grant is the repository, and the dialog says so
@@ -230,7 +231,7 @@ fn a_trusted_restart_comes_back_trusted_and_a_broken_project_reports_the_error()
         None,
         Some(Target::Trust),
         None,
-        Some((root, None)),
+        Some((root, None, true)),
         vec![],
     )
     .unwrap();
@@ -255,7 +256,7 @@ fn a_trusted_restart_comes_back_trusted_and_a_broken_project_reports_the_error()
             None,
             Some(Target::Trust),
             None,
-            Some((root, None)),
+            Some((root, None, true)),
             vec![]
         )
         .is_err()
@@ -598,4 +599,111 @@ fn nothing_the_project_names_runs_before_the_trusted_configuration_is_verified()
         !hook_mark.exists(),
         "an untrusted start runs no project hook"
     );
+}
+
+/// A remembered trust never runs the project's commands: with the project's hook and MCP server configured and
+/// even approved on the command line, neither starts and a notice names them; the same project started with
+/// the launch flag (the trust of THIS run) runs both. Settings of the project still load either way.
+#[test]
+fn a_remembered_trust_leaves_project_hooks_and_mcp_servers_inert_and_says_so() {
+    use clap::Parser as _;
+    use synthesis_desktop::engine::{Args, Engine, StartOpts};
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let (ws, home) = (base.join("ws"), base.join("home"));
+    std::fs::create_dir_all(ws.join(".synt")).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let (hook_mark, mcp_mark) = (base.join("hook-ran"), base.join("mcp-ran"));
+    std::fs::write(
+        ws.join(".synt/settings.json"),
+        format!(
+            r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"touch {}"}}]}}]}}}}"#,
+            hook_mark.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join(".mcp.json"),
+        format!(
+            r#"{{"mcpServers":{{"s":{{"command":"sh","args":["-c","touch {}; sleep 1"]}}}}}}"#,
+            mcp_mark.display()
+        ),
+    )
+    .unwrap();
+    let sp = base.join("script.json");
+    std::fs::write(&sp, r#"[{"text": "ok"}]"#).unwrap();
+    let env = Env::from_pairs([
+        ("HOME", home.to_str().unwrap()),
+        ("SYNT_HOME", home.to_str().unwrap()),
+    ]);
+    let model = format!("fake:{}", sp.display());
+    let common = |inert: bool| {
+        let mut c = Args::try_parse_from([
+            "synthesis-desktop",
+            "--sandbox",
+            "off",
+            "--provider",
+            &model,
+            "--trust-project",
+            "--approve-mcp",
+            "s",
+        ])
+        .unwrap()
+        .common;
+        c.project_exec_inert = inert;
+        c
+    };
+    let start = |inert: bool| {
+        let _ = std::fs::remove_file(&hook_mark);
+        let _ = std::fs::remove_file(&mcp_mark);
+        let (e, _rx) = Engine::start_with(
+            StartOpts {
+                project: ws.clone(),
+                common: common(inert),
+                resume: None,
+                notes: vec![],
+                verify: None,
+            },
+            &env,
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        e
+    };
+    let e = start(true);
+    assert!(
+        e.trusted,
+        "the folder is trusted: settings, rules, skills and the rest load"
+    );
+    assert!(!hook_mark.exists(), "a remembered trust ran a project hook");
+    assert!(
+        !mcp_mark.exists(),
+        "a remembered trust started a project MCP server"
+    );
+    let banner = e
+        .notices
+        .iter()
+        .find(|n| n.contains("not started"))
+        .expect("a notice names what was left out");
+    assert!(
+        banner.contains("hook SessionStart") && banner.contains("MCP server s"),
+        "{banner}"
+    );
+    assert!(
+        banner.contains("never runs project commands") && banner.contains("Trust for this session"),
+        "{banner}"
+    );
+    drop(e);
+    // the trust of this run (session-only or the launch flag): both run, and there is no such notice
+    let e = start(false);
+    assert!(
+        hook_mark.exists(),
+        "the hook should run under a trust of this run"
+    );
+    assert!(
+        mcp_mark.exists(),
+        "the MCP server should start under a trust of this run"
+    );
+    assert!(!e.notices.iter().any(|n| n.contains("not started")));
 }

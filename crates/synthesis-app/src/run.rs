@@ -188,6 +188,11 @@ pub struct Common {
     /// Trust `<cwd>/.synt/config.json`, `.synt/settings.json`, agents and (with approval) MCP servers.
     #[arg(long)]
     pub trust_project: bool,
+    /// With a trusted project: its hooks and its MCP servers (the project's commands) stay inert, as when
+    /// untrusted, while its settings, permission rules, instructions, agents, skills and memory load. Set by
+    /// a host for a REMEMBERED trust; never a flag.
+    #[arg(skip)]
+    pub project_exec_inert: bool,
     /// Start this project-scope MCP server (needs --trust-project; repeatable).
     #[arg(long, value_name = "NAME")]
     pub approve_mcp: Vec<String>,
@@ -684,7 +689,7 @@ pub fn prepare(
     } else {
         cfg.clone()
     };
-    let settings = load_settings_with_file(&lc, trust, c.settings.as_deref());
+    let mut settings = load_settings_with_file(&lc, trust, c.settings.as_deref());
     // A settings file we cannot read would silently drop its deny rules: stop before anything runs
     // (`synt run` exits 2).
     if !settings.errors.is_empty() {
@@ -893,6 +898,10 @@ pub fn prepare(
         _ => uuid::Uuid::new_v4().to_string(),
     };
     let artifact_root = h.synthesis.join("sessions").join(&sid);
+    // before the worktree (a git call) and anything else a project's files could cause
+    if let Some(g) = &gate {
+        g()?;
+    }
     let (ws, worktree) = if c.worktree {
         if !extra_dirs.is_empty() {
             eprintln!("synt: warning: additionalDirectories are ignored with --worktree");
@@ -1372,14 +1381,48 @@ pub fn prepare(
             ),
         );
     }
+    // A remembered trust never runs the project's commands: its hooks are replaced by the user's own and its MCP
+    // servers are planned as for an untrusted project. What was left out is named in a notice.
+    let exec_trust = if c.project_exec_inert {
+        ProjectTrust::Untrusted
+    } else {
+        trust
+    };
+    let mut left_out: Vec<String> = vec![];
+    if c.project_exec_inert && trust == ProjectTrust::Trusted {
+        for (ev, groups) in &settings.hooks {
+            let own = user_settings.hooks.get(ev).map_or(0, Vec::len);
+            if groups.len() > own {
+                left_out.push(format!("hook {ev}"));
+            }
+        }
+        settings.hooks = user_settings.hooks.clone();
+    }
     let mut mplan = crate::mcp::plan(
         &user_cfg,
         &settings,
         &user_settings,
         cwd,
-        trust,
+        exec_trust,
         &c.approve_mcp,
     );
+    if c.project_exec_inert && trust == ProjectTrust::Trusted {
+        left_out.extend(
+            mplan
+                .skipped
+                .iter()
+                .filter(|(_, why)| why.starts_with("project not trusted"))
+                .map(|(n, _)| format!("MCP server {n}")),
+        );
+    }
+    if !left_out.is_empty() {
+        let w = format!(
+            "project hooks/MCP servers not started (a remembered trust never runs project commands; use \"Trust for this session\" to run them): {}",
+            sanitize_for_display(&left_out.join(", "))
+        );
+        eprintln!("synt: warning: {w}");
+        notices.push(w);
+    }
     mplan.env_passthrough = crate::mcp::read_passthrough(&h.synthesis.join("settings.json"));
     mplan.guard = crate::mcp::read_guard(
         &h.synthesis.join("settings.json"),
@@ -1402,9 +1445,6 @@ pub fn prepare(
         );
         eprintln!("synt: warning: {w}");
         notices.push(w);
-    }
-    if let Some(g) = &gate {
-        g()?;
     }
     let (mcp, mcp_attach) = if mplan.servers.is_empty() {
         (None, None)

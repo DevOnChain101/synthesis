@@ -121,7 +121,7 @@ pub struct LiveUi {
     pub model_override: Option<String>,
     /// The project root the person trusted for THIS session (Trust dialog): kept over the restarts that
     /// continue the session (`/model`), dropped by any other launch. Never stored.
-    pub session_trust: Option<(PathBuf, Option<String>)>,
+    pub session_trust: Option<(PathBuf, Option<String>, bool)>,
     /// Roots written to the trust store by the answer that restarts the session: removed again when the
     /// trusted restart fails.
     pub pending_remember: Vec<(PathBuf, Option<synthesis_session::trust::TrustRecord>)>,
@@ -1337,7 +1337,7 @@ impl TuiView {
                         ),
                         true,
                     );
-                    lu.session_trust = Some((root, manifest.ok()));
+                    lu.session_trust = Some((root, manifest.ok(), true));
                     return self.switch(Target::Trust, "trust".into(), cx);
                 }
             };
@@ -1394,7 +1394,7 @@ impl TuiView {
                 }
             }
         }
-        lu.session_trust = Some((root, manifest.ok()));
+        lu.session_trust = Some((root, manifest.ok(), grant.remember.is_none()));
         self.switch(Target::Trust, "trust".into(), cx);
     }
 
@@ -1930,7 +1930,7 @@ pub fn build(
     prior: Option<Arc<Engine>>,
     target: Option<Target>,
     model: Option<String>,
-    trust: Option<(PathBuf, Option<String>)>,
+    trust: Option<(PathBuf, Option<String>, bool)>,
     mut notes: Vec<String>,
 ) -> Result<Launched, String> {
     let first_start = prior.is_none() && target.is_none();
@@ -2009,7 +2009,7 @@ pub fn build(
                    resume: Option<synthesis_tui::Resume>,
                    model: Option<String>,
                    notes: Vec<String>,
-                   trust: Option<&(PathBuf, Option<String>)>,
+                   trust: Option<&(PathBuf, Option<String>, bool)>,
                    remembered: bool| {
         let project = resume
             .as_ref()
