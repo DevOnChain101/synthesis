@@ -1176,6 +1176,13 @@ impl Engine {
         Ok(())
     }
 
+    /// What the permission layer says about a tool call now (tests and tools).
+    pub fn check_permission(&self, tool: &str, input: &Value) -> synthesis_permissions::Decision {
+        lock(&self.harness.permissions())
+            .check_current(tool, input)
+            .decision
+    }
+
     /// `!cmd` (`record_only`: `!!cmd`): the harness runs it through the same Bash permission check,
     /// sandbox, hooks and redaction as the TUI's, and appends it with its output to the history.
     /// Plan mode refuses it (stricter than the TUI, which lets a typed command through in plan).

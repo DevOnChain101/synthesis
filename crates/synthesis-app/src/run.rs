@@ -188,9 +188,10 @@ pub struct Common {
     /// Trust `<cwd>/.synt/config.json`, `.synt/settings.json`, agents and (with approval) MCP servers.
     #[arg(long)]
     pub trust_project: bool,
-    /// With a trusted project: its hooks and its MCP servers (the project's commands) stay inert, as when
-    /// untrusted, while its settings, permission rules, instructions, agents, skills and memory load. Set by
-    /// a host for a REMEMBERED trust; never a flag.
+    /// With a trusted project: only its DATA applies (agents, skills, memory, instruction files). Its settings and
+    /// provider config load with the untrusted filter (no allow rules, env, defaultMode, additionalDirectories,
+    /// verification checks, provider connection or credentials, no hooks, no MCP servers). Set by a host for a
+    /// REMEMBERED trust; never a flag.
     #[arg(skip)]
     pub project_exec_inert: bool,
     /// Start this project-scope MCP server (needs --trust-project; repeatable).
@@ -683,13 +684,24 @@ pub fn prepare(
         user_home: &h.user,
         env,
     };
-    let cfg = load_config(env, &h, Some(cwd), trust)?;
+    // A remembered trust (`project_exec_inert`) is deliberately narrower than a trust of this run: the project's
+    // settings and provider config load with the UNTRUSTED filter (only what can narrow; no allow rules, env,
+    // defaultMode, additionalDirectories, verification checks, provider connection or credentials, and
+    // `disableAllHooks` cannot switch off the user's hooks). Agents, skills, memory and instruction files (data,
+    // not execution) still load.
+    let inert = c.project_exec_inert && c.trust_project;
+    let load_trust = if inert {
+        ProjectTrust::Untrusted
+    } else {
+        trust
+    };
+    let cfg = load_config(env, &h, Some(cwd), load_trust)?;
     let user_cfg = if c.trust_project {
         load_config(env, &h, Some(cwd), ProjectTrust::Untrusted)?
     } else {
         cfg.clone()
     };
-    let mut settings = load_settings_with_file(&lc, trust, c.settings.as_deref());
+    let settings = load_settings_with_file(&lc, load_trust, c.settings.as_deref());
     // A settings file we cannot read would silently drop its deny rules: stop before anything runs
     // (`synt run` exits 2).
     if !settings.errors.is_empty() {
@@ -1381,22 +1393,51 @@ pub fn prepare(
             ),
         );
     }
-    // A remembered trust never runs the project's commands: its hooks are replaced by the user's own and its MCP
-    // servers are planned as for an untrusted project. What was left out is named in a notice.
-    let exec_trust = if c.project_exec_inert {
+    // What a remembered trust leaves out is named in a notice. MCP servers are planned as for an untrusted
+    // project, and hooks are already the user's own (the settings above were loaded untrusted).
+    let exec_trust = if inert {
         ProjectTrust::Untrusted
     } else {
         trust
     };
     let mut left_out: Vec<String> = vec![];
-    if c.project_exec_inert && trust == ProjectTrust::Trusted {
-        for (ev, groups) in &settings.hooks {
-            let own = user_settings.hooks.get(ev).map_or(0, Vec::len);
-            if groups.len() > own {
-                left_out.push(format!("hook {ev}"));
+    if inert {
+        let proj = load_settings_with_file(&lc, ProjectTrust::Trusted, c.settings.as_deref());
+        let mut left = |what: &str, present: bool| {
+            if present {
+                left_out.push(what.to_string());
             }
-        }
-        settings.hooks = user_settings.hooks.clone();
+        };
+        left(
+            "hooks",
+            proj.hooks != settings.hooks || proj.disable_all_hooks != settings.disable_all_hooks,
+        );
+        left(
+            "permission allow rules",
+            proj.permissions.allow.len() > settings.permissions.allow.len(),
+        );
+        left(
+            "additionalDirectories",
+            proj.permissions.additional_directories.len()
+                > settings.permissions.additional_directories.len(),
+        );
+        left(
+            "defaultMode",
+            proj.permissions.default_mode != settings.permissions.default_mode,
+        );
+        left("env", proj.env != settings.env);
+        left(
+            "verification checks",
+            proj.synthesis.verification != settings.synthesis.verification,
+        );
+        left(
+            "provider/config (.synt/config.json)",
+            settings
+                .project_root
+                .join(".synt")
+                .join("config.json")
+                .is_file(),
+        );
     }
     let mut mplan = crate::mcp::plan(
         &user_cfg,
@@ -1406,7 +1447,7 @@ pub fn prepare(
         exec_trust,
         &c.approve_mcp,
     );
-    if c.project_exec_inert && trust == ProjectTrust::Trusted {
+    if inert {
         left_out.extend(
             mplan
                 .skipped
@@ -1417,7 +1458,7 @@ pub fn prepare(
     }
     if !left_out.is_empty() {
         let w = format!(
-            "project hooks/MCP servers not started (a remembered trust never runs project commands; use \"Trust for this session\" to run them): {}",
+            "project settings ignored under a remembered trust (it is deliberately narrower than a trust of this run, and than VS Code; use \"Trust for this session\" to apply them): {}",
             sanitize_for_display(&left_out.join(", "))
         );
         eprintln!("synt: warning: {w}");
@@ -1569,7 +1610,7 @@ pub fn prepare(
     }
     // "Allow always" persists to .synt/settings.local.json, but only in a trusted project: an
     // untrusted project's allow rules are ignored on load, so writing them would be misleading.
-    if trust == ProjectTrust::Trusted {
+    if trust == ProjectTrust::Trusted && !inert {
         let root = settings.project_root.clone();
         harness = harness.with_rule_store(Arc::new(move |rules| {
             if let Err(e) = synthesis_settings::persist_allow_rules(&root, rules) {

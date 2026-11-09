@@ -1033,7 +1033,7 @@ impl SettingsView {
             );
         }
         out.push(
-            small("Remembered in your session store, never in a project. Revoking takes effect at the next engine start (a new session, /model or a restart); the open session keeps what it loaded.", t::MUTED)
+            small("Remembered in your session store, never in a project. A remembered trust is deliberately narrower than VS Code: only agents, skills, memory, instructions and the file explorer apply; project hooks, MCP servers, allow rules, env, providers and verification checks need \"Trust for this session\". Revoking takes effect at the next engine start (a new session, /model or a restart); the open session keeps what it loaded.", t::MUTED)
                 .mt(px(4.))
                 .into_any_element(),
         );
