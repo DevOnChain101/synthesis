@@ -306,6 +306,189 @@ pub fn common_for(c: &Common, granted: &Path, cwd: &Path) -> (Common, Option<Str
     (c, note)
 }
 
+/// The refusal rules of `synthesis_session::trust` for the folder a session trust would grant.
+fn trust_policy(home: Option<&Path>, synt_home: &Path) -> synthesis_session::trust::Policy {
+    synthesis_session::trust::Policy {
+        home: home.map(Path::to_path_buf),
+        synt_home: synt_home.to_path_buf(),
+    }
+}
+
+fn refusal_text(what: &str, root: &Path) -> String {
+    format!(
+        "trust not offered: it would trust {what} ({}). Trust a specific project folder instead: start Synthesis in it with --trust-project.",
+        sanitize_for_display(&root.display().to_string())
+    )
+}
+
+/// Why `root` (the folder a session trust would grant) must not be trusted, if so: a filesystem root, the
+/// user's home or a parent of it, or Synthesis's own config folder (or inside it). Such a folder is trusted
+/// only by starting in a specific project folder.
+pub fn trust_refusal(root: &Path, home: Option<&Path>, synt_home: &Path) -> Option<String> {
+    trust_policy(home, synt_home)
+        .root_refusal(root)
+        .map(|w| refusal_text(w, root))
+}
+
+/// The same for a PARENT grant ("all its subfolders"): also the generic containers (temp folders, Downloads,
+/// Desktop, Documents, world-writable and root-owned system folders).
+pub fn parent_refusal(parent: &Path, home: Option<&Path>, synt_home: &Path) -> Option<String> {
+    trust_policy(home, synt_home)
+        .parent_refusal(parent)
+        .map(|w| refusal_text(w, parent))
+}
+
+/// The flags of a session the person trusted in the Trust dialog: `--trust-project`, and NO `--approve-mcp`
+/// carried over from the launch (an MCP server is approved by name and hash, never by an earlier flag).
+pub fn session_trusted(c: &Common) -> Common {
+    let mut c = c.clone();
+    c.trust_project = true;
+    c.approve_mcp.clear();
+    c.project_exec_inert = false;
+    c
+}
+
+/// The flags of a REMEMBERED trust (and of "Trust this folder (remember)" for the run that follows it): only the
+/// project's DATA applies (agents, skills, memory, instruction files, the file explorer). Its settings and
+/// provider config load with the untrusted filter (no hooks, MCP servers, allow rules, env, defaultMode,
+/// additionalDirectories, verification checks or provider connection). Only a trust given for this run
+/// (session-only, or `--trust-project`) applies those.
+pub fn remembered_trusted(c: &Common) -> Common {
+    let mut c = session_trusted(c);
+    c.project_exec_inert = true;
+    c
+}
+
+/// A path as shown to the person: control characters made visible.
+pub fn display_path(p: &Path) -> String {
+    sanitize_for_display(&p.display().to_string())
+}
+
+/// What the USER store says about `project` (never a project file, never anything a tool wrote: rows are
+/// MAC-checked in `synthesis_session::trust`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Remembered {
+    /// No remembered trust covers it.
+    No,
+    /// Trusted, and the project's trusted configuration is what it was (the manifest that was checked).
+    Trusted(String),
+    /// Trusted once, but the configuration differs (or cannot be fingerprinted now): NOT honoured. The files
+    /// that differ, and when it was trusted.
+    Changed { files: Vec<String>, since: String },
+}
+
+/// Looks `project` up. A `folder` record is compared with its own manifest; a `parent` record is compared with
+/// the baseline of this project, which the first start under that grant records (`write_baseline`). A store
+/// that cannot be read trusts nothing.
+pub fn remembered_trust(
+    synt_home: &Path,
+    user_home: Option<&Path>,
+    project: &Path,
+    write_baseline: bool,
+) -> Remembered {
+    use synthesis_session::trust::{self, FOLDER};
+    let Ok(listing) = trust::list(synt_home) else {
+        return Remembered::No;
+    };
+    let policy = trust_policy(user_home, synt_home);
+    let root = root_of(project);
+    let Some(rec) = trust::covers(&listing.records, &root, &policy) else {
+        return Remembered::No;
+    };
+    let now = trust::fingerprint(&root, project);
+    let since = rec
+        .trusted_at
+        .get(..10)
+        .unwrap_or(&rec.trusted_at)
+        .to_string();
+    let changed = |old: &str| match &now {
+        Ok(n) if n == old => Remembered::Trusted(n.clone()),
+        Ok(n) => Remembered::Changed {
+            files: trust::changed_files(old, n),
+            since: since.clone(),
+        },
+        Err(e) => Remembered::Changed {
+            files: vec![e.to_string()],
+            since: since.clone(),
+        },
+    };
+    if rec.scope == FOLDER {
+        return changed(&rec.fingerprint);
+    }
+    match trust::child_of(&listing.records, &root, &policy) {
+        Some(c) => changed(&c.fingerprint),
+        None => {
+            // the first start of this project under the parent grant: it is the baseline from now on
+            match &now {
+                // a baseline that cannot be written is no baseline: not trusted
+                Ok(n)
+                    if write_baseline
+                        && trust::add(synt_home, &root, trust::CHILD, n, &policy).is_err() =>
+                {
+                    Remembered::No
+                }
+                Ok(n) => Remembered::Trusted(n.clone()),
+                Err(_) => changed(""),
+            }
+        }
+    }
+}
+
+/// The flags of one launch and its notices: the session-trusted ones when `trust` names the root of `project`;
+/// else the launch flags as `common_for` leaves them, plus trust when the user store remembers the project, its
+/// trusted configuration is unchanged and the sandbox is enforcing (a shell that can run unconfined could have
+/// written the store; session-only trust and `--trust-project` still work then). A changed configuration starts
+/// the project untrusted with a notice naming the files; the Files tab asks again.
+pub fn launch_common(
+    c: &Common,
+    granted: &Path,
+    trust: Option<&(PathBuf, Option<String>, bool)>,
+    remembered: bool,
+    project: &Path,
+    synt_home: &Path,
+    user_home: Option<&Path>,
+) -> (Common, Vec<String>, Option<TrustCheck>) {
+    let check = |root: &Path, manifest: String| TrustCheck {
+        root: root.to_path_buf(),
+        cwd: project.to_path_buf(),
+        manifest,
+        before_compare: None,
+    };
+    if let Some((root, manifest, exec)) = trust.filter(|(root, _, _)| root_of(project) == *root) {
+        let chk = manifest.clone().map(|m| check(root, m));
+        let c = if *exec {
+            session_trusted(c)
+        } else {
+            remembered_trusted(c)
+        };
+        return (c, vec![], chk);
+    }
+    let (mut c, note) = common_for(c, granted, project);
+    let mut notes: Vec<String> = note.into_iter().collect();
+    if c.trust_project || !remembered {
+        return (c, notes, None);
+    }
+    let enforcing = c.sandbox_mode() == synthesis_terminal::SandboxMode::Enforce;
+    let root = root_of(project);
+    let shown = sanitize_for_display(&root.display().to_string());
+    let mut chk = None;
+    match remembered_trust(synt_home, user_home, project, enforcing) {
+        Remembered::No => {}
+        _ if !enforcing => notes.push(format!(
+            "remembered trust of {shown} is not honoured: the sandbox is not enforcing (a command that can run unconfined could have written it); start with --sandbox enforce, or trust the folder for this session only"
+        )),
+        Remembered::Trusted(m) => {
+            c = remembered_trusted(&c);
+            chk = Some(check(&root, m));
+        }
+        Remembered::Changed { files, since } => notes.push(format!(
+            "project config changed since you trusted it on {since} ({}): {shown} starts untrusted; review the files, then open the Files tab to trust it again",
+            sanitize_for_display(&files.join(", "))
+        )),
+    }
+    (c, notes, chk)
+}
+
 /// `--resume ID` (id or unique prefix) or `--continue` (newest session of the start folder).
 pub fn requested_resume(
     c: &Common,
@@ -378,6 +561,47 @@ pub struct StartOpts {
     pub resume: Option<Resume>,
     /// Lines for the chat's start-up notes (why a relaunch happened, ...).
     pub notes: Vec<String>,
+    /// The configuration the person trusted, checked again once the engine has loaded it and before any
+    /// hook runs (`None`: nothing to check, as with `--trust-project`).
+    pub verify: Option<TrustCheck>,
+}
+
+/// Marks the error of a start that was refused because the trusted configuration changed meanwhile.
+pub const TRUST_CHANGED: &str = "trust-changed";
+
+fn trust_changed_error(files: &[String]) -> String {
+    format!(
+        "{TRUST_CHANGED}: the trusted configuration changed while the session was starting ({})",
+        sanitize_for_display(&files.join(", "))
+    )
+}
+
+/// What was approved: the manifest of `root`'s trusted configuration (session folder `cwd`) when the trust was
+/// decided or stored.
+#[derive(Clone)]
+pub struct TrustCheck {
+    pub root: PathBuf,
+    pub cwd: PathBuf,
+    pub manifest: String,
+    /// Runs just before the comparison (tests change a file here, as a racing writer would).
+    pub before_compare: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl TrustCheck {
+    /// `Err(files)` when the configuration on disk is no longer the approved one (or cannot be fingerprinted).
+    pub fn verify(&self) -> Result<(), Vec<String>> {
+        if let Some(f) = &self.before_compare {
+            f();
+        }
+        match synthesis_session::trust::fingerprint(&self.root, &self.cwd) {
+            Ok(now) if now == self.manifest => Ok(()),
+            Ok(now) => Err(synthesis_session::trust::changed_files(
+                &self.manifest,
+                &now,
+            )),
+            Err(e) => Err(vec![e.to_string()]),
+        }
+    }
 }
 
 /// What `synt run` does around its task, for every task the person starts: MCP mentions and
@@ -512,6 +736,25 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Stops a background process of this session (the Terminal tab's Kill button). The runtime knows only this
+    /// session's processes, so another id is refused. `Ok(true)`: it was running and got the signal; `Ok(false)`:
+    /// it had already exited, nothing was sent.
+    pub fn kill_process(&self, process_id: &str) -> Result<bool, String> {
+        let err = |e: synthesis_terminal::Error| sanitize_for_display(&e.to_string());
+        if !self
+            .rt
+            .get_status(&self.sid, process_id)
+            .map_err(err)?
+            .running
+        {
+            return Ok(false);
+        }
+        self.rt
+            .signal(&self.sid, process_id, synthesis_terminal::Signal::Kill)
+            .map_err(err)?;
+        Ok(true)
+    }
+
     /// Tests and tools: defaults plus a model, provider and sandbox mode. Blocking, like `start_with`.
     pub fn start(
         project: &Path,
@@ -532,6 +775,7 @@ impl Engine {
                 common,
                 resume: None,
                 notes: vec![],
+                verify: None,
             },
             env,
         )
@@ -548,6 +792,7 @@ impl Engine {
             mut common,
             resume,
             notes,
+            verify,
         } = o;
         let (tx, rx) = unbounded();
         let pending: PendingMap = PendingMap::default();
@@ -572,6 +817,12 @@ impl Engine {
                 pending: inputs.clone(),
                 tx: tx.clone(),
             }),
+            // the approved configuration is checked before the project's files are read and before any MCP
+            // server starts (hooks run later still, after the check that follows `prepare`)
+            pre_start: verify.clone().map(|v| {
+                Arc::new(move || v.verify().map_err(|files| trust_changed_error(&files)))
+                    as synthesis_app::run::PreStart
+            }),
         };
         let p = prepare(
             &common,
@@ -580,6 +831,10 @@ impl Engine {
             &Limits::default(),
             Front::Native(native),
         )?;
+        // the configuration is loaded now and no hook has run yet: it must still be what the person approved
+        if let Some(Err(files)) = verify.as_ref().map(TrustCheck::verify) {
+            return Err(trust_changed_error(&files));
+        }
         let Prepared {
             harness,
             context,
@@ -924,6 +1179,16 @@ impl Engine {
         Ok(())
     }
 
+    /// What the permission layer says about a tool call now. For tests only: not in release builds, hidden from
+    /// the docs (the integration tests compile against the library with default features).
+    #[doc(hidden)]
+    #[cfg(debug_assertions)]
+    pub fn check_permission(&self, tool: &str, input: &Value) -> synthesis_permissions::Decision {
+        lock(&self.harness.permissions())
+            .check_current(tool, input)
+            .decision
+    }
+
     /// `!cmd` (`record_only`: `!!cmd`): the harness runs it through the same Bash permission check,
     /// sandbox, hooks and redaction as the TUI's, and appends it with its output to the history.
     /// Plan mode refuses it (stricter than the TUI, which lets a typed command through in plan).
@@ -1247,6 +1512,230 @@ pub fn close_shared(mut e: Arc<Engine>) -> Option<String> {
     }
     eprintln!("synthesis-desktop: the engine is still in use; its session was not closed cleanly");
     None
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::*;
+
+    #[test]
+    fn roots_that_must_not_be_trusted_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(dir.path()).unwrap();
+        let (home, synt) = (base.join("home"), base.join("home/.synt"));
+        std::fs::create_dir_all(&synt).unwrap();
+        let proj = home.join("work/app");
+        std::fs::create_dir_all(&proj).unwrap();
+        let why = |r: &Path| trust_refusal(r, Some(&home), &synt);
+        assert!(why(&proj).is_none());
+        assert!(why(&home).unwrap().contains("home folder"));
+        assert!(
+            why(&base).unwrap().contains("home folder"),
+            "a parent of home"
+        );
+        assert!(why(&synt).unwrap().contains("config folder"));
+        assert!(
+            why(&synt.join("sessions"))
+                .unwrap()
+                .contains("config folder")
+        );
+        // a filesystem root, spelled the way this platform spells it (`/` or `C:\`)
+        let fs_root = base.ancestors().last().unwrap();
+        assert!(why(fs_root).unwrap().contains("filesystem root"));
+        // an unknown home fails closed
+        assert!(
+            trust_refusal(&proj, None, &synt)
+                .unwrap()
+                .contains("home folder is unknown")
+        );
+    }
+
+    #[test]
+    fn a_remembered_trust_is_honoured_only_while_unchanged_enforcing_and_checked() {
+        use synthesis_session::trust;
+        let dir = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(dir.path()).unwrap();
+        let (home, uhome, proj, sib, sub) = (
+            base.join("home"),
+            base.join("uhome"),
+            base.join("w/app"),
+            base.join("w/app2"),
+            base.join("w/app/sub"),
+        );
+        for d in [&home, &uhome, &proj, &sib, &sub] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let policy = trust_policy(Some(&uhome), &home);
+        let c = Defaults::try_parse_from(["x", "--sandbox", "enforce", "--approve-mcp", "db"])
+            .unwrap()
+            .c;
+        let go = |c: &Common, p: &Path| {
+            let (c, n, _) =
+                launch_common(c, Path::new("/none"), None, true, p, &home, Some(&uhome));
+            (c, n)
+        };
+        assert!(!go(&c, &proj).0.trust_project, "nothing remembered yet");
+        let fp = |p: &Path| trust::fingerprint(p, p).unwrap();
+        trust::add(&home, &proj, trust::FOLDER, &fp(&proj), &policy).unwrap();
+        let (t, notes) = go(&c, &proj);
+        assert!(t.trust_project && t.approve_mcp.is_empty() && notes.is_empty());
+        assert!(!go(&c, &sib).0.trust_project, "a sibling is not trusted");
+        assert!(
+            !go(&c, &sub).0.trust_project,
+            "a folder grant is not inherited by a subfolder"
+        );
+        // the configuration changed since: NOT honoured, the files are named, the folder starts untrusted
+        std::fs::create_dir_all(proj.join(".synt")).unwrap();
+        std::fs::write(proj.join(".synt/settings.json"), "{\"hooks\":{}}").unwrap();
+        let (t, notes) = go(&c, &proj);
+        assert!(!t.trust_project);
+        assert!(
+            notes.len() == 1
+                && notes[0].contains(".synt/settings.json")
+                && notes[0].contains("untrusted"),
+            "{notes:?}"
+        );
+        match remembered_trust(&home, Some(&uhome), &proj, false) {
+            Remembered::Changed { files, .. } => assert_eq!(files, [".synt/settings.json"]),
+            o => panic!("{o:?}"),
+        }
+        // trusting it again records the new manifest: honoured again
+        trust::add(&home, &proj, trust::FOLDER, &fp(&proj), &policy).unwrap();
+        assert!(go(&c, &proj).0.trust_project);
+        // a sandbox that is not enforcing disables remembered trust (and says so); the launch flag is untouched
+        let off = Defaults::try_parse_from(["x", "--sandbox", "off"])
+            .unwrap()
+            .c;
+        let (t, notes) = go(&off, &proj);
+        assert!(
+            !t.trust_project && notes.iter().any(|n| n.contains("not honoured")),
+            "{notes:?}"
+        );
+        let best = Defaults::try_parse_from(["x", "--sandbox", "best-effort"])
+            .unwrap()
+            .c;
+        assert!(!go(&best, &proj).0.trust_project);
+        let flag = Defaults::try_parse_from(["x", "--sandbox", "off", "--trust-project"])
+            .unwrap()
+            .c;
+        assert!(
+            launch_common(
+                &flag,
+                &root_of(&proj),
+                None,
+                true,
+                &proj,
+                &home,
+                Some(&uhome)
+            )
+            .0
+            .trust_project
+        );
+        // without the key the rows cannot be verified: nothing is honoured
+        let key = home.join("run/trust.key");
+        let kept = std::fs::read(&key).unwrap();
+        std::fs::remove_file(&key).unwrap();
+        assert!(!go(&c, &proj).0.trust_project);
+        std::fs::write(&key, kept).unwrap();
+        assert!(go(&c, &proj).0.trust_project);
+        // a revoked root trusts nothing again
+        trust::revoke(&home, &proj.to_string_lossy()).unwrap();
+        assert!(!go(&c, &proj).0.trust_project);
+        // a parent grant covers what is inside it: each project is baselined at its first start, then checked
+        let parent = base.join("w");
+        trust::add(&home, &parent, trust::PARENT, "", &policy).unwrap();
+        assert!(go(&c, &proj).0.trust_project && go(&c, &sib).0.trust_project);
+        assert!(!go(&c, &base.join("elsewhere")).0.trust_project);
+        std::fs::write(sib.join(".mcp.json"), "{}").unwrap();
+        let (t, notes) = go(&c, &sib);
+        assert!(
+            !t.trust_project && notes[0].contains(".mcp.json"),
+            "{notes:?}"
+        );
+        assert!(
+            go(&c, &proj).0.trust_project,
+            "the other project is unchanged"
+        );
+    }
+
+    #[test]
+    fn the_parent_refusal_covers_containers_and_the_refusals_cover_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(dir.path()).unwrap();
+        let (home, synt) = (base.join("h"), base.join("h/.synt"));
+        std::fs::create_dir_all(home.join("Downloads")).unwrap();
+        std::fs::create_dir_all(home.join("src")).unwrap();
+        std::fs::create_dir_all(&synt).unwrap();
+        let p = |d: &Path| parent_refusal(d, Some(&home), &synt);
+        assert!(p(&home.join("src")).is_none());
+        assert!(p(&home.join("Downloads")).unwrap().contains("catch-all"));
+        // the temp folder is refused (as a temporary folder, or, when this test's home lies inside it, as a
+        // parent of home: either reason keeps it from being a parent grant)
+        let why_tmp = p(&std::env::temp_dir()).unwrap();
+        assert!(
+            why_tmp.contains("temporary") || why_tmp.contains("home folder"),
+            "{why_tmp}"
+        );
+        #[cfg(unix)]
+        assert!(p(Path::new("/tmp")).is_some());
+        let fs_root = base.ancestors().last().unwrap();
+        assert!(p(&home).is_some() && p(fs_root).is_some());
+        // the root rules still allow a folder grant in Downloads
+        assert!(trust_refusal(&home.join("Downloads/proj"), Some(&home), &synt).is_none());
+    }
+
+    #[test]
+    fn a_session_trust_drops_the_mcp_approvals_of_the_launch() {
+        let c = Defaults::try_parse_from([
+            "x",
+            "--approve-mcp",
+            "db",
+            "--approve-mcp",
+            "web@abcdef1234",
+        ])
+        .unwrap()
+        .c;
+        assert!(!c.trust_project && c.approve_mcp.len() == 2);
+        let t = session_trusted(&c);
+        assert!(t.trust_project && t.approve_mcp.is_empty());
+        // the root named must be the project's: another project does not inherit the grant
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let root = root_of(&a);
+        assert!(
+            launch_common(
+                &c,
+                Path::new("/none"),
+                Some(&(root.clone(), None, true)),
+                true,
+                &a,
+                dir.path(),
+                None
+            )
+            .0
+            .trust_project
+        );
+        assert!(
+            !launch_common(
+                &c,
+                Path::new("/none"),
+                Some(&(root.clone(), None, true)),
+                true,
+                &b,
+                dir.path(),
+                None
+            )
+            .0
+            .trust_project
+        );
+        assert!(
+            !launch_common(&c, Path::new("/none"), None, true, &a, dir.path(), None)
+                .0
+                .trust_project
+        );
+    }
 }
 
 #[cfg(test)]

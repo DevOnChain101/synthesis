@@ -651,8 +651,7 @@ impl TuiView {
             .collect();
         let tab_click = |i: usize| -> panels::OnClick {
             Box::new(cx.listener(move |this, _, _, cx| {
-                this.ts.tab = ChatTab::ALL[i];
-                cx.notify();
+                this.select_tab(ChatTab::ALL[i], cx);
             }))
         };
         let strip = chrome::tabs(
@@ -880,6 +879,7 @@ impl Render for TuiView {
         let motion = self.live.as_ref().is_some_and(|l| l.cfg.tui.motion);
         // a spinner or a blink in the Running list is repainted every frame too
         if self.attention() == Some(true)
+            || self.pointer_animating()
             || self
                 .live
                 .as_ref()
@@ -1049,6 +1049,31 @@ mod tests {
         view.update(vcx, |t, _| t.set_live(live("a")));
         draw(vcx);
         assert_eq!(view.read_with(vcx, |t, _| t.ts.tab), ChatTab::Diff);
+    }
+
+    /// Opening Files in an untrusted folder reads nothing from it: no scan starts, the tree holds only the note.
+    #[gpui::test]
+    fn the_files_tab_does_no_scan_in_an_untrusted_folder(cx: &mut TestAppContext) {
+        use crate::live::Live;
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let mut l = Live::new();
+        l.starting = false;
+        l.cwd = "/nonexistent/untrusted-project".into();
+        assert!(!l.trusted);
+        view.update(vcx, |t, _| t.set_live(l));
+        view.update(vcx, |t, cx| {
+            t.select_tab(ChatTab::Files, cx);
+            t.tabs_tick(cx);
+        });
+        vcx.run_until_parked();
+        view.read_with(vcx, |t, _| {
+            assert!(!t.tree.loading, "no background scan was started");
+            let note = t.tree.data.as_ref().and_then(|d| d.note.clone());
+            assert_eq!(note.as_deref(), Some(tabs::UNTRUSTED));
+        });
     }
 
     #[gpui::test]
@@ -1329,5 +1354,61 @@ mod tests {
             (0, true, None),
             "picked: the chip is set"
         );
+    }
+
+    /// The close-workspace confirmation is a dialog like the others: under Settings no key reaches it
+    /// (Enter, Down, Esc change nothing), and on screen an Enter typed ahead picks nothing.
+    #[gpui::test]
+    fn the_close_workspace_dialog_ignores_keys_while_hidden(cx: &mut TestAppContext) {
+        use crate::live::Live;
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let mut l = Live::new();
+        l.starting = false;
+        l.view.workspaces.workspaces = vec![synthesis_view::workspaces::WorkspaceRow {
+            root: "/w/other".into(),
+            key: "other".into(),
+            label: "other".into(),
+            sessions: vec![synthesis_view::workspaces::SessionRow {
+                id: "a".into(),
+                title: "t".into(),
+                status: synthesis_core::SessionStatus::Idle,
+                updated_at: String::new(),
+                mtime: 0,
+                is_live: false,
+            }],
+            available: true,
+            changes: None,
+        }];
+        l.ask_close_workspace(Some("other"), 0);
+        l.dialogs[0].armed_until = 0;
+        view.update(vcx, |t, _| t.set_live(l));
+        let state = |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext| {
+            view.read_with(vcx, |t, _| {
+                let d = &t.live.as_ref().unwrap().live.dialogs;
+                (d.len(), d.first().map(|d| (d.sel, d.engaged)))
+            })
+        };
+        let press =
+            |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext, k: &'static str| {
+                let ks = gpui::Keystroke::parse(k).unwrap();
+                view.update_in(vcx, |t, window, cx| t.on_key(&ks, window, cx))
+            };
+        view.update(vcx, |t, _| t.shown = false);
+        for k in ["enter", "down", "1", "2", "escape"] {
+            assert!(!press(&view, vcx, k));
+        }
+        assert_eq!(state(&view, vcx), (1, Some((0, false))), "untouched");
+        view.update(vcx, |t, _| t.shown = true);
+        press(&view, vcx, "enter");
+        assert_eq!(
+            state(&view, vcx),
+            (1, Some((0, false))),
+            "typed ahead picks nothing"
+        );
+        press(&view, vcx, "escape");
+        assert_eq!(state(&view, vcx).0, 0, "Esc cancels");
     }
 }

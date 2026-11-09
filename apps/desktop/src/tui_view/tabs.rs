@@ -31,7 +31,7 @@ use crate::widgets::panes::{self, note};
 pub const PREVIEW_BYTES: usize = 256 * 1024;
 pub const PREVIEW_LINES: usize = 2000;
 
-pub const UNTRUSTED: &str = "The project tree is listed in a trusted folder only (git runs nowhere else): start with --trust-project";
+pub const UNTRUSTED: &str = "This folder is not trusted, so the project tree is not listed (git runs only in a trusted folder). Click the Files tab to be asked again, or start with --trust-project";
 
 /// A file read for the preview.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,6 +109,12 @@ pub struct TabState {
     pub diff_init: bool,
     /// The saved browser frame shown (`None`: the latest).
     pub frame: Option<usize>,
+    /// Commands (by id) of the terminal tab shown whole instead of their last 5 lines.
+    pub term_open: HashSet<String>,
+    /// Background processes the person stopped with Kill.
+    pub killed: HashSet<String>,
+    /// What the terminal tab showed last (commands, output lines, running): a change scrolls to the newest.
+    pub term_sig: (usize, usize, usize),
     /// Directories of the file explorer that are open; changed files' parents open by themselves once.
     pub tree_open: HashSet<String>,
     pub tree_init: bool,
@@ -186,9 +192,24 @@ pub fn dirs_of_changes(d: &ProjectData) -> HashSet<String> {
 }
 
 impl TuiView {
+    /// A click or key on a tab. Opening Files in an untrusted folder raises the Trust dialog (nothing is read
+    /// from the folder until it is accepted); every opening asks again after a "Not now".
+    pub(super) fn select_tab(&mut self, tab: ChatTab, cx: &mut Context<Self>) {
+        self.ts.tab = tab;
+        if tab == ChatTab::Files
+            && let Some(lu) = &mut self.live
+            && lu
+                .live
+                .ask_trust(crate::live::now_ms(), lu.cfg.home.as_deref().map(Path::new))
+        {
+            lu.dirty = true;
+        }
+        cx.notify();
+    }
+
     /// Sets the tab and, when asked, what it shows (`/diff FILE`).
     pub(super) fn show_tab(&mut self, tab: ChatTab, file: Option<String>, cx: &mut Context<Self>) {
-        self.ts.tab = tab;
+        self.select_tab(tab, cx);
         if let (ChatTab::Diff, Some(f)) = (tab, file) {
             let found = self.live.as_ref().and_then(|l| {
                 l.live
@@ -220,12 +241,78 @@ impl TuiView {
             self.ts.diff_open.insert(p);
             self.ts.diff_init = true;
         }
+        if self.ts.tab == ChatTab::Terminal {
+            let c = &lu.live.view.panes.commands;
+            let sig = (
+                c.len(),
+                c.iter().map(|c| c.tail.len()).sum(),
+                c.iter()
+                    .filter(|c| c.state == synthesis_view::agent::CmdState::Running)
+                    .count(),
+            );
+            if sig != self.ts.term_sig {
+                self.ts.term_sig = sig;
+                self.pane_scroll.scroll_to_bottom();
+            }
+        }
         if self.ts.tab == ChatTab::Files {
-            let stale = self.tree.for_cwd != lu.live.cwd || self.tree.at_changes != changes;
+            // a note from before the folder was trusted gives way to the real listing
+            let stale = self.tree.for_cwd != lu.live.cwd
+                || self.tree.at_changes != changes
+                || (lu.live.trusted && self.tree.data.as_ref().is_some_and(|d| d.note.is_some()));
             if (self.tree.data.is_none() || stale) && !self.tree.loading {
                 self.request_scan(cx);
             }
         }
+    }
+
+    /// The Browser tab shows the agent cursor and motion is on: the ring pulses and the cursor fades, so the
+    /// window repaints every frame meanwhile.
+    pub(super) fn pointer_animating(&self) -> bool {
+        let Some(lu) = &self.live else { return false };
+        self.ts.tab == ChatTab::Browser
+            && lu.cfg.tui.motion
+            && lu.live.view.panes.pointer.as_ref().is_some_and(|p| {
+                p.ts.is_some_and(|ts| {
+                    crate::live::now_ms() - ts < panes::POINTER_HOLD_MS + panes::POINTER_FADE_MS
+                })
+            })
+    }
+
+    /// The chat scrolls to the tool row `call_id` (the diff tab's "chat" button). Nothing if the row is gone.
+    fn jump_to_tool(&mut self, call_id: &str, cx: &mut Context<Self>) {
+        let Some(lu) = &self.live else { return };
+        let at = lu.live.view.convo.items.iter().position(
+            |i| matches!(i, synthesis_view::convo::Item::Tool { id, .. } if id == call_id),
+        );
+        match at {
+            Some(anchor) => self.jump_to_item(anchor, cx),
+            None => {
+                self.ts.tab = ChatTab::Chat;
+                cx.notify();
+            }
+        }
+    }
+
+    /// The Kill button of a running background process: the person's own stop of a process of THIS session
+    /// (the terminal runtime refuses any other id); it is not a model tool call and needs no approval.
+    fn kill_process(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        let Some(e) = lu.live.engine.clone() else {
+            return;
+        };
+        match e.kill_process(id) {
+            Ok(true) => {
+                self.ts.killed.insert(id.to_string());
+                lu.live.note(format!("process {id} stopped by you"), false);
+            }
+            Ok(false) => lu
+                .live
+                .note(format!("{id} had already exited: nothing was sent"), false),
+            Err(why) => lu.live.note(format!("could not stop {id}: {why}"), true),
+        }
+        lu.dirty = true;
+        cx.notify();
     }
 
     /// Reads the project tree off the UI thread (git, read-only); an untrusted folder only gets the note.
@@ -359,9 +446,33 @@ impl TuiView {
                         cx.notify();
                     }))
                 };
-                panes::diff(live, &self.ts.diff_open, &toggle)
+                let jump = |call: String| -> OnClick {
+                    Box::new(cx.listener(move |this, _, _, cx| this.jump_to_tool(&call, cx)))
+                };
+                panes::diff(live, &self.ts.diff_open, &toggle, &jump)
             }
-            ChatTab::Terminal => panes::commands(live),
+            ChatTab::Terminal => {
+                let toggle = |id: String| -> OnClick {
+                    Box::new(cx.listener(move |this, _, _, cx| {
+                        if !this.ts.term_open.remove(&id) {
+                            this.ts.term_open.insert(id.clone());
+                        }
+                        cx.notify();
+                    }))
+                };
+                let kill = |id: String| -> OnClick {
+                    Box::new(cx.listener(move |this, _, _, cx| this.kill_process(&id, cx)))
+                };
+                panes::commands(
+                    live,
+                    &panes::TermView {
+                        open: &self.ts.term_open,
+                        killed: &self.ts.killed,
+                        toggle: &toggle,
+                        kill: &kill,
+                    },
+                )
+            }
             ChatTab::Browser => {
                 let home = self.live.as_ref().map(|l| l.cfg.synthesis_home.clone());
                 let pick = |i: usize| -> OnClick {
@@ -370,7 +481,16 @@ impl TuiView {
                         cx.notify();
                     }))
                 };
-                panes::browser(live, self.ts.frame, tz, home.as_deref(), &pick)
+                let motion = self.live.as_ref().is_none_or(|l| l.cfg.tui.motion);
+                panes::browser(
+                    live,
+                    self.ts.frame,
+                    tz,
+                    home.as_deref(),
+                    &pick,
+                    crate::live::now_ms(),
+                    motion,
+                )
             }
             ChatTab::Files => return self.files_tab(cx),
         };

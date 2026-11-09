@@ -63,7 +63,7 @@ fn start(
     target: Option<Target>,
     model: Option<String>,
 ) -> Launched {
-    build(&r.cfg, r.ws.clone(), prior, target, model, vec![]).expect("engine starts")
+    build(&r.cfg, r.ws.clone(), prior, target, model, None, vec![]).expect("engine starts")
 }
 
 /// The caller of `build` gives a `/close` the folder of the session it closes.
@@ -80,6 +80,7 @@ fn start_in(
         Some(prior),
         Some(target),
         model,
+        None,
         vec![],
     )
     .expect("engine starts")
@@ -221,7 +222,7 @@ fn close_workspace_closes_ours_spares_what_another_process_holds_and_other_folde
     engine::close_shared(Arc::new(old.engine));
     let elsewhere = r.cfg.project.parent().unwrap().join("elsewhere");
     std::fs::create_dir_all(&elsewhere).unwrap();
-    let mut far = build(&r.cfg, elsewhere.clone(), None, None, None, vec![]).unwrap();
+    let mut far = build(&r.cfg, elsewhere.clone(), None, None, None, None, vec![]).unwrap();
     run_prompt(&mut far, "far away");
     let far_sid = far.engine.sid.clone();
     engine::close_shared(Arc::new(far.engine));
