@@ -643,6 +643,13 @@ impl Engine {
                 argument_hint: "<path>".into(),
                 local: true,
             }))
+            .chain(std::iter::once(Command {
+                name: "context".into(),
+                aliases: vec![],
+                description: "set (or unset) the context window of the model in use".into(),
+                argument_hint: "<tokens|unset>".into(),
+                local: true,
+            }))
             .chain(std::iter::once(crate::live::send_command()))
             .chain(std::iter::once(crate::live::rewind_command()))
             .chain(

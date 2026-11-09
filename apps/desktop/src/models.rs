@@ -60,7 +60,7 @@ pub fn window_note(env: &Env, project: &Path, label: &str) -> String {
         (None, why) => {
             let (p, m) = label.split_once('/').unwrap_or(("provider", label));
             format!(
-                "unknown ({why}); compaction assumes 200k. Set limit.context for \"{m}\" under providers.{p}.models in synt.json"
+                "unknown ({why}); compaction assumes 200k. Set it: /context <tokens> (e.g. /context 1m) writes limit.context for \"{m}\" under providers.{p}.models in synt.json"
             )
         }
     }

@@ -105,6 +105,8 @@ pub enum Action {
     RefreshModels,
     /// `/open <path>`: a typed folder path as a new workspace.
     Open(String),
+    /// `/context <tokens|unset>`: the window of the model in use, written to the user synt.json.
+    SetContext(String),
     Resume(String),
     /// A fresh session in the selected workspace.
     New,
@@ -330,7 +332,11 @@ pub fn panels_command() -> Command {
 
 pub fn is_wired(name: &str) -> bool {
     // `open`, `send`, `panels`, `doctor` and `rewind` exist only in the desktop app
-    WIRED.contains(&name) || matches!(name, "open" | "send" | "panels" | "doctor" | "rewind")
+    WIRED.contains(&name)
+        || matches!(
+            name,
+            "open" | "send" | "panels" | "doctor" | "rewind" | "context"
+        )
 }
 
 /// `/rewind` is the desktop's own command too: the engine's list has none.
@@ -461,6 +467,8 @@ pub struct Live {
     pub held_prompt: Option<String>,
     /// A prompt handed back unsent (Esc in that picker, a failed switch): the window puts it in the input box.
     pub returned_prompt: Option<String>,
+    /// Notes shown once the next engine is attached (the conversation is rebuilt on a restart).
+    pub after_attach: Vec<String>,
     /// What the open memory confirmation will do if the person says yes.
     pub mem_pending: Option<(crate::memory_ui::Pending, String)>,
 }
@@ -524,6 +532,7 @@ impl Live {
             stale_model: None,
             held_prompt: None,
             returned_prompt: None,
+            after_attach: vec![],
             mem_pending: None,
         }
     }
@@ -549,6 +558,9 @@ impl Live {
         }
         for n in &engine.notices {
             self.note(n.clone(), false);
+        }
+        for n in std::mem::take(&mut self.after_attach) {
+            self.note(n, false);
         }
         self.stale_model = engine.stale_model.clone();
         self.model_pick = None;
@@ -894,6 +906,22 @@ impl Live {
     /// [`Live::pick`] / [`Live::reject`].
     pub fn answer(&mut self, key: &str, now: i64) -> Option<Action> {
         if self.dialogs.is_empty() {
+            return None;
+        }
+        // "Set the context window": the picker closes and the input box gets `/context `
+        if key == "context"
+            && matches!(
+                self.dialogs[0].kind,
+                DialogKind::Picker {
+                    kind: PickerKind::Model,
+                    ..
+                }
+            )
+        {
+            self.dialogs.remove(0);
+            self.close_model_pick();
+            self.returned_prompt = Some("/context ".into());
+            self.context_info();
             return None;
         }
         // the model picker's Refresh and error rows act without closing it
@@ -1492,6 +1520,8 @@ impl Live {
             "model" => return Submitted::Do(Action::Model(arg.into())),
             "open" if arg.is_empty() => self.note("/open: type a folder path", true),
             "open" => return Submitted::Do(Action::Open(arg.into())),
+            "context" if arg.is_empty() => self.context_info(),
+            "context" => return Submitted::Do(Action::SetContext(arg.into())),
             "effort" => self.set_effort(arg),
             "mcp" | "memory" | "agents" | "permissions" | "status" | "name" | "rename"
                 if self.engine.is_none() =>
@@ -1716,6 +1746,17 @@ impl Live {
     }
 
     /// `/status`: session, model, mode, context, verification.
+    /// `/context` alone: the window in use and where it comes from, and how to set it.
+    fn context_info(&mut self) {
+        let Some(e) = &self.engine else { return };
+        let msg = format!(
+            "context window of {}: {}\nType a size to set it: /context 1m, /context 200k, /context 128000; /context unset removes it (written to your synt.json)",
+            e.label,
+            sanitize_for_display(&e.context_source)
+        );
+        self.note(msg, false);
+    }
+
     fn status(&mut self) {
         let Some(e) = &self.engine else { return };
         let verification = self
@@ -1960,6 +2001,12 @@ impl Live {
                 .iter()
                 .map(|x| ("info".to_string(), format!("! refresh failed - {x}"))),
         );
+        if self.held_prompt.is_none() {
+            options.push((
+                "context".into(),
+                "Set the context window of the model in use...".into(),
+            ));
+        }
         let first = options.len();
         options.extend(shown.iter().map(|r| {
             let mark = if r.value == current { "*" } else { " " };

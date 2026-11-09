@@ -123,6 +123,104 @@ pub fn window_source(cfg: &Config, synthesis_home: &Path, label: &str) -> (Optio
     (None, why)
 }
 
+/// `200000`, `200k`, `1m`, `1.5m`, `200,000` -> tokens, 1k..=100M (the range a provider answer is
+/// also held to).
+pub fn parse_tokens(input: &str) -> Result<u64, String> {
+    let t: String = input
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|c| !matches!(c, ',' | '_'))
+        .collect();
+    let (num, mult) = match t.strip_suffix('k') {
+        Some(n) => (n, 1e3),
+        None => match t.strip_suffix('m') {
+            Some(n) => (n, 1e6),
+            None => (t.as_str(), 1.0),
+        },
+    };
+    let bad = || {
+        format!(
+            "\"{}\" is not a token count (e.g. 200000, 200k, 1m)",
+            input.trim()
+        )
+    };
+    let v = num.parse::<f64>().map_err(|_| bad())? * mult;
+    if !v.is_finite() || v.fract().abs() > 1e-6 {
+        return Err(bad());
+    }
+    let v = v.round() as u64;
+    if !(1_000..=100_000_000).contains(&v) {
+        return Err(format!("{v} tokens is outside 1k..100M"));
+    }
+    Ok(v)
+}
+
+/// Sets (`Some`) or removes (`None`) `providers.<provider>.models.<model>.limit.context` in the
+/// USER synt.json and nothing else: other keys and their order stay, credential fields are neither
+/// read nor shown, a file that does not parse or a symlink is refused, a project or managed file
+/// is never opened. The provider must already be in the file with an object-form `models`.
+pub fn set_context_limit(
+    synthesis_home: &Path,
+    provider: &str,
+    model: &str,
+    tokens: Option<u64>,
+) -> Result<(), String> {
+    use serde_json::{Map, Value};
+    let path = synthesis_home.join("synt.json");
+    if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!(
+            "{} is a symbolic link; edit the real file by hand",
+            path.display()
+        ));
+    }
+    let no = |why: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, why);
+    synthesis_settings::edit_json_atomic(&path, "synt.json", |root| {
+        let prov = root
+            .get_mut("providers")
+            .and_then(|p| p.get_mut(provider))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| no(format!("provider \"{provider}\" is not in your synt.json")))?;
+        let models = match prov.get_mut("models") {
+            Some(Value::Object(m)) => m,
+            _ => {
+                return Err(no(format!(
+                    "providers.{provider}.models in synt.json is not an object of models: declare the model there first"
+                )));
+            }
+        };
+        match tokens {
+            Some(n) => {
+                let entry = models
+                    .entry(model.to_string())
+                    .or_insert_with(|| Value::Object(Map::new()));
+                let entry = entry
+                    .as_object_mut()
+                    .ok_or_else(|| no(format!("the entry of \"{model}\" is not an object")))?;
+                let limit = entry
+                    .entry("limit")
+                    .or_insert_with(|| Value::Object(Map::new()));
+                limit
+                    .as_object_mut()
+                    .ok_or_else(|| no("\"limit\" is not an object".into()))?
+                    .insert("context".into(), Value::from(n));
+            }
+            None => {
+                if let Some(entry) = models.get_mut(model).and_then(Value::as_object_mut)
+                    && let Some(limit) = entry.get_mut("limit").and_then(Value::as_object_mut)
+                {
+                    limit.remove("context");
+                    if limit.is_empty() {
+                        entry.remove("limit");
+                    }
+                }
+            }
+        }
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +366,143 @@ mod tests {
             window_source(&c, home.path(), "antigravity/gemini-3.8-flash-low").0,
             None
         );
+    }
+
+    fn home_with(json: &str) -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("synt.json"), json).unwrap();
+        d
+    }
+
+    const FILE: &str = r#"{"$schema":"config.json/v1","model":"omniroute/a","providers":{"omniroute":{"options":{"baseURL":"http://x/v1","apiKey":"{env:OMNI_KEY}"},"discover":true,"models":{"a":{"name":"A","capabilities":{"toolCalling":true}},"b":{}}},"other":{}}}"#;
+
+    #[test]
+    fn token_counts_parse_with_suffixes_and_are_range_checked() {
+        for (i, n) in [
+            ("200000", 200_000),
+            ("200k", 200_000),
+            ("1m", 1_000_000),
+            ("1.5M", 1_500_000),
+            ("200,000", 200_000),
+            (" 64K ", 64_000),
+        ] {
+            assert_eq!(parse_tokens(i), Ok(n), "{i}");
+        }
+        for bad in [
+            "", "abc", "999", "0", "-5k", "101m", "1.2345k", "nan", "1e9",
+        ] {
+            assert!(parse_tokens(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_limit_is_set_and_removed_and_nothing_else_changes() {
+        let d = home_with(FILE);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                d.path().join("synt.json"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+        }
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(d.path().join("synt.json")).unwrap())
+                .unwrap()
+        };
+        set_context_limit(d.path(), "omniroute", "a", Some(1_000_000)).unwrap();
+        let v = read();
+        assert_eq!(
+            v["providers"]["omniroute"]["models"]["a"]["limit"]["context"],
+            1_000_000
+        );
+        // extra keys, the credential reference and the order are kept
+        let mut want: serde_json::Value = serde_json::from_str(FILE).unwrap();
+        want["providers"]["omniroute"]["models"]["a"]["limit"] =
+            serde_json::json!({"context": 1_000_000});
+        assert_eq!(v, want);
+        assert_eq!(
+            v["providers"]["omniroute"]["options"]["apiKey"],
+            "{env:OMNI_KEY}"
+        );
+        assert_eq!(v.as_object().unwrap().keys().next().unwrap(), "$schema");
+        // another model gets its own entry; `limit` of the first stays
+        set_context_limit(d.path(), "omniroute", "b", Some(64_000)).unwrap();
+        assert_eq!(
+            read()["providers"]["omniroute"]["models"]["b"]["limit"]["context"],
+            64_000
+        );
+        // unset removes the number and the empty `limit`, not the rest of the entry
+        set_context_limit(d.path(), "omniroute", "a", None).unwrap();
+        let v = read();
+        assert!(
+            v["providers"]["omniroute"]["models"]["a"]
+                .get("limit")
+                .is_none()
+        );
+        assert_eq!(v["providers"]["omniroute"]["models"]["a"]["name"], "A");
+        // unsetting what is not there is fine
+        set_context_limit(d.path(), "omniroute", "zzz", None).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let m = std::fs::metadata(d.path().join("synt.json"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(m & 0o077, 0, "not wider than 0600 for a file that was 0600");
+        }
+    }
+
+    #[test]
+    fn what_cannot_be_edited_safely_is_refused_and_left_alone() {
+        // a provider or a models list in another shape
+        let d = home_with(FILE);
+        assert!(
+            set_context_limit(d.path(), "nope", "a", Some(5000))
+                .unwrap_err()
+                .contains("not in your synt.json")
+        );
+        assert!(
+            set_context_limit(d.path(), "other", "a", Some(5000))
+                .unwrap_err()
+                .contains("declare the model")
+        );
+        let d2 = home_with(r#"{"providers":{"p":{"models":["a","b"]}}}"#);
+        assert!(set_context_limit(d2.path(), "p", "a", Some(5000)).is_err());
+        // unparseable: refused, bytes untouched
+        let d3 = home_with("{ not json");
+        assert!(set_context_limit(d3.path(), "p", "a", Some(5000)).is_err());
+        assert_eq!(
+            std::fs::read_to_string(d3.path().join("synt.json")).unwrap(),
+            "{ not json"
+        );
+        // a missing file is not created
+        let d4 = tempfile::tempdir().unwrap();
+        assert!(set_context_limit(d4.path(), "p", "a", Some(5000)).is_err());
+        // a project file next to it is never written (only <home>/synt.json is opened)
+        let proj = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(proj.path().join(".synt")).unwrap();
+        let pf = proj.path().join(".synt/config.json");
+        std::fs::write(&pf, "{}").unwrap();
+        set_context_limit(d.path(), "omniroute", "a", Some(5000)).unwrap();
+        assert_eq!(std::fs::read_to_string(&pf).unwrap(), "{}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_synt_json_is_refused() {
+        let d = home_with(FILE);
+        let real = d.path().join("real.json");
+        std::fs::rename(d.path().join("synt.json"), &real).unwrap();
+        std::os::unix::fs::symlink(&real, d.path().join("synt.json")).unwrap();
+        assert!(
+            set_context_limit(d.path(), "omniroute", "a", Some(5000))
+                .unwrap_err()
+                .contains("symbolic link")
+        );
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), FILE);
     }
 
     #[test]

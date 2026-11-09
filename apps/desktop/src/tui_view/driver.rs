@@ -1280,6 +1280,45 @@ impl TuiView {
                 })
                 .detach();
             }
+            Action::SetContext(arg) => {
+                let Some(e) = lu.live.engine.clone() else {
+                    return;
+                };
+                let (p, m) = e.label.split_once('/').unwrap_or(("", &e.label));
+                let r = if arg.trim().eq_ignore_ascii_case("unset") {
+                    Ok(None)
+                } else {
+                    synthesis_app::models::parse_tokens(&arg).map(Some)
+                }
+                .and_then(|t| {
+                    synthesis_app::models::set_context_limit(&e.synthesis_home, p, m, t).map(|()| t)
+                });
+                match r {
+                    Err(why) => lu.live.note(format!("/context: {why}"), true),
+                    Ok(t) => {
+                        let done = match t {
+                            Some(n) => format!(
+                                "context window of {} set to {} tokens in your synt.json",
+                                e.label,
+                                crate::tui_view::snapshot::tok(n)
+                            ),
+                            None => {
+                                format!("context window of {} removed from your synt.json", e.label)
+                            }
+                        };
+                        if lu.live.busy {
+                            lu.live.note(
+                                format!("{done}; a task is running, so it applies from the next session: /model and pick the same model restarts it"),
+                                false,
+                            );
+                        } else {
+                            // the window is read when the session starts: restart on the same session
+                            lu.live.after_attach.push(format!("{done}; the session restarted so compaction and limits use it from now on"));
+                            return self.switch(Target::Model(e.label.clone()), "model".into(), cx);
+                        }
+                    }
+                }
+            }
             Action::Open(typed) => {
                 let l = &lu.live;
                 let home = synthesis_app::homes(&lu.cfg.env).ok().map(|h| h.user);
