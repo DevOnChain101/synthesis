@@ -653,7 +653,7 @@ async fn key(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
     let k = str_field(input, "key").ok_or("\"key\" is required.")?;
     rt.press_key(k).await?;
     // only a control key is named; a printable one can be a character of a secret
-    let named = is_control_chord(k).then_some(k).unwrap_or("key");
+    let named = if is_control_chord(k) { k } else { "key" };
     Ok(ToolOutput::text(format!("Pressed {k}.")).with_meta(action("press", None, Some(named))))
 }
 
