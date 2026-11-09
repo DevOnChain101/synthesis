@@ -1673,9 +1673,46 @@ fn slow_then(final_text: &'static str) -> Responder {
     })
 }
 
+/// Like `slow_then`, but A keeps taking slow rounds until `subscribed` is set, so B's
+/// subscription lands while A still runs however slow the machine is (no fixed sleep decides
+/// it). `started` is set on A's first model request: A is then running a task.
+fn slow_until(
+    final_text: &'static str,
+    started: Arc<std::sync::atomic::AtomicBool>,
+    subscribed: Arc<std::sync::atomic::AtomicBool>,
+) -> Responder {
+    use std::sync::atomic::Ordering::SeqCst;
+    let rounds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    Arc::new(move |r| {
+        if is_responder(r) {
+            return Some(Turn::text("responder must not run"));
+        }
+        started.store(true, SeqCst);
+        Some(
+            if tool_result(r, "s1").is_none() || !subscribed.load(SeqCst) {
+                Turn::tool(
+                    &format!("s{}", rounds.fetch_add(1, SeqCst) + 1),
+                    "Slow",
+                    json!({}),
+                )
+            } else {
+                Turn::text(final_text)
+            },
+        )
+    })
+}
+
 fn b_notifies(to: &'static str) -> Responder {
+    b_notifies_flag(to, Default::default())
+}
+
+/// `subscribed` is set once the SendMessage result is back: A has accepted the subscription.
+fn b_notifies_flag(to: &'static str, subscribed: Arc<std::sync::atomic::AtomicBool>) -> Responder {
     Arc::new(move |r| {
         let all = texts(r);
+        if tool_result(r, "n1").is_some() {
+            subscribed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         Some(if tool_result(r, "n1").is_none() {
             Turn::tool(
                 "n1",
@@ -1695,12 +1732,14 @@ async fn notify_on_end_delivers_the_result_when_the_peers_task_ends() {
     let home = tempfile::tempdir().unwrap();
     let run = run_dir(home.path());
     let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "accept_notify": true});
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let subscribed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (mut a, ea) = side(
         "sess-a",
         "alpha",
         &run,
         Some(on.clone()),
-        slow_then("generated client v2"),
+        slow_until("generated client v2", started.clone(), subscribed.clone()),
         700,
     );
     let (mut b, _) = side(
@@ -1708,7 +1747,7 @@ async fn notify_on_end_delivers_the_result_when_the_peers_task_ends() {
         "beta",
         &run,
         Some(on),
-        b_notifies("ws:alpha/sess:sess-a"),
+        b_notifies_flag("ws:alpha/sess:sess-a", subscribed),
         10,
     );
     let _reg = serve(&a, &run, ea);
@@ -1716,7 +1755,9 @@ async fn notify_on_end_delivers_the_result_when_the_peers_task_ends() {
         let out = run_a(&mut a).await;
         (a, out)
     });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    while !started.load(std::sync::atomic::Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let t0 = std::time::Instant::now();
     let out_b = go(&mut b, "wait for alpha").await;
     let (a, out_a) = a_task.await.unwrap();
@@ -1766,6 +1807,150 @@ async fn notify_on_end_of_an_idle_session_answers_idle_at_once() {
         last.contains("status=\"idle\"") && last.contains("kind=\"result\""),
         "{last}"
     );
+}
+
+/// Two sessions that ask each other to notify them at the same moment: the cycle check must see
+/// the asker's own pending request even while that request is still being delivered, else both
+/// accept and each waits for the other's task end (up to `notify_wait_max_s`, an hour).
+#[tokio::test]
+async fn crossing_notify_requests_do_not_leave_both_sessions_waiting() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "accept_notify": true});
+    let (mut a, ea) = side(
+        "sess-a",
+        "alpha",
+        &run,
+        Some(on.clone()),
+        b_notifies("ws:beta/sess:sess-b"),
+        10,
+    );
+    let (mut b, eb) = side(
+        "sess-b",
+        "beta",
+        &run,
+        Some(on),
+        b_notifies("ws:alpha/sess:sess-a"),
+        10,
+    );
+    let (_ra, _rb) = (serve(&a, &run, ea), serve(&b, &run, eb));
+    let both = async { tokio::join!(go(&mut a, "ask beta"), go(&mut b, "ask alpha")) };
+    let (oa, ob) = tokio::time::timeout(Duration::from_secs(20), both)
+        .await
+        .expect("both sessions wait for each other");
+    assert_eq!(oa.status, TaskStatus::Completed, "{}", oa.reason);
+    assert_eq!(ob.status, TaskStatus::Completed, "{}", ob.reason);
+}
+
+/// A notify_on_end ask from `from_sid` to the session at `ep`, as that peer would send it.
+async fn notify_ask(
+    ep: &str,
+    key: &synthesis_peers::Key,
+    from_sid: &str,
+) -> Result<synthesis_peers::serve::Call, PeerError> {
+    let from = asker("alpha", from_sid);
+    let o = Outgoing {
+        id: &synthesis_harness_uuid(),
+        from: &from,
+        to_agent: "main",
+        text: "notify me",
+        chain: std::slice::from_ref(&from.session_id),
+        timeout_s: 30,
+        extra: Extra {
+            notify_on_end: true,
+            ..Default::default()
+        },
+    };
+    synthesis_peers::serve::begin(ep, key, &o).await
+}
+
+/// B asks A to notify it, but the request is dropped while it is still being delivered (A never
+/// answers the handshake): B's pending entry must go with it, or B refuses every later notify
+/// from A as a cycle.
+#[tokio::test]
+async fn a_notify_request_dropped_while_being_delivered_leaves_no_cycle_entry() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let key = load_or_create_key(&run).unwrap();
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "accept_notify": true});
+    // A: registered and listening, but nobody serves the connection
+    let (_a, mut ea) = side(
+        "sess-a",
+        "alpha",
+        &run,
+        Some(on.clone()),
+        Arc::new(|_| Some(Turn::text("A"))),
+        10,
+    );
+    let dead = Listener::bind(&run).unwrap();
+    ea.endpoint = dead.endpoint();
+    let _reg_a = Registration::create(&run, &ea).unwrap();
+    let (mut b, eb) = side(
+        "sess-b",
+        "beta",
+        &run,
+        Some(on),
+        b_notifies("ws:alpha/sess:sess-a"),
+        10,
+    );
+    let (_rb, ep_b) = serve_ep(&b, &run, eb);
+    let cut = tokio::time::timeout(Duration::from_millis(600), go(&mut b, "ask alpha")).await;
+    assert!(cut.is_err(), "the request was meant to hang in delivery");
+    notify_ask(&ep_b, &key, "sess-a")
+        .await
+        .expect("A's notify request is not a cycle: B is not waiting on A any more");
+}
+
+/// B waits on A (accepted), A never ends its task: the wait is bounded by notify_wait_max_s and
+/// the entry goes away with it.
+#[tokio::test]
+async fn a_notify_wait_that_times_out_clears_the_cycle_entry() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let key = load_or_create_key(&run).unwrap();
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "accept_notify": true,
+        "notify_wait_max_s": 3});
+    let (mut a, ea) = side(
+        "sess-a",
+        "alpha",
+        &run,
+        Some(on.clone()),
+        slow_then("A done"),
+        30_000,
+    );
+    let _ra = serve(&a, &run, ea);
+    let a_task = tokio::spawn(async move { run_a(&mut a).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (mut b, eb) = side(
+        "sess-b",
+        "beta",
+        &run,
+        Some(on),
+        b_notifies("ws:alpha/sess:sess-a"),
+        10,
+    );
+    let (_rb, ep_b) = serve_ep(&b, &run, eb);
+    let b_task = tokio::spawn(async move { go(&mut b, "wait for alpha").await });
+    // B's entry exists while it waits: A's own notify request to B is a cycle
+    let t0 = std::time::Instant::now();
+    loop {
+        match notify_ask(&ep_b, &key, "sess-a").await {
+            Err(PeerError::Rejected(r)) if r == "cycle" => break,
+            _ if t0.elapsed() < Duration::from_secs(2) => {
+                tokio::time::sleep(Duration::from_millis(20)).await
+            }
+            other => panic!("no cycle while B waits: {:?}", other.err()),
+        }
+    }
+    let out = tokio::time::timeout(Duration::from_secs(15), b_task)
+        .await
+        .expect("the wait is bounded")
+        .unwrap();
+    assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
+    notify_ask(&ep_b, &key, "sess-a")
+        .await
+        .expect("the entry went with the finished wait");
+    a_task.abort();
 }
 
 #[tokio::test]

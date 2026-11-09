@@ -980,8 +980,8 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                     dirty = true;
                     urgent = true;
                 }
-                Msg::SendFailed(text, why) => {
-                    app.send_failed(&text, &why);
+                Msg::SendFailed(to, text, why) => {
+                    app.send_failed(&to, &text, &why);
                     dirty = true;
                 }
                 Msg::UserCommandDone(d) => {
@@ -1162,7 +1162,7 @@ fn exec(
             let (h, tx) = (runner.harness.clone(), runner.tx.clone());
             runner.runtime.spawn(async move {
                 if let Err(e) = h.send_user_message(&to, text.clone()).await {
-                    let _ = tx.send(Msg::SendFailed(text, e));
+                    let _ = tx.send(Msg::SendFailed(to, text, e));
                 }
             });
         }

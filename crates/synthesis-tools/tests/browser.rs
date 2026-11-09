@@ -196,7 +196,10 @@ async fn login_flow_sensitive_fill_policy_screenshot_and_session_close() {
 
     // No image support: artifact path + page summary; the PNG exists.
     let o = run("browser_screenshot", json!({})).await;
-    let path = o.meta["artifact_path"].as_str().unwrap().to_string();
+    let path = o.meta["artifact_path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no screenshot: {o:?}"))
+        .to_string();
     assert!(std::fs::metadata(&path).unwrap().len() > 100, "{path}");
     assert!(matches!(o.content, Content::Text(_)) && text(&o).contains(&path));
     // ... and artifact_read describes it instead of dumping bytes.
