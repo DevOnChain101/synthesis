@@ -14,7 +14,10 @@ impl TuiView {
             return;
         };
         let home = e.synthesis_home.clone();
-        // a step that never answers frees the prompt and the engine after a while
+        // a counting step that never answers frees the prompt; a deletion keeps it blocked
+        if matches!(a, Action::CleanApply { .. }) {
+            lu.live.clean_deleting = true;
+        }
         let token = lu.live.clean_job_start();
         cx.spawn(async move |this, cx| {
             cx.background_executor()

@@ -501,6 +501,8 @@ pub struct Live {
     /// A `/clean` is open or deleting: no prompt starts and the engine is not switched.
     pub cleaning: bool,
     pub clean_job: Option<u64>,
+    /// The deletion itself (not the counting) is running: a timeout never clears `cleaning`.
+    pub clean_deleting: bool,
     pub clean_seq: u64,
     /// The plans the open scope picker shows (the confirmation takes its ids from here).
     pub clean_plans: Vec<(synthesis_session::CleanScope, synthesis_session::CleanPlan)>,
@@ -602,6 +604,7 @@ impl Live {
             rewind_seq: 0,
             cleaning: false,
             clean_job: None,
+            clean_deleting: false,
             clean_seq: 0,
             clean_plans: vec![],
             compacting: false,
@@ -690,7 +693,7 @@ impl Live {
         self.queue.clear();
         self.dialogs.clear();
         self.rewinding = false;
-        self.cleaning = false;
+        self.cleaning = self.clean_deleting;
         self.clean_plans.clear();
         // the prompt that waited for a model choice goes out on the model that was picked; if the
         // switch failed (the stored model is still unavailable) it goes back to the input box

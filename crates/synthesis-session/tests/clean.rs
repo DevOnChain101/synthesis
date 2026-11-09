@@ -372,3 +372,50 @@ fn workspaces_count_only_folders_that_lose_their_last_session() {
     assert_eq!(p.counts.snapshot_bytes, 10);
     assert!(p.counts.events >= 2 && p.counts.disk_bytes >= 10);
 }
+
+#[test]
+fn a_running_parent_that_is_not_in_scope_still_protects_its_closed_child() {
+    let e = env();
+    let _parent = e.make("parent", "w", true, None);
+    drop(e.make("child", "w", true, Some("parent")));
+    e.store().close_session("child").unwrap();
+    let r = run(
+        &e,
+        CleanScope::ClosedEmpty,
+        &[],
+        OffsetDateTime::now_utc(),
+        false,
+    );
+    assert_eq!((r.deleted, r.skipped_running), (0, 1));
+    assert_eq!(e.ids(), ["child", "parent"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_existing_backups_dir_is_tightened_to_0700() {
+    use std::os::unix::fs::PermissionsExt;
+    let e = env();
+    drop(e.make("s", "w", true, None));
+    fs::create_dir_all(e.home.join("backups")).unwrap();
+    fs::set_permissions(e.home.join("backups"), fs::Permissions::from_mode(0o755)).unwrap();
+    let r = run(&e, CleanScope::All, &[], OffsetDateTime::now_utc(), true);
+    assert!(r.backup.is_some());
+    let mode = fs::metadata(e.home.join("backups"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700);
+}
+
+#[test]
+fn the_scope_counts_messages_and_a_closed_session_with_history_is_deleted() {
+    let e = env();
+    drop(e.make("c", "w", true, None));
+    e.store().close_session("c").unwrap();
+    let p = e
+        .store()
+        .clean_plan(CleanScope::ClosedEmpty, &[], OffsetDateTime::now_utc())
+        .unwrap();
+    assert_eq!((p.counts.sessions, p.counts.messages), (1, 1));
+}

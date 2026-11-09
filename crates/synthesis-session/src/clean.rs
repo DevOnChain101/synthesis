@@ -55,6 +55,9 @@ impl CleanScope {
     }
 }
 
+/// `updated_at` is always written by the store's own `now()` (fixed-width RFC 3339 UTC, millis, `Z`;
+/// a Node import goes through `create_session` too), so the text comparison in the scope predicates is
+/// chronological. A NULL or foreign-format value does not match (`NULL < x` is NULL), so it is kept.
 fn ts(t: OffsetDateTime) -> String {
     let fmt = time::macros::format_description!(
         "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
@@ -67,6 +70,7 @@ pub struct CleanCounts {
     pub sessions: usize,
     /// Workspace folders that lose their last stored session.
     pub workspaces: usize,
+    pub messages: u64,
     pub events: u64,
     /// Bytes of the per-session directories (nothing followed).
     pub disk_bytes: u64,
@@ -192,9 +196,13 @@ impl Store {
         let mut counts = CleanCounts::default();
         let mut prot: HashSet<&str> = keep.iter().map(String::as_str).collect();
         let mut unusual = HashSet::new();
-        for (id, _, _) in all.iter().filter(|(id, _, _)| cand.contains(id)) {
+        // every session is probed, not only the candidates: a running parent or child that is
+        // not in scope still protects its tree
+        for (id, _, _) in &all {
             if !valid_id(id) {
-                unusual.insert(id.as_str());
+                if cand.contains(id) {
+                    unusual.insert(id.as_str());
+                }
                 continue;
             }
             match probe(&sessions.join(id)) {
@@ -202,9 +210,10 @@ impl Store {
                 Probe::Held => {
                     prot.insert(id);
                 }
-                Probe::Unusual(_) => {
+                Probe::Unusual(_) if cand.contains(id) => {
                     unusual.insert(id.as_str());
                 }
+                Probe::Unusual(_) => {}
             }
         }
         // a running session protects its whole tree (parents and sub-agent children)
@@ -269,12 +278,14 @@ impl Store {
             })
             .count();
         let mut events = conn.prepare("SELECT COUNT(*) FROM events WHERE session_id=?1")?;
+        let mut msgs = conn.prepare("SELECT COUNT(*) FROM messages WHERE session_id=?1")?;
         let mut arts =
             conn.prepare("SELECT kind, mime, size FROM artifacts WHERE session_id=?1")?;
         for id in &ids {
             counts.events += events
                 .query_row([id], |r| r.get::<_, i64>(0))?
                 .unsigned_abs();
+            counts.messages += msgs.query_row([id], |r| r.get::<_, i64>(0))?.unsigned_abs();
             let rows: Vec<(String, String, i64)> = arts
                 .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect::<std::result::Result<_, _>>()?;
@@ -362,6 +373,11 @@ impl Store {
                     continue;
                 }
             };
+            // a directory or lock that appeared since the probe may be a session starting now
+            if lock.is_none() && !matches!(probe(&dir), Probe::Free(None)) {
+                res.skipped_other += 1;
+                continue;
+            }
             // re-checked inside the write transaction
             let still: bool = tx.query_row(
                 &format!(
@@ -419,6 +435,18 @@ impl Store {
             now.format(&fmt).expect("format utc timestamp")
         ));
         private_dir(&base)?;
+        #[cfg(unix)]
+        {
+            // an existing `backups/` must be ours (same owner as the home) and private
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            if fs::metadata(&base)?.uid() != fs::metadata(self.home())?.uid() {
+                return Err(Error::Invalid(format!(
+                    "{} is not owned by you",
+                    base.display()
+                )));
+            }
+            fs::set_permissions(&base, fs::Permissions::from_mode(0o700))?;
+        }
         private_dir(&dir)?;
         let dest = dir.join("synt.db");
         // create_new: an existing file (or link) is an error, never written through

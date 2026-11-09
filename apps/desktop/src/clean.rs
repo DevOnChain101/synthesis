@@ -27,7 +27,7 @@ pub const SCOPES: [CleanScope; 3] = [
 
 pub fn scope_title(s: CleanScope) -> String {
     match s {
-        CleanScope::ClosedEmpty => "Closed and empty sessions".into(),
+        CleanScope::ClosedEmpty => "Closed sessions, and empty ones older than 1 hour".into(),
         CleanScope::Inactive => format!("Sessions inactive for more than {INACTIVE_DAYS} days"),
         CleanScope::All => {
             "ALL sessions and workspaces, except the running ones and the current session".into()
@@ -43,9 +43,10 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 pub fn counts_line(p: &CleanPlan) -> String {
     let c = &p.counts;
     let mut t = format!(
-        "{} \u{b7} {} \u{b7} {} events \u{b7} {} on disk (screenshots {}, checkpoints {}, logs {})",
+        "{} \u{b7} {} \u{b7} {} messages \u{b7} {} events \u{b7} {} on disk (screenshots {}, checkpoints {}, logs {})",
         plural(c.sessions, "session", "sessions"),
         plural(c.workspaces, "workspace", "workspaces"),
+        c.messages,
         c.events,
         size(c.disk_bytes),
         size(c.screenshot_bytes),
@@ -92,7 +93,7 @@ impl CleanDialog {
             (
                 "backup".into(),
                 format!(
-                    "[{}] Back up synt.db first (rows only, not the artifact directories)",
+                    "[{}] Back up synt.db first (ALL sessions incl. tool output, never auto-deleted; not the artifact directories)",
                     if self.backup { "x" } else { " " }
                 ),
             ),
@@ -128,9 +129,10 @@ impl CleanDialog {
             ),
             "NOT touched: settings, auth and environment variables, the memory store, trust records and trust.key, the model cache, logs outside the sessions, the Node-format transcript copies under projects/, your project files, the current session, and every running session or one open in another window or process (skipped: running).".into(),
         ];
+        v.push("Copies of these conversations remain in projects/*.jsonl and in the backup until you delete them.".into());
         v.push(if self.backup {
             format!(
-                "Backup: synt.db is copied to {home}/backups/clean-<time>/synt.db (mode 0600) before anything is deleted, and nothing is deleted if the copy fails. It holds the rows of the deleted conversations; the artifact directories (snapshots, screenshots, logs) are NOT copied. Delete the backup yourself when you no longer need it."
+                "Backup: synt.db is copied to {home}/backups/clean-<time>/synt.db (mode 0600) before anything is deleted, and nothing is deleted if the copy fails. It contains ALL sessions, not only these, including tool output, and is never auto-deleted; the artifact directories (snapshots, screenshots, logs) are NOT copied. Delete the backup yourself when you no longer need it."
             )
         } else {
             "No backup: nothing can bring these sessions back.".into()
@@ -166,13 +168,22 @@ impl Live {
         self.clean_seq
     }
 
-    /// The job `token` never answered: free the flag.
+    /// The job `token` has not answered. A counting step (read-only) frees the flag. A deletion may
+    /// still be running, so its flag stays: prompts and engine switches stay blocked until it reports.
     pub fn clean_timeout(&mut self, token: u64) {
-        if self.clean_job == Some(token) {
-            self.clean_job = None;
+        if self.clean_job != Some(token) {
+            return;
+        }
+        self.clean_job = None;
+        if self.clean_deleting {
+            self.note(
+                "clean: still working, it may be deleting. Prompts stay blocked until it reports",
+                true,
+            );
+        } else {
             self.cleaning = false;
             self.note(
-                "clean: no answer after 10 minutes. It may still be deleting: run /clean again to see what is left",
+                "clean: counting did not answer after 10 minutes; nothing was deleted",
                 true,
             );
         }
@@ -372,6 +383,7 @@ impl Live {
     pub fn clean_done(&mut self, r: Result<CleanResult, String>) {
         self.clean_job = None;
         self.cleaning = false;
+        self.clean_deleting = false;
         match r {
             Err(e) => self.note(format!("clean: nothing was deleted: {e}"), true),
             Ok(o) => {
@@ -451,6 +463,7 @@ mod tests {
                 sessions: n,
                 workspaces: 1,
                 events: 9,
+                messages: 4,
                 disk_bytes: 2048,
                 ..CleanCounts::default()
             },
@@ -477,7 +490,11 @@ mod tests {
         assert_eq!(d.sel, 0);
         assert_eq!(d.options[0].0, "cancel");
         assert_eq!(d.options.len(), 4);
-        assert!(d.options[1].1.contains("2 sessions") && d.options[1].1.contains("9 events"));
+        assert!(
+            d.options[1].1.contains("2 sessions")
+                && d.options[1].1.contains("4 messages")
+                && d.options[1].1.contains("9 events")
+        );
         assert!(
             !d.answerable(),
             "Enter and digits wait for the person to engage it"
@@ -648,14 +665,22 @@ mod tests {
     }
 
     #[test]
-    fn a_job_that_never_answers_frees_the_flag_only_for_its_own_token() {
+    fn a_counting_job_that_never_answers_frees_the_flag_but_a_deleting_one_does_not() {
         let mut l = Live::new();
         l.cleaning = true;
         let t = l.clean_job_start();
         l.clean_timeout(t + 1);
-        assert!(l.cleaning);
+        assert!(l.cleaning, "another job's token does nothing");
         l.clean_timeout(t);
         assert!(!l.cleaning);
+        // a deletion: the flag stays until it reports
+        l.cleaning = true;
+        l.clean_deleting = true;
+        let t = l.clean_job_start();
+        l.clean_timeout(t);
+        assert!(l.cleaning && l.engine_switch_blocker().is_some());
+        l.clean_done(Ok(CleanResult::default()));
+        assert!(!l.cleaning && !l.clean_deleting && l.engine_switch_blocker().is_none());
     }
 
     #[test]
