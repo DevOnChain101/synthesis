@@ -13,6 +13,7 @@ pub mod dialog;
 pub mod driver;
 pub mod layout;
 pub mod panels;
+mod rewind;
 pub mod sample;
 #[cfg(feature = "shot")]
 pub mod shot;
@@ -1266,5 +1267,59 @@ mod tests {
         press(&view, vcx, "down");
         press(&view, vcx, "enter");
         assert_eq!(pending(&view, vcx), 0);
+    }
+
+    /// The send picker is a dialog like the others: under Settings no key reaches it (no typing into its
+    /// filter, no Enter), on screen Enter picks at once (the person opened it), and Esc sends nothing.
+    #[gpui::test]
+    fn the_send_picker_ignores_keys_while_hidden(cx: &mut TestAppContext) {
+        use crate::live::Live;
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let mut l = Live::new();
+        l.starting = false;
+        l.commands.push(crate::live::send_command());
+        l.set_peer_rows(
+            vec![serde_json::json!({"address": "ws:aaaa/sess:11111111-x/agent:main",
+                "workspace": {"label": "api"}, "session": {"short_id": "11111111", "name": "backend"},
+                "agent": {"instance": "main", "status": "idle"}})],
+            0,
+        );
+        l.submit("/send");
+        l.dialogs[0].armed_until = 0;
+        view.update(vcx, |t, _| t.set_live(l));
+        let state = |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext| {
+            view.read_with(vcx, |t, _| {
+                let l = &t.live.as_ref().unwrap().live;
+                (
+                    l.dialogs.len(),
+                    l.send_to.is_some(),
+                    l.send_pick.as_ref().map(|p| p.filter.clone()),
+                )
+            })
+        };
+        let press =
+            |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext, k: &'static str| {
+                let ks = gpui::Keystroke::parse(k).unwrap();
+                view.update_in(vcx, |t, window, cx| t.on_key(&ks, window, cx))
+            };
+        view.update(vcx, |t, _| t.shown = false);
+        for k in ["enter", "a", "escape"] {
+            assert!(!press(&view, vcx, k));
+        }
+        assert_eq!(state(&view, vcx), (1, false, Some(String::new())));
+        view.update(vcx, |t, _| t.shown = true);
+        // untouched: an Enter typed ahead picks nothing
+        press(&view, vcx, "enter");
+        assert_eq!(state(&view, vcx), (1, false, Some(String::new())));
+        press(&view, vcx, "down");
+        press(&view, vcx, "enter");
+        assert_eq!(
+            state(&view, vcx),
+            (0, true, None),
+            "picked: the chip is set"
+        );
     }
 }

@@ -11,6 +11,7 @@ use gpui_component::text::TextView;
 use synthesis_tui_render::theme as t;
 
 use crate::live::{DialogKind, Live, PickerKind, input_lines};
+use crate::rewind::GROUP_LINES;
 use crate::theme::hsla;
 use crate::tui_view::panels::{OnClick, dim, strong, text};
 
@@ -28,6 +29,7 @@ pub fn dock(
     live: &Live,
     scroll: &ScrollHandle,
     click: &dyn Fn(usize) -> OnClick,
+    toggle: &dyn Fn(usize) -> OnClick,
     border: gpui::Hsla,
     max_input_h: f32,
     engage: OnMouseDown,
@@ -123,7 +125,99 @@ pub fn dock(
                 )))
                 .child(div().text_color(strong()).child(q.question.clone()));
         }
+        // a memory confirmation: the whole text it is about, in a scroll box like the approval's input
+        DialogKind::Picker {
+            kind: PickerKind::MemConfirm,
+            headers,
+            ..
+        } => {
+            let lines: Vec<String> = headers
+                .first()
+                .map(|(_, h)| h.lines().map(String::from).collect())
+                .unwrap_or_default();
+            let scrolls = lines.len() as f32 * 19. > max_input_h
+                || lines.iter().any(|l| l.chars().count() > 100);
+            card = card.child(
+                div()
+                    .id("dialog-memory")
+                    .max_h(px(max_input_h))
+                    .overflow_y_scroll()
+                    .p(px(8.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(hsla(t::BORDER))
+                    .bg(hsla(t::BG))
+                    .children(lines.into_iter().map(|l| {
+                        div().text_color(text()).child(if l.is_empty() {
+                            " ".to_string()
+                        } else {
+                            l
+                        })
+                    })),
+            );
+            if scrolls {
+                card = card.child(
+                    div()
+                        .text_color(hsla(t::WARN))
+                        .child("\u{2195} scroll the box to read all of it before answering"),
+                );
+            }
+        }
         DialogKind::Picker { .. } => {}
+        DialogKind::Rewind(r) => {
+            card = card.child(div().text_color(hsla(t::WARN)).child(r.preview.warning()));
+            let groups = r.preview.groups();
+            card = card.child(
+                div()
+                    .id("dialog-rewind")
+                    .max_h(px(max_input_h))
+                    .overflow_y_scroll()
+                    .p(px(8.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(hsla(t::BORDER))
+                    .bg(hsla(t::BG))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .children(groups.into_iter().enumerate().map(|(g, grp)| {
+                        let open = r.expanded.contains(&g);
+                        let total = grp.rows.len();
+                        let cut = !open && total > GROUP_LINES;
+                        let col = if grp.title.starts_with("Will be deleted") {
+                            hsla(t::ERROR)
+                        } else if grp.title.starts_with("Left alone") {
+                            dim()
+                        } else {
+                            hsla(t::WARN)
+                        };
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(div().text_color(col).child(grp.title))
+                            .children(
+                                grp.rows
+                                    .into_iter()
+                                    .take(if cut { GROUP_LINES } else { usize::MAX })
+                                    .map(|l| div().text_color(text()).child(l)),
+                            )
+                            .when(total > GROUP_LINES, |d| {
+                                d.child(
+                                    div()
+                                        .id(("rewind-more", g))
+                                        .cursor_pointer()
+                                        .text_color(hsla(t::ACCENT))
+                                        .child(if cut {
+                                            format!("Show {} more", total - GROUP_LINES)
+                                        } else {
+                                            "Show less".to_string()
+                                        })
+                                        .on_click(toggle(g)),
+                                )
+                            })
+                    })),
+            );
+        }
     }
     let typing = match &d.kind {
         DialogKind::Question { typing, .. } => typing.clone(),
@@ -144,18 +238,34 @@ pub fn dock(
         );
     }
     let headers: &[(usize, String)] = match &d.kind {
+        DialogKind::Picker {
+            kind: PickerKind::MemConfirm,
+            ..
+        } => &[],
         DialogKind::Picker { headers, .. } => headers,
         _ => &[],
     };
     let mut list: Vec<AnyElement> = vec![];
-    for (i, (_, label)) in d.options.iter().enumerate() {
+    let now = crate::live::now_ms();
+    for (i, (key, label)) in d.options.iter().enumerate() {
         if let Some((_, h)) = headers.iter().find(|(at, _)| *at == i) {
             list.push(
                 div()
                     .px(px(10.))
                     .pt(px(8.))
+                    .flex()
+                    .gap(px(8.))
                     .text_color(hsla(t::ACCENT))
-                    .child(h.clone())
+                    .child(match h.split_once('\u{1f}') {
+                        // a label and the id after it, painted apart so a name cannot pass for the id
+                        Some((name, id)) => div()
+                            .flex()
+                            .gap(px(8.))
+                            .child(name.to_string())
+                            .child(div().text_color(dim()).child(id.to_string()))
+                            .into_any_element(),
+                        None => div().child(h.clone()).into_any_element(),
+                    })
                     .into_any_element(),
             );
         }
@@ -188,6 +298,7 @@ pub fn dock(
                             String::new()
                         }),
                 )
+                .children(send_dot(live, d, key, now))
                 .child(
                     div()
                         .flex_1()
@@ -247,5 +358,33 @@ pub fn dock(
     Some(
         card.on_mouse_down(gpui::MouseButton::Left, engage)
             .into_any_element(),
+    )
+}
+
+/// The activity dot of a `/send` picker row (the Running panel's rule), `None` in any other dialog.
+fn send_dot(live: &Live, d: &crate::live::Dialog, key: &str, now: i64) -> Option<gpui::Div> {
+    use crate::tui_view::activity::Presence;
+    if !matches!(
+        d.kind,
+        DialogKind::Picker {
+            kind: PickerKind::Send,
+            ..
+        }
+    ) {
+        return None;
+    }
+    let r = live
+        .send_pick
+        .as_ref()?
+        .rows
+        .iter()
+        .find(|r| r.address == key)?;
+    Some(
+        match r.presence(now) {
+            Presence::Active => crate::widgets::chrome::dot(hsla(t::SUCCESS), true),
+            Presence::Recent => crate::widgets::chrome::dot(hsla(t::SUCCESS), false),
+            Presence::Inactive => crate::widgets::chrome::dot(dim(), true),
+        }
+        .mt(px(6.)),
     )
 }

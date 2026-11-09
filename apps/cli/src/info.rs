@@ -265,7 +265,9 @@ pub fn doctor(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
         h.synthesis.display(),
         h.synthesis.is_dir()
     );
-    for l in legacy_notes(env, &h, &root, std::env::current_exe().ok().as_deref()) {
+    for l in
+        synthesis_app::doctor::legacy_notes(env, &h, &root, std::env::current_exe().ok().as_deref())
+    {
         out!("{l}");
     }
     for l in synthesis_app::login::doctor_lines(env, &h) {
@@ -285,102 +287,6 @@ pub fn doctor(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
         }
     }
     Ok(code)
-}
-
-/// Hints for people coming from the earlier "Nemo" builds, and a PATH shadowing warning. Nothing
-/// legacy is ever read: the old `~/.nemo` and `NEMO_*` are only detected (names, never values).
-fn legacy_notes(
-    env: &Env,
-    h: &synthesis_app::Homes,
-    project: &Path,
-    current_exe: Option<&Path>,
-) -> Vec<String> {
-    let mut v = Vec::new();
-    let mut old: Vec<&str> = env
-        .iter()
-        .map(|(k, _)| k)
-        .filter(|k| k.to_ascii_uppercase().starts_with("NEMO_"))
-        .collect();
-    old.sort_unstable();
-    if !old.is_empty() {
-        v.push(format!(
-            "warning: ignored legacy variables (Synthesis reads SYNT_* only): {}; rename each NEMO_X to SYNT_X",
-            old.join(", ")
-        ));
-    }
-    let mut renamed: Vec<&str> = env
-        .iter()
-        .map(|(k, _)| k)
-        .filter(|k| k.starts_with("SYNTHESIS_"))
-        .collect();
-    renamed.sort_unstable();
-    for k in renamed {
-        // Name only, never the value, and the variable is not honoured.
-        v.push(format!(
-            "warning: ignored legacy variable {k} (renamed 2026-11-02): set SYNT_{} instead",
-            &k["SYNTHESIS_".len()..]
-        ));
-    }
-    let old_home = h.user.join(".nemo");
-    if old_home.is_dir() && !h.synthesis.exists() {
-        v.push(format!(
-            "note: {} exists and {} does not. Synthesis never reads the old location. To migrate, review and run:\n  cp -R {} {}   (Windows: Copy-Item -Recurse)\nthen inside the copy rename nemo.json to synt.json and NEMO.md to AGENTS.md, the \"nemo\" key of settings.json to \"synt\", and in each project .nemo to .synt",
-            old_home.display(),
-            h.synthesis.display(),
-            old_home.display(),
-            h.synthesis.display()
-        ));
-    }
-    // Names of the config folder before 2026-11-02 (`.synthesis`, `synthesis.json`, `synthesis.db`): detected, never read or moved.
-    let old_dir = h.user.join(".synthesis");
-    if old_dir.is_dir() && !h.synthesis.exists() {
-        v.push(format!(
-            "note: {} exists and {} does not. Synthesis never reads the old location. To migrate: mv {} {}   (Windows: Move-Item)",
-            old_dir.display(),
-            h.synthesis.display(),
-            old_dir.display(),
-            h.synthesis.display()
-        ));
-    }
-    for (dir, old, new) in [
-        (h.synthesis.as_path(), "synthesis.json", "synt.json"),
-        (h.synthesis.as_path(), "synthesis.db", "synt.db"),
-        (h.synthesis.as_path(), "SYNTHESIS.md", "AGENTS.md"),
-        (project, "SYNTHESIS.md", "AGENTS.md"),
-        (project, "synthesis.json", "synt.json"),
-    ] {
-        if dir.join(old).is_file() {
-            v.push(format!(
-                "note: {} is ignored (the file is now {new}). To migrate: mv {} {}",
-                dir.join(old).display(),
-                dir.join(old).display(),
-                dir.join(new).display()
-            ));
-        }
-    }
-    if project.join(".synthesis").is_dir() && !project.join(".synt").exists() {
-        v.push(format!(
-            "note: {} is ignored (the project folder is now .synt). To migrate: mv {} {}",
-            project.join(".synthesis").display(),
-            project.join(".synthesis").display(),
-            project.join(".synt").display()
-        ));
-    }
-    let first = env.get_nonempty("PATH").and_then(|p| {
-        std::env::split_paths(p)
-            .flat_map(|d| [d.join("synt"), d.join("synt.exe")])
-            .find(|c| c.is_file())
-    });
-    if let (Some(first), Some(me)) = (first, current_exe)
-        && std::fs::canonicalize(&first).ok() != std::fs::canonicalize(me).ok()
-    {
-        v.push(format!(
-            "warning: `synt` on PATH resolves to {}, not this executable ({})",
-            first.display(),
-            me.display()
-        ));
-    }
-    v
 }
 
 fn report_config(cfg: &Config) {
@@ -539,69 +445,6 @@ fn report_discovery(env: &Env, h: &synthesis_app::Homes, cfg: &Config, cwd: Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn legacy_notes_detect_old_home_vars_and_path_shadowing() {
-        let d = tempfile::tempdir().unwrap();
-        let (user, bin) = (d.path().join("u"), d.path().join("bin"));
-        std::fs::create_dir_all(user.join(".nemo")).unwrap();
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("synt"), "").unwrap();
-        let h = synthesis_app::Homes {
-            synthesis: user.join(".synt"),
-            user,
-        };
-        let path = bin.to_str().unwrap();
-        let env = Env::from_pairs([("NEMO_API_KEY", "secret-value"), ("PATH", path)]);
-        let v = legacy_notes(&env, &h, d.path(), Some(&d.path().join("other"))).join("\n");
-        assert!(
-            v.contains("NEMO_API_KEY") && !v.contains("secret-value"),
-            "{v}"
-        );
-        assert!(v.contains("cp -R") && v.contains("resolves to"), "{v}");
-        // this executable is the first on PATH, the new home exists, no legacy variables: silent
-        std::fs::create_dir_all(&h.synthesis).unwrap();
-        let env = Env::from_pairs([("PATH", path)]);
-        assert!(legacy_notes(&env, &h, d.path(), Some(&bin.join("synt"))).is_empty());
-    }
-
-    #[test]
-    fn legacy_notes_detect_pre_synt_config_names_without_touching_them() {
-        let d = tempfile::tempdir().unwrap();
-        let (user, proj) = (d.path().join("u"), d.path().join("p"));
-        std::fs::create_dir_all(user.join(".synthesis")).unwrap();
-        std::fs::create_dir_all(proj.join(".synthesis")).unwrap();
-        let h = synthesis_app::Homes {
-            synthesis: user.join(".synt"),
-            user: user.clone(),
-        };
-        let env = Env::from_pairs([("PATH", ""), ("SYNTHESIS_HOME", "/secret/value")]);
-        let v = legacy_notes(&env, &h, &proj, None).join("\n");
-        assert!(v.contains("mv ") && v.contains(".synt"), "{v}");
-        assert_eq!(v.matches("To migrate").count(), 2, "{v}");
-        assert!(
-            v.contains("SYNTHESIS_HOME") && v.contains("SYNT_HOME"),
-            "{v}"
-        );
-        assert!(!v.contains("/secret/value"), "{v}");
-        // inside a new-style home the old file names are flagged too
-        std::fs::create_dir_all(&h.synthesis).unwrap();
-        std::fs::write(h.synthesis.join("synthesis.json"), "{}").unwrap();
-        std::fs::write(proj.join("SYNTHESIS.md"), "x").unwrap();
-        std::fs::write(proj.join("synthesis.json"), "{}").unwrap();
-        let v = legacy_notes(&env, &h, &proj, None).join("\n");
-        assert!(v.contains("synthesis.json is ignored"), "{v}");
-        assert!(
-            v.contains(&proj.join("synthesis.json").display().to_string())
-                && v.contains(&proj.join("synt.json").display().to_string()),
-            "{v}"
-        );
-        assert!(
-            v.contains("SYNTHESIS.md is ignored") && v.contains("AGENTS.md"),
-            "{v}"
-        );
-        assert!(user.join(".synthesis").is_dir() && proj.join(".synthesis").is_dir());
-    }
 
     #[test]
     fn doctor_lines_show_the_probe_failure_and_remedy() {

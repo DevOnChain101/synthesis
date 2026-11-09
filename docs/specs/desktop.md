@@ -121,6 +121,14 @@ verification.
 Slash commands (all built-ins are wired; `live.rs` `WIRED`, the TUI's semantics): `/files` and `/diff [file]` switch
 the centre panel to its file explorer or diff tab (`/diff FILE` opens that file's diff) and post nothing in the chat;
 an untrusted folder is said by the file explorer itself. `/peers` posts the TUI's table.
+`/send` with no arguments opens a picker docked above the prompt (`send_pick.rs`, the `/model` dialog family): the
+live peers of the polled listing (main agents, not this session, not unreachable) grouped by workspace, typing filters
+(session, workspace, short id), each row with the Running panel's activity dot, the short id and the last activity
+(the registry carries no time, so it is the window's own: now while running, else the poll that saw the state change;
+none seen = gray). A pick sets a one-shot chip over the prompt (`to <workspace> > <session>`) holding the `ws:<key>/sess:<id>`
+address; the next plain line goes there and a note echoes `sent to ws:abcd1234../sess:12345678..`. Esc (or Ctrl+T) clears
+the chip, a command leaves it, a peer that left the listing holds the line with a notice. Peers off or none listed: the
+picker's only row says how to enable them. `/send <address> <text>` is unchanged.
 `/name` shows the name peers address the session by; it is fixed for the run (`--name`), as in the TUI, so it
 does not rename the stored title. `/rename <title>` does (`synthesis_app::rename`, one validator for both frontends):
 the title is trimmed, newlines collapse to a space, 1-120 characters, control/bidi/zero-width characters and
@@ -209,7 +217,32 @@ tools and skills, conversation. Not done, with where the data would come from:
   `Event::BrowserLoginRequired` is already in the stream and can be shown. Page title changes are not an event.
 - Commands tab: `process.spawned|output|exited` (Bash, terminal_spawn) give the real exit code and background
   rows; `[exit code N]` parsing stays as the fallback for old sessions. A background process nobody polls
-  again never gets `process.exited`. Verification has only `verification.completed` (no per-check progress).
+  again never gets `process.exited`. Verification: `verification.check.started|finished` give per-check progress (a card in the chat with one row per check, 5-line clamp for the output tail of a check that did not pass; a line in Recent Activity); sessions recorded before them show the one-line `verification.completed` as before.
+- `/rewind`: done (`apps/desktop/src/rewind.rs`, `tui_view/rewind.rs`). It is `synt rewind` with a dock in place of flags, and
+  it uses the same code (`synthesis_app::rewind::{load, plan, apply_confirmed}`), so the containment is the CLI's: only files
+  inside the session's workspace roots (parent resolved, `..` and relative paths refused), never a symlink or non-regular file,
+  never a secret-masked snapshot, never a file changed since the run (the desktop has no `--force`). Steps: (1) a picker of the
+  session's checkpoints (name, time, message count, file), a dry run is always next; (2) the exact files as CLI rows
+  (`restore`/`remove`/`skip`, path, size), grouped, 5 rows per group with Show more; (3) a confirmation docked above the prompt
+  that says how many files are overwritten and deleted and that it cannot be undone beyond the checkpoint. Cancel is the
+  selected default and Esc; Enter and digits are ignored until the person engages the dock (arrows, Tab, a click) and for 400 ms
+  after it appears, so type-ahead cannot approve it. Refused with a reason while a task runs, compaction runs, a dialog or queued
+  prompt is pending, or another `/rewind` is open; checked again at apply. Apply plans again right before writing and writes
+  nothing if the plan is not the one shown. The result row gives counts and each failed file; the Files tab is scanned again and
+  the Diff tab drops the files that are back. Like `synt rewind` it puts back files only: the conversation history stays.
+  Every path in a checkpoint is untrusted: a snapshot is written back only if it hashes to the sha256 stored with the
+  checkpoint, a file is deleted only if the checkpoint recorded it as absent before the run (older checkpoints without
+  either are listed under "Will NOT be touched"), no directory on the path may be a symlink or junction, a session whose
+  workspace root is `/`, a drive root or the home directory is refused (the desktop has no `--allow-wide-root`), and each
+  file is checked again right before its own write. One apply per session at a time (lock file). While a rewind is open
+  or writing, nothing switches the engine (`/resume`, `/model`, `/new`, `/close`, `/open`, restarts), and `/rewind` is
+  refused while a background command or sub-agent runs. A partial apply says PARTIAL and lists the failed files.
+  A rewind step that does not answer within 2 minutes frees the prompt and engine switches again (with a note to check the
+  Files tab). Checkpoints come from the file tools only: Bash moves, renames and deletes are not tracked and are not
+  restored. `Live::engine_switch_blocker` is the one check every engine switch or restart must call.
+  Limits: the hashes and the proof live in the session store next to the rows, so a program that can write the store can
+  forge them (whether the store is outside the agent's write scope is a sandbox decision, R7); a write by a process outside
+  Synthesis between the last check and the rename (a directory swapped for a link) is the CLI's documented race.
 - Settings: done. Write API in `crates/synthesis-settings-ui`, the popup in `apps/desktop/src/settings_view` (section 6).
 - Multi-session tabs: TODO. `ViewState` is one session; tabs are a `Vec<ViewState>` keyed by session id
   in the desktop, fed by one event channel per `engine` run. Needs the engine to host several sessions.

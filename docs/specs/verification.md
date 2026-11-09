@@ -98,3 +98,6 @@ Other stops: user cancel → `cancelled`; approval needed but impossible (headle
 ## Open
 - Rule 4 of §3 (inferred-only can reach `passed`) versus "unverified unless the user gave criteria": product decision (doc §13.7).
 - Is a dev server that never becomes ready `failed` (often the bug itself) or `blocked`? Currently `failed` (timeout).
+
+## Progress events [new, 2026-11-09]
+`CheckAuthorizer` also has `started(check, index, total)` and `finished(result)` callbacks, which `VerifyRunner::run_with` calls around each check (not for `run`/`run_one` without an authorizer, so the advisory `verify_run` tool is silent). The harness turns them into `verification.check.started|finished` (events.md); `verification.completed` still closes each evaluation.
