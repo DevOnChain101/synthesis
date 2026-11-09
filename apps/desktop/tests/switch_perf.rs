@@ -241,6 +241,7 @@ fn switch_and_resume_stay_within_budget() {
                         prior.take(),
                         Some(Target::Resume(id.into())),
                         None,
+                        None,
                         vec![],
                     )
                     .unwrap(),
@@ -307,6 +308,7 @@ fn copy_of_a_real_home() {
             project.clone(),
             prior.take(),
             Some(Target::Resume(id.clone())),
+            None,
             None,
             vec![],
         );
