@@ -36,6 +36,8 @@ pub struct Args {
     focus: bool,
     /// `--expand`: every tool card open (Ctrl+O).
     expand: bool,
+    /// `--rows`: print the chat's notice rows (shown or hidden by the quiet-chat rules) to stderr.
+    rows: bool,
     /// `--check`: reopen the written PNG and fail unless it is the asked size (times a whole scale) and not blank.
     check: bool,
     /// `--active tools,mcp[,core,user,hooks,guards,sub,skills,mem]` freezes those Topology nodes in their active
@@ -57,7 +59,7 @@ pub struct LiveShot {
     script: PathBuf,
     prompt: String,
     answer: Option<Choice>,
-    /// `--cmd TEXT`: typed after the task, so a command's output or picker is in the frame.
+    /// `--cmd TEXT[;;TEXT...]`: typed after the task, so a command's output or picker is in the frame.
     cmd: Option<String>,
     /// `--peers FILE`: a JSON array of peer rows (the `/peers` listing) the window has polled.
     peers: Option<PathBuf>,
@@ -204,6 +206,7 @@ pub fn parse(args: &[String]) -> Option<Args> {
         verbose: args.iter().any(|a| a == "--verbose"),
         focus: args.iter().any(|a| a == "--focus"),
         expand: args.iter().any(|a| a == "--expand"),
+        rows: args.iter().any(|a| a == "--rows"),
         check: args.iter().any(|a| a == "--check"),
         active: val("--active")
             .iter()
@@ -376,9 +379,13 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
         );
         live.view.set_peers(&live.peer_rows.clone());
     }
-    if let Some(c) = &l.cmd {
+    // `;;` separates commands typed one after the other (a command that opens a picker ends the list)
+    for c in l.cmd.iter().flat_map(|c| c.split(";;")) {
         live.busy |= l.busy;
-        live.submit(c);
+        live.submit(c.trim());
+        if !live.dialogs.is_empty() {
+            break;
+        }
     }
     if let Some(n) = l.send_pick.and_then(|n| n.checked_sub(1)) {
         let key = live
@@ -466,6 +473,27 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     l.view
                         .apply(&serde_json::from_str::<synthesis_events::Envelope>(line)?);
                 }
+            }
+            if a.rows {
+                use synthesis_view::convo::Item;
+                let (mut n, mut shown) = (0, 0);
+                for i in &l.view.convo.items {
+                    let (warning, text) = match i {
+                        Item::Notice { warning, text } => (*warning, text),
+                        Item::Internal(t) => (false, t),
+                        _ => continue,
+                    };
+                    let v = super::chat::visible(i, l.show_thinking, l.verbose, l.focus_view);
+                    n += 1;
+                    shown += usize::from(v);
+                    eprintln!(
+                        "row {} {} {:?}",
+                        if v { "SHOWN " } else { "hidden" },
+                        if warning { "warn" } else { "info" },
+                        text
+                    );
+                }
+                eprintln!("notice rows: {n}, shown: {shown}");
             }
             (Some((l, c)), Some(e), Some(t))
         }

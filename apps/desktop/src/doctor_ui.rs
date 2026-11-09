@@ -4,7 +4,7 @@
 use synthesis_app::doctor::{Level, Row, summary};
 use synthesis_tui_base::complete::Command;
 
-use crate::live::{Action, Live, Submitted};
+use crate::live::{Action, Live, NoticeKind, Submitted};
 
 pub fn doctor_command() -> Command {
     Command {
@@ -30,7 +30,7 @@ impl Live {
             self.note("/doctor: the session is still starting", true);
             return Submitted::Nothing;
         }
-        self.note("doctor: checking...", false);
+        self.note_kind(NoticeKind::Bookkeeping, "doctor: checking...");
         Submitted::Do(Action::Doctor)
     }
 
