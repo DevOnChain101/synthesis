@@ -562,3 +562,25 @@ mod seatbelt {
         }
     }
 }
+
+/// A signal to a process that already exited does nothing (its pid may have been reused).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_signal_after_exit_is_a_no_op() {
+    let rt = TerminalRuntime::new(SandboxMode::Off);
+    let _f = open(&rt, None);
+    let h = rt.spawn(SID, SpawnSpec::new("exit 3")).await.unwrap();
+    let mut st = rt.get_status(SID, &h.process_id).unwrap();
+    for _ in 0..200 {
+        if !st.running {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        st = rt.get_status(SID, &h.process_id).unwrap();
+    }
+    assert!(!st.running, "the process should have exited");
+    rt.signal(SID, &h.process_id, synthesis_terminal::Signal::Kill)
+        .unwrap();
+    let after = rt.get_status(SID, &h.process_id).unwrap();
+    assert_eq!((after.exit_code, after.signal), (Some(3), None));
+}

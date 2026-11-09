@@ -25,6 +25,7 @@
 
 mod agent;
 mod agents;
+mod browser_action;
 mod classifier;
 mod comm;
 mod context;

@@ -396,7 +396,9 @@ pub fn commands(live: &Live, v: &TermView) -> Div {
                                 .min_w(px(0.))
                                 .truncate()
                                 .text_color(strong())
-                                .child(c.command.lines().next().unwrap_or("").to_string()),
+                                .child(synthesis_harness::sanitize_for_display(
+                                    c.command.lines().next().unwrap_or(""),
+                                )),
                         )
                         .children(who.map(|w| badge(w, dim())))
                         .child(code)
@@ -433,9 +435,13 @@ pub fn commands(live: &Live, v: &TermView) -> Div {
                             .pt(px(4.))
                             .text_color(text())
                             .children(shown.iter().map(|l| {
-                                div()
-                                    .whitespace_nowrap()
-                                    .child(if l.is_empty() { " " } else { l }.to_string())
+                                // output is untrusted: control characters are made visible, not sent to the text system
+                                let l = synthesis_harness::sanitize_for_display(l);
+                                div().whitespace_nowrap().child(if l.is_empty() {
+                                    " ".to_string()
+                                } else {
+                                    l
+                                })
                             }))
                             .when(hidden > 0, |d| {
                                 d.child(
