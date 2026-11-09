@@ -6,6 +6,7 @@ pub mod engine;
 pub mod folder;
 pub mod live;
 pub mod models;
+pub mod send_pick;
 pub mod settings_view;
 pub mod theme;
 pub mod tui_view;

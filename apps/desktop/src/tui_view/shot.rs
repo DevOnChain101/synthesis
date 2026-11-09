@@ -53,6 +53,10 @@ pub struct LiveShot {
     answer: Option<Choice>,
     /// `--cmd TEXT`: typed after the task, so a command's output or picker is in the frame.
     cmd: Option<String>,
+    /// `--peers FILE`: a JSON array of peer rows (the `/peers` listing) the window has polled.
+    peers: Option<PathBuf>,
+    /// `--send-pick N`: option N (from 1) of the picker `--cmd` opened is chosen (the chip shows).
+    send_pick: Option<usize>,
     /// `--earlier TEXT`: a first session of the same folder and home that ran this prompt and
     /// ended (what `/resume` lists).
     earlier: Option<String>,
@@ -92,6 +96,8 @@ pub fn parse(args: &[String]) -> Option<Args> {
             _ => None,
         },
         cmd: val("--cmd").cloned(),
+        peers: val("--peers").map(PathBuf::from),
+        send_pick: val("--send-pick").and_then(|n| n.parse().ok()),
         earlier: val("--earlier").cloned(),
         queue: val("--queue").map_or_else(Vec::new, |q| q.split('|').map(String::from).collect()),
         setup: args.iter().any(|a| a == "--setup"),
@@ -235,8 +241,21 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
         live.view.set_peers(&[]);
         live.ws_key = synthesis_view::workspaces::fold_dir(&engine.root);
     }
+    if let Some(f) = &l.peers {
+        live.set_peer_rows(
+            serde_json::from_str(&std::fs::read_to_string(f)?)?,
+            now_ms(),
+        );
+        live.view.set_peers(&live.peer_rows.clone());
+    }
     if let Some(c) = &l.cmd {
         live.submit(c);
+    }
+    if let Some(n) = l.send_pick.and_then(|n| n.checked_sub(1)) {
+        let key = live
+            .pick(n, now_ms())
+            .ok_or("--send-pick: no such option")?;
+        live.answer(&key, now_ms());
     }
     if !l.queue.is_empty() {
         live.busy = true;
