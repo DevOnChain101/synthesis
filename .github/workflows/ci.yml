@@ -72,6 +72,8 @@ jobs:
         env:
           CARGO_PROFILE_TEST_DEBUG: "0"
           CARGO_PROFILE_DEV_DEBUG: "0"
+          # Same as the browser job: Chrome's own helper sandbox fails on macOS/Linux runners (Mach rendezvous).
+          SYNT_BROWSER_TEST_NO_SANDBOX: ${{ runner.os != 'Windows' && '1' || '' }}
         run: cargo test --workspace --exclude synthesis-desktop --locked --no-fail-fast --features synthesis-cli/test-provider 2>&1 | tee test.log
       - name: Failure digest
         if: always()
@@ -152,8 +154,9 @@ jobs:
     timeout-minutes: 40
     # TODO(macos-browser): Chrome helpers fail Mach port rendezvous on GitHub macOS runners
     # (bootstrap_look_up ... Unknown service name 1102). Drop this once a runner/Chrome combination passes.
-    # TODO(windows-browser): the Browser tests step hit its 15 min timeout with no root cause (unverified,
-    # diagnosis pending; the log now shows the last started test). Non-blocking like macOS until fixed.
+    # TODO(windows-browser): earlier "exit code 101 with no output" was the step's own `bash -e` ending at the
+    # first failing test before its output was logged (fixed: `|| rc=$?`). The real test failure is now in
+    # browser.log; diagnose it from there. Non-blocking like macOS until fixed.
     continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
     strategy:
       fail-fast: false
@@ -214,16 +217,16 @@ jobs:
           failed=""
           for t in $("$bin" --list --format terse | sed -n 's/: test$//p'); do
             say "[$(date -u +%T)] START $t"
+            rc=0 # the runs below end in `|| rc=$?`: under `bash -e` a failing test (exit 101) would otherwise end the step here, before its output is logged
             # 124 = timed out, 137 = killed. GNU timeout (Linux, Git for Windows' bash), gtimeout, or perl
             # alarm (macOS has no `timeout`; the exit code 142 = SIGALRM is mapped to 124).
             if command -v timeout >/dev/null 2>&1; then
-              timeout --kill-after=10 150 "$bin" --exact "$t" --nocapture --test-threads=1 > one.log 2>&1
+              timeout --kill-after=10 150 "$bin" --exact "$t" --nocapture --test-threads=1 > one.log 2>&1 || rc=$?
             elif command -v gtimeout >/dev/null 2>&1; then
-              gtimeout --kill-after=10 150 "$bin" --exact "$t" --nocapture --test-threads=1 > one.log 2>&1
+              gtimeout --kill-after=10 150 "$bin" --exact "$t" --nocapture --test-threads=1 > one.log 2>&1 || rc=$?
             else
-              perl -e 'alarm shift; exec @ARGV' 150 "$bin" --exact "$t" --nocapture --test-threads=1 > one.log 2>&1
+              perl -e 'alarm shift; exec @ARGV' 150 "$bin" --exact "$t" --nocapture --test-threads=1 > one.log 2>&1 || rc=$?
             fi
-            rc=$?
             [ $rc -eq 142 ] && rc=124
             if [ $rc -eq 124 ] || [ $rc -eq 137 ]; then
               say "[$(date -u +%T)] HANG $t (rc=$rc, no exit after 150 s)"
@@ -231,8 +234,12 @@ jobs:
             elif [ $rc -ne 0 ]; then
               failed="$failed $t(rc=$rc)"
             fi
+            if [ $rc -ne 0 ] && [ "$RUNNER_OS" = Windows ]; then
+              say "chrome processes at failure:"
+              powershell -NoProfile -Command "Get-Process chrome -ErrorAction SilentlyContinue | Select-Object Id,StartTime,@{n='MB';e={[int]($_.WorkingSet64/1MB)}} | Format-Table | Out-String" 2>&1 | tee -a browser.log || true
+            fi
             killchrome
-            cat one.log >> browser.log; tail -n 40 one.log
+            cat one.log >> browser.log; tail -n 80 one.log
             say "[$(date -u +%T)] END $t rc=$rc"
           done
           echo "browser tests failed:${failed:- none}" | tee -a "$GITHUB_STEP_SUMMARY"

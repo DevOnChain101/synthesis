@@ -470,6 +470,10 @@ impl Proc {
     }
 
     fn signal(&self, sig: Signal) -> Result<()> {
+        // an exited process may have had its pid reused: never signal it
+        if self.poll().is_some() {
+            return Ok(());
+        }
         let mut guard = lock(&self.child);
         let Some(child) = guard.as_mut() else {
             return Ok(());

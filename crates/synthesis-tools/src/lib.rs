@@ -32,7 +32,7 @@ mod verify;
 mod web;
 mod write;
 
-pub use browser::{BrowserConfig, BrowserHost, LoginRequest, redact_input};
+pub use browser::{BrowserConfig, BrowserHost, LoginRequest, is_control_chord, redact_input};
 pub use registry::{Registry, standard_policy, standard_policy_git, standard_policy_with};
 pub use skill::{
     LearnedProvider, LearnedSkill, SkillInfo, SkillSource, discover_skills, set_learned_skills,

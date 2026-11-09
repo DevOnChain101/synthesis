@@ -195,7 +195,7 @@ mod retry_tests {
 /// One connection, set up with the busy timeout first. SQLite answers "locked" at once to some
 /// steps (journal-mode switch, WAL recovery on first open) without consulting the timeout, so the
 /// whole setup is retried while busy/locked, for up to 15 s (slow Windows runners).
-fn connect(home: &Path, read_only: bool) -> Result<Connection> {
+pub(crate) fn connect(home: &Path, read_only: bool) -> Result<Connection> {
     retry_busy(Duration::from_secs(15), || connect_once(home, read_only))
 }
 
