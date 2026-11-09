@@ -346,7 +346,7 @@ impl Model {
                 let same = (r.scope == synthesis_session::trust::FOLDER
                     && std::path::Path::new(&r.root).is_dir())
                 .then(|| {
-                    synthesis_session::trust::fingerprint(std::path::Path::new(&r.root))
+                    synthesis_session::trust::fingerprint_root(std::path::Path::new(&r.root))
                         .is_ok_and(|f| f == r.fingerprint)
                 });
                 (r, same)
@@ -1122,9 +1122,9 @@ mod tests {
         let (_t, mut m) = model();
         assert!(m.trusted.is_empty());
         let ws = m.cfg.cwd.clone();
-        let fp = synthesis_session::trust::fingerprint(&ws).unwrap();
+        let fp = synthesis_session::trust::fingerprint_root(&ws).unwrap();
         let policy = synthesis_session::trust::Policy {
-            home: None,
+            home: Some(m.cfg.home.join("uh")),
             synt_home: m.cfg.home.clone(),
         };
         synthesis_session::trust::add(&m.cfg.home, &ws, "folder", &fp, &policy).unwrap();

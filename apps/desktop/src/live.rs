@@ -271,7 +271,7 @@ pub fn trust_text(root: &std::path::Path, cwd: &str) -> Vec<String> {
             shown(cwd)
         ));
     }
-    v.push("Enables: the root's project settings (including permission and allow rules), agents, skills, memory and instruction files, hooks, and the file explorer's git listing. Its MCP servers are offered but none starts: each needs your own approval as NAME@HASH (--approve-mcp at launch or your user settings; `synt mcp get` shows the hash). MCP approvals given at launch are not carried over.".into());
+    v.push("Enables: the root's project settings (including permission and allow rules), agents, skills, memory and instruction files, hooks, and the file explorer's git listing. Its MCP servers are offered but none starts: each needs your own approval as NAME@HASH (--approve-mcp at launch or your user settings; `synt mcp get` shows the hash). MCP approvals given at launch are not carried over. The scripts that hooks and MCP servers name are checked for changes, but other code those scripts run in turn is NOT covered.".into());
     v.push("Risks: a repository you did not write can carry hooks that run commands (one can run at the restart that follows), allow rules that skip prompts, and provider endpoints that receive your prompts. A remembered trust runs the project's hooks at EVERY future start, and a later git pull can change hooks, MCP servers, agents or rules without any prompt. So, stricter than VS Code: if the trusted configuration changes, remembered trust is not honoured; the folder starts untrusted and you are asked again, with the changed file names.".into());
     v.push("The session restarts now and must be idle: the saved conversation is reloaded (if it cannot be, a fresh session starts and a note says so), this session's 'always allow' grants and its permission mode are reset. \"Trust this folder (remember)\" records the root in your own session store (never in the project) for later sessions, resumed ones included; /trust lists and revokes it. It does not ask again when the project's files change, but a warning row shows when its trusted configuration differs from when you trusted it. \"Trust for this session only\" saves nothing. Not now changes nothing: no git runs and nothing from the folder is loaded.".into());
     v
@@ -2487,7 +2487,7 @@ impl Live {
             let state = if r.scope == synthesis_session::trust::PARENT {
                 "each project is checked at its first start"
             } else if std::path::Path::new(&r.root).is_dir() {
-                match synthesis_session::trust::fingerprint(std::path::Path::new(&r.root)) {
+                match synthesis_session::trust::fingerprint_root(std::path::Path::new(&r.root)) {
                     Ok(f) if f == r.fingerprint => "config unchanged",
                     _ => "CONFIG CHANGED: not honoured until you trust it again",
                 }

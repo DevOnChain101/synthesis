@@ -46,9 +46,9 @@ fn rig_in(sub: &str) -> (Live, tempfile::TempDir) {
 fn the_dialog_is_raised_once_with_the_safe_option_first_and_needs_a_deliberate_answer() {
     let (mut l, _d) = rig();
     assert!(!l.trusted, "no --trust-project: untrusted");
-    assert!(l.ask_trust(1000, None));
+    assert!(l.ask_trust(1000, Some(std::path::Path::new("/nonexistent/home"))));
     assert!(
-        !l.ask_trust(1000, None),
+        !l.ask_trust(1000, Some(std::path::Path::new("/nonexistent/home"))),
         "a second click does not stack another"
     );
     assert_eq!(l.dialogs.len(), 1);
@@ -90,29 +90,32 @@ fn the_dialog_is_raised_once_with_the_safe_option_first_and_needs_a_deliberate_a
 #[test]
 fn not_now_and_esc_trust_nothing_even_inside_the_arming_delay() {
     let (mut l, _d) = rig();
-    l.ask_trust(1000, None);
+    l.ask_trust(1000, Some(std::path::Path::new("/nonexistent/home")));
     // Esc is never held back by the arming delay
     let key = l.reject();
     assert_eq!(key, None, "a picker closes without an answer");
     assert!(l.dialogs.is_empty());
     assert!(!l.trusted);
     // Not now answers without an action
-    assert!(l.ask_trust(5000, None));
+    assert!(l.ask_trust(5000, Some(std::path::Path::new("/nonexistent/home"))));
     let key = l.pick(0, 5000 + ARM_MS).unwrap();
     assert_eq!(key, "no");
     assert_eq!(l.answer(&key, 6000), None);
     assert!(!l.trusted);
     // the person may be asked again by the next click
-    assert!(l.ask_trust(9000, None));
+    assert!(l.ask_trust(9000, Some(std::path::Path::new("/nonexistent/home"))));
 }
 
 #[test]
 fn no_dialog_for_a_trusted_folder_or_without_a_session() {
     let (mut l, _d) = rig();
     l.trusted = true;
-    assert!(!l.ask_trust(0, None));
+    assert!(!l.ask_trust(0, Some(std::path::Path::new("/nonexistent/home"))));
     assert!(l.dialogs.is_empty());
-    assert!(!Live::new().ask_trust(0, None), "no engine yet");
+    assert!(
+        !Live::new().ask_trust(0, Some(std::path::Path::new("/nonexistent/home"))),
+        "no engine yet"
+    );
 }
 
 fn headers(l: &Live) -> String {
@@ -129,7 +132,7 @@ fn headers(l: &Live) -> String {
 #[test]
 fn the_dialog_names_the_root_and_says_when_it_is_not_the_folder_you_are_in() {
     let (mut l, d) = rig();
-    assert!(l.ask_trust(0, None));
+    assert!(l.ask_trust(0, Some(std::path::Path::new("/nonexistent/home"))));
     let root = std::fs::canonicalize(d.path()).unwrap().join("ws");
     let t = headers(&l);
     assert!(
@@ -142,9 +145,13 @@ fn the_dialog_names_the_root_and_says_when_it_is_not_the_folder_you_are_in() {
         "{t}"
     );
     assert!(t.contains("fresh session") && t.contains("hooks"), "{t}");
+    assert!(
+        t.contains("is NOT covered") && t.contains("EVERY future start"),
+        "{t}"
+    );
     // a subfolder of a repository: the grant is the repository, and the dialog says so
     let (mut l, d) = rig_in("pkg/app");
-    assert!(l.ask_trust(0, None));
+    assert!(l.ask_trust(0, Some(std::path::Path::new("/nonexistent/home"))));
     let root = std::fs::canonicalize(d.path()).unwrap().join("ws");
     let t = headers(&l);
     assert!(
@@ -223,7 +230,7 @@ fn a_trusted_restart_comes_back_trusted_and_a_broken_project_reports_the_error()
         None,
         Some(Target::Trust),
         None,
-        Some(root),
+        Some((root, None)),
         vec![],
     )
     .unwrap();
@@ -248,7 +255,7 @@ fn a_trusted_restart_comes_back_trusted_and_a_broken_project_reports_the_error()
             None,
             Some(Target::Trust),
             None,
-            Some(root),
+            Some((root, None)),
             vec![]
         )
         .is_err()
@@ -318,7 +325,7 @@ fn remember_and_parent_are_offered_and_answer_with_what_to_record() {
 fn the_parent_is_not_offered_when_it_is_home_a_filesystem_root_or_holds_the_config() {
     // `rig()`: the config folder lies next to the project, inside the parent: no parent option
     let (mut l, _d) = rig();
-    assert!(l.ask_trust(0, None));
+    assert!(l.ask_trust(0, Some(std::path::Path::new("/nonexistent/home"))));
     assert!(l.dialogs[0].options.iter().all(|o| o.0 != "parent"));
     // the parent is the user's home: no parent option, the folder itself is still offered
     let (mut l, d, app) = rig_nested();
@@ -334,10 +341,10 @@ fn trust_lists_and_revokes_with_a_confirmation_that_keeps_by_default() {
     let home = l.engine.as_ref().unwrap().synthesis_home.clone();
     {
         let policy = synthesis_session::trust::Policy {
-            home: None,
+            home: Some(std::path::PathBuf::from("/nonexistent/home")),
             synt_home: home.clone(),
         };
-        let fp = synthesis_session::trust::fingerprint(&app).unwrap();
+        let fp = synthesis_session::trust::fingerprint_root(&app).unwrap();
         synthesis_session::trust::add(&home, &app, "folder", &fp, &policy).unwrap();
     }
     l.submit("/trust");
@@ -388,14 +395,84 @@ fn trust_says_when_remembered_trust_is_off_and_counts_rows_it_ignores() {
     assert!(!t.contains("unverified rows"));
     // a row written without the key (what a shell could do to the database) is ignored and counted
     let policy = synthesis_session::trust::Policy {
-        home: None,
+        home: Some(std::path::PathBuf::from("/nonexistent/home")),
         synt_home: home.clone(),
     };
-    let fp = synthesis_session::trust::fingerprint(&app).unwrap();
+    let fp = synthesis_session::trust::fingerprint_root(&app).unwrap();
     synthesis_session::trust::add(&home, &app, "folder", &fp, &policy).unwrap();
     std::fs::remove_file(home.join("run/trust.key")).unwrap();
     l.submit("/trust");
     let t = format!("{:?}", l.view.convo.items.last());
     assert!(t.contains("unverified rows ignored: 1"), "{t}");
     assert!(t.contains("no remembered folder"), "{t}");
+}
+
+#[test]
+fn an_unknown_home_folder_offers_no_trust() {
+    let (mut l, _d) = rig();
+    assert!(!l.ask_trust(0, None));
+    assert!(l.dialogs.is_empty());
+    let note = format!("{:?}", l.view.convo.items.last());
+    assert!(note.contains("home folder is unknown"), "{note}");
+}
+
+/// The trusted configuration is checked again after the engine loaded it and before any hook runs: a file
+/// changed in that window (here from the hook point, as a racing writer would) aborts the start.
+#[test]
+fn a_file_changed_between_the_check_and_the_load_aborts_the_trusted_start() {
+    use clap::Parser as _;
+    use std::sync::Arc;
+    use synthesis_desktop::engine::{Args, Engine, StartOpts, TRUST_CHANGED, TrustCheck};
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let (ws, home) = (base.join("ws"), base.join("home"));
+    std::fs::create_dir_all(ws.join(".synt")).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(ws.join(".synt/settings.json"), "{}").unwrap();
+    let sp = base.join("script.json");
+    std::fs::write(&sp, r#"[{"text": "ok"}]"#).unwrap();
+    let env = Env::from_pairs([
+        ("HOME", home.to_str().unwrap()),
+        ("SYNT_HOME", home.to_str().unwrap()),
+    ]);
+    let model = format!("fake:{}", sp.display());
+    let common = Args::try_parse_from([
+        "synthesis-desktop",
+        "--sandbox",
+        "off",
+        "--provider",
+        &model,
+        "--trust-project",
+    ])
+    .unwrap()
+    .common;
+    let manifest = synthesis_session::trust::fingerprint(&ws, &ws).unwrap();
+    let start = |hook: Option<Arc<dyn Fn() + Send + Sync>>| {
+        Engine::start_with(
+            StartOpts {
+                project: ws.clone(),
+                common: common.clone(),
+                resume: None,
+                notes: vec![],
+                verify: Some(TrustCheck {
+                    root: ws.clone(),
+                    cwd: ws.clone(),
+                    manifest: manifest.clone(),
+                    before_compare: hook,
+                }),
+            },
+            &env,
+        )
+        .map(|_| ())
+    };
+    // unchanged: the engine starts
+    start(None).unwrap();
+    // changed in the window: refused, and the file is named
+    let target = ws.join(".synt/settings.json");
+    let hook: Arc<dyn Fn() + Send + Sync> =
+        Arc::new(move || std::fs::write(&target, r#"{"hooks":{"x":1}}"#).unwrap());
+    let err = start(Some(hook)).unwrap_err();
+    assert!(err.starts_with(TRUST_CHANGED), "{err}");
+    assert!(err.contains(".synt/settings.json"), "{err}");
 }

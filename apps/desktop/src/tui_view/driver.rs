@@ -121,10 +121,10 @@ pub struct LiveUi {
     pub model_override: Option<String>,
     /// The project root the person trusted for THIS session (Trust dialog): kept over the restarts that
     /// continue the session (`/model`), dropped by any other launch. Never stored.
-    pub session_trust: Option<PathBuf>,
+    pub session_trust: Option<(PathBuf, Option<String>)>,
     /// Roots written to the trust store by the answer that restarts the session: removed again when the
     /// trusted restart fails.
-    pub pending_remember: Vec<PathBuf>,
+    pub pending_remember: Vec<(PathBuf, Option<synthesis_session::trust::TrustRecord>)>,
     pub dirty: bool,
     pub comp: Option<Comp>,
     pub hist: Option<HistNav>,
@@ -344,7 +344,11 @@ impl TuiView {
             Err(e) => {
                 lu.session_trust = None;
                 if !lu.pending_remember.is_empty() {
-                    forget(&lu.cfg.synthesis_home, &mut lu.pending_remember);
+                    forget(
+                        &lu.cfg.synthesis_home,
+                        &lu.cfg.home.as_deref().map(PathBuf::from),
+                        &mut lu.pending_remember,
+                    );
                     lu.live
                         .note("trust was not remembered: the trusted restart failed", true);
                 }
@@ -358,7 +362,11 @@ impl TuiView {
                 if !l.engine.trusted {
                     lu.session_trust = None;
                     if !lu.pending_remember.is_empty() {
-                        forget(&lu.cfg.synthesis_home, &mut lu.pending_remember);
+                        forget(
+                            &lu.cfg.synthesis_home,
+                            &lu.cfg.home.as_deref().map(PathBuf::from),
+                            &mut lu.pending_remember,
+                        );
                         lu.live.note(
                             "trust was not remembered: the session could not restart trusted",
                             true,
@@ -1287,8 +1295,16 @@ impl TuiView {
             lu.dirty = true;
             return cx.notify();
         }
-        // "remember": the user store gets the root (or its parent) with the manifest of the project's trusted
-        // configuration now; a configuration that cannot be fingerprinted is not remembered
+        // the manifest of the trusted configuration at the moment of the answer: what is checked again once
+        // the restarted engine has loaded its files, and what "remember" stores
+        let cwd = lu
+            .live
+            .engine
+            .as_ref()
+            .map_or_else(|| root.clone(), |e| PathBuf::from(&e.cwd));
+        let manifest = synthesis_session::trust::fingerprint(&root, &cwd);
+        // "remember": the user store gets the root (or its parent); a configuration that cannot be
+        // fingerprinted is not remembered
         if let Some((at, scope)) = &grant.remember {
             use synthesis_session::trust as tr;
             let home = lu.cfg.synthesis_home.clone();
@@ -1296,24 +1312,29 @@ impl TuiView {
                 home: lu.cfg.home.as_deref().map(PathBuf::from),
                 synt_home: home.clone(),
             };
-            let done = tr::fingerprint(&root)
-                .map_err(|e| e.to_string())
-                .and_then(|fp| {
-                    let own = if *scope == tr::FOLDER {
-                        fp.as_str()
-                    } else {
-                        ""
-                    };
-                    tr::add(&home, at, scope, own, &policy).map_err(|e| e.to_string())?;
-                    lu.pending_remember.push(at.clone());
-                    if *scope == tr::PARENT {
-                        // this project's own baseline under the parent grant, refreshed by this answer
-                        tr::add(&home, &root, tr::CHILD, &fp, &policy)
-                            .map_err(|e| e.to_string())?;
-                        lu.pending_remember.push(root.clone());
-                    }
-                    Ok(())
-                });
+            let prior = tr::list(&home).map(|l| l.records).unwrap_or_default();
+            let note_row = |lu_pending: &mut Vec<(PathBuf, Option<tr::TrustRecord>)>, p: &Path| {
+                // what the row was before this answer, to put back if the restart fails
+                lu_pending.push((
+                    p.to_path_buf(),
+                    prior.iter().find(|r| Path::new(&r.root) == p).cloned(),
+                ));
+            };
+            let done = manifest.clone().map_err(|e| e.to_string()).and_then(|fp| {
+                let own = if *scope == tr::FOLDER {
+                    fp.as_str()
+                } else {
+                    ""
+                };
+                note_row(&mut lu.pending_remember, at);
+                tr::add(&home, at, scope, own, &policy).map_err(|e| e.to_string())?;
+                if *scope == tr::PARENT {
+                    // this project's own baseline under the parent grant, refreshed by this answer
+                    note_row(&mut lu.pending_remember, &root);
+                    tr::add(&home, &root, tr::CHILD, &fp, &policy).map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            });
             match done {
                 Ok(()) => lu.live.note(
                     format!(
@@ -1328,7 +1349,11 @@ impl TuiView {
                     false,
                 ),
                 Err(e) => {
-                    forget(&home, &mut lu.pending_remember);
+                    forget(
+                        &home,
+                        &lu.cfg.home.as_deref().map(PathBuf::from),
+                        &mut lu.pending_remember,
+                    );
                     lu.live.note(
                         format!(
                             "could not remember the trust ({e}); trusted for this session only"
@@ -1338,7 +1363,7 @@ impl TuiView {
                 }
             }
         }
-        lu.session_trust = Some(root);
+        lu.session_trust = Some((root, manifest.ok()));
         self.switch(Target::Trust, "trust".into(), cx);
     }
 
@@ -1819,10 +1844,27 @@ pub fn read_image_file(p: &Path) -> Result<(bool, Vec<u8>), String> {
     Ok((png, v))
 }
 
-/// Removes the rows an answer just wrote (the restart it asked for failed).
-fn forget(home: &Path, roots: &mut Vec<PathBuf>) {
-    for r in roots.drain(..) {
-        let _ = synthesis_session::trust::revoke(home, &r.to_string_lossy());
+/// Undoes the rows an answer wrote (the restart it asked for failed): a row that did not exist before is
+/// removed, one that did is put back as it was.
+fn forget(
+    home: &Path,
+    user_home: &Option<PathBuf>,
+    rows: &mut Vec<(PathBuf, Option<synthesis_session::trust::TrustRecord>)>,
+) {
+    use synthesis_session::trust as tr;
+    let policy = tr::Policy {
+        home: user_home.clone(),
+        synt_home: home.to_path_buf(),
+    };
+    for (root, prev) in rows.drain(..) {
+        match prev {
+            Some(r) => {
+                let _ = tr::restore(home, &r, &policy);
+            }
+            None => {
+                let _ = tr::revoke(home, &root.to_string_lossy());
+            }
+        }
     }
 }
 
@@ -1841,7 +1883,7 @@ pub fn build(
     prior: Option<Arc<Engine>>,
     target: Option<Target>,
     model: Option<String>,
-    trust: Option<PathBuf>,
+    trust: Option<(PathBuf, Option<String>)>,
     mut notes: Vec<String>,
 ) -> Result<Launched, String> {
     let first_start = prior.is_none() && target.is_none();
@@ -1920,7 +1962,8 @@ pub fn build(
                    resume: Option<synthesis_tui::Resume>,
                    model: Option<String>,
                    notes: Vec<String>,
-                   trust: Option<&Path>| {
+                   trust: Option<&(PathBuf, Option<String>)>,
+                   remembered: bool| {
         let project = resume
             .as_ref()
             .map_or(project, |r| PathBuf::from(&r.record.cwd));
@@ -1934,10 +1977,11 @@ pub fn build(
                 replay.session.cwd = r.record.cwd.clone();
             }
         }
-        let (mut common, launch_notes) = engine::launch_common(
+        let (mut common, launch_notes, verify) = engine::launch_common(
             &cfg.args.common,
             &cfg.granted,
             trust,
+            remembered,
             &project,
             &cfg.synthesis_home,
             cfg.home.as_deref().map(Path::new),
@@ -1954,6 +1998,7 @@ pub fn build(
                 common,
                 resume,
                 notes,
+                verify,
             },
             &cfg.env,
         )
@@ -1964,13 +2009,32 @@ pub fn build(
             model,
         })
     };
+    // what a failed trusted start falls back to: the stored session, else a fresh one
+    let resume_id = resume
+        .as_ref()
+        .map(|r| r.record.id.clone())
+        .or_else(|| prior_sid.clone());
     match attempt(
         project.clone(),
         resume,
         model,
         notes.clone(),
-        trust.as_deref(),
+        trust.as_ref(),
+        true,
     ) {
+        // the trusted configuration changed between the check and the load: start untrusted, never on
+        // what was loaded
+        Err(e) if e.starts_with(engine::TRUST_CHANGED) => {
+            notes.push(e);
+            attempt(
+                project,
+                back(&home, resume_id),
+                prior_model,
+                notes,
+                None,
+                false,
+            )
+        }
         Err(e) if matches!(target, Some(Target::Model(_))) => {
             notes.push(format!(
                 "/model: could not switch ({e}); staying on the previous model"
@@ -1980,13 +2044,21 @@ pub fn build(
                 back(&home, prior_sid),
                 prior_model,
                 notes,
-                trust.as_deref(),
+                trust.as_ref(),
+                true,
             )
         }
         // a trusted restart that fails must not leave the session without an engine: it continues untrusted
         Err(e) if matches!(target, Some(Target::Trust)) => {
             notes.push(trust_fallback_note(&e));
-            attempt(project, back(&home, prior_sid), prior_model, notes, None)
+            attempt(
+                project,
+                back(&home, prior_sid),
+                prior_model,
+                notes,
+                None,
+                false,
+            )
         }
         r => r,
     }
@@ -2167,24 +2239,37 @@ pub(super) fn save_panels(home: &Path, cwd: &Path, changes: &[(&str, bool)]) -> 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn a_failed_trusted_restart_takes_back_the_rows_the_answer_wrote() {
+    fn a_failed_trusted_restart_undoes_the_rows_the_answer_wrote_and_restores_those_it_replaced() {
         use synthesis_session::trust as tr;
         let d = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(d.path()).unwrap();
-        let (home, proj) = (base.join("home"), base.join("w/app"));
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(&proj).unwrap();
+        let (home, uh, proj, other) = (
+            base.join("home"),
+            base.join("uh"),
+            base.join("w/app"),
+            base.join("w/other"),
+        );
+        for p in [&home, &uh, &proj, &other] {
+            std::fs::create_dir_all(p).unwrap();
+        }
         let policy = tr::Policy {
-            home: None,
+            home: Some(uh.clone()),
             synt_home: home.clone(),
         };
-        tr::add(&home, &proj, tr::FOLDER, "", &policy).unwrap();
-        tr::add(&home, &base.join("w"), tr::PARENT, "", &policy).unwrap();
-        let mut pending = vec![proj.clone()];
-        forget(&home, &mut pending);
+        tr::add(&home, &proj, tr::FOLDER, "old-manifest", &policy).unwrap();
+        let before = tr::list(&home).unwrap().records[0].clone();
+        // the answer replaced `proj` and added `other`
+        let mut pending = vec![(proj.clone(), Some(before.clone())), (other.clone(), None)];
+        tr::add(&home, &proj, tr::FOLDER, "new-manifest", &policy).unwrap();
+        tr::add(&home, &other, tr::FOLDER, "m", &policy).unwrap();
+        forget(&home, &Some(uh), &mut pending);
         assert!(pending.is_empty());
         let l = tr::list(&home).unwrap();
-        assert_eq!(l.records.len(), 1, "only what the answer wrote is removed");
+        assert_eq!(
+            l.records,
+            vec![before],
+            "the old row is back as it was, the new one is gone"
+        );
     }
 
     use super::*;

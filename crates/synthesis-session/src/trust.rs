@@ -66,6 +66,15 @@ pub struct Policy {
     pub synt_home: PathBuf,
 }
 
+/// Equal paths; case-insensitively on macOS and Windows, whose volumes are case-insensitive by default.
+fn same(a: &Path, b: &Path) -> bool {
+    if cfg!(any(target_os = "macos", windows)) {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    } else {
+        a == b
+    }
+}
+
 fn canon(p: &Path) -> PathBuf {
     synthesis_core::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
@@ -79,11 +88,11 @@ impl Policy {
         if root.parent().is_none() {
             return Some("a filesystem root");
         }
-        if self
-            .home
-            .as_deref()
-            .is_some_and(|h| canon(h).starts_with(&root))
-        {
+        // an unknown home folder cannot be told apart from a folder inside it: refuse
+        let Some(home) = &self.home else {
+            return Some("a folder while the home folder is unknown");
+        };
+        if canon(home).starts_with(&root) {
             return Some("your home folder (or a parent of it)");
         }
         let synt = canon(&self.synt_home);
@@ -99,11 +108,11 @@ impl Policy {
         }
         let p = canon(parent);
         let tmp = canon(&std::env::temp_dir());
-        if p == tmp
+        if same(&p, &tmp)
             || tmp.starts_with(&p)
             || [Path::new("/tmp"), Path::new("/var/tmp")]
                 .iter()
-                .any(|t| canon(t) == p)
+                .any(|t| same(&canon(t), &p))
         {
             return Some("a temporary folder");
         }
@@ -111,19 +120,32 @@ impl Policy {
             let h = canon(h);
             if ["Downloads", "Desktop", "Documents"]
                 .iter()
-                .any(|n| canon(&h.join(n)) == p)
+                .any(|n| same(&canon(&h.join(n)), &p))
             {
                 return Some("a catch-all folder (Downloads, Desktop or Documents)");
             }
         }
         #[cfg(unix)]
-        if let Ok(m) = fs::metadata(&p) {
+        {
             use std::os::unix::fs::MetadataExt as _;
-            if m.mode() & 0o002 != 0 {
-                return Some("a world-writable folder");
+            if let Ok(m) = fs::metadata(&p) {
+                // others can add entries here, sticky bit or not
+                if m.mode() & 0o002 != 0 {
+                    return Some("a world-writable folder");
+                }
+                if m.uid() == 0 && rustix::process::geteuid().as_raw() != 0 {
+                    return Some("a system folder (owned by root)");
+                }
             }
-            if m.uid() == 0 && rustix::process::geteuid().as_raw() != 0 {
-                return Some("a system folder (owned by root)");
+            // a few levels up: another user could swap this folder if an ancestor lets them rename it
+            // (world-writable without the sticky bit)
+            for a in p.ancestors().skip(1).take(4) {
+                if let Ok(m) = fs::metadata(a)
+                    && m.mode() & 0o002 != 0
+                    && m.mode() & 0o1000 == 0
+                {
+                    return Some("a folder under a world-writable folder");
+                }
             }
         }
         None
@@ -157,8 +179,10 @@ fn read_key(home: &Path) -> Option<[u8; 32]> {
     Some(b)
 }
 
-/// Creates the key atomically (`O_EXCL`: a link or a file already there makes it fail), 0600.
-fn create_key(home: &Path) -> Result<[u8; 32]> {
+/// Creates the key without ever replacing one: a 0600 temporary file is written and synced, then hard-linked
+/// to the key's name (the link fails if the name exists, a link included), then the temporary is removed.
+/// `Ok(Some)`: this call made the key; `Ok(None)`: another one was there first (read it).
+fn create_key(home: &Path) -> Result<Option<[u8; 32]>> {
     let dir = home.join("run");
     fs::create_dir_all(&dir).map_err(io)?;
     #[cfg(unix)]
@@ -167,8 +191,8 @@ fn create_key(home: &Path) -> Result<[u8; 32]> {
         let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
     }
     let mut key = [0u8; 32];
-    key[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-    key[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    getrandom::getrandom(&mut key).map_err(|e| Error::Invalid(format!("no random bytes: {e}")))?;
+    let tmp = dir.join(format!(".trust.key.{}", uuid::Uuid::new_v4().simple()));
     let mut o = fs::OpenOptions::new();
     o.write(true).create_new(true);
     #[cfg(unix)]
@@ -177,10 +201,16 @@ fn create_key(home: &Path) -> Result<[u8; 32]> {
         o.mode(0o600)
             .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
     }
-    o.open(key_path(home))
-        .and_then(|mut f| f.write_all(&key))
-        .map_err(io)?;
-    Ok(key)
+    let written = o
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(&key).and_then(|()| f.sync_all()));
+    let linked = written.and_then(|()| fs::hard_link(&tmp, key_path(home)));
+    let _ = fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => Ok(Some(key)),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+        Err(e) => Err(io(e)),
+    }
 }
 
 fn mac_hex(key: &[u8; 32], r: &TrustRecord) -> String {
@@ -286,7 +316,8 @@ pub fn list(home: &Path) -> Result<Listing> {
 
 /// Remembers `root` (a canonical path) with `scope` and the manifest of its configuration now. Refused for a
 /// root the [`Policy`] forbids, a root longer than [`MAX_ROOT_LEN`], or when [`MAX_ROWS`] rows exist already.
-/// A missing key is made only when no row exists; rows that cannot be verified without it are removed first.
+/// A missing key is made atomically (never over an existing one); only when this call made it are the rows
+/// from before it, which cannot be verified, dropped.
 pub fn add(
     home: &Path,
     root: &Path,
@@ -294,33 +325,51 @@ pub fn add(
     fingerprint: &str,
     policy: &Policy,
 ) -> Result<()> {
-    let refusal = match scope {
-        PARENT => policy.parent_refusal(root),
-        FOLDER | CHILD => policy.root_refusal(root),
+    let rec = TrustRecord {
+        root: root.to_string_lossy().into_owned(),
+        scope: scope.into(),
+        trusted_at: now(),
+        fingerprint: fingerprint.into(),
+    };
+    put(home, &rec, policy)
+}
+
+/// Writes `rec` as it is (its own date): the undo of an answer that replaced a row.
+pub fn restore(home: &Path, rec: &TrustRecord, policy: &Policy) -> Result<()> {
+    put(home, rec, policy)
+}
+
+fn put(home: &Path, rec: &TrustRecord, policy: &Policy) -> Result<()> {
+    let refusal = match rec.scope.as_str() {
+        PARENT => policy.parent_refusal(Path::new(&rec.root)),
+        FOLDER | CHILD => policy.root_refusal(Path::new(&rec.root)),
         _ => Some("an unknown scope"),
     };
     if let Some(why) = refusal {
         return Err(Error::Invalid(format!("trust refused for {why}")));
     }
-    let root_s = root.to_string_lossy().into_owned();
-    if root_s.len() > MAX_ROOT_LEN {
+    if rec.root.len() > MAX_ROOT_LEN {
         return Err(Error::Invalid("trust refused: the path is too long".into()));
     }
     let conn = connect(home, false)?;
     ensure(&conn)?;
     let key = match read_key(home) {
         Some(k) => k,
-        None => {
-            // no key: any row cannot be checked, so none counts; start over rather than trust them
-            conn.execute("DELETE FROM trusted_roots", [])?;
-            create_key(home)?
-        }
+        None => match create_key(home)? {
+            // this call made a new key: rows from before it cannot be verified and are dropped, only now
+            Some(k) => {
+                conn.execute("DELETE FROM trusted_roots", [])?;
+                k
+            }
+            None => read_key(home)
+                .ok_or_else(|| Error::Invalid("the trust key is unreadable".into()))?,
+        },
     };
     let n: i64 = conn.query_row("SELECT count(*) FROM trusted_roots", [], |r| r.get(0))?;
     let exists: bool = conn
         .query_row(
             "SELECT 1 FROM trusted_roots WHERE root=?1",
-            [&root_s],
+            [&rec.root],
             |_| Ok(()),
         )
         .optional()?
@@ -330,22 +379,16 @@ pub fn add(
             "trust refused: {MAX_ROWS} folders are remembered already (revoke some)"
         )));
     }
-    let rec = TrustRecord {
-        root: root_s,
-        scope: scope.into(),
-        trusted_at: now(),
-        fingerprint: fingerprint.into(),
-    };
     conn.execute(
         "INSERT INTO trusted_roots(root, scope, trusted_at, fingerprint, mac) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(root) DO UPDATE SET scope=?2, trusted_at=?3, fingerprint=?4, mac=?5",
-        (&rec.root, &rec.scope, &rec.trusted_at, &rec.fingerprint, mac_hex(&key, &rec)),
+        (&rec.root, &rec.scope, &rec.trusted_at, &rec.fingerprint, mac_hex(&key, rec)),
     )?;
     Ok(())
 }
 
-/// Forgets `root` (the exact string of its record), and the baseline rows of projects under it. Whether there
-/// was a row. Needs no key: forgetting is always allowed.
+/// Forgets `root` (the exact string of its record) and the baseline rows (`child`) of the projects under it.
+/// Whether there was a row for `root`. Needs no key: forgetting is always allowed.
 pub fn revoke(home: &Path, root: &str) -> Result<bool> {
     if !home.join("synt.db").exists() {
         return Ok(false);
@@ -354,7 +397,15 @@ pub fn revoke(home: &Path, root: &str) -> Result<bool> {
     if !has_table(&conn)? {
         return Ok(false);
     }
-    Ok(conn.execute("DELETE FROM trusted_roots WHERE root=?1", [root])? > 0)
+    let n = conn.execute("DELETE FROM trusted_roots WHERE root=?1", [root])?;
+    for sep in ["/", "\\"] {
+        let prefix = format!("{root}{sep}");
+        conn.execute(
+            "DELETE FROM trusted_roots WHERE scope='child' AND substr(root,1,length(?1))=?1",
+            [&prefix],
+        )?;
+    }
+    Ok(n > 0)
 }
 
 /// The record that trusts `project_root` (its canonical project root), if any: a `folder` record for exactly
@@ -429,51 +480,54 @@ fn hex(h: impl AsRef<[u8]>) -> String {
 }
 
 impl Walk {
-    fn entry(&mut self, name: String, path: &Path) -> std::result::Result<(), Unfit> {
+    /// One path of the manifest, under `name`. A link is followed to its real target, which must lie inside the
+    /// project: the CONTENT of the target is what is hashed (a link to a directory is walked), so editing the
+    /// target changes the manifest. A link that leaves the project is refused.
+    fn visit(&mut self, name: &str, path: &Path, depth: u8) -> std::result::Result<(), Unfit> {
         let Ok(m) = fs::symlink_metadata(path) else {
             return Ok(());
         };
-        if self.out.len() >= MAX_FILES {
-            return Err(Unfit::TooBig);
-        }
-        if m.file_type().is_symlink() {
-            // not followed: the target path is what is hashed, and it must stay inside the project
-            let target = fs::read_link(path).map_err(|_| Unfit::LinkOutside(name.clone()))?;
+        let real = if m.file_type().is_symlink() {
             let real = canon(path);
             if !real.starts_with(&self.root) {
-                return Err(Unfit::LinkOutside(name));
+                return Err(Unfit::LinkOutside(name.to_string()));
             }
-            self.out.insert(
-                name,
-                format!(
-                    "link:{}",
-                    hex(Sha256::digest(target.to_string_lossy().as_bytes()))
-                ),
-            );
-        } else if m.is_dir() {
-            // reached only through `dir`
-        } else if m.is_file() {
-            if m.len() > MAX_FILE || self.bytes + m.len() > MAX_TOTAL {
+            real
+        } else {
+            path.to_path_buf()
+        };
+        let Ok(m) = fs::metadata(&real) else {
+            return Ok(()); // a dangling link: nothing to hash
+        };
+        if m.is_dir() {
+            if depth >= MAX_DEPTH {
                 return Err(Unfit::TooBig);
             }
-            self.bytes += m.len();
-            let mut h = Sha256::new();
-            let mut f = fs::File::open(path).map_err(|_| Unfit::TooBig)?;
-            let mut buf = [0u8; 64 * 1024];
-            let mut left = MAX_FILE + 1;
-            loop {
-                let n = f.read(&mut buf).map_err(|_| Unfit::TooBig)?;
-                if n == 0 {
-                    break;
-                }
-                left = left.saturating_sub(n as u64);
-                if left == 0 {
-                    return Err(Unfit::TooBig);
-                }
-                h.update(&buf[..n]);
-            }
-            self.out.insert(name, hex(h.finalize()));
+            return self.dir(&real, name, depth + 1);
         }
+        if !m.is_file() {
+            return Ok(());
+        }
+        if self.out.len() >= MAX_FILES || m.len() > MAX_FILE || self.bytes + m.len() > MAX_TOTAL {
+            return Err(Unfit::TooBig);
+        }
+        self.bytes += m.len();
+        let mut h = Sha256::new();
+        let mut f = fs::File::open(&real).map_err(|_| Unfit::TooBig)?;
+        let mut buf = [0u8; 64 * 1024];
+        let mut left = MAX_FILE + 1;
+        loop {
+            let n = f.read(&mut buf).map_err(|_| Unfit::TooBig)?;
+            if n == 0 {
+                break;
+            }
+            left = left.saturating_sub(n as u64);
+            if left == 0 {
+                return Err(Unfit::TooBig); // grew past the cap while reading
+            }
+            h.update(&buf[..n]);
+        }
+        self.out.insert(name.to_string(), hex(h.finalize()));
         Ok(())
     }
 
@@ -485,46 +539,205 @@ impl Walk {
         entries.sort_by_key(|e| e.file_name());
         for e in entries {
             let name = format!("{rel}/{}", e.file_name().to_string_lossy());
-            let Ok(t) = e.file_type() else { continue };
-            if t.is_dir() {
-                if depth >= MAX_DEPTH {
-                    return Err(Unfit::TooBig);
-                }
-                self.dir(&e.path(), &name, depth + 1)?;
-            } else {
-                self.entry(name, &e.path())?;
-            }
+            self.visit(&name, &e.path(), depth)?;
         }
         Ok(())
     }
 }
 
-/// The manifest (`name\thash\n` lines, sorted) of what a trusted project can switch on: `.synt/settings*.json`
-/// (permission rules, hooks, MCP), `.synt/config.json`, `.mcp.json`, `AGENTS.md`, `.synt/AGENTS.md` and every
-/// file under `.synt/agents` and `.synt/skills` (depth 8, at most 500 files, 8 MiB each and 64 MiB in all,
-/// hashed in streaming mode). Links are not followed: their target path is hashed and a link that leaves the
-/// project is an error, like exceeding a cap. Missing files are absent, so an untouched project always gives
-/// the same manifest.
-pub fn fingerprint(root: &Path) -> std::result::Result<String, Unfit> {
+/// The instruction files each directory contributes (`synthesis-context/src/instructions.rs`
+/// `DEFAULT_NAMES`), and the `@import` depth its loader follows.
+const INSTRUCTION_NAMES: [&str; 5] = [
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".claude/CLAUDE.md",
+    ".synt/AGENTS.md",
+    "CLAUDE.local.md",
+];
+const IMPORT_DEPTH: u8 = 4;
+
+/// Project configuration that is read for the person's settings, hooks, MCP servers and permission rules, per
+/// directory that can hold it (the project root, and the session's folder when it is another).
+const CONFIG_FILES: [&str; 4] = [
+    ".mcp.json",
+    ".synt/config.json",
+    ".synt/settings.json",
+    ".synt/settings.local.json",
+];
+
+/// Directories whose every file is loaded: sub-agents, skills, commands and rules.
+const CONFIG_DIRS: [&str; 5] = [
+    ".synt/agents",
+    ".synt/skills",
+    ".synt/commands",
+    ".synt/rules",
+    ".claude/rules",
+];
+
+/// The `@path` imports of an instruction file's text (the loader follows them from the file's folder).
+fn imports_of(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .filter_map(|t| t.strip_prefix('@'))
+        .map(|t| t.trim_end_matches(|c: char| ",.;:)".contains(c)))
+        .filter(|t| !t.is_empty() && !t.starts_with('~') && !t.starts_with('/'))
+        .map(String::from)
+        .collect()
+}
+
+/// In-project files a hook or MCP server launches: strings under `command` and `args` keys of the project's
+/// settings and `.mcp.json`, split on whitespace, that name a file inside the root. The code those scripts
+/// run in turn is NOT covered.
+fn scripts_in(v: &serde_json::Value, root: &Path, out: &mut Vec<PathBuf>) {
+    use serde_json::Value;
+    fn take(s: &str, root: &Path, out: &mut Vec<PathBuf>) {
+        for tok in s.split_whitespace() {
+            let tok = tok.trim_matches(|c| c == '"' || c == '\'');
+            if (tok.contains('/') || tok.starts_with('.')) && out.len() < 100 {
+                let p = Path::new(tok);
+                out.push(if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    root.join(p)
+                });
+            }
+        }
+    }
+    match v {
+        Value::Object(o) => {
+            for (k, v) in o {
+                match (k.as_str(), v) {
+                    ("command", Value::String(s)) => take(s, root, out),
+                    ("args", Value::Array(a)) => {
+                        for s in a.iter().filter_map(Value::as_str) {
+                            take(s, root, out);
+                        }
+                    }
+                    _ => {}
+                }
+                scripts_in(v, root, out);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                scripts_in(v, root, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The manifest (`name\thash\n` lines, sorted) of what a trusted project can switch on:
+/// - settings, config and `.mcp.json` of the root and of `cwd` (`cwd/...` names) when it is another folder;
+/// - the instruction files (`AGENTS.md`, `CLAUDE.md`, `.claude/CLAUDE.md`, `.synt/AGENTS.md`,
+///   `CLAUDE.local.md`) of every folder from the root down to `cwd`, and what they `@import`;
+/// - every file under `.synt/agents|skills|commands|rules` and `.claude/rules`;
+/// - the in-project files that hooks and MCP servers name as their command or arguments (the code THOSE run
+///   is not covered).
+///
+/// Hashing is streaming (depth 8, at most 500 files, 8 MiB each, 64 MiB in all). A link is followed when its
+/// target is inside the project (the target's content is hashed); one that leaves it, or any cap exceeded, is an
+/// error: no trust by fingerprint. Missing files are absent, so an untouched project gives the same manifest.
+pub fn fingerprint(root: &Path, cwd: &Path) -> std::result::Result<String, Unfit> {
     let mut w = Walk {
         root: canon(root),
         out: BTreeMap::new(),
         bytes: 0,
     };
-    for rel in [
-        ".mcp.json",
-        "AGENTS.md",
-        ".synt/AGENTS.md",
-        ".synt/config.json",
-        ".synt/settings.json",
-        ".synt/settings.local.json",
-    ] {
-        w.entry(rel.to_string(), &root.join(rel))?;
+    let cwd_real = canon(cwd);
+    let mut bases: Vec<(String, PathBuf)> = vec![(String::new(), root.to_path_buf())];
+    if cwd_real != w.root && cwd_real.starts_with(&w.root) {
+        bases.push(("cwd/".into(), cwd.to_path_buf()));
     }
-    for d in ["agents", "skills"] {
-        w.dir(&root.join(".synt").join(d), &format!(".synt/{d}"), 0)?;
+    for (prefix, base) in &bases {
+        for rel in CONFIG_FILES {
+            w.visit(&format!("{prefix}{rel}"), &base.join(rel), 0)?;
+        }
+    }
+    for d in CONFIG_DIRS {
+        w.visit(d, &root.join(d), 0)?;
+    }
+    // instruction files from the root down to the session's folder, and their imports
+    let mut dirs = vec![root.to_path_buf()];
+    if let Ok(rest) = cwd_real.strip_prefix(&w.root) {
+        let mut cur = root.to_path_buf();
+        for c in rest.components() {
+            cur.push(c);
+            dirs.push(cur.clone());
+        }
+    }
+    let mut pending: Vec<(PathBuf, u8)> = vec![];
+    for d in &dirs {
+        for n in INSTRUCTION_NAMES {
+            let p = d.join(n);
+            let shown = p
+                .strip_prefix(root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .replace('\\', "/");
+            w.visit(&shown, &p, 0)?;
+            if fs::metadata(&p).is_ok_and(|m| m.is_file()) {
+                pending.push((p, 0));
+            }
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some((file, depth)) = pending.pop() {
+        if depth >= IMPORT_DEPTH || !seen.insert(canon(&file)) {
+            continue;
+        }
+        let mut text = String::new();
+        let _ = fs::File::open(&file).and_then(|f| f.take(32 * 1024).read_to_string(&mut text));
+        for imp in imports_of(&text) {
+            let target = file.parent().unwrap_or(root).join(&imp);
+            let real = canon(&target);
+            if !real.starts_with(&w.root) {
+                continue; // the loader refuses an import that leaves the workspace
+            }
+            let shown = real
+                .strip_prefix(&w.root)
+                .unwrap_or(&real)
+                .to_string_lossy()
+                .replace('\\', "/");
+            w.visit(&format!("@{shown}"), &target, 0)?;
+            if fs::metadata(&real).is_ok_and(|m| m.is_file()) {
+                pending.push((real, depth + 1));
+            }
+        }
+    }
+    // scripts that hooks and MCP servers launch
+    let mut scripts = vec![];
+    for (prefix, base) in &bases {
+        for rel in CONFIG_FILES {
+            let _ = prefix;
+            let mut text = String::new();
+            if fs::File::open(base.join(rel))
+                .and_then(|f| f.take(MAX_FILE).read_to_string(&mut text))
+                .is_ok()
+                && let Ok(v) = serde_json::from_str(&text)
+            {
+                scripts_in(&v, &w.root, &mut scripts);
+            }
+        }
+    }
+    scripts.sort();
+    scripts.dedup();
+    for p in scripts {
+        let real = canon(&p);
+        if real.starts_with(&w.root) && real.is_file() {
+            let shown = real
+                .strip_prefix(&w.root)
+                .unwrap_or(&real)
+                .to_string_lossy()
+                .replace('\\', "/");
+            w.visit(&format!("script:{shown}"), &p, 0)?;
+        }
     }
     Ok(w.out.iter().map(|(k, v)| format!("{k}\t{v}\n")).collect())
+}
+
+/// [`fingerprint`] of a project started in its own root.
+pub fn fingerprint_root(root: &Path) -> std::result::Result<String, Unfit> {
+    fingerprint(root, root)
 }
 
 /// The file names that differ between two manifests (added, removed or changed), sorted.
@@ -585,7 +798,7 @@ mod tests {
     #[test]
     fn a_folder_grant_covers_that_root_only_and_a_parent_grant_what_is_inside() {
         let pl = Policy {
-            home: None,
+            home: Some(PathBuf::from("/nonexistent/home")),
             synt_home: PathBuf::from("/nonexistent/synt"),
         };
         let rs = [rec("/w/app", FOLDER), rec("/p/all", PARENT)];
@@ -861,20 +1074,24 @@ mod tests {
         assert_eq!(v, 0, "remembering never touches the schema version");
     }
 
+    fn fp(r: &Path) -> String {
+        fingerprint_root(r).unwrap()
+    }
+
     #[test]
     fn the_fingerprint_follows_the_trusted_configuration_and_names_what_changed() {
         let d = tempfile::tempdir().unwrap();
-        let r = d.path();
-        let f0 = fingerprint(r).unwrap();
-        assert_eq!(f0, fingerprint(r).unwrap());
+        let r = &fs::canonicalize(d.path()).unwrap();
+        let f0 = fp(r);
+        assert_eq!(f0, fp(r));
         fs::write(r.join("README.md"), "x").unwrap();
-        assert_eq!(fingerprint(r).unwrap(), f0, "ordinary files do not count");
+        assert_eq!(fp(r), f0, "ordinary files do not count");
         fs::create_dir_all(r.join(".synt/agents")).unwrap();
         fs::write(r.join(".synt/settings.json"), "{}").unwrap();
-        let f1 = fingerprint(r).unwrap();
+        let f1 = fp(r);
         assert_eq!(changed_files(&f0, &f1), [".synt/settings.json"]);
         fs::write(r.join("AGENTS.md"), "rules").unwrap();
-        let f2 = fingerprint(r).unwrap();
+        let f2 = fp(r);
         assert_eq!(
             changed_files(&f1, &f2),
             ["AGENTS.md"],
@@ -882,26 +1099,133 @@ mod tests {
         );
         fs::write(r.join(".synt/agents/a.md"), "one").unwrap();
         fs::write(r.join(".mcp.json"), "{}").unwrap();
-        let f3 = fingerprint(r).unwrap();
+        let f3 = fp(r);
         fs::write(r.join(".synt/agents/a.md"), "two").unwrap();
         fs::remove_file(r.join(".mcp.json")).unwrap();
         assert_eq!(
-            changed_files(&f3, &fingerprint(r).unwrap()),
+            changed_files(&f3, &fp(r)),
             [".mcp.json", ".synt/agents/a.md"]
         );
         // deep files count (to a bounded depth)
         let deep = (0..6).fold(r.join(".synt/skills"), |p, i| p.join(format!("d{i}")));
         fs::create_dir_all(&deep).unwrap();
-        let before = fingerprint(r).unwrap();
+        let before = fp(r);
         fs::write(deep.join("s.md"), "x").unwrap();
-        assert_ne!(fingerprint(r).unwrap(), before);
+        assert_ne!(fp(r), before);
         let too_deep = (0..10).fold(r.join(".synt/skills/z"), |p, i| p.join(format!("d{i}")));
         fs::create_dir_all(&too_deep).unwrap();
         assert_eq!(
-            fingerprint(r),
+            fingerprint_root(r),
             Err(Unfit::TooBig),
             "beyond the depth bound: no trust by fingerprint"
         );
+    }
+
+    #[test]
+    fn every_kind_of_project_configuration_a_loader_reads_is_in_the_manifest() {
+        // one file of each kind the loaders read (see CONFIG_FILES, CONFIG_DIRS, INSTRUCTION_NAMES); a new kind
+        // must be added to those lists AND here, so a loader cannot read a file the manifest ignores unnoticed
+        let kinds = [
+            ".mcp.json",
+            ".synt/config.json",
+            ".synt/settings.json",
+            ".synt/settings.local.json",
+            ".synt/agents/a.md",
+            ".synt/skills/s/SKILL.md",
+            ".synt/commands/c.md",
+            ".synt/rules/r.md",
+            ".claude/rules/r.md",
+            "AGENTS.md",
+            "CLAUDE.md",
+            ".claude/CLAUDE.md",
+            ".synt/AGENTS.md",
+            "CLAUDE.local.md",
+        ];
+        let d = tempfile::tempdir().unwrap();
+        let r = &fs::canonicalize(d.path()).unwrap();
+        let mut last = fp(r);
+        for k in kinds {
+            let p = r.join(k);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(&p, "{}").unwrap();
+            let now = fp(r);
+            assert_eq!(
+                changed_files(&last, &now),
+                [k],
+                "{k} is not in the manifest"
+            );
+            last = now;
+            fs::write(&p, "{\"x\":1}").unwrap();
+            assert_ne!(fp(r), last, "{k}: content must count");
+            last = fp(r);
+        }
+    }
+
+    #[test]
+    fn nested_instruction_files_imports_and_the_session_folders_config_count() {
+        let d = tempfile::tempdir().unwrap();
+        let r = &fs::canonicalize(d.path()).unwrap();
+        let cwd = r.join("pkg/app");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(r.join("AGENTS.md"), "see @docs/guide.md").unwrap();
+        fs::create_dir_all(r.join("docs")).unwrap();
+        fs::write(r.join("docs/guide.md"), "v1").unwrap();
+        let f = |c: &Path| fingerprint(r, c).unwrap();
+        let base = f(&cwd);
+        // an import is followed
+        fs::write(r.join("docs/guide.md"), "v2").unwrap();
+        assert_eq!(changed_files(&base, &f(&cwd)), ["@docs/guide.md"]);
+        // a nested AGENTS.md between the root and the session's folder counts, one elsewhere does not
+        let base = f(&cwd);
+        fs::create_dir_all(r.join("pkg/other")).unwrap();
+        fs::write(r.join("pkg/other/AGENTS.md"), "x").unwrap();
+        assert_eq!(f(&cwd), base);
+        fs::write(r.join("pkg/AGENTS.md"), "x").unwrap();
+        assert_eq!(changed_files(&base, &f(&cwd)), ["pkg/AGENTS.md"]);
+        // the session folder's own .synt/config.json (the loader reads cwd's, not the root's)
+        let base = f(&cwd);
+        fs::create_dir_all(cwd.join(".synt")).unwrap();
+        fs::write(cwd.join(".synt/config.json"), "{}").unwrap();
+        assert_eq!(changed_files(&base, &f(&cwd)), ["cwd/.synt/config.json"]);
+        // an import that leaves the project is not followed (the loader refuses it too)
+        let out = tempfile::tempdir().unwrap();
+        fs::write(out.path().join("x.md"), "x").unwrap();
+        fs::write(
+            r.join("CLAUDE.md"),
+            format!("@../../../..{}", out.path().display()),
+        )
+        .unwrap();
+        let _ = f(&cwd);
+    }
+
+    #[test]
+    fn scripts_named_by_hooks_and_mcp_servers_are_hashed_other_files_are_not() {
+        let d = tempfile::tempdir().unwrap();
+        let r = &fs::canonicalize(d.path()).unwrap();
+        fs::create_dir_all(r.join("scripts")).unwrap();
+        fs::create_dir_all(r.join(".synt")).unwrap();
+        fs::write(r.join("scripts/hook.sh"), "echo 1").unwrap();
+        fs::write(r.join("srv.js"), "1").unwrap();
+        fs::write(r.join("notes.txt"), "1").unwrap();
+        fs::write(
+            r.join(".synt/settings.json"),
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"./scripts/hook.sh --flag"}]}]}}"#,
+        )
+        .unwrap();
+        fs::write(
+            r.join(".mcp.json"),
+            r#"{"mcpServers":{"s":{"command":"node","args":["./srv.js","notes.txt"]}}}"#,
+        )
+        .unwrap();
+        let base = fp(r);
+        fs::write(r.join("scripts/hook.sh"), "echo 2").unwrap();
+        assert_eq!(changed_files(&base, &fp(r)), ["script:scripts/hook.sh"]);
+        let base = fp(r);
+        fs::write(r.join("srv.js"), "2").unwrap();
+        assert_eq!(changed_files(&base, &fp(r)), ["script:srv.js"]);
+        let base = fp(r);
+        fs::write(r.join("notes.txt"), "2").unwrap();
+        assert_eq!(fp(r), base, "a bare word is not a path");
     }
 
     #[test]
@@ -910,29 +1234,133 @@ mod tests {
         fs::create_dir_all(d.path().join(".synt")).unwrap();
         let f = fs::File::create(d.path().join(".synt/settings.json")).unwrap();
         f.set_len(MAX_FILE + 1).unwrap();
-        assert_eq!(fingerprint(d.path()), Err(Unfit::TooBig));
+        assert_eq!(fingerprint_root(d.path()), Err(Unfit::TooBig));
     }
 
     #[cfg(unix)]
     #[test]
-    fn a_link_in_the_configuration_is_hashed_by_target_and_one_that_leaves_the_project_is_refused()
-    {
+    fn an_in_project_link_is_hashed_by_its_content_and_one_that_leaves_the_project_is_refused() {
         let d = tempfile::tempdir().unwrap();
-        let r = fs::canonicalize(d.path()).unwrap();
+        let r = &fs::canonicalize(d.path()).unwrap();
         fs::create_dir_all(r.join(".synt")).unwrap();
         fs::write(r.join("rules.md"), "a").unwrap();
         std::os::unix::fs::symlink(r.join("rules.md"), r.join("AGENTS.md")).unwrap();
-        let f1 = fingerprint(&r).unwrap();
+        let f1 = fp(r);
+        // editing the target changes what the link provides: the manifest must change
         fs::write(r.join("rules.md"), "b").unwrap();
-        assert_eq!(
-            fingerprint(&r).unwrap(),
-            f1,
-            "the link's own target path is hashed, not followed"
-        );
+        assert_eq!(changed_files(&f1, &fp(r)), ["AGENTS.md"]);
+        // a linked directory under skills is walked, not hashed as a link
+        fs::create_dir_all(r.join("shared/skill")).unwrap();
+        fs::write(r.join("shared/skill/SKILL.md"), "1").unwrap();
+        std::os::unix::fs::symlink(r.join("shared"), r.join(".synt/skills")).unwrap();
+        let f2 = fp(r);
+        fs::write(r.join("shared/skill/SKILL.md"), "2").unwrap();
+        assert_eq!(changed_files(&f2, &fp(r)), [".synt/skills/skill/SKILL.md"]);
+        // a link that leaves the project
         fs::remove_file(r.join("AGENTS.md")).unwrap();
         let out = tempfile::tempdir().unwrap();
         fs::write(out.path().join("x.md"), "x").unwrap();
         std::os::unix::fs::symlink(out.path().join("x.md"), r.join("AGENTS.md")).unwrap();
-        assert!(matches!(fingerprint(&r), Err(Unfit::LinkOutside(_))));
+        assert!(matches!(fingerprint_root(r), Err(Unfit::LinkOutside(_))));
+    }
+
+    #[test]
+    fn an_unknown_home_fails_closed() {
+        let d = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(d.path()).unwrap();
+        let pl = Policy {
+            home: None,
+            synt_home: base.join("synthome"),
+        };
+        assert!(
+            pl.root_refusal(&base.join("proj"))
+                .unwrap()
+                .contains("home folder is unknown")
+        );
+        assert!(pl.parent_refusal(&base.join("proj")).is_some());
+        let rs = [rec(&base.join("proj").to_string_lossy(), FOLDER)];
+        assert!(covers(&rs, &base.join("proj"), &pl).is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn container_names_compare_case_insensitively_on_macos() {
+        let (d, home) = store_home();
+        let uh = d.path().join("userhome");
+        fs::create_dir_all(uh.join("Downloads")).unwrap();
+        let pl = pol(&home);
+        assert!(pl.parent_refusal(&uh.join("downloads")).is_some());
+        assert!(same(Path::new("/Tmp/X"), Path::new("/tmp/x")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_world_writable_ancestor_without_the_sticky_bit_refuses_a_parent_grant() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (d, home) = store_home();
+        let pl = pol(&home);
+        let open = d.path().join("open");
+        let inner = open.join("proj");
+        fs::create_dir_all(&inner).unwrap();
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(
+            pl.parent_refusal(&inner)
+                .unwrap()
+                .contains("world-writable")
+        );
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o1777)).unwrap();
+        // with the sticky bit the ancestor cannot be used to swap the folder (the folder itself is closed)
+        assert!(
+            pl.parent_refusal(&inner).is_none()
+                || pl.parent_refusal(&inner).unwrap().contains("temporary")
+        );
+    }
+
+    #[test]
+    fn a_failed_key_creation_drops_no_rows_and_revoke_removes_the_baselines_below() {
+        let (_d, home) = store_home();
+        let pl = pol(&home);
+        let (a, b) = (project(&home, "app"), project(&home, "other"));
+        add(&home, &a, FOLDER, "fp", &pl).unwrap();
+        add(&home, &b, FOLDER, "fp", &pl).unwrap();
+        // the key is gone and cannot be made (run is a file): the rows are untouched, the add fails
+        fs::remove_dir_all(home.join("run")).unwrap();
+        fs::write(home.join("run"), b"in the way").unwrap();
+        assert!(add(&home, &a, FOLDER, "fp", &pl).is_err());
+        let n: i64 = connect(&home, true)
+            .unwrap()
+            .query_row("SELECT count(*) FROM trusted_roots", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            n, 2,
+            "rows are dropped only when a new key was actually made"
+        );
+        fs::remove_file(home.join("run")).unwrap();
+        // baselines under a parent go with it
+        let parent = project(&home, "group");
+        let kid = parent.join("kid");
+        fs::create_dir_all(&kid).unwrap();
+        add(&home, &parent, PARENT, "", &pl).unwrap();
+        add(&home, &kid, CHILD, "m", &pl).unwrap();
+        assert!(revoke(&home, &parent.to_string_lossy()).unwrap());
+        let l = list(&home).unwrap();
+        assert!(
+            l.records
+                .iter()
+                .all(|r| r.scope != CHILD && r.root != parent.to_string_lossy()),
+            "{l:?}"
+        );
+    }
+
+    #[test]
+    fn restore_writes_a_row_back_with_its_own_date() {
+        let (_d, home) = store_home();
+        let pl = pol(&home);
+        let a = project(&home, "app");
+        add(&home, &a, FOLDER, "old", &pl).unwrap();
+        let before = list(&home).unwrap().records[0].clone();
+        add(&home, &a, FOLDER, "new", &pl).unwrap();
+        restore(&home, &before, &pl).unwrap();
+        assert_eq!(list(&home).unwrap().records, vec![before]);
     }
 }

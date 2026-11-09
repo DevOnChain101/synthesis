@@ -358,8 +358,8 @@ pub fn display_path(p: &Path) -> String {
 pub enum Remembered {
     /// No remembered trust covers it.
     No,
-    /// Trusted, and the project's trusted configuration is what it was.
-    Trusted,
+    /// Trusted, and the project's trusted configuration is what it was (the manifest that was checked).
+    Trusted(String),
     /// Trusted once, but the configuration differs (or cannot be fingerprinted now): NOT honoured. The files
     /// that differ, and when it was trusted.
     Changed { files: Vec<String>, since: String },
@@ -383,14 +383,14 @@ pub fn remembered_trust(
     let Some(rec) = trust::covers(&listing.records, &root, &policy) else {
         return Remembered::No;
     };
-    let now = trust::fingerprint(&root);
+    let now = trust::fingerprint(&root, project);
     let since = rec
         .trusted_at
         .get(..10)
         .unwrap_or(&rec.trusted_at)
         .to_string();
     let changed = |old: &str| match &now {
-        Ok(n) if n == old => Remembered::Trusted,
+        Ok(n) if n == old => Remembered::Trusted(n.clone()),
         Ok(n) => Remembered::Changed {
             files: trust::changed_files(old, n),
             since: since.clone(),
@@ -407,13 +407,16 @@ pub fn remembered_trust(
         Some(c) => changed(&c.fingerprint),
         None => {
             // the first start of this project under the parent grant: it is the baseline from now on
-            if let Ok(n) = &now {
-                if write_baseline {
-                    let _ = trust::add(synt_home, &root, trust::CHILD, n, &policy);
+            match &now {
+                // a baseline that cannot be written is no baseline: not trusted
+                Ok(n)
+                    if write_baseline
+                        && trust::add(synt_home, &root, trust::CHILD, n, &policy).is_err() =>
+                {
+                    Remembered::No
                 }
-                Remembered::Trusted
-            } else {
-                changed("")
+                Ok(n) => Remembered::Trusted(n.clone()),
+                Err(_) => changed(""),
             }
         }
     }
@@ -427,33 +430,46 @@ pub fn remembered_trust(
 pub fn launch_common(
     c: &Common,
     granted: &Path,
-    trust: Option<&Path>,
+    trust: Option<&(PathBuf, Option<String>)>,
+    remembered: bool,
     project: &Path,
     synt_home: &Path,
     user_home: Option<&Path>,
-) -> (Common, Vec<String>) {
-    if trust.is_some_and(|root| root_of(project) == root) {
-        return (session_trusted(c), vec![]);
+) -> (Common, Vec<String>, Option<TrustCheck>) {
+    let check = |root: &Path, manifest: String| TrustCheck {
+        root: root.to_path_buf(),
+        cwd: project.to_path_buf(),
+        manifest,
+        before_compare: None,
+    };
+    if let Some((root, manifest)) = trust.filter(|(root, _)| root_of(project) == *root) {
+        let chk = manifest.clone().map(|m| check(root, m));
+        return (session_trusted(c), vec![], chk);
     }
     let (mut c, note) = common_for(c, granted, project);
     let mut notes: Vec<String> = note.into_iter().collect();
-    if c.trust_project {
-        return (c, notes);
+    if c.trust_project || !remembered {
+        return (c, notes, None);
     }
     let enforcing = c.sandbox_mode() == synthesis_terminal::SandboxMode::Enforce;
-    let shown = sanitize_for_display(&root_of(project).display().to_string());
+    let root = root_of(project);
+    let shown = sanitize_for_display(&root.display().to_string());
+    let mut chk = None;
     match remembered_trust(synt_home, user_home, project, enforcing) {
         Remembered::No => {}
         _ if !enforcing => notes.push(format!(
             "remembered trust of {shown} is not honoured: the sandbox is not enforcing (a command that can run unconfined could have written it); start with --sandbox enforce, or trust the folder for this session only"
         )),
-        Remembered::Trusted => c = session_trusted(&c),
+        Remembered::Trusted(m) => {
+            c = session_trusted(&c);
+            chk = Some(check(&root, m));
+        }
         Remembered::Changed { files, since } => notes.push(format!(
             "project config changed since you trusted it on {since} ({}): {shown} starts untrusted; review the files, then open the Files tab to trust it again",
             sanitize_for_display(&files.join(", "))
         )),
     }
-    (c, notes)
+    (c, notes, chk)
 }
 
 /// `--resume ID` (id or unique prefix) or `--continue` (newest session of the start folder).
@@ -528,6 +544,40 @@ pub struct StartOpts {
     pub resume: Option<Resume>,
     /// Lines for the chat's start-up notes (why a relaunch happened, ...).
     pub notes: Vec<String>,
+    /// The configuration the person trusted, checked again once the engine has loaded it and before any
+    /// hook runs (`None`: nothing to check, as with `--trust-project`).
+    pub verify: Option<TrustCheck>,
+}
+
+/// Marks the error of a start that was refused because the trusted configuration changed meanwhile.
+pub const TRUST_CHANGED: &str = "trust-changed";
+
+/// What was approved: the manifest of `root`'s trusted configuration (session folder `cwd`) when the trust was
+/// decided or stored.
+#[derive(Clone)]
+pub struct TrustCheck {
+    pub root: PathBuf,
+    pub cwd: PathBuf,
+    pub manifest: String,
+    /// Runs just before the comparison (tests change a file here, as a racing writer would).
+    pub before_compare: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl TrustCheck {
+    /// `Err(files)` when the configuration on disk is no longer the approved one (or cannot be fingerprinted).
+    pub fn verify(&self) -> Result<(), Vec<String>> {
+        if let Some(f) = &self.before_compare {
+            f();
+        }
+        match synthesis_session::trust::fingerprint(&self.root, &self.cwd) {
+            Ok(now) if now == self.manifest => Ok(()),
+            Ok(now) => Err(synthesis_session::trust::changed_files(
+                &self.manifest,
+                &now,
+            )),
+            Err(e) => Err(vec![e.to_string()]),
+        }
+    }
 }
 
 /// What `synt run` does around its task, for every task the person starts: MCP mentions and
@@ -699,6 +749,7 @@ impl Engine {
                 common,
                 resume: None,
                 notes: vec![],
+                verify: None,
             },
             env,
         )
@@ -715,6 +766,7 @@ impl Engine {
             mut common,
             resume,
             notes,
+            verify,
         } = o;
         let (tx, rx) = unbounded();
         let pending: PendingMap = PendingMap::default();
@@ -747,6 +799,13 @@ impl Engine {
             &Limits::default(),
             Front::Native(native),
         )?;
+        // the configuration is loaded now and no hook has run yet: it must still be what the person approved
+        if let Some(Err(files)) = verify.as_ref().map(TrustCheck::verify) {
+            return Err(format!(
+                "{TRUST_CHANGED}: the trusted configuration changed while the session was starting ({})",
+                sanitize_for_display(&files.join(", "))
+            ));
+        }
         let Prepared {
             harness,
             context,
@@ -1431,8 +1490,12 @@ mod trust_tests {
                 .contains("config folder")
         );
         assert!(why(Path::new("/")).unwrap().contains("filesystem root"));
-        // without a known home only the config folder and a filesystem root are refused
-        assert!(trust_refusal(&proj, None, &synt).is_none());
+        // an unknown home fails closed
+        assert!(
+            trust_refusal(&proj, None, &synt)
+                .unwrap()
+                .contains("home folder is unknown")
+        );
     }
 
     #[test]
@@ -1455,10 +1518,12 @@ mod trust_tests {
             .unwrap()
             .c;
         let go = |c: &Common, p: &Path| {
-            launch_common(c, Path::new("/none"), None, p, &home, Some(&uhome))
+            let (c, n, _) =
+                launch_common(c, Path::new("/none"), None, true, p, &home, Some(&uhome));
+            (c, n)
         };
         assert!(!go(&c, &proj).0.trust_project, "nothing remembered yet");
-        let fp = |p: &Path| trust::fingerprint(p).unwrap();
+        let fp = |p: &Path| trust::fingerprint(p, p).unwrap();
         trust::add(&home, &proj, trust::FOLDER, &fp(&proj), &policy).unwrap();
         let (t, notes) = go(&c, &proj);
         assert!(t.trust_project && t.approve_mcp.is_empty() && notes.is_empty());
@@ -1502,9 +1567,17 @@ mod trust_tests {
             .unwrap()
             .c;
         assert!(
-            launch_common(&flag, &root_of(&proj), None, &proj, &home, Some(&uhome))
-                .0
-                .trust_project
+            launch_common(
+                &flag,
+                &root_of(&proj),
+                None,
+                true,
+                &proj,
+                &home,
+                Some(&uhome)
+            )
+            .0
+            .trust_project
         );
         // without the key the rows cannot be verified: nothing is honoured
         let key = home.join("run/trust.key");
@@ -1571,17 +1644,33 @@ mod trust_tests {
         std::fs::create_dir_all(&b).unwrap();
         let root = root_of(&a);
         assert!(
-            launch_common(&c, Path::new("/none"), Some(&root), &a, dir.path(), None)
-                .0
-                .trust_project
+            launch_common(
+                &c,
+                Path::new("/none"),
+                Some(&(root.clone(), None)),
+                true,
+                &a,
+                dir.path(),
+                None
+            )
+            .0
+            .trust_project
         );
         assert!(
-            !launch_common(&c, Path::new("/none"), Some(&root), &b, dir.path(), None)
-                .0
-                .trust_project
+            !launch_common(
+                &c,
+                Path::new("/none"),
+                Some(&(root.clone(), None)),
+                true,
+                &b,
+                dir.path(),
+                None
+            )
+            .0
+            .trust_project
         );
         assert!(
-            !launch_common(&c, Path::new("/none"), None, &a, dir.path(), None)
+            !launch_common(&c, Path::new("/none"), None, true, &a, dir.path(), None)
                 .0
                 .trust_project
         );
