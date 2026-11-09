@@ -347,3 +347,21 @@ fn a_broken_file_is_reported() {
     let st = f.open(ProjectTrust::Untrusted);
     assert_eq!(st.errors.len(), 1);
 }
+
+#[test]
+fn every_key_belongs_to_a_named_group_of_its_tab() {
+    let s = synthesis_settings_ui::SettingsSchema::new();
+    for f in &s.fields {
+        assert!(!f.group.is_empty(), "{} has no group", f.key);
+        assert_eq!(f.group, synthesis_settings_ui::group_of(&f.key, f.section));
+    }
+    // the groups of a tab are few and each has rows (no empty card)
+    for sec in synthesis_settings_ui::Section::ALL {
+        let mut groups: Vec<&str> = s.section(sec).map(|f| f.group).collect();
+        groups.dedup();
+        let mut uniq = groups.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert!(uniq.len() <= 7, "{sec:?}: {uniq:?}");
+    }
+}
