@@ -103,6 +103,8 @@ pub enum Control {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
     pub key: String,
+    /// The card heading inside the tab.
+    pub group: &'static str,
     pub label: String,
     pub help: String,
     pub control: Control,
@@ -458,6 +460,7 @@ impl Model {
         let value = e.map_or(Value::Null, |e| e.value.clone());
         Row {
             key: f.key.clone(),
+            group: f.group,
             label: f.label.clone(),
             help: f.help.clone(),
             control: self.control_of(f, &value, reason.is_some()),

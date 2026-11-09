@@ -23,7 +23,7 @@ use crate::{brand, theme};
 use synthesis_tui_render::theme as t;
 
 /// Icons the shell draws that are Lucide (checked by a test in `brand`); the title bar's own are the design's.
-pub const ICONS: [&str; 1] = ["square-terminal"];
+pub const ICONS: [&str; 2] = ["square-terminal", "undo-2"];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum View {
@@ -63,7 +63,7 @@ pub const TITLEBAR_H: f32 = 30.;
 const TRAFFIC_LIGHTS_W: f32 = 78.;
 
 /// A tooltip: the name and the shortcut.
-struct Tip(String);
+pub(crate) struct Tip(pub String);
 
 impl Render for Tip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {

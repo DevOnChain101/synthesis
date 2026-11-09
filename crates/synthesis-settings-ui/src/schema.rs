@@ -138,6 +138,8 @@ pub struct Field {
     /// A running session keeps the old value until it is restarted.
     pub restart: bool,
     pub edit: Edit,
+    /// Heading of the card the field sits in, inside its section's tab (see [`group_of`]).
+    pub group: &'static str,
 }
 
 impl Field {
@@ -152,6 +154,7 @@ impl Field {
             scope: Scope::UserOnly,
             restart: true,
             edit: Edit::Yes,
+            group: "",
         }
     }
     fn def(mut self, v: Value) -> Self {
@@ -386,6 +389,9 @@ impl SettingsSchema {
                     .help("Show this panel of the dash."),
             );
         }
+        for x in &mut f {
+            x.group = group_of(&x.key, x.section);
+        }
         SettingsSchema { fields: f }
     }
 
@@ -395,6 +401,44 @@ impl SettingsSchema {
 
     pub fn section(&self, s: Section) -> impl Iterator<Item = &Field> {
         self.fields.iter().filter(move |f| f.section == s)
+    }
+}
+
+/// The card heading a key is shown under inside its tab. Every key has one (a test walks the schema).
+pub fn group_of(key: &str, section: Section) -> &'static str {
+    use Section::*;
+    match section {
+        Appearance => "Window",
+        Interface if key.starts_with("synt.tui.panels.") => "Panels",
+        Interface
+            if ["motion", "mouse_capture", "copy_on_select"]
+                .iter()
+                .any(|k| key.ends_with(k)) =>
+        {
+            "Behaviour"
+        }
+        Interface => "Chat",
+        Memory if key.starts_with("synt.images.") => "Images",
+        Memory => "Memory",
+        Execution if key.starts_with("synt.budget.") => "Limits",
+        Execution if key.starts_with("synt.verification.") => "Verification",
+        Execution
+            if key.starts_with("synt.context.")
+                || key.starts_with("synt.modelInfo.")
+                || key == "synt.pricing" =>
+        {
+            "Models and context"
+        }
+        Execution if key.starts_with("synt.shell.") || key == "env" => "Shell and environment",
+        Execution if key.starts_with("synt.browser.") => "Browser",
+        Execution => "Compatibility",
+        Guards if key == "autoMode" => "Auto mode",
+        Guards => "Permissions",
+        Hooks => "Hooks",
+        Mcp if key == "synt.mcp.toolSearch" => "Tool search",
+        Mcp => "Servers",
+        SubAgents => "Peers",
+        UserPrompt | Skills => "General",
     }
 }
 
