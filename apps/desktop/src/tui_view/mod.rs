@@ -256,6 +256,7 @@ impl TuiView {
         }
         if lu.dirty {
             lu.dirty = false;
+            let _t = crate::trace::span(&lu.cfg.env, "frame: snapshot + rows (UI thread)");
             self.snap = snapshot::build(
                 &lu.live,
                 crate::live::now_ms(),

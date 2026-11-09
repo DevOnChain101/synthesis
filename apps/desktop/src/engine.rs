@@ -573,6 +573,10 @@ impl Engine {
                 tx: tx.clone(),
             }),
         };
+        let t_prepare = crate::trace::span(
+            env,
+            "start_with: prepare (config, MCP, memory, skills, store)",
+        );
         let p = prepare(
             &common,
             &project,
@@ -607,9 +611,12 @@ impl Engine {
             notes: memory_notes,
             ..
         } = p;
+        drop(t_prepare);
+        let _t = crate::trace::span(env, "start_with: session start + hooks");
         // Started here (not by the app) so the session hooks follow `session.started`.
         let started = match resumed_from_seq {
             Some(seq) => {
+                let _t = crate::trace::span(env, "start_with: harness.resume_session");
                 harness.resume_session(&session, seq);
                 if let Some(m) = &model_changed {
                     harness.model_changed(m);
@@ -624,6 +631,7 @@ impl Engine {
             "startup"
         };
         if started.is_ok() {
+            let _t = crate::trace::span(env, "start_with: SessionStart hook");
             tokio.block_on(harness.session_hook(
                 HookEvent::SessionStart,
                 json!({"source": source}),
@@ -706,12 +714,17 @@ impl Engine {
             ));
         }
         all_notices.extend(notes);
+        let t_note = crate::trace::span(env, "start_with: window_note");
         let context_source = crate::models::window_note(env, &project, &label);
+        drop(t_note);
+        let t_rows = crate::trace::span(env, "start_with: models::rows");
+        let model_rows = crate::models::rows(env, &project);
+        drop(t_rows);
         let engine = Self {
             sid,
             label,
             models,
-            model_rows: crate::models::rows(env, &project),
+            model_rows,
             stale_model,
             context_source,
             effort_tiers,

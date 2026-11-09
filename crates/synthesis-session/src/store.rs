@@ -1185,6 +1185,21 @@ impl Reader {
         Ok(out)
     }
 
+    /// Payloads of the first `limit` `user.message` events (inline ones only), oldest first: a
+    /// session title needs no more, and it spares decoding every event of the log head.
+    pub fn first_user_messages(&self, session_id: &str, limit: usize) -> Result<Vec<Value>> {
+        let mut st = self.conn.prepare(
+            "SELECT payload FROM events WHERE session_id=?1 AND type='user.message' \
+             AND payload IS NOT NULL ORDER BY seq LIMIT ?2",
+        )?;
+        let rows = st.query_map(params![session_id, limit as i64], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for p in rows {
+            out.push(serde_json::from_str(&p?)?);
+        }
+        Ok(out)
+    }
+
     pub fn read_messages(&self, session_id: &str) -> Result<Vec<MessageRow>> {
         let mut st = self.conn.prepare(
             "SELECT idx,role,content,compacted,meta FROM messages WHERE session_id=?1 ORDER BY idx",
