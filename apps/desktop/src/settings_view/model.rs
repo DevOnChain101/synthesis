@@ -158,6 +158,9 @@ pub struct McpForm {
     pub header: String,
 }
 
+/// Where the doctor thread leaves its rows (or its timeout).
+type DoctorSlot = Arc<Mutex<Option<Result<Vec<synthesis_app::doctor::Row>, String>>>>;
+
 pub struct Model {
     pub cfg: Cfg,
     pub store: SettingsStore,
@@ -175,7 +178,7 @@ pub struct Model {
     /// The checks of `/doctor`, read-only; `None` while they run (or after they timed out: `doctor_error`).
     pub doctor: Option<Vec<synthesis_app::doctor::Row>>,
     pub doctor_error: Option<String>,
-    doctor_slot: Arc<Mutex<Option<Result<Vec<synthesis_app::doctor::Row>, String>>>>,
+    doctor_slot: DoctorSlot,
     /// `(name, description, source)`.
     pub skills: Vec<(String, String, String)>,
 }
