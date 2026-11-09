@@ -736,6 +736,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
             });
             c
         },
+        pulses: v.session.pulses.clone(),
     }
 }
 

@@ -223,6 +223,8 @@ pub struct Snapshot {
     pub agents: Vec<String>,
     pub hints: Vec<(String, String)>,
     pub status: Vec<StatusChip>,
+    /// Live activity of the Topology nodes (flows and glow).
+    pub pulses: synthesis_view::pulse::Pulses,
 }
 
 fn s(x: &str) -> String {
@@ -499,5 +501,6 @@ pub fn sample() -> Snapshot {
                 dot: true,
             },
         ],
+        pulses: Default::default(),
     }
 }
