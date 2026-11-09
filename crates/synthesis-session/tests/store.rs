@@ -1389,6 +1389,63 @@ fn close_hides_a_session_from_the_lists_but_keeps_it_and_its_messages() {
 }
 
 #[test]
+fn close_workspace_closes_the_free_sessions_of_one_folder_only() {
+    let e = env();
+    let (a, b) = (e.dir("a"), e.dir("b"));
+    let store = e.store();
+    let say = |mut w: SessionWriter| {
+        w.append_message(NewMessage::user(json!("hi"))).unwrap();
+        w
+    };
+    for id in ["a-free", "a-done"] {
+        drop(say(create(&e, id, &a)));
+    }
+    drop(say(create(&e, "b-free", &b)));
+    drop(create(&e, "a-empty", &a)); // never used: not listed, not touched
+    assert!(store.close_session("a-done").unwrap());
+    // another live process holds this one (a held writer lock)
+    let _held = say(create(&e, "a-held", &a));
+
+    let in_a = |root: &str| root == a.to_str().unwrap();
+    let r = store.close_workspace(in_a).unwrap();
+    assert_eq!(
+        (r.closed.as_slice(), r.held.as_slice()),
+        (&["a-free".into()][..], &["a-held".into()][..])
+    );
+    assert!(r.failed.is_empty());
+
+    let used: Vec<_> = store
+        .reader()
+        .unwrap()
+        .list_used_sessions(None)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(used.len(), 2, "{used:?}");
+    assert!(used.contains(&"a-held".into()) && used.contains(&"b-free".into()));
+    // nothing deleted: the closed one still reads and resumes
+    assert_eq!(
+        store
+            .reader()
+            .unwrap()
+            .read_messages("a-free")
+            .unwrap()
+            .len(),
+        1
+    );
+    store.resume_session("a-free", false).unwrap();
+
+    // idempotent: a second call has nothing left but the held one
+    let again = store.close_workspace(in_a).unwrap();
+    assert!(again.closed.is_empty() && again.failed.is_empty());
+    assert_eq!(again.held, ["a-held"]);
+    // once the holder is gone it closes too
+    drop(_held);
+    assert_eq!(store.close_workspace(in_a).unwrap().closed, ["a-held"]);
+}
+
+#[test]
 fn set_title_replaces_the_title_and_the_list_shows_it() {
     let e = env();
     let mut w = create(&e, "s-title", &e.dir("w"));
