@@ -1,0 +1,191 @@
+== bash_ok collapsed
+✓ Command $ cargo test -p app --lib  <exit 0>  <2.3s>
+ | Text test a ... ok
+ | Text test b ... ok
+ | Text test c ... ok
+ | Text test d ... ok
+ | Text test result: ok. 12 passed
++2 lines
+== bash_ok open
+✓ Command $ cargo test -p app --lib  <exit 0>  <2.3s>
+ | Text    Compiling app v0.1.0
+ | Text running 12 tests
+ | Text test a ... ok
+ | Text test b ... ok
+ | Text test c ... ok
+ | Text test d ... ok
+ | Text test result: ok. 12 passed
+== bash_fail collapsed
+✗ Command $ npm test  <exit 1>  <1.8s>
+ | Err FAIL src/login.test.js
+ | Err   expected 200, got 500
+ | Err 日本語 😀 wide row
+== bash_fail open
+✗ Command $ npm test  <exit 1>  <1.8s>
+ | Err FAIL src/login.test.js
+ | Err   expected 200, got 500
+ | Err 日本語 😀 wide row
+== bash_bg collapsed
+✓ Command $ npm run dev  <background>  <12ms>
+ | Text Started background shell proc_1
+== bash_bg open
+✓ Command $ npm run dev  <background>  <12ms>
+ | Text Started background shell proc_1
+== bash_run collapsed
+● Command $ sleep 60 && echo done
+== bash_run open
+● Command $ sleep 60 && echo done
+== read1 collapsed
+✓ Read /work/app/src/main.rs  <lines 10–17>  <3ms>
+10 | Text fn main() {
+11 | Text     let x = f(42); // go
+12 | Text     println!("hi {}", x);
+13 | Text     if x > 1 { return; }
+14 | Text }
++3 lines
+== read1 open
+✓ Read /work/app/src/main.rs  <lines 10–17>  <3ms>
+10 | Text fn main() {
+11 | Text     let x = f(42); // go
+12 | Text     println!("hi {}", x);
+13 | Text     if x > 1 { return; }
+14 | Text }
+15 | Text 
+16 | Text fn f(n: u32) -> u32 { n + 1 }
+17 | Text // end
+== grep1 collapsed
+✓ Search TODO  [in src]  <7 matches>  <21ms>
+   | Accent src/a.rs
+12 | Text // TODO one
+40 | Text // TODO two
+   | Accent src/b-c.rs
+ 3 | Text // TODO three
++4 lines
+== grep1 open
+✓ Search TODO  [in src]  <7 matches>  <21ms>
+   | Accent src/a.rs
+12 | Text // TODO one
+40 | Text // TODO two
+   | Accent src/b-c.rs
+ 3 | Text // TODO three
+ 9 | Dim     context line
+   | Accent src/d.rs
+ 1 | Text // TODO four
+ 7 | Text // TODO five
+   | Accent src/e.rs
+ 2 | Text // TODO six
+== glob1 collapsed
+✓ Search **/*.rs  <8 files>  <5ms>
+ | Text src/m0.rs
+ | Text src/m1.rs
+ | Text src/m2.rs
+ | Text src/m3.rs
+ | Text src/m4.rs
++3 lines
+== glob1 open
+✓ Search **/*.rs  <8 files>  <5ms>
+ | Text src/m0.rs
+ | Text src/m1.rs
+ | Text src/m2.rs
+ | Text src/m3.rs
+ | Text src/m4.rs
+ | Text src/m5.rs
+ | Text src/m6.rs
+ | Text src/m7.rs
+== edit1 collapsed
+✓ Edit /work/app/src/lib.rs  <+2>  <−1>  <9ms>
+  | Hunk @@ -3,3 +3,4 @@
+3 | Dim   pub fn add(a: i32) -> i32 {
+4 | Del -     a + 1
+4 | Add +     let b = a + 2; // two
+5 | Add +     b
++1 line
+== edit1 open
+✓ Edit /work/app/src/lib.rs  <+2>  <−1>  <9ms>
+  | Hunk @@ -3,3 +3,4 @@
+3 | Dim   pub fn add(a: i32) -> i32 {
+4 | Del -     a + 1
+4 | Add +     let b = a + 2; // two
+5 | Add +     b
+6 | Dim   }
+== write1 collapsed
+✓ Edit /work/app/NOTES.md  <+3>  <−0>  <4ms>
+1 | Add + # Notes
+2 | Add + line two
+3 | Add + line three
+== write1 open
+✓ Edit /work/app/NOTES.md  <+3>  <−0>  <4ms>
+1 | Add + # Notes
+2 | Add + line two
+3 | Add + line three
+== mcp1 collapsed
+✓ Mcp github:get_issue  [owner=acme, repo=app, number=7]  <420ms>
+ | Text {
+ | Text   "number": 7,
+ | Text   "title": "Crash on start",
+ | Text   "labels": [
+ | Text     "bug",
++7 lines
+== mcp1 open
+✓ Mcp github:get_issue  [owner=acme, repo=app, number=7]  <420ms>
+ | Text {
+ | Text   "number": 7,
+ | Text   "title": "Crash on start",
+ | Text   "labels": [
+ | Text     "bug",
+ | Text     "p1"
+ | Text   ],
+ | Text   "user": {
+ | Text     "login": "octo"
+ | Text   },
+ | Text   "state": "open"
+ | Text }
+== web1 collapsed
+✓ Web https://example.com/docs  [~ Example Docs]  <~HTTP 200>  <900ms>
+ | Text HTTP 200
+ | Text # Example Docs
+ | Text Welcome to the docs.
+ | Text Second line.
+== web1 open
+✓ Web https://example.com/docs  [~ Example Docs]  <~HTTP 200>  <900ms>
+ | Text HTTP 200
+ | Text # Example Docs
+ | Text Welcome to the docs.
+ | Text Second line.
+== web2 collapsed
+✓ Web rust gpui list  <3 results>  <1.5s>
+ | Text 1. GPUI list https://gpui.rs/list
+ | Text 2. Zed blog https://zed.dev/blog
+ | Text 3. Docs https://docs.rs/gpui
+== web2 open
+✓ Web rust gpui list  <3 results>  <1.5s>
+ | Text 1. GPUI list https://gpui.rs/list
+ | Text 2. Zed blog https://zed.dev/blog
+ | Text 3. Docs https://docs.rs/gpui
+== agent1 collapsed
+✓ Agent rev-1  [reviewer]  <done>  <45.0s>
+ | Text Done.
++2 lines
+== agent1 open
+✓ Agent rev-1  [reviewer]  <done>  <45.0s>
+ | Text Found two issues.
+ | Text Fix the token check in auth.rs.
+ | Text Done.
+== den1 collapsed
+⊘ Command $ rm -rf build
+ | Text Permission denied by policy.
+== den1 open
+⊘ Command $ rm -rf build
+ | Text Permission denied by policy.
+== int1 collapsed
+■ Command $ make all
+ | Text Interrupted.
+== int1 open
+■ Command $ make all
+ | Text Interrupted.
+== gen1 collapsed
+✓ Generic {"todos":[]}  <1ms>
+ | Text Todos updated
+== gen1 open
+✓ Generic {"todos":[]}  <1ms>
+ | Text Todos updated

@@ -40,6 +40,12 @@ pub enum Item {
         file: Option<String>,
         /// Structured line diff of that change (`ToolCompleted.diff`).
         diff: Option<Value>,
+        /// What the call was given (`tool.requested.input`): the card shapes by it. `Null` in old logs.
+        input: Box<Value>,
+        /// How the call ended (`tool.completed.status`); None while it runs.
+        status: Option<ToolStatus>,
+        /// Exit code from `process.exited` of a foreground command (structured, not read from the text).
+        exit_code: Option<i64>,
     },
     /// The model's reasoning; the window shows it only with `show_thinking`.
     Thinking(String),
@@ -445,6 +451,9 @@ impl Convo {
                     duration_ms: 0,
                     file: changed_file(name, input),
                     diff: None,
+                    input: Box::new(input.clone()),
+                    status: None,
+                    exit_code: None,
                 });
             }
             Event::ToolCompleted {
@@ -463,9 +472,11 @@ impl Convo {
                     output,
                     duration_ms,
                     diff,
+                    status: st,
                     ..
                 }) = self.tool(tool_call_id)
                 {
+                    *st = Some(*status);
                     if let Some(f) = full {
                         output.clone_from(f);
                     }
@@ -669,6 +680,12 @@ impl Convo {
                     self.notice(false, format!("\u{2190} @{from}{label} {what}"))
                 } else {
                     self.notice(false, format!("@{from} \u{2192} @{to}: {what}"))
+                }
+            }
+            // a foreground command's process id is its tool call id
+            Event::ProcessExited(p) => {
+                if let Some(Item::Tool { exit_code, .. }) = self.tool(&p.process_id) {
+                    *exit_code = p.exit_code;
                 }
             }
             Event::MessageDropped { reason, .. } => self.notice(

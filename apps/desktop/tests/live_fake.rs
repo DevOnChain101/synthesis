@@ -279,6 +279,104 @@ fn a_frame_saved_in_the_session_artifacts_is_viewable() {
 }
 
 #[test]
+fn a_stale_stored_model_holds_the_first_prompt_and_esc_returns_it_unsent() {
+    let mut r = rig(serde_json::json!([]));
+    r.live.stale_model = Some("omniroute/cx/gone".into());
+    assert_eq!(r.live.submit("hello"), Submitted::Nothing);
+    assert_eq!(r.live.dialogs.len(), 1, "the model picker is open");
+    assert!(!r.live.busy, "nothing was sent");
+    // the notice names the stored model and where a pick of the fallback would send the prompt
+    let notice = r
+        .live
+        .view
+        .convo
+        .items
+        .iter()
+        .rev()
+        .find_map(|i| match i {
+            Item::Notice { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        notice.contains("omniroute/cx/gone") && notice.contains(&r.engine.label),
+        "{notice}"
+    );
+    // the highlight starts on Refresh, not on the fallback model
+    assert_eq!(r.live.dialogs[0].sel, 0);
+    assert_eq!(r.live.dialogs[0].options[0].0, "refresh");
+    assert!(r.live.model_filter_key(Some("zzz"), false));
+    assert_eq!(r.live.dialogs[0].options.last().unwrap().0, "info");
+    assert!(r.live.model_filter_key(None, true));
+    // Esc: nothing is sent, the prompt goes back to the input box
+    assert_eq!(r.live.reject(), None);
+    assert!(r.live.dialogs.is_empty() && r.live.model_pick.is_none());
+    assert_eq!(r.live.next_queued(), None);
+    assert_eq!(r.live.returned_prompt.take().as_deref(), Some("hello"));
+    // asked once
+    assert_eq!(r.live.submit("again"), Submitted::Send("again".into()));
+}
+
+#[test]
+fn picking_the_model_in_use_is_the_deliberate_way_to_send_a_held_prompt() {
+    let mut r = rig(serde_json::json!([]));
+    r.live.stale_model = Some("p/gone".into());
+    assert_eq!(r.live.submit("hello"), Submitted::Nothing);
+    let now = 1_000_000;
+    let at = r.live.dialogs[0]
+        .options
+        .iter()
+        .position(|(k, _)| *k == r.engine.label)
+        .unwrap();
+    let key = r.live.pick(at, now).unwrap();
+    assert_eq!(r.live.answer(&key, now), None);
+    assert!(r.live.returned_prompt.is_none());
+    assert_eq!(r.live.next_queued().as_deref(), Some("hello"));
+}
+
+#[test]
+fn a_refresh_row_runs_once_and_its_failure_shows_as_a_row() {
+    use synthesis_desktop::live::Action;
+    let mut r = rig(serde_json::json!([]));
+    assert_eq!(r.live.submit("/model"), Submitted::Nothing);
+    let now = 1_000_000;
+    let key = r.live.pick(0, now).unwrap();
+    assert_eq!(r.live.answer(&key, now), Some(Action::RefreshModels));
+    assert_eq!(
+        r.live.dialogs.len(),
+        1,
+        "the picker stays open while it refreshes"
+    );
+    // a second press while one runs starts nothing
+    let key = r.live.pick(0, now).unwrap();
+    assert_eq!(r.live.answer(&key, now), None);
+    r.live
+        .models_refreshed(vec![], vec!["omniroute: no answer in time".into()]);
+    let d = &r.live.dialogs[0];
+    assert!(
+        d.options[1]
+            .1
+            .contains("refresh failed - omniroute: no answer in time")
+    );
+    assert!(!r.live.model_pick.as_ref().unwrap().refreshing);
+}
+
+#[test]
+fn open_is_a_known_command_that_hands_the_typed_path_to_the_window() {
+    use synthesis_desktop::live::Action;
+    let mut r = rig(serde_json::json!([]));
+    assert_eq!(
+        r.live.submit("/open ~/work"),
+        Submitted::Do(Action::Open("~/work".into()))
+    );
+    assert_eq!(
+        r.live.submit("/open"),
+        Submitted::Nothing,
+        "no path: an error row"
+    );
+}
+
+#[test]
 fn send_now_routing() {
     let mut r = rig(serde_json::json!([]));
     let inject = |to: &str, text: &str| Submitted::Inject {

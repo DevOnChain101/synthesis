@@ -626,7 +626,7 @@ impl TuiView {
             .update(cx, |s, cx| s.set_placeholder(hint, window, cx));
     }
 
-    fn set_prompt(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn set_prompt(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
         lu.prompt.update(cx, |s, cx| {
             s.set_value(text.to_string(), window, cx);
@@ -718,6 +718,15 @@ impl TuiView {
                 lu.dirty = true;
                 cx.notify();
                 return true;
+            }
+            // the model picker filters as you type (model ids hold digits, so they are text there)
+            if !ctrl && !cmd && (key == "backspace" || ks.key_char.is_some()) {
+                let typed = ks.key_char.as_deref().filter(|_| key != "backspace");
+                if lu.live.model_filter_key(typed, key == "backspace") {
+                    lu.dirty = true;
+                    cx.notify();
+                    return true;
+                }
             }
             match key {
                 "up" => lu.live.move_sel(false),
@@ -902,6 +911,23 @@ impl TuiView {
                     return true;
                 }
                 false
+            }
+            // Tab on `/open <path>` completes folder names
+            "tab" if text.starts_with("/open ") && cursor >= text.len() => {
+                let home = synthesis_app::homes(&lu.cfg.env).ok().map(|h| h.user);
+                let arg = &text["/open ".len()..];
+                if let Some(new) =
+                    crate::folder::complete(arg, home.as_deref(), Path::new(&lu.live.cwd))
+                {
+                    let t = format!("/open {new}");
+                    let end = t.len();
+                    lu.prompt.update(cx, |s, cx| {
+                        s.set_value(t, window, cx);
+                        s.set_selected_range(end..end, cx);
+                    });
+                    self.on_prompt_changed(cx);
+                }
+                true
             }
             "tab" if text.is_empty() => {
                 lu.live.focus = lu.live.focus.next();
@@ -1274,6 +1300,51 @@ impl TuiView {
             Action::Model(m) => return self.switch(Target::Model(m), "model".into(), cx),
             Action::TrustFolder => return self.trust_folder(cx),
             Action::Resume(id) => return self.open_session(&id, cx),
+            Action::RefreshModels => {
+                let (env, project) = (lu.cfg.env.clone(), lu.cfg.project.clone());
+                let job =
+                    cx.background_spawn(async move { crate::models::refresh(&env, &project) });
+                cx.spawn(async move |this, cx| {
+                    let (rows, errors) = job.await;
+                    this.update(cx, |t, cx| {
+                        t.live_do(cx, |l| l.models_refreshed(rows, errors))
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            Action::Open(typed) => {
+                let l = &lu.live;
+                let home = synthesis_app::homes(&lu.cfg.env).ok().map(|h| h.user);
+                let cwd = PathBuf::from(&l.cwd);
+                let open: Vec<PathBuf> = l
+                    .view
+                    .workspaces
+                    .workspaces
+                    .iter()
+                    .map(|w| PathBuf::from(&w.root))
+                    .collect();
+                // the disk is touched off the UI thread, with a time limit
+                let job = cx.background_spawn(async move {
+                    crate::folder::resolve_bounded(
+                        typed,
+                        home,
+                        cwd,
+                        open,
+                        std::time::Duration::from_secs(5),
+                    )
+                });
+                cx.spawn(async move |this, cx| {
+                    let r = job.await;
+                    this.update(cx, |t, cx| match r {
+                        Ok(p) => t.open_folder(&p, cx),
+                        Err(e) => t.live_do(cx, |l| l.note(e, true)),
+                    })
+                    .ok();
+                })
+                .detach();
+                return;
+            }
             Action::New => {
                 let l = &lu.live;
                 let root = l
@@ -1406,6 +1477,13 @@ impl TuiView {
     /// A folder chosen as a new workspace: it must be a readable directory.
     pub fn open_folder(&mut self, p: &Path, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
+        // the system picker can return a network path too: not probed here either
+        if crate::folder::is_unc(&p.to_string_lossy()) {
+            lu.live.note(crate::folder::UNC_REFUSED, true);
+            lu.dirty = true;
+            cx.notify();
+            return;
+        }
         match synthesis_core::canonicalize(p) {
             Ok(c) if c.is_dir() => {
                 let key = format!("folder:{}", c.display());

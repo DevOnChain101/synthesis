@@ -7,9 +7,7 @@ use clap::Args;
 use serde_json::json;
 use synthesis_config::{Config, Env, ProjectTrust, list_models, resolve_credential};
 use synthesis_harness::sanitize_for_display as san;
-use synthesis_providers::{NetSettings, ProviderSpec, RetryPolicy, modelinfo};
 use synthesis_sandbox::SandboxBackend;
-use tokio_util::sync::CancellationToken;
 
 use synthesis_app::{homes, load_config};
 
@@ -40,9 +38,6 @@ pub struct ModelsArgs {
     refresh: bool,
 }
 
-/// Longest `models --refresh` waits for one provider.
-const REFRESH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
-
 pub fn models(env: &Env, a: &ModelsArgs) -> Result<u8, String> {
     let h = homes(env)?;
     let cfg = load_config(env, &h, a.cwd.cwd.as_deref(), ProjectTrust::Untrusted)?;
@@ -51,59 +46,16 @@ pub fn models(env: &Env, a: &ModelsArgs) -> Result<u8, String> {
         .map(|m| (m.value, m.provider, m.model, "config"))
         .collect();
     let cache_of = |id: &str, p: &synthesis_config::Provider| {
-        let base = match p.protocol {
-            synthesis_config::Protocol::Anthropic => {
-                synthesis_providers::anthropic::base_url(p.base_url.as_deref())
-            }
-            synthesis_config::Protocol::OpenAi => {
-                synthesis_providers::openai::base_url(p.base_url.as_deref())
-            }
-        };
-        modelinfo::read_cache(
-            &modelinfo::cache_path(&h.synthesis, id),
-            base.trim_end_matches('/'),
-            p.protocol,
-        )
+        synthesis_app::models::cache_of(&h.synthesis, id, p)
     };
     if a.refresh {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| e.to_string())?;
         for (id, p) in cfg
             .providers
             .iter()
             .filter(|(_, p)| p.discover != Some(false))
         {
-            let cred = resolve_credential(id, Some(p), &h.synthesis, env);
-            let cache = modelinfo::cache_path(&h.synthesis, id);
-            let found = ProviderSpec::from_config(id, p, cred.as_ref())
-                .and_then(|s| {
-                    s.connect_cached(
-                        env,
-                        &NetSettings::default(),
-                        RetryPolicy::default(),
-                        Some(cache),
-                    )
-                })
-                .map(|prov| {
-                    rt.block_on(async move {
-                        // one provider may not hold the command for longer than this
-                        tokio::time::timeout(
-                            REFRESH_DEADLINE,
-                            prov.refresh_model_info(true, &CancellationToken::new()),
-                        )
-                        .await
-                        .unwrap_or_else(|_| {
-                            Err(synthesis_providers::ProviderError::new(
-                                synthesis_providers::ErrorKind::Network,
-                                "no answer in time",
-                            ))
-                        })
-                    })
-                });
-            match found {
-                Ok(Ok(())) => {
+            match synthesis_app::models::refresh_provider(env, &h.synthesis, id, p) {
+                Ok(()) => {
                     for m in cache_of(id, p).iter().flat_map(|f| f.models.keys()) {
                         let value = format!("{id}/{m}");
                         if !rows.iter().any(|r| r.0 == value) {
@@ -111,12 +63,8 @@ pub fn models(env: &Env, a: &ModelsArgs) -> Result<u8, String> {
                         }
                     }
                 }
-                Ok(Err(e)) | Err(e) => {
-                    eprintln!(
-                        "synt: {}: model discovery failed: {}",
-                        san(id),
-                        san(e.message())
-                    )
+                Err(e) => {
+                    eprintln!("synt: {}: model discovery failed: {}", san(id), san(&e))
                 }
             }
         }
