@@ -195,6 +195,8 @@ pub struct Session {
     pub context_estimated: bool,
     /// Set by [`Session::settle_replayed`]; a new prompt (live) clears it.
     pub interrupted: bool,
+    /// Live activity of the Topology nodes (flows and glow).
+    pub pulses: crate::pulse::Pulses,
 }
 
 impl Session {
@@ -913,6 +915,7 @@ impl Session {
         for c in self.components.items.iter_mut() {
             c.open = 0;
         }
+        self.pulses.settle();
         self.interrupted = open;
         open
     }
@@ -1064,6 +1067,7 @@ pub fn apply_event(s: &mut Session, env: &synthesis_events::Envelope) {
             }
         }
     }
+    s.pulses.apply(env);
     if s.id.is_empty() {
         s.id = env.session_id.clone();
     }

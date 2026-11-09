@@ -136,6 +136,13 @@ impl ChatTab {
 
 pub struct TuiView {
     snap: Snapshot,
+    /// The Topology activity of this frame (set by `render`, read by `right`) and the time it was taken at.
+    topo_acts: std::collections::BTreeMap<synthesis_view::pulse::Node, synthesis_view::pulse::Act>,
+    topo_now: i64,
+    /// `--shot --active tools,mcp`: these nodes are held open at this time (ms) instead of the live clock.
+    pub(crate) topo_force: Option<(Vec<synthesis_view::pulse::Node>, i64)>,
+    /// The pending repaint of the animation (about 30 per second, only while a node is active).
+    topo_tick: Option<gpui::Task<()>>,
     /// The engine, the chat and the prompt; `None` draws the sample (layout tests, `--sample`, `--shot`).
     live: Option<driver::LiveUi>,
     hidden: layout::Hidden,
@@ -199,6 +206,10 @@ impl TuiView {
             shown: true,
             win_h: 900.,
             snap: sample(),
+            topo_acts: Default::default(),
+            topo_now: 0,
+            topo_force: None,
+            topo_tick: None,
             live: None,
             hidden,
             inset,
@@ -759,7 +770,12 @@ impl TuiView {
                 .child("online")
                 .into_any_element();
             // the canvas fills the body; its own size picks the mode (A, B or T)
-            let body = div().relative().size_full().child(topo::graph(s));
+            let body = div().relative().size_full().child(topo::graph(
+                s,
+                &self.topo_acts,
+                self.topo_now,
+                self.live.as_ref().is_none_or(|l| l.cfg.tui.motion),
+            ));
             let p = panel(
                 Head::new("p-topology", "Synthesis Topology", "network", pad)
                     .fold(self.is_folded("p-topology"), self.fold_cb("p-topology", cx)),
@@ -855,6 +871,38 @@ impl TuiView {
     }
 }
 
+impl TuiView {
+    /// Takes the Topology activity of this frame, and while a node is active schedules the next repaint:
+    /// about 30 frames a second with motion, 4 a second without (only to catch the end of the hold).
+    /// Idle means no timer and no repaint.
+    fn topo_frame(&mut self, cx: &mut Context<Self>) {
+        use synthesis_view::pulse::Pulses;
+        let (pulses, now) = match &self.topo_force {
+            Some((nodes, at)) => (Pulses::forced(nodes), *at),
+            None => (self.snap.pulses.clone(), crate::live::now_ms()),
+        };
+        self.topo_now = now;
+        self.topo_acts = pulses.acts(now);
+        if self.topo_acts.is_empty() || self.topo_force.is_some() {
+            self.topo_tick = None;
+            return;
+        }
+        if self.topo_tick.is_some() {
+            return;
+        }
+        let motion = self.live.as_ref().is_none_or(|l| l.cfg.tui.motion);
+        let wait = std::time::Duration::from_millis(if motion { 33 } else { 250 });
+        self.topo_tick = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |t, cx| {
+                t.topo_tick = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+}
+
 impl Render for TuiView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // a prompt handed back unsent (Esc in the model picker) returns to the input box
@@ -896,6 +944,7 @@ impl Render for TuiView {
             window.request_animation_frame();
         }
         self.refresh(window);
+        self.topo_frame(cx);
         self.sync_placeholder(window, cx);
         self.tabs_tick(cx);
         let vp = window.viewport_size();

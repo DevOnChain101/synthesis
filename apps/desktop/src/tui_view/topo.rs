@@ -4,11 +4,14 @@
 
 use std::collections::HashMap;
 
+use std::collections::BTreeMap;
+
 use gpui::{
     AnyElement, App, Bounds, IntoElement, ParentElement as _, PathBuilder, Pixels, Point,
     Styled as _, Window, canvas, div, fill, point, prelude::*, px, size,
 };
 use synthesis_tui_render::theme as t;
+use synthesis_view::pulse::{Act, Node, toward_core};
 
 use super::MONO;
 use super::sample::{Core, NodeState, Pos, Snapshot, TopoNode};
@@ -77,6 +80,9 @@ impl Geo {
             .unwrap()
     }
 }
+
+/// Width of the core's column relative to a side column.
+const CORE_COL: f32 = 1.25;
 
 const GRID: [[Pos; 3]; 3] = [
     [Pos::User, Pos::Hooks, Pos::Guards],
@@ -148,48 +154,61 @@ pub fn geometry(aw: f32, ah: f32) -> Geo {
         return geometry_t(aw, ah);
     }
     let a = mode == Mode::A;
-    let (px_, py, cg, rg, row_min) = if a {
-        (2f32, 6f32, 18f32, 22f32, 86f32)
+    let (px_, py, cg, rg) = if a {
+        (2f32, 6f32, 18f32, 22f32)
     } else {
-        (2f32, 4f32, 10f32, 12f32, 46f32)
+        (2f32, 4f32, 10f32, 12f32)
     };
     let w = aw - 2. * px_;
-    // owner request: three equal columns and cards that fill their cell (all the same size), the core filling
-    // the middle cell; so the grid follows the panel's width and height instead of leaving it empty
-    let col = (w - 2. * cg) / 3.;
-    let row_h = row_min.max((ah - 2. * py - 2. * rg) / 3.);
-    let col_x = [px_, px_ + col + cg, px_ + 2. * (col + cg)];
-    let row_y = |i: usize| py + i as f32 * (row_h + rg);
-    let card_h = if a {
-        row_h.clamp(86., 150.)
-    } else {
-        row_h.clamp(44.45, 70.)
-    };
+    // owner request: eight equal cards and a square core that is bigger than they are. The middle column is
+    // CORE_COL times as wide as the side ones (the cards of that column stay centred in it at the common
+    // width); the core's side is that width, the cards take their height from what is left.
+    let col = (w - 2. * cg) / (2. + CORE_COL);
+    let mid = col * CORE_COL;
+    let col_x = [px_, px_ + col + cg, px_ + 2. * cg + col + mid];
+    // the cards give height to the core before it is smaller than they are wide
+    let (cmin, cmax) = if a { (70., 130.) } else { (34., 70.) };
+    let avail = ah - 2. * py;
+    let side = mid
+        .min(if a { 240. } else { 200. })
+        .min(avail - 2. * cmin - 2. * rg)
+        .max(cmin);
+    let card_h = ((avail - side - 2. * rg) / 2.).clamp(cmin, cmax);
+    // spare height is kept out of the wires: the gaps grow a little, the rest centres the grid
+    let rg = rg.max((avail - side - 2. * card_h) / 2.).min(rg * 2.5);
+    let top = py + ((avail - side - 2. * card_h - 2. * rg) / 2.).max(0.);
+    let row_y = [top, top + card_h + rg, top + card_h + rg + side + rg];
     let mut nodes = Vec::new();
     for (ri, row) in GRID.iter().enumerate() {
         for (ci, p) in row.iter().enumerate() {
             if ri == 1 && ci == 1 {
                 continue;
             }
+            let x = if ci == 1 {
+                col_x[1] + (mid - col) / 2.
+            } else {
+                col_x[ci]
+            };
+            let y = match ri {
+                1 => row_y[1] + (side - card_h) / 2.,
+                _ => row_y[ri],
+            };
             nodes.push((
                 *p,
                 R {
-                    x: col_x[ci],
-                    y: row_y(ri) + (row_h - card_h) / 2.,
+                    x,
+                    y,
                     w: col,
                     h: card_h,
                 },
             ));
         }
     }
-    // the core is a square (owner rule): the shorter side of its cell, centred in it
-    let side = col.min(row_h).min(if a { 240. } else { 200. });
-    let (cw, ch) = (side, side);
     let core = R {
-        x: col_x[1] + (col - cw) / 2.,
-        y: row_y(1) + (row_h - ch) / 2.,
-        w: cw,
-        h: ch,
+        x: col_x[1] + (mid - side) / 2.,
+        y: row_y[1],
+        w: side,
+        h: side,
     };
     let g = Geo {
         mode,
@@ -343,7 +362,127 @@ fn node_icon(p: Pos) -> &'static str {
     }
 }
 
-fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool) -> AnyElement {
+fn node_of(p: Pos) -> Node {
+    match p {
+        Pos::User => Node::User,
+        Pos::Hooks => Node::Hooks,
+        Pos::Guards => Node::Guards,
+        Pos::Sub => Node::Subagents,
+        Pos::Skills => Node::Skills,
+        Pos::Mcp => Node::Mcp,
+        Pos::Tools => Node::Tools,
+        Pos::Mem => Node::Memory,
+    }
+}
+
+/// One blink is 1060 ms (twice the CLI's 530 ms half-period), as a smooth wave in 0..=1.
+fn wave(now: i64) -> f32 {
+    0.5 + 0.5 * (now.rem_euclid(1060) as f32 / 1060. * std::f32::consts::TAU).sin()
+}
+
+/// How strongly a node shows its activity, 0..=1. With motion it breathes and fades out over the hold;
+/// without, it is a steady full level while active (a static border, no animation).
+pub fn level(a: Act, now: i64, motion: bool) -> f32 {
+    if !a.on() {
+        0.
+    } else if motion {
+        a.strength * (0.55 + 0.45 * wave(now))
+    } else {
+        1.
+    }
+}
+
+/// Dash pattern of the travelling pulse, in px, and its speed in px per ms.
+const DASH: f32 = 7.;
+const GAP_: f32 = 8.;
+const SPEED: f32 = 0.07;
+
+fn flatten(wire: &[Seg]) -> Vec<(f32, f32)> {
+    let mut v: Vec<(f32, f32)> = vec![];
+    for seg in wire {
+        match *seg {
+            Seg::M(x, y) | Seg::L(x, y) => v.push((x, y)),
+            Seg::Q(cx, cy, x, y) => {
+                let (x0, y0) = *v.last().unwrap_or(&(x, y));
+                for i in 1..=8 {
+                    let u = i as f32 / 8.;
+                    let w = 1. - u;
+                    v.push((
+                        w * w * x0 + 2. * w * u * cx + u * u * x,
+                        w * w * y0 + 2. * w * u * cy + u * u * y,
+                    ));
+                }
+            }
+        }
+    }
+    v
+}
+
+/// The part of `poly` between arc lengths `a` and `b`.
+fn slice(poly: &[(f32, f32)], a: f32, b: f32) -> Vec<(f32, f32)> {
+    let (mut out, mut at) = (vec![], 0f32);
+    for w in poly.windows(2) {
+        let (p, q) = (w[0], w[1]);
+        let len = ((q.0 - p.0).powi(2) + (q.1 - p.1).powi(2)).sqrt();
+        if len > 0. && at + len > a && at < b {
+            let pt = |s: f32| {
+                let u = ((s - at) / len).clamp(0., 1.);
+                (p.0 + (q.0 - p.0) * u, p.1 + (q.1 - p.1) * u)
+            };
+            if out.is_empty() {
+                out.push(pt(a));
+            }
+            out.push(pt(b));
+        }
+        at += len;
+    }
+    out
+}
+
+/// The dashes of a pulse running along `poly` (in the direction of the path) at time `now`.
+fn dashes(poly: &[(f32, f32)], now: i64) -> Vec<Vec<(f32, f32)>> {
+    let total: f32 = poly
+        .windows(2)
+        .map(|w| ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt())
+        .sum();
+    let period = DASH + GAP_;
+    let off = (now.rem_euclid(100_000) as f32 * SPEED) % period;
+    let mut v = vec![];
+    let mut s = off - period;
+    while s < total {
+        let (a, b) = (s.max(0.), (s + DASH).min(total));
+        if b > a {
+            v.push(slice(poly, a, b));
+        }
+        s += period;
+    }
+    v
+}
+
+/// The wire of node `i` as a path running from the core to the node. A, B: the wires are drawn node -> core.
+fn core_to_node(geo: &Geo, i: usize) -> Vec<(f32, f32)> {
+    let mut p = flatten(&geo.wires[i]);
+    if geo.mode == Mode::T {
+        // the trunk comes down from the core bar to the branch
+        p.insert(0, geo.dots[0]);
+    } else {
+        p.reverse();
+    }
+    p
+}
+
+/// The focus glow around an active card or the core, like the logo's halo.
+fn glow(c: gpui::Hsla, lvl: f32) -> gpui::BoxShadow {
+    gpui::BoxShadow {
+        color: with_alpha(c, 0.3 * lvl),
+        offset: point(px(0.), px(0.)),
+        blur_radius: px(4. + 10. * lvl),
+        spread_radius: px(0.),
+        inset: false,
+    }
+}
+
+fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool, lvl: f32) -> AnyElement {
     let base = hsla(node_colour(n.pos));
     let col = if n.state == NodeState::Blocked {
         hsla(t::ERROR)
@@ -378,6 +517,12 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool) -> AnyElement {
         let max = ((r.w - 14. - ic - 6.) / (title_size * 0.63))
             .floor()
             .max(2.) as usize;
+        // "USER & PROMPT" gives way to "USER" before it is cut
+        if name.chars().count() > max
+            && let Some((head, _)) = name.split_once(" & ")
+        {
+            name = head.to_string();
+        }
         if name.chars().count() > max {
             name = name.chars().take(max - 1).collect::<String>() + "\u{2026}";
         }
@@ -392,11 +537,31 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool) -> AnyElement {
         } else {
             5.
         }))
+        // narrow rows: a marker dot beats with the activity
+        .when(lvl > 0. && mode == Mode::T, |d| {
+            d.child(
+                div()
+                    .size(px(6.))
+                    .flex_none()
+                    .rounded_full()
+                    .bg(with_alpha(hsla(t::PEARL), 0.35 + 0.65 * lvl)),
+            )
+        })
         .child(icon(node_icon(n.pos), ic, col))
         .child(tracked(&name, title_size, 0.03, col));
+    // a grid card's lines wrap to two rows when its height has room for them, else they are cut to one
+    let lh = line_size * if a { 1.45 } else { 1.35 };
+    let used = if a { 9. + 6. + 24. } else { 14. + 2. + 10. };
+    let clamp = if mode != Mode::T && r.h - used >= nlines as f32 * 2. * lh {
+        2
+    } else {
+        1
+    };
     let lines = n.lines.iter().take(nlines).map(|l| {
         div()
-            .truncate()
+            // one long word (an identifier) is cut with an ellipsis rather than broken in the middle
+            .when(clamp == 1 || !l.contains(' '), |d| d.truncate())
+            .when(clamp > 1 && l.contains(' '), |d| d.line_clamp(clamp))
             .text_size(px(line_size))
             .line_height(px(line_size * if a { 1.45 } else { 1.35 }))
             .child(l.clone())
@@ -408,25 +573,28 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool) -> AnyElement {
             .border_l_2()
             .border_color(col)
             .rounded_r(px(4.))
-            .bg(with_alpha(col, 0.06))
+            .bg(with_alpha(col, 0.06 + 0.14 * lvl))
+            .when(lvl > 0., |d| d.shadow(vec![glow(col, lvl)]))
             .child(title)
             .children(lines.take(1))
     } else {
         let mut d = d
             .flex_col()
-            .when(!a, |d| d.justify_center())
-            .when(a, |d| d.pt(px(9.)))
+            .justify_center()
             .px(px(if a { 10. } else { 7. }))
             .border_1()
             .border_color(with_alpha(
                 col,
-                if n.state == NodeState::Idle {
+                if lvl > 0. {
+                    0.8 + 0.2 * lvl
+                } else if n.state == NodeState::Idle {
                     0.55
                 } else {
                     0.8
                 },
             ))
             .rounded(px(if a { 10. } else { 8. }))
+            .when(lvl > 0., |d| d.shadow(vec![glow(col, lvl)]))
             .child(div().pb(px(if a { 6. } else { 2. })).child(title));
         for l in lines {
             d = d.child(l);
@@ -436,7 +604,64 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool) -> AnyElement {
     d.into_any_element()
 }
 
-fn core_card(c: &Core, r: R, mode: Mode, large: bool) -> AnyElement {
+/// What the core card holds at a given side: everything scales with the side and is dropped, not
+/// overflowed, when it does not fit. `large` is the design's own rule for showing the sub line and the tag.
+#[derive(Clone, Copy, Debug)]
+pub struct CoreFit {
+    pub logo: f32,
+    pub title: f32,
+    pub track: f32,
+    pub sub: bool,
+    pub tag: bool,
+}
+
+pub fn core_fit(mode: Mode, side: f32, large: bool) -> CoreFit {
+    if mode == Mode::B {
+        return CoreFit {
+            logo: (0.38 * side).clamp(18., 44.),
+            title: if side >= 130. { 11. } else { 9.5 },
+            track: 0.,
+            sub: false,
+            tag: false,
+        };
+    }
+    CoreFit {
+        logo: (0.4 * side).clamp(22., 76.),
+        title: if side >= 170. {
+            14.
+        } else if side >= 140. {
+            12.
+        } else {
+            10.5
+        },
+        track: if side >= 170. { 0.2 } else { 0.12 },
+        sub: large && side >= 150.,
+        tag: large && side >= 190.,
+    }
+}
+
+/// Width and height of the content of the core card in px (the border and 8px of padding come off the side).
+pub fn core_content(mode: Mode, side: f32, large: bool, title_chars: usize) -> (f32, f32) {
+    let f = core_fit(mode, side, large);
+    let line = |fs: f32| fs * 1.3;
+    let text_w = |fs: f32, track: f32, n: usize| n as f32 * fs * (0.6 + track);
+    let mut h = f.logo + line(f.title);
+    let mut w = f.logo.max(text_w(f.title, f.track, title_chars));
+    if mode == Mode::A {
+        h += 4.;
+    }
+    if f.sub {
+        h += line(12.);
+        w = w.max(text_w(12., 0.25, 4));
+    }
+    if f.tag {
+        h += 6. + line(12.);
+        w = w.max(text_w(12., 0., 21));
+    }
+    (w, h)
+}
+
+fn core_card(c: &Core, r: R, mode: Mode, large: bool, lvl: f32) -> AnyElement {
     let ink = hsla(t::TEXT_STRONG);
     let logo = |s: f32| {
         // a soft platinum halo behind the mark (two layers); it stays inside the card, which clips
@@ -451,7 +676,10 @@ fn core_card(c: &Core, r: R, mode: Mode, large: bool) -> AnyElement {
             .size(px(s))
             .flex_none()
             .rounded_full()
-            .shadow(vec![halo(0.28, s * 0.35), halo(0.14, s * 0.2)])
+            .shadow(vec![
+                halo(0.28 + 0.5 * lvl, s * 0.35),
+                halo(0.14 + 0.3 * lvl, s * 0.2),
+            ])
             .child(gpui::img(brand::mark()).size(px(s)))
             .into_any_element()
     };
@@ -464,7 +692,10 @@ fn core_card(c: &Core, r: R, mode: Mode, large: bool) -> AnyElement {
         .items_center()
         .bg(hsla(t::BG))
         .border_color(hsla(t::ACCENT_LIGHT))
-        .text_color(hsla(t::TEXT));
+        .text_color(hsla(t::TEXT))
+        .when(lvl > 0., |d| {
+            d.shadow(vec![glow(hsla(t::ACCENT_GLOW), lvl)])
+        });
     match mode {
         Mode::T => d
             .gap(px(8.))
@@ -473,33 +704,42 @@ fn core_card(c: &Core, r: R, mode: Mode, large: bool) -> AnyElement {
             .rounded(px(6.))
             .child(logo(14.))
             .child(tracked(&c.title, 10.5, 0.14, ink))
-            .child(div().ml_auto().text_size(px(10.)).child(c.tag.clone())),
-        Mode::B => d
-            .flex_col()
-            .justify_center()
-            .border_2()
-            .rounded(px(12.))
-            .child(logo(22.))
-            .child(
-                div()
-                    .text_size(px(9.5))
-                    .text_color(ink)
-                    .child(c.title.clone()),
-            ),
+            // the tag goes when the bar is too short for it (it would run out of the card)
+            .when(r.w >= 300., |d| {
+                d.child(div().ml_auto().text_size(px(10.)).child(c.tag.clone()))
+            }),
+        Mode::B => {
+            let f = core_fit(mode, r.w, large);
+            d.flex_col()
+                .justify_center()
+                .border_2()
+                .rounded(px(12.))
+                .child(logo(f.logo))
+                .child(
+                    div()
+                        .text_size(px(f.title))
+                        .text_color(ink)
+                        .child(c.title.clone()),
+                )
+        }
         Mode::A => {
-            // the logo shrinks with the card (`min(76px, 100% - 44px)`)
-            let l = 76f32.min(r.h - if large { 44. } else { 30. }).max(24.);
+            let f = core_fit(mode, r.w, large);
             let mut d = d
                 .flex_col()
                 .justify_center()
                 .border_2()
                 .rounded(px(12.))
-                .child(logo(l))
-                .child(div().mt(px(4.)).child(tracked(&c.title, 14., 0.2, ink)));
-            if large {
-                d = d
-                    .child(tracked(&c.sub, 12., 0.25, ink))
-                    .child(div().mt(px(6.)).text_size(px(12.)).child(c.tag.clone()));
+                .child(logo(f.logo))
+                .child(
+                    div()
+                        .mt(px(4.))
+                        .child(tracked(&c.title, f.title, f.track, ink)),
+                );
+            if f.sub {
+                d = d.child(tracked(&c.sub, 12., 0.25, ink));
+            }
+            if f.tag {
+                d = d.child(div().mt(px(6.)).text_size(px(12.)).child(c.tag.clone()));
             }
             d
         }
@@ -517,18 +757,31 @@ fn pt(o: Point<Pixels>, x: f32, y: f32) -> Point<Pixels> {
 }
 
 /// The graph as a canvas filling its parent (the panel body).
-pub fn graph(s: &Snapshot) -> impl IntoElement {
+pub fn graph(s: &Snapshot, acts: &BTreeMap<Node, Act>, now: i64, motion: bool) -> impl IntoElement {
     let s = s.clone();
+    let (acts, acts2) = (acts.clone(), acts.clone());
+    let act = |m: &BTreeMap<Node, Act>, n: Node| m.get(&n).copied().unwrap_or(Act::IDLE);
     canvas(
         move |b: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
             let geo = geometry(f32::from(b.size.width), f32::from(b.size.height));
             let by: HashMap<Pos, &TopoNode> = s.topology.iter().map(|n| (n.pos, n)).collect();
             // `data-core`: the sub line and the tag show when a third of the body is 150px or more
             let large = (f32::from(b.size.height) - 56.) / 3. >= 150.;
-            let mut els = vec![(geo.core, core_card(&s.core, geo.core, geo.mode, large))];
+            let lvl = |n: Node| level(act(&acts, n), now, motion);
+            // the core swells with its own turns and, less, with every flow that passes through it
+            let busiest = geo
+                .nodes
+                .iter()
+                .map(|(p, _)| lvl(node_of(*p)))
+                .fold(0., f32::max);
+            let core_lvl = lvl(Node::Core).max(0.6 * busiest);
+            let mut els = vec![(
+                geo.core,
+                core_card(&s.core, geo.core, geo.mode, large, core_lvl),
+            )];
             for (p, r) in &geo.nodes {
                 if let Some(n) = by.get(p) {
-                    els.push((*r, card(n, *r, geo.mode, geo.tmin)));
+                    els.push((*r, card(n, *r, geo.mode, geo.tmin, lvl(node_of(*p)))));
                 }
             }
             for (r, e) in &mut els {
@@ -540,8 +793,12 @@ pub fn graph(s: &Snapshot) -> impl IntoElement {
         move |b, mut p: Prepared, window, cx| {
             let o = b.origin;
             let line = with_alpha(hsla(t::SILVER), 0.5);
-            for wire in &p.geo.wires {
-                let mut pb = PathBuilder::stroke(px(1.25));
+            for (i, wire) in p.geo.wires.iter().enumerate() {
+                // wire i serves node i; the T trunk (the last wire) is lit by the branches
+                let node = p.geo.nodes.get(i).map(|(pos, _)| *pos);
+                let a = node.map_or(Act::IDLE, |pos| act(&acts2, node_of(pos)));
+                let hot = node.filter(|_| a.on());
+                let mut pb = PathBuilder::stroke(px(if hot.is_some() { 1.75 } else { 1.25 }));
                 for seg in wire {
                     match *seg {
                         Seg::M(x, y) => pb.move_to(pt(o, x, y)),
@@ -550,7 +807,36 @@ pub fn graph(s: &Snapshot) -> impl IntoElement {
                     }
                 }
                 if let Ok(path) = pb.build() {
-                    window.paint_path(path, line);
+                    let lv = level(a, now, motion);
+                    window.paint_path(
+                        path,
+                        match hot {
+                            Some(pos) => with_alpha(hsla(node_colour(pos)), 0.45 + 0.5 * lv),
+                            None => line,
+                        },
+                    );
+                }
+                // a bright dashed segment runs along the wire: core -> node for a request, back for the result
+                // (the prompt goes the other way); with motion off the lit wire above is all there is
+                if let (Some(pos), true) = (hot, motion) {
+                    let mut poly = core_to_node(&p.geo, i);
+                    if toward_core(node_of(pos), a.phase) {
+                        poly.reverse();
+                    }
+                    let c = with_alpha(hsla(node_colour(pos)), 0.35 + 0.65 * a.strength);
+                    for d in dashes(&poly, now) {
+                        let mut pb = PathBuilder::stroke(px(2.5));
+                        for (k, (x, y)) in d.iter().enumerate() {
+                            if k == 0 {
+                                pb.move_to(pt(o, *x, *y));
+                            } else {
+                                pb.line_to(pt(o, *x, *y));
+                            }
+                        }
+                        if let Ok(path) = pb.build() {
+                            window.paint_path(path, c);
+                        }
+                    }
                 }
             }
             for (x, y) in &p.geo.dots {
@@ -596,6 +882,121 @@ mod tests {
             (p.0 - r.cx()).abs() < 0.01 && ((p.1 - r.y).abs() < 0.01 || (p.1 - r.b()).abs() < 0.01)
         } else {
             (p.1 - r.cy()).abs() < 0.01 && ((p.0 - r.x).abs() < 0.01 || (p.0 - r.r()).abs() < 0.01)
+        }
+    }
+
+    #[test]
+    fn level_is_steady_without_motion_and_fades_with_it() {
+        use synthesis_view::pulse::Phase;
+        let a = |strength| Act {
+            phase: Phase::Result,
+            strength,
+        };
+        assert_eq!(level(Act::IDLE, 0, true), 0.);
+        for now in [0, 200, 530, 900] {
+            assert_eq!(
+                level(a(0.2), now, false),
+                1.,
+                "motion off: static at full level"
+            );
+        }
+        assert!(level(a(0.2), 300, true) < level(a(1.), 300, true));
+        let seen: Vec<f32> = (0..1060)
+            .step_by(53)
+            .map(|n| level(a(1.), n, true))
+            .collect();
+        assert!(
+            seen.iter().any(|l| *l > 0.9) && seen.iter().any(|l| *l < 0.65),
+            "it beats"
+        );
+    }
+
+    #[test]
+    fn dashes_travel_along_the_wire_in_the_asked_direction() {
+        let poly = vec![(0., 0.), (100., 0.)];
+        let first = |now| {
+            dashes(&poly, now)
+                .iter()
+                .map(|d| d[0].0)
+                .fold(f32::MAX, f32::min)
+        };
+        assert!(first(0) < 0.1, "a dash starts at the beginning");
+        let (a, b) = (dashes(&poly, 0), dashes(&poly, 40));
+        assert_ne!(a, b, "the pattern moves");
+        assert!(
+            a.iter()
+                .flatten()
+                .all(|p| (0. ..=100.).contains(&p.0) && p.1 == 0.)
+        );
+        // the dashes advance toward the end of the path they are given
+        let mid = |d: &Vec<Vec<(f32, f32)>>| d.iter().map(|s| s[0].0).fold(0f32, f32::max);
+        assert!(mid(&b) > mid(&a) - 0.001);
+    }
+
+    #[test]
+    fn the_flow_path_runs_from_the_core_to_the_node_in_every_mode() {
+        for (aw, ah) in [(476., 340.), (476., 260.), (236., 330.)] {
+            let g = geometry(aw, ah);
+            for (i, (_, n)) in g.nodes.iter().enumerate() {
+                let p = core_to_node(&g, i);
+                let (s, e) = (p[0], *p.last().unwrap());
+                let on_core = |q: (f32, f32)| {
+                    let c = g.core;
+                    q.0 >= c.x - 0.1 && q.0 <= c.r() + 0.1 && q.1 >= c.y - 0.1 && q.1 <= c.b() + 0.1
+                };
+                assert!(on_core(s), "{:?} {aw}x{ah}: starts on the core", g.mode);
+                assert!(
+                    e.0 >= n.x - 0.1
+                        && e.0 <= n.r() + 0.1
+                        && e.1 >= n.y - 0.1
+                        && e.1 <= n.b() + 0.1,
+                    "{:?} {aw}x{ah}: ends on the node",
+                    g.mode
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_core_is_square_bigger_than_the_cards_and_its_content_fits_inside() {
+        for aw in (256..=420).step_by(4) {
+            for ah in (200..=900).step_by(20) {
+                let g = geometry(aw as f32, ah as f32);
+                if g.mode == Mode::T {
+                    continue;
+                }
+                let (aw, ah) = (aw as f32, ah as f32);
+                let u = g.rect(Pos::User);
+                assert!((g.core.w - g.core.h).abs() < 0.01, "square");
+                // below 240px of height the compact grid is height-bound: the core is then about a card's width
+                let bigger = if ah >= 240. { u.w } else { 0.8 * u.w };
+                assert!(
+                    g.core.w > bigger,
+                    "{aw}x{ah}: core {} vs card {}",
+                    g.core.w,
+                    u.w
+                );
+                for (p, r) in &g.nodes {
+                    assert!(
+                        (r.w - u.w).abs() < 0.01 && (r.h - u.h).abs() < 0.01,
+                        "{p:?} equal"
+                    );
+                    assert!(r.y >= -0.01 && r.b() <= ah + 0.01, "{p:?} inside {aw}x{ah}");
+                }
+                for large in [false, true] {
+                    // a border of 2px and 8px of padding on each side
+                    let room = g.core.w - 2. * (2. + 8.);
+                    let (w, h) = core_content(g.mode, g.core.w, large, 9);
+                    assert!(
+                        w <= room + 0.01,
+                        "{aw}x{ah} {large}: content {w} wide in {room}"
+                    );
+                    assert!(
+                        h <= room + 0.01,
+                        "{aw}x{ah} {large}: content {h} high in {room}"
+                    );
+                }
+            }
         }
     }
 
