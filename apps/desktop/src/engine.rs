@@ -652,6 +652,7 @@ impl Engine {
             }))
             .chain(std::iter::once(crate::live::send_command()))
             .chain(std::iter::once(crate::live::rewind_command()))
+            .chain(std::iter::once(crate::live::close_workspace_command()))
             .chain(
                 skills
                     .iter()

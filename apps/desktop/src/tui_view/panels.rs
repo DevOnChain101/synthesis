@@ -64,6 +64,7 @@ pub fn workspace_body(
     ws: &[Workspace],
     attn: Option<gpui::Hsla>,
     on_click: Option<&dyn Fn(usize) -> OnClick>,
+    on_close: Option<&dyn Fn(usize) -> OnClick>,
     on_new: Option<OnClick>,
 ) -> Div {
     let mut col = div().flex().flex_col();
@@ -85,6 +86,7 @@ pub fn workspace_body(
                             .flex()
                             .flex_col()
                             .min_w(px(0.))
+                            .when(w.closable && on_close.is_some(), |d| d.flex_1())
                             .child(
                                 div()
                                     .truncate()
@@ -99,7 +101,21 @@ pub fn workspace_body(
                                     .text_color(if w.selected { text() } else { dim() })
                                     .child(w.path.clone()),
                             ),
-                    ),
+                    )
+                    // the open folder has none; the others close all their sessions (after a confirmation)
+                    .when_some(on_close.filter(|_| w.closable), |d, f| {
+                        d.child(
+                            div()
+                                .id(("ws-close", i))
+                                .flex_none()
+                                .cursor_pointer()
+                                .rounded(px(4.))
+                                .p(px(2.))
+                                .hover(|h| h.bg(hsla(t::BORDER)))
+                                .on_click(f(i))
+                                .child(icon("close", 12., dim())),
+                        )
+                    }),
             ),
         );
     }

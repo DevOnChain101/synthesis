@@ -10,6 +10,8 @@ pub struct Workspace {
     pub path: String,
     pub sessions: u32,
     pub selected: bool,
+    /// Another folder than the open one: the row has a close button (the design has none).
+    pub closable: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -237,6 +239,7 @@ pub fn sample() -> Snapshot {
         path: s(p),
         sessions: c,
         selected: sel,
+        closable: false,
     };
     let run = |t: &str, f: &str, b: &str, a: &str, sel: bool| Running {
         id: String::new(),

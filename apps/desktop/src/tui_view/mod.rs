@@ -344,6 +344,13 @@ impl TuiView {
         let ws_click = |i: usize| -> panels::OnClick {
             Box::new(cx.listener(move |this, _, _, cx| this.click_workspace(i, cx)))
         };
+        let ws_close = |i: usize| -> panels::OnClick {
+            Box::new(cx.listener(move |this, _, _, cx| {
+                // the button sits inside the row: the row's own click must not follow
+                cx.stop_propagation();
+                this.click_close_workspace(i, cx)
+            }))
+        };
         let run_click = |i: usize| -> panels::OnClick {
             Box::new(cx.listener(move |this, _, window, cx| this.click_running(i, window, cx)))
         };
@@ -370,6 +377,7 @@ impl TuiView {
                     &s.workspaces,
                     attn,
                     live.map(|_| &ws_click as &dyn Fn(usize) -> panels::OnClick),
+                    live.map(|_| &ws_close as &dyn Fn(usize) -> panels::OnClick),
                     new_ws,
                 ),
                 live.map(|l| &l.ws_scroll),

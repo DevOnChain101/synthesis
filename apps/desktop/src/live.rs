@@ -93,6 +93,8 @@ pub enum PickerKind {
     Rewind,
     /// `/send` with no arguments: which live peer the next line goes to.
     Send,
+    /// `/close-workspace` and the Workspace panel's close button: Cancel is the first option and the default.
+    CloseWorkspace,
 }
 
 /// What the window does after a command or a picker (it restarts the engine, talks to it).
@@ -110,6 +112,9 @@ pub enum Action {
     Resume(String),
     /// A fresh session in the selected workspace.
     New,
+    /// The confirmation of `/close-workspace` was answered yes: close every session of this
+    /// workspace key (see `close_ws`).
+    CloseWorkspace(String),
     /// Hide this session, open a fresh one in its folder.
     Close,
     Clear,
@@ -193,7 +198,10 @@ impl Dialog {
     pub fn needs_person(&self) -> bool {
         match &self.kind {
             DialogKind::Picker { kind, .. } => {
-                matches!(kind, PickerKind::Bypass | PickerKind::MemConfirm)
+                matches!(
+                    kind,
+                    PickerKind::Bypass | PickerKind::MemConfirm | PickerKind::CloseWorkspace
+                )
             }
             _ => true,
         }
@@ -335,8 +343,20 @@ pub fn is_wired(name: &str) -> bool {
     WIRED.contains(&name)
         || matches!(
             name,
-            "open" | "send" | "panels" | "doctor" | "rewind" | "context"
+            "open" | "send" | "panels" | "doctor" | "rewind" | "context" | "close-workspace"
         )
+}
+
+/// `/close-workspace` is the desktop's own command (the classic TUI has none).
+pub fn close_workspace_command() -> Command {
+    Command {
+        name: "close-workspace".into(),
+        aliases: vec![],
+        description: "close every session of this workspace (asks first; nothing is deleted)"
+            .into(),
+        argument_hint: String::new(),
+        local: true,
+    }
 }
 
 /// `/rewind` is the desktop's own command too: the engine's list has none.
@@ -996,6 +1016,9 @@ impl Live {
                 }
                 PickerKind::Model => Some(Action::Model(key.to_string())),
                 PickerKind::Resume => Some(Action::Resume(key.to_string())),
+                PickerKind::CloseWorkspace => key
+                    .strip_prefix("close:")
+                    .map(|k| Action::CloseWorkspace(k.to_string())),
                 PickerKind::Remember
                 | PickerKind::Bypass
                 | PickerKind::Rewind
@@ -1513,6 +1536,7 @@ impl Live {
             "panels" => return Submitted::Do(Action::Panels(arg.into())),
             "new" => return Submitted::Do(Action::New),
             "close" => return Submitted::Do(Action::Close),
+            "close-workspace" => self.ask_close_workspace(None, now_ms()),
             "resume" if arg.is_empty() => self.open_resume_picker(now_ms()),
             "resume" => return Submitted::Do(Action::Resume(arg.into())),
             "model" if self.busy => return busy_err(self, "model"),
@@ -2541,6 +2565,7 @@ mod tests {
         l.commands.push(panels_command());
         l.commands.push(send_command());
         l.commands.push(rewind_command());
+        l.commands.push(close_workspace_command());
         l.commands.push(Command {
             name: "tdd".into(),
             description: "skill: tdd".into(),

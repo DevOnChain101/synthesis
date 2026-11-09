@@ -127,7 +127,7 @@ pub fn dock(
         }
         // a memory confirmation: the whole text it is about, in a scroll box like the approval's input
         DialogKind::Picker {
-            kind: PickerKind::MemConfirm,
+            kind: PickerKind::MemConfirm | PickerKind::CloseWorkspace,
             headers,
             ..
         } => {
@@ -239,7 +239,7 @@ pub fn dock(
     }
     let headers: &[(usize, String)] = match &d.kind {
         DialogKind::Picker {
-            kind: PickerKind::MemConfirm,
+            kind: PickerKind::MemConfirm | PickerKind::CloseWorkspace,
             ..
         } => &[],
         DialogKind::Picker { headers, .. } => headers,
