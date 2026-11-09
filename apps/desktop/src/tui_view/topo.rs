@@ -805,7 +805,7 @@ pub fn core_content(mode: Mode, l: &CoreLayout, (tn, sn, gn): CoreChars) -> (f32
         if l.tag {
             w += 8. + text_w(10., 0., gn);
         }
-        return (w, l.logo.max(l.title.map_or(0., |f| line(f))));
+        return (w, l.logo.max(l.title.map_or(0., line)));
     }
     let (mut w, mut h) = (l.logo, l.logo);
     if let Some(f) = l.title {

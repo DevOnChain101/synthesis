@@ -36,6 +36,8 @@ pub struct Args {
     focus: bool,
     /// `--expand`: every tool card open (Ctrl+O).
     expand: bool,
+    /// `--dialog-scroll PX`: the docked dialog is scrolled down by this much (its options below the fold).
+    dialog_scroll: Option<f32>,
     /// `--rows`: print the chat's notice rows (shown or hidden by the quiet-chat rules) to stderr.
     rows: bool,
     /// `--check`: reopen the written PNG and fail unless it is the asked size (times a whole scale) and not blank.
@@ -84,6 +86,11 @@ pub struct LiveShot {
     /// `--trust`: the folder counts as trusted (project memory on).
     memory_seed: bool,
     trust: bool,
+    /// `--untrusted`: the folder is not trusted and the user's home is a known (fake) folder, so the Files tab
+    /// raises the real Trust dialog, parent option included; `--trust-seed`: two remembered folders in the store
+    /// (what `/trust` lists).
+    untrusted: bool,
+    trust_seed: bool,
 }
 
 /// Dev only: notes for the `/memory` shots, written through the normal write path.
@@ -181,6 +188,8 @@ pub fn parse(args: &[String]) -> Option<Args> {
         outside_read: args.iter().any(|a| a == "--outside-read"),
         memory_seed: args.iter().any(|a| a == "--memory-seed"),
         trust: args.iter().any(|a| a == "--trust"),
+        untrusted: args.iter().any(|a| a == "--untrusted"),
+        trust_seed: args.iter().any(|a| a == "--trust-seed"),
     });
     let tab = match val("--tab").map(String::as_str) {
         Some("diff") => super::ChatTab::Diff,
@@ -206,6 +215,7 @@ pub fn parse(args: &[String]) -> Option<Args> {
         verbose: args.iter().any(|a| a == "--verbose"),
         focus: args.iter().any(|a| a == "--focus"),
         expand: args.iter().any(|a| a == "--expand"),
+        dialog_scroll: val("--dialog-scroll").and_then(|n| n.parse().ok()),
         rows: args.iter().any(|a| a == "--rows"),
         check: args.iter().any(|a| a == "--check"),
         active: val("--active")
@@ -248,7 +258,11 @@ type Err = Box<dyn std::error::Error + Send + Sync>;
 /// task ended. A dialog is answered when `--answer` says so.
 fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> {
     let tmp = std::env::temp_dir().join(format!("synthesis-shot-{}", std::process::id()));
-    let (ws, home) = (tmp.join("ws"), tmp.join("home"));
+    // untrusted: one level down, so its parent folder (`code`) is offered by the Trust dialog (the home is not inside it)
+    let (ws, home) = (
+        tmp.join(if l.untrusted { "code/ws" } else { "ws" }),
+        tmp.join("home"),
+    );
     std::fs::create_dir_all(&ws)?;
     std::fs::create_dir_all(&home)?;
     let (ws, home) = (std::fs::canonicalize(&ws)?, std::fs::canonicalize(&home)?);
@@ -356,7 +370,8 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
         granted: crate::engine::root_of(&ws),
         project: ws.clone(),
         synthesis_home: home.clone(),
-        home: None,
+        // a home that exists nowhere: the trust refusals need a known one
+        home: l.untrusted.then(|| "/Users/shot-user".to_string()),
         tz_min: 0,
         tui: Default::default(),
         args,
@@ -370,6 +385,19 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
     }
     if l.memory_seed {
         seed_memory(&home, &ws)?;
+    }
+    if l.trust_seed {
+        use synthesis_session::trust;
+        let other = tmp.join("proj-b");
+        std::fs::create_dir_all(&other)?;
+        let policy = trust::Policy {
+            home: Some(home.join("uh")),
+            synt_home: home.clone(),
+        };
+        for d in [&ws, &std::fs::canonicalize(&other)?] {
+            let fp = trust::fingerprint_root(d).map_err(|e| e.to_string())?;
+            trust::add(&home, d, "folder", &fp, &policy).map_err(|e| e.to_string())?;
+        }
     }
     live.trusted = l.trust;
     if let Some(f) = &l.peers {
@@ -461,7 +489,13 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let fixture = a.live.as_ref().map(run_live).transpose()?;
     let (live, engine, tmp) = match fixture {
         Some((mut l, c, e, t)) => {
-            prepare_tabs(&mut l, &e, &t, a.tab)?;
+            prepare_tabs(
+                &mut l,
+                &e,
+                &t,
+                a.tab,
+                a.live.as_ref().is_some_and(|l| l.untrusted),
+            )?;
             l.verbose = a.verbose;
             l.focus_view = a.focus;
             l.expand_all = a.expand;
@@ -512,8 +546,15 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
             None => TuiView::new(0., hidden),
         });
-        tui.update(cx, |t, _| {
+        let untrusted = a.live.as_ref().is_some_and(|l| l.untrusted);
+        tui.update(cx, |t, cx| {
             t.ts.tab = tab;
+            if untrusted {
+                t.select_tab(tab, cx);
+            }
+            if let (Some(n), Some(lu)) = (a.dialog_scroll, &t.live) {
+                lu.dlg_scroll.set_offset(gpui::point(px(0.), px(-n)));
+            }
             t.drawer = a.drawer;
             if !a.active.is_empty() {
                 t.topo_force = Some((a.active.clone(), a.phase));
@@ -639,8 +680,9 @@ fn prepare_tabs(
     engine: &Engine,
     tmp: &std::path::Path,
     tab: super::ChatTab,
+    untrusted: bool,
 ) -> Result<(), Err> {
-    let ws = tmp.join("ws");
+    let ws = tmp.join(if untrusted { "code/ws" } else { "ws" });
     match tab {
         super::ChatTab::Files => {
             std::fs::create_dir_all(ws.join("src"))?;
@@ -672,7 +714,7 @@ fn prepare_tabs(
                 ws.join("src/main.rs"),
                 "fn main() {\n    println!(\"hello, world\");\n    let n = 3;\n}\n",
             )?;
-            live.trusted = true;
+            live.trusted = !untrusted;
         }
         super::ChatTab::Browser => {
             let dir = engine
