@@ -1099,6 +1099,9 @@ mod tests {
             duration_ms: 1,
             file: None,
             diff: None,
+            input: Box::new(serde_json::Value::Null),
+            status: None,
+            exit_code: None,
         };
         let mut l = Live::new();
         l.starting = false;
