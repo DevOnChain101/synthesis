@@ -74,6 +74,8 @@ pub struct LiveShot {
     queue: Vec<String>,
     /// `--rewind list|confirm`: the `/rewind` checkpoint picker, or its dry-run confirmation, is open.
     rewind: Option<String>,
+    /// `--clean list|closed|all|all-typed`: the `/clean` scope picker, or a confirmation (over seeded sessions).
+    clean: Option<String>,
     /// `--setup`: the first-run card (no model configured) is open.
     setup: bool,
     /// `--outside-read`: an `outside_read` approval dialog is open.
@@ -82,6 +84,41 @@ pub struct LiveShot {
     /// `--trust`: the folder counts as trusted (project memory on).
     memory_seed: bool,
     trust: bool,
+}
+
+fn ws_of(e: &Engine) -> PathBuf {
+    PathBuf::from(&e.root)
+}
+
+/// Dev only: a few stored sessions (two closed, one open-ended) so `/clean` has something to count.
+fn seed_clean(home: &std::path::Path, ws: &std::path::Path) -> Result<(), Err> {
+    use synthesis_session::{NewMessage, NewSession, Retention, Store, StoreOptions};
+    let store = Store::open(home, StoreOptions::default())?;
+    let w = synthesis_core::WorkspaceContext::open("w1", ws, ws, &[], ws.join(".art"), "pg")?;
+    for (i, close) in [(1, true), (2, true), (3, false)] {
+        let mut s = store.create_session(NewSession {
+            id: Some(format!("seed-{i}")),
+            workspace: &w,
+            model_config_id: "fake/fake".into(),
+            permission_mode: synthesis_core::PermissionMode::Default,
+            permission_policy_id: "default".into(),
+            budget: synthesis_events::Budget::default(),
+            parent: None,
+            title: None,
+        })?;
+        s.append_message(NewMessage::user(serde_json::json!("hi")))?;
+        s.put_artifact(
+            "snapshot",
+            "text/plain",
+            &[b'x'; 40_000],
+            Retention::Session,
+        )?;
+        drop(s);
+        if close {
+            store.close_session(&format!("seed-{i}"))?;
+        }
+    }
+    Ok(())
 }
 
 /// Dev only: notes for the `/memory` shots, written through the normal write path.
@@ -175,6 +212,7 @@ pub fn parse(args: &[String]) -> Option<Args> {
         busy: args.iter().any(|a| a == "--busy"),
         queue: val("--queue").map_or_else(Vec::new, |q| q.split('|').map(String::from).collect()),
         rewind: val("--rewind").cloned(),
+        clean: val("--clean").cloned(),
         setup: args.iter().any(|a| a == "--setup"),
         outside_read: args.iter().any(|a| a == "--outside-read"),
         memory_seed: args.iter().any(|a| a == "--memory-seed"),
@@ -400,6 +438,27 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
         if step == "confirm" {
             live.dialogs.clear();
             live.rewind_previewed(crate::rewind::preview(&home, &sid, None));
+        }
+    }
+    if let Some(step) = &l.clean {
+        seed_clean(&engine.synthesis_home, &ws_of(&engine))?;
+        let keep = vec![engine.sid.clone()];
+        live.cleaning = true;
+        live.clean_listed(crate::clean::plans(&engine.synthesis_home, &keep));
+        let scope = match step.as_str() {
+            "closed" => Some("ClosedEmpty"),
+            "all" | "all-typed" => Some("All"),
+            _ => None,
+        };
+        if let Some(k) = scope {
+            live.answer(k, now_ms());
+            if step == "all-typed" {
+                live.dialogs[0].engaged = true;
+                live.dialogs[0].armed_until = 0;
+                for c in "delete".chars() {
+                    live.clean_key(Some(&c.to_string()), false, now_ms());
+                }
+            }
         }
     }
     if l.setup {

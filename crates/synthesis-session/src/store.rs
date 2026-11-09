@@ -83,14 +83,39 @@ fn check_id(s: &str) -> Result<()> {
     }
 }
 
-fn utf8(p: &Path) -> Result<String> {
+pub(crate) fn utf8(p: &Path) -> Result<String> {
     p.to_str()
         .map(str::to_string)
         .ok_or_else(|| Error::Invalid(format!("non-UTF-8 path {}", p.display())))
 }
 
+/// Every row of session `id`, children tables first (foreign keys are on, so a missed table fails
+/// the delete instead of leaving orphans). Returns the event rows removed.
+pub(crate) fn delete_session_rows(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<usize> {
+    let mut events = 0;
+    for q in [
+        "DELETE FROM verification_reports WHERE task_id IN (SELECT id FROM tasks WHERE session_id=?1)",
+        "DELETE FROM tasks WHERE session_id=?1",
+        "DELETE FROM events WHERE session_id=?1",
+        "DELETE FROM messages WHERE session_id=?1",
+        "DELETE FROM tool_calls WHERE session_id=?1",
+        "DELETE FROM processes WHERE session_id=?1",
+        "DELETE FROM browser_contexts WHERE session_id=?1",
+        "DELETE FROM artifacts WHERE session_id=?1",
+        "DELETE FROM approvals WHERE session_id=?1",
+        "DELETE FROM checkpoints WHERE session_id=?1",
+        "DELETE FROM sessions WHERE id=?1",
+    ] {
+        let n = tx.execute(q, [id])?;
+        if q.contains("FROM events") {
+            events = n;
+        }
+    }
+    Ok(events)
+}
+
 /// Directory (and missing parents) created 0700 on unix; a symlink in its place is refused.
-fn private_dir(p: &Path) -> Result<()> {
+pub(crate) fn private_dir(p: &Path) -> Result<()> {
     let mut b = fs::DirBuilder::new();
     b.recursive(true);
     #[cfg(unix)]
@@ -103,7 +128,7 @@ fn private_dir(p: &Path) -> Result<()> {
 }
 
 /// 0600 on unix (the umask can only narrow it).
-fn private_file(o: &mut OpenOptions) -> &mut OpenOptions {
+pub(crate) fn private_file(o: &mut OpenOptions) -> &mut OpenOptions {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(o, 0o600);
     o
@@ -694,21 +719,7 @@ impl Store {
             if used {
                 continue;
             }
-            let gone = [
-                "DELETE FROM verification_reports WHERE task_id IN (SELECT id FROM tasks WHERE session_id=?1)",
-                "DELETE FROM tasks WHERE session_id=?1",
-                "DELETE FROM events WHERE session_id=?1",
-                "DELETE FROM messages WHERE session_id=?1",
-                "DELETE FROM tool_calls WHERE session_id=?1",
-                "DELETE FROM processes WHERE session_id=?1",
-                "DELETE FROM browser_contexts WHERE session_id=?1",
-                "DELETE FROM artifacts WHERE session_id=?1",
-                "DELETE FROM approvals WHERE session_id=?1",
-                "DELETE FROM checkpoints WHERE session_id=?1",
-                "DELETE FROM sessions WHERE id=?1",
-            ]
-            .iter()
-            .try_for_each(|q| tx.execute(q, [id]).map(drop));
+            let gone = delete_session_rows(&tx, id);
             if gone.is_err() || tx.commit().is_err() {
                 continue;
             }

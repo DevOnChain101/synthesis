@@ -244,6 +244,26 @@ tools and skills, conversation. Not done, with where the data would come from:
   Limits: the hashes and the proof live in the session store next to the rows, so a program that can write the store can
   forge them (whether the store is outside the agent's write scope is a sandbox decision, R7); a write by a process outside
   Synthesis between the last check and the rename (a directory swapped for a link) is the CLI's documented race.
+- `/clean` (desktop only): permanently deletes stored sessions. (1) A dock picker of three scopes with live counts computed off the UI
+  thread (sessions, workspaces that lose their last session, event rows, bytes on disk with screenshots / checkpoint snapshots / logs):
+  "Closed sessions, and empty ones older than 1 hour" (`closed_at` set, whatever its history, and a closed-then-resumed session still qualifies because `closed_at` is never cleared; or no message and no task and older than 1 hour), sessions not updated for 30 days, and ALL
+  sessions. Cancel is the first row and the selection; Esc cancels; Enter and digits are ignored until the person engages the dock and for
+  400 ms after it appears. (2) A confirmation that lists what is DELETED PERMANENTLY (session rows and their events, messages, tasks, tool
+  calls, approvals, processes, checkpoints and rewind snapshots, screenshots, logs, and `$SYNT_HOME/sessions/<id>/`) and what is NOT touched
+  (settings, auth and env, memory store, trust records and `trust.key`, model cache, logs outside sessions, the Node transcript copies
+  under `projects/`, project files, the current and running sessions). Rows: Cancel, a "Back up synt.db first" toggle (default on),
+  Delete. Scope "all" also needs `delete` or `clean` typed into the field: letters are taken only when the dock is engaged and armed, so
+  type-ahead cannot spell it; the scope row shows messages and events that go; the confirmation says copies remain in `projects/*.jsonl` and in the backup (which holds ALL sessions, tool output included, and is never auto-deleted); the Delete row is disabled until it matches. (3) `Store::clean` (crates/synthesis-session/src/clean.rs):
+  protected are the open session, every session whose `lock` is held (this process or another) and the whole parent/child tree of those;
+  a session with a child that stays is kept; every session's lock is probed (a running parent or child outside the scope protects its tree), the absence of a directory or lock is re-probed inside the transaction, `backups/` is checked for ownership and set to 0700, and `updated_at` is always the store's own fixed-width UTC text (an import goes through `create_session`; NULL never matches); a `sessions/<id>` that is a link or has a non-regular lock is skipped, never followed. Only
+  ids shown in the confirmation are deleted, each in its own transaction taken under its lock and re-checked (scope, no children), the
+  directory removed only after the rows are gone (`remove_dir_all` unlinks links inside, never follows them). The backup is
+  `VACUUM INTO $SYNT_HOME/backups/clean-<time>/synt.db` (0600, dir 0700, `quick_check`ed; a failed backup deletes nothing); artifact
+  directories are not copied and the backup holds the deleted conversations. The result row gives deleted / skipped running / kept / failed
+  counts, bytes freed and the backup path; the Workspace / Running / Recent lists are read again. While a `/clean` is open or running no
+  prompt starts and no engine switch happens (`Live::engine_switch_blocker`). The 10-minute timeout frees the flag only for the counting step; a deletion keeps prompts and engine switches blocked until it reports (a note says it is still working); it is refused while a task, dialog, queued prompt or
+  `/rewind` is pending. Not done: directories under `sessions/` with no row (left by a crash) are not swept; `synt.db` is not VACUUMed (the
+  file does not shrink; freed pages are zeroed and the WAL truncated); the classic TUI and `synt` have no `/clean`.
 - Settings: done. Write API in `crates/synthesis-settings-ui`, the popup in `apps/desktop/src/settings_view` (section 6).
 - Multi-session tabs: TODO. `ViewState` is one session; tabs are a `Vec<ViewState>` keyed by session id
   in the desktop, fed by one event channel per `engine` run. Needs the engine to host several sessions.

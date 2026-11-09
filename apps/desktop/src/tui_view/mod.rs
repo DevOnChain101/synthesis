@@ -7,6 +7,7 @@
 
 pub mod activity;
 pub mod chat;
+mod clean;
 #[cfg(test)]
 mod design_tests;
 pub mod dialog;

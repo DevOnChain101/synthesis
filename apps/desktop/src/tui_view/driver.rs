@@ -760,6 +760,11 @@ impl TuiView {
             // the model picker filters as you type (model ids hold digits, so they are text there)
             if !ctrl && !cmd && (key == "backspace" || ks.key_char.is_some()) {
                 let typed = ks.key_char.as_deref().filter(|_| key != "backspace");
+                if lu.live.clean_key(typed, key == "backspace", now) {
+                    lu.dirty = true;
+                    cx.notify();
+                    return true;
+                }
                 if lu.live.model_filter_key(typed, key == "backspace") {
                     lu.dirty = true;
                     cx.notify();
@@ -1614,6 +1619,7 @@ impl TuiView {
             a @ (Action::Rewind | Action::RewindPreview(_) | Action::RewindApply(_)) => {
                 return self.run_rewind(a, cx);
             }
+            a @ (Action::Clean | Action::CleanApply { .. }) => return self.run_clean(a, cx),
             Action::Doctor => {
                 let Some(e) = lu.live.engine.clone() else {
                     return;
