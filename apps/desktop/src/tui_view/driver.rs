@@ -368,6 +368,7 @@ impl TuiView {
                 }
             }
             Ok(l) => {
+                let _t = crate::trace::span(&lu.cfg.env, "engine_ready: attach (UI thread)");
                 // a restart that fell back to untrusted keeps no trust to carry
                 if !l.engine.trusted {
                     lu.session_trust = None;
@@ -2016,6 +2017,7 @@ pub fn build(
     let prior_sid = prior.as_ref().map(|p| p.sid.clone());
     let prior_root = prior.as_ref().map(|p| p.root.clone());
     if let Some(p) = prior {
+        let _t = crate::trace::span(&cfg.env, "build: close prior engine");
         // a worktree session's end report (path, branch, changes, cleanup) is a notice of the next chat
         notes.extend(engine::close_shared(p));
     }
@@ -2106,6 +2108,7 @@ pub fn build(
         },
         None => None,
     };
+    let t_load = crate::trace::span(&cfg.env, "build: load resume");
     match want {
         Some(Ok(id)) => match engine::load_resume_in_place(&home, &id) {
             Ok(r) => resume = Some(r),
@@ -2123,6 +2126,7 @@ pub fn build(
         Some(Err(e)) => return Err(e),
         None => {}
     }
+    drop(t_load);
     let attempt = |project: PathBuf,
                    resume: Option<synthesis_tui::Resume>,
                    model: Option<String>,
@@ -2135,6 +2139,7 @@ pub fn build(
         // the replay of the stored conversation, before the new engine adds its own events
         let mut replay = synthesis_view::state::ViewState::default();
         if let Some(r) = &resume {
+            let _t = crate::trace::span(&cfg.env, "build: replay");
             for e in &r.events {
                 replay.apply(e);
             }
@@ -2157,6 +2162,7 @@ pub fn build(
         let mut notes = notes;
         notes.extend(launch_notes);
         let had_resume = resume.is_some();
+        let _t = crate::trace::span(&cfg.env, "build: Engine::start_with");
         Engine::start_with(
             StartOpts {
                 project,
@@ -2250,6 +2256,7 @@ pub fn read_store(
     cfg: &LiveCfg,
     root: Option<&str>,
 ) -> Result<(WorkspaceList, Vec<synthesis_view::usage::HistoryDay>), String> {
+    let _t = crate::trace::span(&cfg.env, "read_store (workspace list, usage)");
     let r = synthesis_session::Reader::open(&cfg.synthesis_home).map_err(|e| e.to_string())?;
     let home = cfg.synthesis_home.clone();
     let live = move |id: &str| !synthesis_app::peers::session_lock_free(&home, id);
