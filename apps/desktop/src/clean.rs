@@ -177,7 +177,7 @@ impl Live {
         self.clean_job = None;
         if self.clean_deleting {
             self.note(
-                "clean: still working, it may be deleting. Prompts stay blocked until it reports",
+                "clean: still working, it may be deleting. Prompts stay blocked until it reports; if it never does, restart the app",
                 true,
             );
         } else {
@@ -436,7 +436,9 @@ pub fn plans(
         .collect()
 }
 
-/// The deletion, off the UI thread.
+/// The deletion, off the UI thread. A panic in the worker becomes an `Err`, so `clean_done` always runs and
+/// the flags never stick. A worker that never returns at all keeps the app blocked: that is the safe way to
+/// fail for a deletion (restart the app to recover).
 pub fn apply(
     home: &std::path::Path,
     scope: CleanScope,
@@ -444,10 +446,18 @@ pub fn apply(
     ids: &[String],
     backup: bool,
 ) -> Result<CleanResult, String> {
-    let store = Store::open(home, StoreOptions::default()).map_err(|e| e.to_string())?;
-    store
-        .clean(scope, keep, OffsetDateTime::now_utc(), ids, backup)
-        .map_err(|e| e.to_string())
+    guarded(|| {
+        let store = Store::open(home, StoreOptions::default()).map_err(|e| e.to_string())?;
+        store
+            .clean(scope, keep, OffsetDateTime::now_utc(), ids, backup)
+            .map_err(|e| e.to_string())
+    })
+}
+
+fn guarded(f: impl FnOnce() -> Result<CleanResult, String>) -> Result<CleanResult, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| {
+        Err("clean worker panicked (some sessions may already be deleted: run /clean again)".into())
+    })
 }
 
 #[cfg(test)]
@@ -711,5 +721,16 @@ mod tests {
         }
         c.backup = false;
         assert!(c.lines().join("\n").contains("No backup"));
+    }
+
+    #[test]
+    fn a_panicking_worker_still_reports_so_the_flags_are_freed() {
+        let r = guarded(|| panic!("boom"));
+        assert!(r.unwrap_err().contains("panicked"));
+        let mut l = Live::new();
+        l.cleaning = true;
+        l.clean_deleting = true;
+        l.clean_done(guarded(|| panic!("boom")));
+        assert!(!l.cleaning && !l.clean_deleting);
     }
 }

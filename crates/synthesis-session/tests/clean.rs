@@ -419,3 +419,23 @@ fn the_scope_counts_messages_and_a_closed_session_with_history_is_deleted() {
         .unwrap();
     assert_eq!((p.counts.sessions, p.counts.messages), (1, 1));
 }
+
+#[test]
+fn a_parent_whose_lock_cannot_be_probed_keeps_its_in_scope_child() {
+    let e = env();
+    drop(e.make("parent", "w", true, None));
+    drop(e.make("child", "w", true, Some("parent")));
+    e.store().close_session("child").unwrap();
+    // the lock path is a directory: not probeable
+    fs::remove_file(e.sdir("parent").join("lock")).unwrap();
+    fs::create_dir(e.sdir("parent").join("lock")).unwrap();
+    let r = run(
+        &e,
+        CleanScope::ClosedEmpty,
+        &[],
+        OffsetDateTime::now_utc(),
+        false,
+    );
+    assert_eq!(r.deleted, 0, "{r:?}");
+    assert_eq!(e.ids(), ["child", "parent"]);
+}

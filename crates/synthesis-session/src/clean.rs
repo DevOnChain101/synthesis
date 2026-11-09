@@ -213,7 +213,10 @@ impl Store {
                 Probe::Unusual(_) if cand.contains(id) => {
                     unusual.insert(id.as_str());
                 }
-                Probe::Unusual(_) => {}
+                // cannot be probed: fail closed, the tree is protected like a held lock
+                Probe::Unusual(_) => {
+                    prot.insert(id);
+                }
             }
         }
         // a running session protects its whole tree (parents and sub-agent children)
@@ -437,9 +440,9 @@ impl Store {
         private_dir(&base)?;
         #[cfg(unix)]
         {
-            // an existing `backups/` must be ours (same owner as the home) and private
+            // an existing `backups/` must be owned by the effective user and private
             use std::os::unix::fs::{MetadataExt, PermissionsExt};
-            if fs::metadata(&base)?.uid() != fs::metadata(self.home())?.uid() {
+            if fs::metadata(&base)?.uid() != rustix::process::geteuid().as_raw() {
                 return Err(Error::Invalid(format!(
                     "{} is not owned by you",
                     base.display()
