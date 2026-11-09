@@ -478,8 +478,9 @@ pub enum Event {
         attempt: i64,
         summary: String,
     },
-    /// A completion-gate check is about to run (after the person's or policy's approval of it).
-    /// `index` counts from 0 within the evaluation; `command` is None for a check nothing can run.
+    /// The gate reached a check; it fires BEFORE the check is authorised, so a refused check shows
+    /// `started` and then `finished` with status `blocked`. `index` counts from 0 within the
+    /// evaluation; `command` is None for a check nothing can run.
     #[serde(rename = "verification.check.started")]
     VerificationCheckStarted {
         check_id: String,

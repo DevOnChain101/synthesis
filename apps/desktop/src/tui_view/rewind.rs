@@ -13,7 +13,11 @@ impl TuiView {
         let Some(e) = lu.live.engine.clone() else {
             return;
         };
-        let (home, sid) = (e.synthesis_home.clone(), e.sid.clone());
+        let home = rewind::Homes {
+            synthesis: e.synthesis_home.clone(),
+            user: synthesis_app::homes(&lu.cfg.env).ok().map(|h| h.user),
+        };
+        let sid = e.sid.clone();
         match a {
             Action::Rewind => {
                 let job = cx.background_spawn(async move { rewind::list(&home, &sid) });

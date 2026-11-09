@@ -850,7 +850,11 @@ impl TuiView {
                     )
             }))
             .when(done.is_some() && !summary.is_empty(), |d| {
-                d.child(div().text_color(dim()).child(summary.to_string()))
+                d.child(
+                    div()
+                        .text_color(dim())
+                        .child(synthesis_harness::sanitize_for_display(summary)),
+                )
             })
             .into_any_element()
     }

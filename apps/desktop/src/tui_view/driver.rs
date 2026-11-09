@@ -297,6 +297,10 @@ impl TuiView {
         cx: &mut Context<Self>,
     ) {
         let Some(lu) = &mut self.live else { return };
+        if let Some(why) = lu.live.engine_switch_blocker() {
+            lu.live.note(why, true);
+            return;
+        }
         if lu.fixture {
             return;
         }
@@ -1112,6 +1116,12 @@ impl TuiView {
     /// repeat within [`SWITCH_ARM_MS`] that cancels a running task is for the same one.
     fn switch(&mut self, target: Target, key: String, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
+        if let Some(why) = lu.live.engine_switch_blocker() {
+            lu.live.note(why, true);
+            lu.dirty = true;
+            cx.notify();
+            return;
+        }
         let now = now_ms();
         if lu.live.busy {
             let armed = lu
@@ -1147,7 +1157,6 @@ impl TuiView {
         let prior = lu.live.engine.take();
         lu.live.queue.clear();
         lu.live.dialogs.clear();
-        lu.live.rewinding = false;
         lu.live.busy = false;
         self.launch_with(project, prior, Some(target), vec![], cx);
     }
@@ -1376,7 +1385,9 @@ impl TuiView {
         let Some(lu) = &self.live else {
             return Some("there is no live session in this window");
         };
-        if lu.live.busy || !lu.live.dialogs.is_empty() || !lu.live.queue.is_empty() {
+        if let Some(why) = lu.live.engine_switch_blocker() {
+            Some(why)
+        } else if lu.live.busy || !lu.live.dialogs.is_empty() || !lu.live.queue.is_empty() {
             Some(
                 "a task is running, or approvals or queued prompts are pending: finish or cancel first",
             )

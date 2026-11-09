@@ -709,6 +709,31 @@ async fn gate_checks_report_progress_failed_then_passed() {
     assert_eq!(seen[5], "report passed");
 }
 
+/// The tail is redacted before it is cut: a secret that the byte cut would split is still masked.
+#[tokio::test]
+async fn check_output_tail_is_redacted_before_it_is_cut() {
+    let opts = Opts {
+        allow: vec!["Write".into(), "Bash".into()],
+        ..gate_opts(true)
+    };
+    let mut rig = gated(opts, write_turns(), None);
+    rig.run_with(
+        with_check(
+            "printf 'sk-ant-api03-abcdefghijklmnop'; head -c 1480 /dev/zero | tr '\\0' y; echo",
+        ),
+        CancellationToken::new(),
+    )
+    .await;
+    let tails = rig.find(|e| match e {
+        Event::VerificationCheckFinished { output_tail, .. } => Some(output_tail.clone()),
+        _ => None,
+    });
+    assert!(!tails.is_empty());
+    for t in &tails {
+        assert!(t.contains("[REDACTED") && !t.contains("abcdefghij"), "{t}");
+    }
+}
+
 /// Honesty: a green check after the agent faked an env var in a test file is `unverified`, and
 /// the one-line summary says which test files were modified.
 #[tokio::test]

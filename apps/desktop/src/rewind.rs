@@ -7,10 +7,11 @@
 //! Like `synt rewind` it puts back files only: the conversation history stays as it is.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use synthesis_app::rewind::{self, Entry, Step};
 use synthesis_harness::sanitize_for_display;
+use synthesis_view::agent::CmdState;
 
 use crate::live::{Action, Dialog, DialogKind, Live, PickerKind, now_ms};
 
@@ -82,8 +83,11 @@ impl Preview {
     pub fn groups(&self) -> Vec<Group> {
         let mut g = [
             ("Will be overwritten with the checkpoint", vec![]),
-            ("Will be deleted (the run created them)", vec![]),
-            ("Left alone", vec![]),
+            (
+                "Will be deleted (the checkpoint recorded them as absent before the run)",
+                vec![],
+            ),
+            ("Will NOT be touched", vec![]),
         ];
         for e in &self.entries {
             let (i, row) = match &e.step {
@@ -106,8 +110,9 @@ impl Preview {
     pub fn warning(&self) -> String {
         let (r, d, _) = self.counts();
         format!(
-            "Apply writes {r} file{} back to its checkpoint contents and deletes {d} file{} the run created. \
+            "Apply writes {r} file{} back to its checkpoint contents and deletes {d} file{}: the checkpoint recorded that they did not exist before the run's first write (that record is the only proof the run created them). \
              It cannot be undone: what is in those files now is not saved anywhere, so the checkpoint is the only copy you can go back to. \
+             The snapshots are checked against the hashes stored with the checkpoint, but both live in the session store: a program that can write that store can forge them. \
              The conversation is not rewound.",
             if r == 1 { "" } else { "s" },
             if d == 1 { "" } else { "s" },
@@ -137,8 +142,16 @@ pub struct Outcome {
 
 impl Outcome {
     pub fn text(&self) -> String {
+        let done = self.restored + self.removed;
         let mut t = format!(
-            "rewind: restored {}, removed {}, left alone {}, failed {}",
+            "rewind{}: restored {}, removed {}, left alone {}, failed {}",
+            if self.failed.is_empty() {
+                ""
+            } else if done > 0 {
+                " PARTIAL (the other files are already written; run /rewind again for the rest)"
+            } else {
+                " FAILED (nothing was written)"
+            },
             self.restored,
             self.removed,
             self.skipped,
@@ -151,9 +164,24 @@ impl Outcome {
     }
 }
 
-pub fn list(home: &Path, sid: &str) -> Result<Vec<CheckpointRow>, String> {
-    let (_, _, cps) = rewind::load(home, sid)?;
-    Ok(cps
+/// Where the session store and the person's home are: the desktop never allows a session whose
+/// workspace root is the home directory or a filesystem root.
+#[derive(Clone, Debug)]
+pub struct Homes {
+    pub synthesis: PathBuf,
+    pub user: Option<PathBuf>,
+}
+
+fn load(h: &Homes, sid: &str) -> Result<rewind::Loaded, String> {
+    rewind::load(&h.synthesis, h.user.as_deref(), sid, false)
+}
+
+/// The picker's key for "every checkpoint": a NUL cannot be part of a checkpoint name.
+pub const ALL: &str = "\u{0}all";
+
+pub fn list(h: &Homes, sid: &str) -> Result<Vec<CheckpointRow>, String> {
+    Ok(load(h, sid)?
+        .cps
         .into_iter()
         .map(|c| CheckpointRow {
             when: c.created_at.get(..16).map_or_else(
@@ -172,9 +200,8 @@ pub fn list(home: &Path, sid: &str) -> Result<Vec<CheckpointRow>, String> {
 }
 
 /// The dry run. Never forces: a file changed since the run stays "left alone".
-pub fn preview(home: &Path, sid: &str, checkpoint: Option<String>) -> Result<Preview, String> {
-    let (r, roots, cps) = rewind::load(home, sid)?;
-    let entries = rewind::plan(&r, sid, &cps, &roots, checkpoint.as_deref(), false)?;
+pub fn preview(h: &Homes, sid: &str, checkpoint: Option<String>) -> Result<Preview, String> {
+    let entries = rewind::plan(&load(h, sid)?, checkpoint.as_deref(), false)?;
     Ok(Preview {
         checkpoint,
         entries,
@@ -182,9 +209,8 @@ pub fn preview(home: &Path, sid: &str, checkpoint: Option<String>) -> Result<Pre
 }
 
 /// Writes what the person confirmed, if it is still exactly that.
-pub fn apply(home: &Path, sid: &str, p: &Preview) -> Result<Outcome, String> {
-    let (r, roots, cps) = rewind::load(home, sid)?;
-    let done = rewind::apply_confirmed(&r, sid, &cps, &roots, p.checkpoint.as_deref(), &p.entries)?;
+pub fn apply(h: &Homes, sid: &str, p: &Preview) -> Result<Outcome, String> {
+    let done = rewind::apply_confirmed(&load(h, sid)?, p.checkpoint.as_deref(), &p.entries)?;
     let mut o = Outcome::default();
     for (e, res) in done {
         match (&e.step, res) {
@@ -212,11 +238,29 @@ impl Live {
             Some(
                 "approvals, questions or queued prompts are pending, or a rewind is open: answer them first",
             )
+        } else if !self.agents.is_empty()
+            || self
+                .view
+                .panes
+                .commands
+                .iter()
+                .any(|c| c.state == CmdState::Running)
+        {
+            Some(
+                "a background command or sub-agent is still running: files must not change under it",
+            )
         } else if self.engine.is_none() {
             Some("the session is still starting")
         } else {
             None
         }
+    }
+
+    /// Why the engine must not be switched or restarted now (`/resume`, `/model`, `/new`, `/close`,
+    /// `/open`, a restart): a rewind is open, and its answer belongs to this session.
+    pub fn engine_switch_blocker(&self) -> Option<&'static str> {
+        self.rewinding
+            .then_some("a /rewind is open or writing: finish or cancel it first")
     }
 
     /// `/rewind`.
@@ -246,7 +290,7 @@ impl Live {
             Err(e) => return self.rewind_over(format!("/rewind: {e}"), true),
         };
         let mut options = vec![(
-            "all".to_string(),
+            ALL.to_string(),
             format!("Every checkpoint of this session ({})", rows.len()),
         )];
         options.extend(rows.iter().map(|c| (c.name.clone(), c.label())));
@@ -317,9 +361,7 @@ impl Live {
                 ..
             } => {
                 self.rewinding = true;
-                Some(Action::RewindPreview(
-                    (key != "all").then(|| key.to_string()),
-                ))
+                Some(Action::RewindPreview((key != ALL).then(|| key.to_string())))
             }
             DialogKind::Rewind(r) if key == "apply" => {
                 // answers and prompts queued behind the dialog are pending work too
@@ -486,6 +528,33 @@ mod tests {
     }
 
     #[test]
+    fn a_rewind_blocks_engine_switches_background_work_blocks_a_rewind_and_all_has_a_sentinel() {
+        let mut l = Live::new();
+        assert!(l.engine_switch_blocker().is_none());
+        l.rewinding = true;
+        assert!(l.engine_switch_blocker().unwrap().contains("/rewind"));
+        let mut l = Live::new();
+        l.agents.push("sub-1".into());
+        assert!(l.rewind_blocker().unwrap().contains("sub-agent"));
+        assert!(ALL.contains('\u{0}'));
+    }
+
+    #[test]
+    fn a_partial_apply_says_so_and_names_what_failed() {
+        let o = Outcome {
+            restored: 1,
+            failed: vec!["/ws/x: boom".into()],
+            ..Outcome::default()
+        };
+        assert!(o.text().starts_with("rewind PARTIAL"));
+        let o = Outcome {
+            failed: vec!["/ws/x: boom".into()],
+            ..Outcome::default()
+        };
+        assert!(o.text().starts_with("rewind FAILED"));
+    }
+
+    #[test]
     fn the_result_row_counts_and_names_each_failure() {
         let mut l = Live::new();
         l.rewinding = true;
@@ -501,7 +570,8 @@ mod tests {
             panic!()
         };
         assert!(*warning);
-        assert!(text.starts_with("rewind: restored 2, removed 1, left alone 1, failed 1"));
+        assert!(text.starts_with("rewind PARTIAL"), "{text}");
+        assert!(text.contains("restored 2, removed 1, left alone 1, failed 1"));
         assert!(text.contains("failed /ws/x: permission denied"));
         assert!(!l.rewinding);
     }

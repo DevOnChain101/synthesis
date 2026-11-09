@@ -230,7 +230,16 @@ tools and skills, conversation. Not done, with where the data would come from:
   prompt is pending, or another `/rewind` is open; checked again at apply. Apply plans again right before writing and writes
   nothing if the plan is not the one shown. The result row gives counts and each failed file; the Files tab is scanned again and
   the Diff tab drops the files that are back. Like `synt rewind` it puts back files only: the conversation history stays.
-  Not covered: a write by a process outside Synthesis between the last check and the rename (the CLI's documented race).
+  Every path in a checkpoint is untrusted: a snapshot is written back only if it hashes to the sha256 stored with the
+  checkpoint, a file is deleted only if the checkpoint recorded it as absent before the run (older checkpoints without
+  either are listed under "Will NOT be touched"), no directory on the path may be a symlink or junction, a session whose
+  workspace root is `/`, a drive root or the home directory is refused (the desktop has no `--allow-wide-root`), and each
+  file is checked again right before its own write. One apply per session at a time (lock file). While a rewind is open
+  or writing, nothing switches the engine (`/resume`, `/model`, `/new`, `/close`, `/open`, restarts), and `/rewind` is
+  refused while a background command or sub-agent runs. A partial apply says PARTIAL and lists the failed files.
+  Limits: the hashes and the proof live in the session store next to the rows, so a program that can write the store can
+  forge them (whether the store is outside the agent's write scope is a sandbox decision, R7); a write by a process outside
+  Synthesis between the last check and the rename (a directory swapped for a link) is the CLI's documented race.
 - Settings: done. Write API in `crates/synthesis-settings-ui`, the popup in `apps/desktop/src/settings_view` (section 6).
 - Multi-session tabs: TODO. `ViewState` is one session; tabs are a `Vec<ViewState>` keyed by session id
   in the desktop, fed by one event channel per `engine` run. Needs the engine to host several sessions.

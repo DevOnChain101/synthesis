@@ -99,7 +99,7 @@ impl CheckAuthorizer for GateAuth<'_> {
             Event::VerificationCheckStarted {
                 check_id: c.id.clone(),
                 name: c.id.clone(),
-                command: c.command.clone(),
+                command: c.command.as_deref().map(cap_command),
                 index: n(index),
                 total: n(total),
             },
@@ -114,18 +114,24 @@ impl CheckAuthorizer for GateAuth<'_> {
             Event::VerificationCheckFinished {
                 check_id: r.id.clone(),
                 name: r.id.clone(),
-                command: r.command.clone(),
+                command: r.command.as_deref().map(cap_command),
                 status: r.status.as_str().into(),
                 duration_ms: r.duration_ms,
                 exit_code: r.exit_code.map(i64::from),
-                output_tail: check_tail(&r.summary),
+                // redact the whole text first: cutting first could split a secret so it no longer matches
+                output_tail: check_tail(&self.harness.sink.redact(&r.summary)),
             },
         );
     }
 }
 
+const CHECK_COMMAND_CHARS: usize = 500;
 const CHECK_TAIL_LINES: usize = 12;
 const CHECK_TAIL_BYTES: usize = 1500;
+
+fn cap_command(c: &str) -> String {
+    c.chars().take(CHECK_COMMAND_CHARS).collect()
+}
 
 /// The end of a check's summary (its first line is the `exit N` head the state already says).
 fn check_tail(summary: &str) -> String {

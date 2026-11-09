@@ -161,7 +161,7 @@ Other commands:
 | Command | Does |
 |---|---|
 | `synt auth status` | Credential status per provider (variable names and where a key comes from, never values). |
-| `synt rewind SESSION` | Put the files a run changed back to their state before its first write to each. A dry run unless `--apply`; a file changed since the run is refused unless `--force`; `--checkpoint NAME` limits it to one checkpoint. Options: `--apply`, `--force`, `--checkpoint`. A checkpoint is taken before the first write attempt, so a dry run can list a file whose write was refused. |
+| `synt rewind SESSION` | Put the files a run changed back to their state before its first write to each. A dry run unless `--apply`; a file changed since the run is refused unless `--force`; `--checkpoint NAME` limits it to one checkpoint. A snapshot is restored only if it still matches the hash stored with the checkpoint, and a file is removed only if the checkpoint recorded it as absent; checkpoints of older builds lack both and need `--force`. A session whose workspace root is a filesystem root or the home directory is refused unless `--allow-wide-root`. Options: `--apply`, `--force`, `--checkpoint`, `--allow-wide-root`. A checkpoint is taken before the first write attempt, so a dry run can list a file whose write was refused. |
 | `synt models [--json] [--refresh]` | List configured models (see below). |
 | `synt doctor` | Diagnose the installation. |
 | `synt browser done PROFILE` | Finish a `browser_login` wait from another terminal. |

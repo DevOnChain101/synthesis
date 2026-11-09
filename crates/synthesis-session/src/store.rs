@@ -489,6 +489,14 @@ pub struct FileSnapshot {
     /// completed). `synt rewind` refuses a file whose state differs, unless forced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_sha256: Option<String>,
+    /// sha256 of the snapshot artifact's bytes, taken when it was stored. A rewind refuses an
+    /// artifact that no longer hashes to this. `None`: a checkpoint of an older build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_sha256: Option<String>,
+    /// [`file_state_hash`] of the file when the checkpoint was taken (`absent`: the run is about to
+    /// create it). A rewind deletes a file only with this proof. `None`: an older build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_state: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2122,6 +2130,8 @@ impl SessionWriter {
                 return Err(Error::OutsideWorkspace(real));
             }
             let mut lossy_sha = None;
+            let mut artifact_sha = None;
+            let pre_state = file_state_hash(&real);
             let artifact_id = match fs::metadata(&real) {
                 Ok(m) if m.is_file() => {
                     if m.len() > MAX_SNAPSHOT_BYTES {
@@ -2134,15 +2144,14 @@ impl SessionWriter {
                     let bytes = fs::read(&real)?;
                     let (stored, lossy) = self.snapshot_bytes(&real, bytes);
                     lossy_sha = lossy;
-                    Some(
-                        self.put_artifact(
-                            "snapshot",
-                            "application/octet-stream",
-                            &stored,
-                            Retention::Keep,
-                        )?
-                        .artifact_id,
-                    )
+                    let art = self.put_artifact(
+                        "snapshot",
+                        "application/octet-stream",
+                        &stored,
+                        Retention::Keep,
+                    )?;
+                    artifact_sha = Some(art.sha256);
+                    Some(art.artifact_id)
                 }
                 Ok(_) => return Err(Error::Invalid(format!("{} is not a file", real.display()))),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -2153,6 +2162,8 @@ impl SessionWriter {
                 artifact_id,
                 lossy_sha256: lossy_sha,
                 post_sha256: None,
+                artifact_sha256: artifact_sha,
+                pre_state: Some(pre_state),
             });
         }
         let id = uuid::Uuid::new_v4().to_string();
