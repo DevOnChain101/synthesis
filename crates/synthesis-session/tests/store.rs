@@ -1446,6 +1446,35 @@ fn close_workspace_closes_the_free_sessions_of_one_folder_only() {
 }
 
 #[test]
+fn close_workspace_fails_closed_when_the_lock_cannot_be_probed() {
+    let e = env();
+    let a = e.dir("a");
+    let store = e.store();
+    let mut w = create(&e, "a-odd", &a);
+    w.append_message(NewMessage::user(json!("hi"))).unwrap();
+    drop(w);
+    // a lock path that cannot be opened as a file (not "missing"): never read as "free"
+    let lock = e.home.join("sessions").join("a-odd").join("lock");
+    fs::remove_file(&lock).unwrap();
+    fs::create_dir(&lock).unwrap();
+    let r = store.close_workspace(|_| true).unwrap();
+    assert!(r.closed.is_empty() && r.held.is_empty(), "{r:?}");
+    assert_eq!(r.failed.len(), 1, "{r:?}");
+    assert_eq!(
+        store
+            .reader()
+            .unwrap()
+            .list_used_sessions(None)
+            .unwrap()
+            .len(),
+        1
+    );
+    // a missing lock file means nobody holds it
+    fs::remove_dir(&lock).unwrap();
+    assert_eq!(store.close_workspace(|_| true).unwrap().closed, ["a-odd"]);
+}
+
+#[test]
 fn set_title_replaces_the_title_and_the_list_shows_it() {
     let e = env();
     let mut w = create(&e, "s-title", &e.dir("w"));

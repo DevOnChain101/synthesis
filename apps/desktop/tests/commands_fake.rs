@@ -270,7 +270,8 @@ fn close_workspace_closes_ours_spares_what_another_process_holds_and_other_folde
         next.engine.sid, cur_sid,
         "a fresh session in the same folder"
     );
-    assert_eq!(next.engine.cwd, r.ws.to_string_lossy());
+    // the engine's folder is the canonical one (`\\?\` on Windows)
+    assert_eq!(next.engine.cwd, engine::root_of(&r.ws).to_string_lossy());
     let note = next
         .engine
         .notices
