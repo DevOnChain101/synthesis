@@ -11,6 +11,7 @@ use gpui_component::text::TextView;
 use synthesis_tui_render::theme as t;
 
 use crate::live::{DialogKind, Live, PickerKind, input_lines};
+use crate::rewind::GROUP_LINES;
 use crate::theme::hsla;
 use crate::tui_view::panels::{OnClick, dim, strong, text};
 
@@ -28,6 +29,7 @@ pub fn dock(
     live: &Live,
     scroll: &ScrollHandle,
     click: &dyn Fn(usize) -> OnClick,
+    toggle: &dyn Fn(usize) -> OnClick,
     border: gpui::Hsla,
     max_input_h: f32,
     engage: OnMouseDown,
@@ -124,6 +126,60 @@ pub fn dock(
                 .child(div().text_color(strong()).child(q.question.clone()));
         }
         DialogKind::Picker { .. } => {}
+        DialogKind::Rewind(r) => {
+            card = card.child(div().text_color(hsla(t::WARN)).child(r.preview.warning()));
+            let groups = r.preview.groups();
+            card = card.child(
+                div()
+                    .id("dialog-rewind")
+                    .max_h(px(max_input_h))
+                    .overflow_y_scroll()
+                    .p(px(8.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(hsla(t::BORDER))
+                    .bg(hsla(t::BG))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .children(groups.into_iter().enumerate().map(|(g, grp)| {
+                        let open = r.expanded.contains(&g);
+                        let total = grp.rows.len();
+                        let cut = !open && total > GROUP_LINES;
+                        let col = if grp.title.starts_with("Will be deleted") {
+                            hsla(t::ERROR)
+                        } else if grp.title.starts_with("Left alone") {
+                            dim()
+                        } else {
+                            hsla(t::WARN)
+                        };
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(div().text_color(col).child(grp.title))
+                            .children(
+                                grp.rows
+                                    .into_iter()
+                                    .take(if cut { GROUP_LINES } else { usize::MAX })
+                                    .map(|l| div().text_color(text()).child(l)),
+                            )
+                            .when(total > GROUP_LINES, |d| {
+                                d.child(
+                                    div()
+                                        .id(("rewind-more", g))
+                                        .cursor_pointer()
+                                        .text_color(hsla(t::ACCENT))
+                                        .child(if cut {
+                                            format!("Show {} more", total - GROUP_LINES)
+                                        } else {
+                                            "Show less".to_string()
+                                        })
+                                        .on_click(toggle(g)),
+                                )
+                            })
+                    })),
+            );
+        }
     }
     let typing = match &d.kind {
         DialogKind::Question { typing, .. } => typing.clone(),

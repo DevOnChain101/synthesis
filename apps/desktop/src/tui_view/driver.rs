@@ -1147,12 +1147,13 @@ impl TuiView {
         let prior = lu.live.engine.take();
         lu.live.queue.clear();
         lu.live.dialogs.clear();
+        lu.live.rewinding = false;
         lu.live.busy = false;
         self.launch_with(project, prior, Some(target), vec![], cx);
     }
 
     /// Runs `f` on the live state, then redraws and scrolls to the new row.
-    fn live_do(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Live)) {
+    pub(super) fn live_do(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Live)) {
         if let Some(lu) = &mut self.live {
             f(&mut lu.live);
             lu.stick();
@@ -1343,6 +1344,9 @@ impl TuiView {
                         .ok();
                 })
                 .detach();
+            }
+            a @ (Action::Rewind | Action::RewindPreview(_) | Action::RewindApply(_)) => {
+                return self.run_rewind(a, cx);
             }
             Action::Peers => {
                 let Some(e) = lu.live.engine.clone() else {

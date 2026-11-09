@@ -640,6 +640,7 @@ impl Engine {
                 local: true,
             }))
             .chain(std::iter::once(crate::live::send_command()))
+            .chain(std::iter::once(crate::live::rewind_command()))
             .chain(
                 skills
                     .iter()

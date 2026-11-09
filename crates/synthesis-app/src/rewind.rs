@@ -96,9 +96,11 @@ pub struct Entry {
 }
 
 /// The session's checkpoints and the workspace roots a rewind may write in.
-pub fn load(env: &Env, session: &str) -> Result<(Reader, Vec<PathBuf>, Vec<Checkpoint>), String> {
-    let h = homes(env)?;
-    let r = Reader::open(&h.synthesis).map_err(|e| e.to_string())?;
+pub fn load(
+    synthesis_home: &Path,
+    session: &str,
+) -> Result<(Reader, Vec<PathBuf>, Vec<Checkpoint>), String> {
+    let r = Reader::open(synthesis_home).map_err(|e| e.to_string())?;
     let rec = r
         .get_session(session)
         .map_err(|_| format!("no saved session {session:?}"))?;
@@ -197,6 +199,9 @@ pub fn apply_entry(r: &Reader, session: &str, e: &Entry) -> Result<(), String> {
     }
 }
 
+/// An entry and how carrying it out went.
+pub type Applied = (Entry, Result<(), String>);
+
 /// Applies a plan the person confirmed. The plan is made again first: if it is not the one they saw
 /// (a file changed, a checkpoint was added) nothing is written. A failure on one file does not stop
 /// the others; each result is returned with its entry.
@@ -207,7 +212,7 @@ pub fn apply_confirmed(
     roots: &[PathBuf],
     checkpoint: Option<&str>,
     seen: &[Entry],
-) -> Result<Vec<(Entry, Result<(), String>)>, String> {
+) -> Result<Vec<Applied>, String> {
     let now = plan(r, session, cps, roots, checkpoint, false)?;
     let key = |v: &[Entry]| {
         v.iter()
@@ -227,7 +232,7 @@ pub fn apply_confirmed(
 }
 
 pub fn run_cmd(env: &Env, a: RewindArgs) -> Result<u8, String> {
-    let (r, roots, cps) = load(env, &a.session)?;
+    let (r, roots, cps) = load(&homes(env)?.synthesis, &a.session)?;
     let entries = plan(
         &r,
         &a.session,

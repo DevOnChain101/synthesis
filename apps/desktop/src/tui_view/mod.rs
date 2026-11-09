@@ -13,6 +13,7 @@ pub mod dialog;
 pub mod driver;
 pub mod layout;
 pub mod panels;
+mod rewind;
 pub mod sample;
 #[cfg(feature = "shot")]
 pub mod shot;

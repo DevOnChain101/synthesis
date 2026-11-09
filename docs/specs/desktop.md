@@ -210,6 +210,19 @@ tools and skills, conversation. Not done, with where the data would come from:
 - Commands tab: `process.spawned|output|exited` (Bash, terminal_spawn) give the real exit code and background
   rows; `[exit code N]` parsing stays as the fallback for old sessions. A background process nobody polls
   again never gets `process.exited`. Verification: `verification.check.started|finished` give per-check progress (a card in the chat with one row per check, 5-line clamp for the output tail of a check that did not pass; a line in Recent Activity); sessions recorded before them show the one-line `verification.completed` as before.
+- `/rewind`: done (`apps/desktop/src/rewind.rs`, `tui_view/rewind.rs`). It is `synt rewind` with a dock in place of flags, and
+  it uses the same code (`synthesis_app::rewind::{load, plan, apply_confirmed}`), so the containment is the CLI's: only files
+  inside the session's workspace roots (parent resolved, `..` and relative paths refused), never a symlink or non-regular file,
+  never a secret-masked snapshot, never a file changed since the run (the desktop has no `--force`). Steps: (1) a picker of the
+  session's checkpoints (name, time, message count, file), a dry run is always next; (2) the exact files as CLI rows
+  (`restore`/`remove`/`skip`, path, size), grouped, 5 rows per group with Show more; (3) a confirmation docked above the prompt
+  that says how many files are overwritten and deleted and that it cannot be undone beyond the checkpoint. Cancel is the
+  selected default and Esc; Enter and digits are ignored until the person engages the dock (arrows, Tab, a click) and for 400 ms
+  after it appears, so type-ahead cannot approve it. Refused with a reason while a task runs, compaction runs, a dialog or queued
+  prompt is pending, or another `/rewind` is open; checked again at apply. Apply plans again right before writing and writes
+  nothing if the plan is not the one shown. The result row gives counts and each failed file; the Files tab is scanned again and
+  the Diff tab drops the files that are back. Like `synt rewind` it puts back files only: the conversation history stays.
+  Not covered: a write by a process outside Synthesis between the last check and the rename (the CLI's documented race).
 - Settings: done. Write API in `crates/synthesis-settings-ui`, the popup in `apps/desktop/src/settings_view` (section 6).
 - Multi-session tabs: TODO. `ViewState` is one session; tabs are a `Vec<ViewState>` keyed by session id
   in the desktop, fed by one event channel per `engine` run. Needs the engine to host several sessions.

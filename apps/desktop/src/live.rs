@@ -70,6 +70,8 @@ pub enum DialogKind {
         title: String,
         headers: Vec<(usize, String)>,
     },
+    /// `/rewind`, step two: the exact files, and the confirmation. Cancel is the selected default.
+    Rewind(Box<crate::rewind::RewindDialog>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +84,8 @@ pub enum PickerKind {
     Setup,
     /// Shift+Tab reached bypassPermissions: the confirmation (Cancel is the first option and the default).
     Bypass,
+    /// `/rewind`: the checkpoints to choose from (a dry run follows; nothing is written by this).
+    Rewind,
 }
 
 /// What the window does after a command or a picker (it restarts the engine, talks to it).
@@ -120,6 +124,12 @@ pub enum Action {
         to: String,
         text: String,
     },
+    /// `/rewind`: read the session's checkpoints off the UI thread ([`Live::rewind_listed`]).
+    Rewind,
+    /// A checkpoint was picked (None: all): make the dry run ([`Live::rewind_previewed`]).
+    RewindPreview(Option<String>),
+    /// The person confirmed this dry run: write it ([`Live::rewind_done`]).
+    RewindApply(crate::rewind::Preview),
 }
 
 /// An image waiting for the next message (the TUI's chip).
@@ -154,7 +164,7 @@ impl Dialog {
         match &self.kind {
             DialogKind::Approval(a) => &a.id,
             DialogKind::Plan { id, .. } | DialogKind::Question { id, .. } => id,
-            DialogKind::Picker { .. } => "",
+            DialogKind::Picker { .. } | DialogKind::Rewind(_) => "",
         }
     }
 
@@ -202,6 +212,7 @@ impl Dialog {
             DialogKind::Plan { .. } => "Ready to code? Here is the plan".into(),
             DialogKind::Question { .. } => "Synthesis has a question".into(),
             DialogKind::Picker { title, .. } => title.clone(),
+            DialogKind::Rewind(_) => "Rewind files: confirm".into(),
         }
     }
 }
@@ -301,7 +312,19 @@ pub fn panels_command() -> Command {
 
 pub fn is_wired(name: &str) -> bool {
     // `open`, `send` and `panels` exist only in the desktop app
-    WIRED.contains(&name) || matches!(name, "open" | "send" | "panels")
+    WIRED.contains(&name) || matches!(name, "open" | "send" | "panels" | "rewind")
+}
+
+/// `/rewind` is the desktop's own command too: the engine's list has none.
+pub fn rewind_command() -> Command {
+    Command {
+        name: "rewind".into(),
+        aliases: vec![],
+        description: "put files a run changed back to a checkpoint (dry run first, then confirm)"
+            .into(),
+        argument_hint: String::new(),
+        local: true,
+    }
 }
 
 /// `/send` is the desktop's own command (the classic TUI has none), so it is not in [`WIRED`].
@@ -351,6 +374,8 @@ pub struct Live {
     pub starting: bool,
     /// A task is running (from `send` to the engine's `TaskDone`).
     pub busy: bool,
+    /// A `/rewind` is open or writing: no prompt starts (files must not change under a task).
+    pub rewinding: bool,
     /// `/compact` between tasks is running (until `UiMsg::Compacted`).
     pub compacting: bool,
     pub dialogs: Vec<Dialog>,
@@ -428,6 +453,7 @@ impl Live {
             engine: None,
             starting: true,
             busy: false,
+            rewinding: false,
             compacting: false,
             dialogs: vec![],
             queue: VecDeque::new(),
@@ -498,6 +524,7 @@ impl Live {
         self.mcp = engine.mcp_status();
         self.queue.clear();
         self.dialogs.clear();
+        self.rewinding = false;
         // the prompt that waited for a model choice goes out on the model that was picked; if the
         // switch failed (the stored model is still unavailable) it goes back to the input box
         if let Some(t) = self.held_prompt.take() {
@@ -626,7 +653,7 @@ impl Live {
         }
     }
 
-    fn push_dialog(&mut self, d: Dialog, now: i64) {
+    pub(crate) fn push_dialog(&mut self, d: Dialog, now: i64) {
         self.dialogs.push(d);
         if self.dialogs.len() == 1 {
             self.arm(now);
@@ -727,6 +754,17 @@ impl Live {
             ..
         }) = self.dialogs.first()
         {
+            if let Some(d) = self.dialogs.first()
+                && matches!(
+                    d.kind,
+                    DialogKind::Picker {
+                        kind: PickerKind::Rewind,
+                        ..
+                    }
+                )
+            {
+                self.rewind_dismissed();
+            }
             self.dialogs.remove(0);
             self.pending_note = None;
             // Esc: nothing is sent; the prompt returns to the input box
@@ -818,6 +856,16 @@ impl Live {
         let d = self.dialogs.remove(0);
         // the next dialog waits out its arming delay whichever branch below answers this one
         self.arm(now);
+        if matches!(
+            d.kind,
+            DialogKind::Rewind(_)
+                | DialogKind::Picker {
+                    kind: PickerKind::Rewind,
+                    ..
+                }
+        ) {
+            return self.rewind_answer(d, key);
+        }
         if let DialogKind::Picker { kind, .. } = d.kind {
             if kind == PickerKind::Bypass {
                 if let (Some(e), "enable") = (&self.engine, key)
@@ -851,7 +899,7 @@ impl Live {
                 }
                 PickerKind::Model => Some(Action::Model(key.to_string())),
                 PickerKind::Resume => Some(Action::Resume(key.to_string())),
-                PickerKind::Remember | PickerKind::Bypass => None,
+                PickerKind::Remember | PickerKind::Bypass | PickerKind::Rewind => None,
                 PickerKind::Setup => Some(match key {
                     "recheck" => Action::Recheck,
                     "settings" => Action::OpenSettings,
@@ -861,7 +909,7 @@ impl Live {
         }
         if let Some(e) = &self.engine {
             match d.kind {
-                DialogKind::Picker { .. } => {}
+                DialogKind::Picker { .. } | DialogKind::Rewind(_) => {}
                 DialogKind::Approval(a) => {
                     let choice = match key {
                         "yes" => Choice::Once,
@@ -1072,7 +1120,7 @@ impl Live {
                 Err(why) => self.note(format!("{why}: queued instead"), false),
             }
         }
-        if self.busy || self.engine.is_none() || !self.dialogs.is_empty() {
+        if self.busy || self.rewinding || self.engine.is_none() || !self.dialogs.is_empty() {
             // the TUI queues a line typed while a task runs; it starts when that one ends
             self.queue.push_back(text.to_string());
             return Submitted::Nothing;
@@ -1310,7 +1358,7 @@ impl Live {
 
     /// The next queued line once the task ended and nothing waits for an answer.
     pub fn next_queued(&mut self) -> Option<String> {
-        if self.busy || self.engine.is_none() || !self.dialogs.is_empty() {
+        if self.busy || self.rewinding || self.engine.is_none() || !self.dialogs.is_empty() {
             return None;
         }
         let t = self.queue.pop_front()?;
@@ -1419,6 +1467,11 @@ impl Live {
                     true,
                 ),
             },
+            "rewind" => {
+                if let Some(a) = self.rewind_command(arg) {
+                    return Submitted::Do(a);
+                }
+            }
             "name" => self.name(arg),
             "rename" => self.rename(arg),
             "focus" => {
@@ -2221,6 +2274,7 @@ mod tests {
         l.commands = synthesis_tui::local_commands();
         l.commands.push(panels_command());
         l.commands.push(send_command());
+        l.commands.push(rewind_command());
         l.commands.push(Command {
             name: "tdd".into(),
             description: "skill: tdd".into(),
