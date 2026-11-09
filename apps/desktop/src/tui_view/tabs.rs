@@ -305,7 +305,7 @@ impl TuiView {
             Ok(true) => {
                 self.ts.killed.insert(id.to_string());
                 lu.live
-                    .note(format!("stopped background process {id}"), false);
+                    .note(format!("process {id} stopped by you"), false);
             }
             Ok(false) => lu
                 .live
