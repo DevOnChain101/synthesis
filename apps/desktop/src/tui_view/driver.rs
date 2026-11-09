@@ -1280,6 +1280,46 @@ impl TuiView {
                 })
                 .detach();
             }
+            Action::SetContext(arg) => {
+                let Some(e) = lu.live.engine.clone() else {
+                    return;
+                };
+                let (p, m) = e.label.split_once('/').unwrap_or(("", &e.label));
+                let r = if arg.trim().eq_ignore_ascii_case("unset") {
+                    Ok(None)
+                } else {
+                    synthesis_app::models::parse_tokens(&arg).map(Some)
+                }
+                .and_then(|t| {
+                    synthesis_app::models::set_context_limit(&e.synthesis_home, p, m, t).map(|()| t)
+                });
+                match r {
+                    Err(why) => lu.live.note(format!("/context: {why}"), true),
+                    Ok(t) => {
+                        let done = match t {
+                            Some(n) => format!(
+                                "context window of {} set to {} tokens in your synt.json",
+                                e.label,
+                                crate::tui_view::snapshot::tok(n)
+                            ),
+                            None => {
+                                format!("context window of {} removed from your synt.json", e.label)
+                            }
+                        };
+                        if let Some(why) = restart_blocker_of(&lu.live) {
+                            // the value is written; a restart now would drop what is pending
+                            lu.live.note(
+                                format!("{done}. Not restarted ({why}); it applies from the next session, or run /model and pick the same model once idle"),
+                                false,
+                            );
+                        } else {
+                            // the window is read when the session starts: restart on the same session
+                            lu.live.after_attach.push(format!("{done}; the session restarted so compaction and limits use it from now on"));
+                            return self.switch(Target::Model(e.label.clone()), "model".into(), cx);
+                        }
+                    }
+                }
+            }
             Action::Open(typed) => {
                 let l = &lu.live;
                 let home = synthesis_app::homes(&lu.cfg.env).ok().map(|h| h.user);
@@ -1405,17 +1445,7 @@ impl TuiView {
         let Some(lu) = &self.live else {
             return Some("there is no live session in this window");
         };
-        if let Some(why) = lu.live.engine_switch_blocker() {
-            Some(why)
-        } else if lu.live.busy || !lu.live.dialogs.is_empty() || !lu.live.queue.is_empty() {
-            Some(
-                "a task is running, or approvals or queued prompts are pending: finish or cancel first",
-            )
-        } else if lu.live.engine.is_none() {
-            Some("the session is still starting")
-        } else {
-            None
-        }
+        restart_blocker_of(&lu.live)
     }
 
     /// The dash panels switched off now.
@@ -1846,6 +1876,21 @@ pub fn build(
     }
 }
 
+/// Why the engine must not be restarted now (a restart drops the queue and every open dialog).
+fn restart_blocker_of(live: &Live) -> Option<&'static str> {
+    if let Some(why) = live.engine_switch_blocker() {
+        Some(why)
+    } else if live.busy || !live.dialogs.is_empty() || !live.queue.is_empty() {
+        Some(
+            "a task is running, or approvals or queued prompts are pending: finish or cancel first",
+        )
+    } else if live.engine.is_none() {
+        Some("the session is still starting")
+    } else {
+        None
+    }
+}
+
 /// The workspace list (with the trust-gated git scan), the sessions a process holds, and the usage
 /// history. Blocking (reads the store, runs git): off the UI thread.
 pub fn read_store(
@@ -2006,6 +2051,17 @@ pub(super) fn save_panels(home: &Path, cwd: &Path, changes: &[(&str, bool)]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_restart_waits_for_running_tasks_queued_prompts_and_open_dialogs() {
+        let mut l = Live::new();
+        assert!(restart_blocker_of(&l).unwrap().contains("still starting"));
+        l.busy = true;
+        assert!(restart_blocker_of(&l).unwrap().contains("task is running"));
+        l.busy = false;
+        l.queue.push_back("later".into());
+        assert!(restart_blocker_of(&l).unwrap().contains("queued prompts"));
+    }
 
     #[test]
     fn cmd_or_ctrl_enter_never_answers_a_dialog() {
