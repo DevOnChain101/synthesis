@@ -7,6 +7,19 @@ use synthesis_config::Env;
 use synthesis_desktop::engine::Engine;
 use synthesis_desktop::live::{ARM_MS, Action, DialogKind, Live, PickerKind, TrustGrant};
 
+/// A home folder that exists nowhere, spelled as an absolute path on every platform.
+fn nohome() -> std::path::PathBuf {
+    std::env::temp_dir().join("synt-no-such-home-for-tests")
+}
+
+/// The text of the newest chat notice (not its `Debug` form, which escapes backslashes in Windows paths).
+fn last_text(l: &Live) -> String {
+    match l.view.convo.items.last() {
+        Some(synthesis_view::convo::Item::Notice { text, .. }) => text.clone(),
+        o => panic!("the newest row is not a notice: {o:?}"),
+    }
+}
+
 fn rig() -> (Live, tempfile::TempDir) {
     rig_in("")
 }
@@ -46,9 +59,9 @@ fn rig_in(sub: &str) -> (Live, tempfile::TempDir) {
 fn the_dialog_is_raised_once_with_the_safe_option_first_and_needs_a_deliberate_answer() {
     let (mut l, _d) = rig();
     assert!(!l.trusted, "no --trust-project: untrusted");
-    assert!(l.ask_trust(1000, Some(std::path::Path::new("/nonexistent/home"))));
+    assert!(l.ask_trust(1000, Some(nohome().as_path())));
     assert!(
-        !l.ask_trust(1000, Some(std::path::Path::new("/nonexistent/home"))),
+        !l.ask_trust(1000, Some(nohome().as_path())),
         "a second click does not stack another"
     );
     assert_eq!(l.dialogs.len(), 1);
@@ -90,30 +103,30 @@ fn the_dialog_is_raised_once_with_the_safe_option_first_and_needs_a_deliberate_a
 #[test]
 fn not_now_and_esc_trust_nothing_even_inside_the_arming_delay() {
     let (mut l, _d) = rig();
-    l.ask_trust(1000, Some(std::path::Path::new("/nonexistent/home")));
+    l.ask_trust(1000, Some(nohome().as_path()));
     // Esc is never held back by the arming delay
     let key = l.reject();
     assert_eq!(key, None, "a picker closes without an answer");
     assert!(l.dialogs.is_empty());
     assert!(!l.trusted);
     // Not now answers without an action
-    assert!(l.ask_trust(5000, Some(std::path::Path::new("/nonexistent/home"))));
+    assert!(l.ask_trust(5000, Some(nohome().as_path())));
     let key = l.pick(0, 5000 + ARM_MS).unwrap();
     assert_eq!(key, "no");
     assert_eq!(l.answer(&key, 6000), None);
     assert!(!l.trusted);
     // the person may be asked again by the next click
-    assert!(l.ask_trust(9000, Some(std::path::Path::new("/nonexistent/home"))));
+    assert!(l.ask_trust(9000, Some(nohome().as_path())));
 }
 
 #[test]
 fn no_dialog_for_a_trusted_folder_or_without_a_session() {
     let (mut l, _d) = rig();
     l.trusted = true;
-    assert!(!l.ask_trust(0, Some(std::path::Path::new("/nonexistent/home"))));
+    assert!(!l.ask_trust(0, Some(nohome().as_path())));
     assert!(l.dialogs.is_empty());
     assert!(
-        !Live::new().ask_trust(0, Some(std::path::Path::new("/nonexistent/home"))),
+        !Live::new().ask_trust(0, Some(nohome().as_path())),
         "no engine yet"
     );
 }
@@ -132,7 +145,7 @@ fn headers(l: &Live) -> String {
 #[test]
 fn the_dialog_names_the_root_and_says_when_it_is_not_the_folder_you_are_in() {
     let (mut l, d) = rig();
-    assert!(l.ask_trust(0, Some(std::path::Path::new("/nonexistent/home"))));
+    assert!(l.ask_trust(0, Some(nohome().as_path())));
     let root = synthesis_core::canonicalize(d.path()).unwrap().join("ws");
     let t = headers(&l);
     assert!(
@@ -151,7 +164,7 @@ fn the_dialog_names_the_root_and_says_when_it_is_not_the_folder_you_are_in() {
     );
     // a subfolder of a repository: the grant is the repository, and the dialog says so
     let (mut l, d) = rig_in("pkg/app");
-    assert!(l.ask_trust(0, Some(std::path::Path::new("/nonexistent/home"))));
+    assert!(l.ask_trust(0, Some(nohome().as_path())));
     let root = synthesis_core::canonicalize(d.path()).unwrap().join("ws");
     let t = headers(&l);
     assert!(
@@ -170,7 +183,7 @@ fn a_home_folder_or_the_config_folder_is_refused_not_offered() {
     assert!(!l.ask_trust(0, Some(&ws)));
     assert!(l.dialogs.is_empty());
     assert!(l.trust_root.is_none());
-    let note = format!("{:?}", l.view.convo.items.last());
+    let note = last_text(&l);
     assert!(
         note.contains("trust not offered") && note.contains("home folder"),
         "{note}"
@@ -325,7 +338,7 @@ fn remember_and_parent_are_offered_and_answer_with_what_to_record() {
 fn the_parent_is_not_offered_when_it_is_home_a_filesystem_root_or_holds_the_config() {
     // `rig()`: the config folder lies next to the project, inside the parent: no parent option
     let (mut l, _d) = rig();
-    assert!(l.ask_trust(0, Some(std::path::Path::new("/nonexistent/home"))));
+    assert!(l.ask_trust(0, Some(nohome().as_path())));
     assert!(l.dialogs[0].options.iter().all(|o| o.0 != "parent"));
     // the parent is the user's home: no parent option, the folder itself is still offered
     let (mut l, d, app) = rig_nested();
@@ -341,14 +354,14 @@ fn trust_lists_and_revokes_with_a_confirmation_that_keeps_by_default() {
     let home = l.engine.as_ref().unwrap().synthesis_home.clone();
     {
         let policy = synthesis_session::trust::Policy {
-            home: Some(std::path::PathBuf::from("/nonexistent/home")),
+            home: Some(nohome()),
             synt_home: home.clone(),
         };
         let fp = synthesis_session::trust::fingerprint_root(&app).unwrap();
         synthesis_session::trust::add(&home, &app, "folder", &fp, &policy).unwrap();
     }
     l.submit("/trust");
-    let last = format!("{:?}", l.view.convo.items.last());
+    let last = last_text(&l);
     assert!(
         last.contains("1.")
             && last.contains(&format!("proj{}app", std::path::MAIN_SEPARATOR))
@@ -379,7 +392,7 @@ fn trust_lists_and_revokes_with_a_confirmation_that_keeps_by_default() {
             .records
             .is_empty()
     );
-    let last = format!("{:?}", l.view.convo.items.last());
+    let last = last_text(&l);
     assert!(last.contains("next engine start"), "{last}");
 }
 
@@ -389,7 +402,7 @@ fn trust_says_when_remembered_trust_is_off_and_counts_rows_it_ignores() {
     let (mut l, _d, app) = rig_nested();
     let home = l.engine.as_ref().unwrap().synthesis_home.clone();
     l.submit("/trust");
-    let t = format!("{:?}", l.view.convo.items.last());
+    let t = last_text(&l);
     assert!(
         t.contains("NOT honoured") && t.contains("sandbox is off"),
         "{t}"
@@ -397,14 +410,14 @@ fn trust_says_when_remembered_trust_is_off_and_counts_rows_it_ignores() {
     assert!(!t.contains("unverified rows"));
     // a row written without the key (what a shell could do to the database) is ignored and counted
     let policy = synthesis_session::trust::Policy {
-        home: Some(std::path::PathBuf::from("/nonexistent/home")),
+        home: Some(nohome()),
         synt_home: home.clone(),
     };
     let fp = synthesis_session::trust::fingerprint_root(&app).unwrap();
     synthesis_session::trust::add(&home, &app, "folder", &fp, &policy).unwrap();
     std::fs::remove_file(home.join("run/trust.key")).unwrap();
     l.submit("/trust");
-    let t = format!("{:?}", l.view.convo.items.last());
+    let t = last_text(&l);
     assert!(t.contains("unverified rows ignored: 1"), "{t}");
     assert!(t.contains("no remembered folder"), "{t}");
 }
@@ -414,7 +427,7 @@ fn an_unknown_home_folder_offers_no_trust() {
     let (mut l, _d) = rig();
     assert!(!l.ask_trust(0, None));
     assert!(l.dialogs.is_empty());
-    let note = format!("{:?}", l.view.convo.items.last());
+    let note = last_text(&l);
     assert!(note.contains("home folder is unknown"), "{note}");
 }
 
