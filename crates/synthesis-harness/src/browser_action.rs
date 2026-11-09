@@ -48,6 +48,17 @@ pub(crate) fn event(tool: &str, a: &Value, redact: &dyn Fn(&str) -> String) -> E
     let num = |k: &str| a.get(k).and_then(Value::as_i64);
     let target = if tool == "browser_fill_secret" {
         Some("secret".to_string())
+    } else if tool == "browser_press_key" {
+        // a key is named only when it is a control key (checked again here, whatever the tool put in the meta)
+        let t = a.get("target").and_then(Value::as_str).unwrap_or("");
+        Some(
+            if synthesis_tools::is_control_chord(t) {
+                t
+            } else {
+                "key"
+            }
+            .to_string(),
+        )
     } else {
         a.get("target")
             .and_then(Value::as_str)
@@ -116,6 +127,22 @@ mod tests {
         assert_eq!((x, w), (None, None), "out of range is dropped, not wrapped");
         let (_, x, w, _) = ev("browser_click", json!({"x": 12, "w": 800}));
         assert_eq!((x, w), (Some(12), Some(800)));
+    }
+
+    #[test]
+    fn a_key_press_names_only_control_keys() {
+        let t = |k: &str| ev("browser_press_key", json!({"action": "press", "target": k})).3;
+        assert_eq!(t("Enter").as_deref(), Some("Enter"));
+        assert_eq!(t("Shift+Tab").as_deref(), Some("Shift+Tab"));
+        for k in ["p", "Control+A", "hunter2", ""] {
+            assert_eq!(t(k).as_deref(), Some("key"), "{k:?}");
+        }
+        assert_eq!(
+            ev("browser_press_key", json!({"action": "press"}))
+                .3
+                .as_deref(),
+            Some("key")
+        );
     }
 
     #[test]

@@ -488,6 +488,37 @@ async fn fill_secret_body(
     )))
 }
 
+/// Whether `key` (a key name or a `Modifier+Key` chord) ends in a non-printable control key: Enter, Tab, Escape,
+/// Backspace, Delete, an arrow, Home, End, PageUp, PageDown or F1-F24, after only modifier names. Only such a
+/// press is reported by name in `browser.action`; a printable key or a chord ending in one (a character of a
+/// password, `Control+A`) never is.
+pub fn is_control_chord(key: &str) -> bool {
+    let mut parts: Vec<&str> = key.split('+').collect();
+    let Some(last) = parts.pop() else {
+        return false;
+    };
+    const MODS: [&str; 5] = ["Control", "Shift", "Alt", "Meta", "ControlOrMeta"];
+    const KEYS: [&str; 12] = [
+        "Enter",
+        "Tab",
+        "Escape",
+        "Backspace",
+        "Delete",
+        "ArrowUp",
+        "ArrowDown",
+        "ArrowLeft",
+        "ArrowRight",
+        "Home",
+        "End",
+        "PageUp",
+    ];
+    let f_key = last
+        .strip_prefix('F')
+        .and_then(|n| n.parse::<u8>().ok())
+        .is_some_and(|n| (1..=24).contains(&n));
+    (KEYS.contains(&last) || last == "PageDown" || f_key) && parts.iter().all(|p| MODS.contains(p))
+}
+
 /// `meta.action` of a result: the harness turns it into a `browser.action` event. Only where the action
 /// landed and a short target; never the text typed, the key pressed or a secret.
 fn action(kind: &str, spot: Option<synthesis_browser::Spot>, target: Option<&str>) -> Value {
@@ -621,8 +652,9 @@ async fn fill_body(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
 async fn key(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
     let k = str_field(input, "key").ok_or("\"key\" is required.")?;
     rt.press_key(k).await?;
-    // the key is not reported: a press can be part of typing a secret
-    Ok(ToolOutput::text(format!("Pressed {k}.")).with_meta(action("press", None, None)))
+    // only a control key is named; a printable one can be a character of a secret
+    let named = is_control_chord(k).then_some(k).unwrap_or("key");
+    Ok(ToolOutput::text(format!("Pressed {k}.")).with_meta(action("press", None, Some(named))))
 }
 
 async fn wait(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
