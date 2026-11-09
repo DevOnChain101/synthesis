@@ -17,6 +17,7 @@ use synthesis_view::state::ViewState;
 
 use crate::engine::{AskApproval, Choice, Engine, McpInfo, UiMsg, is_command};
 use crate::models::ModelRow;
+use crate::send_pick::{self, Seen, SendPick, SendTo};
 
 /// Enter and digits are ignored this long after a dialog comes to the front: a key typed before it
 /// appeared must not answer it (the TUI's `ARM_MS`). Esc still rejects.
@@ -63,7 +64,7 @@ pub enum DialogKind {
         /// The text being typed for "Other" (Enter keeps it, Esc drops it).
         typing: Option<String>,
     },
-    /// `/model` and `/resume`: a list to choose from. `headers`: (index of the first option under
+    /// `/model`, `/resume` and `/send`: a list to choose from. `headers`: (index of the first option under
     /// it, text); an option's key is the model or session id.
     Picker {
         kind: PickerKind,
@@ -86,6 +87,8 @@ pub enum PickerKind {
     Setup,
     /// Shift+Tab reached bypassPermissions: the confirmation (Cancel is the first option and the default).
     Bypass,
+    /// `/send` with no arguments: which live peer the next line goes to.
+    Send,
 }
 
 /// What the window does after a command or a picker (it restarts the engine, talks to it).
@@ -186,15 +189,22 @@ impl Dialog {
 
     /// Digits and Enter may answer this dialog: it is a picker the person opened, or they engaged it.
     pub fn answerable(&self) -> bool {
-        self.engaged || !self.needs_person()
+        let send = matches!(
+            self.kind,
+            DialogKind::Picker {
+                kind: PickerKind::Send,
+                ..
+            }
+        );
+        self.engaged || !(self.needs_person() || send)
     }
 
-    /// Digits pick option 1-9. Not in the model picker: there they type into the filter.
+    /// Digits pick option 1-9. Not in the model and send pickers: there they type into the filter.
     pub fn digits_pick(&self) -> bool {
         !matches!(
             self.kind,
             DialogKind::Picker {
-                kind: PickerKind::Model,
+                kind: PickerKind::Model | PickerKind::Send,
                 ..
             }
         )
@@ -317,8 +327,9 @@ pub fn send_command() -> Command {
     Command {
         name: "send".into(),
         aliases: vec![],
-        description: "message a session in another workspace or process (see /peers)".into(),
-        argument_hint: "<ws:workspace/sess:session> <message>".into(),
+        description: "message a session in another workspace or process (no arguments: pick it)"
+            .into(),
+        argument_hint: "[<ws:workspace/sess:session> <message>]".into(),
         local: true,
     }
 }
@@ -392,6 +403,12 @@ pub struct Live {
     pub mcp: Vec<McpInfo>,
     /// Rows of the peers listing (polled).
     pub peer_rows: Vec<Value>,
+    /// When each listed peer was last active, as the polls saw it.
+    peer_seen: Seen,
+    /// The open `/send` picker's rows and filter.
+    pub send_pick: Option<SendPick>,
+    /// The chip over the prompt: the next line goes to this peer, once.
+    pub send_to: Option<SendTo>,
     pub commands: Vec<Command>,
     pub sid: String,
     /// The title `/rename` stored for this session id (before the lists have it).
@@ -459,6 +476,9 @@ impl Live {
             history: vec![],
             mcp: vec![],
             peer_rows: vec![],
+            peer_seen: Seen::default(),
+            send_pick: None,
+            send_to: None,
             commands: vec![],
             sid: String::new(),
             renamed: None,
@@ -501,6 +521,8 @@ impl Live {
         }
         self.stale_model = engine.stale_model.clone();
         self.model_pick = None;
+        self.send_pick = None;
+        self.send_to = None;
         self.sid = engine.sid.clone();
         self.cwd = engine.cwd.clone();
         self.trusted = engine.trusted;
@@ -639,6 +661,19 @@ impl Live {
     }
 
     pub(crate) fn push_dialog(&mut self, d: Dialog, now: i64) {
+        // an approval, plan or question never waits behind a model or send picker: it goes in front
+        // (the picker is armed again when it is answered)
+        let front_picker = matches!(
+            self.dialogs.first().map(|f| &f.kind),
+            Some(DialogKind::Picker {
+                kind: PickerKind::Model | PickerKind::Send,
+                ..
+            })
+        );
+        if front_picker && !matches!(d.kind, DialogKind::Picker { .. }) {
+            self.dialogs.insert(0, d);
+            return self.arm(now);
+        }
         self.dialogs.push(d);
         if self.dialogs.len() == 1 {
             self.arm(now);
@@ -747,6 +782,7 @@ impl Live {
                 self.returned_prompt = self.held_prompt.take();
             }
             self.close_model_pick();
+            self.send_pick = None;
             return None;
         }
         if let Some(Dialog {
@@ -855,6 +891,17 @@ impl Live {
                 }
                 return None;
             }
+            if kind == PickerKind::Send {
+                // the chip holds the id address of the row; "info" rows pick nothing
+                let pick = self.send_pick.take();
+                if let Some(r) = pick.and_then(|p| p.rows.into_iter().find(|r| r.address == key)) {
+                    self.send_to = Some(SendTo {
+                        label: r.chip(),
+                        address: r.address,
+                    });
+                }
+                return None;
+            }
             if kind == PickerKind::Model {
                 self.close_model_pick();
             }
@@ -870,6 +917,7 @@ impl Live {
                 PickerKind::Resume => Some(Action::Resume(key.to_string())),
                 PickerKind::Remember
                 | PickerKind::Bypass
+                | PickerKind::Send
                 | PickerKind::MemReview
                 | PickerKind::MemConfirm => None,
                 PickerKind::Setup => Some(match key {
@@ -1017,6 +1065,10 @@ impl Live {
             }
             return true;
         }
+        // Esc spends the chip first; a second one cancels the task
+        if self.send_to.take().is_some() {
+            return true;
+        }
         if !self.busy {
             return false;
         }
@@ -1075,6 +1127,22 @@ impl Live {
             return Submitted::Nothing;
         } else if text.starts_with('!') && text.trim_start_matches('!').trim().is_empty() {
             return Submitted::Nothing; // `!` with no command
+        }
+        if !is_command(text)
+            && let Some(to) = self.send_to.take()
+        {
+            // one-shot: the chip is spent whether the line goes or not
+            if !send_pick::listed(&self.peer_rows, &to.address) {
+                self.note(format!("{} is gone, nothing sent", to.label), true);
+                return Submitted::Held;
+            }
+            if !self.images.is_empty() {
+                self.note("images are not sent to another session", true);
+            }
+            return Submitted::Do(Action::Send {
+                to: to.address,
+                text: text.into(),
+            });
         }
         if self.target != "main" && !self.agents.contains(&self.target) {
             let gone = label(&self.target);
@@ -1153,6 +1221,9 @@ impl Live {
 
     /// Ctrl+T: main, then each sub-agent in turn.
     pub fn cycle_target(&mut self) {
+        if self.send_to.take().is_some() {
+            return; // the chip's peer is one more stop: from there back to main
+        }
         if !self.busy {
             return; // the target applies while a task runs
         }
@@ -1421,6 +1492,7 @@ impl Live {
                 self.note(PEERS_OFF, true)
             }
             "peers" => return Submitted::Do(Action::Peers),
+            "send" if arg.is_empty() => self.open_send_picker(),
             "send"
                 if self
                     .engine
@@ -1569,10 +1641,11 @@ impl Live {
         }
     }
 
-    /// The outcome of `/send`. The reply itself arrives as the `peer.reply` row; only a failure is said here.
-    pub fn send_done(&mut self, r: Result<String, String>) {
-        if let Err(e) = r {
-            self.note(format!("/send: {e}"), true);
+    /// The outcome of `/send`. The reply itself arrives as the `peer.reply` row; a delivery is echoed with the ids it went to, a failure is said.
+    pub fn send_done(&mut self, to: &str, r: Result<String, String>) {
+        match r {
+            Ok(_) => self.note(send_pick::echo(to), false),
+            Err(e) => self.note(format!("/send: {e}"), true),
         }
     }
 
@@ -1878,33 +1951,139 @@ impl Live {
         self.model_pick = None;
     }
 
-    /// A printable key (or Backspace) typed into the model picker's filter. False: not the model
-    /// picker, the key is the dialog's.
+    /// A printable key (or Backspace) typed into the filter of the model or send picker. False: not
+    /// one of them, the key is the dialog's.
     pub fn model_filter_key(&mut self, text: Option<&str>, backspace: bool) -> bool {
-        let Some(pick) = &mut self.model_pick else {
-            return false;
-        };
-        if !matches!(
+        let send = matches!(
+            self.dialogs.first().map(|d| &d.kind),
+            Some(DialogKind::Picker {
+                kind: PickerKind::Send,
+                ..
+            })
+        );
+        let filter = if send {
+            self.send_pick.as_mut().map(|p| &mut p.filter)
+        } else if matches!(
             self.dialogs.first().map(|d| &d.kind),
             Some(DialogKind::Picker {
                 kind: PickerKind::Model,
                 ..
             })
         ) {
+            self.model_pick.as_mut().map(|p| &mut p.filter)
+        } else {
+            None
+        };
+        let Some(filter) = filter else {
             return false;
-        }
+        };
         if backspace {
-            pick.filter.pop();
+            filter.pop();
         } else if let Some(t) = text.filter(|t| !t.chars().any(char::is_control)) {
-            pick.filter.push_str(t);
+            filter.push_str(t);
         } else {
             return false;
         }
         if let Some(d) = self.dialogs.first_mut() {
             d.engaged = true;
         }
-        self.rebuild_model_dialog(false);
+        if send {
+            self.rebuild_send_dialog();
+        } else {
+            self.rebuild_model_dialog(false);
+        }
         true
+    }
+
+    /// The polled peer listing, and the activity times read off it. An open `/send` picker follows it.
+    pub fn set_peer_rows(&mut self, rows: Vec<Value>, now: i64) {
+        self.peer_seen.update(&rows, now);
+        self.peer_rows = rows;
+        if self.send_pick.is_some() {
+            self.rebuild_send_dialog();
+        }
+    }
+
+    /// `/send` with no arguments: the live peers grouped by workspace; typing filters. When there is
+    /// nothing to pick the only row says why.
+    fn open_send_picker(&mut self) {
+        self.send_pick = Some(SendPick::default());
+        // armed like the approvals: an Enter typed before it appeared picks nothing, and Enter picks only
+        // once the person engaged it (arrows, Tab, a click, typing in the filter)
+        self.push_dialog(
+            Dialog {
+                kind: DialogKind::Picker {
+                    kind: PickerKind::Send,
+                    title: "Send to a session \u{b7} then type the message".into(),
+                    headers: vec![],
+                },
+                options: vec![],
+                sel: 0,
+                armed_until: 0,
+                engaged: false,
+            },
+            now_ms(),
+        );
+        self.rebuild_send_dialog();
+    }
+
+    /// The send picker's options from the listing and the filter; the highlight stays on the same peer.
+    fn rebuild_send_dialog(&mut self) {
+        let Some(pick) = &mut self.send_pick else {
+            return;
+        };
+        let now = now_ms();
+        pick.rows = send_pick::picks(&self.peer_rows, &self.sid, &self.peer_seen);
+        let shown = send_pick::visible(&pick.rows, &pick.filter);
+        let (mut options, mut headers) = (vec![], vec![]);
+        let mut group = "";
+        for r in &shown {
+            if r.ws() != group {
+                group = r.ws();
+                // the id comes from the address, after a separator a name cannot hold (the card paints it apart)
+                headers.push((
+                    options.len(),
+                    format!("{}\u{1f}{}", r.workspace, r.ws_short),
+                ));
+            }
+            options.push((r.address.clone(), r.row_label(now)));
+        }
+        if options.is_empty() {
+            let off = self
+                .engine
+                .as_ref()
+                .is_some_and(|e| e.peer_name().is_none());
+            let any = !pick.rows.is_empty();
+            options.push(("info".into(), send_pick::empty_note(off, any).into()));
+        }
+        let title = format!(
+            "Send to a session \u{b7} filter: {}_   (type to filter, then pick; you type the message after)",
+            pick.filter
+        );
+        if let Some(d) = self.dialogs.iter_mut().find(|d| {
+            matches!(
+                d.kind,
+                DialogKind::Picker {
+                    kind: PickerKind::Send,
+                    ..
+                }
+            )
+        }) {
+            let on = d.options.get(d.sel).map(|o| o.0.clone());
+            d.sel = options
+                .iter()
+                .position(|o| Some(&o.0) == on.as_ref())
+                .unwrap_or(0);
+            d.options = options;
+            if let DialogKind::Picker {
+                headers: h,
+                title: t,
+                ..
+            } = &mut d.kind
+            {
+                (*h, *t) = (headers, title);
+            }
+        }
     }
 
     /// The Refresh row: false when one is already running.
@@ -2271,10 +2450,19 @@ mod tests {
             })
         );
         assert_eq!(l.submit("/send ws:api/sess:backend"), Submitted::Nothing);
-        assert_eq!(l.submit("/send"), Submitted::Nothing);
         assert!(
             matches!(l.view.convo.items.last(), Some(Item::Notice { warning: true, text }) if text.starts_with("usage: /send"))
         );
+        // no arguments: the picker
+        assert_eq!(l.submit("/send"), Submitted::Nothing);
+        assert!(matches!(
+            l.dialogs[0].kind,
+            DialogKind::Picker {
+                kind: PickerKind::Send,
+                ..
+            }
+        ));
+        l.reject();
         assert!(!l.focus_view);
         assert_eq!(l.submit("/focus"), Submitted::Nothing);
         assert!(l.focus_view);
@@ -2688,6 +2876,152 @@ mod tests {
         assert_eq!(l.dialogs[0].scroll_child(), Some(4));
         assert_eq!(l.reject(), None);
         assert!(l.dialogs.is_empty());
+    }
+
+    fn peer(key: &str, sid: &str, ws: &str, name: &str) -> Value {
+        json!({"address": format!("ws:{key}/sess:{sid}/agent:main"),
+            "workspace": {"label": ws, "key": key, "root": "/w"},
+            "session": {"short_id": &sid[..8], "name": name},
+            "agent": {"instance": "main", "kind": "main", "status": "idle"}, "task_summary": ""})
+    }
+
+    fn send_picker() -> Live {
+        let mut l = live_with_commands();
+        l.set_peer_rows(
+            vec![
+                peer("aaaa1111bbbb", "11111111-0000", "api", "backend"),
+                peer("cccc2222dddd", "22222222-0000", "web", "backend"),
+            ],
+            0,
+        );
+        assert_eq!(l.submit("/send"), Submitted::Nothing);
+        l
+    }
+
+    #[test]
+    fn the_send_picker_filters_and_a_pick_arms_a_one_shot_chip_by_id() {
+        let mut l = send_picker();
+        let d = &l.dialogs[0];
+        assert_eq!(d.options.len(), 2, "same name twice, told apart by id");
+        assert_eq!(d.options[0].0, "ws:aaaa1111bbbb/sess:11111111-0000");
+        assert!(
+            !d.digits_pick() && !d.answerable(),
+            "engaged by typing or arrows first"
+        );
+        // digits are text in the filter (ids are hex)
+        assert!(l.model_filter_key(Some("2"), false));
+        assert!(l.model_filter_key(Some("2"), false));
+        assert_eq!(l.dialogs[0].options.len(), 1);
+        let key = l.pick(0, i64::MAX).unwrap();
+        assert_eq!(l.answer(&key, 0), None);
+        let chip = l.send_to.clone().unwrap();
+        assert_eq!(
+            chip.label,
+            "web (ws:cccc22) \u{203a} backend (sess:22222222)"
+        );
+        // the line goes to the id address, whatever the names are, and spends the chip
+        assert_eq!(
+            l.submit("what sets the TTL?"),
+            Submitted::Do(Action::Send {
+                to: "ws:cccc2222dddd/sess:22222222-0000".into(),
+                text: "what sets the TTL?".into()
+            })
+        );
+        assert!(l.send_to.is_none());
+        // the echo comes with the result, not before it
+        assert!(
+            !matches!(l.view.convo.items.last(), Some(Item::Notice { text, .. }) if text.starts_with("sent to"))
+        );
+        l.send_done("ws:cccc2222dddd/sess:22222222-0000", Ok(String::new()));
+        assert!(
+            matches!(l.view.convo.items.last(), Some(Item::Notice { warning: false, text })
+            if text == "sent to ws:cccc2222../sess:22222222..")
+        );
+        // it never reached the prompt queue
+        assert!(l.queue.is_empty());
+    }
+
+    #[test]
+    fn esc_sends_nothing_and_a_chip_ends_with_esc_ctrl_t_or_a_gone_target() {
+        let mut l = send_picker();
+        assert_eq!(l.reject(), None);
+        assert!(l.dialogs.is_empty() && l.send_pick.is_none() && l.send_to.is_none());
+        let arm = |l: &mut Live| {
+            l.submit("/send");
+            l.model_filter_key(Some("web"), false);
+            let k = l.pick(0, i64::MAX).unwrap();
+            l.answer(&k, 0);
+            assert!(l.send_to.is_some());
+        };
+        arm(&mut l);
+        assert!(l.interrupt() && l.send_to.is_none(), "Esc clears the chip");
+        arm(&mut l);
+        l.busy = true;
+        l.cycle_target();
+        assert!(l.send_to.is_none());
+        // a command leaves the chip for the next line
+        arm(&mut l);
+        l.busy = false;
+        l.submit("/focus");
+        assert!(l.send_to.is_some());
+        // the peer left: held with a notice, nothing sent, the chip is spent
+        l.set_peer_rows(vec![], 0);
+        assert_eq!(l.submit("hello"), Submitted::Held);
+        assert!(l.send_to.is_none());
+        assert!(
+            matches!(l.view.convo.items.last(), Some(Item::Notice { warning: true, text })
+            if text == "web (ws:cccc22) \u{203a} backend (sess:22222222) is gone, nothing sent")
+        );
+    }
+
+    #[test]
+    fn an_enter_typed_ahead_picks_nothing_and_an_approval_goes_in_front_of_the_picker() {
+        let mut l = live_with_commands();
+        l.set_peer_rows(
+            vec![peer("aaaa1111bbbb", "11111111-0000", "api", "backend")],
+            0,
+        );
+        l.submit("/send");
+        let d = &l.dialogs[0];
+        // armed against type-ahead, and Enter answers only after the person engaged it
+        assert!(d.armed_until > 0 && !d.answerable());
+        assert_eq!(l.pick(0, 0), None, "still arming");
+        assert!(l.pick(0, now_ms() + ARM_MS + 1).is_some());
+        l.move_sel(true);
+        assert!(l.dialogs[0].answerable());
+        // an approval arrives: it is the front dialog, the picker's keys do nothing
+        l.on_approval(
+            AskApproval {
+                id: "a".into(),
+                agent_id: None,
+                tool: "Bash".into(),
+                input: json!({"command": "ls"}),
+                dialog: "permission",
+                prompt: String::new(),
+                reason: String::new(),
+                origin: None,
+                suggestions: vec![],
+            },
+            0,
+        );
+        assert!(matches!(l.dialogs[0].kind, DialogKind::Approval(_)));
+        assert_eq!(l.dialogs.len(), 2);
+        assert!(!l.model_filter_key(Some("x"), false));
+        assert_eq!(l.send_pick.as_ref().unwrap().filter, "");
+        assert!(l.send_to.is_none());
+    }
+
+    #[test]
+    fn an_empty_send_picker_says_why_and_picks_nothing() {
+        let mut l = live_with_commands();
+        l.submit("/send");
+        let d = &l.dialogs[0];
+        assert_eq!(d.options.len(), 1);
+        assert!(d.options[0].1.contains("no other live session"));
+        let k = l.pick(0, i64::MAX).unwrap();
+        assert_eq!(l.answer(&k, 0), None);
+        assert!(l.send_to.is_none() && l.dialogs.is_empty());
+        assert!(send_pick::empty_note(true, false).contains("--peers"));
     }
 
     #[test]

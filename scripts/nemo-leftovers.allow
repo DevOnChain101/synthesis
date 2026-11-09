@@ -15,7 +15,7 @@ in tests/agent-evals/harness/selftest.js nemo-cli
 in tests/golden/README.md (Node|NEMO_|nemo_home|loadNemoEnv|nemo-cli|nemo import)[^ ]*
 
 # Legacy migration: `synt doctor` detects the old ~/.nemo and NEMO_* (names only), never reads them.
-file apps/cli/src/info.rs
+file crates/synthesis-app/src/doctor.rs
 # Docs that explain the rename quote the old names (old -> new tables, migration steps).
 in CLAUDE.md Nemo|NEMO[_.*]\S*|\.nemo|\bnemo\b
 in docs/MIGRATION.md Nemo|NEMO[_.*]\S*|\.nemo|nemo\.(json|db)|nemocode|\bnemo\b|"nemo"
