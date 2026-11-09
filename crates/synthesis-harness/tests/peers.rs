@@ -1673,9 +1673,46 @@ fn slow_then(final_text: &'static str) -> Responder {
     })
 }
 
+/// Like `slow_then`, but A keeps taking slow rounds until `subscribed` is set, so B's
+/// subscription lands while A still runs however slow the machine is (no fixed sleep decides
+/// it). `started` is set on A's first model request: A is then running a task.
+fn slow_until(
+    final_text: &'static str,
+    started: Arc<std::sync::atomic::AtomicBool>,
+    subscribed: Arc<std::sync::atomic::AtomicBool>,
+) -> Responder {
+    use std::sync::atomic::Ordering::SeqCst;
+    let rounds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    Arc::new(move |r| {
+        if is_responder(r) {
+            return Some(Turn::text("responder must not run"));
+        }
+        started.store(true, SeqCst);
+        Some(
+            if tool_result(r, "s1").is_none() || !subscribed.load(SeqCst) {
+                Turn::tool(
+                    &format!("s{}", rounds.fetch_add(1, SeqCst) + 1),
+                    "Slow",
+                    json!({}),
+                )
+            } else {
+                Turn::text(final_text)
+            },
+        )
+    })
+}
+
 fn b_notifies(to: &'static str) -> Responder {
+    b_notifies_flag(to, Default::default())
+}
+
+/// `subscribed` is set once the SendMessage result is back: A has accepted the subscription.
+fn b_notifies_flag(to: &'static str, subscribed: Arc<std::sync::atomic::AtomicBool>) -> Responder {
     Arc::new(move |r| {
         let all = texts(r);
+        if tool_result(r, "n1").is_some() {
+            subscribed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         Some(if tool_result(r, "n1").is_none() {
             Turn::tool(
                 "n1",
@@ -1695,12 +1732,14 @@ async fn notify_on_end_delivers_the_result_when_the_peers_task_ends() {
     let home = tempfile::tempdir().unwrap();
     let run = run_dir(home.path());
     let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "accept_notify": true});
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let subscribed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (mut a, ea) = side(
         "sess-a",
         "alpha",
         &run,
         Some(on.clone()),
-        slow_then("generated client v2"),
+        slow_until("generated client v2", started.clone(), subscribed.clone()),
         700,
     );
     let (mut b, _) = side(
@@ -1708,7 +1747,7 @@ async fn notify_on_end_delivers_the_result_when_the_peers_task_ends() {
         "beta",
         &run,
         Some(on),
-        b_notifies("ws:alpha/sess:sess-a"),
+        b_notifies_flag("ws:alpha/sess:sess-a", subscribed),
         10,
     );
     let _reg = serve(&a, &run, ea);
@@ -1716,7 +1755,9 @@ async fn notify_on_end_delivers_the_result_when_the_peers_task_ends() {
         let out = run_a(&mut a).await;
         (a, out)
     });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    while !started.load(std::sync::atomic::Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let t0 = std::time::Instant::now();
     let out_b = go(&mut b, "wait for alpha").await;
     let (a, out_a) = a_task.await.unwrap();
