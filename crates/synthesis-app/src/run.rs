@@ -1467,7 +1467,7 @@ pub fn prepare(
     mplan.env_passthrough = crate::mcp::read_passthrough(&h.synthesis.join("settings.json"));
     mplan.guard = crate::mcp::read_guard(
         &h.synthesis.join("settings.json"),
-        (trust == ProjectTrust::Trusted)
+        (trust == ProjectTrust::Trusted && !inert)
             .then(|| settings.project_root.join(".synt").join("settings.json"))
             .as_deref(),
     );

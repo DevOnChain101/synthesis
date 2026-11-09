@@ -348,9 +348,11 @@ pub fn session_trusted(c: &Common) -> Common {
     c
 }
 
-/// The flags of a REMEMBERED trust (and of "Trust this folder (remember)" for the run that follows it): the
-/// project's settings, rules, instructions, agents, skills and memory load, but its hooks and MCP servers stay
-/// inert as when untrusted. Only a trust given for this run (session-only, or `--trust-project`) runs them.
+/// The flags of a REMEMBERED trust (and of "Trust this folder (remember)" for the run that follows it): only the
+/// project's DATA applies (agents, skills, memory, instruction files, the file explorer). Its settings and
+/// provider config load with the untrusted filter (no hooks, MCP servers, allow rules, env, defaultMode,
+/// additionalDirectories, verification checks or provider connection). Only a trust given for this run
+/// (session-only, or `--trust-project`) applies those.
 pub fn remembered_trusted(c: &Common) -> Common {
     let mut c = session_trusted(c);
     c.project_exec_inert = true;
@@ -1176,7 +1178,10 @@ impl Engine {
         Ok(())
     }
 
-    /// What the permission layer says about a tool call now (tests and tools).
+    /// What the permission layer says about a tool call now. For tests only: not in release builds, hidden from
+    /// the docs (the integration tests compile against the library with default features).
+    #[doc(hidden)]
+    #[cfg(debug_assertions)]
     pub fn check_permission(&self, tool: &str, input: &Value) -> synthesis_permissions::Decision {
         lock(&self.harness.permissions())
             .check_current(tool, input)
