@@ -344,6 +344,13 @@ impl TuiView {
         let ws_click = |i: usize| -> panels::OnClick {
             Box::new(cx.listener(move |this, _, _, cx| this.click_workspace(i, cx)))
         };
+        let ws_close = |i: usize| -> panels::OnClick {
+            Box::new(cx.listener(move |this, _, _, cx| {
+                // the button sits inside the row: the row's own click must not follow
+                cx.stop_propagation();
+                this.click_close_workspace(i, cx)
+            }))
+        };
         let run_click = |i: usize| -> panels::OnClick {
             Box::new(cx.listener(move |this, _, window, cx| this.click_running(i, window, cx)))
         };
@@ -370,6 +377,7 @@ impl TuiView {
                     &s.workspaces,
                     attn,
                     live.map(|_| &ws_click as &dyn Fn(usize) -> panels::OnClick),
+                    live.map(|_| &ws_close as &dyn Fn(usize) -> panels::OnClick),
                     new_ws,
                 ),
                 live.map(|l| &l.ws_scroll),
@@ -1346,5 +1354,61 @@ mod tests {
             (0, true, None),
             "picked: the chip is set"
         );
+    }
+
+    /// The close-workspace confirmation is a dialog like the others: under Settings no key reaches it
+    /// (Enter, Down, Esc change nothing), and on screen an Enter typed ahead picks nothing.
+    #[gpui::test]
+    fn the_close_workspace_dialog_ignores_keys_while_hidden(cx: &mut TestAppContext) {
+        use crate::live::Live;
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let mut l = Live::new();
+        l.starting = false;
+        l.view.workspaces.workspaces = vec![synthesis_view::workspaces::WorkspaceRow {
+            root: "/w/other".into(),
+            key: "other".into(),
+            label: "other".into(),
+            sessions: vec![synthesis_view::workspaces::SessionRow {
+                id: "a".into(),
+                title: "t".into(),
+                status: synthesis_core::SessionStatus::Idle,
+                updated_at: String::new(),
+                mtime: 0,
+                is_live: false,
+            }],
+            available: true,
+            changes: None,
+        }];
+        l.ask_close_workspace(Some("other"), 0);
+        l.dialogs[0].armed_until = 0;
+        view.update(vcx, |t, _| t.set_live(l));
+        let state = |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext| {
+            view.read_with(vcx, |t, _| {
+                let d = &t.live.as_ref().unwrap().live.dialogs;
+                (d.len(), d.first().map(|d| (d.sel, d.engaged)))
+            })
+        };
+        let press =
+            |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext, k: &'static str| {
+                let ks = gpui::Keystroke::parse(k).unwrap();
+                view.update_in(vcx, |t, window, cx| t.on_key(&ks, window, cx))
+            };
+        view.update(vcx, |t, _| t.shown = false);
+        for k in ["enter", "down", "1", "2", "escape"] {
+            assert!(!press(&view, vcx, k));
+        }
+        assert_eq!(state(&view, vcx), (1, Some((0, false))), "untouched");
+        view.update(vcx, |t, _| t.shown = true);
+        press(&view, vcx, "enter");
+        assert_eq!(
+            state(&view, vcx),
+            (1, Some((0, false))),
+            "typed ahead picks nothing"
+        );
+        press(&view, vcx, "escape");
+        assert_eq!(state(&view, vcx).0, 0, "Esc cancels");
     }
 }

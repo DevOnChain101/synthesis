@@ -93,6 +93,8 @@ pub enum PickerKind {
     Rewind,
     /// `/send` with no arguments: which live peer the next line goes to.
     Send,
+    /// `/close-workspace` and the Workspace panel's close button: Cancel is the first option and the default.
+    CloseWorkspace,
     /// `/trust revoke`: confirm forgetting a remembered root (Keep is first and the default).
     Revoke,
     /// The Files tab was opened in an untrusted folder: trust it for this session? ("Not now" is first and the
@@ -123,6 +125,9 @@ pub enum Action {
     Resume(String),
     /// A fresh session in the selected workspace.
     New,
+    /// The confirmation of `/close-workspace` was answered yes: close every session of this
+    /// workspace key (see `close_ws`).
+    CloseWorkspace(String),
     /// Hide this session, open a fresh one in its folder.
     Close,
     Clear,
@@ -214,6 +219,7 @@ impl Dialog {
                         | PickerKind::MemConfirm
                         | PickerKind::Trust
                         | PickerKind::Revoke
+                        | PickerKind::CloseWorkspace
                 )
             }
             _ => true,
@@ -399,8 +405,27 @@ pub fn is_wired(name: &str) -> bool {
     WIRED.contains(&name)
         || matches!(
             name,
-            "open" | "send" | "panels" | "doctor" | "trust" | "rewind" | "context"
+            "open"
+                | "send"
+                | "panels"
+                | "doctor"
+                | "trust"
+                | "rewind"
+                | "context"
+                | "close-workspace"
         )
+}
+
+/// `/close-workspace` is the desktop's own command (the classic TUI has none).
+pub fn close_workspace_command() -> Command {
+    Command {
+        name: "close-workspace".into(),
+        aliases: vec![],
+        description: "close every session of this workspace (asks first; nothing is deleted)"
+            .into(),
+        argument_hint: String::new(),
+        local: true,
+    }
 }
 
 /// `/rewind` is the desktop's own command too: the engine's list has none.
@@ -529,6 +554,8 @@ pub struct Live {
     pub usage_days: usize,
     /// The `#note` the open "Remember this note?" dialog is about.
     pending_note: Option<String>,
+    /// The open `/close-workspace` confirmation, for the checks at confirm time.
+    pub(crate) close_asked: Option<crate::close_ws::Asked>,
     /// The open model picker's rows, filter and refresh state.
     pub model_pick: Option<ModelPick>,
     /// The stored model was not available: the first prompt opens the model picker.
@@ -601,6 +628,7 @@ impl Live {
             focus_view: false,
             usage_days: 7,
             pending_note: None,
+            close_asked: None,
             model_pick: None,
             stale_model: None,
             held_prompt: None,
@@ -1097,6 +1125,9 @@ impl Live {
                 }
                 PickerKind::Model => Some(Action::Model(key.to_string())),
                 PickerKind::Resume => Some(Action::Resume(key.to_string())),
+                PickerKind::CloseWorkspace => key
+                    .strip_prefix("close:")
+                    .and_then(|k| self.confirm_close_workspace(k, now)),
                 PickerKind::Remember
                 | PickerKind::Bypass
                 | PickerKind::Rewind
@@ -1616,6 +1647,7 @@ impl Live {
             "panels" => return Submitted::Do(Action::Panels(arg.into())),
             "new" => return Submitted::Do(Action::New),
             "close" => return Submitted::Do(Action::Close),
+            "close-workspace" => self.ask_close_workspace(None, now_ms()),
             "resume" if arg.is_empty() => self.open_resume_picker(now_ms()),
             "resume" => return Submitted::Do(Action::Resume(arg.into())),
             "model" if self.busy => return busy_err(self, "model"),
@@ -2863,6 +2895,7 @@ mod tests {
         l.commands.push(panels_command());
         l.commands.push(send_command());
         l.commands.push(rewind_command());
+        l.commands.push(close_workspace_command());
         l.commands.push(Command {
             name: "tdd".into(),
             description: "skill: tdd".into(),

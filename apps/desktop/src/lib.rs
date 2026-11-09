@@ -2,6 +2,7 @@
 //! unit-tested without a window.
 
 pub mod brand;
+pub mod close_ws;
 pub mod doctor_ui;
 pub mod engine;
 pub mod folder;

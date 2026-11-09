@@ -60,6 +60,10 @@ pub struct LiveShot {
     /// `--earlier TEXT`: a first session of the same folder and home that ran this prompt and
     /// ended (what `/resume` lists).
     earlier: Option<String>,
+    /// `--other TEXT`: a session in a second folder (a non-open workspace row, with its close button).
+    other: Option<String>,
+    /// `--busy`: a task is running when `--cmd` is typed.
+    busy: bool,
     /// `--queue 'a|b'`: a task is running and these lines wait behind it (rows above the prompt).
     queue: Vec<String>,
     /// `--rewind list|confirm`: the `/rewind` checkpoint picker, or its dry-run confirmation, is open.
@@ -161,6 +165,8 @@ pub fn parse(args: &[String]) -> Option<Args> {
         peers: val("--peers").map(PathBuf::from),
         send_pick: val("--send-pick").and_then(|n| n.parse().ok()),
         earlier: val("--earlier").cloned(),
+        other: val("--other").cloned(),
+        busy: args.iter().any(|a| a == "--busy"),
         queue: val("--queue").map_or_else(Vec::new, |q| q.split('|').map(String::from).collect()),
         rewind: val("--rewind").cloned(),
         setup: args.iter().any(|a| a == "--setup"),
@@ -244,6 +250,26 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
         }
         crate::engine::close_shared(Arc::new(e));
     }
+    if let Some(p) = &l.other {
+        let other = tmp.join("other-project");
+        std::fs::create_dir_all(&other)?;
+        let (e, mut rx) = Engine::start(
+            &std::fs::canonicalize(&other)?,
+            &env,
+            None,
+            Some(&provider),
+            Some("off"),
+        )?;
+        e.send(p.clone()).map_err(|e| e.to_string())?;
+        let t0 = Instant::now();
+        while !matches!(rx.try_recv(), Ok(UiMsg::TaskDone(_))) {
+            if t0.elapsed() > Duration::from_secs(30) {
+                return Err("timed out waiting for the other folder's session".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        crate::engine::close_shared(Arc::new(e));
+    }
     let (engine, mut rx) = Engine::start(&ws, &env, None, Some(&provider), Some("off"))?;
     let engine = Arc::new(engine);
     let mut live = Live::new();
@@ -318,6 +344,7 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
         live.view.set_peers(&live.peer_rows.clone());
     }
     if let Some(c) = &l.cmd {
+        live.busy |= l.busy;
         live.submit(c);
     }
     if let Some(n) = l.send_pick.and_then(|n| n.checked_sub(1)) {

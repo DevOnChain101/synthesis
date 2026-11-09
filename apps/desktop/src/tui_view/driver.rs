@@ -48,6 +48,9 @@ pub enum Target {
     New(PathBuf),
     /// Hide the session we came from and open a fresh one in its folder.
     Close,
+    /// `/close-workspace` in the open folder (the workspace key): close every session of it that no
+    /// other process holds, then open a fresh one in the folder.
+    CloseWorkspace(String),
     /// The same session, its folder trusted for project config (the Trust dialog; this session only).
     Trust,
 }
@@ -1198,7 +1201,7 @@ impl TuiView {
         lu.live.switch_armed = None;
         let project = match &target {
             Target::New(p) => p.clone(),
-            Target::Close => lu
+            Target::Close | Target::CloseWorkspace(_) => lu
                 .live
                 .engine
                 .as_ref()
@@ -1210,6 +1213,51 @@ impl TuiView {
         lu.live.dialogs.clear();
         lu.live.busy = false;
         self.launch_with(project, prior, Some(target), vec![], cx);
+    }
+
+    /// The confirmation of `/close-workspace` was answered yes. The open folder goes through the
+    /// restart (its running task is cancelled: the dialog was the agreement the second press stands
+    /// for); another listed folder only touches the store, off the UI thread.
+    fn close_workspace(&mut self, key: String, cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        if key == lu.live.live_ws_key() {
+            const K: &str = "close-workspace";
+            if lu.live.busy {
+                lu.live.switch_armed = Some((K.into(), now_ms() + SWITCH_ARM_MS));
+            }
+            return self.switch(Target::CloseWorkspace(key), K.into(), cx);
+        }
+        let name = lu
+            .live
+            .view
+            .workspaces
+            .workspaces
+            .iter()
+            .find(|w| w.key == key)
+            .map_or_else(|| key.clone(), |w| w.label.clone());
+        let home = lu.cfg.synthesis_home.clone();
+        let job = cx.background_spawn(async move { crate::close_ws::close_in_store(&home, &key) });
+        cx.spawn(async move |this, cx| {
+            let r = job.await;
+            this.update(cx, |t, cx| {
+                let (msg, err) = match r {
+                    Ok(r) => (crate::close_ws::report(&name, &r), !r.failed.is_empty()),
+                    Err(e) => (format!("/close-workspace: could not close ({e})"), true),
+                };
+                t.live_do(cx, |l| l.note(msg, err));
+                t.refresh_store(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The close button of Workspace row `i` (of the snapshot the person saw): asks first.
+    pub fn click_close_workspace(&mut self, i: usize, cx: &mut Context<Self>) {
+        let Some(key) = self.snap.workspaces.get(i).map(|w| w.key.clone()) else {
+            return;
+        };
+        self.live_do(cx, |l| l.ask_close_workspace(Some(&key), now_ms()));
     }
 
     /// Runs `f` on the live state, then redraws and scrolls to the new row.
@@ -1539,6 +1587,7 @@ impl TuiView {
                 }
             }
             Action::Close => return self.switch(Target::Close, "close".into(), cx),
+            Action::CloseWorkspace(key) => return self.close_workspace(key, cx),
             Action::OpenSettings => cx.emit(OpenSettings),
             Action::Panels(arg) => return self.panels_command(&arg, cx),
             Action::Quit => return self.quit(cx),
@@ -1965,6 +2014,7 @@ pub fn build(
 ) -> Result<Launched, String> {
     let first_start = prior.is_none() && target.is_none();
     let prior_sid = prior.as_ref().map(|p| p.sid.clone());
+    let prior_root = prior.as_ref().map(|p| p.root.clone());
     if let Some(p) = prior {
         // a worktree session's end report (path, branch, changes, cleanup) is a notice of the next chat
         notes.extend(engine::close_shared(p));
@@ -2007,6 +2057,44 @@ pub fn build(
                 prior_sid.clone().map(Ok)
             } else {
                 None
+            }
+        }
+        Some(Target::CloseWorkspace(key)) => {
+            // the engine above is closed, so its lock is free: the open session is closed with the rest
+            let name = prior_root
+                .as_deref()
+                .map_or_else(|| key.clone(), synthesis_view::text::basename);
+            let done = crate::close_ws::close_in_store(&home, key).and_then(|mut r| {
+                let own = prior_sid.as_deref().filter(|_| {
+                    prior_root
+                        .as_deref()
+                        .is_some_and(|root| synthesis_view::workspaces::fold_dir(root) == *key)
+                });
+                if let Some(sid) = own {
+                    r.held.retain(|h| h != sid);
+                    let s = synthesis_session::Store::open(
+                        &home,
+                        synthesis_session::StoreOptions::default(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    match s.close_session(sid) {
+                        Ok(true) => r.closed.push(sid.to_string()),
+                        Ok(false) => {}
+                        Err(e) => r.failed.push((sid.to_string(), e.to_string())),
+                    }
+                }
+                Ok(r)
+            });
+            match done {
+                Ok(r) => {
+                    notes.push(crate::close_ws::report(&name, &r));
+                    notes.push("a fresh session started in the same folder".into());
+                    None
+                }
+                Err(e) => {
+                    notes.push(format!("/close-workspace: could not close ({e})"));
+                    prior_sid.clone().map(Ok)
+                }
             }
         }
         None if first_start => match engine::requested_resume(&cfg.args.common, &project, &home) {
