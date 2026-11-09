@@ -331,7 +331,11 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
         live.queue.extend(l.queue.iter().cloned());
     }
     if let Some(step) = &l.rewind {
-        let (home, sid) = (engine.synthesis_home.clone(), engine.sid.clone());
+        let home = crate::rewind::Homes {
+            synthesis: engine.synthesis_home.clone(),
+            user: crate::rewind::user_home(&cfg.env),
+        };
+        let sid = engine.sid.clone();
         live.rewind_listed(crate::rewind::list(&home, &sid));
         if step == "confirm" {
             live.dialogs.clear();
