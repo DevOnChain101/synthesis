@@ -342,7 +342,14 @@ pub struct Native {
     pub out: Box<dyn std::io::Write + Send>,
     pub approver: Arc<dyn Approver>,
     pub input: Arc<dyn synthesis_harness::InputProvider>,
+    /// Asked (twice) before the project's configuration is read and before any MCP server is started; an
+    /// `Err` ends the start with that message, so nothing the project names has run. The desktop uses it to
+    /// check that a folder's trusted configuration is still the approved one.
+    pub pre_start: Option<PreStart>,
 }
+
+/// See [`Native::pre_start`].
+pub type PreStart = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
 /// Everything a front end needs, built once by [`prepare`].
 pub struct Prepared {
@@ -637,6 +644,14 @@ pub fn prepare(
         rules_arg(&c.deny, "--deny")?,
     );
     let is_tui = matches!(front, Front::Tui | Front::Native(_));
+    let gate: Option<PreStart> = match &front {
+        Front::Native(n) => n.pre_start.clone(),
+        _ => None,
+    };
+    // before any project file is read (settings, config, MCP definitions) and again before any process starts
+    if let Some(g) = &gate {
+        g()?;
+    }
     let h = homes(env)?;
     let mut synthesis_deny = synthesis_sandbox::synthesis_state_paths(&h.synthesis);
     // Before anything is created (worktree, store): a bad grant is a usage error.
@@ -1387,6 +1402,9 @@ pub fn prepare(
         );
         eprintln!("synt: warning: {w}");
         notices.push(w);
+    }
+    if let Some(g) = &gate {
+        g()?;
     }
     let (mcp, mcp_attach) = if mplan.servers.is_empty() {
         (None, None)

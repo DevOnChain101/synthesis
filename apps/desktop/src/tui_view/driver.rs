@@ -348,11 +348,14 @@ impl TuiView {
             Err(e) => {
                 lu.session_trust = None;
                 if !lu.pending_remember.is_empty() {
-                    forget(
+                    let failed = forget(
                         &lu.cfg.synthesis_home,
                         &lu.cfg.home.as_deref().map(PathBuf::from),
                         &mut lu.pending_remember,
                     );
+                    if let Some(n) = forget_note(&failed) {
+                        lu.live.note(n, true);
+                    }
                     lu.live
                         .note("trust was not remembered: the trusted restart failed", true);
                 }
@@ -366,11 +369,14 @@ impl TuiView {
                 if !l.engine.trusted {
                     lu.session_trust = None;
                     if !lu.pending_remember.is_empty() {
-                        forget(
+                        let failed = forget(
                             &lu.cfg.synthesis_home,
                             &lu.cfg.home.as_deref().map(PathBuf::from),
                             &mut lu.pending_remember,
                         );
+                        if let Some(n) = forget_note(&failed) {
+                            lu.live.note(n, true);
+                        }
                         lu.live.note(
                             "trust was not remembered: the session could not restart trusted",
                             true,
@@ -1322,7 +1328,19 @@ impl TuiView {
                 home: lu.cfg.home.as_deref().map(PathBuf::from),
                 synt_home: home.clone(),
             };
-            let prior = tr::list(&home).map(|l| l.records).unwrap_or_default();
+            let prior = match tr::list(&home) {
+                Ok(l) => l.records,
+                Err(e) => {
+                    lu.live.note(
+                        format!(
+                            "could not read the trust store ({e}); trusted for this session only"
+                        ),
+                        true,
+                    );
+                    lu.session_trust = Some((root, manifest.ok()));
+                    return self.switch(Target::Trust, "trust".into(), cx);
+                }
+            };
             let note_row = |lu_pending: &mut Vec<(PathBuf, Option<tr::TrustRecord>)>, p: &Path| {
                 // what the row was before this answer, to put back if the restart fails
                 lu_pending.push((
@@ -1359,11 +1377,14 @@ impl TuiView {
                     false,
                 ),
                 Err(e) => {
-                    forget(
+                    let failed = forget(
                         &home,
                         &lu.cfg.home.as_deref().map(PathBuf::from),
                         &mut lu.pending_remember,
                     );
+                    if let Some(n) = forget_note(&failed) {
+                        lu.live.note(n, true);
+                    }
                     lu.live.note(
                         format!(
                             "could not remember the trust ({e}); trusted for this session only"
@@ -1860,27 +1881,38 @@ pub fn read_image_file(p: &Path) -> Result<(bool, Vec<u8>), String> {
 }
 
 /// Undoes the rows an answer wrote (the restart it asked for failed): a row that did not exist before is
-/// removed, one that did is put back as it was.
+/// removed, one that did is put back as it was. What could not be undone is returned, for a note.
 fn forget(
     home: &Path,
     user_home: &Option<PathBuf>,
     rows: &mut Vec<(PathBuf, Option<synthesis_session::trust::TrustRecord>)>,
-) {
+) -> Vec<String> {
     use synthesis_session::trust as tr;
     let policy = tr::Policy {
         home: user_home.clone(),
         synt_home: home.to_path_buf(),
     };
+    let mut failed = vec![];
     for (root, prev) in rows.drain(..) {
-        match prev {
-            Some(r) => {
-                let _ = tr::restore(home, &r, &policy);
-            }
-            None => {
-                let _ = tr::revoke(home, &root.to_string_lossy());
-            }
+        let r = match prev {
+            Some(r) => tr::restore(home, &r, &policy).map(|()| false),
+            None => tr::revoke(home, &root.to_string_lossy()),
+        };
+        if let Err(e) = r {
+            failed.push(format!("{}: {e}", engine::display_path(&root)));
         }
     }
+    failed
+}
+
+/// The note for what [`forget`] could not undo.
+fn forget_note(failed: &[String]) -> Option<String> {
+    (!failed.is_empty()).then(|| {
+        format!(
+            "trust store: could not undo the remembered trust of {}; check /trust",
+            failed.join("; ")
+        )
+    })
 }
 
 /// The notice of a trusted restart that failed and went on untrusted.

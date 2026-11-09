@@ -552,6 +552,13 @@ pub struct StartOpts {
 /// Marks the error of a start that was refused because the trusted configuration changed meanwhile.
 pub const TRUST_CHANGED: &str = "trust-changed";
 
+fn trust_changed_error(files: &[String]) -> String {
+    format!(
+        "{TRUST_CHANGED}: the trusted configuration changed while the session was starting ({})",
+        sanitize_for_display(&files.join(", "))
+    )
+}
+
 /// What was approved: the manifest of `root`'s trusted configuration (session folder `cwd`) when the trust was
 /// decided or stored.
 #[derive(Clone)]
@@ -791,6 +798,12 @@ impl Engine {
                 pending: inputs.clone(),
                 tx: tx.clone(),
             }),
+            // the approved configuration is checked before the project's files are read and before any MCP
+            // server starts (hooks run later still, after the check that follows `prepare`)
+            pre_start: verify.clone().map(|v| {
+                Arc::new(move || v.verify().map_err(|files| trust_changed_error(&files)))
+                    as synthesis_app::run::PreStart
+            }),
         };
         let p = prepare(
             &common,
@@ -801,10 +814,7 @@ impl Engine {
         )?;
         // the configuration is loaded now and no hook has run yet: it must still be what the person approved
         if let Some(Err(files)) = verify.as_ref().map(TrustCheck::verify) {
-            return Err(format!(
-                "{TRUST_CHANGED}: the trusted configuration changed while the session was starting ({})",
-                sanitize_for_display(&files.join(", "))
-            ));
+            return Err(trust_changed_error(&files));
         }
         let Prepared {
             harness,

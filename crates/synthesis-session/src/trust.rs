@@ -175,8 +175,22 @@ fn read_key(home: &Path) -> Option<[u8; 32]> {
         return None;
     }
     let mut b = [0u8; 32];
-    fs::File::open(&p).ok()?.read_exact(&mut b).ok()?;
+    open_regular(&p)?.read_exact(&mut b).ok()?;
     Some(b)
+}
+
+/// Opens `p` for reading only if it is a regular file: opened without blocking and checked on the open
+/// handle, so a path swapped for a FIFO (or a device) between a check and the open cannot hang the reader.
+fn open_regular(p: &Path) -> Option<fs::File> {
+    let mut o = fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        o.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
+    }
+    let f = o.open(p).ok()?;
+    f.metadata().ok()?.is_file().then_some(f)
 }
 
 /// Creates the key without ever replacing one: a 0600 temporary file is written and synced, then hard-linked
@@ -351,14 +365,38 @@ fn put(home: &Path, rec: &TrustRecord, policy: &Policy) -> Result<()> {
     if rec.root.len() > MAX_ROOT_LEN {
         return Err(Error::Invalid("trust refused: the path is too long".into()));
     }
-    let conn = connect(home, false)?;
+    let mut conn = connect(home, false)?;
     ensure(&conn)?;
     let key = match read_key(home) {
         Some(k) => k,
         None => match create_key(home)? {
-            // this call made a new key: rows from before it cannot be verified and are dropped, only now
+            // this call made a new key: rows that do not verify under it (everything from before it) are
+            // dropped, in one transaction, and rows another process already signed with it stay
             Some(k) => {
-                conn.execute("DELETE FROM trusted_roots", [])?;
+                let tx = conn.transaction()?;
+                let rows: Vec<(TrustRecord, String)> = {
+                    let mut st = tx.prepare(
+                        "SELECT root, scope, trusted_at, fingerprint, mac FROM trusted_roots",
+                    )?;
+                    st.query_map([], |r| {
+                        Ok((
+                            TrustRecord {
+                                root: r.get(0)?,
+                                scope: r.get(1)?,
+                                trusted_at: r.get(2)?,
+                                fingerprint: r.get(3)?,
+                            },
+                            r.get::<_, String>(4)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<_>>()?
+                };
+                for (rec, mac) in rows {
+                    if !mac_ok(&k, &rec, &mac) {
+                        tx.execute("DELETE FROM trusted_roots WHERE root=?1", [&rec.root])?;
+                    }
+                }
+                tx.commit()?;
                 k
             }
             None => read_key(home)
@@ -469,10 +507,16 @@ impl std::fmt::Display for Unfit {
     }
 }
 
+/// Entries (files, directories, links) one manifest may visit: a web of links costs visits, not only hashes.
+const MAX_VISITS: usize = 5000;
+
 struct Walk {
     root: PathBuf,
     out: BTreeMap<String, String>,
     bytes: u64,
+    visits: usize,
+    /// Canonical directories already walked (a link back or a diamond is not walked twice).
+    seen: std::collections::BTreeSet<PathBuf>,
 }
 
 fn hex(h: impl AsRef<[u8]>) -> String {
@@ -484,24 +528,27 @@ impl Walk {
     /// project: the CONTENT of the target is what is hashed (a link to a directory is walked), so editing the
     /// target changes the manifest. A link that leaves the project is refused.
     fn visit(&mut self, name: &str, path: &Path, depth: u8) -> std::result::Result<(), Unfit> {
-        let Ok(m) = fs::symlink_metadata(path) else {
+        if fs::symlink_metadata(path).is_err() {
             return Ok(());
-        };
-        let real = if m.file_type().is_symlink() {
-            let real = canon(path);
-            if !real.starts_with(&self.root) {
-                return Err(Unfit::LinkOutside(name.to_string()));
-            }
-            real
-        } else {
-            path.to_path_buf()
-        };
+        }
+        self.visits += 1;
+        if self.visits > MAX_VISITS {
+            return Err(Unfit::TooBig);
+        }
+        // the real place, whether the entry or a folder on the way to it is a link: it must stay inside
+        let real = canon(path);
+        if !real.starts_with(&self.root) {
+            return Err(Unfit::LinkOutside(name.to_string()));
+        }
         let Ok(m) = fs::metadata(&real) else {
             return Ok(()); // a dangling link: nothing to hash
         };
         if m.is_dir() {
             if depth >= MAX_DEPTH {
                 return Err(Unfit::TooBig);
+            }
+            if !self.seen.insert(real.clone()) {
+                return Ok(());
             }
             return self.dir(&real, name, depth + 1);
         }
@@ -513,7 +560,7 @@ impl Walk {
         }
         self.bytes += m.len();
         let mut h = Sha256::new();
-        let mut f = fs::File::open(&real).map_err(|_| Unfit::TooBig)?;
+        let mut f = open_regular(&real).ok_or(Unfit::TooBig)?;
         let mut buf = [0u8; 64 * 1024];
         let mut left = MAX_FILE + 1;
         loop {
@@ -584,21 +631,16 @@ fn imports_of(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// In-project files a hook or MCP server launches: strings under `command` and `args` keys of the project's
-/// settings and `.mcp.json`, split on whitespace, that name a file inside the root. The code those scripts
-/// run in turn is NOT covered.
-fn scripts_in(v: &serde_json::Value, root: &Path, out: &mut Vec<PathBuf>) {
+/// The words a hook or MCP server launches: every whitespace-separated word of the strings under `command`
+/// keys and of the `args` arrays in the project's settings and `.mcp.json`. Which of them name a file is decided
+/// by the caller (a word that names none is skipped). The code those scripts run in turn is NOT covered.
+fn command_words(v: &serde_json::Value, out: &mut Vec<String>) {
     use serde_json::Value;
-    fn take(s: &str, root: &Path, out: &mut Vec<PathBuf>) {
+    fn take(s: &str, out: &mut Vec<String>) {
         for tok in s.split_whitespace() {
             let tok = tok.trim_matches(|c| c == '"' || c == '\'');
-            if (tok.contains('/') || tok.starts_with('.')) && out.len() < 100 {
-                let p = Path::new(tok);
-                out.push(if p.is_absolute() {
-                    p.to_path_buf()
-                } else {
-                    root.join(p)
-                });
+            if !tok.is_empty() && !tok.starts_with('-') && tok.len() <= 4096 && out.len() < 400 {
+                out.push(tok.to_string());
             }
         }
     }
@@ -606,20 +648,20 @@ fn scripts_in(v: &serde_json::Value, root: &Path, out: &mut Vec<PathBuf>) {
         Value::Object(o) => {
             for (k, v) in o {
                 match (k.as_str(), v) {
-                    ("command", Value::String(s)) => take(s, root, out),
+                    ("command", Value::String(s)) => take(s, out),
                     ("args", Value::Array(a)) => {
                         for s in a.iter().filter_map(Value::as_str) {
-                            take(s, root, out);
+                            take(s, out);
                         }
                     }
                     _ => {}
                 }
-                scripts_in(v, root, out);
+                command_words(v, out);
             }
         }
         Value::Array(a) => {
             for v in a {
-                scripts_in(v, root, out);
+                command_words(v, out);
             }
         }
         _ => {}
@@ -642,6 +684,8 @@ pub fn fingerprint(root: &Path, cwd: &Path) -> std::result::Result<String, Unfit
         root: canon(root),
         out: BTreeMap::new(),
         bytes: 0,
+        visits: 0,
+        seen: Default::default(),
     };
     let cwd_real = canon(cwd);
     let mut bases: Vec<(String, PathBuf)> = vec![(String::new(), root.to_path_buf())];
@@ -686,7 +730,9 @@ pub fn fingerprint(root: &Path, cwd: &Path) -> std::result::Result<String, Unfit
             continue;
         }
         let mut text = String::new();
-        let _ = fs::File::open(&file).and_then(|f| f.take(32 * 1024).read_to_string(&mut text));
+        if let Some(f) = open_regular(&file) {
+            let _ = f.take(32 * 1024).read_to_string(&mut text);
+        }
         for imp in imports_of(&text) {
             let target = file.parent().unwrap_or(root).join(&imp);
             let real = canon(&target);
@@ -704,33 +750,39 @@ pub fn fingerprint(root: &Path, cwd: &Path) -> std::result::Result<String, Unfit
             }
         }
     }
-    // scripts that hooks and MCP servers launch
-    let mut scripts = vec![];
-    for (prefix, base) in &bases {
+    // scripts that hooks and MCP servers launch: every word, tried against the root and the session's folder
+    let mut words = vec![];
+    for (_, base) in &bases {
         for rel in CONFIG_FILES {
-            let _ = prefix;
-            let mut text = String::new();
-            if fs::File::open(base.join(rel))
-                .and_then(|f| f.take(MAX_FILE).read_to_string(&mut text))
-                .is_ok()
-                && let Ok(v) = serde_json::from_str(&text)
-            {
-                scripts_in(&v, &w.root, &mut scripts);
+            if let Some(f) = open_regular(&base.join(rel)) {
+                let mut text = String::new();
+                if f.take(MAX_FILE).read_to_string(&mut text).is_ok()
+                    && let Ok(v) = serde_json::from_str(&text)
+                {
+                    command_words(&v, &mut words);
+                }
             }
         }
     }
-    scripts.sort();
-    scripts.dedup();
-    for p in scripts {
-        let real = canon(&p);
-        if real.starts_with(&w.root) && real.is_file() {
-            let shown = real
-                .strip_prefix(&w.root)
-                .unwrap_or(&real)
-                .to_string_lossy()
-                .replace('\\', "/");
-            w.visit(&format!("script:{shown}"), &p, 0)?;
+    words.sort();
+    words.dedup();
+    let mut found = std::collections::BTreeSet::new();
+    for tok in words {
+        for base in [root, cwd] {
+            let p = base.join(&tok);
+            let real = canon(&p);
+            if real.starts_with(&w.root) && fs::metadata(&real).is_ok_and(|m| m.is_file()) {
+                found.insert((real, p));
+            }
         }
+    }
+    for (real, p) in found {
+        let shown = real
+            .strip_prefix(&w.root)
+            .unwrap_or(&real)
+            .to_string_lossy()
+            .replace('\\', "/");
+        w.visit(&format!("script:{shown}"), &p, 0)?;
     }
     Ok(w.out.iter().map(|(k, v)| format!("{k}\t{v}\n")).collect())
 }
@@ -1199,33 +1251,140 @@ mod tests {
     }
 
     #[test]
-    fn scripts_named_by_hooks_and_mcp_servers_are_hashed_other_files_are_not() {
+    fn scripts_named_by_hooks_and_mcp_servers_are_hashed_with_or_without_a_path() {
         let d = tempfile::tempdir().unwrap();
         let r = &fs::canonicalize(d.path()).unwrap();
         fs::create_dir_all(r.join("scripts")).unwrap();
         fs::create_dir_all(r.join(".synt")).unwrap();
-        fs::write(r.join("scripts/hook.sh"), "echo 1").unwrap();
-        fs::write(r.join("srv.js"), "1").unwrap();
-        fs::write(r.join("notes.txt"), "1").unwrap();
+        fs::create_dir_all(r.join("pkg")).unwrap();
+        for (f, c) in [
+            ("scripts/hook.sh", "echo 1"),
+            ("srv.js", "1"),
+            ("run.sh", "1"),
+            ("unrelated.txt", "1"),
+            ("pkg/tool.py", "1"),
+        ] {
+            fs::write(r.join(f), c).unwrap();
+        }
         fs::write(
             r.join(".synt/settings.json"),
-            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"./scripts/hook.sh --flag"}]}]}}"#,
+            r#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"./scripts/hook.sh --flag"},
+               {"type":"command","command":"bash run.sh"}]}]}}"#,
         )
         .unwrap();
         fs::write(
             r.join(".mcp.json"),
-            r#"{"mcpServers":{"s":{"command":"node","args":["./srv.js","notes.txt"]}}}"#,
+            r#"{"mcpServers":{"s":{"command":"node","args":["srv.js","--port","80"]},
+                "t":{"command":"python3","args":["tool.py"]}}}"#,
         )
         .unwrap();
-        let base = fp(r);
-        fs::write(r.join("scripts/hook.sh"), "echo 2").unwrap();
-        assert_eq!(changed_files(&base, &fp(r)), ["script:scripts/hook.sh"]);
-        let base = fp(r);
-        fs::write(r.join("srv.js"), "2").unwrap();
-        assert_eq!(changed_files(&base, &fp(r)), ["script:srv.js"]);
-        let base = fp(r);
-        fs::write(r.join("notes.txt"), "2").unwrap();
-        assert_eq!(fp(r), base, "a bare word is not a path");
+        let cwd = r.join("pkg");
+        let f = || fingerprint(r, &cwd).unwrap();
+        for (file, shown) in [
+            ("scripts/hook.sh", "script:scripts/hook.sh"),
+            ("srv.js", "script:srv.js"),
+            ("run.sh", "script:run.sh"),
+            ("pkg/tool.py", "script:pkg/tool.py"), // a bare word that names a file under the session's folder
+        ] {
+            let base = f();
+            fs::write(r.join(file), "changed").unwrap();
+            assert_eq!(changed_files(&base, &f()), [shown], "{file}");
+        }
+        // words that name no file (node, bash, --flag, 80) are skipped, and so is a file nobody names
+        let base = f();
+        fs::write(r.join("unrelated.txt"), "changed").unwrap();
+        assert_eq!(f(), base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_web_of_links_is_bounded_by_visits_and_a_config_folder_link_out_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let r = &fs::canonicalize(d.path()).unwrap();
+        // a diamond of directory links: every level links twice to the next, no file is ever hashed
+        let skills = r.join(".synt/skills");
+        fs::create_dir_all(&skills).unwrap();
+        for lvl in 0..7 {
+            let dir = r.join(format!("lvl{lvl}"));
+            fs::create_dir_all(&dir).unwrap();
+            for k in 0..30 {
+                let target = r.join(format!("lvl{}", lvl + 1));
+                fs::create_dir_all(&target).unwrap();
+                std::os::unix::fs::symlink(&target, dir.join(format!("l{k}"))).unwrap();
+            }
+        }
+        std::os::unix::fs::symlink(r.join("lvl0"), skills.join("web")).unwrap();
+        let t0 = std::time::Instant::now();
+        let got = fingerprint_root(r);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            t0.elapsed()
+        );
+        assert!(got.is_ok() || got == Err(Unfit::TooBig));
+        // `.synt` itself a link to a folder outside the project: refused
+        let d2 = tempfile::tempdir().unwrap();
+        let r2 = &fs::canonicalize(d2.path()).unwrap().join("proj");
+        let out = d2.path().join("outside");
+        fs::create_dir_all(out.join("agents")).unwrap();
+        fs::write(out.join("agents/a.md"), "x").unwrap();
+        fs::create_dir_all(r2).unwrap();
+        std::os::unix::fs::symlink(&out, r2.join(".synt")).unwrap();
+        assert!(matches!(fingerprint_root(r2), Err(Unfit::LinkOutside(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_in_the_configuration_cannot_hang_the_walk() {
+        let d = tempfile::tempdir().unwrap();
+        let r = &fs::canonicalize(d.path()).unwrap();
+        fs::create_dir_all(r.join(".synt")).unwrap();
+        let fifo = r.join(".synt/settings.json");
+        // the mkfifo binary the platform ships (no unsafe code here)
+        let st = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        let t0 = std::time::Instant::now();
+        let _ = fingerprint_root(r); // an error or a manifest, but it returns
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_new_key_drops_only_rows_that_do_not_verify_under_it() {
+        let (_d, home) = store_home();
+        let pl = pol(&home);
+        let (a, b) = (project(&home, "app"), project(&home, "other"));
+        add(&home, &a, FOLDER, "fp", &pl).unwrap();
+        // the key is lost; another writer made the new key and signed a row with it before our add ran
+        fs::remove_file(key_path(&home)).unwrap();
+        let k = create_key(&home).unwrap().unwrap();
+        let theirs = TrustRecord {
+            root: b.to_string_lossy().into_owned(),
+            scope: FOLDER.into(),
+            trusted_at: now(),
+            fingerprint: "mine".into(),
+        };
+        let conn = connect(&home, false).unwrap();
+        conn.execute(
+            "INSERT INTO trusted_roots(root, scope, trusted_at, fingerprint, mac) VALUES (?1,?2,?3,?4,?5)",
+            (&theirs.root, &theirs.scope, &theirs.trusted_at, &theirs.fingerprint, mac_hex(&k, &theirs)),
+        )
+        .unwrap();
+        // a later add finds a key in force: nothing is dropped, and the old row still does not verify
+        let c = project(&home, "third");
+        add(&home, &c, FOLDER, "fp", &pl).unwrap();
+        let l = list(&home).unwrap();
+        let roots: Vec<_> = l.records.iter().map(|r| r.root.clone()).collect();
+        assert!(
+            roots.contains(&theirs.root) && roots.contains(&c.to_string_lossy().into_owned()),
+            "{roots:?}"
+        );
+        assert_eq!(
+            l.unverified, 1,
+            "the row from before the new key is ignored"
+        );
     }
 
     #[test]

@@ -476,3 +476,126 @@ fn a_file_changed_between_the_check_and_the_load_aborts_the_trusted_start() {
     assert!(err.starts_with(TRUST_CHANGED), "{err}");
     assert!(err.contains(".synt/settings.json"), "{err}");
 }
+
+/// Nothing the project names has run when the trusted configuration is found changed: the check runs before
+/// the project's files are read, again before any MCP server starts, and once more before any hook runs. A
+/// control run shows the markers DO appear when nothing is tampered with, so the absence proves something.
+#[test]
+fn nothing_the_project_names_runs_before_the_trusted_configuration_is_verified() {
+    use clap::Parser as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use synthesis_desktop::engine::{Args, Engine, StartOpts, TRUST_CHANGED, TrustCheck};
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let (ws, home) = (base.join("ws"), base.join("home"));
+    std::fs::create_dir_all(ws.join(".synt")).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let (hook_mark, mcp_mark) = (base.join("hook-ran"), base.join("mcp-ran"));
+    let settings = ws.join(".synt/settings.json");
+    std::fs::write(
+        &settings,
+        format!(
+            r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"touch {}"}}]}}]}}}}"#,
+            hook_mark.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join(".mcp.json"),
+        format!(
+            r#"{{"mcpServers":{{"s":{{"command":"sh","args":["-c","touch {}; sleep 1"]}}}}}}"#,
+            mcp_mark.display()
+        ),
+    )
+    .unwrap();
+    let sp = base.join("script.json");
+    std::fs::write(&sp, r#"[{"text": "ok"}]"#).unwrap();
+    let env = Env::from_pairs([
+        ("HOME", home.to_str().unwrap()),
+        ("SYNT_HOME", home.to_str().unwrap()),
+    ]);
+    let model = format!("fake:{}", sp.display());
+    let args = |trust: bool| {
+        let mut a = vec![
+            "synthesis-desktop",
+            "--sandbox",
+            "off",
+            "--provider",
+            &model,
+            "--approve-mcp",
+            "s",
+        ];
+        if trust {
+            a.push("--trust-project");
+        }
+        Args::try_parse_from(a).unwrap().common
+    };
+    let manifest = synthesis_session::trust::fingerprint(&ws, &ws).unwrap();
+    let clear = || {
+        let _ = std::fs::remove_file(&hook_mark);
+        let _ = std::fs::remove_file(&mcp_mark);
+    };
+    let start = |trust: bool, tamper_at: Option<usize>| {
+        clear();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let s2 = settings.clone();
+        let hook: Option<Arc<dyn Fn() + Send + Sync>> = tamper_at.map(|n| {
+            let calls = calls.clone();
+            Arc::new(move || {
+                if calls.fetch_add(1, Ordering::SeqCst) + 1 == n {
+                    // a writer that races the start: any change to the file changes the manifest
+                    let mut t = std::fs::read_to_string(&s2).unwrap();
+                    t.push('\n');
+                    std::fs::write(&s2, t).unwrap();
+                }
+            }) as Arc<dyn Fn() + Send + Sync>
+        });
+        let r = Engine::start_with(
+            StartOpts {
+                project: ws.clone(),
+                common: args(trust),
+                resume: None,
+                notes: vec![],
+                verify: trust.then(|| TrustCheck {
+                    root: ws.clone(),
+                    cwd: ws.clone(),
+                    manifest: synthesis_session::trust::fingerprint(&ws, &ws).unwrap(),
+                    before_compare: hook,
+                }),
+            },
+            &env,
+        );
+        // the MCP child is started detached: give it a moment to touch its marker
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        r.map(|(e, _rx)| e.trusted)
+    };
+    // control: untampered, trusted: the SessionStart hook and the MCP server both ran
+    assert_eq!(start(true, None).ok(), Some(true));
+    assert!(hook_mark.exists(), "control: the hook should run");
+    assert!(mcp_mark.exists(), "control: the MCP server should start");
+    let _ = manifest;
+    // tampered at the first check (before any project file is read) or the second (before MCP starts)
+    for n in [1, 2] {
+        let err = start(true, Some(n)).err().unwrap();
+        assert!(err.starts_with(TRUST_CHANGED), "{err}");
+        assert!(
+            !hook_mark.exists() && !mcp_mark.exists(),
+            "check {n}: something already ran"
+        );
+    }
+    // tampered at the third (after prepare): an MCP server may be up by then, but no hook has run
+    let err = start(true, Some(3)).err().unwrap();
+    assert!(err.starts_with(TRUST_CHANGED), "{err}");
+    assert!(
+        !hook_mark.exists(),
+        "no SessionStart hook ran in the aborted attempt"
+    );
+    // the retry the window makes: untrusted, no hook (project hooks are inert untrusted)
+    assert_eq!(start(false, None).ok(), Some(false));
+    assert!(
+        !hook_mark.exists(),
+        "an untrusted start runs no project hook"
+    );
+}

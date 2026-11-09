@@ -177,6 +177,8 @@ pub struct Model {
     pub trusted: Vec<(synthesis_session::trust::TrustRecord, Option<bool>)>,
     /// Rows of the trust store ignored because their MAC does not verify.
     pub trust_unverified: usize,
+    /// Why the trust store could not be read (the list is then empty).
+    pub trust_error: Option<String>,
     pub mcp_error: Option<String>,
     pub providers: Vec<KeyStatus>,
     pub agents_md: Vec<(PathBuf, bool)>,
@@ -269,6 +271,7 @@ impl Model {
             mcp: vec![],
             trusted: vec![],
             trust_unverified: 0,
+            trust_error: None,
             mcp_error: None,
             providers: vec![],
             agents_md: vec![],
@@ -336,7 +339,16 @@ impl Model {
                 (s.name, s.description, src)
             })
             .collect();
-        let listing = synthesis_session::trust::list(&c.home).unwrap_or_default();
+        let listing = match synthesis_session::trust::list(&c.home) {
+            Ok(l) => {
+                self.trust_error = None;
+                l
+            }
+            Err(e) => {
+                self.trust_error = Some(e.to_string());
+                Default::default()
+            }
+        };
         self.trust_unverified = listing.unverified;
         self.trusted = listing
             .records

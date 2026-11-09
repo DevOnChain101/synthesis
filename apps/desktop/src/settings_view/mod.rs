@@ -1014,6 +1014,12 @@ impl SettingsView {
                     .into_any_element(),
             );
         }
+        if let Some(e) = &m.trust_error {
+            out.push(
+                small(format!("The trust store could not be read: {e}"), t::ERROR)
+                    .into_any_element(),
+            );
+        }
         if m.trust_unverified > 0 {
             out.push(
                 small(

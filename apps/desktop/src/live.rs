@@ -2399,6 +2399,9 @@ impl Live {
             self.note(why, true);
             return false;
         }
+        // the trusted configuration must be fingerprintable: it is what a change is detected against
+        let unfit =
+            synthesis_session::trust::fingerprint(&root, std::path::Path::new(&e.cwd)).err();
         let mut paragraphs = trust_text(&root, &e.cwd);
         // trusted before, but the configuration moved on: say what changed (names only)
         if let crate::engine::Remembered::Changed { files, since } =
@@ -2412,6 +2415,14 @@ impl Live {
                 ),
             );
         }
+        if let Some(why) = &unfit {
+            paragraphs.insert(
+                1,
+                format!(
+                    "Change detection is NOT possible here: {why}. Trusting for this session runs WITHOUT any check that the configuration stays what you reviewed, and remembering is not offered."
+                ),
+            );
+        }
         let headers = paragraphs.into_iter().map(|t| (0, t)).collect();
         // "all its subfolders" only for a real project parent: never the home folder, a filesystem or drive
         // root, a parent of home or the config folder (the same refusal as for the root)
@@ -2421,14 +2432,15 @@ impl Live {
                 p.is_dir() && crate::engine::parent_refusal(p, home, &e.synthesis_home).is_none()
             })
             .map(std::path::Path::to_path_buf);
-        let mut options = vec![
-            (
-                "no".to_string(),
-                "Not now (keep the folder untrusted)".to_string(),
-            ),
-            ("remember".into(), "Trust this folder (remember)".into()),
-            ("session".into(), "Trust for this session only".into()),
-        ];
+        let parent = parent.filter(|_| unfit.is_none());
+        let mut options = vec![(
+            "no".to_string(),
+            "Not now (keep the folder untrusted)".to_string(),
+        )];
+        if unfit.is_none() {
+            options.push(("remember".into(), "Trust this folder (remember)".into()));
+        }
+        options.push(("session".into(), "Trust for this session only".into()));
         if let Some(p) = &parent {
             options.push((
                 "parent".into(),
