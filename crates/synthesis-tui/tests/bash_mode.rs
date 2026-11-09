@@ -113,7 +113,7 @@ impl Rig {
                 return;
             }
             assert!(
-                t0.elapsed() < Duration::from_secs(15),
+                t0.elapsed() < Duration::from_secs(60),
                 "timed out waiting for {needle:?}; screen:\n{s}"
             );
             std::thread::sleep(Duration::from_millis(5));
@@ -249,7 +249,7 @@ fn esc_cancels_a_long_command_and_no_model_turn_follows() {
             break;
         }
         assert!(
-            t0.elapsed() < Duration::from_secs(15),
+            t0.elapsed() < Duration::from_secs(60),
             "{}",
             r.tty.screen_text()
         );

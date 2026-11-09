@@ -63,7 +63,7 @@ fn start(
     target: Option<Target>,
     model: Option<String>,
 ) -> Launched {
-    build(&r.cfg, r.ws.clone(), prior, target, model, vec![]).expect("engine starts")
+    build(&r.cfg, r.ws.clone(), prior, target, model, None, vec![]).expect("engine starts")
 }
 
 /// The caller of `build` gives a `/close` the folder of the session it closes.
@@ -80,6 +80,7 @@ fn start_in(
         Some(prior),
         Some(target),
         model,
+        None,
         vec![],
     )
     .expect("engine starts")

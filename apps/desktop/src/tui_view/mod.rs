@@ -644,8 +644,7 @@ impl TuiView {
             .collect();
         let tab_click = |i: usize| -> panels::OnClick {
             Box::new(cx.listener(move |this, _, _, cx| {
-                this.ts.tab = ChatTab::ALL[i];
-                cx.notify();
+                this.select_tab(ChatTab::ALL[i], cx);
             }))
         };
         let strip = chrome::tabs(
@@ -873,6 +872,7 @@ impl Render for TuiView {
         let motion = self.live.as_ref().is_some_and(|l| l.cfg.tui.motion);
         // a spinner or a blink in the Running list is repainted every frame too
         if self.attention() == Some(true)
+            || self.pointer_animating()
             || self
                 .live
                 .as_ref()
@@ -1042,6 +1042,31 @@ mod tests {
         view.update(vcx, |t, _| t.set_live(live("a")));
         draw(vcx);
         assert_eq!(view.read_with(vcx, |t, _| t.ts.tab), ChatTab::Diff);
+    }
+
+    /// Opening Files in an untrusted folder reads nothing from it: no scan starts, the tree holds only the note.
+    #[gpui::test]
+    fn the_files_tab_does_no_scan_in_an_untrusted_folder(cx: &mut TestAppContext) {
+        use crate::live::Live;
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let mut l = Live::new();
+        l.starting = false;
+        l.cwd = "/nonexistent/untrusted-project".into();
+        assert!(!l.trusted);
+        view.update(vcx, |t, _| t.set_live(l));
+        view.update(vcx, |t, cx| {
+            t.select_tab(ChatTab::Files, cx);
+            t.tabs_tick(cx);
+        });
+        vcx.run_until_parked();
+        view.read_with(vcx, |t, _| {
+            assert!(!t.tree.loading, "no background scan was started");
+            let note = t.tree.data.as_ref().and_then(|d| d.note.clone());
+            assert_eq!(note.as_deref(), Some(tabs::UNTRUSTED));
+        });
     }
 
     #[gpui::test]

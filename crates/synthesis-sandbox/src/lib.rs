@@ -431,6 +431,7 @@ pub fn synthesis_state_paths(synthesis_home: &Path) -> Vec<PathBuf> {
         "synt.db",
         "synt.db-wal",
         "synt.db-shm",
+        "synt.db-journal",
         "memory",
         "projects",
         // peer endpoint sockets, `peer.key` and the session registry (messaging.md B8.4)
@@ -635,6 +636,9 @@ mod tests {
     fn peer_run_dir_is_synthesis_state() {
         let home = p("/h/.synt");
         assert!(synthesis_state_paths(&home).contains(&home.join("run")));
+        // the trust key lives under run/, the remembered-trust rows in the database and its journal
+        assert!(synthesis_state_paths(&home).contains(&home.join("synt.db-journal")));
+        assert!(home.join("run/trust.key").starts_with(home.join("run")));
         assert!(synthesis_state_paths(&home).contains(&home.join("browser-profiles")));
     }
 

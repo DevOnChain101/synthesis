@@ -17,29 +17,67 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, prelude::*, px,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::scroll::Scrollbar;
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
 use synthesis_settings_ui::{Kind, Origin, Section};
 use synthesis_tui_render::theme as t;
 
 use crate::theme::hsla;
 use crate::tui_view::layout::Hidden;
-use crate::tui_view::tracked;
 use model::{Cfg, Change, Control, McpForm, Model, Outcome, Row};
 
-/// Largest popup, and the margin kept round it.
-pub const POPUP_W: f32 = 720.;
-pub const POPUP_H: f32 = 640.;
+/// The popup is 720 to 860 wide (62% of the area), at most 720 high (80%), and keeps a margin to the window.
+pub const POPUP_MIN_W: f32 = 720.;
+pub const POPUP_MAX_W: f32 = 860.;
+pub const POPUP_MAX_H: f32 = 720.;
 const MARGIN: f32 = 16.;
-/// Below this width the popup is as wide as the window allows and the tabs wrap.
+/// Below this the popup is as large as the window allows.
 const MIN_W: f32 = 280.;
 const MIN_H: f32 = 240.;
+/// Spacing scale (8 / 12 / 16 / 20), the popup's side padding, and the fixed metrics of the rows and tabs.
+const PAD: f32 = 20.;
+const TAB_H: f32 = 36.;
+const ROW_MIN_H: f32 = 52.;
+const NUMBER_W: f32 = 96.;
+const RESET_W: f32 = 26.;
 
-/// Size of the popup in a content area `w` x `h`: the largest size, shrunk to leave a margin, never over the area.
+/// Size of the popup in a content area `w` x `h`.
 pub fn popup_size(w: f32, h: f32) -> (f32, f32) {
     (
-        (w - 2. * MARGIN).clamp(MIN_W, POPUP_W).min(w),
-        (h - 2. * MARGIN).clamp(MIN_H, POPUP_H).min(h),
+        (w * 0.62)
+            .clamp(POPUP_MIN_W, POPUP_MAX_W)
+            .min(w - 2. * MARGIN)
+            .max(MIN_W)
+            .min(w),
+        (h * 0.8).clamp(MIN_H, POPUP_MAX_H).min(h),
     )
+}
+
+/// Width of the column all the controls of a row sit in, right-aligned.
+pub fn control_w(pw: f32) -> f32 {
+    (pw * 0.36).clamp(168., 280.)
+}
+
+/// Focus ring of a control reached with the keyboard.
+fn ring(s: gpui::StyleRefinement) -> gpui::StyleRefinement {
+    s.border_1().border_color(hsla(t::ACCENT))
+}
+
+/// Space or Enter on a focused control.
+fn activates(ev: &gpui::KeyDownEvent) -> bool {
+    matches!(ev.keystroke.key.as_str(), "space" | "enter")
+}
+
+/// A card of rows.
+fn card() -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .rounded(px(8.))
+        .border_1()
+        .border_color(hsla(t::BORDER))
+        .bg(alpha(t::TEXT, 0.025))
+        .overflow_hidden()
 }
 
 /// The tabs, in order.
@@ -67,7 +105,7 @@ fn tab_label(s: Section) -> &'static str {
         Section::Mcp => "MCP",
         Section::Skills => "Skills",
         Section::SubAgents => "Sub-agents",
-        Section::UserPrompt => "User & prompt",
+        Section::UserPrompt => "Prompt",
     }
 }
 
@@ -189,6 +227,8 @@ pub struct SettingsView {
     mcp_error: Option<String>,
     notice: Option<String>,
     scroll: ScrollHandle,
+    /// The tab strip's own scrolling (it never wraps).
+    tab_scroll: ScrollHandle,
     /// The tab shown (a search shows every section).
     tab: Section,
     /// Why "Restart session" cannot be used now (the shell says).
@@ -341,6 +381,7 @@ impl SettingsView {
             mcp_error: None,
             notice: None,
             scroll: ScrollHandle::new(),
+            tab_scroll: ScrollHandle::new(),
             tab: TABS[0],
             restart_block: None,
             sliders,
@@ -541,6 +582,15 @@ impl SettingsView {
         cx.notify();
     }
 
+    fn trust_revoke(&mut self, root: &str, cx: &mut Context<Self>) {
+        let Some(m) = &mut self.model else { return };
+        self.notice = Some(match m.revoke_trust(root) {
+            Ok(()) => format!("Revoked trust of {root}. It takes effect at the next engine start."),
+            Err(e) => format!("Could not revoke: {e}"),
+        });
+        cx.notify();
+    }
+
     fn mcp_remove(&mut self, name: &str, cx: &mut Context<Self>) {
         let Some(m) = &mut self.model else { return };
         match m.remove_mcp(name) {
@@ -555,81 +605,111 @@ impl SettingsView {
 
     // ---- painting
 
-    fn field_row(&self, r: &Row, cx: &mut Context<Self>) -> AnyElement {
+    /// One row of a card: label, description and a compact status line on the left; the control, right-aligned
+    /// in a column of fixed width, and the reset button on the right. A list editor goes under the row.
+    fn field_row(&self, r: &Row, cw: f32, first: bool, cx: &mut Context<Self>) -> AnyElement {
         let key = r.key.clone();
         let locked = r.locked.is_some();
         let sel = SharedString::from(format!("row-{key}"));
-        let mut head = div().flex().items_center().gap(px(10.)).child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .text_color(hsla(t::TEXT))
-                .child(r.label.clone()),
-        );
         let mut below: Vec<AnyElement> = vec![];
+        let mut ctl = div()
+            .flex()
+            .flex_1()
+            .min_w(px(0.))
+            .items_center()
+            .justify_end()
+            .gap(px(8.));
         match &r.control {
             Control::Switch(on) => {
                 let (on, k) = (*on, key.clone());
+                let k2 = k.clone();
                 let mut s = div()
                     .id(SharedString::from(format!("sw-{key}")))
+                    .debug_selector({
+                        let k = key.clone();
+                        move || format!("ctl-{k}")
+                    })
+                    .rounded(px(10.))
                     .child(switch(on, locked));
                 if !locked {
-                    s = s.cursor_pointer().on_click(cx.listener(
-                        move |this, _: &ClickEvent, w, cx| this.apply(&k, Change::Bool(!on), w, cx),
-                    ));
+                    s = s
+                        .tab_index(0)
+                        .focus_visible(ring)
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _: &ClickEvent, w, cx| {
+                            this.apply(&k, Change::Bool(!on), w, cx)
+                        }))
+                        .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| {
+                            if activates(ev) {
+                                this.apply(&k2, Change::Bool(!on), w, cx);
+                                cx.stop_propagation();
+                            }
+                        }));
                 }
-                head = head.child(s);
+                ctl = ctl.child(s);
             }
             Control::Choice { opts, cur } => {
                 let mut seg = div()
+                    .debug_selector({
+                        let k = key.clone();
+                        move || format!("ctl-{k}")
+                    })
                     .flex()
                     .flex_wrap()
+                    .justify_end()
                     .gap(px(2.))
                     .p(px(3.))
                     .rounded(px(9.))
                     .bg(alpha(t::TEXT, 0.07));
                 for &o in *opts {
-                    let (k, v, sel) = (key.clone(), o.to_string(), o == cur);
+                    let (k, v, on) = (key.clone(), o.to_string(), o == cur);
+                    let (k2, v2) = (k.clone(), v.clone());
                     let mut b = div()
                         .id(SharedString::from(format!("opt-{key}-{o}")))
                         .px(px(9.))
                         .py(px(4.))
                         .rounded(px(7.))
                         .text_size(px(11.5))
-                        .text_color(if sel {
+                        .text_color(if on {
                             hsla(t::TEXT_STRONG)
                         } else {
                             hsla(t::MUTED)
                         })
-                        .when(sel, |d| d.bg(alpha(t::ACCENT, 0.24)))
+                        .when(on, |d| d.bg(alpha(t::ACCENT, 0.24)))
                         .opacity(if locked { 0.5 } else { 1. })
                         .child(o.to_string());
                     if !locked {
-                        b = b.cursor_pointer().on_click(cx.listener(
-                            move |this, _: &ClickEvent, w, cx| {
+                        b = b
+                            .tab_index(0)
+                            .focus_visible(ring)
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _: &ClickEvent, w, cx| {
                                 this.apply(&k, Change::Choice(v.clone()), w, cx)
-                            },
-                        ));
+                            }))
+                            .on_key_down(cx.listener(
+                                move |this, ev: &gpui::KeyDownEvent, w, cx| {
+                                    if activates(ev) {
+                                        this.apply(&k2, Change::Choice(v2.clone()), w, cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ));
                     }
                     seg = seg.child(b);
                 }
-                below.push(seg.into_any_element());
+                ctl = ctl.child(seg);
             }
             Control::Number { range, .. } => {
                 if let Some(inp) = self.inputs.get(&key) {
-                    below.push(
+                    ctl = ctl.child(small(range.clone(), t::MUTED)).child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .child(Input::new(inp).disabled(locked)),
-                            )
-                            .child(small(range.clone(), t::MUTED))
-                            .into_any_element(),
+                            .debug_selector({
+                                let k = key.clone();
+                                move || format!("ctl-{k}")
+                            })
+                            .w(px(NUMBER_W))
+                            .flex_none()
+                            .child(Input::new(inp).disabled(locked)),
                     );
                 }
             }
@@ -653,6 +733,8 @@ impl SettingsView {
                         chip = chip.child(
                             div()
                                 .id(SharedString::from(format!("rm-{key}-{i}")))
+                                .tab_index(0)
+                                .focus_visible(ring)
                                 .cursor_pointer()
                                 .text_color(hsla(t::MUTED))
                                 .hover(|d| d.text_color(hsla(t::ERROR)))
@@ -672,112 +754,209 @@ impl SettingsView {
                     below.push(Input::new(inp).into_any_element());
                 }
             }
-            Control::Slider { min, max, value } => {
+            Control::Slider { value, .. } => {
                 if let Some(sl) = self.sliders.get(&key) {
                     let now = sl.read(cx).value().end().round() as u64;
-                    head = head.child(small(format!("{now} %"), t::TEXT_STRONG));
-                    below.push(
+                    ctl = ctl.child(
                         div()
+                            .debug_selector({
+                                let k = key.clone();
+                                move || format!("ctl-{k}")
+                            })
+                            .flex_1()
+                            .min_w(px(60.))
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(small(format!("{min} %"), t::MUTED))
+                            .child(
+                                div().flex_1().min_w(px(40.)).child(
+                                    Slider::new(sl)
+                                        .horizontal()
+                                        .disabled(locked)
+                                        .accessibility_label(r.label.clone()),
+                                ),
+                            )
                             .child(
                                 div()
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .child(Slider::new(sl).horizontal().disabled(locked)),
-                            )
-                            .child(small(format!("{max} %"), t::MUTED).ml(px(6.)))
-                            .into_any_element(),
+                                    .w(px(40.))
+                                    .flex_none()
+                                    .flex()
+                                    .justify_end()
+                                    .child(small(format!("{now} %"), t::TEXT_STRONG)),
+                            ),
                     );
                 } else {
-                    head = head.child(small(format!("{value} %"), t::MUTED));
+                    ctl = ctl.child(small(format!("{value} %"), t::MUTED));
                 }
             }
             Control::Static(v) => {
-                head = head.child(
+                ctl = ctl.child(
                     div()
-                        .max_w(px(180.))
+                        .debug_selector({
+                            let k = key.clone();
+                            move || format!("ctl-{k}")
+                        })
                         .text_size(px(11.5))
                         .text_color(hsla(t::MUTED))
                         .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
                         .child(v.clone()),
                 );
             }
         }
-        let mut tags = div()
+        // the reset button: only on a row that was changed; the slot is always there so controls line up
+        let reset = div()
+            .w(px(RESET_W))
+            .flex_none()
+            .flex()
+            .justify_center()
+            .when(r.resettable, |d| {
+                let k = key.clone();
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("reset-{key}")))
+                        .debug_selector({
+                            let k = key.clone();
+                            move || format!("reset-{k}")
+                        })
+                        .tab_index(0)
+                        .focus_visible(ring)
+                        .p(px(4.))
+                        .rounded(px(5.))
+                        .cursor_pointer()
+                        .text_color(hsla(t::MUTED))
+                        .hover(|d| d.text_color(hsla(t::ACCENT)).bg(alpha(t::TEXT, 0.08)))
+                        .tooltip({
+                            let d = r.default.clone();
+                            move |_, cx| -> gpui::AnyView {
+                                cx.new(|_| crate::ui::Tip(format!("Reset to default ({d})")))
+                                    .into()
+                            }
+                        })
+                        .on_click(cx.listener({
+                            let k = k.clone();
+                            move |this, _: &ClickEvent, w, cx| this.reset(&k, w, cx)
+                        }))
+                        .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| {
+                            if activates(ev) {
+                                this.reset(&k, w, cx);
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .child(crate::widgets::chrome::icon("undo-2", 12., hsla(t::MUTED))),
+                )
+            });
+        // the status line: one badge at most, the default, where the value is set
+        let mut status = div()
             .flex()
             .flex_wrap()
             .items_center()
-            .gap(px(6.))
-            .child(badge(model::origin_label(r.origin), origin_color(r.origin)));
+            .gap(px(8.))
+            .mt(px(3.));
         if r.terminal_only {
-            tags = tags.child(badge("terminal TUI only", t::MUTED));
-        } else if r.restart {
-            tags = tags.child(if r.changed {
-                badge("applies to the next session (changed)", t::WARN)
-            } else {
-                badge("applies to the next session", t::MUTED)
-            });
-        } else {
-            tags = tags.child(badge("applies now", t::SUCCESS));
-        }
-        if r.confirm {
-            tags = tags.child(badge("asks first", t::MUTED));
+            status = status.child(badge("terminal only", t::MUTED));
+        } else if r.changed {
+            status = status.child(badge("restart needed", t::WARN));
+        } else if r.resettable {
+            status = status.child(badge("modified", t::ACCENT));
         }
         if !matches!(r.control, Control::Static(_)) {
-            tags = tags.child(small(format!("default: {}", r.default), t::MUTED));
+            status = status.child(small(format!("default: {}", r.default), t::MUTED));
         }
-        if r.resettable {
-            let k = key.clone();
-            tags = tags.child(
-                div()
-                    .id(SharedString::from(format!("reset-{key}")))
-                    .cursor_pointer()
-                    .text_size(px(10.5))
-                    .text_color(hsla(t::MUTED))
-                    .hover(|d| d.text_color(hsla(t::ACCENT)))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, w, cx| this.reset(&k, w, cx)))
-                    .child("reset to default"),
-            );
+        if r.origin != Origin::Default {
+            status = status.child(small(
+                format!("set in {}", model::origin_label(r.origin)),
+                origin_color(r.origin),
+            ));
+        }
+        if r.confirm {
+            status = status.child(small("asks before changing", t::MUTED));
+        }
+        let mut left = div().flex_1().min_w(px(0.)).flex().flex_col().child(
+            div()
+                .text_size(px(13.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(hsla(t::TEXT_STRONG))
+                .child(r.label.clone()),
+        );
+        if !r.help.is_empty() {
+            left = left.child(small(r.help.clone(), t::MUTED).mt(px(2.)));
+        }
+        left = left.child(status);
+        if let Some(why) = &r.locked {
+            left = left.child(small(format!("Locked: {why}"), t::WARN).mt(px(2.)));
+        }
+        for x in &r.refused {
+            left = left.child(small(x.clone(), t::MUTED));
+        }
+        if let Some(e) = &r.error {
+            left = left.child(small(e.clone(), t::ERROR).mt(px(3.)));
         }
         let mut col = div()
             .debug_selector(move || sel.to_string())
+            .relative()
             .flex()
             .flex_col()
-            .gap(px(5.))
-            .py(px(7.))
-            .child(head);
+            .px(px(14.))
+            .py(px(10.))
+            .min_h(px(ROW_MIN_H))
+            // the hairline between rows, and a quiet accent on the left edge of a changed row
+            .when(!first, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(1.))
+                        .bg(alpha(t::TEXT, 0.08)),
+                )
+            })
+            .when(r.resettable, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left_0()
+                        .w(px(2.))
+                        .bg(alpha(t::ACCENT, 0.8)),
+                )
+            })
+            .child(
+                div().flex().items_center().gap(px(16.)).child(left).child(
+                    div()
+                        .w(px(cw))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(ctl)
+                        .child(reset),
+                ),
+            );
         for b in below {
-            col = col.child(b);
-        }
-        if !r.help.is_empty() {
-            col = col.child(small(r.help.clone(), t::MUTED));
-        }
-        col = col.child(tags);
-        if let Some(why) = &r.locked {
-            col = col.child(small(format!("Locked: {why}"), t::WARN));
-        }
-        for x in &r.refused {
-            col = col.child(small(x.clone(), t::MUTED));
-        }
-        if let Some(e) = &r.error {
-            col = col.child(small(e.clone(), t::ERROR));
+            col = col.child(div().mt(px(8.)).child(b));
         }
         col.into_any_element()
     }
 
-    fn section_title(&self, s: Section, first: bool) -> AnyElement {
+    /// A section heading: small caps and a hairline.
+    fn heading(&self, text: &str, first: bool) -> AnyElement {
         div()
-            .mt(px(if first { 0. } else { 26. }))
-            .mb(px(6.))
-            .child(tracked(
-                &s.title().to_uppercase(),
-                10.,
-                0.18,
-                hsla(t::MUTED),
-            ))
+            .mt(px(if first { 0. } else { 20. }))
+            .mb(px(8.))
+            .pb(px(6.))
+            .border_b_1()
+            .border_color(alpha(t::TEXT, 0.10))
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(hsla(t::MUTED))
+                    .child(text.to_uppercase()),
+            )
             .into_any_element()
     }
 
@@ -943,6 +1122,105 @@ impl SettingsView {
             out.push(small(format!("{name}: {why}"), t::MUTED).into_any_element());
         }
         out
+    }
+
+    /// The folders remembered as trusted (user store) with a Revoke button each.
+    /// The trusted folders as a section card: a row per folder (path, state and date on the left, Revoke in the
+    /// control column), then the notes.
+    fn trusted_card(&self, m: &Model, cw: f32, cx: &mut Context<Self>) -> AnyElement {
+        let mut c = card();
+        if m.trusted.is_empty() {
+            c = c.child(div().px(px(14.)).py(px(12.)).child(small(
+                "None remembered. The Files tab offers it for a folder.",
+                t::MUTED,
+            )));
+        }
+        for (i, (r, same)) in m.trusted.iter().enumerate() {
+            let root = r.root.clone();
+            let state = match (r.scope.as_str(), same) {
+                ("parent", _) => "parent: all subfolders",
+                (_, Some(true)) => "config unchanged",
+                (_, Some(false)) => "CONFIG CHANGED: not honoured",
+                _ => "folder missing",
+            };
+            let bad = *same == Some(false);
+            let left = div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(hsla(t::TEXT_STRONG))
+                        .overflow_hidden()
+                        .child(synthesis_harness::sanitize_for_display(&r.root)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .mt(px(3.))
+                        .child(badge(state, if bad { t::WARN } else { t::MUTED }))
+                        .child(small(
+                            format!("since {}", r.trusted_at.get(..10).unwrap_or(&r.trusted_at)),
+                            t::MUTED,
+                        )),
+                );
+            c = c.child(
+                div()
+                    .debug_selector(move || format!("trust-row-{i}"))
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .gap(px(16.))
+                    .px(px(14.))
+                    .py(px(10.))
+                    .min_h(px(ROW_MIN_H))
+                    .when(i > 0, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .h(px(1.))
+                                .bg(alpha(t::TEXT, 0.08)),
+                        )
+                    })
+                    .child(left)
+                    .child(
+                        div().w(px(cw)).flex_none().flex().justify_end().child(
+                            btn(format!("trust-rm-{i}"), "Revoke", false)
+                                .tab_index(0)
+                                .focus_visible(ring)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.trust_revoke(&root, cx)
+                                })),
+                        ),
+                    ),
+            );
+        }
+        let mut notes = div().flex().flex_col().gap(px(4.)).px(px(14.)).py(px(10.));
+        if let Some(e) = &m.trust_error {
+            notes = notes.child(small(
+                format!("The trust store could not be read: {e}"),
+                t::ERROR,
+            ));
+        }
+        if m.trust_unverified > 0 {
+            notes = notes.child(small(
+                format!(
+                    "Unverified rows ignored: {} (not written by this app).",
+                    m.trust_unverified
+                ),
+                t::WARN,
+            ));
+        }
+        notes = notes.child(small("Remembered in your session store, never in a project. A remembered trust is deliberately narrower than VS Code: only agents, skills, memory, instructions and the file explorer apply; project hooks, MCP servers, allow rules, env, providers and verification checks need \"Trust for this session\". Revoking takes effect at the next engine start (a new session, /model or a restart); the open session keeps what it loaded.", t::MUTED));
+        c.child(notes).into_any_element()
     }
 
     fn mcp_block(&self, m: &Model, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -1150,31 +1428,242 @@ impl SettingsView {
 }
 
 impl SettingsView {
-    fn tabs(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut row = div().flex().flex_wrap().gap(px(2.));
+    /// The tab strip: one line that never wraps. It scrolls sideways when the popup is too narrow, with a fade at
+    /// the edge that hides tabs; the active tab is underlined; Left/Right (strip focused) and Ctrl/Cmd+[ ] switch.
+    fn tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+        let off = self.tab_scroll.offset().x;
+        let max = self.tab_scroll.max_offset().x;
+        let fade = |left: bool| {
+            let (a, b) = (crate::theme::solid(t::SURFACE), alpha(t::SURFACE, 0.));
+            let (from, to) = if left { (a, b) } else { (b, a) };
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .w(px(28.))
+                .when(left, |d| d.left_0())
+                .when(!left, |d| d.right_0())
+                .bg(gpui::linear_gradient(
+                    90.,
+                    gpui::linear_color_stop(from, 0.),
+                    gpui::linear_color_stop(to, 1.),
+                ))
+        };
+        let mut row = div()
+            .id("settings-tabs")
+            .debug_selector(|| "tabs".to_string())
+            .flex()
+            .flex_nowrap()
+            .h_full()
+            .overflow_x_scroll()
+            .track_scroll(&self.tab_scroll)
+            .gap(px(2.));
         for t in TABS {
             let on = t == self.tab;
             row = row.child(
                 div()
                     .id(SharedString::from(format!("tab-{}", tab_label(t))))
                     .debug_selector(move || format!("tab-{}", tab_label(t)))
-                    .px(px(8.))
-                    .py(px(4.))
-                    .rounded(px(7.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .h_full()
+                    .px(px(7.))
+                    .whitespace_nowrap()
                     .cursor_pointer()
                     .text_size(px(12.))
+                    .font_weight(if on {
+                        FontWeight::MEDIUM
+                    } else {
+                        FontWeight::NORMAL
+                    })
                     .text_color(hsla(if on { t::TEXT_STRONG } else { t::MUTED }))
-                    .when(on, |d| d.bg(alpha(t::ACCENT, 0.24)))
+                    .border_b_2()
+                    .border_color(if on {
+                        hsla(t::ACCENT)
+                    } else {
+                        alpha(t::ACCENT, 0.)
+                    })
                     .hover(|d| d.text_color(hsla(t::TEXT_STRONG)))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.tab = t;
-                        this.scroll.set_offset(gpui::point(px(0.), px(0.)));
-                        cx.notify();
-                    }))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_tab(t, cx)))
                     .child(tab_label(t)),
             );
         }
-        row
+        div()
+            .id("settings-tabs-nav")
+            .relative()
+            .h(px(TAB_H))
+            .flex_none()
+            .border_b_1()
+            .border_color(alpha(t::TEXT, 0.10))
+            .tab_index(0)
+            .focus_visible(ring)
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                let step = match ev.keystroke.key.as_str() {
+                    "left" => -1,
+                    "right" => 1,
+                    _ => return,
+                };
+                this.step_tab(step, cx);
+                cx.stop_propagation();
+            }))
+            .child(row)
+            .when(off < px(-1.), |d| d.child(fade(true)))
+            .when(max > px(0.) && off > -max + px(1.), |d| {
+                d.child(fade(false))
+            })
+            .into_any_element()
+    }
+
+    fn set_tab(&mut self, t: Section, cx: &mut Context<Self>) {
+        self.tab = t;
+        self.scroll.set_offset(gpui::point(px(0.), px(0.)));
+        if let Some(i) = TABS.iter().position(|x| *x == t) {
+            self.tab_scroll.scroll_to_item(i);
+        }
+        cx.notify();
+    }
+
+    /// The tab `by` places further (wrapping round).
+    fn step_tab(&mut self, by: isize, cx: &mut Context<Self>) {
+        let i = TABS.iter().position(|x| *x == self.tab).unwrap_or(0) as isize;
+        self.set_tab(TABS[(i + by).rem_euclid(TABS.len() as isize) as usize], cx);
+    }
+
+    /// The body: cards of rows under section headings (the tab's, or every tab's matches while searching).
+    fn body(&self, cw: f32, cx: &mut Context<Self>) -> gpui::Div {
+        let mut body = div().flex().flex_col();
+        let Some(m) = &self.model else {
+            if let Some(e) = &self.err {
+                body = body.child(small(format!("Settings are unavailable: {e}"), t::ERROR));
+            }
+            return body;
+        };
+        let q = m.filter.trim();
+        let searching = !q.is_empty();
+        let mut first = true;
+        for g in m.groups() {
+            if !searching && g.section != self.tab {
+                continue;
+            }
+            // rows of one card share a `group`; cards keep the order the schema lists them in
+            let mut cards: Vec<(&str, Vec<&Row>)> = vec![];
+            for r in &g.rows {
+                match cards.iter_mut().find(|(n, _)| *n == r.group) {
+                    Some((_, v)) => v.push(r),
+                    None => cards.push((r.group, vec![r])),
+                }
+            }
+            for (name, rows) in cards {
+                let title = if searching {
+                    format!("{} \u{b7} {name}", tab_label(g.section))
+                } else {
+                    name.to_string()
+                };
+                body = body.child(self.heading(&title, first));
+                first = false;
+                let mut card = card();
+                for (i, r) in rows.iter().enumerate() {
+                    card = card.child(self.field_row(r, cw, i == 0, cx));
+                }
+                if g.section == Section::Interface && name == "Panels" && !searching {
+                    card = card.child(div().p(px(14.)).children(self.panels_block(cx)));
+                }
+                body = body.child(card);
+            }
+            if !searching && g.section == Section::Guards {
+                body = body.child(self.heading("Trusted folders", first));
+                first = false;
+                body = body.child(self.trusted_card(m, cw, cx));
+            }
+            if !searching {
+                let info = self.info_block(g.section, m, cx);
+                if !info.is_empty() {
+                    let title = if g.rows.is_empty() {
+                        tab_label(g.section)
+                    } else {
+                        "Details"
+                    };
+                    body = body.child(self.heading(title, first));
+                    first = false;
+                    body = body.child(card().p(px(14.)).children(info));
+                }
+            }
+        }
+        if first {
+            body = body.child(
+                div()
+                    .debug_selector(|| "no-match".to_string())
+                    .py(px(40.))
+                    .flex()
+                    .justify_center()
+                    .child(small(
+                        format!("No setting matches \u{201c}{q}\u{201d}."),
+                        t::MUTED,
+                    )),
+            );
+        }
+        body
+    }
+
+    /// The sticky footer: what is waiting for a new session and the button that starts one, or where changes go.
+    fn footer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let n = self.model.as_ref().map_or(0, |m| m.restart_pending());
+        let mut f = div()
+            .debug_selector(|| "footer".to_string())
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .px(px(PAD))
+            .py(px(10.))
+            .border_t_1()
+            .border_color(alpha(t::TEXT, 0.10))
+            .bg(alpha(t::TEXT, 0.03));
+        if n == 0 {
+            let path = self
+                .model
+                .as_ref()
+                .map(|m| m.cfg.home.join("settings.json").display().to_string())
+                .unwrap_or_default();
+            let msg = self
+                .notice
+                .clone()
+                .map(|n| small(n, t::SUCCESS))
+                .unwrap_or_else(|| {
+                    small(
+                        format!("Changes are saved as you make them to {path}."),
+                        t::MUTED,
+                    )
+                });
+            return f.child(msg.flex_1().min_w(px(0.))).into_any_element();
+        }
+        let blocked = self.restart_block.clone();
+        let mut msg = div().flex_1().min_w(px(0.)).child(small(
+            format!(
+                "{n} change{} apply to the next session. The running one keeps the old values until you restart it.",
+                if n == 1 { "" } else { "s" }
+            ),
+            t::WARN,
+        ));
+        if let Some(why) = &blocked {
+            msg = msg.child(
+                small(format!("Restart is not possible now: {why}."), t::ERROR)
+                    .debug_selector(|| "restart-blocked".to_string()),
+            );
+        }
+        let mut button = btn("restart-session", "Restart session", true);
+        button = if blocked.is_some() {
+            button.opacity(0.45).cursor_default()
+        } else {
+            button
+                .debug_selector(|| "restart-session".to_string())
+                .tab_index(0)
+                .focus_visible(ring)
+                .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(Restart)))
+        };
+        f = f.child(msg).child(button);
+        f.into_any_element()
     }
 }
 
@@ -1185,81 +1674,23 @@ impl Render for SettingsView {
             f32::from(vp.width) - self.inset,
             f32::from(vp.height) - crate::ui::TITLEBAR_H,
         );
-        let pad = if pw < 480. { 14. } else { 22. };
-        let mut body = div().flex().flex_col();
-        let mut restart_note = None;
-        if let Some(m) = &self.model {
-            let searching = !m.filter.trim().is_empty();
-            let mut first = true;
-            for g in m.groups() {
-                if !searching && g.section != self.tab {
-                    continue;
-                }
-                if searching {
-                    body = body.child(self.section_title(g.section, first));
-                }
-                first = false;
-                for r in &g.rows {
-                    body = body.child(self.field_row(r, cx));
-                }
-                if !searching {
-                    for e in self.info_block(g.section, m, cx) {
-                        body = body.child(e);
-                    }
-                }
-            }
-            if first {
-                body = body.child(small("No setting matches the search.", t::MUTED));
-            }
-            let n = m.restart_pending();
-            if n > 0 {
-                let blocked = self.restart_block.clone();
-                let mut msg = div().flex_1().min_w(px(0.)).child(small(
-                    format!("{n} change{} apply to the next session. The running one keeps the old values until you restart it (its conversation is kept in the session list).", if n == 1 { "" } else { "s" }),
-                    t::WARN,
-                ));
-                if let Some(why) = &blocked {
-                    msg = msg.child(
-                        small(format!("Restart is not possible now: {why}."), t::ERROR)
-                            .debug_selector(|| "restart-blocked".to_string()),
-                    );
-                }
-                let mut button = btn("restart-session", "Restart session", true);
-                button = if blocked.is_some() {
-                    button.opacity(0.45).cursor_default()
-                } else {
-                    button
-                        .debug_selector(|| "restart-session".to_string())
-                        .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(Restart)))
-                };
-                restart_note = Some(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .mt(px(10.))
-                        .px(px(10.))
-                        .py(px(6.))
-                        .rounded(px(6.))
-                        .border_1()
-                        .border_color(alpha(t::WARN, 0.55))
-                        .child(msg)
-                        .child(button),
-                );
-            }
-        } else if let Some(e) = &self.err {
-            body = body.child(small(format!("Settings are unavailable: {e}"), t::ERROR));
-        }
+        let cw = control_w(pw);
+        let body = self.body(cw, cx);
         let diag = self.model.as_ref().and_then(|m| self.diagnostics(m));
         let dialog = self.confirm_dialog(pw, cx);
+        let sw = (pw * 0.36).clamp(140., 300.);
 
         let header = div()
+            .flex_none()
             .flex()
             .items_center()
-            .justify_between()
-            .mb(px(10.))
+            .gap(px(12.))
+            .px(px(PAD))
+            .pt(px(14.))
+            .pb(px(12.))
             .child(
                 div()
+                    .flex_1()
                     .text_size(px(15.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(hsla(t::TEXT_STRONG))
@@ -1267,9 +1698,19 @@ impl Render for SettingsView {
             )
             .child(
                 div()
+                    .debug_selector(|| "settings-search".to_string())
+                    .w(px(sw))
+                    .flex_none()
+                    .child(Input::new(&self.search)),
+            )
+            .child(
+                div()
                     .id("settings-close")
+                    .tab_index(0)
+                    .focus_visible(ring)
+                    .rounded(px(6.))
                     .cursor_pointer()
-                    .px(px(6.))
+                    .px(px(8.))
                     .text_size(px(18.))
                     .text_color(hsla(t::MUTED))
                     .hover(|d| d.text_color(hsla(t::TEXT_STRONG)))
@@ -1283,9 +1724,6 @@ impl Render for SettingsView {
             .h(px(ph))
             .flex()
             .flex_col()
-            .pt(px(16.))
-            .pb(px(14.))
-            .px(px(pad))
             .rounded(px(12.))
             .bg(crate::theme::solid(t::SURFACE))
             .border_1()
@@ -1295,25 +1733,28 @@ impl Render for SettingsView {
             // the popup swallows clicks; the backdrop under it closes
             .occlude()
             .child(header)
+            .child(div().px(px(PAD)).flex_none().child(self.tabs(cx)))
             .child(
                 div()
-                    .debug_selector(|| "settings-search".to_string())
-                    .child(Input::new(&self.search)),
-            )
-            .child(div().mt(px(10.)).child(self.tabs(cx)))
-            .children(restart_note)
-            .children(self.notice.clone().map(|n| small(n, t::SUCCESS).mt(px(6.))))
-            .child(
-                div()
-                    .id("settings-scroll")
+                    .relative()
                     .flex_1()
                     .min_h(px(0.))
-                    .mt(px(12.))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .child(body),
+                    .child(
+                        div()
+                            .id("settings-scroll")
+                            .debug_selector(|| "settings-scroll".to_string())
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .px(px(PAD))
+                            .pt(px(16.))
+                            .pb(px(16.))
+                            .child(body),
+                    )
+                    .child(Scrollbar::vertical(&self.scroll)),
             )
-            .children(diag)
+            .children(diag.map(|d| div().px(px(PAD)).pb(px(6.)).child(d)))
+            .child(self.footer(cx))
             .children(dialog);
         div()
             .debug_selector(|| "settings-root".to_string())
@@ -1323,10 +1764,17 @@ impl Render for SettingsView {
             .font_family(crate::brand::UI_FONT)
             .text_size(px(13.))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, w, cx| {
-                if ev.keystroke.key == "escape" {
-                    this.escape(w, cx);
-                    cx.stop_propagation();
+                let k = &ev.keystroke;
+                match k.key.as_str() {
+                    "escape" => this.escape(w, cx),
+                    "tab" if k.modifiers.shift => w.focus_prev(cx),
+                    "tab" => w.focus_next(cx),
+                    "[" | "]" if k.modifiers.secondary(cx) => {
+                        this.step_tab(if k.key == "[" { -1 } else { 1 }, cx)
+                    }
+                    _ => return,
                 }
+                cx.stop_propagation();
             }))
             .child(
                 div()
@@ -1355,12 +1803,14 @@ mod tests {
     use synthesis_config::{Env, ProjectTrust};
 
     #[test]
-    fn popup_is_720_by_640_at_most_and_keeps_a_margin() {
-        assert_eq!(popup_size(1400., 900.), (720., 640.));
-        assert_eq!(popup_size(700., 600.), (668., 568.));
-        assert_eq!(popup_size(480., 300.), (448., 268.));
+    fn popup_is_720_to_860_wide_at_most_720_high_and_keeps_a_margin() {
+        assert_eq!(popup_size(1400., 870.), (860., 696.));
+        assert_eq!(popup_size(1000., 670.), (720., 536.));
+        assert_eq!(popup_size(700., 600.), (668., 480.));
         // never over the area, even tiny ones
         assert_eq!(popup_size(260., 200.), (260., 200.));
+        assert_eq!(control_w(720.), 259.2);
+        assert_eq!(control_w(300.), 168.);
     }
 
     #[test]
@@ -1454,6 +1904,124 @@ mod tests {
                 "{w}: row inside"
             );
         }
+    }
+
+    #[gpui::test]
+    fn the_tab_strip_never_wraps(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        for w in [360., 480., 720., 760., 800., 860., 1000., 1400.] {
+            let v = open(cx, dir.path(), w, 800.);
+            let first = b(v, "tab-Appearance");
+            for t in TABS {
+                let r = b(
+                    v,
+                    Box::leak(format!("tab-{}", tab_label(t)).into_boxed_str()),
+                );
+                assert_eq!(
+                    r.origin.y,
+                    first.origin.y,
+                    "{w}: {} on the same line",
+                    tab_label(t)
+                );
+                assert_eq!(r.size.height, first.size.height, "{w}");
+            }
+            assert!(f32::from(first.size.height) <= TAB_H, "{w}: one line");
+            // where all ten fit the popup they are all inside it; narrower, the strip scrolls
+            let p = b(v, "settings-panel");
+            let last = b(v, "tab-Prompt");
+            if w >= 760. {
+                assert!(
+                    last.right() <= p.right() - px(PAD),
+                    "{w}: every tab visible ({:?} vs {:?})",
+                    last.right(),
+                    p.right()
+                );
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn controls_share_one_right_edge_and_the_footer_is_never_scrolled(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let v = open(cx, dir.path(), 1000., 800.);
+        for (tab, keys) in [
+            (
+                "tab-Interface",
+                vec![
+                    "synt.tui.show_thinking",
+                    "synt.tui.logo",
+                    "synt.tui.verbose",
+                ],
+            ),
+            ("tab-Appearance", vec!["synt.tui.opacity", "synt.tui.blur"]),
+            (
+                "tab-Memory",
+                vec![
+                    "synt.memory.enabled",
+                    "synt.memory.daily_budget_usd",
+                    "synt.images.retentionDays",
+                ],
+            ),
+            ("tab-MCP", vec!["synt.mcp.toolSearch", "synt.mcp.servers"]),
+        ] {
+            click(v, tab);
+            let edges: Vec<f32> = keys
+                .iter()
+                .map(|k| f32::from(b(v, Box::leak(format!("ctl-{k}").into_boxed_str())).right()))
+                .collect();
+            assert!(
+                edges.windows(2).all(|e| (e[0] - e[1]).abs() < 0.6),
+                "{tab}: controls end at one edge {edges:?}"
+            );
+        }
+        // the footer sits under the scroll area, inside the popup, whatever the tab
+        let (p, sc, f) = (
+            b(v, "settings-panel"),
+            b(v, "settings-scroll"),
+            b(v, "footer"),
+        );
+        assert!(sc.bottom() <= f.origin.y + px(0.5) && f.bottom() <= p.bottom() + px(0.5));
+        assert!(f32::from(f.size.height) < 80.);
+    }
+
+    #[gpui::test]
+    fn search_shows_matches_of_every_tab_and_an_empty_state(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            crate::theme::apply("JetBrains Mono", cx);
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path());
+        let (ent, v) = cx.add_window_view(|window, cx| SettingsView::new(window, cx, Ok(c), 0.));
+        v.simulate_resize(size(px(1000.), px(800.)));
+        let search = |v: &mut VisualTestContext, q: &str| {
+            v.update(|_, cx| {
+                ent.update(cx, |s, cx| {
+                    s.model.as_mut().unwrap().filter = q.into();
+                    cx.notify();
+                })
+            });
+            v.run_until_parked();
+        };
+        // the Appearance tab is open, but a match in Memory shows, and the unrelated opacity row does not
+        search(v, "retention");
+        assert!(v.debug_bounds("row-synt.images.retentionDays").is_some());
+        assert!(v.debug_bounds("row-synt.tui.opacity").is_none());
+        assert!(v.debug_bounds("no-match").is_none());
+        search(v, "zzzz-nothing");
+        assert!(v.debug_bounds("no-match").is_some());
+        assert!(v.debug_bounds("footer").is_some(), "the footer stays");
+        search(v, "");
+        assert!(v.debug_bounds("row-synt.tui.opacity").is_some());
+        // the arrow keys of the tab strip step through the tabs and wrap round
+        v.update(|_, cx| {
+            ent.update(cx, |s, cx| {
+                s.step_tab(-1, cx);
+                assert_eq!(s.tab, TABS[TABS.len() - 1]);
+                s.step_tab(1, cx);
+                assert_eq!(s.tab, TABS[0]);
+            })
+        });
     }
 
     #[gpui::test]

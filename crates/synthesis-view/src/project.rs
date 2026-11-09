@@ -6,8 +6,10 @@
 //! textconv and external diff drivers, and every `filter.<name>.clean|smudge|process` found in the
 //! config are switched off for each call (`required=false`, so git does not fail on the missing
 //! program); submodules are not entered; `git` is the one found by absolute path on the injected
-//! PATH; the process gets a minimal environment, `core.hooksPath` points at the null device, and
-//! network protocols are refused. NOT guaranteed: other config keys git may honour that this list does not
+//! PATH; the process gets a minimal environment (`GIT_CONFIG_NOSYSTEM`, `GIT_PAGER=cat`, no askpass),
+//! `core.hooksPath` points at the null device, `core.pager`, `core.sshCommand`, `core.askPass` and the
+//! credential helper are emptied, output is bounded and the call has a wall-clock limit with a process-group kill,
+//! and network protocols are refused. NOT guaranteed: other config keys git may honour that this list does not
 //! name. The scan runs only in a trusted folder (`--trust-project`), which is the real gate.
 
 use std::collections::HashMap;
@@ -177,6 +179,8 @@ impl Git {
                 ("GIT_TERMINAL_PROMPT", "0"),
                 ("GIT_ATTR_NOSYSTEM", "1"),
                 ("GIT_EXTERNAL_DIFF", ""),
+                ("GIT_PAGER", "cat"),
+                ("GIT_ASKPASS", ""),
             ]
             .map(|(k, v)| (k.to_string(), v.to_string())),
         );
@@ -215,6 +219,15 @@ impl Git {
             "core.quotepath=false",
             "-c",
             "protocol.allow=never",
+            // no pager, no ssh or credential programs can be named by a repository's config
+            "-c",
+            "core.pager=cat",
+            "-c",
+            "core.sshCommand=",
+            "-c",
+            "core.askPass=",
+            "-c",
+            "credential.helper=",
         ]
         .iter()
         .map(|s| (*s).to_string())
@@ -481,6 +494,29 @@ pub fn scan(cwd: &Path, env: &Env) -> ProjectData {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn git_runs_with_a_closed_environment_and_no_pager_or_helper_programs() {
+        let g = Git::new(&Env::from_pairs([
+            ("PATH", "/usr/bin"),
+            ("API_KEY", "secret"),
+        ]));
+        let has = |k: &str, v: &str| g.env.iter().any(|(a, b)| a == k && b == v);
+        for (k, v) in [
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_PAGER", "cat"),
+            ("GIT_TERMINAL_PROMPT", "0"),
+            ("GIT_ASKPASS", ""),
+            ("GIT_EXTERNAL_DIFF", ""),
+        ] {
+            assert!(has(k, v), "{k}");
+        }
+        assert!(
+            !g.env.iter().any(|(k, _)| k == "API_KEY"),
+            "no key reaches git"
+        );
+        assert_eq!((g.exec.timeout, g.exec.max), (GIT_TIMEOUT, MAX_BYTES));
+    }
+
     use super::*;
     use std::process::Command;
 

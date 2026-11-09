@@ -8,6 +8,7 @@ pub mod node;
 mod recover;
 mod schema;
 mod store;
+pub mod trust;
 
 pub use error::{Error, Result};
 pub use recover::{

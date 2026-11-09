@@ -103,6 +103,8 @@ pub enum Control {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
     pub key: String,
+    /// The card heading inside the tab.
+    pub group: &'static str,
     pub label: String,
     pub help: String,
     pub control: Control,
@@ -172,6 +174,13 @@ pub struct Model {
     /// Keys written in this run whose change needs a new session.
     pub changed: BTreeSet<String>,
     pub mcp: Vec<McpRow>,
+    /// Folders remembered as trusted (user store), oldest first, each with whether its trusted configuration
+    /// still matches the fingerprint taken when it was trusted (`None`: a parent grant or a missing folder).
+    pub trusted: Vec<(synthesis_session::trust::TrustRecord, Option<bool>)>,
+    /// Rows of the trust store ignored because their MAC does not verify.
+    pub trust_unverified: usize,
+    /// Why the trust store could not be read (the list is then empty).
+    pub trust_error: Option<String>,
     pub mcp_error: Option<String>,
     pub providers: Vec<KeyStatus>,
     pub agents_md: Vec<(PathBuf, bool)>,
@@ -262,6 +271,9 @@ impl Model {
             diag: vec![],
             changed: BTreeSet::new(),
             mcp: vec![],
+            trusted: vec![],
+            trust_unverified: 0,
+            trust_error: None,
             mcp_error: None,
             providers: vec![],
             agents_md: vec![],
@@ -327,6 +339,31 @@ impl Model {
             .map(|s| {
                 let src = format!("{:?}", s.source).to_lowercase();
                 (s.name, s.description, src)
+            })
+            .collect();
+        let listing = match synthesis_session::trust::list(&c.home) {
+            Ok(l) => {
+                self.trust_error = None;
+                l
+            }
+            Err(e) => {
+                self.trust_error = Some(e.to_string());
+                Default::default()
+            }
+        };
+        self.trust_unverified = listing.unverified;
+        self.trusted = listing
+            .records
+            .into_iter()
+            .filter(|r| r.scope != synthesis_session::trust::CHILD)
+            .map(|r| {
+                let same = (r.scope == synthesis_session::trust::FOLDER
+                    && std::path::Path::new(&r.root).is_dir())
+                .then(|| {
+                    synthesis_session::trust::fingerprint_root(std::path::Path::new(&r.root))
+                        .is_ok_and(|f| f == r.fingerprint)
+                });
+                (r, same)
             })
             .collect();
         self.mcp.clear();
@@ -458,6 +495,7 @@ impl Model {
         let value = e.map_or(Value::Null, |e| e.value.clone());
         Row {
             key: f.key.clone(),
+            group: f.group,
             label: f.label.clone(),
             help: f.help.clone(),
             control: self.control_of(f, &value, reason.is_some()),
@@ -645,6 +683,13 @@ impl Model {
     }
 
     /// Only servers of the user file can be removed here.
+    /// Forgets a remembered trusted folder; it takes effect at the next engine start.
+    pub fn revoke_trust(&mut self, root: &str) -> Result<(), String> {
+        synthesis_session::trust::revoke(&self.cfg.home, root).map_err(|e| e.to_string())?;
+        self.refresh_info();
+        Ok(())
+    }
+
     pub fn remove_mcp(&mut self, name: &str) -> Result<(), String> {
         remove_server(&self.cfg.home.join("synt.json"), name)?;
         self.refresh_info();
@@ -1085,5 +1130,27 @@ mod tests {
         }
         // engine settings wait for a session
         assert!(row(&m, "synt.memory.enabled").restart);
+    }
+
+    #[test]
+    fn remembered_trust_is_listed_and_revoked_from_the_settings() {
+        let (_t, mut m) = model();
+        assert!(m.trusted.is_empty());
+        let ws = m.cfg.cwd.clone();
+        let fp = synthesis_session::trust::fingerprint_root(&ws).unwrap();
+        let policy = synthesis_session::trust::Policy {
+            home: Some(m.cfg.home.join("uh")),
+            synt_home: m.cfg.home.clone(),
+        };
+        synthesis_session::trust::add(&m.cfg.home, &ws, "folder", &fp, &policy).unwrap();
+        m.refresh_info();
+        assert_eq!(m.trusted.len(), 1);
+        assert_eq!(m.trusted[0].1, Some(true), "config unchanged");
+        std::fs::create_dir_all(ws.join(".synt")).unwrap();
+        std::fs::write(ws.join(".synt/settings.json"), "{}").unwrap();
+        m.refresh_info();
+        assert_eq!(m.trusted[0].1, Some(false), "config changed since");
+        m.revoke_trust(&ws.to_string_lossy()).unwrap();
+        assert!(m.trusted.is_empty());
     }
 }

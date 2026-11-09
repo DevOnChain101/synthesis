@@ -9,5 +9,7 @@
 mod schema;
 mod store;
 
-pub use schema::{Edit, Field, Kind, ListItem, Scope, Section, SettingsSchema, validate_kind};
+pub use schema::{
+    Edit, Field, Kind, ListItem, Scope, Section, SettingsSchema, group_of, validate_kind,
+};
 pub use store::{Entry, Origin, SetError, SettingsStore};

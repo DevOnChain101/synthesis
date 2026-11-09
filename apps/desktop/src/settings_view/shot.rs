@@ -71,6 +71,20 @@ pub fn render(a: Args) -> Result<(), Err> {
         r#"{"$schema":"SCHEMA","providers":{"omniroute":{"type":"openai","baseURL":"http://localhost:20128/v1","apiKey":"{env:OMNIROUTE_API_KEY}","models":["m"]},"other":{"type":"openai","baseURL":"http://localhost:1/v1","apiKey":"{env:OTHER_API_KEY}","models":["m"]}}}"#.replace("SCHEMA", synthesis_config::SCHEMA_V1),
     )?;
     std::fs::write(ws.join("AGENTS.md"), "rules")?;
+    // two remembered trusted folders, so the Guards tab shows its list
+    {
+        use synthesis_session::trust;
+        let other = tmp.join("other");
+        std::fs::create_dir_all(&other)?;
+        let policy = trust::Policy {
+            home: Some(home.join("uh")),
+            synt_home: home.clone(),
+        };
+        for d in [&ws, &std::fs::canonicalize(&other)?] {
+            let fp = trust::fingerprint_root(d).map_err(|e| e.to_string())?;
+            trust::add(&home, d, "folder", &fp, &policy).map_err(|e| e.to_string())?;
+        }
+    }
     let cfg = Cfg {
         env,
         user_home: home.clone(),
