@@ -697,6 +697,13 @@ fn records_tool_calls_processes_approvals_reports_artifacts_checkpoints() {
         .artifact_bytes(&id, cp.files[0].artifact_id.as_ref().unwrap())
         .unwrap();
     assert_eq!(snap, fs::read(d.join("a.txt")).unwrap());
+    // proof for a rewind: the snapshot's hash, and whether the file existed
+    assert_eq!(
+        cp.files[0].artifact_sha256.as_deref(),
+        Some(synthesis_session::file_state_hash(&d.join("a.txt")).as_str())
+    );
+    assert_eq!(cp.files[0].pre_state, cp.files[0].artifact_sha256);
+    assert_eq!(cp.files[1].pre_state.as_deref(), Some("absent"));
     assert_eq!(w.checkpoint(&id, "before-refactor").unwrap(), cp);
     assert_eq!(
         w.get_session(&id).unwrap().checkpoint_id.as_deref(),
