@@ -7,7 +7,7 @@
 //! Like `synt rewind` it puts back files only: the conversation history stays as it is.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use synthesis_app::rewind::{self, Entry, Step};
 use synthesis_harness::sanitize_for_display;
@@ -432,6 +432,7 @@ mod tests {
             shown: format!("/ws/{name}"),
             step,
             size,
+            state: "x".into(),
         }
     }
 
@@ -440,6 +441,7 @@ mod tests {
             .map(|i| {
                 let step = Step::Restore {
                     artifact_id: "a".into(),
+                    sha256: None,
                 };
                 entry(&format!("f{i}"), step, 2048)
             })

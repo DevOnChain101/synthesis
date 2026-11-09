@@ -442,7 +442,7 @@ mod tests {
         _tmp: tempfile::TempDir,
         base: PathBuf,
         ws: PathBuf,
-        store: Store,
+        _store: Store,
         w: synthesis_session::SessionWriter,
     }
 
@@ -473,7 +473,7 @@ mod tests {
             _tmp: tmp,
             base,
             ws,
-            store,
+            _store: store,
             w,
         }
     }
