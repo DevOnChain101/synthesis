@@ -126,6 +126,7 @@ pub fn touch_of(e: &Event) -> Touch {
         | ProcessExited(_)
         | ProcessOutput { .. }
         | BrowserLoginRequired { .. }
+        | BrowserAction { .. }
         | BrowserFrame { .. } => Touch::Pulse(Tools),
         ToolApprovalRequired { approval_id, .. } => open(Guards, "approval", approval_id),
         ToolApprovalResolved { approval_id, .. } => close("approval", approval_id),
