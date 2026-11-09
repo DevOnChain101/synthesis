@@ -75,8 +75,13 @@ fn same(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// The real place of `p` (a path that does not exist yet keeps its missing tail after the real place of its
+/// nearest existing folder), without the Windows verbatim prefix, so two spellings of one place compare equal.
 fn canon(p: &Path) -> PathBuf {
-    synthesis_core::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    synthesis_core::canonicalize(p)
+        .ok()
+        .or_else(|| synthesis_core::realpath_lenient(p))
+        .unwrap_or_else(|| p.to_path_buf())
 }
 
 impl Policy {
@@ -893,25 +898,30 @@ mod tests {
 
     #[test]
     fn a_folder_grant_covers_that_root_only_and_a_parent_grant_what_is_inside() {
+        // real temp folders and the platform's own absolute spelling (no `/w/app` literals: not absolute on Windows)
+        let d = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(d.path()).unwrap();
         let pl = Policy {
-            home: Some(PathBuf::from("/nonexistent/home")),
-            synt_home: PathBuf::from("/nonexistent/synt"),
+            home: Some(base.join("nohome")),
+            synt_home: base.join("nosynt"),
         };
-        let rs = [rec("/w/app", FOLDER), rec("/p/all", PARENT)];
-        let c = |p: &str| covers(&rs, Path::new(p), &pl).is_some();
-        assert!(c("/w/app"));
+        let at = |rel: &str| base.join(rel);
+        let s = |rel: &str| at(rel).to_string_lossy().into_owned();
+        let rs = [rec(&s("w/app"), FOLDER), rec(&s("p/all"), PARENT)];
+        let c = |rel: &str| covers(&rs, &at(rel), &pl).is_some();
+        assert!(c("w/app"));
         assert!(
-            !c("/w/app/sub"),
+            !c("w/app/sub"),
             "a folder grant is not inherited by a subfolder"
         );
         assert!(
-            !c("/w/app2") && !c("/w") && !c("/w/other"),
+            !c("w/app2") && !c("w") && !c("w/other"),
             "siblings and parents are not covered"
         );
-        assert!(!c("/W/APP"), "exact, case-sensitive");
-        assert!(c("/p/all") && c("/p/all/x") && c("/p/all/x/y"));
+        assert!(!c("W/APP"), "exact, case-sensitive");
+        assert!(c("p/all") && c("p/all/x") && c("p/all/x/y"));
         assert!(
-            !c("/p/allx") && !c("/p") && !c("/p/other"),
+            !c("p/allx") && !c("p") && !c("p/other"),
             "a parent grant stops at its folder"
         );
     }

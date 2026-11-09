@@ -14,7 +14,7 @@ fn rig() -> (Live, tempfile::TempDir) {
 /// A session started in `sub` of a project folder `ws` that holds `.git` (so the trust root is `ws`).
 fn rig_in(sub: &str) -> (Live, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = synthesis_core::canonicalize(dir.path()).unwrap();
     let (ws, home) = (root.join("ws"), root.join("home"));
     std::fs::create_dir_all(&ws).unwrap();
     std::fs::create_dir_all(&home).unwrap();
@@ -133,7 +133,7 @@ fn headers(l: &Live) -> String {
 fn the_dialog_names_the_root_and_says_when_it_is_not_the_folder_you_are_in() {
     let (mut l, d) = rig();
     assert!(l.ask_trust(0, Some(std::path::Path::new("/nonexistent/home"))));
-    let root = std::fs::canonicalize(d.path()).unwrap().join("ws");
+    let root = synthesis_core::canonicalize(d.path()).unwrap().join("ws");
     let t = headers(&l);
     assert!(
         t.contains(&format!("Trust root: {}", root.display())),
@@ -152,7 +152,7 @@ fn the_dialog_names_the_root_and_says_when_it_is_not_the_folder_you_are_in() {
     // a subfolder of a repository: the grant is the repository, and the dialog says so
     let (mut l, d) = rig_in("pkg/app");
     assert!(l.ask_trust(0, Some(std::path::Path::new("/nonexistent/home"))));
-    let root = std::fs::canonicalize(d.path()).unwrap().join("ws");
+    let root = synthesis_core::canonicalize(d.path()).unwrap().join("ws");
     let t = headers(&l);
     assert!(
         t.contains(&format!("Trust root: {}", root.display())),
@@ -165,7 +165,7 @@ fn the_dialog_names_the_root_and_says_when_it_is_not_the_folder_you_are_in() {
 #[test]
 fn a_home_folder_or_the_config_folder_is_refused_not_offered() {
     let (mut l, d) = rig();
-    let ws = std::fs::canonicalize(d.path()).unwrap().join("ws");
+    let ws = synthesis_core::canonicalize(d.path()).unwrap().join("ws");
     // the root would be the user's home
     assert!(!l.ask_trust(0, Some(&ws)));
     assert!(l.dialogs.is_empty());
@@ -192,7 +192,7 @@ fn a_trusted_restart_comes_back_trusted_and_a_broken_project_reports_the_error()
     use synthesis_desktop::tui_view::driver::{LiveCfg, Target, build, trust_fallback_note};
 
     let dir = tempfile::tempdir().unwrap();
-    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let base = synthesis_core::canonicalize(dir.path()).unwrap();
     let (ws, home) = (base.join("ws"), base.join("home"));
     std::fs::create_dir_all(ws.join(".synt")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
@@ -266,7 +266,7 @@ fn a_trusted_restart_comes_back_trusted_and_a_broken_project_reports_the_error()
 /// A project `app` in `proj` (a real project parent), the store at `home`, both under one temp folder.
 fn rig_nested() -> (Live, tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = synthesis_core::canonicalize(dir.path()).unwrap();
     let (app, home) = (root.join("proj/app"), root.join("home"));
     std::fs::create_dir_all(&app).unwrap();
     std::fs::create_dir_all(&home).unwrap();
@@ -350,7 +350,9 @@ fn trust_lists_and_revokes_with_a_confirmation_that_keeps_by_default() {
     l.submit("/trust");
     let last = format!("{:?}", l.view.convo.items.last());
     assert!(
-        last.contains("1.") && last.contains("proj/app") && last.contains("config unchanged"),
+        last.contains("1.")
+            && last.contains(&format!("proj{}app", std::path::MAIN_SEPARATOR))
+            && last.contains("config unchanged"),
         "{last}"
     );
     // revoke asks first; Esc keeps it
@@ -425,7 +427,7 @@ fn a_file_changed_between_the_check_and_the_load_aborts_the_trusted_start() {
     use synthesis_desktop::engine::{Args, Engine, StartOpts, TRUST_CHANGED, TrustCheck};
 
     let dir = tempfile::tempdir().unwrap();
-    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let base = synthesis_core::canonicalize(dir.path()).unwrap();
     let (ws, home) = (base.join("ws"), base.join("home"));
     std::fs::create_dir_all(ws.join(".synt")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
@@ -480,6 +482,8 @@ fn a_file_changed_between_the_check_and_the_load_aborts_the_trusted_start() {
 /// Nothing the project names has run when the trusted configuration is found changed: the check runs before
 /// the project's files are read, again before any MCP server starts, and once more before any hook runs. A
 /// control run shows the markers DO appear when nothing is tampered with, so the absence proves something.
+// `sh`, `touch` and `printf` commands: Unix only
+#[cfg(unix)]
 #[test]
 fn nothing_the_project_names_runs_before_the_trusted_configuration_is_verified() {
     use clap::Parser as _;
@@ -488,7 +492,7 @@ fn nothing_the_project_names_runs_before_the_trusted_configuration_is_verified()
     use synthesis_desktop::engine::{Args, Engine, StartOpts, TRUST_CHANGED, TrustCheck};
 
     let dir = tempfile::tempdir().unwrap();
-    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let base = synthesis_core::canonicalize(dir.path()).unwrap();
     let (ws, home) = (base.join("ws"), base.join("home"));
     std::fs::create_dir_all(ws.join(".synt")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
@@ -603,13 +607,15 @@ fn nothing_the_project_names_runs_before_the_trusted_configuration_is_verified()
 /// A remembered trust never runs the project's commands: with the project's hook and MCP server configured and
 /// even approved on the command line, neither starts and a notice names them; the same project started with
 /// the launch flag (the trust of THIS run) runs both. Settings of the project still load either way.
+// `sh`, `touch` and `printf` commands: Unix only
+#[cfg(unix)]
 #[test]
 fn a_remembered_trust_leaves_project_hooks_and_mcp_servers_inert_and_says_so() {
     use clap::Parser as _;
     use synthesis_desktop::engine::{Args, Engine, StartOpts};
 
     let dir = tempfile::tempdir().unwrap();
-    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let base = synthesis_core::canonicalize(dir.path()).unwrap();
     let (ws, home) = (base.join("ws"), base.join("home"));
     std::fs::create_dir_all(ws.join(".synt")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
@@ -714,6 +720,8 @@ fn a_remembered_trust_leaves_project_hooks_and_mcp_servers_inert_and_says_so() {
 /// A remembered trust applies the project's DATA only: its settings load with the untrusted filter, so a project
 /// `Bash(*)` allow rule still prompts, its `env` does not reach commands, and its `disableAllHooks` cannot switch
 /// off the user's own hook; a trust of this run (the launch flag here) applies all three.
+// `sh`, `touch` and `printf` commands: Unix only
+#[cfg(unix)]
 #[test]
 fn a_remembered_trust_ignores_project_allow_rules_env_and_disable_all_hooks() {
     use clap::Parser as _;
@@ -721,7 +729,7 @@ fn a_remembered_trust_ignores_project_allow_rules_env_and_disable_all_hooks() {
     use synthesis_permissions::Decision;
 
     let dir = tempfile::tempdir().unwrap();
-    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let base = synthesis_core::canonicalize(dir.path()).unwrap();
     let (ws, home) = (base.join("ws"), base.join("home"));
     std::fs::create_dir_all(ws.join(".synt")).unwrap();
     std::fs::create_dir_all(&home).unwrap();

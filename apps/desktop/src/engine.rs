@@ -1520,7 +1520,7 @@ mod trust_tests {
     #[test]
     fn roots_that_must_not_be_trusted_are_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let base = synthesis_core::canonicalize(dir.path()).unwrap();
         let (home, synt) = (base.join("home"), base.join("home/.synt"));
         std::fs::create_dir_all(&synt).unwrap();
         let proj = home.join("work/app");
@@ -1538,7 +1538,9 @@ mod trust_tests {
                 .unwrap()
                 .contains("config folder")
         );
-        assert!(why(Path::new("/")).unwrap().contains("filesystem root"));
+        // a filesystem root, spelled the way this platform spells it (`/` or `C:\`)
+        let fs_root = base.ancestors().last().unwrap();
+        assert!(why(fs_root).unwrap().contains("filesystem root"));
         // an unknown home fails closed
         assert!(
             trust_refusal(&proj, None, &synt)
@@ -1551,7 +1553,7 @@ mod trust_tests {
     fn a_remembered_trust_is_honoured_only_while_unchanged_enforcing_and_checked() {
         use synthesis_session::trust;
         let dir = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let base = synthesis_core::canonicalize(dir.path()).unwrap();
         let (home, uhome, proj, sib, sub) = (
             base.join("home"),
             base.join("uhome"),
@@ -1563,7 +1565,7 @@ mod trust_tests {
             std::fs::create_dir_all(d).unwrap();
         }
         let policy = trust_policy(Some(&uhome), &home);
-        let c = Defaults::try_parse_from(["x", "--approve-mcp", "db"])
+        let c = Defaults::try_parse_from(["x", "--sandbox", "enforce", "--approve-mcp", "db"])
             .unwrap()
             .c;
         let go = |c: &Common, p: &Path| {
@@ -1658,7 +1660,7 @@ mod trust_tests {
     #[test]
     fn the_parent_refusal_covers_containers_and_the_refusals_cover_home() {
         let dir = tempfile::tempdir().unwrap();
-        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let base = synthesis_core::canonicalize(dir.path()).unwrap();
         let (home, synt) = (base.join("h"), base.join("h/.synt"));
         std::fs::create_dir_all(home.join("Downloads")).unwrap();
         std::fs::create_dir_all(home.join("src")).unwrap();
@@ -1666,8 +1668,17 @@ mod trust_tests {
         let p = |d: &Path| parent_refusal(d, Some(&home), &synt);
         assert!(p(&home.join("src")).is_none());
         assert!(p(&home.join("Downloads")).unwrap().contains("catch-all"));
-        assert!(p(Path::new("/tmp")).unwrap().contains("temporary"));
-        assert!(p(&home).is_some() && p(Path::new("/")).is_some());
+        // the temp folder is refused (as a temporary folder, or, when this test's home lies inside it, as a
+        // parent of home: either reason keeps it from being a parent grant)
+        let why_tmp = p(&std::env::temp_dir()).unwrap();
+        assert!(
+            why_tmp.contains("temporary") || why_tmp.contains("home folder"),
+            "{why_tmp}"
+        );
+        #[cfg(unix)]
+        assert!(p(Path::new("/tmp")).is_some());
+        let fs_root = base.ancestors().last().unwrap();
+        assert!(p(&home).is_some() && p(fs_root).is_some());
         // the root rules still allow a folder grant in Downloads
         assert!(trust_refusal(&home.join("Downloads/proj"), Some(&home), &synt).is_none());
     }
