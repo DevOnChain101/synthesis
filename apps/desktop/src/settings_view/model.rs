@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use synthesis_app::mcp::{AddArgs, ScopeArg, add_server, plan, remove_server};
@@ -157,6 +158,9 @@ pub struct McpForm {
     pub header: String,
 }
 
+/// Where the doctor thread leaves its rows (or its timeout).
+type DoctorSlot = Arc<Mutex<Option<Result<Vec<synthesis_app::doctor::Row>, String>>>>;
+
 pub struct Model {
     pub cfg: Cfg,
     pub store: SettingsStore,
@@ -174,6 +178,10 @@ pub struct Model {
     pub mcp_error: Option<String>,
     pub providers: Vec<KeyStatus>,
     pub agents_md: Vec<(PathBuf, bool)>,
+    /// The checks of `/doctor`, read-only; `None` while they run (or after they timed out: `doctor_error`).
+    pub doctor: Option<Vec<synthesis_app::doctor::Row>>,
+    pub doctor_error: Option<String>,
+    doctor_slot: DoctorSlot,
     /// `(name, description, source)`.
     pub skills: Vec<(String, String, String)>,
 }
@@ -261,10 +269,47 @@ impl Model {
             mcp_error: None,
             providers: vec![],
             agents_md: vec![],
+            doctor: None,
+            doctor_error: None,
+            doctor_slot: Arc::default(),
             skills: vec![],
         };
         m.refresh_info();
         m
+    }
+
+    /// Starts the doctor checks on their own thread (capped); [`Model::poll_doctor`] collects them.
+    pub fn start_doctor(&mut self) {
+        let (env, cwd, trusted) = (
+            self.cfg.env.clone(),
+            self.cfg.cwd.clone(),
+            self.cfg.trust == ProjectTrust::Trusted,
+        );
+        let slot = self.doctor_slot.clone();
+        std::thread::spawn(move || {
+            let r = synthesis_app::doctor::rows_capped(
+                &env,
+                &cwd,
+                trusted,
+                std::time::Duration::from_secs(20),
+            );
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+        });
+    }
+
+    /// True once the checks finished (their rows or their error are set).
+    pub fn poll_doctor(&mut self) -> bool {
+        let done = self
+            .doctor_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        match done {
+            Some(Ok(r)) => self.doctor = Some(r),
+            Some(Err(e)) => self.doctor_error = Some(e),
+            None => return false,
+        }
+        true
     }
 
     /// Reads again the parts that are not in the store.
@@ -911,6 +956,20 @@ mod tests {
         m.remove_mcp("docs").unwrap();
         assert!(m.remove_mcp("docs").is_err());
         assert_eq!(m.mcp.len(), 1);
+    }
+
+    #[test]
+    fn the_doctor_loads_in_the_background_and_opening_does_not_wait_for_it() {
+        let (_t, mut m) = model();
+        // opening the model runs no checks: the summary says "checking" until the thread is polled in
+        assert!(m.doctor.is_none() && m.doctor_error.is_none());
+        m.start_doctor();
+        let t0 = std::time::Instant::now();
+        while !m.poll_doctor() {
+            assert!(t0.elapsed().as_secs() < 30, "the doctor never finished");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(m.doctor.as_ref().is_some_and(|r| !r.is_empty()));
     }
 
     #[test]

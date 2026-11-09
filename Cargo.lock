@@ -7306,6 +7306,7 @@ dependencies = [
  "synthesis-harness",
  "synthesis-hooks",
  "synthesis-mcp",
+ "synthesis-memory",
  "synthesis-permissions",
  "synthesis-providers",
  "synthesis-session",

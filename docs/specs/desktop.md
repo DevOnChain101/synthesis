@@ -121,6 +121,14 @@ verification.
 Slash commands (all built-ins are wired; `live.rs` `WIRED`, the TUI's semantics): `/files` and `/diff [file]` switch
 the centre panel to its file explorer or diff tab (`/diff FILE` opens that file's diff) and post nothing in the chat;
 an untrusted folder is said by the file explorer itself. `/peers` posts the TUI's table.
+`/send` with no arguments opens a picker docked above the prompt (`send_pick.rs`, the `/model` dialog family): the
+live peers of the polled listing (main agents, not this session, not unreachable) grouped by workspace, typing filters
+(session, workspace, short id), each row with the Running panel's activity dot, the short id and the last activity
+(the registry carries no time, so it is the window's own: now while running, else the poll that saw the state change;
+none seen = gray). A pick sets a one-shot chip over the prompt (`to <workspace> > <session>`) holding the `ws:<key>/sess:<id>`
+address; the next plain line goes there and a note echoes `sent to ws:abcd1234../sess:12345678..`. Esc (or Ctrl+T) clears
+the chip, a command leaves it, a peer that left the listing holds the line with a notice. Peers off or none listed: the
+picker's only row says how to enable them. `/send <address> <text>` is unchanged.
 `/name` shows the name peers address the session by; it is fixed for the run (`--name`), as in the TUI, so it
 does not rename the stored title. `/rename <title>` does (`synthesis_app::rename`, one validator for both frontends):
 the title is trimmed, newlines collapse to a space, 1-120 characters, control/bidi/zero-width characters and

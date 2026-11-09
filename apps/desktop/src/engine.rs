@@ -565,6 +565,8 @@ pub struct Engine {
     /// The folder is trusted for project config (`--trust-project`).
     pub trusted: bool,
     pub synthesis_home: PathBuf,
+    /// The environment the session started with (`/memory` and `/doctor` read it, names only).
+    pub env: Env,
     harness: Arc<Harness>,
     tokio: Option<tokio::runtime::Runtime>,
     session: Arc<Mutex<Option<AgentSession>>>,
@@ -810,6 +812,7 @@ impl Engine {
             context_window,
             trusted,
             synthesis_home: homes.synthesis,
+            env: env.clone(),
             harness,
             tokio: Some(tokio),
             session: Arc::new(Mutex::new(Some(session))),
