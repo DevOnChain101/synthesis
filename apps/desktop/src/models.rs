@@ -79,25 +79,31 @@ pub fn rows(env: &Env, project: &Path) -> Vec<ModelRow> {
         .into_iter()
         .map(|m| (m.value, m.provider, m.model))
         .collect();
-    for (id, p) in &cfg.providers {
-        let cache = app::cache_of(&h.synthesis, id, p);
-        for m in cache.iter().flat_map(|c| c.models.keys()) {
+    // one cache read per provider: a gateway lists hundreds of models, and reading the file per
+    // model made this quadratic (seconds on every session switch)
+    let caches: std::collections::HashMap<_, _> = cfg
+        .providers
+        .iter()
+        .map(|(id, p)| (id.clone(), app::cache_of(&h.synthesis, id, p)))
+        .collect();
+    let known: std::collections::HashSet<_> = listed.iter().map(|l| l.0.clone()).collect();
+    for id in cfg.providers.keys() {
+        for m in caches[id].iter().flat_map(|c| c.models.keys()) {
             let value = format!("{id}/{m}");
-            if !listed.iter().any(|l| l.0 == value) {
+            if !known.contains(&value) {
                 listed.push((value, id.clone(), m.clone()));
             }
         }
     }
     let mut out = vec![];
     for (value, pid, model) in listed {
-        let facts = cfg
-            .providers
+        let facts = caches
             .get(&pid)
-            .and_then(|p| app::cache_of(&h.synthesis, &pid, p))
-            .and_then(|c| c.models.get(&model).cloned());
+            .and_then(|c| c.as_ref())
+            .and_then(|c| c.models.get(&model));
         let price = app::price_of(&h.synthesis, &value, &model);
         out.push(ModelRow {
-            detail: detail(facts.as_ref(), price),
+            detail: detail(facts, price),
             value: san(&value),
         });
     }
@@ -155,6 +161,47 @@ mod tests {
             "ctx 200k \u{b7} out 8k \u{b7} vision no \u{b7} effort low|high \u{b7} $3/$15"
         );
         assert_eq!(k(1_000_000), "1m");
+    }
+
+    /// A gateway lists hundreds of models; `rows` runs on every session switch, so it must read the
+    /// cache once per provider (it read it once per model: seconds, quadratic).
+    #[test]
+    fn rows_of_a_gateway_with_hundreds_of_models_is_fast() {
+        use synthesis_providers::modelinfo as mi;
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("synt.json"),
+            r#"{"$schema":"config.json/v1","model":"gw/m0","providers":{"gw":{"npm":"@ai-sdk/openai-compatible","options":{"baseURL":"http://localhost:1/v1","apiKey":"k"},"models":{"m0":{"name":"M0"}}}}}"#,
+        )
+        .unwrap();
+        let facts = ModelFacts {
+            context_window: Some(200_000),
+            raw_capabilities: serde_json::json!({"note": "x".repeat(1000)})
+                .as_object()
+                .cloned(),
+            ..Default::default()
+        };
+        let cache = mi::CacheFile {
+            schema_version: mi::SCHEMA_VERSION,
+            base_url: "http://localhost:1/v1".into(),
+            protocol: "openai".into(),
+            fetched_at: 1,
+            models: (0..600)
+                .map(|i| (format!("model-{i}"), facts.clone()))
+                .collect(),
+        };
+        mi::write_cache(&mi::cache_path(&home, "gw"), &cache).unwrap();
+        let env = Env::from_pairs([
+            ("HOME", t.path().to_str().unwrap()),
+            ("SYNT_HOME", home.to_str().unwrap()),
+        ]);
+        let t0 = std::time::Instant::now();
+        let r = rows(&env, t.path());
+        let d = t0.elapsed();
+        assert!(r.len() >= 600, "{} rows", r.len());
+        assert!(d < std::time::Duration::from_millis(500), "rows took {d:?}");
     }
 
     #[test]
