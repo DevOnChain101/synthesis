@@ -129,6 +129,20 @@ fn typing_and_submit_starts_a_task_and_enter_while_busy_queues_in_order() {
 }
 
 #[test]
+fn a_line_sent_as_the_task_ends_becomes_the_next_prompt_not_an_error() {
+    let mut a = app();
+    keys(&mut a, "go\r");
+    let cmds = keys(&mut a, "again\r");
+    assert!(matches!(&cmds[..], [Cmd::SendTo { text, .. }] if text == "again"));
+    // the harness found the task over before the line arrived
+    a.send_failed("again", synthesis_harness::NO_TASK_RUNNING);
+    assert!(!screen(&mut a).contains("not sent"));
+    a.task_done(&Err("done".into()), T0);
+    let cmds = a.next_queued(T0);
+    assert!(matches!(&cmds[..], [Cmd::StartTask { text, .. }] if text == "again"));
+}
+
+#[test]
 fn up_recalls_a_queued_line_and_esc_cancels_the_queue_before_the_task() {
     let mut a = app();
     keys(&mut a, "go\r");

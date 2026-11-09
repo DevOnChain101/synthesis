@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use synthesis_events::{Budget, Envelope, Event};
 use synthesis_harness::{
-    Approval, DENY_MESSAGE, ImageAttachment, TaskAgent, TaskOutcome, UserReply,
+    Approval, DENY_MESSAGE, ImageAttachment, NO_TASK_RUNNING, TaskAgent, TaskOutcome, UserReply,
 };
 use synthesis_permissions::{Mode, Suggestion};
 use synthesis_settings::{TUI_PANELS, TuiSettings};
@@ -1548,6 +1548,12 @@ impl App {
 
     /// The host could not hand a line to its agent: it goes back to the prompt.
     pub fn send_failed(&mut self, text: &str, why: &str) {
+        // The task ended between the keypress and the send (the screen still said "working"):
+        // the line is the next prompt, it starts as soon as the app sees the task over.
+        if why == NO_TASK_RUNNING {
+            self.queue.insert(0, text.to_string());
+            return;
+        }
         self.chat.note(format!("not sent: {why}"), "error");
         if self.editor.chars.is_empty() {
             self.editor.set(text);
