@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use synthesis_events::{Budget, Envelope, Event};
 use synthesis_harness::{
-    Approval, DENY_MESSAGE, ImageAttachment, TaskAgent, TaskOutcome, UserReply,
+    Approval, DENY_MESSAGE, ImageAttachment, NO_TASK_RUNNING, TaskAgent, TaskOutcome, UserReply,
 };
 use synthesis_permissions::{Mode, Suggestion};
 use synthesis_settings::{TUI_PANELS, TuiSettings};
@@ -356,6 +356,8 @@ pub(crate) struct App {
     target: Option<String>,
     /// Messages entered while a task runs, sent one per finished task (oldest first).
     queue: Vec<String>,
+    /// How many lines at the head of `queue` are refused sends waiting for the next task.
+    failed_head: usize,
     /// Big pastes live in the prompt as a chip and are expanded when the prompt is sent.
     pastes: Vec<(String, String)>,
     /// Images pasted with Alt+V, sent with the next request to the main agent.
@@ -643,6 +645,7 @@ impl App {
             task: None,
             target: None,
             queue: vec![],
+            failed_head: 0,
             pastes: vec![],
             attachments: vec![],
             image_busy: false,
@@ -1547,10 +1550,24 @@ impl App {
     }
 
     /// The host could not hand a line to its agent: it goes back to the prompt.
-    pub fn send_failed(&mut self, text: &str, why: &str) {
+    pub fn send_failed(&mut self, to: &str, text: &str, why: &str) {
+        // The task ended between the keypress and the send (the screen still said "working"):
+        // a line for the main agent is the next prompt, it starts as soon as the app sees the
+        // task over, ahead of lines queued later and in the order they failed. A line for a
+        // sub-agent is never re-aimed at main: it goes back to the prompt with its `@name`.
+        if why == NO_TASK_RUNNING && to == "main" {
+            let at = self.failed_head.min(self.queue.len());
+            self.queue.insert(at, text.to_string());
+            self.failed_head = at + 1;
+            return;
+        }
         self.chat.note(format!("not sent: {why}"), "error");
         if self.editor.chars.is_empty() {
-            self.editor.set(text);
+            self.editor.set(&if to == "main" {
+                text.to_string()
+            } else {
+                format!("@{to} {text}")
+            });
         }
     }
 
@@ -1597,6 +1614,7 @@ impl App {
         if self.task.is_none() && !self.compacting && self.quit.is_none() && !self.queue.is_empty()
         {
             let t = self.queue.remove(0);
+            self.failed_head = self.failed_head.saturating_sub(1);
             self.route_submit(t, now, &mut out);
         }
         out
@@ -1605,6 +1623,7 @@ impl App {
     /// Esc: give the queued lines back to the prompt (or drop them when it has a draft).
     fn cancel_queue(&mut self, now: i64) {
         let all = std::mem::take(&mut self.queue).join("\n");
+        self.failed_head = 0;
         if self.editor.chars.is_empty() {
             self.editor.set(&all);
         }

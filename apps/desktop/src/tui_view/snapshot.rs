@@ -21,8 +21,14 @@ pub fn tok(n: u64) -> String {
     if n >= 1_000_000 {
         let m = format!("{:.1}", n as f64 / 1e6);
         format!("{}M", m.trim_end_matches(".0"))
-    } else if n >= 1000 {
+    } else if n >= 100_000 {
         format!("{}k", (n + 500) / 1000)
+    } else if n >= 1000 {
+        // 12_400 -> `12.4k`: under 100k the tenths matter
+        format!(
+            "{}k",
+            format!("{:.1}", n as f64 / 1000.0).trim_end_matches(".0")
+        )
     } else {
         n.to_string()
     }
@@ -576,11 +582,8 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
             session: l.session_name(),
             model: model.clone(),
             effort: effort.clone(),
-            ctx: if window > 0 {
-                tok(window)
-            } else {
-                "n/a".into()
-            },
+            // `?` only when the window is truly unknown
+            ctx: if window > 0 { tok(window) } else { "?".into() },
             health,
             clock: clock_text(now, tz_min),
         },
@@ -613,7 +616,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
                     if window > 0 {
                         format!("{} tokens", grouped(window))
                     } else {
-                        "n/a".into()
+                        "?".into()
                     },
                 ),
                 ("tools".into(), format!("{} used", tools.tools.len())),

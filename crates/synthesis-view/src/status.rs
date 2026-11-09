@@ -72,13 +72,19 @@ pub struct ContextStatus {
     note: Option<(String, i64)>,
 }
 
-/// `124000` -> `124k`, `1_000_000` -> `1M`.
+/// `124000` -> `124k`, `12400` -> `12.4k`, `1_000_000` -> `1M`.
 fn tok(n: u64) -> String {
     if n >= 1_000_000 {
         let m = format!("{:.1}", n as f64 / 1e6);
         format!("{}M", m.trim_end_matches(".0"))
-    } else if n >= 1000 {
+    } else if n >= 100_000 {
         format!("{}k", (n + 500) / 1000)
+    } else if n >= 1000 {
+        // 12_400 -> `12.4k`: under 100k the tenths matter
+        format!(
+            "{}k",
+            format!("{:.1}", n as f64 / 1000.0).trim_end_matches(".0")
+        )
     } else {
         n.to_string()
     }
@@ -312,6 +318,33 @@ mod tests {
             agent_id: None,
             event,
         }
+    }
+
+    #[test]
+    fn golden_display_strings_for_a_known_and_an_unknown_window() {
+        assert_eq!(
+            [
+                tok(950),
+                tok(1_000),
+                tok(12_400),
+                tok(99_950),
+                tok(124_000),
+                tok(872_000),
+                tok(1_000_000),
+                tok(1_048_576)
+            ],
+            ["950", "1k", "12.4k", "100k", "124k", "872k", "1M", "1M"]
+        );
+        let mut c = ContextStatus::default();
+        // a window of 1M: tokens, percent and window agree
+        c.on_usage(12_400, 1_000_000, Some(1.24), false);
+        assert_eq!(c.label(0), Some(("ctx 1% 12.4k/1M".into(), Level::Normal)));
+        assert_eq!(c.numbers(), (12_400, 1_000_000));
+        // truly unknown (window_tokens 0): `?`, never a percentage or a guessed window
+        let mut u = ContextStatus::default();
+        u.on_usage(12_400, 0, Some(0.0), false);
+        assert_eq!(u.label(0), Some(("ctx 12.4k/?".into(), Level::Normal)));
+        assert_eq!(u.numbers(), (12_400, 0));
     }
 
     #[test]

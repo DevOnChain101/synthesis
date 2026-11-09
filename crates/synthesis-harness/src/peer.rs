@@ -140,6 +140,15 @@ pub(crate) struct Origin {
     pub chain: Vec<String>,
 }
 
+/// Removes a `waiting_on` entry when dropped.
+struct WaitGuard(Arc<PeerLink>, String);
+
+impl Drop for WaitGuard {
+    fn drop(&mut self) {
+        lock(&self.0.state).waiting_on.remove(&self.1);
+    }
+}
+
 /// What a session needs to talk to its peers; shared with the server and the sender tasks.
 pub struct PeerLink {
     pub config: Config,
@@ -1117,6 +1126,18 @@ impl Harness {
                 sender_mode: if delegate { sender_mode } else { "" },
             },
         };
+        // Registered before the request leaves: the receiver's cycle check (`peer_subscribe_end`)
+        // must see it even while it is still being delivered, or two sessions asking each other
+        // at once both accept and wait for each other.
+        // The guard takes the entry out again however this call ends: an error, a dropped
+        // future (cancel, timeout) or a panic. A leaked entry would make this session refuse
+        // every notify_on_end from that peer as a cycle for the rest of the process.
+        let wait_guard = notify.then(|| {
+            lock(&link.state)
+                .waiting_on
+                .insert(id.clone(), entry.session_id.clone());
+            WaitGuard(link.clone(), id.clone())
+        });
         let call = if offline_card {
             Err(PeerError::Connect)
         } else {
@@ -1163,9 +1184,6 @@ impl Harness {
         {
             let mut st = lock(&link.state);
             st.inflight += 1;
-            if notify {
-                st.waiting_on.insert(id.clone(), entry.session_id.clone());
-            }
         }
         let (sink, l2, cancel) = (
             self.sink.clone(),
@@ -1176,6 +1194,7 @@ impl Harness {
         let tid = thread_id.clone();
         let sink2 = sink.clone();
         tokio::spawn(async move {
+            let _wait = wait_guard; // the task owns the entry from here (also on a panic)
             let partials = Mutex::new(Vec::<String>::new());
             let r = tokio::select! {
                 r = call.wait(|seq, t| {

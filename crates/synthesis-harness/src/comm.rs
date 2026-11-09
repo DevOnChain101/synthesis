@@ -27,6 +27,9 @@ use crate::traits::BoxFut;
 use crate::util::{lock, uuid};
 use synthesis_events::ToolStatus;
 
+/// Why `send_user_message` refuses a line when the task ended before it arrived.
+pub const NO_TASK_RUNNING: &str = "no task is running";
+
 /// What `ListAgents` and the front end's agent list show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentInfo {
@@ -713,7 +716,7 @@ impl Harness {
         let task_id = self
             .hub
             .task_id()
-            .ok_or_else(|| "no task is running".to_string())?;
+            .ok_or_else(|| NO_TASK_RUNNING.to_string())?;
         let to = self.hub.resolve(to, MAIN)?;
         let mode = lock(&self.permissions).mode();
         let mut text = text;

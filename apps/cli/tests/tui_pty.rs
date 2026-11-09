@@ -174,6 +174,10 @@ fn expect(s: &str) -> Value {
 fn expect_new(s: &str) -> Value {
     json!(["expect_new", s, 40])
 }
+/// Waits until the session store holds `n` events of type `t`.
+fn events(t: &str, n: u32) -> Value {
+    json!(["events", t, n, 40])
+}
 /// Waits until the app has printed nothing for a moment: it is idle and reads keys again.
 fn quiet() -> Value {
     json!(["quiet", 0.7])
@@ -570,6 +574,9 @@ fn esc_with_an_unread_line_gives_one_notice() {
         expect("Enter send"),
         send("hi\r"),
         expect_new("esc to interrupt"),
+        // "working" is on screen before the agent drains its inbox for the first request: a line
+        // sent in that window is delivered at once and never shows as queued
+        events("turn.started", 1),
         send("second\r"),
         expect_new("queued:"),
         send("\x1b"),

@@ -493,3 +493,39 @@ fn a_send_now_during_an_approval_is_delivered_after_the_tool_result_and_leaves_t
     drop(r.engine);
     synthesis_desktop::engine::close_shared(engine);
 }
+
+#[test]
+fn context_is_a_command_and_a_picker_row_that_prefills_it() {
+    use synthesis_desktop::live::Action;
+    let mut r = rig(serde_json::json!([]));
+    assert_eq!(
+        r.live.submit("/context 1m"),
+        Submitted::Do(Action::SetContext("1m".into()))
+    );
+    assert_eq!(
+        r.live.submit("/context"),
+        Submitted::Nothing,
+        "alone: shows the window and its source"
+    );
+    assert!(
+        r.engine.context_source.starts_with("unknown"),
+        "{}",
+        r.engine.context_source
+    );
+    assert!(
+        r.engine.context_source.contains("/context"),
+        "the hint says how to set it"
+    );
+    // the picker has the row; picking it closes the picker and fills the input box
+    assert_eq!(r.live.submit("/model"), Submitted::Nothing);
+    let at = r.live.dialogs[0]
+        .options
+        .iter()
+        .position(|(k, _)| k == "context")
+        .unwrap();
+    let now = 1_000_000;
+    let key = r.live.pick(at, now).unwrap();
+    assert_eq!(r.live.answer(&key, now), None);
+    assert!(r.live.dialogs.is_empty());
+    assert_eq!(r.live.returned_prompt.take().as_deref(), Some("/context "));
+}

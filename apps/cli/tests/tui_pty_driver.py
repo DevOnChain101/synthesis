@@ -2,12 +2,13 @@
 
 usage: tui_pty_driver.py scenario.json out.txt
 scenario: {"argv": [...], "env": {...}, "steps": [["send", "bytes"] | ["wait", secs] |
-           ["expect", "text", secs] | ["expect_new", "text", secs] | ["quiet", secs] | ["mark"] | ["cut"]]}
-`expect_new` looks only at output that arrived after the last `send`. out.txt gets the whole
+           ["expect", "text", secs] | ["expect_new", "text", secs] | ["events", "type", n, secs] | ["quiet", secs] | ["mark"] | ["cut"]]}
+`events` waits until the session store holds n events of a type: the app has really reached that point
+(the screen shows "working" before the agent has read its inbox). `expect_new` looks only at output that arrived after the last `send`. out.txt gets the whole
 screen output (escape sequences removed); out.txt.raw gets the raw bytes between the last `mark` and `cut`
 (start / end without them); out.txt.span is the same span as text and the exit state, the last line is `STATE ok|failed <exit>`.
 """
-import pty,os,sys,time,select,re,json,struct,fcntl,termios,signal
+import pty,os,sys,time,select,re,json,struct,fcntl,termios,signal,sqlite3
 sc=json.load(open(sys.argv[1]))
 env={"PATH":os.environ["PATH"],"TERM":"xterm-256color","COLORTERM":"truecolor"}
 env.update(sc["env"])
@@ -71,6 +72,16 @@ for st in sc["steps"]:
         while time.time()<end:
             n=len(buf); rd(st[1])
             if len(buf)==n: break
+    elif st[0]=="events":
+        end=time.time()+st[3]; n=0
+        while time.time()<end and n<st[2]:
+            rd(0.2)
+            try:
+                c=sqlite3.connect(os.path.join(sc["env"]["SYNT_HOME"],"synt.db"),timeout=1)
+                n=c.execute("SELECT COUNT(*) FROM events WHERE type=?",(st[1],)).fetchone()[0]; c.close()
+            except sqlite3.Error: pass
+        if n<st[2]:
+            ok=False; print("FAIL step",st,"found",n); break
     elif st[0] in ("expect","expect_new"):
         end=time.time()+st[2]; mark=sent_at if st[0]=="expect_new" else 0
         found=False

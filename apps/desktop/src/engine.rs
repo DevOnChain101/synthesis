@@ -693,6 +693,8 @@ pub struct Engine {
     pub model_rows: Vec<crate::models::ModelRow>,
     /// The stored model that could not be used (the session runs on `label`; the stored id is kept).
     pub stale_model: Option<String>,
+    /// The context window and where it comes from, or why it is unknown (`/status`).
+    pub context_source: String,
     pub effort_tiers: Vec<String>,
     pub notices: Vec<String>,
     pub cwd: String,
@@ -894,6 +896,13 @@ impl Engine {
                 argument_hint: "<path>".into(),
                 local: true,
             }))
+            .chain(std::iter::once(Command {
+                name: "context".into(),
+                aliases: vec![],
+                description: "set (or unset) the context window of the model in use".into(),
+                argument_hint: "<tokens|unset>".into(),
+                local: true,
+            }))
             .chain(std::iter::once(crate::live::send_command()))
             .chain(std::iter::once(crate::live::rewind_command()))
             .chain(
@@ -950,12 +959,14 @@ impl Engine {
             ));
         }
         all_notices.extend(notes);
+        let context_source = crate::models::window_note(env, &project, &label);
         let engine = Self {
             sid,
             label,
             models,
             model_rows: crate::models::rows(env, &project),
             stale_model,
+            context_source,
             effort_tiers,
             notices: all_notices,
             cwd,

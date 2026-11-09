@@ -46,6 +46,26 @@ pub fn detail(f: Option<&ModelFacts>, price: Option<(f64, f64)>) -> String {
     )
 }
 
+/// `1M (the provider's model list (cache))` or why the window is unknown and how to set it.
+pub fn window_note(env: &Env, project: &Path, label: &str) -> String {
+    let Ok(h) = synthesis_app::homes(env) else {
+        return "unknown".into();
+    };
+    let Ok(cfg) = synthesis_app::load_config(env, &h, Some(project), ProjectTrust::Untrusted)
+    else {
+        return "unknown".into();
+    };
+    match app::window_source(&cfg, &h.synthesis, label) {
+        (Some(w), src) => format!("{} ({src})", k(w)),
+        (None, why) => {
+            let (p, m) = label.split_once('/').unwrap_or(("provider", label));
+            format!(
+                "unknown ({why}); compaction assumes 200k. Set it: /context <tokens> (e.g. /context 1m) writes limit.context for \"{m}\" under providers.{p}.models in synt.json"
+            )
+        }
+    }
+}
+
 /// Config models first, then cached (discovered) ones; reads files only, never the network.
 pub fn rows(env: &Env, project: &Path) -> Vec<ModelRow> {
     let Ok(h) = synthesis_app::homes(env) else {
