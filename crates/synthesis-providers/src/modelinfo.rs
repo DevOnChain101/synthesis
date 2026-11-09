@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn a_written_cache_stays_readable_whatever_the_provider_sent() {
-        let dir = std::env::temp_dir().join(format!("synt-mi-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("synt-mi-written-{}", std::process::id()));
         let path = dir.join("c.json");
         let mut f = file("http://x", 1);
         let big = |n: usize| json!({"blob": "x".repeat(n)}).as_object().cloned();
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn cache_round_trip_ttl_invalidation_and_corruption() {
-        let dir = std::env::temp_dir().join(format!("synt-mi-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("synt-mi-trip-{}", std::process::id()));
         let p = cache_path(&dir, "we/ird:id");
         let name = p.file_name().unwrap().to_string_lossy().into_owned();
         assert!(
