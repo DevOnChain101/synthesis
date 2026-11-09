@@ -140,10 +140,11 @@ pub fn parse_tokens(input: &str) -> Result<u64, String> {
         },
     };
     let bad = || {
-        format!(
-            "\"{}\" is not a token count (e.g. 200000, 200k, 1m)",
-            input.trim()
-        )
+        let shown: String = synthesis_harness::sanitize_for_display(input.trim())
+            .chars()
+            .take(40)
+            .collect();
+        format!("\"{shown}\" is not a token count (e.g. 200000, 200k, 1m)")
     };
     let v = num.parse::<f64>().map_err(|_| bad())? * mult;
     if !v.is_finite() || v.fract().abs() > 1e-6 {
@@ -168,9 +169,19 @@ pub fn set_context_limit(
 ) -> Result<(), String> {
     use serde_json::{Map, Value};
     let path = synthesis_home.join("synt.json");
-    if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+    // the file and the home folder it sits in: neither may be a link
+    for p in [path.as_path(), synthesis_home] {
+        if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!(
+                "{} is a symbolic link; edit the real file by hand",
+                p.display()
+            ));
+        }
+    }
+    // nothing is created for a file that is not there (so no folder either)
+    if !path.is_file() {
         return Err(format!(
-            "{} is a symbolic link; edit the real file by hand",
+            "{} does not exist: nothing to edit",
             path.display()
         ));
     }
@@ -191,6 +202,13 @@ pub fn set_context_limit(
         };
         match tokens {
             Some(n) => {
+                // `models` is also the list of models a provider offers: the first entry of an
+                // empty one would make every other (discovered) model "not declared"
+                if models.is_empty() {
+                    return Err(no(format!(
+                        "declare the model first in synt.json (providers.{provider}.models) so it does not restrict the other models"
+                    )));
+                }
                 let entry = models
                     .entry(model.to_string())
                     .or_insert_with(|| Value::Object(Map::new()));
@@ -471,6 +489,14 @@ mod tests {
         );
         let d2 = home_with(r#"{"providers":{"p":{"models":["a","b"]}}}"#);
         assert!(set_context_limit(d2.path(), "p", "a", Some(5000)).is_err());
+        // an empty `models` is an open list: the first entry would restrict it, so it is refused
+        let d5 = home_with(r#"{"providers":{"p":{"discover":true,"models":{}}}}"#);
+        let e = set_context_limit(d5.path(), "p", "a", Some(5000)).unwrap_err();
+        assert!(e.contains("declare the model first"), "{e}");
+        assert_eq!(
+            std::fs::read_to_string(d5.path().join("synt.json")).unwrap(),
+            r#"{"providers":{"p":{"discover":true,"models":{}}}}"#
+        );
         // unparseable: refused, bytes untouched
         let d3 = home_with("{ not json");
         assert!(set_context_limit(d3.path(), "p", "a", Some(5000)).is_err());
@@ -488,6 +514,30 @@ mod tests {
         std::fs::write(&pf, "{}").unwrap();
         set_context_limit(d.path(), "omniroute", "a", Some(5000)).unwrap();
         assert_eq!(std::fs::read_to_string(&pf).unwrap(), "{}");
+    }
+
+    #[test]
+    fn a_typed_value_is_echoed_short_and_clean() {
+        let e = parse_tokens(&format!("x\u{1b}[31m{}", "y".repeat(500))).unwrap_err();
+        assert!(!e.contains('\u{1b}') && e.len() < 120, "{e}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_home_is_refused_and_a_missing_file_creates_nothing() {
+        let real = home_with(FILE);
+        let holder = tempfile::tempdir().unwrap();
+        let link = holder.path().join("home");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        assert!(
+            set_context_limit(&link, "omniroute", "a", Some(5000))
+                .unwrap_err()
+                .contains("symbolic link")
+        );
+        // a folder that does not exist is not created by a refused edit
+        let missing = holder.path().join("nope").join("home");
+        assert!(set_context_limit(&missing, "p", "a", Some(5000)).is_err());
+        assert!(!holder.path().join("nope").exists());
     }
 
     #[cfg(unix)]
