@@ -1,7 +1,9 @@
 //! `/clean`: `Store::clean_plan`, `Store::clean`, `Store::backup_db` (temp home only).
 
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 
 use serde_json::json;
 use synthesis_core::{ParentRef, PermissionMode, WorkspaceContext};
