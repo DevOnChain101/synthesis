@@ -307,6 +307,10 @@ impl TuiView {
         cx: &mut Context<Self>,
     ) {
         let Some(lu) = &mut self.live else { return };
+        if let Some(why) = lu.live.engine_switch_blocker() {
+            lu.live.note(why, true);
+            return;
+        }
         if lu.fixture {
             return;
         }
@@ -1157,6 +1161,12 @@ impl TuiView {
     /// repeat within [`SWITCH_ARM_MS`] that cancels a running task is for the same one.
     fn switch(&mut self, target: Target, key: String, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
+        if let Some(why) = lu.live.engine_switch_blocker() {
+            lu.live.note(why, true);
+            lu.dirty = true;
+            cx.notify();
+            return;
+        }
         let now = now_ms();
         if lu.live.busy {
             let armed = lu
@@ -1197,7 +1207,7 @@ impl TuiView {
     }
 
     /// Runs `f` on the live state, then redraws and scrolls to the new row.
-    fn live_do(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Live)) {
+    pub(super) fn live_do(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Live)) {
         if let Some(lu) = &mut self.live {
             f(&mut lu.live);
             lu.stick();
@@ -1490,6 +1500,9 @@ impl TuiView {
                 })
                 .detach();
             }
+            a @ (Action::Rewind | Action::RewindPreview(_) | Action::RewindApply(_)) => {
+                return self.run_rewind(a, cx);
+            }
             Action::Doctor => {
                 let Some(e) = lu.live.engine.clone() else {
                     return;
@@ -1537,7 +1550,9 @@ impl TuiView {
         let Some(lu) = &self.live else {
             return Some("there is no live session in this window");
         };
-        if lu.live.busy || !lu.live.dialogs.is_empty() || !lu.live.queue.is_empty() {
+        if let Some(why) = lu.live.engine_switch_blocker() {
+            Some(why)
+        } else if lu.live.busy || !lu.live.dialogs.is_empty() || !lu.live.queue.is_empty() {
             Some(
                 "a task is running, or approvals or queued prompts are pending: finish or cancel first",
             )

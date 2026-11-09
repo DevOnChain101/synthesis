@@ -62,6 +62,8 @@ pub struct LiveShot {
     earlier: Option<String>,
     /// `--queue 'a|b'`: a task is running and these lines wait behind it (rows above the prompt).
     queue: Vec<String>,
+    /// `--rewind list|confirm`: the `/rewind` checkpoint picker, or its dry-run confirmation, is open.
+    rewind: Option<String>,
     /// `--setup`: the first-run card (no model configured) is open.
     setup: bool,
     /// `--outside-read`: an `outside_read` approval dialog is open.
@@ -160,6 +162,7 @@ pub fn parse(args: &[String]) -> Option<Args> {
         send_pick: val("--send-pick").and_then(|n| n.parse().ok()),
         earlier: val("--earlier").cloned(),
         queue: val("--queue").map_or_else(Vec::new, |q| q.split('|').map(String::from).collect()),
+        rewind: val("--rewind").cloned(),
         setup: args.iter().any(|a| a == "--setup"),
         outside_read: args.iter().any(|a| a == "--outside-read"),
         memory_seed: args.iter().any(|a| a == "--memory-seed"),
@@ -326,6 +329,18 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
     if !l.queue.is_empty() {
         live.busy = true;
         live.queue.extend(l.queue.iter().cloned());
+    }
+    if let Some(step) = &l.rewind {
+        let home = crate::rewind::Homes {
+            synthesis: engine.synthesis_home.clone(),
+            user: crate::rewind::user_home(&cfg.env),
+        };
+        let sid = engine.sid.clone();
+        live.rewind_listed(crate::rewind::list(&home, &sid));
+        if step == "confirm" {
+            live.dialogs.clear();
+            live.rewind_previewed(crate::rewind::preview(&home, &sid, None));
+        }
     }
     if l.setup {
         live.open_setup("no model configured: set `model` in synt.json", now_ms());

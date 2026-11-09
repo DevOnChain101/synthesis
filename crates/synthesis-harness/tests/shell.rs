@@ -660,6 +660,80 @@ async fn interactive_gate_check_asks_the_approver_and_runs_when_allowed() {
     assert!(out.needed_permissions.is_empty());
 }
 
+/// Per-check progress: a scripted check that fails the first time and passes the second gives
+/// started/finished pairs in order, with exit code and output tail, around each report.
+#[tokio::test]
+async fn gate_checks_report_progress_failed_then_passed() {
+    let opts = Opts {
+        allow: vec!["Write".into(), "Bash".into()],
+        ..gate_opts(true)
+    };
+    let mut rig = gated(opts, write_turns(), None);
+    let out = rig
+        .run_with(
+            with_check(
+                "if [ -f m.flag ]; then echo fine; else touch m.flag; echo broke; exit 3; fi",
+            ),
+            CancellationToken::new(),
+        )
+        .await;
+    assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
+    let seen = rig.find(|e| match e {
+        Event::VerificationCheckStarted {
+            check_id,
+            command,
+            index,
+            total,
+            ..
+        } => Some(format!(
+            "start {check_id} {index}/{total} {}",
+            command.is_some()
+        )),
+        Event::VerificationCheckFinished {
+            status,
+            exit_code,
+            output_tail,
+            ..
+        } => Some(format!("end {status} {exit_code:?} {output_tail}")),
+        Event::VerificationCompleted { status, .. } => Some(format!("report {status}")),
+        _ => None,
+    });
+    assert_eq!(seen.len(), 6, "{seen:?}");
+    assert!(
+        seen[0].starts_with("start ") && seen[0].ends_with(" 0/1 true"),
+        "{seen:?}"
+    );
+    assert_eq!(seen[1], "end failed Some(3) broke");
+    assert_eq!(seen[2], "report failed");
+    assert_eq!(seen[4], "end passed Some(0) fine");
+    assert_eq!(seen[5], "report passed");
+}
+
+/// The tail is redacted before it is cut: a secret that the byte cut would split is still masked.
+#[tokio::test]
+async fn check_output_tail_is_redacted_before_it_is_cut() {
+    let opts = Opts {
+        allow: vec!["Write".into(), "Bash".into()],
+        ..gate_opts(true)
+    };
+    let mut rig = gated(opts, write_turns(), None);
+    rig.run_with(
+        with_check(
+            "printf 'sk-ant-api03-abcdefghijklmnop'; head -c 1480 /dev/zero | tr '\\0' y; echo",
+        ),
+        CancellationToken::new(),
+    )
+    .await;
+    let tails = rig.find(|e| match e {
+        Event::VerificationCheckFinished { output_tail, .. } => Some(output_tail.clone()),
+        _ => None,
+    });
+    assert!(!tails.is_empty());
+    for t in &tails {
+        assert!(t.contains("[REDACTED") && !t.contains("abcdefghij"), "{t}");
+    }
+}
+
 /// Honesty: a green check after the agent faked an env var in a test file is `unverified`, and
 /// the one-line summary says which test files were modified.
 #[tokio::test]

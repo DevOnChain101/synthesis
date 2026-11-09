@@ -127,6 +127,12 @@ pub trait CheckAuthorizer: Send + Sync {
         check: &'a Check,
         cancel: &'a CancellationToken,
     ) -> Pin<Box<dyn Future<Output = CheckAuth> + Send + 'a>>;
+
+    /// Progress callbacks of `run_with`: `index` of `total` is about to be authorised and run.
+    fn started(&self, _check: &Check, _index: usize, _total: usize) {}
+
+    /// The check ended (any status, a refused one included).
+    fn finished(&self, _result: &CheckResult) {}
 }
 
 /// Prefix of a [`CheckAuth::Blocked`] reason that needs an approval nobody could give.
@@ -169,11 +175,18 @@ impl VerifyRunner {
         if let Some(a) = auth {
             a.prepare(checks, cancel).await;
         }
-        for c in checks {
+        for (i, c) in checks.iter().enumerate() {
             if cancel.is_cancelled() {
                 break;
             }
-            out.push(self.run_one_with(c, cancel, auth).await);
+            if let Some(a) = auth {
+                a.started(c, i, checks.len());
+            }
+            let r = self.run_one_with(c, cancel, auth).await;
+            if let Some(a) = auth {
+                a.finished(&r);
+            }
+            out.push(r);
         }
         out
     }

@@ -17,6 +17,7 @@ impl TuiView {
             &lu.live,
             &lu.dlg_scroll,
             &|i| Box::new(cx.listener(move |this, _, _, cx| this.click_option(i, cx))),
+            &|g| Box::new(cx.listener(move |this, _, _, cx| this.rewind_toggle(g, cx))),
             border,
             (self.win_h * 0.4).clamp(150., 420.),
             // a press on the panel engages it: Enter and digits answer from then on

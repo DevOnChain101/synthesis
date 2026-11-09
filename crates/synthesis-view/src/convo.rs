@@ -14,6 +14,39 @@ pub enum ToolState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckState {
+    Running,
+    Passed,
+    Failed,
+    Unverified,
+    Blocked,
+}
+
+impl CheckState {
+    fn of(status: &str) -> Self {
+        match status {
+            "passed" => Self::Passed,
+            "failed" => Self::Failed,
+            "blocked" => Self::Blocked,
+            _ => Self::Unverified,
+        }
+    }
+}
+
+/// One check of the completion gate (`verification.check.*`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CheckRow {
+    pub id: String,
+    pub name: String,
+    pub command: Option<String>,
+    pub state: CheckState,
+    pub duration_ms: u64,
+    pub exit_code: Option<i64>,
+    /// The end of the check's output (capped by the producer).
+    pub tail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalState {
     Pending,
     Allowed,
@@ -67,6 +100,15 @@ pub enum Item {
     /// A verification report: `status` is `passed`, `failed`, ... and `summary` one check per line.
     Verification {
         status: String,
+        summary: String,
+    },
+    /// The gate's checks as they run: one row per check. `done` is the report status once
+    /// `verification.completed` closed the card (`ended` when the task ended first); `total` is
+    /// how many the evaluation planned. Old sessions have no such events and show `Verification`.
+    Checks {
+        rows: Vec<CheckRow>,
+        total: usize,
+        done: Option<String>,
         summary: String,
     },
     Approval {
@@ -245,6 +287,15 @@ impl Convo {
         self.items.push(Item::Internal(text));
     }
 
+    /// The latest check card that no report has closed yet.
+    fn open_checks(&mut self) -> Option<&mut Item> {
+        self.items
+            .iter_mut()
+            .rev()
+            .find(|i| matches!(i, Item::Checks { .. }))
+            .filter(|i| matches!(i, Item::Checks { done: None, .. }))
+    }
+
     fn close_stream(&mut self) {
         if let Some(Item::Assistant { streaming, .. }) = self.items.last_mut() {
             *streaming = false;
@@ -293,6 +344,13 @@ impl Convo {
             } => {
                 self.running = false;
                 self.close_stream();
+                if let Some(Item::Checks { rows, done, .. }) = self.open_checks() {
+                    // the task ended inside the gate: nothing is running any more
+                    for r in rows.iter_mut().filter(|r| r.state == CheckState::Running) {
+                        r.state = CheckState::Blocked;
+                    }
+                    *done = Some("ended".into());
+                }
                 let secs = crate::model::parse_ts(&e.ts)
                     .zip(self.started_ms)
                     .map_or(0, |(end, start)| ((end - start) / 1000).max(0));
@@ -423,11 +481,82 @@ impl Convo {
             }
             // unverified and blocked runs are said by the task end line (with these checks);
             // failed and passed are shown
+            Event::VerificationCheckStarted {
+                check_id,
+                name,
+                command,
+                index,
+                total,
+            } if main => {
+                let row = CheckRow {
+                    id: check_id.clone(),
+                    name: sanitize_for_display(name),
+                    command: command.as_deref().map(sanitize_for_display),
+                    state: CheckState::Running,
+                    duration_ms: 0,
+                    exit_code: None,
+                    tail: String::new(),
+                };
+                match self.open_checks().filter(|_| *index > 0) {
+                    Some(Item::Checks { rows, total: t, .. }) => {
+                        rows.retain(|r| r.id != row.id);
+                        rows.push(row);
+                        *t = (*total as usize).max(rows.len());
+                    }
+                    _ => self.items.push(Item::Checks {
+                        rows: vec![row],
+                        total: *total as usize,
+                        done: None,
+                        summary: String::new(),
+                    }),
+                }
+            }
+            Event::VerificationCheckFinished {
+                check_id,
+                name,
+                command,
+                status,
+                duration_ms,
+                exit_code,
+                output_tail,
+            } if main => {
+                let row = CheckRow {
+                    id: check_id.clone(),
+                    name: sanitize_for_display(name),
+                    command: command.as_deref().map(sanitize_for_display),
+                    state: CheckState::of(status),
+                    duration_ms: *duration_ms,
+                    exit_code: *exit_code,
+                    tail: sanitize_for_display(output_tail),
+                };
+                match self.open_checks() {
+                    Some(Item::Checks { rows, total, .. }) => {
+                        match rows.iter_mut().find(|r| r.id == row.id) {
+                            Some(r) => *r = row,
+                            None => rows.push(row),
+                        }
+                        *total = (*total).max(rows.len());
+                    }
+                    // the start was not seen (a stream that begins mid-run)
+                    _ => self.items.push(Item::Checks {
+                        rows: vec![row],
+                        total: 1,
+                        done: None,
+                        summary: String::new(),
+                    }),
+                }
+            }
             Event::VerificationCompleted {
                 status, summary, ..
             } if main => {
                 self.checks = Some(summary.clone());
-                if matches!(status.as_str(), "passed" | "failed") {
+                if let Some(Item::Checks {
+                    done, summary: s, ..
+                }) = self.open_checks()
+                {
+                    *done = Some(status.clone());
+                    *s = summary.clone();
+                } else if matches!(status.as_str(), "passed" | "failed") {
                     self.items.push(Item::Verification {
                         status: status.clone(),
                         summary: summary.clone(),
@@ -706,6 +835,84 @@ mod tests {
         let mut v = json!({"v":1,"seq":1,"ts":"2026-01-01T00:00:00Z","session_id":"s","task_id":null,"turn_id":null,"type":t});
         v["payload"] = payload;
         serde_json::from_value(v).unwrap()
+    }
+
+    fn started(id: &str, index: u32, total: u32) -> Envelope {
+        ev(
+            "verification.check.started",
+            json!({"check_id":id,"name":id,"command":"cargo test","index":index,"total":total}),
+        )
+    }
+
+    fn finished(id: &str, status: &str) -> Envelope {
+        ev(
+            "verification.check.finished",
+            json!({"check_id":id,"name":id,"status":status,"duration_ms":40,"exit_code":1,"output_tail":"boom"}),
+        )
+    }
+
+    fn card(c: &Convo) -> (&[CheckRow], Option<&str>) {
+        match c.items.last() {
+            Some(Item::Checks { rows, done, .. }) => (rows, done.as_deref()),
+            i => panic!("{i:?}"),
+        }
+    }
+
+    #[test]
+    fn check_progress_fills_one_card_that_the_report_closes() {
+        let mut c = Convo::default();
+        c.apply(&started("lint", 0, 2));
+        assert_eq!(card(&c).0[0].state, CheckState::Running);
+        c.apply(&finished("lint", "failed"));
+        c.apply(&started("test", 1, 2));
+        let (rows, done) = card(&c);
+        assert_eq!((rows.len(), done), (2, None));
+        assert_eq!(rows[0].state, CheckState::Failed);
+        assert_eq!(
+            (rows[0].exit_code, rows[0].tail.as_str()),
+            (Some(1), "boom")
+        );
+        assert_eq!(rows[1].state, CheckState::Running);
+        c.apply(&finished("test", "passed"));
+        c.apply(&ev(
+            "verification.completed",
+            json!({"report_id":"r","status":"failed","attempt":1,"summary":"1 failed"}),
+        ));
+        assert_eq!(c.items.len(), 1, "the card replaces the one-line report");
+        assert_eq!(card(&c).1, Some("failed"));
+        // the next attempt starts a new card
+        c.apply(&started("lint", 0, 2));
+        assert_eq!(c.items.len(), 2);
+    }
+
+    #[test]
+    fn check_events_missing_or_cut_short_are_tolerated() {
+        // finished without started, and a task that ends inside the gate
+        let mut c = Convo::default();
+        c.apply(&finished("lint", "passed"));
+        assert_eq!(card(&c).0.len(), 1);
+        c.apply(&started("test", 0, 1));
+        c.apply(&ev(
+            "task.ended",
+            json!({"status":"cancelled","reason":"cancelled","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"changed_files":[],"artifacts_root":""}),
+        ));
+        let Some(Item::Checks { rows, done, .. }) = c
+            .items
+            .iter()
+            .rev()
+            .find(|i| matches!(i, Item::Checks { .. }))
+        else {
+            panic!()
+        };
+        assert_eq!(rows[0].state, CheckState::Blocked);
+        assert_eq!(done.as_deref(), Some("ended"));
+        // an old session: only the report, drawn as before
+        let mut c = Convo::default();
+        c.apply(&ev(
+            "verification.completed",
+            json!({"report_id":"r","status":"passed","attempt":1,"summary":"ok"}),
+        ));
+        assert!(matches!(c.items[0], Item::Verification { .. }));
     }
 
     #[test]
