@@ -6,7 +6,8 @@
 //!
 //! A record names a canonical root, its scope (`folder`: that root; `parent`: that root and everything
 //! under it), when it was given and a fingerprint of the project's trusted configuration at that time.
-//! The fingerprint is only a change warning: trust is not withdrawn when the files change.
+//! The fingerprint (kept for `folder` records; a `parent` record covers many projects and keeps none) is only a
+//! change warning: trust is not withdrawn when the files change.
 
 use std::fs;
 use std::io::Read as _;

@@ -82,9 +82,19 @@ pub enum PickerKind {
     Setup,
     /// Shift+Tab reached bypassPermissions: the confirmation (Cancel is the first option and the default).
     Bypass,
+    /// `/trust revoke`: confirm forgetting a remembered root (Keep is first and the default).
+    Revoke,
     /// The Files tab was opened in an untrusted folder: trust it for this session? ("Not now" is first and the
     /// default.)
     Trust,
+}
+
+/// What the Trust dialog granted: the project root the session restarts trusted for, and, when the person chose
+/// to remember it, the root to record (the project root, or its parent for "all its subfolders") with its scope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrustGrant {
+    pub root: std::path::PathBuf,
+    pub remember: Option<(std::path::PathBuf, &'static str)>,
 }
 
 /// What the window does after a command or a picker (it restarts the engine, talks to it).
@@ -113,7 +123,7 @@ pub enum Action {
     /// `/diff [file]`: the centre panel shows its diff tab, with `file` open when one is named.
     ShowDiff(Option<String>),
     /// The Trust dialog was accepted: the window restarts this session with the folder trusted.
-    TrustFolder(std::path::PathBuf),
+    TrustFolder(TrustGrant),
     /// Setup card: build the engine again (the person set a model and a key meanwhile).
     Recheck,
     /// Setup card: quit the app.
@@ -177,7 +187,10 @@ impl Dialog {
     pub fn needs_person(&self) -> bool {
         match &self.kind {
             DialogKind::Picker { kind, .. } => {
-                matches!(kind, PickerKind::Bypass | PickerKind::Trust)
+                matches!(
+                    kind,
+                    PickerKind::Bypass | PickerKind::Trust | PickerKind::Revoke
+                )
             }
             _ => true,
         }
@@ -241,7 +254,7 @@ pub fn trust_text(root: &std::path::Path, cwd: &str) -> Vec<String> {
     }
     v.push("Enables: the root's project settings (including permission and allow rules), agents, skills, memory and instruction files, hooks, and the file explorer's git listing. Its MCP servers are offered but none starts: each needs your own approval as NAME@HASH (--approve-mcp at launch or your user settings; `synt mcp get` shows the hash). MCP approvals given at launch are not carried over.".into());
     v.push("Risks: a repository you did not write can carry hooks that run commands (one can run at the restart that follows), allow rules that skip prompts, and provider endpoints that receive your prompts.".into());
-    v.push("The session restarts now and must be idle: the saved conversation is reloaded (if it cannot be, a fresh session starts and a note says so), this session's 'always allow' grants and its permission mode are reset. Trust lasts for this session only; nothing is saved. Not now changes nothing: no git runs and nothing from the folder is loaded.".into());
+    v.push("The session restarts now and must be idle: the saved conversation is reloaded (if it cannot be, a fresh session starts and a note says so), this session's 'always allow' grants and its permission mode are reset. \"Trust this folder (remember)\" records the root in your own session store (never in the project) for later sessions, resumed ones included; /trust lists and revokes it. It does not ask again when the project's files change, but a warning row shows when its trusted configuration differs from when you trusted it. \"Trust for this session only\" saves nothing. Not now changes nothing: no git runs and nothing from the folder is loaded.".into());
     v
 }
 
@@ -328,6 +341,17 @@ fn spinner(ms: i64) -> &'static str {
 }
 
 /// Desktop-only commands (not in the terminal TUI's list): `/panels`, added to the engine's commands.
+pub fn trust_command() -> Command {
+    Command {
+        name: "trust".into(),
+        description: "list the folders you trusted and remembered; revoke one".into(),
+        argument_hint: "[revoke <n|path>]".into(),
+        local: true,
+        ..Command::default()
+    }
+}
+
+/// Desktop-only commands (not in the terminal TUI's list): `/panels`, added to the engine's commands.
 pub fn panels_command() -> Command {
     Command {
         name: "panels".into(),
@@ -340,7 +364,7 @@ pub fn panels_command() -> Command {
 
 pub fn is_wired(name: &str) -> bool {
     // `open`, `send` and `panels` exist only in the desktop app
-    WIRED.contains(&name) || matches!(name, "open" | "send" | "panels")
+    WIRED.contains(&name) || matches!(name, "open" | "send" | "panels" | "trust")
 }
 
 /// `/send` is the desktop's own command (the classic TUI has none), so it is not in [`WIRED`].
@@ -431,6 +455,10 @@ pub struct Live {
     pub trusted: bool,
     /// The root the open Trust dialog offers (what "Trust for this session" grants).
     pub trust_root: Option<std::path::PathBuf>,
+    /// The parent folder the open Trust dialog also offers (all its subfolders, remembered).
+    pub trust_parent: Option<std::path::PathBuf>,
+    /// The remembered root the open revoke confirmation is about.
+    pub revoke_root: Option<String>,
     /// Images for the next message.
     pub images: Vec<Attached>,
     /// A clipboard read is in flight (key repeat starts no second one).
@@ -496,6 +524,8 @@ impl Live {
             cwd: String::new(),
             trusted: false,
             trust_root: None,
+            trust_parent: None,
+            revoke_root: None,
             images: vec![],
             image_busy: false,
             focus_view: false,
@@ -537,6 +567,7 @@ impl Live {
         self.trusted = engine.trusted;
         self.commands = engine.commands.clone();
         self.commands.push(panels_command());
+        self.commands.push(trust_command());
         self.mcp = engine.mcp_status();
         self.queue.clear();
         self.dialogs.clear();
@@ -870,10 +901,31 @@ impl Live {
                 return None;
             }
             if kind == PickerKind::Trust {
-                return (key == "session")
-                    .then(|| self.trust_root.take())
-                    .flatten()
-                    .map(Action::TrustFolder);
+                let (root, parent) = (self.trust_root.take(), self.trust_parent.take());
+                let root = root?;
+                let remember = match key {
+                    "remember" => Some((root.clone(), synthesis_session::trust::FOLDER)),
+                    "parent" => Some((parent?, synthesis_session::trust::PARENT)),
+                    "session" => None,
+                    _ => return None,
+                };
+                return Some(Action::TrustFolder(TrustGrant { root, remember }));
+            }
+            if kind == PickerKind::Revoke {
+                if let (Some(e), Some(root), "revoke") =
+                    (&self.engine, self.revoke_root.take(), key)
+                {
+                    let msg = match synthesis_session::trust::revoke(&e.synthesis_home, &root) {
+                        Ok(true) => format!(
+                            "revoked trust of {}: it takes effect at the next engine start (a new session, /model or a restart); this session keeps what it already loaded",
+                            sanitize_for_display(&root)
+                        ),
+                        Ok(false) => format!("{} was not remembered", sanitize_for_display(&root)),
+                        Err(err) => format!("could not revoke: {err}"),
+                    };
+                    self.note(msg, false);
+                }
+                return None;
             }
             if kind == PickerKind::Remember {
                 if let (Some(e), Some(text), "user" | "project") =
@@ -899,7 +951,10 @@ impl Live {
                 }
                 PickerKind::Model => Some(Action::Model(key.to_string())),
                 PickerKind::Resume => Some(Action::Resume(key.to_string())),
-                PickerKind::Remember | PickerKind::Bypass | PickerKind::Trust => None,
+                PickerKind::Remember
+                | PickerKind::Bypass
+                | PickerKind::Trust
+                | PickerKind::Revoke => None,
                 PickerKind::Setup => Some(match key {
                     "recheck" => Action::Recheck,
                     "settings" => Action::OpenSettings,
@@ -1467,6 +1522,7 @@ impl Live {
                     true,
                 ),
             },
+            "trust" => self.trust_cmd(arg),
             "name" => self.name(arg),
             "rename" => self.rename(arg),
             "focus" => {
@@ -2083,7 +2139,33 @@ impl Live {
             .into_iter()
             .map(|t| (0, t))
             .collect();
+        // "all its subfolders" only for a real project parent: never the home folder, a filesystem or drive
+        // root, a parent of home or the config folder (the same refusal as for the root)
+        let parent = root
+            .parent()
+            .filter(|p| {
+                p.is_dir() && crate::engine::trust_refusal(p, home, &e.synthesis_home).is_none()
+            })
+            .map(std::path::Path::to_path_buf);
+        let mut options = vec![
+            (
+                "no".to_string(),
+                "Not now (keep the folder untrusted)".to_string(),
+            ),
+            ("remember".into(), "Trust this folder (remember)".into()),
+            ("session".into(), "Trust for this session only".into()),
+        ];
+        if let Some(p) = &parent {
+            options.push((
+                "parent".into(),
+                format!(
+                    "Trust parent folder {} (all its subfolders, remembered)",
+                    clip_left(&sanitize_for_display(&p.display().to_string()), 56)
+                ),
+            ));
+        }
         self.trust_root = Some(root);
+        self.trust_parent = parent;
         self.push_dialog(
             Dialog {
                 kind: DialogKind::Picker {
@@ -2091,10 +2173,7 @@ impl Live {
                     title: "Trust this folder?".into(),
                     headers,
                 },
-                options: vec![
-                    ("no".into(), "Not now (keep the folder untrusted)".into()),
-                    ("session".into(), "Trust for this session".into()),
-                ],
+                options,
                 sel: 0,
                 armed_until: 0,
                 engaged: false,
@@ -2102,6 +2181,106 @@ impl Live {
             now,
         );
         true
+    }
+
+    /// `/trust`: the remembered folders (from the user store) with their date and whether their trusted
+    /// configuration changed since; `/trust revoke <n|path>` asks first (Keep is the default).
+    fn trust_cmd(&mut self, arg: &str) {
+        let Some(e) = &self.engine else {
+            return self.note("/trust: the session is still starting", true);
+        };
+        let recs = match synthesis_session::trust::list(&e.synthesis_home) {
+            Ok(r) => r,
+            Err(err) => return self.note(format!("/trust: cannot read the store: {err}"), true),
+        };
+        let arg = arg.trim();
+        if let Some(which) = arg.strip_prefix("revoke").map(str::trim) {
+            let pick = which
+                .parse::<usize>()
+                .ok()
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|i| recs.get(i))
+                .or_else(|| recs.iter().find(|r| r.root == which));
+            let Some(r) = pick else {
+                return self.note(
+                    "usage: /trust revoke <number or path>   (numbers are those of /trust)",
+                    true,
+                );
+            };
+            if self.dialogs.iter().any(|d| {
+                matches!(
+                    &d.kind,
+                    DialogKind::Picker {
+                        kind: PickerKind::Revoke,
+                        ..
+                    }
+                )
+            }) {
+                return;
+            }
+            let root = r.root.clone();
+            let shown = clip_left(&sanitize_for_display(&root), 60);
+            self.revoke_root = Some(root);
+            self.push_dialog(
+                Dialog {
+                    kind: DialogKind::Picker {
+                        kind: PickerKind::Revoke,
+                        title: "Revoke trust?".into(),
+                        headers: vec![(0, format!("{shown}: it is asked about again at the next engine start (a new session, /model or a restart). This session keeps what it already loaded."))],
+                    },
+                    options: vec![
+                        ("keep".into(), "Keep it trusted".into()),
+                        ("revoke".into(), "Revoke".into()),
+                    ],
+                    sel: 0,
+                    armed_until: 0,
+                    engaged: false,
+                },
+                now_ms(),
+            );
+            return;
+        }
+        if !arg.is_empty() && arg != "list" {
+            return self.note("usage: /trust [revoke <number or path>]", true);
+        }
+        let mut lines = vec![format!(
+            "this session: {}",
+            if self.trusted {
+                "folder trusted"
+            } else {
+                "folder not trusted"
+            }
+        )];
+        if recs.is_empty() {
+            lines.push("no remembered folder (Files tab -> Trust this folder (remember))".into());
+        }
+        for (i, r) in recs.iter().enumerate() {
+            let state = if r.scope == synthesis_session::trust::PARENT {
+                "config of each project not tracked"
+            } else if std::path::Path::new(&r.root).is_dir() {
+                if synthesis_session::trust::fingerprint(std::path::Path::new(&r.root))
+                    == r.fingerprint
+                {
+                    "config unchanged"
+                } else {
+                    "CONFIG CHANGED"
+                }
+            } else {
+                "folder missing"
+            };
+            lines.push(format!(
+                "{}. {}{}  {}  {state}",
+                i + 1,
+                clip_left(&sanitize_for_display(&r.root), 70),
+                if r.scope == synthesis_session::trust::PARENT {
+                    "  (and its subfolders)"
+                } else {
+                    ""
+                },
+                r.trusted_at.get(..10).unwrap_or(&r.trusted_at),
+            ));
+        }
+        self.note(lines.join("\n"), false);
     }
 
     /// The bypassPermissions confirmation. Cancel is first (the selected option); Esc cancels too. The mode

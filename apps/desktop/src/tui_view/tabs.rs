@@ -304,8 +304,7 @@ impl TuiView {
         match e.kill_process(id) {
             Ok(true) => {
                 self.ts.killed.insert(id.to_string());
-                lu.live
-                    .note(format!("process {id} stopped by you"), false);
+                lu.live.note(format!("process {id} stopped by you"), false);
             }
             Ok(false) => lu
                 .live

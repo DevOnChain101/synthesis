@@ -1245,7 +1245,8 @@ impl TuiView {
 
     /// The Trust dialog was accepted: restarts this session (same conversation) with its folder trusted. The
     /// restart drops a running task, queued prompts and open dialogs, so it waits for an idle session.
-    fn trust_folder(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+    fn trust_folder(&mut self, grant: crate::live::TrustGrant, cx: &mut Context<Self>) {
+        let root = grant.root;
         let why = self.restart_blocker();
         let Some(lu) = &mut self.live else { return };
         let (true, None) = (lu.live.engine.is_some(), why) else {
@@ -1268,6 +1269,32 @@ impl TuiView {
             lu.live.note(why, true);
             lu.dirty = true;
             return cx.notify();
+        }
+        // "remember": the user store gets the root (or its parent) with the project's config fingerprint
+        if let Some((at, scope)) = &grant.remember {
+            let fp = if *scope == synthesis_session::trust::FOLDER {
+                synthesis_session::trust::fingerprint(&root)
+            } else {
+                String::new() // a parent grant covers many projects: no single fingerprint
+            };
+            match synthesis_session::trust::add(&lu.cfg.synthesis_home, at, scope, &fp) {
+                Ok(()) => lu.live.note(
+                    format!(
+                        "trust remembered for {}{}: /trust lists and revokes it",
+                        engine::display_path(at),
+                        if *scope == synthesis_session::trust::PARENT {
+                            " and its subfolders"
+                        } else {
+                            ""
+                        }
+                    ),
+                    false,
+                ),
+                Err(e) => lu.live.note(
+                    format!("could not remember the trust ({e}); trusted for this session only"),
+                    true,
+                ),
+            }
         }
         lu.session_trust = Some(root);
         self.switch(Target::Trust, "trust".into(), cx);
@@ -1306,7 +1333,7 @@ impl TuiView {
                 true,
             ),
             Action::Model(m) => return self.switch(Target::Model(m), "model".into(), cx),
-            Action::TrustFolder(root) => return self.trust_folder(root, cx),
+            Action::TrustFolder(grant) => return self.trust_folder(grant, cx),
             Action::Resume(id) => return self.open_session(&id, cx),
             Action::RefreshModels => {
                 let (env, project) = (lu.cfg.env.clone(), lu.cfg.project.clone());
@@ -1837,13 +1864,18 @@ pub fn build(
                 replay.session.cwd = r.record.cwd.clone();
             }
         }
-        let (mut common, note) =
-            engine::launch_common(&cfg.args.common, &cfg.granted, trust, &project);
+        let (mut common, launch_notes) = engine::launch_common(
+            &cfg.args.common,
+            &cfg.granted,
+            trust,
+            &project,
+            &cfg.synthesis_home,
+        );
         if model.is_some() {
             common.model.clone_from(&model);
         }
         let mut notes = notes;
-        notes.extend(note);
+        notes.extend(launch_notes);
         let had_resume = resume.is_some();
         Engine::start_with(
             StartOpts {
@@ -1899,8 +1931,12 @@ pub fn read_store(
     let home = cfg.synthesis_home.clone();
     let live = move |id: &str| !synthesis_app::peers::session_lock_free(&home, id);
     let (granted, trust) = (cfg.granted.clone(), cfg.args.common.trust_project);
-    // the git scan runs only where `--trust-project` was granted
-    let trusted = move |root: &str| trust && engine::root_of(Path::new(root)) == granted;
+    // the git scan runs only where `--trust-project` was granted or the user store remembers the trust
+    let records = synthesis_session::trust::list(&cfg.synthesis_home).unwrap_or_default();
+    let trusted = move |root: &str| {
+        let r = engine::root_of(Path::new(root));
+        (trust && r == granted) || synthesis_session::trust::covers(&records, &r).is_some()
+    };
     let opts = LoadOpts {
         is_live: Some(&live),
         trusted: Some(&trusted),

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use synthesis_config::Env;
 use synthesis_desktop::engine::Engine;
-use synthesis_desktop::live::{ARM_MS, Action, DialogKind, Live, PickerKind};
+use synthesis_desktop::live::{ARM_MS, Action, DialogKind, Live, PickerKind, TrustGrant};
 
 fn rig() -> (Live, tempfile::TempDir) {
     rig_in("")
@@ -61,17 +61,29 @@ fn the_dialog_is_raised_once_with_the_safe_option_first_and_needs_a_deliberate_a
         }
     ));
     assert_eq!((d.sel, d.options[0].0.as_str()), (0, "no"));
-    assert_eq!(d.options[1].0, "session");
+    assert_eq!(d.options[1].0, "remember");
+    assert_eq!(d.options[2].0, "session");
     assert!(d.needs_person());
     // keys typed before the person engaged it cannot answer: Enter and digits go to the prompt
     assert!(!d.answerable());
     // a click inside the arming delay does not answer either
-    assert_eq!(l.pick(1, 1000 + ARM_MS - 1), None);
+    assert_eq!(
+        l.pick(1, 1000 + ARM_MS - 1),
+        None,
+        "remember cannot be picked early either"
+    );
+    assert_eq!(l.pick(2, 1000 + ARM_MS - 1), None);
     assert_eq!(l.dialogs.len(), 1);
     // after the delay, the explicit option answers: the window then restarts the session trusted
-    let key = l.pick(1, 1000 + ARM_MS).unwrap();
+    let key = l.pick(2, 1000 + ARM_MS).unwrap();
     let root = l.trust_root.clone().unwrap();
-    assert_eq!(l.answer(&key, 2000), Some(Action::TrustFolder(root)));
+    assert_eq!(
+        l.answer(&key, 2000),
+        Some(Action::TrustFolder(TrustGrant {
+            root,
+            remember: None
+        }))
+    );
     assert!(l.dialogs.is_empty());
 }
 
@@ -242,4 +254,113 @@ fn a_trusted_restart_comes_back_trusted_and_a_broken_project_reports_the_error()
         .is_err()
     );
     assert!(trust_fallback_note("x").contains("continues untrusted"));
+}
+
+/// A project `app` in `proj` (a real project parent), the store at `home`, both under one temp folder.
+fn rig_nested() -> (Live, tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let (app, home) = (root.join("proj/app"), root.join("home"));
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let sp = root.join("script.json");
+    std::fs::write(&sp, r#"[{"text": "ok"}]"#).unwrap();
+    let env = Env::from_pairs([
+        ("HOME", home.to_str().unwrap()),
+        ("SYNT_HOME", home.to_str().unwrap()),
+    ]);
+    let (engine, _rx) = Engine::start(
+        &app,
+        &env,
+        None,
+        Some(&format!("fake:{}", sp.display())),
+        Some("off"),
+    )
+    .unwrap();
+    let mut live = Live::new();
+    live.attach(Arc::new(engine), None);
+    (live, dir, app)
+}
+
+#[test]
+fn remember_and_parent_are_offered_and_answer_with_what_to_record() {
+    let (mut l, d, app) = rig_nested();
+    let proj = app.parent().unwrap().to_path_buf();
+    let home = d.path().join("elsewhere");
+    assert!(l.ask_trust(0, Some(&home)));
+    let keys: Vec<_> = l.dialogs[0].options.iter().map(|o| o.0.as_str()).collect();
+    assert_eq!(keys, ["no", "remember", "session", "parent"]);
+    assert!(
+        l.dialogs[0].options[3]
+            .1
+            .contains("all its subfolders, remembered")
+    );
+    // the dialog is not engaged: Enter/digits are for the prompt, and the delay holds clicks back
+    assert!(!l.dialogs[0].answerable());
+    assert_eq!(l.pick(1, ARM_MS - 1), None);
+    let k = l.pick(1, ARM_MS).unwrap();
+    let grant = match l.answer(&k, 1000) {
+        Some(Action::TrustFolder(g)) => g,
+        o => panic!("{o:?}"),
+    };
+    assert_eq!(grant.root, app);
+    assert_eq!(grant.remember, Some((app.clone(), "folder")));
+    // the parent grant records the parent
+    assert!(l.ask_trust(5000, Some(&home)));
+    let k = l.pick(3, 5000 + ARM_MS).unwrap();
+    let Some(Action::TrustFolder(g)) = l.answer(&k, 6000) else {
+        panic!()
+    };
+    assert_eq!((g.root, g.remember), (app, Some((proj, "parent"))));
+}
+
+#[test]
+fn the_parent_is_not_offered_when_it_is_home_a_filesystem_root_or_holds_the_config() {
+    // `rig()`: the config folder lies next to the project, inside the parent: no parent option
+    let (mut l, _d) = rig();
+    assert!(l.ask_trust(0, None));
+    assert!(l.dialogs[0].options.iter().all(|o| o.0 != "parent"));
+    // the parent is the user's home: no parent option, the folder itself is still offered
+    let (mut l, d, app) = rig_nested();
+    let home = app.parent().unwrap().to_path_buf();
+    assert!(l.ask_trust(0, Some(&home)));
+    assert!(l.dialogs[0].options.iter().all(|o| o.0 != "parent"));
+    drop(d);
+}
+
+#[test]
+fn trust_lists_and_revokes_with_a_confirmation_that_keeps_by_default() {
+    let (mut l, _d, app) = rig_nested();
+    let home = l.engine.as_ref().unwrap().synthesis_home.clone();
+    synthesis_session::trust::add(
+        &home,
+        &app,
+        "folder",
+        &synthesis_session::trust::fingerprint(&app),
+    )
+    .unwrap();
+    l.submit("/trust");
+    let last = format!("{:?}", l.view.convo.items.last());
+    assert!(
+        last.contains("1.") && last.contains("proj/app") && last.contains("config unchanged"),
+        "{last}"
+    );
+    // revoke asks first; Esc keeps it
+    l.submit("/trust revoke 1");
+    assert_eq!(l.dialogs[0].options[0].0, "keep");
+    assert_eq!(l.dialogs[0].sel, 0);
+    assert!(l.dialogs[0].needs_person());
+    l.reject();
+    assert_eq!(synthesis_session::trust::list(&home).unwrap().len(), 1);
+    // an unknown target changes nothing
+    l.submit("/trust revoke 9");
+    assert!(l.dialogs.is_empty());
+    // confirmed: gone, and the note says when it takes effect
+    l.submit(&format!("/trust revoke {}", app.display()));
+    let k = l.pick(1, i64::MAX).unwrap();
+    assert_eq!(k, "revoke");
+    assert_eq!(l.answer(&k, 1000), None);
+    assert!(synthesis_session::trust::list(&home).unwrap().is_empty());
+    let last = format!("{:?}", l.view.convo.items.last());
+    assert!(last.contains("next engine start"), "{last}");
 }
