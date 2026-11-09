@@ -38,6 +38,12 @@ pub struct Args {
     expand: bool,
     /// `--check`: reopen the written PNG and fail unless it is the asked size (times a whole scale) and not blank.
     check: bool,
+    /// `--active tools,mcp[,core,user,hooks,guards,sub,skills,mem]` freezes those Topology nodes in their active
+    /// state at `--phase MS` (default 250) of the animation, as no clock can be seen in a still.
+    active: Vec<synthesis_view::pulse::Node>,
+    phase: i64,
+    /// `--topo-size WxH`: only the Topology graph, in a body of exactly this size (a panel width and height).
+    topo_size: Option<(f32, f32)>,
     w: f32,
     h: f32,
     hidden: Hidden,
@@ -60,6 +66,10 @@ pub struct LiveShot {
     /// `--earlier TEXT`: a first session of the same folder and home that ran this prompt and
     /// ended (what `/resume` lists).
     earlier: Option<String>,
+    /// `--other TEXT`: a session in a second folder (a non-open workspace row, with its close button).
+    other: Option<String>,
+    /// `--busy`: a task is running when `--cmd` is typed.
+    busy: bool,
     /// `--queue 'a|b'`: a task is running and these lines wait behind it (rows above the prompt).
     queue: Vec<String>,
     /// `--rewind list|confirm`: the `/rewind` checkpoint picker, or its dry-run confirmation, is open.
@@ -198,6 +208,8 @@ pub fn parse(args: &[String]) -> Option<Args> {
         peers: val("--peers").map(PathBuf::from),
         send_pick: val("--send-pick").and_then(|n| n.parse().ok()),
         earlier: val("--earlier").cloned(),
+        other: val("--other").cloned(),
+        busy: args.iter().any(|a| a == "--busy"),
         queue: val("--queue").map_or_else(Vec::new, |q| q.split('|').map(String::from).collect()),
         rewind: val("--rewind").cloned(),
         clean: val("--clean").cloned(),
@@ -231,6 +243,33 @@ pub fn parse(args: &[String]) -> Option<Args> {
         focus: args.iter().any(|a| a == "--focus"),
         expand: args.iter().any(|a| a == "--expand"),
         check: args.iter().any(|a| a == "--check"),
+        active: val("--active")
+            .iter()
+            .flat_map(|s| s.split(','))
+            .filter_map(|k| {
+                use synthesis_view::pulse::Node::*;
+                let n = match k {
+                    "core" => Core,
+                    "user" => User,
+                    "hooks" => Hooks,
+                    "guards" => Guards,
+                    "sub" | "subagents" => Subagents,
+                    "skills" => Skills,
+                    "mcp" => Mcp,
+                    "tools" => Tools,
+                    "mem" | "memory" => Memory,
+                    _ => {
+                        eprintln!("synthesis-desktop: --active: {k} is not a node");
+                        return None;
+                    }
+                };
+                Some(n)
+            })
+            .collect(),
+        topo_size: val("--topo-size")
+            .and_then(|s| s.split_once('x'))
+            .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))),
+        phase: val("--phase").and_then(|p| p.parse().ok()).unwrap_or(250),
         w,
         h,
         hidden,
@@ -279,6 +318,26 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
                 }
                 Err(_) => std::thread::sleep(Duration::from_millis(10)),
             }
+        }
+        crate::engine::close_shared(Arc::new(e));
+    }
+    if let Some(p) = &l.other {
+        let other = tmp.join("other-project");
+        std::fs::create_dir_all(&other)?;
+        let (e, mut rx) = Engine::start(
+            &std::fs::canonicalize(&other)?,
+            &env,
+            None,
+            Some(&provider),
+            Some("off"),
+        )?;
+        e.send(p.clone()).map_err(|e| e.to_string())?;
+        let t0 = Instant::now();
+        while !matches!(rx.try_recv(), Ok(UiMsg::TaskDone(_))) {
+            if t0.elapsed() > Duration::from_secs(30) {
+                return Err("timed out waiting for the other folder's session".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
         crate::engine::close_shared(Arc::new(e));
     }
@@ -356,6 +415,7 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
         live.view.set_peers(&live.peer_rows.clone());
     }
     if let Some(c) = &l.cmd {
+        live.busy |= l.busy;
         live.submit(c);
     }
     if let Some(n) = l.send_pick.and_then(|n| n.checked_sub(1)) {
@@ -433,6 +493,22 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         crate::ui::register_fonts(cx);
         crate::theme::apply("JetBrains Mono", cx);
     });
+    if let Some((w, h)) = a.topo_size {
+        let acts = synthesis_view::pulse::Pulses::forced(&a.active).acts(a.phase);
+        let win = cx.open_window(size(px(w), px(h)), |_, cx| {
+            cx.new(|_| TopoShot { acts, now: a.phase })
+        })?;
+        cx.run_until_parked();
+        let img = cx.capture_screenshot(win.into())?;
+        img.save(&a.path)?;
+        eprintln!(
+            "wrote {} ({}x{})",
+            a.path.display(),
+            img.width(),
+            img.height()
+        );
+        return Ok(());
+    }
     let hidden = a.hidden;
     let fixture = a.live.as_ref().map(run_live).transpose()?;
     let (live, engine, tmp) = match fixture {
@@ -470,6 +546,9 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tui.update(cx, |t, _| {
             t.ts.tab = tab;
             t.drawer = a.drawer;
+            if !a.active.is_empty() {
+                t.topo_force = Some((a.active.clone(), a.phase));
+            }
         });
         *slot.borrow_mut() = Some(tui.clone());
         cx.new(|cx| crate::ui::Shell::around(window, cx, tui, Err("--shot".into())))
@@ -662,4 +741,30 @@ fn prepare_tabs(
         _ => {}
     }
     Ok(())
+}
+
+/// `--topo-size`: the graph alone on the panel's background.
+struct TopoShot {
+    acts: std::collections::BTreeMap<synthesis_view::pulse::Node, synthesis_view::pulse::Act>,
+    now: i64,
+}
+
+impl gpui::Render for TopoShot {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::{ParentElement as _, Styled as _};
+        gpui::div()
+            .relative()
+            .size_full()
+            .bg(crate::theme::hsla(synthesis_tui_render::theme::BG))
+            .child(super::topo::graph(
+                &super::sample::sample(),
+                &self.acts,
+                self.now,
+                true,
+            ))
+    }
 }

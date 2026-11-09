@@ -742,6 +742,42 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// `/close-workspace`: [`Self::close_session`] for every listed (used, open) session whose
+    /// `workspace_root` satisfies `belongs`. One UPDATE per session, so each is atomic. A session
+    /// whose lock another live process holds is left alone (`held`); the caller must have released
+    /// its own sessions first. Closing again finds nothing left to close.
+    pub fn close_workspace(&self, belongs: impl Fn(&str) -> bool) -> Result<WorkspaceClose> {
+        let mut out = WorkspaceClose::default();
+        let ids: Vec<String> = self
+            .reader()?
+            .list_used_sessions(None)?
+            .into_iter()
+            .filter(|s| belongs(&s.workspace_root))
+            .map(|s| s.id)
+            .collect();
+        for id in ids {
+            let r = (|| -> Result<Option<bool>> {
+                check_id(&id)?;
+                let dir = self.home.join("sessions").join(&id);
+                // like the pruner: a held lock is skipped at once, no lock file means nobody holds it
+                let _lock = match File::options().write(true).open(dir.join("lock")) {
+                    Ok(f) if f.try_lock().is_ok() => Some(f),
+                    Ok(_) => return Ok(None),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => return Err(e.into()),
+                };
+                self.close_session(&id).map(Some)
+            })();
+            match r {
+                Ok(None) => out.held.push(id),
+                Ok(Some(true)) => out.closed.push(id),
+                Ok(Some(false)) => {} // closed meanwhile by someone else
+                Err(e) => out.failed.push((id, e.to_string())),
+            }
+        }
+        Ok(out)
+    }
+
     /// A read-only connection; any number may exist next to the single writer.
     pub fn reader(&self) -> Result<Reader> {
         Reader::open(&self.home)
@@ -1192,6 +1228,21 @@ impl Reader {
                 Ok(env) => Record::Known(env),
                 Err(_) => Record::Unknown(serde_json::from_value::<RawEnvelope>(value)?),
             });
+        }
+        Ok(out)
+    }
+
+    /// Payloads of the first `limit` `user.message` events (inline ones only), oldest first: a
+    /// session title needs no more, and it spares decoding every event of the log head.
+    pub fn first_user_messages(&self, session_id: &str, limit: usize) -> Result<Vec<Value>> {
+        let mut st = self.conn.prepare(
+            "SELECT payload FROM events WHERE session_id=?1 AND type='user.message' \
+             AND payload IS NOT NULL ORDER BY seq LIMIT ?2",
+        )?;
+        let rows = st.query_map(params![session_id, limit as i64], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for p in rows {
+            out.push(serde_json::from_str(&p?)?);
         }
         Ok(out)
     }
@@ -2372,6 +2423,16 @@ fn set_payload(tx: &Transaction<'_>, sid: &str, seq: i64, body: &str) -> Result<
         "UPDATE events SET payload=?3 WHERE session_id=?1 AND seq=?2 AND payload<>?3",
         params![sid, seq, body],
     )? as u64)
+}
+
+/// What [`Store::close_workspace`] did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceClose {
+    pub closed: Vec<String>,
+    /// A live process holds the session's lock: left open.
+    pub held: Vec<String>,
+    /// (id, why): could not be closed.
+    pub failed: Vec<(String, String)>,
 }
 
 /// What [`Store::purge_images`] did.

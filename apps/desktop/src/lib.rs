@@ -3,6 +3,7 @@
 
 pub mod brand;
 pub mod clean;
+pub mod close_ws;
 pub mod doctor_ui;
 pub mod engine;
 pub mod folder;
@@ -13,6 +14,7 @@ pub mod rewind;
 pub mod send_pick;
 pub mod settings_view;
 pub mod theme;
+pub mod trace;
 pub mod tui_view;
 pub mod ui;
 pub mod widgets;

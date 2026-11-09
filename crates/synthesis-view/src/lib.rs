@@ -9,6 +9,7 @@ pub mod agent;
 pub mod convo;
 pub mod model;
 pub mod project;
+pub mod pulse;
 pub mod running;
 pub mod sessions;
 pub mod state;

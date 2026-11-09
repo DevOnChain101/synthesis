@@ -204,6 +204,106 @@ fn relaunches_keep_or_change_the_session() {
 }
 
 #[test]
+fn close_workspace_closes_ours_spares_what_another_process_holds_and_other_folders() {
+    let r = rig();
+    let key = synthesis_view::workspaces::fold_dir(&r.ws.to_string_lossy());
+    let used = |r: &Rig| -> Vec<String> {
+        let rd = synthesis_session::Reader::open(&r.cfg.synthesis_home).unwrap();
+        rd.list_used_sessions(None)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect()
+    };
+    // an earlier session of the folder (its process ended), and one in another folder
+    let mut old = start(&r, None, None, None);
+    run_prompt(&mut old, "earlier");
+    let old_sid = old.engine.sid.clone();
+    engine::close_shared(Arc::new(old.engine));
+    let elsewhere = r.cfg.project.parent().unwrap().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let mut far = build(&r.cfg, elsewhere.clone(), None, None, None, None, vec![]).unwrap();
+    run_prompt(&mut far, "far away");
+    let far_sid = far.engine.sid.clone();
+    engine::close_shared(Arc::new(far.engine));
+    // the open session of the folder, and the one "another process" holds (its lock)
+    let mut cur = start(&r, None, Some(Target::New(r.ws.clone())), None);
+    run_prompt(&mut cur, "now");
+    let cur_sid = cur.engine.sid.clone();
+    let store = synthesis_session::Store::open(
+        &r.cfg.synthesis_home,
+        synthesis_session::StoreOptions::default(),
+    )
+    .unwrap();
+    let held = {
+        let ws =
+            synthesis_core::WorkspaceContext::open("w", &r.ws, &r.ws, &[], r.ws.join(".art"), "pg")
+                .unwrap();
+        let mut w = store
+            .create_session(synthesis_session::NewSession {
+                id: Some("held-elsewhere".into()),
+                workspace: &ws,
+                model_config_id: "m".into(),
+                permission_mode: synthesis_core::PermissionMode::AcceptEdits,
+                permission_policy_id: "default".into(),
+                budget: synthesis_events::Budget::default(),
+                parent: None,
+                title: None,
+            })
+            .unwrap();
+        w.append_message(synthesis_session::NewMessage::user(serde_json::json!(
+            "busy"
+        )))
+        .unwrap();
+        w
+    };
+    assert_eq!(used(&r).len(), 4);
+
+    let next = start_in(
+        &r,
+        &r.ws,
+        Arc::new(cur.engine),
+        Target::CloseWorkspace(key.clone()),
+        None,
+    );
+    assert_ne!(
+        next.engine.sid, cur_sid,
+        "a fresh session in the same folder"
+    );
+    // the engine's folder is the canonical one (`\\?\` on Windows)
+    assert_eq!(next.engine.cwd, engine::root_of(&r.ws).to_string_lossy());
+    let note = next
+        .engine
+        .notices
+        .iter()
+        .find(|n| n.contains("/close-workspace"))
+        .expect("the result is reported");
+    assert!(
+        note.contains("closed 2 sessions") && note.contains("1 left open"),
+        "{note}"
+    );
+    let left = used(&r);
+    assert!(
+        left.contains(&"held-elsewhere".into()) && left.contains(&far_sid),
+        "{left:?}"
+    );
+    assert!(
+        !left.contains(&cur_sid) && !left.contains(&old_sid),
+        "{left:?}"
+    );
+    // nothing is deleted: a closed session still resumes by id
+    let back = start(
+        &r,
+        Some(Arc::new(next.engine)),
+        Some(Target::Resume(old_sid.clone())),
+        None,
+    );
+    assert_eq!(back.engine.sid, old_sid);
+    engine::close_shared(Arc::new(back.engine));
+    drop(held);
+}
+
+#[test]
 fn a_session_that_cannot_be_resumed_leaves_the_current_one_running() {
     let r = rig();
     let mut a = start(&r, None, None, None);

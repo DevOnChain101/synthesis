@@ -137,6 +137,13 @@ impl ChatTab {
 
 pub struct TuiView {
     snap: Snapshot,
+    /// The Topology activity of this frame (set by `render`, read by `right`) and the time it was taken at.
+    topo_acts: std::collections::BTreeMap<synthesis_view::pulse::Node, synthesis_view::pulse::Act>,
+    topo_now: i64,
+    /// `--shot --active tools,mcp`: these nodes are held open at this time (ms) instead of the live clock.
+    pub(crate) topo_force: Option<(Vec<synthesis_view::pulse::Node>, i64)>,
+    /// The pending repaint of the animation (about 30 per second, only while a node is active).
+    topo_tick: Option<gpui::Task<()>>,
     /// The engine, the chat and the prompt; `None` draws the sample (layout tests, `--sample`, `--shot`).
     live: Option<driver::LiveUi>,
     hidden: layout::Hidden,
@@ -200,6 +207,10 @@ impl TuiView {
             shown: true,
             win_h: 900.,
             snap: sample(),
+            topo_acts: Default::default(),
+            topo_now: 0,
+            topo_force: None,
+            topo_tick: None,
             live: None,
             hidden,
             inset,
@@ -257,6 +268,7 @@ impl TuiView {
         }
         if lu.dirty {
             lu.dirty = false;
+            let _t = crate::trace::span(&lu.cfg.env, "frame: snapshot + rows (UI thread)");
             self.snap = snapshot::build(
                 &lu.live,
                 crate::live::now_ms(),
@@ -345,6 +357,13 @@ impl TuiView {
         let ws_click = |i: usize| -> panels::OnClick {
             Box::new(cx.listener(move |this, _, _, cx| this.click_workspace(i, cx)))
         };
+        let ws_close = |i: usize| -> panels::OnClick {
+            Box::new(cx.listener(move |this, _, _, cx| {
+                // the button sits inside the row: the row's own click must not follow
+                cx.stop_propagation();
+                this.click_close_workspace(i, cx)
+            }))
+        };
         let run_click = |i: usize| -> panels::OnClick {
             Box::new(cx.listener(move |this, _, window, cx| this.click_running(i, window, cx)))
         };
@@ -371,6 +390,7 @@ impl TuiView {
                     &s.workspaces,
                     attn,
                     live.map(|_| &ws_click as &dyn Fn(usize) -> panels::OnClick),
+                    live.map(|_| &ws_close as &dyn Fn(usize) -> panels::OnClick),
                     new_ws,
                 ),
                 live.map(|l| &l.ws_scroll),
@@ -752,7 +772,12 @@ impl TuiView {
                 .child("online")
                 .into_any_element();
             // the canvas fills the body; its own size picks the mode (A, B or T)
-            let body = div().relative().size_full().child(topo::graph(s));
+            let body = div().relative().size_full().child(topo::graph(
+                s,
+                &self.topo_acts,
+                self.topo_now,
+                self.live.as_ref().is_none_or(|l| l.cfg.tui.motion),
+            ));
             let p = panel(
                 Head::new("p-topology", "Synthesis Topology", "network", pad)
                     .fold(self.is_folded("p-topology"), self.fold_cb("p-topology", cx)),
@@ -848,6 +873,38 @@ impl TuiView {
     }
 }
 
+impl TuiView {
+    /// Takes the Topology activity of this frame, and while a node is active schedules the next repaint:
+    /// about 30 frames a second with motion, 4 a second without (only to catch the end of the hold).
+    /// Idle means no timer and no repaint.
+    fn topo_frame(&mut self, cx: &mut Context<Self>) {
+        use synthesis_view::pulse::Pulses;
+        let (pulses, now) = match &self.topo_force {
+            Some((nodes, at)) => (Pulses::forced(nodes), *at),
+            None => (self.snap.pulses.clone(), crate::live::now_ms()),
+        };
+        self.topo_now = now;
+        self.topo_acts = pulses.acts(now);
+        if self.topo_acts.is_empty() || self.topo_force.is_some() {
+            self.topo_tick = None;
+            return;
+        }
+        if self.topo_tick.is_some() {
+            return;
+        }
+        let motion = self.live.as_ref().is_none_or(|l| l.cfg.tui.motion);
+        let wait = std::time::Duration::from_millis(if motion { 33 } else { 250 });
+        self.topo_tick = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |t, cx| {
+                t.topo_tick = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+}
+
 impl Render for TuiView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // a prompt handed back unsent (Esc in the model picker) returns to the input box
@@ -889,6 +946,7 @@ impl Render for TuiView {
             window.request_animation_frame();
         }
         self.refresh(window);
+        self.topo_frame(cx);
         self.sync_placeholder(window, cx);
         self.tabs_tick(cx);
         let vp = window.viewport_size();
@@ -1347,5 +1405,61 @@ mod tests {
             (0, true, None),
             "picked: the chip is set"
         );
+    }
+
+    /// The close-workspace confirmation is a dialog like the others: under Settings no key reaches it
+    /// (Enter, Down, Esc change nothing), and on screen an Enter typed ahead picks nothing.
+    #[gpui::test]
+    fn the_close_workspace_dialog_ignores_keys_while_hidden(cx: &mut TestAppContext) {
+        use crate::live::Live;
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let mut l = Live::new();
+        l.starting = false;
+        l.view.workspaces.workspaces = vec![synthesis_view::workspaces::WorkspaceRow {
+            root: "/w/other".into(),
+            key: "other".into(),
+            label: "other".into(),
+            sessions: vec![synthesis_view::workspaces::SessionRow {
+                id: "a".into(),
+                title: "t".into(),
+                status: synthesis_core::SessionStatus::Idle,
+                updated_at: String::new(),
+                mtime: 0,
+                is_live: false,
+            }],
+            available: true,
+            changes: None,
+        }];
+        l.ask_close_workspace(Some("other"), 0);
+        l.dialogs[0].armed_until = 0;
+        view.update(vcx, |t, _| t.set_live(l));
+        let state = |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext| {
+            view.read_with(vcx, |t, _| {
+                let d = &t.live.as_ref().unwrap().live.dialogs;
+                (d.len(), d.first().map(|d| (d.sel, d.engaged)))
+            })
+        };
+        let press =
+            |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext, k: &'static str| {
+                let ks = gpui::Keystroke::parse(k).unwrap();
+                view.update_in(vcx, |t, window, cx| t.on_key(&ks, window, cx))
+            };
+        view.update(vcx, |t, _| t.shown = false);
+        for k in ["enter", "down", "1", "2", "escape"] {
+            assert!(!press(&view, vcx, k));
+        }
+        assert_eq!(state(&view, vcx), (1, Some((0, false))), "untouched");
+        view.update(vcx, |t, _| t.shown = true);
+        press(&view, vcx, "enter");
+        assert_eq!(
+            state(&view, vcx),
+            (1, Some((0, false))),
+            "typed ahead picks nothing"
+        );
+        press(&view, vcx, "escape");
+        assert_eq!(state(&view, vcx).0, 0, "Esc cancels");
     }
 }

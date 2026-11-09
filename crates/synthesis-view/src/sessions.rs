@@ -2,7 +2,6 @@
 
 use std::path::Path;
 
-use synthesis_events::Record;
 use synthesis_session::{Reader, SessionRecord};
 
 /// A session in the store, for the sidebar and the resume picker.
@@ -47,19 +46,15 @@ pub fn list_saved(synthesis_home: &Path, cwd: Option<&str>) -> Result<Vec<SavedS
 
 /// First thing the person typed in a session, one line.
 pub(crate) fn first_prompt(r: &Reader, id: &str) -> Option<String> {
-    for rec in r.read_events(id, 0, 40).ok()? {
-        if let Record::Known(e) = rec
-            && let synthesis_events::Event::UserMessage {
-                text, display_text, ..
-            } = e.event
-        {
-            if crate::text::is_harness_note(display_text.as_deref()) {
-                continue;
-            }
-            let t = display_text.unwrap_or(text);
-            if !t.trim().is_empty() && !t.starts_with("[Synthesis") {
-                return Some(t.split_whitespace().collect::<Vec<_>>().join(" "));
-            }
+    for p in r.first_user_messages(id, 8).ok()? {
+        let str_of = |k: &str| p.get(k).and_then(|v| v.as_str()).map(str::to_string);
+        let display_text = str_of("display_text");
+        if crate::text::is_harness_note(display_text.as_deref()) {
+            continue;
+        }
+        let t = display_text.or_else(|| str_of("text")).unwrap_or_default();
+        if !t.trim().is_empty() && !t.starts_with("[Synthesis") {
+            return Some(t.split_whitespace().collect::<Vec<_>>().join(" "));
         }
     }
     None
