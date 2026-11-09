@@ -47,6 +47,7 @@ pub fn body(name: &str) -> Option<&'static str> {
             r#"<path d="M12 6.2C10.5 4.9 8.5 4.2 6 4.2H3.5v14H6c2.5 0 4.5.7 6 2 1.5-1.3 3.5-2 6-2h2.5v-14H18c-2.5 0-4.5.7-6 2z"/><path d="M12 6.2v14"/>"#
         }
         "search" => r#"<circle cx="11" cy="11" r="6"/><path d="M21 21l-5-5"/>"#,
+        "cursor" => r#"<path d="M5 3l14 7-6 2.2L10.5 19z"/>"#,
         "pencil" => r#"<path d="M4 20l1-4L16 5l3 3L8 19z"/>"#,
         "file" => r#"<path d="M6 3h8l4 4v14H6zM14 3v4h4"/>"#,
         // a pencil with a check: edits are accepted without asking
@@ -102,6 +103,7 @@ pub fn for_lucide(name: &str) -> Option<&'static str> {
         "database" => "db",
         "book-open" => "book",
         "search" => "search",
+        "mouse-pointer" => "cursor",
         "chevron-down" => "chev",
         "chevrons-right" => "fast",
         "send" => "send",
@@ -180,6 +182,7 @@ mod tests {
             "pencil-check",
             "cpu",
             "clock",
+            "mouse-pointer",
         ] {
             assert!(body(for_lucide(n).unwrap()).is_some(), "{n}");
         }

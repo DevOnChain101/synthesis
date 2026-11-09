@@ -1444,6 +1444,13 @@ impl Harness {
             };
             self.emit(task, agent, Some(turn), frame);
         }
+        if name.starts_with("browser_")
+            && !out.is_error
+            && let Some(a) = out.meta.get("action").filter(|a| a.is_object())
+        {
+            let ev = crate::browser_action::event(name, a, &|t| self.sink.redact(t));
+            self.emit(task, agent, Some(turn), ev);
+        }
         if name == "verify_run" && !out.is_error {
             self.register_model_checks(task, &out.meta);
         }
