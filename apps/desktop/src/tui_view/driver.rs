@@ -1854,7 +1854,7 @@ pub fn build(
             let name = prior_root
                 .as_deref()
                 .map_or_else(|| key.clone(), synthesis_view::text::basename);
-            let done = crate::close_ws::close_in_store(&home, &key).and_then(|mut r| {
+            let done = crate::close_ws::close_in_store(&home, key).and_then(|mut r| {
                 let own = prior_sid.as_deref().filter(|_| {
                     prior_root
                         .as_deref()
