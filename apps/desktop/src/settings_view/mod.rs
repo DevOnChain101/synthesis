@@ -24,7 +24,6 @@ use synthesis_tui_render::theme as t;
 
 use crate::theme::hsla;
 use crate::tui_view::layout::Hidden;
-use crate::tui_view::tracked;
 use model::{Cfg, Change, Control, McpForm, Model, Outcome, Row};
 
 /// The popup is 720 to 860 wide (62% of the area), at most 720 high (80%), and keeps a margin to the window.
@@ -50,7 +49,7 @@ pub fn popup_size(w: f32, h: f32) -> (f32, f32) {
             .min(w - 2. * MARGIN)
             .max(MIN_W)
             .min(w),
-        (h * 0.8).min(POPUP_MAX_H).max(MIN_H).min(h),
+        (h * 0.8).clamp(MIN_H, POPUP_MAX_H).min(h),
     )
 }
 
@@ -942,7 +941,13 @@ impl SettingsView {
             .pb(px(6.))
             .border_b_1()
             .border_color(alpha(t::TEXT, 0.10))
-            .child(tracked(&text.to_uppercase(), 10., 0.18, hsla(t::MUTED)))
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(hsla(t::MUTED))
+                    .child(text.to_uppercase()),
+            )
             .into_any_element()
     }
 
