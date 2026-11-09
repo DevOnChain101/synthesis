@@ -198,7 +198,9 @@ impl TuiView {
         self.ts.tab = tab;
         if tab == ChatTab::Files
             && let Some(lu) = &mut self.live
-            && lu.live.ask_trust(crate::live::now_ms())
+            && lu
+                .live
+                .ask_trust(crate::live::now_ms(), lu.cfg.home.as_deref().map(Path::new))
         {
             lu.dirty = true;
         }
@@ -300,11 +302,14 @@ impl TuiView {
             return;
         };
         match e.kill_process(id) {
-            Ok(()) => {
+            Ok(true) => {
                 self.ts.killed.insert(id.to_string());
                 lu.live
                     .note(format!("stopped background process {id}"), false);
             }
+            Ok(false) => lu
+                .live
+                .note(format!("{id} had already exited: nothing was sent"), false),
             Err(why) => lu.live.note(format!("could not stop {id}: {why}"), true),
         }
         lu.dirty = true;

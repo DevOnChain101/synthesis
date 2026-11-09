@@ -149,7 +149,7 @@ pub fn dock(
     };
     let mut list: Vec<AnyElement> = vec![];
     for (i, (_, label)) in d.options.iter().enumerate() {
-        if let Some((_, h)) = headers.iter().find(|(at, _)| *at == i) {
+        for (_, h) in headers.iter().filter(|(at, _)| *at == i) {
             list.push(
                 div()
                     .px(px(10.))

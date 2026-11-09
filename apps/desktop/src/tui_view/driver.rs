@@ -314,17 +314,11 @@ impl TuiView {
         if !matches!(target, Some(Target::Model(_) | Target::Trust)) {
             lu.session_trust = None;
         }
-        let mut cfg = lu.cfg.clone();
-        if let Some(root) = &lu.session_trust {
-            let mut c = (*cfg).clone();
-            c.args.common.trust_project = true;
-            c.granted.clone_from(root);
-            cfg = Arc::new(c);
-        }
-        let model = lu.model_override.clone();
+        let cfg = lu.cfg.clone();
+        let (trust, model) = (lu.session_trust.clone(), lu.model_override.clone());
         let (tx, rx) = futures::channel::oneshot::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(build(&cfg, project, prior, target, model, notes));
+            let _ = tx.send(build(&cfg, project, prior, target, model, trust, notes));
         });
         let task = cx.spawn(async move |this, cx| {
             let r = rx
@@ -344,12 +338,17 @@ impl TuiView {
         lu.dirty = true;
         match r {
             Err(e) => {
+                lu.session_trust = None;
                 lu.live.note(startup_failure(&e), true);
                 if e.starts_with("no model configured") {
                     lu.live.open_setup(&e, now_ms());
                 }
             }
             Ok(l) => {
+                // a restart that fell back to untrusted keeps no trust to carry
+                if !l.engine.trusted {
+                    lu.session_trust = None;
+                }
                 lu.model_override = l.model;
                 lu.live.attach(Arc::new(l.engine), l.replay);
                 lu.list_reset = true;
@@ -1246,11 +1245,10 @@ impl TuiView {
 
     /// The Trust dialog was accepted: restarts this session (same conversation) with its folder trusted. The
     /// restart drops a running task, queued prompts and open dialogs, so it waits for an idle session.
-    fn trust_folder(&mut self, cx: &mut Context<Self>) {
+    fn trust_folder(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         let why = self.restart_blocker();
         let Some(lu) = &mut self.live else { return };
-        let cwd = lu.live.engine.as_ref().map(|e| e.cwd.clone());
-        let (Some(cwd), None) = (cwd, why) else {
+        let (true, None) = (lu.live.engine.is_some(), why) else {
             lu.live.note(
                 format!(
                     "trust not applied ({}): open the Files tab again when the session is idle",
@@ -1261,7 +1259,17 @@ impl TuiView {
             lu.dirty = true;
             return cx.notify();
         };
-        lu.session_trust = Some(engine::root_of(Path::new(&cwd)));
+        // checked again at the answer: the dialog may have been open a while
+        if let Some(why) = engine::trust_refusal(
+            &root,
+            lu.cfg.home.as_deref().map(Path::new),
+            &lu.cfg.synthesis_home,
+        ) {
+            lu.live.note(why, true);
+            lu.dirty = true;
+            return cx.notify();
+        }
+        lu.session_trust = Some(root);
         self.switch(Target::Trust, "trust".into(), cx);
     }
 
@@ -1298,7 +1306,7 @@ impl TuiView {
                 true,
             ),
             Action::Model(m) => return self.switch(Target::Model(m), "model".into(), cx),
-            Action::TrustFolder => return self.trust_folder(cx),
+            Action::TrustFolder(root) => return self.trust_folder(root, cx),
             Action::Resume(id) => return self.open_session(&id, cx),
             Action::RefreshModels => {
                 let (env, project) = (lu.cfg.env.clone(), lu.cfg.project.clone());
@@ -1721,6 +1729,13 @@ pub fn read_image_file(p: &Path) -> Result<(bool, Vec<u8>), String> {
     Ok((png, v))
 }
 
+/// The notice of a trusted restart that failed and went on untrusted.
+pub fn trust_fallback_note(why: &str) -> String {
+    format!(
+        "trust: could not restart with the folder trusted ({why}); the session continues untrusted"
+    )
+}
+
 /// The worker side of a (re)launch: ends `prior`, then starts the engine on `target`. A model
 /// that cannot be built falls back to the session on the model it had.
 pub fn build(
@@ -1729,6 +1744,7 @@ pub fn build(
     prior: Option<Arc<Engine>>,
     target: Option<Target>,
     model: Option<String>,
+    trust: Option<PathBuf>,
     mut notes: Vec<String>,
 ) -> Result<Launched, String> {
     let first_start = prior.is_none() && target.is_none();
@@ -1806,7 +1822,8 @@ pub fn build(
     let attempt = |project: PathBuf,
                    resume: Option<synthesis_tui::Resume>,
                    model: Option<String>,
-                   notes: Vec<String>| {
+                   notes: Vec<String>,
+                   trust: Option<&Path>| {
         let project = resume
             .as_ref()
             .map_or(project, |r| PathBuf::from(&r.record.cwd));
@@ -1820,7 +1837,8 @@ pub fn build(
                 replay.session.cwd = r.record.cwd.clone();
             }
         }
-        let (mut common, note) = engine::common_for(&cfg.args.common, &cfg.granted, &project);
+        let (mut common, note) =
+            engine::launch_common(&cfg.args.common, &cfg.granted, trust, &project);
         if model.is_some() {
             common.model.clone_from(&model);
         }
@@ -1843,12 +1861,29 @@ pub fn build(
             model,
         })
     };
-    match attempt(project.clone(), resume, model, notes.clone()) {
+    match attempt(
+        project.clone(),
+        resume,
+        model,
+        notes.clone(),
+        trust.as_deref(),
+    ) {
         Err(e) if matches!(target, Some(Target::Model(_))) => {
             notes.push(format!(
                 "/model: could not switch ({e}); staying on the previous model"
             ));
-            attempt(project, back(&home, prior_sid), prior_model, notes)
+            attempt(
+                project,
+                back(&home, prior_sid),
+                prior_model,
+                notes,
+                trust.as_deref(),
+            )
+        }
+        // a trusted restart that fails must not leave the session without an engine: it continues untrusted
+        Err(e) if matches!(target, Some(Target::Trust)) => {
+            notes.push(trust_fallback_note(&e));
+            attempt(project, back(&home, prior_sid), prior_model, notes, None)
         }
         r => r,
     }

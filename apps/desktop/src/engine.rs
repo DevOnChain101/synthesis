@@ -306,6 +306,51 @@ pub fn common_for(c: &Common, granted: &Path, cwd: &Path) -> (Common, Option<Str
     (c, note)
 }
 
+/// Why `root` (the folder a session trust would grant) must not be trusted, if so: a filesystem root, the
+/// user's home or a parent of it, or Synthesis's own config folder (or inside it). Such a folder is trusted
+/// only by starting in a specific project folder.
+pub fn trust_refusal(root: &Path, home: Option<&Path>, synt_home: &Path) -> Option<String> {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let root = canon(root);
+    let synt = canon(synt_home);
+    let what = if root.parent().is_none() {
+        "a filesystem root"
+    } else if home.is_some_and(|h| canon(h).starts_with(&root)) {
+        "your home folder (or a parent of it)"
+    } else if synt.starts_with(&root) || root.starts_with(&synt) {
+        "Synthesis's own config folder (or a parent of it)"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "trust not offered: it would trust {what} ({}). Trust a specific project folder instead: start Synthesis in it with --trust-project.",
+        sanitize_for_display(&root.display().to_string())
+    ))
+}
+
+/// The flags of a session the person trusted in the Trust dialog: `--trust-project`, and NO `--approve-mcp`
+/// carried over from the launch (an MCP server is approved by name and hash, never by an earlier flag).
+pub fn session_trusted(c: &Common) -> Common {
+    let mut c = c.clone();
+    c.trust_project = true;
+    c.approve_mcp.clear();
+    c
+}
+
+/// The flags of one launch: the session-trusted ones when `trust` names the root of `project`, else the launch
+/// flags as `common_for` leaves them for that project.
+pub fn launch_common(
+    c: &Common,
+    granted: &Path,
+    trust: Option<&Path>,
+    project: &Path,
+) -> (Common, Option<String>) {
+    match trust {
+        Some(root) if root_of(project) == root => (session_trusted(c), None),
+        _ => common_for(c, granted, project),
+    }
+}
+
 /// `--resume ID` (id or unique prefix) or `--continue` (newest session of the start folder).
 pub fn requested_resume(
     c: &Common,
@@ -509,11 +554,22 @@ pub struct Engine {
 
 impl Engine {
     /// Stops a background process of this session (the Terminal tab's Kill button). The runtime knows only this
-    /// session's processes, so another id is refused.
-    pub fn kill_process(&self, process_id: &str) -> Result<(), String> {
+    /// session's processes, so another id is refused. `Ok(true)`: it was running and got the signal; `Ok(false)`:
+    /// it had already exited, nothing was sent.
+    pub fn kill_process(&self, process_id: &str) -> Result<bool, String> {
+        let err = |e: synthesis_terminal::Error| sanitize_for_display(&e.to_string());
+        if !self
+            .rt
+            .get_status(&self.sid, process_id)
+            .map_err(err)?
+            .running
+        {
+            return Ok(false);
+        }
         self.rt
             .signal(&self.sid, process_id, synthesis_terminal::Signal::Kill)
-            .map_err(|e| sanitize_for_display(&e.to_string()))
+            .map_err(err)?;
+        Ok(true)
     }
 
     /// Tests and tools: defaults plus a model, provider and sandbox mode. Blocking, like `start_with`.
@@ -1239,6 +1295,74 @@ pub fn close_shared(mut e: Arc<Engine>) -> Option<String> {
     }
     eprintln!("synthesis-desktop: the engine is still in use; its session was not closed cleanly");
     None
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::*;
+
+    #[test]
+    fn roots_that_must_not_be_trusted_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let (home, synt) = (base.join("home"), base.join("home/.synt"));
+        std::fs::create_dir_all(&synt).unwrap();
+        let proj = home.join("work/app");
+        std::fs::create_dir_all(&proj).unwrap();
+        let why = |r: &Path| trust_refusal(r, Some(&home), &synt);
+        assert!(why(&proj).is_none());
+        assert!(why(&home).unwrap().contains("home folder"));
+        assert!(
+            why(&base).unwrap().contains("home folder"),
+            "a parent of home"
+        );
+        assert!(why(&synt).unwrap().contains("config folder"));
+        assert!(
+            why(&synt.join("sessions"))
+                .unwrap()
+                .contains("config folder")
+        );
+        assert!(why(Path::new("/")).unwrap().contains("filesystem root"));
+        // without a known home only the config folder and a filesystem root are refused
+        assert!(trust_refusal(&proj, None, &synt).is_none());
+    }
+
+    #[test]
+    fn a_session_trust_drops_the_mcp_approvals_of_the_launch() {
+        let c = Defaults::try_parse_from([
+            "x",
+            "--approve-mcp",
+            "db",
+            "--approve-mcp",
+            "web@abcdef1234",
+        ])
+        .unwrap()
+        .c;
+        assert!(!c.trust_project && c.approve_mcp.len() == 2);
+        let t = session_trusted(&c);
+        assert!(t.trust_project && t.approve_mcp.is_empty());
+        // the root named must be the project's: another project does not inherit the grant
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let root = root_of(&a);
+        assert!(
+            launch_common(&c, Path::new("/none"), Some(&root), &a)
+                .0
+                .trust_project
+        );
+        assert!(
+            !launch_common(&c, Path::new("/none"), Some(&root), &b)
+                .0
+                .trust_project
+        );
+        assert!(
+            !launch_common(&c, Path::new("/none"), None, &a)
+                .0
+                .trust_project
+        );
+    }
 }
 
 #[cfg(test)]

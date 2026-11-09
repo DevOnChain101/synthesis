@@ -113,7 +113,7 @@ pub enum Action {
     /// `/diff [file]`: the centre panel shows its diff tab, with `file` open when one is named.
     ShowDiff(Option<String>),
     /// The Trust dialog was accepted: the window restarts this session with the folder trusted.
-    TrustFolder,
+    TrustFolder(std::path::PathBuf),
     /// Setup card: build the engine again (the person set a model and a key meanwhile).
     Recheck,
     /// Setup card: quit the app.
@@ -213,8 +213,37 @@ impl Dialog {
     }
 }
 
-/// What the Trust dialog says: what trust enables, what it risks, how long it lasts.
-const TRUST_TEXT: &str = "Opening the file explorer reads this folder's git file list. Trusting it also turns on what the folder itself configures: project settings, MCP servers (each still needs its own approval), agents, skills, hooks, memory and instruction files. A repository you did not write can carry hooks, MCP servers or provider endpoints that run commands or send data. Trust lasts for this session only (nothing is saved); the session restarts with the same conversation. Not now keeps the folder untrusted: no git runs and nothing from it is loaded.";
+/// `s` cut from the left to `n` chars (`\u{2026}` first): the end of a path is the part that tells.
+pub fn clip_left(s: &str, n: usize) -> String {
+    let c: Vec<char> = s.chars().collect();
+    if c.len() <= n {
+        s.to_string()
+    } else {
+        std::iter::once('\u{2026}')
+            .chain(c[c.len() - (n - 1)..].iter().copied())
+            .collect()
+    }
+}
+
+/// What the Trust dialog says, one paragraph each: the canonical root that would be trusted (and that it is
+/// not the folder the person is in, when so), what trust enables, what it risks, what the restart does.
+pub fn trust_text(root: &std::path::Path, cwd: &str) -> Vec<String> {
+    let shown = |p: &str| clip_left(&sanitize_for_display(p), 72);
+    let mut v = vec![format!(
+        "Trust root: {}",
+        shown(&root.display().to_string())
+    )];
+    if root != std::path::Path::new(cwd) {
+        v.push(format!(
+            "This is NOT the folder you are in ({}): it is the nearest parent holding .git or .synt, and everything under it is trusted.",
+            shown(cwd)
+        ));
+    }
+    v.push("Enables: the root's project settings (including permission and allow rules), agents, skills, memory and instruction files, hooks, and the file explorer's git listing. Its MCP servers are offered but none starts: each needs your own approval as NAME@HASH (--approve-mcp at launch or your user settings; `synt mcp get` shows the hash). MCP approvals given at launch are not carried over.".into());
+    v.push("Risks: a repository you did not write can carry hooks that run commands (one can run at the restart that follows), allow rules that skip prompts, and provider endpoints that receive your prompts.".into());
+    v.push("The session restarts now and must be idle: the saved conversation is reloaded (if it cannot be, a fresh session starts and a note says so), this session's 'always allow' grants and its permission mode are reset. Trust lasts for this session only; nothing is saved. Not now changes nothing: no git runs and nothing from the folder is loaded.".into());
+    v
+}
 
 /// The suggestion in the shape `permission_options` reads (the TUI's `suggestion_view`).
 fn suggestion_view(s: &Suggestion) -> Value {
@@ -400,6 +429,8 @@ pub struct Live {
     pub renamed: Option<(String, String)>,
     pub cwd: String,
     pub trusted: bool,
+    /// The root the open Trust dialog offers (what "Trust for this session" grants).
+    pub trust_root: Option<std::path::PathBuf>,
     /// Images for the next message.
     pub images: Vec<Attached>,
     /// A clipboard read is in flight (key repeat starts no second one).
@@ -464,6 +495,7 @@ impl Live {
             renamed: None,
             cwd: String::new(),
             trusted: false,
+            trust_root: None,
             images: vec![],
             image_busy: false,
             focus_view: false,
@@ -838,7 +870,10 @@ impl Live {
                 return None;
             }
             if kind == PickerKind::Trust {
-                return (key == "session").then_some(Action::TrustFolder);
+                return (key == "session")
+                    .then(|| self.trust_root.take())
+                    .flatten()
+                    .map(Action::TrustFolder);
             }
             if kind == PickerKind::Remember {
                 if let (Some(e), Some(text), "user" | "project") =
@@ -2025,7 +2060,7 @@ impl Live {
     /// Nothing is read from the folder before the answer. "Not now" is first (selected) and Esc declines; the
     /// dialog needs a deliberate engage and waits out the arming delay like an approval. Returns whether a
     /// dialog was raised (not for a trusted folder, a starting session or one already asked).
-    pub fn ask_trust(&mut self, now: i64) -> bool {
+    pub fn ask_trust(&mut self, now: i64, home: Option<&std::path::Path>) -> bool {
         let asked = self.dialogs.iter().any(|d| {
             matches!(
                 &d.kind,
@@ -2035,15 +2070,26 @@ impl Live {
                 }
             )
         });
-        if self.trusted || self.engine.is_none() || asked {
+        let Some(e) = self.engine.as_ref().filter(|_| !self.trusted && !asked) else {
+            return false;
+        };
+        // the grant is the nearest folder with .git or .synt above the session's folder, not the folder itself
+        let root = crate::engine::root_of(std::path::Path::new(&e.cwd));
+        if let Some(why) = crate::engine::trust_refusal(&root, home, &e.synthesis_home) {
+            self.note(why, true);
             return false;
         }
+        let headers = trust_text(&root, &e.cwd)
+            .into_iter()
+            .map(|t| (0, t))
+            .collect();
+        self.trust_root = Some(root);
         self.push_dialog(
             Dialog {
                 kind: DialogKind::Picker {
                     kind: PickerKind::Trust,
                     title: "Trust this folder?".into(),
-                    headers: vec![(0, TRUST_TEXT.into())],
+                    headers,
                 },
                 options: vec![
                     ("no".into(), "Not now (keep the folder untrusted)".into()),
