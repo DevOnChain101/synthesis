@@ -12,6 +12,18 @@ fn nohome() -> std::path::PathBuf {
     std::env::temp_dir().join("synt-no-such-home-for-tests")
 }
 
+/// The text of every chat notice after the first `from` rows (what one command added, whatever its order).
+fn notices_from(l: &Live, from: usize) -> String {
+    l.view.convo.items[from..]
+        .iter()
+        .filter_map(|i| match i {
+            synthesis_view::convo::Item::Notice { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The text of the newest chat notice (not its `Debug` form, which escapes backslashes in Windows paths).
 fn last_text(l: &Live) -> String {
     match l.view.convo.items.last() {
@@ -280,7 +292,7 @@ fn a_trusted_restart_comes_back_trusted_and_a_broken_project_reports_the_error()
 fn rig_nested() -> (Live, tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let root = synthesis_core::canonicalize(dir.path()).unwrap();
-    let (app, home) = (root.join("proj/app"), root.join("home"));
+    let (app, home) = (root.join("proj").join("app"), root.join("home"));
     std::fs::create_dir_all(&app).unwrap();
     std::fs::create_dir_all(&home).unwrap();
     let sp = root.join("script.json");
@@ -360,8 +372,9 @@ fn trust_lists_and_revokes_with_a_confirmation_that_keeps_by_default() {
         let fp = synthesis_session::trust::fingerprint_root(&app).unwrap();
         synthesis_session::trust::add(&home, &app, "folder", &fp, &policy).unwrap();
     }
+    let mark = l.view.convo.items.len();
     l.submit("/trust");
-    let last = last_text(&l);
+    let last = notices_from(&l, mark);
     assert!(
         last.contains("1.")
             && last.contains(&format!("proj{}app", std::path::MAIN_SEPARATOR))
@@ -401,8 +414,9 @@ fn trust_says_when_remembered_trust_is_off_and_counts_rows_it_ignores() {
     // the test engine runs with --sandbox off: remembered trust is not honoured, and /trust says so
     let (mut l, _d, app) = rig_nested();
     let home = l.engine.as_ref().unwrap().synthesis_home.clone();
+    let mark = l.view.convo.items.len();
     l.submit("/trust");
-    let t = last_text(&l);
+    let t = notices_from(&l, mark);
     assert!(
         t.contains("NOT honoured") && t.contains("sandbox is off"),
         "{t}"
@@ -416,8 +430,9 @@ fn trust_says_when_remembered_trust_is_off_and_counts_rows_it_ignores() {
     let fp = synthesis_session::trust::fingerprint_root(&app).unwrap();
     synthesis_session::trust::add(&home, &app, "folder", &fp, &policy).unwrap();
     std::fs::remove_file(home.join("run/trust.key")).unwrap();
+    let mark = l.view.convo.items.len();
     l.submit("/trust");
-    let t = last_text(&l);
+    let t = notices_from(&l, mark);
     assert!(t.contains("unverified rows ignored: 1"), "{t}");
     assert!(t.contains("no remembered folder"), "{t}");
 }
