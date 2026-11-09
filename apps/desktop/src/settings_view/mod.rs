@@ -517,6 +517,15 @@ impl SettingsView {
         cx.notify();
     }
 
+    fn trust_revoke(&mut self, root: &str, cx: &mut Context<Self>) {
+        let Some(m) = &mut self.model else { return };
+        self.notice = Some(match m.revoke_trust(root) {
+            Ok(()) => format!("Revoked trust of {root}. It takes effect at the next engine start."),
+            Err(e) => format!("Could not revoke: {e}"),
+        });
+        cx.notify();
+    }
+
     fn mcp_remove(&mut self, name: &str, cx: &mut Context<Self>) {
         let Some(m) = &mut self.model else { return };
         match m.remove_mcp(name) {
@@ -862,6 +871,7 @@ impl SettingsView {
                 }
             }
             Section::Mcp => out.extend(self.mcp_block(m, cx)),
+            Section::Guards => out.extend(self.trusted_block(m, cx)),
             Section::Interface => out.extend(self.panels_block(cx)),
             _ => {}
         }
@@ -891,6 +901,73 @@ impl SettingsView {
         for (name, why) in ALWAYS {
             out.push(small(format!("{name}: {why}"), t::MUTED).into_any_element());
         }
+        out
+    }
+
+    /// The folders remembered as trusted (user store) with a Revoke button each.
+    fn trusted_block(&self, m: &Model, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut out: Vec<AnyElement> = vec![
+            small("Trusted folders", t::TEXT)
+                .mt(px(8.))
+                .into_any_element(),
+        ];
+        if m.trusted.is_empty() {
+            out.push(
+                small(
+                    "None remembered. The Files tab offers it for a folder.",
+                    t::MUTED,
+                )
+                .into_any_element(),
+            );
+        }
+        for (i, (r, same)) in m.trusted.iter().enumerate() {
+            let root = r.root.clone();
+            let state = match (r.scope.as_str(), same) {
+                ("parent", _) => "parent: all subfolders",
+                (_, Some(true)) => "config unchanged",
+                (_, Some(false)) => "CONFIG CHANGED",
+                _ => "folder missing",
+            };
+            out.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .py(px(3.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_size(px(12.))
+                            .text_color(hsla(t::TEXT_STRONG))
+                            .overflow_hidden()
+                            .child(synthesis_harness::sanitize_for_display(&r.root)),
+                    )
+                    .child(badge(
+                        state,
+                        if *same == Some(false) {
+                            t::WARN
+                        } else {
+                            t::MUTED
+                        },
+                    ))
+                    .child(small(
+                        r.trusted_at.get(..10).unwrap_or(&r.trusted_at).to_string(),
+                        t::MUTED,
+                    ))
+                    .child(btn(format!("trust-rm-{i}"), "Revoke", false).on_click(
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.trust_revoke(&root, cx)
+                        }),
+                    ))
+                    .into_any_element(),
+            );
+        }
+        out.push(
+            small("Remembered in your session store, never in a project. Revoking takes effect at the next engine start (a new session, /model or a restart); the open session keeps what it loaded.", t::MUTED)
+                .mt(px(4.))
+                .into_any_element(),
+        );
         out
     }
 
