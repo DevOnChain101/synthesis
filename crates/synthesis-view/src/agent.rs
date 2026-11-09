@@ -181,6 +181,36 @@ pub struct Frame {
     pub ts: Option<i64>,
 }
 
+/// The agent's last action in the browser (`browser.action`): where, as a point of a `w` x `h` viewport.
+/// Never what was typed. The screenshot it is drawn on is not live, so the cursor can lag the page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pointer {
+    pub action: String,
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    pub w: Option<u32>,
+    pub h: Option<u32>,
+    pub target: Option<String>,
+    pub ts: Option<i64>,
+}
+
+impl Pointer {
+    /// The point as fractions (0..=1) of the viewport, for any image of the same aspect; clamped, since a
+    /// point can lie outside the viewport (element scrolled out). `None` without a point or a viewport.
+    pub fn frac(&self) -> Option<(f32, f32)> {
+        let (x, y, w, h) = (
+            self.x?,
+            self.y?,
+            self.w.filter(|w| *w > 0)?,
+            self.h.filter(|h| *h > 0)?,
+        );
+        Some((
+            (x as f32 / w as f32).clamp(0.0, 1.0),
+            (y as f32 / h as f32).clamp(0.0, 1.0),
+        ))
+    }
+}
+
 /// A file the session changed: the sum of its edits and the latest diff.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChangedFile {
@@ -190,6 +220,8 @@ pub struct ChangedFile {
     pub edits: u32,
     /// `ToolCompleted.diff` of the latest edit (`hidden` for a secret file).
     pub diff: Option<Value>,
+    /// The tool call of that edit (the chat row it came from).
+    pub call_id: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -200,10 +232,14 @@ pub struct AgentPanes {
     pub browser: Vec<BrowserCall>,
     /// The last URL a `browser_navigate` named.
     pub url: String,
+    /// The page title the last navigate/snapshot result reported (page content: clipped, shown sanitized).
+    pub title: String,
     /// Path of the newest screenshot the browser tool saved.
     pub screenshot: Option<String>,
     /// Every `browser.frame`, oldest first (the newest 50).
     pub frames: Vec<Frame>,
+    /// The latest `browser.action`.
+    pub pointer: Option<Pointer>,
     pub files: Vec<ChangedFile>,
     /// Tool call id -> index in `commands` / `browser` / agent id, to match the completion.
     pending: Vec<(String, Pending)>,
@@ -318,7 +354,7 @@ impl AgentPanes {
         Some(self.pending.remove(at).1)
     }
 
-    fn note_file(&mut self, d: &Value) {
+    fn note_file(&mut self, d: &Value, call_id: &str) {
         if d.get("hidden").and_then(Value::as_bool) == Some(true) && d.get("path").is_none() {
             return;
         }
@@ -333,6 +369,7 @@ impl AgentPanes {
                 f.removed += r;
                 f.edits += 1;
                 f.diff = Some(d.clone());
+                f.call_id = call_id.to_string();
             }
             None => self.files.push(ChangedFile {
                 path: path.to_string(),
@@ -340,6 +377,7 @@ impl AgentPanes {
                 removed: r,
                 edits: 1,
                 diff: Some(d.clone()),
+                call_id: call_id.to_string(),
             }),
         }
     }
@@ -532,6 +570,9 @@ impl AgentPanes {
                             {
                                 self.screenshot = Some(p);
                             }
+                            if let Some(t) = title_of(out) {
+                                self.title = t;
+                            }
                         }
                     }
                     Some(Pending::Sub(a, i)) => {
@@ -542,7 +583,7 @@ impl AgentPanes {
                     None => {}
                 }
                 if let Some(d) = diff {
-                    self.note_file(d);
+                    self.note_file(d, tool_call_id);
                 }
             }
             // A foreground Bash call is `process_id == tool_call_id`: its row exists already.
@@ -605,6 +646,25 @@ impl AgentPanes {
                         CmdState::Failed
                     };
                 }
+            }
+            Event::BrowserAction {
+                action,
+                x,
+                y,
+                w,
+                h,
+                target,
+                ..
+            } => {
+                self.pointer = Some(Pointer {
+                    action: action.clone(),
+                    x: *x,
+                    y: *y,
+                    w: *w,
+                    h: *h,
+                    target: target.clone(),
+                    ts,
+                });
             }
             Event::BrowserFrame {
                 path,
@@ -678,6 +738,12 @@ pub fn read_report(
         .position(|(_, _, v)| v.get("id").and_then(Value::as_str) == Some(report_id));
     let at = by_id.or_else(|| all.iter().rposition(|(a, _, _)| *a == attempt))?;
     Some(all.into_iter().nth(at)?.2)
+}
+
+/// The `title: ...` line of a page-info result (`browser_navigate`, `browser_snapshot`), clipped to 120 chars.
+fn title_of(out: &str) -> Option<String> {
+    let t = out.lines().find_map(|l| l.strip_prefix("title: "))?.trim();
+    (!t.is_empty()).then(|| t.chars().take(120).collect())
 }
 
 fn browser_summary(name: &str, input: &Value) -> String {
@@ -926,6 +992,54 @@ mod tests {
     }
 
     #[test]
+    fn the_latest_browser_action_is_the_pointer_and_scales_to_the_viewport() {
+        let act = |action: &str, x: Value, y: Value| json!({"action": action, "x": x, "y": y, "w": 1280, "h": 800, "target": "button \"Go\""});
+        let p = run(vec![
+            ev(
+                1,
+                None,
+                "browser.action",
+                act("click", json!(10), json!(20)),
+            ),
+            ev(
+                2,
+                None,
+                "browser.action",
+                act("click", json!(640), json!(200)),
+            ),
+        ]);
+        let ptr = p.pointer.as_ref().unwrap();
+        assert_eq!(
+            (ptr.action.as_str(), ptr.target.as_deref()),
+            ("click", Some("button \"Go\""))
+        );
+        assert_eq!(ptr.frac(), Some((0.5, 0.25)));
+        // outside the viewport (scrolled out): clamped, never off the image
+        let p = run(vec![ev(
+            1,
+            None,
+            "browser.action",
+            act("click", json!(5000), json!(-30)),
+        )]);
+        assert_eq!(p.pointer.unwrap().frac(), Some((1.0, 0.0)));
+        // navigate / press carry no point; a missing viewport gives none either
+        let p = run(vec![ev(
+            1,
+            None,
+            "browser.action",
+            json!({"action": "navigate"}),
+        )]);
+        assert_eq!(p.pointer.unwrap().frac(), None);
+        let p = run(vec![ev(
+            1,
+            None,
+            "browser.action",
+            json!({"action": "click", "x": 1, "y": 1, "w": 0, "h": 0}),
+        )]);
+        assert_eq!(p.pointer.unwrap().frac(), None);
+    }
+
+    #[test]
     fn browser_frames_are_kept_and_the_latest_is_the_screenshot() {
         let frame = |n: u32| {
             json!({"path": format!("/a/screenshot-{n}.png"), "url": "https://example.com",
@@ -978,6 +1092,11 @@ mod tests {
             (5, 1, 2)
         );
         assert_eq!(p.totals(), (10, 1));
+        // the chat row to jump to is the latest edit's tool call
+        assert_eq!(
+            (p.files[0].call_id.as_str(), p.files[1].call_id.as_str()),
+            ("e2", "e3")
+        );
     }
 
     #[test]
@@ -995,7 +1114,13 @@ mod tests {
                 2,
                 None,
                 "tool.completed",
-                completed("w1", "browser_navigate", "ok", "ok", None),
+                completed(
+                    "w1",
+                    "browser_navigate",
+                    "ok",
+                    "Navigated.\nurl: https://example.com/\ntitle: Example Domain",
+                    None,
+                ),
             ),
             ev(
                 3,
@@ -1017,6 +1142,7 @@ mod tests {
             ),
         ]);
         assert_eq!(p.url, "https://example.com");
+        assert_eq!(p.title, "Example Domain");
         assert_eq!(p.browser.len(), 2);
         assert_eq!(p.browser[0].summary, "https://example.com");
         assert_eq!(p.screenshot.as_deref(), shot.to_str());

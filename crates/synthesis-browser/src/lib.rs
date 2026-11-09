@@ -143,6 +143,16 @@ pub struct Screenshot {
     pub path: PathBuf,
 }
 
+/// Where an action landed: a point in CSS pixels of the viewport, and the viewport size (`w` x `h`) it is
+/// measured in. Position only; it never carries text.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spot {
+    pub x: f64,
+    pub y: f64,
+    pub w: u32,
+    pub h: u32,
+}
+
 struct Tab {
     session: String,
     refs: Mutex<RefTable>,
@@ -1130,7 +1140,50 @@ impl BrowserRuntime {
             .ok_or_else(|| BrowserError::StaleRef(r.to_owned()))
     }
 
-    pub async fn click(&self, r: &str) -> Result<()> {
+    /// The viewport size in CSS pixels (the configured one when the browser does not say).
+    async fn viewport(&self, tab: &Tab) -> (u32, u32) {
+        let m = self
+            .call(tab, "Page.getLayoutMetrics", json!({}))
+            .await
+            .ok();
+        let n = |k: &str| {
+            m.as_ref()
+                .and_then(|m| m["cssVisualViewport"][k].as_f64())
+                .map(|v| v.round() as u32)
+        };
+        match (n("clientWidth"), n("clientHeight")) {
+            (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
+            _ => self.opts.viewport,
+        }
+    }
+
+    /// The centre of the element behind `r`, from the DOM box model (no script runs in the page), for the
+    /// cursor of a viewer. Best effort: `None` when the element is gone or has no box.
+    pub async fn spot_of(&self, r: &str) -> Option<Spot> {
+        let tab = self.current().ok()?;
+        let backend = lock(&tab.refs).resolve(r)?;
+        let m = self
+            .call(&tab, "DOM.getBoxModel", json!({"backendNodeId": backend}))
+            .await
+            .ok()?;
+        let q: Vec<f64> = m["model"]["content"]
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_f64)
+            .collect();
+        if q.len() != 8 {
+            return None;
+        }
+        let (x, y) = (
+            (q[0] + q[2] + q[4] + q[6]) / 4.0,
+            (q[1] + q[3] + q[5] + q[7]) / 4.0,
+        );
+        let (w, h) = self.viewport(&tab).await;
+        Some(Spot { x, y, w, h })
+    }
+
+    /// Clicks the element behind `r` and returns where the pointer went.
+    pub async fn click(&self, r: &str) -> Result<Spot> {
         let tab = self.current()?;
         let oid = self.object_for(&tab, r).await?;
         let f = "function(){this.scrollIntoView({block:'center',inline:'center'});const r=this.getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2,r.width*r.height]}";
@@ -1153,7 +1206,8 @@ impl BrowserRuntime {
             }
             self.call(&tab, "Input.dispatchMouseEvent", ev).await?;
         }
-        Ok(())
+        let (w, h) = self.viewport(&tab).await;
+        Ok(Spot { x, y, w, h })
     }
 
     /// Focuses the element, replaces its content with `text` and fires input events.

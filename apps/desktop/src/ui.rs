@@ -449,7 +449,8 @@ pub fn open(cx: &mut App, live: Option<LiveCfg>) {
             user_home: c.home.clone().map(Into::into).unwrap_or_default(),
             cwd: c.project.clone(),
             managed: synthesis_settings::managed_settings_path(),
-            trust: if c.args.common.trust_project {
+            // what is effective: a remembered trust (inert) is shown as untrusted, like the engine loads it
+            trust: if c.args.common.trust_project && !c.args.common.project_exec_inert {
                 synthesis_config::ProjectTrust::Trusted
             } else {
                 synthesis_config::ProjectTrust::Untrusted
