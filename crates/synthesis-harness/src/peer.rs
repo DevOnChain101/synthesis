@@ -1117,6 +1117,14 @@ impl Harness {
                 sender_mode: if delegate { sender_mode } else { "" },
             },
         };
+        // Registered before the request leaves: the receiver's cycle check (`peer_subscribe_end`)
+        // must see it even while it is still being delivered, or two sessions asking each other
+        // at once both accept and wait for each other.
+        if notify {
+            lock(&link.state)
+                .waiting_on
+                .insert(id.clone(), entry.session_id.clone());
+        }
         let call = if offline_card {
             Err(PeerError::Connect)
         } else {
@@ -1125,6 +1133,7 @@ impl Harness {
         let call = match call {
             Ok(c) => c,
             Err(e) => {
+                lock(&link.state).waiting_on.remove(&id);
                 let (status, why) = match e {
                     PeerError::Connect if (link.lock_free)(&entry) => {
                         remove_entry(&link.run_dir, &entry.session_id);
@@ -1163,9 +1172,6 @@ impl Harness {
         {
             let mut st = lock(&link.state);
             st.inflight += 1;
-            if notify {
-                st.waiting_on.insert(id.clone(), entry.session_id.clone());
-            }
         }
         let (sink, l2, cancel) = (
             self.sink.clone(),

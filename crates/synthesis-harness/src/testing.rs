@@ -20,6 +20,8 @@ use tokio_util::sync::CancellationToken;
 pub enum Step {
     Event(StreamEvent),
     Delay(Duration),
+    /// Waits until the file exists (cancellable): a test opens it when the world is ready.
+    Gate(std::path::PathBuf),
     Fail(ProviderError),
 }
 
@@ -191,6 +193,12 @@ impl Turn {
         self
     }
 
+    /// Waits until `path` exists before the first event.
+    pub fn delayed_until(mut self, path: &std::path::Path) -> Self {
+        self.steps.insert(0, Step::Gate(path.to_path_buf()));
+        self
+    }
+
     /// Waits `ms` after the first event, i.e. mid-stream.
     pub fn delayed_mid_stream(mut self, ms: u64) -> Self {
         self.steps.insert(1, Step::Delay(Duration::from_millis(ms)));
@@ -309,9 +317,20 @@ impl ModelProvider for FakeProvider {
                 match steps.pop_front()? {
                     Step::Event(e) => Some((Ok(e), (steps, cancel))),
                     Step::Fail(e) => Some((Err(e), (VecDeque::new(), cancel))),
-                    Step::Delay(d) => {
+                    wait @ (Step::Delay(_) | Step::Gate(_)) => {
+                        let waited = async {
+                            match wait {
+                                Step::Delay(d) => tokio::time::sleep(d).await,
+                                Step::Gate(p) => {
+                                    while !p.exists() {
+                                        tokio::time::sleep(Duration::from_millis(20)).await;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        };
                         tokio::select! {
-                            () = tokio::time::sleep(d) => {}
+                            () = waited => {}
                             () = cancel.cancelled() => {
                                 return Some((Err(ProviderError::cancelled()), (VecDeque::new(), cancel)));
                             }
@@ -320,7 +339,7 @@ impl ModelProvider for FakeProvider {
                         match steps.pop_front()? {
                             Step::Event(e) => Some((Ok(e), (steps, cancel))),
                             Step::Fail(e) => Some((Err(e), (VecDeque::new(), cancel))),
-                            Step::Delay(_) => None,
+                            Step::Delay(_) | Step::Gate(_) => None,
                         }
                     }
                 }

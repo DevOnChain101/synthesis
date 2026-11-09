@@ -1809,6 +1809,39 @@ async fn notify_on_end_of_an_idle_session_answers_idle_at_once() {
     );
 }
 
+/// Two sessions that ask each other to notify them at the same moment: the cycle check must see
+/// the asker's own pending request even while that request is still being delivered, else both
+/// accept and each waits for the other's task end (up to `notify_wait_max_s`, an hour).
+#[tokio::test]
+async fn crossing_notify_requests_do_not_leave_both_sessions_waiting() {
+    let home = tempfile::tempdir().unwrap();
+    let run = run_dir(home.path());
+    let on = json!({"enabled": true, "allow": ["ws:alpha", "ws:beta"], "accept_notify": true});
+    let (mut a, ea) = side(
+        "sess-a",
+        "alpha",
+        &run,
+        Some(on.clone()),
+        b_notifies("ws:beta/sess:sess-b"),
+        10,
+    );
+    let (mut b, eb) = side(
+        "sess-b",
+        "beta",
+        &run,
+        Some(on),
+        b_notifies("ws:alpha/sess:sess-a"),
+        10,
+    );
+    let (_ra, _rb) = (serve(&a, &run, ea), serve(&b, &run, eb));
+    let both = async { tokio::join!(go(&mut a, "ask beta"), go(&mut b, "ask alpha")) };
+    let (oa, ob) = tokio::time::timeout(Duration::from_secs(20), both)
+        .await
+        .expect("both sessions wait for each other");
+    assert_eq!(oa.status, TaskStatus::Completed, "{}", oa.reason);
+    assert_eq!(ob.status, TaskStatus::Completed, "{}", ob.reason);
+}
+
 #[tokio::test]
 async fn a_subscription_is_gated_one_per_asker_and_refused_in_a_cycle() {
     let home = tempfile::tempdir().unwrap();
