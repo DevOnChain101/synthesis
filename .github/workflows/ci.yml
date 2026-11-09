@@ -72,6 +72,8 @@ jobs:
         env:
           CARGO_PROFILE_TEST_DEBUG: "0"
           CARGO_PROFILE_DEV_DEBUG: "0"
+          # Same as the browser job: Chrome's own helper sandbox fails on macOS/Linux runners (Mach rendezvous).
+          SYNT_BROWSER_TEST_NO_SANDBOX: ${{ runner.os != 'Windows' && '1' || '' }}
         run: cargo test --workspace --exclude synthesis-desktop --locked --no-fail-fast --features synthesis-cli/test-provider 2>&1 | tee test.log
       - name: Failure digest
         if: always()
