@@ -82,6 +82,47 @@ pub fn price_of(synthesis_home: &Path, label: &str, model: &str) -> Option<(f64,
         .map(|p| (p.input_per_mtok, p.output_per_mtok))
 }
 
+/// Where the context window of `provider/model` comes from, in the order of docs/specs/config.md
+/// 6.2: `limit.context` of the model in synt.json, the model-list cache, the built-in table
+/// (api.openai.com only). Nothing is guessed from the model's name: no source = unknown.
+pub fn window_source(cfg: &Config, synthesis_home: &Path, label: &str) -> (Option<u64>, String) {
+    let Some((p, m)) = label.split_once('/') else {
+        return (None, "no provider in the model id".into());
+    };
+    let Some(prov) = cfg.providers.get(p) else {
+        return (None, format!("provider \"{p}\" is not configured"));
+    };
+    let declared = prov
+        .models_meta
+        .as_ref()
+        .and_then(|t| t.get(m))
+        .and_then(|t| t.context_window)
+        .map(|w| w as u64);
+    if let Some(w) = declared {
+        return (Some(w), "limit.context in synt.json".into());
+    }
+    let cache = cache_of(synthesis_home, p, prov);
+    if let Some(w) = cache
+        .as_ref()
+        .and_then(|c| c.models.get(m))
+        .and_then(|f| f.context_window)
+    {
+        return (Some(w), "the provider's model list (cache)".into());
+    }
+    let native = prov.protocol == Protocol::OpenAi
+        && synthesis_providers::openai::base_url(prov.base_url.as_deref())
+            .starts_with("https://api.openai.com");
+    if let Some((w, _)) = modelinfo::builtin(native, m) {
+        return (Some(w), "built-in table of documented limits".into());
+    }
+    let why = match cache {
+        None => "no model-list cache for this provider".to_string(),
+        Some(c) if c.models.contains_key(m) => "the provider's list gives no window for it".into(),
+        Some(_) => "the provider's list does not contain it".into(),
+    };
+    (None, why)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +174,100 @@ mod tests {
             .build()
             .unwrap()
             .block_on(refresh_bounded(&f, d))
+    }
+
+    fn cfg_with(declared: Option<u64>) -> Config {
+        let mut c = Config::default();
+        let mut p = Provider {
+            base_url: Some("http://localhost:8688/v1".into()),
+            protocol: Protocol::OpenAi,
+            models_meta: Some(Default::default()),
+            ..Default::default()
+        };
+        p.models_meta.as_mut().unwrap().insert(
+            "antigravity/gemini-3.8-flash-low".to_string(),
+            synthesis_config::ModelMeta {
+                context_window: declared.map(|w| w as f64),
+                ..Default::default()
+            },
+        );
+        c.providers.insert("omniroute".into(), p);
+        c
+    }
+
+    fn write_list(home: &Path, c: &Config, ids: &[(&str, Option<u64>)]) {
+        let p = &c.providers["omniroute"];
+        let cache = modelinfo::CacheFile {
+            schema_version: modelinfo::SCHEMA_VERSION,
+            base_url: "http://localhost:8688/v1".into(),
+            protocol: modelinfo::protocol_name(p.protocol).into(),
+            fetched_at: modelinfo::unix_now(),
+            models: ids
+                .iter()
+                .map(|(i, w)| {
+                    (
+                        i.to_string(),
+                        modelinfo::ModelFacts {
+                            context_window: *w,
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect(),
+        };
+        modelinfo::write_cache(&modelinfo::cache_path(home, "omniroute"), &cache).unwrap();
+    }
+
+    #[test]
+    fn the_window_of_a_slash_id_comes_from_config_then_cache_and_is_never_guessed() {
+        let home = tempfile::tempdir().unwrap();
+        let label = "omniroute/antigravity/gemini-3.8-flash-low";
+        // a gateway list without the declared id (as the owner's omniroute): unknown, with the reason
+        let c = cfg_with(None);
+        write_list(home.path(), &c, &[("cx/gpt-5.6-terra", Some(872_000))]);
+        let (w, why) = window_source(&c, home.path(), label);
+        assert_eq!(w, None);
+        assert_eq!(why, "the provider's list does not contain it");
+        // another model of the same gateway has its window
+        assert_eq!(
+            window_source(&c, home.path(), "omniroute/cx/gpt-5.6-terra").0,
+            Some(872_000)
+        );
+        // the id listed with a window
+        write_list(
+            home.path(),
+            &c,
+            &[("antigravity/gemini-3.8-flash-low", Some(1_000_000))],
+        );
+        assert_eq!(
+            window_source(&c, home.path(), label),
+            (Some(1_000_000), "the provider's model list (cache)".into())
+        );
+        // listed without a window: unknown, and it says so
+        write_list(
+            home.path(),
+            &c,
+            &[("antigravity/gemini-3.8-flash-low", None)],
+        );
+        assert_eq!(
+            window_source(&c, home.path(), label).1,
+            "the provider's list gives no window for it"
+        );
+        // limit.context in synt.json wins over the cache
+        write_list(
+            home.path(),
+            &c,
+            &[("antigravity/gemini-3.8-flash-low", Some(1_000_000))],
+        );
+        assert_eq!(
+            window_source(&cfg_with(Some(500_000)), home.path(), label),
+            (Some(500_000), "limit.context in synt.json".into())
+        );
+        // the provider prefix is part of the label, not of the cache key
+        assert_eq!(
+            window_source(&c, home.path(), "antigravity/gemini-3.8-flash-low").0,
+            None
+        );
     }
 
     #[test]

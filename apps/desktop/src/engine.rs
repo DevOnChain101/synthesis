@@ -471,6 +471,8 @@ pub struct Engine {
     pub model_rows: Vec<crate::models::ModelRow>,
     /// The stored model that could not be used (the session runs on `label`; the stored id is kept).
     pub stale_model: Option<String>,
+    /// The context window and where it comes from, or why it is unknown (`/status`).
+    pub context_source: String,
     pub effort_tiers: Vec<String>,
     pub notices: Vec<String>,
     pub cwd: String,
@@ -697,12 +699,14 @@ impl Engine {
             ));
         }
         all_notices.extend(notes);
+        let context_source = crate::models::window_note(env, &project, &label);
         let engine = Self {
             sid,
             label,
             models,
             model_rows: crate::models::rows(env, &project),
             stale_model,
+            context_source,
             effort_tiers,
             notices: all_notices,
             cwd,

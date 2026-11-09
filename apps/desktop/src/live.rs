@@ -1735,7 +1735,19 @@ impl Live {
             format!("folder: {}", sanitize_for_display(&e.cwd)),
             format!("model: {}", e.label),
             format!("mode: {}", e.mode().as_str()),
-            format!("context: {} / {} tokens", t.0, t.1),
+            format!(
+                "context: {} / {} tokens",
+                crate::tui_view::snapshot::tok(t.0),
+                if t.1 > 0 {
+                    crate::tui_view::snapshot::tok(t.1)
+                } else {
+                    "?".into()
+                }
+            ),
+            format!(
+                "context window: {}",
+                sanitize_for_display(&e.context_source)
+            ),
             format!("trusted folder: {}", if e.trusted { "yes" } else { "no" }),
             format!("verification: {verification}"),
         ];
