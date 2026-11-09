@@ -293,7 +293,7 @@ fn remember_and_parent_are_offered_and_answer_with_what_to_record() {
     assert!(
         l.dialogs[0].options[3]
             .1
-            .contains("all its subfolders, remembered")
+            .contains("including repositories cloned there later")
     );
     // the dialog is not engaged: Enter/digits are for the prompt, and the delay holds clicks back
     assert!(!l.dialogs[0].answerable());
@@ -332,13 +332,14 @@ fn the_parent_is_not_offered_when_it_is_home_a_filesystem_root_or_holds_the_conf
 fn trust_lists_and_revokes_with_a_confirmation_that_keeps_by_default() {
     let (mut l, _d, app) = rig_nested();
     let home = l.engine.as_ref().unwrap().synthesis_home.clone();
-    synthesis_session::trust::add(
-        &home,
-        &app,
-        "folder",
-        &synthesis_session::trust::fingerprint(&app),
-    )
-    .unwrap();
+    {
+        let policy = synthesis_session::trust::Policy {
+            home: None,
+            synt_home: home.clone(),
+        };
+        let fp = synthesis_session::trust::fingerprint(&app).unwrap();
+        synthesis_session::trust::add(&home, &app, "folder", &fp, &policy).unwrap();
+    }
     l.submit("/trust");
     let last = format!("{:?}", l.view.convo.items.last());
     assert!(
@@ -351,7 +352,10 @@ fn trust_lists_and_revokes_with_a_confirmation_that_keeps_by_default() {
     assert_eq!(l.dialogs[0].sel, 0);
     assert!(l.dialogs[0].needs_person());
     l.reject();
-    assert_eq!(synthesis_session::trust::list(&home).unwrap().len(), 1);
+    assert_eq!(
+        synthesis_session::trust::list(&home).unwrap().records.len(),
+        1
+    );
     // an unknown target changes nothing
     l.submit("/trust revoke 9");
     assert!(l.dialogs.is_empty());
@@ -360,7 +364,38 @@ fn trust_lists_and_revokes_with_a_confirmation_that_keeps_by_default() {
     let k = l.pick(1, i64::MAX).unwrap();
     assert_eq!(k, "revoke");
     assert_eq!(l.answer(&k, 1000), None);
-    assert!(synthesis_session::trust::list(&home).unwrap().is_empty());
+    assert!(
+        synthesis_session::trust::list(&home)
+            .unwrap()
+            .records
+            .is_empty()
+    );
     let last = format!("{:?}", l.view.convo.items.last());
     assert!(last.contains("next engine start"), "{last}");
+}
+
+#[test]
+fn trust_says_when_remembered_trust_is_off_and_counts_rows_it_ignores() {
+    // the test engine runs with --sandbox off: remembered trust is not honoured, and /trust says so
+    let (mut l, _d, app) = rig_nested();
+    let home = l.engine.as_ref().unwrap().synthesis_home.clone();
+    l.submit("/trust");
+    let t = format!("{:?}", l.view.convo.items.last());
+    assert!(
+        t.contains("NOT honoured") && t.contains("sandbox is off"),
+        "{t}"
+    );
+    assert!(!t.contains("unverified rows"));
+    // a row written without the key (what a shell could do to the database) is ignored and counted
+    let policy = synthesis_session::trust::Policy {
+        home: None,
+        synt_home: home.clone(),
+    };
+    let fp = synthesis_session::trust::fingerprint(&app).unwrap();
+    synthesis_session::trust::add(&home, &app, "folder", &fp, &policy).unwrap();
+    std::fs::remove_file(home.join("run/trust.key")).unwrap();
+    l.submit("/trust");
+    let t = format!("{:?}", l.view.convo.items.last());
+    assert!(t.contains("unverified rows ignored: 1"), "{t}");
+    assert!(t.contains("no remembered folder"), "{t}");
 }

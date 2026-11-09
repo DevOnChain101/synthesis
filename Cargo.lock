@@ -7475,8 +7475,10 @@ dependencies = [
 name = "synthesis-session"
 version = "0.1.0"
 dependencies = [
+ "hmac",
  "regex",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.10.9",

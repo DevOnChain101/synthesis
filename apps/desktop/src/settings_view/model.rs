@@ -175,6 +175,8 @@ pub struct Model {
     /// Folders remembered as trusted (user store), oldest first, each with whether its trusted configuration
     /// still matches the fingerprint taken when it was trusted (`None`: a parent grant or a missing folder).
     pub trusted: Vec<(synthesis_session::trust::TrustRecord, Option<bool>)>,
+    /// Rows of the trust store ignored because their MAC does not verify.
+    pub trust_unverified: usize,
     pub mcp_error: Option<String>,
     pub providers: Vec<KeyStatus>,
     pub agents_md: Vec<(PathBuf, bool)>,
@@ -266,6 +268,7 @@ impl Model {
             changed: BTreeSet::new(),
             mcp: vec![],
             trusted: vec![],
+            trust_unverified: 0,
             mcp_error: None,
             providers: vec![],
             agents_md: vec![],
@@ -333,15 +336,18 @@ impl Model {
                 (s.name, s.description, src)
             })
             .collect();
-        self.trusted = synthesis_session::trust::list(&c.home)
-            .unwrap_or_default()
+        let listing = synthesis_session::trust::list(&c.home).unwrap_or_default();
+        self.trust_unverified = listing.unverified;
+        self.trusted = listing
+            .records
             .into_iter()
+            .filter(|r| r.scope != synthesis_session::trust::CHILD)
             .map(|r| {
                 let same = (r.scope == synthesis_session::trust::FOLDER
                     && std::path::Path::new(&r.root).is_dir())
                 .then(|| {
                     synthesis_session::trust::fingerprint(std::path::Path::new(&r.root))
-                        == r.fingerprint
+                        .is_ok_and(|f| f == r.fingerprint)
                 });
                 (r, same)
             })
@@ -1116,8 +1122,12 @@ mod tests {
         let (_t, mut m) = model();
         assert!(m.trusted.is_empty());
         let ws = m.cfg.cwd.clone();
-        let fp = synthesis_session::trust::fingerprint(&ws);
-        synthesis_session::trust::add(&m.cfg.home, &ws, "folder", &fp).unwrap();
+        let fp = synthesis_session::trust::fingerprint(&ws).unwrap();
+        let policy = synthesis_session::trust::Policy {
+            home: None,
+            synt_home: m.cfg.home.clone(),
+        };
+        synthesis_session::trust::add(&m.cfg.home, &ws, "folder", &fp, &policy).unwrap();
         m.refresh_info();
         assert_eq!(m.trusted.len(), 1);
         assert_eq!(m.trusted[0].1, Some(true), "config unchanged");

@@ -272,7 +272,7 @@ pub fn trust_text(root: &std::path::Path, cwd: &str) -> Vec<String> {
         ));
     }
     v.push("Enables: the root's project settings (including permission and allow rules), agents, skills, memory and instruction files, hooks, and the file explorer's git listing. Its MCP servers are offered but none starts: each needs your own approval as NAME@HASH (--approve-mcp at launch or your user settings; `synt mcp get` shows the hash). MCP approvals given at launch are not carried over.".into());
-    v.push("Risks: a repository you did not write can carry hooks that run commands (one can run at the restart that follows), allow rules that skip prompts, and provider endpoints that receive your prompts.".into());
+    v.push("Risks: a repository you did not write can carry hooks that run commands (one can run at the restart that follows), allow rules that skip prompts, and provider endpoints that receive your prompts. A remembered trust runs the project's hooks at EVERY future start, and a later git pull can change hooks, MCP servers, agents or rules without any prompt. So, stricter than VS Code: if the trusted configuration changes, remembered trust is not honoured; the folder starts untrusted and you are asked again, with the changed file names.".into());
     v.push("The session restarts now and must be idle: the saved conversation is reloaded (if it cannot be, a fresh session starts and a note says so), this session's 'always allow' grants and its permission mode are reset. \"Trust this folder (remember)\" records the root in your own session store (never in the project) for later sessions, resumed ones included; /trust lists and revokes it. It does not ask again when the project's files change, but a warning row shows when its trusted configuration differs from when you trusted it. \"Trust for this session only\" saves nothing. Not now changes nothing: no git runs and nothing from the folder is loaded.".into());
     v
 }
@@ -2336,16 +2336,26 @@ impl Live {
             self.note(why, true);
             return false;
         }
-        let headers = trust_text(&root, &e.cwd)
-            .into_iter()
-            .map(|t| (0, t))
-            .collect();
+        let mut paragraphs = trust_text(&root, &e.cwd);
+        // trusted before, but the configuration moved on: say what changed (names only)
+        if let crate::engine::Remembered::Changed { files, since } =
+            crate::engine::remembered_trust(&e.synthesis_home, home, &root, false)
+        {
+            paragraphs.insert(
+                1,
+                format!(
+                    "CHANGED since you trusted it on {since}: {}. Review these files (for example with git diff) before you trust the folder again; remembered trust is not honoured until you do.",
+                    clip_left(&sanitize_for_display(&files.join(", ")), 300)
+                ),
+            );
+        }
+        let headers = paragraphs.into_iter().map(|t| (0, t)).collect();
         // "all its subfolders" only for a real project parent: never the home folder, a filesystem or drive
         // root, a parent of home or the config folder (the same refusal as for the root)
         let parent = root
             .parent()
             .filter(|p| {
-                p.is_dir() && crate::engine::trust_refusal(p, home, &e.synthesis_home).is_none()
+                p.is_dir() && crate::engine::parent_refusal(p, home, &e.synthesis_home).is_none()
             })
             .map(std::path::Path::to_path_buf);
         let mut options = vec![
@@ -2360,8 +2370,8 @@ impl Live {
             options.push((
                 "parent".into(),
                 format!(
-                    "Trust parent folder {} (all its subfolders, remembered)",
-                    clip_left(&sanitize_for_display(&p.display().to_string()), 56)
+                    "Trust parent folder {} (all subfolders, including repositories cloned there later; remembered)",
+                    clip_left(&sanitize_for_display(&p.display().to_string()), 40)
                 ),
             ));
         }
@@ -2390,10 +2400,17 @@ impl Live {
         let Some(e) = &self.engine else {
             return self.note("/trust: the session is still starting", true);
         };
-        let recs = match synthesis_session::trust::list(&e.synthesis_home) {
+        let listing = match synthesis_session::trust::list(&e.synthesis_home) {
             Ok(r) => r,
             Err(err) => return self.note(format!("/trust: cannot read the store: {err}"), true),
         };
+        let unverified = listing.unverified;
+        // the per-project baselines of a parent grant are bookkeeping, not something to list
+        let recs: Vec<_> = listing
+            .records
+            .into_iter()
+            .filter(|r| r.scope != synthesis_session::trust::CHILD)
+            .collect();
         let arg = arg.trim();
         if let Some(which) = arg.strip_prefix("revoke").map(str::trim) {
             let pick = which
@@ -2452,19 +2469,27 @@ impl Live {
                 "folder not trusted"
             }
         )];
+        if e.sandbox.mode != "enforce" {
+            lines.push(format!(
+                "remembered trust is NOT honoured now: the sandbox is {} (a command that can run unconfined could have written the store); session-only trust and --trust-project still work",
+                if e.sandbox.mode.is_empty() { "not reported" } else { e.sandbox.mode.as_str() }
+            ));
+        }
+        if unverified > 0 {
+            lines.push(format!(
+                "unverified rows ignored: {unverified} (not written by this app)"
+            ));
+        }
         if recs.is_empty() {
             lines.push("no remembered folder (Files tab -> Trust this folder (remember))".into());
         }
         for (i, r) in recs.iter().enumerate() {
             let state = if r.scope == synthesis_session::trust::PARENT {
-                "config of each project not tracked"
+                "each project is checked at its first start"
             } else if std::path::Path::new(&r.root).is_dir() {
-                if synthesis_session::trust::fingerprint(std::path::Path::new(&r.root))
-                    == r.fingerprint
-                {
-                    "config unchanged"
-                } else {
-                    "CONFIG CHANGED"
+                match synthesis_session::trust::fingerprint(std::path::Path::new(&r.root)) {
+                    Ok(f) if f == r.fingerprint => "config unchanged",
+                    _ => "CONFIG CHANGED: not honoured until you trust it again",
                 }
             } else {
                 "folder missing"

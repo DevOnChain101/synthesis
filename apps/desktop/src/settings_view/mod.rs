@@ -976,7 +976,7 @@ impl SettingsView {
             let state = match (r.scope.as_str(), same) {
                 ("parent", _) => "parent: all subfolders",
                 (_, Some(true)) => "config unchanged",
-                (_, Some(false)) => "CONFIG CHANGED",
+                (_, Some(false)) => "CONFIG CHANGED: not honoured",
                 _ => "folder missing",
             };
             out.push(
@@ -1012,6 +1012,18 @@ impl SettingsView {
                         }),
                     ))
                     .into_any_element(),
+            );
+        }
+        if m.trust_unverified > 0 {
+            out.push(
+                small(
+                    format!(
+                        "Unverified rows ignored: {} (not written by this app).",
+                        m.trust_unverified
+                    ),
+                    t::WARN,
+                )
+                .into_any_element(),
             );
         }
         out.push(
