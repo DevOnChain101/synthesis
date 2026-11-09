@@ -81,6 +81,9 @@ impl Geo {
     }
 }
 
+/// Width of the core's column relative to a side column.
+const CORE_COL: f32 = 1.25;
+
 const GRID: [[Pos; 3]; 3] = [
     [Pos::User, Pos::Hooks, Pos::Guards],
     [Pos::Sub, Pos::Hooks, Pos::Skills], // the middle cell is the core
@@ -151,48 +154,61 @@ pub fn geometry(aw: f32, ah: f32) -> Geo {
         return geometry_t(aw, ah);
     }
     let a = mode == Mode::A;
-    let (px_, py, cg, rg, row_min) = if a {
-        (2f32, 6f32, 18f32, 22f32, 86f32)
+    let (px_, py, cg, rg) = if a {
+        (2f32, 6f32, 18f32, 22f32)
     } else {
-        (2f32, 4f32, 10f32, 12f32, 46f32)
+        (2f32, 4f32, 10f32, 12f32)
     };
     let w = aw - 2. * px_;
-    // owner request: three equal columns and cards that fill their cell (all the same size), the core filling
-    // the middle cell; so the grid follows the panel's width and height instead of leaving it empty
-    let col = (w - 2. * cg) / 3.;
-    let row_h = row_min.max((ah - 2. * py - 2. * rg) / 3.);
-    let col_x = [px_, px_ + col + cg, px_ + 2. * (col + cg)];
-    let row_y = |i: usize| py + i as f32 * (row_h + rg);
-    let card_h = if a {
-        row_h.clamp(86., 150.)
-    } else {
-        row_h.clamp(44.45, 70.)
-    };
+    // owner request: eight equal cards and a square core that is bigger than they are. The middle column is
+    // CORE_COL times as wide as the side ones (the cards of that column stay centred in it at the common
+    // width); the core's side is that width, the cards take their height from what is left.
+    let col = (w - 2. * cg) / (2. + CORE_COL);
+    let mid = col * CORE_COL;
+    let col_x = [px_, px_ + col + cg, px_ + 2. * cg + col + mid];
+    // the cards give height to the core before it is smaller than they are wide
+    let (cmin, cmax) = if a { (70., 130.) } else { (34., 70.) };
+    let avail = ah - 2. * py;
+    let side = mid
+        .min(if a { 240. } else { 200. })
+        .min(avail - 2. * cmin - 2. * rg)
+        .max(cmin);
+    let card_h = ((avail - side - 2. * rg) / 2.).clamp(cmin, cmax);
+    // spare height is kept out of the wires: the gaps grow a little, the rest centres the grid
+    let rg = rg.max((avail - side - 2. * card_h) / 2.).min(rg * 2.5);
+    let top = py + ((avail - side - 2. * card_h - 2. * rg) / 2.).max(0.);
+    let row_y = [top, top + card_h + rg, top + card_h + rg + side + rg];
     let mut nodes = Vec::new();
     for (ri, row) in GRID.iter().enumerate() {
         for (ci, p) in row.iter().enumerate() {
             if ri == 1 && ci == 1 {
                 continue;
             }
+            let x = if ci == 1 {
+                col_x[1] + (mid - col) / 2.
+            } else {
+                col_x[ci]
+            };
+            let y = match ri {
+                1 => row_y[1] + (side - card_h) / 2.,
+                _ => row_y[ri],
+            };
             nodes.push((
                 *p,
                 R {
-                    x: col_x[ci],
-                    y: row_y(ri) + (row_h - card_h) / 2.,
+                    x,
+                    y,
                     w: col,
                     h: card_h,
                 },
             ));
         }
     }
-    // the core is a square (owner rule): the shorter side of its cell, centred in it
-    let side = col.min(row_h).min(if a { 240. } else { 200. });
-    let (cw, ch) = (side, side);
     let core = R {
-        x: col_x[1] + (col - cw) / 2.,
-        y: row_y(1) + (row_h - ch) / 2.,
-        w: cw,
-        h: ch,
+        x: col_x[1] + (mid - side) / 2.,
+        y: row_y[1],
+        w: side,
+        h: side,
     };
     let g = Geo {
         mode,
@@ -501,6 +517,12 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool, lvl: f32) -> AnyElement {
         let max = ((r.w - 14. - ic - 6.) / (title_size * 0.63))
             .floor()
             .max(2.) as usize;
+        // "USER & PROMPT" gives way to "USER" before it is cut
+        if name.chars().count() > max
+            && let Some((head, _)) = name.split_once(" & ")
+        {
+            name = head.to_string();
+        }
         if name.chars().count() > max {
             name = name.chars().take(max - 1).collect::<String>() + "\u{2026}";
         }
@@ -527,9 +549,19 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool, lvl: f32) -> AnyElement {
         })
         .child(icon(node_icon(n.pos), ic, col))
         .child(tracked(&name, title_size, 0.03, col));
+    // a grid card's lines wrap to two rows when its height has room for them, else they are cut to one
+    let lh = line_size * if a { 1.45 } else { 1.35 };
+    let used = if a { 9. + 6. + 24. } else { 14. + 2. + 10. };
+    let clamp = if mode != Mode::T && r.h - used >= nlines as f32 * 2. * lh {
+        2
+    } else {
+        1
+    };
     let lines = n.lines.iter().take(nlines).map(|l| {
         div()
-            .truncate()
+            // one long word (an identifier) is cut with an ellipsis rather than broken in the middle
+            .when(clamp == 1 || !l.contains(' '), |d| d.truncate())
+            .when(clamp > 1 && l.contains(' '), |d| d.line_clamp(clamp))
             .text_size(px(line_size))
             .line_height(px(line_size * if a { 1.45 } else { 1.35 }))
             .child(l.clone())
@@ -548,8 +580,7 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool, lvl: f32) -> AnyElement {
     } else {
         let mut d = d
             .flex_col()
-            .when(!a, |d| d.justify_center())
-            .when(a, |d| d.pt(px(9.)))
+            .justify_center()
             .px(px(if a { 10. } else { 7. }))
             .border_1()
             .border_color(with_alpha(
@@ -571,6 +602,63 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool, lvl: f32) -> AnyElement {
         d
     };
     d.into_any_element()
+}
+
+/// What the core card holds at a given side: everything scales with the side and is dropped, not
+/// overflowed, when it does not fit. `large` is the design's own rule for showing the sub line and the tag.
+#[derive(Clone, Copy, Debug)]
+pub struct CoreFit {
+    pub logo: f32,
+    pub title: f32,
+    pub track: f32,
+    pub sub: bool,
+    pub tag: bool,
+}
+
+pub fn core_fit(mode: Mode, side: f32, large: bool) -> CoreFit {
+    if mode == Mode::B {
+        return CoreFit {
+            logo: (0.38 * side).clamp(18., 44.),
+            title: if side >= 130. { 11. } else { 9.5 },
+            track: 0.,
+            sub: false,
+            tag: false,
+        };
+    }
+    CoreFit {
+        logo: (0.4 * side).clamp(22., 76.),
+        title: if side >= 170. {
+            14.
+        } else if side >= 140. {
+            12.
+        } else {
+            10.5
+        },
+        track: if side >= 170. { 0.2 } else { 0.12 },
+        sub: large && side >= 150.,
+        tag: large && side >= 190.,
+    }
+}
+
+/// Width and height of the content of the core card in px (the border and 8px of padding come off the side).
+pub fn core_content(mode: Mode, side: f32, large: bool, title_chars: usize) -> (f32, f32) {
+    let f = core_fit(mode, side, large);
+    let line = |fs: f32| fs * 1.3;
+    let text_w = |fs: f32, track: f32, n: usize| n as f32 * fs * (0.6 + track);
+    let mut h = f.logo + line(f.title);
+    let mut w = f.logo.max(text_w(f.title, f.track, title_chars));
+    if mode == Mode::A {
+        h += 4.;
+    }
+    if f.sub {
+        h += line(12.);
+        w = w.max(text_w(12., 0.25, 4));
+    }
+    if f.tag {
+        h += 6. + line(12.);
+        w = w.max(text_w(12., 0., 21));
+    }
+    (w, h)
 }
 
 fn core_card(c: &Core, r: R, mode: Mode, large: bool, lvl: f32) -> AnyElement {
@@ -616,33 +704,42 @@ fn core_card(c: &Core, r: R, mode: Mode, large: bool, lvl: f32) -> AnyElement {
             .rounded(px(6.))
             .child(logo(14.))
             .child(tracked(&c.title, 10.5, 0.14, ink))
-            .child(div().ml_auto().text_size(px(10.)).child(c.tag.clone())),
-        Mode::B => d
-            .flex_col()
-            .justify_center()
-            .border_2()
-            .rounded(px(12.))
-            .child(logo(22.))
-            .child(
-                div()
-                    .text_size(px(9.5))
-                    .text_color(ink)
-                    .child(c.title.clone()),
-            ),
+            // the tag goes when the bar is too short for it (it would run out of the card)
+            .when(r.w >= 300., |d| {
+                d.child(div().ml_auto().text_size(px(10.)).child(c.tag.clone()))
+            }),
+        Mode::B => {
+            let f = core_fit(mode, r.w, large);
+            d.flex_col()
+                .justify_center()
+                .border_2()
+                .rounded(px(12.))
+                .child(logo(f.logo))
+                .child(
+                    div()
+                        .text_size(px(f.title))
+                        .text_color(ink)
+                        .child(c.title.clone()),
+                )
+        }
         Mode::A => {
-            // the logo shrinks with the card (`min(76px, 100% - 44px)`)
-            let l = 76f32.min(r.h - if large { 44. } else { 30. }).max(24.);
+            let f = core_fit(mode, r.w, large);
             let mut d = d
                 .flex_col()
                 .justify_center()
                 .border_2()
                 .rounded(px(12.))
-                .child(logo(l))
-                .child(div().mt(px(4.)).child(tracked(&c.title, 14., 0.2, ink)));
-            if large {
-                d = d
-                    .child(tracked(&c.sub, 12., 0.25, ink))
-                    .child(div().mt(px(6.)).text_size(px(12.)).child(c.tag.clone()));
+                .child(logo(f.logo))
+                .child(
+                    div()
+                        .mt(px(4.))
+                        .child(tracked(&c.title, f.title, f.track, ink)),
+                );
+            if f.sub {
+                d = d.child(tracked(&c.sub, 12., 0.25, ink));
+            }
+            if f.tag {
+                d = d.child(div().mt(px(6.)).text_size(px(12.)).child(c.tag.clone()));
             }
             d
         }
@@ -856,6 +953,49 @@ mod tests {
                     "{:?} {aw}x{ah}: ends on the node",
                     g.mode
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn the_core_is_square_bigger_than_the_cards_and_its_content_fits_inside() {
+        for aw in (256..=420).step_by(4) {
+            for ah in (200..=900).step_by(20) {
+                let g = geometry(aw as f32, ah as f32);
+                if g.mode == Mode::T {
+                    continue;
+                }
+                let (aw, ah) = (aw as f32, ah as f32);
+                let u = g.rect(Pos::User);
+                assert!((g.core.w - g.core.h).abs() < 0.01, "square");
+                // below 240px of height the compact grid is height-bound: the core is then about a card's width
+                let bigger = if ah >= 240. { u.w } else { 0.8 * u.w };
+                assert!(
+                    g.core.w > bigger,
+                    "{aw}x{ah}: core {} vs card {}",
+                    g.core.w,
+                    u.w
+                );
+                for (p, r) in &g.nodes {
+                    assert!(
+                        (r.w - u.w).abs() < 0.01 && (r.h - u.h).abs() < 0.01,
+                        "{p:?} equal"
+                    );
+                    assert!(r.y >= -0.01 && r.b() <= ah + 0.01, "{p:?} inside {aw}x{ah}");
+                }
+                for large in [false, true] {
+                    // a border of 2px and 8px of padding on each side
+                    let room = g.core.w - 2. * (2. + 8.);
+                    let (w, h) = core_content(g.mode, g.core.w, large, 9);
+                    assert!(
+                        w <= room + 0.01,
+                        "{aw}x{ah} {large}: content {w} wide in {room}"
+                    );
+                    assert!(
+                        h <= room + 0.01,
+                        "{aw}x{ah} {large}: content {h} high in {room}"
+                    );
+                }
             }
         }
     }

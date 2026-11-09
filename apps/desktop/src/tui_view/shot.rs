@@ -42,6 +42,8 @@ pub struct Args {
     /// state at `--phase MS` (default 250) of the animation, as no clock can be seen in a still.
     active: Vec<synthesis_view::pulse::Node>,
     phase: i64,
+    /// `--topo-size WxH`: only the Topology graph, in a body of exactly this size (a panel width and height).
+    topo_size: Option<(f32, f32)>,
     w: f32,
     h: f32,
     hidden: Hidden,
@@ -220,6 +222,9 @@ pub fn parse(args: &[String]) -> Option<Args> {
                 Some(n)
             })
             .collect(),
+        topo_size: val("--topo-size")
+            .and_then(|s| s.split_once('x'))
+            .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))),
         phase: val("--phase").and_then(|p| p.parse().ok()).unwrap_or(250),
         w,
         h,
@@ -402,6 +407,22 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         crate::ui::register_fonts(cx);
         crate::theme::apply("JetBrains Mono", cx);
     });
+    if let Some((w, h)) = a.topo_size {
+        let acts = synthesis_view::pulse::Pulses::forced(&a.active).acts(a.phase);
+        let win = cx.open_window(size(px(w), px(h)), |_, cx| {
+            cx.new(|_| TopoShot { acts, now: a.phase })
+        })?;
+        cx.run_until_parked();
+        let img = cx.capture_screenshot(win.into())?;
+        img.save(&a.path)?;
+        eprintln!(
+            "wrote {} ({}x{})",
+            a.path.display(),
+            img.width(),
+            img.height()
+        );
+        return Ok(());
+    }
     let hidden = a.hidden;
     let fixture = a.live.as_ref().map(run_live).transpose()?;
     let (live, engine, tmp) = match fixture {
@@ -634,4 +655,30 @@ fn prepare_tabs(
         _ => {}
     }
     Ok(())
+}
+
+/// `--topo-size`: the graph alone on the panel's background.
+struct TopoShot {
+    acts: std::collections::BTreeMap<synthesis_view::pulse::Node, synthesis_view::pulse::Act>,
+    now: i64,
+}
+
+impl gpui::Render for TopoShot {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        _: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::{ParentElement as _, Styled as _};
+        gpui::div()
+            .relative()
+            .size_full()
+            .bg(crate::theme::hsla(synthesis_tui_render::theme::BG))
+            .child(super::topo::graph(
+                &super::sample::sample(),
+                &self.acts,
+                self.now,
+                true,
+            ))
+    }
 }
