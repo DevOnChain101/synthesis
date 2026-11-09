@@ -119,6 +119,8 @@ pub enum Action {
     Quit,
     /// `/peers`: the listing is read off the UI thread; the text comes back through [`Live::peers_done`].
     Peers,
+    /// `/doctor`: the checks run off the UI thread; the rows come back through [`Live::doctor_done`].
+    Doctor,
     /// `/send ADDRESS TEXT`: runs off the UI thread; the outcome comes back through [`Live::send_done`].
     Send {
         to: String,
@@ -415,7 +417,7 @@ pub struct Live {
     /// A prompt handed back unsent (Esc in that picker, a failed switch): the window puts it in the input box.
     pub returned_prompt: Option<String>,
     /// What the open memory confirmation will do if the person says yes.
-    pub mem_pending: Option<crate::memory_ui::Pending>,
+    pub mem_pending: Option<(crate::memory_ui::Pending, String)>,
 }
 
 /// State behind the `/model` picker; the dialog's options are rebuilt from it.
@@ -1379,7 +1381,7 @@ impl Live {
                 self.info(|e| e.permissions_report())
             }
             "status" => self.status(),
-            "doctor" => self.doctor_cmd(),
+            "doctor" => return self.doctor_cmd(),
             "terminal" => {
                 let v = self.calls(|n| n == "Bash", "shell commands");
                 self.note(v, false);

@@ -282,6 +282,73 @@ fn refuse_secret(s: &Store, text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A long random-looking token (base64 or hex of 32+ characters, mixed classes): the secret check is a
+/// heuristic, so such text needs an extra explicit confirmation instead of passing silently.
+pub fn long_token(text: &str) -> bool {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || "+/=_-".contains(c)))
+        .any(|t| {
+            let (lo, up, di) = t.chars().fold((false, false, false), |(l, u, d), c| {
+                (
+                    l | c.is_ascii_lowercase(),
+                    u | c.is_ascii_uppercase(),
+                    d | c.is_ascii_digit(),
+                )
+            });
+            t.len() >= 32 && (lo as u8 + up as u8 + di as u8) >= 2
+        })
+}
+
+/// What the dock can show whole (a confirm never shows part of the text it is about).
+const MAX_CHARS: usize = 2000;
+const MAX_LINES: usize = 40;
+
+fn check_len(what: &str, text: &str) -> Result<(), String> {
+    let (c, l) = (text.chars().count(), text.lines().count());
+    if c > MAX_CHARS || l > MAX_LINES {
+        return Err(format!(
+            "{what} is {c} chars and {l} lines, over {MAX_CHARS} chars / {MAX_LINES} lines, more than the dialog can show whole. Shorten it (a longer record can be read with `synt memory show` and approved there)."
+        ));
+    }
+    Ok(())
+}
+
+fn snapshot(m: &Memory) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        m.id,
+        m.status,
+        m.trust.as_str(),
+        m.version,
+        m.updated_at,
+        m.title,
+        m.body
+    )
+}
+
+/// Everything the confirmation is about, as it is now: [`apply`] refuses when it differs from what the
+/// dialog was shown with (the record changed meanwhile).
+pub fn fingerprint(c: &Ctx, p: &Pending) -> Result<String, String> {
+    let s = c.open()?;
+    Ok(match p {
+        Pending::Add { text, user } => format!("add|{user}|{text}"),
+        Pending::Edit { id, text } => format!("edit|{}|{text}", snapshot(&c.get(&s, id)?)),
+        Pending::Forget { id } | Pending::Accept { id } | Pending::Review { id } => {
+            format!("rec|{}", snapshot(&c.get(&s, id)?))
+        }
+    })
+}
+
+/// The whole text, line by line, with its size (what the dock shows in its scroll box).
+fn whole(text: &str) -> String {
+    let t = text.trim();
+    format!(
+        "{} line(s), {} chars, shown whole:\n{}",
+        t.lines().count(),
+        t.chars().count(),
+        t.lines().map(san).collect::<Vec<_>>().join("\n")
+    )
+}
+
 fn new_note(c: &Ctx, user: bool, text: &str, source: &str) -> NewMemory {
     let (scope, key) = c.scope_of(user);
     let title: String = text.chars().take(80).collect();
@@ -292,11 +359,17 @@ fn new_note(c: &Ctx, user: bool, text: &str, source: &str) -> NewMemory {
 }
 
 /// Runs a confirmed operation; the line to show.
-pub fn apply(c: &Ctx, p: &Pending) -> Result<String, String> {
+pub fn apply(c: &Ctx, p: &Pending, seen: &str) -> Result<String, String> {
+    if fingerprint(c, p)? != seen {
+        return Err(
+            "the note changed since the question was shown; nothing was done. Ask again.".into(),
+        );
+    }
     let mut s = c.open()?;
     let e = |x: synthesis_memory::Error| san(&x.to_string());
     match p {
         Pending::Add { text, user } => {
+            check_len("the note", text)?;
             refuse_secret(&s, text)?;
             if c.scope_of(*user).0 != "user" {
                 s.touch_workspace(&c.repo.key, &c.repo.root, &c.repo.label)
@@ -319,6 +392,7 @@ pub fn apply(c: &Ctx, p: &Pending) -> Result<String, String> {
                     old.kind, old.status
                 ));
             }
+            check_len("the note", text)?;
             refuse_secret(&s, text)?;
             let title: String = text.chars().take(80).collect();
             let mut n = NewMemory::new(
@@ -360,6 +434,7 @@ pub fn apply(c: &Ctx, p: &Pending) -> Result<String, String> {
             if !matches!(m.status.as_str(), "proposed" | "quarantined") {
                 return Err(format!("{id} is {}, not pending", m.status));
             }
+            check_len(id, &format!("{}\n{}", m.title, m.body))?;
             s.set_status(id, "active").map_err(e)?;
             Ok(format!(
                 "{id} is active (trust stays {})",
@@ -370,49 +445,69 @@ pub fn apply(c: &Ctx, p: &Pending) -> Result<String, String> {
     }
 }
 
-/// The text above the options of a confirmation: what will happen, with what trust.
+/// The text above the options of a confirmation: what will happen, with what trust, and the COMPLETE
+/// text it is about (the dock shows it in a scroll box). Text over the cap is refused, never shown in part.
 pub fn describe(c: &Ctx, p: &Pending) -> Result<String, String> {
     let s = c.open()?;
-    let clip = |t: &str| -> String { san(t).chars().take(400).collect() };
+    let heuristic = "The secret check is a heuristic, not a guarantee: read the text yourself.";
+    let user_scope = |user: bool| -> String {
+        if user || !c.project {
+            format!(
+                "USER SCOPE: this note applies to EVERY repository.{}\n",
+                if c.project {
+                    ""
+                } else {
+                    " This folder is NOT trusted (project memory is off here), so it goes to the user scope."
+                }
+            )
+        } else {
+            format!("Scope: this repository ({}).\n", san(&c.repo.label))
+        }
+    };
+    let token = |text: &str| {
+        if long_token(text) {
+            "\nWARNING: the text holds a long random-looking string (32+ characters). If it is a key or token, answer No."
+        } else {
+            ""
+        }
+    };
     Ok(match p {
         Pending::Add { text, user } => {
+            check_len("the note", text)?;
             refuse_secret(&s, text)?;
-            let scope = match c.scope_of(*user).0 {
-                "user" => "user scope (every repository)".to_string(),
-                _ => format!("this repository ({})", san(&c.repo.label)),
-            };
             let rule = scan(text.trim(), Trust::Owner)
                 .map(|r| format!(" The scanner flags it (rule {r}): it will be kept quarantined, not used, until you accept it in /memory review."))
                 .unwrap_or_default();
-            let gate = c
-                .why_not
-                .as_ref()
-                .map(|w| format!(" Note: {w}."))
-                .unwrap_or_default();
             format!(
-                "Saves this note in {scope} with trust 'owner' (you typed it). Later sessions give it to the model as data in its context, so keep out anything you would not want it to read.{rule}{gate}\n\"{}\"",
-                clip(text)
+                "{}Saves it with trust 'owner' (you typed it). Later sessions give it to the model as data in its context, so keep out anything you would not want it to read. {heuristic}{rule}{}\n{}",
+                user_scope(*user),
+                token(text),
+                whole(text)
             )
         }
         Pending::Edit { id, text } => {
             let old = c.get(&s, id)?;
+            check_len("the note", text)?;
             refuse_secret(&s, text)?;
             format!(
-                "Replaces {id} ({}, {}) by a new version with trust 'owner'. The old text is kept as superseded. Later sessions give the new text to the model as data.\n\"{}\"",
+                "{}Replaces {id} ({}, {}) by a new version with trust 'owner'. The old text is kept as superseded. Later sessions give the new text to the model as data. {heuristic}{}\n{}",
+                user_scope(old.scope == "user"),
                 old.kind,
                 trust_label(old.trust),
-                clip(text)
+                token(text),
+                whole(text)
             )
         }
         Pending::Forget { id } => {
             let m = c.get(&s, id)?;
             format!(
                 "Archives {id}: it stays in the store with its provenance but is no longer given to the model.\n{}",
-                clip(&m.title)
+                whole(&m.title)
             )
         }
         Pending::Accept { id } | Pending::Review { id } => {
             let m = c.get(&s, id)?;
+            check_len(id, &format!("{}\n{}", m.title, m.body))?;
             let who = match m.trust {
                 Trust::Untrusted => {
                     "UNTRUSTED: it cites web, MCP or outside-workspace content. Accepting it removes it from review but its trust stays 'untrusted', so it is never given to the model by itself."
@@ -422,9 +517,14 @@ pub fn describe(c: &Ctx, p: &Pending) -> Result<String, String> {
                 }
                 _ => "Accepting makes it active: later sessions give it to the model as data.",
             };
-            format!("{who}\n{}", show(&m, false))
+            format!("{who}\n{}", whole(&show(&m, true)))
         }
     })
+}
+
+/// The text needs the extra "I checked" answer (a long random-looking string).
+fn needs_ack(p: &Pending) -> bool {
+    matches!(p, Pending::Add { text, .. } | Pending::Edit { text, .. } if long_token(text))
 }
 
 fn dialog(kind: PickerKind, title: &str, header: String, options: &[(&str, &str)]) -> Dialog {
@@ -530,7 +630,7 @@ impl Live {
         self.push_memory_dialog(d, None, now);
     }
 
-    fn push_memory_dialog(&mut self, d: Dialog, p: Option<Pending>, now: i64) {
+    fn push_memory_dialog(&mut self, d: Dialog, p: Option<(Pending, String)>, now: i64) {
         self.mem_pending = p;
         self.push_dialog(d, now);
     }
@@ -549,9 +649,17 @@ impl Live {
             return Err("answer the open memory question first".into());
         }
         let header = describe(c, &p)?;
+        let seen = fingerprint(c, &p)?;
+        let ack = needs_ack(&p);
+        let add_title = match &p {
+            Pending::Add { user, .. } if *user || !c.project => {
+                "Save to USER memory (every repository)?"
+            }
+            _ => "Save this to memory?",
+        };
         let (title, options): (&str, &[(&str, &str)]) = match &p {
             Pending::Add { .. } => (
-                "Save this to memory?",
+                add_title,
                 &[
                     ("no", "No, do not save (esc also cancels)"),
                     ("yes", "Yes, save it"),
@@ -588,9 +696,18 @@ impl Live {
                 ],
             ),
         };
+        // a long random-looking string: the only way to save is a line that says the person checked it
+        let flagged = [
+            ("no", "No, do not save (esc also cancels)"),
+            (
+                "yes_token",
+                "Yes, save it: I checked that the long random-looking string is not a secret",
+            ),
+        ];
+        let options = if ack { &flagged[..] } else { options };
         self.push_memory_dialog(
             dialog(PickerKind::MemConfirm, title, header, options),
-            Some(p),
+            Some((p, seen)),
             now,
         );
         Ok(())
@@ -604,13 +721,13 @@ impl Live {
                 (PickerKind::MemReview, _, id) => self
                     .confirm(&c, Pending::Review { id: id.into() }, now)
                     .map(|_| None),
-                (_, Some(Pending::Review { id }), "accept") => {
+                (_, Some((Pending::Review { id }, _)), "accept") => {
                     self.confirm(&c, Pending::Accept { id }, now).map(|_| None)
                 }
-                (_, Some(Pending::Review { id }), "reject") => {
+                (_, Some((Pending::Review { id }, _)), "reject") => {
                     self.confirm(&c, Pending::Forget { id }, now).map(|_| None)
                 }
-                (_, Some(Pending::Review { id }), "edit") => {
+                (_, Some((Pending::Review { id }, _)), "edit") => {
                     let m = c.get(&c.open()?, &id)?;
                     self.returned_prompt = Some(format!(
                         "/memory edit {id} {}",
@@ -618,7 +735,7 @@ impl Live {
                     ));
                     Ok(None)
                 }
-                (_, Some(p), "yes") => apply(&c, &p).map(Some),
+                (_, Some((p, seen)), "yes" | "yes_token") => apply(&c, &p, &seen).map(Some),
                 _ => Ok(None),
             });
         match r {
@@ -645,6 +762,10 @@ mod tests {
             trusted,
         )
         .unwrap()
+    }
+
+    fn run(c: &Ctx, p: &Pending) -> Result<String, String> {
+        apply(c, p, &fingerprint(c, p)?)
     }
 
     fn add(text: &str) -> Pending {
@@ -718,7 +839,7 @@ mod tests {
     fn add_and_forget_go_through_the_store_with_owner_trust() {
         let d = tempfile::tempdir().unwrap();
         let c = ctx(d.path(), true);
-        let done = apply(&c, &add("Tests run with cargo test")).unwrap();
+        let done = run(&c, &add("Tests run with cargo test")).unwrap();
         assert!(done.starts_with("added m-"), "{done}");
         let s = c.open().unwrap();
         let rows = s.list(&c.filter("active", 10)).unwrap();
@@ -730,7 +851,7 @@ mod tests {
         assert!(row(&rows[0]).contains("owner") && row(&rows[0]).contains("Tests run"));
         let id = rows[0].id.clone();
         drop(s);
-        apply(&c, &Pending::Forget { id: id.clone() }).unwrap();
+        run(&c, &Pending::Forget { id: id.clone() }).unwrap();
         assert_eq!(
             c.open().unwrap().get(&id).unwrap().unwrap().status,
             "archived"
@@ -745,7 +866,7 @@ mod tests {
             "key is sk-live-abcdefgh12345 ok",
             "token ghp_abcdefghijklmnopqrstuvwxyz0123456789",
         ] {
-            let e = apply(&c, &add(t)).unwrap_err();
+            let e = run(&c, &add(t)).unwrap_err();
             assert!(e.contains("secret") && !e.contains("abcdefgh"), "{e}");
             // the confirm is refused too, before any dialog opens
             assert!(describe(&c, &add(t)).is_err());
@@ -763,8 +884,8 @@ mod tests {
     fn an_untrusted_folder_sees_and_writes_only_the_user_scope() {
         let d = tempfile::tempdir().unwrap();
         let trusted = ctx(d.path(), true);
-        apply(&trusted, &add("repo note")).unwrap();
-        apply(
+        run(&trusted, &add("repo note")).unwrap();
+        run(
             &trusted,
             &Pending::Add {
                 text: "user note".into(),
@@ -793,16 +914,16 @@ mod tests {
             .unwrap()
             .id;
         assert!(
-            apply(&c, &Pending::Forget { id: repo_id })
+            run(&c, &Pending::Forget { id: repo_id })
                 .unwrap_err()
                 .contains("not in the memory")
         );
         // an add lands in the user scope, and the confirmation says why
         assert!(
-            describe(&c, &add("x y z")).unwrap().contains("user scope")
-                && describe(&c, &add("x y z")).unwrap().contains("not trusted")
+            describe(&c, &add("x y z")).unwrap().contains("USER SCOPE")
+                && describe(&c, &add("x y z")).unwrap().contains("NOT trusted")
         );
-        apply(&c, &add("from untrusted folder")).unwrap();
+        run(&c, &add("from untrusted folder")).unwrap();
         assert_eq!(
             c.open()
                 .unwrap()
@@ -832,11 +953,11 @@ mod tests {
             text.contains("UNTRUSTED") && text.contains("never given to the model by itself"),
             "{text}"
         );
-        apply(&c, &Pending::Accept { id: id.clone() }).unwrap();
+        run(&c, &Pending::Accept { id: id.clone() }).unwrap();
         let m = c.open().unwrap().get(&id).unwrap().unwrap();
         assert_eq!((m.status.as_str(), m.trust), ("active", Trust::Untrusted));
         assert!(
-            apply(&c, &Pending::Accept { id })
+            run(&c, &Pending::Accept { id })
                 .unwrap_err()
                 .contains("not pending")
         );
@@ -846,7 +967,7 @@ mod tests {
     fn show_clamps_to_five_lines_until_full() {
         let d = tempfile::tempdir().unwrap();
         let c = ctx(d.path(), true);
-        apply(&c, &add("a\nb\nc\nd\ne\nf\ng")).unwrap();
+        run(&c, &add("a\nb\nc\nd\ne\nf\ng")).unwrap();
         let m = c
             .open()
             .unwrap()
@@ -870,7 +991,11 @@ mod tests {
             "h".into(),
             &[("no", "No"), ("yes", "Yes")],
         );
-        l.push_memory_dialog(d, Some(Pending::Forget { id: "m-1".into() }), 10_000);
+        l.push_memory_dialog(
+            d,
+            Some((Pending::Forget { id: "m-1".into() }, String::new())),
+            10_000,
+        );
         let d = &l.dialogs[0];
         assert_eq!((d.sel, d.options[0].0.as_str()), (0, "no"));
         // like an approval: Enter and digits are ignored until the person engages it
@@ -891,5 +1016,99 @@ mod tests {
             !l.dialogs[0].needs_person(),
             "choosing a row only opens the confirmation"
         );
+    }
+
+    #[test]
+    fn text_is_confirmed_whole_or_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let c = ctx(d.path(), true);
+        // within the cap: the last line is in what the dock shows, with the size
+        let ok = (1..=30)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let h = describe(&c, &add(&ok)).unwrap();
+        assert!(
+            h.contains("30 line(s)") && h.contains("line 30") && h.contains("heuristic"),
+            "{h}"
+        );
+        // over the cap (chars or lines): refused, not clipped
+        for long in ["x ".repeat(1001), "a\n".repeat(41)] {
+            let e = describe(&c, &add(&long)).unwrap_err();
+            assert!(e.contains("Shorten"), "{e}");
+            assert!(run(&c, &add(&long)).unwrap_err().contains("Shorten"));
+        }
+        // a pending record too long to show whole cannot be accepted here
+        let mut n = NewMemory::new(
+            "workspace",
+            &c.repo.key,
+            "fact",
+            "t",
+            &"w ".repeat(1000),
+            Trust::Agent,
+        );
+        n.status = Some("proposed".into());
+        let id = c.open().unwrap().put(n).unwrap().id;
+        assert!(
+            describe(&c, &Pending::Accept { id: id.clone() })
+                .unwrap_err()
+                .contains("Shorten")
+        );
+        assert!(run(&c, &Pending::Accept { id }).is_err());
+    }
+
+    #[test]
+    fn a_record_that_changed_since_the_dialog_is_not_acted_on() {
+        let d = tempfile::tempdir().unwrap();
+        let c = ctx(d.path(), true);
+        let mut n = NewMemory::new(
+            "workspace",
+            &c.repo.key,
+            "fact",
+            "t",
+            "body one",
+            Trust::Agent,
+        );
+        n.status = Some("proposed".into());
+        let id = c.open().unwrap().put(n).unwrap().id;
+        let p = Pending::Accept { id: id.clone() };
+        let seen = fingerprint(&c, &p).unwrap();
+        // the record is changed (here: parked again) before the person answers
+        c.open().unwrap().set_status(&id, "quarantined").unwrap();
+        let e = apply(&c, &p, &seen).unwrap_err();
+        assert!(e.contains("changed since"), "{e}");
+        assert_ne!(
+            c.open().unwrap().get(&id).unwrap().unwrap().status,
+            "active"
+        );
+    }
+
+    #[test]
+    fn long_random_looking_strings_need_the_extra_answer() {
+        assert!(long_token(
+            "use 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08 here"
+        ));
+        assert!(long_token(
+            "x QWxhZGRpbjpvcGVuIHNlc2FtZSBhbmQgbW9yZSBieXRlcw== y"
+        ));
+        assert!(!long_token(
+            "run cargo test --workspace before pushing, see apps/desktop/src/tui_view/dialog"
+        ));
+        assert!(!long_token("short Ab1 tokens only"));
+        let d = tempfile::tempdir().unwrap();
+        let c = ctx(d.path(), true);
+        let mut l = Live::new();
+        l.confirm(
+            &c,
+            add("id 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"),
+            0,
+        )
+        .unwrap();
+        let keys: Vec<&str> = l.dialogs[0].options.iter().map(|o| o.0.as_str()).collect();
+        assert_eq!(keys, ["no", "yes_token"]);
+        let DialogKind::Picker { headers, .. } = &l.dialogs[0].kind else {
+            panic!()
+        };
+        assert!(headers[0].1.contains("WARNING") && headers[0].1.contains("9f86d081884c7d65"));
     }
 }

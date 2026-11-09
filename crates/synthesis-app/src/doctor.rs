@@ -54,6 +54,30 @@ const STANDARD_VARS: [&str; 6] = [
     "SSL_CERT_DIR",
 ];
 
+/// Runs `f` on its own thread and gives up after `limit` (the thread is left to finish by itself).
+pub fn capped<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+    limit: std::time::Duration,
+) -> Result<T, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(limit)
+        .map_err(|_| format!("timed out after {} s", limit.as_secs()))
+}
+
+/// [`rows`] off the caller's thread, with a cap (a slow disk or a huge store must not freeze a window).
+pub fn rows_capped(
+    env: &Env,
+    cwd: &Path,
+    trusted: bool,
+    limit: std::time::Duration,
+) -> Result<Vec<Row>, String> {
+    let (env, cwd) = (env.clone(), cwd.to_path_buf());
+    capped(move || rows(&env, &cwd, trusted), limit)
+}
+
 /// Doctor rows for the folder `cwd`. Read-only: nothing is created, started or migrated.
 pub fn rows(env: &Env, cwd: &Path, trusted: bool) -> Vec<Row> {
     let mut v: Vec<Row> = vec![];
@@ -461,6 +485,17 @@ mod tests {
             "{v}"
         );
         assert!(user.join(".synthesis").is_dir() && proj.join(".synthesis").is_dir());
+    }
+
+    #[test]
+    fn a_slow_check_is_given_up_on() {
+        use std::time::Duration;
+        let slow = capped(
+            || std::thread::sleep(Duration::from_millis(500)),
+            Duration::from_millis(20),
+        );
+        assert!(slow.unwrap_err().contains("timed out"));
+        assert_eq!(capped(|| 7, Duration::from_secs(5)), Ok(7));
     }
 
     #[test]

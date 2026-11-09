@@ -219,10 +219,34 @@ impl SettingsView {
         cfg: Result<Cfg, String>,
         inset: f32,
     ) -> Self {
-        let (model, err) = match cfg {
+        let (mut model, err) = match cfg {
             Ok(c) => (Some(Model::open(c)), None),
             Err(e) => (None, Some(e)),
         };
+        if let Some(m) = &mut model {
+            m.start_doctor();
+            // the checks run on their own thread: look every 250 ms until they are in, then redraw
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(250))
+                        .await;
+                    let Ok(done) = this.update(cx, |v, cx| {
+                        let done = v.model.as_mut().is_none_or(|m| m.poll_doctor());
+                        if done {
+                            cx.notify();
+                        }
+                        done
+                    }) else {
+                        break;
+                    };
+                    if done {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         let mut subs = vec![];
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search settings"));
         subs.push(
@@ -837,12 +861,17 @@ impl SettingsView {
                         .id("doctor-summary")
                         .text_size(px(11.5))
                         .text_color(hsla(t::TEXT))
-                        .child(synthesis_app::doctor::summary(&m.doctor))
+                        .child(match (&m.doctor, &m.doctor_error) {
+                            (Some(r), _) => synthesis_app::doctor::summary(r),
+                            (None, Some(e)) => format!("not checked: {e}"),
+                            (None, None) => "checking...".into(),
+                        })
                         .into_any_element(),
                 );
                 for r in m
                     .doctor
                     .iter()
+                    .flatten()
                     .filter(|r| r.level != synthesis_app::doctor::Level::Ok)
                 {
                     let colour = if r.level == synthesis_app::doctor::Level::Fail {
