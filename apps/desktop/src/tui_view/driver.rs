@@ -1345,6 +1345,26 @@ impl TuiView {
                 })
                 .detach();
             }
+            Action::Doctor => {
+                let Some(e) = lu.live.engine.clone() else {
+                    return;
+                };
+                let (env, cwd, trusted) = (e.env.clone(), e.cwd.clone(), lu.live.trusted);
+                let job = cx.background_spawn(async move {
+                    synthesis_app::doctor::rows_capped(
+                        &env,
+                        std::path::Path::new(&cwd),
+                        trusted,
+                        crate::doctor_ui::LIMIT,
+                    )
+                });
+                cx.spawn(async move |this, cx| {
+                    let r = job.await;
+                    this.update(cx, |t, cx| t.live_do(cx, |l| l.doctor_done(r)))
+                        .ok();
+                })
+                .detach();
+            }
             Action::Peers => {
                 let Some(e) = lu.live.engine.clone() else {
                     return;
