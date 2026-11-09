@@ -1092,7 +1092,6 @@ impl SettingsView {
                 }
             }
             Section::Mcp => out.extend(self.mcp_block(m, cx)),
-            Section::Guards => out.extend(self.trusted_block(m, cx)),
             Section::Interface => out.extend(self.panels_block(cx)),
             _ => {}
         }
@@ -1126,20 +1125,15 @@ impl SettingsView {
     }
 
     /// The folders remembered as trusted (user store) with a Revoke button each.
-    fn trusted_block(&self, m: &Model, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut out: Vec<AnyElement> = vec![
-            small("Trusted folders", t::TEXT)
-                .mt(px(8.))
-                .into_any_element(),
-        ];
+    /// The trusted folders as a section card: a row per folder (path, state and date on the left, Revoke in the
+    /// control column), then the notes.
+    fn trusted_card(&self, m: &Model, cw: f32, cx: &mut Context<Self>) -> AnyElement {
+        let mut c = card();
         if m.trusted.is_empty() {
-            out.push(
-                small(
-                    "None remembered. The Files tab offers it for a folder.",
-                    t::MUTED,
-                )
-                .into_any_element(),
-            );
+            c = c.child(div().px(px(14.)).py(px(12.)).child(small(
+                "None remembered. The Files tab offers it for a folder.",
+                t::MUTED,
+            )));
         }
         for (i, (r, same)) in m.trusted.iter().enumerate() {
             let root = r.root.clone();
@@ -1149,65 +1143,84 @@ impl SettingsView {
                 (_, Some(false)) => "CONFIG CHANGED: not honoured",
                 _ => "folder missing",
             };
-            out.push(
+            let bad = *same == Some(false);
+            let left = div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(hsla(t::TEXT_STRONG))
+                        .overflow_hidden()
+                        .child(synthesis_harness::sanitize_for_display(&r.root)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .mt(px(3.))
+                        .child(badge(state, if bad { t::WARN } else { t::MUTED }))
+                        .child(small(
+                            format!("since {}", r.trusted_at.get(..10).unwrap_or(&r.trusted_at)),
+                            t::MUTED,
+                        )),
+                );
+            c = c.child(
                 div()
+                    .debug_selector(move || format!("trust-row-{i}"))
+                    .relative()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
-                    .py(px(3.))
+                    .gap(px(16.))
+                    .px(px(14.))
+                    .py(px(10.))
+                    .min_h(px(ROW_MIN_H))
+                    .when(i > 0, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .h(px(1.))
+                                .bg(alpha(t::TEXT, 0.08)),
+                        )
+                    })
+                    .child(left)
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .text_size(px(12.))
-                            .text_color(hsla(t::TEXT_STRONG))
-                            .overflow_hidden()
-                            .child(synthesis_harness::sanitize_for_display(&r.root)),
-                    )
-                    .child(badge(
-                        state,
-                        if *same == Some(false) {
-                            t::WARN
-                        } else {
-                            t::MUTED
-                        },
-                    ))
-                    .child(small(
-                        r.trusted_at.get(..10).unwrap_or(&r.trusted_at).to_string(),
-                        t::MUTED,
-                    ))
-                    .child(btn(format!("trust-rm-{i}"), "Revoke", false).on_click(
-                        cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.trust_revoke(&root, cx)
-                        }),
-                    ))
-                    .into_any_element(),
+                        div().w(px(cw)).flex_none().flex().justify_end().child(
+                            btn(format!("trust-rm-{i}"), "Revoke", false)
+                                .tab_index(0)
+                                .focus_visible(ring)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.trust_revoke(&root, cx)
+                                })),
+                        ),
+                    ),
             );
         }
+        let mut notes = div().flex().flex_col().gap(px(4.)).px(px(14.)).py(px(10.));
         if let Some(e) = &m.trust_error {
-            out.push(
-                small(format!("The trust store could not be read: {e}"), t::ERROR)
-                    .into_any_element(),
-            );
+            notes = notes.child(small(
+                format!("The trust store could not be read: {e}"),
+                t::ERROR,
+            ));
         }
         if m.trust_unverified > 0 {
-            out.push(
-                small(
-                    format!(
-                        "Unverified rows ignored: {} (not written by this app).",
-                        m.trust_unverified
-                    ),
-                    t::WARN,
-                )
-                .into_any_element(),
-            );
+            notes = notes.child(small(
+                format!(
+                    "Unverified rows ignored: {} (not written by this app).",
+                    m.trust_unverified
+                ),
+                t::WARN,
+            ));
         }
-        out.push(
-            small("Remembered in your session store, never in a project. A remembered trust is deliberately narrower than VS Code: only agents, skills, memory, instructions and the file explorer apply; project hooks, MCP servers, allow rules, env, providers and verification checks need \"Trust for this session\". Revoking takes effect at the next engine start (a new session, /model or a restart); the open session keeps what it loaded.", t::MUTED)
-                .mt(px(4.))
-                .into_any_element(),
-        );
-        out
+        notes = notes.child(small("Remembered in your session store, never in a project. A remembered trust is deliberately narrower than VS Code: only agents, skills, memory, instructions and the file explorer apply; project hooks, MCP servers, allow rules, env, providers and verification checks need \"Trust for this session\". Revoking takes effect at the next engine start (a new session, /model or a restart); the open session keeps what it loaded.", t::MUTED));
+        c.child(notes).into_any_element()
     }
 
     fn mcp_block(&self, m: &Model, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -1557,6 +1570,11 @@ impl SettingsView {
                     card = card.child(div().p(px(14.)).children(self.panels_block(cx)));
                 }
                 body = body.child(card);
+            }
+            if !searching && g.section == Section::Guards {
+                body = body.child(self.heading("Trusted folders", first));
+                first = false;
+                body = body.child(self.trusted_card(m, cw, cx));
             }
             if !searching {
                 let info = self.info_block(g.section, m, cx);
