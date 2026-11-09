@@ -365,7 +365,19 @@ pub fn dock(
             .debug_selector(|| "dialog-list".to_string())
             .flex()
             .flex_col()
-            .max_h(px(180.))
+            .max_h(px(
+                if matches!(
+                    d.kind,
+                    DialogKind::Picker {
+                        kind: PickerKind::Clean,
+                        ..
+                    }
+                ) {
+                    300.
+                } else {
+                    180.
+                },
+            ))
             .overflow_y_scroll()
             .track_scroll(scroll)
             .children(list),
