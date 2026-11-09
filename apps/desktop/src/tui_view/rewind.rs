@@ -15,9 +15,19 @@ impl TuiView {
         };
         let home = rewind::Homes {
             synthesis: e.synthesis_home.clone(),
-            user: synthesis_app::homes(&lu.cfg.env).ok().map(|h| h.user),
+            user: rewind::user_home(&lu.cfg.env),
         };
         let sid = e.sid.clone();
+        // every step is a background job; one that never answers frees the prompt after a while
+        let token = lu.live.rewind_job_start();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(rewind::JOB_TIMEOUT_MS))
+                .await;
+            this.update(cx, |t, cx| t.live_do(cx, |l| l.rewind_timeout(token)))
+                .ok();
+        })
+        .detach();
         match a {
             Action::Rewind => {
                 let job = cx.background_spawn(async move { rewind::list(&home, &sid) });

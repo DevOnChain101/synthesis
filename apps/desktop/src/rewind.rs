@@ -172,6 +172,18 @@ pub struct Homes {
     pub user: Option<PathBuf>,
 }
 
+/// The person's home directory, or None when it is not known (only `SYNT_HOME` set gives an empty
+/// path): `synthesis_app::rewind::load` then refuses, it does not skip its home check.
+pub fn user_home(env: &synthesis_config::Env) -> Option<PathBuf> {
+    synthesis_app::homes(env)
+        .ok()
+        .map(|h| h.user)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
+/// A rewind step that has not answered after this long frees the prompt and the engine again.
+pub const JOB_TIMEOUT_MS: u64 = 120_000;
+
 fn load(h: &Homes, sid: &str) -> Result<rewind::Loaded, String> {
     rewind::load(&h.synthesis, h.user.as_deref(), sid, false)
 }
@@ -263,6 +275,26 @@ impl Live {
             .then_some("a /rewind is open or writing: finish or cancel it first")
     }
 
+    /// A step (list, dry run, apply) was handed to a background job: its token, for [`Live::rewind_timeout`].
+    pub fn rewind_job_start(&mut self) -> u64 {
+        self.rewind_seq += 1;
+        self.rewind_job = Some(self.rewind_seq);
+        self.rewind_seq
+    }
+
+    /// The job `token` never answered: free the flag so the prompt and engine switches work again.
+    /// The apply may still be writing under its lock; the note says to look before trying again.
+    pub fn rewind_timeout(&mut self, token: u64) {
+        if self.rewind_job == Some(token) {
+            self.rewind_job = None;
+            self.rewinding = false;
+            self.note(
+                "rewind: no answer after 2 minutes. Files may still be being written: check the Files tab, then run /rewind again",
+                true,
+            );
+        }
+    }
+
     /// `/rewind`.
     pub fn rewind_command(&mut self, arg: &str) -> Option<Action> {
         if !arg.is_empty() {
@@ -282,6 +314,7 @@ impl Live {
 
     /// The listing came back: the picker, docked above the prompt.
     pub fn rewind_listed(&mut self, r: Result<Vec<CheckpointRow>, String>) {
+        self.rewind_job = None;
         let rows = match r {
             Ok(v) if v.is_empty() => {
                 return self.rewind_over("/rewind: this session has no checkpoint yet (one is taken before the first write to each file)", true);
@@ -312,6 +345,7 @@ impl Live {
 
     /// The dry run came back: the file list and the confirmation. Cancel is last (Esc picks it) and selected.
     pub fn rewind_previewed(&mut self, r: Result<Preview, String>) {
+        self.rewind_job = None;
         let p = match r {
             Ok(p) if !p.actionable() => {
                 let rows: Vec<String> = p.groups().into_iter().flat_map(|g| g.rows).collect();
@@ -400,6 +434,7 @@ impl Live {
 
     /// The apply finished: the result row, and the Diff tab forgets the files that are back.
     pub fn rewind_done(&mut self, r: Result<Outcome, String>) {
+        self.rewind_job = None;
         self.rewinding = false;
         match r {
             Err(e) => self.note(format!("rewind: {e}"), true),
@@ -539,6 +574,36 @@ mod tests {
         l.agents.push("sub-1".into());
         assert!(l.rewind_blocker().unwrap().contains("sub-agent"));
         assert!(ALL.contains('\u{0}'));
+    }
+
+    #[test]
+    fn a_job_that_never_answers_frees_the_flag_once_and_only_for_its_own_token() {
+        let mut l = Live::new();
+        l.rewinding = true;
+        let t = l.rewind_job_start();
+        l.rewind_timeout(t + 1);
+        assert!(l.rewinding, "another job's token does nothing");
+        l.rewind_timeout(t);
+        assert!(!l.rewinding && l.engine_switch_blocker().is_none());
+        assert!(matches!(
+            l.view.convo.items.last(),
+            Some(Item::Notice { warning: true, .. })
+        ));
+        // an answer that arrived in time cancels the timeout
+        l.rewinding = true;
+        let t = l.rewind_job_start();
+        l.rewind_done(Ok(Outcome::default()));
+        l.rewinding = true;
+        l.rewind_timeout(t);
+        assert!(l.rewinding);
+    }
+
+    #[test]
+    fn only_synt_home_set_gives_no_user_home() {
+        let only = synthesis_config::Env::from_pairs([("SYNT_HOME", "/tmp/x".to_string())]);
+        assert_eq!(user_home(&only), None);
+        let with = synthesis_config::Env::from_pairs([("HOME", "/Users/a".to_string())]);
+        assert_eq!(user_home(&with), Some(PathBuf::from("/Users/a")));
     }
 
     #[test]

@@ -237,6 +237,9 @@ tools and skills, conversation. Not done, with where the data would come from:
   file is checked again right before its own write. One apply per session at a time (lock file). While a rewind is open
   or writing, nothing switches the engine (`/resume`, `/model`, `/new`, `/close`, `/open`, restarts), and `/rewind` is
   refused while a background command or sub-agent runs. A partial apply says PARTIAL and lists the failed files.
+  A rewind step that does not answer within 2 minutes frees the prompt and engine switches again (with a note to check the
+  Files tab). Checkpoints come from the file tools only: Bash moves, renames and deletes are not tracked and are not
+  restored. `Live::engine_switch_blocker` is the one check every engine switch or restart must call.
   Limits: the hashes and the proof live in the session store next to the rows, so a program that can write the store can
   forge them (whether the store is outside the agent's write scope is a sandbox decision, R7); a write by a process outside
   Synthesis between the last check and the rename (a directory swapped for a link) is the CLI's documented race.

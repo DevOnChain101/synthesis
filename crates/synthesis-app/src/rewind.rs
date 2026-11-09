@@ -1,5 +1,6 @@
-//! `synt rewind SESSION`: put the files a run changed back to their state before the run's first
-//! write to each (the checkpoints `synt run` takes). A dry run unless `--apply`.
+//! `synt rewind SESSION`: put the files the agent changed with its file tools back to their state
+//! at the checkpoint taken before its first such write to each (Bash moves, renames and deletes are
+//! not tracked). A dry run unless `--apply`.
 //!
 //! Safety: every path in a checkpoint is untrusted input. Only files inside the session's
 //! workspace roots (the parent directory is resolved, so a link cannot lead out; roots that are a
@@ -51,14 +52,19 @@ fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = dir.join(format!(".synt-rewind-{}", uuid::Uuid::new_v4()));
     let r = (|| {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
-        f.write_all(bytes)?;
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            // private from the first byte; the original's mode is applied before any content is written
+            use std::os::unix::fs::OpenOptionsExt;
+            o.mode(0o600);
+        }
+        let mut f = o.open(&tmp)?;
         if let Ok(m) = std::fs::metadata(path) {
             f.set_permissions(m.permissions())?;
         }
+        f.write_all(bytes)?;
         f.sync_all()?;
         std::fs::rename(&tmp, path)
     })();
@@ -193,14 +199,21 @@ pub fn load(
         .chain(rec.additional_dirs.clone())
         .map(PathBuf::from)
         .collect();
-    let user = user_home.and_then(|h| synthesis_core::canonicalize(h).ok());
-    for r in &roots {
-        let c = synthesis_core::canonicalize(r).unwrap_or_else(|_| r.clone());
-        if !allow_wide && (c.parent().is_none() || user.as_ref() == Some(&c)) {
-            return Err(format!(
-                "the session's workspace root {} is a filesystem root or your home directory: a rewind there could touch almost anything (synt rewind --allow-wide-root)",
-                synthesis_harness::sanitize_for_display(&r.to_string_lossy())
-            ));
+    if !allow_wide {
+        // fails closed: without a home directory to compare with, the check cannot be made
+        let user = user_home
+            .filter(|h| !h.as_os_str().is_empty())
+            .and_then(|h| synthesis_core::canonicalize(h).ok())
+            .ok_or("the home directory is not known (HOME or USERPROFILE is unset or unreadable), so a workspace root that contains it cannot be ruled out: refused (synt rewind --allow-wide-root)")?;
+        for r in &roots {
+            let c = synthesis_core::canonicalize(r).unwrap_or_else(|_| r.clone());
+            // a filesystem root, the home directory, or any directory that contains it (/Users, /home)
+            if c.parent().is_none() || user.starts_with(&c) {
+                return Err(format!(
+                    "the session's workspace root {} is a filesystem root, your home directory or a directory that contains it: a rewind there could touch almost anything (synt rewind --allow-wide-root)",
+                    synthesis_harness::sanitize_for_display(&r.to_string_lossy())
+                ));
+            }
         }
     }
     let cps = reader.checkpoints(session).map_err(|e| e.to_string())?;
@@ -290,7 +303,15 @@ pub fn plan(l: &Loaded, checkpoint: Option<&str>, force: bool) -> Result<Vec<Ent
                     }
                 }
             }
-        } else if f.pre_state.as_deref() != Some("absent") && !force {
+        } else if let Some(state) = f.pre_state.as_deref().filter(|s| *s != "absent") {
+            // recorded as existing but no snapshot: the record contradicts a deletion, even forced
+            skip(
+                &format!(
+                    "the checkpoint recorded the file as present ({state}) but holds no snapshot: it will not be touched"
+                ),
+                false,
+            )
+        } else if f.pre_state.is_none() && !force {
             skip(
                 "no proof the run created it (the checkpoint did not record that the file was absent): it will not be touched",
                 true,
@@ -349,12 +370,19 @@ pub fn apply_entry(l: &Loaded, e: &Entry) -> Result<(), String> {
 pub fn lock(l: &Loaded) -> Result<std::fs::File, String> {
     let dir = l.home.join("sessions").join(&l.session);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let f = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join(".rewind.lock"))
-        .map_err(|e| e.to_string())?;
+    let path = dir.join(".rewind.lock");
+    // never create or open through a link someone planted there
+    if is_link(&path) {
+        return Err("the session's .rewind.lock is a symlink: refusing to follow it".into());
+    }
+    let mut o = std::fs::OpenOptions::new();
+    o.create(true).truncate(false).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+    }
+    let f = o.open(&path).map_err(|e| e.to_string())?;
     f.try_lock()
         .map_err(|_| "another rewind of this session is running".to_string())?;
     Ok(f)
@@ -394,12 +422,20 @@ pub fn run_cmd(env: &Env, a: RewindArgs) -> Result<u8, String> {
     let h = homes(env)?;
     let user = (!h.user.as_os_str().is_empty()).then_some(h.user.as_path());
     let l = load(&h.synthesis, user, &a.session, a.allow_wide_root)?;
-    let entries = plan(&l, a.checkpoint.as_deref(), a.force)?;
+    // the lock comes before the plan, so the plan is the state the writes will find
     let _lock = a.apply.then(|| lock(&l)).transpose()?;
-    let mut problems = 0;
+    let entries = plan(&l, a.checkpoint.as_deref(), a.force)?;
+    let (mut problems, mut done, mut failed) = (0, 0, 0);
     for e in &entries {
         let shown = &e.shown;
-        match &e.step {
+        let verb = |apply: &str, dry: &str| {
+            if a.apply {
+                apply.to_string()
+            } else {
+                dry.to_string()
+            }
+        };
+        let (what, note) = match &e.step {
             Step::Skip { reason, forceable } => {
                 problems += 1;
                 out!(
@@ -410,22 +446,39 @@ pub fn run_cmd(env: &Env, a: RewindArgs) -> Result<u8, String> {
                         ""
                     }
                 );
+                continue;
             }
-            Step::Restore { .. } => out!(
-                "{} {shown}",
-                if a.apply { "restore" } else { "would restore" }
+            Step::Restore { .. } => (verb("restore", "would restore"), ""),
+            Step::Remove => (
+                verb("remove", "would remove"),
+                " (did not exist before the run)",
             ),
-            Step::Remove => out!(
-                "{} {shown} (did not exist before the run)",
-                if a.apply { "remove" } else { "would remove" }
-            ),
-        }
-        if a.apply {
-            apply_entry(&l, e)?;
+        };
+        // applied first, printed after: a line never says "restore" for a write that failed
+        match a.apply.then(|| apply_entry(&l, e)) {
+            Some(Err(why)) => {
+                problems += 1;
+                failed += 1;
+                out!("FAILED {why}");
+            }
+            r => {
+                done += usize::from(r.is_some());
+                out!("{what} {shown}{note}");
+            }
         }
     }
     if !a.apply {
         out!("dry run: pass --apply to do it");
+    } else if failed > 0 {
+        out!(
+            "rewind {}: {done} written, {failed} failed{}",
+            if done > 0 { "PARTIAL" } else { "FAILED" },
+            if done > 0 {
+                " (the other files are already written)"
+            } else {
+                ""
+            }
+        );
     }
     Ok(u8::from(problems > 0))
 }
@@ -455,6 +508,7 @@ mod tests {
             base.join(sub)
         };
         fs::create_dir_all(&ws).unwrap();
+        fs::create_dir_all(base.join("userhome")).unwrap();
         let store = Store::open(&base.join("home"), StoreOptions::default()).unwrap();
         let ctx = WorkspaceContext::open("w1", &ws, &ws, &[], base.join("art"), "pg").unwrap();
         let w = store
@@ -494,7 +548,13 @@ mod tests {
             p
         }
         fn loaded(&self) -> Loaded {
-            load(&self.base.join("home"), None, "s1", false).unwrap()
+            load(
+                &self.base.join("home"),
+                Some(&self.base.join("userhome")),
+                "s1",
+                false,
+            )
+            .unwrap()
         }
         fn plan(&self) -> Vec<Entry> {
             plan(&self.loaded(), None, false).unwrap()
@@ -709,18 +769,86 @@ mod tests {
     }
 
     #[test]
-    fn a_workspace_root_that_is_the_home_directory_is_refused_unless_allowed() {
+    fn a_wide_workspace_root_is_refused_unless_allowed_and_an_unknown_home_fails_closed() {
         let g = rig_in("fakehome");
         let home = g.base.join("home");
+        let sub = g.ws.join("me");
+        fs::create_dir_all(&sub).unwrap();
+        // the root is the home directory
         let err = load(&home, Some(&g.ws), "s1", false).err().unwrap();
-        assert!(
-            err.contains("filesystem root or your home directory"),
-            "{err}"
-        );
-        assert!(load(&home, Some(&g.ws), "s1", true).is_ok());
-        assert!(
-            load(&home, Some(&g.base), "s1", false).is_ok(),
-            "another home is fine"
+        assert!(err.contains("filesystem root"), "{err}");
+        // the root contains the home directory (like /Users or /home)
+        let err = load(&home, Some(&sub), "s1", false).err().unwrap();
+        assert!(err.contains("contains it"), "{err}");
+        assert!(load(&home, Some(&sub), "s1", true).is_ok());
+        // the usual case: the workspace is below the home directory
+        assert!(load(&home, Some(&g.base), "s1", false).is_ok());
+        let other = g.base.join("elsewhere");
+        fs::create_dir_all(&other).unwrap();
+        assert!(load(&home, Some(&other), "s1", false).is_ok());
+        // no home known (only SYNT_HOME set gives an empty path): refused, not skipped
+        for none in [None, Some(Path::new(""))] {
+            let err = load(&home, none, "s1", false).err().unwrap();
+            assert!(err.contains("home directory is not known"), "{err}");
+        }
+        assert!(load(&home, None, "s1", true).is_ok());
+    }
+
+    #[test]
+    fn force_does_not_override_a_recorded_pre_state() {
+        let mut g = rig();
+        g.run_wrote("b.txt", "made");
+        let mut l = g.loaded();
+        let f = &mut l.cps[0].files[0];
+        f.pre_state = Some("deadbeef".into());
+        for force in [false, true] {
+            let v = plan(&l, None, force).unwrap();
+            assert!(
+                matches!(
+                    &v[0].step,
+                    Step::Skip {
+                        forceable: false,
+                        ..
+                    }
+                ),
+                "{v:?}"
+            );
+        }
+        l.cps[0].files[0].pre_state = None;
+        assert!(matches!(
+            plan(&l, None, true).unwrap()[0].step,
+            Step::Remove
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_symlink_as_the_lock_file_is_not_followed() {
+        let g = rig();
+        let l = g.loaded();
+        let target = g.base.join("victim");
+        let lockfile = g.base.join("home/sessions/s1/.rewind.lock");
+        std::os::unix::fs::symlink(&target, &lockfile).unwrap();
+        assert!(lock(&l).unwrap_err().contains("symlink"));
+        assert!(!target.exists(), "the dangling target was not created");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_restored_file_keeps_a_private_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut g = rig();
+        let p = g.ws.join("k.txt");
+        fs::write(&p, "old").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+        g.run_wrote("k.txt", "new");
+        let l = g.loaded();
+        let v = plan(&l, None, false).unwrap();
+        apply_entry(&l, &v[0]).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "old");
+        assert_eq!(
+            fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
         );
     }
 

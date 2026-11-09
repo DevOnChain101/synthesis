@@ -49,9 +49,9 @@ console.log(`check-no-legacy-name: ${files.length} tracked files ok`);
 
 // The command is `synt` (2026-11-02); a whole-word `synth` is the retired command name. Allowed: history and recorded oracle data.
 // Same for the config folder names renamed on 2026-11-02: `.synthesis/`, `synthesis.json`, `synthesis.db` (now `.synt/`, `synt.json`, `synt.db`), `SYNTHESIS.md` (now `AGENTS.md`), `SYNTHESIS_*` env (now `SYNT_*`);
-// only `synt doctor` (apps/cli/src/info.rs) may name the old ones, to print how to migrate.
+// only `synt doctor` (crates/synthesis-app/src/doctor.rs) may name the old ones, to print how to migrate.
 const synthOk = (f) => f === "CHANGELOG.md" || f === "CLAUDE.md" || f === "scripts/check-no-legacy-name.mjs" || f.startsWith("tests/golden/");
-const oldCfgOk = (f) => f === "CHANGELOG.md" || f === "CLAUDE.md" || f === "scripts/check-no-legacy-name.mjs" || f === "apps/cli/src/info.rs" || f === "docs/MIGRATION.md" || f === "crates/synthesis-settings/tests/settings.rs";
+const oldCfgOk = (f) => f === "CHANGELOG.md" || f === "CLAUDE.md" || f === "scripts/check-no-legacy-name.mjs" || f === "crates/synthesis-app/src/doctor.rs" || f === "docs/MIGRATION.md" || f === "crates/synthesis-settings/tests/settings.rs";
 const oldCfg = /(?<!^\s*)(?<![A-Za-z0-9_])\.synthesis(?![A-Za-z0-9_.(-])|(?<![A-Za-z0-9_-])synthesis\.(json|db)\b|(?<![A-Za-z0-9_])SYNTHESIS\.md\b|(?<![A-Za-z0-9_])SYNTHESIS_|"synthesis"(?=\s*:)/;
 const old = [];
 for (const f of files) {

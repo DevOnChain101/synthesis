@@ -81,6 +81,10 @@ pub enum PickerKind {
     Resume,
     /// `#note`: which instruction file gets it (or none).
     Remember,
+    /// `/memory review`: the pending records to choose from.
+    MemReview,
+    /// A change to memory (add, edit, forget, accept): says what it will do; the person must engage it.
+    MemConfirm,
     /// No model configured: the TUI's setup card (check again, Settings, quit).
     Setup,
     /// Shift+Tab reached bypassPermissions: the confirmation (Cancel is the first option and the default).
@@ -122,6 +126,8 @@ pub enum Action {
     Quit,
     /// `/peers`: the listing is read off the UI thread; the text comes back through [`Live::peers_done`].
     Peers,
+    /// `/doctor`: the checks run off the UI thread; the rows come back through [`Live::doctor_done`].
+    Doctor,
     /// `/send ADDRESS TEXT`: runs off the UI thread; the outcome comes back through [`Live::send_done`].
     Send {
         to: String,
@@ -184,7 +190,9 @@ impl Dialog {
     /// the bypass confirmation is.
     pub fn needs_person(&self) -> bool {
         match &self.kind {
-            DialogKind::Picker { kind, .. } => *kind == PickerKind::Bypass,
+            DialogKind::Picker { kind, .. } => {
+                matches!(kind, PickerKind::Bypass | PickerKind::MemConfirm)
+            }
             _ => true,
         }
     }
@@ -321,8 +329,8 @@ pub fn panels_command() -> Command {
 }
 
 pub fn is_wired(name: &str) -> bool {
-    // `open`, `send` and `panels` exist only in the desktop app
-    WIRED.contains(&name) || matches!(name, "open" | "send" | "panels" | "rewind")
+    // `open`, `send`, `panels`, `doctor` and `rewind` exist only in the desktop app
+    WIRED.contains(&name) || matches!(name, "open" | "send" | "panels" | "doctor" | "rewind")
 }
 
 /// `/rewind` is the desktop's own command too: the engine's list has none.
@@ -387,6 +395,9 @@ pub struct Live {
     pub busy: bool,
     /// A `/rewind` is open or writing: no prompt starts (files must not change under a task).
     pub rewinding: bool,
+    /// The background job of the current `/rewind` step, for its timeout (`rewind_job_start`).
+    pub rewind_job: Option<u64>,
+    pub rewind_seq: u64,
     /// `/compact` between tasks is running (until `UiMsg::Compacted`).
     pub compacting: bool,
     pub dialogs: Vec<Dialog>,
@@ -450,6 +461,8 @@ pub struct Live {
     pub held_prompt: Option<String>,
     /// A prompt handed back unsent (Esc in that picker, a failed switch): the window puts it in the input box.
     pub returned_prompt: Option<String>,
+    /// What the open memory confirmation will do if the person says yes.
+    pub mem_pending: Option<(crate::memory_ui::Pending, String)>,
 }
 
 /// State behind the `/model` picker; the dialog's options are rebuilt from it.
@@ -471,6 +484,8 @@ impl Live {
             starting: true,
             busy: false,
             rewinding: false,
+            rewind_job: None,
+            rewind_seq: 0,
             compacting: false,
             dialogs: vec![],
             queue: VecDeque::new(),
@@ -509,6 +524,7 @@ impl Live {
             stale_model: None,
             held_prompt: None,
             returned_prompt: None,
+            mem_pending: None,
         }
     }
 
@@ -543,6 +559,7 @@ impl Live {
         self.trusted = engine.trusted;
         self.commands = engine.commands.clone();
         self.commands.push(panels_command());
+        self.commands.push(crate::doctor_ui::doctor_command());
         self.mcp = engine.mcp_status();
         self.queue.clear();
         self.dialogs.clear();
@@ -802,6 +819,7 @@ impl Live {
             }
             self.dialogs.remove(0);
             self.pending_note = None;
+            self.mem_pending = None;
             // Esc: nothing is sent; the prompt returns to the input box
             if self.model_pick.is_some() {
                 self.returned_prompt = self.held_prompt.take();
@@ -911,6 +929,10 @@ impl Live {
                 }
                 return None;
             }
+            if matches!(kind, PickerKind::MemReview | PickerKind::MemConfirm) {
+                self.memory_answer(kind, key, now);
+                return None;
+            }
             if kind == PickerKind::Remember {
                 if let (Some(e), Some(text), "user" | "project") =
                     (&self.engine, self.pending_note.take(), key)
@@ -949,7 +971,9 @@ impl Live {
                 PickerKind::Remember
                 | PickerKind::Bypass
                 | PickerKind::Rewind
-                | PickerKind::Send => None,
+                | PickerKind::Send
+                | PickerKind::MemReview
+                | PickerKind::MemConfirm => None,
                 PickerKind::Setup => Some(match key {
                     "recheck" => Action::Recheck,
                     "settings" => Action::OpenSettings,
@@ -1475,12 +1499,14 @@ impl Live {
                 self.note(format!("/{name}: the session is still starting"), true)
             }
             "mcp" => self.info(|e| e.mcp_report()),
+            "memory" if !arg.is_empty() => self.memory_cmd(arg, now_ms()),
             "memory" => self.info(|e| e.memory_report.clone()),
             "agents" => self.info(|e| e.agents_report()),
             "permissions" if arg.is_empty() || arg == "list" => {
                 self.info(|e| e.permissions_report())
             }
             "status" => self.status(),
+            "doctor" => return self.doctor_cmd(),
             "terminal" => {
                 let v = self.calls(|n| n == "Bash", "shell commands");
                 self.note(v, false);

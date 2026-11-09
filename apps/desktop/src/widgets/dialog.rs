@@ -125,6 +125,44 @@ pub fn dock(
                 )))
                 .child(div().text_color(strong()).child(q.question.clone()));
         }
+        // a memory confirmation: the whole text it is about, in a scroll box like the approval's input
+        DialogKind::Picker {
+            kind: PickerKind::MemConfirm,
+            headers,
+            ..
+        } => {
+            let lines: Vec<String> = headers
+                .first()
+                .map(|(_, h)| h.lines().map(String::from).collect())
+                .unwrap_or_default();
+            let scrolls = lines.len() as f32 * 19. > max_input_h
+                || lines.iter().any(|l| l.chars().count() > 100);
+            card = card.child(
+                div()
+                    .id("dialog-memory")
+                    .max_h(px(max_input_h))
+                    .overflow_y_scroll()
+                    .p(px(8.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(hsla(t::BORDER))
+                    .bg(hsla(t::BG))
+                    .children(lines.into_iter().map(|l| {
+                        div().text_color(text()).child(if l.is_empty() {
+                            " ".to_string()
+                        } else {
+                            l
+                        })
+                    })),
+            );
+            if scrolls {
+                card = card.child(
+                    div()
+                        .text_color(hsla(t::WARN))
+                        .child("\u{2195} scroll the box to read all of it before answering"),
+                );
+            }
+        }
         DialogKind::Picker { .. } => {}
         DialogKind::Rewind(r) => {
             card = card.child(div().text_color(hsla(t::WARN)).child(r.preview.warning()));
@@ -200,6 +238,10 @@ pub fn dock(
         );
     }
     let headers: &[(usize, String)] = match &d.kind {
+        DialogKind::Picker {
+            kind: PickerKind::MemConfirm,
+            ..
+        } => &[],
         DialogKind::Picker { headers, .. } => headers,
         _ => &[],
     };
