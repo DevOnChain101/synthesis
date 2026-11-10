@@ -931,16 +931,16 @@ impl TuiView {
                     } else {
                         self.topo_h.get() + self.month_used.get() - tier.topo_min
                     };
+                    let body_w = cols(w).right - 2. * 12. - 2.;
                     let mode = if self.is_folded("p-usage") {
                         layout::MonthMode::Hidden
                     } else {
-                        layout::month_mode(slack, &s.usage.month)
+                        layout::month_mode(slack, &s.usage.month, body_w)
                     };
                     self.month_used.set(match mode {
                         layout::MonthMode::Hidden => 0.,
-                        m => layout::month_h(m, &s.usage.month) + layout::MONTH_GAP,
+                        m => layout::month_h(m, &s.usage.month, body_w) + layout::MONTH_GAP,
                     });
-                    let body_w = cols(w).right - 2. * 12. - 2.;
                     panels::usage_body(&s.usage).when(mode != layout::MonthMode::Hidden, |d| {
                         d.child(panels::month_section(&s.usage.month, mode, body_w))
                     })
@@ -1218,12 +1218,7 @@ mod tests {
         });
         let mut l = Live::new();
         l.starting = false;
-        l.view.convo.items = (0..2000)
-            .map(|i| Item::Notice {
-                warning: false,
-                text: format!("row {i}"),
-            })
-            .collect();
+        l.view.convo.items = (0..2000).map(|i| Item::User(format!("row {i}"))).collect();
         view.update(vcx, |t, _| t.set_live(l));
         vcx.simulate_resize(size(px(1400.), px(900.)));
         vcx.run_until_parked();

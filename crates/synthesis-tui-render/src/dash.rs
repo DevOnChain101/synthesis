@@ -42,7 +42,8 @@ pub struct SessionRow {
 }
 
 use synthesis_view::usage::{
-    DayCell, MONTHS, MonthGrid, civil, month_grid as usage_month_grid, month_summary,
+    DayCell, MONTHS, MonthGrid, civil, month_grid as usage_month_grid, month_summary, year_grid,
+    year_month_starts,
 };
 pub use synthesis_view::usage::{HistoryDay, heat_level};
 
@@ -2159,42 +2160,14 @@ fn usage_year_content(s: &DashState, inner: i64, max_rows: usize) -> (String, Li
     }
     let stat_cols = stat_cols.max(0) as usize;
     let grid_w = USAGE_LABEL_W + weeks as usize * 2 - 1;
-    let today = history.last().unwrap();
-    let today_dow = civil(today.date_ms, s.tz_offset_min).dow as i64;
-    let cell = |c: i64, r: i64| -> Option<&HistoryDay> {
-        let ago = (weeks - 1 - c) * 7 + (today_dow - r);
-        if ago < 0 {
-            return None;
-        }
-        let idx = history.len() as i64 - 1 - ago;
-        if idx < 0 {
-            None
-        } else {
-            history.get(idx as usize)
-        }
-    };
-    let mut max = 1.0f64;
-    for c in 0..weeks {
-        for r in 0..7 {
-            if let Some(d) = cell(c, r) {
-                max = max.max(val(d));
-            }
-        }
-    }
+    let yg = year_grid(history, s.tz_offset_min, weeks, &val);
+    let max = yg.max;
+    let starts = year_month_starts(&yg, s.tz_offset_min);
     let mut months = vec![' '; grid_w];
     let mut last_x: i64 = -10;
-    for c in 0..weeks {
-        let mut mo: Option<usize> = None;
-        for r in 0..7 {
-            if let Some(d) = cell(c, r) {
-                let cv = civil(d.date_ms, s.tz_offset_min);
-                if cv.day == 1 {
-                    mo = Some(cv.month);
-                }
-            }
-        }
-        let x = USAGE_LABEL_W as i64 + c * 2;
-        let Some(mo) = mo else { continue };
+    for (c, mo) in starts.iter().enumerate() {
+        let x = USAGE_LABEL_W as i64 + c as i64 * 2;
+        let Some(mo) = *mo else { continue };
         if x + 3 > grid_w as i64 || x - last_x < 4 {
             continue;
         }
@@ -2206,7 +2179,7 @@ fn usage_year_content(s: &DashState, inner: i64, max_rows: usize) -> (String, Li
     let mut grid = vec![paint(COL_MUTED, &months.iter().collect::<String>())];
     for r in 0..7 {
         let cells: Vec<String> = (0..weeks)
-            .map(|c| match cell(c, r) {
+            .map(|c| match yg.cols[c as usize][r as usize] {
                 None => " ".to_string(),
                 Some(d) => paint(HEAT[heat_level(Some(val(d)), Some(max))], "■"),
             })

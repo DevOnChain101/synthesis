@@ -183,13 +183,16 @@ yet, so the `u: metric` hint in the title does nothing). There is no provider qu
 5-hour and 7-day quota rows are absent, and no cost is shown.
 
 In the desktop app's Usage & Metrics panel the existing 7/30-day select and metric bars are unchanged; the CLI's
-month section is added under them, from the same logic (`synthesis_view::usage`: `month_grid`, `month_summary`,
-`heat_level`, shared with `dash.rs`): the title `Usage · tokens · <total> this month` (shorter forms when narrow), the
-calendar of weeks as columns and seven weekday rows (M / W / F labels, four heat levels relative to the month's
-busiest day, days to come as a small dim dot), the `Less ... More` legend, and when the panel is wide enough the
-today / 7 days / month / best / active / streak rows. It is drawn whole or not at all, and only into height the
-Topology panel can spare above its minimum (`layout::month_mode`): the full grid first, else the one-line strip of the
-days so far, else nothing, so no bar and no other panel moves; while the history is read it says `loading usage…`.
+year section is added under them, from the same logic (`synthesis_view::usage`: `year_grid`, `year_month_starts`,
+`month_summary`, `heat_level`, shared with `dash.rs`): the title `Usage · tokens · <total> this year` (shorter forms
+when narrow), month labels over 53 week columns and seven weekday rows (M / W / F labels, four heat levels relative to
+the year's busiest day), the `Less ... More` legend, and under it, when the panel is at least 280 px wide, the
+today / 7 days / month / best / active / streak rows in two columns. The cell pitch grows with the panel width (4 to
+14 px, so the grid fills the width; about 5 px at the 336 px right column); below 4 px the oldest weeks are dropped
+instead of drawing smaller dots. It is drawn whole or not at all, and only into height the Topology panel can spare
+above its minimum (`layout::month_mode`): grid and summary first, then the grid alone, then the one-line strip of the
+month's days so far, else nothing, so no bar and no other panel moves; while the history is read it says
+`loading usage…`. Shot flag `--usage-seed` fills the history with made-up tokens.
 Not matched with the CLI: the metric is tokens only (the CLI has no switch either), today is not highlighted (the CLI does
 not either), the empty-day colour is a faint white (the CLI's SURFACE would vanish on the panel). Recent Activity there lists only the person's prompts and the agent's answers. The chat shows the welcome screen (logo, tagline, tips) whenever it holds no message, tool or task row: notices alone (after `/close-workspace`, `/close`, `/clear`, `/new`) do not hide it, the latest one is shown under the tips.
 

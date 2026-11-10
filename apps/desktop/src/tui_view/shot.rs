@@ -110,6 +110,8 @@ pub struct LiveShot {
     /// `--memory-seed`: a few notes (owner, agent and untrusted proposals) are in the throwaway memory store;
     /// `--trust`: the folder counts as trusted (project memory on).
     memory_seed: bool,
+    /// `--usage-seed`: a year of made-up daily tokens in the Usage history (the stored one is empty).
+    usage_seed: bool,
     trust: bool,
     /// `--untrusted`: the folder is not trusted and the user's home is a known (fake) folder, so the Files tab
     /// raises the real Trust dialog, parent option included; `--trust-seed`: two remembered folders in the store
@@ -256,6 +258,7 @@ pub fn parse(args: &[String]) -> Option<Args> {
         setup: args.iter().any(|a| a == "--setup"),
         outside_read: args.iter().any(|a| a == "--outside-read"),
         memory_seed: args.iter().any(|a| a == "--memory-seed"),
+        usage_seed: args.iter().any(|a| a == "--usage-seed"),
         trust: args.iter().any(|a| a == "--trust"),
         untrusted: args.iter().any(|a| a == "--untrusted"),
         trust_seed: args.iter().any(|a| a == "--trust-seed"),
@@ -478,6 +481,11 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
     if let Ok((w, days)) = crate::tui_view::driver::read_store(&cfg, Some(&engine.root)) {
         live.view.workspaces = w;
         live.view.usage = synthesis_view::usage::UsageHistory { days };
+        if l.usage_seed {
+            for (i, d) in live.view.usage.days.iter_mut().enumerate() {
+                d.tokens = ((i * 7919 % 13) as f64 - 4.).max(0.) * 10_000. * (1 + i % 5) as f64;
+            }
+        }
         live.view.set_peers(&[]);
         live.ws_key = synthesis_view::workspaces::fold_dir(&engine.root);
     }
