@@ -192,6 +192,8 @@ pub fn panel_scroll(
     if let Some((f, on_toggle)) = h.fold {
         label = label
             .cursor_pointer()
+            .rounded(px(4.))
+            .hover(|d| d.bg(with_alpha(gpui::white(), 0.05)))
             .child(icon(
                 if f { "chevron-right" } else { "chevron-down" },
                 12.,
@@ -523,6 +525,7 @@ pub fn tabs(
                 .h_full()
                 .when(wrapped, |d| d.w(px(width[i])).overflow_hidden())
                 .cursor_pointer()
+                .when(!on, |d| d.hover(|d| d.bg(with_alpha(gpui::white(), 0.05))))
                 .when(framed(it), |d| {
                     d.border_l_1().border_r_1().border_color(rule())
                 })
@@ -616,8 +619,55 @@ fn marquee_left(d: f32, travel: f32) -> f32 {
     -(d / moving).min(1.) * travel
 }
 
-/// Width the header row keeps for the prompt marquee at least (about 20 characters).
-const MIN_PROMPT_SLOT: f32 = 150.;
+/// The two header rows (`.topbar` and `#chead`) and the least width each of their items keeps, px. Every width
+/// they reserve is read from `HEADER_MIN`; the chips and the status/path text add their own (7.5px a character).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HeaderItem {
+    TopPad,
+    TopBrand,
+    TopGap,
+    TopSlack,
+    DrawerButton,
+    ChatIcon,
+    ChatName,
+    ChatRule,
+    ChatCtxBar,
+    ChatPad,
+    /// The prompt marquee's slot (about 20 characters).
+    PromptSlot,
+}
+
+pub const HEADER_MIN: [(HeaderItem, f32); 11] = [
+    (HeaderItem::TopPad, 32.),
+    (HeaderItem::TopBrand, 160.),
+    (HeaderItem::TopGap, 28.),
+    (HeaderItem::TopSlack, 8.),
+    (HeaderItem::DrawerButton, 32.),
+    (HeaderItem::ChatIcon, 14.),
+    (HeaderItem::ChatName, 67.5),
+    (HeaderItem::ChatRule, 7.5),
+    (HeaderItem::ChatCtxBar, 54.),
+    (HeaderItem::ChatPad, 84.),
+    (HeaderItem::PromptSlot, 150.),
+];
+
+pub fn header_min(item: HeaderItem) -> f32 {
+    HEADER_MIN
+        .iter()
+        .find(|(i, _)| *i == item)
+        .map_or(0., |(_, w)| *w)
+}
+
+/// What `.topbar` holds besides the chips: padding, brand mark and name, the gap after them, the slack and
+/// the drawer buttons (`buttons` of them shown).
+pub fn top_fixed(buttons: usize) -> f32 {
+    use HeaderItem::*;
+    [TopPad, TopBrand, TopGap, TopSlack]
+        .into_iter()
+        .map(header_min)
+        .sum::<f32>()
+        + header_min(DrawerButton) * buttons as f32
+}
 
 /// The header tail that still leaves the prompt slot its minimum: `path | stats`, then `path`, then nothing.
 /// The lower-priority stats go first as the row narrows, then the path.
@@ -625,13 +675,18 @@ pub fn header_tail(path: &str, stats: &str, status: &str, width: f32) -> String 
     let slot = |tail: &str| width - header_fixed(status, tail);
     [format!("{path} | {stats}"), path.to_string()]
         .into_iter()
-        .find(|t| slot(t) >= MIN_PROMPT_SLOT)
+        .find(|t| slot(t) >= header_min(HeaderItem::PromptSlot))
         .unwrap_or_default()
 }
 
 /// What the header row holds besides the prompt slot (icon, "Synthesis", status, rule, context bar, tail, gaps).
 fn header_fixed(status: &str, tail: &str) -> f32 {
-    14. + 7.5 * (9 + status.chars().count() + 1 + tail.chars().count()) as f32 + 54. + 84.
+    use HeaderItem::*;
+    [ChatIcon, ChatName, ChatRule, ChatCtxBar, ChatPad]
+        .into_iter()
+        .map(header_min)
+        .sum::<f32>()
+        + 7.5 * (status.chars().count() + tail.chars().count()) as f32
 }
 
 /// `#chead`: icon, "Synthesis", the status word, the latest prompt (clipped), the context bar and `tail`
@@ -790,6 +845,45 @@ mod fit_chips_tests {
         // a chip is kept whole or dropped, in order
         let out = fit_chips(chips(), chip_w(&chips()[0]) + chip_w(&chips()[1]) + 40.);
         assert_eq!(out[1].label, "session:");
+    }
+}
+
+#[cfg(test)]
+mod header_min_tests {
+    use super::*;
+    use crate::tui_view::layout::{GAP, PAD, cols};
+
+    /// Every item of the table, at the three window widths: each fits its row, and the rows' fixed parts
+    /// plus the least the chips and the prompt slot keep fit the row.
+    #[test]
+    fn every_header_item_fits_its_row_at_900_1100_1400() {
+        for w in [900., 1100., 1400.] {
+            let c = cols(w);
+            let side = |on: bool, x: f32| if on { x + GAP } else { 0. };
+            let centre = w - 2. * PAD - side(c.left_inline, c.left) - side(c.right_inline, c.right);
+            let buttons = usize::from(!c.left_inline) + usize::from(!c.right_inline);
+            for (item, min) in HEADER_MIN {
+                let row = match item {
+                    HeaderItem::TopPad
+                    | HeaderItem::TopBrand
+                    | HeaderItem::TopGap
+                    | HeaderItem::TopSlack
+                    | HeaderItem::DrawerButton => w,
+                    _ => centre,
+                };
+                assert!(min > 0. && min < row, "{item:?} at {w}");
+            }
+            // top bar: the right chips (health, clock) and the closing `...` chip stay
+            let right = chip_w(&Chip::new("", "all systems ok", dim()).dotted())
+                + chip_w(&Chip::new("", "Tue Nov 10  06:47:07", dim()));
+            let dots = chip_w(&Chip::new("", "\u{2026}", dim()));
+            assert!(top_fixed(buttons) + right + dots <= w, "top bar at {w}");
+            // chat head: "ready", no tail, the prompt slot
+            assert!(
+                header_fixed("ready", "") + header_min(HeaderItem::PromptSlot) <= centre,
+                "chat head at {w}"
+            );
+        }
     }
 }
 

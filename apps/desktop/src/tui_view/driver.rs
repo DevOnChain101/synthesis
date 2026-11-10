@@ -15,6 +15,7 @@ use gpui_component::input::{InputEvent, TextareaState};
 use synthesis_config::Env;
 use synthesis_tui_base::complete::{self, StdFs};
 use synthesis_tui_base::editor::LineEditor;
+use synthesis_view::convo::Item;
 use synthesis_view::workspaces::{LoadOpts, WorkspaceList, fold_dir};
 
 use super::{TuiView, panels};
@@ -65,9 +66,6 @@ pub struct SessionStarted;
 
 impl gpui::EventEmitter<SessionStarted> for TuiView {}
 
-/// Rows at the end of the chat measured again after every change.
-const TAIL_REMEASURE: usize = 12;
-
 /// How long the row a click in Recent Activity jumped to stays highlighted.
 pub const FLASH_MS: i64 = 1500;
 
@@ -110,6 +108,8 @@ pub struct LiveUi {
     /// The chat is a virtual list: only the rows near the viewport are built.
     pub list: ListState,
     pub rows: Vec<Row>,
+    /// `row_sig` of each row at the last sync: only a row whose signature moved is measured again.
+    row_sigs: Vec<u64>,
     /// The next sync starts the list over (another session, `/clear`).
     pub list_reset: bool,
     /// The chat sticks to the newest row until the person scrolls up (read off the list).
@@ -207,6 +207,7 @@ impl TuiView {
                 l
             },
             rows: vec![],
+            row_sigs: vec![],
             list_reset: true,
             follow: true,
             ws_scroll: ScrollHandle::new(),
@@ -1104,9 +1105,7 @@ impl TuiView {
         let Some(pos) = lu.rows.iter().position(|r| *r == Row::Item(anchor)) else {
             return;
         };
-        if let Some(synthesis_view::convo::Item::Tool { id, .. }) =
-            lu.live.view.convo.items.get(anchor)
-        {
+        if let Some(Item::Tool { id, .. }) = lu.live.view.convo.items.get(anchor) {
             lu.live.expanded.insert(id.clone());
         }
         self.ts.tab = super::ChatTab::Chat;
@@ -1887,25 +1886,36 @@ impl LiveUi {
         rows
     }
 
-    /// Tells the list what changed: rows added or dropped at the end, and the last rows (a streaming
-    /// answer, a tool that just finished) measured again. Shortcut: a row older than
-    /// `TAIL_REMEASURE` rows that changes (a slow parallel tool) keeps its old height until the
-    /// next `remeasure`.
+    /// Tells the list what changed: rows added or dropped at the end, and every row whose signature moved
+    /// (a streaming answer, a tool that finished, even a slow parallel one far above the end) measured again.
     pub fn sync_rows(&mut self) {
         let rows = self.rows_now();
         let (old, new) = (self.list.item_count(), rows.len());
+        let sigs: Vec<u64> = rows.iter().map(|r| self.row_sig(*r)).collect();
         if std::mem::take(&mut self.list_reset) {
             self.list.reset(new);
             self.list.set_follow_mode(FollowMode::Tail);
-        } else if new > old {
-            self.list.splice(old..old, new - old);
-        } else if new < old {
-            self.list.splice(new..old, 0);
+        } else {
+            if new > old {
+                self.list.splice(old..old, new - old);
+            } else if new < old {
+                self.list.splice(new..old, 0);
+            }
+            for ix in stale_rows(&self.row_sigs, &sigs) {
+                self.list.remeasure_items(ix..ix + 1);
+            }
         }
-        self.list
-            .remeasure_items(new.saturating_sub(TAIL_REMEASURE)..new);
         self.rows = rows;
+        self.row_sigs = sigs;
         self.follow = self.list.is_following_tail();
+    }
+
+    /// What decides the height of a row; the plan card and the working line always count as changed.
+    fn row_sig(&self, r: Row) -> u64 {
+        match r {
+            Row::Item(i) => self.live.view.convo.items.get(i).map_or(0, item_sig),
+            Row::Plan | Row::Activity => u64::MAX,
+        }
     }
 
     /// The outcome of an attach, as a line in the chat.
@@ -1920,6 +1930,63 @@ impl LiveUi {
     fn add_sub(&mut self, s: Subscription) {
         self._subs.push(s);
     }
+}
+
+/// A hash of what shapes an item's height: its kind, state flags and text lengths (not the text, so a long
+/// output costs nothing to check).
+fn item_sig(it: &Item) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::mem::discriminant(it).hash(&mut h);
+    match it {
+        Item::User(t) | Item::Thinking(t) | Item::Internal(t) => t.len().hash(&mut h),
+        Item::Assistant { text, streaming } => (text.len(), streaming).hash(&mut h),
+        Item::Tool {
+            summary,
+            state,
+            preview,
+            output,
+            diff,
+            status,
+            exit_code,
+            ..
+        } => (
+            summary.len(),
+            *state as u8,
+            preview.len(),
+            output.len(),
+            diff.is_some(),
+            status.map(|s| s as u8),
+            exit_code,
+        )
+            .hash(&mut h),
+        Item::Agent { running, .. } => running.hash(&mut h),
+        Item::TaskEnd {
+            ok,
+            text,
+            word,
+            checks,
+        } => (ok, text.len(), word.len(), checks.len()).hash(&mut h),
+        Item::Verification { status, summary } => (status.len(), summary.len()).hash(&mut h),
+        Item::Checks {
+            rows,
+            total,
+            done,
+            summary,
+        } => (rows.len(), total, done, summary.len()).hash(&mut h),
+        Item::Approval { prompt, state, .. } => (prompt.len(), *state as u8).hash(&mut h),
+        Item::Notice { warning, text } => (warning, text.len()).hash(&mut h),
+    }
+    h.finish()
+}
+
+/// Indexes of the rows that were there before and whose signature moved (new rows are measured by the list).
+fn stale_rows(old: &[u64], new: &[u64]) -> impl Iterator<Item = usize> {
+    old.iter()
+        .zip(new)
+        .enumerate()
+        .filter(|(_, (a, b))| a != b || **a == u64::MAX)
+        .map(|(i, _)| i)
 }
 
 /// The TUI's checks for a pasted PNG (magic, 4 MB, 8000x8000) and the per-message limits.
@@ -2438,6 +2505,52 @@ pub(super) fn save_panels(home: &Path, cwd: &Path, changes: &[(&str, bool)]) -> 
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use synthesis_view::convo::ToolState;
+
+    fn tool(state: ToolState, output: &str) -> Item {
+        Item::Tool {
+            id: "t".into(),
+            name: "Bash".into(),
+            summary: "cargo test".into(),
+            state,
+            preview: String::new(),
+            output: output.into(),
+            duration_ms: 0,
+            file: None,
+            diff: None,
+            input: Box::new(serde_json::Value::Null),
+            status: None,
+            exit_code: None,
+        }
+    }
+
+    /// A row far above the end that grows (a slow parallel tool finishing) is found, and only it; an
+    /// unchanged chat re-measures nothing but the plan and the working line.
+    #[test]
+    fn only_the_rows_whose_height_inputs_moved_are_measured_again() {
+        let mut items: Vec<Item> = (0..40).map(|i| Item::User(format!("q{i}"))).collect();
+        items[3] = tool(ToolState::Running, "");
+        let sigs = |items: &[Item]| -> Vec<u64> { items.iter().map(item_sig).collect() };
+        let before = sigs(&items);
+        assert_eq!(stale_rows(&before, &sigs(&items)).count(), 0);
+        items[3] = tool(ToolState::Ok, &"line\n".repeat(30));
+        assert_eq!(stale_rows(&before, &sigs(&items)).collect::<Vec<_>>(), [3]);
+        // streaming text: the same row grows each batch
+        items[39] = Item::Assistant {
+            text: "a".into(),
+            streaming: true,
+        };
+        let before = sigs(&items);
+        items[39] = Item::Assistant {
+            text: "ab".into(),
+            streaming: true,
+        };
+        assert_eq!(stale_rows(&before, &sigs(&items)).collect::<Vec<_>>(), [39]);
+        // the plan card and the working line are always measured again
+        assert_eq!(stale_rows(&[u64::MAX], &[u64::MAX]).count(), 1);
+    }
+
     #[test]
     fn a_failed_trusted_restart_undoes_the_rows_the_answer_wrote_and_restores_those_it_replaced() {
         use synthesis_session::trust as tr;
@@ -2471,8 +2584,6 @@ mod tests {
             "the old row is back as it was, the new one is gone"
         );
     }
-
-    use super::*;
 
     #[test]
     fn a_restart_waits_for_running_tasks_queued_prompts_and_open_dialogs() {

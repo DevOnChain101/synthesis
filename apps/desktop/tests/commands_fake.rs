@@ -384,6 +384,7 @@ fn pickers_and_info_commands() {
         ("/memory", "Instruction files"),
         ("/agents", "Agents in this session"),
         ("/permissions", "mode:"),
+        ("/perms", "mode:"),
         ("/status", "session:"),
         ("/terminal", "no shell commands"),
         ("/images", "no images"),
@@ -396,6 +397,12 @@ fn pickers_and_info_commands() {
             last_note(&live)
         );
     }
+    // `/agents --all` adds the other sessions (peers are off in this rig, and it says so); `/quit` is `/exit`
+    for cmd in ["/agents --all", "/agents -a"] {
+        assert_eq!(live.submit(cmd), Submitted::Nothing, "{cmd}");
+        assert!(last_note(&live).contains("peers are off"), "{cmd}");
+    }
+    assert_eq!(live.submit("/quit"), Submitted::Quit);
     assert_eq!(live.submit("/new"), Submitted::Do(Action::New));
     assert_eq!(live.submit("/close"), Submitted::Do(Action::Close));
     assert_eq!(live.submit("/clear"), Submitted::Do(Action::Clear));

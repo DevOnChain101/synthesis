@@ -630,7 +630,9 @@ impl TuiView {
             );
         }
         if d.rows.is_empty() {
-            rows = rows.child(note("no files"));
+            rows = rows.child(note(
+                "No files to list yet: the project has no tracked or new files.",
+            ));
         }
         if d.truncated {
             rows = rows.child(
