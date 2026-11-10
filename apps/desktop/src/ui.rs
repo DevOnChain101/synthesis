@@ -287,8 +287,18 @@ impl Shell {
                                     cx.stop_propagation();
                                     s.go(View::Tui, window, cx)
                                 }))
+                                // only the dot blinks: the words stay at full contrast, and one fixed line box
+                                // inside the strip keeps them whole
                                 .child(div().size(px(8.)).flex_none().rounded_full().bg(red))
-                                .child(div().text_color(red).child("approval needed")),
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .whitespace_nowrap()
+                                        .text_size(px(12.))
+                                        .line_height(px(16.))
+                                        .text_color(theme::hsla(t::ERROR))
+                                        .child("approval needed"),
+                                ),
                         )
                     }),
             )

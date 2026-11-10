@@ -172,6 +172,9 @@ pub struct TuiView {
     pub shown: bool,
     /// Height of the window from the last render (the dialog panel's input box takes up to 40% of it).
     win_h: f32,
+    /// Scroll handles of the Tools & Skills and Recent Activity bodies (the fade shows when one is cut).
+    tools_scroll: gpui::ScrollHandle,
+    act_scroll: gpui::ScrollHandle,
     /// The slide-over column that is open (only a collapsed column has one; closed by default).
     pub(crate) drawer: Option<Side>,
     /// Side-panel sections folded to their header (by panel id), kept for the session.
@@ -210,6 +213,8 @@ impl TuiView {
             active: true,
             shown: true,
             win_h: 900.,
+            tools_scroll: gpui::ScrollHandle::new(),
+            act_scroll: gpui::ScrollHandle::new(),
             snap: sample(),
             topo_acts: Default::default(),
             topo_now: 0,
@@ -287,8 +292,16 @@ impl TuiView {
     }
 
     /// The top bar; a collapsed side column gets a button at the right end that opens its drawer.
-    fn top_bar(&self, left_btn: bool, right_btn: bool, cx: &mut Context<Self>) -> Div {
+    fn top_bar(&self, w: f32, left_btn: bool, right_btn: bool, cx: &mut Context<Self>) -> Div {
         let (left, right) = top_chips(&self.snap.top);
+        // what the row holds besides the left chips: padding, brand mark and name, the gap after them, the right
+        // chips, the drawer buttons and a little slack
+        let fixed =
+            32. + 160. + 28. + 8. + 32. * f32::from(u8::from(left_btn) + u8::from(right_btn));
+        let left = chrome::fit_chips(
+            left,
+            w - fixed - right.iter().map(chrome::chip_w).sum::<f32>(),
+        );
         let btn = |side: Side, id: &'static str, glyph: &'static str, cx: &mut Context<Self>| {
             div()
                 .id(id)
@@ -468,12 +481,13 @@ impl TuiView {
             );
         }
         if !h.tools {
-            let p = panel(
+            let p = panel_scroll(
                 Head::new("p-tools", "Tools & Skills", "wrench", Pad::LEFT)
                     .max_body(TOOLS_MAX_H)
                     .fold(self.is_folded("p-tools"), self.fold_cb("p-tools", cx)),
                 Some(meta(text(), s.tools.count.clone())),
                 panels::tools_body(&s.tools),
+                Some(&self.tools_scroll),
             );
             col = col.child(self.fit(p, "p-tools", |p| p.flex_initial().min_h(min)));
         }
@@ -482,7 +496,7 @@ impl TuiView {
             let act_click = |i: usize| -> panels::OnClick {
                 Box::new(cx.listener(move |this, _, _, cx| this.click_activity(i, cx)))
             };
-            let p = panel(
+            let p = panel_scroll(
                 Head::new("p-activity", "Recent Activity", "activity", Pad::LEFT)
                     .fold(self.is_folded("p-activity"), self.fold_cb("p-activity", cx)),
                 Some(meta(text(), s.activity.len().to_string())),
@@ -490,6 +504,7 @@ impl TuiView {
                     &s.activity,
                     live.map(|_| &act_click as &dyn Fn(usize) -> panels::OnClick),
                 ),
+                Some(&self.act_scroll),
             );
             // as tall at least as the design's two panels it replaces (Recent Activity and User Prompt)
             col = col.child(self.fit(p, "p-activity", |p| {
@@ -1047,7 +1062,7 @@ impl Render for TuiView {
             .text_size(px(12.5))
             .line_height(gpui::relative(1.55))
             .text_color(text())
-            .child(self.top_bar(!left_in, right_btn, cx))
+            .child(self.top_bar(w, !left_in, right_btn, cx))
             .child(body)
             .child(self.footer())
             .children(drawer)

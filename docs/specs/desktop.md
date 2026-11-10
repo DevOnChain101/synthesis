@@ -187,6 +187,15 @@ below that a drawer too (folder icon, Cmd/Ctrl+B). Drawers are closed by default
 metrics are the design's; `design_tests.rs` keeps the Chrome rects as the reference for everything except column
 x/width (and the wrapping of the right cards in the narrower column), and `chat_share`, `drawers` and
 `topology_fits_the_narrow_column` encode the rule. Known: at 300-336px the Context card clips a long `tokens` row.
+Narrow-window polish (audit `docs/ui-audit-2026-11.md`, deviations from `cli.html`, only below the widths where it
+fits): the top bar drops whole chips that do not fit and ends with a `...` chip (`chrome::fit_chips`; `cli.html` clips them
+mid-glyph); a docked dialog (Trust, approval, pickers) is not taller than its column, so the prompt stays on screen:
+its text box and option list shrink and scroll, and a line `down-arrow more ...: scroll` shows while text is below the
+fold; "approval needed" in the title bar has a fixed line box and only its dot blinks; a side panel body that is cut
+(Tools & Skills, Recent Activity, Workspace, Running) fades out at its bottom edge; the `/model` picker lists only the
+metadata the provider gave; `chrome::dim` is `#8E8F93` (docs/tui-palette.md). At the reference sizes of `design_tests`
+nothing of this changes the rects. Shot flags: `--live SCRIPT` without `--prompt` (empty chat), `--hide-all`, `--bare`
+(Files and Browser tabs unseeded).
 Not ported: topology mode L (tall and narrow falls back to T). The "Latest user prompt" scrolls (16s, repeating,
 `synt.tui.motion`) only when it does not fit.
 

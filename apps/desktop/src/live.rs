@@ -2287,9 +2287,13 @@ impl Live {
             (
                 r.value.clone(),
                 format!(
-                    "{mark} {:<w$}  {}{}",
+                    "{mark} {:<w$}{}{}",
                     r.value,
-                    r.detail,
+                    if r.detail.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  {}", r.detail)
+                    },
                     if mark == "*" { "  (current)" } else { "" }
                 ),
             )
@@ -2298,7 +2302,7 @@ impl Live {
             options.push(("info".into(), "no model matches the filter".into()));
         }
         let header = format!(
-            "filter: {}_   (type to filter \u{b7} * marks the one in use \u{b7} ? = the provider did not say)",
+            "filter: {}_   (type to filter \u{b7} * marks the one in use \u{b7} a field the provider did not give is left out)",
             pick.filter
         );
         let at = options

@@ -15,7 +15,7 @@ impl TuiView {
             .unwrap_or_else(|| crate::theme::hsla(synthesis_tui_render::theme::ACCENT));
         crate::widgets::dialog::dock(
             &lu.live,
-            &lu.dlg_scroll,
+            (&lu.dlg_scroll, &lu.body_scroll),
             &|i| Box::new(cx.listener(move |this, _, _, cx| this.click_option(i, cx))),
             &|g| Box::new(cx.listener(move |this, _, _, cx| this.rewind_toggle(g, cx))),
             border,

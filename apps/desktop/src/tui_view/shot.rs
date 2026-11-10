@@ -1,4 +1,4 @@
-//! Development only (feature `shot`): `synthesis-desktop --shot out.png [--size WxH] [--hide a,b]` draws
+//! Development only (feature `shot`): `synthesis-desktop --shot out.png [--size WxH] [--hide a,b | --hide-all]` draws
 //! the TUI view into a headless gpui context (real text shaping, Metal/wgpu renderer, no window server)
 //! and writes the frame to a PNG, so no Screen Recording permission and no display are needed.
 
@@ -34,6 +34,8 @@ pub struct Args {
     inject: Option<PathBuf>,
     verbose: bool,
     focus: bool,
+    /// `--bare`: the Files and Browser tabs get no seeded project or screenshots (their empty states).
+    bare: bool,
     /// `--expand`: every tool card open (Ctrl+O).
     expand: bool,
     /// `--dialog-scroll PX`: the docked dialog is scrolled down by this much (its options below the fold).
@@ -57,12 +59,13 @@ pub struct Args {
     live: Option<LiveShot>,
 }
 
-/// `--live SCRIPT --prompt TEXT [--answer once|always|deny|none]`: the real engine on a scripted model
+/// `--live SCRIPT [--prompt TEXT] [--answer once|always|deny|none]`: the real engine on a scripted model
 /// (needs a build with `--features test-provider`) runs the prompt in a throwaway home and folder,
 /// and the window shows the resulting conversation.
 pub struct LiveShot {
     script: PathBuf,
-    prompt: String,
+    /// Absent: nothing is sent (an empty chat).
+    prompt: Option<String>,
     answer: Option<Choice>,
     /// `--cmd TEXT[;;TEXT...]`: typed after the task, so a command's output or picker is in the frame.
     cmd: Option<String>,
@@ -207,9 +210,15 @@ pub fn parse(args: &[String]) -> Option<Args> {
             eprintln!("synthesis-desktop: --hide: {k} is not a panel key");
         }
     }
+    // `--hide-all`: what `/panels hide-all` does
+    if args.iter().any(|a| a == "--hide-all") {
+        for (k, _) in super::layout::HIDEABLE {
+            hidden.hide(k);
+        }
+    }
     let live = val("--live").map(|script| LiveShot {
         script: PathBuf::from(script),
-        prompt: val("--prompt").cloned().unwrap_or_else(|| "hello".into()),
+        prompt: val("--prompt").cloned(),
         answer: match val("--answer").map(String::as_str) {
             Some("once") => Some(Choice::Once),
             Some("always") => Some(Choice::Always),
@@ -255,6 +264,7 @@ pub fn parse(args: &[String]) -> Option<Args> {
         inject: val("--inject").map(PathBuf::from),
         verbose: args.iter().any(|a| a == "--verbose"),
         focus: args.iter().any(|a| a == "--focus"),
+        bare: args.iter().any(|a| a == "--bare"),
         expand: args.iter().any(|a| a == "--expand"),
         dialog_scroll: val("--dialog-scroll").and_then(|n| n.parse().ok()),
         rows: args.iter().any(|a| a == "--rows"),
@@ -374,36 +384,38 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
     };
     std::thread::sleep(Duration::from_millis(50));
     drain(&mut live, &mut rx);
-    if let Submitted::Send(t) = live.submit(&l.prompt) {
+    if let Some(Submitted::Send(t)) = l.prompt.as_deref().map(|p| live.submit(p)) {
         engine.send(t).map_err(|e| e.to_string())?;
     }
-    let t0 = Instant::now();
-    loop {
-        drain(&mut live, &mut rx);
-        if !live.dialogs.is_empty() {
-            match l.answer {
-                Some(c) => {
-                    let id = live.dialogs[0].id().to_string();
-                    engine.answer(&id, c);
-                    live.dialogs.clear();
+    if l.prompt.is_some() {
+        let t0 = Instant::now();
+        loop {
+            drain(&mut live, &mut rx);
+            if !live.dialogs.is_empty() {
+                match l.answer {
+                    Some(c) => {
+                        let id = live.dialogs[0].id().to_string();
+                        engine.answer(&id, c);
+                        live.dialogs.clear();
+                    }
+                    None => break,
                 }
-                None => break,
             }
+            if !live.busy
+                && live
+                    .view
+                    .convo
+                    .items
+                    .iter()
+                    .any(|i| matches!(i, synthesis_view::convo::Item::TaskEnd { .. }))
+            {
+                break;
+            }
+            if t0.elapsed() > Duration::from_secs(30) {
+                return Err("timed out waiting for the scripted task".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
-        if !live.busy
-            && live
-                .view
-                .convo
-                .items
-                .iter()
-                .any(|i| matches!(i, synthesis_view::convo::Item::TaskEnd { .. }))
-        {
-            break;
-        }
-        if t0.elapsed() > Duration::from_secs(30) {
-            return Err("timed out waiting for the scripted task".into());
-        }
-        std::thread::sleep(Duration::from_millis(10));
     }
     std::thread::sleep(Duration::from_millis(50));
     drain(&mut live, &mut rx);
@@ -552,13 +564,17 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let fixture = a.live.as_ref().map(run_live).transpose()?;
     let (live, engine, tmp) = match fixture {
         Some((mut l, c, e, t)) => {
-            prepare_tabs(
-                &mut l,
-                &e,
-                &t,
-                a.tab,
-                a.live.as_ref().is_some_and(|l| l.untrusted),
-            )?;
+            if a.bare {
+                l.trusted = !a.live.as_ref().is_some_and(|l| l.untrusted);
+            } else {
+                prepare_tabs(
+                    &mut l,
+                    &e,
+                    &t,
+                    a.tab,
+                    a.live.as_ref().is_some_and(|l| l.untrusted),
+                )?;
+            }
             l.verbose = a.verbose;
             l.focus_view = a.focus;
             l.expand_all = a.expand;
@@ -676,6 +692,11 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             })
         })?;
         cx.run_until_parked();
+        // scroll boxes know whether they are cut only after a first frame: draw the cues (fades, "more") on a second
+        for _ in 0..2 {
+            win.update(&mut cx, |_, _, cx| tui.update(cx, |_, cx| cx.notify()))?;
+            cx.run_until_parked();
+        }
     }
     if a.view != crate::ui::View::Tui {
         win.update(&mut cx, |s, window, cx| s.go(a.view, window, cx))?;
