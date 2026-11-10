@@ -26,6 +26,10 @@ pub struct Args {
     drawer: Option<super::Side>,
     /// `--open FILE`: the file selected in the file explorer.
     open: Option<String>,
+    /// `--select FILE:A-B`: opens FILE in the file explorer with lines A to B (1-based) selected (no pointer here).
+    select: Option<Sel>,
+    /// `--quote`: those lines are also quoted (see [`LiveShot`]).
+    quote: bool,
     /// `--view tui|settings`: the view shown.
     view: crate::ui::View,
     /// `--inject FILE`: a JSONL of events applied to the live conversation after the task (rows a
@@ -62,6 +66,15 @@ pub struct Args {
 /// `--live SCRIPT [--prompt TEXT] [--answer once|always|deny|none]`: the real engine on a scripted model
 /// (needs a build with `--features test-provider`) runs the prompt in a throwaway home and folder,
 /// and the window shows the resulting conversation.
+/// File, first and last line (1-based).
+type Sel = (String, usize, usize);
+
+fn sel_spec(s: &str) -> Option<Sel> {
+    let (f, r) = s.rsplit_once(':')?;
+    let (a, b) = r.split_once('-')?;
+    Some((f.into(), a.parse().ok()?, b.parse().ok()?))
+}
+
 pub struct LiveShot {
     script: PathBuf,
     /// Absent: nothing is sent (an empty chat).
@@ -71,6 +84,10 @@ pub struct LiveShot {
     cmd: Option<String>,
     /// `--peers FILE`: a JSON array of peer rows (the `/peers` listing) the window has polled.
     peers: Option<PathBuf>,
+    /// `--select FILE:A-B` (with `--quote`): a demo file is written to the folder, so the explorer lists it.
+    select: Option<Sel>,
+    /// `--quote`: the selected lines are quoted: into `--prompt` when there is one, else as the chip under the input.
+    quote: bool,
     /// `--send-pick N`: option N (from 1) of the picker `--cmd` opened is chosen (the chip shows).
     send_pick: Option<usize>,
     /// `--earlier TEXT`: a first session of the same folder and home that ran this prompt and
@@ -227,6 +244,8 @@ pub fn parse(args: &[String]) -> Option<Args> {
         },
         cmd: val("--cmd").cloned(),
         peers: val("--peers").map(PathBuf::from),
+        select: val("--select").and_then(|v| sel_spec(v)),
+        quote: args.iter().any(|a| a == "--quote"),
         send_pick: val("--send-pick").and_then(|n| n.parse().ok()),
         earlier: val("--earlier").cloned(),
         other: val("--other").cloned(),
@@ -256,7 +275,11 @@ pub fn parse(args: &[String]) -> Option<Args> {
             Some("right") => Some(super::Side::Right),
             _ => None,
         },
-        open: val("--open").cloned(),
+        open: val("--open")
+            .cloned()
+            .or_else(|| val("--select").and_then(|v| sel_spec(v)).map(|s| s.0)),
+        select: val("--select").and_then(|v| sel_spec(v)),
+        quote: args.iter().any(|a| a == "--quote"),
         view: match val("--view").map(String::as_str) {
             Some("settings") => crate::ui::View::Settings,
             _ => crate::ui::View::Tui,
@@ -329,6 +352,19 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
                 .to_string(),
         ),
     ]);
+    if let Some((f, ..)) = &l.select {
+        // a demo file in a throwaway git repository: the explorer lists what git lists
+        let file = ws.join(f);
+        std::fs::create_dir_all(file.parent().unwrap_or(&ws))?;
+        let body: String = (1..=40)
+            .map(|i| format!("    let value_{i} = compute({i}); // step {i}\n"))
+            .collect();
+        std::fs::write(&file, format!("fn main() {{\n{body}}}\n"))?;
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&ws)
+            .status()?;
+    }
     // `{WS}` in the script is the throwaway folder (a Write needs an absolute path)
     let script = tmp.join("script.json");
     std::fs::write(
@@ -385,6 +421,14 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
     std::thread::sleep(Duration::from_millis(50));
     drain(&mut live, &mut rx);
     if let Some(Submitted::Send(t)) = l.prompt.as_deref().map(|p| live.submit(p)) {
+        let t = match (&l.select, l.quote) {
+            (Some((f, a, b)), true) => {
+                let lines = super::tabs::read_preview(&ws, f)?.lines;
+                let q = super::quote::from_range(f, &lines, a - 1, b - 1)?;
+                super::quote::compose(&t, &[q])
+            }
+            _ => t,
+        };
         engine.send(t).map_err(|e| e.to_string())?;
     }
     if l.prompt.is_some() {
@@ -665,6 +709,17 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 for _ in 0..40 {
                     cx.run_until_parked();
                     std::thread::sleep(Duration::from_millis(25));
+                }
+                let a_quote_chip = a.quote && a.live.as_ref().is_none_or(|l| l.prompt.is_none());
+                if let Some((_, a, b)) = &a.select {
+                    tui.update(&mut cx, |t, cx| {
+                        t.ts.sel = Some((a - 1, b - 1));
+                        // with a prompt the quote already went with it
+                        if a_quote_chip {
+                            t.quote_selection(cx);
+                        }
+                    });
+                    cx.run_until_parked();
                 }
                 eprintln!(
                     "selected: {:?}",

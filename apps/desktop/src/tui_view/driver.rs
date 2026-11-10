@@ -582,7 +582,18 @@ impl TuiView {
         lu.comp = None;
         lu.hist = None;
         lu.search = None;
-        match lu.live.submit_as(&text, now) {
+        // the quotes of the file explorer go with a prompt, never with a command
+        let quoted = !self.ts.quotes.is_empty()
+            && !text.trim().is_empty()
+            && !text.starts_with(['/', '!', '#']);
+        if quoted {
+            text = super::quote::compose(&text, &self.ts.quotes);
+        }
+        let sent = lu.live.submit_as(&text, now);
+        if quoted && !matches!(sent, Submitted::Held) {
+            self.ts.quotes.clear();
+        }
+        match sent {
             Submitted::Held => {
                 lu.dirty = true;
                 return cx.notify();
@@ -832,6 +843,27 @@ impl TuiView {
                 _ => return false,
             }
             self.show_search_hit(window, cx);
+            return true;
+        }
+        // Backspace on an empty input drops the newest quote chip
+        if key == "backspace"
+            && !ctrl
+            && !cmd
+            && !self.ts.quotes.is_empty()
+            && text_of(&lu.prompt, cx).is_empty()
+        {
+            self.ts.quotes.pop();
+            cx.notify();
+            return true;
+        }
+        // Cmd/Ctrl+C with lines selected in the file explorer copies them (not while text is selected in the input)
+        if key == "c"
+            && (ks.modifiers.platform || ctrl)
+            && self.ts.tab == super::ChatTab::Files
+            && self.ts.sel.is_some()
+            && lu.prompt.read(cx).selected_range().is_empty()
+        {
+            self.copy_selection(cx);
             return true;
         }
         match (key, ctrl) {
