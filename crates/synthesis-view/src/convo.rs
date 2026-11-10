@@ -371,6 +371,11 @@ impl Convo {
                     .zip(self.started_ms)
                     .map_or(0, |(end, start)| ((end - start) / 1000).max(0));
                 let checks = self.checks.take();
+                if let Some((_, msg)) = model_error_parts(reason)
+                    && matches!(self.items.last(), Some(Item::Notice { text, .. }) if text == msg)
+                {
+                    self.items.pop();
+                }
                 self.items.push(if *status == TaskStatus::Completed {
                     Item::TaskEnd {
                         ok: true,
@@ -393,6 +398,14 @@ impl Convo {
                     };
                     let text = if *status == TaskStatus::Cancelled && reason == "cancelled" {
                         "interrupted".into()
+                    } else if let Some((kind, msg)) = model_error_parts(reason) {
+                        // one line: the model-error notice just above says the same thing
+                        let hint = if kind == "auth" {
+                            " \u{2014} check your API key env"
+                        } else {
+                            ""
+                        };
+                        format!("model error ({kind}): {}{hint}", sanitize_for_display(msg))
                     } else if reason.is_empty() || reason == word {
                         format!("task {word}")
                     } else {
@@ -846,6 +859,11 @@ impl Convo {
     }
 }
 
+/// `model_error:<kind>: <message>` (the harness's task-end reason) as (kind, message).
+fn model_error_parts(reason: &str) -> Option<(&str, &str)> {
+    reason.strip_prefix("model_error:")?.split_once(": ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1237,6 +1255,21 @@ mod tests {
                 "blocked".into(),
                 String::new()
             )
+        );
+        // a model error and its task end are one line
+        c.items.clear();
+        c.apply(&ev(
+            "model.error",
+            json!({"message":"Invalid API key","retryable":false,"context_overflow":false}),
+        ));
+        c.apply(&ev(
+            "task.ended",
+            ended("blocked", "model_error:auth: Invalid API key"),
+        ));
+        assert_eq!(c.items.len(), 1);
+        assert_eq!(
+            word(&c).1,
+            "model error (auth): Invalid API key \u{2014} check your API key env"
         );
         c.apply(&ev("task.ended", ended("failed", "failed")));
         assert_eq!(word(&c).1, "task failed");

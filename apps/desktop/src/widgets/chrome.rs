@@ -550,6 +550,24 @@ fn marquee_left(d: f32, travel: f32) -> f32 {
     -(d / moving).min(1.) * travel
 }
 
+/// Width the header row keeps for the prompt marquee at least (about 20 characters).
+const MIN_PROMPT_SLOT: f32 = 150.;
+
+/// The header tail that still leaves the prompt slot its minimum: `path | stats`, then `path`, then nothing.
+/// The lower-priority stats go first as the row narrows, then the path.
+pub fn header_tail(path: &str, stats: &str, status: &str, width: f32) -> String {
+    let slot = |tail: &str| width - header_fixed(status, tail);
+    [format!("{path} | {stats}"), path.to_string()]
+        .into_iter()
+        .find(|t| slot(t) >= MIN_PROMPT_SLOT)
+        .unwrap_or_default()
+}
+
+/// What the header row holds besides the prompt slot (icon, "Synthesis", status, rule, context bar, tail, gaps).
+fn header_fixed(status: &str, tail: &str) -> f32 {
+    14. + 7.5 * (9 + status.chars().count() + 1 + tail.chars().count()) as f32 + 54. + 84.
+}
+
 /// `#chead`: icon, "Synthesis", the status word, the latest prompt (clipped), the context bar and `tail`
 /// (folder and change counts). 36.4px: 8px padding around one line, and the 1px rule.
 pub fn chat_head(
@@ -564,9 +582,7 @@ pub fn chat_head(
     let label = format!("Latest user prompt: {prompt}");
     let tw = label.chars().count() as f32 * 7.5;
     // what else the row holds (icon, "Synthesis", status, rule, context bar, tail, gaps) leaves the slot
-    let fixed =
-        14. + 7.5 * (9 + status.chars().count() + 1 + tail.chars().count()) as f32 + 54. + 84.;
-    let slot_w = (width - fixed).max(0.);
+    let slot_w = (width - header_fixed(status, tail)).max(0.);
     // `prompt-scroll`: only once a prompt was sent. With motion one copy enters at the slot's right edge, runs
     // left and leaves through its left edge, then the next run starts; without motion it is plain clipped text.
     let prompt_el: gpui::AnyElement = if prompt.is_empty() {
@@ -644,6 +660,19 @@ pub fn chat_head(
                 ),
         )
         .child(div().flex_none().text_color(dim()).child(tail.to_string()))
+}
+
+#[cfg(test)]
+mod header_tail_tests {
+    use super::*;
+
+    #[test]
+    fn stats_then_path_drop_as_the_row_narrows() {
+        let (p, st) = ("~/Vibe/synthesis", "12 files | 3.2k LOC");
+        assert_eq!(header_tail(p, st, "ready", 1100.), format!("{p} | {st}"));
+        assert_eq!(header_tail(p, st, "ready", 620.), p);
+        assert_eq!(header_tail(p, st, "ready", 400.), "");
+    }
 }
 
 #[cfg(test)]
