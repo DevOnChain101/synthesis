@@ -1443,12 +1443,18 @@ impl Live {
             self.history.push(text.to_string());
         }
         if let Some(rest) = text.strip_prefix('/') {
-            let name = rest.split_whitespace().next().unwrap_or("");
+            let typed = rest.split_whitespace().next().unwrap_or("");
+            // the terminal TUI's two aliases
+            let name = match typed {
+                "quit" => "exit",
+                "perms" => "permissions",
+                n => n,
+            };
             match self.commands.iter().find(|c| c.name == name) {
                 // skills and MCP prompts are for the engine
                 Some(c) if !c.local => {}
                 Some(_) => {
-                    let arg = rest.trim_start()[name.len()..].trim();
+                    let arg = rest.trim_start()[typed.len()..].trim();
                     return self.command(name, arg);
                 }
                 None => {
@@ -1799,6 +1805,11 @@ impl Live {
             "mcp" => self.info(|e| e.mcp_report()),
             "memory" if !arg.is_empty() => self.memory_cmd(arg, now_ms()),
             "memory" => self.info(|e| e.memory_report.clone()),
+            // `--all` (or `-a`): the other sessions too, as the `/peers` table
+            "agents" if arg.split_whitespace().any(|a| a == "--all" || a == "-a") => {
+                self.info(|e| e.agents_report());
+                return self.command("peers", "");
+            }
             "agents" => self.info(|e| e.agents_report()),
             "permissions" if arg.is_empty() || arg == "list" => {
                 self.info(|e| e.permissions_report())
@@ -3059,6 +3070,12 @@ mod tests {
             Submitted::Do(Action::ShowDiff(Some("a.rs".into())))
         );
         assert_eq!(l.submit("/peers"), Submitted::Do(Action::Peers));
+        // the terminal TUI's aliases
+        assert_eq!(l.submit("/quit"), Submitted::Quit);
+        l.submit("/perms bogus");
+        assert!(
+            matches!(l.view.convo.items.last(), Some(Item::Notice { warning: true, text }) if !text.contains("unknown command"))
+        );
         assert_eq!(
             l.submit("/send ws:api/sess:backend  what sets the TTL? "),
             Submitted::Do(Action::Send {
