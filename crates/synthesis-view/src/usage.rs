@@ -223,6 +223,62 @@ pub fn month_grid<'a>(history: &'a [HistoryDay], tz: i32, now: i64) -> MonthGrid
     }
 }
 
+/// The year heatmap: `cols` weeks (oldest first, the last one holds today), each Sunday to Saturday; `None` is a
+/// day before the history or after today. `max` is the busiest day (at least 1) for [`heat_level`].
+pub struct YearGrid<'a> {
+    pub cols: Vec<[Option<&'a HistoryDay>; 7]>,
+    pub max: f64,
+}
+
+pub fn year_grid<'a>(
+    history: &'a [HistoryDay],
+    tz: i32,
+    weeks: i64,
+    val: &dyn Fn(&HistoryDay) -> f64,
+) -> YearGrid<'a> {
+    let Some(today) = history.last() else {
+        return YearGrid {
+            cols: vec![],
+            max: 1.0,
+        };
+    };
+    let today_dow = civil(today.date_ms, tz).dow as i64;
+    let mut max = 1.0f64;
+    let cols = (0..weeks)
+        .map(|c| {
+            std::array::from_fn(|r| {
+                let ago = (weeks - 1 - c) * 7 + (today_dow - r as i64);
+                let idx = history.len() as i64 - 1 - ago;
+                let d = if ago < 0 || idx < 0 {
+                    None
+                } else {
+                    history.get(idx as usize)
+                };
+                if let Some(d) = d {
+                    max = max.max(val(d));
+                }
+                d
+            })
+        })
+        .collect();
+    YearGrid { cols, max }
+}
+
+/// Per week column, the month (0-11) whose 1st falls in it: where the month labels go.
+pub fn year_month_starts(grid: &YearGrid, tz: i32) -> Vec<Option<usize>> {
+    grid.cols
+        .iter()
+        .map(|col| {
+            col.iter()
+                .flatten()
+                .map(|d| civil(d.date_ms, tz))
+                .filter(|c| c.day == 1)
+                .map(|c| c.month)
+                .next_back()
+        })
+        .collect()
+}
+
 /// The numbers of the Usage panel's summary rows, for the metric `val` (the CLI and the desktop app draw them).
 pub struct MonthSummary {
     pub today: f64,
@@ -305,6 +361,35 @@ mod tests {
             browser: 8,
             mcp: 9,
         }
+    }
+
+    #[test]
+    fn the_year_grid_ends_with_today_and_marks_month_starts() {
+        // 2026-11-10 is a Tuesday (day 20767)
+        let h: Vec<HistoryDay> = (20_600..=20_767)
+            .map(|n| HistoryDay {
+                date_ms: n * MS_DAY,
+                tokens: if n == 20_767 { 5.0 } else { 0.0 },
+                ..Default::default()
+            })
+            .collect();
+        let g = year_grid(&h, 0, 53, &|d| d.tokens);
+        assert_eq!(g.cols.len(), 53);
+        let last = g.cols.last().unwrap();
+        assert_eq!(
+            (last[2].map(|d| d.tokens), last[3].is_none()),
+            (Some(5.0), true)
+        );
+        assert!(g.cols[0].iter().all(Option::is_none), "before the history");
+        assert_eq!(g.max, 5.0);
+        let starts = year_month_starts(&g, 0);
+        assert_eq!(starts.last().unwrap(), &None);
+        assert_eq!(
+            starts[52 - 1],
+            Some(10),
+            "Nov 1 is a Sunday, the week before the last"
+        );
+        assert!(year_grid(&[], 0, 53, &|d| d.tokens).cols.is_empty());
     }
 
     #[test]

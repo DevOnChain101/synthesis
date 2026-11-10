@@ -47,7 +47,7 @@ pub(crate) fn with_alpha_white(a: f32) -> Hsla {
     chrome::with_alpha(gpui::white(), a)
 }
 
-/// The TUI view's font: `cli.html` `--mono` (bundled Fira Code, SIL OFL), at its body weight 500.
+/// The TUI view's font: `cli.html` `--mono` (bundled Fira Code, SIL OFL), at weight 400 (Regular; owner decision 2026-11-10, `cli.html` used 500).
 /// Tools & Skills body: five 21.4px rows (`li` 1+19.4+1) and the 2px top and 6px bottom padding; the rest scrolls.
 const TOOLS_MAX_H: f32 = 5. * 21.4 + 8.;
 pub const MONO: &str = crate::brand::MONO_FONT;
@@ -935,16 +935,16 @@ impl TuiView {
                     } else {
                         self.topo_h.get() + self.month_used.get() - tier.topo_min
                     };
+                    let body_w = cols(w).right - 2. * 12. - 2.;
                     let mode = if self.is_folded("p-usage") {
                         layout::MonthMode::Hidden
                     } else {
-                        layout::month_mode(slack, &s.usage.month)
+                        layout::month_mode(slack, &s.usage.month, body_w)
                     };
                     self.month_used.set(match mode {
                         layout::MonthMode::Hidden => 0.,
-                        m => layout::month_h(m, &s.usage.month) + layout::MONTH_GAP,
+                        m => layout::month_h(m, &s.usage.month, body_w) + layout::MONTH_GAP,
                     });
-                    let body_w = cols(w).right - 2. * 12. - 2.;
                     panels::usage_body(&s.usage).when(mode != layout::MonthMode::Hidden, |d| {
                         d.child(panels::month_section(&s.usage.month, mode, body_w))
                     })
@@ -1108,7 +1108,7 @@ impl Render for TuiView {
             .overflow_hidden()
             .bg(crate::theme::fill(t::BG))
             .font_family(MONO)
-            .font_weight(FontWeight::MEDIUM)
+            .font_weight(FontWeight::NORMAL)
             .text_size(px(12.5))
             .line_height(gpui::relative(1.55))
             .text_color(text())
@@ -1222,12 +1222,7 @@ mod tests {
         });
         let mut l = Live::new();
         l.starting = false;
-        l.view.convo.items = (0..2000)
-            .map(|i| Item::Notice {
-                warning: false,
-                text: format!("row {i}"),
-            })
-            .collect();
+        l.view.convo.items = (0..2000).map(|i| Item::User(format!("row {i}"))).collect();
         view.update(vcx, |t, _| t.set_live(l));
         vcx.simulate_resize(size(px(1400.), px(900.)));
         vcx.run_until_parked();

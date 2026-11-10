@@ -50,22 +50,51 @@ pub fn cols(width: f32) -> Cols {
 /// in `TuiView::chat` pads them all, so no tab draws up to the frame's border.
 pub const TAB_PAD_X: f32 = 16.;
 
-/// What the Usage panel shows of the CLI's month section under the metric bars (never at the bars' expense).
+/// What the Usage panel shows of the CLI's usage section under the metric bars (never at the bars' expense).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MonthMode {
-    /// The calendar grid, summary and legend.
+    /// The year heatmap (53 weeks), the legend and the summary rows.
     Full,
-    /// The one-line strip of the days so far (the CLI's short panel) or the loading line.
+    /// The year heatmap and the legend only.
+    Grid,
+    /// The one-line strip of the days of the month so far (the CLI's short panel) or the loading line.
     Strip,
     Hidden,
 }
 
-/// Height of the month section in `mode` (border, title, grid or strip, legend).
-pub fn month_h(mode: MonthMode, m: &super::sample::MonthUse) -> f32 {
+/// Width of the weekday labels (M / W / F) left of the year grid.
+pub const YEAR_LABEL_W: f32 = 16.;
+/// Weeks of the year grid.
+pub const YEAR_WEEKS: usize = 53;
+/// Narrowest pitch (px) of a day cell: fewer weeks are drawn rather than smaller dots.
+const YEAR_MIN_PITCH: f32 = 4.;
+/// Below this body width the summary rows (two columns) do not fit.
+const SUMMARY_MIN_W: f32 = 280.;
+
+/// Weeks drawn and the pitch of a day cell for a body of `body_w` px: the pitch grows with the width so the grid
+/// fills it (at most 14 px), and below 4 px the oldest weeks are dropped instead.
+pub fn year_fit(body_w: f32) -> (usize, f32) {
+    let avail = (body_w - YEAR_LABEL_W).max(0.);
+    let pitch = (avail / YEAR_WEEKS as f32).clamp(YEAR_MIN_PITCH, 14.);
+    (((avail / pitch) as usize).clamp(1, YEAR_WEEKS), pitch)
+}
+
+/// Height of the section in `mode` (border, title, grid or strip, legend, summary).
+pub fn month_h(mode: MonthMode, m: &super::sample::MonthUse, body_w: f32) -> f32 {
+    // border + padding + title + gap
+    let head = 1. + 5. + 16. + 4.;
     match mode {
         _ if m.note.is_some() => 28.,
-        MonthMode::Full => 144.,
-        MonthMode::Strip => 58.,
+        MonthMode::Full | MonthMode::Grid if !m.year.is_empty() => {
+            let grid = 12. + 2. + 7. * year_fit(body_w).1 + 4. + 14.;
+            let summary = if mode == MonthMode::Full {
+                4. + 3. * 16.
+            } else {
+                0.
+            };
+            (head + grid + summary).ceil()
+        }
+        MonthMode::Full | MonthMode::Grid | MonthMode::Strip => 58.,
         MonthMode::Hidden => 0.,
     }
 }
@@ -75,12 +104,21 @@ pub const MONTH_GAP: f32 = 6.;
 
 /// The section is drawn whole or not at all: `slack` is the height the right column can give it without the
 /// topology panel dropping below its minimum, so no other panel and no bar moves.
-pub fn month_mode(slack: f32, m: &super::sample::MonthUse) -> MonthMode {
+pub fn month_mode(slack: f32, m: &super::sample::MonthUse, body_w: f32) -> MonthMode {
+    let fits = |mode| slack >= month_h(mode, m, body_w) + MONTH_GAP;
     if m.is_empty() {
         MonthMode::Hidden
-    } else if slack >= month_h(MonthMode::Full, m) + MONTH_GAP {
+    } else if m.year.is_empty() || m.note.is_some() {
+        if fits(MonthMode::Strip) {
+            MonthMode::Strip
+        } else {
+            MonthMode::Hidden
+        }
+    } else if body_w >= SUMMARY_MIN_W && fits(MonthMode::Full) {
         MonthMode::Full
-    } else if slack >= month_h(MonthMode::Strip, m) + MONTH_GAP {
+    } else if fits(MonthMode::Grid) {
+        MonthMode::Grid
+    } else if fits(MonthMode::Strip) {
         MonthMode::Strip
     } else {
         MonthMode::Hidden
@@ -252,20 +290,48 @@ mod tests {
     fn the_month_section_shows_whole_or_not_at_all() {
         use super::super::sample::{DayDot, MonthUse};
         let mut m = MonthUse::default();
-        assert_eq!(month_mode(999., &m), MonthMode::Hidden, "nothing to draw");
+        assert_eq!(
+            month_mode(999., &m, 300.),
+            MonthMode::Hidden,
+            "nothing to draw"
+        );
         m.weeks = vec![
             [Some(DayDot {
                 level: 0,
                 future: false,
             }); 7],
         ];
-        assert_eq!(month_mode(-5., &m), MonthMode::Hidden);
-        assert_eq!(month_mode(63.9, &m), MonthMode::Hidden);
-        assert_eq!(month_mode(64., &m), MonthMode::Strip);
-        assert_eq!(month_mode(149.9, &m), MonthMode::Strip);
-        assert_eq!(month_mode(150., &m), MonthMode::Full);
+        assert_eq!(month_mode(-5., &m, 300.), MonthMode::Hidden);
+        assert_eq!(month_mode(63.9, &m, 300.), MonthMode::Hidden);
+        assert_eq!(month_mode(64., &m, 300.), MonthMode::Strip);
+        // with a year grid: the grid first, the summary on top of it when there is room and width
+        m.year = vec![[None; 7]; YEAR_WEEKS];
+        let (full, grid) = (
+            month_h(MonthMode::Full, &m, 300.),
+            month_h(MonthMode::Grid, &m, 300.),
+        );
+        assert!(full > grid && grid > month_h(MonthMode::Strip, &m, 300.));
+        assert_eq!(month_mode(full + MONTH_GAP, &m, 300.), MonthMode::Full);
+        assert_eq!(
+            month_mode(full + MONTH_GAP - 0.1, &m, 300.),
+            MonthMode::Grid
+        );
+        assert_eq!(month_mode(grid + MONTH_GAP, &m, 270.), MonthMode::Grid);
+        assert_eq!(
+            month_mode(grid + MONTH_GAP - 0.1, &m, 300.),
+            MonthMode::Strip
+        );
         m.note = Some("loading usage".into());
-        assert_eq!(month_h(MonthMode::Strip, &m), 28.);
+        assert_eq!(month_h(MonthMode::Strip, &m, 300.), 28.);
+    }
+
+    #[test]
+    fn the_year_grid_fills_the_width() {
+        assert_eq!(year_fit(300.).0, 53);
+        assert!((year_fit(300.).1 * 53. + YEAR_LABEL_W - 300.).abs() < 0.01);
+        assert_eq!(year_fit(1000.).1, 14.);
+        let (weeks, pitch) = year_fit(120.);
+        assert!(pitch == 4. && weeks == 26, "{weeks} {pitch}");
     }
 
     #[test]

@@ -9,7 +9,7 @@ use gpui::{
 use synthesis_tui_render::theme as t;
 
 use super::activity::{Presence, RunState, presence};
-use super::layout::{MONTH_GAP, MonthMode, month_h};
+use super::layout::{MONTH_GAP, MonthMode, YEAR_LABEL_W, month_h, year_fit};
 use super::sample::{
     ActKind, ActivityRow, AgentStatus, ContextInfo, DayDot, MonthUse, Running, SessionInfo,
     StepKind, Tone, ToolsInfo, Usage, Workspace,
@@ -697,7 +697,7 @@ fn legend() -> Div {
 pub fn month_section(m: &MonthUse, mode: MonthMode, body_w: f32) -> Div {
     let mut d = div()
         .debug_selector(|| "usage-month".to_string())
-        .h(px(month_h(mode, m)))
+        .h(px(month_h(mode, m, body_w)))
         .flex_none()
         .flex()
         .flex_col()
@@ -710,11 +710,12 @@ pub fn month_section(m: &MonthUse, mode: MonthMode, body_w: f32) -> Div {
     if let Some(n) = &m.note {
         return d.child(div().text_color(dim()).child(n.clone()));
     }
-    let title = m
-        .titles
+    let year = mode != MonthMode::Strip && !m.year.is_empty();
+    let titles = if year { &m.year_titles } else { &m.titles };
+    let title = titles
         .iter()
         .find(|t| t.chars().count() as f32 * CH <= body_w)
-        .unwrap_or(&m.titles[2]);
+        .unwrap_or(&titles[2]);
     d = d.child(
         div()
             .h(px(16.))
@@ -722,7 +723,7 @@ pub fn month_section(m: &MonthUse, mode: MonthMode, body_w: f32) -> Div {
             .text_color(dim())
             .child(title.clone()),
     );
-    if mode == MonthMode::Strip {
+    if !year {
         let n = ((body_w / CELL) as usize).max(1);
         let all = m.strip();
         let from = all.len().saturating_sub(n);
@@ -735,68 +736,103 @@ pub fn month_section(m: &MonthUse, mode: MonthMode, body_w: f32) -> Div {
             })))
             .child(legend());
     }
-    let grid_w = 16. + m.weeks.len() as f32 * CELL;
-    let side_w = 20. * CH;
-    let grid = div()
-        .flex()
-        .flex_col()
+    // the CLI's year grid: weeks as columns sized to the width (the oldest weeks drop when it is too narrow),
+    // month labels above, M / W / F at the left
+    let (weeks, pitch) = year_fit(body_w);
+    let skip = m.year.len() - weeks;
+    let dot = pitch - if pitch >= 9. { 2. } else { 1. };
+    let mut last_x = f32::MIN;
+    let marks = m.year_marks.iter().filter_map(|(c, name)| {
+        let x = YEAR_LABEL_W + c.checked_sub(skip)? as f32 * pitch;
+        // a label is three 10 px letters (about 18 px) wide; never over the previous one or past the edge
+        (x - last_x >= 20. && x + 18. <= body_w).then(|| {
+            last_x = x;
+            div().absolute().left(px(x)).child(*name)
+        })
+    });
+    d = d
         .child(
             div()
-                .h(px(14.))
-                .line_height(px(14.))
+                .relative()
+                .h(px(12.))
+                .flex_none()
+                .text_size(px(10.))
+                .line_height(px(12.))
                 .text_color(dim())
                 .whitespace_nowrap()
-                .child(m.label.clone()),
+                .children(marks),
         )
-        .children((0..7).map(|r| {
+        .child(
             div()
-                .h(px(CELL))
                 .flex()
-                .items_center()
-                .child(
+                .flex_col()
+                .mt(px(-2.))
+                .children((0..7).map(|r| {
                     div()
-                        .w(px(16.))
-                        .flex_none()
-                        .text_size(px(10.))
-                        .text_color(dim())
-                        .child(["", "M", "", "W", "", "F", ""][r]),
-                )
-                .children(m.weeks.iter().map(|w| day_dot(w[r])))
-        }));
-    let side = (grid_w + 24. + side_w <= body_w).then(|| {
-        div()
-            .flex()
-            .flex_col()
-            .justify_center()
-            .children(m.summary.iter().map(|(k, v, sub, tone)| {
-                div()
-                    .h(px(16.))
-                    .line_height(px(14.))
-                    .flex()
-                    .items_center()
-                    .whitespace_nowrap()
-                    .child(div().w(px(52.)).flex_none().text_color(dim()).child(*k))
-                    .child(
-                        div()
-                            .text_color(match tone {
-                                Tone::Plain => text(),
-                                Tone::Accent => hsla(t::ACCENT),
-                                Tone::Ok => hsla(t::SUCCESS),
-                            })
-                            .child(v.clone()),
-                    )
-                    .child(div().text_color(dim()).child(sub.clone()))
-            }))
-    });
-    d.child(
-        div()
-            .flex()
-            .justify_center()
-            .gap(px(24.))
-            .child(grid)
-            .children(side),
-    )
-    .child(legend())
+                        .h(px(pitch))
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .w(px(YEAR_LABEL_W))
+                                .flex_none()
+                                .text_size(px(10.))
+                                .text_color(dim())
+                                .child(["", "M", "", "W", "", "F", ""][r]),
+                        )
+                        .children(m.year[skip..].iter().map(|w| {
+                            let cell = div().size(px(pitch)).flex_none().flex().items_center();
+                            match w[r] {
+                                Some(x) => cell.child(
+                                    div()
+                                        .size(px(dot))
+                                        .rounded(px(if dot >= 6. { 2. } else { 1. }))
+                                        .bg(heat(x.level)),
+                                ),
+                                None => cell,
+                            }
+                        }))
+                })),
+        )
+        .child(legend());
+    if mode == MonthMode::Full {
+        let rows = |r: &[(&'static str, String, String, Tone)]| {
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .children(r.iter().map(|(k, v, sub, tone)| {
+                    div()
+                        .h(px(16.))
+                        .line_height(px(14.))
+                        .flex()
+                        .items_center()
+                        .whitespace_nowrap()
+                        .child(div().w(px(52.)).flex_none().text_color(dim()).child(*k))
+                        .child(
+                            div()
+                                .text_color(match tone {
+                                    Tone::Plain => text(),
+                                    Tone::Accent => hsla(t::ACCENT),
+                                    Tone::Ok => hsla(t::SUCCESS),
+                                })
+                                .child(v.clone()),
+                        )
+                        .child(div().text_color(dim()).child(sub.clone()))
+                }))
+        };
+        let (a, b) = m.summary.split_at(m.summary.len().div_ceil(2));
+        d = d.child(
+            div()
+                .flex()
+                .gap(px(12.))
+                .mt(px(0.))
+                .child(rows(a))
+                .child(rows(b)),
+        );
+    }
+    d
 }
 
 /// The scroll offset (px from the top) that brings the row `[top, top + row)` into a view of

@@ -391,7 +391,9 @@ fn grouped(n: u64) -> String {
 /// The Usage month section of the classic CLI (tokens): the calendar grid, its heat levels and the summary rows,
 /// from the shared `synthesis_view::usage` month logic. `days` empty: the history is still being read.
 fn month_use(days: &[synthesis_view::usage::HistoryDay], tz_min: i32, now: i64) -> MonthUse {
-    use synthesis_view::usage::{MONTHS, heat_level, month_grid, month_summary};
+    use synthesis_view::usage::{
+        MONTHS, heat_level, month_grid, month_summary, year_grid, year_month_starts,
+    };
     if days.is_empty() {
         return MonthUse {
             note: Some("loading usage\u{2026}".into()),
@@ -409,6 +411,8 @@ fn month_use(days: &[synthesis_view::usage::HistoryDay], tz_min: i32, now: i64) 
         .map(|d| d.entry.map_or(0., val))
         .fold(1., f64::max);
     let sm = month_summary(days, &grid, &val);
+    let yg = year_grid(days, tz_min, super::layout::YEAR_WEEKS as i64, &val);
+    let year_total = tok(days.iter().map(val).sum::<f64>() as u64);
     let (total, count) = (tok(sm.month as u64), |n: usize, w: &str| format!("{n}{w}"));
     MonthUse {
         label: format!("{} {}", MONTHS[grid.month], grid.year),
@@ -416,6 +420,28 @@ fn month_use(days: &[synthesis_view::usage::HistoryDay], tz_min: i32, now: i64) 
             format!("Usage \u{b7} tokens \u{b7} {total} this month"),
             format!("Usage \u{b7} tokens \u{b7} {total}"),
             format!("Usage \u{b7} {total}"),
+        ],
+        year: yg
+            .cols
+            .iter()
+            .map(|w| {
+                w.map(|d| {
+                    d.map(|d| DayDot {
+                        level: heat_level(Some(val(d)), Some(yg.max)) as u8,
+                        future: false,
+                    })
+                })
+            })
+            .collect(),
+        year_marks: year_month_starts(&yg, tz_min)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(c, m)| Some((c, MONTHS[m?])))
+            .collect(),
+        year_titles: [
+            format!("Usage \u{b7} tokens \u{b7} {year_total} this year"),
+            format!("Usage \u{b7} tokens \u{b7} {year_total}"),
+            format!("Usage \u{b7} {year_total}"),
         ],
         weeks: grid
             .weeks
@@ -1156,6 +1182,13 @@ mod tests {
         assert_eq!((row("streak").1, row("today").1), ("1".into(), "50".into()));
         assert_eq!(m.strip().len(), 10);
         assert_eq!(m.titles[2], "Usage \u{b7} 1k");
+        // the year heatmap: 53 weeks ending with today's week (Tue = row 2), the busiest day of the year is level 4
+        assert_eq!(m.year.len(), 53);
+        let (last, prev) = (m.year[52], m.year[51]);
+        assert_eq!((last[2].unwrap().level, last[3].is_none()), (1, true));
+        assert_eq!(prev[2].unwrap().level, 4, "Nov 3");
+        assert_eq!(m.year_marks.last(), Some(&(51, "Nov")));
+        assert_eq!(m.year_titles[2], "Usage \u{b7} 1k");
         // no history yet: the CLI's loading line, no grid
         assert_eq!(
             month_use(&[], 0, 0).note.as_deref(),

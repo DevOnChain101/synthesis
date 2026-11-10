@@ -48,6 +48,21 @@ pub fn visible(it: &Item, show_thinking: bool, verbose: bool, focus: bool) -> bo
     }
 }
 
+/// `Some` when the chat holds nothing but notices (or nothing): the latest notice as (warning, text).
+fn notices_only(rows: &[super::driver::Row], items: &[Item]) -> Option<Option<(bool, String)>> {
+    let mut last = None;
+    for r in rows {
+        match r {
+            super::driver::Row::Item(i) => match items.get(*i) {
+                Some(Item::Notice { warning, text }) => last = Some((*warning, text.clone())),
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+    Some(last)
+}
+
 /// Left edge of what sits under a speaker's text: the row's 10px padding, the 34px avatar column, the 10px gap.
 const INDENT: f32 = 54.;
 
@@ -333,8 +348,19 @@ impl TuiView {
         let Some(lu) = &self.live else {
             return div().into_any_element();
         };
-        if lu.rows.is_empty() {
-            return self.welcome().into_any_element();
+        // no message yet (notices alone, e.g. after /close-workspace or /clear): the welcome, with the latest notice
+        if let Some(n) = notices_only(&lu.rows, &lu.live.view.convo.items) {
+            return self
+                .welcome()
+                .children(n.map(|(warning, text)| {
+                    div()
+                        .max_w(px(560.))
+                        .px(px(16.))
+                        .mt(px(12.))
+                        .text_color(if warning { hsla(t::WARN) } else { dim() })
+                        .child(text)
+                }))
+                .into_any_element();
         }
         let rows = list(
             lu.list.clone(),
@@ -564,7 +590,7 @@ impl TuiView {
                         .justify_center()
                         .bg(hsla(t::INFO))
                         .child(icon("user", 14., hsla(t::BG))),
-                    "you",
+                    "YOU",
                     hsla(t::INFO),
                     &time,
                     div()
@@ -1482,6 +1508,21 @@ mod tests {
         assert!(blink_on(0) && blink_on(529));
         assert!(!blink_on(530) && !blink_on(1059));
         assert!(blink_on(1060));
+    }
+
+    #[test]
+    fn notices_alone_leave_the_welcome_up() {
+        use super::super::driver::Row;
+        let n = |t: &str| Item::Notice {
+            warning: false,
+            text: t.into(),
+        };
+        assert_eq!(notices_only(&[], &[]), Some(None));
+        let items = [n("a"), n("b"), Item::User("hi".into())];
+        let rows = [Row::Item(0), Row::Item(1)];
+        assert_eq!(notices_only(&rows, &items), Some(Some((false, "b".into()))));
+        assert_eq!(notices_only(&[Row::Item(0), Row::Item(2)], &items), None);
+        assert_eq!(notices_only(&[Row::Activity], &items), None);
     }
 
     #[test]
