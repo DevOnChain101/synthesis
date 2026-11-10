@@ -351,15 +351,14 @@ fn hiding_panels_gives_their_space_away(cx: &mut TestAppContext) {
     );
     assert!(get(v, "p-activity").is_none());
 
-    // Agent Status cannot be hidden: hiding Context leaves it the whole row
+    // hiding Context leaves Mission (it has tasks in the sample) the whole row
     let mut h = Hidden::default();
-    assert!(!h.hide("status"));
     h.hide("tokens");
     let v = open_with(cx, 1400., 900., h);
     near(
         f(bounds(v, "p-agent").size.width),
         f(bounds(v, "status-context").size.width),
-        "Agent Status takes the whole row",
+        "Mission takes the whole row",
     );
     assert!(get(v, "p-context").is_none());
 
@@ -379,6 +378,7 @@ fn all_hidden() -> Hidden {
     for (k, _) in super::layout::HIDEABLE {
         h.hide(k);
     }
+    h.status = false; // Mission is hideable too; the tests below want it in the column
     h
 }
 

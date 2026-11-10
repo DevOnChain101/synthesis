@@ -138,10 +138,11 @@ the chat are always shown; the other panels take the rows of a hidden one. With 
 and activity all hidden, Workspace and Running split the whole left column in halves. `status` and
 `tokens` are the boxes above the chat: with both hidden the chat takes their rows. (The desktop app maps the same
 keys onto the panels of its `cli.html` layout: `session` Session, `tools` Tools & Skills, `activity` Recent Activity,
-`status` Agent Status (never hidden), `tokens` Context, `topology`, `usage` Usage & Metrics, `mcp` none; see
+`status` Mission (the agent's task list), `tokens` Context, `topology`, `usage` Usage & Metrics, `mcp` none; see
 `docs/specs/desktop.md`.) `topology` is
 the right-hand graph and `usage` the history panel: hiding one gives its space to the other. In the desktop app
-`status` (Agent Status) and the sub-agents are never hidden, so its right column always exists; the desktop `/panels`
+the sub-agents are never hidden, so its right column always exists, and `status` (Mission) is hideable like the others (an
+old settings file that has `status: false` now hides it; `/panels mission off` is the same key); the desktop `/panels`
 command lists the panels, `/panels hide-all|show-all` and `/panels <name> on|off` apply at once and save here), `logo` (`art` | `off`), `show_thinking`, `verbose`
 (internal rows in the chat, see Events), `diffs_expanded`
 (long output starts whole, like ctrl+o), `queue_indicators`, `motion` (spinners drawn still when off),
@@ -155,6 +156,19 @@ nothing else, so never a credential. First run without a configured model shows 
 (`r` checks again, `q` quits) instead of an error. What came from the removed new TUI and what did
 not: `docs/tui-feature-port.md`.
 
+## Desktop: sub-agent roster and Mission (2026-11-10)
+
+The `* main` switch under the chat input shows only while the session has sub-agents. Below it, one row per
+sub-agent: `name - state` at the left, `online - tokens` (`5m - 900k tokens`) at the far right of the same row.
+Lifecycle (pure functions in `crates/synthesis-view/src/lifecycle.rs`, tested with an injected `now`): working = the
+hub's status (`running`); finished = `done`, transcript still viewable; 1 minute after it finished = `idle`; 5 minutes
+after = row and transcript removed. Online time ticks while it works and is frozen when it finished. Tokens are the
+input plus output of its `turn.completed` events. A resumed session's sub-agents that were still working count as
+finished (they were interrupted).
+
+Mission (was Agent Status) shows only while the agent has a task list (`todo.updated`): tasks in order, a done task
+with a tick, the next open one running. 5 minutes after every task is done the panel disappears; a new list replaces
+the old one at once; a resumed session starts without a task list, even one that was still running.
 Panel values never wrap: in Session and Context a value is one line cut with `…` when the panel is narrow (cwd and worktree keep their end, `…/folders/ws`; the model name and the rest keep their start), and hovering a Session value shows it whole. Tools & Skills lists every row in a body five rows high that scrolls. The chat header shows the folder as `~/a/b` or its last two segments (`…/code/ws`), at most 20 characters.
 
 ## Usage panel

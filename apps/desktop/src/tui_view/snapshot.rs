@@ -551,7 +551,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
 
     let steps: Vec<Step> = v
         .convo
-        .plan
+        .mission(now)
         .iter()
         .map(|p| Step {
             text: p.text.clone(),
@@ -721,9 +721,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
         ],
         mode,
         effort,
-        agents: std::iter::once("main".to_string())
-            .chain(v.convo.agents.iter().map(|a| a.0.clone()))
-            .collect(),
+        roster: synthesis_view::lifecycle::roster(&v.panes.subs, now),
         hints: hints(l),
         status: {
             let mut c = vec![StatusChip {
@@ -1082,7 +1080,7 @@ mod tests {
         assert!(tools.lines[0].contains("Bash"));
         assert_eq!(s.usage.rows.len(), 6);
         assert_eq!(s.usage.rows[1].label, "Tool calls");
-        assert_eq!(s.agents, ["main"]);
+        assert!(s.roster.is_empty());
         assert_eq!(s.head.stats, "0 files | 0 LOC");
     }
 

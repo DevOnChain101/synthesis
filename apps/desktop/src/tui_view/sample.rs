@@ -220,8 +220,8 @@ pub struct Snapshot {
     pub tips: Vec<String>,
     pub mode: String,
     pub effort: String,
-    /// Sub-agents offered by the transcript switch under the prompt (`main` first).
-    pub agents: Vec<String>,
+    /// Sub-agents of the roster under the prompt (empty: the roster is not shown).
+    pub roster: Vec<synthesis_view::lifecycle::RosterRow>,
     pub hints: Vec<(String, String)>,
     pub status: Vec<StatusChip>,
     /// Live activity of the Topology nodes (flows and glow).
@@ -475,7 +475,17 @@ pub fn sample() -> Snapshot {
         ],
         mode: s("auto"),
         effort: s("high"),
-        agents: vec![s("main"), s("developer")],
+        roster: [("developer", "idle", 240_000, 900_000)]
+            .map(
+                |(n, st, online_ms, tokens)| synthesis_view::lifecycle::RosterRow {
+                    id: s(n),
+                    name: s(n),
+                    state: s(st),
+                    online_ms,
+                    tokens,
+                },
+            )
+            .into(),
         hints: [
             ("\u{2318}/Ctrl+L", "focus input"),
             ("Esc", "leave input"),

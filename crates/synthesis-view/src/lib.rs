@@ -7,6 +7,7 @@
 pub mod activity;
 pub mod agent;
 pub mod convo;
+pub mod lifecycle;
 pub mod model;
 pub mod project;
 pub mod pulse;

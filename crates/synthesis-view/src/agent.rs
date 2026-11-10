@@ -46,6 +46,8 @@ pub struct SubAgent {
     pub ended: Option<i64>,
     pub reason: String,
     pub tool_calls: u32,
+    /// Input plus output tokens of its turns (`turn.completed`).
+    pub tokens: u64,
     pub entries: Vec<Entry>,
 }
 
@@ -320,6 +322,14 @@ impl AgentPanes {
         self.subs.iter_mut().find(|s| s.id == id)
     }
 
+    /// A resumed session's sub-agents are over: whatever was still working was interrupted.
+    pub fn settle_replayed(&mut self) {
+        for s in self.subs.iter_mut().filter(|s| s.live()) {
+            s.ended = s.entries.last().and_then(|e| e.ts).or(s.started);
+            s.status = "stopped".into();
+        }
+    }
+
     /// Sub-agents that are still working.
     pub fn live_subs(&self) -> usize {
         self.subs.iter().filter(|s| s.live()).count()
@@ -400,6 +410,7 @@ impl AgentPanes {
                         ended: None,
                         reason: String::new(),
                         tool_calls: 0,
+                        tokens: 0,
                         entries: vec![],
                     });
                 }
@@ -414,6 +425,11 @@ impl AgentPanes {
                     s.ended = ts;
                     s.status = "stopped".into();
                     s.reason = i.reason.clone().unwrap_or_default();
+                }
+            }
+            Event::TurnCompleted { usage: Some(u), .. } => {
+                if let Some(s) = agent.as_deref().and_then(|a| self.sub_mut(a)) {
+                    s.tokens += u.input_tokens + u.output_tokens;
                 }
             }
             Event::TurnStarted { model, .. } => {

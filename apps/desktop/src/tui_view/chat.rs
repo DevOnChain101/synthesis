@@ -190,6 +190,8 @@ impl TuiView {
             .ts
             .sub
             .as_deref()
+            // the transcript goes with its roster row (viewable for 5 minutes after it finished)
+            .filter(|id| self.snap.roster.iter().any(|r| r.id == *id))
             .and_then(|id| self.sub_pane(id, sub_w, cx));
         if sub.is_none() {
             return self.conversation(cx);
