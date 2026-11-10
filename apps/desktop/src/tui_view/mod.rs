@@ -518,29 +518,29 @@ impl TuiView {
         )
     }
 
-    /// `.agent-switch`: the transcript views, `main` first, then the sub-agents of the session; the chosen one is
-    /// marked with `*`, and picking one opens its transcript beside the chat.
+    /// `.agent-switch`: shown only while the session has sub-agents. `* main`, then a row per sub-agent, CLI style:
+    /// `name - state` at the left, `online - tokens` at the far right; the chosen one is marked with `*`, and
+    /// picking one opens its transcript beside the chat. Rows come and go with `synthesis_view::lifecycle`.
     fn agent_switch(&self, cx: &mut Context<Self>) -> Div {
-        // (id, label, state)
-        let mut rows: Vec<(Option<String>, String, String)> =
-            vec![(None, "main".into(), String::new())];
-        match &self.live {
-            Some(lu) => rows.extend(
-                lu.live
-                    .view
-                    .panes
-                    .subs
-                    .iter()
-                    .map(|a| (Some(a.id.clone()), a.name.clone(), a.status.clone())),
-            ),
-            None => rows.extend(
-                self.snap
-                    .agents
-                    .iter()
-                    .skip(1)
-                    .map(|a| (Some(a.clone()), a.clone(), String::new())),
-            ),
+        use synthesis_view::lifecycle::online;
+        if self.snap.roster.is_empty() {
+            return div();
         }
+        // (id, label, state, stats)
+        let mut rows: Vec<(Option<String>, String, String, String)> =
+            vec![(None, "main".into(), String::new(), String::new())];
+        rows.extend(self.snap.roster.iter().map(|r| {
+            (
+                Some(r.id.clone()),
+                r.name.clone(),
+                format!(" - {}", r.state),
+                format!(
+                    "{} - {} tokens",
+                    online(r.online_ms),
+                    snapshot::tok(r.tokens)
+                ),
+            )
+        }));
         div()
             .debug_selector(|| "agent-switch".to_string())
             .flex_none()
@@ -550,37 +550,47 @@ impl TuiView {
             .p(px(4.))
             .flex()
             .flex_col()
-            .items_start()
             .gap(px(1.))
-            .children(rows.into_iter().enumerate().map(|(i, (id, name, state))| {
-                let on = self.ts.sub == id;
-                let pick = id.clone();
-                div()
-                    .id(("agent-opt", i))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .h(px(20.))
-                    .rounded(px(3.))
-                    .cursor_pointer()
-                    .text_color(if on { strong() } else { text() })
-                    .hover(|d| d.text_color(strong()))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.ts.sub = pick.clone();
-                        this.ts.tab = ChatTab::Chat;
-                        cx.notify();
-                    }))
-                    .child(
+            .children(
+                rows.into_iter()
+                    .enumerate()
+                    .map(|(i, (id, name, state, stats))| {
+                        let on = self.ts.sub == id;
+                        let pick = id.clone();
                         div()
-                            .w(px(8.))
-                            .flex_none()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(hsla(t::ACCENT))
-                            .child(if on { "*" } else { "" }),
-                    )
-                    .child(name)
-                    .child(div().text_color(dim()).child(state))
-            }))
+                            .id(("agent-opt", i))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .h(px(20.))
+                            .rounded(px(3.))
+                            .cursor_pointer()
+                            .whitespace_nowrap()
+                            .text_color(if on { strong() } else { text() })
+                            .hover(|d| d.text_color(strong()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.ts.sub = pick.clone();
+                                this.ts.tab = ChatTab::Chat;
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .w(px(8.))
+                                    .flex_none()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(hsla(t::ACCENT))
+                                    .child(if on { "*" } else { "" }),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .child(format!("{name}{state}")),
+                            )
+                            .child(div().flex_none().text_color(dim()).child(stats))
+                    }),
+            )
     }
 
     fn mode_bar(&self) -> Div {
@@ -804,7 +814,9 @@ impl TuiView {
                 .flex_none(),
             );
         }
-        {
+        // Mission shows only while the agent has a task list (and `status` is not switched off)
+        let mission = !hid.status && !s.agent.steps.is_empty();
+        if mission || !hid.tokens {
             let card_min = if tight { 84. } else { 110. };
             let mut row = div()
                 .debug_selector(|| "status-context".to_string())
@@ -812,10 +824,10 @@ impl TuiView {
                 .gap(px(CARD_GAP))
                 .flex_initial()
                 .min_h(px(card_min));
-            {
+            if mission {
                 row = row.child(
                     panel(
-                        Head::new("p-agent", "Agent Status", "sparkles", Pad::CARD)
+                        Head::new("p-agent", "Mission", "sparkles", Pad::CARD)
                             .fold(self.is_folded("p-agent"), self.fold_cb("p-agent", cx)),
                         None,
                         div()

@@ -86,10 +86,11 @@ pub fn tiers(height: f32) -> Tiers {
 
 /// The `synt.tui.panels.*` settings keys (docs/TUI.md "Settings"), mapped onto the panels of `cli.html`:
 /// `session` = Session, `tools` = Tools & Skills, `activity` = Recent Activity (prompts and agent activity in one
-/// panel), `tokens` = Context, `topology` = Synthesis Topology, `usage` = Usage & Metrics.
+/// panel), `tokens` = Context, `topology` = Synthesis Topology, `usage` = Usage & Metrics, `status` = Mission.
 /// Never hideable (owner decision 2026-11-09): Workspace, Running, the chat (with the sub-agent transcript beside
-/// it), Agent Status (the task list; `status` is accepted and ignored) and the sub-agents (the Topology Subagents
-/// card, or a compact Subagents block in its place while Topology is hidden). So the right column always exists.
+/// it) and the sub-agents (the Topology Subagents card, or a compact Subagents block in its place while Topology
+/// is hidden). So the right column always exists. `status` = Mission (the agent's task list): it shows only while
+/// the agent has tasks, and `/panels status off` (or `mission off`) hides it for good.
 /// `mcp` has no panel of its own any more (MCP servers are the Topology MCP card and the Tools & Skills
 /// `mcp` row); the key is accepted and ignored so no user's settings.json breaks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -101,24 +102,26 @@ pub struct Hidden {
     pub tokens: bool,
     pub topology: bool,
     pub usage: bool,
+    /// `status`: the Mission panel (it also needs a task list to show).
+    pub status: bool,
 }
 
 /// The panels `/panels` and Settings can switch: (settings key, name shown).
-pub const HIDEABLE: [(&str, &str); 6] = [
+pub const HIDEABLE: [(&str, &str); 7] = [
     ("session", "Session"),
     ("tools", "Tools & Skills"),
     ("activity", "Recent Activity"),
     ("tokens", "Context"),
     ("topology", "Synthesis Topology"),
     ("usage", "Usage & Metrics"),
+    ("status", "Mission"),
 ];
 
 /// The panels that stay when everything else is hidden, with the reason (docs/TUI.md).
-pub const ALWAYS: [(&str, &str); 5] = [
+pub const ALWAYS: [(&str, &str); 4] = [
     ("Workspace", "always shown"),
     ("Running", "always shown"),
     ("Chat", "always shown"),
-    ("Agent Status", "the task list stays visible"),
     (
         "Subagents",
         "shown in Topology, or as a compact block when Topology is hidden",
@@ -135,11 +138,12 @@ impl Hidden {
             "tokens" => &mut self.tokens,
             "topology" => &mut self.topology,
             "usage" => &mut self.usage,
+            "status" | "mission" => &mut self.status,
             _ => return None,
         })
     }
 
-    /// Hides or shows the panel with this settings key; false for a key that cannot be switched (`status` too).
+    /// Hides or shows the panel with this settings key; false for a key that cannot be switched.
     pub fn set_hidden(&mut self, key: &str, hidden: bool) -> bool {
         self.flag(key).map(|f| *f = hidden).is_some()
     }
@@ -181,7 +185,7 @@ pub fn parse_panels(arg: &str) -> Result<PanelsCmd, String> {
             let key = HIDEABLE.iter().find(|(k, _)| k == name).map(|(k, _)| *k);
             match (key, *name) {
                 (Some(k), _) => Ok(PanelsCmd::Set(k, *state == "off")),
-                (None, "status" | "workspace" | "running" | "chat" | "subagents") => {
+                (None, "workspace" | "running" | "chat" | "subagents") => {
                     Err(format!("{name} is always shown"))
                 }
                 (None, _) => Err(format!("{name} is not a panel ({})", keys())),
@@ -233,7 +237,9 @@ mod tests {
     #[test]
     fn panel_keys() {
         let mut h = Hidden::default();
-        assert!(!h.hide("workspace") && !h.hide("running") && !h.hide("chat") && !h.hide("status"));
+        assert!(!h.hide("workspace") && !h.hide("running") && !h.hide("chat") && !h.hide("nope"));
+        assert!(h.hide("mission") && h.is_hidden("status"));
+        assert!(h.set_hidden("status", false));
         for k in ["session", "mcp", "tools"] {
             assert!(h.hide(k));
         }
@@ -251,8 +257,9 @@ mod tests {
         assert_eq!(parse_panels("show-all"), Ok(ShowAll));
         assert_eq!(parse_panels("usage off"), Ok(Set("usage", true)));
         assert_eq!(parse_panels("tokens  on"), Ok(Set("tokens", false)));
+        assert_eq!(parse_panels("status off"), Ok(Set("status", true)));
         assert!(
-            parse_panels("status off")
+            parse_panels("running off")
                 .unwrap_err()
                 .contains("always shown")
         );

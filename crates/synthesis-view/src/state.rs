@@ -100,6 +100,9 @@ impl ViewState {
                     self.apply(&e);
                 }
             }
+            // a resumed session starts without its old task list; its working sub-agents were interrupted
+            self.convo.clear_plan();
+            self.panes.settle_replayed();
             if self.session.cwd.is_empty() {
                 self.session.cwd = ws.cwd.to_string_lossy().into_owned();
             }

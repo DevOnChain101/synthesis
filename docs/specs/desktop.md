@@ -143,16 +143,20 @@ panels radius 8, the height tiers (column breakpoints: see the column rule below
 topology modes A, B and T), only the colours are the platinum tokens. Panels: top bar; left Workspace, Running,
 Session, Tools & Skills, Recent Activity, User Prompt; centre header (status, latest prompt, context bar, folder,
 files | LOC), tabs chat | diff | terminal | browser | file explorer, conversation, prompt, transcript switch, mode
-bar; right Synthesis Topology, Agent Status + Context, Usage & Metrics; key hint footer. Shared chrome
+bar; right Synthesis Topology, Mission (only with a task list) + Context, Usage & Metrics; key hint footer. Shared chrome
 (`widgets/chrome.rs`: top bar, panel, tabs, footer, chat header); the diff, terminal (command history, read-only, no
 PTY) and browser panes are `widgets/panes.rs`, the file explorer `tui_view/tabs.rs`.
 
 `synt.tui.panels.*` keys (unchanged, so no settings.json breaks): `session` = Session, `tools` = Tools & Skills,
 `activity` = Recent Activity (prompts and agent activity merged), `tokens` = Context, `topology` = Synthesis
 Topology, `usage` = Usage & Metrics; `mcp` has no panel any more (MCP is in the Topology card and the Tools &
-Skills row) and is ignored. Workspace, Running, the chat (with the sub-agent transcript beside it), Agent Status
-(the task list; its `status` key is accepted and ignored) and the sub-agents cannot be hidden (owner decision
-2026-11-09). The sub-agents are the Subagents card of Topology; while Topology is hidden a compact Subagents block
+Skills row) and is ignored. Workspace, Running, the chat (with the sub-agent transcript beside it), and the sub-agents
+cannot be hidden (owner decision 2026-11-09). Mission (was Agent Status, the agent's task list; key `status`, also
+`/panels mission`) is hideable, and shows only while the agent has a task list; `Convo::mission(now)` hides it 5
+minutes after all tasks are done, a new list replaces the old, a resumed session clears it. The `* main` switch under
+the prompt shows only while sub-agents exist: a row each, `name - state` left and `online - tokens` right; done ->
+idle after 1 minute -> removed (with its transcript) after 5 (`synthesis_view::lifecycle`; online time freezes when it
+finished; docs/TUI.md has the details). The sub-agents are the Subagents card of Topology; while Topology is hidden a compact Subagents block
 (`p-subagents`) takes its place, so the right column always exists and the chat no longer spans to the right edge.
 `/panels` lists the panels with their state, `/panels hide-all` hides every hideable one, `/panels show-all`
 shows them, `/panels <name> on|off` switches one; it applies at once and saves to `synt.tui.panels` in the user file

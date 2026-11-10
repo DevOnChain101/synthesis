@@ -149,6 +149,8 @@ pub struct Convo {
     pub cost_usd: f64,
     /// The mission plan: the agent's todo list, latest version.
     pub plan: Vec<Step>,
+    /// When the plan became all done (epoch ms); `None` while a task is open.
+    pub plan_done_at: Option<i64>,
     /// Sub-agents that started and have not stopped (`agent_type`).
     pub agents: Vec<(String, String)>,
     /// Turns of the task in progress (for its end line).
@@ -219,6 +221,20 @@ impl Convo {
             c.apply(e);
         }
         c
+    }
+
+    pub fn clear_plan(&mut self) {
+        self.plan.clear();
+        self.plan_done_at = None;
+    }
+
+    /// The task list to show at `now` (see [`crate::lifecycle::mission_visible`]).
+    pub fn mission(&self, now: i64) -> &[Step] {
+        if crate::lifecycle::mission_visible(self.plan.len(), self.plan_done_at, now) {
+            &self.plan
+        } else {
+            &[]
+        }
     }
 
     /// When the task in progress started (epoch ms).
@@ -458,6 +474,10 @@ impl Convo {
                         },
                     })
                     .collect();
+                self.plan_done_at = (!self.plan.is_empty()
+                    && self.plan.iter().all(|s| s.state == StepState::Done))
+                .then(|| crate::model::parse_ts(&e.ts))
+                .flatten();
             }
             Event::SubagentStarted(i) => {
                 self.agents.push((i.agent_id.clone(), i.agent_type.clone()));
@@ -995,6 +1015,33 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn the_task_list_clears_5_minutes_after_all_done_or_when_replaced_or_resumed() {
+        let list = |st: &str| {
+            ev(
+                "todo.updated",
+                json!({"todos":[{"content":"A","status":st,"active_form":"A"}]}),
+            )
+        };
+        let t0 = crate::model::parse_ts("2026-01-01T00:00:00Z").unwrap();
+        let mut c = Convo::default();
+        c.apply(&list("in_progress"));
+        assert_eq!(
+            c.mission(t0 + 3_600_000).len(),
+            1,
+            "open tasks never expire"
+        );
+        c.apply(&list("completed"));
+        assert_eq!(c.mission(t0 + 299_999).len(), 1);
+        assert!(c.mission(t0 + 300_000).is_empty());
+        // new tasks replace the finished list at once
+        c.apply(&list("pending"));
+        assert_eq!(c.mission(t0 + 600_000).len(), 1);
+        // a resumed session drops it, even an open one
+        c.clear_plan();
+        assert!(c.mission(t0).is_empty());
     }
 
     #[test]
