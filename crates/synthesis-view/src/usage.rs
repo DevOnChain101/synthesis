@@ -118,6 +118,175 @@ impl UsageHistory {
     }
 }
 
+// Calendar helpers of the Usage panel (days since 1970 <-> civil dates, local to a UTC offset).
+
+pub struct Civil {
+    pub year: i64,
+    pub month: usize,
+    pub day: i64,
+    pub dow: usize,
+}
+
+pub fn civil_from_days(z: i64) -> (i64, usize, i64) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, (m - 1) as usize, d)
+}
+pub fn days_from_civil(y: i64, m0: usize, d: i64) -> i64 {
+    let m = m0 as i64 + 1;
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+pub fn civil(ms: i64, tz: i32) -> Civil {
+    let days = (ms + i64::from(tz) * 60_000).div_euclid(86_400_000);
+    let (year, month, day) = civil_from_days(days);
+    Civil {
+        year,
+        month,
+        day,
+        dow: (days + 4).rem_euclid(7) as usize,
+    }
+}
+pub fn days_in_month(y: i64, m0: usize) -> i64 {
+    days_from_civil(if m0 == 11 { y + 1 } else { y }, (m0 + 1) % 12, 1) - days_from_civil(y, m0, 1)
+}
+
+pub const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+pub fn heat_level(v: Option<f64>, max: Option<f64>) -> usize {
+    let (Some(v), Some(max)) = (v, max) else {
+        return 0;
+    };
+    if v.is_nan() || max.is_nan() || v <= 0.0 || max <= 0.0 || !v.is_finite() || !max.is_finite() {
+        return 0;
+    }
+    4.min(1 + 3.min(((v / max) * (4.0 - 1e-9)).floor() as usize))
+}
+
+#[derive(Clone)]
+pub struct DayCell<'a> {
+    pub day: i64,
+    pub month: usize,
+    pub future: bool,
+    pub entry: Option<&'a HistoryDay>,
+}
+
+pub struct MonthGrid<'a> {
+    pub weeks: Vec<[Option<DayCell<'a>>; 7]>,
+    pub year: i64,
+    pub month: usize,
+    pub today_ms: i64,
+}
+
+pub fn month_grid<'a>(history: &'a [HistoryDay], tz: i32, now: i64) -> MonthGrid<'a> {
+    let today_ms = history.last().map_or(now, |l| l.date_ms);
+    let t = civil(today_ms, tz);
+    let dim = days_in_month(t.year, t.month);
+    let mut weeks = vec![];
+    let mut week: [Option<DayCell>; 7] = Default::default();
+    for day in 1..=dim {
+        let days = days_from_civil(t.year, t.month, day);
+        let start_ms = days * 86_400_000 - i64::from(tz) * 60_000;
+        let dow = (days + 4).rem_euclid(7) as usize;
+        let entry = history.iter().find(|d| {
+            let c = civil(d.date_ms, tz);
+            c.year == t.year && c.month == t.month && c.day == day
+        });
+        week[dow] = Some(DayCell {
+            day,
+            month: t.month,
+            future: start_ms > today_ms,
+            entry,
+        });
+        if dow == 6 || day == dim {
+            weeks.push(std::mem::take(&mut week));
+        }
+    }
+    MonthGrid {
+        weeks,
+        year: t.year,
+        month: t.month,
+        today_ms,
+    }
+}
+
+/// The numbers of the Usage panel's summary rows, for the metric `val` (the CLI and the desktop app draw them).
+pub struct MonthSummary {
+    pub today: f64,
+    pub week: f64,
+    pub month: f64,
+    pub best: f64,
+    /// Day of month and month index (0-11) of the best day.
+    pub best_day: Option<(i64, usize)>,
+    pub active: usize,
+    /// Days of the month up to today.
+    pub days: usize,
+    pub streak: usize,
+}
+
+pub fn month_summary(
+    history: &[HistoryDay],
+    grid: &MonthGrid,
+    val: &dyn Fn(&HistoryDay) -> f64,
+) -> MonthSummary {
+    let month_days: Vec<&DayCell> = grid
+        .weeks
+        .iter()
+        .flatten()
+        .flatten()
+        .filter(|d| !d.future)
+        .collect();
+    let active = month_days
+        .iter()
+        .filter(|d| d.entry.is_some_and(|e| val(e) > 0.0))
+        .count();
+    let mut peak_val = -1.0;
+    let mut peak_day: Option<&DayCell> = None;
+    for d in &month_days {
+        let v = d.entry.map_or(0.0, val);
+        if v > peak_val {
+            peak_val = v;
+            peak_day = Some(d);
+        }
+    }
+    let today_entry = history.last();
+    let mut streak = 0;
+    let mut i = history.len() as i64 - 1 - i64::from(!today_entry.is_some_and(|t| val(t) > 0.0));
+    while i >= 0 && val(&history[i as usize]) > 0.0 {
+        streak += 1;
+        i -= 1;
+    }
+    let sum = |n: usize| {
+        history[history.len().saturating_sub(n)..]
+            .iter()
+            .map(val)
+            .sum::<f64>()
+    };
+    MonthSummary {
+        today: today_entry.map_or(0.0, val),
+        week: sum(7),
+        month: month_days.iter().map(|d| d.entry.map_or(0.0, val)).sum(),
+        best: peak_val.max(0.0),
+        best_day: peak_day.map(|d| (d.day, d.month)),
+        active,
+        days: month_days.len(),
+        streak,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

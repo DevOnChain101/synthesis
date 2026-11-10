@@ -9,9 +9,9 @@ use super::activity::{
     Activity, RunState, activity_of, run_state_of_live, run_state_of_status, status_word,
 };
 use super::sample::{
-    ActKind, ActivityRow, AgentStatus, ChatHead, ContextInfo, Core, Metric, MonthUse, NodeState,
-    Pos, Running, SessionInfo, Snapshot, StatusChip, Step, StepKind, ToolRow, ToolsInfo, Top,
-    TopoNode, Usage, Workspace,
+    ActKind, ActivityRow, AgentStatus, ChatHead, ContextInfo, Core, DayDot, Metric, MonthUse,
+    NodeState, Pos, Running, SessionInfo, Snapshot, StatusChip, Step, StepKind, Tone, ToolRow,
+    ToolsInfo, Top, TopoNode, Usage, Workspace,
 };
 use crate::live::{Focus, Live};
 use synthesis_view::convo::{Item, StepState};
@@ -388,56 +388,72 @@ fn grouped(n: u64) -> String {
     out
 }
 
-/// Days since 1970-01-01 to (year, month 1-12, day) (proleptic Gregorian).
-fn civil(z: i64) -> (i64, usize, i64) {
-    let z = z + 719_468;
-    let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    (y, m as usize, doy - (153 * mp + 2) / 5 + 1)
-}
-
-/// The month of the last history day (today) as dots of token intensity, like the CLI's month grid: level 1..=4
-/// is the day's share of the month's busiest day, 0 a day with no tokens, `None` a day still to come.
-fn month_use(days: &[synthesis_view::usage::HistoryDay], tz_min: i32) -> MonthUse {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let Some(last) = days.last() else {
-        return MonthUse::default();
-    };
-    let day_no = |ms: i64| (ms + i64::from(tz_min) * 60_000).div_euclid(86_400_000);
-    let today = day_no(last.date_ms);
-    let (y, m, d) = civil(today);
-    let first = today - (d - 1);
-    let len = (28..=31)
-        .rev()
-        .find(|n| civil(first + n - 1).1 == m)
-        .unwrap_or(28);
-    let tokens = |n: i64| {
-        days.iter()
-            .find(|x| day_no(x.date_ms) == n)
-            .map_or(0., |x| x.tokens)
-    };
-    let (mut total, mut max) = (0., 0f64);
-    for n in first..=today {
-        total += tokens(n);
-        max = max.max(tokens(n));
+/// The Usage month section of the classic CLI (tokens): the calendar grid, its heat levels and the summary rows,
+/// from the shared `synthesis_view::usage` month logic. `days` empty: the history is still being read.
+fn month_use(days: &[synthesis_view::usage::HistoryDay], tz_min: i32, now: i64) -> MonthUse {
+    use synthesis_view::usage::{MONTHS, heat_level, month_grid, month_summary};
+    if days.is_empty() {
+        return MonthUse {
+            note: Some("loading usage\u{2026}".into()),
+            ..MonthUse::default()
+        };
     }
+    let val = |d: &synthesis_view::usage::HistoryDay| d.tokens;
+    let grid = month_grid(days, tz_min, now);
+    let max = grid
+        .weeks
+        .iter()
+        .flatten()
+        .flatten()
+        .filter(|d| !d.future)
+        .map(|d| d.entry.map_or(0., val))
+        .fold(1., f64::max);
+    let sm = month_summary(days, &grid, &val);
+    let (total, count) = (tok(sm.month as u64), |n: usize, w: &str| format!("{n}{w}"));
     MonthUse {
-        label: format!("{} {y}", MONTHS[m - 1]),
-        total: tok(total as u64),
-        days: (first..first + len)
-            .map(|n| {
-                (n <= today).then(|| match tokens(n) {
-                    v if v <= 0. => 0,
-                    v => 1 + (((v / max) * 3.999) as u8).min(3),
+        label: format!("{} {}", MONTHS[grid.month], grid.year),
+        titles: [
+            format!("Usage \u{b7} tokens \u{b7} {total} this month"),
+            format!("Usage \u{b7} tokens \u{b7} {total}"),
+            format!("Usage \u{b7} {total}"),
+        ],
+        weeks: grid
+            .weeks
+            .iter()
+            .map(|w| {
+                w.clone().map(|c| {
+                    c.map(|d| DayDot {
+                        level: heat_level(Some(d.entry.map_or(0., val)), Some(max)) as u8,
+                        future: d.future,
+                    })
                 })
             })
             .collect(),
+        summary: vec![
+            ("today", tok(sm.today as u64), String::new(), Tone::Accent),
+            ("7 days", tok(sm.week as u64), String::new(), Tone::Plain),
+            ("month", total.clone(), String::new(), Tone::Plain),
+            (
+                "best",
+                tok(sm.best as u64),
+                sm.best_day
+                    .map_or(String::new(), |(d, m)| format!(" {d} {}", MONTHS[m])),
+                Tone::Plain,
+            ),
+            (
+                "active",
+                count(sm.active, ""),
+                format!("/{} days", sm.days),
+                Tone::Plain,
+            ),
+            (
+                "streak",
+                count(sm.streak, ""),
+                if sm.streak == 1 { " day" } else { " days" }.into(),
+                if sm.streak > 0 { Tone::Ok } else { Tone::Plain },
+            ),
+        ],
+        note: None,
     }
 }
 
@@ -718,7 +734,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
                 metric("Browser requests", w7.browser, w30.browser, false),
                 metric("MCP calls", w7.mcp, w30.mcp, false),
             ],
-            month: month_use(&v.usage.days, tz_min),
+            month: month_use(&v.usage.days, tz_min, now),
         },
         tips: vec![
             "Ask for a change in plain words; Shift+Tab cycles the permission mode.".into(),
@@ -1101,30 +1117,50 @@ mod tests {
     }
 
     #[test]
-    fn the_month_is_one_dot_per_day_up_to_today() {
+    fn the_month_is_a_cli_calendar_with_its_summary() {
         use synthesis_view::usage::HistoryDay;
-        // 2026-11-10 (day 20767), 02:00 local at +120 min: the day starts at local midnight
+        // 2026-11-10 (day 20767, a Tuesday) at +120 min; the days start at local midnight
         let day = |n: i64, tokens: f64| HistoryDay {
             date_ms: n * 86_400_000 - 120 * 60_000,
             tokens,
             ..Default::default()
         };
-        let h = [
-            day(20_760, 850.),
-            day(20_765, 100.),
-            day(20_766, 0.),
-            day(20_767, 50.),
-        ];
-        let m = month_use(&h, 120);
-        assert_eq!((m.label.as_str(), m.total.as_str()), ("Nov 2026", "1k"));
-        assert_eq!(m.days.len(), 30);
-        // Nov 3 is the busiest day (4); Nov 8 has 100 and Nov 10 has 50 of its 850 (1); Nov 9 none; Nov 11 to come
+        let h: Vec<_> = (20_700..=20_767)
+            .map(|n| match n {
+                20_760 => day(n, 850.),
+                20_765 => day(n, 100.),
+                20_767 => day(n, 50.),
+                _ => day(n, 0.),
+            })
+            .collect();
+        let m = month_use(&h, 120, 20_767 * 86_400_000);
+        assert_eq!(m.label, "Nov 2026");
+        // Nov 1 is a Sunday: five week columns; Nov 3 (Tue) is the busiest day, Nov 10 has 50 of 850,
+        // Nov 11 is still to come
+        assert_eq!(m.weeks.len(), 5);
+        let at = |w: usize, d: usize| m.weeks[w][d].unwrap();
+        assert_eq!((at(0, 2).level, at(0, 2).future), (4, false));
+        assert_eq!((at(1, 2).level, at(1, 0).level), (1, 1));
+        assert_eq!((at(0, 0).level, at(1, 3).future), (0, true));
+        assert!(m.weeks[4][2].is_none() && m.weeks[4][1].is_some());
+        let row = |k: &str| m.summary.iter().find(|r| r.0 == k).unwrap().clone();
+        assert_eq!(row("month").1, "1k");
         assert_eq!(
-            (m.days[0], m.days[2], m.days[8]),
-            (Some(0), Some(4), Some(0))
+            (row("best").1, row("best").2),
+            ("850".into(), " 3 Nov".into())
         );
-        assert_eq!((m.days[7], m.days[9], m.days[10]), (Some(1), Some(1), None));
-        assert_eq!(month_use(&[], 0).days.len(), 0);
+        assert_eq!(
+            (row("active").1, row("active").2),
+            ("3".into(), "/10 days".into())
+        );
+        assert_eq!((row("streak").1, row("today").1), ("1".into(), "50".into()));
+        assert_eq!(m.strip().len(), 10);
+        assert_eq!(m.titles[2], "Usage \u{b7} 1k");
+        // no history yet: the CLI's loading line, no grid
+        assert_eq!(
+            month_use(&[], 0, 0).note.as_deref(),
+            Some("loading usage\u{2026}")
+        );
     }
 
     #[test]

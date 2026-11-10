@@ -140,13 +140,54 @@ pub struct Usage {
     pub month: MonthUse,
 }
 
-/// The current month as one dot per day (the classic CLI's month grid, tokens): `Nov 2026`, its token total, and
-/// per day 0 (none) to 4 (busiest day of the month), `None` for a day still to come.
+/// One day of the month grid: its heat level (0 none to 4, share of the month's busiest day) and whether it is
+/// still to come.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DayDot {
+    pub level: u8,
+    pub future: bool,
+}
+
+/// How a summary value is coloured (the CLI: today in the accent, a running streak in green).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Plain,
+    Accent,
+    Ok,
+}
+
+/// The CLI's Usage month section (`dash.rs` `usage_month_panel`, tokens): a calendar of weeks as columns and
+/// seven weekday rows, a one-line strip for a short panel, and the summary rows. Empty (`weeks` empty and no
+/// `note`) when there is nothing to draw: the sample view.
 #[derive(Clone, Debug, Default)]
 pub struct MonthUse {
+    /// `Nov 2026`.
     pub label: String,
-    pub total: String,
-    pub days: Vec<Option<u8>>,
+    /// The CLI's three titles, longest first; the first one that fits is drawn.
+    pub titles: [String; 3],
+    /// Weeks of the month, Sunday to Saturday; `None` outside the month.
+    pub weeks: Vec<[Option<DayDot>; 7]>,
+    /// Summary rows: key, value, muted suffix, tone.
+    pub summary: Vec<(&'static str, String, String, Tone)>,
+    /// `loading usage…` while the history is not read yet (the grid is not drawn).
+    pub note: Option<String>,
+}
+
+impl MonthUse {
+    pub fn is_empty(&self) -> bool {
+        self.weeks.is_empty() && self.note.is_none()
+    }
+
+    /// Levels of the days up to today (the strip of a short panel).
+    pub fn strip(&self) -> Vec<u8> {
+        self.weeks
+            .iter()
+            .flatten()
+            .flatten()
+            .filter(|d| !d.future)
+            .map(|d| d.level)
+            .collect()
+    }
 }
 
 /// Topology node state; maps to the card border colour.
@@ -471,13 +512,7 @@ pub fn sample() -> Snapshot {
                 metric("Browser requests", "3", 9.),
                 metric("MCP calls", "12", 20.),
             ],
-            month: MonthUse {
-                label: s("Nov 2026"),
-                total: s("48.2k"),
-                days: (1..=30)
-                    .map(|d| (d <= 10).then(|| [0, 1, 3, 0, 2, 4, 1, 0, 2, 3][d - 1]))
-                    .collect(),
-            },
+            month: MonthUse::default(),
         },
         tips: vec![
             s("Ask for a change in plain words; Shift+Tab cycles the permission mode."),

@@ -50,6 +50,43 @@ pub fn cols(width: f32) -> Cols {
 /// in `TuiView::chat` pads them all, so no tab draws up to the frame's border.
 pub const TAB_PAD_X: f32 = 16.;
 
+/// What the Usage panel shows of the CLI's month section under the metric bars (never at the bars' expense).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MonthMode {
+    /// The calendar grid, summary and legend.
+    Full,
+    /// The one-line strip of the days so far (the CLI's short panel) or the loading line.
+    Strip,
+    Hidden,
+}
+
+/// Height of the month section in `mode` (border, title, grid or strip, legend).
+pub fn month_h(mode: MonthMode, m: &super::sample::MonthUse) -> f32 {
+    match mode {
+        _ if m.note.is_some() => 28.,
+        MonthMode::Full => 144.,
+        MonthMode::Strip => 58.,
+        MonthMode::Hidden => 0.,
+    }
+}
+
+/// Space above the section (its `mt`), taken from the same slack.
+pub const MONTH_GAP: f32 = 6.;
+
+/// The section is drawn whole or not at all: `slack` is the height the right column can give it without the
+/// topology panel dropping below its minimum, so no other panel and no bar moves.
+pub fn month_mode(slack: f32, m: &super::sample::MonthUse) -> MonthMode {
+    if m.is_empty() {
+        MonthMode::Hidden
+    } else if slack >= month_h(MonthMode::Full, m) + MONTH_GAP {
+        MonthMode::Full
+    } else if slack >= month_h(MonthMode::Strip, m) + MONTH_GAP {
+        MonthMode::Strip
+    } else {
+        MonthMode::Hidden
+    }
+}
+
 /// Height tiers (`@media (max-height: 749/609)`, `(min-height: 860)`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tiers {
@@ -210,6 +247,26 @@ fn keys() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_month_section_shows_whole_or_not_at_all() {
+        use super::super::sample::{DayDot, MonthUse};
+        let mut m = MonthUse::default();
+        assert_eq!(month_mode(999., &m), MonthMode::Hidden, "nothing to draw");
+        m.weeks = vec![
+            [Some(DayDot {
+                level: 0,
+                future: false,
+            }); 7],
+        ];
+        assert_eq!(month_mode(-5., &m), MonthMode::Hidden);
+        assert_eq!(month_mode(63.9, &m), MonthMode::Hidden);
+        assert_eq!(month_mode(64., &m), MonthMode::Strip);
+        assert_eq!(month_mode(149.9, &m), MonthMode::Strip);
+        assert_eq!(month_mode(150., &m), MonthMode::Full);
+        m.note = Some("loading usage".into());
+        assert_eq!(month_h(MonthMode::Strip, &m), 28.);
+    }
 
     #[test]
     fn chat_is_the_majority_at_every_width() {
