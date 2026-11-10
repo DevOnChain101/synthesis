@@ -37,17 +37,36 @@ fn scroll_cue(h: &ScrollHandle, what: &str) -> Option<AnyElement> {
     })
 }
 
+/// One text line of the TUI view: the Trust text box is cut at a multiple of it, never inside a line.
+const LH: f32 = crate::tui_view::layout::LINE;
+
+/// Height of the front part of a scroll box's children (rows) that fits `budget` whole: the lowest row edge not
+/// below it, at least the first row. `budget` itself while the rows are not measured yet (the first frame).
+fn whole_rows(h: &ScrollHandle, budget: f32) -> f32 {
+    let top = f32::from(h.bounds().origin.y) - f32::from(h.offset().y);
+    let edges: Vec<f32> = (0..)
+        .map_while(|i| h.bounds_for_item(i))
+        .map(|b| f32::from(b.bottom()) - top)
+        .collect();
+    let first = edges.first().copied().unwrap_or(budget);
+    edges
+        .into_iter()
+        .filter(|e| *e <= budget + 0.5)
+        .fold(first, f32::max)
+}
+
 /// The front dialog as a panel for the chat column, docked above the prompt, or `None`. `click(i)` is the
 /// handler of option `i`; the scroll handles are (`scroll`, `body_scroll`): `scroll` keeps the option list's position (the pickers scroll to the selected row);
 /// `body_scroll` is the one text box above the options (input, plan, memory, trust, rewind, clean);
-/// `border` is the panel's border (the red of the approval signal, or the accent).
+/// `border` is the panel's border (the red of the approval signal, or the accent). `win_h` sizes the Trust
+/// dialog's two boxes, which are cut between lines and rows, never inside one.
 pub fn dock(
     live: &Live,
     (scroll, body_scroll): (&ScrollHandle, &ScrollHandle),
     click: &dyn Fn(usize) -> OnClick,
     toggle: &dyn Fn(usize) -> OnClick,
     border: gpui::Hsla,
-    max_input_h: f32,
+    (max_input_h, win_h): (f32, f32),
     engage: OnMouseDown,
 ) -> Option<AnyElement> {
     let d = live.dialogs.first()?;
@@ -314,6 +333,7 @@ pub fn dock(
                 .child(div().text_color(strong()).child(format!("{t}\u{258F}"))),
         );
     }
+    let mut list_cap = None;
     let headers: &[(usize, String)] = match &d.kind {
         DialogKind::Picker {
             kind: PickerKind::MemConfirm | PickerKind::CloseWorkspace,
@@ -325,16 +345,28 @@ pub fn dock(
             headers,
             ..
         } => {
+            // what the card leaves its two boxes: the chat column keeps about 310px of the window, the card's own
+            // padding, title, hint and gaps ~155px; the text gets the larger half, at least three lines
+            let room = (win_h - 310. - 155.).max(3. * LH + 63.);
+            let text_cap = ((room * 0.55 / LH).floor() * LH).max(3. * LH);
+            let shown = f32::from(body_scroll.bounds().size.height);
+            let used = if shown > 0. {
+                shown.min(text_cap)
+            } else {
+                text_cap
+            };
+            list_cap = Some(whole_rows(scroll, (room - used).max(0.)));
             card = card.child(
                 div()
                     .id("dialog-trust")
                     .debug_selector(|| "dialog-trust".to_string())
-                    .max_h(px(max_input_h * 0.5))
+                    .max_h(px(text_cap))
                     .overflow_y_scroll()
                     .track_scroll(body_scroll)
                     .flex()
                     .flex_col()
-                    .gap(px(8.))
+                    .gap(px(LH))
+                    .line_height(px(LH))
                     .text_color(hsla(t::ACCENT))
                     .children(headers.iter().map(|(_, h)| div().child(h.clone()))),
             );
@@ -422,6 +454,7 @@ pub fn dock(
             .debug_selector(|| "dialog-list".to_string())
             .flex()
             .flex_col()
+            .when_some(list_cap, |d2, h| d2.max_h(px(h)))
             .when(!trust, |d2| {
                 d2.max_h(px(
                     if matches!(

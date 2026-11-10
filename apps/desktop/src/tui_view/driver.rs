@@ -2585,8 +2585,6 @@ mod tests {
         );
     }
 
-    use super::*;
-
     #[test]
     fn a_restart_waits_for_running_tasks_queued_prompts_and_open_dialogs() {
         let mut l = Live::new();
