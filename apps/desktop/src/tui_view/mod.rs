@@ -518,7 +518,7 @@ impl TuiView {
             hsla(t::SUCCESS),
             &h.prompt,
             h.ctx_pct,
-            &format!("{} | {}", h.path, h.stats),
+            &chrome::header_tail(&h.path, &h.stats, &h.status, self.centre_w),
             self.centre_w,
             self.live.as_ref().is_some_and(|l| l.cfg.tui.motion),
         )
