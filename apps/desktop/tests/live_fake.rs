@@ -486,7 +486,8 @@ fn a_send_now_during_an_approval_is_delivered_after_the_tool_result_and_leaves_t
     let tool = at(&|i| matches!(i, Item::Tool { name, .. } if name == "Write"));
     let user = at(&|i| matches!(i, Item::User(t) if t == "also add a note"));
     assert!(user > tool, "delivered after the tool result: {items:?}");
-    assert!(matches!(&items[user + 1], Item::Notice { text, .. } if text.contains("sent now")));
+    // bookkeeping: the user row above already shows it, so it is an internal row (verbose only)
+    assert!(matches!(&items[user + 1], Item::Internal(text) if text.contains("sent now")));
     assert!(r.live.pending.is_empty());
     assert_eq!(r.live.queue, ["later"], "the queue is untouched");
     let engine = r.live.engine.take().unwrap();

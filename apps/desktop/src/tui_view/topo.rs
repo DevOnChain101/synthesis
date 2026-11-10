@@ -482,6 +482,114 @@ fn glow(c: gpui::Hsla, lvl: f32) -> gpui::BoxShadow {
     }
 }
 
+/// What a node card holds in its box, derived from the box alone: the cut title and how many detail lines
+/// show (and wrap) so the content always fits inside the border and padding. Painter and tests share it.
+#[derive(Clone, Copy, Debug)]
+pub struct CardFit {
+    pub title_size: f32,
+    pub line_size: f32,
+    pub icon: f32,
+    /// Characters of the (upper-case) title that fit; longer ones are cut with an ellipsis, 0 hides it.
+    pub name_max: usize,
+    /// Detail lines shown, and how many rows each may wrap to.
+    pub lines: usize,
+    pub clamp: usize,
+}
+
+/// Border plus padding on the two sides of a card's content, horizontally.
+fn card_inset(mode: Mode) -> f32 {
+    match mode {
+        Mode::A => 2. + 20.,
+        Mode::B => 2. + 14.,
+        Mode::T => 2. + 12.,
+    }
+}
+
+pub fn card_fit(mode: Mode, tmin: bool, w: f32, h: f32) -> CardFit {
+    let a = mode == Mode::A;
+    let (title_size, line_size) = if a { (12., 12.5) } else { (10.5, 10.5) };
+    let icon = if a {
+        16.
+    } else if mode == Mode::B {
+        12.
+    } else {
+        11.
+    };
+    let nlines = match mode {
+        Mode::A => 2,
+        Mode::B => 1,
+        Mode::T => usize::from(!tmin),
+    };
+    let lh = line_size * if a { 1.45 } else { 1.35 };
+    let room = (w - card_inset(mode)).max(0.);
+    // icon and gap; a T row also reserves the 6px marker dot and its gap
+    let head = icon + if mode == Mode::T { 6. + 5. + 5. } else { 6. };
+    let name_max = ((room - head) / (title_size * 0.63)).floor().max(0.) as usize;
+    if mode == Mode::T {
+        // the detail goes after the title with an 8px gap and shows only if a few characters of it fit
+        return CardFit {
+            title_size,
+            line_size,
+            icon,
+            name_max,
+            lines: nlines,
+            clamp: 1,
+        };
+    }
+    // the title row, its gap, then each detail line, inside the border
+    let title_h = icon.max(title_size * 1.45);
+    let pb = if a { 6. } else { 2. };
+    let fit = ((h - 2. - title_h - pb) / lh).floor().max(0.) as usize;
+    let used = if a { 9. + 6. + 24. } else { 14. + 2. + 10. };
+    let lines = nlines.min(fit);
+    CardFit {
+        title_size,
+        line_size,
+        icon,
+        name_max,
+        lines,
+        clamp: if h - used >= nlines as f32 * 2. * lh {
+            2
+        } else {
+            1
+        },
+    }
+}
+
+/// The title as shown: "USER & PROMPT" gives way to "USER" before it is cut with an ellipsis.
+fn card_name(title: &str, max: usize) -> String {
+    let mut name = title.to_uppercase();
+    if name.chars().count() > max
+        && let Some((head, _)) = name.split_once(" & ")
+    {
+        name = head.to_string();
+    }
+    if name.chars().count() > max {
+        name = match max {
+            0 => String::new(),
+            _ => name.chars().take(max - 1).collect::<String>() + "\u{2026}",
+        };
+    }
+    name
+}
+
+/// Width and height in px of what the card lays out (detail lines truncate, so they add no minimum width).
+pub fn card_content(mode: Mode, f: &CardFit, name_chars: usize) -> (f32, f32) {
+    let head = f.icon + if mode == Mode::T { 6. + 5. + 5. } else { 6. };
+    let w = head + name_chars as f32 * f.title_size * 0.63;
+    let a = mode == Mode::A;
+    let lh = f.line_size * if a { 1.45 } else { 1.35 };
+    let title_h = f
+        .icon
+        .max(f.title_size * if mode == Mode::T { 1.35 } else { 1.45 });
+    let h = if mode == Mode::T {
+        title_h
+    } else {
+        title_h + if a { 6. } else { 2. } + f.lines as f32 * lh + 2.
+    };
+    (w, h)
+}
+
 fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool, lvl: f32) -> AnyElement {
     let base = hsla(node_colour(n.pos));
     let col = if n.state == NodeState::Blocked {
@@ -490,13 +598,8 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool, lvl: f32) -> AnyElement {
         base
     };
     let a = mode == Mode::A;
-    let title_size = if a { 12. } else { 10.5 };
-    let line_size = if a { 12.5 } else { 10.5 };
-    let nlines = match mode {
-        Mode::A => 2,
-        Mode::B => 1,
-        Mode::T => usize::from(!tmin),
-    };
+    let fit = card_fit(mode, tmin, r.w, r.h);
+    let (title_size, line_size, ic) = (fit.title_size, fit.line_size, fit.icon);
     let mut d = div()
         .w(px(r.w))
         .h(px(r.h))
@@ -504,29 +607,7 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool, lvl: f32) -> AnyElement {
         .overflow_hidden()
         .font_family(MONO)
         .text_color(hsla(t::TEXT));
-    let ic = if a {
-        16.
-    } else if mode == Mode::B {
-        12.
-    } else {
-        11.
-    };
-    // a grid card's title is cut with an ellipsis where the card ends (T rows have room)
-    let mut name = n.title.to_uppercase();
-    if mode != Mode::T {
-        let max = ((r.w - 14. - ic - 6.) / (title_size * 0.63))
-            .floor()
-            .max(2.) as usize;
-        // "USER & PROMPT" gives way to "USER" before it is cut
-        if name.chars().count() > max
-            && let Some((head, _)) = name.split_once(" & ")
-        {
-            name = head.to_string();
-        }
-        if name.chars().count() > max {
-            name = name.chars().take(max - 1).collect::<String>() + "\u{2026}";
-        }
-    }
+    let name = card_name(&n.title, fit.name_max);
     let title = div()
         .flex()
         .items_center()
@@ -549,13 +630,15 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool, lvl: f32) -> AnyElement {
         })
         .child(icon(node_icon(n.pos), ic, col))
         .child(tracked(&name, title_size, 0.03, col));
-    // a grid card's lines wrap to two rows when its height has room for them, else they are cut to one
-    let lh = line_size * if a { 1.45 } else { 1.35 };
-    let used = if a { 9. + 6. + 24. } else { 14. + 2. + 10. };
-    let clamp = if mode != Mode::T && r.h - used >= nlines as f32 * 2. * lh {
-        2
+    // detail lines wrap to two rows when the height has room, else they are cut to one
+    let clamp = fit.clamp;
+    // a T row shows its detail only when a few characters of it fit after the title
+    let t_room =
+        r.w - card_inset(Mode::T) - (card_content(mode, &fit, name.chars().count()).0) - 8.;
+    let nlines = if mode == Mode::T && t_room < 3. * line_size * 0.6 {
+        0
     } else {
-        1
+        fit.lines
     };
     let lines = n.lines.iter().take(nlines).map(|l| {
         div()
@@ -604,59 +687,138 @@ fn card(n: &TopoNode, r: R, mode: Mode, tmin: bool, lvl: f32) -> AnyElement {
     d.into_any_element()
 }
 
-/// What the core card holds at a given side: everything scales with the side and is dropped, not
-/// overflowed, when it does not fit. `large` is the design's own rule for showing the sub line and the tag.
+/// What the core card holds in a box of `w` x `h` px, derived from the box alone and degrading by HIDING parts
+/// (tag, then sub line, then title, then everything but the logo) so the content always fits the room inside the
+/// border and the padding, whatever the panel size. `large` is the design's own rule for showing the sub line
+/// and the tag. Painter and tests use this one function.
 #[derive(Clone, Copy, Debug)]
-pub struct CoreFit {
+pub struct CoreLayout {
     pub logo: f32,
-    pub title: f32,
+    /// Title font size; `None`: the title is hidden.
+    pub title: Option<f32>,
     pub track: f32,
     pub sub: bool,
     pub tag: bool,
+    /// Padding on each side, inside the border.
+    pub pad: f32,
+    pub border: f32,
 }
 
-pub fn core_fit(mode: Mode, side: f32, large: bool) -> CoreFit {
-    if mode == Mode::B {
-        return CoreFit {
-            logo: (0.38 * side).clamp(18., 44.),
-            title: if side >= 130. { 11. } else { 9.5 },
-            track: 0.,
+/// Characters of the core's title, sub line and tag.
+pub type CoreChars = (usize, usize, usize);
+
+pub fn core_layout(mode: Mode, w: f32, h: f32, large: bool, ch: CoreChars) -> CoreLayout {
+    let (w, h) = (w.max(0.), h.max(0.));
+    if mode == Mode::T {
+        let (border, pad) = (1., 10f32.min(w * 0.1));
+        let room = (w - 2. * (border + pad)).max(0.);
+        let base = CoreLayout {
+            logo: 14f32.min((h - 2. * border).max(0.)),
+            title: Some(10.5),
+            track: 0.14,
             sub: false,
             tag: false,
+            pad,
+            border,
         };
+        let tag = CoreLayout {
+            tag: w >= 300.,
+            ..base
+        };
+        return [tag, CoreLayout { tag: false, ..base }]
+            .into_iter()
+            .find(|l| core_content(mode, l, ch).0 <= room)
+            .unwrap_or(CoreLayout {
+                title: None,
+                logo: base.logo.min(room),
+                ..base
+            });
     }
-    CoreFit {
-        logo: (0.4 * side).clamp(22., 76.),
-        title: if side >= 170. {
+    let side = w.min(h);
+    let (border, pad) = (2., (side * 0.05).min(8.));
+    let room = (side - 2. * (border + pad)).max(0.);
+    let a = mode == Mode::A;
+    let base = CoreLayout {
+        logo: if a { 0.4 * side } else { 0.38 * side }.min(if a { 76. } else { 44. }),
+        title: Some(if !a {
+            if side >= 130. { 11. } else { 9.5 }
+        } else if side >= 170. {
             14.
         } else if side >= 140. {
             12.
         } else {
             10.5
+        }),
+        track: if !a {
+            0.
+        } else if side >= 170. {
+            0.2
+        } else {
+            0.12
         },
-        track: if side >= 170. { 0.2 } else { 0.12 },
-        sub: large && side >= 150.,
-        tag: large && side >= 190.,
+        sub: a && large && side >= 150.,
+        tag: a && large && side >= 190.,
+        pad,
+        border,
+    };
+    let fits = |l: &CoreLayout| {
+        let (cw, chh) = core_content(mode, l, ch);
+        cw <= room && chh <= room
+    };
+    // a tiny side shows only the logo, scaled to the room
+    let logo_only = CoreLayout {
+        title: None,
+        sub: false,
+        tag: false,
+        logo: base.logo.min(room),
+        ..base
+    };
+    if side < 60. {
+        return CoreLayout {
+            logo: room,
+            ..logo_only
+        };
     }
+    [
+        base,
+        CoreLayout { tag: false, ..base },
+        CoreLayout {
+            tag: false,
+            sub: false,
+            ..base
+        },
+    ]
+    .into_iter()
+    .find(fits)
+    .unwrap_or(logo_only)
 }
 
-/// Width and height of the content of the core card in px (the border and 8px of padding come off the side).
-pub fn core_content(mode: Mode, side: f32, large: bool, title_chars: usize) -> (f32, f32) {
-    let f = core_fit(mode, side, large);
+/// Width and height in px of the content `l` lays out in the core card (what the painter builds).
+pub fn core_content(mode: Mode, l: &CoreLayout, (tn, sn, gn): CoreChars) -> (f32, f32) {
     let line = |fs: f32| fs * 1.3;
     let text_w = |fs: f32, track: f32, n: usize| n as f32 * fs * (0.6 + track);
-    let mut h = f.logo + line(f.title);
-    let mut w = f.logo.max(text_w(f.title, f.track, title_chars));
-    if mode == Mode::A {
-        h += 4.;
+    if mode == Mode::T {
+        let mut w = l.logo;
+        if let Some(f) = l.title {
+            w += 8. + text_w(f, l.track, tn);
+        }
+        if l.tag {
+            w += 8. + text_w(10., 0., gn);
+        }
+        return (w, l.logo.max(l.title.map_or(0., line)));
     }
-    if f.sub {
+    let (mut w, mut h) = (l.logo, l.logo);
+    if let Some(f) = l.title {
+        h += line(f) + if mode == Mode::A { 4. } else { 0. };
+        w = w.max(text_w(f, l.track, tn));
+    }
+    if l.sub {
         h += line(12.);
-        w = w.max(text_w(12., 0.25, 4));
+        w = w.max(text_w(12., 0.25, sn));
     }
-    if f.tag {
+    if l.tag {
         h += 6. + line(12.);
-        w = w.max(text_w(12., 0., 21));
+        w = w.max(text_w(12., 0., gn));
     }
     (w, h)
 }
@@ -683,6 +845,12 @@ fn core_card(c: &Core, r: R, mode: Mode, large: bool, lvl: f32) -> AnyElement {
             .child(gpui::img(brand::mark()).size(px(s)))
             .into_any_element()
     };
+    let ch = (
+        c.title.chars().count(),
+        c.sub.chars().count(),
+        c.tag.chars().count(),
+    );
+    let f = core_layout(mode, r.w, r.h, large, ch);
     let d = div()
         .w(px(r.w))
         .h(px(r.h))
@@ -690,6 +858,7 @@ fn core_card(c: &Core, r: R, mode: Mode, large: bool, lvl: f32) -> AnyElement {
         .overflow_hidden()
         .font_family(MONO)
         .items_center()
+        .justify_center()
         .bg(hsla(t::BG))
         .border_color(hsla(t::ACCENT_LIGHT))
         .text_color(hsla(t::TEXT))
@@ -699,42 +868,30 @@ fn core_card(c: &Core, r: R, mode: Mode, large: bool, lvl: f32) -> AnyElement {
     match mode {
         Mode::T => d
             .gap(px(8.))
-            .px(px(10.))
+            .px(px(f.pad))
             .border_1()
             .rounded(px(6.))
-            .child(logo(14.))
-            .child(tracked(&c.title, 10.5, 0.14, ink))
-            // the tag goes when the bar is too short for it (it would run out of the card)
-            .when(r.w >= 300., |d| {
+            // the bar's content starts at the left padding like a list row; a lone logo is centred
+            .when(f.title.is_some(), |d| d.justify_start())
+            .child(logo(f.logo))
+            .when_some(f.title, |d, s| d.child(tracked(&c.title, s, f.track, ink)))
+            .when(f.tag, |d| {
                 d.child(div().ml_auto().text_size(px(10.)).child(c.tag.clone()))
             }),
-        Mode::B => {
-            let f = core_fit(mode, r.w, large);
-            d.flex_col()
-                .justify_center()
-                .border_2()
-                .rounded(px(12.))
-                .child(logo(f.logo))
-                .child(
-                    div()
-                        .text_size(px(f.title))
-                        .text_color(ink)
-                        .child(c.title.clone()),
-                )
-        }
-        Mode::A => {
-            let f = core_fit(mode, r.w, large);
+        _ => {
             let mut d = d
                 .flex_col()
-                .justify_center()
+                .p(px(f.pad))
                 .border_2()
                 .rounded(px(12.))
-                .child(logo(f.logo))
-                .child(
+                .child(logo(f.logo));
+            if let Some(s) = f.title {
+                d = d.child(
                     div()
-                        .mt(px(4.))
-                        .child(tracked(&c.title, f.title, f.track, ink)),
+                        .when(mode == Mode::A, |d| d.mt(px(4.)))
+                        .child(tracked(&c.title, s, f.track, ink)),
                 );
+            }
             if f.sub {
                 d = d.child(tracked(&c.sub, 12., 0.25, ink));
             }
@@ -983,21 +1140,94 @@ mod tests {
                     );
                     assert!(r.y >= -0.01 && r.b() <= ah + 0.01, "{p:?} inside {aw}x{ah}");
                 }
+            }
+        }
+    }
+
+    /// Containment by construction: at every panel size the content of the core and of each card, from the same
+    /// pure functions the painter uses, fits inside its border box less the declared border and padding.
+    #[test]
+    fn core_and_cards_contain_their_content_at_every_panel_size() {
+        let titles = [
+            "User & prompt",
+            "Subagents",
+            "Memory",
+            "A very long node title that never fits",
+        ];
+        let ch = (9, 4, 21);
+        for aw in (120..=1200).step_by(8) {
+            for ah in (80..=1600).step_by(8) {
+                let (aw, ah) = (aw as f32, ah as f32);
+                let g = geometry(aw, ah);
+                for r in std::iter::once(&g.core).chain(g.nodes.iter().map(|(_, r)| r)) {
+                    assert!(r.w >= 0. && r.h >= 0., "{aw}x{ah}: negative box {r:?}");
+                }
                 for large in [false, true] {
-                    // a border of 2px and 8px of padding on each side
-                    let room = g.core.w - 2. * (2. + 8.);
-                    let (w, h) = core_content(g.mode, g.core.w, large, 9);
+                    let l = core_layout(g.mode, g.core.w, g.core.h, large, ch);
+                    let (w, h) = core_content(g.mode, &l, ch);
+                    let rw = g.core.w - 2. * (l.border + l.pad);
+                    let rh =
+                        g.core.h - 2. * l.border - if g.mode == Mode::T { 0. } else { 2. * l.pad };
+                    assert!(l.logo >= 0. && l.pad >= 0., "{aw}x{ah}: {l:?}");
                     assert!(
-                        w <= room + 0.01,
-                        "{aw}x{ah} {large}: content {w} wide in {room}"
+                        w <= rw + 0.01,
+                        "{aw}x{ah} {:?} {large}: {w} wide in {rw}: {l:?}",
+                        g.mode
                     );
                     assert!(
-                        h <= room + 0.01,
-                        "{aw}x{ah} {large}: content {h} high in {room}"
+                        h <= rh + 0.01,
+                        "{aw}x{ah} {:?} {large}: {h} high in {rh}: {l:?}",
+                        g.mode
                     );
+                    // parts go in the order tag, sub line, title, never the other way round
+                    assert!(
+                        !l.tag || l.sub || g.mode == Mode::T,
+                        "{aw}x{ah}: tag without sub"
+                    );
+                    assert!(
+                        l.title.is_some() || (!l.sub && !l.tag),
+                        "{aw}x{ah}: parts without a title"
+                    );
+                }
+                let tmin = g.tmin;
+                for (_, r) in &g.nodes {
+                    let f = card_fit(g.mode, tmin, r.w, r.h);
+                    for t in titles {
+                        let name = card_name(t, f.name_max);
+                        let (w, h) = card_content(g.mode, &f, name.chars().count());
+                        assert!(
+                            w <= r.w - card_inset(g.mode) + 0.01
+                                || f.name_max == 0 && name.is_empty() && f.icon <= r.w,
+                            "{aw}x{ah} {:?} {t:?}: {w} wide in a {} card",
+                            g.mode,
+                            r.w
+                        );
+                        assert!(
+                            h <= r.h + 0.01,
+                            "{aw}x{ah} {:?}: {h} high in {}",
+                            g.mode,
+                            r.h
+                        );
+                    }
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_tiny_core_shows_only_a_centred_logo_and_a_huge_one_caps_the_content() {
+        let ch = (9, 4, 21);
+        let tiny = core_layout(Mode::B, 40., 40., true, ch);
+        assert!(
+            tiny.title.is_none() && !tiny.sub && !tiny.tag && tiny.logo > 0. && tiny.logo <= 40.
+        );
+        let degenerate = core_layout(Mode::A, 0., 0., true, ch);
+        assert!(degenerate.logo == 0. && degenerate.title.is_none());
+        let huge = core_layout(Mode::A, 2000., 2000., true, ch);
+        assert!(huge.logo <= 76. && huge.title.is_some() && huge.tag);
+        // 100 px: the title still fits, the sub line and tag do not
+        let mid = core_layout(Mode::A, 100., 100., true, ch);
+        assert!(mid.title.is_some() && !mid.sub && !mid.tag, "{mid:?}");
     }
 
     #[test]
