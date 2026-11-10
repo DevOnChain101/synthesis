@@ -136,6 +136,7 @@ pub fn diff_grid(d: &Value) -> Div {
             };
             let row = div()
                 .flex()
+                .pr(px(12.))
                 .whitespace_nowrap()
                 .child(cell(no(l, "old_no"), 34.))
                 .child(cell(no(l, "new_no"), 34.))
@@ -147,7 +148,15 @@ pub fn diff_grid(d: &Value) -> Div {
                         .text_color(fg)
                         .child(if tag == " " { "" } else { tag }.to_string()),
                 )
-                .child(div().text_color(text()).child(super::syntax::styled(tx)));
+                // a line wider than the card is cut before the card's border, not under it
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_color(text())
+                        .child(super::syntax::styled(tx)),
+                );
             col = col.child(match bg {
                 Some(b) => row.bg(b),
                 None => row,
@@ -437,7 +446,7 @@ pub fn commands(live: &Live, v: &TermView) -> Div {
                             .children(shown.iter().map(|l| {
                                 // output is untrusted: control characters are made visible, not sent to the text system
                                 let l = synthesis_harness::sanitize_for_display(l);
-                                div().whitespace_nowrap().child(if l.is_empty() {
+                                div().truncate().child(if l.is_empty() {
                                     " ".to_string()
                                 } else {
                                     l

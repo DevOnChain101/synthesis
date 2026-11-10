@@ -689,3 +689,44 @@ fn topology_fits_the_narrow_column(cx: &mut TestAppContext) {
         }
     }
 }
+
+/// Every centre tab body sits between the same gutters inside the chat frame (`layout::TAB_PAD_X` each side of the
+/// frame's 1px border), at the three sizes the owner checks, and what each tab draws stays inside that body.
+#[gpui::test]
+fn tab_bodies_stay_inside_the_frame(cx: &mut TestAppContext) {
+    use super::ChatTab;
+    use super::layout::TAB_PAD_X;
+    for (w, h) in [(900., 600.), (1100., 700.), (1400., 900.)] {
+        for tab in ChatTab::ALL {
+            let (tui, v) = cx.add_window_view(|_, _| TuiView::new(0., Hidden::default()));
+            v.simulate_resize(size(px(w), px(h)));
+            tui.update(v, |t, cx| t.select_tab(tab, cx));
+            v.run_until_parked();
+            let (frame, body) = (bounds(v, "p-chat"), bounds(v, "tab-body"));
+            let what = format!("{w}x{h} {tab:?}");
+            // the body fills the frame inside its border; the content starts and ends one gutter in
+            near(
+                f(body.origin.x) - f(frame.origin.x),
+                1.,
+                &format!("{what}: body left"),
+            );
+            near(
+                f(frame.bottom_right().x) - f(body.bottom_right().x),
+                1.,
+                &format!("{what}: body right"),
+            );
+            if let Some(pane) = get(v, "tab-pane") {
+                near(
+                    f(pane.origin.x) - f(frame.origin.x),
+                    1. + TAB_PAD_X,
+                    &format!("{what}: left gutter"),
+                );
+                near(
+                    f(frame.bottom_right().x) - f(pane.bottom_right().x),
+                    1. + TAB_PAD_X,
+                    &format!("{what}: right gutter"),
+                );
+            }
+        }
+    }
+}

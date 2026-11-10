@@ -176,6 +176,10 @@ pub struct TuiView {
     /// Scroll handles of the Tools & Skills and Recent Activity bodies (the fade shows when one is cut).
     tools_scroll: gpui::ScrollHandle,
     act_scroll: gpui::ScrollHandle,
+    /// Height of the Topology panel from the last frame, and what the Usage month section took from it then:
+    /// together they say how much the column can give the section now (`layout::month_mode`).
+    topo_h: std::rc::Rc<std::cell::Cell<f32>>,
+    month_used: std::cell::Cell<f32>,
     /// The slide-over column that is open (only a collapsed column has one; closed by default).
     pub(crate) drawer: Option<Side>,
     /// Side-panel sections folded to their header (by panel id), kept for the session.
@@ -216,6 +220,8 @@ impl TuiView {
             win_h: 900.,
             tools_scroll: gpui::ScrollHandle::new(),
             act_scroll: gpui::ScrollHandle::new(),
+            topo_h: Default::default(),
+            month_used: Default::default(),
             snap: sample(),
             topo_acts: Default::default(),
             topo_now: 0,
@@ -715,6 +721,15 @@ impl TuiView {
         } else {
             self.welcome().into_any_element()
         };
+        let body = div()
+            .debug_selector(|| "tab-body".to_string())
+            .flex_1()
+            .min_h(px(0.))
+            .min_w(px(0.))
+            .flex()
+            .flex_col()
+            .px(px(layout::TAB_PAD_X))
+            .child(body);
         let dock = self.dialog_dock(cx);
         let prompt = if self.live.is_some() {
             self.live_prompt(cx)
@@ -816,6 +831,16 @@ impl TuiView {
                 Some(online),
                 body,
             );
+            // the last frame's height, for the Usage month section's slack
+            let cell = self.topo_h.clone();
+            let p = p.relative().child(
+                gpui::canvas(
+                    move |b, _, _| cell.set(f32::from(b.size.height)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            );
             // `.grow` (flex 1 1 0)
             col = col.child(self.fit(p, "p-topology", |p| p.flex_1().min_h(px(tier.topo_min))));
         } else if let Some(n) = s.topology.iter().find(|n| n.pos == sample::Pos::Sub) {
@@ -899,7 +924,27 @@ impl TuiView {
                         }))
                     }),
                 )),
-                panels::usage_body(&s.usage),
+                {
+                    // the CLI's month section goes under the bars only into space the topology panel can spare
+                    let slack = if hid.topology || self.is_folded("p-topology") {
+                        0.
+                    } else {
+                        self.topo_h.get() + self.month_used.get() - tier.topo_min
+                    };
+                    let mode = if self.is_folded("p-usage") {
+                        layout::MonthMode::Hidden
+                    } else {
+                        layout::month_mode(slack, &s.usage.month)
+                    };
+                    self.month_used.set(match mode {
+                        layout::MonthMode::Hidden => 0.,
+                        m => layout::month_h(m, &s.usage.month) + layout::MONTH_GAP,
+                    });
+                    let body_w = cols(w).right - 2. * 12. - 2.;
+                    panels::usage_body(&s.usage).when(mode != layout::MonthMode::Hidden, |d| {
+                        d.child(panels::month_section(&s.usage.month, mode, body_w))
+                    })
+                },
             );
             col = col.child(self.fit(p, "p-usage", |p| p.flex_initial().min_h(px(tier.usage_min))));
         }

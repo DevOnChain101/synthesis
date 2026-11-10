@@ -226,7 +226,6 @@ impl TuiView {
                 .flex_none()
                 .min_h(px(0.))
                 .my(px(10.))
-                .mr(px(12.))
                 .flex()
                 .flex_col()
                 .overflow_hidden()
@@ -342,7 +341,6 @@ impl TuiView {
             cx.processor(|this: &mut Self, ix: usize, _window, cx| this.row(ix, cx)),
         )
         .size_full()
-        .px(px(12.))
         .pb(px(10.));
         // the padding is outside the list: a row scrolled to the top edge stops below it
         let mut wrap = div()
@@ -566,7 +564,7 @@ impl TuiView {
                         .justify_center()
                         .bg(hsla(t::INFO))
                         .child(icon("user", 14., hsla(t::BG))),
-                    "USER",
+                    "you",
                     hsla(t::INFO),
                     &time,
                     div()

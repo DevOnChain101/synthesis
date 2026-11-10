@@ -41,7 +41,10 @@ pub struct SessionRow {
     pub title: String,
 }
 
-pub use synthesis_view::usage::HistoryDay;
+use synthesis_view::usage::{
+    DayCell, MONTHS, MonthGrid, civil, month_grid as usage_month_grid, month_summary,
+};
+pub use synthesis_view::usage::{HistoryDay, heat_level};
 
 #[derive(Clone, Debug, Default)]
 pub struct Tap {
@@ -370,48 +373,6 @@ fn fmt_time(ts: i64, tz: i32) -> String {
         .div_euclid(1000)
         .rem_euclid(86400);
     format!("{:02}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60)
-}
-
-struct Civil {
-    year: i64,
-    month: usize,
-    day: i64,
-    dow: usize,
-}
-
-fn civil_from_days(z: i64) -> (i64, usize, i64) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, (m - 1) as usize, d)
-}
-fn days_from_civil(y: i64, m0: usize, d: i64) -> i64 {
-    let m = m0 as i64 + 1;
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y.rem_euclid(400);
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-fn civil(ms: i64, tz: i32) -> Civil {
-    let days = (ms + i64::from(tz) * 60_000).div_euclid(86_400_000);
-    let (year, month, day) = civil_from_days(days);
-    Civil {
-        year,
-        month,
-        day,
-        dow: (days + 4).rem_euclid(7) as usize,
-    }
-}
-fn days_in_month(y: i64, m0: usize) -> i64 {
-    days_from_civil(if m0 == 11 { y + 1 } else { y }, (m0 + 1) % 12, 1) - days_from_civil(y, m0, 1)
 }
 
 // ---------------------------------------------------------------- panels
@@ -1720,25 +1681,12 @@ fn agent_panel(
 
 // ---------------------------------------------------------------- usage
 
-const MONTHS: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
 const USAGE_LABEL_W: usize = 4;
 const USAGE_SUMMARY_W: usize = 20;
 const USAGE_MAX_H: i64 = 2 + 1 + 7 + 1;
 const USAGE_WEEKS: i64 = 53;
 const USAGE_YEAR_H: i64 = 2 + 15;
 const USAGE_MIN_H: i64 = 4;
-
-pub fn heat_level(v: Option<f64>, max: Option<f64>) -> usize {
-    let (Some(v), Some(max)) = (v, max) else {
-        return 0;
-    };
-    if v.is_nan() || max.is_nan() || v <= 0.0 || max <= 0.0 || !v.is_finite() || !max.is_finite() {
-        return 0;
-    }
-    4.min(1 + 3.min(((v / max) * (4.0 - 1e-9)).floor() as usize))
-}
 
 #[derive(Clone, Copy)]
 struct Metric {
@@ -1800,53 +1748,6 @@ fn m_fmt(m: &Metric, v: f64) -> String {
         fmt_num(Some(v))
     } else {
         crate::util::round_str(v)
-    }
-}
-
-#[derive(Clone)]
-struct DayCell<'a> {
-    day: i64,
-    month: usize,
-    future: bool,
-    entry: Option<&'a HistoryDay>,
-}
-
-struct MonthGrid<'a> {
-    weeks: Vec<[Option<DayCell<'a>>; 7]>,
-    year: i64,
-    month: usize,
-    today_ms: i64,
-}
-
-fn usage_month_grid<'a>(history: &'a [HistoryDay], tz: i32, now: i64) -> MonthGrid<'a> {
-    let today_ms = history.last().map_or(now, |l| l.date_ms);
-    let t = civil(today_ms, tz);
-    let dim = days_in_month(t.year, t.month);
-    let mut weeks = vec![];
-    let mut week: [Option<DayCell>; 7] = Default::default();
-    for day in 1..=dim {
-        let days = days_from_civil(t.year, t.month, day);
-        let start_ms = days * 86_400_000 - i64::from(tz) * 60_000;
-        let dow = (days + 4).rem_euclid(7) as usize;
-        let entry = history.iter().find(|d| {
-            let c = civil(d.date_ms, tz);
-            c.year == t.year && c.month == t.month && c.day == day
-        });
-        week[dow] = Some(DayCell {
-            day,
-            month: t.month,
-            future: start_ms > today_ms,
-            entry,
-        });
-        if dow == 6 || day == dim {
-            weeks.push(std::mem::take(&mut week));
-        }
-    }
-    MonthGrid {
-        weeks,
-        year: t.year,
-        month: t.month,
-        today_ms,
     }
 }
 
@@ -1918,63 +1819,20 @@ fn usage_summary(
     m: &Metric,
     tz: i32,
 ) -> Vec<(&'static str, String)> {
-    let val = |d: &HistoryDay| val_of(m, d);
-    let month_days: Vec<&DayCell> = grid
-        .weeks
-        .iter()
-        .flatten()
-        .flatten()
-        .filter(|d| !d.future)
-        .collect();
-    let active = month_days
-        .iter()
-        .filter(|d| d.entry.is_some_and(|e| val(e) > 0.0))
-        .count();
-    let mut peak_val = -1.0;
-    let mut peak_day: Option<&DayCell> = None;
-    for d in &month_days {
-        let v = d.entry.map_or(0.0, val);
-        if v > peak_val {
-            peak_val = v;
-            peak_day = Some(d);
-        }
-    }
-    let today_entry = history.last();
-    let mut streak = 0;
-    let mut i = history.len() as i64
-        - 1
-        - if today_entry.is_some_and(|t| val(t) > 0.0) {
-            0
-        } else {
-            1
-        };
-    while i >= 0 && val(&history[i as usize]) > 0.0 {
-        streak += 1;
-        i -= 1;
-    }
-    let sum = |n: usize| {
-        history[history.len().saturating_sub(n)..]
-            .iter()
-            .map(val)
-            .sum::<f64>()
-    };
-    let month_total: f64 = month_days.iter().map(|d| d.entry.map_or(0.0, val)).sum();
-    let when = peak_day.map_or(String::new(), |d| {
-        let _ = tz;
-        format!(" {} {}", d.day, MONTHS[d.month])
+    let _ = tz;
+    let sm = month_summary(history, grid, &|d| val_of(m, d));
+    let when = sm.best_day.map_or(String::new(), |(day, month)| {
+        format!(" {} {}", day, MONTHS[month])
     });
     vec![
-        (
-            "today",
-            paint(COL_ACCENT, &m_fmt(m, today_entry.map_or(0.0, val))),
-        ),
-        ("7 days", paint(COL_TEXT, &m_fmt(m, sum(7)))),
-        ("month", paint(COL_TEXT, &m_fmt(m, month_total))),
+        ("today", paint(COL_ACCENT, &m_fmt(m, sm.today))),
+        ("7 days", paint(COL_TEXT, &m_fmt(m, sm.week))),
+        ("month", paint(COL_TEXT, &m_fmt(m, sm.month))),
         (
             "best",
             format!(
                 "{}{}",
-                paint(COL_TEXT, &m_fmt(m, peak_val.max(0.0))),
+                paint(COL_TEXT, &m_fmt(m, sm.best)),
                 paint(COL_SUBTLE, &when)
             ),
         ),
@@ -1982,8 +1840,8 @@ fn usage_summary(
             "active",
             format!(
                 "{}{}",
-                paint(COL_TEXT, &active.to_string()),
-                paint(COL_SUBTLE, &format!("/{} days", month_days.len()))
+                paint(COL_TEXT, &sm.active.to_string()),
+                paint(COL_SUBTLE, &format!("/{} days", sm.days))
             ),
         ),
         (
@@ -1991,10 +1849,10 @@ fn usage_summary(
             format!(
                 "{}{}",
                 paint(
-                    if streak > 0 { COL_OK } else { COL_TEXT },
-                    &streak.to_string()
+                    if sm.streak > 0 { COL_OK } else { COL_TEXT },
+                    &sm.streak.to_string()
                 ),
-                paint(COL_SUBTLE, if streak == 1 { " day" } else { " days" })
+                paint(COL_SUBTLE, if sm.streak == 1 { " day" } else { " days" })
             ),
         ),
     ]

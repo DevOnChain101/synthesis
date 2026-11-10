@@ -1,5 +1,5 @@
 //! The panel bodies of the TUI view, 1:1 with `cli.html` (`.rows`, `.ws-item`, `.run-item`, `.kv`, `.chk`,
-//! `.bars`): Workspace, Running, Session, Tools & Skills, Recent Activity (prompts and agent activity), Agent Status, Context
+//! `.bars`): Workspace, Running, Session, Tools & Skills, Recent Activity (prompts and answers), Agent Status, Context
 //! and Usage & Metrics. The panel chrome itself is `widgets::chrome`.
 
 use gpui::{
@@ -9,9 +9,10 @@ use gpui::{
 use synthesis_tui_render::theme as t;
 
 use super::activity::{Presence, RunState, presence};
+use super::layout::{MONTH_GAP, MonthMode, month_h};
 use super::sample::{
-    ActKind, ActivityRow, AgentStatus, ContextInfo, Running, SessionInfo, StepKind, ToolsInfo,
-    Usage, Workspace,
+    ActKind, ActivityRow, AgentStatus, ContextInfo, DayDot, MonthUse, Running, SessionInfo,
+    StepKind, Tone, ToolsInfo, Usage, Workspace,
 };
 use crate::theme::hsla;
 pub use crate::widgets::chrome::{OnClick, dim, dot, icon, strong, text, with_alpha};
@@ -399,7 +400,7 @@ fn circ(kind: Option<StepKind>) -> Div {
 }
 
 /// Recent Activity: `time  mark  text` per entry, one line each. Prompts are strong text behind a blue mark, the
-/// agent's doings plain text behind their own mark; an entry the chat no longer shows is dimmed and not clickable.
+/// agent's answers plain text behind an accent mark; an entry the chat no longer shows is dimmed and not clickable.
 pub fn activity_body(rows: &[ActivityRow], on_click: Option<&dyn Fn(usize) -> OnClick>) -> Div {
     if rows.is_empty() {
         return div().text_color(dim()).child("No activity yet");
@@ -410,10 +411,7 @@ pub fn activity_body(rows: &[ActivityRow], on_click: Option<&dyn Fn(usize) -> On
         .children(rows.iter().enumerate().map(|(i, a)| {
             let (mark, fg) = match a.kind {
                 ActKind::Prompt => (hsla(t::INFO), strong()),
-                ActKind::Tool => (dim(), text()),
-                ActKind::Agent => (hsla(t::ACCENT), text()),
-                ActKind::Approval => (hsla(t::WARN), text()),
-                ActKind::Error => (hsla(t::ERROR), hsla(t::ERROR)),
+                ActKind::Reply => (hsla(t::ACCENT), text()),
             };
             let fg = if a.shown { fg } else { dim() };
             li().child(
@@ -623,6 +621,163 @@ pub fn usage_body(u: &Usage) -> Div {
                     .child(r.value.clone()),
             )
     }))
+}
+
+/// Width of one character of the panel text (12.5px monospace), for fitting the CLI's titles.
+const CH: f32 = 7.5;
+/// Pitch of a day cell of the month grid and its dot.
+const CELL: f32 = 12.;
+const DOT: f32 = 8.;
+
+fn heat(level: u8) -> gpui::Hsla {
+    match level {
+        0 => with_alpha(gpui::white(), 0.16),
+        l => hsla(t::HEAT[usize::from(l).min(4)]),
+    }
+}
+
+fn day_dot(d: Option<DayDot>) -> Div {
+    let cell = div()
+        .size(px(DOT))
+        .flex_none()
+        .mr(px(CELL - DOT))
+        .flex()
+        .items_center()
+        .justify_center();
+    match d {
+        None => cell,
+        Some(d) if d.future => cell.child(
+            div()
+                .size(px(3.))
+                .rounded_full()
+                .bg(with_alpha(gpui::white(), 0.18)),
+        ),
+        Some(d) => cell.child(div().size(px(DOT)).rounded(px(2.)).bg(heat(d.level))),
+    }
+}
+
+/// The CLI's `Less ... More` legend (`dash.rs` `legend`).
+fn legend() -> Div {
+    div()
+        .h(px(14.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(5.))
+        .text_size(px(11.))
+        .text_color(dim())
+        .child("Less")
+        .children((0..5).map(|l| div().size(px(DOT)).rounded(px(2.)).bg(heat(l))))
+        .child("More")
+}
+
+/// The CLI's Usage month section, added under the metric rows (see `layout::month_mode`): the title that fits
+/// `body_w` (the CLI's fallback list), then the calendar grid (weeks as columns, M / W / F row labels) with the
+/// summary rows beside it when there is room, or one strip of the days so far; the legend under both. Its height is
+/// exactly `layout::month_h(mode)`.
+pub fn month_section(m: &MonthUse, mode: MonthMode, body_w: f32) -> Div {
+    let mut d = div()
+        .debug_selector(|| "usage-month".to_string())
+        .h(px(month_h(mode, m)))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .mt(px(MONTH_GAP))
+        .pt(px(5.))
+        .border_t_1()
+        .border_color(hsla(t::RULE))
+        .overflow_hidden();
+    if let Some(n) = &m.note {
+        return d.child(div().text_color(dim()).child(n.clone()));
+    }
+    let title = m
+        .titles
+        .iter()
+        .find(|t| t.chars().count() as f32 * CH <= body_w)
+        .unwrap_or(&m.titles[2]);
+    d = d.child(
+        div()
+            .h(px(16.))
+            .truncate()
+            .text_color(dim())
+            .child(title.clone()),
+    );
+    if mode == MonthMode::Strip {
+        let n = ((body_w / CELL) as usize).max(1);
+        let all = m.strip();
+        let from = all.len().saturating_sub(n);
+        return d
+            .child(div().flex().children(all[from..].iter().map(|l| {
+                day_dot(Some(DayDot {
+                    level: *l,
+                    future: false,
+                }))
+            })))
+            .child(legend());
+    }
+    let grid_w = 16. + m.weeks.len() as f32 * CELL;
+    let side_w = 20. * CH;
+    let grid = div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(px(14.))
+                .line_height(px(14.))
+                .text_color(dim())
+                .whitespace_nowrap()
+                .child(m.label.clone()),
+        )
+        .children((0..7).map(|r| {
+            div()
+                .h(px(CELL))
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .w(px(16.))
+                        .flex_none()
+                        .text_size(px(10.))
+                        .text_color(dim())
+                        .child(["", "M", "", "W", "", "F", ""][r]),
+                )
+                .children(m.weeks.iter().map(|w| day_dot(w[r])))
+        }));
+    let side = (grid_w + 24. + side_w <= body_w).then(|| {
+        div()
+            .flex()
+            .flex_col()
+            .justify_center()
+            .children(m.summary.iter().map(|(k, v, sub, tone)| {
+                div()
+                    .h(px(16.))
+                    .line_height(px(14.))
+                    .flex()
+                    .items_center()
+                    .whitespace_nowrap()
+                    .child(div().w(px(52.)).flex_none().text_color(dim()).child(*k))
+                    .child(
+                        div()
+                            .text_color(match tone {
+                                Tone::Plain => text(),
+                                Tone::Accent => hsla(t::ACCENT),
+                                Tone::Ok => hsla(t::SUCCESS),
+                            })
+                            .child(v.clone()),
+                    )
+                    .child(div().text_color(dim()).child(sub.clone()))
+            }))
+    });
+    d.child(
+        div()
+            .flex()
+            .justify_center()
+            .gap(px(24.))
+            .child(grid)
+            .children(side),
+    )
+    .child(legend())
 }
 
 /// The scroll offset (px from the top) that brings the row `[top, top + row)` into a view of
