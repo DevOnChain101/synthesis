@@ -123,6 +123,12 @@ pub struct TabState {
     pub preview: Option<Preview>,
     /// The transcript of this sub-agent shows beside the chat (`AgentPanes::subs` id).
     pub sub: Option<String>,
+    /// Lines (0-based, anchor and head) selected in the preview; a drag is in progress; the right-click menu's spot.
+    pub sel: Option<(usize, usize)>,
+    pub sel_drag: bool,
+    pub menu: Option<gpui::Point<gpui::Pixels>>,
+    /// Quotes waiting for the next prompt (shown as chips under the input).
+    pub quotes: Vec<super::quote::Quote>,
 }
 
 /// The project tree of the session's folder.
@@ -370,6 +376,7 @@ impl TuiView {
         let root = PathBuf::from(&lu.live.cwd);
         self.ts.tree_sel = Some(path.clone());
         self.ts.preview = None;
+        (self.ts.sel, self.ts.menu) = (None, None);
         let rel = path.clone();
         let job = cx.background_spawn(async move { read_preview(&root, &rel) });
         cx.spawn(async move |this, cx| {
@@ -657,11 +664,11 @@ impl TuiView {
             .min_w(px(0.))
             .h_full()
             .overflow_scroll()
-            .child(self.preview_view());
+            .child(self.preview_view(cx));
         shell(div().size_full().flex().child(tree).child(body))
     }
 
-    fn preview_view(&self) -> Div {
+    fn preview_view(&self, cx: &mut Context<Self>) -> Div {
         let Some(sel) = &self.ts.tree_sel else {
             return div()
                 .p(px(14.))
@@ -690,6 +697,20 @@ impl TuiView {
                 )
                 .child(div().flex_none().text_color(dim()).child(right))
         };
+        let copy = div()
+            .id("copy-file")
+            .flex_none()
+            .px(px(6.))
+            .rounded(px(4.))
+            .border_1()
+            .border_color(hsla(t::BORDER))
+            .text_color(strong())
+            .cursor_pointer()
+            .child("copy")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.ts.sel = None;
+                this.copy_selection(cx)
+            }));
         match &p.body {
             Err(why) => div()
                 .child(head(String::new()))
@@ -700,16 +721,72 @@ impl TuiView {
                 div()
                     .flex()
                     .flex_col()
-                    .child(head(format!("{n} lines \u{b7} {}", human_size(b.size))))
+                    .child(head(format!("{n} lines \u{b7} {}", human_size(b.size))).child(copy))
                     .child(
                         div()
                             .py(px(6.))
                             .children(b.lines.iter().enumerate().map(|(i, l)| {
+                                let on = self
+                                    .ts
+                                    .sel
+                                    .is_some_and(|(a, z)| (a.min(z)..=a.max(z)).contains(&i));
                                 div()
                                     .flex()
                                     .px(px(12.))
                                     .whitespace_nowrap()
+                                    .cursor_text()
                                     .hover(|d| d.bg(with_alpha(hsla(t::TEXT_STRONG), 0.03)))
+                                    .when(on, |d| d.bg(with_alpha(hsla(t::ACCENT), 0.22)))
+                                    // line-wise selection: press, drag over lines, release; right-click opens the menu
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Left,
+                                        cx.listener(
+                                            move |this, e: &gpui::MouseDownEvent, _, cx| {
+                                                let from = this
+                                                    .ts
+                                                    .sel
+                                                    .filter(|_| e.modifiers.shift)
+                                                    .map_or(i, |s| s.0);
+                                                this.ts.sel = Some((from, i));
+                                                (this.ts.sel_drag, this.ts.menu) = (true, None);
+                                                cx.notify();
+                                            },
+                                        ),
+                                    )
+                                    .on_mouse_move(cx.listener(
+                                        move |this, e: &gpui::MouseMoveEvent, _, cx| {
+                                            if !this.ts.sel_drag {
+                                                return;
+                                            }
+                                            if e.pressed_button != Some(gpui::MouseButton::Left) {
+                                                this.ts.sel_drag = false;
+                                            } else if let Some(s) = &mut this.ts.sel
+                                                && s.1 != i
+                                            {
+                                                s.1 = i;
+                                                cx.notify();
+                                            }
+                                        },
+                                    ))
+                                    .on_mouse_up(
+                                        gpui::MouseButton::Left,
+                                        cx.listener(|this, _, _, _| this.ts.sel_drag = false),
+                                    )
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Right,
+                                        cx.listener(
+                                            move |this, e: &gpui::MouseDownEvent, _, cx| {
+                                                if !this.ts.sel.is_some_and(|(a, z)| {
+                                                    (a.min(z)..=a.max(z)).contains(&i)
+                                                }) {
+                                                    this.ts.sel = Some((i, i));
+                                                }
+                                                (this.ts.sel_drag, this.ts.menu) =
+                                                    (false, Some(e.position));
+                                                cx.notify();
+                                            },
+                                        ),
+                                    )
                                     .child(
                                         div()
                                             .w(px(w))

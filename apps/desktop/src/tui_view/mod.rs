@@ -14,6 +14,7 @@ pub mod dialog;
 pub mod driver;
 pub mod layout;
 pub mod panels;
+mod quote;
 mod rewind;
 pub mod sample;
 #[cfg(feature = "shot")]
@@ -752,6 +753,7 @@ impl TuiView {
             .child(body)
             .children(dock)
             .child(prompt)
+            .children(self.quote_chips(cx))
             .child(self.agent_switch(cx))
             .child(self.mode_bar())
     }
@@ -1065,6 +1067,7 @@ impl Render for TuiView {
             .child(body)
             .child(self.footer())
             .children(drawer)
+            .children(self.quote_menu(cx))
     }
 }
 
