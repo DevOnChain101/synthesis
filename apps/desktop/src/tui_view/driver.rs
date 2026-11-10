@@ -120,6 +120,8 @@ pub struct LiveUi {
     /// The chat item a click in Recent Activity jumped to, and when its highlight ends (epoch ms).
     pub flash: Option<(usize, i64)>,
     pub dlg_scroll: ScrollHandle,
+    /// The one text box above a dialog's options (the Trust paragraphs, an approval's input).
+    pub body_scroll: ScrollHandle,
     /// The model chosen with `/model`, applied to every relaunch until a resume.
     pub model_override: Option<String>,
     /// The project root the person trusted for THIS session (Trust dialog): kept over the restarts that
@@ -211,6 +213,7 @@ impl TuiView {
             run_scroll: ScrollHandle::new(),
             flash: None,
             dlg_scroll: ScrollHandle::new(),
+            body_scroll: ScrollHandle::new(),
             model_override: None,
             session_trust: None,
             pending_remember: vec![],

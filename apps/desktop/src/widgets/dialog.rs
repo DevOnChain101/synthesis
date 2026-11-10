@@ -22,12 +22,28 @@ const INPUT_LINES: usize = 200;
 pub type OnMouseDown =
     Box<dyn Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static>;
 
+/// Whether a scroll box (as last drawn) has more below its visible part.
+fn more_below(h: &ScrollHandle) -> bool {
+    f32::from(h.max_offset().y) + f32::from(h.offset().y) > 1.
+}
+
+/// The line under a scroll box that has more below, so a cut text is never taken for the whole of it.
+fn scroll_cue(h: &ScrollHandle, what: &str) -> Option<AnyElement> {
+    more_below(h).then(|| {
+        div()
+            .text_color(hsla(t::WARN))
+            .child(format!("\u{2193} more {what}: scroll"))
+            .into_any_element()
+    })
+}
+
 /// The front dialog as a panel for the chat column, docked above the prompt, or `None`. `click(i)` is the
-/// handler of option `i`; `scroll` keeps the option list's position (the pickers scroll to the selected row);
+/// handler of option `i`; the scroll handles are (`scroll`, `body_scroll`): `scroll` keeps the option list's position (the pickers scroll to the selected row);
+/// `body_scroll` is the one text box above the options (input, plan, memory, trust, rewind, clean);
 /// `border` is the panel's border (the red of the approval signal, or the accent).
 pub fn dock(
     live: &Live,
-    scroll: &ScrollHandle,
+    (scroll, body_scroll): (&ScrollHandle, &ScrollHandle),
     click: &dyn Fn(usize) -> OnClick,
     toggle: &dyn Fn(usize) -> OnClick,
     border: gpui::Hsla,
@@ -38,7 +54,11 @@ pub fn dock(
     let queued = live.dialogs.len() - 1;
     let mut card = div()
         .debug_selector(|| "dialog".to_string())
-        .flex_none()
+        .id("dialog")
+        // short window: the text boxes and the option list give way and scroll, and the card itself scrolls as the
+        // last resort, so the prompt below stays on screen (a card that cannot shrink pushed it out)
+        .min_h(px(0.))
+        .overflow_y_scroll()
         .mx(px(12.))
         .mb(px(8.))
         .flex()
@@ -79,6 +99,7 @@ pub fn dock(
                     .id("dialog-input")
                     .max_h(px(max_input_h))
                     .overflow_y_scroll()
+                    .track_scroll(body_scroll)
                     .p(px(8.))
                     .rounded(px(6.))
                     .border_1()
@@ -92,7 +113,7 @@ pub fn dock(
                         })
                     })),
             );
-            if scrolls {
+            if scrolls || more_below(body_scroll) {
                 card = card.child(div().text_color(hsla(t::WARN)).child(
                     "\u{2195} more than fits: scroll the box to read all of it before answering",
                 ));
@@ -110,9 +131,11 @@ pub fn dock(
                     .id("dialog-plan")
                     .max_h(px(200.))
                     .overflow_y_scroll()
+                    .track_scroll(body_scroll)
                     .text_color(text())
                     .child(TextView::markdown("plan", plan.clone())),
             );
+            card = card.children(scroll_cue(body_scroll, "of the plan"));
         }
         DialogKind::Question { questions, cur, .. } => {
             let q = &questions[*cur];
@@ -142,6 +165,7 @@ pub fn dock(
                     .id("dialog-memory")
                     .max_h(px(max_input_h))
                     .overflow_y_scroll()
+                    .track_scroll(body_scroll)
                     .p(px(8.))
                     .rounded(px(6.))
                     .border_1()
@@ -155,7 +179,7 @@ pub fn dock(
                         })
                     })),
             );
-            if scrolls {
+            if scrolls || more_below(body_scroll) {
                 card = card.child(
                     div()
                         .text_color(hsla(t::WARN))
@@ -172,6 +196,7 @@ pub fn dock(
                     .id("dialog-rewind")
                     .max_h(px(max_input_h))
                     .overflow_y_scroll()
+                    .track_scroll(body_scroll)
                     .p(px(8.))
                     .rounded(px(6.))
                     .border_1()
@@ -217,6 +242,7 @@ pub fn dock(
                             })
                     })),
             );
+            card = card.children(scroll_cue(body_scroll, "lines"));
         }
         DialogKind::Clean(c) => {
             let lines = c.lines();
@@ -225,6 +251,7 @@ pub fn dock(
                     .id("dialog-clean")
                     .max_h(px(max_input_h))
                     .overflow_y_scroll()
+                    .track_scroll(body_scroll)
                     .p(px(8.))
                     .rounded(px(6.))
                     .border_1()
@@ -242,6 +269,7 @@ pub fn dock(
                         div().text_color(col).child(l)
                     })),
             );
+            card = card.children(scroll_cue(body_scroll, "lines"));
             if c.needs_word() {
                 let ok = c.word_ok();
                 card = card.child(
@@ -303,12 +331,14 @@ pub fn dock(
                     .debug_selector(|| "dialog-trust".to_string())
                     .max_h(px(max_input_h * 0.5))
                     .overflow_y_scroll()
+                    .track_scroll(body_scroll)
                     .flex()
                     .flex_col()
                     .gap(px(8.))
                     .text_color(hsla(t::ACCENT))
                     .children(headers.iter().map(|(_, h)| div().child(h.clone()))),
             );
+            card = card.children(scroll_cue(body_scroll, "text"));
             &[]
         }
         DialogKind::Picker { headers, .. } => headers,
@@ -411,6 +441,7 @@ pub fn dock(
             .track_scroll(scroll)
             .children(list),
     );
+    card = card.children(scroll_cue(scroll, "options"));
     let verb = match (&d.kind, typing.is_some()) {
         (_, true) => "Enter keeps the text \u{b7} Esc drops it",
         (

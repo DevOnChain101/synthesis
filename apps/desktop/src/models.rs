@@ -26,24 +26,27 @@ fn k(n: u64) -> String {
     }
 }
 
-/// `ctx 200k · out 64k · vision yes · effort low|high · $3/$15` with `?` where nothing is known.
+/// `ctx 200k · out 64k · vision yes · effort low|high · $3/$15`: only the fields that are known (none: empty).
 pub fn detail(f: Option<&ModelFacts>, price: Option<(f64, f64)>) -> String {
-    let q = || "?".to_string();
-    let ctx = f.and_then(|f| f.context_window).map_or_else(q, k);
-    let out = f.and_then(|f| f.max_output).map_or_else(q, k);
-    let vision = match f.and_then(|f| f.vision) {
-        Some(true) => "yes".into(),
-        Some(false) => "no".into(),
-        None => q(),
-    };
-    let tiers = match f.map(|f| &f.effort_tiers) {
-        Some(t) if !t.is_empty() => t.join("|"),
-        _ => q(),
-    };
-    let price = price.map_or_else(q, |(i, o)| format!("${i}/${o}"));
-    format!(
-        "ctx {ctx} \u{b7} out {out} \u{b7} vision {vision} \u{b7} effort {tiers} \u{b7} {price}"
-    )
+    let vision = f
+        .and_then(|f| f.vision)
+        .map(|v| if v { "yes" } else { "no" });
+    let tiers = f
+        .map(|f| f.effort_tiers.join("|"))
+        .filter(|t| !t.is_empty());
+    [
+        f.and_then(|f| f.context_window)
+            .map(|n| format!("ctx {}", k(n))),
+        f.and_then(|f| f.max_output)
+            .map(|n| format!("out {}", k(n))),
+        vision.map(|v| format!("vision {v}")),
+        tiers.map(|t| format!("effort {t}")),
+        price.map(|(i, o)| format!("${i}/${o}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" \u{b7} ")
 }
 
 /// `1M (the provider's model list (cache))` or why the window is unknown and how to set it.
@@ -144,11 +147,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unknown_values_show_a_question_mark_and_known_ones_their_number() {
-        assert_eq!(
-            detail(None, None),
-            "ctx ? \u{b7} out ? \u{b7} vision ? \u{b7} effort ? \u{b7} ?"
-        );
+    fn unknown_values_are_left_out_and_known_ones_show_their_number() {
+        assert_eq!(detail(None, None), "");
+        let only_ctx = ModelFacts {
+            context_window: Some(32_000),
+            ..Default::default()
+        };
+        assert_eq!(detail(Some(&only_ctx), None), "ctx 32k");
         let f = ModelFacts {
             context_window: Some(200_000),
             max_output: Some(8192),

@@ -17,8 +17,11 @@ pub fn text() -> Hsla {
 pub fn strong() -> Hsla {
     hsla(t::TEXT_STRONG)
 }
+/// Dim text of the TUI view: `MUTED` lifted a little (#8E8F93) so it reaches 4.5:1 on the elevated ground of
+/// selected rows too (`MUTED` itself is 4.06 there); on BG and SURFACE it is brighter than the palette's.
+pub const DIM: t::Rgb = [142, 143, 147];
 pub fn dim() -> Hsla {
-    hsla(t::MUTED)
+    hsla(DIM)
 }
 /// `--line` of the design: the 1px rules between header, tabs and footer.
 pub fn rule() -> Hsla {
@@ -219,8 +222,20 @@ pub fn panel_scroll(
                 .child(m),
         );
     }
+    // a body cut at the panel's bottom (by the column or its max height) fades out over the last rows instead of
+    // ending in half a line
+    let clipped =
+        scroll.is_some_and(|s| f32::from(s.max_offset().y) + f32::from(s.offset().y) > 1.);
+    let (from, to) = (
+        crate::theme::fill(t::SURFACE),
+        Hsla {
+            a: 0.,
+            ..crate::theme::fill(t::SURFACE)
+        },
+    );
     div()
         .debug_selector(|| h.id.to_string())
+        .relative()
         .flex()
         .flex_col()
         .min_w(px(0.))
@@ -234,6 +249,25 @@ pub fn panel_scroll(
             d.child(b.child(body))
                 // the bottom padding sits outside the scroll area, or the next row shows through it
                 .child(div().h(px(h.pad.body_bottom)).flex_none())
+                .when(clipped, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom(px(h.pad.body_bottom))
+                            .h(px(17.))
+                            .flex()
+                            .flex_col()
+                            .child(div().flex_1().bg(gpui::linear_gradient(
+                                180.,
+                                gpui::linear_color_stop(to, 0.),
+                                gpui::linear_color_stop(from, 1.),
+                            )))
+                            // the cut edge itself is fully covered: no sliver of the next row shows
+                            .child(div().h(px(3.)).flex_none().bg(from)),
+                    )
+                })
         })
 }
 
@@ -284,6 +318,38 @@ fn chip(c: &Chip) -> Div {
         })
         .when(!c.label.is_empty(), |d| d.child(c.label.clone()))
         .child(div().text_color(c.colour).child(c.value.clone()))
+}
+
+/// Width a chip takes in the monospace face (7.5 px a character at 12.5 px): 14 px padding each side, the
+/// 1 px rule, and 6 px between dot, label and value.
+pub fn chip_w(c: &Chip) -> f32 {
+    let parts = [
+        c.dot.then_some(7.),
+        (!c.label.is_empty()).then(|| c.label.chars().count() as f32 * 7.5),
+        Some(c.value.chars().count() as f32 * 7.5),
+    ];
+    let parts: Vec<f32> = parts.into_iter().flatten().collect();
+    29. + parts.iter().sum::<f32>() + 6. * (parts.len() - 1) as f32
+}
+
+/// The chips that fit `avail` px whole; when some do not, the leading ones and a closing `...` chip, so no chip is
+/// ever cut mid-glyph. (`cli.html` clips them; that only shows below the widths the design was measured at.)
+pub fn fit_chips(chips: Vec<Chip>, avail: f32) -> Vec<Chip> {
+    if chips.iter().map(chip_w).sum::<f32>() <= avail {
+        return chips;
+    }
+    let ellipsis = Chip::new("", "\u{2026}", dim());
+    let room = avail - chip_w(&ellipsis);
+    let mut used = 0.;
+    let mut out: Vec<Chip> = chips
+        .into_iter()
+        .take_while(|c| {
+            used += chip_w(c);
+            used <= room
+        })
+        .collect();
+    out.push(ellipsis);
+    out
 }
 
 /// `.topbar`: 46px, brand, the chips (clipped, not wrapped, when the window is narrow), a spacer and
@@ -660,6 +726,71 @@ pub fn chat_head(
                 ),
         )
         .child(div().flex_none().text_color(dim()).child(tail.to_string()))
+}
+
+#[cfg(test)]
+mod contrast_tests {
+    use super::*;
+    use synthesis_tui_render::theme::measure::contrast;
+
+    /// WCAG AA for body text (4.5:1): the text colours the view draws, on every ground they sit on.
+    #[test]
+    fn body_text_reaches_4_5_to_1_on_every_ground() {
+        let grounds = [
+            ("BG", t::BG),
+            ("SURFACE", t::SURFACE),
+            ("ELEVATED", t::ELEVATED),
+        ];
+        let texts = [
+            ("dim", DIM),
+            ("TEXT", t::TEXT),
+            ("TEXT_STRONG", t::TEXT_STRONG),
+            ("ERROR (attention)", t::ERROR),
+            ("WARN", t::WARN),
+            ("ACCENT", t::ACCENT),
+        ];
+        for (tn, tc) in texts {
+            for (gn, gc) in grounds {
+                let r = contrast(tc, gc);
+                assert!(r >= 4.5, "{tn} on {gn}: {r:.2}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod fit_chips_tests {
+    use super::*;
+
+    fn chips() -> Vec<Chip> {
+        vec![
+            Chip::new("", "1 live", dim()).dotted(),
+            Chip::new("session:", "Shopping", dim()),
+            Chip::new("model:", "claude-sonnet", dim()),
+        ]
+    }
+
+    #[test]
+    fn whole_chips_stay_or_go_and_a_dropped_tail_ends_in_an_ellipsis() {
+        let all: f32 = chips().iter().map(chip_w).sum();
+        assert_eq!(
+            fit_chips(chips(), all).len(),
+            3,
+            "everything fits: untouched"
+        );
+        for avail in [0., 50., 100., 200., all - 1.] {
+            let out = fit_chips(chips(), avail);
+            let used: f32 = out.iter().map(chip_w).sum();
+            assert_eq!(out.last().unwrap().value, "\u{2026}", "{avail}");
+            assert!(
+                out.len() <= 3 && (used <= avail || out.len() == 1),
+                "{avail}: {used}"
+            );
+        }
+        // a chip is kept whole or dropped, in order
+        let out = fit_chips(chips(), chip_w(&chips()[0]) + chip_w(&chips()[1]) + 40.);
+        assert_eq!(out[1].label, "session:");
+    }
 }
 
 #[cfg(test)]

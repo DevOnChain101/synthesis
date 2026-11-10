@@ -257,10 +257,16 @@ impl TuiView {
             }
         }
         if self.ts.tab == ChatTab::Files {
-            // a note from before the folder was trusted gives way to the real listing
+            // the untrusted note gives way to the real listing once the folder is trusted (a note of the scan itself, such as
+            // "not a git repository", stays: rescanning on it spun the scan on every frame)
             let stale = self.tree.for_cwd != lu.live.cwd
                 || self.tree.at_changes != changes
-                || (lu.live.trusted && self.tree.data.as_ref().is_some_and(|d| d.note.is_some()));
+                || (lu.live.trusted
+                    && self
+                        .tree
+                        .data
+                        .as_ref()
+                        .is_some_and(|d| d.note.as_deref() == Some(UNTRUSTED)));
             if (self.tree.data.is_none() || stale) && !self.tree.loading {
                 self.request_scan(cx);
             }

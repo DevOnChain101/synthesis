@@ -41,6 +41,11 @@ reach 4.5 (tests `palette_tests`). Regenerate with
 | CYAN | #80B6BC | 186 | 0.32 | 8.65 | 7.82 | inline code, storage keywords |
 | SELECT_BG | #463C32 | 30 | 0.29 | 1.81 | 1.64 | selected text ground (SELECT_FG = PEARL, 9.1:1 on it) |
 
+The desktop app's TUI view draws its dim text (`chrome::dim`, `apps/desktop/src/widgets/chrome.rs`) in `#8E8F93`,
+`MUTED` lifted by about 9 levels, because `MUTED` is 4.06:1 on ELEVATED (the ground of selected rows and the open tab);
+`#8E8F93` is 4.57:1 there and 6.03:1 on BG. The terminal TUI keeps `MUTED`. A desktop unit test
+(`contrast_tests`) checks dim, TEXT, TEXT_STRONG, ERROR, WARN and ACCENT at 4.5:1 on BG, SURFACE and ELEVATED.
+
 Syntax colours (`SYN_*`) and the sub-agent/context colours (`AGENT_COLORS`) are drawn from these
 tokens. An agent definition that asks for the colour `purple` gets ACCENT_LIGHT, `pink` BEIGE.
 
