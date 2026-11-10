@@ -15,12 +15,12 @@ use gpui_component::input::{InputEvent, TextareaState};
 use synthesis_config::Env;
 use synthesis_tui_base::complete::{self, StdFs};
 use synthesis_tui_base::editor::LineEditor;
-use synthesis_view::convo::Item;
+use synthesis_view::convo::{Convo, Item};
 use synthesis_view::workspaces::{LoadOpts, WorkspaceList, fold_dir};
 
 use super::{TuiView, panels};
 use crate::engine::{self, Args, Engine, StartOpts, UiMsg};
-use crate::live::{Action, Focus, Live, NoticeKind, SWITCH_ARM_MS, Submitted, now_ms};
+use crate::live::{Action, Focus, Live, NoticeKind, Preview, SWITCH_ARM_MS, Submitted, now_ms};
 
 /// What the live view needs from `main`: the environment snapshot and the flags.
 #[derive(Clone)]
@@ -144,6 +144,14 @@ pub struct LiveUi {
     fixture: bool,
     store_task: Option<Task<()>>,
     peer_task: Option<Task<()>>,
+    /// Recently read stored conversations (id, the row's `last` they were read at, conversation), oldest first.
+    previews: Vec<(String, i64, Arc<Convo>)>,
+    /// Session ids being read right now, and the one the chat waits to show.
+    loading: Vec<String>,
+    want: Option<String>,
+    /// A line typed while the engine was not there yet (a previewed session starts, or a relaunch runs): it is
+    /// handled as soon as the engine is attached.
+    after_start: Option<String>,
     /// Blink state of the prompt's block caret.
     pub blink: super::chat::Blink,
     _subs: Vec<Subscription>,
@@ -228,6 +236,10 @@ impl TuiView {
             fixture: false,
             store_task: None,
             peer_task: None,
+            previews: vec![],
+            loading: vec![],
+            want: None,
+            after_start: None,
             busy_hint: false,
             blink: Default::default(),
             _subs: subs,
@@ -321,7 +333,14 @@ impl TuiView {
         if lu.fixture {
             return;
         }
-        // the old conversation stays on screen until the new engine replaces it: no blank frame
+        // the old conversation stays on screen until the new engine replaces it: no blank frame; a preview
+        // of the session about to resume stays too, any other preview is not the new session
+        if !matches!(&target, Some(Target::Resume(id)) if lu.live.preview.as_ref().is_some_and(|p| p.sid == *id))
+        {
+            lu.live.preview = None;
+            lu.list_reset = true;
+        }
+        lu.want = None;
         lu.live.starting = true;
         lu.live.engine = None;
         lu.dirty = true;
@@ -353,6 +372,7 @@ impl TuiView {
         lu.dirty = true;
         match r {
             Err(e) => {
+                lu.live.returned_prompt = lu.after_start.take().or(lu.live.returned_prompt.take());
                 lu.session_trust = None;
                 if !lu.pending_remember.is_empty() {
                     let failed = forget(
@@ -401,9 +421,24 @@ impl TuiView {
                 lu.pump_task = Some(pump);
                 self.refresh_store(cx);
                 cx.emit(SessionStarted);
+                // the line typed while the engine started goes out now
+                if let Some(t) = self.live.as_mut().and_then(|lu| lu.after_start.take()) {
+                    self.dispatch(t, cx);
+                }
             }
         }
         cx.notify();
+    }
+
+    /// A line the prompt held back until the engine was there (no window: the box was cleared already).
+    fn dispatch(&mut self, text: String, cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        match lu.live.submit_as(&text, false) {
+            Submitted::Send(t) => self.send_text(t, cx),
+            Submitted::Do(a) => self.run_action(a, cx),
+            Submitted::Inject { to, text } => self.inject(to, text, cx),
+            _ => {}
+        }
     }
 
     pub(super) fn apply_batch(&mut self, batch: Vec<UiMsg>, cx: &mut Context<Self>) {
@@ -582,6 +617,14 @@ impl TuiView {
         lu.comp = None;
         lu.hist = None;
         lu.search = None;
+        // a previewed session or a relaunch in flight has no engine yet: the line waits for it
+        if lu.live.starting || lu.live.preview.as_ref().is_some_and(|p| !p.sid.is_empty()) {
+            return self.hold_for_engine(text, window, cx);
+        }
+        // the welcome of a `new ...` row is no session: the line goes to the open one
+        if lu.live.preview.take().is_some() {
+            lu.list_reset = true;
+        }
         // the quotes of the file explorer go with a prompt, never with a command
         let quoted = !self.ts.quotes.is_empty()
             && !text.trim().is_empty()
@@ -621,6 +664,42 @@ impl TuiView {
         lu.stick();
         lu.dirty = true;
         cx.notify();
+    }
+
+    /// `text` (maybe empty: Enter on a previewed session) waits for the engine; a previewed session is started
+    /// for it. The box is cleared only when the line is held (a refused start leaves it as typed).
+    fn hold_for_engine(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        let line = !text.trim().is_empty();
+        if line && lu.after_start.is_some() {
+            lu.live.note(
+                "one line is already waiting for the session to start",
+                false,
+            );
+            lu.dirty = true;
+            return cx.notify();
+        }
+        if !lu.live.starting {
+            let id = lu
+                .live
+                .preview
+                .as_ref()
+                .map(|p| p.sid.clone())
+                .unwrap_or_default();
+            lu.after_start = line.then(|| text.clone());
+            self.open_session(&id, cx);
+            let Some(lu) = &mut self.live else { return };
+            if !lu.live.starting {
+                // refused (a task runs, a /rewind is open): the engine stays, the box keeps the text
+                lu.after_start = None;
+                return;
+            }
+        } else if line {
+            lu.after_start = Some(text);
+        }
+        if line {
+            self.set_prompt("", window, cx);
+        }
     }
 
     /// Send now: the harness takes the line at the next safe point (`UiMsg::SendFailed` if not).
@@ -1036,17 +1115,25 @@ impl TuiView {
         let Some(lu) = &mut self.live else {
             return false;
         };
-        let n = match lu.live.focus {
+        // the `new workspace` / `new session` row is the last one of its list
+        let n = 1 + match lu.live.focus {
             Focus::Workspace => lu.live.view.workspaces.workspaces.len(),
             _ => self.snap.running.len(),
         };
         match key {
-            "tab" => lu.live.focus = lu.live.focus.next(),
+            "tab" => {
+                lu.live.focus = lu.live.focus.next();
+                if lu.live.focus == Focus::Running {
+                    let sel = lu.live.run_sel;
+                    self.preview_row(sel, cx);
+                }
+            }
             "escape" => lu.live.focus = Focus::Chat,
             "up" | "down" | "pageup" | "pagedown" | "home" | "end" => {
                 let down = matches!(key, "down" | "pagedown" | "end");
                 let step = if key.starts_with("page") { 5 } else { 1 };
                 let cur = match lu.live.focus {
+                    Focus::Workspace if lu.live.ws_new => n - 1,
                     Focus::Workspace => lu
                         .live
                         .view
@@ -1055,7 +1142,7 @@ impl TuiView {
                         .iter()
                         .position(|w| w.key == lu.live.ws_key)
                         .unwrap_or(0),
-                    _ => lu.live.run_sel,
+                    _ => lu.live.run_sel.min(n - 1),
                 };
                 let next = match key {
                     "home" => 0,
@@ -1066,16 +1153,23 @@ impl TuiView {
                 self.select_row(next, cx);
             }
             "enter" => match lu.live.focus {
+                // the `new ...` rows act only here (or on a click)
+                Focus::Workspace if lu.live.ws_new => self.new_workspace(cx),
                 Focus::Workspace => {
                     // its sessions get the keys
                     lu.live.focus = Focus::Running;
                     lu.live.run_sel = 0;
+                    self.preview_row(0, cx);
                 }
                 _ => {
                     // opening a session hands the keys to its chat
                     lu.live.focus = Focus::Chat;
                     let sel = lu.live.run_sel;
-                    self.open_row(sel, cx);
+                    if sel + 1 >= n {
+                        self.run_action(Action::New, cx);
+                    } else {
+                        self.open_row(sel, cx);
+                    }
                 }
             },
             // typing goes back to the chat (the character is inserted there)
@@ -1098,22 +1192,149 @@ impl TuiView {
 
     fn select_row(&mut self, i: usize, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
+        let in_ws = lu.live.focus == Focus::Workspace;
         match lu.live.focus {
             Focus::Workspace => {
+                lu.live.ws_new = false;
                 if let Some(w) = lu.live.view.workspaces.workspaces.get(i) {
                     lu.live.ws_key = w.key.clone();
                     lu.live.run_sel = 0;
+                } else {
+                    lu.live.ws_new = true;
                 }
             }
             _ => lu.live.run_sel = i,
         }
-        if lu.live.focus == Focus::Workspace {
+        if in_ws {
             panels::reveal_row(&lu.ws_scroll, i, panels::WS_ROW_H);
         } else {
             panels::reveal_row(&lu.run_scroll, i, panels::RUN_ROW_H);
         }
         lu.dirty = true;
+        if in_ws {
+            // a workspace row shows the open session; its `new` row the welcome
+            let new = lu.live.ws_new;
+            return self.show_preview(String::new(), new.then(Default::default), cx);
+        }
+        self.preview_row(i, cx);
         cx.notify();
+    }
+
+    /// Stores `c` as the most recent of the few conversations kept (the oldest goes).
+    fn remember(&mut self, id: String, last: i64, c: Arc<Convo>) {
+        let Some(lu) = &mut self.live else { return };
+        lu.previews.retain(|p| p.0 != id);
+        lu.previews.push((id, last, c));
+        if lu.previews.len() > PREVIEW_CACHE {
+            lu.previews.remove(0);
+        }
+    }
+
+    /// Shows what Running row `i` holds in the chat, read-only, without touching the engine: a stored session
+    /// from the cache at once (else the chat keeps what it shows until the read ends), the open session's own
+    /// chat, or the welcome for the `new session` row. The neighbours are read ahead.
+    fn preview_row(&mut self, i: usize, cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        lu.want = None;
+        let rows = &self.snap.running;
+        let stored = |j: usize| {
+            rows.get(j)
+                .filter(|r| !r.peer && !r.id.is_empty() && r.id != lu.live.sid)
+                .map(|r| (r.id.clone(), r.last))
+        };
+        if rows.get(i).is_none() {
+            return self.show_preview(String::new(), Some(Default::default()), cx);
+        }
+        let (cur, ahead) = (stored(i), [stored(i.wrapping_sub(1)), stored(i + 1)]);
+        match cur {
+            None => self.show_preview(String::new(), None, cx),
+            Some((id, last)) => {
+                let hit = lu
+                    .previews
+                    .iter()
+                    .find(|p| p.0 == id && p.1 == last)
+                    .map(|p| p.2.clone());
+                match hit {
+                    Some(c) => self.show_preview(id, Some(c), cx),
+                    None => {
+                        lu.want = Some(id.clone());
+                        self.read_preview(id, last, cx);
+                    }
+                }
+            }
+        }
+        for (id, last) in ahead.into_iter().flatten() {
+            self.read_preview(id, last, cx);
+        }
+    }
+
+    /// Makes the chat show `c` as session `sid` (`None`: the open session's own chat again).
+    fn show_preview(&mut self, sid: String, c: Option<Arc<Convo>>, cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        let same = match (&lu.live.preview, &c) {
+            (None, None) => true,
+            (Some(p), Some(c)) => p.sid == sid && (sid.is_empty() || Arc::ptr_eq(&p.convo, c)),
+            _ => false,
+        };
+        if !same {
+            lu.live.preview = c.map(|convo| Preview { sid, convo });
+            lu.list_reset = true;
+            lu.stick();
+        }
+        lu.dirty = true;
+        cx.notify();
+    }
+
+    /// Reads a stored conversation off the UI thread into the cache (nothing when it is cached or being read).
+    fn read_preview(&mut self, id: String, last: i64, cx: &mut Context<Self>) {
+        let Some(lu) = &mut self.live else { return };
+        if lu.loading.contains(&id) || lu.previews.iter().any(|p| p.0 == id && p.1 == last) {
+            return;
+        }
+        lu.loading.push(id.clone());
+        let home = lu.cfg.synthesis_home.clone();
+        let job = {
+            let id = id.clone();
+            cx.background_spawn(async move { load_convo(&home, &id) })
+        };
+        cx.spawn(async move |this, cx| {
+            let r = job.await;
+            this.update(cx, |t, cx| t.preview_read(id, last, r, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn preview_read(
+        &mut self,
+        id: String,
+        last: i64,
+        r: Result<Convo, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(lu) = &mut self.live else { return };
+        lu.loading.retain(|x| *x != id);
+        let wanted = lu.want.as_deref() == Some(id.as_str());
+        match r {
+            Ok(c) => {
+                let c = Arc::new(c);
+                self.remember(id.clone(), last, c.clone());
+                if wanted {
+                    if let Some(lu) = &mut self.live {
+                        lu.want = None;
+                    }
+                    self.show_preview(id, Some(c), cx);
+                }
+            }
+            Err(e) if wanted => {
+                lu.want = None;
+                lu.live
+                    .note(format!("could not read session {id}: {e}"), true);
+                lu.dirty = true;
+                cx.notify();
+            }
+            Err(_) => {}
+        }
     }
 
     /// Click on a Workspace row: select it; Running lists its sessions.
@@ -1136,6 +1357,10 @@ impl TuiView {
     /// Scrolls the chat to item `anchor` (a collapsed tool card opens) and flashes it. Nothing if its row is gone.
     pub(super) fn jump_to_item(&mut self, anchor: usize, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
+        // Recent Activity belongs to the open session, not to a previewed one
+        if lu.live.preview.is_some() {
+            return;
+        }
         let Some(pos) = lu.rows.iter().position(|r| *r == Row::Item(anchor)) else {
             return;
         };
@@ -1185,11 +1410,12 @@ impl TuiView {
             return;
         }
         let Some(lu) = &mut self.live else { return };
-        // the row is selected and the session's chat gets the keys (cursor visible, typing works at once)
+        // the row is selected and the session's chat gets the keys (cursor visible, typing works at once); the
+        // conversation shows at once and the engine starts with the first line (or Enter)
         lu.live.focus = Focus::Chat;
         lu.live.run_sel = i;
         lu.prompt.update(cx, |s, cx| s.focus(window, cx));
-        self.open_row(i, cx);
+        self.preview_row(i, cx);
     }
 
     fn open_row(&mut self, i: usize, cx: &mut Context<Self>) {
@@ -1904,7 +2130,7 @@ impl LiveUi {
     /// Rows of the chat now: what the quiet chat shows, then the plan and the working line.
     fn rows_now(&self) -> Vec<Row> {
         let l = &self.live;
-        let c = &l.view.convo;
+        let c = l.convo();
         let mut rows: Vec<Row> = c
             .items
             .iter()
@@ -1916,7 +2142,7 @@ impl LiveUi {
             rows.push(Row::Plan);
         }
         // every busy state has its line: thinking, a tool, a sub-agent, verifying, compacting, an approval
-        if super::activity::activity_of(l).is_some() {
+        if l.preview.is_none() && super::activity::activity_of(l).is_some() {
             rows.push(Row::Activity);
         }
         rows
@@ -1949,7 +2175,7 @@ impl LiveUi {
     /// What decides the height of a row; the plan card and the working line always count as changed.
     fn row_sig(&self, r: Row) -> u64 {
         match r {
-            Row::Item(i) => self.live.view.convo.items.get(i).map_or(0, item_sig),
+            Row::Item(i) => self.live.convo().items.get(i).map_or(0, item_sig),
             Row::Plan | Row::Activity => u64::MAX,
         }
     }
@@ -2366,6 +2592,24 @@ fn restart_blocker_of(live: &Live) -> Option<&'static str> {
     }
 }
 
+/// Conversations kept for the preview of a Running row.
+const PREVIEW_CACHE: usize = 8;
+
+/// The stored conversation of session `id`, replayed as a resume would, without the engine. Blocking: off the UI thread.
+pub fn load_convo(home: &Path, id: &str) -> Result<Convo, String> {
+    let r = synthesis_session::Reader::open(home).map_err(|e| e.to_string())?;
+    let mut c = Convo::default();
+    for rec in r
+        .read_events(id, 0, usize::MAX >> 1)
+        .map_err(|e| e.to_string())?
+    {
+        if let synthesis_events::Record::Known(e) = rec {
+            c.apply(&e);
+        }
+    }
+    Ok(c)
+}
+
 /// The workspace list (with the trust-gated git scan), the sessions a process holds, and the usage
 /// history. Blocking (reads the store, runs git): off the UI thread.
 pub fn read_store(
@@ -2696,5 +2940,288 @@ mod tests {
         assert!(h.session && !h.usage && !h.tools);
         assert!(!proj.path().join(".synt").exists());
         assert!(save_panels(home.path(), proj.path(), &[("status_x", true)]).is_err());
+    }
+}
+
+/// Switching the selection between stored sessions: the chat shows the stored conversation at once and the
+/// engine starts only when the person asks for it.
+#[cfg(test)]
+mod switch_tests {
+    use super::*;
+    use clap::Parser as _;
+    use gpui::{TestAppContext, px, size};
+    use serde_json::json;
+    use synthesis_core::{PermissionMode, WorkspaceContext};
+    use synthesis_events::{Budget, Event};
+    use synthesis_session::{NewMessage, NewSession, Store, StoreOptions};
+    use synthesis_view::workspaces::{SessionRow, WorkspaceRow};
+
+    const IDS: [&str; 3] = ["session-a", "session-b", "session-c"];
+
+    /// A store with the three sessions (each says `said-<id>`), a scripted-model config on it, and a
+    /// `Live` listing them with `sa` open.
+    fn setup() -> (tempfile::TempDir, LiveCfg, Live) {
+        let t = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(t.path()).unwrap();
+        let (home, dir) = (base.join("home"), base.join("proj"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(
+            &home,
+            StoreOptions {
+                write_node_transcripts: false,
+                ..StoreOptions::default()
+            },
+        )
+        .unwrap();
+        for id in IDS {
+            let ws = WorkspaceContext::open("w1", &dir, &dir, &[], dir.join(".art"), "pg").unwrap();
+            let mut w = store
+                .create_session(NewSession {
+                    id: Some(id.into()),
+                    workspace: &ws,
+                    model_config_id: "m".into(),
+                    permission_mode: PermissionMode::AcceptEdits,
+                    permission_policy_id: "default".into(),
+                    budget: Budget::default(),
+                    parent: None,
+                    title: None,
+                })
+                .unwrap();
+            w.append_message(NewMessage::user(json!("hi"))).unwrap();
+            w.append_event(Event::UserMessage {
+                text: format!("said-{id}"),
+                display_text: None,
+                images: vec![],
+            })
+            .unwrap();
+        }
+        drop(store);
+        let script = base.join("script.json");
+        std::fs::write(&script, r#"[{"text":"ok"},{"text":"ok"}]"#).unwrap();
+        let provider = format!("fake:{}", script.display());
+        let cfg = LiveCfg {
+            env: Env::from_pairs([
+                ("HOME", home.to_str().unwrap()),
+                ("SYNT_HOME", home.to_str().unwrap()),
+            ]),
+            args: Args::try_parse_from([
+                "synthesis-desktop",
+                "--provider",
+                &provider,
+                "--sandbox",
+                "off",
+            ])
+            .unwrap(),
+            granted: engine::root_of(&dir),
+            project: dir.clone(),
+            synthesis_home: home,
+            home: None,
+            tz_min: 0,
+            tui: Default::default(),
+        };
+        let mut l = Live::new();
+        l.starting = false;
+        l.sid = "session-a".into();
+        l.cwd = dir.to_string_lossy().into();
+        l.ws_key = fold_dir(&l.cwd);
+        let row = |id: &str, mtime| SessionRow {
+            id: id.into(),
+            title: id.into(),
+            status: synthesis_core::SessionStatus::Idle,
+            updated_at: String::new(),
+            mtime,
+            is_live: false,
+        };
+        l.view.workspaces.workspaces = vec![WorkspaceRow {
+            root: l.cwd.clone(),
+            key: l.ws_key.clone(),
+            label: "proj".into(),
+            sessions: vec![
+                row("session-a", 3),
+                row("session-b", 2),
+                row("session-c", 1),
+            ],
+            available: true,
+            changes: None,
+        }];
+        l.focus = Focus::Running;
+        (t, cfg, l)
+    }
+
+    type Win<'a> = (Entity<TuiView>, &'a mut gpui::VisualTestContext);
+
+    fn open(cx: &mut TestAppContext, cfg: LiveCfg, l: Live, engine: bool) -> Win<'_> {
+        cx.update(gpui_component::init);
+        let (view, vcx) =
+            cx.add_window_view(|window, cx| TuiView::live(window, cx, cfg, Default::default(), 0.));
+        view.update(vcx, |t, _| {
+            t.set_live(l);
+            // `set_live` makes a fixture (no engine ever); the lazy start needs the real path
+            t.live.as_mut().unwrap().fixture = !engine;
+        });
+        vcx.simulate_resize(size(px(1400.), px(900.)));
+        vcx.run_until_parked();
+        (view, vcx)
+    }
+
+    fn press(w: &mut Win<'_>, k: &'static str) {
+        press_now(w, k);
+        w.1.run_until_parked();
+    }
+
+    fn press_now(w: &mut Win<'_>, k: &'static str) {
+        let ks = Keystroke::parse(k).unwrap();
+        w.0.update_in(w.1, |t, window, cx| t.on_key(&ks, window, cx));
+    }
+
+    /// The gpui test scheduler cannot be woken by the engine's worker thread: the start is observed (state set,
+    /// thread running), then its receiver is dropped before the scheduler ever polls it.
+    fn forget_engine(w: &mut Win<'_>) {
+        w.0.update(w.1, |t, _| t.live.as_mut().unwrap().engine_task = None);
+    }
+
+    /// (preview session, the preview's user lines, starting, an engine task exists)
+    fn state(w: &mut Win<'_>) -> (Option<String>, Vec<String>, bool, bool) {
+        w.0.read_with(w.1, |t, _| {
+            let lu = t.live.as_ref().unwrap();
+            let said = lu
+                .live
+                .convo()
+                .items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::User(u) => Some(u.clone()),
+                    _ => None,
+                })
+                .collect();
+            (
+                lu.live.preview.as_ref().map(|p| p.sid.clone()),
+                said,
+                lu.live.starting,
+                lu.engine_task.is_some(),
+            )
+        })
+    }
+
+    #[gpui::test]
+    fn the_arrows_show_the_stored_chat_without_starting_an_engine(cx: &mut TestAppContext) {
+        let (_t, cfg, l) = setup();
+        let mut w = open(cx, cfg, l, true);
+        press(&mut w, "down");
+        let (sid, said, starting, launched) = state(&mut w);
+        assert_eq!(sid.as_deref(), Some("session-b"));
+        assert_eq!(said, ["said-session-b"]);
+        assert!(!starting && !launched, "a selection starts nothing");
+        press(&mut w, "down");
+        assert_eq!(state(&mut w).1, ["said-session-c"]);
+        // back on the open session: its own chat
+        press(&mut w, "up");
+        press(&mut w, "up");
+        let (sid, said, starting, launched) = state(&mut w);
+        assert_eq!(
+            (sid, said.len(), starting, launched),
+            (None, 0, false, false)
+        );
+        // the neighbours were read ahead: the store holds them without a second read
+        let cached =
+            w.0.read_with(w.1, |t, _| t.live.as_ref().unwrap().previews.len());
+        assert_eq!(cached, 2);
+    }
+
+    #[gpui::test]
+    fn the_engine_starts_with_the_first_line_and_that_line_is_kept(cx: &mut TestAppContext) {
+        let (_t, cfg, l) = setup();
+        let mut w = open(cx, cfg, l, true);
+        press(&mut w, "down");
+        w.0.update_in(w.1, |t, window, cx| {
+            t.hold_for_engine("hello".into(), window, cx)
+        });
+        let (sid, _, starting, launched) = state(&mut w);
+        assert_eq!(
+            sid.as_deref(),
+            Some("session-b"),
+            "the preview stays while it starts"
+        );
+        assert!(starting && launched);
+        let held =
+            w.0.read_with(w.1, |t, _| t.live.as_ref().unwrap().after_start.clone());
+        assert_eq!(held.as_deref(), Some("hello"));
+        // a second line while it starts waits too, the first is not replaced
+        w.0.update_in(w.1, |t, window, cx| {
+            t.hold_for_engine("again".into(), window, cx)
+        });
+        let held =
+            w.0.read_with(w.1, |t, _| t.live.as_ref().unwrap().after_start.clone());
+        assert_eq!(held.as_deref(), Some("hello"));
+        forget_engine(&mut w);
+    }
+
+    #[gpui::test]
+    fn a_running_task_is_never_torn_down_by_selection_or_a_line(cx: &mut TestAppContext) {
+        let (_t, cfg, mut l) = setup();
+        l.busy = true;
+        let mut w = open(cx, cfg, l, true);
+        press(&mut w, "down");
+        assert_eq!(state(&mut w).0.as_deref(), Some("session-b"));
+        w.0.update_in(w.1, |t, window, cx| {
+            t.hold_for_engine("go".into(), window, cx)
+        });
+        let (_, _, starting, launched) = state(&mut w);
+        assert!(
+            !starting && !launched,
+            "the first press only arms the switch"
+        );
+        w.0.read_with(w.1, |t, _| {
+            let lu = t.live.as_ref().unwrap();
+            assert!(lu.live.busy && lu.after_start.is_none());
+            assert!(lu.live.switch_armed.is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn the_new_rows_are_part_of_the_list_and_act_only_on_enter(cx: &mut TestAppContext) {
+        let (_t, cfg, l) = setup();
+        let mut w = open(cx, cfg, l, true);
+        press(&mut w, "end");
+        let sel =
+            w.0.read_with(w.1, |t, _| t.live.as_ref().unwrap().live.run_sel);
+        assert_eq!(sel, 3, "the new session row follows the three sessions");
+        // selected: the welcome, nothing created
+        assert_eq!(state(&mut w), (Some(String::new()), vec![], false, false));
+        w.0.read_with(w.1, |t, _| {
+            assert_eq!(t.live.as_ref().unwrap().rows.len(), 0)
+        });
+        // past the end stays on it; up goes back to the last session
+        press(&mut w, "down");
+        assert_eq!(
+            w.0.read_with(w.1, |t, _| t.live.as_ref().unwrap().live.run_sel),
+            3
+        );
+        press(&mut w, "up");
+        assert_eq!(state(&mut w).1, ["said-session-c"]);
+        press(&mut w, "down");
+        press_now(&mut w, "enter");
+        let (_, _, starting, launched) = state(&mut w);
+        assert!(starting && launched, "Enter on the row creates the session");
+        forget_engine(&mut w);
+    }
+
+    #[gpui::test]
+    fn the_new_workspace_row_is_reached_with_the_keys_and_opens_nothing(cx: &mut TestAppContext) {
+        let (_t, cfg, mut l) = setup();
+        l.focus = Focus::Workspace;
+        let mut w = open(cx, cfg, l, true);
+        press(&mut w, "down");
+        w.0.read_with(w.1, |t, _| {
+            let lu = t.live.as_ref().unwrap();
+            assert!(lu.live.ws_new && !lu.live.starting && lu.engine_task.is_none());
+            assert_eq!(
+                lu.live.ws_key,
+                fold_dir(&lu.live.cwd),
+                "the workspace list keeps its pick"
+            );
+        });
+        press(&mut w, "up");
+        assert!(!w.0.read_with(w.1, |t, _| t.live.as_ref().unwrap().live.ws_new));
     }
 }

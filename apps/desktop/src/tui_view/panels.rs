@@ -72,6 +72,7 @@ pub fn workspace_body(
     on_click: Option<&dyn Fn(usize) -> OnClick>,
     on_close: Option<&dyn Fn(usize) -> OnClick>,
     on_new: Option<OnClick>,
+    new_selected: bool,
 ) -> Div {
     let mut col = div().flex().flex_col();
     for (i, w) in ws.iter().enumerate() {
@@ -131,7 +132,7 @@ pub fn workspace_body(
     }
     col.child(
         li().child(
-            item_box(false, (1., 8., 1., 8.))
+            item_box(new_selected, (1., 8., 1., 8.))
                 .id("ws-new")
                 .items_center()
                 .text_color(dim())
@@ -189,6 +190,7 @@ pub fn running_body(
     now: i64,
     on_click: Option<&dyn Fn(usize) -> OnClick>,
     on_new: Option<OnClick>,
+    new_selected: bool,
 ) -> Div {
     let waiting = crate::widgets::chrome::blink(hsla(t::WARN), motion, now);
     let mut col = div().flex().flex_col();
@@ -275,6 +277,7 @@ pub fn running_body(
         li().child(
             div()
                 .id("run-new")
+                .relative()
                 .flex()
                 .w_full()
                 .items_center()
@@ -285,6 +288,22 @@ pub fn running_body(
                 .border_color(gpui::transparent_black())
                 .rounded(px(4.))
                 .text_color(dim())
+                // selected with the keys: lit like a session row (the accent bar is a child, as in `item_box`)
+                .when(new_selected, |d| {
+                    d.bg(hsla(t::ELEVATED))
+                        .border_color(hsla(t::BORDER))
+                        .text_color(strong())
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(-1.))
+                                .top(px(-1.))
+                                .bottom(px(-1.))
+                                .w(px(3.))
+                                .rounded_l(px(5.))
+                                .bg(hsla(t::ACCENT)),
+                        )
+                })
                 .when_some(on_new, |d, f| {
                     d.cursor_pointer()
                         .hover(|d| d.text_color(strong()))

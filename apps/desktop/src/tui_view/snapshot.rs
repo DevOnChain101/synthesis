@@ -660,7 +660,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
                 name: w.label.clone(),
                 path: tilde(&w.root, home),
                 sessions: w.session_count() as u32,
-                selected: w.key == l.ws_key,
+                selected: w.key == l.ws_key && !(l.focus == Focus::Workspace && l.ws_new),
                 closable: w.key != l.live_ws_key(),
             })
             .collect(),
