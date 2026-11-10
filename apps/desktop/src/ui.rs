@@ -18,7 +18,7 @@ use gpui::{
 use crate::settings_view::{self, Applied, Close, Restart, SettingsView};
 use crate::tui_view::driver::{LiveCfg, OpenSettings, SessionStarted};
 use crate::tui_view::{Side, TuiView, layout};
-use crate::widgets::chrome::{icon, tracked, with_alpha};
+use crate::widgets::chrome::{self, icon, tracked, with_alpha};
 use crate::{brand, theme};
 use synthesis_tui_render::theme as t;
 
@@ -88,6 +88,8 @@ pub struct Shell {
     settings: Entity<SettingsView>,
     /// A restart was asked from Settings and the new session is not live yet.
     restarting: bool,
+    /// The timer of the next frame of the title bar's blinking red (see `chrome::next_frame`).
+    anim_tick: Option<gpui::Task<()>>,
 }
 
 impl Shell {
@@ -336,10 +338,10 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // the title bar's red signal repaints with the view it belongs to
         if self.tui.read(cx).attention() == Some(true) {
-            window.request_animation_frame();
+            chrome::next_frame(|t| &mut t.anim_tick, self, cx);
         }
         let content = match self.view {
             View::Tui => div().size_full().child(self.tui.clone()),
@@ -551,6 +553,7 @@ impl Shell {
             tui,
             settings,
             restarting: false,
+            anim_tick: None,
         }
     }
 }

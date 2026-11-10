@@ -146,6 +146,8 @@ pub struct TuiView {
     pub(crate) topo_force: Option<(Vec<synthesis_view::pulse::Node>, i64)>,
     /// The pending repaint of the animation (about 30 per second, only while a node is active).
     topo_tick: Option<gpui::Task<()>>,
+    /// The timer of the next frame of a spinner or a blink (see `chrome::next_frame`).
+    anim_tick: Option<gpui::Task<()>>,
     /// The engine, the chat and the prompt; `None` draws the sample (layout tests, `--sample`, `--shot`).
     live: Option<driver::LiveUi>,
     hidden: layout::Hidden,
@@ -213,6 +215,7 @@ impl TuiView {
             topo_now: 0,
             topo_force: None,
             topo_tick: None,
+            anim_tick: None,
             live: None,
             hidden,
             inset,
@@ -271,6 +274,7 @@ impl TuiView {
         if lu.dirty {
             lu.dirty = false;
             let _t = crate::trace::span(&lu.cfg.env, "frame: snapshot + rows (UI thread)");
+            let _perf = crate::perf::timed(false);
             self.snap = snapshot::build(
                 &lu.live,
                 crate::live::now_ms(),
@@ -909,6 +913,7 @@ impl TuiView {
 
 impl Render for TuiView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let _perf = crate::perf::timed(true);
         // a prompt handed back unsent (Esc in the model picker) returns to the input box
         if let Some(t) = self
             .live
@@ -925,7 +930,7 @@ impl Render for TuiView {
             && lu.live.spin_refresh(crate::live::now_ms())
         {
             lu.dirty = true;
-            window.request_animation_frame();
+            chrome::next_frame(|t| &mut t.anim_tick, self, cx);
         }
         // a blinking red is repainted every frame while an approval waits
         let motion = self.live.as_ref().is_some_and(|l| l.cfg.tui.motion);
@@ -945,7 +950,7 @@ impl Render for TuiView {
                     )
                 }))
         {
-            window.request_animation_frame();
+            chrome::next_frame(|t| &mut t.anim_tick, self, cx);
         }
         self.refresh(window);
         self.topo_frame(cx);

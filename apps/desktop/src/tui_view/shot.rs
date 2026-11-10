@@ -42,6 +42,9 @@ pub struct Args {
     rows: bool,
     /// `--check`: reopen the written PNG and fail unless it is the asked size (times a whole scale) and not blank.
     check: bool,
+    /// `--perf N`: after the setup, N frames of each scenario (idle, a streaming reply, the clock tick,
+    /// a long chat) drawn in a loop, with the milliseconds a frame took (dev only, no PNG needed).
+    perf: Option<usize>,
     /// `--active tools,mcp[,core,user,hooks,guards,sub,skills,mem]` freezes those Topology nodes in their active
     /// state at `--phase MS` (default 250) of the animation, as no clock can be seen in a still.
     active: Vec<synthesis_view::pulse::Node>,
@@ -256,6 +259,7 @@ pub fn parse(args: &[String]) -> Option<Args> {
         dialog_scroll: val("--dialog-scroll").and_then(|n| n.parse().ok()),
         rows: args.iter().any(|a| a == "--rows"),
         check: args.iter().any(|a| a == "--check"),
+        perf: val("--perf").and_then(|n| n.parse().ok()),
         active: val("--active")
             .iter()
             .flat_map(|s| s.split(','))
@@ -677,6 +681,9 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         win.update(&mut cx, |s, window, cx| s.go(a.view, window, cx))?;
     }
     cx.run_until_parked();
+    if let (Some(n), Some(tui)) = (a.perf, tui_slot.borrow().clone()) {
+        perf_run(&mut cx, win.into(), &tui, n)?;
+    }
     let img = cx.capture_screenshot(win.into())?;
     img.save(&a.path)?;
     if a.check {
@@ -837,4 +844,122 @@ impl gpui::Render for TopoShot {
                 true,
             ))
     }
+}
+
+/// Dev only (`--perf N`): the cost of a frame (element tree, layout, prepaint, paint; not the GPU) in four
+/// situations. Each frame is one `refresh` + `draw`; the scenarios change the state first.
+fn perf_run(
+    cx: &mut gpui::HeadlessAppContext,
+    win: gpui::AnyWindowHandle,
+    tui: &gpui::Entity<TuiView>,
+    n: usize,
+) -> Result<(), Err> {
+    use synthesis_events::{Envelope, Event};
+    use synthesis_view::convo::{Item, ToolState};
+    let frame = |cx: &mut gpui::HeadlessAppContext| -> Result<f64, Err> {
+        let t0 = Instant::now();
+        cx.update_window(win, |_, window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        })?;
+        Ok(t0.elapsed().as_secs_f64() * 1e3)
+    };
+    let report = |name: &str, mut ms: Vec<f64>| {
+        ms.sort_by(f64::total_cmp);
+        let avg = ms.iter().sum::<f64>() / ms.len().max(1) as f64;
+        let p = |q: f64| ms[((ms.len() as f64 * q) as usize).min(ms.len() - 1)];
+        eprintln!(
+            "perf: {name:<28} frames {:>4}  avg {avg:>7.2} ms  p50 {:>7.2}  p95 {:>7.2}  max {:>7.2}",
+            ms.len(),
+            p(0.5),
+            p(0.95),
+            p(1.0)
+        );
+    };
+    let delta = |text: &str| {
+        UiMsg::Event(Box::new(Envelope {
+            v: 1,
+            seq: 0,
+            ts: String::new(),
+            session_id: String::new(),
+            task_id: None,
+            turn_id: None,
+            agent_id: None,
+            event: Event::ModelDelta {
+                block_index: 0,
+                kind: "text".into(),
+                text: text.into(),
+            },
+        }))
+    };
+    let stream = |cx: &mut gpui::HeadlessAppContext, name: &str| -> Result<(), Err> {
+        let mut ms = vec![];
+        for i in 0..n {
+            tui.update(cx, |t, cx| {
+                t.apply_batch(
+                    vec![delta(&format!("word{i} of `code` and **bold** text. "))],
+                    cx,
+                )
+            });
+            ms.push(frame(cx)?);
+        }
+        report(name, ms);
+        Ok(())
+    };
+    cx.run_until_parked();
+    let mut ms = vec![];
+    for _ in 0..n {
+        ms.push(frame(cx)?);
+    }
+    report("idle (refresh only)", ms);
+    let mut ms = vec![];
+    for i in 0..n {
+        tui.update(cx, |t, cx| t.tick(i as u64 + 1, cx));
+        ms.push(frame(cx)?);
+    }
+    report("clock tick (1/s in the app)", ms);
+    stream(cx, "streaming, short chat")?;
+    // 1500 rows: a prompt, a markdown answer and a finished tool each
+    tui.update(cx, |t, _| {
+        if let Some(lu) = &mut t.live {
+            for i in 0..500 {
+                let items = &mut lu.live.view.convo.items;
+                items.push(Item::User(format!("question {i}: why does the build fail?")));
+                items.push(Item::Assistant {
+                    text: format!("## Answer {i}\n\nThe cause is `x{i}`.\n\n- one\n- two\n\n```rust\nfn f() {{}}\n```\n"),
+                    streaming: false,
+                });
+                items.push(Item::Tool {
+                    id: format!("t{i}"),
+                    name: "Bash".into(),
+                    summary: "cargo test".into(),
+                    state: ToolState::Ok,
+                    preview: "ok".into(),
+                    output: "line\n".repeat(20),
+                    duration_ms: 5,
+                    file: None,
+                    diff: None,
+                    input: Box::new(serde_json::json!({"command": "cargo test"})),
+                    status: None,
+                    exit_code: Some(0),
+                });
+            }
+            lu.dirty = true;
+            lu.list_reset = true;
+        }
+    });
+    cx.run_until_parked();
+    let mut ms = vec![];
+    for _ in 0..n {
+        ms.push(frame(cx)?);
+    }
+    report("idle, 1500+ rows", ms);
+    let mut ms = vec![];
+    for i in 0..n {
+        tui.update(cx, |t, cx| t.tick(i as u64 + 1, cx));
+        ms.push(frame(cx)?);
+    }
+    report("clock tick, 1500+ rows", ms);
+    stream(cx, "streaming, 1500+ rows")?;
+    Ok(())
 }

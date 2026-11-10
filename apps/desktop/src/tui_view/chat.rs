@@ -493,7 +493,9 @@ impl TuiView {
             use gpui::AnimationExt as _;
             line.with_animation(
                 "activity-frames",
-                gpui::Animation::new(std::time::Duration::from_millis(800)).repeat(),
+                gpui::Animation::new(std::time::Duration::from_millis(800))
+                    .repeat()
+                    .with_max_fps(crate::widgets::chrome::ANIM_FPS),
                 |el, _| el,
             )
             .into_any_element()
