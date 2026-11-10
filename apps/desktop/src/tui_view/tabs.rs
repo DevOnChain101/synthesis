@@ -24,6 +24,7 @@ use synthesis_view::project::{self, ProjectData};
 
 use super::panels::{OnClick, dim, icon, strong, text, with_alpha};
 use super::{ChatTab, TuiView};
+use crate::live::NoticeKind;
 use crate::theme::hsla;
 use crate::widgets::panes::{self, note};
 
@@ -304,7 +305,10 @@ impl TuiView {
         match e.kill_process(id) {
             Ok(true) => {
                 self.ts.killed.insert(id.to_string());
-                lu.live.note(format!("process {id} stopped by you"), false);
+                lu.live.note_kind(
+                    NoticeKind::Bookkeeping,
+                    format!("process {id} stopped by you"),
+                );
             }
             Ok(false) => lu
                 .live

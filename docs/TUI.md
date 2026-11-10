@@ -169,6 +169,7 @@ finished (they were interrupted).
 Mission (was Agent Status) shows only while the agent has a task list (`todo.updated`): tasks in order, a done task
 with a tick, the next open one running. 5 minutes after every task is done the panel disappears; a new list replaces
 the old one at once; a resumed session starts without a task list, even one that was still running.
+Panel values never wrap: in Session and Context a value is one line cut with `…` when the panel is narrow (cwd and worktree keep their end, `…/folders/ws`; the model name and the rest keep their start), and hovering a Session value shows it whole. Tools & Skills lists every row in a body five rows high that scrolls. The chat header shows the folder as `~/a/b` or its last two segments (`…/code/ws`), at most 20 characters.
 
 ## Usage panel
 

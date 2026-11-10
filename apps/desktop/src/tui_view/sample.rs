@@ -53,7 +53,6 @@ pub struct ToolRow {
 pub struct ToolsInfo {
     pub count: String,
     pub rows: Vec<ToolRow>,
-    pub more: u32,
 }
 
 /// What a row of Recent Activity is, for its mark and colour.
@@ -342,7 +341,6 @@ pub fn sample() -> Snapshot {
                 tool("mcp", "2 servers", true),
                 tool("memory", "on", false),
             ],
-            more: 5,
         },
         activity: [
             (ActKind::Tool, "Edited auth.ts", "23:02"),

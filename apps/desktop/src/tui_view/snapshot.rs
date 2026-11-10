@@ -61,6 +61,23 @@ pub fn age(now: i64, then: i64) -> String {
 }
 
 /// The home folder as `~`.
+/// The chat header's folder: `~/a/b` stays whole, any other path keeps its last `keep` segments behind `…/`, and the
+/// result is at most `max` chars (the front is cut, on char boundaries). The panels cut by width instead.
+pub fn short_path(p: &str, keep: usize, max: usize) -> String {
+    let segs: Vec<&str> = p.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+    let s = if segs.len() <= keep + usize::from(segs.first() == Some(&"~")) {
+        p.to_string()
+    } else {
+        format!("…/{}", segs[segs.len() - keep..].join("/"))
+    };
+    let n = s.chars().count();
+    if n <= max {
+        return s;
+    }
+    let tail: String = s.chars().skip(n - (max - 1)).collect();
+    format!("…{tail}")
+}
+
 pub fn tilde(p: &str, home: Option<&str>) -> String {
     match home.filter(|h| !h.is_empty()) {
         Some(h) if p == h => "~".into(),
@@ -531,7 +548,6 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
         plain: false,
     }));
     let total = trows.len();
-    trows.truncate(7);
 
     let steps: Vec<Step> = v
         .convo
@@ -645,7 +661,6 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
         },
         tools: ToolsInfo {
             count: total.to_string(),
-            more: total.saturating_sub(7) as u32,
             rows: trows,
         },
         activity: activity_rows(l, tz_min),
@@ -682,7 +697,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
             },
             prompt: first_line(&topo.user.last_prompt, 200),
             ctx_pct,
-            path: tilde(&l.cwd, home),
+            path: short_path(&tilde(&l.cwd, home), 2, 20),
             stats: format!("{n_files} files | {} LOC", tok(added + removed)),
         },
         topology: nodes,
@@ -802,6 +817,17 @@ fn hints(l: &Live) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn short_path_keeps_the_tail_and_never_splits_a_char() {
+        use super::short_path as sp;
+        assert_eq!(sp("~/Vibe/synthesis", 2, 28), "~/Vibe/synthesis");
+        assert_eq!(sp("/", 2, 28), "/");
+        assert_eq!(sp("/private/var/folders/x/ws", 2, 28), "…/x/ws");
+        assert_eq!(sp("~/a/b/c", 2, 28), "…/b/c");
+        assert_eq!(sp("/a/日本語日本語日本語日本語日本語", 1, 6), "…本語日本語");
+        assert_eq!(sp("C:\\Users\\me\\code\\ws", 2, 28), "…/code/ws");
+    }
+
     use super::*;
     use serde_json::json;
     use synthesis_events::Envelope;

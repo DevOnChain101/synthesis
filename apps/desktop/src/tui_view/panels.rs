@@ -306,11 +306,25 @@ pub fn kv(rows: &[(String, String)], label_w: f32, col_gap: f32, row_gap: f32) -
                         .child(k.clone()),
                 )
                 .child(
+                    // one line: a path keeps its tail ("…/folders/ws"), any other value its head; the full value is the tooltip
                     div()
+                        .id(gpui::SharedString::from(format!("kv-{k}")))
                         .flex_1()
                         .min_w(px(0.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .when(matches!(k.as_str(), "cwd" | "worktree"), |d| {
+                            d.text_ellipsis_start()
+                        })
+                        .when(!matches!(k.as_str(), "cwd" | "worktree"), |d| {
+                            d.text_ellipsis()
+                        })
                         .text_color(value_colour(k, v))
-                        .child(v.clone()),
+                        .child(v.clone())
+                        .tooltip({
+                            let v = v.clone();
+                            move |_, cx| cx.new(|_| crate::ui::Tip(v.clone())).into()
+                        }),
                 )
         }))
 }
@@ -332,31 +346,20 @@ pub fn session_body(s: &SessionInfo) -> Div {
 }
 
 pub fn tools_body(k: &ToolsInfo) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .children(k.rows.iter().map(|r| {
-            li().flex()
-                .items_center()
-                .gap(px(8.))
-                .child(dot(hsla(t::SUCCESS), true))
-                .child(div().child(r.name.clone()))
-                .child(
-                    div()
-                        .ml_auto()
-                        .flex_none()
-                        .text_color(if r.plain { dim() } else { hsla(t::SUCCESS) })
-                        .child(r.value.clone()),
-                )
-        }))
-        .child(
-            li().flex()
-                .items_center()
-                .gap(px(8.))
-                .text_color(dim())
-                .child(div().w(px(7.)).flex_none())
-                .child(format!("+ {} more...", k.more)),
-        )
+    div().flex().flex_col().children(k.rows.iter().map(|r| {
+        li().flex()
+            .items_center()
+            .gap(px(8.))
+            .child(dot(hsla(t::SUCCESS), true))
+            .child(div().child(r.name.clone()))
+            .child(
+                div()
+                    .ml_auto()
+                    .flex_none()
+                    .text_color(if r.plain { dim() } else { hsla(t::SUCCESS) })
+                    .child(r.value.clone()),
+            )
+    }))
 }
 
 /// `.circ`: the 11px ring of a list row or a checklist step.
@@ -524,6 +527,8 @@ pub fn context_body(c: &ContextInfo, rows_shown: usize) -> Div {
                 )
                 .child(
                     div()
+                        .min_w(px(0.))
+                        .truncate()
                         .text_color(if c.max == "?" {
                             dim()
                         } else {
@@ -534,6 +539,7 @@ pub fn context_body(c: &ContextInfo, rows_shown: usize) -> Div {
                 .child(
                     div()
                         .ml_auto()
+                        .flex_none()
                         .text_color(if c.max == "?" {
                             dim()
                         } else {

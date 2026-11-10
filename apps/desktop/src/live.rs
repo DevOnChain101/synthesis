@@ -511,6 +511,22 @@ pub fn clip(s: &str, n: usize) -> String {
         .collect()
 }
 
+/// The window note without its "Set it: ..." hint (`/context` with no argument says how in its own line).
+fn window_short(source: &str) -> &str {
+    source.split_once(". Set it:").map_or(source, |(a, _)| a)
+}
+
+/// How a notice reaches the chat (docs/TUI.md "Events"). `Warning`: an error or something the person must
+/// act on, never hidden. `Result`: the outcome of a command or action the person asked for, never hidden.
+/// `Bookkeeping`: a success the window already shows elsewhere (a queue row, a status bar, a dialog the person
+/// just answered); an internal row, shown only with `verbose` (`/verbose`, `synt.tui.verbose`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoticeKind {
+    Warning,
+    Result,
+    Bookkeeping,
+}
+
 /// The chat's own state beyond the events.
 pub struct Live {
     pub view: ViewState,
@@ -702,7 +718,11 @@ impl Live {
             self.view.status.context.set_window(w);
         }
         for n in &engine.notices {
-            self.note(n.clone(), false);
+            // a restart (model, trust, /context) keeps the conversation: a start-up note it already shows is not repeated
+            let shown = |i: &Item| matches!(i, Item::Notice { text, .. } if text == n);
+            if !self.view.convo.items.iter().any(shown) {
+                self.note(n.clone(), false);
+            }
         }
         for n in std::mem::take(&mut self.after_attach) {
             self.note(n, false);
@@ -769,11 +789,30 @@ impl Live {
         self.note("new conversation", false);
     }
 
-    /// A line in the chat that is not from the model.
+    /// A line in the chat that is not from the model: a warning (`true`) or the result of something the
+    /// person asked for. Both are always shown; see [`NoticeKind`] for what is not.
     pub fn note(&mut self, text: impl Into<String>, warning: bool) {
-        self.view.convo.items.push(Item::Notice {
-            warning,
-            text: text.into(),
+        let kind = if warning {
+            NoticeKind::Warning
+        } else {
+            NoticeKind::Result
+        };
+        self.note_kind(kind, text);
+    }
+
+    /// The one place a chat notice becomes a row.
+    pub fn note_kind(&mut self, kind: NoticeKind, text: impl Into<String>) {
+        let text = text.into();
+        self.view.convo.items.push(match kind {
+            NoticeKind::Warning => Item::Notice {
+                warning: true,
+                text,
+            },
+            NoticeKind::Result => Item::Notice {
+                warning: false,
+                text,
+            },
+            NoticeKind::Bookkeeping => Item::Internal(text),
         });
     }
 
@@ -1198,7 +1237,7 @@ impl Live {
                 PickerKind::Model if current == Some(key) => {
                     // a deliberate pick of the model in use: the held prompt goes to it
                     self.queue.extend(self.held_prompt.take());
-                    self.note(format!("model: already {key}"), false);
+                    self.note_kind(NoticeKind::Bookkeeping, format!("model: already {key}"));
                     None
                 }
                 PickerKind::Model => Some(Action::Model(key.to_string())),
@@ -1452,7 +1491,9 @@ impl Live {
                     self.note(why, true);
                     return Submitted::Held;
                 }
-                Err(why) => self.note(format!("{why}: queued instead"), false),
+                Err(why) => {
+                    self.note_kind(NoticeKind::Bookkeeping, format!("{why}: queued instead"))
+                }
             }
         }
         if self.busy
@@ -1589,13 +1630,13 @@ impl Live {
                     if to == "main" {
                         self.mark_delivered = true; // the user row follows this event
                     } else {
-                        self.note(
+                        self.note_kind(
+                            NoticeKind::Bookkeeping,
                             format!(
                                 "sent now to @{}, delivered at its next step: {}",
                                 label(&to),
                                 clip(&text, 80)
                             ),
-                            false,
                         );
                     }
                 }
@@ -1614,7 +1655,10 @@ impl Live {
                 }
             }
             Event::UserMessage { .. } if std::mem::take(&mut self.mark_delivered) => {
-                self.note("sent now, delivered at the next step", false);
+                self.note_kind(
+                    NoticeKind::Bookkeeping,
+                    "sent now, delivered at the next step",
+                );
             }
             _ => {}
         }
@@ -1982,7 +2026,7 @@ impl Live {
         let msg = format!(
             "context window of {}: {}\nType a size to set it: /context 1m, /context 200k, /context 128000; /context unset removes it (written to your synt.json)",
             e.label,
-            sanitize_for_display(&e.context_source)
+            sanitize_for_display(window_short(&e.context_source))
         );
         self.note(msg, false);
     }
@@ -2017,7 +2061,7 @@ impl Live {
             ),
             format!(
                 "context window: {}",
-                sanitize_for_display(&e.context_source)
+                sanitize_for_display(window_short(&e.context_source))
             ),
             format!("trusted folder: {}", if e.trusted { "yes" } else { "no" }),
             format!("verification: {verification}"),
@@ -3591,6 +3635,81 @@ mod tests {
         assert_eq!(l.answer(&k, 0), None);
         assert!(l.send_to.is_none() && l.dialogs.is_empty());
         assert!(send_pick::empty_note(true, false).contains("--peers"));
+    }
+
+    /// The texts of the chat's notice and internal rows that the quiet chat draws.
+    fn drawn(l: &Live, verbose: bool, focus: bool) -> Vec<String> {
+        l.view
+            .convo
+            .items
+            .iter()
+            .filter(|i| crate::tui_view::chat::visible(i, false, verbose, focus))
+            .filter_map(|i| match i {
+                Item::Notice { text, .. } | Item::Internal(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn warnings_and_results_are_always_drawn_and_bookkeeping_only_in_verbose() {
+        let mut l = Live::new();
+        l.note_kind(NoticeKind::Warning, "warn");
+        l.note_kind(NoticeKind::Result, "result");
+        l.note_kind(NoticeKind::Bookkeeping, "book");
+        l.note("old-style warning", true);
+        l.note("old-style result", false);
+        assert_eq!(
+            drawn(&l, false, false),
+            ["warn", "result", "old-style warning", "old-style result"]
+        );
+        assert_eq!(drawn(&l, true, false).len(), 5, "verbose shows every row");
+        assert_eq!(drawn(&l, true, false)[2], "book");
+        // /focus keeps prompts, answers, results and notices; bookkeeping is not one
+        assert_eq!(drawn(&l, true, true).len(), 4);
+        // a warning is a warning row, never an internal one
+        assert!(matches!(
+            l.view.convo.items[0],
+            Item::Notice { warning: true, .. }
+        ));
+    }
+
+    #[test]
+    fn errors_are_never_hidden_whatever_the_switches() {
+        let mut l = live_with_commands();
+        l.submit("/nope");
+        for (verbose, focus) in [(false, false), (true, false), (false, true), (true, true)] {
+            let d = drawn(&l, verbose, focus);
+            assert!(d.iter().any(|t| t == "unknown command /nope"), "{d:?}");
+        }
+    }
+
+    #[test]
+    fn the_verbose_command_result_shows_even_when_it_turns_verbose_off() {
+        let mut l = live_with_commands();
+        l.submit("/verbose");
+        l.submit("/verbose");
+        assert_eq!(drawn(&l, false, false), ["verbose on", "verbose off"]);
+    }
+
+    #[test]
+    fn a_queued_instead_line_is_bookkeeping() {
+        let mut l = Live::new();
+        l.note_kind(
+            NoticeKind::Bookkeeping,
+            "commands are not sent now: queued instead",
+        );
+        assert!(drawn(&l, false, false).is_empty());
+    }
+
+    #[test]
+    fn the_window_hint_is_cut_for_status_and_kept_for_the_setter() {
+        let src = "unknown (provider \"x\" is not configured); compaction assumes 200k. Set it: /context <tokens>";
+        assert_eq!(
+            window_short(src),
+            "unknown (provider \"x\" is not configured); compaction assumes 200k"
+        );
+        assert_eq!(window_short("200k (config)"), "200k (config)");
     }
 
     #[test]

@@ -80,6 +80,11 @@ fn group(key: &str) -> Group {
 /// height follows wrapped text (browser and GPUI break lines at different places) are listed with why.
 fn tol(key: &str, w: f32) -> (f32, f32) {
     match key {
+        // Owner decision: Tools & Skills is five rows high (the design's `max-height` is three), which the
+        // left column's other panels give back or take; the rest of the column's boxes follow in height and y.
+        "panel:ws" | "panel:running" | "panel:sess" | "panel:tools" | "panel:act" if w >= 1400. => {
+            (1., 36.)
+        }
         // Session wraps its values ("claude-3.5-sonnet" breaks at the hyphen in Chrome, not in GPUI) in the
         // columns narrower than 250px, and its height feeds the panels below it and Agent Status.
         "panel:sess" | "panel:tools" | "panel:act" if w < 1400. => (1., 40.),
@@ -91,8 +96,8 @@ fn tol(key: &str, w: f32) -> (f32, f32) {
             (1., 60.)
         }
         // Workspace/Running shrink in proportion to their content when the column is short; the content
-        // heights are the design's to within a text line
-        "panel:ws" | "panel:running" if w < 1400. => (1., 12.),
+        // heights are the design's to within a text line (plus the five-row Tools & Skills above)
+        "panel:ws" | "panel:running" if w < 1400. => (1., 20.),
         // text rows: a 19.375px line box comes out 19.5px, so a panel of six rows is 0.75px taller and the
         // panels sharing the column with it give that back
         "panel:topo1" | "status-context" | "panel:agent" | "panel:ctx" | "panel:use1"
