@@ -191,7 +191,7 @@ today / 7 days / month / best / active / streak rows. It is drawn whole or not a
 Topology panel can spare above its minimum (`layout::month_mode`): the full grid first, else the one-line strip of the
 days so far, else nothing, so no bar and no other panel moves; while the history is read it says `loading usage…`.
 Not matched with the CLI: the metric is tokens only (the CLI has no switch either), today is not highlighted (the CLI does
-not either), the empty-day colour is a faint white (the CLI's SURFACE would vanish on the panel). Recent Activity there lists only the person's prompts and the agent's answers.
+not either), the empty-day colour is a faint white (the CLI's SURFACE would vanish on the panel). Recent Activity there lists only the person's prompts and the agent's answers. The chat shows the welcome screen (logo, tagline, tips) whenever it holds no message, tool or task row: notices alone (after `/close-workspace`, `/close`, `/clear`, `/new`) do not hide it, the latest one is shown under the tips.
 
 ## Git in `/files` and `/diff`
 
