@@ -527,9 +527,22 @@ pub enum NoticeKind {
     Bookkeeping,
 }
 
+/// A stored session (or the empty welcome of a `new ...` row) shown read-only in the chat while the engine
+/// stays on its own session: selecting a row starts nothing.
+#[derive(Clone)]
+pub struct Preview {
+    /// The session id; empty for the `new workspace` / `new session` rows.
+    pub sid: String,
+    pub convo: std::sync::Arc<synthesis_view::convo::Convo>,
+}
+
 /// The chat's own state beyond the events.
 pub struct Live {
     pub view: ViewState,
+    /// What the chat shows instead of `view.convo` (see [`Preview`]); `attach` drops it.
+    pub preview: Option<Preview>,
+    /// The Workspace selection is on its `new workspace` row (Running: `run_sel` past the last row).
+    pub ws_new: bool,
     pub engine: Option<Arc<Engine>>,
     /// The engine is being built (first start or a relaunch).
     pub starting: bool,
@@ -640,6 +653,8 @@ impl Live {
     pub fn new() -> Self {
         Self {
             view: ViewState::default(),
+            preview: None,
+            ws_new: false,
             engine: None,
             starting: true,
             busy: false,
@@ -698,9 +713,15 @@ impl Live {
         }
     }
 
+    /// The conversation the chat draws: the preview when one is shown, else the open session's.
+    pub fn convo(&self) -> &synthesis_view::convo::Convo {
+        self.preview.as_ref().map_or(&self.view.convo, |p| &p.convo)
+    }
+
     /// Takes over a started engine: its identity, commands and notices. `replay`: the stored
     /// conversation of a resumed session.
     pub fn attach(&mut self, engine: Arc<Engine>, replay: Option<ViewState>) {
+        self.preview = None;
         match replay {
             // the stored conversation and panels; the store panels load separately
             Some(v) => {

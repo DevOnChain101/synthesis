@@ -12,7 +12,7 @@ use synthesis_config::Env;
 use synthesis_core::{PermissionMode, SessionStatus, WorkspaceContext};
 use synthesis_desktop::engine::{self, Args};
 use synthesis_desktop::live::Live;
-use synthesis_desktop::tui_view::driver::{LiveCfg, Target, build, read_store};
+use synthesis_desktop::tui_view::driver::{LiveCfg, Target, build, load_convo, read_store};
 use synthesis_desktop::tui_view::snapshot;
 use synthesis_events::{Budget, Event, ToolStatus};
 use synthesis_session::{NewMessage, NewSession, Store, StoreOptions};
@@ -210,6 +210,22 @@ fn switch_and_resume_stay_within_budget() {
         "perf: {} events, {} items",
         resume.events.len(),
         view.convo.items.len()
+    );
+
+    // the preview of a selected row: what the chat shows before any engine exists
+    let mut convo = None;
+    time(
+        "preview load_convo (long session)",
+        Duration::from_millis(1000),
+        &mut || convo = Some(load_convo(&home, "s0-00-perfid").unwrap()),
+    );
+    assert_eq!(convo.unwrap().items.len(), view.convo.items.len());
+    time(
+        "preview load_convo (short session)",
+        Duration::from_millis(200),
+        &mut || {
+            load_convo(&home, "s0-01-perfid").unwrap();
+        },
     );
 
     // the frame after the switch, and every dirty frame (the 1 s tick marks it dirty)

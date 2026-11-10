@@ -417,6 +417,8 @@ impl TuiView {
                     live.map(|_| &ws_click as &dyn Fn(usize) -> panels::OnClick),
                     live.map(|_| &ws_close as &dyn Fn(usize) -> panels::OnClick),
                     new_ws,
+                    focus == Some(crate::live::Focus::Workspace)
+                        && live.is_some_and(|l| l.live.ws_new),
                 ),
                 live.map(|l| &l.ws_scroll),
             ),
@@ -444,6 +446,8 @@ impl TuiView {
                     crate::live::now_ms(),
                     live.map(|_| &run_click as &dyn Fn(usize) -> panels::OnClick),
                     new_run,
+                    focus == Some(crate::live::Focus::Running)
+                        && live.is_some_and(|l| l.live.run_sel >= s.running.len()),
                 ),
                 live.map(|l| &l.run_scroll),
             ),

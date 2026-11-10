@@ -44,6 +44,8 @@ pub struct Args {
     expand: bool,
     /// `--dialog-scroll PX`: the docked dialog is scrolled down by this much (its options below the fold).
     dialog_scroll: Option<f32>,
+    /// `--keys "tab;;tab;;down"`: keystrokes sent to the view after the setup (a panel selection, a preview).
+    keys: Option<String>,
     /// `--rows`: print the chat's notice rows (shown or hidden by the quiet-chat rules) to stderr.
     rows: bool,
     /// `--check`: reopen the written PNG and fail unless it is the asked size (times a whole scale) and not blank.
@@ -316,6 +318,7 @@ pub fn parse(args: &[String]) -> Option<Args> {
                 Some(n)
             })
             .collect(),
+        keys: val("--keys").cloned(),
         topo_size: val("--topo-size")
             .and_then(|s| s.split_once('x'))
             .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))),
@@ -725,6 +728,28 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     "selected: {:?}",
                     tui.read_with(&cx, |t, _| t.ts.tree_sel.clone())
                 );
+            }
+        }
+    }
+    let tui_now = tui_slot.borrow().clone();
+    let keys = a.keys.clone();
+    if let (Some(keys), Some(tui)) = (keys, tui_now) {
+        // dev harness: a few short strings, leaked for `Keystroke::parse`
+        let keys: &'static str = Box::leak(keys.into_boxed_str());
+        for k in keys.split(";;") {
+            let ks = gpui::Keystroke::parse(k.trim())?;
+            win.update(&mut cx, |_, window, cx| {
+                tui.update(cx, |t, cx| {
+                    // the shell sets these when it shows the view
+                    t.active = true;
+                    t.shown = true;
+                    t.on_key(&ks, window, cx)
+                })
+            })?;
+            // a preview is read on a background thread
+            for _ in 0..20 {
+                cx.run_until_parked();
+                std::thread::sleep(Duration::from_millis(10));
             }
         }
     }

@@ -397,7 +397,7 @@ impl TuiView {
         let Some(lu) = &self.live else {
             return div().into_any_element();
         };
-        let c = &lu.live.view.convo;
+        let c = lu.live.convo();
         // everything but the messages sits under the speaker's text (avatar column + gap)
         let under = |d: AnyElement| div().ml(px(INDENT)).child(d).into_any_element();
         let el = match lu.rows.get(ix) {
@@ -506,7 +506,7 @@ impl TuiView {
 
     fn plan_card(&self) -> Div {
         let Some(lu) = &self.live else { return div() };
-        let steps = &lu.live.view.convo.plan;
+        let steps = &lu.live.convo().plan;
         div()
             .flex()
             .flex_col()
@@ -550,7 +550,7 @@ impl TuiView {
             return div().into_any_element();
         };
         // `HH:MM` of the event that made the row
-        let time = lu.live.view.convo.time_of(idx).map_or(String::new(), |ms| {
+        let time = lu.live.convo().time_of(idx).map_or(String::new(), |ms| {
             super::snapshot::clock(ms, lu.cfg.tz_min)[..5].to_string()
         });
         match it {

@@ -105,11 +105,11 @@ a prompt.
 | input | does |
 |---|---|
 | Tab (empty prompt, no dialog) | chat -> Workspace -> Running -> chat. The focused panel's border takes the accent colour (warm sand #C7AE90, see `docs/tui-palette.md`) and the footer shows its keys. Skipped when the sidebar is not on screen (terminal under 80 columns) |
-| Up/Down, PageUp/PageDown, Home/End | in a focused panel: move the selection (the panel scrolls to keep it visible) |
-| Enter | Workspace: its sessions get the keys. Running: open the selected session and give the keys to its chat |
+| Up/Down, PageUp/PageDown, Home/End | in a focused panel: move the selection (the panel scrolls to keep it visible). The last row of each list is its `new workspace...` / `new session...` row: reachable like an entry, lit when selected, and it acts only on Enter or a click (desktop app) |
+| Enter | Workspace: its sessions get the keys (on `new workspace...`: the folder dialog). Running: open the selected session (desktop: starts its engine now) and give the keys to its chat (on `new session...`: creates it) |
 | Esc, typing, Ctrl+C ... | back to the chat (a typed character is inserted) |
 | click a workspace row | select it; Running lists its sessions |
-| click a session row | open it and focus its chat input (the live session: only the focus moves) |
+| click a session row | focus its chat input and show it (desktop app: the stored conversation at once, the engine starts with the first line or Enter; terminal: opens it, the live session: only the focus moves) |
 | click a `❯` row in Activity | scrolls the chat so that prompt is the first row of the view |
 | wheel over Workspace / Running | focuses that panel and moves its selection one row per notch (the panel scrolls with it) |
 | wheel over Activity | scrolls it (3 rows per notch, clamped); its title shows `↑n` older / `↓n` newer rows out of view |
