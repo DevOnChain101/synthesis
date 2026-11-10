@@ -73,6 +73,9 @@ pub enum DialogKind {
     },
     /// `/rewind`, step two: the exact files, and the confirmation. Cancel is the selected default.
     Rewind(Box<crate::rewind::RewindDialog>),
+    /// `/clean`, step two: what goes, what stays, the backup toggle and (for "all") the word to type.
+    /// Cancel is the first row and the selected one; Esc closes it.
+    Clean(Box<crate::clean::CleanDialog>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +94,8 @@ pub enum PickerKind {
     Bypass,
     /// `/rewind`: the checkpoints to choose from (a dry run follows; nothing is written by this).
     Rewind,
+    /// `/clean`: the scopes with their counts (a confirmation follows; nothing is deleted by this).
+    Clean,
     /// `/send` with no arguments: which live peer the next line goes to.
     Send,
     /// `/close-workspace` and the Workspace panel's close button: Cancel is the first option and the default.
@@ -161,6 +166,15 @@ pub enum Action {
     RewindPreview(Option<String>),
     /// The person confirmed this dry run: write it ([`Live::rewind_done`]).
     RewindApply(crate::rewind::Preview),
+    /// `/clean`: count what each scope would delete, off the UI thread ([`Live::clean_listed`]).
+    Clean,
+    /// The person confirmed: delete these sessions (of this scope, still in scope and not in `keep`).
+    CleanApply {
+        scope: synthesis_session::CleanScope,
+        ids: Vec<String>,
+        backup: bool,
+        keep: Vec<String>,
+    },
 }
 
 /// An image waiting for the next message (the TUI's chip).
@@ -195,7 +209,7 @@ impl Dialog {
         match &self.kind {
             DialogKind::Approval(a) => &a.id,
             DialogKind::Plan { id, .. } | DialogKind::Question { id, .. } => id,
-            DialogKind::Picker { .. } | DialogKind::Rewind(_) => "",
+            DialogKind::Picker { .. } | DialogKind::Rewind(_) | DialogKind::Clean(_) => "",
         }
     }
 
@@ -219,6 +233,7 @@ impl Dialog {
                         | PickerKind::MemConfirm
                         | PickerKind::Trust
                         | PickerKind::Revoke
+                        | PickerKind::Clean
                         | PickerKind::CloseWorkspace
                 )
             }
@@ -260,6 +275,10 @@ impl Dialog {
             DialogKind::Question { .. } => "Synthesis has a question".into(),
             DialogKind::Picker { title, .. } => title.clone(),
             DialogKind::Rewind(_) => "Rewind files: confirm".into(),
+            DialogKind::Clean(c) => format!(
+                "Clean: confirm PERMANENT deletion of {}",
+                crate::clean::scope_title(c.scope)
+            ),
         }
     }
 }
@@ -401,7 +420,7 @@ pub fn panels_command() -> Command {
 }
 
 pub fn is_wired(name: &str) -> bool {
-    // `open`, `send`, `panels`, `doctor`, `trust`, `rewind` and `context` exist only in the desktop app
+    // `open`, `send`, `panels`, `doctor`, `trust`, `rewind`, `context` and `clean` exist only in the desktop app
     WIRED.contains(&name)
         || matches!(
             name,
@@ -413,6 +432,7 @@ pub fn is_wired(name: &str) -> bool {
                 | "rewind"
                 | "context"
                 | "close-workspace"
+                | "clean"
         )
 }
 
@@ -435,6 +455,17 @@ pub fn rewind_command() -> Command {
         aliases: vec![],
         description: "put files a run changed back to a checkpoint (dry run first, then confirm)"
             .into(),
+        argument_hint: String::new(),
+        local: true,
+    }
+}
+
+/// `/clean` is the desktop's own command too.
+pub fn clean_command() -> Command {
+    Command {
+        name: "clean".into(),
+        aliases: vec![],
+        description: "permanently delete stored sessions (pick a scope, then confirm)".into(),
         argument_hint: String::new(),
         local: true,
     }
@@ -509,6 +540,14 @@ pub struct Live {
     /// The background job of the current `/rewind` step, for its timeout (`rewind_job_start`).
     pub rewind_job: Option<u64>,
     pub rewind_seq: u64,
+    /// A `/clean` is open or deleting: no prompt starts and the engine is not switched.
+    pub cleaning: bool,
+    pub clean_job: Option<u64>,
+    /// The deletion itself (not the counting) is running: a timeout never clears `cleaning`.
+    pub clean_deleting: bool,
+    pub clean_seq: u64,
+    /// The plans the open scope picker shows (the confirmation takes its ids from here).
+    pub clean_plans: Vec<(synthesis_session::CleanScope, synthesis_session::CleanPlan)>,
     /// `/compact` between tasks is running (until `UiMsg::Compacted`).
     pub compacting: bool,
     pub dialogs: Vec<Dialog>,
@@ -607,6 +646,11 @@ impl Live {
             rewinding: false,
             rewind_job: None,
             rewind_seq: 0,
+            cleaning: false,
+            clean_job: None,
+            clean_deleting: false,
+            clean_seq: 0,
+            clean_plans: vec![],
             compacting: false,
             dialogs: vec![],
             queue: VecDeque::new(),
@@ -698,6 +742,8 @@ impl Live {
         self.queue.clear();
         self.dialogs.clear();
         self.rewinding = false;
+        self.cleaning = self.clean_deleting;
+        self.clean_plans.clear();
         // the prompt that waited for a model choice goes out on the model that was picked; if the
         // switch failed (the stored model is still unavailable) it goes back to the input box
         if let Some(t) = self.held_prompt.take() {
@@ -954,11 +1000,29 @@ impl Live {
 
     /// Esc / Ctrl+C in a dialog: the last option ("no" / "keep planning").
     pub fn reject(&mut self) -> Option<String> {
+        // the clean confirmation: Esc is Cancel (its last row is the destructive one)
+        if matches!(
+            self.dialogs.first().map(|d| &d.kind),
+            Some(DialogKind::Clean(_))
+        ) {
+            self.clean_dismissed();
+            self.dialogs.remove(0);
+            return None;
+        }
         if let Some(Dialog {
             kind: DialogKind::Picker { .. },
             ..
         }) = self.dialogs.first()
         {
+            if matches!(
+                self.dialogs.first().map(|d| &d.kind),
+                Some(DialogKind::Picker {
+                    kind: PickerKind::Clean,
+                    ..
+                })
+            ) {
+                self.clean_dismissed();
+            }
             if let Some(d) = self.dialogs.first()
                 && matches!(
                     d.kind,
@@ -1076,9 +1140,23 @@ impl Live {
         {
             return (key == "refresh" && self.start_refresh()).then_some(Action::RefreshModels);
         }
+        // the clean confirmation's backup toggle and a not-yet-enabled delete leave the dialog open
+        if self.clean_stays(key) {
+            return None;
+        }
         let d = self.dialogs.remove(0);
         // the next dialog waits out its arming delay whichever branch below answers this one
         self.arm(now);
+        if matches!(
+            d.kind,
+            DialogKind::Clean(_)
+                | DialogKind::Picker {
+                    kind: PickerKind::Clean,
+                    ..
+                }
+        ) {
+            return self.clean_answer(d, key);
+        }
         if matches!(
             d.kind,
             DialogKind::Rewind(_)
@@ -1170,6 +1248,7 @@ impl Live {
                 PickerKind::Remember
                 | PickerKind::Bypass
                 | PickerKind::Rewind
+                | PickerKind::Clean
                 | PickerKind::Send
                 | PickerKind::MemReview
                 | PickerKind::MemConfirm
@@ -1184,7 +1263,7 @@ impl Live {
         }
         if let Some(e) = &self.engine {
             match d.kind {
-                DialogKind::Picker { .. } | DialogKind::Rewind(_) => {}
+                DialogKind::Picker { .. } | DialogKind::Rewind(_) | DialogKind::Clean(_) => {}
                 DialogKind::Approval(a) => {
                     let choice = match key {
                         "yes" => Choice::Once,
@@ -1417,7 +1496,12 @@ impl Live {
                 }
             }
         }
-        if self.busy || self.rewinding || self.engine.is_none() || !self.dialogs.is_empty() {
+        if self.busy
+            || self.rewinding
+            || self.cleaning
+            || self.engine.is_none()
+            || !self.dialogs.is_empty()
+        {
             // the TUI queues a line typed while a task runs; it starts when that one ends
             self.queue.push_back(text.to_string());
             return Submitted::Nothing;
@@ -1661,7 +1745,12 @@ impl Live {
 
     /// The next queued line once the task ended and nothing waits for an answer.
     pub fn next_queued(&mut self) -> Option<String> {
-        if self.busy || self.rewinding || self.engine.is_none() || !self.dialogs.is_empty() {
+        if self.busy
+            || self.rewinding
+            || self.cleaning
+            || self.engine.is_none()
+            || !self.dialogs.is_empty()
+        {
             return None;
         }
         let t = self.queue.pop_front()?;
@@ -1779,6 +1868,11 @@ impl Live {
             "trust" => self.trust_cmd(arg),
             "rewind" => {
                 if let Some(a) = self.rewind_command(arg) {
+                    return Submitted::Do(a);
+                }
+            }
+            "clean" => {
+                if let Some(a) = self.clean_command(arg) {
                     return Submitted::Do(a);
                 }
             }
@@ -2939,6 +3033,7 @@ mod tests {
         l.commands.push(panels_command());
         l.commands.push(send_command());
         l.commands.push(rewind_command());
+        l.commands.push(clean_command());
         l.commands.push(close_workspace_command());
         l.commands.push(Command {
             name: "tdd".into(),
