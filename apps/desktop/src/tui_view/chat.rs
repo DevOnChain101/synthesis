@@ -564,7 +564,7 @@ impl TuiView {
                         .justify_center()
                         .bg(hsla(t::INFO))
                         .child(icon("user", 14., hsla(t::BG))),
-                    "you",
+                    "YOU",
                     hsla(t::INFO),
                     &time,
                     div()

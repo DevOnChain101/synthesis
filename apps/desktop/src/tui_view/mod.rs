@@ -47,7 +47,7 @@ pub(crate) fn with_alpha_white(a: f32) -> Hsla {
     chrome::with_alpha(gpui::white(), a)
 }
 
-/// The TUI view's font: `cli.html` `--mono` (bundled Fira Code, SIL OFL), at its body weight 500.
+/// The TUI view's font: `cli.html` `--mono` (bundled Fira Code, SIL OFL), at weight 400 (Regular; owner decision 2026-11-10, `cli.html` used 500).
 /// Tools & Skills body: five 21.4px rows (`li` 1+19.4+1) and the 2px top and 6px bottom padding; the rest scrolls.
 const TOOLS_MAX_H: f32 = 5. * 21.4 + 8.;
 pub const MONO: &str = crate::brand::MONO_FONT;
@@ -1104,7 +1104,7 @@ impl Render for TuiView {
             .overflow_hidden()
             .bg(crate::theme::fill(t::BG))
             .font_family(MONO)
-            .font_weight(FontWeight::MEDIUM)
+            .font_weight(FontWeight::NORMAL)
             .text_size(px(12.5))
             .line_height(gpui::relative(1.55))
             .text_color(text())
