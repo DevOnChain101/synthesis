@@ -554,20 +554,26 @@ impl TuiView {
             super::snapshot::clock(ms, lu.cfg.tz_min)[..5].to_string()
         });
         match it {
-            Item::User(s) => msg(
-                div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(hsla(t::INFO))
-                    .child(icon("user", 14., hsla(t::BG))),
-                "you",
-                hsla(t::INFO),
-                &time,
-                div().text_color(strong()).child(s.clone()),
-            )
-            .into_any_element(),
+            Item::User(s) => {
+                let (head, quoted) = super::quote::split(s);
+                msg(
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(hsla(t::INFO))
+                        .child(icon("user", 14., hsla(t::BG))),
+                    "you",
+                    hsla(t::INFO),
+                    &time,
+                    div()
+                        .text_color(strong())
+                        .child(head)
+                        .children(super::quote::blocks(&quoted)),
+                )
+                .into_any_element()
+            }
             Item::Assistant { text: s, .. } => msg(
                 div().size_full().bg(gpui::black()).child(
                     gpui::img(crate::brand::mark())

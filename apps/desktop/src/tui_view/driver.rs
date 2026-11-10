@@ -582,7 +582,18 @@ impl TuiView {
         lu.comp = None;
         lu.hist = None;
         lu.search = None;
-        match lu.live.submit_as(&text, now) {
+        // the quotes of the file explorer go with a prompt, never with a command
+        let quoted = !self.ts.quotes.is_empty()
+            && !text.trim().is_empty()
+            && !text.starts_with(['/', '!', '#']);
+        if quoted {
+            text = super::quote::compose(&text, &self.ts.quotes);
+        }
+        let sent = lu.live.submit_as(&text, now);
+        if quoted && !matches!(sent, Submitted::Held) {
+            self.ts.quotes.clear();
+        }
+        match sent {
             Submitted::Held => {
                 lu.dirty = true;
                 return cx.notify();
@@ -834,6 +845,27 @@ impl TuiView {
             self.show_search_hit(window, cx);
             return true;
         }
+        // Backspace on an empty input drops the newest quote chip
+        if key == "backspace"
+            && !ctrl
+            && !cmd
+            && !self.ts.quotes.is_empty()
+            && text_of(&lu.prompt, cx).is_empty()
+        {
+            self.ts.quotes.pop();
+            cx.notify();
+            return true;
+        }
+        // Cmd/Ctrl+C with lines selected in the file explorer copies them (not while text is selected in the input)
+        if key == "c"
+            && (ks.modifiers.platform || ctrl)
+            && self.ts.tab == super::ChatTab::Files
+            && self.ts.sel.is_some()
+            && lu.prompt.read(cx).selected_range().is_empty()
+        {
+            self.copy_selection(cx);
+            return true;
+        }
         match (key, ctrl) {
             // Ctrl+1..5: the centre tabs (chat, diff, terminal, browser, file explorer)
             (k @ ("1" | "2" | "3" | "4" | "5"), true) if !ks.modifiers.shift => {
@@ -1040,6 +1072,8 @@ impl TuiView {
                     lu.live.run_sel = 0;
                 }
                 _ => {
+                    // opening a session hands the keys to its chat
+                    lu.live.focus = Focus::Chat;
                     let sel = lu.live.run_sel;
                     self.open_row(sel, cx);
                 }
@@ -1151,8 +1185,10 @@ impl TuiView {
             return;
         }
         let Some(lu) = &mut self.live else { return };
-        lu.live.focus = Focus::Running;
+        // the row is selected and the session's chat gets the keys (cursor visible, typing works at once)
+        lu.live.focus = Focus::Chat;
         lu.live.run_sel = i;
+        lu.prompt.update(cx, |s, cx| s.focus(window, cx));
         self.open_row(i, cx);
     }
 

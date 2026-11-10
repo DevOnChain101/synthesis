@@ -14,6 +14,7 @@ pub mod dialog;
 pub mod driver;
 pub mod layout;
 pub mod panels;
+mod quote;
 mod rewind;
 pub mod sample;
 #[cfg(feature = "shot")]
@@ -767,6 +768,7 @@ impl TuiView {
             .child(body)
             .children(dock)
             .child(prompt)
+            .children(self.quote_chips(cx))
             .child(self.agent_switch(cx))
             .child(self.mode_bar())
     }
@@ -1110,6 +1112,7 @@ impl Render for TuiView {
             .child(body)
             .child(self.footer())
             .children(drawer)
+            .children(self.quote_menu(cx))
     }
 }
 
@@ -1539,5 +1542,66 @@ mod tests {
         );
         press(&view, vcx, "escape");
         assert_eq!(state(&view, vcx).0, 0, "Esc cancels");
+    }
+
+    /// A click on a Running row selects it and hands the keys to the chat (the prompt holds the focus), even
+    /// when the Workspace/Running panel had them; the order of the rows does not change.
+    #[gpui::test]
+    fn clicking_a_running_row_focuses_the_chat_and_keeps_the_order(cx: &mut TestAppContext) {
+        use crate::live::{Focus, Live};
+        use gpui::Focusable as _;
+        use synthesis_view::workspaces::{SessionRow, WorkspaceRow, fold_dir};
+        cx.update(gpui_component::init);
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let mut l = Live::new();
+        l.starting = false;
+        l.cwd = "/w/proj".into();
+        l.sid = "a".into();
+        l.ws_key = fold_dir("/w/proj");
+        let row = |id: &str| SessionRow {
+            id: id.into(),
+            title: id.into(),
+            status: synthesis_core::SessionStatus::Idle,
+            updated_at: String::new(),
+            mtime: 0,
+            is_live: false,
+        };
+        l.view.workspaces.workspaces = vec![WorkspaceRow {
+            root: "/w/proj".into(),
+            key: l.ws_key.clone(),
+            label: "proj".into(),
+            sessions: vec![row("a"), row("b"), row("c")],
+            available: true,
+            changes: None,
+        }];
+        l.focus = Focus::Running;
+        view.update(vcx, |t, _| t.set_live(l));
+        vcx.simulate_resize(size(px(1400.), px(900.)));
+        vcx.run_until_parked();
+        let ids = |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext| {
+            view.read_with(vcx, |t, _| {
+                t.snap
+                    .running
+                    .iter()
+                    .map(|r| r.id.clone())
+                    .collect::<Vec<_>>()
+            })
+        };
+        let before = ids(&view, vcx);
+        assert_eq!(before, ["a", "b", "c"]);
+        view.update_in(vcx, |t, window, cx| t.click_running(1, window, cx));
+        vcx.run_until_parked();
+        let (focus, sel, focused) = view.update_in(vcx, |t, window, cx| {
+            let lu = t.live.as_ref().unwrap();
+            (
+                lu.live.focus,
+                lu.live.run_sel,
+                lu.prompt.focus_handle(cx).is_focused(window),
+            )
+        });
+        assert_eq!((focus, sel, focused), (Focus::Chat, 1, true));
+        assert_eq!(ids(&view, vcx), before, "the click moves no row");
     }
 }
