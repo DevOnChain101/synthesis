@@ -156,7 +156,15 @@ impl WorkspaceList {
                 ws.push(blank(&raw, key, vec![]));
             }
         }
+        // A session keeps its place: creation time, never `updated_at` (selecting or running one must not move rows).
+        let created = |id: &str| {
+            recs.iter()
+                .find(|r| r.id == id)
+                .map(|r| parse_ts(&r.created_at))
+        };
         for w in &mut ws {
+            w.sessions
+                .sort_by_cached_key(|s| (std::cmp::Reverse(created(&s.id)), s.id.clone()));
             w.changes = changes(&w.root, opts);
         }
         Ok(Self { workspaces: ws })
@@ -255,6 +263,38 @@ mod tests {
         );
         assert!(wa.available && wa.changes.is_none(), "no trust, no scan");
         assert_eq!(list.find(c.to_str().unwrap()).unwrap().session_count(), 0);
+    }
+
+    #[test]
+    fn sessions_keep_their_creation_order_when_one_is_touched() {
+        let t = tempfile::tempdir().unwrap();
+        let a = synthesis_core::canonicalize(t.path()).unwrap();
+        let store = Store::open(&a.join("home"), StoreOptions::default()).unwrap();
+        let ids = |store: &Store| -> Vec<String> {
+            let l = WorkspaceList::load(&store.reader().unwrap(), None, &LoadOpts::default());
+            l.unwrap().workspaces[0]
+                .sessions
+                .iter()
+                .map(|s| s.id.clone())
+                .collect()
+        };
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(5));
+        for id in ["s1", "s2", "s3"] {
+            session(&store, id, &a, Some("hi"));
+            pause();
+        }
+        assert_eq!(ids(&store), ["s3", "s2", "s1"], "newest created first");
+        pause();
+        // activity on the oldest session moves its updated_at, not its place
+        let mut w = store.resume_session("s1", true).unwrap();
+        w.set_title("renamed").unwrap();
+        assert_eq!(ids(&store), ["s3", "s2", "s1"], "activity does not reorder");
+        session(&store, "s4", &a, Some("new"));
+        assert_eq!(
+            ids(&store),
+            ["s4", "s3", "s2", "s1"],
+            "a new one joins at the top"
+        );
     }
 
     #[test]
