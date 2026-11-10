@@ -59,14 +59,14 @@ impl PeerRow {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct RunningList {
-    /// Live sessions of every workspace, newest first, with the folder they belong to.
+    /// Live sessions of every workspace, in the workspace list's stable order (creation, never activity), with the folder they belong to.
     pub live: Vec<(String, SessionRow)>,
     pub peers: Vec<PeerRow>,
 }
 
 impl RunningList {
     pub fn new(w: &WorkspaceList, peers: &[Value]) -> Self {
-        let mut live: Vec<(String, SessionRow)> = w
+        let live: Vec<(String, SessionRow)> = w
             .workspaces
             .iter()
             .flat_map(|w| {
@@ -76,7 +76,6 @@ impl RunningList {
                     .map(|s| (w.root.clone(), s.clone()))
             })
             .collect();
-        live.sort_by_key(|(_, s)| std::cmp::Reverse(s.mtime));
         Self {
             live,
             peers: peers.iter().map(PeerRow::from_json).collect(),

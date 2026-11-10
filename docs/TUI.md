@@ -97,7 +97,7 @@ The status line shows `ctx 62% 124k/200k`; the Context panel, the header chip an
 The sidebar has three controls. **Workspace** lists the folders that have sessions in the store (the
 live one first, then by newest session) with the session count. **Running** lists the sessions of the
 SELECTED workspace: the live one (`●`, marked `⌘`) and the stored ones (`○`, named by their first
-prompt), newest first. On a tall terminal each panel lists 5 rows (a session is 2 lines) before it scrolls (`↑ n more` / `↓ n more`); a shorter terminal gives them fewer, and the panels below shrink or drop out instead of overlapping. Sessions with no message and no task (a launch where nothing was typed) are not listed, in these panels or in `/resume`; the open session always shows, and a folder whose sessions are all hidden is not a workspace row (the live folder stays). At start the app deletes such sessions when they are older than 1 hour, are not the one being resumed and are not locked by a running `synt` (with their rows and directory); anything doubtful is kept. Selecting a workspace only changes that list; nothing restarts. Opening a
+prompt), in a STABLE order: newest CREATED first (`sessions.created_at`, id as tie-break), never by last activity, so selecting, opening or running a session, or a status change, never moves a row; a new session joins at the top and the others keep their relative order. On a tall terminal each panel lists 5 rows (a session is 2 lines) before it scrolls (`↑ n more` / `↓ n more`); a shorter terminal gives them fewer, and the panels below shrink or drop out instead of overlapping. Sessions with no message and no task (a launch where nothing was typed) are not listed, in these panels or in `/resume`; the open session always shows, and a folder whose sessions are all hidden is not a workspace row (the live folder stays). At start the app deletes such sessions when they are older than 1 hour, are not the one being resumed and are not locked by a running `synt` (with their rows and directory); anything doubtful is kept. Selecting a workspace only changes that list; nothing restarts. Opening a
 stored session is `/resume` (the app restarts on it, in its own folder; a running task is cancelled
 after a second Enter / click within 5 s). **Activity** is the feed of the live session; a `❯` row is
 a prompt.
@@ -106,10 +106,10 @@ a prompt.
 |---|---|
 | Tab (empty prompt, no dialog) | chat -> Workspace -> Running -> chat. The focused panel's border takes the accent colour (warm sand #C7AE90, see `docs/tui-palette.md`) and the footer shows its keys. Skipped when the sidebar is not on screen (terminal under 80 columns) |
 | Up/Down, PageUp/PageDown, Home/End | in a focused panel: move the selection (the panel scrolls to keep it visible) |
-| Enter | Workspace: its sessions get the keys. Running: open the selected session |
+| Enter | Workspace: its sessions get the keys. Running: open the selected session and give the keys to its chat |
 | Esc, typing, Ctrl+C ... | back to the chat (a typed character is inserted) |
 | click a workspace row | select it; Running lists its sessions |
-| click a session row | open it (the live session: nothing happens) |
+| click a session row | open it and focus its chat input (the live session: only the focus moves) |
 | click a `❯` row in Activity | scrolls the chat so that prompt is the first row of the view |
 | wheel over Workspace / Running | focuses that panel and moves its selection one row per notch (the panel scrolls with it) |
 | wheel over Activity | scrolls it (3 rows per notch, clamped); its title shows `↑n` older / `↓n` newer rows out of view |

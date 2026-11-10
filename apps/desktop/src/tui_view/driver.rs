@@ -1040,6 +1040,8 @@ impl TuiView {
                     lu.live.run_sel = 0;
                 }
                 _ => {
+                    // opening a session hands the keys to its chat
+                    lu.live.focus = Focus::Chat;
                     let sel = lu.live.run_sel;
                     self.open_row(sel, cx);
                 }
@@ -1151,8 +1153,10 @@ impl TuiView {
             return;
         }
         let Some(lu) = &mut self.live else { return };
-        lu.live.focus = Focus::Running;
+        // the row is selected and the session's chat gets the keys (cursor visible, typing works at once)
+        lu.live.focus = Focus::Chat;
         lu.live.run_sel = i;
+        lu.prompt.update(cx, |s, cx| s.focus(window, cx));
         self.open_row(i, cx);
     }
 
