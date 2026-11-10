@@ -402,7 +402,7 @@ impl TuiView {
         cx.notify();
     }
 
-    fn apply_batch(&mut self, batch: Vec<UiMsg>, cx: &mut Context<Self>) {
+    pub(super) fn apply_batch(&mut self, batch: Vec<UiMsg>, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
         let now = now_ms();
         let mut ended = false;
@@ -413,6 +413,7 @@ impl TuiView {
         if ended {
             self.after_task(cx);
         }
+        crate::perf::notify();
         cx.notify();
     }
 
@@ -511,7 +512,7 @@ impl TuiView {
     }
 
     /// Once a second: the clock, the MCP states, the peers every fifth time.
-    fn tick(&mut self, n: u64, cx: &mut Context<Self>) {
+    pub(super) fn tick(&mut self, n: u64, cx: &mut Context<Self>) {
         let Some(lu) = &mut self.live else { return };
         lu.dirty = true;
         if let Some(e) = lu.live.engine.clone() {
@@ -534,6 +535,7 @@ impl TuiView {
                 lu.peer_task = Some(t);
             }
         }
+        crate::perf::notify();
         cx.notify();
     }
 

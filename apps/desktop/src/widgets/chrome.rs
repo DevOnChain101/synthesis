@@ -502,6 +502,32 @@ pub fn with_alpha(c: Hsla, a: f32) -> Hsla {
     Hsla { a, ..c }
 }
 
+/// Frames per second of every looping animation (spinner, blink, scrolling prompt). Their motion needs
+/// far fewer than a display's 60 to 120: a frame redraws the whole window.
+pub const ANIM_FPS: f32 = 30.;
+
+/// Asks for one more frame of the view being rendered in `1 / ANIM_FPS` s instead of at the next vsync.
+/// `slot` is the view's own field for the pending timer (one at a time).
+pub fn next_frame<T: 'static>(
+    slot: fn(&mut T) -> &mut Option<gpui::Task<()>>,
+    this: &mut T,
+    cx: &mut gpui::Context<T>,
+) {
+    if slot(this).is_some() {
+        return;
+    }
+    *slot(this) = Some(cx.spawn(async move |this, cx| {
+        cx.background_executor()
+            .timer(std::time::Duration::from_secs_f32(1. / ANIM_FPS))
+            .await;
+        this.update(cx, |t, cx| {
+            *slot(t) = None;
+            cx.notify();
+        })
+        .ok();
+    }));
+}
+
 /// Speed of the scrolling prompt (px/s) and the pause with the slot empty between two runs.
 const MARQUEE_PX_S: f32 = 40.;
 const MARQUEE_PAUSE_S: f32 = 1.;
@@ -561,7 +587,8 @@ pub fn chat_head(
                         gpui::Animation::new(std::time::Duration::from_secs_f32(marquee_period(
                             travel,
                         )))
-                        .repeat(),
+                        .repeat()
+                        .with_max_fps(ANIM_FPS),
                         move |el, d| el.left(px(marquee_left(d, travel))),
                     ),
             )
@@ -650,5 +677,59 @@ mod marquee_tests {
         assert!((marquee_left(moving / 2., travel) + travel / 2.).abs() < 1e-3);
         // period = (slot + text) / speed + pause
         assert_eq!(marquee_period(travel), 400. / 40. + 1.);
+    }
+}
+
+#[cfg(test)]
+mod next_frame_tests {
+    use super::*;
+    use gpui::{Context, Render, TestAppContext};
+    use std::time::Duration;
+
+    struct Spin {
+        renders: u32,
+        tick: Option<gpui::Task<()>>,
+        vsync: bool,
+    }
+
+    impl Render for Spin {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.renders += 1;
+            if self.vsync {
+                window.request_animation_frame();
+            } else {
+                next_frame(|s| &mut s.tick, self, cx);
+            }
+            div()
+        }
+    }
+
+    /// Renders in one second of 120 Hz frames: a vsync loop draws every one, `next_frame` about `ANIM_FPS`.
+    fn renders_in_a_second(cx: &mut TestAppContext, vsync: bool) -> u32 {
+        let (v, cx) = cx.add_window_view(|_, _| Spin {
+            renders: 0,
+            tick: None,
+            vsync,
+        });
+        for _ in 0..120 {
+            cx.executor().advance_clock(Duration::from_micros(8333));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            });
+        }
+        v.read_with(cx, |s, _| s.renders)
+    }
+
+    #[gpui::test]
+    fn a_looping_animation_draws_at_anim_fps_not_at_vsync(cx: &mut TestAppContext) {
+        let throttled = renders_in_a_second(cx, false);
+        let vsync = renders_in_a_second(cx, true);
+        println!("renders in 1 s at 120 Hz: vsync loop {vsync}, next_frame {throttled}");
+        assert!(vsync >= 100, "{vsync}");
+        assert!(
+            (25..=35).contains(&throttled),
+            "{throttled} renders in a second"
+        );
     }
 }
