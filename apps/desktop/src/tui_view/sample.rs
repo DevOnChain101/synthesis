@@ -169,6 +169,12 @@ pub struct MonthUse {
     pub weeks: Vec<[Option<DayDot>; 7]>,
     /// Summary rows: key, value, muted suffix, tone.
     pub summary: Vec<(&'static str, String, String, Tone)>,
+    /// The year heatmap (53 weeks, oldest first, Sunday to Saturday; `None` is outside the history or after today)
+    /// and the (week, month) pairs where a month label goes.
+    pub year: Vec<[Option<DayDot>; 7]>,
+    pub year_marks: Vec<(usize, &'static str)>,
+    /// The section's titles with the year total, longest first (the strip keeps `titles`).
+    pub year_titles: [String; 3],
     /// `loading usage…` while the history is not read yet (the grid is not drawn).
     pub note: Option<String>,
 }
