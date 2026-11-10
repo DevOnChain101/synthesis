@@ -182,6 +182,10 @@ offset): tokens (`turn.completed` input + output), messages (`user.message`), to
 yet, so the `u: metric` hint in the title does nothing). There is no provider quota source, so the
 5-hour and 7-day quota rows are absent, and no cost is shown.
 
+In the desktop app's Usage & Metrics panel the same per-day history also draws the current month under the bars:
+one dot per day (green by that day's share of the month's busiest day, tokens; empty days dim, days to come dimmer),
+the month name and its token total. Recent Activity there lists only the person's prompts and the agent's answers.
+
 ## Git in `/files` and `/diff`
 
 Only in a folder started with `--trust-project`, one scan at a time, 5 s limit, output bounded and cut

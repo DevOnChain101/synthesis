@@ -46,6 +46,10 @@ pub fn cols(width: f32) -> Cols {
     }
 }
 
+/// Left and right gutter of every centre tab body (chat, diff, terminal, browser, file explorer): one container
+/// in `TuiView::chat` pads them all, so no tab draws up to the frame's border.
+pub const TAB_PAD_X: f32 = 16.;
+
 /// Height tiers (`@media (max-height: 749/609)`, `(min-height: 860)`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tiers {
@@ -85,7 +89,7 @@ pub fn tiers(height: f32) -> Tiers {
 }
 
 /// The `synt.tui.panels.*` settings keys (docs/TUI.md "Settings"), mapped onto the panels of `cli.html`:
-/// `session` = Session, `tools` = Tools & Skills, `activity` = Recent Activity (prompts and agent activity in one
+/// `session` = Session, `tools` = Tools & Skills, `activity` = Recent Activity (prompts and answers in one
 /// panel), `tokens` = Context, `topology` = Synthesis Topology, `usage` = Usage & Metrics, `status` = Mission.
 /// Never hideable (owner decision 2026-11-09): Workspace, Running, the chat (with the sub-agent transcript beside
 /// it) and the sub-agents (the Topology Subagents card, or a compact Subagents block in its place while Topology

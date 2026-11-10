@@ -127,6 +127,20 @@ fn prompt_tool_approval_answer_round_trip() {
     assert!(ended, "{items:?}");
     let snap = snapshot::build(&r.live, 1_000_000, 0, None);
     assert!(snap.activity.iter().any(|p| p.text == "make hello.txt"));
+    // Recent Activity lists the prompt and the answer only: no tool call, approval, turn or notice
+    assert!(
+        snap.activity.iter().any(|p| p.text == "Finished."),
+        "{:?}",
+        snap.activity
+    );
+    assert!(
+        snap.activity.iter().all(|p| p.text == "make hello.txt"
+            || items
+                .iter()
+                .any(|i| matches!(i, Item::Assistant { text, .. } if text.trim() == p.text))),
+        "{:?}",
+        snap.activity
+    );
     assert_eq!(snap.top.health, "system healthy");
     assert!(snap.context.input != "0");
     let engine = r.live.engine.take().unwrap();

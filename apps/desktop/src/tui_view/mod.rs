@@ -714,6 +714,15 @@ impl TuiView {
         } else {
             self.welcome().into_any_element()
         };
+        let body = div()
+            .debug_selector(|| "tab-body".to_string())
+            .flex_1()
+            .min_h(px(0.))
+            .min_w(px(0.))
+            .flex()
+            .flex_col()
+            .px(px(layout::TAB_PAD_X))
+            .child(body);
         let dock = self.dialog_dock(cx);
         let prompt = if self.live.is_some() {
             self.live_prompt(cx)

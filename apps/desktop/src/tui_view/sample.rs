@@ -60,17 +60,11 @@ pub struct ToolsInfo {
 pub enum ActKind {
     /// What the person typed.
     Prompt,
-    /// A tool or command run.
-    Tool,
-    /// A sub-agent.
-    Agent,
-    /// A permission asked.
-    Approval,
-    /// A failed tool or task.
-    Error,
+    /// What the agent answered.
+    Reply,
 }
 
-/// One entry of Recent Activity: a prompt or something the agent did, at `time`.
+/// One entry of Recent Activity: a prompt or an answer, at `time`.
 #[derive(Clone, Debug)]
 pub struct ActivityRow {
     pub kind: ActKind,
@@ -143,6 +137,16 @@ pub struct Metric {
 pub struct Usage {
     pub range: String,
     pub rows: Vec<Metric>,
+    pub month: MonthUse,
+}
+
+/// The current month as one dot per day (the classic CLI's month grid, tokens): `Nov 2026`, its token total, and
+/// per day 0 (none) to 4 (busiest day of the month), `None` for a day still to come.
+#[derive(Clone, Debug, Default)]
+pub struct MonthUse {
+    pub label: String,
+    pub total: String,
+    pub days: Vec<Option<u8>>,
 }
 
 /// Topology node state; maps to the card border colour.
@@ -343,10 +347,11 @@ pub fn sample() -> Snapshot {
             ],
         },
         activity: [
-            (ActKind::Tool, "Edited auth.ts", "23:02"),
-            (ActKind::Tool, "Ran tests", "23:00"),
-            (ActKind::Tool, "Searched codebase", "22:58"),
-            (ActKind::Tool, "Read architecture.md", "22:55"),
+            (
+                ActKind::Reply,
+                "The redirect loop came from the session check in auth.ts; fixed.",
+                "23:02",
+            ),
             (
                 ActKind::Prompt,
                 "Investigate why login redirects loop in auth.ts and fix it.",
@@ -466,6 +471,13 @@ pub fn sample() -> Snapshot {
                 metric("Browser requests", "3", 9.),
                 metric("MCP calls", "12", 20.),
             ],
+            month: MonthUse {
+                label: s("Nov 2026"),
+                total: s("48.2k"),
+                days: (1..=30)
+                    .map(|d| (d <= 10).then(|| [0, 1, 3, 0, 2, 4, 1, 0, 2, 3][d - 1]))
+                    .collect(),
+            },
         },
         tips: vec![
             s("Ask for a change in plain words; Shift+Tab cycles the permission mode."),

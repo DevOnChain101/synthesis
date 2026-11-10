@@ -9,12 +9,12 @@ use super::activity::{
     Activity, RunState, activity_of, run_state_of_live, run_state_of_status, status_word,
 };
 use super::sample::{
-    ActKind, ActivityRow, AgentStatus, ChatHead, ContextInfo, Core, Metric, NodeState, Pos,
-    Running, SessionInfo, Snapshot, StatusChip, Step, StepKind, ToolRow, ToolsInfo, Top, TopoNode,
-    Usage, Workspace,
+    ActKind, ActivityRow, AgentStatus, ChatHead, ContextInfo, Core, Metric, MonthUse, NodeState,
+    Pos, Running, SessionInfo, Snapshot, StatusChip, Step, StepKind, ToolRow, ToolsInfo, Top,
+    TopoNode, Usage, Workspace,
 };
 use crate::live::{Focus, Live};
-use synthesis_view::convo::{ApprovalState, CheckState, Item, StepState, ToolState};
+use synthesis_view::convo::{Item, StepState};
 
 /// `124000` -> `124k`, `1_300_000` -> `1.3M`.
 pub fn tok(n: u64) -> String {
@@ -388,12 +388,66 @@ fn grouped(n: u64) -> String {
     out
 }
 
+/// Days since 1970-01-01 to (year, month 1-12, day) (proleptic Gregorian).
+fn civil(z: i64) -> (i64, usize, i64) {
+    let z = z + 719_468;
+    let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m as usize, doy - (153 * mp + 2) / 5 + 1)
+}
+
+/// The month of the last history day (today) as dots of token intensity, like the CLI's month grid: level 1..=4
+/// is the day's share of the month's busiest day, 0 a day with no tokens, `None` a day still to come.
+fn month_use(days: &[synthesis_view::usage::HistoryDay], tz_min: i32) -> MonthUse {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let Some(last) = days.last() else {
+        return MonthUse::default();
+    };
+    let day_no = |ms: i64| (ms + i64::from(tz_min) * 60_000).div_euclid(86_400_000);
+    let today = day_no(last.date_ms);
+    let (y, m, d) = civil(today);
+    let first = today - (d - 1);
+    let len = (28..=31)
+        .rev()
+        .find(|n| civil(first + n - 1).1 == m)
+        .unwrap_or(28);
+    let tokens = |n: i64| {
+        days.iter()
+            .find(|x| day_no(x.date_ms) == n)
+            .map_or(0., |x| x.tokens)
+    };
+    let (mut total, mut max) = (0., 0f64);
+    for n in first..=today {
+        total += tokens(n);
+        max = max.max(tokens(n));
+    }
+    MonthUse {
+        label: format!("{} {y}", MONTHS[m - 1]),
+        total: tok(total as u64),
+        days: (first..first + len)
+            .map(|n| {
+                (n <= today).then(|| match tokens(n) {
+                    v if v <= 0. => 0,
+                    v => 1 + (((v / max) * 3.999) as u8).min(3),
+                })
+            })
+            .collect(),
+    }
+}
+
 fn first_line(s: &str, n: usize) -> String {
     s.lines().next().unwrap_or("").chars().take(n).collect()
 }
 
-/// Recent Activity: the person's prompts and the agent's runs, approvals and errors from the conversation,
-/// strictly newest first by event time. A row with no event time (a local notice) is not an event and is left out.
+/// Recent Activity: what the person asked and what the agent answered (assistant text), strictly newest first by
+/// event time. Commands, tool calls, turns, notices and errors are not listed (the chat and the Running list
+/// show those); a row with no event time (a local notice) is not an event and is left out.
 fn activity_rows(l: &Live, tz_min: i32) -> Vec<ActivityRow> {
     let c = &l.view.convo;
     let mut v: Vec<(i64, ActivityRow)> = vec![];
@@ -402,57 +456,9 @@ fn activity_rows(l: &Live, tz_min: i32) -> Vec<ActivityRow> {
         let Some(ts) = c.time_of(i) else { continue };
         let (kind, text) = match it {
             Item::User(t) => (ActKind::Prompt, t.clone()),
-            Item::Tool {
-                name,
-                summary,
-                state: ToolState::Failed,
-                ..
-            } => (ActKind::Error, format!("{name} failed: {summary}")),
-            Item::Tool { name, summary, .. } if name == "Agent" || name == "Task" => {
-                (ActKind::Agent, format!("Delegate: {summary}"))
+            Item::Assistant { text, .. } if !text.trim().is_empty() => {
+                (ActKind::Reply, text.trim().to_string())
             }
-            Item::Tool { name, summary, .. } => (ActKind::Tool, format!("{name} {summary}")),
-            Item::Agent { kind, .. } => (ActKind::Agent, format!("{kind} agent")),
-            Item::Approval { prompt, state, .. } => (
-                ActKind::Approval,
-                format!(
-                    "{} {prompt}",
-                    match state {
-                        ApprovalState::Pending => "Asked",
-                        ApprovalState::Allowed => "Allowed",
-                        ApprovalState::Denied => "Denied",
-                    }
-                ),
-            ),
-            Item::Checks {
-                rows, total, done, ..
-            } => {
-                let failed = rows
-                    .iter()
-                    .filter(|r| r.state == CheckState::Failed)
-                    .count();
-                let ran = rows
-                    .iter()
-                    .filter(|r| r.state != CheckState::Running)
-                    .count();
-                let word = match done.as_deref() {
-                    _ if failed > 0 => format!("{failed} failed"),
-                    Some("passed") => "passed".to_string(),
-                    Some(w) => w.to_string(),
-                    None => format!("{ran}/{total} done"),
-                };
-                (
-                    if failed > 0 {
-                        ActKind::Error
-                    } else {
-                        ActKind::Tool
-                    },
-                    format!("Verification: {word}"),
-                )
-            }
-            Item::TaskEnd {
-                ok: false, text, ..
-            } => (ActKind::Error, text.clone()),
             _ => continue,
         };
         v.push((
@@ -712,6 +718,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
                 metric("Browser requests", w7.browser, w30.browser, false),
                 metric("MCP calls", w7.mcp, w30.mcp, false),
             ],
+            month: month_use(&v.usage.days, tz_min),
         },
         tips: vec![
             "Ask for a change in plain words; Shift+Tab cycles the permission mode.".into(),
@@ -957,7 +964,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_activity_interleaves_prompts_and_agent_runs_newest_first() {
+    fn recent_activity_lists_prompts_and_answers_only_newest_first() {
         let mut l = Live::new();
         l.starting = false;
         let mut n = 0;
@@ -967,6 +974,8 @@ mod tests {
         };
         let tool = |id: &str, cmd: &str| json!({"tool_call_id": id, "name": "Bash", "input": {"command": cmd}, "input_truncated": false});
         let done = |id: &str, status: &str, err: bool| json!({"tool_call_id": id, "name": "Bash", "status": status, "is_error": err, "not_run": false, "duration_ms": 3, "preview": "p", "bytes": 1, "truncated": false});
+        let said =
+            |t: &str| json!({"stop_reason": "end_turn", "content": [{"type": "text", "text": t}]});
         send(
             &mut l,
             "2026-11-07T10:00:00Z",
@@ -987,6 +996,12 @@ mod tests {
         );
         send(
             &mut l,
+            "2026-11-07T10:01:30Z",
+            "assistant.message",
+            said("listed it"),
+        );
+        send(
+            &mut l,
             "2026-11-07T10:02:00Z",
             "user.message",
             json!({"text": "second", "images": []}),
@@ -1004,29 +1019,19 @@ mod tests {
             done("b", "error", true),
         );
         let rows = build(&l, 0, 0, None).activity;
-        let got: Vec<_> = rows.iter().map(|r| (r.kind, r.time.as_str())).collect();
+        // the failed command and the tool calls are not listed
+        let got: Vec<_> = rows
+            .iter()
+            .map(|r| (r.kind, r.time.as_str(), r.text.as_str()))
+            .collect();
         assert_eq!(
             got,
             [
-                (ActKind::Error, "10:03"),
-                (ActKind::Prompt, "10:02"),
-                (ActKind::Tool, "10:01"),
-                (ActKind::Prompt, "10:00"),
+                (ActKind::Prompt, "10:02", "second"),
+                (ActKind::Reply, "10:01", "listed it"),
+                (ActKind::Prompt, "10:00", "first"),
             ]
         );
-        assert!(
-            rows[0].text.starts_with("Bash failed: make"),
-            "{:?}",
-            rows[0]
-        );
-        // /focus hides the tool rows from the chat: their entries stay, dimmed and not clickable
-        l.focus_view = true;
-        let shown: Vec<_> = build(&l, 0, 0, None)
-            .activity
-            .iter()
-            .map(|r| r.shown)
-            .collect();
-        assert_eq!(shown, [false, true, false, true]);
     }
 
     #[test]
@@ -1093,6 +1098,33 @@ mod tests {
         assert_eq!(uptime(3725), "1h 02m 05s");
         assert_eq!(grouped(128_000), "128,000");
         assert_eq!(ago(10 * 60_000 + 60_000, 60_000), "10m ago");
+    }
+
+    #[test]
+    fn the_month_is_one_dot_per_day_up_to_today() {
+        use synthesis_view::usage::HistoryDay;
+        // 2026-11-10 (day 20767), 02:00 local at +120 min: the day starts at local midnight
+        let day = |n: i64, tokens: f64| HistoryDay {
+            date_ms: n * 86_400_000 - 120 * 60_000,
+            tokens,
+            ..Default::default()
+        };
+        let h = [
+            day(20_760, 850.),
+            day(20_765, 100.),
+            day(20_766, 0.),
+            day(20_767, 50.),
+        ];
+        let m = month_use(&h, 120);
+        assert_eq!((m.label.as_str(), m.total.as_str()), ("Nov 2026", "1k"));
+        assert_eq!(m.days.len(), 30);
+        // Nov 3 is the busiest day (4); Nov 8 has 100 and Nov 10 has 50 of its 850 (1); Nov 9 none; Nov 11 to come
+        assert_eq!(
+            (m.days[0], m.days[2], m.days[8]),
+            (Some(0), Some(4), Some(0))
+        );
+        assert_eq!((m.days[7], m.days[9], m.days[10]), (Some(1), Some(1), None));
+        assert_eq!(month_use(&[], 0).days.len(), 0);
     }
 
     #[test]

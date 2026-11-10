@@ -1,5 +1,5 @@
 //! The panel bodies of the TUI view, 1:1 with `cli.html` (`.rows`, `.ws-item`, `.run-item`, `.kv`, `.chk`,
-//! `.bars`): Workspace, Running, Session, Tools & Skills, Recent Activity (prompts and agent activity), Agent Status, Context
+//! `.bars`): Workspace, Running, Session, Tools & Skills, Recent Activity (prompts and answers), Agent Status, Context
 //! and Usage & Metrics. The panel chrome itself is `widgets::chrome`.
 
 use gpui::{
@@ -10,8 +10,8 @@ use synthesis_tui_render::theme as t;
 
 use super::activity::{Presence, RunState, presence};
 use super::sample::{
-    ActKind, ActivityRow, AgentStatus, ContextInfo, Running, SessionInfo, StepKind, ToolsInfo,
-    Usage, Workspace,
+    ActKind, ActivityRow, AgentStatus, ContextInfo, MonthUse, Running, SessionInfo, StepKind,
+    ToolsInfo, Usage, Workspace,
 };
 use crate::theme::hsla;
 pub use crate::widgets::chrome::{OnClick, dim, dot, icon, strong, text, with_alpha};
@@ -399,7 +399,7 @@ fn circ(kind: Option<StepKind>) -> Div {
 }
 
 /// Recent Activity: `time  mark  text` per entry, one line each. Prompts are strong text behind a blue mark, the
-/// agent's doings plain text behind their own mark; an entry the chat no longer shows is dimmed and not clickable.
+/// agent's answers plain text behind an accent mark; an entry the chat no longer shows is dimmed and not clickable.
 pub fn activity_body(rows: &[ActivityRow], on_click: Option<&dyn Fn(usize) -> OnClick>) -> Div {
     if rows.is_empty() {
         return div().text_color(dim()).child("No activity yet");
@@ -410,10 +410,7 @@ pub fn activity_body(rows: &[ActivityRow], on_click: Option<&dyn Fn(usize) -> On
         .children(rows.iter().enumerate().map(|(i, a)| {
             let (mark, fg) = match a.kind {
                 ActKind::Prompt => (hsla(t::INFO), strong()),
-                ActKind::Tool => (dim(), text()),
-                ActKind::Agent => (hsla(t::ACCENT), text()),
-                ActKind::Approval => (hsla(t::WARN), text()),
-                ActKind::Error => (hsla(t::ERROR), hsla(t::ERROR)),
+                ActKind::Reply => (hsla(t::ACCENT), text()),
             };
             let fg = if a.shown { fg } else { dim() };
             li().child(
@@ -598,31 +595,77 @@ pub fn usage_meta(u: &Usage, on_click: Option<OnClick>) -> gpui::AnyElement {
 }
 
 pub fn usage_body(u: &Usage) -> Div {
-    div().flex().flex_col().children(u.rows.iter().map(|r| {
-        div()
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .py(px(3.))
-            .child(
-                div()
-                    .w(px(118.))
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .child(r.label.clone()),
-            )
-            .child(div().flex_1().min_w(px(0.)).child(bar(r.pct)))
-            .child(
-                div()
-                    .w(px(92.))
-                    .flex_none()
-                    .flex()
-                    .justify_end()
-                    .whitespace_nowrap()
-                    .text_color(strong())
-                    .child(r.value.clone()),
-            )
-    }))
+    div()
+        .flex()
+        .flex_col()
+        .children(u.rows.iter().map(|r| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .py(px(3.))
+                .child(
+                    div()
+                        .w(px(118.))
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .child(r.label.clone()),
+                )
+                .child(div().flex_1().min_w(px(0.)).child(bar(r.pct)))
+                .child(
+                    div()
+                        .w(px(92.))
+                        .flex_none()
+                        .flex()
+                        .justify_end()
+                        .whitespace_nowrap()
+                        .text_color(strong())
+                        .child(r.value.clone()),
+                )
+        }))
+        .when(!u.month.days.is_empty(), |d| d.child(month_dots(&u.month)))
+}
+
+/// The month under the metric rows: its name and token total, then one dot per day, green by intensity
+/// (`dash.rs` month grid); an empty day is dim, a day to come dimmer.
+fn month_dots(m: &MonthUse) -> Div {
+    let green = |a: f32| with_alpha(hsla(t::SUCCESS), a);
+    div()
+        .debug_selector(|| "usage-month".to_string())
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .mt(px(4.))
+        .pt(px(5.))
+        .border_t_1()
+        .border_color(hsla(t::RULE))
+        .child(
+            div()
+                .flex()
+                .justify_between()
+                .gap(px(10.))
+                .whitespace_nowrap()
+                .child(div().text_color(dim()).child(m.label.clone()))
+                .child(
+                    div()
+                        .text_color(strong())
+                        .child(format!("{} tokens", m.total)),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(3.))
+                .children(m.days.iter().map(|d| {
+                    let c = match d {
+                        None => with_alpha(gpui::white(), 0.04),
+                        Some(0) => with_alpha(gpui::white(), 0.12),
+                        Some(l) => green([0., 0.35, 0.55, 0.8, 1.][usize::from(*l).min(4)]),
+                    };
+                    div().size(px(7.)).flex_none().rounded_full().bg(c)
+                })),
+        )
 }
 
 /// The scroll offset (px from the top) that brings the row `[top, top + row)` into a view of

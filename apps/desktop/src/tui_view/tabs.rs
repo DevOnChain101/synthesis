@@ -506,12 +506,11 @@ impl TuiView {
         };
         div()
             .id(("pane", self.ts.tab as usize))
-            .debug_selector(|| "tab-body".to_string())
+            .debug_selector(|| "tab-pane".to_string())
             .flex_1()
             .min_h(px(0.))
             .overflow_y_scroll()
             .track_scroll(&self.pane_scroll)
-            .px(px(14.))
             .py(px(10.))
             .child(inner)
             .into_any_element()
@@ -521,10 +520,9 @@ impl TuiView {
     fn files_tab(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let shell = |body: Div| {
             div()
-                .debug_selector(|| "tab-body".to_string())
+                .debug_selector(|| "tab-pane".to_string())
                 .flex_1()
                 .min_h(px(0.))
-                .mx(px(12.))
                 .my(px(10.))
                 .border_1()
                 .border_color(hsla(t::BORDER))
@@ -719,13 +717,16 @@ impl TuiView {
                                             .text_color(dim())
                                             .child((i + 1).to_string()),
                                     )
-                                    .child(div().text_color(text()).child(
-                                        crate::widgets::syntax::styled(if l.is_empty() {
-                                            " "
-                                        } else {
-                                            l
-                                        }),
-                                    ))
+                                    .child(
+                                        div()
+                                            .min_w(px(0.))
+                                            .flex_1()
+                                            .overflow_hidden()
+                                            .text_color(text())
+                                            .child(crate::widgets::syntax::styled(
+                                                if l.is_empty() { " " } else { l },
+                                            )),
+                                    )
                             })),
                     )
                     .when(b.cut, |d| {
