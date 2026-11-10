@@ -291,9 +291,36 @@ pub fn dock(
             kind: PickerKind::MemConfirm | PickerKind::CloseWorkspace,
             ..
         } => &[],
+        // the Trust paragraphs wrap in a capped scroll box of their own, so the options below stay fully visible
+        DialogKind::Picker {
+            kind: PickerKind::Trust,
+            headers,
+            ..
+        } => {
+            card = card.child(
+                div()
+                    .id("dialog-trust")
+                    .debug_selector(|| "dialog-trust".to_string())
+                    .max_h(px(max_input_h * 0.5))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .text_color(hsla(t::ACCENT))
+                    .children(headers.iter().map(|(_, h)| div().child(h.clone()))),
+            );
+            &[]
+        }
         DialogKind::Picker { headers, .. } => headers,
         _ => &[],
     };
+    let trust = matches!(
+        d.kind,
+        DialogKind::Picker {
+            kind: PickerKind::Trust,
+            ..
+        }
+    );
     let mut list: Vec<AnyElement> = vec![];
     let now = crate::live::now_ms();
     for (i, (key, label)) in d.options.iter().enumerate() {
@@ -365,19 +392,21 @@ pub fn dock(
             .debug_selector(|| "dialog-list".to_string())
             .flex()
             .flex_col()
-            .max_h(px(
-                if matches!(
-                    d.kind,
-                    DialogKind::Picker {
-                        kind: PickerKind::Clean,
-                        ..
-                    }
-                ) {
-                    300.
-                } else {
-                    180.
-                },
-            ))
+            .when(!trust, |d2| {
+                d2.max_h(px(
+                    if matches!(
+                        d.kind,
+                        DialogKind::Picker {
+                            kind: PickerKind::Clean,
+                            ..
+                        }
+                    ) {
+                        300.
+                    } else {
+                        180.
+                    },
+                ))
+            })
             .overflow_y_scroll()
             .track_scroll(scroll)
             .children(list),

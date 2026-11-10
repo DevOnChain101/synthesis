@@ -19,7 +19,7 @@ use synthesis_view::workspaces::{LoadOpts, WorkspaceList, fold_dir};
 
 use super::{TuiView, panels};
 use crate::engine::{self, Args, Engine, StartOpts, UiMsg};
-use crate::live::{Action, Focus, Live, SWITCH_ARM_MS, Submitted, now_ms};
+use crate::live::{Action, Focus, Live, NoticeKind, SWITCH_ARM_MS, Submitted, now_ms};
 
 /// What the live view needs from `main`: the environment snapshot and the flags.
 #[derive(Clone)]
@@ -1204,7 +1204,8 @@ impl TuiView {
             if let Some(e) = &lu.live.engine {
                 e.cancel();
             }
-            lu.live.note("task cancelled: switching", false);
+            lu.live
+                .note_kind(NoticeKind::Bookkeeping, "task cancelled: switching");
         }
         lu.live.switch_armed = None;
         let project = match &target {
@@ -1422,7 +1423,7 @@ impl TuiView {
             match done {
                 Ok(()) => lu.live.note(
                     format!(
-                        "trust remembered for {}{}: /trust lists and revokes it",
+                        "trust remembered for {}{}",
                         engine::display_path(at),
                         if *scope == tr::PARENT {
                             " and its subfolders"
@@ -1476,7 +1477,8 @@ impl TuiView {
                     ),
                     Some(Ok(false)) => {
                         lu.live.compacting = true;
-                        lu.live.note("compacting the conversation...", false)
+                        lu.live
+                            .note_kind(NoticeKind::Bookkeeping, "compacting the conversation...")
                     }
                     Some(Err(e)) => lu.live.note(format!("/compact: {e}"), true),
                     None => {}
@@ -1536,7 +1538,7 @@ impl TuiView {
                             );
                         } else {
                             // the window is read when the session starts: restart on the same session
-                            lu.live.after_attach.push(format!("{done}; the session restarted so compaction and limits use it from now on"));
+                            lu.live.after_attach.push(done);
                             return self.switch(Target::Model(e.label.clone()), "model".into(), cx);
                         }
                     }

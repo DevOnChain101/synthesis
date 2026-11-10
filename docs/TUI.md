@@ -155,6 +155,8 @@ nothing else, so never a credential. First run without a configured model shows 
 (`r` checks again, `q` quits) instead of an error. What came from the removed new TUI and what did
 not: `docs/tui-feature-port.md`.
 
+Panel values never wrap: in Session and Context a value is one line cut with `…` when the panel is narrow (cwd and worktree keep their end, `…/folders/ws`; the model name and the rest keep their start), and hovering a Session value shows it whole. Tools & Skills lists every row in a body five rows high that scrolls. The chat header shows the folder as `~/a/b` or its last two segments (`…/code/ws`), at most 20 characters.
+
 ## Usage panel
 
 The sidebar's Usage panel (wide terminals) is a per-day history of every session in the store

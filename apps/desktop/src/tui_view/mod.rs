@@ -47,6 +47,8 @@ pub(crate) fn with_alpha_white(a: f32) -> Hsla {
 }
 
 /// The TUI view's font: `cli.html` `--mono` (bundled Fira Code, SIL OFL), at its body weight 500.
+/// Tools & Skills body: five 21.4px rows (`li` 1+19.4+1) and the 2px top and 6px bottom padding; the rest scrolls.
+const TOOLS_MAX_H: f32 = 5. * 21.4 + 8.;
 pub const MONO: &str = crate::brand::MONO_FONT;
 
 /// Icons the view draws (checked by a test).
@@ -468,7 +470,7 @@ impl TuiView {
         if !h.tools {
             let p = panel(
                 Head::new("p-tools", "Tools & Skills", "wrench", Pad::LEFT)
-                    .max_body(72.)
+                    .max_body(TOOLS_MAX_H)
                     .fold(self.is_folded("p-tools"), self.fold_cb("p-tools", cx)),
                 Some(meta(text(), s.tools.count.clone())),
                 panels::tools_body(&s.tools),
