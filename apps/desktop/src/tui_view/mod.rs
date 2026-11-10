@@ -296,8 +296,7 @@ impl TuiView {
         let (left, right) = top_chips(&self.snap.top);
         // what the row holds besides the left chips: padding, brand mark and name, the gap after them, the right
         // chips, the drawer buttons and a little slack
-        let fixed =
-            32. + 160. + 28. + 8. + 32. * f32::from(u8::from(left_btn) + u8::from(right_btn));
+        let fixed = chrome::top_fixed(usize::from(left_btn) + usize::from(right_btn));
         let left = chrome::fit_chips(
             left,
             w - fixed - right.iter().map(chrome::chip_w).sum::<f32>(),
