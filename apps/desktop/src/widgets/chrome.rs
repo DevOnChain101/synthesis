@@ -192,6 +192,8 @@ pub fn panel_scroll(
     if let Some((f, on_toggle)) = h.fold {
         label = label
             .cursor_pointer()
+            .rounded(px(4.))
+            .hover(|d| d.bg(with_alpha(gpui::white(), 0.05)))
             .child(icon(
                 if f { "chevron-right" } else { "chevron-down" },
                 12.,
@@ -523,6 +525,7 @@ pub fn tabs(
                 .h_full()
                 .when(wrapped, |d| d.w(px(width[i])).overflow_hidden())
                 .cursor_pointer()
+                .when(!on, |d| d.hover(|d| d.bg(with_alpha(gpui::white(), 0.05))))
                 .when(framed(it), |d| {
                     d.border_l_1().border_r_1().border_color(rule())
                 })

@@ -28,6 +28,11 @@ fn li() -> Div {
 
 /// The `.ws-item`/`.run-item` box: 1px transparent border, radius 5; selected: elevated, a rule border and
 /// the accent bar on the left edge (gpui has no per-side border colour, so the bar is a child).
+/// The pointer-hover fill of a clickable row (the picker options use `ELEVATED`; rows on a panel stay lighter).
+fn row_hover() -> gpui::Hsla {
+    with_alpha(gpui::white(), 0.05)
+}
+
 fn item_box(selected: bool, pad: (f32, f32, f32, f32)) -> Div {
     let d = div()
         .relative()
@@ -75,7 +80,11 @@ pub fn workspace_body(
                     .when_some(attn.filter(|_| w.selected), |d, c| d.border_color(c))
                     .id(("ws-row", i))
                     .items_center()
-                    .when_some(on_click, |d, f| d.cursor_pointer().on_click(f(i)))
+                    .when_some(on_click, |d, f| {
+                        d.cursor_pointer()
+                            .when(!w.selected, |d| d.hover(|d| d.bg(row_hover())))
+                            .on_click(f(i))
+                    })
                     .child(icon(
                         "folder",
                         14.,
@@ -125,7 +134,11 @@ pub fn workspace_body(
                 .id("ws-new")
                 .items_center()
                 .text_color(dim())
-                .when_some(on_new, |d, f| d.cursor_pointer().on_click(f))
+                .when_some(on_new, |d, f| {
+                    d.cursor_pointer()
+                        .hover(|d| d.text_color(strong()))
+                        .on_click(f)
+                })
                 .child(icon("plus", 14., dim()))
                 .child("new workspace..."),
         ),
@@ -186,7 +199,11 @@ pub fn running_body(
                 item_box(r.selected, (5., 7., 5., 6.))
                     .when_some(attn.filter(|_| r.selected), |d, c| d.border_color(c))
                     .id(("run-row", i))
-                    .when_some(on_click, |d, f| d.cursor_pointer().on_click(f(i)))
+                    .when_some(on_click, |d, f| {
+                        d.cursor_pointer()
+                            .when(!r.selected, |d| d.hover(|d| d.bg(row_hover())))
+                            .on_click(f(i))
+                    })
                     .child(run_mark(r, attn, motion, now))
                     .child(
                         div()
@@ -267,7 +284,11 @@ pub fn running_body(
                 .border_color(gpui::transparent_black())
                 .rounded(px(4.))
                 .text_color(dim())
-                .when_some(on_new, |d, f| d.cursor_pointer().on_click(f))
+                .when_some(on_new, |d, f| {
+                    d.cursor_pointer()
+                        .hover(|d| d.text_color(strong()))
+                        .on_click(f)
+                })
                 .child(icon("plus", 14., dim()))
                 .child("new session..."),
         ),
