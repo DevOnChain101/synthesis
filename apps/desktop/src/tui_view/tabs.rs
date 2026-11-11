@@ -5,7 +5,7 @@
 //! - terminal: the command history (from `process.*` / `tool.*` events): command, exit code, duration, output
 //!   tail, running state;
 //! - browser: the page, the saved `browser.frame` screenshots (latest and history) and the browser calls;
-//! - file explorer: the project tree (git's file list, trust-gated, directories open on demand, changed files
+//! - file explorer: the project tree (git's file list in a trusted folder, a plain walk without git otherwise, directories open on demand, changed files
 //!   marked) and a read-only text preview of the selected file (size and line caps, no secret files).
 //!
 //! What is open or selected lives in a [`TabState`] kept per session, so switching sessions and back finds the
@@ -31,8 +31,6 @@ use crate::widgets::panes::{self, note};
 /// Bytes of a file the preview reads at most, and the lines it draws.
 pub const PREVIEW_BYTES: usize = 256 * 1024;
 pub const PREVIEW_LINES: usize = 2000;
-
-pub const UNTRUSTED: &str = "This folder is not trusted, so the project tree is not listed (git runs only in a trusted folder). Click the Files tab to be asked again, or start with --trust-project";
 
 /// A file read for the preview.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,6 +137,8 @@ pub struct Tree {
     pub loading: bool,
     /// Changed files at the time of the scan: a different count means the tree is stale.
     pub at_changes: usize,
+    /// Whether the folder was trusted at the scan (git) or not (plain walk).
+    pub trusted: bool,
 }
 
 /// Paths of the tree rows (`dir/sub/file`), in row order.
@@ -199,18 +199,10 @@ pub fn dirs_of_changes(d: &ProjectData) -> HashSet<String> {
 }
 
 impl TuiView {
-    /// A click or key on a tab. Opening Files in an untrusted folder raises the Trust dialog (nothing is read
-    /// from the folder until it is accepted); every opening asks again after a "Not now".
+    /// A click or key on a tab. Files and Diff are for the person's own eyes (the agent never reads them), so
+    /// they need no trust; the Trust dialog is `/trust ask`.
     pub(super) fn select_tab(&mut self, tab: ChatTab, cx: &mut Context<Self>) {
         self.ts.tab = tab;
-        if tab == ChatTab::Files
-            && let Some(lu) = &mut self.live
-            && lu
-                .live
-                .ask_trust(crate::live::now_ms(), lu.cfg.home.as_deref().map(Path::new))
-        {
-            lu.dirty = true;
-        }
         cx.notify();
     }
 
@@ -263,16 +255,10 @@ impl TuiView {
             }
         }
         if self.ts.tab == ChatTab::Files {
-            // the untrusted note gives way to the real listing once the folder is trusted (a note of the scan itself, such as
-            // "not a git repository", stays: rescanning on it spun the scan on every frame)
+            // the plain listing of an untrusted folder gives way to the git one once it is trusted
             let stale = self.tree.for_cwd != lu.live.cwd
                 || self.tree.at_changes != changes
-                || (lu.live.trusted
-                    && self
-                        .tree
-                        .data
-                        .as_ref()
-                        .is_some_and(|d| d.note.as_deref() == Some(UNTRUSTED)));
+                || self.tree.trusted != lu.live.trusted;
             if (self.tree.data.is_none() || stale) && !self.tree.loading {
                 self.request_scan(cx);
             }
@@ -331,7 +317,8 @@ impl TuiView {
         cx.notify();
     }
 
-    /// Reads the project tree off the UI thread (git, read-only); an untrusted folder only gets the note.
+    /// Reads the project tree off the UI thread: git (read-only) in a trusted folder, a plain walk without git
+    /// in an untrusted one.
     pub fn request_scan(&mut self, cx: &mut Context<Self>) {
         let Some(lu) = &self.live else { return };
         let cwd = lu.live.cwd.clone();
@@ -339,19 +326,15 @@ impl TuiView {
         if cwd.is_empty() {
             return;
         }
-        if !lu.live.trusted {
-            self.tree.data = Some(ProjectData {
-                loaded: true,
-                note: Some(UNTRUSTED.into()),
-                ..Default::default()
-            });
-            self.tree.for_cwd = cwd;
-            self.tree.at_changes = changes;
-            return;
-        }
         self.tree.loading = true;
-        let (dir, env) = (PathBuf::from(&cwd), lu.cfg.env.clone());
-        let job = cx.background_spawn(async move { project::scan(&dir, &env) });
+        let (dir, env, trusted) = (PathBuf::from(&cwd), lu.cfg.env.clone(), lu.live.trusted);
+        let job = cx.background_spawn(async move {
+            if trusted {
+                project::scan(&dir, &env)
+            } else {
+                project::scan_plain(&dir)
+            }
+        });
         cx.spawn(async move |this, cx| {
             let d = job.await;
             this.update(cx, |t, cx| {
@@ -363,6 +346,7 @@ impl TuiView {
                 t.tree.data = Some(d);
                 t.tree.for_cwd = cwd;
                 t.tree.at_changes = changes;
+                t.tree.trusted = trusted;
                 cx.notify();
             })
             .ok();

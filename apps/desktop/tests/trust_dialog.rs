@@ -1,4 +1,4 @@
-//! The Trust dialog the Files tab raises in an untrusted folder: the real engine on a scripted model, a
+//! The Trust dialog `/trust ask` raises in an untrusted folder: the real engine on a scripted model, a
 //! temp `SYNT_HOME`. Declining (Not now, Esc), type-ahead and the arming delay never trust anything.
 
 use std::sync::Arc;

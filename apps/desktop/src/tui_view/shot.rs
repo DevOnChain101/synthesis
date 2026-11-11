@@ -115,7 +115,7 @@ pub struct LiveShot {
     /// `--usage-seed`: a year of made-up daily tokens in the Usage history (the stored one is empty).
     usage_seed: bool,
     trust: bool,
-    /// `--untrusted`: the folder is not trusted and the user's home is a known (fake) folder, so the Files tab
+    /// `--untrusted`: the folder is not trusted and the user's home is a known (fake) folder, so `/trust ask`
     /// raises the real Trust dialog, parent option included; `--trust-seed`: two remembered folders in the store
     /// (what `/trust` lists).
     untrusted: bool,
@@ -683,8 +683,12 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let untrusted = a.live.as_ref().is_some_and(|l| l.untrusted);
         tui.update(cx, |t, cx| {
             t.ts.tab = tab;
-            if untrusted {
-                t.select_tab(tab, cx);
+            if untrusted && let Some(lu) = &mut t.live {
+                lu.live.ask_trust(
+                    crate::live::now_ms(),
+                    lu.cfg.home.as_deref().map(std::path::Path::new),
+                );
+                lu.dirty = true;
             }
             if let (Some(n), Some(lu)) = (a.dialog_scroll, &t.live) {
                 lu.dlg_scroll.set_offset(gpui::point(px(0.), px(-n)));

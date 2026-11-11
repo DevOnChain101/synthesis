@@ -1187,17 +1187,19 @@ mod tests {
         assert_eq!(view.read_with(vcx, |t, _| t.ts.tab), ChatTab::Diff);
     }
 
-    /// Opening Files in an untrusted folder reads nothing from it: no scan starts, the tree holds only the note.
+    /// The Files tab needs no trust: an untrusted folder is listed at once by a plain walk (no git), no dialog.
     #[gpui::test]
-    fn the_files_tab_does_no_scan_in_an_untrusted_folder(cx: &mut TestAppContext) {
+    fn the_files_tab_lists_an_untrusted_folder_without_a_dialog(cx: &mut TestAppContext) {
         use crate::live::Live;
         cx.update(gpui_component::init);
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.txt"), "x").unwrap();
         let (view, vcx) = cx.add_window_view(|window, cx| {
             TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
         });
         let mut l = Live::new();
         l.starting = false;
-        l.cwd = "/nonexistent/untrusted-project".into();
+        l.cwd = d.path().to_string_lossy().into_owned();
         assert!(!l.trusted);
         view.update(vcx, |t, _| t.set_live(l));
         view.update(vcx, |t, cx| {
@@ -1206,9 +1208,12 @@ mod tests {
         });
         vcx.run_until_parked();
         view.read_with(vcx, |t, _| {
-            assert!(!t.tree.loading, "no background scan was started");
-            let note = t.tree.data.as_ref().and_then(|d| d.note.clone());
-            assert_eq!(note.as_deref(), Some(tabs::UNTRUSTED));
+            assert!(
+                t.live.as_ref().unwrap().live.dialogs.is_empty(),
+                "no Trust dialog"
+            );
+            let d = t.tree.data.as_ref().unwrap();
+            assert!(d.note.is_none() && d.rows.iter().any(|r| r.name == "a.txt"));
         });
     }
 

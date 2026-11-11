@@ -10,7 +10,8 @@
 //! `core.hooksPath` points at the null device, `core.pager`, `core.sshCommand`, `core.askPass` and the
 //! credential helper are emptied, output is bounded and the call has a wall-clock limit with a process-group kill,
 //! and network protocols are refused. NOT guaranteed: other config keys git may honour that this list does not
-//! name. The scan runs only in a trusted folder (`--trust-project`), which is the real gate.
+//! name. The git scan runs only in a trusted folder (`--trust-project`); an untrusted folder gets [`scan_plain`]
+//! (no git at all), which is why the file explorer needs no trust.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -331,6 +332,92 @@ fn filter_guards_from(o: Option<Output>) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// The tree rows of sorted `/`-separated file paths, cut at [`MAX_ROWS`] (and whether it was).
+fn tree_rows(paths: &[String], status: &HashMap<String, char>) -> (Vec<TreeRow>, bool) {
+    let mut truncated = false;
+    let mut rows: Vec<TreeRow> = vec![];
+    let mut open: Vec<&str> = vec![];
+    'files: for p in paths {
+        let parts: Vec<&str> = p.split('/').collect();
+        let dirs = &parts[..parts.len() - 1];
+        let common = open.iter().zip(dirs).take_while(|(a, b)| a == b).count();
+        open.truncate(common);
+        for (d, name) in dirs.iter().enumerate().skip(common) {
+            if rows.len() >= MAX_ROWS {
+                truncated = true;
+                break 'files;
+            }
+            rows.push(TreeRow {
+                depth: d as u16,
+                name: (*name).to_string(),
+                dir: true,
+                status: None,
+            });
+            open.push(name);
+        }
+        if rows.len() >= MAX_ROWS {
+            truncated = true;
+            break;
+        }
+        rows.push(TreeRow {
+            depth: dirs.len() as u16,
+            name: parts[parts.len() - 1].to_string(),
+            dir: false,
+            status: status.get(p).copied(),
+        });
+    }
+    (rows, truncated)
+}
+
+/// Most files the plain walk collects, and the deepest directory it enters.
+const WALK_FILES: usize = 20_000;
+const WALK_DEPTH: usize = 32;
+
+/// The tree of a folder WITHOUT git: a plain directory walk, so nothing the folder holds (a `.git/config`
+/// naming programs, attributes, hooks) can run. Links are not followed (nor listed), `.git` is skipped, no
+/// ignore rules and no status letters. For a folder that is not trusted: the user only looks at file names.
+pub fn scan_plain(cwd: &Path) -> ProjectData {
+    fn walk(dir: &Path, rel: &str, depth: usize, out: &mut Vec<String>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            if out.len() >= WALK_FILES {
+                return;
+            }
+            let (Ok(ft), Some(name)) = (e.file_type(), e.file_name().to_str().map(str::to_string))
+            else {
+                continue;
+            };
+            if name == ".git" || ft.is_symlink() {
+                continue;
+            }
+            let path = if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            };
+            if ft.is_dir() {
+                if depth < WALK_DEPTH {
+                    walk(&e.path(), &path, depth + 1, out);
+                }
+            } else if ft.is_file() {
+                out.push(path);
+            }
+        }
+    }
+    let mut paths = vec![];
+    walk(cwd, "", 0, &mut paths);
+    paths.sort();
+    let (rows, cut) = tree_rows(&paths, &HashMap::new());
+    ProjectData {
+        loaded: true,
+        rows,
+        truncated: cut || paths.len() >= WALK_FILES,
+        ..Default::default()
+    }
+}
+
 /// `git status --porcelain=v1 -z`: `XY path`, and for a rename or a copy (in either column) the
 /// origin follows as an entry of its own, which is not a file of its own.
 fn parse_status(st: &[u8]) -> HashMap<String, char> {
@@ -414,38 +501,8 @@ pub fn scan(cwd: &Path, env: &Env) -> ProjectData {
     ) {
         status = parse_status(&st);
     }
-    let mut truncated = files_cut;
-    let mut rows: Vec<TreeRow> = vec![];
-    let mut open: Vec<&str> = vec![];
-    'files: for p in &paths {
-        let parts: Vec<&str> = p.split('/').collect();
-        let dirs = &parts[..parts.len() - 1];
-        let common = open.iter().zip(dirs).take_while(|(a, b)| a == b).count();
-        open.truncate(common);
-        for (d, name) in dirs.iter().enumerate().skip(common) {
-            if rows.len() >= MAX_ROWS {
-                truncated = true;
-                break 'files;
-            }
-            rows.push(TreeRow {
-                depth: d as u16,
-                name: (*name).to_string(),
-                dir: true,
-                status: None,
-            });
-            open.push(name);
-        }
-        if rows.len() >= MAX_ROWS {
-            truncated = true;
-            break;
-        }
-        rows.push(TreeRow {
-            depth: dirs.len() as u16,
-            name: parts[parts.len() - 1].to_string(),
-            dir: false,
-            status: status.get(p).copied(),
-        });
-    }
+    let (rows, rows_cut) = tree_rows(&paths, &status);
+    let mut truncated = files_cut || rows_cut;
     // no textconv and no external diff driver: both are programs named by the repository's config
     let diff = |extra: &[&str]| {
         let mut a = vec![
@@ -494,6 +551,30 @@ pub fn scan(cwd: &Path, env: &Env) -> ProjectData {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_plain_scan_lists_files_without_git_or_links() {
+        let d = tempfile::tempdir().unwrap();
+        let w = d.path();
+        std::fs::create_dir_all(w.join("src")).unwrap();
+        std::fs::create_dir_all(w.join(".git")).unwrap();
+        std::fs::write(w.join("src/a.rs"), "x").unwrap();
+        std::fs::write(w.join("b.txt"), "x").unwrap();
+        std::fs::write(w.join(".git/config"), "[core]\nfsmonitor = touch pwned\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc", w.join("out")).unwrap();
+        let d = super::scan_plain(w);
+        let names: Vec<_> = d
+            .rows
+            .iter()
+            .map(|r| (r.depth, r.name.as_str(), r.dir))
+            .collect();
+        assert_eq!(
+            names,
+            [(0, "b.txt", false), (0, "src", true), (1, "a.rs", false)]
+        );
+        assert!(d.loaded && d.note.is_none() && !d.truncated);
+    }
+
     #[test]
     fn git_runs_with_a_closed_environment_and_no_pager_or_helper_programs() {
         let g = Git::new(&Env::from_pairs([
