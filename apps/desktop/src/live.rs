@@ -1,17 +1,17 @@
 //! Live state of the desktop TUI view: the `ViewState` the engine's events feed, the dialogs waiting
 //! for the person, the prompt queue and history, the sidebar selection. Plain Rust, no gpui; the window
 //! (`tui_view`) reads it and calls the methods below, the pump applies `UiMsg`s with [`Live::on_msg`].
-//! The rules follow the classic TUI (`docs/TUI.md`; `crates/synthesis-tui/src/app.rs`).
+//! The rules follow the CLI (`docs/CLI-APP.md`; `crates/synthesis-cli-ui/src/app.rs`).
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use serde_json::Value;
+use synthesis_cli_ui_base::complete::Command;
+use synthesis_cli_ui_render::dialogs::permission_options;
 use synthesis_harness::{UserReply, sanitize_for_display};
 use synthesis_permissions::{Mode, Suggestion};
 use synthesis_tools::{NeedsUser, Question};
-use synthesis_tui_base::complete::Command;
-use synthesis_tui_render::dialogs::permission_options;
 use synthesis_view::convo::Item;
 use synthesis_view::state::ViewState;
 
@@ -20,9 +20,9 @@ use crate::models::ModelRow;
 use crate::send_pick::{self, Seen, SendPick, SendTo};
 
 /// Enter and digits are ignored this long after a dialog comes to the front: a key typed before it
-/// appeared must not answer it (the TUI's `ARM_MS`). Esc still rejects.
+/// appeared must not answer it (the CLI's `ARM_MS`). Esc still rejects.
 pub const ARM_MS: i64 = 400;
-/// The second Ctrl+C that quits has to come within this long (the TUI's `QUIT_ARM_MS`).
+/// The second Ctrl+C that quits has to come within this long (the CLI's `QUIT_ARM_MS`).
 pub const QUIT_ARM_MS: i64 = 1500;
 /// A session switch with a task running needs a second click within this long.
 pub const SWITCH_ARM_MS: i64 = 5000;
@@ -88,7 +88,7 @@ pub enum PickerKind {
     MemReview,
     /// A change to memory (add, edit, forget, accept): says what it will do; the person must engage it.
     MemConfirm,
-    /// No model configured: the TUI's setup card (check again, Settings, quit).
+    /// No model configured: the CLI's setup card (check again, Settings, quit).
     Setup,
     /// Shift+Tab reached bypassPermissions: the confirmation (Cancel is the first option and the default).
     Bypass,
@@ -177,7 +177,7 @@ pub enum Action {
     },
 }
 
-/// An image waiting for the next message (the TUI's chip).
+/// An image waiting for the next message (the CLI's chip).
 #[derive(Clone, Debug)]
 pub struct Attached {
     pub name: String,
@@ -186,7 +186,7 @@ pub struct Attached {
     pub base64: String,
 }
 
-/// The TUI's limits (`docs/TUI.md`): images per message and base64 bytes per message (the session
+/// The CLI's limits (`docs/CLI-APP.md`): images per message and base64 bytes per message (the session
 /// store refuses a message over 8 MiB).
 pub const MAX_ATTACHMENTS: usize = 5;
 pub const MAX_ATTACHED_BYTES: usize = 6 << 20;
@@ -315,7 +315,7 @@ pub fn trust_text(root: &std::path::Path, cwd: &str) -> Vec<String> {
     v
 }
 
-/// The suggestion in the shape `permission_options` reads (the TUI's `suggestion_view`).
+/// The suggestion in the shape `permission_options` reads (the CLI's `suggestion_view`).
 fn suggestion_view(s: &Suggestion) -> Value {
     use serde_json::json;
     match s {
@@ -397,7 +397,7 @@ fn spinner(ms: i64) -> &'static str {
     F[(ms.max(0) / 120) as usize % F.len()]
 }
 
-/// Desktop-only commands (not in the terminal TUI's list): `/panels`, added to the engine's commands.
+/// Desktop-only commands (not in the CLI's list): `/panels`, added to the engine's commands.
 pub fn trust_command() -> Command {
     Command {
         name: "trust".into(),
@@ -408,7 +408,7 @@ pub fn trust_command() -> Command {
     }
 }
 
-/// Desktop-only commands (not in the terminal TUI's list): `/panels`, added to the engine's commands.
+/// Desktop-only commands (not in the CLI's list): `/panels`, added to the engine's commands.
 pub fn panels_command() -> Command {
     Command {
         name: "panels".into(),
@@ -436,7 +436,7 @@ pub fn is_wired(name: &str) -> bool {
         )
 }
 
-/// `/close-workspace` is the desktop's own command (the classic TUI has none).
+/// `/close-workspace` is the desktop's own command (the CLI has none).
 pub fn close_workspace_command() -> Command {
     Command {
         name: "close-workspace".into(),
@@ -471,7 +471,7 @@ pub fn clean_command() -> Command {
     }
 }
 
-/// `/send` is the desktop's own command (the classic TUI has none), so it is not in [`WIRED`].
+/// `/send` is the desktop's own command (the CLI has none), so it is not in [`WIRED`].
 pub fn send_command() -> Command {
     Command {
         name: "send".into(),
@@ -483,7 +483,7 @@ pub fn send_command() -> Command {
     }
 }
 
-/// `5m ago`, `3h ago`, `2d ago` (the TUI's wording).
+/// `5m ago`, `3h ago`, `2d ago` (the CLI's wording).
 pub fn age(ms: i64) -> String {
     let m = ms.max(0) / 60_000;
     match m {
@@ -516,7 +516,7 @@ fn window_short(source: &str) -> &str {
     source.split_once(". Set it:").map_or(source, |(a, _)| a)
 }
 
-/// How a notice reaches the chat (docs/TUI.md "Events"). `Warning`: an error or something the person must
+/// How a notice reaches the chat (docs/CLI-APP.md "Events"). `Warning`: an error or something the person must
 /// act on, never hidden. `Result`: the outcome of a command or action the person asked for, never hidden.
 /// `Bookkeeping`: a success the window already shows elsewhere (a queue row, a status bar, a dialog the person
 /// just answered); an internal row, shown only with `verbose` (`/verbose`, `synt.tui.verbose`).
@@ -578,7 +578,7 @@ pub struct Live {
     /// The next `user.message` of main is a sent-now line being delivered.
     mark_delivered: bool,
     pub show_thinking: bool,
-    /// Internal rows (`docs/TUI.md` Events) show up in the chat.
+    /// Internal rows (`docs/CLI-APP.md` Events) show up in the chat.
     pub verbose: bool,
     /// Ctrl+O: every tool output whole.
     pub expand_all: bool,
@@ -616,7 +616,7 @@ pub struct Live {
     pub images: Vec<Attached>,
     /// A clipboard read is in flight (key repeat starts no second one).
     pub image_busy: bool,
-    /// `/focus`: only the prompts, answers, results and notices show (the TUI's focus view).
+    /// `/focus`: only the prompts, answers, results and notices show (the CLI's focus view).
     pub focus_view: bool,
     /// The Usage & Metrics period (7 or 30 days).
     pub usage_days: usize,
@@ -1447,7 +1447,7 @@ impl Live {
         false
     }
 
-    /// Classifies what the person typed (same rules as the TUI's prompt) and adds it to the
+    /// Classifies what the person typed (same rules as the CLI's prompt) and adds it to the
     /// history; the host sends `Submitted::Send`.
     pub fn submit(&mut self, text: &str) -> Submitted {
         self.submit_as(text, false)
@@ -1465,7 +1465,7 @@ impl Live {
         }
         if let Some(rest) = text.strip_prefix('/') {
             let typed = rest.split_whitespace().next().unwrap_or("");
-            // the terminal TUI's two aliases
+            // the CLI's two aliases
             let name = match typed {
                 "quit" => "exit",
                 "perms" => "permissions",
@@ -1529,7 +1529,7 @@ impl Live {
             || self.engine.is_none()
             || !self.dialogs.is_empty()
         {
-            // the TUI queues a line typed while a task runs; it starts when that one ends
+            // the CLI queues a line typed while a task runs; it starts when that one ends
             self.queue.push_back(text.to_string());
             return Submitted::Nothing;
         }
@@ -1720,7 +1720,7 @@ impl Live {
         );
     }
 
-    /// `#note`: nothing is saved before the person picks the file (the TUI's confirmation).
+    /// `#note`: nothing is saved before the person picks the file (the CLI's confirmation).
     fn ask_where_to_remember(&mut self, note: &str) {
         if note.is_empty() {
             return;
@@ -1785,7 +1785,7 @@ impl Live {
         Some(t)
     }
 
-    /// A built-in command (docs/TUI.md "Commands"): what the person sees in the chat, or the
+    /// A built-in command (docs/CLI-APP.md "Commands"): what the person sees in the chat, or the
     /// action the window carries out.
     fn command(&mut self, name: &str, arg: &str) -> Submitted {
         let busy_err = |l: &mut Self, what: &str| {
@@ -1926,7 +1926,7 @@ impl Live {
         Submitted::Nothing
     }
 
-    /// `/permissions allow RULE | remove RULE`: this session only, the TUI's check.
+    /// `/permissions allow RULE | remove RULE`: this session only, the CLI's check.
     fn permissions_edit(&mut self, arg: &str) {
         let Some(e) = self.engine.clone() else { return };
         let (sub, rule) = arg.split_once(char::is_whitespace).unwrap_or((arg, ""));
@@ -1942,7 +1942,7 @@ impl Live {
         }
     }
 
-    /// `/name`: shows the name peers address this session by; it is fixed for the run, as in the TUI.
+    /// `/name`: shows the name peers address this session by; it is fixed for the run, as in the CLI.
     fn name(&mut self, arg: &str) {
         let Some(shown) = self.engine.as_ref().map(|e| e.peer_name()) else {
             return;
@@ -2031,7 +2031,7 @@ impl Live {
     /// The `/peers` listing (`None`: peers are off).
     pub fn peers_done(&mut self, rows: Option<Vec<Value>>) {
         match rows {
-            Some(r) => self.note(synthesis_tui::peers_view::table(&r).join("\n"), false),
+            Some(r) => self.note(synthesis_cli_ui::peers_view::table(&r).join("\n"), false),
             None => self.note(PEERS_OFF, true),
         }
     }
@@ -2156,7 +2156,7 @@ impl Live {
         }
     }
 
-    /// An image for the next message: the TUI's limits (5 images, 6 MiB of base64 together).
+    /// An image for the next message: the CLI's limits (5 images, 6 MiB of base64 together).
     pub fn attach_image(
         &mut self,
         media_type: &'static str,
@@ -2166,7 +2166,7 @@ impl Live {
         if self.images.len() >= MAX_ATTACHMENTS {
             return Err(format!("at most {MAX_ATTACHMENTS} images per message"));
         }
-        let base64 = synthesis_tui_base::clipboard::base64(bytes);
+        let base64 = synthesis_cli_ui_base::clipboard::base64(bytes);
         let held: usize = self.images.iter().map(|a| a.base64.len()).sum();
         if held + base64.len() > MAX_ATTACHED_BYTES {
             return Err(format!(
@@ -2220,7 +2220,7 @@ impl Live {
             t if tiers.iter().any(|x| x == t) => Some(t.to_string()),
             _ => return self.note(format!("usage: /effort [auto|{}]", tiers.join("|")), true),
         };
-        // kept for the next start too (state.json), like the TUI
+        // kept for the next start too (state.json), like the CLI
         if let Err(err) = synthesis_config::save_effort(&e.synthesis_home, next.as_deref()) {
             self.note(format!("/effort: not saved ({err})"), false);
         }
@@ -2622,7 +2622,7 @@ impl Live {
         })
     }
 
-    /// Shift+Tab: the TUI's cycle (default, acceptEdits, plan, auto) without its last step:
+    /// Shift+Tab: the CLI's cycle (default, acceptEdits, plan, auto) without its last step:
     /// bypassPermissions is not reachable from the desktop app.
     pub fn cycle_mode(&mut self) {
         let Some(e) = &self.engine else { return };
@@ -3065,7 +3065,7 @@ mod tests {
 
     fn live_with_commands() -> Live {
         let mut l = Live::new();
-        l.commands = synthesis_tui::local_commands();
+        l.commands = synthesis_cli_ui::local_commands();
         l.commands.push(panels_command());
         l.commands.push(send_command());
         l.commands.push(rewind_command());
@@ -3091,7 +3091,7 @@ mod tests {
             Submitted::Do(Action::ShowDiff(Some("a.rs".into())))
         );
         assert_eq!(l.submit("/peers"), Submitted::Do(Action::Peers));
-        // the terminal TUI's aliases
+        // the CLI's aliases
         assert_eq!(l.submit("/quit"), Submitted::Quit);
         l.submit("/perms bogus");
         assert!(
@@ -3360,7 +3360,7 @@ mod tests {
 
     #[test]
     fn every_builtin_command_works_or_says_it_is_not_available() {
-        let mut unwired: Vec<String> = synthesis_tui::local_commands()
+        let mut unwired: Vec<String> = synthesis_cli_ui::local_commands()
             .into_iter()
             .map(|c| c.name)
             .filter(|n| !is_wired(n))
@@ -3369,7 +3369,7 @@ mod tests {
         assert!(unwired.is_empty(), "{unwired:?}");
         // the wired ones are all real commands, and the unwired ones answer with the notice
         let mut l = live_with_commands();
-        for c in synthesis_tui::local_commands() {
+        for c in synthesis_cli_ui::local_commands() {
             assert!(!is_wired(&c.name) || WIRED.contains(&c.name.as_str()));
             if !is_wired(&c.name) {
                 assert_eq!(l.submit(&format!("/{}", c.name)), Submitted::Nothing);
@@ -3380,11 +3380,11 @@ mod tests {
                 );
             }
         }
-        assert!(
-            WIRED
+        assert!(WIRED.iter().all(|w| {
+            synthesis_cli_ui::local_commands()
                 .iter()
-                .all(|w| synthesis_tui::local_commands().iter().any(|c| c.name == *w))
-        );
+                .any(|c| c.name == *w)
+        }));
         // the actions the window carries out
         assert_eq!(l.submit("/config"), Submitted::Do(Action::OpenSettings));
         assert_eq!(

@@ -1,5 +1,5 @@
 //! UI-agnostic view models: typed state and pure reducers over the event stream
-//! (`synthesis-events`) and the session store, shared by the classic TUI and the desktop app.
+//! (`synthesis-events`) and the session store, shared by the CLI and the desktop app.
 //! No terminal, no GPUI, no drawing: colours, layout and ANSI stay in the front ends.
 //!
 //! [`state::ViewState`] is the entry point; the other modules are the panels it holds.

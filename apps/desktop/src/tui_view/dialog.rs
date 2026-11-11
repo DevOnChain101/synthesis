@@ -1,4 +1,4 @@
-//! The TUI view's dialog hooks: the card itself is `widgets::dialog`, shared with the Agent view.
+//! The TUI view's dialog hooks: the card itself is `widgets::dialog`, shared with the Super Agent view.
 
 use gpui::{AnyElement, Context};
 
@@ -12,7 +12,7 @@ impl TuiView {
         let lu = self.live.as_ref()?;
         let border = self
             .attention_colour()
-            .unwrap_or_else(|| crate::theme::hsla(synthesis_tui_render::theme::ACCENT));
+            .unwrap_or_else(|| crate::theme::hsla(synthesis_cli_ui_render::theme::ACCENT));
         crate::widgets::dialog::dock(
             &lu.live,
             (&lu.dlg_scroll, &lu.body_scroll),

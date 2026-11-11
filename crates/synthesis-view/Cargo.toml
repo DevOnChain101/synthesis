@@ -17,7 +17,7 @@ synthesis-events = { path = "../synthesis-events" }
 synthesis-harness = { path = "../synthesis-harness" }
 synthesis-session = { path = "../synthesis-session" }
 # is_js_space and the bounded process runner (imgclip::RealExec) that project.rs runs git with
-synthesis-tui-base = { path = "../synthesis-tui-base" }
+synthesis-cli-ui-base = { path = "../synthesis-cli-ui-base" }
 synthesis-workspace = { path = "../synthesis-workspace" }
 regex = "1"
 serde = { version = "1.0.229", features = ["derive"] }

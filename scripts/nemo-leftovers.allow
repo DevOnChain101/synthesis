@@ -9,7 +9,7 @@ token scripts/nemo-leftovers\.allow
 token Vibe/Nemo-ACD                      # the local folder keeps its name
 file tools/golden-capture/**             # reads the Node repo; cannot regenerate the goldens after the rename (tests/golden/README.md)
 file tests/agent-evals/adapters/node/**  # drives the Node NativeAgent, which still reads NEMO_HOME and nemoHome
-file design/tui-prototype/**             # the owner's HTML prototype, copied unchanged (its sample code uses "nemo-session")
+file design/cli-prototype/**             # the owner's HTML prototype, copied unchanged (its sample code uses "nemo-session")
 in tests/agent-evals/README.md NEMO_HOME
 in tests/agent-evals/harness/selftest.js nemo-cli
 in tests/golden/README.md (Node|NEMO_|nemo_home|loadNemoEnv|nemo-cli|nemo import)[^ ]*
@@ -26,7 +26,7 @@ in tests/golden/README.md Nemo|NEMO[_.*]\S*|\.nemo|nemo\.json|nemocode-config|\b
 # The checker itself, this list, and the rename test harness wording.
 file scripts/check-no-legacy-name.mjs
 file scripts/nemo-leftovers.allow
-in crates/synthesis-tui-render/tests/golden.rs (Nemo -> Synthesis|"nemo")
+in crates/synthesis-cli-ui-render/tests/golden.rs (Nemo -> Synthesis|"nemo")
 
 # History: past entries describe what was true then.
 file CHANGELOG.md

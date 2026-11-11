@@ -1,9 +1,9 @@
-//! The TUI view: the classic TUI's dashboard drawn natively (docs/specs/desktop.md), rebuilt 1:1 from
+//! The TUI view: the CLI's dashboard drawn natively (docs/specs/desktop.md), rebuilt 1:1 from
 //! `cli.html` in the platinum palette. Top bar; left column Workspace / Running / Session / Tools & Skills /
 //! Recent Activity (prompts and agent activity in one list); centre panel (header, tabs chat | diff | terminal | browser | file
 //! explorer, conversation, prompt, transcript switch, mode bar); right column Synthesis Topology, Agent
 //! Status + Context, Usage & Metrics; key hint footer. It reads a `Snapshot` (see `sample`); no terminal, no
-//! PTY. Panels hide with the TUI's `panels.*` keys (`layout::Hidden`).
+//! PTY. Panels hide with the CLI's `panels.*` keys (`layout::Hidden`).
 
 pub mod activity;
 pub mod chat;
@@ -27,7 +27,7 @@ use gpui::{
     Context, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
-use synthesis_tui_render::theme as t;
+use synthesis_cli_ui_render::theme as t;
 
 use self::layout::{CARD_GAP, FOOTER_H, GAP, HEADER_H, LEFT_GAP, MIN_H, MIN_W, PAD, cols, tiers};
 use self::panels::{dim, icon, strong, text};
@@ -95,7 +95,7 @@ pub enum ChatTab {
 }
 
 fn t_mode_name(m: synthesis_permissions::Mode) -> String {
-    synthesis_tui_render::dialogs::mode_name(Some(m.as_str()))
+    synthesis_cli_ui_render::dialogs::mode_name(Some(m.as_str()))
 }
 
 impl ChatTab {
@@ -194,7 +194,7 @@ pub enum Side {
 }
 
 /// The top bar's chips: live count, workspace, session, model, effort, context on the left; health and the
-/// clock on the right (shared with the Agent view).
+/// clock on the right (shared with the Super Agent view).
 pub fn top_chips(top: &sample::Top) -> (Vec<Chip>, Vec<Chip>) {
     (
         vec![

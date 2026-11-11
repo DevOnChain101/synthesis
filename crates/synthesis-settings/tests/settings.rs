@@ -467,34 +467,34 @@ fn persisting_keeps_the_permissions_of_the_file_it_replaces() {
 }
 
 #[test]
-fn synthesis_tui_parses_validates_and_names_the_key_not_the_value() {
-    let (d, diag) = TuiSettings::from_settings(&json!({}));
-    assert_eq!((d, diag), (TuiSettings::default(), vec![]));
-    let (s, diag) = TuiSettings::from_settings(&json!({"synt": {"tui": {
+fn ui_settings_parse_validates_and_names_the_key_not_the_value() {
+    let (d, diag) = UiSettings::from_settings(&json!({}));
+    assert_eq!((d, diag), (UiSettings::default(), vec![]));
+    let (s, diag) = UiSettings::from_settings(&json!({"synt": {"tui": {
         "panels": {"tools": false, "activity": false},
         "logo": "off", "show_thinking": false, "verbose": true, "diffs_expanded": true,
         "queue_indicators": false, "motion": false, "mouse_capture": false, "copy_on_select": false}}}));
     assert_eq!(diag, Vec::<String>::new());
     assert_eq!(s.panels, [true, true, false, false, true, true, true, true]);
     assert!(!s.logo && !s.show_thinking && s.diffs_expanded && s.verbose);
-    assert!(!TuiSettings::default().verbose);
+    assert!(!UiSettings::default().verbose);
     // the four panels of the dash: status, tokens, topology, usage (default on)
-    let (p, diag) = TuiSettings::from_settings(&json!({"synt": {"tui": {
+    let (p, diag) = UiSettings::from_settings(&json!({"synt": {"tui": {
         "panels": {"status": false, "tokens": false, "topology": false, "usage": false}}}}));
     assert_eq!(
         (p.panels, diag),
         ([true, true, true, true, false, false, false, false], vec![])
     );
     let (p, diag) =
-        TuiSettings::from_settings(&json!({"synt": {"tui": {"panels": {"usage": "no"}}}}));
-    assert_eq!(p, TuiSettings::default());
+        UiSettings::from_settings(&json!({"synt": {"tui": {"panels": {"usage": "no"}}}}));
+    assert_eq!(p, UiSettings::default());
     assert!(diag[0].contains("tui.panels.usage"), "{diag:?}");
     assert_eq!(p.to_value()["panels"]["topology"], true);
     assert!(!s.queue_indicators && !s.motion && !s.mouse_capture && !s.copy_on_select);
     // wrong types and unknown names keep the defaults and say which key
-    let (s, diag) = TuiSettings::from_settings(&json!({"synt": {"tui": {
+    let (s, diag) = UiSettings::from_settings(&json!({"synt": {"tui": {
         "motion": "yes", "logo": "SECRET-VALUE", "panels": {"chat": false, "mcp": 3}, "colour": 1}}}));
-    assert_eq!(s, TuiSettings::default());
+    assert_eq!(s, UiSettings::default());
     let all = diag.join("\n");
     for key in [
         "tui.motion",
@@ -506,13 +506,11 @@ fn synthesis_tui_parses_validates_and_names_the_key_not_the_value() {
         assert!(all.contains(key), "{key}: {all}");
     }
     assert!(!all.contains("SECRET-VALUE"));
-    assert!(
-        TuiSettings::from_settings(&json!({"synt": {"tui": 5}})).1[0].contains("not an object")
-    );
+    assert!(UiSettings::from_settings(&json!({"synt": {"tui": 5}})).1[0].contains("not an object"));
 }
 
 #[test]
-fn synthesis_tui_is_read_from_the_user_file_only_and_the_others_are_named() {
+fn synt_tui_and_cli_are_read_from_the_user_file_only_and_the_others_are_named() {
     let f = fx();
     f.user(json!({"synt": {"tui": {"motion": false}}}));
     f.project(json!({"synt": {"tui": {"motion": true}}}));
@@ -535,7 +533,7 @@ fn synthesis_tui_is_read_from_the_user_file_only_and_the_others_are_named() {
     assert!(warned("project settings") && warned("local settings") && warned("managed settings"));
     assert!(!warned("user settings"), "{:?}", s.diagnostics);
     assert!(
-        !read_user_tui(f.home.path()).0.motion,
+        !read_user_ui(f.home.path(), "tui").0.motion,
         "the user file's value is the one in force"
     );
 }
@@ -543,18 +541,18 @@ fn synthesis_tui_is_read_from_the_user_file_only_and_the_others_are_named() {
 #[test]
 fn tui_opacity_and_blur_are_validated_and_round_trip() {
     let (s, diag) =
-        TuiSettings::from_settings(&json!({"synt": {"tui": {"opacity": 55, "blur": true}}}));
+        UiSettings::from_settings(&json!({"synt": {"tui": {"opacity": 55, "blur": true}}}));
     assert_eq!((s.opacity, s.blur, diag), (55, true, vec![]));
     assert_eq!(s.to_value()["opacity"], 55);
     for bad in [json!(29), json!(101), json!(60.5), json!("90"), json!(-1)] {
-        let (s, diag) = TuiSettings::from_settings(&json!({"synt": {"tui": {"opacity": bad}}}));
+        let (s, diag) = UiSettings::from_settings(&json!({"synt": {"tui": {"opacity": bad}}}));
         assert_eq!(s.opacity, 100, "{bad}");
         assert!(
             diag[0].contains("synt.tui.opacity") && !diag[0].contains("90"),
             "{diag:?}"
         );
     }
-    let (s, diag) = TuiSettings::from_settings(&json!({"synt": {"tui": {"blur": 1}}}));
+    let (s, diag) = UiSettings::from_settings(&json!({"synt": {"tui": {"blur": 1}}}));
     assert!(!s.blur && diag[0].contains("synt.tui.blur"), "{diag:?}");
 }
 
@@ -562,19 +560,19 @@ fn tui_opacity_and_blur_are_validated_and_round_trip() {
 fn persisting_tui_keeps_everything_else_never_overwrites_a_bad_file_and_writes_no_credentials() {
     let f = fx();
     let home = f.home.path();
-    let t = TuiSettings {
+    let t = UiSettings {
         panels: [true, true, false, true, true, true, true, true],
         motion: false,
-        ..TuiSettings::default()
+        ..UiSettings::default()
     };
-    persist_user_tui(home, &t).unwrap();
-    assert_eq!(read_user_tui(home), (t, vec![]));
+    persist_user_ui(home, "tui", &t).unwrap();
+    assert_eq!(read_user_ui(home, "tui"), (t, vec![]));
     fs::write(
         home.join("settings.json"),
         r#"{"zeta":1,"permissions":{"deny":["x"]},"synt":{"budget":{"max_turns":3},"tui":{"old":1}},"alpha":2,"env":{"API_KEY":"sk-keep"}}"#,
     )
     .unwrap();
-    persist_user_tui(home, &t).unwrap();
+    persist_user_ui(home, "tui", &t).unwrap();
     let text = fs::read_to_string(home.join("settings.json")).unwrap();
     assert!(text.find("zeta").unwrap() < text.find("permissions").unwrap());
     assert!(
@@ -611,7 +609,7 @@ fn persisting_tui_keeps_everything_else_never_overwrites_a_bad_file_and_writes_n
     );
     for bad in ["{not json", r#"{"synt": 5}"#, "[1]"] {
         fs::write(home.join("settings.json"), bad).unwrap();
-        assert!(persist_user_tui(home, &t).is_err(), "{bad}");
+        assert!(persist_user_ui(home, "tui", &t).is_err(), "{bad}");
         assert_eq!(fs::read_to_string(home.join("settings.json")).unwrap(), bad);
     }
     assert!(
@@ -872,4 +870,23 @@ fn model_info_fetch_is_a_user_setting_only() {
             .iter()
             .any(|d| d.contains("modelInfo.fetch must be"))
     );
+}
+
+#[test]
+fn synt_cli_and_synt_tui_are_separate_sections_of_the_user_file() {
+    let f = fx();
+    let home = f.home.path();
+    let t = UiSettings {
+        verbose: true,
+        ..UiSettings::default()
+    };
+    persist_user_ui(home, CLI_SECTION, &t).unwrap();
+    assert_eq!(read_user_ui(home, CLI_SECTION), (t, vec![]));
+    // the desktop TUI tab's section is untouched
+    assert_eq!(read_user_ui(home, TUI_SECTION).0, UiSettings::default());
+    let v: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.join("settings.json")).unwrap()).unwrap();
+    assert!(v["synt"].get("tui").is_none() && v["synt"]["cli"]["verbose"] == true);
+    let (_, d) = UiSettings::from_section(&json!({"synt": {"cli": {"motion": 1}}}), CLI_SECTION);
+    assert!(d[0].contains("synt.cli.motion"), "{d:?}");
 }

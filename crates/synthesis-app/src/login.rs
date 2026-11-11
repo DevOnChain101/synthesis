@@ -198,7 +198,7 @@ pub fn stdio_servers(servers: &[synthesis_mcp::McpServerConfig]) -> Vec<String> 
 }
 
 /// Warnings about credentials the agent's side could reach. Printed at `synt run` start and by
-/// `synt doctor`; a front-end with its own start-up (a TUI) calls this too.
+/// `synt doctor`; a front-end with its own start-up (a CLI) calls this too.
 pub fn exposure_warnings(
     home: &Path,
     b: &BrowserSettings,
@@ -582,7 +582,7 @@ fn emit_login_required(sink: &EventSink, req: &LoginRequest) {
     );
 }
 
-/// The interactive app's host (the classic TUI): the three questions are dialogs of the app's own
+/// The interactive app's host (the CLI): the three questions are dialogs of the app's own
 /// [`Approver`], in its permission-dialog style. They are NOT harness approvals (no approval
 /// events, no "allow always"), and the permission mode cannot answer them. The login wait is
 /// Enter/Esc in the dialog only: no one-time code, no signal file.

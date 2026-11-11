@@ -1,5 +1,5 @@
 //! The real engine in this process (docs/specs/desktop.md section 1, E1): `synthesis_app::run::prepare`
-//! builds the harness, the window talks to it through channels. It mirrors what `synt tui` does around
+//! builds the harness, the window talks to it through channels. It mirrors what `synt` does around
 //! one prepared session (`apps/cli/src/tui.rs` `round` and its `Host`): the session start, the
 //! `SessionStart`/`SessionEnd` hooks, skills, MCP prompts and mentions, the memory block, the stored
 //! usage and the shutdown. Events arrive as typed envelopes, approvals and questions wait in maps until
@@ -18,6 +18,8 @@ use clap::Parser;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use serde_json::{Value, json};
 use synthesis_app::run::{Common, Front, Limits, Native, Prepared, finish_store, prepare};
+use synthesis_cli_ui::Resume;
+use synthesis_cli_ui_base::complete::Command;
 use synthesis_config::Env;
 use synthesis_core::{AgentSession, WorkspaceContext};
 use synthesis_events::{Envelope, Event};
@@ -29,8 +31,6 @@ use synthesis_hooks::HookEvent;
 use synthesis_permissions::{Mode, Suggestion};
 use synthesis_providers::Message;
 use synthesis_tools::NeedsUser;
-use synthesis_tui::Resume;
-use synthesis_tui_base::complete::Command;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -42,7 +42,7 @@ pub fn is_command(text: &str) -> bool {
 /// What the engine sends to the window.
 pub enum UiMsg {
     Event(Box<Envelope>),
-    /// An event line this build cannot read: visible, not skipped (like the TUI).
+    /// An event line this build cannot read: visible, not skipped (like the CLI).
     BadEvent(String),
     /// A permission ask; answer it with [`Engine::answer`].
     Approval(Box<AskApproval>),
@@ -264,7 +264,7 @@ impl io::Write for Lines {
 }
 
 /// The flags of `synt` plus `--cwd` and `--sample`: the desktop takes the same `Common` flags as
-/// `synt tui` (`--model`, `--sandbox`, `--trust-project`, `--approve-mcp`, `--peers`, `--resume`, ...).
+/// `synt` (`--model`, `--sandbox`, `--trust-project`, `--approve-mcp`, `--peers`, `--resume`, ...).
 #[derive(Parser, Clone)]
 #[command(name = "synthesis-desktop", about = "Synthesis desktop app")]
 pub struct Args {
@@ -500,11 +500,13 @@ pub fn requested_resume(
     }
     let id = match (&c.resume, c.continue_session) {
         (Some(id), _) => id.clone(),
-        (None, true) => synthesis_tui::list_saved(synthesis_home, Some(&start.to_string_lossy()))?
-            .into_iter()
-            .next()
-            .map(|s| s.id)
-            .ok_or("--continue: no saved session for this directory")?,
+        (None, true) => {
+            synthesis_cli_ui::list_saved(synthesis_home, Some(&start.to_string_lossy()))?
+                .into_iter()
+                .next()
+                .map(|s| s.id)
+                .ok_or("--continue: no saved session for this directory")?
+        }
         (None, false) => return Ok(None),
     };
     load_resume_in_place(synthesis_home, &id).map(Some)
@@ -512,7 +514,7 @@ pub fn requested_resume(
 
 /// `load_resume`, and the session's folder must still exist.
 pub fn load_resume_in_place(home: &Path, id: &str) -> Result<Resume, String> {
-    let r = synthesis_tui::load_resume(home, id)?;
+    let r = synthesis_cli_ui::load_resume(home, id)?;
     if !Path::new(&r.record.cwd).is_dir() {
         return Err(format!(
             "cannot resume {id}: its folder {} no longer exists",
@@ -725,11 +727,11 @@ pub struct Engine {
     worktree: Option<synthesis_app::wt::Worktree>,
     cleanup_worktree: bool,
     began: bool,
-    pub sandbox: synthesis_tui::SandboxStatus,
+    pub sandbox: synthesis_cli_ui::SandboxStatus,
     pub memory_on: bool,
     /// Lines of `/memory`: the instruction files loaded at start and where `#` notes go.
     pub memory_report: Vec<String>,
-    /// Where `#` notes go (the TUI's `MemoryHook`).
+    /// Where `#` notes go (the CLI's `MemoryHook`).
     pub notes: synthesis_app::memory::Notes,
     /// A `!cmd` ended and the model should read its output (the window starts that turn).
     followup: Arc<std::sync::atomic::AtomicBool>,
@@ -896,7 +898,7 @@ impl Engine {
         let cwd = session.workspace.cwd.to_string_lossy().into_owned();
         let root = session.workspace.root.to_string_lossy().into_owned();
         let workspace = session.workspace.clone();
-        let commands: Vec<Command> = synthesis_tui::local_commands()
+        let commands: Vec<Command> = synthesis_cli_ui::local_commands()
             .into_iter()
             // desktop only: a typed folder path as a new workspace
             .chain(std::iter::once(Command {
@@ -1204,8 +1206,8 @@ impl Engine {
     }
 
     /// `!cmd` (`record_only`: `!!cmd`): the harness runs it through the same Bash permission check,
-    /// sandbox, hooks and redaction as the TUI's, and appends it with its output to the history.
-    /// Plan mode refuses it (stricter than the TUI, which lets a typed command through in plan).
+    /// sandbox, hooks and redaction as the CLI's, and appends it with its output to the history.
+    /// Plan mode refuses it (stricter than the CLI, which lets a typed command through in plan).
     /// `TaskDone` follows. `Err`: a task is running, or the command was refused before it started.
     pub fn user_command(&self, command: String, record_only: bool) -> Result<(), &'static str> {
         if self.mode() == Mode::Plan {
@@ -1255,7 +1257,7 @@ impl Engine {
             .swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// An image the person dropped: its resolved path, when the session may read it. The TUI's
+    /// An image the person dropped: its resolved path, when the session may read it. The CLI's
     /// `@file` rule (`WorkspaceContext::resolve`): inside the workspace or an additional
     /// directory with links resolved (a link out is outside), never a secret file, no read-deny
     /// rule. Read the returned path, not the one given.
@@ -1359,7 +1361,7 @@ impl Engine {
         v
     }
 
-    /// `/permissions allow RULE`: a session-only rule, the TUI's check and wording (`Err`: an error line).
+    /// `/permissions allow RULE`: a session-only rule, the CLI's check and wording (`Err`: an error line).
     pub fn allow_rule(&self, rule: &str) -> Result<String, String> {
         if !synthesis_permissions::Permissions::is_well_formed_rule(rule) {
             return Err(
@@ -1453,7 +1455,7 @@ impl Engine {
         r.send(reply).is_ok()
     }
 
-    /// Ends the session like the TUI host does (`round`): the `SessionEnd` hook, the stored usage,
+    /// Ends the session like the CLI host does (`round`): the `SessionEnd` hook, the stored usage,
     /// `session.completed`, the MCP servers, the worktree; then stops the runtime. Returns what the
     /// worktree finish found (path, branch, changes, cleanup), for the caller to show.
     pub fn close(mut self) -> Option<String> {

@@ -78,7 +78,7 @@ Counts: **P0 3, P1 12, P2 19 (34 total)**.
 **B-1 Mouse selection never reaches the clipboard (pipe tools never get EOF).**
 Repro: run a command that prints text, drag over it, release. Notice `✓ copied 10 characters` appears but
 `pbpaste` still returns the old content. `pgrep -x pbcopy` shows one `pbcopy` child that lives until the TUI is
-killed (8 s observed). Cause: `crates/synthesis-tui-base/src/clipboard.rs:160-163`: the thread does
+killed (8 s observed). Cause: `crates/synthesis-cli-ui-base/src/clipboard.rs:160-163`: the thread does
 `stdin.write_all(&data); child.wait();` and `stdin` is only dropped when the closure ends, i.e. after `wait()`, so
 the tool blocks on read forever; the comment "closes stdin on drop" is wrong. Same for `clip.exe`, `wl-copy`, `xclip`.
 Fix: `drop(stdin)` before `child.wait()`; add a test with a real `cat > file` sink that asserts content. The success
@@ -110,12 +110,12 @@ same command (`crates/synthesis-harness/src/harness.rs:985-1010`), inferred chec
 ### P1
 
 **B-4 Enter while a turn runs is swallowed.** Type a second message and press Enter during streaming: the text stays in
-the prompt, nothing is queued or sent after the turn ends, no hint (`crates/synthesis-tui/src/app.rs:760`, `submit` at :895).
+the prompt, nothing is queued or sent after the turn ends, no hint (`crates/synthesis-cli-ui/src/app.rs:760`, `submit` at :895).
 `!cmd` in bash mode behaves the same (text accumulates: `! !false!!echo ...`).
 
 **B-5 Edit/Write approval dialog shows an escaped one-line "diff".** `│ - b\nc` / `│ + B\nc`, 536-char input cut to 400 with a
 sha256 note, instead of the numbered hunk that is shown after approval. Cause: the preview is built from the raw JSON
-string (`crates/synthesis-permissions/src/lib.rs` Ask path / `crates/synthesis-tui-render/src/dialogs.rs`); reuse the post-edit diff renderer.
+string (`crates/synthesis-permissions/src/lib.rs` Ask path / `crates/synthesis-cli-ui-render/src/dialogs.rs`); reuse the post-edit diff renderer.
 
 **B-6 Internal state-machine error leaks into the transcript.** `※ invalid session transition Verifying -> WaitingApproval`
 every time a verification check needs approval (`crates/synthesis-core/src/session.rs:44`; raised from `harness.rs:588-604`). Either allow
@@ -124,7 +124,7 @@ the transition or do not surface it.
 **B-7 Mouse clicks do nothing in the approval dialog** (all options inert; wheel and Tab too). Keyboard only.
 
 **B-8 `/compact` fails loudly on short conversations and gives no progress.** `※ /compact failed: NoProgress { before: 3, after: 11 }`
-(Rust Debug format of `CompactError`, `crates/synthesis-tui/src/chat.rs:239` + `synthesis-context/src/compact.rs:224`), emitted twice
+(Rust Debug format of `CompactError`, `crates/synthesis-cli-ui/src/chat.rs:239` + `synthesis-context/src/compact.rs:224`), emitted twice
 (`context compaction failed (manual): ...` and `/compact failed: ...`). In one run the command took 20 s with the screen showing
 `✓ Done` and no spinner. Should say "Nothing to compact yet" and show `Compacting...`.
 

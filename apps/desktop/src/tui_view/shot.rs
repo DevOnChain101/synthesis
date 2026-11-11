@@ -945,7 +945,7 @@ impl gpui::Render for TopoShot {
         gpui::div()
             .relative()
             .size_full()
-            .bg(crate::theme::hsla(synthesis_tui_render::theme::BG))
+            .bg(crate::theme::hsla(synthesis_cli_ui_render::theme::BG))
             .child(super::topo::graph(
                 &super::sample::sample(),
                 &self.acts,

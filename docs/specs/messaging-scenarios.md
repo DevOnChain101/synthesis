@@ -122,7 +122,7 @@ Each change keeps the non-negotiables (messaging.md §0): a message never grants
 ### P2. Peer `notify_on_end` (wait for B's result, not poll)
 - **Sender.** `SendMessage{to, message, notify_on_end:true}` registers a subscription on B. B's next `task.ended` (or the current one, if B is idle: an immediate reply `idle`) sends the final assistant text (≤ 8 KiB) plus `status` and the changed-file list from `TaskState` as a `reply` with `kind:"result"`.
 - **Delivery.** Reuses the H `deliver` frame and `expect` ledger. If A is gone, the result goes to A's mailbox. A's task wait (D3) gets a separate cap, `notify_wait_max_s` (default 3600 **[A]**). On timeout A gets `timeout` and continues or ends.
-- **Gates.** The receiver's allow list and `answer:true`. The result passes the redactor and `confirm_replies`. The subscription is visible in B's TUI (`⇄ ws:web/sess:client waits for this task`), and B's user can drop it. One subscription per asker session per receiver.
+- **Gates.** The receiver's allow list and `answer:true`. The result passes the redactor and `confirm_replies`. The subscription is visible in B's CLI (`⇄ ws:web/sess:client waits for this task`), and B's user can drop it. One subscription per asker session per receiver.
 - **Deadlock.** A session that has a pending `notify_on_end` on X cannot be subscribed to by X (`cycle`), checked through the `chain` both sides keep. Wall caps on both sides.
 - **Strongest reason against.** B's final summary leaves B without a question being answered. It is still the same class of data a responder would share, and it passes the same gates.
 
@@ -141,7 +141,7 @@ B's main agent (not a fork) receives the message at its next drain point as `<pe
   3. **No grants**: unchanged §0.1. A peer message cannot answer a dialog, change mode or add a rule.
   4. **Hops and cycles**: messages B sends while tainted carry `chain + [B]`, and `max_hops` 2 holds. Same thread cap as P1 (6 rounds).
   5. **Exfil**: replies from the live agent pass the redactor and `confirm_replies`. B's agent is told the same "share the minimum, never credentials" rule.
-  6. **Audit**: `peer.message_delivered {thread_id, at}`, `permission.*` events carry `cause:"peer:<thread_id>"`, and the TUI shows a `⇄ live thread` badge until the taint clears.
+  6. **Audit**: `peer.message_delivered {thread_id, at}`, `permission.*` events carry `cause:"peer:<thread_id>"`, and the CLI shows a `⇄ live thread` badge until the taint clears.
 - **Strongest reason against.** Even with every mutating call asking B's user, a person who approves many dialogs in a row ends up approving the injected one. The protection is only as good as B's user's attention. This is the decision the owner must make.
 
 ### P5. Delegated bounded command (user-approved in B)
@@ -180,7 +180,7 @@ With peers enabled, the default allow list becomes "same `repo_key`" (all worktr
 | E5 `peer_worktree_sibling_allowed` | S3/S6, P0 | A and B in two worktrees of one temp repo (`git worktree add`) | Today: B gets `denied` without an allow rule (pins the gap). With P0: answered. |
 | E6 `peer_offline_question_answered_on_restart` | S1 after B exits | `resume_offline:true`. A runs and exits. B sends and gets `queued`. A runs again. | B's mailbox gets a `reply` with B's request id, delivered once (a third B run sees it once, a fourth not at all). |
 | E7 `peer_notify_on_end` | S7, P2 acceptance | B: `[SendMessage{notify_on_end:true}] → wait`; A: `{delay 3000, "generated client v2"}` | B gets `kind:"result"` with `generated client v2` after A's `task.ended` (timestamps ordered). B finishes before its 60 s guard. A subscription to B from A while B waits on A → `cycle`. |
-| E8 `peer_live_thread_needs_owner_and_taints` | S2, P4 acceptance | A: `peers.live:"ask"`, headless; B sends | Headless A answers read-only (responder), never live. Interactive variant (TUI test harness): after "Allow this thread", A's Edit asks even in `acceptEdits`, with `cause:"peer:<thread>"`. |
+| E8 `peer_live_thread_needs_owner_and_taints` | S2, P4 acceptance | A: `peers.live:"ask"`, headless; B sends | Headless A answers read-only (responder), never live. Interactive variant (CLI test harness): after "Allow this thread", A's Edit asks even in `acceptEdits`, with `cause:"peer:<thread>"`. |
 
 E1, E3, E4 and E6 run against today's code. E2 and E5 pin current gaps. E7 and E8 are acceptance tests for proposals and land with them. All run on macOS, Linux and Windows. Windows needs the named pipe and is unverified until CI runs it.
 

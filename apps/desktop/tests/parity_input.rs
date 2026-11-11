@@ -1,5 +1,5 @@
-//! Desktop parity with the classic TUI's input rules: dropped images follow the `@file` rule,
-//! `!cmd` and `#note` work as in the TUI, Shift+Tab never reaches bypassPermissions. The real engine
+//! Desktop parity with the CLI's input rules: dropped images follow the `@file` rule,
+//! `!cmd` and `#note` work as in the CLI, Shift+Tab never reaches bypassPermissions. The real engine
 //! on a scripted model, a temp `SYNT_HOME`.
 
 use std::sync::Arc;

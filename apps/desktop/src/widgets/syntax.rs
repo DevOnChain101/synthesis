@@ -5,7 +5,7 @@
 use std::ops::Range;
 
 use gpui::{HighlightStyle, Hsla, StyledText};
-use synthesis_tui_render::theme as t;
+use synthesis_cli_ui_render::theme as t;
 
 use crate::theme::hsla;
 

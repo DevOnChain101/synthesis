@@ -63,7 +63,7 @@ fn every_field_has_a_unique_key_and_a_sound_default() {
 
 #[test]
 fn defaults_match_the_loaders() {
-    let (tui, _) = synthesis_settings::TuiSettings::from_settings(&json!({}));
+    let (tui, _) = synthesis_settings::UiSettings::from_settings(&json!({}));
     let s = SettingsSchema::new();
     assert_eq!(
         s.field("synt.tui.motion").unwrap().default,
@@ -101,7 +101,7 @@ fn round_trip_and_origin() {
         json!("off")
     );
     let v = f.read();
-    assert!(!synthesis_settings::TuiSettings::from_settings(&v).0.panels[1]);
+    assert!(!synthesis_settings::UiSettings::from_settings(&v).0.panels[1]);
     assert_eq!(
         synthesis_harness::AutoCompact::from_settings(&v)
             .0

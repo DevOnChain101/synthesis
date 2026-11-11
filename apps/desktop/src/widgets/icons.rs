@@ -74,7 +74,7 @@ pub fn body(name: &str) -> Option<&'static str> {
         }
         // the Tauri app's title bar (`index.html` `#chrome`)
         "tui" => r#"<path d="M4 6h16M4 12h10M4 18h16"/><circle cx="19" cy="12" r="1.6"/>"#,
-        "agent" => {
+        "super-agent" => {
             r#"<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM18 16l.8 2.2L21 19l-2.2.8L18 22l-.8-2.2L15 19l2.2-.8z"/>"#
         }
         "gear" => {
@@ -118,10 +118,10 @@ pub fn for_lucide(name: &str) -> Option<&'static str> {
         "pencil-check" => "editok",
         "cpu" => "cpu",
         "clock" => "clock",
-        "tui" | "agent" | "gear" | "win-min" | "win-max" | "win-close" => {
+        "tui" | "super-agent" | "gear" | "win-min" | "win-max" | "win-close" => {
             return Some(match name {
                 "tui" => "tui",
-                "agent" => "agent",
+                "super-agent" => "super-agent",
                 "gear" => "gear",
                 "win-min" => "win-min",
                 "win-max" => "win-max",

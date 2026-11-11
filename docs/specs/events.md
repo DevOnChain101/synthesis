@@ -3,7 +3,7 @@
 Status: reviewed 0.1 (R1). Normative words: MUST / SHOULD / MAY. Tags: `[from-node file:line]` = derived from the frozen Node reference (`~/Vibe/nemo-cli`), `[new]` = new design per the design doc §5.12 / §7.3.
 
 ## 1. Purpose
-One typed, append-only event stream per session. It is the only interface between the core and every client (TUI, headless CLI, eval harness, future GPUI). It replaces Node's untyped `EventEmitter` + `'update'` repaint signal [from-node agent.js:450-4027]. The same records are persisted (session-store.md `events` table) and streamed on stdout in headless mode.
+One typed, append-only event stream per session. It is the only interface between the core and every client (CLI, headless CLI, eval harness, future GPUI). It replaces Node's untyped `EventEmitter` + `'update'` repaint signal [from-node agent.js:450-4027]. The same records are persisted (session-store.md `events` table) and streamed on stdout in headless mode.
 
 ## 2. Envelope [new]
 One JSON object per line, UTF-8, `\n` terminated, no pretty printing. Max line size 64 KiB (see §5).
@@ -75,7 +75,7 @@ Doc §5.12 types are kept verbatim; additions are marked. Payload field types: `
 | `peer.delegation.tool` | `delegation_id:str, tool_call_id:str, name:str, origin:"peer", from:str` | [new] a tool call made for a peer (J4.4); `from` = canonical sender address, unverified |
 | `peer.delegation.completed` | `delegation_id:str, status:"answered"\|"declined"\|"failed"\|"cancelled"\|"timeout", tool_calls:u64, duration_ms:u64` | [new] ids and counts only |
 | `peer.delegation.denied` | `request_id:str, from:PeerAddr, reason:str` | [new] a delegated request was refused (`delegation_denied\|too_deep\|cycle\|busy\|...`) |
-| `session.mode_changed` | `from:str, to:str, reason:str?` | [new] permission mode switched while the session runs (TUI Shift+Tab, a future GUI via `Harness::set_mode`); not emitted for the starting mode. Entering `bypassPermissions` also emits a `notice` |
+| `session.mode_changed` | `from:str, to:str, reason:str?` | [new] permission mode switched while the session runs (CLI Shift+Tab, a future GUI via `Harness::set_mode`); not emitted for the starting mode. Entering `bypassPermissions` also emits a `notice` |
 | `permission.auto_verdict` | `tool_call_id:str, name:str, verdict:"allow"\|"deny"\|"ask", reason:str, source:"model"\|"cache"\|"fail_closed"` | [new] auto mode: the judge's decision on one call before it runs (audit trail; `fail_closed` = judge unavailable, unparseable, timed out or over the per-task cap, so the call is an ask) |
 | `model.changed` | `model:str, effort:str?` | [from-node agent.js:1539 'model-changed'] |
 | `budget.exceeded` | `budget:str, limit:number, used:number` | [new] |
@@ -133,5 +133,5 @@ Applied by the producer before persistence AND before streaming; an unredacted c
 - The JSON Schema for each payload lives in `crates/synthesis-events/schema/v1/*.json` (to be generated from the Rust types); golden stream fixtures in `tests/golden/events/` pin it.
 
 ## Open
-- Whether `model.delta` for `thinking` is streamed at all to non-TUI clients (doc §5.4 "never leak hidden internals").
+- Whether `model.delta` for `thinking` is streamed at all to non-CLI clients (doc §5.4 "never leak hidden internals").
 - Live output streaming for long `Bash`/`terminal.exec` (no `tool.output` event in v1; use `terminal.logs`).

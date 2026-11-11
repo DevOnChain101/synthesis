@@ -1,6 +1,6 @@
 # Windows test checklist (for the owner)
 
-Status: Windows is NOT verified. CI builds and tests `x86_64-pc-windows-msvc` on `windows-latest`, but nobody has run `synt` on a real Windows machine. This list is the first real run. There is no TUI or GUI; `synt` is a headless command line program. Everything below is PowerShell 7 (`pwsh`) unless noted.
+Status: Windows is NOT verified. CI builds and tests `x86_64-pc-windows-msvc` on `windows-latest`, but nobody has run `synt` on a real Windows machine. This list is the first real run. There is no CLI or GUI; `synt` is a headless command line program. Everything below is PowerShell 7 (`pwsh`) unless noted.
 
 Needs: Windows 10/11 x64, PowerShell 7+ (`winget install Microsoft.PowerShell`), Git for Windows (`winget install Git.Git`; the `Bash` tool uses its `bash.exe`), and a provider endpoint plus API key you can use from that machine.
 

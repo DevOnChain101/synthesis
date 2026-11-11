@@ -10,7 +10,7 @@ use gpui::{
     AnyElement, App, Bounds, IntoElement, ParentElement as _, PathBuilder, Pixels, Point,
     Styled as _, Window, canvas, div, fill, point, prelude::*, px, size,
 };
-use synthesis_tui_render::theme as t;
+use synthesis_cli_ui_render::theme as t;
 use synthesis_view::pulse::{Act, Node, toward_core};
 
 use super::MONO;

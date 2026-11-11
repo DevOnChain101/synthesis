@@ -52,8 +52,8 @@ synthesis-core = { path = "../../crates/synthesis-core" }
 synthesis-harness = { path = "../../crates/synthesis-harness" }
 synthesis-permissions = { path = "../../crates/synthesis-permissions" }
 synthesis-providers = { path = "../../crates/synthesis-providers" }
-synthesis-tui = { path = "../../crates/synthesis-tui" }
-synthesis-tui-render = { path = "../../crates/synthesis-tui-render" }
+synthesis-cli-ui = { path = "../../crates/synthesis-cli-ui" }
+synthesis-cli-ui-render = { path = "../../crates/synthesis-cli-ui-render" }
 synthesis-view = { path = "../../crates/synthesis-view" }
 synthesis-hooks = { path = "../../crates/synthesis-hooks" }
 synthesis-memory = { path = "../../crates/synthesis-memory" }
@@ -61,7 +61,7 @@ synthesis-session = { path = "../../crates/synthesis-session" }
 synthesis-settings = { path = "../../crates/synthesis-settings" }
 synthesis-settings-ui = { path = "../../crates/synthesis-settings-ui" }
 synthesis-terminal = { path = "../../crates/synthesis-terminal" }
-synthesis-tui-base = { path = "../../crates/synthesis-tui-base" }
+synthesis-cli-ui-base = { path = "../../crates/synthesis-cli-ui-base" }
 time = "0.3"
 serde_json = "1.0.154"
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }

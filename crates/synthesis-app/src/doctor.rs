@@ -44,6 +44,14 @@ pub fn summary(rows: &[Row]) -> String {
     )
 }
 
+/// `synt.cli` keys the desktop TUI tab has no use for (it has no mouse mode, queue lines or expanded diffs).
+const TERMINAL_ONLY_KEYS: [&str; 4] = [
+    "mouse_capture",
+    "copy_on_select",
+    "diffs_expanded",
+    "queue_indicators",
+];
+
 /// Proxy and TLS variables `synt doctor` reports (set or not; never the value, a proxy URL can hold a password).
 const STANDARD_VARS: [&str; 6] = [
     "HTTPS_PROXY",
@@ -358,6 +366,44 @@ pub fn legacy_notes(
             &k["SYNTHESIS_".len()..]
         ));
     }
+    // Renamed 2026-11-11 (the terminal app is the CLI, `tui` is the desktop tab): never read, never moved.
+    let mut cli_env: Vec<&str> = env
+        .iter()
+        .map(|(k, _)| k)
+        .filter(|k| k.starts_with("SYNT_TUI_"))
+        .collect();
+    cli_env.sort_unstable();
+    for k in cli_env {
+        v.push(format!(
+            "warning: ignored legacy variable {k} (renamed 2026-11-11): set SYNT_CLI_{} instead",
+            &k["SYNT_TUI_".len()..]
+        ));
+    }
+    // `synt.tui` now belongs to the desktop TUI tab; the terminal app reads `synt.cli`. Only keys the
+    // desktop never shows can only have come from the terminal app.
+    let user_settings: Option<serde_json::Value> = std::fs::read(h.synthesis.join("settings.json"))
+        .ok()
+        .filter(|b| b.len() <= 1 << 20)
+        .and_then(|b| serde_json::from_slice(&b).ok());
+    if let Some(old) = user_settings
+        .as_ref()
+        .and_then(|j| j.get("synt"))
+        .filter(|s| s.get("cli").is_none())
+        .and_then(|s| s.get("tui"))
+        .and_then(|t| t.as_object())
+    {
+        let keys: Vec<&str> = TERMINAL_ONLY_KEYS
+            .into_iter()
+            .filter(|k| old.contains_key(*k))
+            .collect();
+        if !keys.is_empty() {
+            v.push(format!(
+                "note: synt.tui.{} in {} is ignored by the terminal app (it reads synt.cli; synt.tui is the desktop TUI tab). To migrate, move these keys (or the whole \"tui\" object) to \"cli\" under \"synt\"",
+                keys.join(", synt.tui."),
+                h.synthesis.join("settings.json").display()
+            ));
+        }
+    }
     let old_home = h.user.join(".nemo");
     if old_home.is_dir() && !h.synthesis.exists() {
         v.push(format!(
@@ -447,6 +493,42 @@ mod tests {
         std::fs::create_dir_all(&h.synthesis).unwrap();
         let env = Env::from_pairs([("PATH", path)]);
         assert!(legacy_notes(&env, &h, d.path(), Some(&bin.join("synt"))).is_empty());
+    }
+
+    #[test]
+    fn legacy_notes_detect_the_tui_to_cli_rename_names_only() {
+        let d = tempfile::tempdir().unwrap();
+        let user = d.path().join("u");
+        let h = crate::Homes {
+            synthesis: user.join(".synt"),
+            user,
+        };
+        std::fs::create_dir_all(&h.synthesis).unwrap();
+        let file = h.synthesis.join("settings.json");
+        std::fs::write(
+            &file,
+            r#"{"synt":{"tui":{"mouse_capture":false,"motion":false}}}"#,
+        )
+        .unwrap();
+        let env = Env::from_pairs([("PATH", ""), ("SYNT_TUI_X", "secret-value")]);
+        let v = legacy_notes(&env, &h, d.path(), None).join("\n");
+        assert!(
+            v.contains("SYNT_CLI_X") && !v.contains("secret-value"),
+            "{v}"
+        );
+        assert!(
+            v.contains("synt.tui.mouse_capture") && !v.contains("synt.tui.motion"),
+            "{v}"
+        );
+        // migrated, or only desktop keys: silent
+        std::fs::write(
+            &file,
+            r#"{"synt":{"tui":{"mouse_capture":false},"cli":{}}}"#,
+        )
+        .unwrap();
+        assert!(legacy_notes(&Env::from_pairs([("PATH", "")]), &h, d.path(), None).is_empty());
+        std::fs::write(&file, r#"{"synt":{"tui":{"opacity":80}}}"#).unwrap();
+        assert!(legacy_notes(&Env::from_pairs([("PATH", "")]), &h, d.path(), None).is_empty());
     }
 
     #[test]

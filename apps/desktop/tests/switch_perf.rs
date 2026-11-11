@@ -192,7 +192,7 @@ fn switch_and_resume_stay_within_budget() {
         "load_resume (long session)",
         Duration::from_secs(2),
         &mut || {
-            resume = Some(synthesis_tui::load_resume(&home, "s0-00-perfid").unwrap());
+            resume = Some(synthesis_cli_ui::load_resume(&home, "s0-00-perfid").unwrap());
         },
     );
     let resume = resume.unwrap();

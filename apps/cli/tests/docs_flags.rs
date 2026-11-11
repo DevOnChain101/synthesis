@@ -36,7 +36,7 @@ fn every_flag_and_command_in_help_is_in_the_cli_doc() {
     let doc =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/CLI.md")).unwrap();
     let mut missing = vec![];
-    for cmd in [&[][..], &["run"], &["tui"], &["models"], &["rewind"]] {
+    for cmd in [&[][..], &["run"], &["models"], &["rewind"]] {
         for f in flags(&help(cmd)) {
             let allowed = UNDOCUMENTED.iter().any(|(u, _)| *u == f);
             if !allowed && !doc.contains(&format!("`{f}")) && !doc.contains(&format!(", {f}")) {
@@ -52,7 +52,7 @@ fn every_flag_and_command_in_help_is_in_the_cli_doc() {
         .skip(1)
         .take_while(|l| !l.is_empty())
         .filter_map(|l| l.split_whitespace().next());
-    for c in cmds.filter(|c| *c != "help" && *c != "tui") {
+    for c in cmds.filter(|c| *c != "help") {
         if !doc.contains(&format!("synt {c}")) {
             missing.push(format!("command synt {c}"));
         }

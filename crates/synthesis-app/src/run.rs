@@ -337,9 +337,9 @@ pub enum Front {
         closed: Arc<std::sync::atomic::AtomicBool>,
     },
     /// Events go to the interactive app; the person approves.
-    Tui,
+    Cli,
     /// A native front end (the desktop window): the host supplies the event writer, approver and
-    /// input provider instead of the TUI's `UiLink`. Behaves like `Tui` otherwise.
+    /// input provider instead of the CLI's `UiLink`. Behaves like `Cli` otherwise.
     Native(Native),
 }
 
@@ -385,9 +385,9 @@ pub struct Prepared {
     pub effort_tiers: Vec<String>,
     /// The model's window as known now (config, cache, built-in table); `None` = unknown.
     pub context_window: Option<u64>,
-    pub sandbox: synthesis_tui::SandboxStatus,
-    /// The interactive app's side of the event/approval/input channels (`Front::Tui` only).
-    pub link: Option<synthesis_tui::UiLink>,
+    pub sandbox: synthesis_cli_ui::SandboxStatus,
+    /// The interactive app's side of the event/approval/input channels (`Front::Cli` only).
+    pub link: Option<synthesis_cli_ui::UiLink>,
     pub homes: crate::Homes,
     /// Open long-term memory store (None with --no-memory, a failure, or `synt.memory.enabled: false`).
     pub memory: Option<Arc<crate::memcmd::MemoryRun>>,
@@ -547,11 +547,11 @@ impl Approver for AuditDeny {
     }
 }
 
-pub fn sandbox_status(mode: SandboxMode, unsandboxed: bool) -> synthesis_tui::SandboxStatus {
+pub fn sandbox_status(mode: SandboxMode, unsandboxed: bool) -> synthesis_cli_ui::SandboxStatus {
     let b = synthesis_sandbox::detect();
     let c = b.capabilities();
     let g = |x: Guarantee| format!("{x:?}").to_lowercase();
-    synthesis_tui::SandboxStatus {
+    synthesis_cli_ui::SandboxStatus {
         mode: match mode {
             SandboxMode::Enforce => "enforce",
             SandboxMode::BestEffort => "best-effort",
@@ -649,7 +649,7 @@ pub fn prepare(
         rules_arg(&c.allow, "--allow")?,
         rules_arg(&c.deny, "--deny")?,
     );
-    let is_tui = matches!(front, Front::Tui | Front::Native(_));
+    let is_cli = matches!(front, Front::Cli | Front::Native(_));
     let gate: Option<PreStart> = match &front {
         Front::Native(n) => n.pre_start.clone(),
         _ => None,
@@ -837,11 +837,11 @@ pub fn prepare(
         Some(ModeArg::DontAsk) => Mode::DontAsk,
         Some(ModeArg::Auto) => Mode::Auto,
         Some(ModeArg::BypassPermissions) => {
-            // A TUI session switches into bypass with a confirmation dialog instead (Shift+Tab
+            // A CLI session switches into bypass with a confirmation dialog instead (Shift+Tab
             // never reaches it); the flag is for `synt run`.
-            if is_tui {
+            if is_cli {
                 return Err(
-                    "--permission-mode bypassPermissions is only for `synt run`; in the TUI press Shift+Tab until the bypass dialog opens"
+                    "--permission-mode bypassPermissions is only for `synt run`; in the CLI press Shift+Tab until the bypass dialog opens"
                         .into(),
                 );
             }
@@ -877,7 +877,7 @@ pub fn prepare(
     // (the interactive app has a person watching)
     budget.max_wall_ms = limits
         .max_wall_secs
-        .or((!is_tui).then_some(HEADLESS_WALL_SECS))
+        .or((!is_cli).then_some(HEADLESS_WALL_SECS))
         .map(|s| s.saturating_mul(1000));
 
     let mut extra_dirs: Vec<PathBuf> = settings
@@ -997,7 +997,7 @@ pub fn prepare(
         ),
         Mode::Auto => notices.push(format!(
             "auto mode: a model call judges each call the rules leave open (allow / deny / ask); an unclear answer is an ask, which {}",
-            if is_tui { "you answer in a dialog" } else { "this run denies" }
+            if is_cli { "you answer in a dialog" } else { "this run denies" }
         )),
         _ => {}
     }
@@ -1111,8 +1111,8 @@ pub fn prepare(
             Arc::new(AuditDeny),
             Some((closed, cancel.clone())),
         ),
-        Front::Tui => {
-            let l = synthesis_tui::UiLink::new();
+        Front::Cli => {
+            let l = synthesis_cli_ui::UiLink::new();
             let ap = l.approver();
             (
                 Box::new(l.event_writer()),
@@ -1528,14 +1528,14 @@ pub fn prepare(
         sandbox_mode == SandboxMode::Enforce,
     ) {
         let w = sanitize_for_display(&w);
-        if is_tui {
+        if is_cli {
             notices.push(w); // a startup note and a `notice` event; stderr would garble the screen
         } else {
             eprintln!("synt: warning: {w}");
         }
     }
     // The interactive app asks in its own dialogs; headless asks on the terminal.
-    let browser_host: Arc<dyn synthesis_tools::BrowserHost> = if is_tui {
+    let browser_host: Arc<dyn synthesis_tools::BrowserHost> = if is_cli {
         Arc::new(crate::login::DialogHost {
             approver: approver.clone(),
             sink: sink.clone(),
@@ -1554,7 +1554,7 @@ pub fn prepare(
                 sandbox_mode == SandboxMode::Enforce,
                 stdio,
             ))
-            .with_background_on_timeout(is_tui),
+            .with_background_on_timeout(is_cli),
     );
     if let Some(a) = mcp_attach {
         toolbox = a.apply(toolbox);
@@ -1636,8 +1636,8 @@ pub fn prepare(
         ws.cwd.display(),
         mode.as_str()
     );
-    if is_tui {
-        // Event log / replay copy; the UI also gets `notices` as startup notes (tui.rs) and shows
+    if is_cli {
+        // Event log / replay copy; the UI also gets `notices` as startup notes (cli_app.rs) and shows
         // each text once, so it no longer depends on this channel buffering.
         for n in &notices {
             sink.emit(
