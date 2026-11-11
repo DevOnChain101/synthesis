@@ -116,10 +116,20 @@ async fn grep_for_a_responder_skips_secret_shaped_files_and_links_to_them() {
             json!({"pattern": "needle", "path": w, "output_mode": "content"}),
         )
         .await;
+    // since the secret-file control: a walk never returns secrets, for the main agent too
     assert!(
-        text(&all).contains("needle-env"),
-        "the main agent still greps everything"
+        text(&all).contains("needle-ok") && !text(&all).contains("needle-env"),
+        "{}",
+        text(&all)
     );
+    // naming one with `glob` (which the permission layer asks about) searches it
+    let named = f
+        .run(
+            "Grep",
+            json!({"pattern": "needle", "path": w, "glob": ".env", "output_mode": "content"}),
+        )
+        .await;
+    assert!(text(&named).contains("needle-env"), "{}", text(&named));
     f.ctx.skip_secrets = true;
     let o = f
         .run(
@@ -232,18 +242,21 @@ async fn interactive_timeout_moves_bash_to_the_background_and_tells_the_model() 
         "{t}"
     );
     // the model can read the rest with BashOutput once it finishes
-    let mut last = String::new();
+    // BashOutput returns only output new since the last read, so `end` can arrive in a poll
+    // before the one that reports the exit: accumulate every poll.
+    let mut all = String::new();
     for _ in 0..100 {
         let r = f.run("BashOutput", json!({"bash_id": id})).await;
-        last = text(&r).to_string();
-        if last.contains("exited") {
+        let t = text(&r).to_string();
+        all.push_str(&t);
+        if t.contains("exited") {
             break;
         }
         tokio::time::sleep(Duration::from_millis(30)).await;
     }
     assert!(
-        last.contains("end") && last.contains("exit code 0"),
-        "{last}"
+        all.contains("end") && all.contains("exit code 0") && !all.contains("more output pending"),
+        "{all}"
     );
 }
 

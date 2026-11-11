@@ -27,6 +27,10 @@ enum Reply {
     },
     /// Sends headers, then nothing.
     Stall,
+    /// 400 with no length and a body that never ends (until the client hangs up).
+    Flood,
+    /// Reads the request, then sends nothing at all (not even headers).
+    Silent,
 }
 
 struct Mock {
@@ -127,6 +131,14 @@ async fn start(replies: Vec<Reply>) -> Mock {
                             let _ = sock.write_all(b"ff\r\npartial").await; // promised 255 bytes, dies
                         }
                     }
+                    Reply::Flood => {
+                        let _ = sock
+                            .write_all(b"HTTP/1.1 400 X\r\nconnection: close\r\n\r\n")
+                            .await;
+                        let chunk = vec![b'x'; 16 << 10];
+                        while sock.write_all(&chunk).await.is_ok() {}
+                    }
+                    Reply::Silent => tokio::time::sleep(Duration::from_secs(30)).await,
                     Reply::Stall => {
                         let _ = sock
                             .write_all(
@@ -730,4 +742,438 @@ async fn proxy_comes_from_the_injected_env_only() {
     let (_, err) = collect(p.as_ref(), CancellationToken::new()).await;
     assert!(err.is_none(), "{err:?}");
     assert_eq!(direct.count(), 1);
+}
+
+fn provider_with_header_timeout(
+    mock: &Mock,
+    retry: RetryPolicy,
+    ms: u64,
+) -> Arc<dyn ModelProvider> {
+    ProviderSpec {
+        id: "gw".into(),
+        protocol: Protocol::Anthropic,
+        base_url: Some(mock.base.clone()),
+        auth: Auth::ApiKey(Secret::new(KEY)),
+        headers: Default::default(),
+        models_meta: Default::default(),
+    }
+    .connect(
+        &Env::default(),
+        &NetSettings {
+            header_timeout: Duration::from_millis(ms),
+            ..Default::default()
+        },
+        retry,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_server_that_never_sends_headers_is_a_retryable_timeout() {
+    let m = start(vec![Reply::Silent]).await;
+    let p = provider_with_header_timeout(&m, fast_retry(1), 150);
+    let t = Instant::now();
+    let (ev, err) = collect(p.as_ref(), CancellationToken::new()).await;
+    let e = err.expect("a timeout error");
+    assert!(ev.is_empty());
+    assert!(e.to_string().contains("did not answer within"), "{e}");
+    assert!(e.retryable());
+    assert_eq!(m.count(), 2, "one retry");
+    assert!(t.elapsed() < Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn cancel_ends_the_wait_for_headers_at_once() {
+    let m = start(vec![Reply::Silent]).await;
+    let p = provider_with_header_timeout(&m, fast_retry(0), 60_000);
+    let cancel = CancellationToken::new();
+    let c2 = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        c2.cancel();
+    });
+    let t = Instant::now();
+    let (_, err) = collect(p.as_ref(), cancel).await;
+    assert_eq!(err.unwrap().kind, ErrorKind::Cancelled);
+    assert!(t.elapsed() < Duration::from_secs(3));
+}
+
+#[tokio::test]
+async fn the_effort_tier_reaches_both_protocols() {
+    for (proto, key, events) in [
+        (
+            Protocol::Anthropic,
+            "output_config",
+            sse(&anthropic_events()),
+        ),
+        (
+            Protocol::OpenAi,
+            "reasoning_effort",
+            b"data: [DONE]\n\n".to_vec(),
+        ),
+    ] {
+        let mock = start(vec![Reply::Sse {
+            body: events,
+            piece: 64,
+            cut: false,
+        }])
+        .await;
+        let p = provider(proto, &mock, Auth::ApiKey(Secret::new(KEY)), fast_retry(0));
+        let mut r = req();
+        r.reasoning_effort = Some("high".into());
+        let mut s = p.stream(&r, CancellationToken::new());
+        while s.next().await.is_some() {}
+        let sent = mock.req(0);
+        assert!(
+            sent.contains(key) && sent.contains("\"high\""),
+            "{key}: {sent}"
+        );
+        // and nothing when no tier is chosen
+        let mock = start(vec![Reply::Sse {
+            body: sse(&anthropic_events()),
+            piece: 64,
+            cut: false,
+        }])
+        .await;
+        let p = provider(proto, &mock, Auth::ApiKey(Secret::new(KEY)), fast_retry(0));
+        let mut s = p.stream(&req(), CancellationToken::new());
+        while s.next().await.is_some() {}
+        assert!(!mock.req(0).contains(key));
+    }
+}
+
+fn cached(proto: Protocol, base: &str, cache: &std::path::Path) -> Arc<dyn ModelProvider> {
+    ProviderSpec {
+        id: "gw".into(),
+        protocol: proto,
+        base_url: Some(base.into()),
+        auth: Auth::ApiKey(Secret::new(KEY)),
+        headers: Default::default(),
+        models_meta: Default::default(),
+    }
+    .connect_cached(
+        &Env::default(),
+        &NetSettings::default(),
+        fast_retry(0),
+        Some(cache.to_path_buf()),
+    )
+    .unwrap()
+}
+
+fn tmp_cache(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("synt-mock-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    d.join("cache/models/gw.json")
+}
+
+#[tokio::test]
+async fn anthropic_model_info_is_fetched_cached_and_reused_without_network() {
+    let mock = start(vec![status(
+        200,
+        vec![],
+        json!({"data":[
+            {"id":"big","max_input_tokens":1_000_000,"max_tokens":64_000,
+             "capabilities":{"image_input":{"supported":false},"effort":{"supported":true,"high":{"supported":true}}}},
+            {"id":"small","max_input_tokens":200_000,"max_tokens":8_000}
+        ],"has_more":false}),
+    )])
+    .await;
+    let cache = tmp_cache("anth");
+    let p = cached(Protocol::Anthropic, &mock.base, &cache);
+    // unknown until the fetch ran
+    assert_eq!(p.capabilities("big").context_window, None);
+    p.refresh_model_info(false, &CancellationToken::new())
+        .await
+        .unwrap();
+    let big = p.capabilities("big");
+    assert_eq!(
+        (big.context_window, big.max_output, big.images),
+        (Some(1_000_000), Some(64_000), false)
+    );
+    // discovered effort tiers are the model's tiers (what /effort and the request check use)
+    assert_eq!(big.effort_tiers, ["high"]);
+    assert!(p.capabilities("small").effort_tiers.is_empty());
+    // the same provider serves another model of the list with its own numbers
+    assert_eq!(p.capabilities("small").context_window, Some(200_000));
+    assert_eq!(p.capabilities("small").max_output, Some(8_000));
+    let file = std::fs::read_to_string(&cache).unwrap();
+    assert!(!file.contains(KEY));
+    assert!(file.contains("\"effort_tiers\""));
+
+    // a second start: fresh cache, no request, same numbers
+    let q = cached(Protocol::Anthropic, &mock.base, &cache);
+    assert_eq!(q.capabilities("big").context_window, Some(1_000_000));
+    assert_eq!(q.capabilities("big").effort_tiers, ["high"]);
+    q.refresh_model_info(false, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(mock.count(), 1);
+    // --refresh forces it
+    q.refresh_model_info(true, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(mock.count(), 2);
+    let _ = std::fs::remove_dir_all(cache.ancestors().nth(3).unwrap());
+}
+
+#[tokio::test]
+async fn openai_compatible_shapes_and_offline_fallback_to_a_stale_cache() {
+    let mock = start(vec![status(
+        200,
+        vec![],
+        json!({"data":[
+            {"id":"a","context_length":131072},
+            {"id":"b","context_window":32000},
+            {"id":"c","top_provider":{"context_length":64000,"max_completion_tokens":4096}},
+            {"id":"d"}
+        ]}),
+    )])
+    .await;
+    let cache = tmp_cache("oai");
+    let p = cached(Protocol::OpenAi, &mock.base, &cache);
+    p.refresh_model_info(false, &CancellationToken::new())
+        .await
+        .unwrap();
+    let w = |m: &str| p.capabilities(m).context_window;
+    assert_eq!(
+        (w("a"), w("b"), w("c"), w("d")),
+        (Some(131_072), Some(32_000), Some(64_000), None)
+    );
+    assert_eq!(p.capabilities("c").max_output, Some(4096));
+
+    // age the cache past the TTL, then go offline (nothing listens on port 1)
+    let mut f: Value = serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
+    f["fetched_at"] = json!(1);
+    f["base_url"] = json!("http://127.0.0.1:1");
+    std::fs::write(&cache, serde_json::to_vec(&f).unwrap()).unwrap();
+    let off = cached(Protocol::OpenAi, "http://127.0.0.1:1", &cache);
+    assert_eq!(
+        off.capabilities("a").context_window,
+        Some(131_072),
+        "stale cache is used"
+    );
+    assert!(
+        off.refresh_model_info(false, &CancellationToken::new())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        off.capabilities("a").context_window,
+        Some(131_072),
+        "and kept"
+    );
+
+    // another endpoint: the cache does not apply
+    let other = cached(Protocol::OpenAi, "http://127.0.0.1:2", &cache);
+    assert_eq!(other.capabilities("a").context_window, None);
+    let _ = std::fs::remove_dir_all(cache.ancestors().nth(3).unwrap());
+}
+
+#[tokio::test]
+async fn config_beats_the_fetched_value_and_a_silent_server_times_out() {
+    let mock = start(vec![status(
+        200,
+        vec![],
+        json!({"data":[{"id":"m","max_input_tokens":1_000_000}]}),
+    )])
+    .await;
+    let mut meta = indexmap::IndexMap::new();
+    meta.insert(
+        "m".to_string(),
+        synthesis_config::ModelMeta {
+            context_window: Some(50_000.0),
+            ..Default::default()
+        },
+    );
+    let spec = |base: &str| ProviderSpec {
+        id: "gw".into(),
+        protocol: Protocol::Anthropic,
+        base_url: Some(base.into()),
+        auth: Auth::ApiKey(Secret::new(KEY)),
+        headers: Default::default(),
+        models_meta: meta.clone(),
+    };
+    let p = spec(&mock.base)
+        .connect(&Env::default(), &NetSettings::default(), fast_retry(0))
+        .unwrap();
+    p.refresh_model_info(false, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(p.capabilities("m").context_window, Some(50_000));
+
+    let silent = start(vec![Reply::Silent]).await;
+    let q = spec(&silent.base)
+        .connect(&Env::default(), &NetSettings::default(), fast_retry(0))
+        .unwrap();
+    let t = Instant::now();
+    let r = tokio::time::timeout(
+        Duration::from_millis(300),
+        q.refresh_model_info(false, &CancellationToken::new()),
+    )
+    .await;
+    assert!(r.is_err(), "the caller's timeout ends the wait");
+    assert!(t.elapsed() < Duration::from_secs(3));
+}
+
+#[test]
+fn only_openai_native_gets_the_builtin_table() {
+    let mk = |base: Option<&str>| {
+        ProviderSpec {
+            id: "openai".into(),
+            protocol: Protocol::OpenAi,
+            base_url: base.map(String::from),
+            auth: Auth::Bearer(Secret::new(KEY)),
+            headers: Default::default(),
+            models_meta: Default::default(),
+        }
+        .connect(&Env::default(), &NetSettings::default(), fast_retry(0))
+        .unwrap()
+    };
+    assert_eq!(
+        mk(None).capabilities("gpt-4o").context_window,
+        Some(128_000)
+    );
+    assert_eq!(
+        mk(Some("https://gw.example/v1"))
+            .capabilities("gpt-4o")
+            .context_window,
+        None
+    );
+}
+
+#[tokio::test]
+async fn a_model_list_over_the_size_cap_is_an_error_not_memory() {
+    let big = format!(
+        r#"{{"data":[{{"id":"m","pad":"{}"}}]}}"#,
+        "x".repeat(9 << 20)
+    );
+    let mock = start(vec![Reply::Status {
+        code: 200,
+        headers: vec![],
+        body: big,
+    }])
+    .await;
+    let p = provider(
+        Protocol::OpenAi,
+        &mock,
+        Auth::Bearer(Secret::new(KEY)),
+        fast_retry(0),
+    );
+    let e = p.list_models(&CancellationToken::new()).await.unwrap_err();
+    assert!(e.to_string().contains("too large"), "{e}");
+}
+
+fn with_list_deadline(base: &str, ms: u64) -> Arc<dyn ModelProvider> {
+    ProviderSpec {
+        id: "gw".into(),
+        protocol: Protocol::OpenAi,
+        base_url: Some(base.into()),
+        auth: Auth::Bearer(Secret::new(KEY)),
+        headers: Default::default(),
+        models_meta: Default::default(),
+    }
+    .connect(
+        &Env::default(),
+        &NetSettings {
+            list_deadline: Duration::from_millis(ms),
+            ..Default::default()
+        },
+        fast_retry(0),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_model_list_body_that_stalls_or_drips_hits_the_deadline() {
+    // headers, then nothing
+    let mock = start(vec![Reply::Stall]).await;
+    let t = Instant::now();
+    let e = with_list_deadline(&mock.base, 200)
+        .list_models(&CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("in time"), "{e}");
+    assert!(t.elapsed() < Duration::from_secs(3));
+
+    // one byte every 40 ms of a 100000-byte body: each read succeeds, the total does not
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut s, _) = l.accept().await.unwrap();
+        let mut b = [0u8; 2048];
+        let _ = s.read(&mut b).await;
+        let _ = s
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 100000\r\n\r\n")
+            .await;
+        for _ in 0..1000 {
+            if s.write_all(b" ").await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+    });
+    let t = Instant::now();
+    let e = with_list_deadline(&base, 300)
+        .list_models(&CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("in time"), "{e}");
+    assert!(t.elapsed() < Duration::from_secs(3));
+}
+
+#[tokio::test]
+async fn ids_with_terminal_escapes_are_not_listed_and_after_id_is_encoded() {
+    let mock = start(vec![
+        status(
+            200,
+            vec![],
+            json!({"data":[{"id":"ok-1"},{"id":"x\u{1b}]0;pwn\u{7}"},{"id":"y\u{1b}[2J"}],
+                   "has_more":true,"last_id":"x&limit=1 #"}),
+        ),
+        status(
+            200,
+            vec![],
+            json!({"data":[{"id":"ok-2"}],"has_more":false}),
+        ),
+    ])
+    .await;
+    let p = provider(
+        Protocol::Anthropic,
+        &mock,
+        Auth::ApiKey(Secret::new(KEY)),
+        fast_retry(0),
+    );
+    let ids: Vec<_> = p
+        .list_models(&CancellationToken::new())
+        .await
+        .unwrap()
+        .iter()
+        .map(|m| m.id.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, ["ok-1", "ok-2"]);
+    let second = mock.req(1);
+    assert!(
+        second.starts_with("GET /v1/models?limit=1000&after_id=x%26limit%3D1%20%23 "),
+        "{second}"
+    );
+}
+
+#[tokio::test]
+async fn an_endless_error_body_is_cut_and_the_error_still_arrives() {
+    let mock = start(vec![Reply::Flood]).await;
+    let p = provider(
+        Protocol::OpenAi,
+        &mock,
+        Auth::Bearer(Secret::new(KEY)),
+        fast_retry(0),
+    );
+    let e = tokio::time::timeout(
+        Duration::from_secs(10),
+        p.list_models(&CancellationToken::new()),
+    )
+    .await
+    .expect("the read must stop at its cap, not wait for the end")
+    .unwrap_err();
+    assert_eq!(e.status, Some(400));
+    assert!(e.to_string().len() < 2000, "{}", e.to_string().len());
 }

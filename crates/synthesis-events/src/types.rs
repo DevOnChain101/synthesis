@@ -151,7 +151,7 @@ pub struct SessionEnd {
 }
 
 /// Payload of `process.spawned|ready|exited`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProcessInfo {
     pub process_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,6 +162,15 @@ pub struct ProcessInfo {
     pub exit_code: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal: Option<String>,
+    /// The tool call that started (or, for a background process, first started) it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// `process.spawned` of a Bash command: the command line, redacted like `tool.requested`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// `process.exited` of a command the harness timed: wall time of the call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// Payload of `subagent.started|stopped`.
@@ -328,6 +337,7 @@ pub enum Event {
     #[serde(rename = "context.usage")]
     ContextUsage {
         used_tokens: u64,
+        /// 0 = the model's window is unknown (compaction assumes 200k); `percent` is then 0.
         window_tokens: u64,
         /// 0..=100 (may exceed 100 when the estimate is over the window).
         percent: f64,
@@ -444,6 +454,16 @@ pub enum Event {
     ProcessReady(ProcessInfo),
     #[serde(rename = "process.exited")]
     ProcessExited(ProcessInfo),
+    /// Output of a foreground command, coalesced and redacted like `tool.output`, but capped
+    /// lower (the live pane needs a tail, the artifact has the log).
+    #[serde(rename = "process.output")]
+    ProcessOutput {
+        process_id: String,
+        tool_call_id: String,
+        text: String,
+        /// 1, 2, ... per process.
+        seq: u64,
+    },
     #[serde(rename = "artifact.created")]
     ArtifactCreated {
         #[serde(flatten)]
@@ -457,6 +477,32 @@ pub enum Event {
         status: String,
         attempt: i64,
         summary: String,
+    },
+    /// The gate reached a check; it fires BEFORE the check is authorised, so a refused check shows
+    /// `started` and then `finished` with status `blocked`. `index` counts from 0 within the
+    /// evaluation; `command` is None for a check nothing can run.
+    #[serde(rename = "verification.check.started")]
+    VerificationCheckStarted {
+        check_id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        index: u32,
+        total: u32,
+    },
+    /// The check ended: `status` is `passed|failed|unverified|blocked`; `output_tail` is the last
+    /// part of its output (capped, redacted like every event).
+    #[serde(rename = "verification.check.finished")]
+    VerificationCheckFinished {
+        check_id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        status: String,
+        duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i64>,
+        output_tail: String,
     },
     #[serde(rename = "todo.updated")]
     TodoUpdated { todos: Vec<Todo> },
@@ -655,6 +701,40 @@ pub enum Event {
     /// confirm. Names only: no cookie, token or page content ever appears in an event.
     #[serde(rename = "browser.login_required")]
     BrowserLoginRequired { origin: String, profile: String },
+    /// `browser_screenshot` wrote a PNG artifact. Metadata only: no image bytes in the stream.
+    #[serde(rename = "browser.frame")]
+    BrowserFrame {
+        /// The artifact file, as `browser_screenshot` reports it.
+        path: String,
+        /// Origin of the page (scheme, host, port; no path or query).
+        url: String,
+        w: u32,
+        h: u32,
+        bytes: u64,
+    },
+    /// A browser tool acted on the page (the agent mouse cursor of the desktop Browser tab). Position and
+    /// a short target only: NEVER typed text, a key, a secret value or page content (`browser_fill_secret`
+    /// reports the target `secret`). Sent after the action ran, so a viewer lags the page.
+    #[serde(rename = "browser.action")]
+    BrowserAction {
+        /// `click`, `type`, `press`, `navigate`, `hover`, `scroll`, ...
+        action: String,
+        /// Where, in CSS pixels of the viewport of size `w` x `h`; absent when the action has no point.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        w: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        h: Option<u32>,
+        /// Role and name, or the element ref, clipped to 80 chars.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        /// Screenshot the point belongs to (absent: the reader uses its newest `browser.frame`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame: Option<String>,
+    },
     #[serde(rename = "notice")]
     Notice { level: String, text: String },
 }

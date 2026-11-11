@@ -6,20 +6,92 @@ use std::path::PathBuf;
 use synthesis_tui_base::text::strip_ansi;
 use synthesis_tui_render::agent::{Agent, EditorView};
 use synthesis_tui_render::dash::{
-    DashState, DashView, Focus, Hidden, Live, SessionRow, Usage, Workspace, render_frame,
-    workspace_key,
+    DashState, DashView, Focus, Hidden, HistoryDay, Live, SessionRow, Usage, Workspace,
+    render_frame, workspace_key,
 };
-use synthesis_tui_render::model::session_from_events;
+use synthesis_tui_render::model::{FeedItem, session_from_events};
 use synthesis_tui_render::util::basename;
 
 const NOW: i64 = 1_800_000_000_000;
 
 fn frame(cols: usize, rows: usize, hidden: Hidden) -> Vec<String> {
+    frame_with(cols, rows, hidden, &[], false)
+}
+
+fn frame_with(
+    cols: usize,
+    rows: usize,
+    hidden: Hidden,
+    history: &[HistoryDay],
+    history_loading: bool,
+) -> Vec<String> {
+    raw_frame(
+        cols,
+        rows,
+        hidden,
+        history,
+        history_loading,
+        Focus::Agent,
+        0,
+        0,
+    )
+    .lines
+    .iter()
+    .map(|l| strip_ansi(l).trim_end().to_string())
+    .collect()
+}
+
+/// The frame as the renderer made it (colours, hit rects); `n_prompts` rows in Activity.
+#[allow(clippy::too_many_arguments)]
+fn raw_frame(
+    cols: usize,
+    rows: usize,
+    hidden: Hidden,
+    history: &[HistoryDay],
+    history_loading: bool,
+    focus: Focus,
+    activity_scroll: usize,
+    n_prompts: usize,
+) -> synthesis_tui_render::dash::Frame {
+    raw_frame_n(
+        cols,
+        rows,
+        hidden,
+        history,
+        history_loading,
+        focus,
+        activity_scroll,
+        n_prompts,
+        1,
+    )
+}
+
+/// [`raw_frame`] with `n` workspaces and `n` sessions in the active one.
+#[allow(clippy::too_many_arguments)]
+fn raw_frame_n(
+    cols: usize,
+    rows: usize,
+    hidden: Hidden,
+    history: &[HistoryDay],
+    history_loading: bool,
+    focus: Focus,
+    activity_scroll: usize,
+    n_prompts: usize,
+    n: usize,
+) -> synthesis_tui_render::dash::Frame {
     let cwd = "/work/proj".to_string();
     let mut session = session_from_events("s1", []);
     session.cwd = cwd.clone();
     session.project = basename(&cwd);
     session.model = "fake/model".into();
+    for i in 0..n_prompts {
+        session.activity.push(FeedItem {
+            ts: Some(NOW),
+            kind: "prompt",
+            text: format!("prompt {i}"),
+            anchor: Some(i),
+        });
+    }
     let agent = Agent {
         id: "s1".into(),
         kind: "main".into(),
@@ -30,7 +102,7 @@ fn frame(cols: usize, rows: usize, hidden: Hidden) -> Vec<String> {
         status: "idle".into(),
         ..Agent::default()
     };
-    let srows = [SessionRow {
+    let one = SessionRow {
         id: "s1".into(),
         project: basename(&cwd),
         cwd: cwd.clone(),
@@ -45,18 +117,41 @@ fn frame(cols: usize, rows: usize, hidden: Hidden) -> Vec<String> {
         ctx_pct: None,
         waiting: false,
         mode: Some("default".into()),
-    }];
+        title: String::new(),
+    };
+    let srows: Vec<SessionRow> = (0..n)
+        .map(|i| SessionRow {
+            id: if i == 0 {
+                "s1".into()
+            } else {
+                format!("s{}", i + 1)
+            },
+            live: if i == 0 { one.live.clone() } else { None },
+            ..one.clone()
+        })
+        .collect();
     let key = workspace_key(&cwd);
-    let ws = [Workspace {
-        key: key.clone(),
-        name: basename(&cwd),
-        cwd: cwd.clone(),
-        count: 1,
-        waiting: false,
-        busy: false,
-    }];
+    let ws: Vec<Workspace> = (0..n)
+        .map(|i| Workspace {
+            key: if i == 0 {
+                key.clone()
+            } else {
+                format!("{key}{i}")
+            },
+            name: if i == 0 {
+                basename(&cwd)
+            } else {
+                format!("proj{i}")
+            },
+            cwd: cwd.clone(),
+            count: 1,
+            waiting: false,
+            busy: false,
+        })
+        .collect();
     let view = DashView {
         hidden,
+        activity_scroll,
         ..DashView::default()
     };
     let usage = Usage::default();
@@ -67,7 +162,8 @@ fn frame(cols: usize, rows: usize, hidden: Hidden) -> Vec<String> {
         index: 0,
         usage: &usage,
         follow: false,
-        history: &[],
+        history,
+        history_loading,
         usage_metric: "tokens",
         mcp_servers: &[],
         mcp_live: None,
@@ -79,16 +175,12 @@ fn frame(cols: usize, rows: usize, hidden: Hidden) -> Vec<String> {
             chars: &editor,
             cur: 0,
         }),
-        focus: Focus::Agent,
+        focus,
         view: &view,
         agent_session_id: Some("s1"),
         tz_offset_min: 0,
     };
     render_frame(&state, cols, rows, 0, NOW)
-        .lines
-        .iter()
-        .map(|l| strip_ansi(l).trim_end().to_string())
-        .collect()
 }
 
 fn case(name: &str, cols: usize, rows: usize, hidden: Hidden) -> Vec<String> {
@@ -170,6 +262,7 @@ fn a_hidden_panel_disappears_and_the_others_take_its_rows() {
             mcp: true,
             tools: true,
             activity: true,
+            ..Hidden::default()
         },
     );
     for t in ["Session", "Tools & Skil", "Activity"] {
@@ -194,4 +287,262 @@ fn a_hidden_panel_disappears_and_the_others_take_its_rows() {
         blank[first_blank..].iter().all(|b| *b),
         "a hole in the sidebar: {blank:?}"
     );
+}
+
+#[test]
+fn usage_panel_says_loading_then_no_usage_then_shows_the_data() {
+    let (loading, empty) = (
+        frame_with(160, 47, Hidden::default(), &[], true),
+        frame_with(160, 47, Hidden::default(), &[], false),
+    );
+    assert!(has(&loading, "loading usage…") && !has(&loading, "no usage yet"));
+    assert!(has(&empty, "no usage yet") && !has(&empty, "loading usage…"));
+    // three days ending today (NOW is 2027-01-15 08:00Z)
+    let day = |ago: i64, tokens: f64| HistoryDay {
+        date_ms: NOW - ago * 86_400_000,
+        tokens,
+        ..HistoryDay::default()
+    };
+    let data = [day(2, 1200.0), day(1, 0.0), day(0, 34_500.0)];
+    let loaded = frame_with(160, 47, Hidden::default(), &data, false);
+    assert!(!has(&loaded, "no usage yet") && !has(&loaded, "loading usage…"));
+    assert!(has(&loaded, "35.7k"), "{}", loaded.join("\n"));
+}
+
+#[test]
+fn the_focused_panel_has_the_accent_border_and_the_hit_rects_cover_the_panels() {
+    use synthesis_tui_render::theme::{T_CLAUDE, paint};
+    let accent = paint(T_CLAUDE, "┏━");
+    // (line of the Workspace top border, line of the Running top border)
+    let lit = |focus| {
+        let f = raw_frame(160, 47, Hidden::default(), &[], false, focus, 0, 0);
+        let at = |t: &str| {
+            f.lines
+                .iter()
+                .position(|l| strip_ansi(l).contains(t))
+                .unwrap()
+        };
+        // only the sidebar's columns: the chat's own border is accented when it has the focus
+        let side = |t: &str| {
+            let l = &f.lines[at(t)];
+            let cut = l.find("┓").map_or(l.len(), |i| i + 3);
+            l[..cut].contains(&accent)
+        };
+        (side("Workspace"), side("Running"))
+    };
+    assert_eq!(lit(Focus::Agent), (false, false));
+    assert_eq!(lit(Focus::Workspace), (true, false));
+    assert_eq!(lit(Focus::Dashboard), (false, true));
+    let r = raw_frame(160, 47, Hidden::default(), &[], false, Focus::Agent, 0, 0).rects;
+    let (w, q) = (r.workspace_rect.unwrap(), r.session_rect.unwrap());
+    assert_eq!(q.y, w.y + w.h, "Running starts under Workspace");
+    assert_eq!(r.workspace_rows, [(w.y + 1, workspace_key("/work/proj"))]);
+    assert_eq!(r.session_rows[0], (q.y + 1, "s1".to_string()));
+}
+
+#[test]
+fn activity_scrolls_clamped_and_says_how_much_is_cut() {
+    let at = |scroll| {
+        raw_frame(
+            160,
+            47,
+            Hidden::default(),
+            &[],
+            false,
+            Focus::Agent,
+            scroll,
+            60,
+        )
+    };
+    let f = at(0);
+    let title = |f: &synthesis_tui_render::dash::Frame| {
+        f.lines
+            .iter()
+            .map(|l| strip_ansi(l))
+            .find(|l| l.contains("Activity"))
+            .unwrap()
+    };
+    let max = f.rects.activity_max_scroll;
+    assert!(max > 0 && title(&f).contains('↑') && !title(&f).contains('↓'));
+    // newest at the bottom: the last row is the newest prompt
+    assert_eq!(f.rects.activity_hits.last().unwrap().1, 59);
+    // past the end is clamped to the oldest row
+    let old = at(10_000);
+    assert_eq!(old.rects.activity_scroll, max);
+    assert_eq!(old.rects.activity_hits[0].1, 0);
+    assert!(title(&old).contains('↓') && !title(&old).contains('↑'));
+}
+
+/// With 7 workspaces and 7 sessions the Workspace and Running panels list 5 rows each (a session
+/// is 2 lines) on a tall terminal; a short one gives them less, never overlapping.
+#[test]
+fn workspace_and_running_list_five_rows_and_degrade_without_overlap() {
+    let rects = |rows| {
+        let f = raw_frame_n(
+            160,
+            rows,
+            Hidden::default(),
+            &[],
+            false,
+            Focus::Agent,
+            0,
+            0,
+            7,
+        );
+        f.rects
+    };
+    let r = rects(47);
+    let (w, q) = (r.workspace_rect.unwrap(), r.session_rect.unwrap());
+    assert!(r.workspace_rows.len() >= 5);
+    assert!(r.session_rows.len() >= 10, "{}", r.session_rows.len());
+    assert_eq!(q.y, w.y + w.h);
+    for rows in [20, 24, 30, 40] {
+        let r = rects(rows);
+        let (w, q) = (r.workspace_rect.unwrap(), r.session_rect.unwrap());
+        assert_eq!(q.y, w.y + w.h, "{rows} rows");
+        assert!(q.y + q.h <= rows as i64, "{rows} rows: {} {}", w.h, q.h);
+    }
+}
+
+fn side_hidden() -> Hidden {
+    Hidden {
+        session: true,
+        mcp: true,
+        tools: true,
+        activity: true,
+        ..Hidden::default()
+    }
+}
+
+fn rects_of(
+    cols: usize,
+    rows: usize,
+    hidden: Hidden,
+    n: usize,
+) -> synthesis_tui_render::dash::Rects {
+    raw_frame_n(cols, rows, hidden, &[], false, Focus::Agent, 0, 0, n).rects
+}
+
+/// Only Workspace and Running left in the sidebar: they split the whole column (heights differ by
+/// at most 1), each lists what fits, and both stay clickable. Some hidden: the old sizing.
+#[test]
+fn workspace_and_running_split_the_left_column_when_nothing_else_is_shown() {
+    for rows in [24usize, 30, 47, 60] {
+        let r = rects_of(160, rows, side_hidden(), 7);
+        let (w, q) = (r.workspace_rect.unwrap(), r.session_rect.unwrap());
+        assert!((w.h - q.h).abs() <= 1, "{rows} rows: {} vs {}", w.h, q.h);
+        assert_eq!(q.y, w.y + w.h, "{rows} rows");
+        assert_eq!(
+            w.h + q.h,
+            r.sidebar_rect.unwrap().h,
+            "{rows} rows: the whole column"
+        );
+        assert!(!r.workspace_rows.is_empty() && !r.session_rows.is_empty());
+    }
+    // more rows than the old fixed size when the terminal is tall
+    let tall = rects_of(160, 60, side_hidden(), 12);
+    assert!(
+        tall.workspace_rows.len() > 7,
+        "{}",
+        tall.workspace_rows.len()
+    );
+    // one optional panel still shown: Workspace keeps its capped height
+    let some = rects_of(
+        160,
+        47,
+        Hidden {
+            session: true,
+            mcp: true,
+            tools: true,
+            ..Hidden::default()
+        },
+        7,
+    );
+    assert!(some.workspace_rect.unwrap().h <= 9);
+}
+
+/// Each new panel hidden: it is gone and its neighbours take the space.
+#[test]
+fn status_tokens_topology_and_usage_can_be_hidden() {
+    let chat = |hidden| rects_of(200, 47, hidden, 1).chat_rect.unwrap();
+    let all = chat(Hidden::default());
+    let only = |f: fn(&mut Hidden)| {
+        let mut h = Hidden::default();
+        f(&mut h);
+        h
+    };
+    let txt = |h| frame(200, 47, h);
+    assert!(has(&txt(Hidden::default()), "Tokens") && has(&txt(Hidden::default()), "Status"));
+
+    let no_status = txt(only(|h| h.status = true));
+    assert!(!has(&no_status, "◆ Status") && has(&no_status, "Tokens"));
+    let no_tokens = txt(only(|h| h.tokens = true));
+    assert!(!has(&no_tokens, "Tokens") && has(&no_tokens, "◆ Status"));
+    // Status + Tokens: the chat takes their rows
+    let none = only(|h| {
+        h.status = true;
+        h.tokens = true;
+    });
+    let top = txt(none);
+    assert!(!has(&top, "◆ Status") && !has(&top, "Tokens"));
+    let c = chat(none);
+    assert_eq!(
+        (c.y, c.h),
+        (2, all.h + all.y - 2),
+        "chat starts at the first body row"
+    );
+    assert_eq!((c.x, c.w), (all.x, all.w));
+    assert_eq!(top.len(), 47);
+
+    // Topology hidden: Usage fills the right column from the top; Usage hidden: Topology does
+    let no_topo = txt(only(|h| h.topology = true));
+    assert!(!has(&no_topo, "TOPOLOGY") && has(&no_topo, "Usage"));
+    let usage_row = no_topo.iter().position(|l| l.contains("Usage")).unwrap();
+    assert_eq!(usage_row, 2, "Usage starts the right column");
+    let no_usage = txt(only(|h| h.usage = true));
+    assert!(has(&no_usage, "TOPOLOGY") && !has(&no_usage, "Usage"));
+    assert!(
+        no_usage[45].contains('┛'),
+        "Topology reaches the bottom of the body"
+    );
+    for l in no_topo.iter().chain(&no_usage) {
+        assert!(l.chars().count() <= 200);
+    }
+}
+
+/// Topology and Usage both hidden: no empty column, the chat reaches the right edge.
+#[test]
+fn without_topology_and_usage_the_chat_spans_to_the_right_edge() {
+    let hidden = Hidden {
+        topology: true,
+        usage: true,
+        ..Hidden::default()
+    };
+    for (cols, rows) in [(160usize, 48usize), (200, 47), (100, 30), (60, 16)] {
+        let r = rects_of(cols, rows, hidden, 1);
+        let c = r.chat_rect.unwrap();
+        assert_eq!(c.x + c.w, cols as i64, "{cols}x{rows} {c:?}");
+        let lines = frame(cols, rows, hidden);
+        assert!(!has(&lines, "TOPOLOGY") && !has(&lines, "Usage"));
+        assert_eq!(lines.len(), rows);
+    }
+    // everything optional hidden on small terminals: still a frame with the locked panels
+    let all = Hidden {
+        session: true,
+        mcp: true,
+        tools: true,
+        activity: true,
+        status: true,
+        tokens: true,
+        topology: true,
+        usage: true,
+    };
+    for (cols, rows) in [(60usize, 16usize), (80, 24), (120, 30), (200, 60)] {
+        let lines = frame(cols, rows, all);
+        assert_eq!(lines.len(), rows, "{cols}x{rows}");
+        assert!(
+            has(&lines, "SYNTHESIS") && (cols < 80 || has(&lines, "Running")),
+            "{cols}x{rows}"
+        );
+    }
 }

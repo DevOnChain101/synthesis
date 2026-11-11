@@ -136,3 +136,67 @@ fn event_stream_matches_transcript_model() {
     assert_eq!(n.tokens, s.tokens);
     assert_eq!(n.tool_counts, s.tool_counts);
 }
+
+/// A process that died mid-task leaves a prompt and a tool without an end. Replaying that is
+/// idle (nothing runs in this process), and a new prompt works again.
+#[test]
+fn replayed_unfinished_turn_is_idle_not_thinking() {
+    let at = "2026-10-02T11:50:00.000Z";
+    let mut events = vec![
+        env(
+            1,
+            at,
+            Event::UserMessage {
+                text: "go".into(),
+                display_text: None,
+                images: vec![],
+            },
+        ),
+        env(
+            2,
+            at,
+            Event::AssistantMessage {
+                message_id: None,
+                content: vec![
+                    json!({"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "sleep 9"}}),
+                ],
+                stop_reason: "tool_use".into(),
+                usage: None,
+            },
+        ),
+    ];
+    let now = synthesis_tui_render::model::parse_ts(at).unwrap() + 1000;
+    let mut s = session_from_events("s1", &events);
+    assert_eq!(session_phase(&s, now).phase, Phase::Tool);
+    assert!(s.settle_replayed());
+    let ph = session_phase(&s, now);
+    assert_eq!(ph.phase, Phase::Idle);
+    assert!(ph.running.is_empty());
+    // a finished turn is not reported
+    events.push(env(
+        3,
+        at,
+        Event::AssistantMessage {
+            message_id: None,
+            content: vec![json!({"type": "text", "text": "done"})],
+            stop_reason: "end_turn".into(),
+            usage: None,
+        },
+    ));
+    let mut done = session_from_events("s1", &events[2..]);
+    assert!(!done.settle_replayed());
+    // a live prompt after the replay is derived from live events again
+    synthesis_tui_render::model::apply_event(
+        &mut s,
+        &env(
+            4,
+            at,
+            Event::UserMessage {
+                text: "again".into(),
+                display_text: None,
+                images: vec![],
+            },
+        ),
+    );
+    assert_eq!(session_phase(&s, now).phase, Phase::Thinking);
+}

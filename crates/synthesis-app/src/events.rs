@@ -169,7 +169,11 @@ impl Write for Persist {
         self.buf.extend_from_slice(data);
         while let Some(i) = self.buf.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = self.buf.drain(..=i).collect();
-            self.line(&line[..line.len() - 1])?;
+            // the sink only learns "write failed"; say why, or the run ends as "event sink failed"
+            if let Err(e) = self.line(&line[..line.len() - 1]) {
+                let _ = writeln!(io::stderr(), "synt: event stream: {e}");
+                return Err(e);
+            }
         }
         Ok(data.len())
     }

@@ -51,6 +51,11 @@ CREATE TABLE sessions(
   parent_session_id TEXT REFERENCES sessions(id), parent_tool_call_id TEXT,  -- sub-agents
   legacy_transcript_path TEXT,            -- Node JSONL this session mirrors/imports
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+```
+
+`sessions.title` holds only a title a person set (`/rename`, `SessionWriter::set_title`: the row, `updated_at`, and a Node `summary` line; the value is redacted). It is `NULL` otherwise: the first prompt that names an untitled session in the lists is derived when they are read (`synthesis-view`) and never written, so it cannot overwrite a set title. No schema change (no `session.renamed` event: the lists read the store).
+
+```sql
 CREATE TABLE tasks(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
   request TEXT NOT NULL, acceptance_criteria TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL,
   reason TEXT, started_at TEXT NOT NULL, ended_at TEXT);
@@ -81,6 +86,8 @@ CREATE TABLE approvals(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES 
 ```
 `tool_calls.id` is the provider's tool-use id and is unique only within a session, hence the composite key. The `messages` table exists because resume needs the exact history the model saw (Node rebuilds it lossily from UI items [agent.js:3035-3039]); whether events alone are enough is doc §13.4.
 
+Migration v2 (addition): `ALTER TABLE sessions ADD COLUMN closed_at TEXT`. `/close` sets it; `Reader::list_used_sessions` (Running/Workspace panels, `/resume` picker) skips closed sessions, `list_sessions` and resume by id still see them. A v2 store makes older binaries fail with `SchemaTooNew`.
+
 ### B.3 Write rules
 - One writer process per session: advisory lock file `$SYNT_HOME/sessions/<id>/lock` (`fs4`-style OS lock; crate unverified). A second Rust process attaches read-only.
 - Each event is inserted in the same transaction that updates `sessions.event_cursor`; streaming to clients happens after commit, so a client never sees a seq that is not durable.
@@ -95,8 +102,10 @@ Requirement: session formats read/write compatible both ways during the parallel
 5. **Cutover (R9).** The mirror is switched off by default; import stays forever. Schema changes go through numbered `schema_migrations`; the binary refuses to open a DB newer than it knows, and a downgrade needs an explicit export.
 
 ## Checkpoints and `synt rewind`
-Each file entry of a checkpoint may carry `post_sha256`: the state of the file after the run's last write to it (`file_state_hash`: sha256, or `absent` / `not-a-regular-file`). `synt rewind` refuses a file whose state differs or has no recorded hash unless `--force`, never touches symlinks or non-regular files, restores through a temp file and rename, and removes a file the run created only while it still has the recorded hash. `synt run --resume ID` only finds sessions of the current directory unless `--resume-any-workspace`.
+Each file entry of a checkpoint may carry `post_sha256`: the state of the file after the run's last write to it (`file_state_hash`: sha256, or `absent` / `not-a-regular-file`). `synt rewind` refuses a file whose state differs or has no recorded hash unless `--force`, never touches symlinks or non-regular files, restores through a temp file and rename, and removes a file the run created only while it still has the recorded hash. A checkpoint file entry also carries `artifact_sha256` (sha256 of the stored snapshot bytes) and `pre_state` (`file_state_hash` when the checkpoint was taken; `absent` = the run is about to create the file). Both are additive JSON fields (older binaries ignore them). A rewind writes a snapshot back only if it still hashes to `artifact_sha256`, and deletes a file only with `pre_state: absent`; entries of older builds have neither and need `synt rewind --force` (the desktop refuses them). The hashes sit in the same store as the rows, so they detect damage and a replaced artifact file, not a forged row: whoever can write `synt.db` can forge both. Keeping the session store outside the agent's write scope is a sandbox decision (R7). Checkpoints are taken by the file tools only: moves, renames and deletes through Bash are not tracked and a rewind cannot restore them. `synt rewind` refuses a session whose workspace root is a filesystem root, the home directory or a directory containing it (and any session when the home directory is unknown) unless `--allow-wide-root`; `--force` does not override a recorded `pre_state` or hash; the lock file is opened without following links, takes a per-session lock (`sessions/ID/.rewind.lock`) to apply, and checks every path again (inside the roots, no symlink or junction directory, same file state, same snapshot hash) right before its own write. `synt run --resume ID` only finds sessions of the current directory unless `--resume-any-workspace`.
 
 ## Open
+- Empty sessions (no `messages` and no `tasks` row): `Reader::list_used_sessions` leaves them out of listings (TUI panels, `/resume`); `Store::prune_empty_sessions` deletes those older than 1 hour at TUI start (all dependent rows and `sessions/<id>/`), skipping the session being resumed, any session with a child session, and any whose `lock` is held by a live process.
+- `Store::clean_plan` / `clean` / `backup_db` (desktop `/clean`, see desktop.md): permanent deletion of sessions by scope (closed or empty-and-older-than-1-hour, inactive 30 days, all) with the same row list as `prune_empty_sessions`; never the kept ids, lock-held sessions or their parent/child tree; directories only under `sessions/<id>`, links never followed; optional `VACUUM INTO backups/clean-<time>/synt.db`.
 - Artifact retention default and size cap (proposal: keep for the session's lifetime, `synt gc --older-than 30d`).
 - Store full raw provider responses for debugging? Not in v1 (cost, secrets).

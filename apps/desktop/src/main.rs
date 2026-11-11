@@ -1,0 +1,107 @@
+//! `synthesis-desktop`: the native desktop app (docs/specs/desktop.md).
+// Release builds on Windows use the GUI subsystem (no console window); debug builds keep the console.
+#![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
+
+use clap::Parser as _;
+use synthesis_app::{homes, launch_dir};
+use synthesis_config::Env;
+use synthesis_desktop::engine::{Args, root_of};
+use synthesis_desktop::live::local_offset_min;
+use synthesis_desktop::tui_view::driver::LiveCfg;
+
+/// The flags and the process environment, read once here (the engine only sees this snapshot).
+fn live_cfg(args: Args, env: Env) -> Result<LiveCfg, String> {
+    let dir = match &args.cwd {
+        Some(d) => d.clone(),
+        // A Finder launch starts in `/`; never make the filesystem root the workspace.
+        None => match launch_dir()? {
+            d if d.parent().is_none() => homes(&env)?.user,
+            d => d,
+        },
+    };
+    let project =
+        synthesis_core::canonicalize(&dir).map_err(|e| format!("--cwd {}: {e}", dir.display()))?;
+    let h = homes(&env)?;
+    let (tui, diag) = synthesis_settings::read_user_tui(&h.synthesis);
+    for d in diag {
+        eprintln!("synthesis-desktop: warning: {d}");
+    }
+    Ok(LiveCfg {
+        granted: root_of(&project),
+        project,
+        synthesis_home: h.synthesis,
+        home: Some(h.user.to_string_lossy().into_owned()),
+        tz_min: local_offset_min(),
+        tui,
+        args,
+        env,
+    })
+}
+
+fn main() {
+    // `--view settings` without `--live` is the Settings panel's own shot (throwaway home, real cfg)
+    #[cfg(feature = "shot")]
+    if let Some(a) = (!std::env::args().any(|a| a == "--live"))
+        .then(|| {
+            synthesis_desktop::settings_view::shot::parse(&std::env::args().collect::<Vec<_>>())
+        })
+        .flatten()
+    {
+        if let Err(e) = synthesis_desktop::settings_view::shot::render(a) {
+            eprintln!("synthesis-desktop: shot: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    #[cfg(feature = "shot")]
+    if let Some(a) = synthesis_desktop::tui_view::shot::parse(&std::env::args().collect::<Vec<_>>())
+    {
+        if let Err(e) = synthesis_desktop::tui_view::shot::render(a) {
+            eprintln!("synthesis-desktop: shot: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    // `--exit-after-first-frame` is read below (dev feature `shot`), not by clap
+    let args = Args::parse_from(std::env::args().filter(|a| a != "--exit-after-first-frame"));
+    let live = if args.sample {
+        None
+    } else {
+        match live_cfg(args, Env::from_process()) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("synthesis-desktop: {e}");
+                std::process::exit(2);
+            }
+        }
+    };
+    gpui_platform::application()
+        .with_assets(synthesis_desktop::brand::Assets)
+        .run(move |cx| {
+            gpui_component::init(cx);
+            synthesis_desktop::ui::register_fonts(cx);
+            synthesis_desktop::theme::apply("JetBrains Mono", cx);
+            synthesis_desktop::ui::open(cx, live);
+            // CI smoke (no offscreen renderer on Windows): prove a real window drew, then exit
+            #[cfg(feature = "shot")]
+            if std::env::args().any(|a| a == "--exit-after-first-frame") {
+                for w in cx.windows() {
+                    let _ = w.update(cx, |_, window, _| {
+                        window.on_next_frame(|window, _| {
+                            window.on_next_frame(|_, cx| {
+                                eprintln!("synthesis-desktop: first frame drawn");
+                                cx.quit();
+                            })
+                        })
+                    });
+                }
+            }
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            cx.activate(true);
+        });
+}

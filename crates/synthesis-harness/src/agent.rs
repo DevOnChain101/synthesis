@@ -35,6 +35,8 @@ fn provider_used(p: Protocol, u: &synthesis_providers::Usage) -> Option<u64> {
 
 pub(crate) enum StreamFail {
     Cancelled,
+    /// The task wall budget ran out during the model call.
+    Budget(&'static str),
     Provider(ProviderError),
 }
 
@@ -170,6 +172,16 @@ impl Harness {
             let next = tokio::select! {
                 biased;
                 () = agent.cancel.cancelled() => return Err(StreamFail::Cancelled),
+                // dropping the stream ends the request; a stalled or slow provider cannot outlive `max_wall_ms`
+                () = async {
+                    match task.deadline {
+                        Some(d) => tokio::time::sleep_until(tokio::time::Instant::from_std(d)).await,
+                        None => std::future::pending().await,
+                    }
+                } => match self.budget_hit(task, agent) {
+                    Some(k) => return Err(StreamFail::Budget(k)),
+                    None => continue,
+                },
                 n = stream.next() => n,
             };
             let Some(item) = next else { break };
@@ -270,6 +282,21 @@ impl Harness {
         agent: &AgentCtx,
         st: &mut AgentState,
     ) -> Result<Request, String> {
+        if task.caps.context_window.is_none()
+            && agent.agent_id.is_none()
+            && !self
+                .window_noted
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.notice(
+                task,
+                "warning",
+                format!(
+                    "context window unknown for {}: assuming 200k; set limit.context",
+                    self.config.model
+                ),
+            );
+        }
         let built = self.context.build(&st.messages, agent.prompt.as_deref())?;
         let max_output = task
             .caps
@@ -290,6 +317,19 @@ impl Harness {
                     format!("the model does not take images: {n} image(s) are sent as \"[image]\""),
                 );
             }
+        }
+        // older screenshots go out as placeholders; the history keeps them
+        let (n, bytes) = synthesis_context::omit_old_images(&mut messages, 2, REQUEST_IMAGE_BYTES);
+        if n > st.images_omitted {
+            st.images_omitted = n;
+            self.notice(
+                task,
+                "info",
+                format!(
+                    "older screenshots omitted from the model request ({n} images, {:.1} MB); they stay in the session",
+                    bytes as f64 / 1e6
+                ),
+            );
         }
         let (tools, deferred) = self.tool_defs(task, agent);
         let mut system = built.system;
@@ -315,7 +355,10 @@ impl Harness {
             tools,
             temperature: None,
             thinking: None,
-            reasoning_effort: lock(&self.reasoning_effort).clone(),
+            // never a tier the model does not declare (it may have changed with /model)
+            reasoning_effort: lock(&self.reasoning_effort)
+                .clone()
+                .filter(|e| task.caps.effort_tiers.contains(e)),
         };
         st.fixed_raw = fixed_tokens(&req);
         Ok(req)
@@ -334,8 +377,14 @@ impl Harness {
         messages_tokens(&CharsPerToken::default(), &st.messages)
     }
 
+    /// The window compaction is measured against: the model's, else the 200k fallback.
     pub(crate) fn window(task: &TaskRun) -> u64 {
         task.caps.context_window.unwrap_or(DEFAULT_WINDOW).max(1)
+    }
+
+    /// The window shown to people (`window_tokens` of the events): 0 = unknown.
+    fn reported_window(task: &TaskRun) -> u64 {
+        task.caps.context_window.map_or(0, |w| w.max(1))
     }
 
     fn auto_due(&self, task: &TaskRun, st: &AgentState, used: u64) -> bool {
@@ -347,7 +396,7 @@ impl Harness {
     }
 
     fn emit_usage(&self, task: &TaskRun, agent: &AgentCtx, used: u64, source: &str, stale: bool) {
-        let window = Self::window(task);
+        let window = Self::reported_window(task);
         self.emit(
             task,
             agent,
@@ -355,7 +404,11 @@ impl Harness {
             Event::ContextUsage {
                 used_tokens: used,
                 window_tokens: window,
-                percent: used as f64 * 100.0 / window as f64,
+                percent: if window == 0 {
+                    0.0
+                } else {
+                    used as f64 * 100.0 / window as f64
+                },
                 source: source.into(),
                 stale,
             },
@@ -396,7 +449,7 @@ impl Harness {
         instructions: &str,
     ) -> Result<(u64, u64), String> {
         let started = std::time::Instant::now();
-        let window = Self::window(task);
+        let window = Self::reported_window(task);
         let before = st.meter.estimate(st.fixed_raw + self.messages_raw(st));
         let hook = self
             .run_hook(
@@ -593,6 +646,7 @@ impl Harness {
             let streamed = match self.stream_once(task, agent, &turn, &req).await {
                 Ok(s) => s,
                 Err(StreamFail::Cancelled) => return AgentEnd::Cancelled,
+                Err(StreamFail::Budget(k)) => return AgentEnd::Budget(k),
                 Err(StreamFail::Provider(e)) => {
                     if agent.cancel.is_cancelled() || e.kind == ErrorKind::Cancelled {
                         return AgentEnd::Cancelled;
@@ -608,8 +662,8 @@ impl Harness {
                             context_overflow: e.context_overflow(),
                         },
                     );
-                    if e.context_overflow() && !st.compacted {
-                        st.compacted = true;
+                    if e.context_overflow() && st.overflow_compactions < MAX_OVERFLOW_COMPACTIONS {
+                        st.overflow_compactions += 1;
                         match self.compact_history(task, agent, st, "overflow", "").await {
                             Ok(_) => continue,
                             Err(why) => {
@@ -788,6 +842,11 @@ pub(crate) fn tool_status_for(is_error: bool, soft: bool) -> ToolStatus {
         (true, false) => ToolStatus::Error,
     }
 }
+
+/// Reactive compactions allowed per task.
+const MAX_OVERFLOW_COMPACTIONS: u8 = 3;
+/// Decoded image bytes one request may carry (newest first); well under common gateway limits.
+const REQUEST_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Replaces images (attached by the person or returned in a tool result) by the text `[image]` in a
 /// request copy (the history keeps them); returns how many.

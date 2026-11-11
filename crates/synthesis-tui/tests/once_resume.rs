@@ -88,6 +88,7 @@ fn once_is_render_frame_plus_the_status_line() {
         ctx_pct: None,
         waiting: false,
         mode: Some("default".into()),
+        title: String::new(),
     }];
     let key = workspace_key(&o.cwd);
     let ws = [Workspace {
@@ -110,6 +111,7 @@ fn once_is_render_frame_plus_the_status_line() {
         usage: &usage,
         follow: false,
         history: &[],
+        history_loading: false,
         usage_metric: "tokens",
         mcp_servers: &[],
         mcp_live: None,

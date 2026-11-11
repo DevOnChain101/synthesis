@@ -71,7 +71,7 @@ mod automode_defaults;
 pub mod bash;
 pub mod paths;
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 use synthesis_core::PathPolicy;
@@ -101,6 +101,12 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "ExitPlanMode",
 ];
 const EDIT_TOOLS: &[&str] = &["Write", "Edit", "MultiEdit", "NotebookEdit"];
+/// Programs that read their file operands (a secret among them is asked about).
+const READERS: &[&str] = &[
+    "cat", "head", "tail", "less", "more", "grep", "egrep", "fgrep", "rg", "sed", "awk", "gawk",
+    "nl", "tac", "od", "xxd", "hexdump", "strings", "cut", "sort", "uniq", "wc", "diff", "cmp",
+    "bat", "cp", "mv", "tee", "source", ".", "base64", "paste", "fold",
+];
 const PATH_TOOLS: &[&str] = &[
     "Read",
     "Write",
@@ -331,6 +337,47 @@ pub struct Env {
     pub project_root: Option<PathBuf>,
     /// Memory authorship (see [`NoteOracle`]); `None` = no store, so every note asks.
     pub memory_notes: Option<NoteOracle>,
+}
+
+/// `/proc/...` and `/dev/fd/...` (also `/dev/fd` itself), by their spelling.
+fn is_proc_path(p: &Path) -> bool {
+    let mut c = p.components().skip(1).map(|c| c.as_os_str());
+    match c.next().and_then(|x| x.to_str()) {
+        Some("proc") => true,
+        Some("dev") => c.next().and_then(|x| x.to_str()) == Some("fd"),
+        _ => false,
+    }
+}
+
+/// A `..` that follows a symlinked component of `op`: the shell steps back physically (out of the
+/// link's target), the lexical normalisation steps back in the spelling. Not resolvable then.
+fn dotdot_after_link(base: &Path, op: &str) -> bool {
+    let op = Path::new(op);
+    let mut cur = if op.is_absolute() {
+        PathBuf::new()
+    } else {
+        base.to_path_buf()
+    };
+    let mut linked: Vec<bool> = Vec::new();
+    for c in op.components() {
+        match c {
+            Component::ParentDir => {
+                if linked.iter().any(|&l| l) {
+                    return true;
+                }
+                linked.pop();
+                cur.pop();
+            }
+            Component::CurDir => {}
+            c => {
+                cur.push(c);
+                linked.push(
+                    std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink()),
+                );
+            }
+        }
+    }
+    false
 }
 
 impl Env {
@@ -624,6 +671,18 @@ impl Permissions {
         &self.rules
     }
 
+    /// `Tool` or `Tool(content)`: the shape `--allow` / `--deny` and `/permissions allow` accept.
+    pub fn is_well_formed_rule(r: &str) -> bool {
+        let name = r.split('(').next().unwrap_or("");
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+            && (r.len() == name.len() || r.ends_with(')'))
+            && r.len() <= 2000
+            && !r.chars().any(char::is_control)
+    }
+
     /// Adds a session-only allow rule typed by the user; `false` if it was already there.
     pub fn add_allow(&mut self, rule: &str) -> bool {
         let new = !self.rules.allow.iter().any(|r| r == rule);
@@ -815,6 +874,69 @@ impl Permissions {
         None
     }
 
+    /// Read/Grep/Glob aimed at a secret file (`.env`, keys, ...): the `path`, a Grep `glob` or a Glob
+    /// `pattern` that names one or could match one (`.env*`, `*.pem`), by name or through a link.
+    fn names_secret_file(&self, tool: &str, input: &Value) -> bool {
+        use synthesis_core::secrets::{is_secret_path, names_secret};
+        if !OUTSIDE_READ_TOOLS.contains(&tool) {
+            return false;
+        }
+        let field = if tool == "Read" { "file_path" } else { "path" };
+        let by_pattern = match tool {
+            "Grep" => non_empty(input, "glob"),
+            "Glob" => non_empty(input, "pattern"),
+            _ => None,
+        };
+        by_pattern.is_some_and(names_secret)
+            || non_empty(input, field).is_some_and(|t| {
+                let abs = paths::resolve(&self.env.cwd, t);
+                [Some(paths::lexical_normalize(&abs)), paths::real_of(&abs)]
+                    .into_iter()
+                    .flatten()
+                    .any(|c| is_secret_path(&c))
+            })
+    }
+
+    /// A read-only (or auto-safe) command, or a known reader, with an operand that names a secret file or could match
+    /// one, lexically or through a link: `cat .env`, `head -1 .e*`, `grep x *.pem`. Other commands
+    /// are not scanned (a `git add .env` is not a read; the sandbox is the real boundary).
+    fn bash_reads_secret(&self, cmd: &str) -> bool {
+        let all_safe = self.bash_safe(cmd, true);
+        let Some(segs) = bash::deep_segments(cmd, 0) else {
+            return false;
+        };
+        let mut bases = vec![self.env.cwd.clone()];
+        for seg in segs {
+            let w = bash::unwrap_words(&seg, true);
+            let prog = paths::basename(w.first().map_or("", String::as_str), self.policy());
+            if prog == "cd" {
+                self.widen_bases(&mut bases, w.get(1));
+            }
+            if !all_safe && !READERS.contains(&prog) {
+                continue;
+            }
+            for word in &seg {
+                let bare = word.rsplit(['<', '>']).next().unwrap_or(word);
+                let val = bare.rsplit_once('=').map(|(_, v)| v);
+                for t in [word.as_str(), bare].into_iter().chain(val) {
+                    if synthesis_core::secrets::names_secret(t) {
+                        return true;
+                    }
+                    if !t.contains(['$', '`', '*', '?', '[']) {
+                        for b in &bases {
+                            if let Some((p, _)) = self.resolve_operand(t, b)
+                                && paths::real_of(&p).is_some_and(|r| secret_shaped(&r))
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// ANY rule matches (deny/ask). Bash: ANY sub-command against ANY rule.
     fn some_match(&self, rules: &[String], tool: &str, input: &Value) -> bool {
         if tool == "Bash" {
@@ -833,6 +955,21 @@ impl Permissions {
         rules
             .iter()
             .any(|r| self.matches_rule(r, tool, input, false))
+    }
+
+    /// Like `allow_match` but only rules that name something: a tool-wide rule (`Read`, `Bash`,
+    /// `Read(*)`, `Bash(cat:*)`) does not count. Used where the person must decide per path.
+    fn specific_allow(&self, mode: Mode, tool: &str, input: &Value) -> bool {
+        let rules: Vec<String> = self
+            .allow_rules(mode)
+            .into_iter()
+            .filter(|r| match bash::parse_rule(r) {
+                ("Bash", Some(s)) => !s.contains('*'),
+                (_, Some(s)) => !s.trim_matches(['/', '*', '.', '?']).is_empty(),
+                _ => false,
+            })
+            .collect();
+        self.allow_match(&rules, tool, input)
     }
 
     /// Allow rules in force: while in auto the broad ones are left out (suspended, not deleted).
@@ -882,19 +1019,23 @@ impl Permissions {
             .any(|r| paths::within(r, &abs, self.policy()))
     }
 
-    /// Inside cwd/additional dirs lexically AND after resolving links.
+    /// Inside cwd/additional dirs after resolving links on both sides.
     fn in_scope(&self, p: &Path) -> bool {
         let Some(rp) = paths::real_of(p) else {
             return false;
         };
+        // the child, not synt, interprets these (`/proc/self/cwd`, `/dev/fd/N`): never inside
+        if is_proc_path(p) || is_proc_path(&rp) {
+            return false;
+        }
         self.roots().iter().any(|r| {
-            paths::within(r, p, self.policy())
-                && !paths::win_unsafe(&paths::relative(r, p), self.policy())
-                && paths::within(
-                    &paths::real_of(r).unwrap_or_else(|| r.clone()),
-                    &rp,
-                    self.policy(),
-                )
+            // Compared as realpaths only, so `/tmp/ws/x` and `/private/tmp/ws/x` are the same
+            // place; a link leading outside resolves outside. Unresolvable = outside.
+            let rr = paths::real_of(r).unwrap_or_else(|| r.clone());
+            paths::within(&rr, &rp, self.policy())
+                && !paths::win_unsafe(&paths::relative(&rr, &rp), self.policy())
+                && !(paths::within(r, p, self.policy())
+                    && paths::win_unsafe(&paths::relative(r, p), self.policy()))
         })
     }
 
@@ -933,8 +1074,12 @@ impl Permissions {
         outside
     }
 
+    /// For writes: inside after links, and not a hard-linked file (its other name may be outside).
     fn path_inside_allowed(&self, tool: &str, input: &Value) -> bool {
-        path_of(tool, input).is_some_and(|fp| self.in_scope(&paths::resolve(&self.env.cwd, fp)))
+        path_of(tool, input).is_some_and(|fp| {
+            let abs = paths::resolve(&self.env.cwd, fp);
+            self.in_scope(&abs) && paths::hard_links(&abs).is_none()
+        })
     }
 
     // --- protected and critical paths ------------------------------------------------------
@@ -1177,6 +1322,9 @@ impl Permissions {
         if g.is_some() && op[dir.len()..].starts_with('.') {
             return None;
         }
+        if dotdot_after_link(base, dir) {
+            return None;
+        }
         Some((
             paths::resolve(base, if dir.is_empty() { "." } else { dir }),
             g.is_some(),
@@ -1192,11 +1340,13 @@ impl Permissions {
             bash::is_read_only_simple(w)
         };
         // echo only prints: its words are text, not paths
-        ok && (w[0] == "echo"
-            || w[1..].iter().filter(|a| !a.starts_with('-')).all(|a| {
-                base.and_then(|b| self.resolve_operand(a, b))
-                    .is_some_and(|(p, _)| self.in_scope(&p))
-            }))
+        // base `None` = an earlier `cd` went somewhere unknown or outside: even operand-less runs there
+        ok && base.is_some()
+            && (w[0] == "echo"
+                || w[1..].iter().filter(|a| !a.starts_with('-')).all(|a| {
+                    base.and_then(|b| self.resolve_operand(a, b))
+                        .is_some_and(|(p, _)| self.in_scope(&p))
+                }))
     }
 
     /// Working directory after a simple command (`cd` moves it).
@@ -1204,13 +1354,22 @@ impl Permissions {
         if seg[0] != "cd" {
             return base;
         }
-        match seg.len() {
-            2 => base
+        let to = match seg.len() {
+            2 if seg[1] != "-" => base
                 .as_deref()
                 .and_then(|b| self.resolve_operand(&seg[1], b))
                 .map(|(p, _)| p),
+            2 => None,
             _ => Some(self.env.home.clone()),
-        }
+        }?;
+        // Outside the workspace, or through a link inside it (a later `..` would step back
+        // physically, not in the spelling): unresolvable, so the command asks.
+        let roots = self.roots();
+        let linked = to
+            .ancestors()
+            .take_while(|a| !roots.iter().any(|r| r.starts_with(a)))
+            .any(|a| std::fs::symlink_metadata(a).is_ok_and(|m| m.file_type().is_symlink()));
+        (self.in_scope(&to) && !linked).then_some(to)
     }
 
     /// Every segment passes `seg_safe` (tracking `cd`); the scoped `is_read_only_bash` /
@@ -1266,6 +1425,48 @@ impl Permissions {
                         .is_some_and(|(p, _)| self.is_protected(&p))
                 })
             }) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Does the command write (redirect, `tee`, `sed -i`, `cp`/`mv`/`ln`/`dd of=` ... operands;
+    /// over-approximate: a source operand counts too) an existing file with more than one hard link?
+    fn bash_writes_hard_link(&self, cmd: &str) -> bool {
+        const WRITERS: &[&str] = &["tee", "install", "ln", "truncate", "chmod", "chown", "dd"];
+        let Some(segs) = bash::deep_segments(cmd, 0) else {
+            return false; // unparsable: the other rules already ask
+        };
+        let mut bases = vec![self.env.cwd.clone()];
+        for seg in segs {
+            let w = bash::unwrap_words(&seg, true);
+            let name = paths::basename(w.first().map_or("", String::as_str), self.policy());
+            let mut ops = bash::redirect_targets(&seg);
+            if name == "cd" {
+                self.widen_bases(&mut bases, w.get(1));
+            } else if (bash::FS_CMDS.contains(&name) || WRITERS.contains(&name))
+                // removing a name leaves the other inode alone
+                && !matches!(name, "rm" | "rmdir")
+            {
+                let mut args: Vec<String> = w[1..]
+                    .iter()
+                    .filter(|a| !a.starts_with('-'))
+                    .map(|a| a.strip_prefix("of=").unwrap_or(a).to_string())
+                    .collect();
+                // a rename replaces the destination's directory entry, not its inode
+                if name == "mv" {
+                    args.pop();
+                }
+                ops.extend(args);
+            }
+            let hit = ops.iter().any(|o| {
+                bases.iter().any(|b| {
+                    self.resolve_operand(o, b)
+                        .is_some_and(|(p, wild)| !wild && paths::hard_links(&p).is_some())
+                })
+            });
+            if hit {
                 return true;
             }
         }
@@ -1346,11 +1547,6 @@ impl Permissions {
     /// `patch`, `git checkout`, `perl -pi` ...).
     fn bash_paths_denied(&self, cmd: &str, write: bool) -> bool {
         const WRITERS: &[&str] = &["tee", "install", "ln", "truncate", "dd"];
-        const READERS: &[&str] = &[
-            "cat", "head", "tail", "less", "more", "grep", "egrep", "fgrep", "rg", "sed", "awk",
-            "gawk", "nl", "tac", "od", "xxd", "hexdump", "strings", "cut", "sort", "uniq", "wc",
-            "diff", "cmp", "bat", "cp", "mv", "tee", "source", ".", "base64", "paste", "fold",
-        ];
         // programs that never write their operands (`sort -o`, `awk -i inplace` are checked apart)
         const HARMLESS: &[&str] = &[
             "echo", "printf", "ls", "pwd", "true", "false", "test", "[", "[[", "stat", "file",
@@ -1532,13 +1728,10 @@ impl Permissions {
             let w = bash::unwrap_words(&seg, false);
             let name = w.first().map_or("", String::as_str);
             if name == "cd" {
-                base = match w.len() {
-                    1 => Some(self.env.home.clone()),
-                    2 => base
-                        .as_deref()
-                        .and_then(|b| self.resolve_operand(&w[1], b))
-                        .map(|(p, _)| p),
-                    _ => None,
+                base = if w.len() > 2 {
+                    None
+                } else {
+                    self.after_cd(&w, base.take())
                 };
                 continue;
             }
@@ -1805,12 +1998,52 @@ impl Permissions {
             return r;
         }
 
+        // a secret file (`.env`, keys) is the person's call, also through a read-only command, a
+        // search `glob` or a wildcard; only an allow rule or bypassPermissions skips the question
+        // (only a rule that names the path lifts it, never a tool-wide one: `Read`, `Bash(cat:*)`)
+        if (self.names_secret_file(tool, input)
+            || (tool == "Bash" && self.bash_reads_secret(bash_cmd)))
+            && !self.specific_allow(mode, tool, input)
+        {
+            return match mode {
+                Mode::DontAsk | Mode::Plan => {
+                    v(Deny, format!("{} mode: reads a secret file", mode.as_str()))
+                }
+                _ => v(Ask, "reads a secret file (.env, key, credentials)"),
+            };
+        }
+
+        // a write through a hard link in the workspace changes a file whose other name may be
+        // outside it; the sandbox checks paths, not link counts (bypassPermissions skips this)
+        if tool == "Bash"
+            && self.bash_writes_hard_link(bash_cmd)
+            && !self.specific_allow(mode, tool, input)
+        {
+            return match mode {
+                Mode::DontAsk | Mode::Plan => v(
+                    Deny,
+                    format!("{} mode: writes through a hard link", mode.as_str()),
+                ),
+                _ => v(
+                    Ask,
+                    "writes a file with several hard links (another name may be outside the workspace)",
+                ),
+            };
+        }
+
         if mode == Mode::Plan {
             if EDIT_TOOLS.contains(&tool) {
                 return v(Deny, "plan mode: read-only");
             }
             if tool == "Bash" && self.bash_safe(bash_cmd, false) {
                 return v(Allow, "plan mode: read-only command");
+            }
+            // plan is read-only: the judge (`useAutoModeDuringPlan`) is only ever asked about reads
+            if tool == "Bash"
+                || !(READ_ONLY_TOOLS.contains(&tool)
+                    || matches!(tool, "WebFetch" | "WebSearch" | "SendMessage"))
+            {
+                return v(Deny, "plan mode: read-only (only read-only calls run)");
             }
         }
 
@@ -1819,8 +2052,15 @@ impl Permissions {
             return self.protected_path_decision(mode);
         }
 
-        // explicit allow rules always win once we're past deny/ask.
+        // explicit allow rules always win once we're past deny/ask, except in plan mode, where
+        // they apply to read-only calls only (a read-only Bash command was allowed above)
         if self.allow_match(&self.allow_rules(mode), tool, input) {
+            if mode == Mode::Plan
+                && !READ_ONLY_TOOLS.contains(&tool)
+                && !matches!(tool, "WebFetch" | "WebSearch")
+            {
+                return v(Deny, "plan mode: read-only (an allow rule does not apply)");
+            }
             return v(Allow, "matched an allow rule");
         }
 
@@ -1903,15 +2143,32 @@ impl Permissions {
                     format!("{} mode: path inside workspace", mode.as_str()),
                 );
             }
+            let hard = fp
+                .filter(|f| self.lex_inside(f))
+                .and_then(|f| paths::hard_links(&paths::resolve(&self.env.cwd, f)));
             if auto {
                 // inside by name but not after resolving links: the user decides, not the classifier
                 if fp.is_some_and(|f| self.lex_inside(f)) {
+                    if let Some(n) = hard {
+                        return v(
+                            Ask,
+                            format!(
+                                "file has {n} hard links (another name may be outside the workspace)"
+                            ),
+                        );
+                    }
                     return v(Ask, "path resolves outside the workspace (link)");
                 }
                 return v(Classify, "edit outside the workspace: classifier review");
             }
             if mode == Mode::DontAsk {
                 return v(Deny, "dontAsk mode");
+            }
+            if let Some(n) = hard {
+                return v(
+                    Ask,
+                    format!("file has {n} hard links; writing changes every path that shares it"),
+                );
             }
             return v(Ask, "edit tool requires confirmation");
         }
@@ -1928,11 +2185,13 @@ impl Permissions {
             {
                 let mut base = Some(self.env.cwd.clone());
                 let rules = self.allow_rules(mode);
-                if bash::bash_all_match_or(&rules, bash_cmd, |seg| {
-                    let ok = self.seg_safe(seg, base.as_deref(), false);
-                    base = self.after_cd(seg, base.take());
-                    ok
-                }) {
+                if mode != Mode::Plan
+                    && bash::bash_all_match_or(&rules, bash_cmd, |seg| {
+                        let ok = self.seg_safe(seg, base.as_deref(), false);
+                        base = self.after_cd(seg, base.take());
+                        ok
+                    })
+                {
                     return v(Allow, "matched an allow rule; other parts are read-only");
                 }
             }
@@ -1987,6 +2246,27 @@ impl Permissions {
                 behavior: Decision::Allow,
             }]
         };
+        // a secret file is the person's call each time: offer a rule for that path only
+        if self.names_secret_file(tool, input) {
+            let field = if tool == "Read" { "file_path" } else { "path" };
+            let abs = non_empty(input, field).map(|t| {
+                paths::lexical_normalize(&paths::resolve(&self.env.cwd, t))
+                    .to_string_lossy()
+                    .into_owned()
+            });
+            return abs
+                .filter(|a| synthesis_core::secrets::is_secret_path(Path::new(a)))
+                .and_then(|a| rule_path(&a, self.policy().windows_separators))
+                .map_or(vec![], |p| add(tool, Some(p)));
+        }
+        if tool == "Bash" && self.bash_reads_secret(command_of(input)) {
+            let cmd = command_of(input).trim();
+            return if exact_unsafe(cmd) || cmd.contains('*') {
+                vec![]
+            } else {
+                add("Bash", Some(cmd.to_string()))
+            };
+        }
         if tool == "Bash" || COMMAND_TOOLS.contains(&tool) {
             let cmd = command_of(input).trim();
             // the rule is a Bash rule: verify_run/terminal_spawn commands are judged as Bash
@@ -2079,6 +2359,24 @@ impl Permissions {
         }
         mode
     }
+}
+
+/// The `//abs` spelling of an absolute path for an allow rule, or `None` when no rule may be
+/// offered: a glob character in the name would make the rule broader than that file, and a UNC
+/// path has no `//` form. On Windows the verbatim prefix (`\\?\C:\x`) is dropped first (its `?` is
+/// not a glob character) and `\` becomes `/`, the spelling the matcher expects (`//C:/x`).
+fn rule_path(abs: &str, windows: bool) -> Option<String> {
+    let p = if windows {
+        let p = abs.strip_prefix(r"\\?\").unwrap_or(abs);
+        if p.starts_with(r"UNC\") || p.starts_with(r"\\") {
+            return None;
+        }
+        p.replace('\\', "/")
+    } else {
+        abs.to_string()
+    };
+    (!p.contains(['*', '?', '[', ']', '{', '}']))
+        .then(|| format!("//{}", p.trim_start_matches('/')))
 }
 
 /// `path.parse(p).root`.

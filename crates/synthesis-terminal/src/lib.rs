@@ -382,13 +382,19 @@ impl ProcessStatus {
             name: self.name.clone(),
             pid: Some(self.pid.into()),
             exit_code: self.exit_code.map(Into::into),
-            signal: self.signal.map(|s| match s {
-                2 => "SIGINT".into(),
-                9 => "SIGKILL".into(),
-                15 => "SIGTERM".into(),
-                n => format!("SIG{n}"),
-            }),
+            signal: self.signal.map(signal_name),
+            ..Default::default()
         }
+    }
+}
+
+/// `SIGKILL` for 9, ... (the `signal` of `process.exited`).
+pub fn signal_name(n: i32) -> String {
+    match n {
+        2 => "SIGINT".into(),
+        9 => "SIGKILL".into(),
+        15 => "SIGTERM".into(),
+        n => format!("SIG{n}"),
     }
 }
 
@@ -464,6 +470,10 @@ impl Proc {
     }
 
     fn signal(&self, sig: Signal) -> Result<()> {
+        // an exited process may have had its pid reused: never signal it
+        if self.poll().is_some() {
+            return Ok(());
+        }
         let mut guard = lock(&self.child);
         let Some(child) = guard.as_mut() else {
             return Ok(());

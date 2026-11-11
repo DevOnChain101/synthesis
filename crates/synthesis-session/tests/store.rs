@@ -310,7 +310,7 @@ fn schema_is_versioned_and_foreign_keys_are_on() {
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(n, 1);
+    assert_eq!(n, synthesis_session::SCHEMA_VERSION_LATEST);
     for t in [
         "sessions",
         "tasks",
@@ -333,7 +333,12 @@ fn schema_is_versioned_and_foreign_keys_are_on() {
         Store::open(&e.home, StoreOptions::default()),
         Err(Error::SchemaTooNew { found: 99, .. })
     ));
-    conn.pragma_update(None, "user_version", 1).unwrap();
+    conn.pragma_update(
+        None,
+        "user_version",
+        synthesis_session::SCHEMA_VERSION_LATEST,
+    )
+    .unwrap();
     Store::open(&e.home, StoreOptions::default()).unwrap();
 }
 
@@ -692,6 +697,13 @@ fn records_tool_calls_processes_approvals_reports_artifacts_checkpoints() {
         .artifact_bytes(&id, cp.files[0].artifact_id.as_ref().unwrap())
         .unwrap();
     assert_eq!(snap, fs::read(d.join("a.txt")).unwrap());
+    // proof for a rewind: the snapshot's hash, and whether the file existed
+    assert_eq!(
+        cp.files[0].artifact_sha256.as_deref(),
+        Some(synthesis_session::file_state_hash(&d.join("a.txt")).as_str())
+    );
+    assert_eq!(cp.files[0].pre_state, cp.files[0].artifact_sha256);
+    assert_eq!(cp.files[1].pre_state.as_deref(), Some("absent"));
     assert_eq!(w.checkpoint(&id, "before-refactor").unwrap(), cp);
     assert_eq!(
         w.get_session(&id).unwrap().checkpoint_id.as_deref(),
@@ -1204,4 +1216,271 @@ fn meta_images_go_too_and_a_log_held_open_by_a_reader_is_reported_not_hidden() {
     // nothing left to do: nothing reported
     let again = store.purge_images(30, now).unwrap();
     assert_eq!((again.images, again.wal_truncated), (0, true));
+}
+
+#[test]
+fn usage_by_day_sums_across_sessions_and_cuts_days_at_the_offset() {
+    use synthesis_events::Usage;
+    let e = env();
+    let (da, db) = (e.dir("a"), e.dir("b"));
+    let turn = |i: u64, o: u64| Event::TurnCompleted {
+        stop_reason: "end_turn".into(),
+        usage: Some(Usage {
+            input_tokens: i,
+            output_tokens: o,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            cost_usd: None,
+        }),
+        duration_ms: 1,
+    };
+    let mut a = create(&e, "sa", &da);
+    let mut b = create(&e, "sb", &db);
+    let s1 = a.append_event(turn(100, 50)).unwrap().seq;
+    let s2 = a.append_event(turn(10, 5)).unwrap().seq;
+    let s3 = a
+        .append_event(Event::UserMessage {
+            text: "hi".into(),
+            display_text: None,
+            images: vec![],
+        })
+        .unwrap()
+        .seq;
+    let s4 = b.append_event(turn(7, 3)).unwrap().seq;
+    drop((a, b));
+    let conn = rusqlite::Connection::open(e.home.join("synt.db")).unwrap();
+    let set = |sid: &str, seq: u64, ts: &str| {
+        conn.execute(
+            "UPDATE events SET ts=?1 WHERE session_id=?2 AND seq=?3",
+            rusqlite::params![ts, sid, seq as i64],
+        )
+        .unwrap();
+    };
+    // day 20513 is 2026-03-01; 23:30Z is already 03-02 at +120 min; 03-02 10:00Z is 03-02 in both
+    set("sa", s1, "2026-03-01T23:30:00.000Z");
+    set("sa", s2, "2026-03-02T10:00:00.000Z");
+    set("sa", s3, "2026-03-02T10:00:01.000Z");
+    set("sb", s4, "2026-03-02T11:00:00.000Z");
+    let r = synthesis_session::Reader::open(&e.home).unwrap();
+    let since = 0;
+    let utc = r.usage_by_day(since, 0).unwrap();
+    assert_eq!(utc.len(), 2);
+    assert_eq!(
+        (utc[0].day, utc[0].tokens, utc[0].sessions),
+        (20513, 150, 1)
+    );
+    assert_eq!(utc[1].day, 20514);
+    assert_eq!((utc[1].tokens, utc[1].output, utc[1].messages), (25, 8, 1));
+    assert_eq!(utc[1].sessions, 2);
+    let east = r.usage_by_day(since, 120).unwrap();
+    assert_eq!(east.len(), 1);
+    assert_eq!(
+        (east[0].day, east[0].tokens, east[0].sessions),
+        (20514, 175, 2)
+    );
+    // `since` cuts older events
+    let late = r.usage_by_day(1_772_445_600_000, 0).unwrap(); // 2026-03-02T10:00Z
+    assert_eq!(late.len(), 1);
+}
+
+#[test]
+fn usage_by_day_classifies_tool_starts() {
+    let e = env();
+    let d = e.dir("a");
+    let mut a = create(&e, "sa", &d);
+    for (i, name) in [
+        "Bash",
+        "Bash",
+        "Edit",
+        "Write",
+        "browser_navigate",
+        "mcp__gh__issue",
+        "Read",
+    ]
+    .iter()
+    .enumerate()
+    {
+        a.append_event(Event::ToolStarted {
+            tool_call_id: format!("t{i}"),
+            name: (*name).into(),
+            side_effect: "read".into(),
+            cwd: ".".into(),
+        })
+        .unwrap();
+    }
+    drop(a);
+    let r = synthesis_session::Reader::open(&e.home).unwrap();
+    let days = r.usage_by_day(0, 0).unwrap();
+    let t = &days[0];
+    assert_eq!(
+        (t.tools, t.commands, t.files, t.browser, t.mcp),
+        (7, 2, 2, 1, 1)
+    );
+}
+
+#[test]
+fn prune_removes_only_old_unlocked_empty_sessions_and_listing_hides_empty_ones() {
+    let e = env();
+    let d = e.dir("w");
+    let store = e.store();
+    let hour = std::time::Duration::from_secs(3600);
+    let now = time::OffsetDateTime::now_utc();
+    let later = now + time::Duration::hours(2);
+    let mut with_msg = create(&e, "with-msg", &d);
+    with_msg
+        .append_message(NewMessage::user(json!("hi")))
+        .unwrap();
+    let mut with_task = create(&e, "with-task", &d);
+    with_task.begin_task("do it", &[]).unwrap();
+    with_task.append_event(notice("n")).unwrap();
+    let _locked = create(&e, "locked", &d);
+    let _current = create(&e, "current", &d);
+    drop(create(&e, "empty", &d));
+    let empty_dir = e.home.join("sessions").join("empty");
+    assert!(empty_dir.exists());
+
+    let r = store.reader().unwrap();
+    let used: Vec<_> = r
+        .list_used_sessions(None)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(used.len(), 2, "{used:?}");
+    assert!(used.contains(&"with-msg".into()) && used.contains(&"with-task".into()));
+
+    // recent: nothing goes
+    assert_eq!(store.prune_empty_sessions("current", hour, now).unwrap(), 0);
+    // old: only the unlocked, non-current, empty one
+    assert_eq!(
+        store.prune_empty_sessions("current", hour, later).unwrap(),
+        1
+    );
+    assert!(!empty_dir.exists());
+    let mut left: Vec<_> = r
+        .list_sessions(None)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    left.sort();
+    assert_eq!(left, ["current", "locked", "with-msg", "with-task"]);
+    assert_eq!(
+        store.prune_empty_sessions("current", hour, later).unwrap(),
+        0
+    );
+}
+
+#[test]
+fn close_hides_a_session_from_the_lists_but_keeps_it_and_its_messages() {
+    let e = env();
+    let d = e.dir("w");
+    let store = e.store();
+    let mut s = create(&e, "to-close", &d);
+    s.append_message(NewMessage::user(json!("hi"))).unwrap();
+    drop(s);
+    let r = store.reader().unwrap();
+    assert_eq!(r.list_used_sessions(None).unwrap().len(), 1);
+    assert!(store.close_session("to-close").unwrap());
+    assert!(!store.close_session("to-close").unwrap(), "already closed");
+    assert!(r.list_used_sessions(None).unwrap().is_empty());
+    assert_eq!(r.list_sessions(None).unwrap().len(), 1);
+    assert_eq!(r.read_messages("to-close").unwrap().len(), 1);
+}
+
+#[test]
+fn close_workspace_closes_the_free_sessions_of_one_folder_only() {
+    let e = env();
+    let (a, b) = (e.dir("a"), e.dir("b"));
+    let store = e.store();
+    let say = |mut w: SessionWriter| {
+        w.append_message(NewMessage::user(json!("hi"))).unwrap();
+        w
+    };
+    for id in ["a-free", "a-done"] {
+        drop(say(create(&e, id, &a)));
+    }
+    drop(say(create(&e, "b-free", &b)));
+    drop(create(&e, "a-empty", &a)); // never used: not listed, not touched
+    assert!(store.close_session("a-done").unwrap());
+    // another live process holds this one (a held writer lock)
+    let _held = say(create(&e, "a-held", &a));
+
+    let in_a = |root: &str| root == a.to_str().unwrap();
+    let r = store.close_workspace(in_a).unwrap();
+    assert_eq!(
+        (r.closed.as_slice(), r.held.as_slice()),
+        (&["a-free".into()][..], &["a-held".into()][..])
+    );
+    assert!(r.failed.is_empty());
+
+    let used: Vec<_> = store
+        .reader()
+        .unwrap()
+        .list_used_sessions(None)
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(used.len(), 2, "{used:?}");
+    assert!(used.contains(&"a-held".into()) && used.contains(&"b-free".into()));
+    // nothing deleted: the closed one still reads and resumes
+    assert_eq!(
+        store
+            .reader()
+            .unwrap()
+            .read_messages("a-free")
+            .unwrap()
+            .len(),
+        1
+    );
+    store.resume_session("a-free", false).unwrap();
+
+    // idempotent: a second call has nothing left but the held one
+    let again = store.close_workspace(in_a).unwrap();
+    assert!(again.closed.is_empty() && again.failed.is_empty());
+    assert_eq!(again.held, ["a-held"]);
+    // once the holder is gone it closes too
+    drop(_held);
+    assert_eq!(store.close_workspace(in_a).unwrap().closed, ["a-held"]);
+}
+
+#[test]
+fn close_workspace_fails_closed_when_the_lock_cannot_be_probed() {
+    let e = env();
+    let a = e.dir("a");
+    let store = e.store();
+    let mut w = create(&e, "a-odd", &a);
+    w.append_message(NewMessage::user(json!("hi"))).unwrap();
+    drop(w);
+    // a lock path that cannot be opened as a file (not "missing"): never read as "free"
+    let lock = e.home.join("sessions").join("a-odd").join("lock");
+    fs::remove_file(&lock).unwrap();
+    fs::create_dir(&lock).unwrap();
+    let r = store.close_workspace(|_| true).unwrap();
+    assert!(r.closed.is_empty() && r.held.is_empty(), "{r:?}");
+    assert_eq!(r.failed.len(), 1, "{r:?}");
+    assert_eq!(
+        store
+            .reader()
+            .unwrap()
+            .list_used_sessions(None)
+            .unwrap()
+            .len(),
+        1
+    );
+    // a missing lock file means nobody holds it
+    fs::remove_dir(&lock).unwrap();
+    assert_eq!(store.close_workspace(|_| true).unwrap().closed, ["a-odd"]);
+}
+
+#[test]
+fn set_title_replaces_the_title_and_the_list_shows_it() {
+    let e = env();
+    let mut w = create(&e, "s-title", &e.dir("w"));
+    assert_eq!(w.get_session("s-title").unwrap().title, None);
+    w.set_title("Fix the build").unwrap();
+    w.set_title("Renamed").unwrap();
+    let listed = w.list_sessions(None).unwrap();
+    assert_eq!(listed[0].title.as_deref(), Some("Renamed"));
 }

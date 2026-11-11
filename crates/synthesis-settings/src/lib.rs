@@ -106,6 +106,8 @@ pub struct SynthesisSettings {
     /// `browser` (docs/BROWSER-LOGIN.md): secrets, login timeout, profile domains. The user's own
     /// settings file only; interpreted by `synthesis-browser` / `synthesis-app`.
     pub browser: Map<String, Value>,
+    /// `modelInfo.fetch` (user settings only): `Some(false)` turns the startup model-info fetch off.
+    pub model_info_fetch: Option<bool>,
     pub compat: Compat,
 }
 
@@ -240,7 +242,8 @@ pub fn load_settings_with_file(
     load_settings_layers(ctx, trust, &managed_settings_path(), extra)
 }
 
-fn load_settings_layers(
+/// All layers with an explicit managed file and an optional `--settings` file.
+pub fn load_settings_layers(
     ctx: &LoadContext<'_>,
     trust: ProjectTrust,
     managed: &Path,
@@ -549,7 +552,7 @@ mod tmp_tests {
 }
 
 /// `Ok(None)`: no such file. `Err`: it exists but is unusable (names the file, never a value).
-fn read_json(path: &Path, what: &str) -> Result<Option<Value>, String> {
+pub fn read_json(path: &Path, what: &str) -> Result<Option<Value>, String> {
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -789,6 +792,19 @@ impl Settings {
                 ));
             }
         }
+        if let Some(m) = n.get("modelInfo") {
+            if what != "user settings" {
+                self.diagnostics.push(format!(
+                    "{what}: synt.modelInfo is read from user settings only, ignored"
+                ));
+            } else if let Some(f) = m.get("fetch").and_then(Value::as_bool) {
+                self.synthesis.model_info_fetch = Some(f);
+            } else if m.get("fetch").is_some() {
+                self.diagnostics.push(format!(
+                    "{what}: synt.modelInfo.fetch must be true or false"
+                ));
+            }
+        }
         let num = |o: Option<&Value>, k: &str| o.and_then(|b| b.get(k)).and_then(Value::as_u64);
         let b = n.get("budget").filter(|b| b.is_object());
         let t = &mut self.synthesis.budget;
@@ -810,13 +826,27 @@ impl Settings {
 
 // ---------------------------------------------------------------- synt.tui (USER file only)
 
-/// Panels of the dash sidebar that can be switched off (Workspace, Running sessions and the chat
-/// are always on).
-pub const TUI_PANELS: [(&str, &str); 4] = [
+/// Panels of the dash that can be switched off (Workspace, Running sessions and the chat are
+/// always on). The desktop app maps the same keys onto the panels of its `cli.html` layout (the label
+/// names that panel); the keys never change, so no settings.json breaks.
+pub const TUI_PANELS: [(&str, &str); 8] = [
     ("session", "Session info (model, mode, effort, cwd, uptime)"),
-    ("mcp", "MCP servers"),
+    (
+        "mcp",
+        "MCP servers (terminal TUI; the desktop shows them in Topology and Tools & Skills)",
+    ),
     ("tools", "Tools & Skills used in this session"),
-    ("activity", "Activity feed"),
+    (
+        "activity",
+        "Activity feed (desktop: Recent Activity, with the latest user prompt)",
+    ),
+    (
+        "status",
+        "Status box above the chat (desktop: Mission, the agent's task list, shown only while it has one)",
+    ),
+    ("tokens", "Tokens box above the chat (desktop: Context)"),
+    ("topology", "Topology graph (right column)"),
+    ("usage", "Usage history (desktop: Usage & Metrics)"),
 ];
 
 /// `synt.tui` of the USER settings.json: what the interactive app shows and how it behaves.
@@ -824,11 +854,14 @@ pub const TUI_PANELS: [(&str, &str); 4] = [
 /// set it (a diagnostic says so).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TuiSettings {
-    /// `[session, mcp, tools, activity]`: shown.
-    pub panels: [bool; 4],
+    /// One flag per `TUI_PANELS` entry, in that order: shown.
+    pub panels: [bool; 8],
     /// `logo`: `art` (the braille symbol on the welcome) or `off`.
     pub logo: bool,
     pub show_thinking: bool,
+    /// Also draw the internal rows (memory, mode, permission and sub-agent bookkeeping) as one
+    /// readable line each; they are always in the event log.
+    pub verbose: bool,
     /// Long tool output, code and diffs start expanded (what ctrl+o toggles).
     pub diffs_expanded: bool,
     /// The `queued: ...` lines above the prompt while a task runs.
@@ -839,19 +872,30 @@ pub struct TuiSettings {
     pub mouse_capture: bool,
     /// Drag-select copies when the button is released.
     pub copy_on_select: bool,
+    /// Desktop app: opacity of the window's backgrounds in percent, `TUI_OPACITY_MIN` to 100. Text stays opaque.
+    pub opacity: u8,
+    /// Desktop app: blur what is behind the window (only visible below 100 % opacity, and only where the
+    /// platform supports it).
+    pub blur: bool,
 }
+
+/// Lowest `synt.tui.opacity`: under it the window is too faint to read.
+pub const TUI_OPACITY_MIN: u8 = 30;
 
 impl Default for TuiSettings {
     fn default() -> Self {
         Self {
-            panels: [true; 4],
+            panels: [true; 8],
             logo: true,
             show_thinking: true,
+            verbose: false,
             diffs_expanded: false,
             queue_indicators: true,
             motion: true,
             mouse_capture: true,
             copy_on_select: true,
+            opacity: 100,
+            blur: false,
         }
     }
 }
@@ -875,11 +919,25 @@ impl TuiSettings {
             Some(_) => diags.push(format!("synt.tui.{key} must be true or false, kept")),
         };
         flag("show_thinking", &mut s.show_thinking);
+        flag("verbose", &mut s.verbose);
         flag("diffs_expanded", &mut s.diffs_expanded);
         flag("queue_indicators", &mut s.queue_indicators);
         flag("motion", &mut s.motion);
         flag("mouse_capture", &mut s.mouse_capture);
         flag("copy_on_select", &mut s.copy_on_select);
+        flag("blur", &mut s.blur);
+        match tui.get("opacity") {
+            None => {}
+            Some(v) => match v
+                .as_u64()
+                .filter(|n| (u64::from(TUI_OPACITY_MIN)..=100).contains(n))
+            {
+                Some(n) => s.opacity = n as u8,
+                None => diags.push(format!(
+                    "synt.tui.opacity must be a whole number from {TUI_OPACITY_MIN} to 100, kept"
+                )),
+            },
+        }
         match tui.get("logo").map(Value::as_str) {
             None => {}
             Some(Some("art")) => s.logo = true,
@@ -907,11 +965,14 @@ impl TuiSettings {
                 "panels",
                 "logo",
                 "show_thinking",
+                "verbose",
                 "diffs_expanded",
                 "queue_indicators",
                 "motion",
                 "mouse_capture",
                 "copy_on_select",
+                "opacity",
+                "blur",
             ]
             .contains(&k.as_str())
             {
@@ -932,11 +993,14 @@ impl TuiSettings {
             "panels": panels,
             "logo": if self.logo { "art" } else { "off" },
             "show_thinking": self.show_thinking,
+            "verbose": self.verbose,
             "diffs_expanded": self.diffs_expanded,
             "queue_indicators": self.queue_indicators,
             "motion": self.motion,
             "mouse_capture": self.mouse_capture,
             "copy_on_select": self.copy_on_select,
+            "opacity": self.opacity,
+            "blur": self.blur,
         })
     }
 }

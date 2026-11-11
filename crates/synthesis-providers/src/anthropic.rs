@@ -86,6 +86,10 @@ pub fn build_body(req: &Request) -> Value {
         }
         _ => {}
     }
+    // Anthropic's effort parameter (`output_config.effort`)
+    if let Some(e) = req.reasoning_effort.as_ref().filter(|e| !e.is_empty()) {
+        body.insert("output_config".into(), json!({"effort": e}));
+    }
     Value::Object(body)
 }
 

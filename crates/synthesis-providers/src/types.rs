@@ -159,7 +159,7 @@ pub struct Request {
     /// Anthropic extended thinking. Suppresses `temperature`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfig>,
-    /// OpenAI `reasoning_effort`; set only for models that report effort tiers.
+    /// The effort tier: OpenAI `reasoning_effort`, Anthropic `output_config.effort`; set only for models that report effort tiers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
 }

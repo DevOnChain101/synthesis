@@ -61,6 +61,8 @@ pub struct Screen<W: Write> {
     /// Post-processes each encoded line (OSC 8 hyperlinks); the row cache compares the plain lines.
     linker: Option<Linker>,
     mouse: bool,
+    /// Adopted screen: the first full frame overwrites every row instead of clearing first.
+    adopted: bool,
 }
 
 pub type Linker = Box<dyn Fn(&str) -> String + Send>;
@@ -71,6 +73,7 @@ impl<W: Write> Screen<W> {
             out,
             color_mode,
             prev: Vec::new(),
+            adopted: false,
             cols: 0,
             rows: 0,
             active: false,
@@ -111,6 +114,15 @@ impl<W: Write> Screen<W> {
             self.enter_seq()
         )?;
         self.out.flush()
+    }
+
+    /// Takes over a terminal that is already in the app's screen mode (a guard held across a
+    /// restart): nothing is written, the next draw is a full frame that paints over the old one
+    /// (no clear, so no blank flash).
+    pub fn adopt(&mut self) {
+        self.active = true;
+        self.adopted = true;
+        self.invalidate();
     }
 
     pub fn set_title(&mut self, title: &str) -> io::Result<()> {
@@ -181,7 +193,9 @@ impl<W: Write> Screen<W> {
             self.cols = cols;
             self.rows = rows;
             full = true;
-            buf.push_str("\x1b[2J\x1b[H");
+            if !std::mem::take(&mut self.adopted) {
+                buf.push_str("\x1b[2J\x1b[H");
+            }
         } else if self.force_next > 0 {
             full = true;
         }
@@ -275,6 +289,20 @@ mod tests {
         assert!(take(&mut s).contains("\x1b[2J\x1b[H"));
         s.resize().unwrap();
         assert!(take(&mut s).contains("\x1b[2J\x1b[3J\x1b[H"));
+    }
+
+    #[test]
+    fn an_adopted_screen_paints_a_full_frame_without_clearing() {
+        let mut s = screen();
+        s.adopt();
+        s.draw(&["aaa".into()], 3, 1).unwrap();
+        let t = take(&mut s);
+        assert!(
+            t.contains("\x1b[1;1Haaa") && !t.contains("\x1b[2J"),
+            "{t:?}"
+        );
+        s.draw(&["aaa".into()], 4, 1).unwrap(); // a later size change clears as usual
+        assert!(take(&mut s).contains("\x1b[2J\x1b[H"));
     }
 
     #[test]

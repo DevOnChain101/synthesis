@@ -368,6 +368,14 @@ fn clean(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).take(120).collect()
 }
 
+/// An id, key or instance that is safe inside an address: ASCII letters, digits, `-` and `_`.
+pub fn is_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// `run/<session_id>.json` (B4).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -445,7 +453,10 @@ pub fn read_entries(run_dir: &Path) -> Vec<Entry> {
         .filter(|f| f.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|f| serde_json::from_slice::<Entry>(&std::fs::read(f.path()).ok()?).ok())
         .filter(|e| e.v == 1)
+        // ids and keys end up inside addresses a person may edit or send to: no blanks, controls or `/`
+        .filter(|e| is_token(&e.session_id) && is_token(&e.workspace_key))
         .map(|mut e| {
+            e.workspace_label = clean(&e.workspace_label);
             // a registry file is written by any same-user process: bound what is shown from it
             e.about = e.about.as_deref().map(clean);
             e.session_name = e.session_name.as_deref().map(clean);

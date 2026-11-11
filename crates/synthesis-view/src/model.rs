@@ -5,7 +5,7 @@
 //! Shortcut: `serde_json` keeps object keys sorted, Node keeps insertion order; this only
 //! matters for `summarize_tool`'s "first string input" fallback and `serde_json::to_string`.
 
-use crate::util::{basename, short};
+use crate::text::{basename, short};
 use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -146,6 +146,8 @@ pub struct FeedItem {
     pub ts: Option<i64>,
     pub kind: &'static str,
     pub text: String,
+    /// A prompt row: index of the chat item that holds it (set by the host, which owns the chat).
+    pub anchor: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -191,6 +193,10 @@ pub struct Session {
     /// Set after a compaction until the next request reports usage (display only).
     pub context_display_reset: bool,
     pub context_estimated: bool,
+    /// Set by [`Session::settle_replayed`]; a new prompt (live) clears it.
+    pub interrupted: bool,
+    /// Live activity of the Topology nodes (flows and glow).
+    pub pulses: crate::pulse::Pulses,
 }
 
 impl Session {
@@ -413,13 +419,23 @@ fn is_synthetic_prompt(text: &str) -> bool {
 }
 
 fn push_feed(s: &mut Session, ts: Option<i64>, kind: &'static str, text: String) {
-    s.feed.push(FeedItem { ts, kind, text });
+    s.feed.push(FeedItem {
+        ts,
+        kind,
+        text,
+        anchor: None,
+    });
     if s.feed.len() > FEED_LIMIT {
         s.feed.drain(..s.feed.len() - FEED_LIMIT);
     }
 }
 fn push_activity(s: &mut Session, ts: Option<i64>, kind: &'static str, text: String) {
-    s.activity.push(FeedItem { ts, kind, text });
+    s.activity.push(FeedItem {
+        ts,
+        kind,
+        text,
+        anchor: None,
+    });
     if s.activity.len() > FEED_LIMIT {
         s.activity.drain(..s.activity.len() - FEED_LIMIT);
     }
@@ -877,6 +893,34 @@ pub struct PhaseInfo<'a> {
     pub running_agents: Vec<&'a AgentRec>,
 }
 
+impl Session {
+    /// Call once after replaying stored events: nothing is running in this process yet, so a
+    /// tool or agent without an end, or a turn without a stop, was cut short (the process died).
+    /// Returns whether something was open.
+    pub fn settle_replayed(&mut self) -> bool {
+        let at = self.last_activity;
+        let open = session_phase(self, at.unwrap_or(0)).phase != Phase::Idle;
+        for t in self.tools.items.iter_mut().filter(|t| t.end.is_none()) {
+            t.end = at;
+        }
+        for a in self
+            .agents
+            .items
+            .iter_mut()
+            .filter(|a| a.status == "running")
+        {
+            a.end = at;
+            a.status = "interrupted".into();
+        }
+        for c in self.components.items.iter_mut() {
+            c.open = 0;
+        }
+        self.pulses.settle();
+        self.interrupted = open;
+        open
+    }
+}
+
 pub fn session_phase(s: &Session, now: i64) -> PhaseInfo<'_> {
     let running: Vec<&Tool> = s.tools.values().filter(|t| t.end.is_none()).collect();
     let running_agents: Vec<&AgentRec> = s
@@ -885,7 +929,9 @@ pub fn session_phase(s: &Session, now: i64) -> PhaseInfo<'_> {
         .filter(|a| a.status == "running")
         .collect();
     let idle_for = now - s.last_activity.unwrap_or(0);
-    let phase = if !running.is_empty() {
+    let phase = if s.interrupted {
+        Phase::Idle
+    } else if !running.is_empty() {
         Phase::Tool
     } else if !running_agents.is_empty() && idle_for < 10 * 60 * 1000 {
         Phase::Agents
@@ -893,7 +939,8 @@ pub fn session_phase(s: &Session, now: i64) -> PhaseInfo<'_> {
         && s.last_assistant_at.unwrap_or(0) >= s.last_user_at.unwrap_or(0)
     {
         Phase::Idle
-    } else if idle_for < 5 * 60 * 1000 {
+    } else if s.last_user_at.is_some() && idle_for < 5 * 60 * 1000 {
+        // no prompt yet: a fresh session is idle, not thinking
         Phase::Thinking
     } else {
         Phase::Idle
@@ -921,10 +968,11 @@ pub fn entries_from_event(env: &synthesis_events::Envelope) -> Vec<Value> {
             ]
         }
         // a harness note to the model (`display_text: ""`) is not something the person said
-        Event::UserMessage {
-            display_text: Some(d),
-            ..
-        } if d.is_empty() => vec![],
+        Event::UserMessage { display_text, .. }
+            if crate::text::is_harness_note(display_text.as_deref()) =>
+        {
+            vec![]
+        }
         Event::UserMessage {
             text, display_text, ..
         } => vec![json!({
@@ -982,6 +1030,12 @@ pub fn entries_from_event(env: &synthesis_events::Envelope) -> Vec<Value> {
 /// Applies one event; `todo.updated` and `model.changed` set fields directly.
 pub fn apply_event(s: &mut Session, env: &synthesis_events::Envelope) {
     use synthesis_events::Event;
+    if matches!(
+        env.event,
+        Event::UserMessage { .. } | Event::TaskStarted { .. }
+    ) {
+        s.interrupted = false;
+    }
     match &env.event {
         Event::TodoUpdated { todos } => {
             s.todos = todos
@@ -1013,6 +1067,7 @@ pub fn apply_event(s: &mut Session, env: &synthesis_events::Envelope) {
             }
         }
     }
+    s.pulses.apply(env);
     if s.id.is_empty() {
         s.id = env.session_id.clone();
     }

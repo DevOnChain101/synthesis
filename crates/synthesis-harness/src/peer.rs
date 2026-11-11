@@ -16,8 +16,8 @@ use synthesis_events::{Event, PeerAddr, SubagentInfo, TaskStatus};
 use synthesis_peers::address::{candidates, parse, resolve};
 use synthesis_peers::mailbox::{Envelope, MailError, Mailbox, now_s};
 use synthesis_peers::serve::{
-    Answered, BoxFut, Down, Extra, Outgoing, PeerError, Reply, Request, Responder, Server, begin,
-    deliver, discover,
+    Answered, BoxFut, Down, Extra, Outgoing, PeerError, Reply, Request, Responder, Server, ask,
+    begin, deliver, discover,
 };
 use synthesis_peers::{Addr, Config, Entry, Key, Registration, read_entries, remove_entry};
 use synthesis_permissions::Mode;
@@ -140,6 +140,15 @@ pub(crate) struct Origin {
     pub chain: Vec<String>,
 }
 
+/// Removes a `waiting_on` entry when dropped.
+struct WaitGuard(Arc<PeerLink>, String);
+
+impl Drop for WaitGuard {
+    fn drop(&mut self) {
+        lock(&self.0.state).waiting_on.remove(&self.1);
+    }
+}
+
 /// What a session needs to talk to its peers; shared with the server and the sender tasks.
 pub struct PeerLink {
     pub config: Config,
@@ -188,6 +197,8 @@ struct PeerState {
     /// `notify_on_end` requests this session sent and still waits on: request id to the target's
     /// session id (a subscription from that session would be a cycle).
     waiting_on: HashMap<String, String>,
+    /// The user's own `/send` calls waiting for an answer.
+    user_sends: usize,
     /// A delegate worker is running (one at a time per receiver).
     delegating: bool,
     /// What the last task ended with, for `notify_on_end` subscribers (redacted, <= 8 KiB).
@@ -254,6 +265,32 @@ impl PeerLink {
         let mut a = self.me.addr(instance, kind);
         a.agent_id = agent_id;
         a
+    }
+}
+
+/// At most this many `/send` calls wait for an answer at once.
+const MAX_USER_SENDS: usize = 4;
+
+/// One of the user's sends in flight; released when the call ends or is dropped.
+struct UserSend(Arc<PeerLink>);
+
+impl UserSend {
+    fn take(link: &Arc<PeerLink>) -> Result<Self, String> {
+        let mut st = lock(&link.state);
+        if st.user_sends >= MAX_USER_SENDS {
+            return Err(format!(
+                "busy: {MAX_USER_SENDS} of your messages are already waiting for an answer"
+            ));
+        }
+        st.user_sends += 1;
+        Ok(Self(link.clone()))
+    }
+}
+
+impl Drop for UserSend {
+    fn drop(&mut self) {
+        let mut st = lock(&self.0.state);
+        st.user_sends = st.user_sends.saturating_sub(1);
     }
 }
 
@@ -889,6 +926,19 @@ impl Harness {
         self.peers.as_ref().map(|p| p.changed.subscribe())
     }
 
+    /// Why a `SendMessage` to a peer session cannot be sent at all (no session the allow list permits), so the user is not asked to approve a send that is refused afterwards.
+    pub(crate) fn peer_send_refusal(&self, input: &Value) -> Option<String> {
+        let a = parse(input.get("to").and_then(Value::as_str)?)?;
+        let p = self.peers.as_ref().filter(|p| p.on())?;
+        // no session the allow list permits: another workspace needs `synt.peers.allow`
+        match resolve(&p.entries(), &p.config, &p.me.session_id, &a) {
+            Err(e) if e.kind == "not_found" => Some(format!(
+                "{e}; only sessions allowed by synt.peers.allow can be addressed (default: this workspace and its worktrees)"
+            )),
+            _ => None,
+        }
+    }
+
     /// True when `input` is a `SendMessage` to a peer session this session may ask without a
     /// prompt (peers on, `initiate`, target allowed, B7).
     pub(crate) fn peer_preapproved(&self, input: &Value) -> bool {
@@ -964,14 +1014,13 @@ impl Harness {
                     .into(),
             );
         };
-        if !link.config.initiate {
-            return fail("denied: synt.peers.initiate is false".into());
-        }
         let s = |k: &str| input.get(k).and_then(Value::as_str).unwrap_or_default();
         let Some(addr) = parse(s("to")) else {
             return fail("not_found: not a peer address".into());
         };
-        let text = s("message");
+        // Secrets never go on the wire: the receiver's own redactor is not a substitute.
+        let redacted = self.sink.redact(s("message"));
+        let text = redacted.as_str();
         // `thread:true` starts a thread (this side makes the id), `thread_id` continues one.
         let thread_id = match input.get("thread_id").and_then(Value::as_str) {
             Some(t) if synthesis_peers::serve::valid_thread_id(t) => Some(t.to_string()),
@@ -1077,6 +1126,18 @@ impl Harness {
                 sender_mode: if delegate { sender_mode } else { "" },
             },
         };
+        // Registered before the request leaves: the receiver's cycle check (`peer_subscribe_end`)
+        // must see it even while it is still being delivered, or two sessions asking each other
+        // at once both accept and wait for each other.
+        // The guard takes the entry out again however this call ends: an error, a dropped
+        // future (cancel, timeout) or a panic. A leaked entry would make this session refuse
+        // every notify_on_end from that peer as a cycle for the rest of the process.
+        let wait_guard = notify.then(|| {
+            lock(&link.state)
+                .waiting_on
+                .insert(id.clone(), entry.session_id.clone());
+            WaitGuard(link.clone(), id.clone())
+        });
         let call = if offline_card {
             Err(PeerError::Connect)
         } else {
@@ -1123,9 +1184,6 @@ impl Harness {
         {
             let mut st = lock(&link.state);
             st.inflight += 1;
-            if notify {
-                st.waiting_on.insert(id.clone(), entry.session_id.clone());
-            }
         }
         let (sink, l2, cancel) = (
             self.sink.clone(),
@@ -1136,6 +1194,7 @@ impl Harness {
         let tid = thread_id.clone();
         let sink2 = sink.clone();
         tokio::spawn(async move {
+            let _wait = wait_guard; // the task owns the entry from here (also on a panic)
             let partials = Mutex::new(Vec::<String>::new());
             let r = tokio::select! {
                 r = call.wait(|seq, t| {
@@ -1209,6 +1268,111 @@ impl Harness {
         )
     }
 
+    /// A message the user typed (`/send`) to another session's main agent; the reply is returned,
+    /// not queued for the model. The receiver's gates (allow list, permits, rate limit,
+    /// read-only responder, `confirm_replies`) apply unchanged; no delegate, notify or thread.
+    pub async fn peer_ask_user(&self, to: &str, text: &str) -> Result<String, String> {
+        let Some(link) = self.peers.clone().filter(|p| p.on()) else {
+            return Err(
+                "disabled: cross-session messaging is off (start with --peers, or synt.peers.enabled)"
+                    .into(),
+            );
+        };
+        let Some(addr) = parse(to) else {
+            return Err("not_found: not a peer address (ws:<workspace>/sess:<session>)".into());
+        };
+        if addr.instance != MAIN {
+            return Err(format!(
+                "not_found: /send reaches a session's main agent only; drop `agent:{}`",
+                addr.instance
+            ));
+        }
+        // the cap is on what goes on the wire: redaction can make the text longer
+        let masked = self.sink.redact(text);
+        if masked.len() > MAX_BYTES {
+            return Err("too_large: a message is at most 32 KiB".into());
+        }
+        let all = link.entries();
+        let entry = resolve(&all, &link.config, &link.me.session_id, &addr)
+            .map_err(|e| e.to_string())?
+            .clone();
+        if entry.endpoint.is_empty() {
+            return Err("offline: that session has ended".into());
+        }
+        if !synthesis_peers::endpoint_ok(&link.run_dir, &entry.endpoint) {
+            return Err("unreachable: the registry entry names a foreign endpoint".into());
+        }
+        let _slot = UserSend::take(&link)?;
+        // approximate: the redactor does not report its replacements, so the marks are counted
+        let n = masked
+            .matches("[REDACTED")
+            .count()
+            .saturating_sub(text.matches("[REDACTED").count());
+        let text = masked;
+        if n > 0 {
+            self.sink.emit(
+                &Scope::default(),
+                Event::Notice {
+                    level: "info".into(),
+                    text: format!("{n} secret value(s) masked before sending"),
+                },
+            );
+        }
+        let id = uuid();
+        let from = link.addr(MAIN, MAIN, None);
+        let chain = [link.me.session_id.clone()];
+        let scope = Scope::default();
+        self.sink.emit(
+            &scope,
+            Event::PeerRequestSent {
+                request_id: id.clone(),
+                from: ev_addr(&from),
+                to: ev_addr(&entry.addr(MAIN, MAIN)),
+                summary: one_line(&text, 120),
+                bytes: text.len() as u64,
+                chain_len: 1,
+            },
+        );
+        let started = Instant::now();
+        let out = Outgoing {
+            id: &id,
+            from: &from,
+            to_agent: MAIN,
+            text: &text,
+            chain: &chain,
+            timeout_s: REQUEST_TIMEOUT_S,
+            extra: Extra::default(),
+        };
+        let r = ask(&entry.endpoint, &link.key, &out, |_, _| {}).await;
+        let (status, reply) = match r {
+            Ok(f) => (f.status, f.text),
+            Err(PeerError::Rejected(r)) => (
+                "failed".into(),
+                format!("{r}: the peer refused the request"),
+            ),
+            Err(_) => (
+                "failed".into(),
+                "unreachable: the session did not answer".into(),
+            ),
+        };
+        let shown = self.sink.redact(&reply);
+        self.sink.emit(
+            &scope,
+            Event::PeerReply {
+                request_id: id,
+                status: status.clone(),
+                text: shown.chars().take(4096).collect(),
+                bytes: shown.len() as u64,
+                duration_ms: started.elapsed().as_millis() as u64,
+            },
+        );
+        if status == "answered" {
+            Ok(shown)
+        } else {
+            Err(format!("{status}: {shown}"))
+        }
+    }
+
     /// R10c: the target is dead. Store the question in its mailbox; it is answered when the
     /// session starts again, and the reply comes back to this session (or its mailbox).
     #[allow(clippy::too_many_arguments)]
@@ -1269,14 +1433,17 @@ impl Harness {
         agents
             .iter()
             .filter(|a| !only_main || a["instance"] == MAIN)
+            // the instance and kind come from the peer's status frame: only plain tokens are listed
+            .filter(|a| a["instance"].as_str().is_none_or(synthesis_peers::is_token))
             .map(|a| {
-                let ad = entry.addr(a["instance"].as_str().unwrap_or(MAIN), a["kind"].as_str().unwrap_or(""));
+                let kind = a["kind"].as_str().filter(|k| synthesis_peers::is_token(k)).unwrap_or("");
+                let ad = entry.addr(a["instance"].as_str().unwrap_or(MAIN), kind);
                 json!({
                     "address": ad.canonical(),
                     "display": ad.display(),
                     "workspace": {"label": entry.workspace_label, "key": entry.workspace_key, "root": entry.workspace_root},
                     "session": {"short_id": entry.session_id.chars().take(8).collect::<String>(), "name": entry.session_name, "about": entry.about, "status": session_status},
-                    "agent": {"instance": a["instance"], "kind": a["kind"], "status": a["status"], "queued": a["queued"]},
+                    "agent": {"instance": a["instance"], "kind": kind, "status": a["status"], "queued": a["queued"]},
                     "task_summary": a["task_summary"],
                 })
             })

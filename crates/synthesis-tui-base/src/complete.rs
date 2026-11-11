@@ -259,7 +259,14 @@ fn path_item(rel: String, abs: PathBuf, is_dir: bool, order: usize) -> Item {
     Item {
         score: 1.0,
         order,
-        insert: format!("@{rel}{}", if is_dir { "" } else { " " }),
+        // a name with whitespace is written `@"name"` (what `expand_mentions` reads); a folder
+        // keeps the quote open so the person goes on typing inside it
+        insert: match (rel.contains(char::is_whitespace), is_dir) {
+            (true, true) => format!("@\"{rel}"),
+            (true, false) => format!("@\"{rel}\" "),
+            (false, true) => format!("@{rel}"),
+            (false, false) => format!("@{rel} "),
+        },
         label: format!("@{rel}"),
         more: false,
         detail: Detail::Path { abs, is_dir },
@@ -394,6 +401,20 @@ pub fn score(query: &str, target: &str) -> Option<f64> {
 
 /// The token being completed at `cur`, if any.
 pub fn token_at(chars: &[char], cur: usize) -> Option<Token> {
+    // inside an open `@"...` (a folder name with spaces): the token runs from the `@`
+    if let Some(k) = chars[..cur].iter().rposition(|&c| c == '"')
+        && k >= 1
+        && chars[k - 1] == '@'
+        && (k == 1 || is_js_space(chars[k - 2]))
+        && !chars[k..cur].contains(&'\n')
+    {
+        return Some(Token {
+            kind: TokenKind::File,
+            start: k - 1,
+            end: cur,
+            query: chars[k + 1..cur].iter().collect(),
+        });
+    }
     let mut i = cur;
     while i > 0 && !is_js_space(chars[i - 1]) {
         i -= 1;
@@ -513,6 +534,30 @@ mod tests {
 
     fn labels(q: &str, cwd: &Path) -> Vec<String> {
         items(q, &Options::new(cwd))
+    }
+
+    #[test]
+    fn names_with_spaces_insert_the_quoted_form_and_an_open_quote_is_one_token() {
+        let d = tree(&["my dir/a b.txt", "plain.txt"]);
+        let root = real(&d);
+        let o = Options::new(&root);
+        let pick = |q: &str| {
+            let mut e = LineEditor::new();
+            e.insert(&format!("see @{q}"));
+            suggest(&e, &o, &StdFs).unwrap().items[0].insert.clone()
+        };
+        assert_eq!(pick("my"), "@\"my dir/");
+        assert_eq!(pick("plain"), "@plain.txt ");
+        // typing on inside the open quote completes the file in the quoted form
+        let mut e = LineEditor::new();
+        e.insert("see @\"my dir/a");
+        let s = suggest(&e, &o, &StdFs).unwrap();
+        assert_eq!(s.items[0].insert, "@\"my dir/a b.txt\" ");
+        apply(&mut e, &s.token, &s.items[0]);
+        assert_eq!(
+            e.chars.iter().collect::<String>(),
+            "see @\"my dir/a b.txt\" "
+        );
     }
 
     fn fwd(p: &Path) -> String {

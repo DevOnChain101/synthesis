@@ -296,20 +296,27 @@ pub fn markdown(m: &Memory) -> String {
         .slot
         .as_deref()
         .map_or(String::new(), |s| format!("slot {s} · "));
+    // each field on its own line: `san` escapes newlines, so the body is cleaned line by line
+    let body = m.body.split('\n').map(san).collect::<Vec<_>>().join("\n");
     san(&format!(
-        "## {} · {} · {} · {} · {}\n{}used {} (ok {}) · {}\n{}\n{}",
+        "## {} · {} · {} · {} · {}",
         m.id,
         m.kind,
         scope,
         m.trust.as_str(),
-        m.status,
-        slot,
-        m.use_count,
-        m.success_count,
-        m.updated_at.get(..10).unwrap_or(&m.updated_at),
-        m.title,
-        m.body
-    ))
+        m.status
+    )) + "\n"
+        + &san(&format!(
+            "{}used {} (ok {}) · {}",
+            slot,
+            m.use_count,
+            m.success_count,
+            m.updated_at.get(..10).unwrap_or(&m.updated_at)
+        ))
+        + "\n"
+        + &san(&m.title)
+        + "\n"
+        + &body
 }
 
 fn cwd_of(c: &Option<PathBuf>) -> PathBuf {
@@ -349,9 +356,11 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
             limit,
         } => {
             let f = filter(&scope, None, "active", limit);
-            for m in s.search(&query, &f).map_err(e)? {
-                out!("{}\n", markdown(&m));
+            let found = s.search(&query, &f).map_err(e)?;
+            for m in &found {
+                out!("{}\n", markdown(m));
             }
+            out!("{} record(s)", found.len());
         }
         MemoryCmd::Show { id } => match s.get(&id).map_err(e)? {
             Some(m) => {
@@ -443,11 +452,22 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
             let mut n = 0;
             for status in ["proposed", "quarantined"] {
                 for m in s.list(&filter(&scope, None, status, 100)).map_err(e)? {
-                    out!("{}\n", markdown(&m));
+                    out!("{}", markdown(&m));
+                    if let Some(r) = m.flags.iter().find_map(|f| f.strip_prefix("quarantine:")) {
+                        out!("quarantined by rule: {}", san(r));
+                    }
+                    out!("");
                     n += 1;
                 }
             }
-            out!("{n} item(s) to review; `synt memory approve <id>` or `forget <id> --reason ...`");
+            let at = if scope.all {
+                ""
+            } else {
+                " in this repository and user scope (--all: every repository)"
+            };
+            out!(
+                "{n} item(s) to review{at}; `synt memory approve <id>` or `forget <id> --reason ...`"
+            );
         }
         MemoryCmd::Export { format, scope } => {
             let key = (!scope.all).then(|| repo_of(&cwd_of(&scope.cwd)).key);
@@ -694,18 +714,33 @@ fn edit(env: &Env, s: &mut Store, id: &str) -> Result<(), String> {
             old.kind, old.status
         ));
     }
-    let path = std::env::temp_dir().join(format!("synthesis-memory-{}.md", uuid::Uuid::new_v4()));
+    // the temp lives in its own private dir (0700) so no other user can read or swap the file
+    let dir = std::env::temp_dir().join(format!("synthesis-memory-{}", uuid::Uuid::new_v4()));
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut db = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut db, 0o700);
+    db.create(&dir)
+        .map_err(|x| format!("{}: {x}", dir.display()))?;
+    let path = dir.join("note.md");
     let mut o = std::fs::OpenOptions::new();
     o.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-    std::io::Write::write_all(
-        &mut o
-            .open(&path)
-            .map_err(|x| format!("{}: {x}", path.display()))?,
-        edit_text(&old).as_bytes(),
-    )
-    .map_err(|x| x.to_string())?;
+    let mut f = match o.open(&path) {
+        Ok(f) => f,
+        Err(x) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!("{}: {x}", path.display()));
+        }
+    };
+    if let Err(x) = std::io::Write::write_all(&mut f, edit_text(&old).as_bytes()) {
+        drop(f);
+        let _ = std::fs::remove_dir_all(&dir); // a half-written file is not anybody's text
+        return Err(x.to_string());
+    }
+    drop(f);
+    let mut quarantined = false;
     let result = (|| {
         let mut parts = editor.split_whitespace();
         let status = std::process::Command::new(parts.next().ok_or("empty $EDITOR")?)
@@ -740,26 +775,41 @@ fn edit(env: &Env, s: &mut Store, id: &str) -> Result<(), String> {
         n.source = serde_json::json!({"origin": "cli_edit", "edits": id});
         let r = s.revise(id, n).map_err(|x| x.to_string())?;
         match (r.op, r.rule) {
-            ("quarantined", rule) => out!(
-                "not applied: {} was quarantined by rule {} (structure that could steer the model); {id} is unchanged",
-                r.id,
-                rule.unwrap_or("?")
-            ),
+            ("quarantined", rule) => {
+                quarantined = true;
+                out!(
+                    "not applied: {} was quarantined by rule {} (structure that could steer the model; see `synt memory review`); {id} is unchanged",
+                    r.id,
+                    rule.unwrap_or("?")
+                );
+            }
             ("deduped", _) => out!("no changes (identical to {})", r.id),
             _ => out!("edited {id}: new owner version {} ({})", r.id, r.status),
         }
         Ok(())
     })();
-    // on a refused save the person's text is the only copy: keep it and say where
-    match &result {
-        Err(e) if !e.starts_with("the editor") && !e.starts_with("cannot start") => {
-            Err(format!("{e}; your text is kept at {}", path.display()))
-        }
-        _ => {
-            let _ = std::fs::remove_file(&path);
-            result
-        }
+    // Always removed, except a refused save whose text differs from the stored record: then it
+    // is the person's only copy, so keep it and say where.
+    let refused =
+        matches!(&result, Err(e) if !e.starts_with("the editor") && !e.starts_with("cannot start"));
+    let differs = std::fs::read(&path).is_ok_and(|b| b != edit_text(&old).as_bytes());
+    if quarantined && differs {
+        out!(
+            "your text is kept at {} (the directory {} is kept too: delete it yourself when done)",
+            path.display(),
+            dir.display()
+        );
+        return result;
     }
+    if refused && differs {
+        return result.map_err(|e| format!(
+                "{e}; your text is kept at {} (the directory {} is kept too: delete it yourself when done)",
+                path.display(),
+                dir.display()
+            ));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    result
 }
 
 /// `synt doctor` rows for memory: where the store is, how big, whether it is healthy, what trust the
@@ -1812,6 +1862,23 @@ mod tests {
     }
 
     #[test]
+    fn markdown_keeps_real_line_breaks_and_escapes_inside_a_line() {
+        let m: Memory = serde_json::from_value(serde_json::json!({
+            "id": "m1", "scope": "user", "scope_key": "", "kind": "fact", "slot": null,
+            "name": null, "title": "T", "body": "one\ntwo\u{202e}", "tags": [],
+            "trust": "owner", "status": "active", "pinned": false, "confidence": 1.0,
+            "use_count": 0, "success_count": 0, "failure_count": 0, "version": 1,
+            "supersedes": null, "source": null, "anchors": [], "flags": [],
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            "last_used_at": null
+        }))
+        .unwrap();
+        let t = markdown(&m);
+        assert_eq!(t.lines().count(), 5, "{t}");
+        assert!(!t.contains("\\n") && t.contains("two\\u{202e}"), "{t}");
+    }
+
+    #[test]
     fn a_project_can_only_turn_memory_off_and_the_user_can_list_roots() {
         let d = tempfile::tempdir().unwrap();
         let root = d.path().join("repo");
@@ -1854,6 +1921,57 @@ mod tests {
         );
         assert_eq!(parse_edit("only title\n"), None);
         assert_eq!(parse_edit("\n\nbody"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn edit_temp_is_private_and_kept_only_as_the_only_copy_of_a_refused_save() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&d.path().join("home"), vec![]).unwrap();
+        let id = store
+            .put(NewMemory::new(
+                "user",
+                "",
+                "fact",
+                "T",
+                "body",
+                Trust::Owner,
+            ))
+            .unwrap()
+            .id;
+        // (editor body, expect an error, expect the temp kept)
+        for (name, body, err, kept) in [
+            ("same", ":", false, false),
+            ("fail", "exit 1", true, false),
+            ("refused", "printf 'no body' > \"$1\"", true, true),
+        ] {
+            let rec = d.path().join(format!("{name}.rec"));
+            let sh = d.path().join(format!("{name}.sh"));
+            std::fs::write(
+                &sh,
+                format!(
+                    "#!/bin/sh\nprintf '%s' \"$1\" > {}\n{body}\n",
+                    rec.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let env = Env::from_pairs([("EDITOR", sh.to_str().unwrap())]);
+            let r = edit(&env, &mut store, &id);
+            assert_eq!(r.is_err(), err, "{name}: {r:?}");
+            let tmp = PathBuf::from(std::fs::read_to_string(&rec).unwrap());
+            assert_eq!(tmp.exists(), kept, "{name}");
+            if kept {
+                assert!(r.unwrap_err().contains(tmp.to_str().unwrap()));
+                let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode(&tmp), 0o600);
+                assert_eq!(mode(tmp.parent().unwrap()), 0o700);
+                std::fs::remove_dir_all(tmp.parent().unwrap()).unwrap();
+            } else {
+                assert!(!tmp.parent().unwrap().exists(), "{name}: dir removed too");
+            }
+        }
     }
 
     // ---- round 2: episodes, verified facts, compaction, sub-agents, claude import ----

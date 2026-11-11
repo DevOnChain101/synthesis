@@ -19,6 +19,7 @@ fn cfg(cwd: &str) -> AppConfig {
         mode: Mode::Default,
         models: vec!["fake/a".into(), "fake/b".into()],
         effort_tiers: vec!["low".into(), "medium".into(), "high".into()],
+        context_window: None,
         extra_commands: vec![],
         saved: vec![SavedSession {
             id: "abcdef123456".into(),
@@ -125,6 +126,32 @@ fn typing_and_submit_starts_a_task_and_enter_while_busy_queues_in_order() {
         matches!(&cmds[..], [Cmd::UserCommand { command, record_only: false, .. }] if command == "echo hi")
     );
     assert!(a.queue.is_empty());
+}
+
+#[test]
+fn a_main_line_sent_as_the_task_ends_becomes_the_next_prompt_in_order() {
+    let mut a = app();
+    keys(&mut a, "go\r");
+    keys(&mut a, "again\r");
+    a.queue = vec!["!later".into()];
+    // the harness found the task over before the lines arrived
+    a.send_failed("main", "one", synthesis_harness::NO_TASK_RUNNING);
+    a.send_failed("main", "two", synthesis_harness::NO_TASK_RUNNING);
+    assert_eq!(a.queue, ["one", "two", "!later"]);
+    assert!(!screen(&mut a).contains("not sent"));
+    a.task_done(&Err("done".into()), T0);
+    let cmds = a.next_queued(T0);
+    assert!(matches!(&cmds[..], [Cmd::StartTask { text, .. }] if text == "one"));
+}
+
+#[test]
+fn a_sub_agent_line_refused_for_no_task_is_restored_with_its_name_not_requeued() {
+    let mut a = app();
+    keys(&mut a, "go\r");
+    a.send_failed("w", "do X", synthesis_harness::NO_TASK_RUNNING);
+    assert!(a.queue.is_empty(), "never re-aimed at main");
+    assert_eq!(a.editor.text(), "@w do X");
+    assert!(screen(&mut a).contains("not sent: no task is running"));
 }
 
 #[test]
@@ -916,12 +943,12 @@ fn selection_drag_copies_chat_text() {
     }
     // the highlight is painted until something clears it
     let hl = a.render(COLS, ROWS, T0).join("\n");
-    assert!(hl.contains("\x1b[48;2;31;77;73m"));
+    assert!(hl.contains("\x1b[48;2;70;60;50m"));
     keys(&mut a, "x");
     assert!(
         !a.render(COLS, ROWS, T0)
             .join("\n")
-            .contains("\x1b[48;2;31;77;73m")
+            .contains("\x1b[48;2;70;60;50m")
     );
     // a click without a drag copies nothing
     let click_up = Key::Mouse {
@@ -1262,6 +1289,47 @@ fn replayed_session_shows_its_history_and_is_idle() {
 }
 
 #[test]
+fn replayed_unfinished_tool_rows_end_as_interrupted() {
+    let evs = [
+        env(
+            0,
+            Ev::UserMessage {
+                text: "go".into(),
+                display_text: None,
+                images: vec![],
+            },
+        ),
+        env(
+            1,
+            Ev::TaskStarted {
+                request: "go".into(),
+                acceptance_criteria: vec![],
+                budget: Budget::default(),
+            },
+        ),
+        env(
+            2,
+            Ev::ToolRequested {
+                tool_call_id: "c1".into(),
+                name: "Bash".into(),
+                input: json!({"command": "sleep 60"}),
+                input_truncated: false,
+                origin: None,
+            },
+        ),
+    ];
+    let mut a = App::new(cfg("/tmp/proj"), &evs, T0);
+    let s = screen(&mut a);
+    assert!(s.contains("previous run was interrupted"), "{s}");
+    assert!(
+        s.contains("⎿  interrupted") && !s.contains("running…"),
+        "{s}"
+    );
+    assert!(a.chat.agent.items.iter().all(|i| i.status != "running"));
+    assert!(!a.animating(), "nothing left to animate");
+}
+
+#[test]
 fn animation_is_a_function_of_the_explicit_clock_and_startup_is_not_busy() {
     let mut a = app();
     // the harness emits created -> preparing at startup: that is not a running task
@@ -1569,7 +1637,11 @@ fn only_a_typed_bang_makes_a_shell_command() {
     // a paste, or a burst of characters, that starts with `!` is plain text
     keys(&mut a, "\x1b[200~!rm -rf x\x1b[201~");
     assert!(!a.bash(), "{:?}", a.editor.text());
-    assert!(matches!(&keys(&mut a, "\r")[..], [Cmd::StartTask { .. }]));
+    assert!(screen(&mut a).contains("typed ! to run a shell command"));
+    // the model gets the text without the marker space
+    assert!(
+        matches!(&keys(&mut a, "\r")[..], [Cmd::StartTask { text, .. }] if text == "!rm -rf x")
+    );
     let mut a = app();
     a.on_key(Key::Text("!ls".into()), T0);
     assert!(!a.bash());
@@ -1776,6 +1848,12 @@ fn new_slash_commands_ask_the_host_and_status_has_no_debug_output() {
         [Cmd::Info(Info::Peers)]
     ));
     assert!(matches!(&keys(&mut a, "/name beta\r")[..], [Cmd::Info(Info::Name(n))] if n == "beta"));
+    // /rename: the title goes to the host; no argument shows the title and clears nothing
+    assert!(matches!(&keys(&mut a, "/rename  Fix it \r")[..], [Cmd::Rename(t)] if t == "Fix it"));
+    a.set_title("Fix it".into());
+    assert!(keys(&mut a, "/rename\r").is_empty());
+    let last = a.chat.agent.items.last().unwrap().clone();
+    assert!(last.text.contains("Session title: Fix it") && last.text.contains("usage: /rename"));
     assert!(matches!(
         &keys(&mut a, "/permissions\r")[..],
         [Cmd::Info(Info::Permissions(PermAction::List))]
@@ -1883,8 +1961,68 @@ fn effort_cycles_with_alt_t_and_shows_in_the_footer() {
     assert!(matches!(&cmds[..], [Cmd::SetEffort(None)]), "{cmds:?}");
     let cmds = keys(&mut a, "/effort high\r");
     assert!(matches!(&cmds[..], [Cmd::SetEffort(Some(e))] if e == "high"));
+    assert_eq!(a.chat.agent.effort, "high", "the header and status read it");
     let cmds = keys(&mut a, "/effort bogus\r");
     assert!(cmds.is_empty() && screen(&mut a).contains("usage: /effort"));
+}
+
+#[test]
+fn browser_lists_the_browser_and_web_calls() {
+    let mut a = app();
+    assert!(screen_after(&mut a, "/browser\r").contains("no browser and web calls"));
+    for (i, (name, input)) in [
+        ("browser_navigate", json!({"url": "https://example.com/a"})),
+        ("WebFetch", json!({"url": "https://example.com/b"})),
+        ("Bash", json!({"command": "zzmarker"})),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        a.on_event(
+            &env(
+                i as u64 + 1,
+                Ev::ToolRequested {
+                    tool_call_id: format!("c{i}"),
+                    name: name.into(),
+                    input,
+                    input_truncated: false,
+                    origin: None,
+                },
+            ),
+            T0,
+        );
+    }
+    let s = screen_after(&mut a, "/browser\r");
+    assert!(s.contains("2 browser and web calls"), "{s}");
+}
+
+fn screen_after(a: &mut App, k: &str) -> String {
+    keys(a, k);
+    screen(a)
+}
+
+#[test]
+fn a_saved_effort_is_restored_only_when_the_model_declares_it() {
+    let mut a = app();
+    assert_eq!(
+        a.restore_effort(Some("high".into())).as_deref(),
+        Some("high")
+    );
+    assert_eq!(a.chat.agent.effort, "high");
+    assert_eq!(a.restore_effort(Some("max".into())), None);
+    assert_eq!(a.chat.agent.effort, "");
+    assert!(screen(&mut a).contains("effort max is not declared by this model"));
+}
+
+#[test]
+fn switching_model_in_process_resets_the_effort_to_auto_with_a_notice() {
+    let mut a = app();
+    keys(&mut a, "/effort high\r");
+    assert_eq!(a.effort().as_deref(), Some("high"));
+    a.model_switched("fake/b");
+    assert_eq!(a.effort(), None);
+    assert_eq!(a.chat.agent.effort, "");
+    assert!(screen(&mut a).contains("effort reset to auto"));
 }
 
 #[test]
@@ -2026,15 +2164,15 @@ fn tab_cycles_the_target_and_the_prompt_shows_it() {
     started(&mut a, "w");
     started(&mut a, "v");
     assert!(a.target.is_none());
-    keys(&mut a, "\t");
+    keys(&mut a, "\x14"); // ctrl+t
     assert!(
         screen(&mut a).contains("to @w · running"),
         "{}",
         screen(&mut a)
     );
-    keys(&mut a, "\t");
+    keys(&mut a, "\x14"); // ctrl+t
     assert!(screen(&mut a).contains("@v · running"));
-    keys(&mut a, "\t");
+    keys(&mut a, "\x14"); // ctrl+t
     assert!(a.target.is_none());
 }
 
@@ -2070,7 +2208,7 @@ fn lines_follow_the_address_and_the_task_state() {
         "{c:?}"
     );
     // Esc with a background target cancels that agent only
-    keys(&mut a, "\t");
+    keys(&mut a, "\x14"); // ctrl+t
     let c = keys(&mut a, "\x1b");
     assert!(matches!(&c[..], [Cmd::CancelAgent(n)] if n == "w"), "{c:?}");
     // @agent:<type> while a task runs waits in the queue
@@ -2441,7 +2579,7 @@ fn settings_change_what_is_drawn() {
     let mut a = app();
     let t = synthesis_settings::TuiSettings {
         logo: false,
-        panels: [false, true, false, false],
+        panels: [false, true, false, false, true, true, true, true],
         ..Default::default()
     };
     a.set_tui(
@@ -2489,4 +2627,456 @@ fn files_and_diff_need_a_trusted_folder_and_never_run_two_scans_at_once() {
     assert!(screen(&mut b).contains("still running"));
     b.project_done();
     assert_eq!(started(&mut b, "/diff x\r"), 1);
+}
+
+/// Ctrl+N with a typed query: `Some(folder)` when Enter started a session, else the picker text.
+fn new_folder_typed(cwd: &Path, home: Option<&Path>, typed: &str) -> (Option<PathBuf>, String) {
+    let mut c = cfg(&cwd.to_string_lossy());
+    c.home = home.map(Path::to_path_buf);
+    let mut a = App::new(c, &[], T0);
+    keys(&mut a, "\x0e"); // ctrl+n: new workspace
+    keys(&mut a, typed);
+    let shown = screen(&mut a);
+    keys(&mut a, "\r");
+    match a.quit.clone() {
+        Some(ExitReason::OpenFolder(p)) => (Some(p), shown),
+        _ => (None, screen(&mut a)),
+    }
+}
+
+#[test]
+fn new_folder_a_typed_query_never_falls_back_to_the_current_folder() {
+    let d = tempfile::tempdir().unwrap();
+    let cwd = d.path().join("here");
+    std::fs::create_dir_all(&cwd).unwrap();
+    // the current path is in the detail column of `use this folder`: it must not match
+    let (got, text) = new_folder_typed(&cwd, None, "bad");
+    assert!(got.is_none(), "{text}");
+    assert!(text.contains("no matches"), "{text}");
+}
+
+#[test]
+fn new_folder_typed_paths_open_a_folder_or_say_why_not() {
+    let d = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(d.path()).unwrap();
+    let cwd = root.join("here");
+    for sub in ["here/sub", "home/x", "my dir é"] {
+        std::fs::create_dir_all(root.join(sub)).unwrap();
+    }
+    std::fs::write(root.join("here/afile"), "x").unwrap();
+    let home = root.join("home");
+    let open = |q: &str| new_folder_typed(&cwd, Some(&home), q);
+    // relative to the session's folder, `~`, absolute, spaces and non-ASCII
+    assert_eq!(open("./sub").0, Some(cwd.join("sub")));
+    assert_eq!(open("~/x").0, Some(home.join("x")));
+    assert_eq!(open("../my dir é").0, Some(root.join("my dir é")));
+    assert_eq!(
+        open(&root.join("my dir é").to_string_lossy()).0,
+        Some(root.join("my dir é"))
+    );
+    // a file, a missing path
+    let (got, text) = open("./afile");
+    assert!(got.is_none() && text.contains("not a folder"), "{text}");
+    let (got, text) = open("./nope");
+    assert!(got.is_none() && text.contains("no such folder"), "{text}");
+    // a folder nobody may read
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let locked = root.join("here/locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let (got, text) = open("./locked");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // root can read anything: only assert where the mode is enforced
+        if std::fs::read_dir(&locked).is_ok() && got.is_some() {
+            return;
+        }
+        // the card may wrap the message: compare without borders and line breaks
+        let flat = text.replace(['│', '┃'], " ");
+        assert!(
+            got.is_none()
+                && flat
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains("permission denied"),
+            "{text}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn new_folder_lists_symlinked_folders_with_a_marker() {
+    let d = tempfile::tempdir().unwrap();
+    let cwd = std::fs::canonicalize(d.path()).unwrap();
+    std::fs::create_dir_all(cwd.join("real")).unwrap();
+    std::os::unix::fs::symlink(cwd.join("real"), cwd.join("lnk")).unwrap();
+    // a loop is just a link to a folder: one level per listing, no recursion
+    std::os::unix::fs::symlink(&cwd, cwd.join("loop")).unwrap();
+    let mut a = App::new(cfg(&cwd.to_string_lossy()), &[], T0);
+    keys(&mut a, "\x0e"); // ctrl+n: new workspace
+    let text = screen(&mut a);
+    assert!(
+        text.contains("lnk/ (link)") && text.contains("real/"),
+        "{text}"
+    );
+}
+
+#[test]
+fn permissions_allow_rejects_a_malformed_rule() {
+    use synthesis_permissions::Permissions;
+    for bad in ["((", "", "Bash(", "a b", "Bash(x)\n"] {
+        assert!(!Permissions::is_well_formed_rule(bad), "{bad:?}");
+    }
+    for ok in ["Edit", "Bash(cargo test:*)", "mcp__srv__tool"] {
+        assert!(Permissions::is_well_formed_rule(ok), "{ok}");
+    }
+}
+
+#[test]
+fn resume_toggle_to_this_folder_says_so_when_it_has_no_sessions() {
+    let mut a = app(); // the only saved session is in /work/other
+    keys(&mut a, "/resume\r");
+    keys(&mut a, "only this");
+    keys(&mut a, "\r");
+    let text = screen(&mut a);
+    assert!(text.contains("no saved sessions in this folder"), "{text}");
+}
+
+#[test]
+fn a_long_folder_name_is_shortened_in_the_narrow_header_not_dropped() {
+    let mut a = App::new(cfg("/tmp/a-very-long-project-folder-name"), &[], T0);
+    let rows = a.render(80, 24, T0);
+    let head = strip_ansi(&rows[0]);
+    assert!(head.contains('⌂') && head.contains('…'), "{head}");
+}
+
+// ---------------------------------------------------------------- workspace / running / activity
+
+fn saved(id: &str, cwd: &str, title: &str, mtime: i64) -> SavedSession {
+    SavedSession {
+        id: id.into(),
+        cwd: cwd.into(),
+        title: title.into(),
+        updated_at: String::new(),
+        mtime,
+    }
+}
+
+/// Live `sess-1` in /tmp/proj; stored: two sessions in /w/a, one in /w/b, one more in /tmp/proj.
+fn multi_app() -> App {
+    let mut c = cfg("/tmp/proj");
+    c.saved = vec![
+        saved("a-old", "/w/a", "alpha old", 5),
+        saved("b-1", "/w/b", "beta", 7),
+        saved("a-new", "/w/a", "alpha new", 9),
+        saved("p-1", "/tmp/proj", "earlier here", 3),
+        saved("sess-1", "/tmp/proj", "the live one, also stored", 11),
+    ];
+    App::new(c, &[], T0)
+}
+
+fn tap(a: &mut App, x: i64, y: i64) -> Vec<Cmd> {
+    a.on_key(
+        Key::Mouse {
+            x: x as u32 + 1,
+            y: y as u32 + 1,
+            button: 0,
+            action: MouseAction::Down,
+            mods: Mods::default(),
+        },
+        T0,
+    )
+}
+
+/// The Activity panel only fits on a tall terminal.
+fn big(a: &mut App) -> String {
+    a.render(160, 48, T0)
+        .iter()
+        .map(|l| strip_ansi(l).trim_end().to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn wheel(a: &mut App, x: i64, y: i64, dir: WheelDir) {
+    a.on_key(
+        Key::Wheel {
+            dir,
+            x: x as u32 + 1,
+            y: y as u32 + 1,
+            mods: Mods::default(),
+        },
+        T0,
+    );
+}
+
+fn prompts(a: &mut App, n: usize) {
+    for i in 0..n {
+        let ev = Ev::UserMessage {
+            text: format!("prompt number {i}"),
+            display_text: None,
+            images: vec![],
+        };
+        a.on_event(&env(i as u64 + 1, ev), T0);
+    }
+}
+
+#[test]
+fn workspaces_are_grouped_live_first_then_newest_and_the_live_session_is_not_listed_twice() {
+    let a = multi_app();
+    let keys: Vec<&str> = a.groups.iter().map(|g| g.cwd.as_str()).collect();
+    assert_eq!(keys, ["/tmp/proj", "/w/a", "/w/b"]);
+    let ids = |g: &panels::Group| g.sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids(&a.groups[0]), ["p-1"], "the live id is dropped");
+    assert_eq!(ids(&a.groups[1]), ["a-new", "a-old"], "newest first");
+    // a workspace with nothing stored still exists when it is the live one
+    let b = App::new(cfg("/tmp/empty"), &[], T0);
+    assert_eq!(b.groups.len(), 2);
+    assert_eq!(b.groups[0].cwd, "/tmp/empty");
+}
+
+#[test]
+fn clicking_a_workspace_lists_its_sessions_and_clicking_a_session_resumes_it() {
+    let mut a = multi_app();
+    let s = screen(&mut a);
+    assert!(
+        s.contains("Workspace 3") && s.contains("earlier here"),
+        "{s}"
+    );
+    let r = a.frame.as_ref().unwrap().rects.clone();
+    assert_eq!(r.workspace_rows.len(), 3, "{:?}", r.workspace_rows);
+    // the second workspace row: /w/a
+    let (y, _) = r.workspace_rows[1].clone();
+    assert!(tap(&mut a, 3, y).is_empty());
+    assert_eq!(a.ws_sel, 1);
+    assert_eq!(a.side, Focus::Dashboard);
+    let s = screen(&mut a);
+    assert!(s.contains("alpha new") && s.contains("alpha old"), "{s}");
+    assert!(!s.contains("earlier here"), "{s}");
+    assert!(
+        s.contains("1 live"),
+        "the header still counts the live session: {s}"
+    );
+    // its second session
+    let r = a.frame.as_ref().unwrap().rects.clone();
+    let (y, id) = r.session_rows.last().cloned().unwrap();
+    assert_eq!(id, "a-old");
+    tap(&mut a, 3, y);
+    assert_eq!(a.quit, Some(ExitReason::Resume("a-old".into())));
+}
+
+#[test]
+fn clicking_the_live_session_only_moves_the_focus_back_and_a_running_task_needs_a_second_click() {
+    let mut a = multi_app();
+    screen(&mut a);
+    let live_y = a.frame.as_ref().unwrap().rects.session_rows[0].0;
+    a.side = Focus::Dashboard;
+    tap(&mut a, 3, live_y);
+    assert!(a.quit.is_none());
+    assert_eq!(a.side, Focus::Agent);
+    // another session while a task runs: the first click asks, the second one switches
+    keys(&mut a, "work\r");
+    assert!(a.running());
+    let y = a.frame.as_ref().unwrap().rects.session_rows[2].0;
+    tap(&mut a, 3, y);
+    assert!(a.quit.is_none() && a.toast.is_some());
+    tap(&mut a, 3, y);
+    assert_eq!(a.quit, Some(ExitReason::Resume("p-1".into())));
+}
+
+#[test]
+fn tab_walks_chat_workspace_running_chat_and_only_from_an_empty_prompt_without_dialogs() {
+    let mut a = multi_app();
+    screen(&mut a);
+    keys(&mut a, "\t");
+    assert_eq!(a.side, Focus::Workspace);
+    assert!(a.chat.agents.is_empty());
+    keys(&mut a, "\t");
+    assert_eq!(a.side, Focus::Dashboard);
+    keys(&mut a, "\t");
+    assert_eq!(a.side, Focus::Agent);
+    // the focused panel shows it: its border takes the accent colour
+    let off = a.render(COLS, ROWS, T0)[2].clone();
+    keys(&mut a, "\t");
+    let lit = a.render(COLS, ROWS, T0)[2].clone();
+    assert_ne!(lit, off);
+    let accent = synthesis_tui_render::theme::paint(synthesis_tui_render::theme::T_CLAUDE, "┏━");
+    assert!(lit.contains(&accent) && !off.contains(&accent), "{lit:?}");
+    // Esc, typing, Shift+Tab: back in the chat (Shift+Tab still cycles the mode)
+    keys(&mut a, "\x1b");
+    assert_eq!(a.side, Focus::Agent);
+    keys(&mut a, "\t");
+    keys(&mut a, "x");
+    assert_eq!((a.side, a.editor.text().as_str()), (Focus::Agent, "x"));
+    // a prompt with text: Tab is not ours
+    keys(&mut a, "\t");
+    assert_eq!(a.side, Focus::Agent);
+    a.editor.clear();
+    // a dialog open: neither Tab nor a click reaches the panels
+    let (ask1, _rx) = ask("Bash", json!({"command": "ls"}), vec![]);
+    a.on_approval(ask1, T0);
+    keys(&mut a, "\t");
+    assert_eq!(a.side, Focus::Agent);
+}
+
+#[test]
+fn ctrl_t_cycles_the_agent_target_only_when_there_are_agents() {
+    let mut a = multi_app();
+    keys(&mut a, "\x14");
+    assert!(a.target.is_none() && !screen(&mut a).contains("now talking"));
+    started(&mut a, "w");
+    keys(&mut a, "\x14");
+    assert_eq!(a.target.as_deref(), Some("w"));
+    keys(&mut a, "\t");
+    assert_eq!(
+        a.target.as_deref(),
+        Some("w"),
+        "tab no longer cycles the target"
+    );
+}
+
+#[test]
+fn panel_keys_move_the_selection_enter_opens_and_text_goes_back_to_the_chat() {
+    let mut a = multi_app();
+    screen(&mut a);
+    keys(&mut a, "\t\x1b[B"); // workspace panel, down
+    assert_eq!(a.ws_sel, 1);
+    keys(&mut a, "\x1b[F"); // end
+    assert_eq!(a.ws_sel, 2);
+    keys(&mut a, "\x1b[H\x1b[A"); // home, up: clamped
+    assert_eq!(a.ws_sel, 0);
+    keys(&mut a, "\x1b[B\r"); // enter: its sessions get the keys
+    assert_eq!((a.ws_sel, a.side), (1, Focus::Dashboard));
+    keys(&mut a, "\x1b[B\r"); // second session of /w/a
+    assert_eq!(a.quit, Some(ExitReason::Resume("a-old".into())));
+}
+
+#[test]
+fn new_session_opens_the_selected_workspace_and_ctrl_n_still_picks_a_folder() {
+    let mut a = multi_app();
+    keys(&mut a, "/new\r");
+    assert_eq!(a.quit, Some(ExitReason::OpenFolder("/tmp/proj".into())));
+    let mut a = multi_app();
+    a.select_ws(2);
+    keys(&mut a, "/new\r");
+    assert_eq!(a.quit, Some(ExitReason::OpenFolder("/w/b".into())));
+    let mut a = multi_app();
+    keys(&mut a, "\x0e");
+    assert!(a.picker.is_some() && a.quit.is_none());
+}
+
+#[test]
+fn the_wheel_scrolls_the_panel_under_it_clamped_and_leaves_the_rest_alone() {
+    let mut a = multi_app();
+    prompts(&mut a, 80);
+    big(&mut a);
+    let r = a.frame.as_ref().unwrap().rects.clone();
+    let act = r.activity_rect.expect("activity panel at 120x40");
+    assert!(r.activity_max_scroll > 0);
+    let (ax, ay) = (act.x + 2, act.y + 2);
+    for _ in 0..500 {
+        wheel(&mut a, ax, ay, WheelDir::Up);
+    }
+    assert_eq!(a.act_scroll, r.activity_max_scroll, "clamped at the oldest");
+    assert_eq!(a.scroll, 0, "the chat did not move");
+    big(&mut a);
+    assert_eq!(
+        a.frame.as_ref().unwrap().rects.activity_hits[0].1,
+        0,
+        "the oldest row is shown"
+    );
+    for _ in 0..500 {
+        wheel(&mut a, ax, ay, WheelDir::Down);
+    }
+    assert_eq!(a.act_scroll, 0);
+    // Workspace panel: moves the selection and stops at the ends
+    let w = r.workspace_rect.unwrap();
+    wheel(&mut a, w.x + 2, w.y + 1, WheelDir::Down);
+    wheel(&mut a, w.x + 2, w.y + 1, WheelDir::Down);
+    wheel(&mut a, w.x + 2, w.y + 1, WheelDir::Down);
+    assert_eq!(a.ws_sel, 2);
+    // Running panel (back on the workspace with two sessions)
+    a.select_ws(0);
+    let q = r.session_rect.unwrap();
+    wheel(&mut a, q.x + 2, q.y + 1, WheelDir::Down);
+    assert_eq!(a.run_sel, 1);
+    wheel(&mut a, q.x + 2, q.y + 1, WheelDir::Up);
+    wheel(&mut a, q.x + 2, q.y + 1, WheelDir::Up);
+    assert_eq!(a.run_sel, 0);
+    // elsewhere in the sidebar (the header row): nothing
+    let before = (a.ws_sel, a.run_sel, a.act_scroll, a.scroll);
+    wheel(&mut a, 2, 0, WheelDir::Down);
+    assert_eq!(before, (a.ws_sel, a.run_sel, a.act_scroll, a.scroll));
+    // the chat still scrolls with the wheel
+    let c = r.chat_rect.unwrap();
+    wheel(&mut a, c.x + 5, c.y + 2, WheelDir::Up);
+    assert!(a.scroll > 0);
+}
+
+#[test]
+fn clicking_a_prompt_in_activity_scrolls_the_chat_to_it() {
+    let mut a = multi_app();
+    prompts(&mut a, 80);
+    big(&mut a);
+    let r = a.frame.as_ref().unwrap().rects.clone();
+    let act = r.activity_rect.unwrap();
+    // scroll Activity to the oldest prompts, then click the first visible row
+    for _ in 0..500 {
+        wheel(&mut a, act.x + 2, act.y + 2, WheelDir::Up);
+    }
+    big(&mut a);
+    let r = a.frame.as_ref().unwrap().rects.clone();
+    let (i, at) = r.activity_hits[0];
+    assert_eq!(a.activity.activity[at].text, "prompt number 0");
+    tap(&mut a, act.x + 4, act.y + 1 + i as i64);
+    assert!(a.scroll > 0, "the chat moved up to the old prompt");
+    // the prompt is the first row of the chat view
+    let lines = a.render(160, 48, T0);
+    let c = a.frame.as_ref().unwrap().rects.chat_rect.unwrap();
+    let first = strip_ansi(&lines[c.y as usize + 1]);
+    assert!(first.contains("> prompt number 0"), "{first:?}");
+    // a click on a row that is not a prompt (the sidebar header) is not an error
+    tap(&mut a, 2, 0);
+}
+
+#[test]
+fn a_replayed_prompt_in_activity_knows_its_chat_item() {
+    let ev = |i: u64, t: &str| {
+        env(
+            i,
+            Ev::UserMessage {
+                text: t.into(),
+                display_text: None,
+                images: vec![],
+            },
+        )
+    };
+    let a = App::new(cfg("/tmp/proj"), &[ev(1, "first"), ev(2, "second")], T0);
+    let anchors: Vec<Option<usize>> = a.activity.activity.iter().map(|f| f.anchor).collect();
+    let users: Vec<usize> = (0..a.chat.agent.items.len())
+        .filter(|i| a.chat.agent.items[*i].kind == "user")
+        .collect();
+    assert_eq!(anchors, users.iter().map(|i| Some(*i)).collect::<Vec<_>>());
+    assert_eq!(users.len(), 2);
+}
+
+#[test]
+fn without_a_sidebar_tab_skips_the_panels_and_the_mouse_paths_are_inert() {
+    let mut a = multi_app();
+    a.render(70, 24, T0);
+    assert!(!a.sidebar_visible());
+    keys(&mut a, "\t");
+    assert_eq!(a.side, Focus::Agent);
+    tap(&mut a, 3, 5);
+    wheel(&mut a, 3, 5, WheelDir::Down);
+    assert_eq!((a.ws_sel, a.run_sel, a.act_scroll), (0, 0, 0));
+    assert!(a.quit.is_none());
+    // a screen that shrinks while a panel has the focus gives the keyboard back
+    a.render(120, 40, T0);
+    keys(&mut a, "\t");
+    assert_eq!(a.side, Focus::Workspace);
+    a.render(70, 24, T0);
+    assert_eq!(a.side, Focus::Agent);
 }

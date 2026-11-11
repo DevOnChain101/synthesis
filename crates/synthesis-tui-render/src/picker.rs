@@ -28,6 +28,10 @@ pub struct Picker {
     pub loading_text: String,
     /// A yes/no style choice: no "filter:" line, typing does nothing.
     pub no_filter: bool,
+    /// Match the query against labels only (the detail column is not searched).
+    pub label_only: bool,
+    /// The first item is shown whatever the query says.
+    pub pin_first: bool,
 }
 
 /// Loose in-order character match, case-insensitive (the same rule "/" and "@" completion use).
@@ -71,7 +75,13 @@ impl Picker {
         }
         self.items
             .iter()
-            .filter(|it| matches(&self.query, &it.label) || matches(&self.query, &it.detail))
+            .enumerate()
+            .filter(|(i, it)| {
+                (self.pin_first && *i == 0)
+                    || matches(&self.query, &it.label)
+                    || (!self.label_only && matches(&self.query, &it.detail))
+            })
+            .map(|(_, it)| it)
             .collect()
     }
 

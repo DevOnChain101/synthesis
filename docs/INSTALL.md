@@ -35,6 +35,16 @@ Download `synthesis-<version>-<target>.tar.gz|zip` and `SHA256SUMS` from the rel
 
 Templates only: `packaging/homebrew/synthesis.rb.tmpl`, `packaging/winget/*.tmpl`. Not published. Fill `@VERSION@` and the `@SHA256_*@` values from the release `SHA256SUMS`.
 
+## 6. Desktop app (native window)
+
+Separate download from the CLI: `synthesis-desktop-<version>-<target>.zip|tar.gz` on the release page (same `SHA256SUMS` and attestation as the CLI archives; check them as in section 4). It runs the same engine in process; API keys come from `SYNT_*` environment variables as for `synt`. The window works on the folder it is started in (`--cwd DIR` to choose; started from Finder, which uses `/`, it falls back to your home folder). Not code-signed or notarized, so each OS warns on first run. UNVERIFIED on real Windows and Linux machines; macOS was run by the maintainers.
+
+- macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`): unzip, drag `Synthesis.app` to Applications. The app is only ad-hoc signed, so Gatekeeper says it "cannot be opened" because the developer cannot be verified. Right-click the app, Open, Open (once), or run `xattr -dr com.apple.quarantine /Applications/Synthesis.app`. Environment variables from your shell are not seen by an app started from Finder; start it from a terminal (`open -a Synthesis`, or `/Applications/Synthesis.app/Contents/MacOS/Synthesis`) after exporting the key, or put the provider in `~/.synt/synt.json` with `{file:}`.
+- Windows (`x86_64-pc-windows-msvc`; `aarch64` experimental): unzip, run `Synthesis.exe` (technical name in the build: `synthesis-desktop.exe`). SmartScreen shows "Windows protected your PC": More info, Run anyway; or `Unblock-File .\Synthesis.exe`. No console window opens, so start-up errors are not visible; run it from a terminal with `--help` to check the flags. Needs a DirectX 11 capable GPU/driver. As on the CLI, there is no OS sandbox on Windows. Started from Explorer the folder is the exe's folder; pass `--cwd` in a shortcut (`Target: "...\Synthesis.exe" --cwd C:\work\repo`).
+- Linux (`x86_64-unknown-linux-gnu`; `aarch64` experimental): `tar -xzf`, then follow `README.txt` in the archive (binary `synthesis-desktop`, a `synthesis.desktop` launcher and hicolor icons). Needs X11 or Wayland plus the libraries listed there (xcb, xkbcommon, wayland, fontconfig, freetype, Vulkan loader and a Vulkan driver). glibc 2.35 or newer.
+
+Uninstall: delete the app, exe folder or files you copied. State is shared with `synt` in `$SYNT_HOME`.
+
 ## Requirements and checks
 
 - git on PATH (repository identity, `--worktree`, verification; a plain `synt run` also worked without it in the clean containers); a Chrome-family browser only for browser features (`SYNT_BROWSER_PATH` to choose one; Synthesis never downloads a browser).

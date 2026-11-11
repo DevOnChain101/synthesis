@@ -1,0 +1,28 @@
+[package]
+name = "synthesis-view"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "UI-agnostic view models and reducers over the event stream and the session store (no terminal, no GPUI)"
+
+[lints]
+workspace = true
+
+[dependencies]
+synthesis-config = { path = "../synthesis-config" }
+synthesis-core = { path = "../synthesis-core" }
+synthesis-events = { path = "../synthesis-events" }
+# sanitize_for_display: repo text reaches the models as data, made visible
+synthesis-harness = { path = "../synthesis-harness" }
+synthesis-session = { path = "../synthesis-session" }
+# is_js_space and the bounded process runner (imgclip::RealExec) that project.rs runs git with
+synthesis-tui-base = { path = "../synthesis-tui-base" }
+synthesis-workspace = { path = "../synthesis-workspace" }
+regex = "1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+time = { version = "0.3", features = ["parsing"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

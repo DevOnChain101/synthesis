@@ -37,19 +37,15 @@ pub struct SessionRow {
     pub ctx_pct: Option<f64>,
     pub waiting: bool,
     pub mode: Option<String>,
+    /// Name of a stored session (the first prompt); live rows use `Live::name`.
+    pub title: String,
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct HistoryDay {
-    /// Instant (ms) inside the day; the calendar day is taken in the state's UTC offset.
-    pub date_ms: i64,
-    pub tokens: f64,
-    pub output: f64,
-    pub messages: f64,
-    pub tools: f64,
-    pub agents: f64,
-    pub sessions: f64,
-}
+use synthesis_view::usage::{
+    DayCell, MONTHS, MonthGrid, civil, month_grid as usage_month_grid, month_summary, year_grid,
+    year_month_starts,
+};
+pub use synthesis_view::usage::{HistoryDay, heat_level};
 
 #[derive(Clone, Debug, Default)]
 pub struct Tap {
@@ -107,7 +103,7 @@ pub enum Focus {
     Workspace,
 }
 
-/// Sidebar panels switched off (`synt.tui.panels`); the panels that stay take their rows.
+/// Panels switched off (`synt.tui.panels`); the panels that stay take their rows.
 /// Workspace, Running sessions and the chat cannot be hidden.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Hidden {
@@ -115,6 +111,10 @@ pub struct Hidden {
     pub mcp: bool,
     pub tools: bool,
     pub activity: bool,
+    pub status: bool,
+    pub tokens: bool,
+    pub topology: bool,
+    pub usage: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -132,6 +132,8 @@ pub struct DashState<'a> {
     pub usage: &'a Usage,
     pub follow: bool,
     pub history: &'a [HistoryDay],
+    /// The first load of `history` is still running (the Usage panel says so, not "no usage yet").
+    pub history_loading: bool,
     pub usage_metric: &'a str,
     pub mcp_servers: &'a [McpServer],
     pub mcp_live: Option<&'a [McpLive]>,
@@ -163,6 +165,8 @@ pub struct Rects {
     pub dock_rect: Option<Rect>,
     pub activity_rect: Option<Rect>,
     pub workspace_rect: Option<Rect>,
+    /// The Running panel (same columns as `workspace_rect`).
+    pub session_rect: Option<Rect>,
     pub session_rows: Vec<(i64, String)>,
     pub workspace_rows: Vec<(i64, String)>,
     pub activity_hits: Vec<(usize, usize)>,
@@ -325,7 +329,7 @@ fn boxed(title: &str, lines: Lines, w: i64, h: i64, active: bool, valign: VAlign
         "{}{}{}",
         paint(bc, "┏━"),
         paint(
-            if active { COL_ACCENT } else { COL_MUTED },
+            if active { COL_ACCENT } else { COL_WHITE },
             &format!("{t}{RESET}")
         ),
         paint(bc, &format!("{}┓", "━".repeat(u(w - 3 - tw))))
@@ -338,11 +342,7 @@ fn boxed(title: &str, lines: Lines, w: i64, h: i64, active: bool, valign: VAlign
         VAlign::Top => lines,
     };
     for i in 0..row_count {
-        let lch = if i == 0 || i as i64 == h - 3 {
-            "┃"
-        } else {
-            "│"
-        };
+        let lch = "┃"; // the same heavy edge as the ┏┓┗┛ corners on every row
         let c = content.get(i).map_or("", String::as_str);
         rows.push(format!(
             "{}{}{}",
@@ -376,48 +376,6 @@ fn fmt_time(ts: i64, tz: i32) -> String {
     format!("{:02}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60)
 }
 
-struct Civil {
-    year: i64,
-    month: usize,
-    day: i64,
-    dow: usize,
-}
-
-fn civil_from_days(z: i64) -> (i64, usize, i64) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    (if m <= 2 { y + 1 } else { y }, (m - 1) as usize, d)
-}
-fn days_from_civil(y: i64, m0: usize, d: i64) -> i64 {
-    let m = m0 as i64 + 1;
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y.rem_euclid(400);
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-fn civil(ms: i64, tz: i32) -> Civil {
-    let days = (ms + i64::from(tz) * 60_000).div_euclid(86_400_000);
-    let (year, month, day) = civil_from_days(days);
-    Civil {
-        year,
-        month,
-        day,
-        dow: (days + 4).rem_euclid(7) as usize,
-    }
-}
-fn days_in_month(y: i64, m0: usize) -> i64 {
-    days_from_civil(if m0 == 11 { y + 1 } else { y }, (m0 + 1) % 12, 1) - days_from_civil(y, m0, 1)
-}
-
 // ---------------------------------------------------------------- panels
 
 fn open_todos(s: &DashState) -> usize {
@@ -428,24 +386,19 @@ fn open_todos(s: &DashState) -> usize {
         .count()
 }
 
-fn context_size(session: &Session, tap: Option<&Tap>, agent_window: Option<f64>) -> f64 {
-    if let Some(c) = tap.and_then(|t| t.context_size).filter(|c| *c != 0.0) {
-        return c;
-    }
-    if let Some(c) = agent_window.filter(|c| *c != 0.0) {
-        return c;
-    }
-    if session.model.to_lowercase().contains("1m") {
-        1_000_000.0
-    } else {
-        200_000.0
-    }
+/// The harness's resolved window first (it is the one compaction uses), then the tap's. `None` =
+/// unknown: nothing is guessed from the model name.
+fn context_size(tap: Option<&Tap>, agent_window: Option<f64>) -> Option<f64> {
+    agent_window
+        .or_else(|| tap.and_then(|t| t.context_size))
+        .filter(|c| *c != 0.0)
 }
 
-fn ctx_pct_of(s: &DashState) -> f64 {
+/// `None` while the window is unknown.
+fn ctx_pct_of(s: &DashState) -> Option<f64> {
     let tap = s.usage.tap.as_ref();
     if s.session.context_display_reset {
-        return 0.0;
+        return Some(0.0);
     }
     let from_tap = if s.session.context_estimated {
         None
@@ -453,12 +406,11 @@ fn ctx_pct_of(s: &DashState) -> f64 {
         tap.and_then(|t| t.context_pct)
     };
     from_tap
-        .unwrap_or(
-            s.session.context_used as f64
-                / context_size(s.session, tap, s.agent.and_then(|a| a.context_window))
-                * 100.0,
-        )
-        .min(100.0)
+        .or_else(|| {
+            context_size(tap, s.agent.and_then(|a| a.context_window))
+                .map(|c| s.session.context_used as f64 / c * 100.0)
+        })
+        .map(|p| p.min(100.0))
 }
 
 fn thinking_wave(frame: usize, w: usize) -> String {
@@ -527,7 +479,7 @@ fn status_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> Lines 
         lines.push(paint(COL_MUTED, "  waiting for the next prompt…"));
     }
     let tap = s.usage.tap.as_ref();
-    let ctx_max = context_size(session, tap, s.agent.and_then(|a| a.context_window));
+    let ctx_max = context_size(tap, s.agent.and_then(|a| a.context_window));
     let ctx_pct = ctx_pct_of(s);
     let bw = u((w - 32).max(8));
     let nums = paint(
@@ -535,16 +487,19 @@ fn status_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> Lines 
         &format!(
             " {}/{}",
             fmt_num(Some(session.context_used as f64)),
-            fmt_num(Some(ctx_max))
+            ctx_max.map_or("?".to_string(), |c| fmt_num(Some(c)))
         ),
     );
     lines.push(format!(
         "{} {} {}{nums}",
         paint(COL_MUTED, "Context "),
-        bar(Some(ctx_pct), bw, frame, !idle),
+        bar(ctx_pct, bw, frame, !idle),
         paint(
-            level_color(ctx_pct),
-            &format!("{}%", pad_start(&to_fixed(ctx_pct, 0), 3))
+            level_color(ctx_pct.unwrap_or(0.0)),
+            &ctx_pct.map_or("  ?".to_string(), |p| format!(
+                "{}%",
+                pad_start(&to_fixed(p, 0), 3)
+            ))
         )
     ));
     let quota = |name: &str, win: &Quota| {
@@ -793,7 +748,15 @@ fn feed_panel(s: &DashState, w: i64, h: i64, now: i64, rects: &mut Rects) -> Lin
             )
         })
         .collect();
-    boxed("Activity", lines, w, h, false, VAlign::Top)
+    // content cut: how many older rows are above and how many newer below the window
+    let mut title = "Activity".to_string();
+    if start > 0 {
+        title += &paint(COL_SUBTLE, &format!(" ↑{start}"));
+    }
+    if scroll > 0 {
+        title += &paint(COL_SUBTLE, &format!(" ↓{scroll}"));
+    }
+    boxed(&title, lines, w, h, false, VAlign::Top)
 }
 
 /// Visible window `[start, end)` of the session list and the "more" counts; the selected row
@@ -1031,6 +994,7 @@ fn sessions_panel(
             (inner - 3 - width(&tag) as i64 - mode_s.len() as i64 - ctx.len() as i64 - 1).max(4);
         let raw_name = match live {
             Some(l) if !l.name.is_empty() && l.name != "agent" => l.name.clone(),
+            None if !sr.title.is_empty() => sr.title.clone(),
             _ => {
                 let b = basename(&sr.cwd);
                 if b.is_empty() { sr.project.clone() } else { b }
@@ -1091,7 +1055,8 @@ fn sessions_panel(
     let ws = s
         .workspaces
         .and_then(|l| l.iter().find(|x| x.key == s.active_workspace));
-    let where_ = ws.map_or(String::new(), |w0| {
+    // the workspace is named in its own panel: a narrow sidebar keeps the title whole instead
+    let where_ = ws.filter(|_| w >= 30).map_or(String::new(), |w0| {
         paint(
             COL_MUTED,
             &format!("· {} ", short(&w0.name, u((w - 20).max(4)))),
@@ -1157,13 +1122,18 @@ fn goal_row(g: &agent::Goal, inner: i64) -> String {
     )
 }
 
-fn session_info_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> Lines {
+fn session_info_panel(s: &DashState, w: i64, h: i64, _frame: usize, now: i64) -> Lines {
     let session = s.session;
     let inner = w - 3;
     let mut lines = vec![];
     let model = model_of(s)
         .or(Some(session.model.clone()).filter(|m| !m.is_empty()))
-        .unwrap_or_else(|| waiting("loading model…", frame));
+        .unwrap_or_else(|| "not set".into()); // `--once` starts no session: nothing is loading
+    // the header names the provider: a short column keeps the model's own name
+    let model = match model.rsplit_once('/') {
+        Some((_, m)) if width(&model) as i64 > inner - 7 => m.to_string(),
+        _ => model,
+    };
     lines.push(session_row("model", &model, COL_ACCENT, inner));
     if let Some(a) = s.agent {
         let (m, c) = mode_line(a);
@@ -1185,12 +1155,7 @@ fn session_info_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> 
             lines.push(goal_row(g, inner));
         }
         if let Some(cw) = a.context_window.filter(|c| *c != 0.0) {
-            lines.push(session_row(
-                "window",
-                &format!("{} tokens", fmt_num(Some(cw))),
-                COL_TEXT,
-                inner,
-            ));
+            lines.push(session_row("window", &fmt_num(Some(cw)), COL_TEXT, inner));
         }
     }
     if !session.git_branch.is_empty() {
@@ -1208,9 +1173,14 @@ fn session_info_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> 
         ));
     }
     let tools: u32 = session.tool_counts.iter().map(|t| t.1).sum();
+    let turns = format!("{} prompts · {tools} tools", session.prompts);
     lines.push(session_row(
         "turns",
-        &format!("{} prompts · {tools} tools", session.prompts),
+        if width(&turns) as i64 > inner - 7 {
+            &turns[..turns.find(" ·").unwrap_or(turns.len())]
+        } else {
+            &turns
+        },
         COL_TEXT,
         inner,
     ));
@@ -1226,12 +1196,12 @@ fn session_info_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> 
     boxed("Session", lines, w, h, false, VAlign::Evenly)
 }
 
-fn session_info_essential(s: &DashState, w: i64, h: i64, frame: usize) -> Lines {
+fn session_info_essential(s: &DashState, w: i64, h: i64, _frame: usize) -> Lines {
     let inner = w - 3;
     let session = s.session;
     let model = model_of(s)
         .or(Some(session.model.clone()).filter(|m| !m.is_empty()))
-        .unwrap_or_else(|| waiting("loading model…", frame));
+        .unwrap_or_else(|| "not set".into()); // `--once` starts no session: nothing is loading
     let mut lines = vec![session_row("model", &model, COL_ACCENT, inner)];
     if let Some(a) = s.agent {
         let (m, c) = mode_line(a);
@@ -1467,6 +1437,7 @@ fn mcp_summary_line(s: &DashState, w: i64) -> Lines {
 struct Hits {
     ws: Vec<Option<String>>,
     ws_h: i64,
+    sess_h: i64,
     session: Vec<Option<String>>,
 }
 
@@ -1481,11 +1452,17 @@ fn side_column(
     hits: &mut Hits,
 ) -> Lines {
     let n = running_sessions(s).0.len() as i64;
+    let hd = s.view.hidden;
+    // only Workspace and Running left: they split the whole column
+    let only_two = hd.session && hd.mcp && hd.tools && hd.activity;
     let ws_h = match s.workspaces {
-        Some(l) if !l.is_empty() => (l.len() as i64 + 2).min(6),
+        Some(l) if !l.is_empty() && only_two => h / 2,
+        // room for 5 rows plus the "more" lines when the column is tall enough, fewer as it shrinks
+        Some(l) if !l.is_empty() => (l.len() as i64 + 2).min(9).min(h / 3).max(3),
         _ => 0,
     };
-    let cap = max_sessions_h - ws_h;
+    // 3/5 of the terminal (was 1/2): Running lists 5 sessions (2 lines each) on a tall one
+    let cap = max_sessions_h * 6 / 5 - ws_h;
     let sessions_h = clamp_int(2 * n + 3, 5, cap.max(5));
     let mut ws_rows: Lines = vec![];
     if ws_h > 0 {
@@ -1494,12 +1471,14 @@ fn side_column(
         hits.ws = wh;
         hits.ws_h = ws_h;
     }
-    if h - ws_h - sessions_h < 10 {
+    if only_two || h - ws_h - sessions_h < 10 {
         let mut out = ws_rows;
+        hits.sess_h = h - ws_h;
         out.extend(sessions_panel(s, w, h - ws_h, frame, &mut hits.session));
         return out;
     }
     let mut out = ws_rows;
+    hits.sess_h = sessions_h;
     out.extend(sessions_panel(s, w, sessions_h, frame, &mut hits.session));
     let budget = h - ws_h - sessions_h;
     let hidden = s.view.hidden;
@@ -1703,25 +1682,12 @@ fn agent_panel(
 
 // ---------------------------------------------------------------- usage
 
-const MONTHS: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
 const USAGE_LABEL_W: usize = 4;
 const USAGE_SUMMARY_W: usize = 20;
 const USAGE_MAX_H: i64 = 2 + 1 + 7 + 1;
 const USAGE_WEEKS: i64 = 53;
 const USAGE_YEAR_H: i64 = 2 + 15;
 const USAGE_MIN_H: i64 = 4;
-
-pub fn heat_level(v: Option<f64>, max: Option<f64>) -> usize {
-    let (Some(v), Some(max)) = (v, max) else {
-        return 0;
-    };
-    if v.is_nan() || max.is_nan() || v <= 0.0 || max <= 0.0 || !v.is_finite() || !max.is_finite() {
-        return 0;
-    }
-    4.min(1 + 3.min(((v / max) * (4.0 - 1e-9)).floor() as usize))
-}
 
 #[derive(Clone, Copy)]
 struct Metric {
@@ -1783,53 +1749,6 @@ fn m_fmt(m: &Metric, v: f64) -> String {
         fmt_num(Some(v))
     } else {
         crate::util::round_str(v)
-    }
-}
-
-#[derive(Clone)]
-struct DayCell<'a> {
-    day: i64,
-    month: usize,
-    future: bool,
-    entry: Option<&'a HistoryDay>,
-}
-
-struct MonthGrid<'a> {
-    weeks: Vec<[Option<DayCell<'a>>; 7]>,
-    year: i64,
-    month: usize,
-    today_ms: i64,
-}
-
-fn usage_month_grid<'a>(history: &'a [HistoryDay], tz: i32, now: i64) -> MonthGrid<'a> {
-    let today_ms = history.last().map_or(now, |l| l.date_ms);
-    let t = civil(today_ms, tz);
-    let dim = days_in_month(t.year, t.month);
-    let mut weeks = vec![];
-    let mut week: [Option<DayCell>; 7] = Default::default();
-    for day in 1..=dim {
-        let days = days_from_civil(t.year, t.month, day);
-        let start_ms = days * 86_400_000 - i64::from(tz) * 60_000;
-        let dow = (days + 4).rem_euclid(7) as usize;
-        let entry = history.iter().find(|d| {
-            let c = civil(d.date_ms, tz);
-            c.year == t.year && c.month == t.month && c.day == day
-        });
-        week[dow] = Some(DayCell {
-            day,
-            month: t.month,
-            future: start_ms > today_ms,
-            entry,
-        });
-        if dow == 6 || day == dim {
-            weeks.push(std::mem::take(&mut week));
-        }
-    }
-    MonthGrid {
-        weeks,
-        year: t.year,
-        month: t.month,
-        today_ms,
     }
 }
 
@@ -1901,63 +1820,20 @@ fn usage_summary(
     m: &Metric,
     tz: i32,
 ) -> Vec<(&'static str, String)> {
-    let val = |d: &HistoryDay| val_of(m, d);
-    let month_days: Vec<&DayCell> = grid
-        .weeks
-        .iter()
-        .flatten()
-        .flatten()
-        .filter(|d| !d.future)
-        .collect();
-    let active = month_days
-        .iter()
-        .filter(|d| d.entry.is_some_and(|e| val(e) > 0.0))
-        .count();
-    let mut peak_val = -1.0;
-    let mut peak_day: Option<&DayCell> = None;
-    for d in &month_days {
-        let v = d.entry.map_or(0.0, val);
-        if v > peak_val {
-            peak_val = v;
-            peak_day = Some(d);
-        }
-    }
-    let today_entry = history.last();
-    let mut streak = 0;
-    let mut i = history.len() as i64
-        - 1
-        - if today_entry.is_some_and(|t| val(t) > 0.0) {
-            0
-        } else {
-            1
-        };
-    while i >= 0 && val(&history[i as usize]) > 0.0 {
-        streak += 1;
-        i -= 1;
-    }
-    let sum = |n: usize| {
-        history[history.len().saturating_sub(n)..]
-            .iter()
-            .map(val)
-            .sum::<f64>()
-    };
-    let month_total: f64 = month_days.iter().map(|d| d.entry.map_or(0.0, val)).sum();
-    let when = peak_day.map_or(String::new(), |d| {
-        let _ = tz;
-        format!(" {} {}", d.day, MONTHS[d.month])
+    let _ = tz;
+    let sm = month_summary(history, grid, &|d| val_of(m, d));
+    let when = sm.best_day.map_or(String::new(), |(day, month)| {
+        format!(" {} {}", day, MONTHS[month])
     });
     vec![
-        (
-            "today",
-            paint(COL_ACCENT, &m_fmt(m, today_entry.map_or(0.0, val))),
-        ),
-        ("7 days", paint(COL_TEXT, &m_fmt(m, sum(7)))),
-        ("month", paint(COL_TEXT, &m_fmt(m, month_total))),
+        ("today", paint(COL_ACCENT, &m_fmt(m, sm.today))),
+        ("7 days", paint(COL_TEXT, &m_fmt(m, sm.week))),
+        ("month", paint(COL_TEXT, &m_fmt(m, sm.month))),
         (
             "best",
             format!(
                 "{}{}",
-                paint(COL_TEXT, &m_fmt(m, peak_val.max(0.0))),
+                paint(COL_TEXT, &m_fmt(m, sm.best)),
                 paint(COL_SUBTLE, &when)
             ),
         ),
@@ -1965,8 +1841,8 @@ fn usage_summary(
             "active",
             format!(
                 "{}{}",
-                paint(COL_TEXT, &active.to_string()),
-                paint(COL_SUBTLE, &format!("/{} days", month_days.len()))
+                paint(COL_TEXT, &sm.active.to_string()),
+                paint(COL_SUBTLE, &format!("/{} days", sm.days))
             ),
         ),
         (
@@ -1974,10 +1850,10 @@ fn usage_summary(
             format!(
                 "{}{}",
                 paint(
-                    if streak > 0 { COL_OK } else { COL_TEXT },
-                    &streak.to_string()
+                    if sm.streak > 0 { COL_OK } else { COL_TEXT },
+                    &sm.streak.to_string()
                 ),
-                paint(COL_SUBTLE, if streak == 1 { " day" } else { " days" })
+                paint(COL_SUBTLE, if sm.streak == 1 { " day" } else { " days" })
             ),
         ),
     ]
@@ -1994,7 +1870,14 @@ fn usage_month_panel(s: &DashState, w: i64, h: i64, valign: VAlign, now: i64) ->
     if history.is_empty() {
         return boxed(
             "Usage",
-            vec![paint(COL_MUTED, "collecting history…")],
+            vec![paint(
+                COL_MUTED,
+                if s.history_loading {
+                    "loading usage…"
+                } else {
+                    "no usage yet"
+                },
+            )],
             w,
             h,
             false,
@@ -2277,42 +2160,14 @@ fn usage_year_content(s: &DashState, inner: i64, max_rows: usize) -> (String, Li
     }
     let stat_cols = stat_cols.max(0) as usize;
     let grid_w = USAGE_LABEL_W + weeks as usize * 2 - 1;
-    let today = history.last().unwrap();
-    let today_dow = civil(today.date_ms, s.tz_offset_min).dow as i64;
-    let cell = |c: i64, r: i64| -> Option<&HistoryDay> {
-        let ago = (weeks - 1 - c) * 7 + (today_dow - r);
-        if ago < 0 {
-            return None;
-        }
-        let idx = history.len() as i64 - 1 - ago;
-        if idx < 0 {
-            None
-        } else {
-            history.get(idx as usize)
-        }
-    };
-    let mut max = 1.0f64;
-    for c in 0..weeks {
-        for r in 0..7 {
-            if let Some(d) = cell(c, r) {
-                max = max.max(val(d));
-            }
-        }
-    }
+    let yg = year_grid(history, s.tz_offset_min, weeks, &val);
+    let max = yg.max;
+    let starts = year_month_starts(&yg, s.tz_offset_min);
     let mut months = vec![' '; grid_w];
     let mut last_x: i64 = -10;
-    for c in 0..weeks {
-        let mut mo: Option<usize> = None;
-        for r in 0..7 {
-            if let Some(d) = cell(c, r) {
-                let cv = civil(d.date_ms, s.tz_offset_min);
-                if cv.day == 1 {
-                    mo = Some(cv.month);
-                }
-            }
-        }
-        let x = USAGE_LABEL_W as i64 + c * 2;
-        let Some(mo) = mo else { continue };
+    for (c, mo) in starts.iter().enumerate() {
+        let x = USAGE_LABEL_W as i64 + c as i64 * 2;
+        let Some(mo) = *mo else { continue };
         if x + 3 > grid_w as i64 || x - last_x < 4 {
             continue;
         }
@@ -2324,7 +2179,7 @@ fn usage_year_content(s: &DashState, inner: i64, max_rows: usize) -> (String, Li
     let mut grid = vec![paint(COL_MUTED, &months.iter().collect::<String>())];
     for r in 0..7 {
         let cells: Vec<String> = (0..weeks)
-            .map(|c| match cell(c, r) {
+            .map(|c| match yg.cols[c as usize][r as usize] {
                 None => " ".to_string(),
                 Some(d) => paint(HEAT[heat_level(Some(val(d)), Some(max))], "■"),
             })
@@ -2475,6 +2330,18 @@ fn header(s: &DashState, w: i64, frame: usize, now: i64) -> String {
             b
         }
     };
+    // likewise the model: a long id must not push the folder chip off
+    let model = if w < 100 && width(&model) > 18 {
+        fit(&model, 18)
+    } else {
+        model
+    };
+    // on a narrow header a long folder name is shortened, not dropped with its chip
+    let project = if w < 100 && width(&project) > 10 {
+        fit(&project, 10)
+    } else {
+        project
+    };
     let ctx_pct = ctx_pct_of(s);
     let logos = [" ✻ SYNTHESIS ", " ✻ "];
     let pulse_s = if busy > 0 {
@@ -2505,7 +2372,7 @@ fn header(s: &DashState, w: i64, frame: usize, now: i64) -> String {
             },
         ),
         (
-            4,
+            3,
             if project.is_empty() {
                 String::new()
             } else {
@@ -2527,12 +2394,15 @@ fn header(s: &DashState, w: i64, frame: usize, now: i64) -> String {
     let right_chips: Vec<(u8, String)> = [
         (1, paint(COL_WHITE, &fmt_time(now, s.tz_offset_min))),
         (
-            3,
+            4,
             format!(
                 "{}{} {}",
                 paint(COL_MUTED, "ctx "),
-                mini_bar(ctx_pct, 6),
-                paint(level_color(ctx_pct), &format!("{}%", to_fixed(ctx_pct, 0)))
+                mini_bar(ctx_pct.unwrap_or(0.0), 6),
+                paint(
+                    level_color(ctx_pct.unwrap_or(0.0)),
+                    &ctx_pct.map_or("?".to_string(), |p| format!("{}%", to_fixed(p, 0)))
+                )
             ),
         ),
         (
@@ -2638,7 +2508,7 @@ fn header_rule(w: i64) -> String {
 fn topology_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> Lines {
     let tap = s.usage.tap.as_ref();
     let opts = FlowOpts {
-        context_size: tap.and_then(|t| t.context_size),
+        context_size: context_size(tap, s.agent.and_then(|a| a.context_window)),
         ctx_pct: if s.session.context_display_reset {
             Some(0.0)
         } else if !s.session.context_estimated {
@@ -2665,46 +2535,54 @@ fn topology_panel(s: &DashState, w: i64, h: i64, frame: usize, now: i64) -> Line
 }
 
 fn footer(s: &DashState, w: i64) -> String {
-    let agent_keys: &[(&str, &str)] = &[
-        (
-            "tab",
-            "workspace selector (when multiple) → sessions → prompt",
-        ),
+    let mut agent_keys: Vec<(&str, &str)> = vec![];
+    if w >= 80 {
+        agent_keys.push(("tab", "workspaces → running → prompt"));
+    }
+    if s.agent.is_some_and(|a| !a.subagents.is_empty()) {
+        agent_keys.push(("ctrl+t", "talk to next agent"));
+    }
+    agent_keys.extend([
         ("enter", "send"),
         ("esc", "interrupt"),
         ("⇧tab", "mode"),
+        ("ctrl+n", "new workspace"),
+        ("/new", "new session"),
         ("alt+v", "paste image"),
         ("!", "shell"),
         ("ctrl+o", "expand"),
         ("ctrl+r", "search history"),
         ("ctrl+l", "redraw"),
-        ("ctrl+↑/↓", "browse sessions"),
-        ("ctrl+n", "new workspace"),
-        ("/new", "new session"),
-        ("ctrl+pgup/pgdn", "switch session"),
-        ("alt+↑/↓", "switch workspace"),
         ("pgup/pgdn", "scroll"),
         ("ctrl+c ×2", "quit"),
-    ];
-    let mut dash_keys: Vec<(&str, &str)> = vec![("↑/↓", "select session")];
-    if s.workspaces.is_some() {
-        dash_keys.push(("←/→", "switch workspace"));
-    }
-    dash_keys.extend([
-        ("a", "follow newest"),
-        ("u", "usage metric"),
-        ("r", "reload"),
     ]);
-    if s.agent.is_some() {
-        dash_keys.push(("tab", "agent"));
-    }
-    dash_keys.push(("q", "quit"));
+    // the standalone dashboard (no chat) keeps the Node keys; the app's Running panel has its own
+    let dash_keys: Vec<(&str, &str)> = if s.agent.is_some() {
+        vec![
+            ("↑/↓", "select session"),
+            ("enter", "open it"),
+            ("tab", "prompt"),
+            ("esc", "prompt"),
+        ]
+    } else {
+        let mut k = vec![("↑/↓", "select session")];
+        if s.workspaces.is_some() {
+            k.push(("←/→", "switch workspace"));
+        }
+        k.extend([
+            ("a", "follow newest"),
+            ("u", "usage metric"),
+            ("r", "reload"),
+            ("q", "quit"),
+        ]);
+        k
+    };
     let ws_keys: &[(&str, &str)] = &[
-        ("↑/↓", "switch workspace"),
-        ("g/G", "first/last"),
-        ("enter/→/tab", "sessions"),
-        ("esc", "agent"),
-        ("q", "quit"),
+        ("↑/↓", "select workspace"),
+        ("home/end", "first/last"),
+        ("enter", "its sessions"),
+        ("tab", "running"),
+        ("esc", "prompt"),
     ];
     let perm_keys: &[(&str, &str)] = &[
         ("↑/↓ 1-3", "choose"),
@@ -2713,7 +2591,7 @@ fn footer(s: &DashState, w: i64) -> String {
         ("tab", "dashboard"),
     ];
     let mut keys: Vec<(&str, &str)> = if s.agent.is_some() && s.focus == Focus::Agent {
-        agent_keys.to_vec()
+        agent_keys
     } else if s.focus == Focus::Workspace {
         ws_keys.to_vec()
     } else {
@@ -2852,7 +2730,19 @@ fn viewed_subagent<'a>(s: &DashState<'a>) -> Option<&'a Agent> {
 }
 
 fn topology_column(s: &DashState, w: i64, h: i64, frame: usize, now: i64, cx: &mut Ctx) -> Topo {
-    let min_below = USAGE_MIN_H;
+    let hidden = s.view.hidden;
+    if hidden.topology {
+        // the usage (or tasks) panel takes the whole column
+        let below = tasks_usage_row(s, w, h, frame, now);
+        return Topo {
+            rows: below.rows,
+            usage: below.usage,
+            tasks: below.tasks,
+            docked: false,
+            dock_offset: None,
+        };
+    }
+    let min_below = if hidden.usage { 0 } else { USAGE_MIN_H };
     if h - TOPO_MIN_H < min_below {
         return Topo {
             rows: topology_panel(s, w, h, frame, now),
@@ -2886,7 +2776,18 @@ fn topology_column(s: &DashState, w: i64, h: i64, frame: usize, now: i64, cx: &m
     if s.agent.is_some() {
         below_h = below_h.min(USAGE_MAX_H.max(if open_todos(s) > 0 { todo_count + 4 } else { 0 }));
     }
-    let below = tasks_usage_row(s, w, below_h, frame, now);
+    if hidden.usage {
+        below_h = 0;
+    }
+    let below = if hidden.usage {
+        TasksUsage {
+            rows: vec![],
+            usage: false,
+            tasks: false,
+        }
+    } else {
+        tasks_usage_row(s, w, below_h, frame, now)
+    };
     let sub = viewed_subagent(s);
     let spare = h - below_h - topo_h;
     if let Some(sub) = sub.filter(|_| w >= DOCK_MIN_W && spare >= DOCK_MIN_H) {
@@ -2958,6 +2859,47 @@ fn frame_active(sub: &Agent) -> bool {
     sub.status == "running"
 }
 
+/// The row of boxes above the chat: Status, Tokens (wide only) and the open tasks; a hidden box
+/// gives its width to the first one left, and nothing is drawn when none is.
+fn agent_top(s: &DashState, d: i64, wide: bool, with_tasks: bool, frame: usize, now: i64) -> Lines {
+    let hd = s.view.hidden;
+    let tasks = wide && with_tasks && open_todos(s) > 0;
+    let tasks_w = if tasks {
+        (d as f64 * 0.3).floor() as i64
+    } else {
+        0
+    };
+    let rest_w = d - tasks_w;
+    let status_w = (rest_w as f64 * if tasks { 0.65 } else { 0.6 }).floor() as i64;
+    let mut cols: Vec<(char, i64)> = vec![];
+    if !hd.status {
+        cols.push(('s', status_w));
+    }
+    if wide && !hd.tokens {
+        cols.push(('t', rest_w - status_w));
+    }
+    if tasks {
+        cols.push(('k', tasks_w));
+    }
+    if !wide && !hd.status {
+        cols[0].1 = d;
+    }
+    let used: i64 = cols.iter().map(|c| c.1).sum();
+    let Some(first) = cols.first_mut() else {
+        return vec![];
+    };
+    first.1 += d - used;
+    hstack(
+        cols.iter()
+            .map(|&(k, w)| match k {
+                's' => status_panel(s, w, STATUS_H, frame, now),
+                't' => token_panel(s, w, STATUS_H),
+                _ => tasks_panel(s, w, STATUS_H, frame, VAlign::Evenly),
+            })
+            .collect(),
+    )
+}
+
 fn agent_detail(
     s: &DashState,
     d: i64,
@@ -2968,7 +2910,12 @@ fn agent_detail(
     with_tasks: bool,
     cx: &mut Ctx,
 ) -> Lines {
-    if h < STATUS_H + AGENT_MIN_H {
+    let hd = s.view.hidden;
+    let with_usage = with_usage && !hd.usage;
+    let wide = d >= 96;
+    let top = agent_top(s, d, wide, with_tasks, frame, now);
+    let top_h = top.len() as i64;
+    if h < top_h + AGENT_MIN_H {
         cx.local_rect = Some(Rect {
             x: 0,
             y: 0,
@@ -2977,49 +2924,30 @@ fn agent_detail(
         });
         return agent_panel(s, d, h, frame, now, cx.sub_docked, cx.rects, &mut cx.body);
     }
-    let wide = d >= 96;
     let todos_len = if with_tasks {
         s.session.todos.len() as i64
     } else {
         0
-    };
-    let top = if wide && (!with_tasks || open_todos(s) == 0) {
-        let status_w = (d as f64 * 0.6).floor() as i64;
-        hstack(vec![
-            status_panel(s, status_w, STATUS_H, frame, now),
-            token_panel(s, d - status_w, STATUS_H),
-        ])
-    } else if wide {
-        let tasks_w = (d as f64 * 0.3).floor() as i64;
-        let rest_w = d - tasks_w;
-        let status_w = (rest_w as f64 * 0.65).floor() as i64;
-        hstack(vec![
-            status_panel(s, status_w, STATUS_H, frame, now),
-            token_panel(s, rest_w - status_w, STATUS_H),
-            tasks_panel(s, tasks_w, STATUS_H, frame, VAlign::Evenly),
-        ])
-    } else {
-        status_panel(s, d, STATUS_H, frame, now)
     };
     let usage_h = if open_todos(s) > 0 {
         USAGE_MAX_H
     } else {
         USAGE_YEAR_H
     };
-    let mid = if with_usage && h - STATUS_H - usage_h >= 24 {
+    let mid = if with_usage && h - top_h - usage_h >= 24 {
         usage_panel(s, d, usage_h, VAlign::Evenly, UsageView::Auto, now)
     } else {
         vec![]
     };
     let mut tasks_block: Lines = vec![];
     if !wide && open_todos(s) > 0 {
-        let avail = h - STATUS_H - mid.len() as i64 - AGENT_MIN_H;
+        let avail = h - top_h - mid.len() as i64 - AGENT_MIN_H;
         let tasks_h = (todos_len + 3).min(8).min(avail.max(0));
         if tasks_h >= 4 {
             tasks_block = tasks_panel(s, d, tasks_h, frame, VAlign::Evenly);
         }
     }
-    let agent_h = h - STATUS_H - mid.len() as i64 - tasks_block.len() as i64;
+    let agent_h = h - top_h - mid.len() as i64 - tasks_block.len() as i64;
     cx.local_rect = Some(Rect {
         x: 0,
         y: (top.len() + mid.len() + tasks_block.len()) as i64,
@@ -3121,12 +3049,17 @@ pub fn render_frame(
     let rule = h >= 30;
     let body_h = h - 2 - i64::from(rule);
     let header_rows = 1 + i64::from(rule);
-    let layout = layout_for(w, h);
+    // no Topology and no Usage: the chat spans to the right edge
+    let layout = if s.view.hidden.topology && s.view.hidden.usage {
+        Layout::None
+    } else {
+        layout_for(w, h)
+    };
     // Narrow terminals: chat only; the sidebar would leave ~38 columns for the conversation (QA B-25).
     let side_w = if s.agent.is_some() && w < 80 {
         0
     } else if s.agent.is_some() {
-        clamp_int((w as f64 * 0.14).floor() as i64, 20, 40)
+        clamp_int((w as f64 * 0.14).floor() as i64, 22, 40)
     } else {
         clamp_int((w as f64 * 0.17).floor() as i64, 22, 40)
     };
@@ -3295,6 +3228,12 @@ pub fn render_frame(
     } else {
         None
     };
+    r.session_rect = (hits.sess_h > 0).then_some(Rect {
+        x: 0,
+        y: header_rows + hits.ws_h,
+        w: side_w,
+        h: hits.sess_h,
+    });
     r.session_rows = hits
         .session
         .iter()

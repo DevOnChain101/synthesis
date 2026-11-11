@@ -472,11 +472,24 @@ fn synthesis_tui_parses_validates_and_names_the_key_not_the_value() {
     assert_eq!((d, diag), (TuiSettings::default(), vec![]));
     let (s, diag) = TuiSettings::from_settings(&json!({"synt": {"tui": {
         "panels": {"tools": false, "activity": false},
-        "logo": "off", "show_thinking": false, "diffs_expanded": true,
+        "logo": "off", "show_thinking": false, "verbose": true, "diffs_expanded": true,
         "queue_indicators": false, "motion": false, "mouse_capture": false, "copy_on_select": false}}}));
     assert_eq!(diag, Vec::<String>::new());
-    assert_eq!(s.panels, [true, true, false, false]);
-    assert!(!s.logo && !s.show_thinking && s.diffs_expanded);
+    assert_eq!(s.panels, [true, true, false, false, true, true, true, true]);
+    assert!(!s.logo && !s.show_thinking && s.diffs_expanded && s.verbose);
+    assert!(!TuiSettings::default().verbose);
+    // the four panels of the dash: status, tokens, topology, usage (default on)
+    let (p, diag) = TuiSettings::from_settings(&json!({"synt": {"tui": {
+        "panels": {"status": false, "tokens": false, "topology": false, "usage": false}}}}));
+    assert_eq!(
+        (p.panels, diag),
+        ([true, true, true, true, false, false, false, false], vec![])
+    );
+    let (p, diag) =
+        TuiSettings::from_settings(&json!({"synt": {"tui": {"panels": {"usage": "no"}}}}));
+    assert_eq!(p, TuiSettings::default());
+    assert!(diag[0].contains("tui.panels.usage"), "{diag:?}");
+    assert_eq!(p.to_value()["panels"]["topology"], true);
     assert!(!s.queue_indicators && !s.motion && !s.mouse_capture && !s.copy_on_select);
     // wrong types and unknown names keep the defaults and say which key
     let (s, diag) = TuiSettings::from_settings(&json!({"synt": {"tui": {
@@ -528,11 +541,29 @@ fn synthesis_tui_is_read_from_the_user_file_only_and_the_others_are_named() {
 }
 
 #[test]
+fn tui_opacity_and_blur_are_validated_and_round_trip() {
+    let (s, diag) =
+        TuiSettings::from_settings(&json!({"synt": {"tui": {"opacity": 55, "blur": true}}}));
+    assert_eq!((s.opacity, s.blur, diag), (55, true, vec![]));
+    assert_eq!(s.to_value()["opacity"], 55);
+    for bad in [json!(29), json!(101), json!(60.5), json!("90"), json!(-1)] {
+        let (s, diag) = TuiSettings::from_settings(&json!({"synt": {"tui": {"opacity": bad}}}));
+        assert_eq!(s.opacity, 100, "{bad}");
+        assert!(
+            diag[0].contains("synt.tui.opacity") && !diag[0].contains("90"),
+            "{diag:?}"
+        );
+    }
+    let (s, diag) = TuiSettings::from_settings(&json!({"synt": {"tui": {"blur": 1}}}));
+    assert!(!s.blur && diag[0].contains("synt.tui.blur"), "{diag:?}");
+}
+
+#[test]
 fn persisting_tui_keeps_everything_else_never_overwrites_a_bad_file_and_writes_no_credentials() {
     let f = fx();
     let home = f.home.path();
     let t = TuiSettings {
-        panels: [true, true, false, true],
+        panels: [true, true, false, true, true, true, true, true],
         motion: false,
         ..TuiSettings::default()
     };
@@ -565,14 +596,17 @@ fn persisting_tui_keeps_everything_else_never_overwrites_a_bad_file_and_writes_n
     assert_eq!(
         keys,
         [
+            "blur",
             "copy_on_select",
             "diffs_expanded",
             "logo",
             "motion",
             "mouse_capture",
+            "opacity",
             "panels",
             "queue_indicators",
-            "show_thinking"
+            "show_thinking",
+            "verbose"
         ]
     );
     for bad in ["{not json", r#"{"synt": 5}"#, "[1]"] {
@@ -809,4 +843,33 @@ fn old_synthesis_key_is_reported_and_not_honoured() {
         s.diagnostics
     );
     assert_eq!(s.synthesis.budget.max_turns, None);
+}
+
+#[test]
+fn model_info_fetch_is_a_user_setting_only() {
+    let f = fx();
+    f.user(json!({"synt":{"modelInfo":{"fetch":false}}}));
+    f.project(json!({"synt":{"modelInfo":{"fetch":true}}}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(s.synthesis.model_info_fetch, Some(false));
+    assert!(
+        s.diagnostics
+            .iter()
+            .any(|d| d.contains("project settings: synt.modelInfo is read from user settings only"))
+    );
+    let f = fx();
+    f.project(json!({"synt":{"modelInfo":{"fetch":false}}}));
+    assert_eq!(
+        f.load(ProjectTrust::Trusted).synthesis.model_info_fetch,
+        None
+    );
+    let f = fx();
+    f.user(json!({"synt":{"modelInfo":{"fetch":"no"}}}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(s.synthesis.model_info_fetch, None);
+    assert!(
+        s.diagnostics
+            .iter()
+            .any(|d| d.contains("modelInfo.fetch must be"))
+    );
 }

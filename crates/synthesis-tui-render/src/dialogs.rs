@@ -181,7 +181,8 @@ pub const HELP: &[&str] = &[
     "! run a shell command (!! only records it) · / commands and skills · @ mention a file · ctrl+v / alt+v pastes an image from the clipboard (WSL and Windows; ctrl+v tries an image first, then text; alt+v image only) · /images clear drops attached images",
     "/model /mcp /agents /permissions /status /compact /clear /new /resume /focus /exit",
     "↑/↓ prompt history · ctrl+r search history · ctrl+o show all of long tasks, bash output and code (6 lines by default) · right-click in the prompt pastes the clipboard · drag, double or triple click copies · pgup/pgdn scroll · ctrl+l redraw a garbled screen",
-    "ctrl+n or /new open a session in another folder · /resume continues a saved one (this folder first)",
+    "ctrl+n new workspace (pick a folder, a new session starts there) · /new new session in the selected workspace · /resume continues a saved one (this folder first) · ctrl+t talks to the next sub-agent",
+    "sidebar: tab walks chat → Workspace → Running → chat (↑/↓ select, enter opens, esc back) · click a workspace, a session or a prompt in Activity (jumps to it in the chat) · the wheel scrolls the panel under it",
     "dialogs: ↑/↓ or 1-9 choose · click an option · space toggles · ←/→ switch question · enter confirm · esc reject · x shows the whole input",
 ];
 

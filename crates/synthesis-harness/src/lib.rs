@@ -25,6 +25,7 @@
 
 mod agent;
 mod agents;
+mod browser_action;
 mod classifier;
 mod comm;
 mod context;
@@ -46,7 +47,7 @@ pub use agents::{
     AgentDef, AgentSource, AgentTable, GENERAL_PURPOSE, ModelResolver, from_mode, stricter, to_mode,
 };
 pub use classifier::AutoJudge;
-pub use comm::{AgentInfo, TaskAgent};
+pub use comm::{AgentInfo, NO_TASK_RUNNING, TaskAgent};
 pub use context::{RULES, StaticContext, wrap_tool_output};
 pub use harness::{
     AutoCompact, GateFactory, Harness, HarnessConfig, HarnessError, ImageAttachment, ModeError,

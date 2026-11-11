@@ -480,7 +480,59 @@ async fn fill_secret_body(
     }
     let maybe = rt.fill_secret(r, spec, &value).await?;
     let out = json!({"ok": true, "filled": if maybe { json!("maybe") } else { json!(true) }, "secret": name});
-    Ok(ToolOutput::text(out.to_string()))
+    // the position only, and the word "secret" instead of the field or the secret's name
+    Ok(ToolOutput::text(out.to_string()).with_meta(action(
+        "type",
+        rt.spot_of(r).await,
+        Some("secret"),
+    )))
+}
+
+/// Whether `key` (a key name or a `Modifier+Key` chord) ends in a non-printable control key: Enter, Tab, Escape,
+/// Backspace, Delete, an arrow, Home, End, PageUp, PageDown or F1-F24, after only modifier names. Only such a
+/// press is reported by name in `browser.action`; a printable key or a chord ending in one (a character of a
+/// password, `Control+A`) never is.
+pub fn is_control_chord(key: &str) -> bool {
+    let mut parts: Vec<&str> = key.split('+').collect();
+    let Some(last) = parts.pop() else {
+        return false;
+    };
+    const MODS: [&str; 5] = ["Control", "Shift", "Alt", "Meta", "ControlOrMeta"];
+    const KEYS: [&str; 12] = [
+        "Enter",
+        "Tab",
+        "Escape",
+        "Backspace",
+        "Delete",
+        "ArrowUp",
+        "ArrowDown",
+        "ArrowLeft",
+        "ArrowRight",
+        "Home",
+        "End",
+        "PageUp",
+    ];
+    let f_key = last
+        .strip_prefix('F')
+        .and_then(|n| n.parse::<u8>().ok())
+        .is_some_and(|n| (1..=24).contains(&n));
+    (KEYS.contains(&last) || last == "PageDown" || f_key) && parts.iter().all(|p| MODS.contains(p))
+}
+
+/// `meta.action` of a result: the harness turns it into a `browser.action` event. Only where the action
+/// landed and a short target; never the text typed, the key pressed or a secret.
+fn action(kind: &str, spot: Option<synthesis_browser::Spot>, target: Option<&str>) -> Value {
+    let mut a = json!({"action": kind});
+    if let Some(s) = spot {
+        a["x"] = json!(s.x.round() as i32);
+        a["y"] = json!(s.y.round() as i32);
+        a["w"] = json!(s.w);
+        a["h"] = json!(s.h);
+    }
+    if let Some(t) = target {
+        a["target"] = json!(t.chars().take(80).collect::<String>());
+    }
+    json!({"action": a})
 }
 
 async fn nav(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
@@ -501,12 +553,13 @@ async fn nav(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
     if rt.guard_text().await.is_err() {
         return Ok(ToolOutput::text(
             "Navigated. (page text withheld: a secret was typed into this document)",
-        ));
+        )
+        .with_meta(action("navigate", None, None)));
     }
-    Ok(ToolOutput::text(format!(
-        "Navigated.\n{}",
-        untrusted(page_text(&page))
-    )))
+    Ok(
+        ToolOutput::text(format!("Navigated.\n{}", untrusted(page_text(&page))))
+            .with_meta(action("navigate", None, None)),
+    )
 }
 
 async fn snap(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
@@ -550,20 +603,28 @@ async fn ref_by_role(rt: &BrowserRuntime, role: &str, name: &str) -> Result<Stri
 }
 
 async fn click_body(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
+    let mut label = None;
     let r = match (
         str_field(input, "ref"),
         str_field(input, "role"),
         str_field(input, "name"),
     ) {
         (Some(r), ..) => r.to_string(),
-        (None, Some(role), Some(name)) => ref_by_role(rt, role, name).await?,
+        (None, Some(role), Some(name)) => {
+            label = Some(format!("{role} {name}"));
+            ref_by_role(rt, role, name).await?
+        }
         _ if input.get("selector").is_some() => {
             return Err("selectors are not supported yet; use ref or role+name.".into());
         }
         _ => return Err("give ref, or role and name.".into()),
     };
-    rt.click(&r).await?;
-    Ok(ToolOutput::text(format!("Clicked {r}.")))
+    let spot = rt.click(&r).await?;
+    Ok(ToolOutput::text(format!("Clicked {r}.")).with_meta(action(
+        "click",
+        Some(spot),
+        Some(label.as_deref().unwrap_or(&r)),
+    )))
 }
 
 async fn fill_body(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
@@ -578,17 +639,22 @@ async fn fill_body(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
     let value = input["value"].as_str().unwrap_or("");
     rt.fill(r, value).await?;
     // The text is never echoed: a sensitive value must not reach the transcript or events.
+    let mut meta = action("type", rt.spot_of(r).await, Some(r));
+    meta["ref"] = json!(r);
+    meta["sensitive"] = json!(input["sensitive"] == true);
     Ok(ToolOutput::text(format!(
         "Filled {r} ({} characters).",
         value.chars().count()
     ))
-    .with_meta(json!({"ref": r, "sensitive": input["sensitive"] == true})))
+    .with_meta(meta))
 }
 
 async fn key(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
     let k = str_field(input, "key").ok_or("\"key\" is required.")?;
     rt.press_key(k).await?;
-    Ok(ToolOutput::text(format!("Pressed {k}.")))
+    // only a control key is named; a printable one can be a character of a secret
+    let named = if is_control_chord(k) { k } else { "key" };
+    Ok(ToolOutput::text(format!("Pressed {k}.")).with_meta(action("press", None, Some(named))))
 }
 
 async fn wait(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
@@ -611,13 +677,28 @@ async fn wait(rt: &BrowserRuntime, input: &Value, _: &Shared) -> Res {
     Ok(ToolOutput::text("Done waiting."))
 }
 
+/// Width and height from the IHDR chunk of a PNG; 0, 0 when the bytes are not one.
+fn png_size(png: &[u8]) -> (u32, u32) {
+    let be = |i: usize| {
+        png.get(i..i + 4)
+            .map_or(0, |b| u32::from_be_bytes(b.try_into().unwrap()))
+    };
+    if png.starts_with(b"\x89PNG") {
+        (be(16), be(20))
+    } else {
+        (0, 0)
+    }
+}
+
 async fn shot(rt: &BrowserRuntime, input: &Value, sh: &Shared) -> Res {
     if input.get("ref").is_some() {
         return Err("element screenshots (ref) are not supported yet.".into());
     }
     let s = rt.screenshot(input["full_page"] == true).await?;
     let path = s.path.display().to_string();
-    let meta = json!({"artifact_path": path});
+    let (w, h) = png_size(&s.png);
+    let frame = json!({"url": rt.page_origin().await.unwrap_or_default(), "w": w, "h": h, "bytes": s.png.len()});
+    let meta = json!({"artifact_path": path, "frame": frame});
     if lock(&sh.browser_cfg).supports_images {
         return Ok(ToolOutput {
             content: Content::Blocks(vec![
@@ -794,5 +875,42 @@ mod tests {
         c.cancel();
         let e = await_person(&Hang, &req(Duration::from_secs(60)), &c).await;
         assert!(matches!(e, Err(BrowserError::Refused(m)) if m.contains("cancelled")));
+    }
+}
+
+#[cfg(test)]
+mod png_tests {
+    #[test]
+    fn png_size_reads_ihdr() {
+        let mut p = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        p.extend([0, 0, 5, 0, 0, 0, 2, 208]);
+        assert_eq!(super::png_size(&p), (1280, 720));
+        assert_eq!(super::png_size(b"nope"), (0, 0));
+    }
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::*;
+
+    #[test]
+    fn the_action_meta_has_a_point_and_a_clipped_target_and_nothing_else() {
+        let spot = synthesis_browser::Spot {
+            x: 100.4,
+            y: 50.6,
+            w: 1280,
+            h: 800,
+        };
+        let m = action("type", Some(spot), Some(&"x".repeat(200)));
+        let a = m["action"].as_object().unwrap();
+        let mut keys: Vec<_> = a.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["action", "h", "target", "w", "x", "y"]);
+        assert_eq!((a["x"].as_i64(), a["y"].as_i64()), (Some(100), Some(51)));
+        assert_eq!(a["target"].as_str().unwrap().len(), 80);
+        assert_eq!(
+            action("press", None, None)["action"],
+            json!({"action": "press"})
+        );
     }
 }

@@ -1,0 +1,430 @@
+# Spec: Desktop app (native GPUI): draft 0.2, phase 0
+
+Replaces the archived spec (tag `archive/ui-before-removal`, `docs/specs/desktop.md`: Mode 1/Mode 2,
+onboarding, OS credential store). Owner request 2026-11-06; CLAUDE.md "Status" has the one-line note.
+
+## 1. Goals and non-goals
+
+A native GPUI app (not Tauri, no webview) for macOS, Linux and Windows that is the desktop version
+of the classic TUI design, in this repo, running the Rust engine in process.
+
+- One interface, plus a placeholder and Settings: **TUI** (the classic TUI design drawn natively from engine
+  data, `cli.html` exactly), **Agent** (a different design, later: the page says "Coming soon") and **Settings**
+  (a centred popup over the TUI view, section 6). The design reference is `~/Vibe/synthesis-cli-ui/cli.html` with the platinum
+  palette (`docs/tui-palette.md`), not its blue/green. The first Agent view (`agent_view/`, built on `#view2`) was
+  removed on 2026-11-07 by owner decision; its chat pane, diff/terminal/browser panes and project tree live on in
+  the TUI view's centre panel.
+- Non-goals (owner decisions): no launchpad/landing/Ask page; no embedded terminal emulator and no
+  PTY pane (the TUI view is panels fed by backend events, not alacritty/xterm/vt100); no desktop-control
+  feature; no keychain or credential storage (ADR-011: API keys via `SYNT_*` env, `{env:}`/`{file:}`).
+
+## 2. Architecture
+
+- Crate `apps/desktop` (`synthesis-desktop`, bin `synthesis-desktop`). `src/ui.rs` is the only file that
+  paints; `engine`, `theme` are plain Rust, unit-tested without a window. All view state lives in
+  `crates/synthesis-view` (below).
+- `engine.rs`: `synthesis_app::run::prepare(.., Front::Native(Native { out, approver, input }))` builds
+  the harness in process. The host supplies the JSONL event writer (parsed to typed `Envelope`s and sent
+  to the window over a channel), the `Approver` (pending map answered by the UI) and the
+  `InputProvider` (`ChanInput`: plan and question dialogs, answered by the window). `Front::Native` behaves like `Front::Tui` otherwise.
+- `crates/synthesis-view` (`synthesis-view`): UI-agnostic view models and reducers, no terminal, no
+  GPUI, no drawing. The classic TUI and the desktop both depend on it. One `state::ViewState` per
+  session: `apply(&Envelope)` folds an event into every panel; `load_from_store(&Reader,
+  &WorkspaceContext, &StoreLoad)` fills the store panels (and replays one session). Panels:
+  `convo` (messages, tool cards, pending approvals, sub-agents, todo plan; moved from
+  `apps/desktop/src/convo.rs`), `status` (`StatusModel`: context used/window, tokens in/out/cache and
+  hit rate, cost, turns, tools, model/effort/mode, cwd, uptime; `SandboxStatus`, `ContextStatus` moved
+  from `synthesis-tui`), `usage` (`UsageHistory`, per-day history; moved), `workspaces`
+  (`WorkspaceList`: root, label, session count, `+N -N` when the host marks the folder trusted;
+  `SessionRow` with title or `(untitled)`, status, `updated_at`, `is_live`; empty and closed
+  sessions hidden by `Reader::list_used_sessions`), `running` (`RunningList`: live sessions and
+  `PeerRow`s from the `/peers` listing), `activity` (`ActivityModel`, `ToolsSkillsModel`),
+  `topology` (`Topology`: stage pipeline Plan, Guard, Orch, Exec, Verify, Learn, and the
+  user/core/guards/skills/agents/hooks/mcp/exec/memory nodes with state and counters), `model`
+  (the transcript-shaped `Session` all of those read; moved from `synthesis-tui-render`),
+  `project` (git tree/diff scan with the trust gate; moved from `synthesis-tui`), `sessions`
+  (`list_saved`; moved). `synthesis-tui` and `synthesis-tui-render` re-export the moved items under
+  their old paths and keep colours, layout and ANSI. Frontends decide `is_live` and the trust gate
+  by closures in `LoadOpts`; the crate never reads the environment itself.
+  Dependency note: `synthesis-view` still depends on `synthesis-tui-base` (only for `is_js_space` and
+  the bounded process runner `imgclip::RealExec` that `project` runs git with) and on
+  `synthesis-harness` (only `sanitize_for_display`); moving both into a small base crate is follow-up.
+- `theme.rs` reads the TUI's own tokens (`synthesis-tui-render::theme`), so palette changes land in
+  both UIs at once. Fonts: Inter (UI sans), Fira Code (TUI and Agent views, the design's `--mono`) and JetBrains Mono (settings font choice), SIL OFL, licences in
+  `apps/desktop/assets/fonts/*-OFL.txt`; icons: Lucide through `gpui-kit-assets`.
+- Pins (exact): `gpui-pre =0.3.10` (the maintainers' snapshot of Zed's gpui), `gpui-component =0.8.1`,
+  `gpui-pre-platform =0.3.10` with `font-kit`, `gpui-kit-assets =0.8.1`; macOS adds `gpui-pre-apple`
+  with `runtime_shaders` (Command Line Tools only, no Xcode). Never mix with a git `gpui`.
+
+## 3. Build matrix
+
+- `cargo build -p synthesis-desktop` (run `target/debug/synthesis-desktop`); `cargo test -p synthesis-desktop`.
+- The root `Cargo.toml` has `default-members` without the desktop crate, so plain `cargo build/test`
+  skip it. `--workspace` ignores `default-members`, hence the CI commands carry `--exclude synthesis-desktop`.
+- CI (`ci.yml` job `desktop`, required by `ci-ok`): `cargo build`, `clippy -D warnings`, `test` on ubuntu, macos and windows. Linux needs the
+  gpui-pre-linux system libraries (xcb, xkbcommon, wayland, fontconfig/freetype, Vulkan loader/headers for the wgpu renderer; the apt list is in
+  the job); Windows is gpui-pre-windows (DirectX 11/DirectWrite). Client-side window controls (minimise/maximise/close) are missing for Windows and Linux.
+- CI runtime smoke (same job, `scripts/desktop-smoke.sh`, build with `--features shot,test-provider`; artifact `desktop-shots-<OS>`: download it from the
+  run's Summary page, unzip, open the PNGs). macOS and Linux render offscreen `tui-1400x900.png`, `tui-1000x700.png`, `settings-1400x900.png`
+  (`--shot ... --view settings --check`: size is the asked one times a whole scale, more than 16 distinct colours, and a text edge density of at least 0.7%: a frame with layout and icons but no glyphs fails; a no-op text system gave 0.5%, real frames 1.1% to 3.2%); macOS uses headless Metal,
+  Linux wgpu on lavapipe (`mesa-vulkan-drivers`). gpui-pre-windows has no headless renderer, so Windows launches the real app on `--sample` with
+  `--exit-after-first-frame` and requires the "first frame drawn" line (log in the artifact; no PNG). Not proven: real window on macOS/Linux, a real GPU,
+  HiDPI beyond the runner's scale, IME, input events, Windows pixels and Windows text (first frame only proves a draw). `gpui_platform` needs the `wayland` and `x11` features on Linux (off by default in gpui-pre-linux: without them the Linux build has a no-op text system and no window backend).
+- Release (`release.yml` job `desktop`, `scripts/package-desktop.mjs`): archives `synthesis-desktop-<version>-<target>`; docs/RELEASE.md "Desktop".
+
+  | Target | Runner | Archive | Contents | Status |
+  |---|---|---|---|---|
+  | aarch64-apple-darwin, x86_64-apple-darwin | macos-latest | zip | `Synthesis.app` (ad-hoc signed) | required |
+  | x86_64-unknown-linux-gnu | ubuntu-22.04 | tar.gz | `synthesis-desktop`, `.desktop`, hicolor icons, README.txt | required |
+  | x86_64-pc-windows-msvc | windows-latest | zip | `Synthesis.exe` (icon embedded, GUI subsystem in release) | required |
+  | aarch64-unknown-linux-gnu, aarch64-pc-windows-msvc | ubuntu-22.04-arm, windows-11-arm | tar.gz, zip | as above | experimental |
+
+- Names: the cargo binary stays `synthesis-desktop` (technical; it is not the `synt` command and there is no alias). Display name "Synthesis"
+  (bundle name, window/app name in the menu, `.desktop` Name, `Synthesis.exe`). Bundle identifier `dev.synthesis.desktop`
+  (`[package.metadata.bundle]`). Icons: `assets/icons/` (committed .icns/.ico/png, from `design/01-brand/app-icons`); fonts are compiled in.
+- No signing or notarization (no secrets in the pipeline). Started from Finder the cwd is `/`; the app then uses the home folder.
+
+## 4. Phases
+
+0. Shell (done): window, title bar (TUI, Agent, Settings icons), placeholders, palette, fonts, `Front::Native`,
+   engine and reducer restored and green against the current crates.
+1. Agent view on `engine` + `synthesis_view::convo` (send, stream, approve/deny), then TUI view panels from the same state.
+2. Settings from `synthesis-settings` (model, permissions, appearance), stored-session resume.
+3. Plan/question dialogs, browser/verification panels, Linux and Windows builds and CI jobs.
+
+## 5. Known gaps
+
+Wired: the input provider (plan and question dialogs, with "Other" free text), stored-session resume and the
+model/resume pickers, every built-in slash command, image paste, and peer polling (`tui_view/driver.rs` `tick`
+calls `Engine::peer_rows` every fifth second into `ViewState::set_peers`). Linux/Windows run in CI but no
+maintainer has used them on a real machine (no ConPTY need any more).
+
+Chat rows follow the classic TUI's quiet-chat rules (`tui_view/chat.rs` `visible`, reducer in
+`synthesis-view/src/convo.rs`, wording from `synthesis-tui` `chat.rs`). Always shown: budget exceeded, failed
+hooks, a browser login to confirm, a refused peer request, work a peer asked for, peer replies and agent
+messages, a memory note waiting for review, a failed memory reflection. Internal rows (successful hooks,
+memory retrieved/written/quarantined, peer listening/requests/threads/tool calls) are `Item::Internal`: drawn
+only with `synt.tui.verbose`, never in `/focus`. A task that did not complete ends with a warning line
+(`task unverified|blocked|cancelled`, `interrupted`) or an error line (`task failed`), followed by the checks of its
+last verification report; `Done` is the only green end. An exceeded budget also shows as a status chip until the
+next task. With `--worktree`, a chat notice and the Session panel (`worktree`, `branch`) give the path and branch;
+the finish report (changes, cleanup) is a notice of the next session's chat (stderr on quit).
+
+TUI view is LIVE (phase 2b-1): `engine.rs` mirrors `synt tui` (prepare + `round` + `Host`), `live.rs` holds the
+dialogs/queue/history/focus rules, `tui_view/snapshot.rs` builds the painted `Snapshot` from `ViewState`,
+`driver.rs` pumps engine messages (batched, one redraw per 16 ms), handles keys, completion, resume and
+store refresh, `chat.rs`/`dialog.rs` paint the conversation and the permission/plan/question dialogs.
+`--sample` keeps the sample data; `--shot ... --live SCRIPT --prompt T [--answer once|deny|always]` renders a
+scripted (fake provider, `--features shot,test-provider`) conversation on the real engine. Not yet: Linux/Windows/IME
+verification.
+
+Slash commands (all built-ins are wired; `live.rs` `WIRED`, the TUI's semantics): `/files` and `/diff [file]` switch
+the centre panel to its file explorer or diff tab (`/diff FILE` opens that file's diff) and post nothing in the chat;
+an untrusted folder is said by the file explorer itself. `/peers` posts the TUI's table.
+`/send` with no arguments opens a picker docked above the prompt (`send_pick.rs`, the `/model` dialog family): the
+live peers of the polled listing (main agents, not this session, not unreachable) grouped by workspace, typing filters
+(session, workspace, short id), each row with the Running panel's activity dot, the short id and the last activity
+(the registry carries no time, so it is the window's own: now while running, else the poll that saw the state change;
+none seen = gray). A pick sets a one-shot chip over the prompt (`to <workspace> > <session>`) holding the `ws:<key>/sess:<id>`
+address; the next plain line goes there and a note echoes `sent to ws:abcd1234../sess:12345678..`. Esc (or Ctrl+T) clears
+the chip, a command leaves it, a peer that left the listing holds the line with a notice. Peers off or none listed: the
+picker's only row says how to enable them. `/send <address> <text>` is unchanged.
+`/name` shows the name peers address the session by; it is fixed for the run (`--name`), as in the TUI, so it
+does not rename the stored title. `/rename <title>` does (`synthesis_app::rename`, one validator for both frontends):
+the title is trimmed, newlines collapse to a space, 1-120 characters, control/bidi/zero-width characters and
+secret-shaped text are refused; it is stored with `Store::set_title` and shows at once in the Workspace and
+Running lists; without an argument it shows the current title and the usage. `/focus [on|off]` hides tools, thinking, approvals and agent rows (user,
+assistant, result and notices stay). `/permissions allow|remove RULE` edits the rules of this session only
+(`is_well_formed_rule`, nothing is written to settings, as in the TUI; `remove` also drops deny/ask entries).
+
+TUI view (`src/tui_view/`), rebuilt 1:1 on the owner's design `~/Vibe/synthesis-cli-ui/cli.html` (owner decision
+2026-11-07, "dung lai dung cli.html"): geometry and typography are the design's (Fira Code 500, 12.5px / 1.55,
+panels radius 8, the height tiers (column breakpoints: see the column rule below) 750/610/860, the `fitRight` rules, the
+topology modes A, B and T), only the colours are the platinum tokens. Panels: top bar; left Workspace, Running,
+Session, Tools & Skills, Recent Activity, User Prompt; centre header (status, latest prompt, context bar, folder,
+files | LOC), tabs chat | diff | terminal | browser | file explorer, conversation, prompt, transcript switch, mode
+bar; right Synthesis Topology, Mission (only with a task list) + Context, Usage & Metrics; key hint footer. Shared chrome
+(`widgets/chrome.rs`: top bar, panel, tabs, footer, chat header); the diff, terminal (command history, read-only, no
+PTY) and browser panes are `widgets/panes.rs`, the file explorer `tui_view/tabs.rs`.
+
+`synt.tui.panels.*` keys (unchanged, so no settings.json breaks): `session` = Session, `tools` = Tools & Skills,
+`activity` = Recent Activity (prompts and agent activity merged), `tokens` = Context, `topology` = Synthesis
+Topology, `usage` = Usage & Metrics; `mcp` has no panel any more (MCP is in the Topology card and the Tools &
+Skills row) and is ignored. Workspace, Running, the chat (with the sub-agent transcript beside it), and the sub-agents
+cannot be hidden (owner decision 2026-11-09). Mission (was Agent Status, the agent's task list; key `status`, also
+`/panels mission`) is hideable, and shows only while the agent has a task list; `Convo::mission(now)` hides it 5
+minutes after all tasks are done, a new list replaces the old, a resumed session clears it. The `* main` switch under
+the prompt shows only while sub-agents exist: a row each, `name - state` left and `online - tokens` right; done ->
+idle after 1 minute -> removed (with its transcript) after 5 (`synthesis_view::lifecycle`; online time freezes when it
+finished; docs/TUI.md has the details). The sub-agents are the Subagents card of Topology; while Topology is hidden a compact Subagents block
+(`p-subagents`) takes its place, so the right column always exists and the chat no longer spans to the right edge.
+`/panels` lists the panels with their state, `/panels hide-all` hides every hideable one, `/panels show-all`
+shows them, `/panels <name> on|off` switches one; it applies at once and saves to `synt.tui.panels` in the user file
+(atomic, via `SettingsStore`). The labels in
+`synthesis-settings::TUI_PANELS` name both the terminal and the desktop panel.
+
+Data: `sample.rs` is the design's own sample (`STATE`), `snapshot.rs` builds the same `Snapshot` from the live
+`ViewState`. Usage & Metrics rows come from `synthesis-view::usage` (`UsageHistory::metrics`: tokens, tool calls,
+files modified, commands run, browser requests, MCP calls over the last 7 days; the bar is that week's share of the
+last 30 days), counted per day from `tool.started` in `synt.db` (`synthesis-session::UsageDay`).
+
+Design acceptance: `tests/design/cli-rects.json` holds `getBoundingClientRect` of the design's panels at 900x520,
+1000x700, 1200x800, 1400x900 and 1920x1080 (headless Chrome, `cli.html` copied beside its assets); `design_tests.rs`
+lays the sample out in GPUI at the same sizes and compares (1px; 1.5px for panels of text rows, because gpui rounds a
+19.375px line box up to 19.5px; wider only where Chrome and gpui wrap text differently, listed in `tol`). Run
+`cargo test -p synthesis-desktop --lib design_ -- --nocapture` for the table. Offscreen PNG: `cargo run -p
+synthesis-desktop --features shot -- --shot out.png --size 1400x900 [--hide session,tools,...]` (headless
+Metal/wgpu, no window server); `node scripts/design-compare.mjs <ref-dir> <shots-dir> <out-dir>` writes
+[design | app | difference] images from Chrome renders of `cli.html` (`ref-WxH.png`) and the shots.
+Column rule (owner decision 2026-11-07, an approved DEVIATION from the proportions of `cli.html`, whose 250|1fr|500 gave
+the chat 43% of a 1400px window): the chat column (tabs, conversation, prompt, mode bar) is at least 55% of the window
+width at every width and fills the content height. `layout::cols`: left column 250 from 1400, else 220; right column
+clamp(300, 24% of the width, 420), so the side columns stop growing at 670px and the chat takes the rest (63% at 1920,
+79% at 3440). The right column is inline from 1280 and below that a slide-over drawer (button with the topology icon at
+the right end of the top bar, Cmd/Ctrl+I, click on the dimmed chat closes it); the left column is inline from 1000 and
+below that a drawer too (folder icon, Cmd/Ctrl+B). Drawers are closed by default, one at a time, drawn over the chat
+(`--drawer left|right` for `--shot`). Hidden `synt.tui.panels.*` panels give their space to the chat. All other
+metrics are the design's; `design_tests.rs` keeps the Chrome rects as the reference for everything except column
+x/width (and the wrapping of the right cards in the narrower column), and `chat_share`, `drawers` and
+`topology_fits_the_narrow_column` encode the rule. Known: at 300-336px the Context card clips a long `tokens` row.
+Narrow-window polish (audit `docs/ui-audit-2026-11.md`, deviations from `cli.html`, only below the widths where it
+fits): the top bar drops whole chips that do not fit and ends with a `...` chip (`chrome::fit_chips`; `cli.html` clips them
+mid-glyph); a docked dialog (Trust, approval, pickers) is not taller than its column, so the prompt stays on screen:
+its text box and option list shrink and scroll, and a line `down-arrow more ...: scroll` shows while text is below the
+fold; "approval needed" in the title bar has a fixed line box and only its dot blinks; a side panel body that is cut
+(Tools & Skills, Recent Activity, Workspace, Running) fades out at its bottom edge; the `/model` picker lists only the
+metadata the provider gave; `chrome::dim` is `#8E8F93` (docs/tui-palette.md). At the reference sizes of `design_tests`
+nothing of this changes the rects. Shot flags: `--live SCRIPT` without `--prompt` (empty chat), `--hide-all`, `--bare`
+(Files and Browser tabs unseeded).
+Not ported: topology mode L (tall and narrow falls back to T). The "Latest user prompt" scrolls (16s, repeating,
+`synt.tui.motion`) only when it does not fit.
+
+Window shell (`ui.rs`): a 30px title bar over the content, no side rail. The bar follows the Tauri app's chrome
+(`#chrome`: `.cb` buttons 26x22, radius 6, hover and pressed backgrounds): the app mark and drag region on the left,
+the TUI and Agent icons in a group, then the Settings gear; each has a tooltip with its shortcut (Cmd/Ctrl+1,
+Cmd/Ctrl+2, Cmd/Ctrl+,). The content below is the design's 1400x900 etc. exactly (the bound tests lay the view out
+without the bar; `ui::tests` checks that the bar adds 30px above it and nothing beside it). macOS: transparent
+native title bar with the traffic lights at (14, 9) and 78px reserved for them. Windows and Linux: client-side
+decorations, the bar is the drag region (`WindowControlArea::Drag`) and draws minimise / maximise / close
+(`WindowControlArea::Min|Max|Close`, close hovers red). Not verified without a real window on each OS.
+
+Session switch (instant preview, owner request 2026-11-10; `tui_view/driver.rs` `preview_row`, `Live::preview`): moving the Running selection (arrows, Tab into the panel, a click) shows that session's STORED conversation in the chat at once and starts nothing. It is read-only: `Live::convo()` returns the preview, the engine and its pump keep running on the open session. The conversation is replayed from the store off the UI thread (`load_convo`: events only, no session listing, no messages, no engine) into an LRU of 8 (key: session id + the row's last-activity time, so a changed session is read again); the rows next to the selection are read ahead. Until a read ends the chat keeps what it shows (no spinner, no loading text); a cached session shows in the same frame. The engine starts lazily, through the unchanged `switch()` (so `engine_switch_blocker` and the 5 s `switch_armed` rule for a running task still decide): on Enter on the row, on a click followed by Enter, or on the first line typed (`hold_for_engine`: the line is held in `after_start`, the box is cleared, and the line is handled by `dispatch` once the engine is attached; a refused start leaves the text in the box; a failed start returns it to the box). A line typed while any engine start is in flight is held the same way (it was dropped before). Moving the selection never tears down a running session. The Recent Activity click does nothing while a preview is shown. Only the chat is previewed: the side panels keep showing the open session. The `new workspace...` and `new session...` rows are the last row of their lists (`Live::ws_new`, `run_sel` past the sessions): selectable and lit, they show the empty chat (welcome) and create nothing until Enter or a click.
+
+Centre tabs (`TabState`, kept per session id, so a session left and resumed finds its tabs as they were; the strip
+shows counters; Ctrl+1..5 switch, Esc returns to the chat, PageUp/PageDown scroll the pane):
+- diff: the session's changed files (`AgentPanes.files`) with `+N -N`; the newest opens by itself, a click expands a
+  file's syntax-coloured diff; `/diff FILE` opens that file.
+- terminal: the command history (`AgentPanes.commands`, from `process.*` and Bash tool events): command, exit code,
+  duration, output tail, running state. Read-only, not a terminal.
+- browser: the page, the selected saved screenshot (`browser.frame`; the latest by default, history rows select
+  another; a PNG inside the session's artifact folder only, <= 8 MiB) and the browser calls with state and duration.
+- file explorer: `project::scan` (git's file list; trusted folders only), directories open on demand (the parents of
+  changed files open first), changed files marked M/A/D/?, a click previews a text file read-only (<= 256 KB and 2000
+  lines; refuses paths outside the folder, links out of it, secret files and binary content).
+
+### Feature gaps against the TUI (view-model status)
+
+Done in `synthesis-view`: workspaces and sessions, running/peers, usage, status, topology, activity,
+tools and skills, conversation. Not done, with where the data would come from:
+
+- Browser screenshots: done as history, not a live stream. `browser.frame` (path, origin, w, h, bytes) feeds
+  `AgentPanes.frames` and `.screenshot`; the file is opened only through `viewable_screenshot`.
+  `Event::BrowserLoginRequired` is already in the stream and can be shown. Page title changes are not an event.
+- Commands tab: `process.spawned|output|exited` (Bash, terminal_spawn) give the real exit code and background
+  rows; `[exit code N]` parsing stays as the fallback for old sessions. A background process nobody polls
+  again never gets `process.exited`. Verification: `verification.check.started|finished` give per-check progress (a card in the chat with one row per check, 5-line clamp for the output tail of a check that did not pass; a line in Recent Activity); sessions recorded before them show the one-line `verification.completed` as before.
+- `/rewind`: done (`apps/desktop/src/rewind.rs`, `tui_view/rewind.rs`). It is `synt rewind` with a dock in place of flags, and
+- `/close-workspace` (desktop only; `apps/desktop/src/close_ws.rs`, `Store::close_workspace`): closes every listed session of a workspace (`sessions.closed_at`; nothing deleted, `/resume <id>` opens one) after a dock confirmation (Cancel selected, Esc cancels, needs engaging like the bypass confirmation) that names the workspace and path, the count, the running sessions with their age, and that running tasks are cancelled. Sessions whose lock another live process holds are never closed and are listed as such. The open folder goes through the engine restart (the confirmation stands for the second press that cancels a running task) and lands on a fresh session in the same folder; the Workspace panel's `x` button (every row but the open folder) closes another folder in the store only. Refused while another dialog is open and, for the open folder, while a rewind is open (`engine_switch_blocker`). At confirm time the ask-time checks run again (`Live::confirm_close_workspace`): the workspace gone or a blocker now applies refuses with a note; a different open/not-open state or session list (id and kind) re-opens the dialog instead of closing. The open folder's dialog names the queued prompts and open dialogs the restart drops. `Store::open` (used to write) creates or tightens the home directory (0700), the database file and migrates the schema to the latest; it prunes nothing (empty-session pruning runs only at the first start of an engine). Folders that differ only by case on a case-sensitive volume are merged by `fold_dir`, as in the existing lists. Not in the terminal TUI.
+  it uses the same code (`synthesis_app::rewind::{load, plan, apply_confirmed}`), so the containment is the CLI's: only files
+  inside the session's workspace roots (parent resolved, `..` and relative paths refused), never a symlink or non-regular file,
+  never a secret-masked snapshot, never a file changed since the run (the desktop has no `--force`). Steps: (1) a picker of the
+  session's checkpoints (name, time, message count, file), a dry run is always next; (2) the exact files as CLI rows
+  (`restore`/`remove`/`skip`, path, size), grouped, 5 rows per group with Show more; (3) a confirmation docked above the prompt
+  that says how many files are overwritten and deleted and that it cannot be undone beyond the checkpoint. Cancel is the
+  selected default and Esc; Enter and digits are ignored until the person engages the dock (arrows, Tab, a click) and for 400 ms
+  after it appears, so type-ahead cannot approve it. Refused with a reason while a task runs, compaction runs, a dialog or queued
+  prompt is pending, or another `/rewind` is open; checked again at apply. Apply plans again right before writing and writes
+  nothing if the plan is not the one shown. The result row gives counts and each failed file; the Files tab is scanned again and
+  the Diff tab drops the files that are back. Like `synt rewind` it puts back files only: the conversation history stays.
+  Every path in a checkpoint is untrusted: a snapshot is written back only if it hashes to the sha256 stored with the
+  checkpoint, a file is deleted only if the checkpoint recorded it as absent before the run (older checkpoints without
+  either are listed under "Will NOT be touched"), no directory on the path may be a symlink or junction, a session whose
+  workspace root is `/`, a drive root or the home directory is refused (the desktop has no `--allow-wide-root`), and each
+  file is checked again right before its own write. One apply per session at a time (lock file). While a rewind is open
+  or writing, nothing switches the engine (`/resume`, `/model`, `/new`, `/close`, `/open`, restarts), and `/rewind` is
+  refused while a background command or sub-agent runs. A partial apply says PARTIAL and lists the failed files.
+  A rewind step that does not answer within 2 minutes frees the prompt and engine switches again (with a note to check the
+  Files tab). Checkpoints come from the file tools only: Bash moves, renames and deletes are not tracked and are not
+  restored. `Live::engine_switch_blocker` is the one check every engine switch or restart must call.
+  Limits: the hashes and the proof live in the session store next to the rows, so a program that can write the store can
+  forge them (whether the store is outside the agent's write scope is a sandbox decision, R7); a write by a process outside
+  Synthesis between the last check and the rename (a directory swapped for a link) is the CLI's documented race.
+- `/clean` (desktop only): permanently deletes stored sessions. (1) A dock picker of three scopes with live counts computed off the UI
+  thread (sessions, workspaces that lose their last session, event rows, bytes on disk with screenshots / checkpoint snapshots / logs):
+  "Closed sessions, and empty ones older than 1 hour" (`closed_at` set, whatever its history, and a closed-then-resumed session still qualifies because `closed_at` is never cleared; or no message and no task and older than 1 hour), sessions not updated for 30 days, and ALL
+  sessions. Cancel is the first row and the selection; Esc cancels; Enter and digits are ignored until the person engages the dock and for
+  400 ms after it appears. (2) A confirmation that lists what is DELETED PERMANENTLY (session rows and their events, messages, tasks, tool
+  calls, approvals, processes, checkpoints and rewind snapshots, screenshots, logs, and `$SYNT_HOME/sessions/<id>/`) and what is NOT touched
+  (settings, auth and env, memory store, trust records and `trust.key`, model cache, logs outside sessions, the Node transcript copies
+  under `projects/`, project files, the current and running sessions). Rows: Cancel, a "Back up synt.db first" toggle (default on),
+  Delete. Scope "all" also needs `delete` or `clean` typed into the field: letters are taken only when the dock is engaged and armed, so
+  type-ahead cannot spell it; the scope row shows messages and events that go; the confirmation says copies remain in `projects/*.jsonl` and in the backup (which holds ALL sessions, tool output included, and is never auto-deleted); the Delete row is disabled until it matches. (3) `Store::clean` (crates/synthesis-session/src/clean.rs):
+  protected are the open session, every session whose `lock` is held (this process or another) and the whole parent/child tree of those;
+  a session with a child that stays is kept; every session's lock is probed (a running parent or child outside the scope protects its tree), the absence of a directory or lock is re-probed inside the transaction, `backups/` is checked for ownership and set to 0700, and `updated_at` is always the store's own fixed-width UTC text (an import goes through `create_session`; NULL never matches); a `sessions/<id>` that is a link or has a non-regular lock is skipped, never followed. Only
+  ids shown in the confirmation are deleted, each in its own transaction taken under its lock and re-checked (scope, no children), the
+  directory removed only after the rows are gone (`remove_dir_all` unlinks links inside, never follows them). The backup is
+  `VACUUM INTO $SYNT_HOME/backups/clean-<time>/synt.db` (0600, dir 0700, `quick_check`ed; a failed backup deletes nothing); artifact
+  directories are not copied and the backup holds the deleted conversations. The result row gives deleted / skipped running / kept / failed
+  counts, bytes freed and the backup path; the Workspace / Running / Recent lists are read again. While a `/clean` is open or running no
+  prompt starts and no engine switch happens (`Live::engine_switch_blocker`). The 10-minute timeout frees the flag only for the counting step; a deletion keeps prompts and engine switches blocked until it reports (a note says it is still working); it is refused while a task, dialog, queued prompt or
+  `/rewind` is pending. Not done: directories under `sessions/` with no row (left by a crash) are not swept; `synt.db` is not VACUUMed (the
+  file does not shrink; freed pages are zeroed and the WAL truncated); the classic TUI and `synt` have no `/clean`.
+- Settings: done. Write API in `crates/synthesis-settings-ui`, the popup in `apps/desktop/src/settings_view` (section 6).
+- Multi-session tabs: TODO. `ViewState` is one session; tabs are a `Vec<ViewState>` keyed by session id
+  in the desktop, fed by one event channel per `engine` run. Needs the engine to host several sessions.
+- Peers refresh: done. `ViewState::set_peers` takes the harness rows; the desktop polls the `peer` listing every
+  fifth second (`driver.rs` `tick`, `Engine::peer_rows`).
+- Uncommitted `+N -N` needs the host's trust decision per folder (`LoadOpts::trusted`) and runs git
+  with a 5 s limit per call, so load off the UI thread.
+- Interactive PTY: not wanted (owner decision).
+
+### Agent view (removed)
+
+The first Agent view (phase 3) is gone; the Agent page is "Coming soon". What it built on `synthesis_view::agent`
+(`AgentPanes`: sub-agents, commands, verification, browser calls and frames, changed files) is used by the TUI view's
+tabs and its sub-agent transcript (the `* main / developer` switch under the prompt opens a transcript beside the chat).
+Known gaps: browser events carry no image bytes (screenshots are the saved artifacts, no live stream); concurrent
+engines share process-global state (`set_learned_skills`), which no longer matters with one session on screen.
+
+## 6. Settings (backend: `crates/synthesis-settings-ui`)
+
+**What the design has.** `cli.html` has no settings form with these sections. USER & PROMPT, MEMORY,
+EXECUTION, GUARDS, HOOKS, MCP, SKILLS and SUB-AGENTS are the status cards of the topology (`topology1`,
+`topology2`); its only settings hook is the `synthesis-settings` message (theme, font, font size, opacity), which is
+appearance and has no backend key (the desktop owns it). The sections below are the same titles, filled with the real keys.
+
+**Crate.** Pure data, no UI dependency. Separate from `synthesis-settings` because it reuses the validators of
+`synthesis-harness` (`AutoCompact`, `ToolSearchMode`, `ShellSettings`), and the harness depends on `synthesis-settings`.
+- `SettingsSchema::new()`: `Field { key (dotted path), section, label, kind (Bool | Enum | Int{min,max} | Float{min,max} |
+  Percent{min,max} (a slider) | List | ReadOnly), default, help, scope (UserOnly | Layered | Tighten), restart, edit (Yes | Confirm(reason) | No(reason)) }`.
+- `SettingsStore::open(&LoadContext, ProjectTrust, managed_path, --settings file)`: `entries` (value in force, `Origin`
+  Default/User/Project/Local/Flag/Managed, the USER file's own value, and the layers that hold the key but may not set it, each
+  with the reason), plus the loader's `diagnostics` and `errors`.
+- `set(key, value)` / `set_confirmed` (for `Edit::Confirm` keys) / `unset(key)` write the USER `settings.json` only, with
+  `synthesis_settings::edit_json_atomic` (temp file and rename, mode kept, 0600 when new, a file that cannot be parsed or a parent that
+  is not an object is never overwritten, every other key and the key order stay). Checks, in order: known key, edit policy,
+  managed lock (`SetError::Locked`), the kind (type, enum, range), a credential-shaped literal, then the loaders' own validators on the
+  document about to be written. Errors name the key and never echo a refused secret. Returns the diagnostics after the write.
+- MCP servers are not in the store. Add and remove call `synthesis_app::mcp::{add_server, remove_server}`, the code `synt mcp add|remove`
+  runs (name check, URL/header/env/args credential guards, closed-schema validation, atomic 0600 write); `synt mcp` now calls them too.
+- The TUI `/config` still writes `synt.tui` through `persist_user_tui`; switching it was not zero-risk (it writes the whole subtree and the
+  TUI would gain a dependency on this crate). Both produce the same file.
+
+**Sections and keys.** Scope: `user file only` = project, local, `--settings` and managed copies are ignored (shown refused with that
+reason); `layered` = user, `--settings`, managed, and project/local only with a trusted project; `may tighten` = an untrusted project may
+also set it. Restart: a running session keeps the old value. Editable = the UI may write it (always to the user file).
+
+| Key | Section | Scope | Restart | Editable from the UI |
+|---|---|---|---|---|
+| `synt.memory.enabled` | MEMORY | user file only | yes | yes |
+| `synt.memory.reflection` | MEMORY | user file only | yes | yes, after confirm: this sends task digests to your model provider |
+| `synt.memory.daily_budget_usd` | MEMORY | user file only | yes | yes |
+| `synt.memory.disabled_workspaces` | MEMORY | user file only | yes | yes |
+| `synt.images.retentionDays` | MEMORY | user file only | yes | yes |
+| `synt.budget.max_turns` | EXECUTION | layered (project if trusted) | yes | yes |
+| `synt.budget.max_tool_calls` | EXECUTION | layered (project if trusted) | yes | yes |
+| `synt.budget.max_verify_attempts` | EXECUTION | layered (project if trusted) | yes | yes |
+| `synt.verification.max_attempts` | EXECUTION | layered (project if trusted) | yes | yes |
+| `synt.verification.inferred_only` | EXECUTION | layered (project if trusted) | yes | yes, after confirm: allow_passed lets inferred checks alone mark a task passed |
+| `synt.verification.checks` | EXECUTION | layered (project if trusted) | yes | no: each check is a shell command the verifier runs; edit settings.json by hand |
+| `synt.context.auto_compact` | EXECUTION | user file only | yes | yes |
+| `synt.context.auto_compact_threshold` | EXECUTION | user file only | yes | yes |
+| `synt.shell.user_commands_model_turn` | EXECUTION | user file only | yes | yes |
+| `synt.shell.user_commands_unsandboxed` | EXECUTION | user file only | yes | yes, after confirm: this runs your `!` commands without the OS sandbox |
+| `synt.modelInfo.fetch` | EXECUTION | user file only | yes | yes |
+| `synt.compat.write_node_transcripts` | EXECUTION | layered (project if trusted) | yes | yes |
+| `synt.browser.login_timeout_sec` | EXECUTION | user file only | yes | yes |
+| `synt.browser.allow_unsandboxed` | EXECUTION | user file only | yes | no: turns the browser sandbox off; edit settings.json by hand |
+| `synt.browser.secrets` | EXECUTION | user file only | yes | no: references to credentials; edit settings.json by hand ({env:} / {file:} only) |
+| `synt.browser.profiles` | EXECUTION | user file only | yes | no: decides which domains a login may browse; edit settings.json by hand |
+| `synt.browser.approved` | EXECUTION | user file only | yes | no: pre-approves logins for unattended runs; edit settings.json by hand |
+| `synt.pricing` | EXECUTION | user file only | yes | no: a table keyed by provider/model; edit settings.json by hand |
+| `env` | EXECUTION | layered (project if trusted) | yes | no: variables for Bash, hooks and verification; secret-shaped names are refused by the loader, edit settings.json by hand |
+| `permissions.defaultMode` | GUARDS | layered (project may tighten) | yes | yes, after confirm: a mode other than default changes what runs without asking |
+| `permissions.blockReadsOutsideWorkingDirectories` | GUARDS | user file only | yes | yes, after confirm: turning this off lets the agent read outside the workspace |
+| `permissions.allow` | GUARDS | layered (project if trusted) | yes | no: an allow rule grants a tool without asking; add them through the approval prompt (allow always) or by hand |
+| `permissions.deny` | GUARDS | layered (project may tighten) | yes | no: rule syntax is validated by synthesis-permissions, not wired here yet; edit by hand |
+| `permissions.ask` | GUARDS | layered (project may tighten) | yes | no: rule syntax is validated by synthesis-permissions, not wired here yet; edit by hand |
+| `permissions.additionalDirectories` | GUARDS | layered (project if trusted) | yes | no: widens the filesystem the agent may touch; edit by hand |
+| `autoMode` | GUARDS | user file only | yes | no: steers the classifier that approves without asking; edit settings.json by hand |
+| `hooks` | HOOKS | layered (project if trusted) | yes | no: hooks are commands run with your privileges; edit settings.json by hand |
+| `disableAllHooks` | HOOKS | layered (project if trusted) | yes | yes, after confirm: this also switches off hooks you rely on as safeguards |
+| `synt.mcp.toolSearch` | MCP | user file only | yes | yes |
+| `synt.mcp.env_passthrough` | MCP | user file only | yes | no: names of variables handed to stdio servers, secrets included; edit settings.json by hand |
+| `synt.mcp.servers` | MCP | user file only | yes | no: per-server write_tools/read_tools; read_tools weakens the guard, edit by hand |
+| `enabledMcpjsonServers` | MCP | layered (project if trusted) | yes | no: approving a project server lets a repository start a process; use --approve-mcp NAME@HASH |
+| `enableAllProjectMcpServers` | MCP | layered (project if trusted) | yes | no: lets any repository start processes; edit by hand |
+| `disabledMcpjsonServers` | MCP | layered (project may tighten) | yes | yes |
+| `synt.peers` | SUB-AGENTS | user file only | yes | no: messaging between sessions (off by default); edit settings.json by hand |
+| `synt.tui.logo` | INTERFACE | user file only | no | yes |
+| `synt.tui.show_thinking` | INTERFACE | user file only | no | yes |
+| `synt.tui.verbose` | INTERFACE | user file only | no | yes |
+| `synt.tui.diffs_expanded` | INTERFACE | user file only | no | yes |
+| `synt.tui.queue_indicators` | INTERFACE | user file only | no | yes |
+| `synt.tui.motion` | INTERFACE | user file only | no | yes |
+| `synt.tui.opacity` | APPEARANCE | user file only | no | yes (slider 30 to 100 %, default 100) |
+| `synt.tui.blur` | APPEARANCE | user file only | no | yes where the platform blurs (default off) |
+| `synt.tui.mouse_capture` | INTERFACE | user file only | no | yes |
+| `synt.tui.copy_on_select` | INTERFACE | user file only | no | yes |
+| `synt.tui.panels.{session,mcp,tools,activity,status,tokens,topology,usage}` | INTERFACE | user file only | no | yes |
+
+Why the "no" keys: an `allow` rule, an extra directory, a project MCP approval, `env_passthrough` and `read_tools` widen what the agent
+may do or leak; hooks, verification checks and `autoMode` run or steer commands; browser secrets/profiles/pre-approvals are credential
+adjacent (ADR-011: only `{env:}`/`{file:}` references, written by hand); `deny` and `ask` would be safe to add but their rule syntax is
+validated in `synthesis-permissions`, not wired here yet (follow-up). A managed file that sets a key locks it (`Locked`).
+
+**Design controls with no backend key** (shown read-only or not at all): the user name and task text (USER & PROMPT: session state);
+model and effort (`synt.json` / `state.json`, `/model` `/effort`); safety, policy, sandbox and network toggles (GUARDS: `--sandbox` and
+`--network` flags of the run); approval "granular" (only `permissions.defaultMode` and rules); proxy (standard `HTTP(S)_PROXY` variables);
+per-skill on/off and planner/coder/reviewer toggles (SKILLS, SUB-AGENTS: files in `skills/` and `agents/`); per-event hook toggles
+(pre-tool, post-tool, on-error, on-done: hooks are defined per event, only `disableAllHooks` exists); MEMORY learned/feedback counters
+(data, not settings); EXECUTION tool-call, error and success counters (live status); theme and font (desktop appearance; opacity
+and blur are `synt.tui.opacity` / `synt.tui.blur`).
+
+**The popup** (`settings_view`). Cmd/Ctrl+`,`, the gear in the title bar and `/config` open it; Esc (the open confirmation first), the x
+and a click on the backdrop close it. It is a centred panel over the TUI view (no sidebar, no view of its own): at most 720 x 640, a
+16 px margin to the window, scrolling inside. Tabs group the sections (Appearance, Interface, Memory, Execution, Guards, Hooks, MCP,
+Skills, Sub-agents, User & prompt); a search shows the matching rows of every tab. Each row shows the value, where it comes from
+(default / user / project / local / flag / managed), its default, a reset link (removes the key from the USER file), the validation
+error of a refused edit, and when it applies: `applies now` (panels, thinking, verbose rows, motion, opacity, blur), `applies to the next
+session` with a banner and a working **Restart session** button (a fresh session in the same folder, which reads the files again), or
+`terminal TUI only` (logo, expanded diffs, queue lines, mouse capture, copy on select: the desktop view has nothing to apply). Keys that
+widen what the agent may do stay read-only with the reason; there is no field for an API key (ADR-011). Every write goes through
+`SettingsStore` (atomic, USER `settings.json`, every other key kept). While the popup is open the TUI view is not `shown`, so it never
+answers a pending approval (the title bar keeps the red "approval needed", a click on it returns to the TUI view).
+
+**Window opacity and blur.** `synt.tui.opacity` (whole percent, 30 to 100, default 100; under 30 the window is too faint to read, so
+the loader and the slider refuse it) and `synt.tui.blur` (default off). Opacity scales the alpha of the window's background fills
+only (`theme::fill`: the shell, the title bar, the TUI view, the panels); text, borders and the Settings popup stay opaque. The window
+asks GPUI for `Opaque` at 100 %, else `Blurred` (blur on and supported) or `Transparent` (`WindowBackgroundAppearance`, set at open
+and on every change). Blur: macOS (NSVisualEffectView) and Windows (acrylic) support it; on Linux GPUI blurs only on some Wayland
+compositors and never on X11, so the control is disabled there with that reason. Blur shows only under 100 % opacity. Dragging the
+slider previews at once; the file is written when the thumb is released. Only a real window shows the result (headless shots draw no
+desktop behind the window).
+
+## 7. Project trust (desktop)
+
+- Launch flag `--trust-project` still works. Without it a folder is untrusted: project settings, MCP servers, agents, skills, hooks and memory stay inert and no git runs.
+- Opening the Files tab in an untrusted folder raises the Trust dialog in the dock: it shows the canonical ROOT that would be trusted (the nearest folder with `.git` or `.synt`, which can be above the current folder; said so when it differs), what trust enables and risks, and offers Not now (default, Esc), Trust this folder (remember), Trust for this session only and, only for a real project parent, Trust parent folder (all its subfolders, remembered). A filesystem or drive root, the home folder (or a parent of it) and the config folder are refused for both. Arming delay and "engaged" rules are those of approvals.
+- Accepting restarts the same session (conversation reloaded from the store, `--approve-mcp` of the launch dropped, grants and mode reset); a failed trusted restart continues untrusted.
+- Remembered trust (owner decision 2026-11-09, hardened after the round-3 review) lives in the USER session store, `synt.db`, table `trusted_roots` (root, scope `folder|parent|child`, date, manifest, MAC), created lazily outside the versioned migrations so `user_version` does not move and older binaries still open the store. It is read at every engine start (resumed sessions of the folder included), never from a project file and never settable by a model, peer or tool output.
+  - **Integrity:** anything that can run a shell as the user can write the database, so each row carries HMAC-SHA256(key, root|scope|date|manifest). The key is 32 random bytes in `<SYNT_HOME>/run/trust.key` (0600, `O_EXCL`, never a link, never printed; `run/` is in `synthesis_state_paths` and the permission deny list, and `*.key` is a secret path). Rows whose MAC fails are ignored and counted (`/trust`: "unverified rows ignored: N"). A missing key is made only when no row exists; if rows exist without it they are invalid and dropped by the next grant. `synt.db-journal` is in the protected state paths too.
+  - **Sandbox gate:** remembered trust is honoured only while the sandbox is `enforce` (the default; `best-effort` and `off` can run a command unconfined, which could have written the store). `/trust` and a start-up notice say so; session-only trust and `--trust-project` are unaffected. The desktop never starts in `bypassPermissions` (the engine forces `default`).
+  - **Scope:** a folder grant covers exactly that root; a parent grant covers it and what lies inside (components compared, case-sensitive, project path resolved with `dunce` first). Records are skipped when their root is empty, relative, a filesystem or drive root, `$HOME` or an ancestor, the config folder; a parent grant is also refused (and not offered) for temp folders, `~/Downloads|Desktop|Documents`, world-writable and root-owned system folders. At most 200 rows, roots up to 4096 bytes.
+  - **Changed configuration (stricter than VS Code):** the row keeps a manifest (SHA-256 per file). It covers: `.synt/settings.json`, `.synt/settings.local.json`, `.synt/config.json` and `.mcp.json` of the project root and (as `cwd/...`) of the session's folder when that is another one; `AGENTS.md`, `CLAUDE.md`, `.claude/CLAUDE.md`, `.synt/AGENTS.md` and `CLAUDE.local.md` of every folder from the root down to the session's folder, and what they `@import` inside the project (4 hops); every file under `.synt/agents|skills|commands|rules` and `.claude/rules`; and the in-project files that hooks and MCP servers name as `command` or `args`. The code those scripts run in turn is NOT covered (the dialog says so). Hashing streams (depth 8, at most 500 files, 8 MiB each, 64 MiB in all). A link is followed when its target is inside the project and the target's CONTENT is hashed (a linked directory is walked); a link that leaves the project, or any cap exceeded, refuses trust-by-fingerprint. If the manifest no longer matches, remembered trust is NOT honoured: the project starts untrusted with a notice naming the changed files, and the Files tab asks again listing them; trusting again records the new manifest. The set is a hand-kept list (`CONFIG_FILES`, `CONFIG_DIRS`, `INSTRUCTION_NAMES` in `trust.rs`, one test file per kind): it is not derived from the loaders, so a new project-config kind must be added there. A parent grant records each child project's manifest at its first start (scope `child`, an internal row removed with its parent) and checks it afterwards.
+  - **A remembered trust applies the project's DATA only (owner decision, round 7; deliberately narrower than VS Code):** a trust that comes from the store (and the run that follows "Trust this folder (remember)") enables the file explorer's git listing and the project's agents, skills, memory and instruction files. The project's settings and provider config load with the UNTRUSTED filter (`Common::project_exec_inert`; `prepare` loads both with `ProjectTrust::Untrusted`): no hooks, no MCP servers, no permission allow rules, `defaultMode`, `additionalDirectories`, `env`, verification checks, or provider URLs, keys and headers, and `disableAllHooks` cannot switch off the user's own hooks (project deny/ask rules, which only narrow, still apply). "Allow always" is not persisted into the project. Everything that widens permissions, sets env, changes providers or runs commands needs "Trust for this session only" or `--trust-project` in THIS run. A notice at every start says when project settings were present but ignored and lists what was left out (hooks, allow rules, additionalDirectories, defaultMode, env, verification checks, provider/config, MCP servers). The integrity gate stays sound without parsing commands: the manifest hashes declarative configuration for change detection; the script content it also hashes is best effort only (words of hook/MCP `command`/`args`, `$SYNT_PROJECT_DIR`/`$CLAUDE_PROJECT_DIR` expanded; shell operators, `--opt=path`, directories and what a script runs in turn are not followed; more than 2000 words, a word over 4096 bytes, or a link that dangles or leaves the project make the manifest unfit, so no remember is offered).
+  - **Checked around the load:** the approved manifest (the stored one, or the one taken at the answer for a session-only trust) is compared (1) before the restarted engine reads any project file, (2) again before the worktree and anything else a project's files could cause (`Native::pre_start`, called by `prepare`), and (3) once more before any hook runs (`StartOpts::verify`, after `prepare`, before `session_hook`). A change in between aborts that start, which is repeated untrusted with the changed files in a notice (check (2) precedes the loading of agents, skills and memory, which are content only, never executed); a test shows no hook or MCP server ran when it failed at (1) or (2) and no hook at (3). Limit: a point-in-time check, not a hash of the bytes the loaders read, so a file changed after check (2) is not caught (it only matters for a trust of this run, which the person has just granted). A session that could not be fingerprinted runs without change detection, and the dialog says so before it is chosen.
+  - **Walk limits:** every entry's real path, whether it or a folder on the way is a link, must stay inside the project; at most 5000 entries are visited and a directory is walked once (a web of links costs visits, so it ends as too big); files are opened without blocking and checked on the open handle (a FIFO swapped in cannot hang it).
+  - **Git in the file explorer** (after trust) is the hardened read-only `git` of `synthesis-view::project`: absolute exe, closed environment (`GIT_CONFIG_NOSYSTEM`, `GIT_PAGER=cat`, no askpass, no API keys), `core.fsmonitor`, `core.hooksPath`, `core.pager`, `core.sshCommand`, `core.askPass`, `credential.helper`, `diff.external` and every `filter.*` driver neutralised with `-c`, `protocol.allow=never`, bounded output and a wall-clock limit with a process-group kill.
+  - If the restart after "remember" fails, the rows that answer wrote are removed.
+- `/trust` lists the remembered folders (date, fingerprint state); `/trust revoke <n|path>` confirms in the dock (Keep is the default); Settings > Guards lists them with a Revoke button. Revoking takes effect at the next engine start.

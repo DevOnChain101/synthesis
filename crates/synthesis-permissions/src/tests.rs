@@ -102,33 +102,33 @@ fn d(p: &Permissions, tool: &str, input: Value) -> Decision {
 const TABLE: &[(&str, &str)] = &[
     ("ls -la", "AAAAAA"),
     ("git status && cat a.txt | head", "AAAAAA"),
-    ("ls; rm x", "QACADA"),
-    ("mkdir newdir", "QACADA"),
-    ("touch a.txt", "QACADA"),
-    ("mv a.txt b.txt", "QACADA"),
-    ("cp a.txt sub/b.txt", "QACADA"),
-    ("sed -i s/a/b/ a.txt", "QACADA"),
-    ("sed -i s/a/b/e a.txt", "QQCCDA"),
-    ("sed -n 1p a.txt", "QACADA"),
-    ("LANG=C mkdir x", "QACADA"),
-    ("timeout 5 rm x", "QACADA"),
-    ("nice -n 5 touch x", "QACADA"),
-    ("cd sub && touch x", "QACADA"),
-    ("rm -rf ./build/*.o", "QACADA"),
-    ("rm *.o", "QACADA"),
-    ("rm -rf src/*", "QQCCDA"),
-    ("npm test", "QQCADA"),
-    ("git add .", "QQCCDA"),
-    ("curl http://example.com", "QQCCDA"),
-    ("node script.js", "QQCCDA"),
-    ("touch .git/hooks/x", "QQCCDA"),
-    ("touch .synt/settings.json", "QQCCDA"),
-    ("mkdir x && touch .husky/pre-commit", "QQCCDA"),
-    ("touch OUTSIDE/x", "QQCCDA"),
-    ("mv a.txt OUTSIDE/a.txt", "QQCCDA"),
-    ("cp OUTSIDE/a.txt .", "QQCCDA"),
-    ("rm $HOME/x", "QQCCDA"),
-    ("touch \"$DIR\"/x", "QQCCDA"),
+    ("ls; rm x", "QADADA"),
+    ("mkdir newdir", "QADADA"),
+    ("touch a.txt", "QADADA"),
+    ("mv a.txt b.txt", "QADADA"),
+    ("cp a.txt sub/b.txt", "QADADA"),
+    ("sed -i s/a/b/ a.txt", "QADADA"),
+    ("sed -i s/a/b/e a.txt", "QQDCDA"),
+    ("sed -n 1p a.txt", "QADADA"),
+    ("LANG=C mkdir x", "QADADA"),
+    ("timeout 5 rm x", "QADADA"),
+    ("nice -n 5 touch x", "QADADA"),
+    ("cd sub && touch x", "QADADA"),
+    ("rm -rf ./build/*.o", "QADADA"),
+    ("rm *.o", "QADADA"),
+    ("rm -rf src/*", "QQDCDA"),
+    ("npm test", "QQDADA"),
+    ("git add .", "QQDCDA"),
+    ("curl http://example.com", "QQDCDA"),
+    ("node script.js", "QQDCDA"),
+    ("touch .git/hooks/x", "QQDCDA"),
+    ("touch .synt/settings.json", "QQDCDA"),
+    ("mkdir x && touch .husky/pre-commit", "QQDCDA"),
+    ("touch OUTSIDE/x", "QQDCDA"),
+    ("mv a.txt OUTSIDE/a.txt", "QQDCDA"),
+    ("cp OUTSIDE/a.txt .", "QQDCDA"),
+    ("rm $HOME/x", "QQDCDA"),
+    ("touch \"$DIR\"/x", "QQDCDA"),
     // critical paths: never silently allowed, not even in bypassPermissions
     ("rm -rf ~", "QQQQDQ"),
     ("rm -rf /", "QQQQDQ"),
@@ -347,6 +347,372 @@ fn symlink_escaping_cwd_is_not_inside_for_bash_fs_commands_or_edit_tools() {
             "{mode:?}: Write"
         );
     }
+}
+
+#[test]
+fn plan_mode_ignores_allow_rules_for_non_read_calls() {
+    let f = fx();
+    let p = f.with(
+        rules(&["Bash(touch:*)", "Bash(ls:*)", "mcp__s__w"], &[], &[]),
+        Mode::Plan,
+    );
+    let v = p.check_current("Bash", &json!({ "command": "touch x" }));
+    assert_eq!(v.decision, D);
+    assert!(v.reason.contains("plan mode"), "{}", v.reason);
+    assert_eq!(d(&p, "Bash", json!({ "command": "ls && touch x" })), D);
+    assert_eq!(d(&p, "mcp__s__w", json!({})), D);
+    assert_eq!(d(&p, "Bash", json!({ "command": "ls" })), A);
+    assert_eq!(d(&p, "Read", json!({ "file_path": f.cwd.join("a") })), A);
+}
+
+#[test]
+fn secret_file_reads_ask_by_mode_and_an_allow_rule_wins() {
+    let f = fx();
+    let env = json!({ "file_path": f.cwd.join(".env") });
+    for (mode, want) in [
+        (Mode::Default, Q),
+        (Mode::AcceptEdits, Q),
+        (Mode::Auto, Q),
+        (Mode::Plan, D),
+        (Mode::DontAsk, D),
+        (Mode::BypassPermissions, A),
+    ] {
+        assert_eq!(d(&f.perms(mode), "Read", env.clone()), want, "{mode:?}");
+    }
+    assert_eq!(
+        d(
+            &f.perms(Mode::Default),
+            "Grep",
+            json!({ "pattern": "x", "path": f.cwd.join(".env") })
+        ),
+        Q
+    );
+    assert_eq!(
+        d(
+            &f.perms(Mode::Default),
+            "Read",
+            json!({ "file_path": f.cwd.join(".env.example") })
+        ),
+        A
+    );
+    let allowed = f.with(rules(&["Read(.env)"], &[], &[]), Mode::Default);
+    assert_eq!(d(&allowed, "Read", env), A);
+}
+
+#[test]
+fn secret_files_ask_through_grep_globs_and_read_only_bash_in_every_mode() {
+    let f = fx();
+    let cwd = f.cwd.to_string_lossy().into_owned();
+    let calls = [
+        (
+            "Grep",
+            json!({ "pattern": "x", "path": cwd, "glob": ".env" }),
+        ),
+        ("Grep", json!({ "pattern": "x", "glob": "*.pem" })),
+        ("Glob", json!({ "pattern": ".env*" })),
+        ("Bash", json!({ "command": "cat .env" })),
+        ("Bash", json!({ "command": "head -1 .env.local && ls" })),
+        ("Bash", json!({ "command": "cat .e*" })),
+        ("Bash", json!({ "command": "grep x *.pem" })),
+        ("Bash", json!({ "command": "sed -n p sub/../.env" })),
+    ];
+    for (tool, input) in &calls {
+        for (mode, want) in [
+            (Mode::Default, Q),
+            (Mode::AcceptEdits, Q),
+            (Mode::Auto, Q),
+            (Mode::Plan, D),
+            (Mode::DontAsk, D),
+            (Mode::BypassPermissions, A),
+        ] {
+            assert_eq!(
+                d(&f.perms(mode), tool, input.clone()),
+                want,
+                "{mode:?} {tool} {input}"
+            );
+        }
+    }
+    // not secret: the tool skips secret files itself when it walks
+    for (tool, input) in [
+        ("Grep", json!({ "pattern": "x" })),
+        ("Grep", json!({ "pattern": "x", "path": cwd })),
+        ("Bash", json!({ "command": "cat *" })),
+        ("Bash", json!({ "command": "cat *.rs sub/a.txt" })),
+        ("Bash", json!({ "command": "ls -a" })),
+    ] {
+        for mode in [Mode::Default, Mode::AcceptEdits, Mode::Auto, Mode::Plan] {
+            assert_eq!(
+                d(&f.perms(mode), tool, input.clone()),
+                A,
+                "{mode:?} {tool} {input}"
+            );
+        }
+    }
+    // a rule that names the file is the person's decision; a tool-wide one is not
+    let cat = json!({ "command": "cat .env" });
+    let p = f.with(rules(&["Bash(cat .env)"], &[], &[]), Mode::Default);
+    assert_eq!(d(&p, "Bash", cat.clone()), A);
+    let p = f.with(
+        rules(&["Bash(cat:*)", "Read(.env)"], &[], &[]),
+        Mode::Default,
+    );
+    assert_eq!(d(&p, "Bash", cat), Q);
+}
+
+/// The real path of `p` the way the matcher sees it: no `\\?\` prefix, `/` separators on Windows.
+fn real_spelled(p: &Path) -> PathBuf {
+    let c = dunce::canonicalize(p).unwrap();
+    if cfg!(windows) {
+        PathBuf::from(c.to_string_lossy().replace('\\', "/"))
+    } else {
+        c
+    }
+}
+
+/// The rule path the engine offers for `<dir>/.env`.
+fn env_rule(dir: &Path) -> String {
+    crate::rule_path(&dir.join(".env").to_string_lossy(), cfg!(windows)).unwrap()
+}
+
+#[test]
+fn rule_paths_drop_the_verbatim_prefix_and_refuse_glob_characters_on_every_os() {
+    use crate::rule_path;
+    for p in [r"\\?\C:\proj\.env", r"C:\proj\.env", "C:/proj/.env"] {
+        assert_eq!(rule_path(p, true).as_deref(), Some("//C:/proj/.env"), "{p}");
+    }
+    assert_eq!(
+        rule_path("/home/u/.env", false).as_deref(),
+        Some("//home/u/.env")
+    );
+    for p in [
+        r"C:\proj\*.pem",
+        r"C:\proj\[a]\.env",
+        r"\\?\C:\proj\.env?",
+        r"\\?\UNC\s\h\.env",
+        r"\\s\h\.env",
+    ] {
+        assert_eq!(rule_path(p, true), None, "{p}");
+    }
+    // POSIX: `\` and `?` are literal name characters, `?` suppresses
+    assert_eq!(rule_path("/h/a?b/.env", false), None);
+    assert_eq!(rule_path("/h/*/.env", false), None);
+}
+
+#[test]
+fn a_blanket_allow_rule_does_not_lift_the_secret_file_ask() {
+    let f = fx();
+    let calls = [
+        ("Read", json!({ "file_path": f.cwd.join(".env") })),
+        (
+            "Grep",
+            json!({ "pattern": "x", "path": f.cwd.join(".env") }),
+        ),
+        ("Glob", json!({ "pattern": ".env*" })),
+        ("Bash", json!({ "command": "cat .env" })),
+    ];
+    for blanket in [
+        &["Read", "Grep", "Glob", "Bash"][..],
+        &[
+            "Read(*)",
+            "Read(//**)",
+            "Grep(**)",
+            "Bash(*)",
+            "Bash(cat:*)",
+        ],
+        &["Read(?*)", "Read(**/?*)", "Grep(?*)", "Glob(**/?*)"],
+    ] {
+        for (tool, input) in &calls {
+            for (mode, want) in [
+                (Mode::Default, Q),
+                (Mode::AcceptEdits, Q),
+                (Mode::Auto, Q),
+                (Mode::Plan, D),
+                (Mode::DontAsk, D),
+                (Mode::BypassPermissions, A),
+            ] {
+                let p = f.with(rules(blanket, &[], &[]), mode);
+                assert_eq!(
+                    d(&p, tool, input.clone()),
+                    want,
+                    "{blanket:?} {mode:?} {tool}"
+                );
+            }
+        }
+    }
+    // an absolute rule for that one file lifts it, another secret file still asks
+    let real = real_spelled(&f.cwd); // a rule must match the lexical and the real path
+    let rule = format!("Read({})", env_rule(&real));
+    let p = f.with(rules(&["Read", &rule], &[], &[]), Mode::Default);
+    assert_eq!(d(&p, "Read", json!({ "file_path": real.join(".env") })), A);
+    assert_eq!(
+        d(&p, "Read", json!({ "file_path": real.join("id_rsa") })),
+        Q
+    );
+}
+
+#[test]
+fn a_secret_ask_offers_a_rule_for_that_path_only() {
+    let f = fx();
+    let p = f.perms(Mode::Default);
+    let one = |tool: &str, input: Value| -> Vec<String> {
+        p.suggestions(tool, &input)
+            .iter()
+            .flat_map(|s| match s {
+                Suggestion::AddRules { rules, .. } => rules
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "{}({})",
+                            r.tool_name,
+                            r.rule_content.clone().unwrap_or_default()
+                        )
+                    })
+                    .collect(),
+                _ => vec![],
+            })
+            .collect()
+    };
+    let env = real_spelled(&f.cwd).join(".env");
+    let want = format!("Read({})", env_rule(&real_spelled(&f.cwd)));
+    assert_eq!(one("Read", json!({ "file_path": env })), [want]);
+    // the offered rule lifts that ask and no other
+    let mut q = f.perms(Mode::Default);
+    q.apply(&p.suggestions("Read", &json!({ "file_path": env })));
+    assert_eq!(d(&q, "Read", json!({ "file_path": env })), A);
+    assert_eq!(
+        d(
+            &q,
+            "Read",
+            json!({ "file_path": env.with_file_name("id_rsa") })
+        ),
+        Q
+    );
+    // a secret file whose own name holds a glob character gets no rule (it would be broader)
+    assert!(one("Read", json!({ "file_path": f.cwd.join("sub/*.pem") })).is_empty());
+    assert!(one("Read", json!({ "file_path": f.cwd.join("**/.env") })).is_empty());
+    // a pattern with no secret path, and a glob command, offer nothing; an exact command does
+    assert!(one("Glob", json!({ "pattern": ".env*" })).is_empty());
+    assert!(one("Bash", json!({ "command": "cat .e*" })).is_empty());
+    assert_eq!(
+        one("Bash", json!({ "command": "cat .env" })),
+        ["Bash(cat .env)"]
+    );
+    // an ordinary read still offers the tool rule
+    assert_eq!(
+        one("Read", json!({ "file_path": f.cwd.join("a.txt") })),
+        ["Read()"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bash_writes_through_a_hard_link_ask_even_with_a_bash_allow_rule() {
+    let f = fx();
+    fs::write(f.outside.join("x"), "x").unwrap();
+    fs::hard_link(f.outside.join("x"), f.cwd.join("hard")).unwrap();
+    fs::write(f.cwd.join("plain"), "x").unwrap();
+    for cmd in [
+        "echo y > hard",
+        "echo y >> hard",
+        "echo y | tee hard",
+        "sed -i s/x/y/ hard",
+        "cp plain hard",
+        "truncate -s 0 hard",
+        "dd if=plain of=hard",
+        "cd sub && echo y > ../hard",
+    ] {
+        for allow in [
+            &[][..],
+            &["Bash"],
+            &["Bash(echo:*)", "Bash(sed:*)", "Bash(cp:*)"],
+        ] {
+            for (mode, want) in [
+                (Mode::Default, Q),
+                (Mode::AcceptEdits, Q),
+                (Mode::Auto, Q),
+                (Mode::Plan, D),
+                (Mode::DontAsk, D),
+                (Mode::BypassPermissions, A),
+            ] {
+                let p = f.with(rules(allow, &[], &[]), mode);
+                assert_eq!(
+                    d(&p, "Bash", json!({ "command": cmd })),
+                    want,
+                    "{allow:?} {mode:?} {cmd}"
+                );
+            }
+        }
+    }
+    // removing a name, or renaming onto it, leaves the outside inode alone; a linked mv source,
+    // a cp source or any other writer still asks
+    for (cmd, want) in [
+        ("rm hard", A),
+        ("rmdir hard", A),
+        ("mv plain hard", A),
+        ("mv hard other", Q),
+        ("cp hard other", Q),
+        ("ln hard other", Q),
+        ("chmod 600 hard", Q),
+        ("install plain hard", Q),
+    ] {
+        let p = f.with(rules(&["Bash"], &[], &[]), Mode::Default);
+        assert_eq!(d(&p, "Bash", json!({ "command": cmd })), want, "{cmd}");
+    }
+    // a rule that names the exact command lifts it; a plain file and a read are untouched
+    let p = f.with(
+        rules(&["Bash(sed -i s/x/y/ hard)"], &[], &[]),
+        Mode::Default,
+    );
+    assert_eq!(d(&p, "Bash", json!({ "command": "sed -i s/x/y/ hard" })), A);
+    assert_eq!(
+        d(
+            &f.perms(Mode::AcceptEdits),
+            "Bash",
+            json!({ "command": "touch plain" })
+        ),
+        A
+    );
+    assert_eq!(
+        d(
+            &f.perms(Mode::Default),
+            "Bash",
+            json!({ "command": "cat hard" })
+        ),
+        A
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hard_linked_file_is_not_auto_allowed_for_writes() {
+    let f = fx();
+    fs::write(f.outside.join("secret"), "x").unwrap();
+    fs::hard_link(f.outside.join("secret"), f.cwd.join("link")).unwrap();
+    fs::write(f.cwd.join("plain"), "x").unwrap();
+    for mode in [Mode::AcceptEdits, Mode::Auto] {
+        let p = f.perms(mode);
+        assert_eq!(
+            d(&p, "Write", json!({ "file_path": f.cwd.join("link") })),
+            Q
+        );
+        assert_eq!(
+            d(&p, "Write", json!({ "file_path": f.cwd.join("plain") })),
+            A
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn hard_linked_write_ask_reason_names_the_links() {
+    let f = fx();
+    fs::write(f.outside.join("secret"), "x").unwrap();
+    fs::hard_link(f.outside.join("secret"), f.cwd.join("link")).unwrap();
+    let v = f
+        .perms(Mode::Default)
+        .check_current("Write", &json!({ "file_path": f.cwd.join("link") }));
+    assert_eq!(v.decision, Q);
+    assert!(v.reason.contains("2 hard links"), "{}", v.reason);
 }
 
 #[test]
@@ -580,7 +946,7 @@ fn protected_hard_asks_even_in_bypass_and_denies_headless() {
         for mode in Mode::ALL {
             let hard = mk(mode, true, true).check_current(tool, &input);
             // plan and dontAsk deny a write anyway
-            let want = if matches!(mode, Mode::DontAsk) || (mode == Mode::Plan && tool == "Write") {
+            let want = if matches!(mode, Mode::DontAsk | Mode::Plan) {
                 D
             } else {
                 Q
@@ -1129,10 +1495,12 @@ fn classify_all_shell_suspends_every_bash_allow_rule_in_auto() {
 }
 
 #[test]
-fn plan_mode_bash_goes_to_the_classifier_edits_stay_denied_the_setting_turns_it_off() {
+fn plan_mode_is_read_only_even_with_the_judge_setting_on() {
     let f = fx();
     let p = f.perms(Mode::Plan);
-    assert_eq!(d(&p, "Bash", json!({ "command": "rm x" })), C);
+    // the judge is only ever asked about reads: a write command is denied, not classified
+    assert_eq!(d(&p, "Bash", json!({ "command": "rm x" })), D);
+    assert_eq!(d(&p, "mcp__s__w", json!({})), D);
     assert_eq!(d(&p, "Bash", json!({ "command": "git status" })), A);
     assert_eq!(d(&p, "Write", json!({ "file_path": f.path("a") })), D);
     let v = p.check_current("Bash", &json!({ "command": "rm -rf ~" }));
@@ -1143,7 +1511,7 @@ fn plan_mode_bash_goes_to_the_classifier_edits_stay_denied_the_setting_turns_it_
     );
     let mut off = f.perms(Mode::Plan);
     off.env.auto_mode.use_auto_mode_during_plan = false;
-    assert_eq!(d(&off, "Bash", json!({ "command": "rm x" })), Q);
+    assert_eq!(d(&off, "Bash", json!({ "command": "rm x" })), D);
     assert!(
         !off.check_current("Bash", &json!({ "command": "rm -rf ~" }))
             .critical
@@ -3295,5 +3663,116 @@ fn bash_cannot_name_browser_profiles_however_the_path_is_spelled() {
         "echo xbrowser-profiles",
     ] {
         assert_ne!(d(&p, "Bash", json!({ "command": ok })), D, "{ok}");
+    }
+}
+
+// --- workspace containment compares realpaths (macOS /tmp -> /private/tmp) ---------------------
+
+#[cfg(unix)]
+#[test]
+fn accept_edits_write_through_an_alias_of_the_workspace_is_inside() {
+    let f = fx();
+    let real = dunce::canonicalize(&f.cwd).unwrap();
+    let alias = f.outside.join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let p = Permissions::new(
+        PermissionRules::default(),
+        Env::new(&real, &f.home, Mode::AcceptEdits).interactive(true),
+    );
+    let w = |path: PathBuf| d(&p, "Write", json!({ "file_path": path, "content": "x" }));
+    assert_eq!(w(alias.join("x")), A);
+    assert_eq!(w(alias.join("new/deep/x")), A, "nested new file");
+    assert_eq!(w(real.join("x")), A);
+    // symlinked parent dir inside the workspace, both directions
+    fs::create_dir(real.join("d")).unwrap();
+    std::os::unix::fs::symlink(real.join("d"), real.join("dl")).unwrap();
+    assert_eq!(w(alias.join("dl/x")), A);
+    // `..` is resolved before links: out of the workspace and back through the alias
+    assert_eq!(w(alias.join("../x")), Q);
+    assert_eq!(w(alias.join("sub/../../x")), Q);
+    // a link inside pointing outside, also via the alias, and a dangling one
+    std::os::unix::fs::symlink(&f.home, real.join("esc")).unwrap();
+    assert_eq!(w(alias.join("esc/x")), Q);
+    assert_eq!(w(real.join("esc/new/x")), Q);
+    std::os::unix::fs::symlink(f.home.join("nowhere"), real.join("dang")).unwrap();
+    assert_eq!(w(alias.join("dang/x")), Q);
+    // protected paths stay protected through the alias
+    assert_eq!(w(alias.join(".git/config")), Q);
+    assert_eq!(w(alias.join(".synt/x")), Q);
+    assert_eq!(w(alias.join(".env")), Q);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn accept_edits_tmp_and_private_tmp_are_the_same_workspace() {
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let ws = dir.path().join("ws");
+    fs::create_dir(&ws).unwrap();
+    let real = dunce::canonicalize(&ws).unwrap();
+    assert!(real.starts_with("/private/tmp"));
+    let p = Permissions::new(
+        PermissionRules::default(),
+        Env::new(&real, dir.path(), Mode::AcceptEdits).interactive(true),
+    );
+    for path in [ws.join("x"), real.join("x")] {
+        assert_eq!(
+            d(&p, "Write", json!({ "file_path": path, "content": "x" })),
+            A
+        );
+    }
+    // case-folding of the native policy is unchanged
+    let upper = PathBuf::from(real.to_string_lossy().to_uppercase()).join("x");
+    assert_eq!(
+        d(&p, "Write", json!({ "file_path": upper, "content": "x" })),
+        A
+    );
+}
+
+// --- `..` after a symlink, /proc and /dev/fd ----------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn bash_dotdot_after_a_symlinked_component_is_not_normalised_away() {
+    let f = fx();
+    fs::create_dir(f.outside.join("deep")).unwrap();
+    fs::write(f.outside.join("passwd"), "x").unwrap();
+    std::os::unix::fs::symlink(f.outside.join("deep"), f.cwd.join("link")).unwrap();
+    fs::write(f.cwd.join("passwd"), "x").unwrap();
+    fs::create_dir_all(f.cwd.join("a/b")).unwrap();
+    for mode in [Mode::Default, Mode::AcceptEdits] {
+        assert_eq!(f.bash(mode, "cat link/../passwd"), Q, "{mode:?}");
+        assert_eq!(f.bash(mode, "cd link/.. && cat passwd"), Q, "{mode:?}");
+        assert_eq!(f.bash(mode, "cat a/b/../../passwd"), A, "{mode:?}");
+        assert_eq!(f.bash(mode, "cd a/b/.. && cat ../passwd"), A, "{mode:?}");
+        // entering the link with cd, then `..`
+        for c in [
+            "cd link && cat ../passwd",
+            "cd link; cat ../passwd",
+            "cd link/ && cat ../passwd",
+            "cd a/../link && cat ../passwd",
+        ] {
+            assert_eq!(f.bash(mode, c), Q, "{mode:?} {c}");
+        }
+        assert_eq!(f.bash(mode, "cd a && cat ../passwd"), A, "{mode:?}");
+        // cd out of the workspace, then an operand-less command
+        assert_eq!(f.bash(mode, "cd .. && ls"), Q, "{mode:?}");
+        assert_eq!(f.bash(mode, "cd /etc && ls"), Q, "{mode:?}");
+        assert_eq!(f.bash(mode, "cd a/b && ls"), A, "{mode:?}");
+    }
+}
+
+#[test]
+fn proc_and_dev_fd_spellings_are_never_inside() {
+    for (p, yes) in [
+        ("/proc", true),
+        ("/proc/self/cwd/x", true),
+        ("/proc/123/root/etc", true),
+        ("/dev/fd/3", true),
+        ("/dev/fd", true),
+        ("/dev/null", false),
+        ("/procfs/x", false),
+        ("/home/proc/x", false),
+    ] {
+        assert_eq!(super::is_proc_path(Path::new(p)), yes, "{p}");
     }
 }

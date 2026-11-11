@@ -100,11 +100,18 @@ pub fn resolve<'a>(
     self_session: &str,
     a: &Address,
 ) -> Result<&'a Entry, ResolveError> {
-    let all: Vec<&Entry> = entries
+    let mut all: Vec<&Entry> = entries
         .iter()
         .filter(|e| e.session_id != self_session && config.permits(&e.addr("main", "")))
         .collect();
-    let hits = candidates(entries, config, self_session, a);
+    let mut hits = candidates(entries, config, self_session, a);
+    // An ended session (offline card, no endpoint) only counts when no live one matches, so it
+    // never makes a live session's name ambiguous.
+    for v in [&mut all, &mut hits] {
+        if v.iter().any(|e| !e.endpoint.is_empty()) {
+            v.retain(|e| !e.endpoint.is_empty());
+        }
+    }
     let list = |v: &[&Entry]| {
         v.iter()
             .take(10)
@@ -209,6 +216,24 @@ mod tests {
                 .kind,
             "not_found"
         );
+    }
+
+    #[test]
+    fn an_ended_session_never_makes_a_live_one_ambiguous() {
+        let mut live = e("aaaaaaaa-1", Some("b"), "api", "111111111111aaaa");
+        live.endpoint = "ep".into();
+        let dead = e("bbbbbbbb-2", Some("b"), "api", "111111111111aaaa");
+        let es = vec![dead.clone(), live];
+        let c = all_ws();
+        assert_eq!(
+            resolve(&es, &c, "self", &parse("sess:b").unwrap())
+                .unwrap()
+                .session_id,
+            "aaaaaaaa-1"
+        );
+        // alone, the ended session is still found (the caller reports `offline`)
+        let only = [dead];
+        assert!(resolve(&only, &c, "self", &parse("sess:b").unwrap()).is_ok());
     }
 
     #[test]

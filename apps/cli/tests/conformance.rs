@@ -114,6 +114,38 @@ fn allow_with_space_star_lets_the_command_run() {
     assert!(rig.ws().join("made.txt").exists());
 }
 
+/// `auto` allows edits inside the workspace itself (like acceptEdits), without the judge: there
+/// is no `permission.auto_verdict` event for them. docs/CLI.md and `--help` say so.
+#[test]
+fn auto_mode_allows_an_in_workspace_edit_without_the_judge() {
+    let rig = Rig::new();
+    let script = json!([
+        {"tools": [{"name": "Write", "input": {"file_path": "made.txt", "content": "x"}}]},
+        {"text": "done"}
+    ]);
+    let (_, ev) = rig.run(script, &["--permission-mode", "auto"]);
+    assert!(
+        rig.ws().join("made.txt").exists(),
+        "the in-workspace write was refused"
+    );
+    assert!(ev.iter().all(|e| e["type"] != "permission.auto_verdict"));
+}
+
+#[test]
+fn mcp_add_refuses_an_existing_name_unless_forced() {
+    let rig = Rig::new();
+    assert!(
+        rig.synt(&["mcp", "add", "demo", "--", "echo", "hi"])
+            .status
+            .success()
+    );
+    let o = rig.synt(&["mcp", "add", "demo", "--", "echo", "other"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--force"));
+    let o = rig.synt(&["mcp", "add", "demo", "--force", "--", "echo", "other"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+}
+
 #[test]
 fn mcp_add_then_run_works_on_a_fresh_home() {
     let rig = Rig::new();
@@ -172,6 +204,128 @@ fn run_resume_continues_a_stored_session() {
     assert_eq!(session_id(&ev2), sid, "same session");
     assert_eq!(ev2[0]["payload"]["source"], "resume");
     assert_eq!(messages(&rig, &sid), 4, "history kept, new turn appended");
+}
+
+fn stored_model(rig: &Rig, sid: &str) -> String {
+    let c = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
+    c.query_row(
+        "SELECT model_config FROM sessions WHERE id=?1",
+        [sid],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+fn turn_model(ev: &[Value]) -> String {
+    let t = ev.iter().find(|e| e["type"] == "turn.started").unwrap();
+    t["payload"]["model"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn a_model_change_is_stored_and_a_resume_continues_on_it() {
+    let rig = Rig::new();
+    let (_, ev1) = rig.run(text_script("first"), &["--model", "fake/mock-a"]);
+    let sid = session_id(&ev1);
+    assert_eq!(stored_model(&rig, &sid), "\"fake/mock-a\"");
+    let (_, ev2) = rig.run(
+        text_script("second"),
+        &["--resume", &sid, "--model", "fake/mock-b"],
+    );
+    assert!(
+        ev2.iter()
+            .any(|e| e["type"] == "model.changed" && e["payload"]["model"] == "fake/mock-b"),
+        "model.changed is recorded"
+    );
+    assert_eq!(stored_model(&rig, &sid), "\"fake/mock-b\"");
+    // no --model: the stored one, and no second model.changed
+    let (_, ev3) = rig.run(text_script("third"), &["--resume", &sid]);
+    assert_eq!(turn_model(&ev3), "fake/mock-b");
+    assert!(!ev3.iter().any(|e| e["type"] == "model.changed"));
+    assert_eq!(stored_model(&rig, &sid), "\"fake/mock-b\"");
+}
+
+#[test]
+fn a_stored_model_that_cannot_be_built_is_kept_and_warned_about() {
+    let rig = Rig::new();
+    std::fs::create_dir_all(rig.home()).unwrap();
+    std::fs::write(
+        rig.home().join("synt.json"),
+        r#"{"$schema":"config.json/v1","model":"gw/big","providers":{"gw":{"type":"anthropic","baseURL":"http://127.0.0.1:1","apiKey":false,"models":["big"]}}}"#,
+    )
+    .unwrap();
+    let go = |extra: &[&str]| {
+        rig.base()
+            .args(["run", "--cwd"])
+            .arg(rig.ws())
+            .args(["--sandbox", "off", "--prompt", "hi"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let first = go(&[]);
+    let sid = session_id(&events(&first.stdout));
+    let c = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
+    c.execute(
+        "UPDATE sessions SET model_config='\"ghost/\\u001b[31mx\\nsynt: warning: forged\"' WHERE id=?1",
+        [&sid],
+    )
+    .unwrap();
+    drop(c);
+    let second = go(&["--resume", &sid]);
+    let err = String::from_utf8_lossy(&second.stderr);
+    assert!(err.contains("stored model ghost/"), "{err}");
+    assert!(!err.contains('\u{1b}'), "escape sequences are stripped");
+    assert!(
+        !err.lines().any(|l| l.starts_with("synt: warning: forged")),
+        "a newline in the label cannot forge a line: {err}"
+    );
+    assert!(
+        stored_model(&rig, &sid).contains("ghost/"),
+        "the stored model is kept"
+    );
+}
+
+#[test]
+fn a_stored_model_removed_from_its_provider_list_warns_and_is_kept() {
+    let rig = Rig::new();
+    std::fs::create_dir_all(rig.home()).unwrap();
+    let conf = |models: &str| {
+        format!(
+            r#"{{"$schema":"config.json/v1","model":"gw/big","providers":{{"gw":{{"type":"anthropic","baseURL":"http://127.0.0.1:1","apiKey":false,"models":{models}}}}}}}"#
+        )
+    };
+    std::fs::write(rig.home().join("synt.json"), conf(r#"["big","other"]"#)).unwrap();
+    let go = |extra: &[&str]| {
+        rig.base()
+            .args(["run", "--cwd"])
+            .arg(rig.ws())
+            .args(["--sandbox", "off", "--prompt", "hi"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let first = go(&["--model", "gw/other"]);
+    let sid = session_id(&events(&first.stdout));
+    assert_eq!(stored_model(&rig, &sid), "\"gw/other\"");
+    std::fs::write(rig.home().join("synt.json"), conf(r#"["big"]"#)).unwrap();
+    let second = go(&["--resume", &sid]);
+    let err = String::from_utf8_lossy(&second.stderr);
+    let want = "synt: warning: stored model gw/other is not available (not in the models of provider \"gw\"); using gw/big";
+    assert!(err.contains(want), "{err}");
+    let ev = events(&second.stdout);
+    assert!(
+        ev.iter().any(|e| e["type"] == "notice"
+            && e["payload"]["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("stored model gw/other is not available"))),
+        "a notice event"
+    );
+    assert_eq!(turn_model(&ev), "big");
+    assert_eq!(
+        stored_model(&rig, &sid),
+        "\"gw/other\"",
+        "the label is kept"
+    );
 }
 
 #[test]

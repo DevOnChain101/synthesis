@@ -355,14 +355,14 @@ fn golden_permissions_match_node() {
         .unwrap(),
     )
     .unwrap();
-    let (mut failed, mut skipped, mut diverged) = (Vec::new(), 0, Vec::new());
+    let (mut failed, mut skipped, mut diverged) = (Vec::new(), Vec::new(), Vec::new());
     for c in &cases {
         let read = |f: &str| -> Value {
             serde_json::from_str(&fs::read_to_string(c.join(f)).unwrap()).unwrap()
         };
         let (input, expected) = (read("input.json"), read("expected.json"));
         match run_case(&input) {
-            None => skipped += 1,
+            None => skipped.push(c.file_name().unwrap().to_string_lossy().into_owned()),
             Some(got) if got == expected => {}
             Some(_)
                 if allowed
@@ -394,7 +394,8 @@ fn golden_permissions_match_node() {
         .as_object()
         .unwrap()
         .keys()
-        .filter(|k| !diverged.contains(k))
+        // a case skipped on this platform cannot be judged here (it is checked where it runs)
+        .filter(|k| !diverged.contains(k) && !skipped.contains(k))
         .collect();
     assert!(
         stale.is_empty(),
@@ -403,14 +404,15 @@ fn golden_permissions_match_node() {
     eprintln!(
         "golden permissions: {} cases, {} skipped on this platform, {} diverge on purpose, {} failed",
         cases.len(),
-        skipped,
+        skipped.len(),
         diverged.len(),
         failed.len()
     );
     // 2 symlink cases + 4 POSIX-path cases; a larger number means the skip rule is hiding cases.
     assert!(
-        !cfg!(windows) || skipped <= 6,
-        "{skipped} cases skipped on Windows"
+        !cfg!(windows) || skipped.len() <= 6,
+        "{} cases skipped on Windows",
+        skipped.len()
     );
     assert!(
         failed.is_empty(),

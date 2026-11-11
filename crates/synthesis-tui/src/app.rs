@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use synthesis_events::{Budget, Envelope, Event};
 use synthesis_harness::{
-    Approval, DENY_MESSAGE, ImageAttachment, TaskAgent, TaskOutcome, UserReply,
+    Approval, DENY_MESSAGE, ImageAttachment, NO_TASK_RUNNING, TaskAgent, TaskOutcome, UserReply,
 };
 use synthesis_permissions::{Mode, Suggestion};
 use synthesis_settings::{TUI_PANELS, TuiSettings};
@@ -27,8 +27,8 @@ use synthesis_tui_render::agent::{
     Suggestions as RSug, body_sel_rows,
 };
 use synthesis_tui_render::dash::{
-    DashState, DashView, Focus, Frame, Hidden, Live, MIN_COLS, MIN_ROWS, SessionRow, Usage,
-    Workspace, render_frame, workspace_key,
+    DashState, DashView, Focus, Frame, Hidden, HistoryDay, Live, MIN_COLS, MIN_ROWS, Rect,
+    SessionRow, Usage, Workspace, render_frame, workspace_key,
 };
 use synthesis_tui_render::dialogs::HELP;
 use synthesis_tui_render::model::{
@@ -47,8 +47,10 @@ use crate::links::{
 };
 use crate::route::{self, Known, Route};
 use crate::sanitize::{clean_input, clean_input_lines, clean_line, clean_text};
+use crate::status::ContextText;
 use crate::status::{SandboxStatus, StatusExtra, status_line_with};
 use crate::{ExitReason, SavedSession};
+use synthesis_view::workspaces::fold_dir;
 
 const QUIT_ARM_MS: i64 = 1500;
 const SCROLL_STEP: usize = 10;
@@ -106,6 +108,8 @@ pub(crate) struct AppConfig {
     pub models: Vec<String>,
     /// `effort_tiers` the current model declares (empty: no effort control).
     pub effort_tiers: Vec<String>,
+    /// The model's context window if known.
+    pub context_window: Option<u64>,
     /// Skills / custom commands offered next to the local ones (sent to the model as text).
     pub extra_commands: Vec<CmdDef>,
     pub saved: Vec<SavedSession>,
@@ -192,6 +196,8 @@ pub(crate) enum Cmd {
     Compact {
         instructions: Option<String>,
     },
+    /// `/rename TITLE`: the host validates and stores it, then calls [`App::set_title`].
+    Rename(String),
 }
 
 #[derive(Debug)]
@@ -314,6 +320,8 @@ pub(crate) type NotePreview = std::rc::Rc<dyn Fn(&str) -> String>;
 
 pub(crate) struct App {
     pub cfg: AppConfig,
+    /// Title of the open session (stored, else first prompt); `/rename` replaces it.
+    session_title: String,
     pub quit: Option<ExitReason>,
     pub mode: Mode,
     pub model: String,
@@ -348,6 +356,8 @@ pub(crate) struct App {
     target: Option<String>,
     /// Messages entered while a task runs, sent one per finished task (oldest first).
     queue: Vec<String>,
+    /// How many lines at the head of `queue` are refused sends waiting for the next task.
+    failed_head: usize,
     /// Big pastes live in the prompt as a chip and are expanded when the prompt is sent.
     pastes: Vec<(String, String)>,
     /// Images pasted with Alt+V, sent with the next request to the main agent.
@@ -356,6 +366,8 @@ pub(crate) struct App {
     image_busy: bool,
     /// A `/files` or `/diff` scan is running: at most one.
     project_busy: bool,
+    /// Usage panel: per-day history of the stored sessions; `None` until the first load ends.
+    usage_history: Option<Vec<HistoryDay>>,
     /// `synt.tui` (user settings), edited by `/config`.
     pub(crate) tui: TuiSettings,
     /// Cross-session messaging: the requests in flight, `None` when peers are off.
@@ -377,9 +389,22 @@ pub(crate) struct App {
     lines: Vec<String>,
     size: (u32, u32),
     commands: Vec<CmdDef>,
+    /// The workspaces of the session store, the live one first (`panels`).
+    groups: Vec<panels::Group>,
+    /// Selected workspace (index into `groups`) and row of the Running panel.
+    ws_sel: usize,
+    run_sel: usize,
+    /// Which part has the keyboard: the chat, the Workspace panel (`Workspace`) or Running
+    /// (`Dashboard`).
+    side: Focus,
+    /// Rows the Activity panel is scrolled up from the newest.
+    act_scroll: usize,
+    /// A switch waiting for its second press because a task is running: (what, when).
+    switch_armed: Option<(String, i64)>,
 }
 
-fn local_commands() -> Vec<CmdDef> {
+/// The built-in slash commands, for hosts that offer completion of their own.
+pub fn local_commands() -> Vec<CmdDef> {
     let c = |name: &str, d: &str, hint: &str| CmdDef {
         name: name.into(),
         aliases: vec![],
@@ -395,7 +420,12 @@ fn local_commands() -> Vec<CmdDef> {
             "summarise the conversation to free context",
             "[instructions]",
         ),
-        c("new", "open a session in another folder", ""),
+        c("new", "new session in the selected workspace", ""),
+        c(
+            "close",
+            "close this session (hide it) and start a new one",
+            "",
+        ),
         c("resume", "continue a saved session", "[session id]"),
         c("model", "pick a model, or change it directly", "[model]"),
         c(
@@ -443,6 +473,11 @@ fn local_commands() -> Vec<CmdDef> {
             "[name]",
         ),
         c(
+            "rename",
+            "rename this session (its stored title)",
+            "<title>",
+        ),
+        c(
             "permissions",
             "mode and rules; allow / remove a rule",
             "[allow|remove RULE]",
@@ -457,6 +492,11 @@ fn local_commands() -> Vec<CmdDef> {
             "toggle focus view (prompt, summary and response only)",
             "[on|off]",
         ),
+        c(
+            "verbose",
+            "show internal rows (memory, mode, permissions) in the chat",
+            "[on|off]",
+        ),
         c("exit", "quit", ""),
     ]
 }
@@ -464,17 +504,6 @@ fn local_commands() -> Vec<CmdDef> {
 /// A built-in command name (or alias): a skill or MCP prompt of the same name never shadows it.
 pub(crate) fn is_local_command(name: &str) -> bool {
     matches!(name, "quit" | "perms") || local_commands().iter().any(|c| c.name == name)
-}
-
-/// Canonical, case-folded where the file system folds case (macOS, Windows): the key of a folder.
-fn fold_dir(p: &str) -> String {
-    let c = std::fs::canonicalize(p)
-        .map_or_else(|_| p.to_string(), |p| p.to_string_lossy().into_owned());
-    if cfg!(any(windows, target_os = "macos")) {
-        c.to_lowercase()
-    } else {
-        c
-    }
 }
 
 /// Same folder, through symlinks (macOS /var -> /private/var) and, where the file system folds
@@ -504,7 +533,11 @@ fn bang_command(text: &str) -> (bool, String) {
 }
 
 fn activity_for(cfg: &AppConfig, replay: &[Envelope]) -> Session {
-    let mut activity = session_from_events(&cfg.session_id, replay.iter());
+    finish_activity(session_from_events(&cfg.session_id, replay.iter()), cfg)
+}
+
+fn finish_activity(mut activity: Session, cfg: &AppConfig) -> Session {
+    activity.settle_replayed();
     activity.cwd = clean_line(&cfg.cwd);
     activity.project = clean_line(&basename(&cfg.cwd));
     if activity.model.is_empty() {
@@ -521,6 +554,7 @@ fn is_key(k: &Key, n: Named) -> bool {
     matches!(k, Key::Named(x) if *x == n)
 }
 
+mod panels;
 #[cfg(test)]
 mod tests;
 
@@ -536,18 +570,55 @@ impl App {
         chat.agent.mode = mode_str(cfg.mode).into();
         chat.agent.version = cfg.version.clone();
         chat.agent.status = "idle".into();
-        let activity = activity_for(&cfg, replay);
+        let mut activity = Session::new(&cfg.session_id);
         for e in replay {
+            let (prompts, items) = (activity.prompts, chat.agent.items.len());
+            apply_event(&mut activity, e);
             chat.apply(e, parse_ts(&e.ts).unwrap_or(now));
+            panels::link_prompt(&mut activity, &chat, prompts, items);
         }
+        let activity = finish_activity(activity, &cfg);
+        // the window belongs to the model in use, not to the one that wrote the history (/model)
+        chat.ctx.set_window(cfg.context_window.unwrap_or(0));
         chat.agent.status = "idle".into();
         // agents of an earlier run are gone with its process
         chat.agents.clear();
         chat.inflight.clear();
+        // the last task of the stored run never ended: its process died (kill, closed window)
+        if activity.interrupted
+            && replay
+                .iter()
+                .rev()
+                .find_map(|e| match e.event {
+                    Event::TaskStarted { .. } => Some(true),
+                    Event::TaskEnded { .. } => Some(false),
+                    _ => None,
+                })
+                .unwrap_or(false)
+        {
+            // the tools of that run (and their Task rows) will never report back
+            for it in chat
+                .agent
+                .items
+                .iter_mut()
+                .filter(|i| i.status == "running")
+            {
+                it.status = "interrupted".into();
+            }
+            chat.note("previous run was interrupted", "warn");
+        }
         let ran_task = replay
             .iter()
             .any(|e| matches!(e.event, Event::TaskEnded { .. }));
+        let groups = panels::group_sessions(&cfg.cwd, &cfg.session_id, &cfg.saved);
+        let session_title = cfg
+            .saved
+            .iter()
+            .find(|s| s.id == cfg.session_id)
+            .map(|s| s.title.clone())
+            .unwrap_or_default();
         Self {
+            session_title,
             mode: cfg.mode,
             model: cfg.model.clone(),
             cfg,
@@ -574,10 +645,12 @@ impl App {
             task: None,
             target: None,
             queue: vec![],
+            failed_head: 0,
             pastes: vec![],
             attachments: vec![],
             image_busy: false,
             project_busy: false,
+            usage_history: None,
             peer_status: None,
             tui: TuiSettings::default(),
             esc_at: None,
@@ -593,14 +666,22 @@ impl App {
             lines: vec![],
             size: (80, 24),
             commands,
+            groups,
+            ws_sel: 0,
+            run_sel: 0,
+            side: Focus::Agent,
+            act_scroll: 0,
+            switch_armed: None,
         }
     }
 
     // ------------------------------------------------------------------ inputs from the harness
 
     pub fn on_event(&mut self, env: &Envelope, now: i64) {
+        let (prompts, items) = (self.activity.prompts, self.chat.agent.items.len());
         apply_event(&mut self.activity, env);
         self.chat.apply(env, now);
+        panels::link_prompt(&mut self.activity, &self.chat, prompts, items);
         if self
             .target
             .as_ref()
@@ -922,6 +1003,10 @@ impl App {
             out.push(Cmd::ResetScreen);
             return out;
         }
+        // a dialog, picker or search owns the keyboard: the panels give it up
+        if !self.dialogs.is_empty() || self.picker.is_some() || self.search.is_some() {
+            self.side = Focus::Agent;
+        }
         if is_key(&k, Named::AltT) && self.dialogs.is_empty() && self.picker.is_none() {
             self.set_effort("", &mut out);
             return out;
@@ -960,6 +1045,7 @@ impl App {
             self.picker_key(&k, now, &mut out);
         } else if self.search.is_some() {
             self.search_key(&k);
+        } else if self.side != Focus::Agent && self.panel_key(&k, now) {
         } else if !self.suggestion_key(&k, now, &mut out) {
             self.agent_key(&k, now, &mut out);
         }
@@ -1048,6 +1134,16 @@ impl App {
         }
     }
 
+    fn bang_hint(&mut self, t: &str, now: i64) {
+        if t.starts_with('!') && !t.contains('\n') {
+            self.toast(
+                "typed ! to run a shell command; pasted text is sent as a prompt",
+                now,
+                false,
+            );
+        }
+    }
+
     fn agent_key(&mut self, k: &Key, now: i64, out: &mut Vec<Cmd>) {
         match k {
             Key::Text(t) => {
@@ -1061,6 +1157,7 @@ impl App {
                     // only a typed `!` / `#` / `@` starts a shell command / note / agent message,
                     // never a burst of characters
                     self.editor.insert(&format!(" {t}"));
+                    self.bang_hint(t, now);
                 } else {
                     self.editor.insert(t);
                 }
@@ -1072,6 +1169,7 @@ impl App {
                 // pasted text never becomes a shell command (or an agent message) by itself: type
                 // the `!` / `@` yourself
                 let t = if self.editor.cur == 0 && t.starts_with(['!', '#', '@']) {
+                    self.bang_hint(t, now);
                     format!(" {t}")
                 } else {
                     t.clone()
@@ -1164,7 +1262,10 @@ impl App {
                     self.esc_at = Some(now);
                 }
             }
-            Tab if tab_cycles => self.cycle_target(),
+            Tab if tab_cycles => self.tab_into_sidebar(),
+            CtrlT if tab_cycles && (!self.chat.agents.is_empty() || self.target.is_some()) => {
+                self.cycle_target()
+            }
             CtrlR => {
                 let from = e.history.len() as i64 - 1;
                 let (matched, at) = self.search_history("", from);
@@ -1194,6 +1295,10 @@ impl App {
                 } else {
                     self.quit_armed_at = Some(now);
                     self.chat.note("press ctrl+c again to quit", "");
+                    if self.scroll > 0 {
+                        // the note is at the bottom of the chat, out of view while scrolled up
+                        self.toast("press ctrl+c again to quit", now, false);
+                    }
                 }
             }
             CtrlD => {
@@ -1316,7 +1421,7 @@ impl App {
         self.chat.note(format!("now talking to @{name}"), "");
     }
 
-    /// Tab on an empty prompt: main, then the agents of this session, then main again.
+    /// Ctrl+T on an empty prompt: main, then the agents of this session, then main again.
     fn cycle_target(&mut self) {
         let mut order = vec!["main".to_string()];
         order.extend(self.chat.agents.iter().map(|r| r.name.clone()));
@@ -1445,10 +1550,24 @@ impl App {
     }
 
     /// The host could not hand a line to its agent: it goes back to the prompt.
-    pub fn send_failed(&mut self, text: &str, why: &str) {
+    pub fn send_failed(&mut self, to: &str, text: &str, why: &str) {
+        // The task ended between the keypress and the send (the screen still said "working"):
+        // a line for the main agent is the next prompt, it starts as soon as the app sees the
+        // task over, ahead of lines queued later and in the order they failed. A line for a
+        // sub-agent is never re-aimed at main: it goes back to the prompt with its `@name`.
+        if why == NO_TASK_RUNNING && to == "main" {
+            let at = self.failed_head.min(self.queue.len());
+            self.queue.insert(at, text.to_string());
+            self.failed_head = at + 1;
+            return;
+        }
         self.chat.note(format!("not sent: {why}"), "error");
         if self.editor.chars.is_empty() {
-            self.editor.set(text);
+            self.editor.set(&if to == "main" {
+                text.to_string()
+            } else {
+                format!("@{to} {text}")
+            });
         }
     }
 
@@ -1465,6 +1584,11 @@ impl App {
             });
             return;
         }
+        // the space that marked a burst / pasted `!x` as "not typed" is not part of the prompt
+        let text = match text.strip_prefix(' ') {
+            Some(r) if r.starts_with(['!', '#', '@']) => r.to_string(),
+            _ => text,
+        };
         let cancel = self.begin_followup(now);
         self.clear_selection();
         let images = self
@@ -1490,6 +1614,7 @@ impl App {
         if self.task.is_none() && !self.compacting && self.quit.is_none() && !self.queue.is_empty()
         {
             let t = self.queue.remove(0);
+            self.failed_head = self.failed_head.saturating_sub(1);
             self.route_submit(t, now, &mut out);
         }
         out
@@ -1498,6 +1623,7 @@ impl App {
     /// Esc: give the queued lines back to the prompt (or drop them when it has a draft).
     fn cancel_queue(&mut self, now: i64) {
         let all = std::mem::take(&mut self.queue).join("\n");
+        self.failed_head = 0;
         if self.editor.chars.is_empty() {
             self.editor.set(&all);
         }
@@ -1505,6 +1631,11 @@ impl App {
     }
 
     // ------------------------------------------------------------------ slash commands
+
+    /// The title `/rename` stored: the live row of the Running panel shows it at once.
+    pub fn set_title(&mut self, title: String) {
+        self.session_title = title;
+    }
 
     pub fn output(&mut self, text: String, error: bool) {
         self.out_item(text, error);
@@ -1559,7 +1690,7 @@ impl App {
                 } else {
                     self.chat.agent.items.clear();
                     // the meters belong to the conversation that is gone
-                    self.chat.ctx = Default::default();
+                    self.chat.ctx.reset();
                     self.chat.verification = None;
                     self.chat.totals = Default::default();
                     self.ran_task = false;
@@ -1570,7 +1701,12 @@ impl App {
                     out.push(Cmd::ClearConversation);
                 }
             }
-            "new" => self.open_folder_picker(PathBuf::from(&self.cfg.cwd)),
+            "new" => self.new_session(now),
+            "close" => {
+                if self.confirm_switch("/close", now) {
+                    self.quit = Some(ExitReason::Close);
+                }
+            }
             "resume" => {
                 if arg.is_empty() {
                     self.open_resume_picker(false, now);
@@ -1595,7 +1731,7 @@ impl App {
             }
             "browser" => {
                 let v = self.calls(
-                    |n| n.starts_with("Browser") || n == "WebFetch" || n == "WebSearch",
+                    |n| n.starts_with("browser_") || n == "WebFetch" || n == "WebSearch",
                     "browser and web calls",
                 );
                 self.out_item(v, false);
@@ -1637,6 +1773,12 @@ impl App {
             })),
             "peers" => out.push(Cmd::Info(Info::Peers)),
             "name" => out.push(Cmd::Info(Info::Name(arg.trim().to_string()))),
+            "rename" if arg.trim().is_empty() => {
+                let t = clean_line(&self.session_title);
+                let t = if t.is_empty() { "(untitled)" } else { &t };
+                self.out_item(format!("Session title: {t}\nusage: /rename <title>"), false);
+            }
+            "rename" => out.push(Cmd::Rename(arg.trim().to_string())),
             "permissions" | "perms" => {
                 let (sub, rule) = arg.split_once(char::is_whitespace).unwrap_or((arg, ""));
                 let rule = rule.trim();
@@ -1655,6 +1797,28 @@ impl App {
                     _ => !self.chat.agent.focus_view,
                 };
                 self.chat.agent.focus_view = on;
+                // a toast: the focus view itself hides command-output rows
+                self.toast(
+                    format!("focus view {}", if on { "on" } else { "off" }),
+                    now,
+                    false,
+                );
+            }
+            "verbose" => {
+                let on = match arg {
+                    "on" => true,
+                    "off" => false,
+                    _ => !self.chat.verbose,
+                };
+                self.chat.verbose = on;
+                self.toast(
+                    format!(
+                        "verbose {} (rows from now on)",
+                        if on { "on" } else { "off" }
+                    ),
+                    now,
+                    false,
+                );
             }
             other => self.out_item(format!("unknown command: /{other} (try /help)"), true),
         }
@@ -1764,7 +1928,26 @@ impl App {
         self.chat
             .note(format!("effort: {}", next.as_deref().unwrap_or("auto")), "");
         self.effort.clone_from(&next);
+        self.chat.agent.effort = next.clone().unwrap_or_default();
         out.push(Cmd::SetEffort(next));
+    }
+
+    pub fn effort(&self) -> Option<String> {
+        self.effort.clone()
+    }
+
+    /// The tier saved by an earlier run, when this model declares it; the host passes it on to
+    /// the harness. Returns what is in force.
+    pub fn restore_effort(&mut self, saved: Option<String>) -> Option<String> {
+        self.effort = saved.clone().filter(|e| self.cfg.effort_tiers.contains(e));
+        if let (Some(e), None) = (&saved, &self.effort) {
+            self.chat.note(
+                format!("effort {e} is not declared by this model: using auto"),
+                "",
+            );
+        }
+        self.chat.agent.effort = self.effort.clone().unwrap_or_default();
+        self.effort.clone()
     }
 
     fn switch_model(&mut self, name: &str, out: &mut Vec<Cmd>) {
@@ -1776,6 +1959,11 @@ impl App {
     }
 
     pub fn model_switched(&mut self, label: &str) {
+        // the new model's tiers are not known here: go back to auto rather than send a stale one
+        if self.effort.take().is_some() {
+            self.chat.agent.effort.clear();
+            self.chat.note("effort reset to auto for the new model", "");
+        }
         self.model = label.to_string();
         self.chat.agent.model = clean_line(label);
         self.activity.model = clean_line(label);
@@ -1875,6 +2063,11 @@ impl App {
         }
     }
 
+    /// The history load answered (at start, and after each task).
+    pub fn set_usage(&mut self, h: Vec<HistoryDay>) {
+        self.usage_history = Some(h);
+    }
+
     /// The scan answered (any way): the next one may start.
     pub fn project_done(&mut self) {
         self.project_busy = false;
@@ -1925,6 +2118,10 @@ impl App {
         match key {
             "logo" => t.logo = !t.logo,
             "show_thinking" => t.show_thinking = !t.show_thinking,
+            "verbose" => {
+                t.verbose = !t.verbose;
+                self.chat.verbose = t.verbose;
+            }
             "diffs_expanded" => {
                 t.diffs_expanded = !t.diffs_expanded;
                 self.expanded = t.diffs_expanded;
@@ -1959,6 +2156,7 @@ impl App {
         items.extend([
             row("logo", "logo art", "the braille symbol on the welcome", t.logo),
             row("show_thinking", "show thinking", "draw the model's thinking blocks", t.show_thinking),
+            row("verbose", "verbose", "also show internal rows (memory, mode, permissions, sub-agents) as readable lines", t.verbose),
             row("diffs_expanded", "expand long output", "tool output, code and diffs start whole (ctrl+o)", t.diffs_expanded),
             row("queue_indicators", "queue lines", "the queued messages above the prompt", t.queue_indicators),
             row("motion", "motion", "spinners and the pulse", t.motion),
@@ -1981,6 +2179,7 @@ impl App {
     /// The host read `synt.tui`: apply it, and say what was wrong with the file.
     pub fn set_tui(&mut self, t: TuiSettings, diagnostics: &[String]) {
         self.expanded = t.diffs_expanded;
+        self.chat.verbose = t.verbose;
         self.tui = t;
         for d in diagnostics {
             self.chat.startup_note(d);
@@ -2129,10 +2328,14 @@ impl App {
                 "up".to_string(),
             ),
         ];
-        for name in list_dirs(&dir) {
+        for (name, link) in list_dirs(&dir) {
             items.push((
                 PickerItem {
-                    label: format!("{}/", clean_line(&name)),
+                    label: format!(
+                        "{}/{}",
+                        clean_line(&name),
+                        if link { " (link)" } else { "" }
+                    ),
                     detail: String::new(),
                     current: false,
                 },
@@ -2141,10 +2344,11 @@ impl App {
         }
         let mut picker = Picker::new(
             "folder",
-            "New session in folder",
+            "New workspace: pick a folder",
             &dir.display().to_string(),
             vec![],
         );
+        picker.label_only = true;
         let (pi, values): (Vec<_>, Vec<_>) = items.into_iter().unzip();
         picker.items = pi;
         picker.choice = 0;
@@ -2178,9 +2382,28 @@ impl App {
             Key::Named(Named::PageDown) => p.move_by(p.window_size.max(1) as i64),
             Key::Named(Named::Home) => p.home(),
             Key::Named(Named::End) => p.end(),
-            Key::Named(Named::Backspace) => p.backspace(),
-            Key::Text(t) | Key::Paste(t) if !p.no_filter => p.type_text(&t.replace('\n', " ")),
+            Key::Named(Named::Backspace) => {
+                p.backspace();
+                self.folder_path_row();
+            }
+            Key::Text(t) | Key::Paste(t) if !p.no_filter => {
+                p.type_text(&t.replace('\n', " "));
+                self.folder_path_row();
+            }
             Key::Named(Named::Enter) => {
+                // a typed path that is not a folder never falls back to a fuzzy row: say why
+                let q = p.query.trim();
+                if ps.kind == PickerKind::Folder
+                    && looks_like_path(q)
+                    && !ps.values.first().is_some_and(|v| v.starts_with("open:"))
+                {
+                    let path = typed_path(q, self.cfg.home.as_deref(), Path::new(&self.cfg.cwd));
+                    p.subtitle = clean_line(
+                        &folder_problem(&path)
+                            .unwrap_or_else(|| format!("no such folder: {}", path.display())),
+                    );
+                    return;
+                }
                 let Some(item) = p.filtered().get(p.choice).copied() else {
                     return;
                 };
@@ -2195,13 +2418,62 @@ impl App {
         }
     }
 
+    /// A typed path (`/x`, `~/x`, `./x`, `a/b`) becomes a first row `open <path>` when it is a
+    /// readable folder; otherwise the subtitle says why not.
+    fn folder_path_row(&mut self) {
+        let Some(ps) = self.picker.as_mut() else {
+            return;
+        };
+        if ps.kind != PickerKind::Folder {
+            return;
+        }
+        if ps.values.first().is_some_and(|v| v.starts_with("open:")) {
+            ps.values.remove(0);
+            ps.picker.items.remove(0);
+        }
+        ps.picker.pin_first = false;
+        ps.picker.subtitle = ps.dir.display().to_string();
+        let q = ps.picker.query.trim();
+        if !looks_like_path(q) {
+            return;
+        }
+        let path = typed_path(q, self.cfg.home.as_deref(), Path::new(&self.cfg.cwd));
+        match folder_problem(&path) {
+            None => {
+                let shown = path.display().to_string();
+                ps.picker.items.insert(
+                    0,
+                    PickerItem {
+                        label: format!("open {}", clean_line(&shown)),
+                        detail: String::new(),
+                        current: false,
+                    },
+                );
+                ps.values.insert(0, format!("open:{shown}"));
+                ps.picker.pin_first = true;
+                ps.picker.choice = 0;
+            }
+            Some(why) => ps.picker.subtitle = clean_line(&why),
+        }
+    }
+
     fn pick(&mut self, kind: PickerKind, value: &str, dir: PathBuf, now: i64, out: &mut Vec<Cmd>) {
         match kind {
-            PickerKind::Folder => match value {
-                "use" => {
-                    self.picker = None;
-                    self.quit = Some(ExitReason::OpenFolder(dir));
+            PickerKind::Folder if value.starts_with("open:") || value == "use" => {
+                let target = value.strip_prefix("open:").map_or(dir, PathBuf::from);
+                match folder_problem(&target) {
+                    None => {
+                        self.picker = None;
+                        self.quit = Some(ExitReason::OpenFolder(target));
+                    }
+                    Some(why) => {
+                        if let Some(ps) = self.picker.as_mut() {
+                            ps.picker.subtitle = clean_line(&why);
+                        }
+                    }
                 }
+            }
+            PickerKind::Folder => match value {
                 "up" => {
                     let parent = dir.parent().map_or(dir.clone(), Path::to_path_buf);
                     self.open_folder_picker(parent);
@@ -2217,6 +2489,10 @@ impl App {
                     .as_ref()
                     .is_some_and(|p| p.picker.title.contains("this folder"));
                 self.open_resume_picker(all, now);
+                // asked for this folder, got the full list back: there is nothing here
+                if !all && let Some(ps) = self.picker.as_mut() {
+                    ps.picker.subtitle = "no saved sessions in this folder".into();
+                }
             }
             PickerKind::Resume => {
                 self.picker = None;
@@ -2844,6 +3120,11 @@ impl App {
                         self.scroll.saturating_sub(WHEEL_LINES)
                     };
                     self.follow_pointer();
+                } else if self.dialogs.is_empty()
+                    && self.picker.is_none()
+                    && matches!(dir, WheelDir::Up | WheelDir::Down)
+                {
+                    self.panel_wheel(p, dir == WheelDir::Up);
                 }
             }
             // motion with no button (terminals that report it): hint when over a link
@@ -2940,6 +3221,16 @@ impl App {
                 action: MouseAction::Down,
                 ..
             } if !self.dialogs.is_empty() => self.dialog_click(i64::from(y) - 1, now),
+            // a click on the Workspace / Running / Activity panels
+            Key::Mouse {
+                x,
+                y,
+                button: 0,
+                action: MouseAction::Down,
+                ..
+            } if self.picker.is_none() && self.search.is_none() && self.panel_click(x, y, now) => {
+                self.clear_selection();
+            }
             Key::Mouse {
                 x,
                 y,
@@ -3235,14 +3526,18 @@ impl App {
         } else {
             "idle"
         };
+        let g = &self.groups[self.ws_sel];
+        let live_cwd = &self.groups[0].cwd;
+        // the live session is always a row (the header counts it); the renderer lists only the
+        // rows of the selected workspace
         let mut rows = vec![SessionRow {
             id: self.cfg.session_id.clone(),
             project: clean_line(&basename(&self.cfg.cwd)),
-            cwd: clean_line(&self.cfg.cwd),
+            cwd: live_cwd.clone(),
             mtime: now,
             live: Some(Live {
                 name: "synthesis".into(),
-                cwd: clean_line(&self.cfg.cwd),
+                cwd: live_cwd.clone(),
                 status: if !self.dialogs.is_empty() {
                     "waiting"
                 } else if busy {
@@ -3257,40 +3552,21 @@ impl App {
             ctx_pct: None,
             waiting: !self.dialogs.is_empty(),
             mode: Some(mode_str(self.mode).into()),
+            title: clean_line(&self.session_title),
         }];
-        // One row per other folder (the newest): the same repo listed once per stored session is noise.
-        let mut seen: Vec<(String, &SavedSession)> = vec![];
-        let mut canon: std::collections::HashMap<&str, String> = Default::default();
-        let me = fold_dir(&self.cfg.cwd);
-        for s in self.cfg.saved.iter() {
-            let k = canon
-                .entry(s.cwd.as_str())
-                .or_insert_with(|| fold_dir(&s.cwd))
-                .clone();
-            if k == me {
-                continue;
-            }
-            match seen.iter_mut().find(|(n, _)| *n == k) {
-                Some((_, n)) if n.mtime < s.mtime => *n = s,
-                Some(_) => {}
-                None => seen.push((k, s)),
-            }
-        }
-        let newest: Vec<&SavedSession> = seen.into_iter().map(|(_, s)| s).collect();
-        for s in newest {
-            rows.push(SessionRow {
-                id: s.id.clone(),
-                project: clean_line(&basename(&s.cwd)),
-                cwd: clean_line(&s.cwd),
-                mtime: s.mtime,
-                live: None,
-                phase: "idle".into(),
-                tokens: 0.0,
-                ctx_pct: None,
-                waiting: false,
-                mode: None,
-            });
-        }
+        // the stored sessions of the selected workspace, newest first
+        rows.extend(g.sessions.iter().map(|s| SessionRow {
+            id: s.id.clone(),
+            project: clean_line(&basename(&g.cwd)),
+            cwd: g.cwd.clone(),
+            mtime: s.mtime,
+            phase: "idle".into(),
+            title: match clean_line(&s.title) {
+                t if t.is_empty() => "(untitled)".into(),
+                t => t,
+            },
+            ..SessionRow::default()
+        }));
         rows
     }
 
@@ -3349,20 +3625,20 @@ impl App {
         self.activity.context_display_reset = false;
         self.chat.agent.context_window = (window > 0).then_some(window as f64);
         let rows_s = self.session_rows(now);
-        let key = workspace_key(&self.cfg.cwd);
-        let ws = [Workspace {
-            key: key.clone(),
-            name: clean_line(&basename(&self.cfg.cwd)),
-            cwd: clean_line(&self.cfg.cwd),
-            count: (1 + self
-                .cfg
-                .saved
-                .iter()
-                .filter(|s| s.id != self.cfg.session_id)
-                .count()) as u32,
-            waiting: !self.dialogs.is_empty(),
-            busy: self.chat.agent.status != "idle",
-        }];
+        let ws: Vec<Workspace> = self
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(i, g)| Workspace {
+                key: workspace_key(&g.cwd),
+                name: basename(&g.cwd),
+                cwd: g.cwd.clone(),
+                count: g.sessions.len() as u32 + u32::from(i == 0),
+                waiting: i == 0 && !self.dialogs.is_empty(),
+                busy: i == 0 && self.chat.agent.status != "idle",
+            })
+            .collect();
+        let key = workspace_key(&self.groups[self.ws_sel].cwd);
         let lead = self.bash() || self.memory();
         let mut opts = AgentOpts {
             input_mode: if self.bash() {
@@ -3426,14 +3702,24 @@ impl App {
             });
         }
         let view = DashView {
+            activity_scroll: self.act_scroll,
             opts,
             hidden: Hidden {
                 session: !self.tui.panels[0],
                 mcp: !self.tui.panels[1],
                 tools: !self.tui.panels[2],
                 activity: !self.tui.panels[3],
+                status: !self.tui.panels[4],
+                tokens: !self.tui.panels[5],
+                topology: !self.tui.panels[6],
+                usage: !self.tui.panels[7],
             },
             ..DashView::default()
+        };
+        let focus = if self.dialogs.is_empty() && self.picker.is_none() && self.search.is_none() {
+            self.side
+        } else {
+            Focus::Agent
         };
         let usage = Usage::default();
         let sid = self.cfg.session_id.clone();
@@ -3441,10 +3727,12 @@ impl App {
             let state = DashState {
                 session: &self.activity,
                 sessions: &rows_s,
-                index: 0,
+                index: (self.run_sel + usize::from(!self.live_group()))
+                    .min(rows_s.len().saturating_sub(1)),
                 usage: &usage,
                 follow: false,
-                history: &[],
+                history: self.usage_history.as_deref().unwrap_or_default(),
+                history_loading: self.usage_history.is_none(),
                 usage_metric: "tokens",
                 mcp_servers: &[],
                 mcp_live: None,
@@ -3456,7 +3744,7 @@ impl App {
                     chars: &self.editor.chars[usize::from(lead)..],
                     cur: self.editor.cur.saturating_sub(usize::from(lead)),
                 }),
-                focus: Focus::Agent,
+                focus,
                 view: &view,
                 agent_session_id: Some(&sid),
                 tz_offset_min: self.cfg.tz_offset_min,
@@ -3483,6 +3771,10 @@ impl App {
             },
         ));
         self.caret = frame.rects.caret.map(|(x, y)| (x as u32, y as u32));
+        // no sidebar on this screen (narrow terminal): the chat keeps the keyboard
+        if frame.rects.workspace_rect.is_none() {
+            self.side = Focus::Agent;
+        }
         self.frame = Some(frame);
         self.lines.clone_from(&lines);
         // selection highlight is painted on a copy: hit tests keep reading the plain lines
@@ -3537,18 +3829,71 @@ fn suggestion_view(s: &Suggestion) -> Value {
     }
 }
 
-fn list_dirs(dir: &Path) -> Vec<String> {
-    let mut v: Vec<String> = std::fs::read_dir(dir)
+/// Sub-folders with a flag for symlinks (followed: a link to a folder is a folder). One level
+/// is listed per call, so a link loop cannot hang it.
+fn list_dirs(dir: &Path) -> Vec<(String, bool)> {
+    let mut v: Vec<(String, bool)> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| !n.starts_with('.'))
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let link = e.file_type().is_ok_and(|t| t.is_symlink());
+            Some((e.file_name().into_string().ok()?, link))
+        })
+        .filter(|(n, _)| !n.starts_with('.'))
         .collect();
-    v.sort_by_key(|n| n.to_lowercase());
+    v.sort_by_key(|(n, _)| n.to_lowercase());
     v.truncate(500);
     v
+}
+
+fn looks_like_path(q: &str) -> bool {
+    q.starts_with(['/', '~', '.']) || q.contains(['/', std::path::MAIN_SEPARATOR])
+}
+
+/// `~` and `~/x` from the home, relative paths from the session's folder.
+fn typed_path(q: &str, home: Option<&Path>, cwd: &Path) -> PathBuf {
+    let p = match (q.strip_prefix('~'), home) {
+        (Some(""), Some(h)) => h.to_path_buf(),
+        (Some(rest), Some(h)) if rest.starts_with(['/', std::path::MAIN_SEPARATOR]) => {
+            h.join(&rest[1..])
+        }
+        _ => PathBuf::from(q),
+    };
+    // joining an absolute path replaces the base
+    let p = cwd.join(p);
+    // fold `.` and `..` without touching the disk
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Why `p` cannot be the folder of a new session, or `None`.
+fn folder_problem(p: &Path) -> Option<String> {
+    let shown = p.display();
+    match std::fs::metadata(p) {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Some(format!("cannot open {shown}: permission denied"))
+        }
+        Err(_) => Some(format!("no such folder: {shown}")),
+        Ok(m) if !m.is_dir() => Some(format!("not a folder: {shown}")),
+        Ok(_) => std::fs::read_dir(p).err().map(|e| {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                format!("cannot open {shown}: permission denied")
+            } else {
+                format!("cannot open {shown}: {e}")
+            }
+        }),
+    }
 }
 
 pub(crate) fn too_small(w: usize, h: usize) -> Vec<String> {

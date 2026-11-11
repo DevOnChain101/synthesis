@@ -63,6 +63,8 @@ CREATE TABLE checkpoints(                                    -- addition: named 
   files TEXT NOT NULL CHECK(json_valid(files)), created_at TEXT NOT NULL,
   UNIQUE(session_id, name));
 "#,
+    // v2: `/close` hides a session from the lists; nothing is deleted and it stays resumable by id.
+    "ALTER TABLE sessions ADD COLUMN closed_at TEXT;",
 ];
 
 pub const LATEST: i64 = MIGRATIONS.len() as i64;

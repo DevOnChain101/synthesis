@@ -78,6 +78,10 @@ impl Rig {
     }
     fn cmd_for(&self, ws: &Path, script_name: &str, script: Value, args: &[&str]) -> Command {
         let s = self.dir.path().join(script_name);
+        let mut script = script;
+        if cfg!(windows) {
+            slow_delays(&mut script);
+        }
         std::fs::write(&s, script.to_string()).unwrap();
         let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.args(["run", "--cwd"])
@@ -1343,6 +1347,20 @@ impl Drop for Live {
 }
 
 impl Live {
+    /// Blocks until a stdout line contains `needle` (the child must be at that point, not just
+    /// started: Windows runners take seconds to spawn a shell for one `Bash` call).
+    fn wait_for(&self, needle: &str) {
+        let start = Instant::now();
+        while !self.out.lock().unwrap().iter().any(|l| l.contains(needle)) {
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "no `{needle}` within 60 s; stderr: {}",
+                self.err.lock().unwrap()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn finish(mut self) -> Done {
         let start = Instant::now();
         let status = loop {
@@ -1351,8 +1369,9 @@ impl Live {
             }
             if start.elapsed() > Duration::from_secs(60) {
                 panic!(
-                    "process did not end in 60 s; stderr: {}",
-                    self.err.lock().unwrap()
+                    "process did not end in 60 s; stderr: {}\nevents:\n{}",
+                    self.err.lock().unwrap(),
+                    self.out.lock().unwrap().join("\n")
                 );
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -1389,7 +1408,30 @@ fn outputs(ev: &[Value], name: &str) -> Vec<String> {
 }
 
 fn ok(d: &Done) {
-    assert_eq!(d.0.code(), Some(0), "stderr: {}", d.2);
+    let last: Vec<&Value> = d.1.iter().rev().take(5).rev().collect();
+    assert_eq!(
+        d.0.code(),
+        Some(0),
+        "stderr: {}\nlast events: {last:?}",
+        d.2
+    );
+}
+
+/// Windows runners start processes slowly: the fixed `delay_ms` that keeps one peer alive for the
+/// other would expire first, so triple them there.
+fn slow_delays(v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m.iter_mut() {
+                match (k.as_str(), x.as_u64()) {
+                    ("delay_ms", Some(n)) => *x = json!(n * 3),
+                    _ => slow_delays(x),
+                }
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(slow_delays),
+        _ => {}
+    }
 }
 
 fn peers_fit(rig: &Rig) -> bool {
@@ -1439,10 +1481,38 @@ impl Rig {
     }
     /// A first (alive for a while), B after A listens; B is joined first.
     fn pair(&self, a: Command, b: Command) -> (Done, Done) {
+        self.pair_after(a, b, None)
+    }
+    /// Like `pair`, but B starts only once A's stdout has a line containing `a_has`.
+    fn pair_after(&self, a: Command, b: Command, a_has: Option<&str>) -> (Done, Done) {
+        self.pair_gated(a, b, a_has, None)
+    }
+    /// `pair_after` plus: once A's stdout has `a_then` (B's request reached it), the file `gate`
+    /// is created, which opens an `after_file` turn of A's script.
+    fn pair_gated(
+        &self,
+        a: Command,
+        b: Command,
+        a_has: Option<&str>,
+        gate: Option<(&Path, &str)>,
+    ) -> (Done, Done) {
         let a = spawn_live(a);
+        if let Some(n) = a_has {
+            a.wait_for(n);
+        }
         let b = spawn_live(b);
+        if let Some((file, a_then)) = gate {
+            a.wait_for(a_then);
+            std::fs::write(file, "").unwrap();
+        }
         let rb = b.finish();
-        (a.finish(), rb)
+        let ra = a.finish();
+        // Shown only when the test fails (captured output): both children, whole.
+        for (who, d) in [("A", &ra), ("B", &rb)] {
+            eprintln!("--- {who}: {:?}\nstderr: {}", d.0, d.2);
+            d.1.iter().for_each(|e| eprintln!("{who} {e}"));
+        }
+        (ra, rb)
     }
 }
 
@@ -1567,7 +1637,8 @@ fn bash_marker_reply(share: Option<Value>) -> String {
         json!([send("ws:ws/sess:a", "what failed?", json!({})), {"text": "waiting"}, {"text": "ok"}]),
         &[],
     );
-    let (a, b) = rig.pair(a, b);
+    // The responder reads A's transcript when B's question lands, so the Bash call must be done.
+    let (a, b) = rig.pair_after(a, b, Some("tool.completed"));
     ok(&a);
     ok(&b);
     assert!(
@@ -1773,8 +1844,10 @@ fn e7_notify_on_end_hands_over_the_result_and_refuses_a_cycle() {
         return;
     }
     user_settings(&rig, std_peers());
+    // A's task ends only after B's subscription reached it, however late B starts
+    let gate = rig.dir.path().join("b-subscribed");
     let a = rig.a(
-        json!([{"delay_ms": 3000, "text": "generated client v2"}]),
+        json!([{"after_file": gate, "text": "generated client v2"}]),
         &[],
     );
     let b = rig.b(
@@ -1782,12 +1855,16 @@ fn e7_notify_on_end_hands_over_the_result_and_refuses_a_cycle() {
                {"text": "waiting"}, {"text": "B continues"}]),
         &[],
     );
-    let t0 = Instant::now();
-    let (a, b) = rig.pair(a, b);
+    let (a, b) = rig.pair_gated(a, b, None, Some((&gate, "peer.request_received")));
     ok(&a);
     ok(&b);
+    let ts = |d: &Done, t: &str| {
+        d.1.iter()
+            .find(|e| e["type"] == t)
+            .map(|e| e["ts"].to_string())
+    };
     assert!(
-        t0.elapsed() >= Duration::from_secs(2),
+        ts(&a, "task.ended") <= ts(&b, "peer.reply"),
         "B waited for A's task, not for an answer"
     );
     let r = payloads(&b.1, "peer.reply");
@@ -1808,14 +1885,16 @@ fn e7_notify_on_end_hands_over_the_result_and_refuses_a_cycle() {
     // cycle: B waits on A; A (still running) then asks B to notify it, and B refuses
     let rig = Rig::new();
     user_settings(&rig, std_peers());
+    // A asks only after B's request reached it (B then waits on A), and B is registered by then
+    let gate = rig.dir.path().join("b-asked");
     let mut first = send("ws:ws_b/sess:b", "ping me", json!({"notify_on_end": true}));
-    first["delay_ms"] = json!(2000);
+    first["after_file"] = json!(gate);
     let a = rig.a(json!([first, {"text": "A ends"}]), &[]);
     let b = rig.b(
         json!([send("ws:ws/sess:a", "ping me", json!({"notify_on_end": true})), {"text": "waiting"}, {"text": "B done"}]),
         &[],
     );
-    let (a, b) = rig.pair(a, b);
+    let (a, b) = rig.pair_gated(a, b, None, Some((&gate, "peer.request_received")));
     ok(&a);
     ok(&b);
     assert!(

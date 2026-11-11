@@ -6,14 +6,16 @@
 //! textconv and external diff drivers, and every `filter.<name>.clean|smudge|process` found in the
 //! config are switched off for each call (`required=false`, so git does not fail on the missing
 //! program); submodules are not entered; `git` is the one found by absolute path on the injected
-//! PATH; the process gets a minimal environment, `core.hooksPath` points at the null device, and
-//! network protocols are refused. NOT guaranteed: other config keys git may honour that this list does not
+//! PATH; the process gets a minimal environment (`GIT_CONFIG_NOSYSTEM`, `GIT_PAGER=cat`, no askpass),
+//! `core.hooksPath` points at the null device, `core.pager`, `core.sshCommand`, `core.askPass` and the
+//! credential helper are emptied, output is bounded and the call has a wall-clock limit with a process-group kill,
+//! and network protocols are refused. NOT guaranteed: other config keys git may honour that this list does not
 //! name. The scan runs only in a trusted folder (`--trust-project`), which is the real gate.
 
-use crate::sanitize::clean_line;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
+use synthesis_harness::sanitize_for_display as clean_line;
 
 use synthesis_config::Env;
 use synthesis_tui_base::imgclip::{Output, RealExec};
@@ -35,6 +37,9 @@ pub struct ProjectData {
     pub rows: Vec<TreeRow>,
     /// Unified diff of the tracked changes, one line per entry.
     pub diff: Vec<String>,
+    /// `(added, deleted, path)` of every changed file from `git diff --numstat` (the counts of a
+    /// binary file are `-`); complete even when `diff` was cut at the display limit.
+    pub stats: Vec<(String, String, String)>,
     /// The tree or the diff was cut at the bound.
     pub truncated: bool,
 }
@@ -90,24 +95,40 @@ pub fn diff_lines(p: &ProjectData, which: &str) -> Vec<String> {
             .filter(|l| l.starts_with(c) && !l.starts_with("+++") && !l.starts_with("---"))
             .count()
     };
-    let mut v: Vec<String> = files
-        .iter()
-        .map(|f| format!("+{} -{}  {}", count(f, '+'), count(f, '-'), f.0))
-        .collect();
+    let mut v: Vec<String> = if p.stats.is_empty() {
+        files
+            .iter()
+            .map(|f| format!("+{} -{}  {}", count(f, '+'), count(f, '-'), f.0))
+            .collect()
+    } else {
+        p.stats
+            .iter()
+            .map(|(a, d, name)| format!("+{a} -{d}  {name}"))
+            .collect()
+    };
+    if p.truncated {
+        // first, where it is seen: the list below is complete, the diff text is not
+        v.insert(
+            0,
+            "… cut at the display limit (the file list is complete)".into(),
+        );
+    }
     let picked: Vec<&(String, Vec<&String>)> = files
         .iter()
         .filter(|f| which.is_empty() || f.0.contains(which))
         .collect();
     if !which.is_empty() && picked.is_empty() {
-        v.push(format!("/diff: no changed file matches \"{which}\""));
+        let beyond = p.stats.iter().any(|st| st.2.contains(which));
+        v.push(if beyond {
+            format!("/diff: the text of \"{which}\" is past the display limit; use git diff")
+        } else {
+            format!("/diff: no changed file matches \"{which}\"")
+        });
         return v;
     }
     v.push(String::new());
     for f in picked {
         v.extend(f.1.iter().map(|l| (*l).clone()));
-    }
-    if p.truncated {
-        v.push("… cut at the display limit".into());
     }
     v
 }
@@ -158,6 +179,8 @@ impl Git {
                 ("GIT_TERMINAL_PROMPT", "0"),
                 ("GIT_ATTR_NOSYSTEM", "1"),
                 ("GIT_EXTERNAL_DIFF", ""),
+                ("GIT_PAGER", "cat"),
+                ("GIT_ASKPASS", ""),
             ]
             .map(|(k, v)| (k.to_string(), v.to_string())),
         );
@@ -193,7 +216,18 @@ impl Git {
             "-c",
             "core.untrackedCache=false",
             "-c",
+            "core.quotepath=false",
+            "-c",
             "protocol.allow=never",
+            // no pager, no ssh or credential programs can be named by a repository's config
+            "-c",
+            "core.pager=cat",
+            "-c",
+            "core.sshCommand=",
+            "-c",
+            "core.askPass=",
+            "-c",
+            "credential.helper=",
         ]
         .iter()
         .map(|s| (*s).to_string())
@@ -420,6 +454,7 @@ pub fn scan(cwd: &Path, env: &Env) -> ProjectData {
             "--no-ext-diff",
             "--no-textconv",
             "--ignore-submodules=all",
+            "--no-renames",
         ];
         a.extend(extra);
         git.run_with(cwd, &guards, &a, b'\n')
@@ -431,17 +466,57 @@ pub fn scan(cwd: &Path, env: &Env) -> ProjectData {
         .map(clean_line)
         .collect();
     truncated |= all.len() > MAX_DIFF_LINES;
+    // counts of every file, not just the ones inside the displayed lines
+    let (stat_raw, _) = diff(&["--numstat", "HEAD"])
+        .or_else(|| diff(&["--numstat"]))
+        .unwrap_or_default();
+    let stats = String::from_utf8_lossy(&stat_raw)
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.splitn(3, '\t');
+            Some((
+                it.next()?.to_string(),
+                it.next()?.to_string(),
+                clean_line(it.next()?),
+            ))
+        })
+        .take(MAX_ROWS)
+        .collect();
     ProjectData {
         loaded: true,
         note: None,
         rows,
         diff: all.into_iter().take(MAX_DIFF_LINES).collect(),
+        stats,
         truncated,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn git_runs_with_a_closed_environment_and_no_pager_or_helper_programs() {
+        let g = Git::new(&Env::from_pairs([
+            ("PATH", "/usr/bin"),
+            ("API_KEY", "secret"),
+        ]));
+        let has = |k: &str, v: &str| g.env.iter().any(|(a, b)| a == k && b == v);
+        for (k, v) in [
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("GIT_PAGER", "cat"),
+            ("GIT_TERMINAL_PROMPT", "0"),
+            ("GIT_ASKPASS", ""),
+            ("GIT_EXTERNAL_DIFF", ""),
+        ] {
+            assert!(has(k, v), "{k}");
+        }
+        assert!(
+            !g.env.iter().any(|(k, _)| k == "API_KEY"),
+            "no key reaches git"
+        );
+        assert_eq!((g.exec.timeout, g.exec.max), (GIT_TIMEOUT, MAX_BYTES));
+    }
+
     use super::*;
     use std::process::Command;
 
@@ -494,6 +569,38 @@ mod tests {
         assert_eq!(find("a.rs").status, Some('M'));
         assert_eq!(find("new.txt").status, Some('?'));
         assert!(p.diff.iter().any(|l| l == "+two"));
+    }
+
+    #[test]
+    fn diff_counts_cover_files_past_the_display_limit_and_names_are_not_quoted() {
+        let d = tempfile::tempdir().unwrap();
+        let w = d.path();
+        run(w, &["init", "-q"]);
+        std::fs::write(w.join("a.txt"), "x\n").unwrap();
+        std::fs::write(w.join("ü.txt"), "x\n").unwrap();
+        std::fs::write(w.join("z.txt"), "x\n").unwrap();
+        run(w, &["add", "."]);
+        run(w, &["commit", "-qm", "x"]);
+        let many = |n: usize| (0..n).map(|i| format!("l{i}\n")).collect::<String>();
+        std::fs::write(w.join("a.txt"), many(1000)).unwrap();
+        std::fs::write(w.join("ü.txt"), many(300)).unwrap();
+        std::fs::write(w.join("z.txt"), many(200)).unwrap();
+        let p = scan(w, &env());
+        assert!(p.truncated);
+        let v = diff_lines(&p, "");
+        assert!(v[0].starts_with("… cut at the display limit"), "{v:?}");
+        assert_eq!(v[1], "+1000 -1  a.txt");
+        assert_eq!(v[3], "+300 -1  ü.txt", "no octal quoting");
+        assert_eq!(
+            v[2], "+200 -1  z.txt",
+            "a file past line 600 is listed with its count"
+        );
+        assert!(
+            diff_lines(&p, "z.txt")
+                .last()
+                .unwrap()
+                .contains("past the display limit")
+        );
     }
 
     #[test]

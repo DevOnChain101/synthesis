@@ -76,15 +76,18 @@ fn glob_hits(re: &Regex, rel: &str, win: bool) -> bool {
     re.is_match(&rel) || re.is_match(rel.rsplit('/').next().unwrap_or(&rel))
 }
 
-fn collect_files(search: &Path, is_dir: bool, ctx: &ToolContext) -> Vec<PathBuf> {
+/// `explicit`: the call named secret files itself (a `glob` such as `.env`), which the permission
+/// layer asked about, so a directory walk keeps them. Otherwise a walk always skips them.
+fn collect_files(search: &Path, is_dir: bool, ctx: &ToolContext, explicit: bool) -> Vec<PathBuf> {
     let secret = |p: &Path| {
-        ctx.skip_secrets
+        (!explicit || ctx.skip_secrets)
             && (synthesis_core::secrets::is_secret_shaped(p)
                 || std::fs::canonicalize(p)
                     .is_ok_and(|r| synthesis_core::secrets::is_secret_shaped(&r)))
     };
     if !is_dir {
-        return if secret(search) {
+        // a file named as `path` is the person's call (asked for); only peers never read one
+        return if ctx.skip_secrets && secret(search) {
             vec![]
         } else {
             vec![search.to_path_buf()]
@@ -137,7 +140,8 @@ fn search(
         _ => Mode::Files,
     };
 
-    let mut files = collect_files(search_path, is_dir, ctx);
+    let explicit = str_field(input, "glob").is_some_and(synthesis_core::secrets::names_secret);
+    let mut files = collect_files(search_path, is_dir, ctx, explicit);
     if ctx.cancel.is_cancelled() {
         return Err("cancelled".to_string());
     }

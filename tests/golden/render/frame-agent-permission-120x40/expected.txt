@@ -1,40 +1,40 @@
 ▐ ✻ SYNTHESIS ▌ │ ● 2 live │ ◆ anthropic/fake-sonnet │ ⌂ proj             session- · up 1m00s │ ctx ▱▱▱▱▱▱ 3% │ 12:00:00
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-┏━ ◆ Running 2 ━━━━┓┏━ ◆ Status ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┏━ ◆ Tokens ━━━━━━━━━━━━┓┏━ ◆ Tasks · 2 open ━━━━━━━━━┓
-┃ ►● proj-0     10%┃┃                                           ┃┃ total  30.5k    agent…┃┃ █████░░░░░░░░░ 1/3         ┃
-│ project-0        ││ · RUNNING TOOL  last activity 9m54s ago   ││ input  9.0k     outpu…││ 1 ✓ Read                   │
-│  ● proj-1     10%││   ✻ Agent explorer: find files 9m59s      ││ cache  20.0k    hit  …││ 2 · Fixing                 │
-│ project-1        ││ Context  ░░░░░░░░░░░░░   3% 5.9k/200.0k   ││ cost   -        lines…││ 3 ○ Test                   │
-┃                  ┃┃                                           ┃┃                     █ ┃┃                            ┃
-┗━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-┏━ ◆ Session ━━━━━━┓┏━ ◆ SYNTHESIS · /work/proj  ◆ permission needed ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ model  anthropic…┃┃ ◆ Synthesis needs your permission  ↑/↓ choose · enter confirm · esc reject                       ┃
-│ mode   manual    ││   ⎿ ☒ Read                                                                                       │
-│ effort auto      ││     ■ Fixing                                                                                     │
-│ window 200.0k to…││     ☐ Test                                                                                       │
-│ cwd    proj      ││ ╭─ Bash command ────────────────────────────────────────────────────────────────────────────────╮│
-│ uptime 1m00s     ││ │   ls                                                                                          ││
-│ turns  1 prompts…││ │                                                                                               ││
-│ errors 1         ││ │ Do you want to proceed?                                                                       ││
-┃                  ┃│ │ ❯ 1. Yes                                                                                      ││
-┗━━━━━━━━━━━━━━━━━━┛│ │   2. No, and tell Synthesis what to do differently (esc)                                      ││
-                    │ ╰───────────────────────────────────────────────────────────────────────────────────────────────╯│
-                    ┃ ⏸ manual mode on (shift+tab to cycle)                                  fake-sonnet · effort: auto┃
-                    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+┏━ ◆ Running 2 ━━━━━━┓┏━ ◆ Status ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓┏━ ◆ Tokens ━━━━━━━━━━━━┓┏━ ◆ Tasks · 2 open ━━━━━━━━┓
+┃ ►● proj-0       10%┃┃                                          ┃┃ total  30.5k    agent…┃┃ ████░░░░░░░░░ 1/3         ┃
+┃ project-0 (…ace)   ┃┃ · RUNNING TOOL  last activity 9m54s ago  ┃┃ input  9.0k     outpu…┃┃ 1 ✓ Read                  ┃
+┃  ● proj-1       10%┃┃   ✻ Agent explorer: find files 9m59s     ┃┃ cache  20.0k    hit  …┃┃ 2 · Fixing                ┃
+┃ project-1 (…ace)   ┃┃ Context  ░░░░░░░░░░░░   3% 5.9k/200.0k   ┃┃ cost   -        lines…┃┃ 3 ○ Test                  ┃
+┃                    ┃┃                                          ┃┃                     █ ┃┃                           ┃
+┗━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━┛┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+┏━ ◆ Session ━━━━━━━━┓┏━ ◆ SYNTHESIS · /work/proj  ◆ permission needed ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ model  fake-sonnet ┃┃ ◆ Synthesis needs your permission  ↑/↓ choose · enter confirm · esc reject                     ┃
+┃ mode   manual      ┃┃   ⎿ ☒ Read                                                                                     ┃
+┃ effort auto        ┃┃     ■ Fixing                                                                                   ┃
+┃ window 200.0k      ┃┃     ☐ Test                                                                                     ┃
+┃ cwd    proj        ┃┃ ╭─ Bash command ──────────────────────────────────────────────────────────────────────────────╮┃
+┃ uptime 1m00s       ┃┃ │   ls                                                                                        │┃
+┃ turns  1 prompts   ┃┃ │                                                                                             │┃
+┃ errors 1           ┃┃ │ Do you want to proceed?                                                                     │┃
+┃                    ┃┃ │ ❯ 1. Yes                                                                                    │┃
+┗━━━━━━━━━━━━━━━━━━━━┛┃ │   2. No, and tell Synthesis what to do differently (esc)                                    │┃
+                      ┃ ╰─────────────────────────────────────────────────────────────────────────────────────────────╯┃
+                      ┃ ⏸ manual mode on (shift+tab to cycle)                                fake-sonnet · effort: auto┃
+                      ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 ┏━ ◆ TOPOLOGY 1 active ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃ ✓ 1 Plan ━► ○ 2 Guard ━► ✶ 3 Orchestrate ━► ○ 4 Execute ━► ✓ 5 Verify ━► ○ 6 Learn                                   ┃
-│ ▸ Orchestrate: select skills / sub-agents — Agent explorer: find files                                               │
-│                                                                                                                      │
-│ ╭─── USER · PROJECT ────────────────╮   ╭─── GUARDS ────────────────────────╮   ╭─── SKILLS  1 ─────────────────────╮│
-│ │ +3 more                           │   │ 0 guards                          │   │ ★ scout                   ×1 · 9m ││
-│ ╰───────────────────────────────────╯   ╰──────────────────────────────▲────╯   ╰──▲────────────────────────────────╯│
-│                                  └────────┐                            │  ┌────────┘                                 │
-│ ╭─── MEMORY · FEEDBACK ─────────────╮   ┏━▼━ SYNTHESIS CORE  opus-5.5 ━┻━━┻━┓   ┏━━━ SUB-AGENTS  1 active / 1 ━━━━━━┓│
-│ │ context ▱▱▱▱▱▱▱▱▱▱             3% │   ┃ · Intent       parse … understood ┃   ┃ · explorer · find files  working… ┃│
-│ │ +3 more                           ◄───┫ +3 more                           ┣●━━►                                   ┃│
-│ ╰───────────────────────────────────╯   ┗━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━┳━┛   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│
-│                                  ┌────────┘                            │  └────────┐                                 │
-│ ╭─ EXTERNAL · MCP ───────────────▼──╮   ╭─ EXECUTION  3 ───────────────▼────╮   ╭──▼─ HOOKS ────────────────────────╮│
+┃ ▸ Orchestrate: select skills / sub-agents — Agent explorer: find files                                               ┃
+┃                                                                                                                      ┃
+┃ ╭─── USER · PROJECT ────────────────╮   ╭─── GUARDS ────────────────────────╮   ╭─── SKILLS  1 ─────────────────────╮┃
+┃ │ +3 more                           │   │ 0 guards                          │   │ ★ scout                   ×1 · 9m │┃
+┃ ╰───────────────────────────────────╯   ╰─────────────────▲─────────────────╯   ╰─────────────────▲─────────────────╯┃
+┃                   └───────────────────────────────┐       │       ┌───────────────────────────────┘                  ┃
+┃ ╭─── MEMORY · FEEDBACK ─────────────╮   ┏━ CORE ━━▼━━━━━━━┻━━━━━━━┻━━━━━━━━━┓   ┏━━━ SUB-AGENTS  1 active / 1 ━━━━━━┓┃
+┃ │ context ▱▱▱▱▱▱▱▱▱▱             3% ◄───┫ · Intent       parse … understood ┣●━━► · explorer · find files  working… ┃┃
+┃ │ +3 more                           │   ┃ +3 more                           ┃   ┃                                   ┃┃
+┃ ╰───────────────────────────────────╯   ┗━━━━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━━━┛   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┃
+┃                   ┌───────────────────────────────┘       │       └───────────────────────────────┐                  ┃
+┃ ╭─ MCP ───────────▼─────────────────╮   ╭─ EXECUTION ─────▼─────────────────╮   ╭─ HOOKS ─────────▼─────────────────╮┃
 ┃ ╰───────────────────────────────────╯   ╰───────────────────────────────────╯   ╰───────────────────────────────────╯┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 ↑/↓ 1-3 choose   enter confirm   esc reject   tab dashboard                                                             

@@ -15,7 +15,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/DevOnChain101/synthesis
 npm install -g @devonchain101/synthesis   # installs the command `synt`
 ```
 
-Windows (PowerShell 7+): `irm https://github.com/DevOnChain101/synthesis/releases/latest/download/install.ps1 | iex`. Release archives, SHA256SUMS and build provenance are on the GitHub Releases page. License: Apache-2.0.
+Windows (PowerShell 7+): `irm https://github.com/DevOnChain101/synthesis/releases/latest/download/install.ps1 | iex`. Desktop app (native window, macOS/Linux/Windows): `synthesis-desktop-<version>-<target>` archives on the same page, see [docs/INSTALL.md](docs/INSTALL.md) section 6. Release archives, SHA256SUMS and build provenance are on the GitHub Releases page. License: Apache-2.0.
 
 ## Quick start
 
@@ -56,7 +56,7 @@ During the parallel run both CLIs can be installed. See [docs/MIGRATION.md](docs
 - Not yet run end to end on GitHub CI, Linux or Windows by the maintainers; release pipeline and signing are unverified until the first tag.
 - Windows has no filesystem or network sandbox; macOS Seatbelt is deprecated by Apple and best-effort.
 - Eval parity with the Node CLI against real models is not yet measured (cutover gate).
-- `synt` with no subcommand opens the classic terminal app (palette `docs/tui-palette.md`, commands `docs/TUI.md`); `synt run` is the headless CLI. The GPUI desktop app and the redesigned TUI stay removed (archived at tag `archive/ui-before-removal`). Durable sessions and worktrees are incomplete; see `docs/STATUS.md`.
+- `synt` with no subcommand opens the classic terminal app (palette `docs/tui-palette.md`, commands `docs/TUI.md`); `synt run` is the headless CLI. The native GPUI desktop app (`apps/desktop`, `docs/specs/desktop.md`) is built and released next to the CLI; the redesigned TUI stays removed (archived at tag `archive/ui-before-removal`). Durable sessions and worktrees are incomplete; see `docs/STATUS.md`.
 
 ## Development
 

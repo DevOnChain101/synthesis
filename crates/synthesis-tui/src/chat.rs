@@ -66,6 +66,8 @@ pub struct Chat {
     pub totals: Totals,
     pub verification: Option<Verification>,
     pub ctx: ContextStatus,
+    /// `synt.tui.verbose` / `/verbose`: also draw the internal rows (see [`describe`]).
+    pub verbose: bool,
     /// Task counters start fresh with every task.
     pub task_started: Option<i64>,
     /// Startup notes whose `Notice` event has not come through the event channel yet.
@@ -149,50 +151,99 @@ pub(crate) fn friendly_compact_error(e: &str) -> (String, &'static str) {
 /// shows them, or they are only bookkeeping. Every other event kind (peers, memory, processes,
 /// mode changes, ...) and every kind added to the core later gets [`generic_row`].
 fn quiet(e: &Event) -> bool {
-    match e {
-        Event::HookRan { outcome, .. } => outcome == "success",
-        e => matches!(
-            e,
-            Event::ToolStarted { .. }
-                | Event::ToolApprovalRequired { .. }
-                | Event::SessionStarted { .. }
-                | Event::SessionStatusChanged { .. }
-                | Event::SessionCompleted(_)
-                | Event::SessionFailed(_)
-                | Event::SessionCancelled(_)
-                | Event::TodoUpdated { .. }
-                | Event::ArtifactCreated { .. }
-                | Event::TaskStarted { .. }
-                | Event::TurnStarted { .. }
-                | Event::TurnCompleted { .. }
-                | Event::ModelDelta { .. }
-                | Event::AssistantMessage { .. }
-                | Event::ContextUsage { .. }
-                | Event::ContextCompacting { .. }
-                | Event::ToolOutput { .. }
-        ),
-    }
+    matches!(
+        e,
+        Event::ToolStarted { .. }
+            | Event::ToolApprovalRequired { .. }
+            | Event::SessionStarted { .. }
+            | Event::SessionStatusChanged { .. }
+            | Event::SessionCompleted(_)
+            | Event::SessionFailed(_)
+            | Event::SessionCancelled(_)
+            | Event::TodoUpdated { .. }
+            | Event::ArtifactCreated { .. }
+            | Event::TaskStarted { .. }
+            | Event::TurnStarted { .. }
+            | Event::TurnCompleted { .. }
+            | Event::ModelDelta { .. }
+            | Event::AssistantMessage { .. }
+            | Event::ContextUsage { .. }
+            | Event::ContextCompacting { .. }
+            | Event::ToolOutput { .. }
+            | Event::ProcessOutput { .. }
+            | Event::BrowserFrame { .. }
+            | Event::BrowserAction { .. }
+    ) || matches!(e, Event::ProcessSpawned(i) | Event::ProcessReady(i) | Event::ProcessExited(i)
+        if i.tool_call_id.is_some()) // the Bash tool row already shows these
 }
 
-/// `type: key=value ...` from the event's own fields: scalars only, each cut short, everything
-/// sanitised (peer and memory text came from other sessions or a model, so it is data).
-fn generic_row(e: &Event) -> Option<String> {
-    let v = serde_json::to_value(e).ok()?;
-    let kind = v.get("type")?.as_str()?.to_string();
-    let mut out = clean_line(&kind);
-    if let Some(Value::Object(p)) = v.get("payload") {
-        for (k, val) in p {
-            let t = match val {
-                Value::String(s) => s.clone(),
-                Value::Number(n) => n.to_string(),
-                Value::Bool(b) => b.to_string(),
-                _ => continue,
-            };
-            let t: String = clean_line(&t).chars().take(60).collect();
-            out.push_str(&format!(" {}={t}", clean_line(k)));
+/// One readable line for an event the chat does not need to show, and whether it is shown anyway
+/// (a failure or something the person must act on). The rest is drawn only in verbose mode. An
+/// unknown kind gets its name and nothing else: never `key=value` machine rows.
+fn describe(e: &Event) -> (String, bool) {
+    let ps = |what: &str, i: &synthesis_events::ProcessInfo| {
+        (
+            format!(
+                "process {} {what}",
+                i.name.as_deref().unwrap_or(&i.process_id)
+            ),
+            false,
+        )
+    };
+    match e {
+        Event::MemoryRetrieved { ids, tokens, .. } => (
+            format!("memory: {} note(s) retrieved ({tokens} tokens)", ids.len()),
+            false,
+        ),
+        Event::MemoryWritten { op, kind, .. } => (format!("memory: {kind} note {op}"), false),
+        Event::MemoryQuarantined { rule, .. } => {
+            (format!("memory: a note was quarantined ({rule})"), false)
+        }
+        Event::MemoryReflectionStarted { .. } => ("memory: reflection started".into(), false),
+        Event::MemoryReflectionCompleted { ops, .. } => {
+            (format!("memory: reflection saved {ops} note(s)"), false)
+        }
+        Event::MemoryReflectionFailed { error, .. } => {
+            (format!("memory reflection failed: {error}"), true)
+        }
+        Event::MemoryProposalCreated { .. } => {
+            ("a memory note is waiting for your review".into(), true)
+        }
+        Event::BrowserLoginRequired { origin, .. } => (
+            format!("log in to {origin} in the browser window, then confirm"),
+            true,
+        ),
+        Event::HookRan {
+            event,
+            hook_name,
+            outcome,
+            ..
+        } => (
+            format!("hook {hook_name} ({event}): {outcome}"),
+            outcome != "success",
+        ),
+        Event::ProcessSpawned(i) => ps("started", i),
+        Event::ProcessReady(i) => ps("ready", i),
+        Event::ProcessExited(i) => ps("exited", i),
+        Event::PeerListening { .. } => ("peers: listening for requests".into(), false),
+        Event::PeerStopped { .. } => ("peers: stopped listening".into(), false),
+        Event::PeerRequestSent { summary, .. } => (format!("peer request sent: {summary}"), false),
+        Event::PeerRequestReceived {
+            summary, decision, ..
+        } => (format!("peer request {decision}: {summary}"), false),
+        Event::PeerReply { status, .. } => (format!("peer reply: {status}"), false),
+        Event::PeerThreadClosed { reason, .. } => (format!("peer thread closed ({reason})"), false),
+        Event::PeerDelegationDenied { reason, .. } => {
+            (format!("peer request refused: {reason}"), true)
+        }
+        e => {
+            let kind = serde_json::to_value(e)
+                .ok()
+                .and_then(|v| v.get("type")?.as_str().map(str::to_string))
+                .unwrap_or_default();
+            (clean_line(&kind), false)
         }
     }
-    Some(out.chars().take(240).collect())
 }
 
 fn note(text: impl Into<String>, tone: &str) -> Item {
@@ -230,6 +281,13 @@ impl Chat {
 
     pub fn note(&mut self, text: impl Into<String>, tone: &str) {
         self.push(note(text, tone));
+    }
+
+    /// A row the person only needs when `show`; verbose mode draws it anyway.
+    fn hint(&mut self, text: impl Into<String>, tone: &str, show: bool) {
+        if show || self.verbose {
+            self.note(text, tone);
+        }
     }
 
     /// Startup notes are shown now; the same `Notice` event arriving later is not shown again.
@@ -290,7 +348,14 @@ impl Chat {
             } => {
                 let t = display_text.as_deref().unwrap_or(text);
                 // `Some("")`: a note from the harness to the model, not something typed
-                if !t.is_empty() {
+                // the harness's own notes to the model are not something typed
+                let internal = matches!(
+                    display_text.as_deref(),
+                    Some("verification feedback" | "stop hook feedback")
+                );
+                if internal {
+                    self.hint(format!("sent to the model: {t}"), "", false);
+                } else if !t.is_empty() {
                     // a line to a sub-agent reads as typed with its address
                     let t = match &sub {
                         Some(a) => format!("@{} {t}", self.name_of(a)),
@@ -398,7 +463,11 @@ impl Chat {
                 max,
                 error,
                 ..
-            } => self.note(format!("model retry {attempt}/{max}: {error}"), "warn"),
+            } => self.hint(
+                format!("model retry {attempt}/{max}: {error}"),
+                "warn",
+                *attempt <= 1,
+            ),
             Event::ModelError { message, .. } => {
                 self.model_error_shown = true;
                 self.note(format!("model error: {message}"), "error")
@@ -561,10 +630,22 @@ impl Chat {
                     touch(it);
                 }
             }
+            // only a refusal is worth a line; the tool row shows an allowed call
             Event::ToolApprovalResolved {
-                decision, reviewer, ..
-            } if reviewer != "user" || decision == "expired" => {
-                self.note(format!("approval {decision} ({reviewer})"), "warn");
+                decision,
+                reviewer,
+                message,
+                ..
+            } => {
+                let mut s = match decision.as_str() {
+                    "allow" => format!("approval granted ({reviewer})"),
+                    "expired" => format!("approval expired ({reviewer})"),
+                    _ => format!("approval denied ({reviewer})"),
+                };
+                if let Some(m) = message.as_deref().filter(|m| !m.is_empty()) {
+                    s.push_str(&format!(": {m}"));
+                }
+                self.hint(s, "warn", decision != "allow");
             }
             Event::VerificationCompleted {
                 status, summary, ..
@@ -578,7 +659,12 @@ impl Chat {
                     "failed" => "error",
                     _ => "warn",
                 };
-                self.note(format!("verification {status}: {summary}"), tone);
+                // an unverified or blocked task says so again, in its end line
+                self.hint(
+                    format!("verification {status}: {summary}"),
+                    tone,
+                    matches!(status.as_str(), "passed" | "failed"),
+                );
             }
             Event::BudgetExceeded {
                 budget,
@@ -602,18 +688,25 @@ impl Chat {
                     show: i.background || i.tool_call_id.is_none(),
                     ..AgentRow::default()
                 });
-                self.note(
+                // a foreground sub-agent is its Task row
+                self.hint(
                     format!(
                         "agent @{name} started ({}){}",
                         i.agent_type,
                         if i.background { " · background" } else { "" }
                     ),
                     "",
+                    i.background || i.tool_call_id.is_none(),
                 );
             }
             Event::SubagentStopped(i) => {
                 let name = self.name_of(&i.agent_id);
-                self.note(format!("agent @{name} stopped ({})", i.agent_type), "");
+                let show = self.agents.iter().any(|r| r.id == i.agent_id && r.show);
+                self.hint(
+                    format!("agent @{name} stopped ({})", i.agent_type),
+                    "",
+                    show,
+                );
             }
             Event::SubagentStatusChanged { agent_id, to, .. } => {
                 if to == "evicted" {
@@ -657,22 +750,26 @@ impl Chat {
             Event::MessageDropped { message_id, reason } => {
                 self.unqueue(message_id);
                 if let Some(i) = self.inflight.iter().position(|(id, _)| id == message_id) {
+                    // `task_done` says so once, when the line goes back to the prompt
                     self.dropped_lines.push(self.inflight.remove(i).1);
+                } else {
+                    self.note(format!("⚠ message dropped: {reason}"), "warn");
                 }
-                self.note(format!("⚠ message dropped: {reason}"), "warn");
             }
             Event::AutoVerdict {
                 name,
                 verdict,
                 reason,
                 ..
-            } => self.note(
+            } => self.hint(
                 format!("auto mode: {verdict} {name}: {reason}"),
                 if verdict == "allow" { "" } else { "warn" },
+                verdict != "allow",
             ),
             Event::ModelChanged { model, .. } => {
                 self.agent.model = clean_line(model);
-                self.note(format!("model: {model}"), "");
+                // /model says it and the header shows it
+                self.hint(format!("model: {model}"), "", false);
             }
             // Already shown as a startup note: the event log keeps it, the pane shows it once.
             Event::Notice { level, text } => {
@@ -733,6 +830,8 @@ impl Chat {
                     } else if *status == TaskStatus::Cancelled && reason == "cancelled" {
                         let kept = if kept { " · partial output kept" } else { "" };
                         self.note(format!("interrupted{kept}"), tone);
+                    } else if reason.is_empty() || reason == word {
+                        self.note(format!("task {word}"), tone);
                     } else {
                         self.note(format!("task {word}: {reason}"), tone);
                     }
@@ -754,11 +853,14 @@ impl Chat {
                 self.agent.interrupting = false;
                 self.tools.clear();
             }
+            Event::SessionModeChanged { to, .. } => {
+                // the footer shows the mode
+                self.hint(format!("mode: {}", clean_line(to)), "", false)
+            }
             e if !quiet(e) => {
-                if let Some(t) = generic_row(e) {
-                    let who = sub.map_or(String::new(), |a| format!("[{}] ", clean_line(&a)));
-                    self.note(format!("{who}{t}"), "");
-                }
+                let (t, show) = describe(e);
+                let who = sub.map_or(String::new(), |a| format!("[{}] ", clean_line(&a)));
+                self.hint(format!("{who}{t}"), if show { "warn" } else { "" }, show);
             }
             _ => {}
         }
@@ -804,11 +906,13 @@ mod tests {
         assert!(!sent("system", "agent").starts_with('⚠'));
     }
 
-    #[test]
-    fn events_without_a_view_become_one_safe_row_and_bookkeeping_stays_quiet() {
-        let mut chat = Chat::default();
-        let mut apply = |event: Event| {
-            let env = Envelope {
+    fn rows_of(verbose: bool, event: Event) -> Vec<String> {
+        let mut chat = Chat {
+            verbose,
+            ..Chat::default()
+        };
+        chat.apply(
+            &Envelope {
                 v: 1,
                 seq: 1,
                 ts: "2026-01-01T00:00:00.000Z".into(),
@@ -817,47 +921,238 @@ mod tests {
                 turn_id: None,
                 agent_id: None,
                 event,
-            };
-            chat.apply(&env, 0);
-            chat.agent.items.len()
-        };
-        assert_eq!(
-            apply(Event::PeerListening {
-                endpoint_kind: "unix".into()
-            }),
-            1
-        );
-        let n = apply(Event::MemoryWritten {
-            id: "m1\x1b[2J".into(),
-            op: "add".into(),
-            kind: "fact".into(),
-            scope: "repo".into(),
-            trust: "trusted".into(),
-            status: "active".into(),
-        });
-        assert_eq!(n, 2);
-        let row = chat.agent.items.last().unwrap().text.clone();
-        assert!(
-            row.starts_with("memory.written ") && row.contains("op=add"),
-            "{row}"
-        );
-        assert!(!row.contains('\x1b'), "{row:?}");
-        // already shown elsewhere: no extra row
-        let n = chat.agent.items.len();
-        chat.apply(
-            &Envelope {
-                v: 1,
-                seq: 2,
-                ts: "2026-01-01T00:00:00.000Z".into(),
-                session_id: "s".into(),
-                task_id: None,
-                turn_id: None,
-                agent_id: None,
-                event: Event::TodoUpdated { todos: vec![] },
             },
             0,
         );
-        assert_eq!(chat.agent.items.len(), n);
+        chat.agent.items.iter().map(|i| i.text.clone()).collect()
+    }
+
+    /// Internal events: no row by default, one readable row (never `key=value`) when verbose.
+    #[test]
+    fn internal_events_are_hidden_and_verbose_shows_one_readable_line() {
+        let resolved = |decision: &str, reviewer: &str| Event::ToolApprovalResolved {
+            approval_id: "a".into(),
+            decision: decision.into(),
+            reviewer: reviewer.into(),
+            input_changed: false,
+            message: None,
+        };
+        let hidden: Vec<(Event, &str)> = vec![
+            (
+                Event::MemoryWritten {
+                    id: "m1\x1b[2J".into(),
+                    op: "added".into(),
+                    kind: "episode".into(),
+                    scope: "workspace".into(),
+                    trust: "untrusted".into(),
+                    status: "active".into(),
+                },
+                "memory: episode note added",
+            ),
+            (
+                Event::MemoryRetrieved {
+                    ids: vec!["m1".into()],
+                    tokens: 12,
+                    candidates: 3,
+                },
+                "memory: 1 note(s) retrieved (12 tokens)",
+            ),
+            (
+                Event::MemoryRetrieved {
+                    ids: vec![],
+                    tokens: 0,
+                    candidates: 0,
+                },
+                "memory: 0 note(s) retrieved (0 tokens)",
+            ),
+            (
+                Event::SessionModeChanged {
+                    from: "default".into(),
+                    to: "acceptEdits".into(),
+                    reason: None,
+                },
+                "mode: acceptEdits",
+            ),
+            (resolved("allow", "user"), "approval granted (user)"),
+            (resolved("allow", "auto"), "approval granted (auto)"),
+            (
+                Event::AutoVerdict {
+                    tool_call_id: "t".into(),
+                    name: "Bash".into(),
+                    verdict: "allow".into(),
+                    reason: "safe".into(),
+                    source: "model".into(),
+                },
+                "auto mode: allow Bash: safe",
+            ),
+            (
+                Event::ModelChanged {
+                    model: "m".into(),
+                    effort: None,
+                },
+                "model: m",
+            ),
+            (
+                Event::ModelRetry {
+                    attempt: 2,
+                    max: 3,
+                    error: "boom".into(),
+                    delay_ms: 1,
+                },
+                "model retry 2/3: boom",
+            ),
+            (
+                Event::VerificationCompleted {
+                    report_id: "r".into(),
+                    status: "unverified".into(),
+                    attempt: 1,
+                    summary: "0 passed".into(),
+                },
+                "verification unverified: 0 passed",
+            ),
+            (
+                Event::HookRan {
+                    event: "PostToolUse".into(),
+                    hook_name: "fmt".into(),
+                    exit_code: Some(0),
+                    outcome: "success".into(),
+                    duration_ms: 1,
+                },
+                "hook fmt (PostToolUse): success",
+            ),
+            (
+                Event::PeerListening {
+                    endpoint_kind: "unix".into(),
+                },
+                "peers: listening for requests",
+            ),
+        ];
+        for (e, line) in hidden {
+            let kind = format!("{e:?}");
+            assert!(rows_of(false, e.clone()).is_empty(), "shown: {kind}");
+            let v = rows_of(true, e);
+            assert_eq!(v, [line], "{kind}");
+            assert!(!v[0].contains('=') && !v[0].contains('\x1b'), "{v:?}");
+        }
+    }
+
+    /// Failures, refusals and things that need the person stay visible without verbose.
+    #[test]
+    fn failures_and_refusals_stay_visible() {
+        let shown: Vec<(Event, &str)> = vec![
+            (
+                Event::ToolApprovalResolved {
+                    approval_id: "a".into(),
+                    decision: "deny".into(),
+                    reviewer: "user".into(),
+                    input_changed: false,
+                    message: Some("not now".into()),
+                },
+                "approval denied (user): not now",
+            ),
+            (
+                Event::ToolApprovalResolved {
+                    approval_id: "a".into(),
+                    decision: "expired".into(),
+                    reviewer: "policy".into(),
+                    input_changed: false,
+                    message: None,
+                },
+                "approval expired (policy)",
+            ),
+            (
+                Event::ModelRetry {
+                    attempt: 1,
+                    max: 3,
+                    error: "boom".into(),
+                    delay_ms: 1,
+                },
+                "model retry 1/3: boom",
+            ),
+            (
+                Event::ModelError {
+                    status: None,
+                    message: "bad key".into(),
+                    retryable: false,
+                    context_overflow: false,
+                },
+                "model error: bad key",
+            ),
+            (
+                Event::AutoVerdict {
+                    tool_call_id: "t".into(),
+                    name: "Bash".into(),
+                    verdict: "deny".into(),
+                    reason: "rm".into(),
+                    source: "model".into(),
+                },
+                "auto mode: deny Bash: rm",
+            ),
+            (
+                Event::VerificationCompleted {
+                    report_id: "r".into(),
+                    status: "failed".into(),
+                    attempt: 1,
+                    summary: "tests".into(),
+                },
+                "verification failed: tests",
+            ),
+            (
+                Event::HookRan {
+                    event: "Stop".into(),
+                    hook_name: "lint".into(),
+                    exit_code: Some(1),
+                    outcome: "error".into(),
+                    duration_ms: 1,
+                },
+                "hook lint (Stop): error",
+            ),
+            (
+                Event::BrowserLoginRequired {
+                    origin: "https://x.test".into(),
+                    profile: "p".into(),
+                },
+                "log in to https://x.test in the browser window, then confirm",
+            ),
+        ];
+        for (e, line) in shown {
+            let kind = format!("{e:?}");
+            assert_eq!(rows_of(false, e.clone()), [line], "{kind}");
+            assert_eq!(rows_of(true, e), [line], "{kind}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_internal_event_is_nothing_or_just_its_name() {
+        let e = || Event::PeerThreadClosed {
+            thread_id: "t".into(),
+            reason: "cap".into(),
+        };
+        assert!(rows_of(false, e()).is_empty());
+        assert_eq!(rows_of(true, e()), ["peer thread closed (cap)"]);
+        let e = Event::ProcessSpawned(synthesis_events::ProcessInfo {
+            process_id: "p1".into(),
+            name: None,
+            pid: Some(7),
+            exit_code: None,
+            signal: None,
+            ..Default::default()
+        });
+        assert_eq!(rows_of(true, e), ["process p1 started"]);
+    }
+
+    #[test]
+    fn the_harness_notes_to_the_model_are_not_user_rows() {
+        let e = || Event::UserMessage {
+            text: "[Synthesis verification report.]".into(),
+            display_text: Some("verification feedback".into()),
+            images: vec![],
+        };
+        assert!(rows_of(false, e()).is_empty());
+        assert_eq!(
+            rows_of(true, e()),
+            ["sent to the model: verification feedback"]
+        );
     }
 
     #[test]

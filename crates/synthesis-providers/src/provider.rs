@@ -6,6 +6,7 @@ use crate::error::{ErrorKind, ProviderError, Redaction};
 use crate::http::{
     Endpoint, EventStream, Mapper, NetSettings, build_client, header, proxy_secrets, spawn_stream,
 };
+use crate::modelinfo::{self, ModelInfoStore};
 use crate::retry::RetryPolicy;
 use crate::types::Request;
 use crate::{anthropic, openai};
@@ -14,6 +15,7 @@ use indexmap::IndexMap;
 use reqwest::header::HeaderMap;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use std::path::PathBuf;
 use std::sync::Arc;
 use synthesis_config::{
     Credential, CredentialKind, Env, ModelMeta, Protocol, Provider, TypeSource,
@@ -69,9 +71,13 @@ pub struct ModelInfo {
 /// Tolerates the Anthropic shape and OpenAI-compatible gateway shapes.
 pub fn normalize_model(m: &Value) -> ModelInfo {
     let id = m.get("id").cloned().unwrap_or(Value::Null);
+    // `top_provider.*` is the OpenRouter shape.
     let num = |keys: &[&str]| {
         keys.iter()
-            .filter_map(|k| m.get(*k).filter(|v| !v.is_null()))
+            .filter_map(|k| match k.split_once('.') {
+                Some((a, b)) => m.get(a)?.get(b),
+                None => m.get(*k),
+            })
             .find_map(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
     };
     let name = ["display_name", "displayName"]
@@ -81,8 +87,19 @@ pub fn normalize_model(m: &Value) -> ModelInfo {
     ModelInfo {
         display_name: name.map_or_else(|| id.clone(), |s| Value::String(s.into())),
         id,
-        context_window: num(&["context_length", "max_input_tokens", "context_window"]),
-        max_output: num(&["max_output_tokens"]),
+        context_window: num(&[
+            "context_length",
+            "max_input_tokens",
+            "context_window",
+            "max_context_length",
+            "top_provider.context_length",
+        ]),
+        // Anthropic reports its output cap as `max_tokens`
+        max_output: num(&[
+            "max_output_tokens",
+            "max_tokens",
+            "top_provider.max_completion_tokens",
+        ]),
         capabilities: m
             .get("capabilities")
             .and_then(Value::as_object)
@@ -97,12 +114,22 @@ pub trait ModelProvider: Send + Sync {
     fn capabilities(&self, model: &str) -> ProviderCapabilities;
     /// Starts the request on a spawned task (needs a Tokio runtime) and returns its events.
     /// Dropping the stream or cancelling `cancel` aborts the request. Pre-stream failures are
-    /// retried per policy; after the first byte the stream is never replayed.
+    /// retried per policy; after the first byte this layer never replays the stream (the harness
+    /// may re-request the whole turn: it runs no tool before a stream has completed).
     fn stream(&self, req: &Request, cancel: CancellationToken) -> EventStream;
     fn list_models<'a>(
         &'a self,
         cancel: &'a CancellationToken,
     ) -> BoxFuture<'a, Result<Vec<ModelInfo>, ProviderError>>;
+    /// Fetches the model list into the cache and into [`Self::capabilities`] in place, unless the
+    /// cache is still fresh (`force` ignores that). Providers without a model list do nothing.
+    fn refresh_model_info<'a>(
+        &'a self,
+        _force: bool,
+        _cancel: &'a CancellationToken,
+    ) -> BoxFuture<'a, Result<(), ProviderError>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Node `anthropicUsesBearer`: explicit `authHeader` wins; otherwise the real Anthropic API
@@ -126,6 +153,18 @@ pub fn anthropic_uses_bearer(
         return false;
     }
     !key.is_some_and(|k| k.starts_with("sk-ant-"))
+}
+
+/// Percent-encodes everything but RFC 3986 unreserved characters.
+fn encode_query(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 fn url_host(u: &str) -> Option<String> {
@@ -198,6 +237,18 @@ impl ProviderSpec {
         net: &NetSettings,
         retry: RetryPolicy,
     ) -> Result<Arc<dyn ModelProvider>, ProviderError> {
+        self.connect_cached(env, net, retry, None)
+    }
+
+    /// [`Self::connect`] with a model-info cache file (see [`crate::modelinfo::cache_path`]),
+    /// loaded now and rewritten by `refresh_model_info`.
+    pub fn connect_cached(
+        self,
+        env: &Env,
+        net: &NetSettings,
+        retry: RetryPolicy,
+        cache: Option<PathBuf>,
+    ) -> Result<Arc<dyn ModelProvider>, ProviderError> {
         let secret = match &self.auth {
             Auth::ApiKey(s) | Auth::Bearer(s) => s.0.clone(),
         };
@@ -232,20 +283,40 @@ impl ProviderSpec {
             retry,
             redaction,
             idle_timeout: net.idle_timeout,
+            header_timeout: net.header_timeout,
         };
         let base = match self.protocol {
             Protocol::Anthropic => anthropic::base_url(self.base_url.as_deref()),
             Protocol::OpenAi => openai::base_url(self.base_url.as_deref()),
         };
+        let base = base.trim_end_matches('/').to_string();
+        let info = ModelInfoStore::default();
+        if let Some(f) = cache
+            .as_deref()
+            .and_then(|p| modelinfo::read_cache(p, &base, self.protocol))
+        {
+            info.set(
+                f.models.clone(),
+                modelinfo::is_fresh(&f, modelinfo::unix_now()),
+            );
+        }
         Ok(Arc::new(HttpProvider {
             id: self.id,
             protocol: self.protocol,
-            base: base.trim_end_matches('/').to_string(),
+            openai_native: self.protocol == Protocol::OpenAi
+                && url_host(&base).as_deref() == Some("api.openai.com"),
+            base,
             ep: Arc::new(ep),
             models_meta: self.models_meta,
+            info,
+            cache,
+            list_deadline: net.list_deadline,
         }))
     }
 }
+
+/// Largest model-list page read.
+const MAX_LIST_BYTES: usize = 8 << 20;
 
 struct HttpProvider {
     id: String,
@@ -253,6 +324,11 @@ struct HttpProvider {
     base: String,
     ep: Arc<Endpoint>,
     models_meta: IndexMap<String, ModelMeta>,
+    info: ModelInfoStore,
+    cache: Option<PathBuf>,
+    list_deadline: std::time::Duration,
+    /// The built-in limits table applies (OpenAI's own API reports no context length).
+    openai_native: bool,
 }
 
 impl HttpProvider {
@@ -264,12 +340,34 @@ impl HttpProvider {
     }
 
     async fn page(&self, url: &str, cancel: &CancellationToken) -> Result<Value, ProviderError> {
-        let resp = self.ep.send(url, None, cancel).await?;
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| self.ep.redaction.transport(e))?;
-        serde_json::from_str(&text).map_err(|_| {
+        let mut resp = self.ep.send(url, None, cancel).await?;
+        // a hard size cap and a total deadline: a gateway may stream forever or drip
+        let read = async {
+            let mut body = Vec::new();
+            while let Some(c) = resp
+                .chunk()
+                .await
+                .map_err(|e| self.ep.redaction.transport(e))?
+            {
+                if body.len() + c.len() > MAX_LIST_BYTES {
+                    return Err(ProviderError::new(
+                        ErrorKind::InvalidResponse,
+                        "model list is too large",
+                    ));
+                }
+                body.extend_from_slice(&c);
+            }
+            Ok(body)
+        };
+        let text = tokio::select! {
+            () = cancel.cancelled() => {
+                return Err(ProviderError::new(ErrorKind::Cancelled, "cancelled"));
+            }
+            r = tokio::time::timeout(self.list_deadline, read) => r.map_err(|_| {
+                ProviderError::new(ErrorKind::Network, "model list did not arrive in time")
+            })??,
+        };
+        serde_json::from_slice(&text).map_err(|_| {
             ProviderError::new(ErrorKind::InvalidResponse, "model list is not valid JSON")
         })
     }
@@ -284,8 +382,59 @@ impl ModelProvider for HttpProvider {
         self.protocol
     }
 
+    /// Per field: `synt.json` first, then the cache / last fetch, then the built-in table.
     fn capabilities(&self, model: &str) -> ProviderCapabilities {
-        ProviderCapabilities::resolve(self.protocol, self.models_meta.get(model))
+        let meta = self.models_meta.get(model);
+        let mut c = ProviderCapabilities::resolve(self.protocol, meta);
+        let f = self.info.get(model).unwrap_or_default();
+        let known = modelinfo::builtin(self.openai_native, model);
+        c.context_window = c.context_window.or(f.context_window).or(known.map(|k| k.0));
+        c.max_output = c.max_output.or(f.max_output).or(known.map(|k| k.1));
+        if c.effort_tiers.is_empty() {
+            c.effort_tiers = f.effort_tiers;
+        }
+        let declared = meta.is_some_and(|m| {
+            ["images", "vision"]
+                .iter()
+                .any(|k| m.capabilities.contains_key(*k))
+        });
+        if let (false, Some(v)) = (declared, f.vision) {
+            c.images = v;
+        }
+        c
+    }
+
+    fn refresh_model_info<'a>(
+        &'a self,
+        force: bool,
+        cancel: &'a CancellationToken,
+    ) -> BoxFuture<'a, Result<(), ProviderError>> {
+        Box::pin(async move {
+            if !force && self.info.fresh() {
+                return Ok(());
+            }
+            let models: std::collections::BTreeMap<_, _> = self
+                .list_models(cancel)
+                .await?
+                .iter()
+                .filter_map(modelinfo::facts_of)
+                .collect();
+            if let Some(p) = &self.cache {
+                // a cache that cannot be written (read-only home) is not an error
+                let _ = modelinfo::write_cache(
+                    p,
+                    &modelinfo::CacheFile {
+                        schema_version: modelinfo::SCHEMA_VERSION,
+                        base_url: self.base.clone(),
+                        protocol: modelinfo::protocol_name(self.protocol).into(),
+                        fetched_at: modelinfo::unix_now(),
+                        models: models.clone(),
+                    },
+                );
+            }
+            self.info.set(models, true);
+            Ok(())
+        })
     }
 
     fn stream(&self, req: &Request, cancel: CancellationToken) -> EventStream {
@@ -318,7 +467,7 @@ impl ModelProvider for HttpProvider {
                 if self.protocol == Protocol::Anthropic {
                     url.push_str("?limit=1000");
                     if let Some(a) = &after {
-                        url.push_str(&format!("&after_id={a}"));
+                        url.push_str(&format!("&after_id={}", encode_query(a)));
                     }
                 }
                 let page = self.page(&url, cancel).await?;
@@ -327,7 +476,8 @@ impl ModelProvider for HttpProvider {
                         .and_then(Value::as_array)
                         .into_iter()
                         .flatten()
-                        .map(normalize_model),
+                        .map(normalize_model)
+                        .filter(|m| m.id.as_str().is_some_and(modelinfo::valid_id)),
                 );
                 match (
                     page.get("has_more") == Some(&Value::Bool(true)),

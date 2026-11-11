@@ -83,14 +83,39 @@ fn check_id(s: &str) -> Result<()> {
     }
 }
 
-fn utf8(p: &Path) -> Result<String> {
+pub(crate) fn utf8(p: &Path) -> Result<String> {
     p.to_str()
         .map(str::to_string)
         .ok_or_else(|| Error::Invalid(format!("non-UTF-8 path {}", p.display())))
 }
 
+/// Every row of session `id`, children tables first (foreign keys are on, so a missed table fails
+/// the delete instead of leaving orphans). Returns the event rows removed.
+pub(crate) fn delete_session_rows(tx: &Transaction<'_>, id: &str) -> rusqlite::Result<usize> {
+    let mut events = 0;
+    for q in [
+        "DELETE FROM verification_reports WHERE task_id IN (SELECT id FROM tasks WHERE session_id=?1)",
+        "DELETE FROM tasks WHERE session_id=?1",
+        "DELETE FROM events WHERE session_id=?1",
+        "DELETE FROM messages WHERE session_id=?1",
+        "DELETE FROM tool_calls WHERE session_id=?1",
+        "DELETE FROM processes WHERE session_id=?1",
+        "DELETE FROM browser_contexts WHERE session_id=?1",
+        "DELETE FROM artifacts WHERE session_id=?1",
+        "DELETE FROM approvals WHERE session_id=?1",
+        "DELETE FROM checkpoints WHERE session_id=?1",
+        "DELETE FROM sessions WHERE id=?1",
+    ] {
+        let n = tx.execute(q, [id])?;
+        if q.contains("FROM events") {
+            events = n;
+        }
+    }
+    Ok(events)
+}
+
 /// Directory (and missing parents) created 0700 on unix; a symlink in its place is refused.
-fn private_dir(p: &Path) -> Result<()> {
+pub(crate) fn private_dir(p: &Path) -> Result<()> {
     let mut b = fs::DirBuilder::new();
     b.recursive(true);
     #[cfg(unix)]
@@ -103,7 +128,7 @@ fn private_dir(p: &Path) -> Result<()> {
 }
 
 /// 0600 on unix (the umask can only narrow it).
-fn private_file(o: &mut OpenOptions) -> &mut OpenOptions {
+pub(crate) fn private_file(o: &mut OpenOptions) -> &mut OpenOptions {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(o, 0o600);
     o
@@ -138,7 +163,68 @@ fn ensure_db_file(path: &Path) -> Result<()> {
     }
 }
 
-fn connect(home: &Path, read_only: bool) -> Result<Connection> {
+fn is_busy(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::Sqlite(rusqlite::Error::SqliteFailure(f, _))
+            if matches!(f.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
+}
+
+/// Runs `f` again while it fails with a busy/locked database, for at most `limit`.
+fn retry_busy<T>(limit: Duration, mut f: impl FnMut() -> Result<T>) -> Result<T> {
+    let start = std::time::Instant::now();
+    loop {
+        match f() {
+            Err(e) if is_busy(&e) && start.elapsed() < limit => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            r => return r,
+        }
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    fn busy() -> Error {
+        Error::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        ))
+    }
+
+    #[test]
+    fn busy_is_retried_until_it_works_and_other_errors_are_not() {
+        let mut n = 0;
+        let r = retry_busy(Duration::from_secs(5), || {
+            n += 1;
+            if n < 3 { Err(busy()) } else { Ok(n) }
+        });
+        assert_eq!(r.unwrap(), 3);
+        let mut m = 0;
+        let r: Result<()> = retry_busy(Duration::from_secs(5), || {
+            m += 1;
+            Err(Error::SchemaTooNew {
+                found: 9,
+                supported: 1,
+            })
+        });
+        assert!(r.is_err() && m == 1);
+        let r: Result<()> = retry_busy(Duration::from_millis(60), || Err(busy()));
+        assert!(is_busy(&r.unwrap_err()), "gives up after the limit");
+    }
+}
+
+/// One connection, set up with the busy timeout first. SQLite answers "locked" at once to some
+/// steps (journal-mode switch, WAL recovery on first open) without consulting the timeout, so the
+/// whole setup is retried while busy/locked, for up to 15 s (slow Windows runners).
+pub(crate) fn connect(home: &Path, read_only: bool) -> Result<Connection> {
+    retry_busy(Duration::from_secs(15), || connect_once(home, read_only))
+}
+
+fn connect_once(home: &Path, read_only: bool) -> Result<Connection> {
     let path = home.join("synt.db");
     let conn = if read_only {
         Connection::open_with_flags(
@@ -148,7 +234,7 @@ fn connect(home: &Path, read_only: bool) -> Result<Connection> {
     } else {
         Connection::open(&path)?
     };
-    conn.busy_timeout(Duration::from_millis(2000))?;
+    conn.busy_timeout(Duration::from_millis(5000))?;
     conn.pragma_update(None, "foreign_keys", true)?;
     if !read_only {
         let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
@@ -213,6 +299,26 @@ pub struct Store {
     mirror: bool,
     redactor: Arc<Redactor>,
     limits: Limits,
+}
+
+/// One local calendar day of [`Reader::usage_by_day`]; `day` counts days since 1970-01-01.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageDay {
+    pub day: i64,
+    pub tokens: u64,
+    pub output: u64,
+    pub messages: u64,
+    pub tools: u64,
+    pub agents: u64,
+    pub sessions: u64,
+    /// `tool.started` of `Bash`.
+    pub commands: u64,
+    /// `tool.started` of a file-writing tool (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`).
+    pub files: u64,
+    /// `tool.started` of a `browser_*` tool.
+    pub browser: u64,
+    /// `tool.started` of an MCP tool (`mcp__server__tool`).
+    pub mcp: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -408,6 +514,14 @@ pub struct FileSnapshot {
     /// completed). `synt rewind` refuses a file whose state differs, unless forced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_sha256: Option<String>,
+    /// sha256 of the snapshot artifact's bytes, taken when it was stored. A rewind refuses an
+    /// artifact that no longer hashes to this. `None`: a checkpoint of an older build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_sha256: Option<String>,
+    /// [`file_state_hash`] of the file when the checkpoint was taken (`absent`: the run is about to
+    /// create it). A rewind deletes a file only with this proof. `None`: an older build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_state: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -434,8 +548,12 @@ impl Store {
         #[cfg(unix)]
         chmod(synthesis_home, 0o700)?;
         ensure_db_file(&synthesis_home.join("synt.db"))?;
-        let mut conn = connect(synthesis_home, false)?;
-        schema::migrate(&mut conn, &now())?;
+        // Two processes opening a fresh home at once: `connect` retries its setup; the migration
+        // is retried here too.
+        retry_busy(Duration::from_secs(15), || {
+            let mut conn = connect(synthesis_home, false)?;
+            schema::migrate(&mut conn, &now())
+        })?;
         Ok(Store {
             home: synthesis_home.to_path_buf(),
             mirror: opts.write_node_transcripts,
@@ -549,6 +667,115 @@ impl Store {
             Err(e) if busy(&e) => Ok(PurgeReport::default()),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Deletes the sessions that hold no message and no task, were last touched more than
+    /// `min_age` ago, are not `keep` and are not locked by a live process, with every dependent
+    /// row and their directory. Anything doubtful (a child session, a lock held, a failed
+    /// delete, a busy database) is skipped. Returns the sessions removed.
+    pub fn prune_empty_sessions(
+        &self,
+        keep: &str,
+        min_age: Duration,
+        now: OffsetDateTime,
+    ) -> Result<usize> {
+        let fmt = time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+        );
+        let cutoff = (now - min_age).format(&fmt).expect("format utc timestamp");
+        let mut conn = connect(&self.home, false)?;
+        conn.busy_timeout(Duration::from_millis(200))?;
+        let ids: Vec<String> = {
+            let mut st = conn.prepare(
+                "SELECT id FROM sessions s WHERE id != ?1 AND updated_at < ?2 \
+                 AND NOT EXISTS (SELECT 1 FROM messages WHERE session_id=s.id) \
+                 AND NOT EXISTS (SELECT 1 FROM tasks WHERE session_id=s.id) \
+                 AND NOT EXISTS (SELECT 1 FROM sessions c WHERE c.parent_session_id=s.id)",
+            )?;
+            st.query_map([keep, &cutoff], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        let mut removed = 0;
+        for id in ids.iter().filter(|id| valid_id(id)) {
+            let dir = self.home.join("sessions").join(id);
+            // a held lock (live process) is skipped at once; no lock file means nobody holds it
+            let lock = match File::options().write(true).open(dir.join("lock")) {
+                Ok(f) if f.try_lock().is_ok() => Some(f),
+                Ok(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(_) => continue,
+            };
+            let Ok(tx) = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            else {
+                continue;
+            };
+            // re-checked inside the write transaction: a session that got a message meanwhile stays
+            let used: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM messages WHERE session_id=?1) \
+                     OR EXISTS (SELECT 1 FROM tasks WHERE session_id=?1)",
+                [id],
+                |r| r.get(0),
+            )?;
+            if used {
+                continue;
+            }
+            let gone = delete_session_rows(&tx, id);
+            if gone.is_err() || tx.commit().is_err() {
+                continue;
+            }
+            drop(lock); // Windows cannot remove an open file
+            let _ = fs::remove_dir_all(&dir);
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
+    /// `/close`: hides the session from [`Reader::list_used_sessions`]; messages stay and it can
+    /// still be resumed by id. Returns whether a session of that id exists.
+    pub fn close_session(&self, id: &str) -> Result<bool> {
+        check_id(id)?;
+        let conn = connect(&self.home, false)?;
+        let n = conn.execute(
+            "UPDATE sessions SET closed_at=?2 WHERE id=?1 AND closed_at IS NULL",
+            (id, now()),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// `/close-workspace`: [`Self::close_session`] for every listed (used, open) session whose
+    /// `workspace_root` satisfies `belongs`. One UPDATE per session, so each is atomic. A session
+    /// whose lock another live process holds is left alone (`held`); the caller must have released
+    /// its own sessions first. Closing again finds nothing left to close.
+    pub fn close_workspace(&self, belongs: impl Fn(&str) -> bool) -> Result<WorkspaceClose> {
+        let mut out = WorkspaceClose::default();
+        let ids: Vec<String> = self
+            .reader()?
+            .list_used_sessions(None)?
+            .into_iter()
+            .filter(|s| belongs(&s.workspace_root))
+            .map(|s| s.id)
+            .collect();
+        for id in ids {
+            let r = (|| -> Result<Option<bool>> {
+                check_id(&id)?;
+                let dir = self.home.join("sessions").join(&id);
+                // like the pruner: a held lock is skipped at once, no lock file means nobody holds it
+                let _lock = match File::options().write(true).open(dir.join("lock")) {
+                    Ok(f) if f.try_lock().is_ok() => Some(f),
+                    Ok(_) => return Ok(None),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => return Err(e.into()),
+                };
+                self.close_session(&id).map(Some)
+            })();
+            match r {
+                Ok(None) => out.held.push(id),
+                Ok(Some(true)) => out.closed.push(id),
+                Ok(Some(false)) => {} // closed meanwhile by someone else
+                Err(e) => out.failed.push((id, e.to_string())),
+            }
+        }
+        Ok(out)
     }
 
     /// A read-only connection; any number may exist next to the single writer.
@@ -902,6 +1129,63 @@ impl Reader {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// [`Self::list_sessions`] without the sessions that hold no message and no task (the ones
+    /// every launch leaves behind when nothing was typed) and the closed ones.
+    pub fn list_used_sessions(&self, cwd: Option<&str>) -> Result<Vec<SessionRecord>> {
+        let mut st = self.conn.prepare(&format!(
+            "SELECT {SESSION_COLS} FROM sessions WHERE (?1 IS NULL OR cwd=?1) \
+             AND closed_at IS NULL \
+             AND (EXISTS (SELECT 1 FROM messages WHERE session_id=sessions.id) \
+               OR EXISTS (SELECT 1 FROM tasks WHERE session_id=sessions.id)) \
+             ORDER BY updated_at DESC, id"
+        ))?;
+        let rows = st.query_map([cwd], session_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Per-day activity of every session in the store since `since_ms`, days taken at
+    /// `tz_offset_min` east of UTC (read-only; sparse: days without events are absent).
+    pub fn usage_by_day(&self, since_ms: i64, tz_offset_min: i32) -> Result<Vec<UsageDay>> {
+        let mut st = self.conn.prepare(
+            "SELECT (CAST(strftime('%s', ts) AS INTEGER) + ?2 * 60) / 86400 AS day,
+               SUM(CASE WHEN type='turn.completed'
+                   THEN COALESCE(json_extract(payload,'$.usage.input_tokens'),0)
+                      + COALESCE(json_extract(payload,'$.usage.output_tokens'),0) ELSE 0 END),
+               SUM(CASE WHEN type='turn.completed'
+                   THEN COALESCE(json_extract(payload,'$.usage.output_tokens'),0) ELSE 0 END),
+               SUM(type='user.message'), SUM(type='tool.started'), SUM(type='subagent.started'),
+               COUNT(DISTINCT session_id),
+               SUM(type='tool.started' AND json_extract(payload,'$.name')='Bash'),
+               SUM(type='tool.started' AND json_extract(payload,'$.name') IN ('Write','Edit','MultiEdit','NotebookEdit')),
+               SUM(type='tool.started' AND substr(json_extract(payload,'$.name'),1,8)='browser_'),
+               SUM(type='tool.started' AND substr(json_extract(payload,'$.name'),1,5)='mcp__')
+             FROM events
+             WHERE type IN ('turn.completed','user.message','tool.started','subagent.started')
+               AND payload IS NOT NULL AND CAST(strftime('%s', ts) AS INTEGER) >= ?1 / 1000
+             GROUP BY day ORDER BY day",
+        )?;
+        let rows = st.query_map(params![since_ms, tz_offset_min], |r| {
+            let n = |i: usize| {
+                r.get::<_, Option<i64>>(i)
+                    .map(|v| v.unwrap_or(0).max(0) as u64)
+            };
+            Ok(UsageDay {
+                day: r.get(0)?,
+                tokens: n(1)?,
+                output: n(2)?,
+                messages: n(3)?,
+                tools: n(4)?,
+                agents: n(5)?,
+                sessions: n(6)?,
+                commands: n(7)?,
+                files: n(8)?,
+                browser: n(9)?,
+                mcp: n(10)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Events with `seq > from_cursor` in order, for replay and reconnect (`from_cursor` 0 = all).
     pub fn read_events(
         &self,
@@ -944,6 +1228,21 @@ impl Reader {
                 Ok(env) => Record::Known(env),
                 Err(_) => Record::Unknown(serde_json::from_value::<RawEnvelope>(value)?),
             });
+        }
+        Ok(out)
+    }
+
+    /// Payloads of the first `limit` `user.message` events (inline ones only), oldest first: a
+    /// session title needs no more, and it spares decoding every event of the log head.
+    pub fn first_user_messages(&self, session_id: &str, limit: usize) -> Result<Vec<Value>> {
+        let mut st = self.conn.prepare(
+            "SELECT payload FROM events WHERE session_id=?1 AND type='user.message' \
+             AND payload IS NOT NULL ORDER BY seq LIMIT ?2",
+        )?;
+        let rows = st.query_map(params![session_id, limit as i64], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for p in rows {
+            out.push(serde_json::from_str(&p?)?);
         }
         Ok(out)
     }
@@ -1353,7 +1652,11 @@ impl SessionWriter {
 
     /// Untyped append, used for store-owned types such as `legacy.imported`.
     pub(crate) fn append_parts(&mut self, kind: &str, payload: Value) -> Result<RawEnvelope> {
-        let r = self.append_parts_inner(kind, payload);
+        // A busy/locked write (another peer on the same synt.db, slow Windows disk) rolled back
+        // whole, so it is safe to run again; the event sink would otherwise break the task.
+        let r = retry_busy(Duration::from_secs(15), || {
+            self.append_parts_inner(kind, payload.clone())
+        });
         if r.is_err() {
             self.sweep_orphan_artifacts(); // the failed transaction is rolled back by now
         }
@@ -1421,7 +1724,7 @@ impl SessionWriter {
     /// Validated against the `synthesis_core` state machine; emits `session.status_changed` in the
     /// same transaction. Returns the new event cursor.
     pub fn update_status(&mut self, to: SessionStatus, reason: Option<&str>) -> Result<u64> {
-        self.set_status(to, reason)
+        retry_busy(Duration::from_secs(15), || self.set_status(to, reason))
     }
 
     /// `validate = false` skips the state machine; only [`Self::repair_cancelling`] uses it.
@@ -1508,6 +1811,15 @@ impl SessionWriter {
             params![self.id, title, now()],
         )?;
         self.mirror_line(&self.stamped(json!({"type": "summary", "summary": title})));
+        Ok(())
+    }
+
+    /// `/model`: the model the session continues with (`resume` uses it unless `--model` is given).
+    pub fn set_model(&mut self, label: &str) -> Result<()> {
+        self.reader.conn.execute(
+            "UPDATE sessions SET model_config=?2, updated_at=?3 WHERE id=?1",
+            params![self.id, serde_json::to_string(label)?, now()],
+        )?;
         Ok(())
     }
 
@@ -1880,6 +2192,8 @@ impl SessionWriter {
                 return Err(Error::OutsideWorkspace(real));
             }
             let mut lossy_sha = None;
+            let mut artifact_sha = None;
+            let pre_state = file_state_hash(&real);
             let artifact_id = match fs::metadata(&real) {
                 Ok(m) if m.is_file() => {
                     if m.len() > MAX_SNAPSHOT_BYTES {
@@ -1892,15 +2206,14 @@ impl SessionWriter {
                     let bytes = fs::read(&real)?;
                     let (stored, lossy) = self.snapshot_bytes(&real, bytes);
                     lossy_sha = lossy;
-                    Some(
-                        self.put_artifact(
-                            "snapshot",
-                            "application/octet-stream",
-                            &stored,
-                            Retention::Keep,
-                        )?
-                        .artifact_id,
-                    )
+                    let art = self.put_artifact(
+                        "snapshot",
+                        "application/octet-stream",
+                        &stored,
+                        Retention::Keep,
+                    )?;
+                    artifact_sha = Some(art.sha256);
+                    Some(art.artifact_id)
                 }
                 Ok(_) => return Err(Error::Invalid(format!("{} is not a file", real.display()))),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -1911,6 +2224,8 @@ impl SessionWriter {
                 artifact_id,
                 lossy_sha256: lossy_sha,
                 post_sha256: None,
+                artifact_sha256: artifact_sha,
+                pre_state: Some(pre_state),
             });
         }
         let id = uuid::Uuid::new_v4().to_string();
@@ -2108,6 +2423,16 @@ fn set_payload(tx: &Transaction<'_>, sid: &str, seq: i64, body: &str) -> Result<
         "UPDATE events SET payload=?3 WHERE session_id=?1 AND seq=?2 AND payload<>?3",
         params![sid, seq, body],
     )? as u64)
+}
+
+/// What [`Store::close_workspace`] did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceClose {
+    pub closed: Vec<String>,
+    /// A live process holds the session's lock: left open.
+    pub held: Vec<String>,
+    /// (id, why): could not be closed.
+    pub failed: Vec<(String, String)>,
 }
 
 /// What [`Store::purge_images`] did.

@@ -126,10 +126,9 @@ fn add_list_search_scope_and_export() {
 
     let hit = r.ok(&["search", "how do I run the tests", "--cwd", &repo]);
     assert!(hit.contains("cargo test --workspace"));
-    assert!(
-        r.ok(&["search", "NEAR( \" *", "--cwd", &repo])
-            .trim()
-            .is_empty()
+    assert_eq!(
+        r.ok(&["search", "NEAR( \" *", "--cwd", &repo]).trim(),
+        "0 record(s)"
     );
 
     let dump = r.ok(&["export", "--cwd", &repo]);
@@ -590,6 +589,19 @@ mod edit {
             r.ok(&["list", "--cwd", cwd(&r.repo())])
                 .contains("cargo test")
         );
+        // the quarantined record waits in review with its rule, and the edited text is kept
+        let rev = r.ok(&["review", "--cwd", cwd(&r.repo())]);
+        assert!(
+            rev.contains("quarantined by rule:") && rev.contains("1 item(s)"),
+            "{rev}"
+        );
+        let dir = out
+            .split("the directory ")
+            .nth(1)
+            .and_then(|t| t.split(" is kept").next())
+            .unwrap_or_else(|| panic!("no kept directory: {out}"));
+        assert!(Path::new(dir).join("note.md").exists(), "{out}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

@@ -675,39 +675,125 @@ pub enum ScopeArg {
 
 #[derive(clap::Args)]
 pub struct AddArgs {
-    name: String,
+    pub name: String,
     #[arg(long, value_enum, default_value = "user")]
-    scope: ScopeArg,
+    pub scope: ScopeArg,
     #[arg(long)]
-    url: Option<String>,
+    pub url: Option<String>,
     /// `http` (streamable, default) or `sse` (legacy).
     #[arg(long, default_value = "http")]
-    transport: String,
+    pub transport: String,
     /// `KEY=VALUE`; secret-looking keys need a `${VAR}` value.
     #[arg(long)]
-    env: Vec<String>,
+    pub env: Vec<String>,
     /// `Name: value`; Authorization and similar need a `${VAR}` value.
     #[arg(long)]
-    header: Vec<String>,
+    pub header: Vec<String>,
     #[arg(long)]
-    cwd: Option<std::path::PathBuf>,
+    pub cwd: Option<std::path::PathBuf>,
+    /// Replace a server of the same name (otherwise `add` refuses).
+    #[arg(long)]
+    pub force: bool,
     #[arg(last = true)]
-    command: Vec<String>,
+    pub command: Vec<String>,
 }
 
+/// Name split into lowercase words at `_ - . ` and other punctuation, camelCase and digits:
+/// `accessToken` -> access, token; `APIKey` -> api, key.
+fn name_words(k: &str) -> Vec<String> {
+    let c: Vec<char> = k.chars().collect();
+    let mut words = vec![String::new()];
+    for (i, &ch) in c.iter().enumerate() {
+        if !ch.is_ascii_alphabetic() {
+            if !words.last().is_some_and(String::is_empty) {
+                words.push(String::new());
+            }
+            continue;
+        }
+        let prev = i.checked_sub(1).map(|j| c[j]);
+        let next = c.get(i + 1);
+        let boundary = ch.is_ascii_uppercase()
+            && prev.is_some_and(|p| {
+                p.is_ascii_lowercase()
+                    || (p.is_ascii_uppercase() && next.is_some_and(|n| n.is_ascii_lowercase()))
+            });
+        if boundary && !words.last().is_some_and(String::is_empty) {
+            words.push(String::new());
+        }
+        words.last_mut().unwrap().push(ch.to_ascii_lowercase());
+    }
+    words.retain(|w| !w.is_empty());
+    words
+}
+
+/// Does this flag / key / header name a credential? Whole words only (`--author`, `--keyboard`,
+/// `bypass` are fine), and not when the name ends in a location (`--key-file /path`).
 fn secret_like(k: &str) -> bool {
-    let k = k.to_ascii_lowercase();
-    [
-        "key",
-        "token",
-        "secret",
-        "password",
-        "auth",
-        "cookie",
-        "credential",
-    ]
-    .iter()
-    .any(|w| k.contains(w))
+    let w = name_words(k);
+    !w.last()
+        .is_some_and(|l| matches!(l.as_str(), "file" | "path" | "dir"))
+        && w.iter().any(|w| {
+            // ordinary flags (`--max-tokens`, `--tokenizer`, `--session-name`); a secret-shaped
+            // value is still caught by `secret_shaped`
+            if matches!(
+                w.as_str(),
+                "tokenizer" | "tokenizers" | "tokens" | "session"
+            ) {
+                return false;
+            }
+            matches!(
+                w.as_str(),
+                "token"
+                    | "tok"
+                    | "pswd"
+                    | "secret"
+                    | "password"
+                    | "passwd"
+                    | "pass"
+                    | "pwd"
+                    | "key"
+                    | "apikey"
+                    | "auth"
+                    | "authorization"
+                    | "cookie"
+                    | "credential"
+                    | "credentials"
+                    | "bearer"
+                    | "sig"
+                    | "signature"
+                    | "jwt"
+                    | "pw"
+                    | "pat"
+                    | "sessionid"
+                    | "sid"
+                    | "otp"
+                    | "passphrase"
+            ) || SECRET_STEMS.iter().any(|t| w.contains(t))
+                || SECRET_KEY_ENDS.iter().any(|t| w.ends_with(t))
+        })
+}
+
+/// Concatenated names (`--secretkey`, `AUTHTOKEN`, `xapikey`) have no word boundary to split on.
+const SECRET_STEMS: &[&str] = &[
+    "secret",
+    "password",
+    "passwd",
+    "passphrase",
+    "token",
+    "apikey",
+    "privatekey",
+    "accesskey",
+    "credential",
+];
+/// Only these may end a word in `key` (`keyboard`, `monkey` stay clean).
+const SECRET_KEY_ENDS: &[&str] = &["authkey", "signkey", "sshkey"];
+
+/// `${NAME}` with a plain variable name: nothing else may sit inside the braces.
+fn is_ref_name(n: &str) -> bool {
+    let mut c = n.chars();
+    c.next()
+        .is_some_and(|f| f.is_ascii_alphabetic() || f == '_')
+        && c.all(|x| x.is_ascii_alphanumeric() || x == '_')
 }
 
 /// `${VAR}` references, optionally behind `Bearer` / `Basic`; no literal secret text.
@@ -718,6 +804,9 @@ fn only_refs(v: &str) -> bool {
         let Some(end) = rest[i..].find('}') else {
             return false;
         };
+        if !is_ref_name(&rest[i + 2..i + end]) {
+            return false;
+        }
         let scheme = rest[..i].trim();
         if !scheme.is_empty()
             && !scheme.eq_ignore_ascii_case("bearer")
@@ -731,6 +820,154 @@ fn only_refs(v: &str) -> bool {
     refs > 0 && rest.is_empty()
 }
 
+/// Token-shaped literals that are secrets whatever the flag or key is called.
+fn secret_shaped(v: &str) -> bool {
+    let v = v.trim();
+    let v = match v.split_once(' ') {
+        Some((s, rest)) if s.eq_ignore_ascii_case("bearer") => rest.trim_start(),
+        _ => v,
+    };
+    [
+        "sk-",
+        "ghp_",
+        "gho_",
+        "github_pat_",
+        "xoxb-",
+        "xoxp-",
+        "AKIA",
+        "AIza",
+        "glpat-",
+        "npm_",
+        "sk_live_",
+        "xoxa-",
+        "xoxs-",
+        "eyJ",
+    ]
+    .iter()
+    .any(|p| v.starts_with(p) && v.len() >= p.len() + 8)
+        || url_credentials(v)
+}
+
+/// `scheme://user:password@host`: a literal password inside a URL.
+fn url_credentials(v: &str) -> bool {
+    let Some((_, rest)) = v.split_once("://") else {
+        return false;
+    };
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
+    auth.split_once('@').is_some_and(|(userinfo, _)| {
+        userinfo
+            .split_once(':')
+            .is_some_and(|(_, p)| !p.is_empty() && !only_refs(p))
+    })
+}
+
+/// Where a literal credential sits in the args after `--` (a secret-named `KEY=VALUE` / `--flag=v` /
+/// `--flag v`, or a token-shaped value): the NAME to report, never the value.
+fn literal_secret_arg(args: &[String]) -> Option<String> {
+    let mut flag: Option<&str> = None;
+    for a in args {
+        if let Some(f) = flag.take()
+            && !only_refs(a)
+            && !is_flag_shape(a)
+        {
+            return Some(f.to_string());
+        }
+        if let Some((k, v)) = a.split_once('=') {
+            if (secret_like(k) && !only_refs(v)) || secret_shaped(v) {
+                return Some(k.to_string());
+            }
+        } else if let Some((h, v)) = a.split_once(": ")
+            && secret_like(h)
+            && !only_refs(v)
+        {
+            // a header given as one argument: `Authorization: Bearer abc`
+            return Some(h.to_string());
+        } else if a.starts_with('-') && secret_like(a) {
+            flag = Some(a);
+        } else if secret_shaped(a) {
+            return Some("an argument".into());
+        }
+    }
+    None
+}
+
+/// `--word` with letters and dashes only: the next flag, not a value (`-abc123` is a value).
+fn is_flag_shape(a: &str) -> bool {
+    a.strip_prefix("--")
+        .is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_alphabetic() || c == '-'))
+}
+
+/// `%XX` decoded (invalid sequences stay as they are).
+fn pct_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2]))
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Why a `--url` cannot be stored, or `Ok`. Only http(s); no user name or password unless it is
+/// only `${VAR}` references; no secret-named or token-shaped query value, path segment or
+/// fragment. Messages name the place, never the value.
+fn check_url(u: &str) -> Result<(), String> {
+    let refuse = |what: &str| {
+        Err(format!(
+            "{what}: looks like a credential in the URL; synthesis never writes credentials into config files. Put it in an environment variable and pass ${{VAR}} (or use --header 'Authorization: Bearer ${{VAR}}')"
+        ))
+    };
+    let url = url::Url::parse(u).map_err(|_| "--url is not a valid URL".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("--url must be an http:// or https:// URL".into());
+    }
+    let dec = pct_decode;
+    if !url.username().is_empty() && !only_refs(&dec(url.username())) {
+        return refuse("the URL user name");
+    }
+    if url.password().is_some_and(|p| !only_refs(&dec(p))) {
+        return refuse("the URL password");
+    }
+    if let Some(f) = url.fragment() {
+        let f = dec(f);
+        if f.contains('=') || secret_shaped(&f) {
+            return refuse("the URL fragment");
+        }
+    }
+    // `a=b` pairs split on `;` (path params) or `&`/`;` (query); a bare part is checked by shape.
+    let part = |p: &str| {
+        let (k, v) = p.split_once('=').unwrap_or((p, ""));
+        let (k, v) = (dec(k), dec(v));
+        (((secret_like(&k) || name_words(&k).iter().any(|w| w == "access"))
+            && !v.is_empty()
+            && !only_refs(&v))
+            || secret_shaped(&k)
+            || secret_shaped(&v))
+        .then_some(k)
+    };
+    for seg in url.path_segments().into_iter().flatten() {
+        if seg.split(';').any(|p| part(p).is_some()) {
+            return refuse("a URL path segment");
+        }
+    }
+    for p in url.query().unwrap_or("").split(['&', ';']) {
+        if let Some(k) = part(p) {
+            return refuse(&format!("the query parameter {k}"));
+        }
+    }
+    Ok(())
+}
+
 fn kv(s: &str, sep: char) -> Result<(String, String), String> {
     let (k, v) = s
         .split_once(sep)
@@ -741,7 +978,22 @@ fn kv(s: &str, sep: char) -> Result<(String, String), String> {
             "{k}: looks like a credential; synthesis never writes credentials into config files. Put it in an environment variable and pass {k}{sep}${{VAR}}"
         ));
     }
+    if secret_shaped(v) || literal_auth_scheme(v) {
+        return Err(format!(
+            "{k}: the value looks like a credential; synthesis never writes credentials into config files. Put it in an environment variable and pass {k}{sep}${{VAR}}"
+        ));
+    }
     Ok((k.to_string(), v.to_string()))
+}
+
+/// `Bearer abc12345` / `Basic abc12345`: an auth scheme followed by a literal token (not `${VAR}`).
+fn literal_auth_scheme(v: &str) -> bool {
+    v.split_once(' ').is_some_and(|(s, t)| {
+        let t = t.trim();
+        (s.eq_ignore_ascii_case("bearer") || s.eq_ignore_ascii_case("basic"))
+            && t.len() >= 8
+            && !only_refs(t)
+    })
 }
 
 /// The JSON entry for `a` (Claude shape).
@@ -749,17 +1001,24 @@ fn entry(a: &AddArgs) -> Result<Value, String> {
     let mut e = serde_json::Map::new();
     match (&a.url, a.command.split_first()) {
         (Some(u), None) => {
+            check_url(u)?;
             e.insert("type".into(), json!(a.transport));
             e.insert("url".into(), json!(u));
         }
         (None, Some((c, rest))) => {
+            if let Some(k) = literal_secret_arg(rest) {
+                return Err(format!(
+                    "{k}: looks like a credential in the command arguments; synthesis never writes credentials into config files. Put it in an environment variable and pass ${{VAR}} (or {{env:VAR}})"
+                ));
+            }
             e.insert("command".into(), json!(c));
             e.insert("args".into(), json!(rest));
         }
         _ => return Err("give either --url URL or a command after `--`".into()),
     }
-    if !matches!(a.transport.as_str(), "http" | "sse" | "ws") {
-        return Err("--transport must be http, sse or ws".into());
+    // the config schema knows no other remote type: an entry with one makes every command fail
+    if !matches!(a.transport.as_str(), "http" | "sse") {
+        return Err("--transport must be http or sse".into());
     }
     let env: Result<serde_json::Map<String, Value>, String> = a
         .env
@@ -781,8 +1040,16 @@ fn entry(a: &AddArgs) -> Result<Value, String> {
     Ok(e.into())
 }
 
+fn server_exists(path: &Path, name: &str) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .is_some_and(|v| v["mcpServers"].get(name).is_some())
+}
+
 /// Sets (`Some`) or removes (`None`) `mcpServers.<name>` in the JSON object file, keeping every
 /// other key. Returns whether anything changed.
+// Best effort: two `mcp add` running at the same moment can lose one update (no lock).
 fn edit_file(path: &Path, name: &str, value: Option<Value>) -> Result<bool, String> {
     let mut root = match std::fs::read_to_string(path) {
         Ok(t) => serde_json::from_str::<Value>(&t)
@@ -807,6 +1074,7 @@ fn edit_file(path: &Path, name: &str, value: Option<Value>) -> Result<bool, Stri
         .map(|o| o.entry("mcpServers").or_insert_with(|| json!({})))
         .and_then(Value::as_object_mut)
         .ok_or(format!("{}: mcpServers is not an object", path.display()))?;
+    let value_set = value.is_some();
     let changed = match value {
         Some(v) => {
             servers.insert(name.to_string(), v);
@@ -814,16 +1082,21 @@ fn edit_file(path: &Path, name: &str, value: Option<Value>) -> Result<bool, Stri
         }
         None => servers.remove(name).is_some(),
     };
+    if changed && value_set {
+        // never write an entry the loader would refuse
+        if path.file_name().is_some_and(|n| n == "synt.json") {
+            synthesis_config::validate_versioned_config(&root, &path.display().to_string())
+                .map_err(|e| format!("refusing to write an invalid config: {e}"))?;
+        }
+    }
     if changed {
         if let Some(d) = path.parent() {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(
-            &tmp,
-            serde_json::to_string_pretty(&root).unwrap_or_default() + "\n",
+        synthesis_config::write_private_atomic(
+            path,
+            (serde_json::to_string_pretty(&root).unwrap_or_default() + "\n").as_bytes(),
         )
-        .and_then(|()| std::fs::rename(&tmp, path))
         .map_err(|e| format!("{}: {e}", path.display()))?;
     }
     Ok(changed)
@@ -894,6 +1167,23 @@ const WHOAMI: [&str; 5] = [
     "getAccessibleAtlassianResources",
 ];
 
+/// A connect error without the transport library's type names; an unreachable server in one line.
+fn plain_connect_error(e: &str) -> String {
+    let (mut out, mut depth) = (String::new(), 0);
+    for c in e.chars() {
+        match c {
+            '[' => depth += 1,
+            ']' if depth > 0 => depth -= 1,
+            c if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    if out.contains("error sending request") {
+        return "could not reach the server (is the url right and the server running?)".into();
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn test_server(env: &Env, h: &crate::Homes, a: &TestArgs) -> Result<u8, String> {
     use synthesis_settings::{LoadContext, load_settings};
     // the server process runs here, so it must exist: default to the current directory
@@ -937,7 +1227,7 @@ fn test_server(env: &Env, h: &crate::Homes, a: &TestArgs) -> Result<u8, String> 
         let (mgr, _attach, _) = start(&p, env, cwd).await;
         let st = mgr.status().into_iter().next().ok_or("no status")?;
         if st.state != ServerState::Connected {
-            out!("  connect: FAILED, {}", san(&st.error.unwrap_or_default()));
+            out!("  connect: FAILED, {}", san(&plain_connect_error(&st.error.unwrap_or_default())));
             mgr.close().await;
             return Ok(1);
         }
@@ -1047,6 +1337,32 @@ fn list_prompts(env: &Env, h: &crate::Homes, a: &PromptsArgs) -> Result<u8, Stri
     })
 }
 
+/// `synt mcp add` on `file` (`<home>/synt.json` or `<cwd>/.mcp.json`): name check, no overwrite
+/// unless `a.force`, the credential guards (`entry`, `check_url`) and the atomic private write.
+/// Also what a settings UI calls, so the guards exist once.
+pub fn add_server(file: &Path, a: &AddArgs) -> Result<(), String> {
+    if !synthesis_mcp::valid_server_name(&a.name) {
+        return Err("invalid server name (allowed: 1-64 of A-Z a-z 0-9 _ . -)".into());
+    }
+    if !a.force && server_exists(file, &a.name) {
+        return Err(format!(
+            "server {:?} already exists in {}; use --force to replace it",
+            a.name,
+            file.display()
+        ));
+    }
+    edit_file(file, &a.name, Some(entry(a)?)).map(drop)
+}
+
+/// `synt mcp remove` on `file`; an error when the server is not there.
+pub fn remove_server(file: &Path, name: &str) -> Result<(), String> {
+    if edit_file(file, name, None)? {
+        Ok(())
+    } else {
+        Err(format!("no server {name:?} in {}", file.display()))
+    }
+}
+
 pub fn run_cmd(env: &Env, cmd: McpCmd) -> Result<u8, String> {
     let h = crate::homes(env)?;
     // `.` is the process directory; project scope writes `./.mcp.json`
@@ -1060,11 +1376,8 @@ pub fn run_cmd(env: &Env, cmd: McpCmd) -> Result<u8, String> {
         McpCmd::Prompts(a) => list_prompts(env, &h, &a),
         McpCmd::Add(a) => {
             let cwd = cwd_of(&a.cwd)?;
-            if !synthesis_mcp::valid_server_name(&a.name) {
-                return Err("invalid server name (allowed: 1-64 of A-Z a-z 0-9 _ . -)".into());
-            }
             let f = scope_file(a.scope, &h.synthesis, &cwd);
-            edit_file(&f, &a.name, Some(entry(&a)?))?;
+            add_server(&f, &a)?;
             out!("added {} to {}", a.name, f.display());
             if matches!(a.scope, ScopeArg::Project) {
                 out!(
@@ -1075,12 +1388,9 @@ pub fn run_cmd(env: &Env, cmd: McpCmd) -> Result<u8, String> {
         }
         McpCmd::Remove { name, scope, cwd } => {
             let f = scope_file(scope, &h.synthesis, &cwd_of(&cwd)?);
-            if edit_file(&f, &name, None)? {
-                out!("removed {name} from {}", f.display());
-                Ok(0)
-            } else {
-                Err(format!("no server {name:?} in {}", f.display()))
-            }
+            remove_server(&f, &name)?;
+            out!("removed {name} from {}", f.display());
+            Ok(0)
         }
     }
 }
@@ -1156,6 +1466,54 @@ mod tests {
             extra: extra.as_object().unwrap().clone(),
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn connect_errors_lose_library_internals() {
+        let raw = "http: Send message error Transport [rmcp::transport::worker::WorkerTransport<rmcp::x<reqwest::Client>>] error: Client error: error sending request for url (***)";
+        assert_eq!(
+            plain_connect_error(raw),
+            "could not reach the server (is the url right and the server running?)"
+        );
+        assert_eq!(plain_connect_error("a [x] b"), "a b");
+    }
+
+    #[test]
+    fn add_and_remove_server_keep_the_guards() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("synt.json");
+        let args = |name: &str, header: &[&str]| AddArgs {
+            name: name.into(),
+            scope: ScopeArg::User,
+            url: Some("https://example.com/mcp".into()),
+            transport: "http".into(),
+            env: vec![],
+            header: header.iter().map(|s| s.to_string()).collect(),
+            cwd: None,
+            force: false,
+            command: vec![],
+        };
+        add_server(&f, &args("ok", &["Authorization: Bearer ${TOK}"])).unwrap();
+        let before = std::fs::read(&f).unwrap();
+        assert!(
+            add_server(&f, &args("ok", &[]))
+                .unwrap_err()
+                .contains("already exists")
+        );
+        let e = add_server(&f, &args("bad", &["Authorization: Bearer abcdefgh12345"])).unwrap_err();
+        assert!(e.contains("credential"), "{e}");
+        assert!(
+            add_server(&f, &args("bad name", &[]))
+                .unwrap_err()
+                .contains("invalid server name")
+        );
+        assert_eq!(
+            std::fs::read(&f).unwrap(),
+            before,
+            "a refused add writes nothing"
+        );
+        remove_server(&f, "ok").unwrap();
+        assert!(remove_server(&f, "ok").is_err());
     }
 
     #[test]
@@ -1509,10 +1867,65 @@ mod tests {
             env: vec![],
             header: vec![],
             cwd: None,
+            force: false,
             command: vec![],
         };
         extra(&mut a);
         a
+    }
+
+    #[test]
+    fn env_and_header_values_are_checked_by_shape() {
+        let env = |v: &str| {
+            entry(&add("s", |a| {
+                a.command = vec!["x".into()];
+                a.env = vec![format!("NOTE={v}")];
+            }))
+        };
+        let hdr = |v: &str| {
+            entry(&add("s", |a| {
+                a.url = Some("https://h/mcp".into());
+                a.header = vec![format!("X-Custom: {v}")];
+            }))
+        };
+        for bad in [
+            "sk-fakefakefake123",
+            "ghp_abcdefghijkl",
+            "AKIAABCDEFGHIJKL",
+            "eyJhbGciOiJIUzI1",
+            "Bearer abcdefgh1234",
+            "Bearer sk-fakefakefake123",
+            "Basic dXNlcjpwYXNz",
+            "https://u:hunter2@h/x",
+        ] {
+            assert!(env(bad).is_err(), "env {bad}");
+            assert!(hdr(bad).is_err(), "header {bad}");
+        }
+        for ok in [
+            "1",
+            "/usr/bin:/bin",
+            "8080",
+            "Bearer ${TOK}",
+            "${A}",
+            "Basic ${B}",
+            "Bearer abc",
+        ] {
+            assert!(env(ok).is_ok(), "env {ok}");
+            assert!(hdr(ok).is_ok(), "header {ok}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn add_never_writes_through_a_symlinked_config_or_temp_name() {
+        let d = tempfile::tempdir().unwrap();
+        let victim = d.path().join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        let f = d.path().join(".mcp.json");
+        std::os::unix::fs::symlink(&victim, &f).unwrap();
+        std::os::unix::fs::symlink(&victim, d.path().join(".mcp.json.tmp")).unwrap();
+        assert!(edit_file(&f, "s", Some(json!({"command": "x"}))).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
     }
 
     #[test]
@@ -1521,7 +1934,7 @@ mod tests {
         let f = d.path().join("synt.json");
         std::fs::write(
             &f,
-            json!({"model": "m", "mcpServers": {"old": {"command": "x"}}}).to_string(),
+            json!({"$schema": synthesis_config::SCHEMA_V1, "model": "m", "mcpServers": {"old": {"command": "x"}}}).to_string(),
         )
         .unwrap();
         let e = entry(&add("s", |a| {
@@ -1541,8 +1954,209 @@ mod tests {
         let fresh = d.path().join("fresh").join("synt.json");
         let e = entry(&add("s", |a| a.command = vec!["echo".into(), "hi".into()])).unwrap();
         assert!(edit_file(&fresh, "s", Some(e)).unwrap());
+        assert!(server_exists(&fresh, "s") && !server_exists(&fresh, "t"));
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&fresh).unwrap()).unwrap();
         assert!(synthesis_config::validate_versioned_config(&v, "synt.json").is_ok());
+
+        for bad in [
+            vec!["--env", "API_KEY=literal123"],
+            vec!["--token=abc12345"],
+            vec!["--api-key", "abc12345"],
+            vec!["sk-abcdefghijklmnop"],
+            vec!["x", "ghp_abcdefghijklmnopqrstuvwx"],
+            vec!["Authorization: Bearer abc12345"],
+            vec!["postgres://user:abc12345@host/db"],
+            vec!["glpat-abcdefghijklmnop"],
+        ] {
+            let mut cmd = vec!["python3".to_string(), "srv.py".into()];
+            cmd.extend(bad.iter().map(|s| s.to_string()));
+            let err = entry(&add("s", |a| a.command = cmd)).unwrap_err();
+            assert!(err.contains("never writes credentials"), "{bad:?}");
+            assert!(
+                !err.contains("literal123")
+                    && !err.contains("abc12345")
+                    && !err.contains("ghp_abc")
+            );
+        }
+        let mut cmd: Vec<String> = [
+            "npx",
+            "-y",
+            "@scope/pkg",
+            "--port",
+            "8080",
+            "/tmp/key/x",
+            "--api-key",
+            "${K}",
+            "TOKEN=${T}",
+            "postgres://user:${DB_PASS}@host/db",
+            "https://host/path?x=1",
+            "Authorization: Bearer ${T}",
+        ]
+        .map(String::from)
+        .into();
+        assert!(entry(&add("s", |a| a.command = std::mem::take(&mut cmd))).is_ok());
+
+        for bad in [
+            "https://user:hunter2pw@example.com/mcp",
+            "https://h/mcp?token=literal123456",
+            "https://h/mcp?x=1&api_key=literal123456",
+            "https://ghp_xxxxxxxxxxxx@h/mcp",
+            "https://token:@h/mcp",
+            "https://u:p@h/mcp",
+            "https://h/mcp#access_token=abc123456",
+            "https://h/v1/sk-abcdefghijkl/mcp",
+            "https://h/v1/%73k-abcdefghijkl/mcp",
+            "https://h/mcp?ap%69_ke%79=literal123",
+            "https://h/mcp?pass=hunter2pw",
+            "https://h/mcp?pwd=hunter2pw",
+            "https://h/mcp?sig=abcdef123456",
+            "https://h/mcp?jwt=abcdef123456",
+            "https://h/mcp?access=abcdef123456",
+            "https://h/mcp?token=${sk-live-literal}",
+        ] {
+            let err = entry(&add("s", |a| a.url = Some(bad.into()))).unwrap_err();
+            assert!(err.contains("never writes credentials"), "{bad}");
+            for secret in [
+                "hunter2pw",
+                "literal123",
+                "abcdef123456",
+                "ghp_xxxx",
+                "abcdefghijkl",
+                "abc123456",
+            ] {
+                assert!(!err.contains(secret), "{bad}: {err}");
+            }
+        }
+        for bad in [
+            "ws://h/mcp",
+            "wss://h/mcp",
+            "file:///x",
+            "ftp://h/x",
+            "not a url",
+        ] {
+            assert!(
+                entry(&add("s", |a| a.url = Some(bad.into()))).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(
+            only_refs("${T}")
+                && only_refs("Bearer ${A_1}${B}")
+                && !only_refs("${sk-live-literal}")
+                && !only_refs("${}")
+                && !only_refs("${1X}")
+        );
+        assert!(literal_secret_arg(&["--token=${sk-live-literal}".to_string()]).is_some());
+        for bad in [
+            "https://h/mcp?sk-abcdefghijkl",
+            "https://h/mcp?a=1;token=abcdef123456",
+            "https://h/mcp;key=abcdef123456",
+            "https://h/mcp?x=Bearer%20sk-abcdefghijkl",
+        ] {
+            assert!(check_url(bad).is_err(), "{bad}");
+        }
+        for ok in [
+            "https://h/mcp?design=1&assignee=bob&keyword=x;compass=y",
+            "https://h/mcp;v=2",
+        ] {
+            assert!(check_url(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "--api-key",
+            "API_KEY",
+            "x-api-key",
+            "accessToken",
+            "client_secret",
+            "--auth-token",
+            "APIKey",
+            "Authorization",
+            "key",
+            "--secretkey",
+            "--accesskey",
+            "--privatekey",
+            "--apitoken",
+            "--authtoken",
+            "--sessiontoken",
+            "--clientsecret",
+            "AUTHTOKEN",
+            "xapikey",
+            "--authkey",
+            "--pw",
+            "--pat",
+            "--sid",
+            "--pswd",
+            "--tok",
+            "--session-token",
+            "--otp",
+            "--passphrase",
+        ] {
+            assert!(secret_like(bad), "{bad}");
+        }
+        for ok in [
+            "--author",
+            "--keyboard",
+            "--design",
+            "--key-file",
+            "assignee",
+            "signal",
+            "bypass",
+            "compass",
+            "keyword",
+            "author",
+            "--port",
+            "--monkey",
+            "--tokenizer",
+            "--max-tokens",
+            "--tokens",
+            "--session-name",
+            "--session",
+            "--keyboard-layout",
+        ] {
+            assert!(!secret_like(ok), "{ok}");
+        }
+        assert!(literal_secret_arg(&["--tokenizer".into(), "gpt2".into()]).is_none());
+        assert!(literal_secret_arg(&["--max-tokens".into(), "100".into()]).is_none());
+        assert!(
+            literal_secret_arg(&["--session".into(), "Bearer sk-abcdefghijkl".into()]).is_some()
+        );
+        assert!(literal_secret_arg(&["--token".into(), "-abc123".into()]).is_some());
+        assert!(literal_secret_arg(&["--token".into(), "--other-flag".into()]).is_none());
+        assert!(secret_shaped("Bearer sk-abcdefghijkl"));
+        assert!(
+            literal_secret_arg(&[
+                "--author".into(),
+                "bob".into(),
+                "--key-file".into(),
+                "/p".into()
+            ])
+            .is_none()
+        );
+        assert!(literal_secret_arg(&["--api-key".into(), "abc".into()]).is_some());
+        for ok in [
+            "https://h/mcp",
+            "https://h/mcp?x=1&page=2",
+            "https://${U}:${DB_PASS}@h/mcp",
+            "https://h/mcp?token=${T}",
+            "https://h:8443/a/b",
+            "http://localhost:3000/mcp?x=1#top",
+            "https://h/mcp?token=",
+        ] {
+            assert!(
+                entry(&add("s", |a| a.url = Some(ok.into()))).is_ok(),
+                "{ok}"
+            );
+        }
+        // a transport the schema does not know would make synt.json invalid
+        let err = entry(&add("s", |a| {
+            a.url = Some("https://h/mcp".into());
+            a.transport = "ws".into();
+        }))
+        .unwrap_err();
+        assert!(err.contains("http or sse"), "{err}");
+        // and edit_file refuses to write an entry that fails the schema
+        let bad_file = d.path().join("bad").join("synt.json");
+        assert!(edit_file(&bad_file, "s", Some(json!({"type": "ws", "url": "x"}))).is_err());
+        assert!(!bad_file.exists());
 
         let literal = entry(&add("s", |a| {
             a.url = Some("https://h/mcp".into());

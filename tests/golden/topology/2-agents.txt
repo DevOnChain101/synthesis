@@ -1,0 +1,184 @@
+--- 40x48
+○ 1›○ 2›✶ 3›○ 4›○ 5›○ 6
+▸ Orchestrate: select skills / sub-agen…
+
+   ╭─── USER · PROJECT ─────────────╮
+   │ ❯ waiting for a prompt…        │
+┌──│ prompts 0                      │
+│  │ project ?                      │
+│  ╰────────────────────────────────╯
+│
+│
+│  ╭─── GUARDS ─────────────────────╮
+│  │ 0 guards                       ◄─┐
+│  ╰────────────────────────────────╯ │
+│                                     │
+│  ╭─── SKILLS ─────────────────────╮ │
+│┌─► no skills used yet             │ │
+││ ╰────────────────────────────────╯ │
+││                                    │
+││ ┏━━━ SUB-AGENTS  2 active / 2 ━━━┓ │
+││ ┃ · explore · scan par… working… ┃ │
+││ ┃ ✢ explore · scan par… working… ┃ │
+││ ┗━━━━━━━━━━━━━━━▲━━━━━━━━━━━━━━━━┛ │
+││                 ●                  │
+││ ┏━━━━━━━━━━━━━━━┻━ CORE ━━━━━━━━━┓ │
+│└─┫ · Intent       parse request   ┃ │
+└──► · Plan         decompose       ┣─┘
+┌──┫ ✶ Orchestrat… 2 agents · 0 sk… ┣─┐
+│┌─┫ ctx 0% · 0 tok                 ┃ │
+││ ┗━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┛ │
+││                 │                  │
+││ ╭───────────────▼─ EXECUTION ────╮ │
+││ │ 0 calls              no errors │ │
+││ ╰────────────────────────────────╯ │
+││                                    │
+││ ╭─── HOOKS ──────────────────────╮ │
+│└─► no event hooks fired           │ │
+│  ╰────────────────────────────────╯ │
+│                                     │
+│  ╭─── EXTERNAL · MCP ─────────────╮ │
+│  │ no MCP servers called          ◄─┘
+│  ╰────────────────────────────────╯
+│
+│  ╭─── MEMORY · FEEDBACK ──────────╮
+│  │ context ▱▱▱▱▱▱▱▱▱▱          0% │
+└──► verify  no test / build run y… │
+   │ memory  0 writes               │
+   │ tasks   none                   │
+   ╰────────────────────────────────╯
+--- 60x30
+○ 1›○ 2›✶ 3›○ 4›○ 5›○ 6
+▸ Orchestrate: select skills / sub-agents — Task explore: s…
+
+  ╭─── USER · PROJECT ──────╮  ╭─── GUARDS ──────────────╮
+  │ ❯ waiting for a prompt… │  │ 0 guards                │
+┌─│ prompts 0               │  │                         ◄─┐
+│ │ project ?               │  │                         │ │
+│ ╰─────────────────────────╯  ╰─────────────────────────╯ │
+│                                                          │
+│ ┏━━━ SUB-AGENTS  2 activ…━┓  ╭─── SKILLS ──────────────╮ │
+│ ┃ · explore · s… working… ┃  │ no skills used yet      │ │
+│ ┃ ✢ explore · s… working… ┃  │                         │ │
+│ ┗━━━━━━━━━━━━▲━━━━━━━━━━━━┛  ╰────────────▲────────────╯ │
+│              ●━━━━━●                ┌─────┘              │
+│ ┏━ SYNTHESIS CORE ━┻━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━┓ │
+│ ┃ · Intent       parse request                         ┃ │
+└─► · Plan         decompose                             ┣─┘
+┌─┫ ✶ Orchestrator route work        2 agents · 0 skills ┣─┐
+│ ┃ ctx 0% · 0 tok                                       ┃ │
+│ ┗━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┛ │
+│              ┌─────┘                └─────┐              │
+│ ╭─ EXEC ─────▼────────────╮  ╭─ HOOKS ────▼────────────╮ │
+│ │ 0 calls       no errors │  │ no event hooks fired    │ │
+│ ╰─────────────────────────╯  ╰─────────────────────────╯ │
+│                                                          │
+│ ╭─── EXTERNAL · MCP ──────╮  ╭─── MEMORY · FEEDBACK ───╮ │
+│ │ no MCP servers called   │  │ context ▱▱▱▱▱▱▱▱▱▱   0% │ │
+└─►                         │  │ verify  no test / buil… ◄─┘
+  │                         │  │ +2 more                 │
+  ╰─────────────────────────╯  ╰─────────────────────────╯
+--- 70x14
+○ 1 Plan ► ○ 2 Guard ► ✶ 3 Orch ► ○ 4 Exec ► ○ 5 Verify ► ○ 6 Learn
+▸ Orchestrate: select skills / sub-agents — Task explore: scan part 0
+
+╭─── USER ──────────╮   ╭─── GUARDS ────────╮   ╭─── SKILLS ─────────╮
+│ +3 more           │   │ 0 guards          │   │ no skills used yet │
+╰───────────────────╯   ╰─────────▲─────────╯   ╰─────────▲──────────╯
+          └───────────────────┐   │   ┌───────────────────┘
+╭─── MEMORY ────────╮   ┏━ C…━▼━━━┻━━━┻━━━━━┓   ┏━━━ SUB-AGENTS ━━━━━┓
+│ context ▱▱▱▱▱… 0% ◄───┫ · Intent       p… ┣●━━► · explore working… ┃
+│ +3 more           │   ┃ +3 more           ┃   ┃ ✢ explore working… ┃
+╰───────────────────╯   ┗━━━━━┳━━━┳━━━┳━━━━━┛   ┗━━━━━━━━━━━━━━━━━━━━┛
+          ┌───────────────────┘   │   └───────────────────┐
+╭─ MCP ───▼─────────╮   ╭─ EXEC ──▼─────────╮   ╭─────────▼─ HOOKS ──╮
+╰───────────────────╯   ╰───────────────────╯   ╰────────────────────╯
+--- 70x22
+○ 1 Plan ► ○ 2 Guard ► ✶ 3 Orch ► ○ 4 Exec ► ○ 5 Verify ► ○ 6 Learn
+▸ Orchestrate: select skills / sub-agents — Task explore: scan part 0
+
+╭─── USER ──────────╮   ╭─── GUARDS ────────╮   ╭─── SKILLS ─────────╮
+│ ❯ waiting for a … │   │ 0 guards          │   │ no skills used yet │
+│ prompts 0         │   │                   │   │                    │
+│ project ?         │   │                   │   │                    │
+╰───────────────────╯   ╰─────────▲─────────╯   ╰─────────▲──────────╯
+          │                       │                       │
+          └───────────┐           │           ┌───────────┘
+╭─── MEMORY ────────╮ │ ┏━ CORE ━━┻━━━━━━━━━┓ │ ┏━━━ SUB-AGENTS ━━━━━┓
+│ context ▱▱▱▱▱… 0% │ └─► · Intent       p… ┣─┘ ┃ · explore working… ┃
+│ verify  no test … ◄───┫ · Plan         d… ┣●━━► ✢ explore working… ┃
+│ memory  0 writes  │ ┌─┫ ✶ Orch… 2 agents… ┣─┐ ┃                    ┃
+│ tasks   none      │ │ ┃ ctx 0% · 0 tok    ┃ │ ┃                    ┃
+╰───────────────────╯ │ ┗━━━━━━━━━┳━━━━━━━━━┛ │ ┗━━━━━━━━━━━━━━━━━━━━┛
+          ┌───────────┘           │           └───────────┐
+          │                       │                       │
+╭─ MCP ───▼─────────╮   ╭─ EXEC ──▼─────────╮   ╭─────────▼─ HOOKS ──╮
+│ no MCP servers c… │   │ 0 calls no errors │   │ no event hooks fi… │
+╰───────────────────╯   ╰───────────────────╯   ╰────────────────────╯
+
+--- 110x22
+○ 1 Plan ━► ○ 2 Guard ━► ✶ 3 Orchestrate ━► ○ 4 Execute ━► ○ 5 Verify ━► ○ 6 Learn
+▸ Orchestrate: select skills / sub-agents — Task explore: scan part 0
+
+╭─── USER · PROJECT ─────────────╮   ╭─── GUARDS ─────────────────────╮   ╭─── SKILLS ───────────────────────╮
+│ ❯ waiting for a prompt…        │   │ 0 guards                       │   │ no skills used yet               │
+│ prompts 0                      │   │                                │   │                                  │
+│ project ?                      │   │                                │   │                                  │
+╰────────────────────────────────╯   ╰───────────────▲────────────────╯   ╰────────────────▲─────────────────╯
+                │                                    │                                     │
+                └──────────────────┐                 │                  ┌──────────────────┘
+╭─── MEMORY · FEEDBACK ──────────╮ │ ┏━━━━━━━━━━━━━━━┻━ CORE ━━━━━━━━━┓ │ ┏━━━ SUB-AGENTS  2 active / 2 ━━━━━┓
+│ context ▱▱▱▱▱▱▱▱▱▱          0% │ └─► · Intent       parse request   ┣─┘ ┃ · explore · scan part 0 working… ┃
+│ verify  no test / build run y… ◄───┫ · Plan         decompose       ┣●━━► ✢ explore · scan part 1 working… ┃
+│ memory  0 writes               │ ┌─┫ ✶ Orchestrat… 2 agents · 0 sk… ┣─┐ ┃                                  ┃
+│ tasks   none                   │ │ ┃ ctx 0% · 0 tok                 ┃ │ ┃                                  ┃
+╰────────────────────────────────╯ │ ┗━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┛ │ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                ┌──────────────────┘                 │                  └──────────────────┐
+                │                                    │                                     │
+╭───────────────▼─ MCP ──────────╮   ╭───────────────▼─ EXECUTION ────╮   ╭────────────────▼─ HOOKS ─────────╮
+│ no MCP servers called          │   │ 0 calls              no errors │   │ no event hooks fired             │
+╰────────────────────────────────╯   ╰────────────────────────────────╯   ╰──────────────────────────────────╯
+
+--- 150x30
+○ 1 Plan ━► ○ 2 Guard ━► ✶ 3 Orchestrate ━► ○ 4 Execute ━► ○ 5 Verify ━► ○ 6 Learn
+▸ Orchestrate: select skills / sub-agents — Task explore: scan part 0
+
+
+
+
+
+╭─── USER · PROJECT ──────────────────────────╮    ╭─── GUARDS ──────────────────────────────────╮    ╭─── SKILLS ───────────────────────────────────╮
+│ ❯ waiting for a prompt…                     │    │ 0 guards                                    │    │ no skills used yet                           │
+│ prompts 0                                   │    │                                             │    │                                              │
+│ project ?                                   │    │                                             │    │                                              │
+╰─────────────────────────────────────────────╯    ╰──────────────────────▲──────────────────────╯    ╰──────────────────────▲───────────────────────╯
+                       │                                                  │                                                  │
+                       └─────────────────────────┐                        │                        ┌─────────────────────────┘
+╭─── MEMORY · FEEDBACK ───────────────────────╮  │ ┏━ SYNTHESIS CORE ━━━━━┻━━━━━━━━━━━━━━━━━━━━━━┓ │  ┏━━━ SUB-AGENTS  2 active / 2 ━━━━━━━━━━━━━━━━━┓
+│ context ▱▱▱▱▱▱▱▱▱▱                       0% │  └─► · Intent       parse request                ┣─┘  ┃ · explore · scan part 0             working… ┃
+│ verify  no test / build run yet             ◄────┫ · Plan         decompose                    ┣●━━━► ✢ explore · scan part 1             working… ┃
+│ memory  0 writes                            │  ┌─┫ ✶ Orchestrator route w… 2 agents · 0 skills ┣─┐  ┃                                              ┃
+│ tasks   none                                │  │ ┃ ctx 0% · 0 tok                              ┃ │  ┃                                              ┃
+╰─────────────────────────────────────────────╯  │ ┗━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┛ │  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                       ┌─────────────────────────┘                        │                        └─────────────────────────┐
+                       │                                                  │                                                  │
+╭─ EXTERNAL · MCP ─────▼──────────────────────╮    ╭─ EXECUTION ──────────▼──────────────────────╮    ╭──────────────────────▼─ HOOKS ───────────────╮
+│ no MCP servers called                       │    │ 0 calls                           no errors │    │ no event hooks fired                         │
+╰─────────────────────────────────────────────╯    ╰─────────────────────────────────────────────╯    ╰──────────────────────────────────────────────╯
+
+
+
+
+
+--- 60x11
+○ 1›○ 2›✶ 3›○ 4›○ 5›○ 6
+SYNTHESIS CORE  · Intent       parse request
+USER · PROJECT  ❯ waiting for a prompt…
+GUARDS  0 guards
+SUB-AGENTS 2 active / 2  · explore · scan part 0    working…
+SKILLS  no skills used yet
+HOOKS  no event hooks fired
+EXECUTION  0 calls                                 no errors
+EXTERNAL · MCP  no MCP servers called
+MEMORY · FEEDBACK  context ▱▱▱▱▱▱▱▱▱▱                     0%
+

@@ -166,6 +166,7 @@ fn gen_history(g: &Value) -> Vec<HistoryDay> {
             tools: 2.0,
             agents: if n % 3 == 0 { 1.0 } else { 0.0 },
             sessions: 1.0,
+            ..Default::default()
         })
         .collect()
 }
@@ -349,6 +350,7 @@ impl Owned {
             usage: &self.usage,
             follow: false,
             history: &self.history,
+            history_loading: false,
             usage_metric: &self.metric,
             mcp_servers: &self.mcp,
             mcp_live: None,
@@ -399,7 +401,14 @@ fn skeleton<S: AsRef<str>>(rows: &[S]) -> String {
 
 /// Cases whose rename diff was checked by hand (2026-10-30) because it ADDS text: the panel title
 /// "SYNTHESIS CORE" no longer fits, flow.rs falls back to "CORE" and the model chip now fits.
-const REVIEWED_RENAME_DIFFS: [&str; 1] = ["dash-short-sessions-scroll-index-39-180x30"];
+/// The two 100x50 / 220x80 cases (2026-11-05): the topology wires moved to the edge midpoints, the
+/// core's top port now splits its title row in two, so "CORE" + the model chip replace "SYNTHESIS
+/// CORE" and "MCP" replaces "EXTERNAL · MCP"; only the topology panel rows differ (checked by hand).
+const REVIEWED_RENAME_DIFFS: [&str; 3] = [
+    "dash-short-sessions-scroll-index-39-180x30",
+    "dash-layout-bottom-100x50",
+    "dash-sessions-cap-half-height-220x80",
+];
 
 /// Same text, or only whole header chips dropped for lack of room (the longer name takes it).
 fn is_subsequence(got: &str, want: &str) -> bool {

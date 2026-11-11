@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::sync::Arc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
-use synthesis_permissions::Mode;
+use synthesis_permissions::{Mode, Permissions};
 
 use synthesis_config::Env;
 use synthesis_core::AgentSession;
@@ -43,6 +43,8 @@ pub enum ExitReason {
     Resume(String),
     /// `/model NAME`: the host rebuilds the harness for that model and reopens this session.
     SwitchModel(String),
+    /// `/close`: the host hides this session, then opens a fresh one in the same folder.
+    Close,
 }
 
 pub struct Exit {
@@ -51,6 +53,8 @@ pub struct Exit {
     pub session: Option<AgentSession>,
     /// Outcome of the last finished task, for `Harness::end_session`.
     pub last_outcome: Option<TaskOutcome>,
+    /// The app was left while a task ran, so the task was cancelled.
+    pub cancelled_task: bool,
 }
 
 type SaveNote = Box<dyn Fn(bool, &str) -> Result<String, String>>;
@@ -89,7 +93,15 @@ pub trait TaskHost: Send + Sync {
         out: &'a TaskOutcome,
         session: &'a AgentSession,
     ) -> BoxFut<'a, ()>;
+    /// `/rename TITLE`: validates and stores the title of this session; `Ok` is the stored title.
+    fn rename(&self, _title: &str) -> Result<String, String> {
+        Err("/rename: not available in this session".into())
+    }
 }
+
+/// Where the terminal guard waits between two runs of the app (a `/model`, session or folder switch): the screen
+/// is never left, so there is no flash and no cooked-mode gap.
+pub type Hold = Arc<std::sync::Mutex<Option<TerminalGuard>>>;
 
 type ModelSwitch = Box<dyn FnMut(&str) -> Result<(Arc<Harness>, String), String>>;
 
@@ -110,9 +122,14 @@ pub struct Options {
     pub models: Vec<String>,
     /// `effort_tiers` of the current model; empty disables `/effort`.
     pub effort_tiers: Vec<String>,
+    /// The current model's context window if known; it replaces the one in a replayed history.
+    pub context_window: Option<u64>,
     /// Applies a model choice: returns the rebuilt harness and its label. Without it `/model`
     /// only lists.
     pub switch_model: Option<ModelSwitch>,
+    /// With it, a run that ends in anything but a quit leaves the terminal in the app's
+    /// screen mode and parks its guard here; the next run takes it over.
+    pub hold: Option<Hold>,
     pub extra_commands: Vec<CmdDef>,
     /// Lines for `/mcp`: servers, state, tools, errors (called each time the command runs).
     pub mcp_report: Option<Box<dyn Fn() -> Vec<String>>>,
@@ -170,7 +187,9 @@ impl Options {
             sandbox: SandboxStatus::default(),
             models: vec![],
             effort_tiers: vec![],
+            context_window: None,
             switch_model: None,
+            hold: None,
             extra_commands: vec![],
             mcp_report: None,
             memory: None,
@@ -224,6 +243,7 @@ fn cfg_for(o: &Options) -> AppConfig {
         },
         models: o.models.clone(),
         effort_tiers: o.effort_tiers.clone(),
+        context_window: o.context_window,
         extra_commands: o
             .extra_commands
             .iter()
@@ -249,6 +269,7 @@ fn cfg_for(o: &Options) -> AppConfig {
 struct Runner {
     env: Env,
     settings_home: Option<std::path::PathBuf>,
+    tz_offset_min: i32,
     images: Option<Arc<dyn ImageSource>>,
     host: Option<Arc<dyn TaskHost>>,
     mcp_report: Option<Box<dyn Fn() -> Vec<String>>>,
@@ -264,6 +285,21 @@ struct Runner {
 }
 
 impl Runner {
+    /// Reads the Usage panel's history off the UI thread; [`Msg::Usage`] answers.
+    fn load_usage(&self, now: i64) {
+        let (home, tz, tx) = (
+            self.settings_home.clone(),
+            self.tz_offset_min,
+            self.tx.clone(),
+        );
+        std::thread::spawn(move || {
+            let h = home
+                .map(|h| synthesis_view::usage::load(&h, now, tz))
+                .unwrap_or_default();
+            let _ = tx.send(Msg::Usage(h));
+        });
+    }
+
     /// `/compact`: while a task runs the harness compacts at its next safe point, otherwise the
     /// conversation between tasks is compacted now (on the runtime; `Msg::Compacted` returns it).
     fn compact(&mut self, app: &mut App, instructions: Option<String>, now: i64) {
@@ -389,6 +425,13 @@ impl Runner {
                         v.push("add: /permissions allow RULE · remove: /permissions remove RULE (this session only)".into());
                         (v, false)
                     }
+                    PermAction::Allow(rule) if !Permissions::is_well_formed_rule(&rule) => (
+                        vec![
+                            "expected a rule like Bash(cargo test:*), Edit or mcp__server__tool"
+                                .into(),
+                        ],
+                        true,
+                    ),
                     PermAction::Allow(rule) => {
                         if p.add_allow(&rule) {
                             (
@@ -613,6 +656,10 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
         .unwrap_or_default();
     let mut app = App::new(cfg_for(&o), &replay, clock());
     app.set_tui(o.tui, &std::mem::take(&mut o.tui_diagnostics));
+    if let Some(h) = &o.synthesis_home {
+        let e = app.restore_effort(synthesis_config::load_state(h).effort);
+        o.harness.set_reasoning_effort(e);
+    }
     if o.harness.peer_summary().is_some() {
         let h = o.harness.clone();
         app.peer_status = Some(Box::new(move || h.peer_summary().map(|p| p.1)));
@@ -660,7 +707,15 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
     }
     let _stop_reading = StopReading(stop);
     let out = SharedOut::new(output);
-    let guard = TerminalGuard::enter(out.clone(), GuardOptions { raw_mode })?;
+    let held = o
+        .hold
+        .as_ref()
+        .and_then(|h| h.lock().unwrap_or_else(|e| e.into_inner()).take());
+    let resumed = held.is_some();
+    let guard = match held {
+        Some(g) => g,
+        None => TerminalGuard::enter(out.clone(), GuardOptions { raw_mode })?,
+    };
     let mut screen = Screen::new(out.clone(), color);
     if hyperlinks_enabled(&o.env) {
         let (base, home) = (
@@ -675,8 +730,12 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
         })));
     }
     screen.set_mouse(o.tui.mouse_capture);
-    screen.enter()?;
-    out.clone().write_all(BRACKETED_PASTE_ON.as_bytes())?;
+    if resumed {
+        screen.adopt();
+    } else {
+        screen.enter()?;
+        out.clone().write_all(BRACKETED_PASTE_ON.as_bytes())?;
+    }
 
     #[cfg(not(unix))]
     let _ = watch_signals; // Ctrl-C arrives as a key in raw mode; there is no SIGWINCH to watch
@@ -692,6 +751,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
     let mut runner = Runner {
         env: o.env.clone(),
         settings_home: o.synthesis_home.clone(),
+        tz_offset_min: o.tz_offset_min,
         images: o
             .image_source
             .take()
@@ -708,6 +768,17 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
         tx: tx.clone(),
     };
     let mut switch = o.switch_model.take();
+    if resumed {
+        // a relaunch: the history is read before the first frame, so the Usage panel (and the
+        // layout around it) does not change a moment after the screen is taken over
+        let h = o
+            .synthesis_home
+            .as_ref()
+            .map(|h| synthesis_view::usage::load(h, clock(), o.tz_offset_min));
+        app.set_usage(h.unwrap_or_default());
+    } else {
+        runner.load_usage(clock());
+    }
     let mut parser = KeyParser::default();
     let mut last_size = size();
     let mut dirty = true;
@@ -745,6 +816,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                         reason,
                         session: None,
                         last_outcome: runner.last_outcome.take(),
+                        cancelled_task: true,
                     };
                 }
             } else {
@@ -752,6 +824,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                     reason,
                     session: runner.session.take(),
                     last_outcome: runner.last_outcome.take(),
+                    cancelled_task: quit_deadline.is_some(),
                 };
             }
         }
@@ -868,6 +941,10 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                     dirty = true;
                 }
                 Msg::ProjectDone => app.project_done(),
+                Msg::Usage(h) => {
+                    app.set_usage(h);
+                    dirty = true;
+                }
                 Msg::Wake => {}
                 Msg::Event(e) => {
                     app.on_event(&e, now);
@@ -903,8 +980,8 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                     dirty = true;
                     urgent = true;
                 }
-                Msg::SendFailed(text, why) => {
-                    app.send_failed(&text, &why);
+                Msg::SendFailed(to, text, why) => {
+                    app.send_failed(&to, &text, &why);
                     dirty = true;
                 }
                 Msg::UserCommandDone(d) => {
@@ -956,6 +1033,7 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
                         runner.last_outcome = Some(out.clone());
                     }
                     app.task_done(&result, now);
+                    runner.load_usage(now);
                     if let Some(w) = warn {
                         app.note(format!("session state: {w}"), "warn");
                     }
@@ -992,10 +1070,17 @@ pub fn run_interactive(mut o: Options, tty: Tty) -> io::Result<Exit> {
         }
     };
 
-    guard.restore();
     #[cfg(unix)]
     if let Some(h) = signals {
         h.close();
+    }
+    match o
+        .hold
+        .as_ref()
+        .filter(|_| !matches!(result.reason, ExitReason::Quit | ExitReason::InputClosed))
+    {
+        Some(h) => *h.lock().unwrap_or_else(|e| e.into_inner()) = Some(guard),
+        None => guard.restore(),
     }
     Ok(result)
 }
@@ -1005,6 +1090,7 @@ fn closed(runner: &mut Runner, reason: ExitReason) -> Exit {
         reason,
         session: runner.session.take(),
         last_outcome: runner.last_outcome.take(),
+        cancelled_task: false,
     }
 }
 
@@ -1033,10 +1119,10 @@ fn exec(
         Cmd::Project { cwd, diff } => {
             let env = runner.env.clone();
             spawn_scan(runner.tx.clone(), move || {
-                let p = crate::project::scan(&cwd, &env);
+                let p = synthesis_view::project::scan(&cwd, &env);
                 match &diff {
-                    None => crate::project::tree_lines(&p),
-                    Some(f) => crate::project::diff_lines(&p, f.trim()),
+                    None => synthesis_view::project::tree_lines(&p),
+                    Some(f) => synthesis_view::project::diff_lines(&p, f.trim()),
                 }
                 .join("\n")
             });
@@ -1076,7 +1162,7 @@ fn exec(
             let (h, tx) = (runner.harness.clone(), runner.tx.clone());
             runner.runtime.spawn(async move {
                 if let Err(e) = h.send_user_message(&to, text.clone()).await {
-                    let _ = tx.send(Msg::SendFailed(text, e));
+                    let _ = tx.send(Msg::SendFailed(to, text, e));
                 }
             });
         }
@@ -1113,6 +1199,17 @@ fn exec(
             let (lines, error) = runner.info(i);
             app.output(lines.join("\n"), error);
         }
+        Cmd::Rename(t) => match runner.host.as_ref().map(|h| h.rename(&t)) {
+            Some(Ok(t)) => {
+                app.output(
+                    format!("Session renamed: {}", crate::sanitize::clean_line(&t)),
+                    false,
+                );
+                app.set_title(t);
+            }
+            Some(Err(e)) => app.output(e, true),
+            None => app.output("/rename: not available in this session".into(), true),
+        },
         Cmd::Remember { user, text } => match runner.memory.as_ref().map(|m| (m.save)(user, &text))
         {
             Some(Ok(done)) => app.output(done, false),
@@ -1148,7 +1245,15 @@ fn exec(
                 app.mode_rejected(now, &e.to_string());
             }
         }
-        Cmd::SetEffort(e) => runner.harness.set_reasoning_effort(e),
+        Cmd::SetEffort(e) => {
+            // kept for the next start too (state.json)
+            if let Some(h) = &runner.settings_home
+                && let Err(err) = synthesis_config::save_effort(h, e.as_deref())
+            {
+                app.note(format!("/effort: not saved ({err})"), "warn");
+            }
+            runner.harness.set_reasoning_effort(e);
+        }
         Cmd::SwitchModel(name) => match switch.as_mut() {
             // the host restarts the app on the same session with the other model
             None => app.quit = Some(ExitReason::SwitchModel(name)),
@@ -1156,6 +1261,7 @@ fn exec(
                 Ok((h, label)) => {
                     runner.harness = h;
                     app.model_switched(&label);
+                    runner.harness.set_reasoning_effort(app.effort());
                 }
                 Err(e) => app.note(format!("/model {name}: {e}"), "error"),
             },
@@ -1211,6 +1317,7 @@ pub fn render_once(o: &OnceOptions, out: &mut impl Write) -> io::Result<()> {
         mode: o.mode,
         models: vec![],
         effort_tiers: vec![],
+        context_window: None,
         extra_commands: vec![],
         saved: o.saved.clone(),
         home: None,

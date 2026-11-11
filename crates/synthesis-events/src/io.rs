@@ -210,6 +210,9 @@ mod tests {
             pid: Some(1),
             exit_code: None,
             signal: None,
+            tool_call_id: Some("t".into()),
+            command: Some("ls".into()),
+            duration_ms: Some(3),
         }
     }
     fn sub() -> SubagentInfo {
@@ -424,6 +427,37 @@ mod tests {
             Event::ProcessSpawned(proc()),
             Event::ProcessReady(proc()),
             Event::ProcessExited(proc()),
+            Event::ProcessOutput {
+                process_id: s("p"),
+                tool_call_id: s("t"),
+                text: s("hi\n"),
+                seq: 1,
+            },
+            Event::BrowserFrame {
+                path: s("/a/screenshot-1.png"),
+                url: s("https://example.com"),
+                w: 1280,
+                h: 720,
+                bytes: 1234,
+            },
+            Event::BrowserAction {
+                action: s("click"),
+                x: Some(640),
+                y: Some(360),
+                w: Some(1280),
+                h: Some(720),
+                target: Some(s("button \"Send\"")),
+                frame: None,
+            },
+            Event::BrowserAction {
+                action: s("navigate"),
+                x: None,
+                y: None,
+                w: None,
+                h: None,
+                target: None,
+                frame: Some(s("/a/screenshot-1.png")),
+            },
             Event::ArtifactCreated {
                 artifact: aref(),
                 kind: s("log"),
@@ -434,6 +468,22 @@ mod tests {
                 status: s("passed"),
                 attempt: 1,
                 summary: s("ok"),
+            },
+            Event::VerificationCheckStarted {
+                check_id: s("k1"),
+                name: s("k1"),
+                command: Some(s("cargo test")),
+                index: 0,
+                total: 2,
+            },
+            Event::VerificationCheckFinished {
+                check_id: s("k1"),
+                name: s("k1"),
+                command: None,
+                status: s("failed"),
+                duration_ms: 12,
+                exit_code: Some(101),
+                output_tail: s("boom"),
             },
             Event::TodoUpdated {
                 todos: vec![Todo {

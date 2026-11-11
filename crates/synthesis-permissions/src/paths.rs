@@ -81,6 +81,23 @@ pub fn real_of(p: &Path) -> Option<PathBuf> {
     realpath_lenient(p)
 }
 
+/// Link count of an existing regular file with more than one hard link (unix only; else `None`).
+pub fn hard_links(p: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(p)
+            .ok()
+            .filter(|m| m.is_file() && m.nlink() > 1)
+            .map(|m| m.nlink())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = p;
+        None
+    }
+}
+
 /// `path.relative(from, to)` over components, `/`-joined.
 pub fn relative(from: &Path, to: &Path) -> String {
     let f: Vec<_> = from.components().collect();

@@ -12,9 +12,8 @@ mod app;
 mod chat;
 mod link;
 pub mod links;
-mod peers_view;
+pub mod peers_view;
 mod preview;
-mod project;
 mod resume;
 mod route;
 mod runtime;
@@ -22,27 +21,18 @@ mod setup;
 mod status;
 mod tty;
 
+pub use app::local_commands;
 pub use link::{EventWriter, UiLink};
 pub use links::{OpenTarget, Opener, PathTarget, SystemOpener};
-pub use resume::{Resume, list_saved, load_resume};
+pub use resume::{Resume, load_resume};
 pub use runtime::{
-    BoxFut, Exit, ExitReason, MemoryHook, OnceOptions, Options, TaskHost, render_once,
+    BoxFut, Exit, ExitReason, Hold, MemoryHook, OnceOptions, Options, TaskHost, render_once,
     run_interactive, size_from_env,
 };
 pub use setup::{SetupExit, SetupOptions, card as setup_card, run_setup};
 pub use status::{SandboxStatus, status_line};
+pub use synthesis_view::sessions::{SavedSession, list_saved};
 pub use tty::{ScriptedTty, Tty, replay};
-
-/// A session in the store, for the sidebar and the resume picker.
-#[derive(Clone, Debug, Default)]
-pub struct SavedSession {
-    pub id: String,
-    pub cwd: String,
-    pub title: String,
-    pub updated_at: String,
-    /// Epoch ms of `updated_at` (0 when unknown).
-    pub mtime: i64,
-}
 
 pub(crate) fn wall_clock_ms() -> i64 {
     std::time::SystemTime::now()

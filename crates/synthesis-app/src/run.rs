@@ -46,7 +46,7 @@ pub enum ModeArg {
     Plan,
     #[value(name = "dontAsk")]
     DontAsk,
-    /// Headless: no classifier is wired, so asks the classifier would review are denied.
+    /// Edits inside the workspace are allowed (as in acceptEdits); a judge model call reviews the other open calls (Bash, MCP, edits outside the workspace); ask, unclear answer, error or timeout is denied.
     Auto,
     /// Skips approval prompts. Still stops: deny rules, ask rules, critical rm, destructive MCP asks.
     /// Does NOT stop plain writes to protected paths (.git, .synt, .ssh ...), as in Claude Code. CLI only.
@@ -188,6 +188,12 @@ pub struct Common {
     /// Trust `<cwd>/.synt/config.json`, `.synt/settings.json`, agents and (with approval) MCP servers.
     #[arg(long)]
     pub trust_project: bool,
+    /// With a trusted project: only its DATA applies (agents, skills, memory, instruction files). Its settings and
+    /// provider config load with the untrusted filter (no allow rules, env, defaultMode, additionalDirectories,
+    /// verification checks, provider connection or credentials, no hooks, no MCP servers). Set by a host for a
+    /// REMEMBERED trust; never a flag.
+    #[arg(skip)]
+    pub project_exec_inert: bool,
     /// Start this project-scope MCP server (needs --trust-project; repeatable).
     #[arg(long, value_name = "NAME")]
     pub approve_mcp: Vec<String>,
@@ -332,7 +338,24 @@ pub enum Front {
     },
     /// Events go to the interactive app; the person approves.
     Tui,
+    /// A native front end (the desktop window): the host supplies the event writer, approver and
+    /// input provider instead of the TUI's `UiLink`. Behaves like `Tui` otherwise.
+    Native(Native),
 }
+
+/// The host side of [`Front::Native`].
+pub struct Native {
+    pub out: Box<dyn std::io::Write + Send>,
+    pub approver: Arc<dyn Approver>,
+    pub input: Arc<dyn synthesis_harness::InputProvider>,
+    /// Asked (twice) before the project's configuration is read and before any MCP server is started; an
+    /// `Err` ends the start with that message, so nothing the project names has run. The desktop uses it to
+    /// check that a folder's trusted configuration is still the approved one.
+    pub pre_start: Option<PreStart>,
+}
+
+/// See [`Native::pre_start`].
+pub type PreStart = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 
 /// Everything a front end needs, built once by [`prepare`].
 pub struct Prepared {
@@ -360,6 +383,8 @@ pub struct Prepared {
     pub models: Vec<String>,
     /// `effort_tiers` the model declares (enables `/effort`).
     pub effort_tiers: Vec<String>,
+    /// The model's window as known now (config, cache, built-in table); `None` = unknown.
+    pub context_window: Option<u64>,
     pub sandbox: synthesis_tui::SandboxStatus,
     /// The interactive app's side of the event/approval/input channels (`Front::Tui` only).
     pub link: Option<synthesis_tui::UiLink>,
@@ -372,6 +397,10 @@ pub struct Prepared {
     pub history: Vec<Message>,
     /// Set when the stored session itself continues: the last event seq it had.
     pub resumed_from_seq: Option<u64>,
+    /// Set with `resumed_from_seq` when the session continues on another model than the stored one.
+    pub model_changed: Option<String>,
+    /// The stored model that could not be used (the session runs on `label`; the stored id is kept).
+    pub stale_model: Option<String>,
 }
 
 /// The stored session `--resume ID` / `--continue` names and its live (non-compacted) messages.
@@ -470,14 +499,7 @@ fn rules_arg(v: &[String], flag: &str) -> Result<Vec<String>, String> {
     v.iter()
         .map(|r| {
             let r = r.trim();
-            let name = r.split('(').next().unwrap_or("");
-            let well_formed = !name.is_empty()
-                && name
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
-                && (r.len() == name.len() || r.ends_with(')'))
-                && r.len() <= 2000
-                && !r.chars().any(char::is_control);
+            let well_formed = synthesis_permissions::Permissions::is_well_formed_rule(r);
             if well_formed {
                 Ok(r.to_string())
             } else {
@@ -574,6 +596,32 @@ fn read_denied(perms: &Permissions, p: &Path) -> bool {
         == synthesis_permissions::Decision::Deny
 }
 
+/// `@file` / `@dir/` / `@"name with spaces"` mentions in a prompt become fenced data blocks after
+/// it (workspace containment, caps and secret-file rules are `expand_mentions`', read-deny rules
+/// are the session's). Returns the request and one notice per mention that named nothing.
+pub fn expand_file_mentions(
+    harness: &Harness,
+    ws: &WorkspaceContext,
+    request: String,
+) -> (String, Vec<String>) {
+    let perms = harness.permissions();
+    let deny = |p: &Path| {
+        let g = perms.lock().unwrap_or_else(|e| e.into_inner());
+        read_denied(&g, p)
+    };
+    let opts = synthesis_context::MentionOptions {
+        deny: Some(&deny),
+        ..Default::default()
+    };
+    let m = synthesis_context::expand_mentions(&request, ws, &opts);
+    let notes = m
+        .missing
+        .iter()
+        .map(|x| format!("@{}: no such file", sanitize_for_display(x)))
+        .collect();
+    (request + &m.text, notes)
+}
+
 /// Default `--max-wall-secs` of a headless `synt run` (one hour). Turns (50) and tool calls (200)
 /// are bounded by default already; a cost cap needs a configured price, so it has no default.
 const HEADLESS_WALL_SECS: u64 = 3600;
@@ -601,7 +649,15 @@ pub fn prepare(
         rules_arg(&c.allow, "--allow")?,
         rules_arg(&c.deny, "--deny")?,
     );
-    let is_tui = matches!(front, Front::Tui);
+    let is_tui = matches!(front, Front::Tui | Front::Native(_));
+    let gate: Option<PreStart> = match &front {
+        Front::Native(n) => n.pre_start.clone(),
+        _ => None,
+    };
+    // before any project file is read (settings, config, MCP definitions) and again before any process starts
+    if let Some(g) = &gate {
+        g()?;
+    }
     let h = homes(env)?;
     let mut synthesis_deny = synthesis_sandbox::synthesis_state_paths(&h.synthesis);
     // Before anything is created (worktree, store): a bad grant is a usage error.
@@ -628,18 +684,29 @@ pub fn prepare(
         user_home: &h.user,
         env,
     };
-    let cfg = load_config(env, &h, Some(cwd), trust)?;
+    // A remembered trust (`project_exec_inert`) is deliberately narrower than a trust of this run: the project's
+    // settings and provider config load with the UNTRUSTED filter (only what can narrow; no allow rules, env,
+    // defaultMode, additionalDirectories, verification checks, provider connection or credentials, and
+    // `disableAllHooks` cannot switch off the user's hooks). Agents, skills, memory and instruction files (data,
+    // not execution) still load.
+    let inert = c.project_exec_inert && c.trust_project;
+    let load_trust = if inert {
+        ProjectTrust::Untrusted
+    } else {
+        trust
+    };
+    let cfg = load_config(env, &h, Some(cwd), load_trust)?;
     let user_cfg = if c.trust_project {
         load_config(env, &h, Some(cwd), ProjectTrust::Untrusted)?
     } else {
         cfg.clone()
     };
-    let settings = load_settings_with_file(&lc, trust, c.settings.as_deref());
+    let settings = load_settings_with_file(&lc, load_trust, c.settings.as_deref());
     // A settings file we cannot read would silently drop its deny rules: stop before anything runs
     // (`synt run` exits 2).
     if !settings.errors.is_empty() {
         return Err(format!(
-            "settings error: {}\nsynth: fix or remove the file; nothing was started because its deny/ask rules would not apply",
+            "settings error: {}\nsynt: fix or remove the file; nothing was started because its deny/ask rules would not apply",
             sanitize_for_display(&settings.errors.join("; "))
         ));
     }
@@ -663,13 +730,84 @@ pub fn prepare(
             sanitize_for_display(&settings.env_refused.join(", "))
         );
     }
-    let res = resolve_provider(
+    let resume = resolve_resume(c, &h, cwd)?;
+    if resume.is_some() && (c.worktree || c.no_session_store) {
+        return Err(
+            "--resume/--continue cannot be combined with --worktree or --no-session-store".into(),
+        );
+    }
+    // a resumed session continues on the model it last used (`/model` is stored) unless
+    // --model says otherwise or --provider names another provider; a stored model that cannot be
+    // built falls back to the default
+    let stored = resume
+        .as_ref()
+        .filter(|_| c.model.is_none())
+        .and_then(|(id, _)| {
+            synthesis_session::Reader::open(&h.synthesis)
+                .ok()?
+                .get_session(id)
+                .ok()
+        })
+        .map(|r| r.model_config_id)
+        .filter(|m| {
+            c.provider
+                .as_deref()
+                .is_none_or(|p| m.starts_with(&format!("{}/", p.split(':').next().unwrap_or(p))))
+        });
+    let default = resolve_provider(
         c.provider.as_deref(),
         c.model.as_deref(),
         &cfg,
         &h.synthesis,
         env,
-    )?;
+    );
+    // a stored model that cannot be used is kept as it is (warned about, not overwritten)
+    let mut stored_unbuildable = false;
+    let mut model_warning = None;
+    let mut stale_model = None;
+    let res = match (default, stored) {
+        (Ok(r), Some(m)) if r.label != m => {
+            // judged on the user's own config only: a repository must not decide that a model is gone
+            let user_only = load_config(env, &h, None, ProjectTrust::Untrusted).ok();
+            let gone = user_only.as_ref().and_then(|u| {
+                stored_model_gone(
+                    u,
+                    &h.synthesis,
+                    &m,
+                    synthesis_providers::modelinfo::unix_now(),
+                )
+            });
+            let stored_res = match gone {
+                Some(why) => Err(why),
+                None => resolve_provider(c.provider.as_deref(), Some(&m), &cfg, &h.synthesis, env),
+            };
+            match stored_res {
+                Ok(s) => s,
+                Err(e) => {
+                    let w = format!(
+                        "stored model {} is not available ({}); using {}",
+                        sanitize_for_display(&m),
+                        sanitize_for_display(&e),
+                        sanitize_for_display(&r.label)
+                    )
+                    // one line: a label with a newline must not forge a second `synt: warning:`
+                    .replace(['\n', '\t'], " ");
+                    eprintln!("synt: warning: {w}");
+                    model_warning = Some(w);
+                    stale_model = Some(m.clone());
+                    stored_unbuildable = true;
+                    r
+                }
+            }
+        }
+        (Ok(r), _) => r,
+        // nothing configured by default: the stored model may still be buildable
+        (Err(e), Some(m)) => {
+            resolve_provider(c.provider.as_deref(), Some(&m), &cfg, &h.synthesis, env)
+                .map_err(|_| e)?
+        }
+        (Err(e), None) => return Err(e),
+    };
 
     // `synt.browser` comes from the user's own settings file only (the loader enforces it)
     let browser = crate::login::parse_settings(&settings.synthesis.browser);
@@ -766,18 +904,16 @@ pub fn prepare(
             }
         }
     }
-    let resume = resolve_resume(c, &h, cwd)?;
-    if resume.is_some() && (c.worktree || c.no_session_store) {
-        return Err(
-            "--resume/--continue cannot be combined with --worktree or --no-session-store".into(),
-        );
-    }
     let in_place = resume.is_some() && !c.fork_session;
     let sid = match &resume {
         Some((id, _)) if in_place => id.clone(),
         _ => uuid::Uuid::new_v4().to_string(),
     };
     let artifact_root = h.synthesis.join("sessions").join(&sid);
+    // before the worktree (a git call) and anything else a project's files could cause
+    if let Some(g) = &gate {
+        g()?;
+    }
     let (ws, worktree) = if c.worktree {
         if !extra_dirs.is_empty() {
             eprintln!("synt: warning: additionalDirectories are ignored with --worktree");
@@ -859,17 +995,19 @@ pub fn prepare(
             "bypassPermissions: tool calls run without approval; only deny rules, ask rules, critical removals and destructive MCP asks still stop them; protected paths are not stopped"
                 .to_string(),
         ),
-        Mode::Auto => notices.push(
-            "auto mode: a model call judges each call the rules leave open (allow / deny / ask); an unclear answer is an ask, which this run denies"
-                .to_string(),
-        ),
+        Mode::Auto => notices.push(format!(
+            "auto mode: a model call judges each call the rules leave open (allow / deny / ask); an unclear answer is an ask, which {}",
+            if is_tui { "you answer in a dialog" } else { "this run denies" }
+        )),
         _ => {}
     }
     for n in &notices {
         eprintln!("synt: WARNING: {n}");
     }
+    notices.extend(model_warning); // already printed above
 
     let mut resumed_from_seq = None;
+    let mut model_changed = None;
     let store: Option<Store> = if c.no_session_store {
         None
     } else {
@@ -907,6 +1045,8 @@ pub fn prepare(
             let to = match w.get_session(&sid).map_err(|e| e.to_string())?.status {
                 SessionStatus::Interrupted => Some(SessionStatus::Recovering),
                 SessionStatus::Idle => None,
+                // opened but never prompted (a /model switch before the first task)
+                SessionStatus::Preparing => Some(SessionStatus::Idle),
                 s if s.is_task_terminal() => Some(SessionStatus::Idle),
                 s => return Err(format!("session {sid} is {s:?} and cannot be resumed")),
             };
@@ -917,7 +1057,12 @@ pub fn prepare(
             } else {
                 session.status = SessionStatus::Idle;
             }
-            resumed_from_seq = Some(w.get_session(&sid).map_err(|e| e.to_string())?.event_cursor);
+            let rec = w.get_session(&sid).map_err(|e| e.to_string())?;
+            resumed_from_seq = Some(rec.event_cursor);
+            if rec.model_config_id != res.label && !stored_unbuildable {
+                w.set_model(&res.label).map_err(|e| e.to_string())?;
+                model_changed = Some(res.label.clone());
+            }
         }
         Some(Arc::new(Mutex::new(w)))
     };
@@ -936,6 +1081,7 @@ pub fn prepare(
         _ => None,
     };
     let cancel = CancellationToken::new();
+    let mut native_input = None;
     let (out, tee, prompt, link, approver, closed): (
         Box<dyn std::io::Write + Send>,
         _,
@@ -944,6 +1090,10 @@ pub fn prepare(
         Arc<dyn Approver>,
         _,
     ) = match front {
+        Front::Native(n) => {
+            native_input = Some(n.input);
+            (n.out, None, String::new(), None, n.approver, None)
+        }
         Front::Headless {
             prompt,
             tee,
@@ -1229,18 +1379,95 @@ pub fn prepare(
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
+    // `synt.modelInfo.fetch` is the user's own setting: a repository cannot switch it
+    if user_settings.synthesis.model_info_fetch != Some(false) {
+        start_model_info(
+            tokio_rt.handle(),
+            &cfg,
+            &user_cfg,
+            &h.synthesis,
+            env,
+            (
+                res.label.split('/').next().unwrap_or_default(),
+                &res.provider,
+            ),
+        );
+    }
+    // What a remembered trust leaves out is named in a notice. MCP servers are planned as for an untrusted
+    // project, and hooks are already the user's own (the settings above were loaded untrusted).
+    let exec_trust = if inert {
+        ProjectTrust::Untrusted
+    } else {
+        trust
+    };
+    let mut left_out: Vec<String> = vec![];
+    if inert {
+        let proj = load_settings_with_file(&lc, ProjectTrust::Trusted, c.settings.as_deref());
+        let mut left = |what: &str, present: bool| {
+            if present {
+                left_out.push(what.to_string());
+            }
+        };
+        left(
+            "hooks",
+            proj.hooks != settings.hooks || proj.disable_all_hooks != settings.disable_all_hooks,
+        );
+        left(
+            "permission allow rules",
+            proj.permissions.allow.len() > settings.permissions.allow.len(),
+        );
+        left(
+            "additionalDirectories",
+            proj.permissions.additional_directories.len()
+                > settings.permissions.additional_directories.len(),
+        );
+        left(
+            "defaultMode",
+            proj.permissions.default_mode != settings.permissions.default_mode,
+        );
+        left("env", proj.env != settings.env);
+        left(
+            "verification checks",
+            proj.synthesis.verification != settings.synthesis.verification,
+        );
+        left(
+            "provider/config (.synt/config.json)",
+            settings
+                .project_root
+                .join(".synt")
+                .join("config.json")
+                .is_file(),
+        );
+    }
     let mut mplan = crate::mcp::plan(
         &user_cfg,
         &settings,
         &user_settings,
         cwd,
-        trust,
+        exec_trust,
         &c.approve_mcp,
     );
+    if inert {
+        left_out.extend(
+            mplan
+                .skipped
+                .iter()
+                .filter(|(_, why)| why.starts_with("project not trusted"))
+                .map(|(n, _)| format!("MCP server {n}")),
+        );
+    }
+    if !left_out.is_empty() {
+        let w = format!(
+            "project settings ignored under a remembered trust (it is deliberately narrower than a trust of this run, and than VS Code; use \"Trust for this session\" to apply them): {}",
+            sanitize_for_display(&left_out.join(", "))
+        );
+        eprintln!("synt: warning: {w}");
+        notices.push(w);
+    }
     mplan.env_passthrough = crate::mcp::read_passthrough(&h.synthesis.join("settings.json"));
     mplan.guard = crate::mcp::read_guard(
         &h.synthesis.join("settings.json"),
-        (trust == ProjectTrust::Trusted)
+        (trust == ProjectTrust::Trusted && !inert)
             .then(|| settings.project_root.join(".synt").join("settings.json"))
             .as_deref(),
     );
@@ -1375,12 +1602,15 @@ pub fn prepare(
     if let Some(l) = &link {
         harness = harness.with_input(l.input());
     }
+    if let Some(i) = native_input {
+        harness = harness.with_input(i);
+    }
     if let Some(l) = peer_link {
         harness = harness.with_peers(l);
     }
     // "Allow always" persists to .synt/settings.local.json, but only in a trusted project: an
     // untrusted project's allow rules are ignored on load, so writing them would be misleading.
-    if trust == ProjectTrust::Trusted {
+    if trust == ProjectTrust::Trusted && !inert {
         let root = settings.project_root.clone();
         harness = harness.with_rule_store(Arc::new(move |rules| {
             if let Err(e) = synthesis_settings::persist_allow_rules(&root, rules) {
@@ -1423,17 +1653,9 @@ pub fn prepare(
         .into_iter()
         .map(|m| m.value)
         .collect();
-    let effort_tiers = res
-        .label
-        .strip_suffix(&format!("/{}", res.model))
-        .and_then(|id| cfg.providers.get(id)?.models_meta.as_ref()?.get(&res.model))
-        .and_then(|m| m.capabilities.get("effort_tiers")?.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    let caps = res.provider.capabilities(&res.model);
+    let effort_tiers = caps.effort_tiers;
+    let context_window = caps.context_window;
     let harness = Arc::new(harness);
     if let (Some(l), Some(server)) = (peer_listener, harness.peer_server()) {
         if let Some(w) = harness.peer_mailbox_worker(server.clone()) {
@@ -1461,6 +1683,7 @@ pub fn prepare(
         label: res.label,
         models,
         effort_tiers,
+        context_window,
         sandbox: sandbox_status(sandbox_mode, sandbox_mode != SandboxMode::Enforce),
         link,
         homes: h,
@@ -1468,6 +1691,8 @@ pub fn prepare(
         notes,
         history: resume.map(|(_, hist)| hist).unwrap_or_default(),
         resumed_from_seq,
+        model_changed,
+        stale_model,
     })
 }
 
@@ -1545,6 +1770,7 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
         memory,
         history,
         resumed_from_seq,
+        model_changed,
         ..
     } = p;
     // `@server:uri` mentions and `/mcp__server__prompt` commands; memory below sees what was typed
@@ -1559,6 +1785,8 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
             }
         };
     let mut notices = notices;
+    let (request, files_missing) = expand_file_mentions(&harness, &session.workspace, request);
+    let more: Vec<String> = more.into_iter().chain(files_missing).collect();
     for n in more {
         let n = sanitize_for_display(&n);
         eprintln!("synt: warning: {n}");
@@ -1573,7 +1801,12 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
             let mut session = session;
             let r = async {
                 match resumed_from_seq {
-                    Some(seq) => h2.resume_session(&session, seq),
+                    Some(seq) => {
+                        h2.resume_session(&session, seq);
+                        if let Some(m) = &model_changed {
+                            h2.model_changed(m);
+                        }
+                    }
                     None => h2.start_session(&mut session, "startup")?,
                 }
                 h2.session_hook(
@@ -1653,7 +1886,7 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
         });
         let code = match task.await {
             Ok(Ok(out)) => {
-                eprintln!("synt: task {:?}: {}", out.status, out.reason);
+                eprintln!("{}", task_line(out.status, &out.reason));
                 if let Some(h) = blocked_hint(&out) {
                     eprintln!("{h}");
                 }
@@ -1901,6 +2134,83 @@ fn agent_model_resolver(cfg: &Config, label: &str) -> synthesis_harness::ModelRe
     })
 }
 
+/// Starts fetching model info (context window, max output, ...) in the background for the active
+/// provider and for every other one that has declared models or `discover: true` and a credential
+/// (`discover: false` is never contacted; each provider gets only its own key). The active one
+/// updates `active` in place; the others come from the user's own config (`user_cfg`, never a
+/// project's) and only rewrite their cache file (read at the next start or `/model` switch). A fresh cache, a provider without a
+/// credential and any failure (offline, timeout) are silent; nothing here blocks the UI.
+pub fn start_model_info(
+    rt: &tokio::runtime::Handle,
+    cfg: &Config,
+    user_cfg: &Config,
+    synthesis_home: &Path,
+    env: &Env,
+    active: (&str, &Arc<dyn ModelProvider>),
+) {
+    let net = NetSettings {
+        connect_timeout: std::time::Duration::from_secs(3),
+        header_timeout: std::time::Duration::from_secs(5),
+        ..NetSettings::default()
+    };
+    let others = user_cfg.providers.iter().filter(|(id, _)| *id != active.0);
+    for (id, p) in cfg
+        .providers
+        .get_key_value(active.0)
+        .into_iter()
+        .chain(others)
+    {
+        let wanted = p.discover == Some(true) || p.models.as_ref().is_some_and(|m| !m.is_empty());
+        if p.discover == Some(false) || (id != active.0 && !wanted) {
+            continue;
+        }
+        let provider = if id == active.0 {
+            active.1.clone()
+        } else {
+            let cred = resolve_credential(id, Some(p), synthesis_home, env);
+            let spec = ProviderSpec::from_config(id, p, cred.as_ref());
+            let cache = synthesis_providers::modelinfo::cache_path(synthesis_home, id);
+            match spec
+                .and_then(|s| s.connect_cached(env, &net, RetryPolicy::default(), Some(cache)))
+            {
+                Ok(x) => x,
+                Err(_) => continue, // no credential or unusable settings
+            }
+        };
+        rt.spawn(async move {
+            let cancel = CancellationToken::new();
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                provider.refresh_model_info(false, &cancel),
+            )
+            .await;
+        });
+    }
+}
+
+/// A cached model list older than this no longer proves a stored model is gone.
+const STALE_CHECK_MAX_AGE_SECS: u64 = 7 * 24 * 3600;
+
+/// Why a stored `provider/model` can no longer be used although its provider is still configured:
+/// the provider's declared model list lacks it, or (no declared list, discovery on) a non-empty
+/// cached list younger than a week lacks it. No list, an empty or old cache: not checked. An
+/// unknown provider is an error of `resolve_provider`. `cfg` must be the user's own config (no
+/// project layer: a repository must not decide that a model is gone).
+fn stored_model_gone(cfg: &Config, home: &Path, label: &str, now: u64) -> Option<String> {
+    let (p, m) = label.split_once('/')?;
+    let prov = cfg.providers.get(p)?;
+    let why = || format!("not in the models of provider \"{p}\"");
+    match prov.models.as_ref().filter(|l| !l.is_empty()) {
+        Some(l) => (!l.iter().any(|x| x == m)).then(why),
+        None if prov.discover == Some(false) => None,
+        None => {
+            let c = crate::models::cache_of(home, p, prov)?;
+            let recent = now.saturating_sub(c.fetched_at) < STALE_CHECK_MAX_AGE_SECS;
+            (recent && !c.models.is_empty() && !c.models.contains_key(m)).then(why)
+        }
+    }
+}
+
 pub struct Resolved {
     pub provider: Arc<dyn ModelProvider>,
     pub model: String,
@@ -1924,7 +2234,12 @@ pub fn resolve_provider(
             let model = model_arg.map_or_else(|| "fake-model".to_string(), String::from);
             return Ok(Resolved {
                 provider: crate::fake::load(Path::new(script))?,
-                label: format!("fake/{model}"),
+                // `/model fake/other` passes the label as the model
+                label: if model.starts_with("fake/") {
+                    model.clone()
+                } else {
+                    format!("fake/{model}")
+                },
                 model,
                 secrets: vec![],
             });
@@ -1950,8 +2265,14 @@ pub fn resolve_provider(
             }),
         (_, m) => m.map(String::from),
     };
-    let parsed = parse_model(spec.as_deref(), cfg).map_err(|_| NO_MODEL.to_string())?;
-    let id = parsed.provider_id.ok_or("no provider configured")?;
+    // `--provider X` without a model: say what is missing about X (key first), not NO_MODEL
+    let (id, parsed) = match parse_model(spec.as_deref(), cfg) {
+        Ok(m) => (
+            m.provider_id.clone().ok_or("no provider configured")?,
+            Some(m),
+        ),
+        Err(_) => (provider_arg.ok_or(NO_MODEL)?.to_string(), None),
+    };
     let p = cfg
         .providers
         .get(&id)
@@ -1972,8 +2293,21 @@ pub fn resolve_provider(
             ),
         });
     }
+    let parsed = parsed.ok_or_else(|| {
+        format!("no model for provider \"{id}\": pass --model {id}/<model> or set SYNT_MODEL")
+    })?;
     let provider = ProviderSpec::from_config(&id, p, cred.as_ref())
-        .and_then(|s| s.connect(env, &NetSettings::default(), RetryPolicy::default()))
+        .and_then(|s| {
+            s.connect_cached(
+                env,
+                &NetSettings::default(),
+                RetryPolicy::default(),
+                Some(synthesis_providers::modelinfo::cache_path(
+                    synthesis_home,
+                    &id,
+                )),
+            )
+        })
         .map_err(|e| e.message().to_string())?;
     Ok(Resolved {
         provider,
@@ -1987,6 +2321,23 @@ pub fn resolve_provider(
 pub const EXIT_STDOUT_CLOSED: u8 = 141;
 
 /// `synt: blocked: approval needed for ... - rerun with --allow ...`.
+/// The stderr summary of a finished task; the machine-readable reason stays in the JSON result.
+fn task_line(status: TaskStatus, reason: &str) -> String {
+    let word = format!("{status:?}").to_lowercase();
+    let why = match reason {
+        "gate_not_applicable" => "no verification applied",
+        "verified" => "verified",
+        // the reason only repeats the status
+        r if r.eq_ignore_ascii_case(&word) => "",
+        r => &r.replace('_', " "),
+    };
+    if why.is_empty() {
+        format!("synt: task {word}")
+    } else {
+        format!("synt: task {word} ({why})")
+    }
+}
+
 fn blocked_hint(out: &TaskOutcome) -> Option<String> {
     if out.needed_permissions.is_empty() {
         return None;
@@ -2096,6 +2447,145 @@ fn artifact_to_dir(dir: PathBuf) -> PutArtifact {
 mod tests {
     use super::*;
 
+    /// A server that counts the connections it gets and answers an empty model list.
+    fn counting_server() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n2 = n.clone();
+        std::thread::spawn(move || {
+            for mut s in l.incoming().flatten() {
+                n2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut b = [0u8; 2048];
+                let _ = s.read(&mut b);
+                let body = r#"{"data":[]}"#;
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (url, n)
+    }
+
+    #[test]
+    fn stored_model_gone_by_declared_list_or_a_recent_nonempty_cache() {
+        use synthesis_providers::modelinfo::{self, CacheFile};
+        let home = tempfile::tempdir().unwrap();
+        let cfg = |models: &[&str], discover: Option<bool>| {
+            let mut c = Config::default();
+            c.providers.insert(
+                "p".into(),
+                synthesis_config::Provider {
+                    models: Some(models.iter().map(|m| m.to_string()).collect()),
+                    discover,
+                    ..Default::default()
+                },
+            );
+            c
+        };
+        let now = 1_000_000_000;
+        let gone = |c: &Config, l: &str| stored_model_gone(c, home.path(), l, now).is_some();
+        let cache = |ids: &[&str], at: u64| {
+            let p = synthesis_config::Provider::default();
+            let base = match p.protocol {
+                synthesis_config::Protocol::Anthropic => {
+                    synthesis_providers::anthropic::base_url(p.base_url.as_deref())
+                }
+                synthesis_config::Protocol::OpenAi => {
+                    synthesis_providers::openai::base_url(p.base_url.as_deref())
+                }
+            };
+            let f = CacheFile {
+                schema_version: modelinfo::SCHEMA_VERSION,
+                base_url: base.trim_end_matches('/').into(),
+                protocol: modelinfo::protocol_name(p.protocol).into(),
+                fetched_at: at,
+                models: ids
+                    .iter()
+                    .map(|i| (i.to_string(), Default::default()))
+                    .collect(),
+            };
+            modelinfo::write_cache(&modelinfo::cache_path(home.path(), "p"), &f).unwrap();
+        };
+        // declared list
+        assert!(gone(&cfg(&["a"], None), "p/cx/b"));
+        assert!(!gone(&cfg(&["a", "cx/b"], None), "p/cx/b"));
+        assert!(!gone(&cfg(&["a"], None), "other/b"));
+        // discover-only: no cache -> not checked
+        let d = cfg(&[], None);
+        assert!(!gone(&d, "p/cx/b"), "no cache: not flagged");
+        cache(&["a"], now - 60);
+        assert!(gone(&d, "p/cx/b"), "recent list without the id");
+        assert!(!gone(&d, "p/a"));
+        assert!(
+            !gone(&cfg(&[], Some(false)), "p/cx/b"),
+            "discover:false is not asked"
+        );
+        cache(&[], now - 60);
+        assert!(!gone(&d, "p/cx/b"), "empty cache: not flagged");
+        cache(&["a"], now - 30 * 24 * 3600);
+        assert!(!gone(&d, "p/cx/b"), "old cache: not flagged");
+    }
+
+    #[test]
+    fn startup_fetch_skips_discover_false_and_providers_nobody_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("h");
+        std::fs::create_dir_all(&home).unwrap();
+        let names = ["act", "listed", "nodisc", "bare"];
+        let servers: Vec<_> = names.iter().map(|_| counting_server()).collect();
+        let prov = |i: usize, extra: &str| {
+            format!(
+                r#""{}":{{"type":"anthropic","baseURL":"{}","apiKey":"{{env:SYNT_TEST_K}}"{extra}}}"#,
+                names[i], servers[i].0
+            )
+        };
+        let json = format!(
+            r#"{{"$schema":"config.json/v1","providers":{{{},{},{},{}}}}}"#,
+            prov(0, r#","models":["m"]"#),
+            prov(1, r#","models":["m"]"#),
+            prov(2, r#","models":["m"],"discover":false"#),
+            prov(3, "")
+        );
+        std::fs::write(home.join("synt.json"), json).unwrap();
+        let env = Env::from_pairs([
+            ("HOME", dir.path().to_str().unwrap()),
+            ("SYNT_HOME", home.to_str().unwrap()),
+            ("SYNT_TEST_K", "sk-test-0123456789abcdef"),
+        ]);
+        let h = homes(&env).unwrap();
+        let cfg = load_config(&env, &h, None, ProjectTrust::Untrusted).unwrap();
+        let res = resolve_provider(None, Some("act/m"), &cfg, &h.synthesis, &env).unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        start_model_info(
+            rt.handle(),
+            &cfg,
+            &cfg,
+            &h.synthesis,
+            &env,
+            ("act", &res.provider),
+        );
+        let hits = |i: usize| servers[i].1.load(std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..100 {
+            if hits(0) == 1 && hits(1) == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(
+            (hits(0), hits(1), hits(2), hits(3)),
+            (1, 1, 0, 0),
+            "active and listed are asked; discover:false and unlisted are not"
+        );
+    }
+
     #[test]
     fn agent_models_resolve_only_within_the_runs_provider() {
         let mut cfg = Config::default();
@@ -2162,6 +2652,22 @@ mod tests {
             needed_permissions: rules.iter().map(|r| r.to_string()).collect(),
             messages: vec![],
         }
+    }
+
+    #[test]
+    fn the_task_line_is_a_sentence() {
+        assert_eq!(
+            task_line(TaskStatus::Completed, "gate_not_applicable"),
+            "synt: task completed (no verification applied)"
+        );
+        assert_eq!(
+            task_line(TaskStatus::Unverified, "unverified"),
+            "synt: task unverified"
+        );
+        assert_eq!(
+            task_line(TaskStatus::Blocked, "approval_unavailable"),
+            "synt: task blocked (approval unavailable)"
+        );
     }
 
     #[test]

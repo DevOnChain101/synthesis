@@ -109,6 +109,11 @@ fn text(o: &ToolOutput) -> String {
     }
 }
 
+/// Asserts a tool call succeeded; the failure message carries the tool's own output.
+fn ok(o: &ToolOutput, what: &str) {
+    assert!(!o.is_error, "{what}: {}", text(o));
+}
+
 fn ref_of(tree: &str, needle: &str) -> String {
     let line = tree
         .lines()
@@ -196,7 +201,10 @@ async fn login_flow_sensitive_fill_policy_screenshot_and_session_close() {
 
     // No image support: artifact path + page summary; the PNG exists.
     let o = run("browser_screenshot", json!({})).await;
-    let path = o.meta["artifact_path"].as_str().unwrap().to_string();
+    let path = o.meta["artifact_path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no screenshot: {o:?}"))
+        .to_string();
     assert!(std::fs::metadata(&path).unwrap().len() > 100, "{path}");
     assert!(matches!(o.content, Content::Text(_)) && text(&o).contains(&path));
     // ... and artifact_read describes it instead of dumping bytes.
@@ -906,11 +914,8 @@ async fn using_a_saved_login_needs_the_person_unless_pre_approved() {
     let yes = person(true);
     let reg = mk(&yes, &[]);
     let c = ctx(d.path(), "ap2");
-    assert!(
-        !reg.execute("browser_navigate", nav.clone(), &c)
-            .await
-            .is_error
-    );
+    let o = reg.execute("browser_navigate", nav.clone(), &c).await;
+    ok(&o, "navigate after the person said yes");
     reg.execute("browser_snapshot", json!({}), &c).await;
     assert_eq!(yes.profiles.lock().unwrap().len(), 1);
     reg.close_session("ap2");
@@ -918,7 +923,8 @@ async fn using_a_saved_login_needs_the_person_unless_pre_approved() {
     let silent = person(false);
     let reg = mk(&silent, &["acme"]);
     let c = ctx(d.path(), "ap3");
-    assert!(!reg.execute("browser_navigate", nav, &c).await.is_error);
+    let o = reg.execute("browser_navigate", nav, &c).await;
+    ok(&o, "navigate with a pre-approved profile");
     assert!(silent.profiles.lock().unwrap().is_empty());
     reg.close_session("ap3");
 }
@@ -1118,11 +1124,8 @@ async fn a_short_secret_blocks_snapshots_and_screenshots_until_the_page_navigate
         &c,
     )
     .await;
-    assert!(
-        !reg.execute("browser_snapshot", json!({}), &c)
-            .await
-            .is_error
-    );
+    let o = reg.execute("browser_snapshot", json!({}), &c).await;
+    ok(&o, "snapshot");
     reg.close_session("short1");
 }
 
@@ -1218,7 +1221,8 @@ async fn a_short_secret_keeps_the_guard_after_a_long_one_and_covers_console_netw
         "browser_network",
         "browser_tabs",
     ] {
-        assert!(!reg.execute(t, json!({}), &c).await.is_error, "{t}");
+        let o = reg.execute(t, json!({}), &c).await;
+        ok(&o, t);
     }
     reg.close_session("g1");
 }
@@ -1249,7 +1253,7 @@ async fn the_person_is_not_asked_a_third_time_after_two_refusals() {
                 &c,
             )
             .await;
-        assert!(o.is_error);
+        assert!(o.is_error, "expected an error: {}", text(&o));
         last = text(&o);
     }
     assert_eq!(
@@ -1289,7 +1293,7 @@ async fn saved_login_refusals_are_cached_and_stdio_mcp_blocks_the_credential_too
     let mut last = String::new();
     for _ in 0..3 {
         let o = reg.execute("browser_navigate", nav.clone(), &c).await;
-        assert!(o.is_error);
+        assert!(o.is_error, "expected an error: {}", text(&o));
         last = text(&o);
     }
     assert_eq!(no.profiles.lock().unwrap().len(), 2);

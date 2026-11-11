@@ -182,9 +182,19 @@ impl Redaction {
             "context_length_exceeded",
             "maximum context length",
             "context window",
+            // request-size rejections (Anthropic `request_too_large`, OpenAI `string_above_max_length`,
+            // gateways); image-heavy histories hit these before the token limit
+            "request_too_large",
+            "request too large",
+            "payload too large",
+            "exceeds the maximum",
+            "too many images",
+            "image exceeds",
+            "string too long",
         ]
         .iter()
-        .any(|p| hay.contains(p));
+        .any(|p| hay.contains(p))
+            || status == Some(413);
         let kind = match (status, etype) {
             _ if overflow && status.is_none_or(|s| (400..500).contains(&s)) => {
                 ErrorKind::ContextLength
@@ -206,5 +216,35 @@ impl Redaction {
             e.retryable = false;
         }
         e
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn size_rejections_are_context_overflow() {
+        let r = Redaction::new([]);
+        let kind = |status: Option<u16>, body: &str| r.api_error(status, body, None).kind;
+        // shapes modelled on the documented Anthropic and OpenAI errors (not captured live)
+        let anthropic_413 = r#"{"type":"error","error":{"type":"request_too_large","message":"Request exceeds the maximum allowed number of bytes."}}"#;
+        let anthropic_img = r#"{"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content.1.image.source.base64: image exceeds 5 MB maximum: 6291456 bytes > 5242880 bytes"}}"#;
+        let openai = r#"{"error":{"message":"Invalid 'input[0].content[1].image_url': string too long. Expected a string with maximum length 20971520","type":"invalid_request_error","code":"string_above_max_length"}}"#;
+        let openai_ctx = r#"{"error":{"message":"This model's maximum context length is 128000 tokens.","type":"invalid_request_error","code":"context_length_exceeded"}}"#;
+        for (s, b) in [
+            (413, anthropic_413),
+            (400, anthropic_img),
+            (400, openai),
+            (400, openai_ctx),
+            (413, "<html>Request Entity Too Large</html>"),
+            (400, "too many images in request"),
+        ] {
+            assert_eq!(kind(Some(s), b), ErrorKind::ContextLength, "{s} {b}");
+        }
+        assert_eq!(
+            kind(Some(400), r#"{"error":{"message":"bad field"}}"#),
+            ErrorKind::InvalidRequest
+        );
     }
 }

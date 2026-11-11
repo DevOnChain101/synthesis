@@ -14,11 +14,32 @@ use tokio_util::sync::CancellationToken;
 
 pub type EventStream = BoxStream<'static, Result<StreamEvent, ProviderError>>;
 
+/// Most of an error response's body that is read; a provider may not stream one forever.
+const MAX_ERROR_BODY: usize = 64 << 10;
+
+/// The body of an error response, cut at [`MAX_ERROR_BODY`] with a marker.
+async fn error_text(mut resp: reqwest::Response) -> Result<String, reqwest::Error> {
+    let mut body = Vec::new();
+    while let Some(c) = resp.chunk().await? {
+        let room = MAX_ERROR_BODY - body.len();
+        body.extend_from_slice(&c[..c.len().min(room)]);
+        if c.len() >= room {
+            return Ok(format!("{}...[truncated]", String::from_utf8_lossy(&body)));
+        }
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
 #[derive(Debug, Clone)]
 pub struct NetSettings {
     pub connect_timeout: Duration,
     /// Max silence between two network chunks of a stream.
     pub idle_timeout: Duration,
+    /// Max wait for the response headers after the request was sent (a server that accepts the
+    /// connection and then says nothing).
+    pub header_timeout: Duration,
+    /// Longest wait for the body of one model-list page (a gateway may drip or never finish).
+    pub list_deadline: Duration,
 }
 
 impl Default for NetSettings {
@@ -26,6 +47,8 @@ impl Default for NetSettings {
         Self {
             connect_timeout: Duration::from_secs(30),
             idle_timeout: Duration::from_secs(300),
+            header_timeout: Duration::from_secs(120),
+            list_deadline: Duration::from_secs(30),
         }
     }
 }
@@ -130,6 +153,7 @@ pub(crate) struct Endpoint {
     pub retry: RetryPolicy,
     pub redaction: Redaction,
     pub idle_timeout: Duration,
+    pub header_timeout: Duration,
 }
 
 /// `Retry-After` as seconds (`retry-after-ms` also honoured). HTTP-date form is not parsed
@@ -163,13 +187,27 @@ impl Endpoint {
                     None => self.client.get(url),
                 };
                 rb = rb.headers(self.headers.clone());
-                let resp = rb.send().await.map_err(|e| self.redaction.transport(e))?;
+                // Not a `reqwest` timeout: that one would also cover the body of a stream.
+                let resp = tokio::time::timeout(self.header_timeout, rb.send())
+                    .await
+                    .map_err(|_| {
+                        ProviderError::new(
+                            ErrorKind::Network,
+                            format!(
+                                "the provider did not answer within {}s (no response headers)",
+                                self.header_timeout.as_secs()
+                            ),
+                        )
+                    })?
+                    .map_err(|e| self.redaction.transport(e))?;
                 let status = resp.status();
                 if status.is_success() {
                     return Ok(resp);
                 }
                 let ra = retry_after(resp.headers());
-                let text = resp.text().await.map_err(|e| self.redaction.transport(e))?;
+                let text = error_text(resp)
+                    .await
+                    .map_err(|e| self.redaction.transport(e))?;
                 Err(self.redaction.api_error(Some(status.as_u16()), &text, ra))
             })
             .await

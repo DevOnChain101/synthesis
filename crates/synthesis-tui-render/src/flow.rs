@@ -1,69 +1,16 @@
 //! Topology / flow canvas: port of `topology.js` (node states, z-ordered character canvas, wire
 //! glyphs, conveyor animation) and `flow.js` (phase bar, cards, ring / stack / fan / list layouts).
 
-use crate::model::{AgentRec, Component, Phase, Session, Tool, session_phase};
+use crate::model::{AgentRec, Component, Session};
 use crate::theme::*;
 use crate::util::{basename, one_line, to_fixed};
 use std::collections::BTreeSet;
+use synthesis_view::topology::{PhaseState, agent_state, component_state, is_guard, phase_state};
+pub use synthesis_view::topology::{St, is_active, is_busy};
 
-const DISPATCH_MS: i64 = 1800;
-const RETURN_HOLD_MS: i64 = 6000;
-const COMP_DISPATCH_MS: i64 = 600;
-const COMP_HOLD_MS: i64 = 2500;
 const CONVEYOR_MS: i64 = 50;
 const SLATE: Rgb = SILVER;
 const DIM: Rgb = WARM_DIM;
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum St {
-    Dispatch,
-    Working,
-    Returning,
-    Failed,
-    Done,
-}
-pub fn is_active(s: St) -> bool {
-    matches!(s, St::Dispatch | St::Working | St::Returning)
-}
-pub fn is_busy(s: St) -> bool {
-    matches!(s, St::Dispatch | St::Working)
-}
-
-fn agent_state(a: &AgentRec, now: i64) -> St {
-    if a.status == "running" {
-        return if now - a.start.unwrap_or(0) < DISPATCH_MS {
-            St::Dispatch
-        } else {
-            St::Working
-        };
-    }
-    if let Some(e) = a.end.filter(|e| *e != 0)
-        && now - e < RETURN_HOLD_MS
-    {
-        return St::Returning;
-    }
-    if a.status == "failed" {
-        St::Failed
-    } else {
-        St::Done
-    }
-}
-
-fn component_state(c: &Component, now: i64) -> St {
-    if c.open > 0 {
-        return if now - c.last_start.unwrap_or(0) < COMP_DISPATCH_MS {
-            St::Dispatch
-        } else {
-            St::Working
-        };
-    }
-    if let Some(e) = c.last_end.filter(|e| *e != 0)
-        && now - e < COMP_HOLD_MS
-    {
-        return St::Returning;
-    }
-    if c.error { St::Failed } else { St::Done }
-}
 
 pub enum NodeRef<'a> {
     Agent(&'a AgentRec),
@@ -415,76 +362,6 @@ fn ago(ms: i64) -> String {
     }
 }
 
-fn is_guard(c: &Component) -> bool {
-    let s = c
-        .event
-        .as_deref()
-        .filter(|e| !e.is_empty())
-        .unwrap_or(&c.name);
-    ["PreToolUse", "UserPromptSubmit", "PermissionRequest"]
-        .iter()
-        .any(|p| {
-            s.strip_prefix(p).is_some_and(|rest| {
-                !rest.starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
-            })
-        })
-}
-
-struct PhaseState<'a> {
-    current: Option<String>,
-    seen: BTreeSet<String>,
-    current_tool: Option<&'a Tool>,
-}
-
-fn phase_state(s: &Session, now: i64) -> PhaseState<'_> {
-    let since = s.last_prompt_at.unwrap_or(0);
-    let mut seen = BTreeSet::new();
-    let mut current_tool: Option<&Tool> = None;
-    for t in s.tools.values() {
-        if t.start.unwrap_or(0) >= since {
-            seen.insert(t.cat.to_string());
-        }
-        if t.end.is_none()
-            && current_tool.is_none_or(|c| t.start.unwrap_or(0) > c.start.unwrap_or(0))
-        {
-            current_tool = Some(t);
-        }
-    }
-    let mut last_guard = 0;
-    for c in s.components.values() {
-        let Some(le) = c.last_end.filter(|e| *e != 0) else {
-            continue;
-        };
-        if c.kind != "hook" || !is_guard(c) {
-            continue;
-        }
-        if le >= since {
-            seen.insert("guard".into());
-        }
-        last_guard = last_guard.max(le);
-    }
-    let agents_busy = s.agents.values().any(|a| a.status == "running");
-    let current = if last_guard != 0 && now - last_guard < 900 {
-        Some("guard".to_string())
-    } else if let Some(t) = current_tool {
-        Some(t.cat.to_string())
-    } else if agents_busy {
-        Some("orchestrate".into())
-    } else if session_phase(s, now).phase == Phase::Thinking {
-        Some("plan".into())
-    } else {
-        None
-    };
-    if let Some(c) = &current {
-        seen.remove(c);
-    }
-    PhaseState {
-        current,
-        seen,
-        current_tool,
-    }
-}
-
 type Seg = (String, Rgb, bool);
 #[derive(Clone, Default)]
 struct Line {
@@ -712,11 +589,15 @@ fn build_cards(
     let todos = &s.todos;
     let done = todos.iter().filter(|t| t.status == "completed").count();
     let doing = todos.iter().find(|t| t.status == "in_progress");
-    let ctx_max = opts.context_size.filter(|c| *c != 0.0).unwrap_or(200_000.0);
-    let ctx_pct = opts
-        .ctx_pct
-        .unwrap_or(s.context_used as f64 / ctx_max * 100.0)
-        .min(100.0);
+    // no window known (and no percent): nothing is guessed, the cards show "?"
+    let ctx_pct = opts.ctx_pct.or(opts
+        .context_size
+        .filter(|c| *c != 0.0)
+        .map(|c| s.context_used as f64 / c * 100.0));
+    let ctx_txt = ctx_pct.map_or("?".to_string(), |p| {
+        format!("{}%", to_fixed(p.min(100.0), 0))
+    });
+    let ctx_pct = ctx_pct.unwrap_or(0.0).min(100.0);
     let stage = |k: &str| ps.current.as_deref() == Some(k);
     let stage_glyph = |on: bool, i: usize| {
         if on {
@@ -859,10 +740,7 @@ fn build_cards(
                 ),
                 Line {
                     left: vec![
-                        seg(
-                            format!("ctx {}% ", to_fixed(ctx_pct, 0)),
-                            level_or_inactive(ctx_pct),
-                        ),
+                        seg(format!("ctx {ctx_txt} "), level_or_inactive(ctx_pct)),
                         seg(
                             format!("· {} tok", fmt_num(s.tokens.total() as f64)),
                             T_SUBTLE,
@@ -1003,7 +881,7 @@ fn build_cards(
                         seg("context ", T_SUBTLE),
                         seg(ctx_bar(ctx_pct, 10), level_col(ctx_pct)),
                     ],
-                    right: Some(seg(format!("{}%", to_fixed(ctx_pct, 0)), T_INACTIVE)),
+                    right: Some(seg(ctx_txt.clone(), T_INACTIVE)),
                 },
                 match v {
                     Some(v) => Line {
@@ -1180,6 +1058,53 @@ fn card_of<'a>(cards: &'a [(&'static str, Card)], id: &str) -> &'a Card {
     &cards.iter().find(|(i, _)| *i == id).unwrap().1
 }
 
+/// `n` attachment cells on an edge whose drawable cells are `start..start + len` (corners
+/// excluded): mirror-symmetric about the edge centre, evenly spaced (about `len / (n + 1)`). One
+/// point is the midpoint; for an even `len` the centre is the cell before the geometric middle.
+fn spread(start: i64, len: i64, n: usize) -> Vec<i64> {
+    spread_by(start, len, n, i64::MAX)
+}
+
+/// `spread` with the spacing capped at `max_step` (the fan packs its ports side by side).
+fn spread_by(start: i64, len: i64, n: usize, max_step: i64) -> Vec<i64> {
+    let m = n as i64;
+    let mut c2 = 2 * start + len - 1;
+    if n <= 1 {
+        return (0..n).map(|_| c2.div_euclid(2)).collect();
+    }
+    let mut t = (len / (m + 1)).clamp(1, max_step);
+    if m % 2 == 1 {
+        c2 -= c2 & 1;
+    } else if (c2 - t) % 2 != 0 {
+        if t > 1 {
+            t -= 1;
+        } else if max_step > 1 && (m - 1) * 2 < len {
+            t = 2;
+        } else {
+            c2 -= 1; // too tight for an exact mirror: one cell off, towards the start
+        }
+    }
+    (0..m).map(|k| (c2 + (2 * k - m + 1) * t) / 2).collect()
+}
+
+/// Midpoint cell of a node's top/bottom edge (`x`) or left/right edge (`y`).
+fn mid(start: i64, len: i64) -> i64 {
+    spread(start + 1, len - 2, 1)[0]
+}
+
+/// Vertical wire between the core (`px` on its top/bottom edge) and a node edge (`tx`): leaves the
+/// core at `px`, jogs on the middle row of the gap and enters the node at `tx`.
+fn vwire(px: i64, tx: i64, up: bool, core: &Pos, p: &Pos) -> Vec<Pt> {
+    let (top, gy, end) = if up {
+        let end = p.y + p.h;
+        (core.y - 1, end + (core.y - end).div_euclid(2), end)
+    } else {
+        let bottom = core.y + core.h;
+        (bottom, bottom + (p.y - bottom - 1).div_euclid(2), p.y - 1)
+    };
+    run(run(run(vec![(px, top)], px, gy), tx, gy), tx, end)
+}
+
 fn layout_ring(w: i64, h: i64, cards: &[(&'static str, Card)], ph: i64) -> Layout {
     let gap_x = ((w as f64 * 0.03).floor() as i64).clamp(3, 4);
     let col_w = (w - 2 * gap_x) / 3;
@@ -1224,11 +1149,12 @@ fn layout_ring(w: i64, h: i64, cards: &[(&'static str, Card)], ph: i64) -> Layou
     }
     let get = |id: &str| pos.iter().find(|(i, _)| *i == id).unwrap().1.clone();
     let core = get("core");
-    let ym = core.y + core.h / 2;
-    let top = core.y - 1;
     let bottom = core.y + core.h;
-    let tx0 = core.x + core.w - 6;
     let side_ports = core.h >= 5;
+    // ports per core edge, left to right / top to bottom
+    let xs3 = spread(core.x + 1, core.w - 2, if side_ports { 1 } else { 3 });
+    let ys3 = spread(core.y + 1, core.h - 2, if side_ports { 3 } else { 1 });
+    let ym = ys3[ys3.len() / 2];
     let mut links = vec![];
     for (slot, id) in RING {
         let p = get(id);
@@ -1241,36 +1167,27 @@ fn layout_ring(w: i64, h: i64, cards: &[(&'static str, Card)], ph: i64) -> Layou
             arrow,
         };
         match slot {
-            "t" => links.push(mk(
-                run(vec![(tx0, top)], tx0, p.y + p.h),
-                D,
-                U,
-                Port {
-                    x: tx0,
-                    y: core.y,
-                    side: "top",
-                },
-                Arrow {
-                    x: tx0,
-                    y: p.y + p.h - 1,
-                    ch: '▲',
-                },
-            )),
-            "b" => links.push(mk(
-                run(vec![(tx0, bottom)], tx0, p.y - 1),
-                U,
-                D,
-                Port {
-                    x: tx0,
-                    y: bottom - 1,
-                    side: "bottom",
-                },
-                Arrow {
-                    x: tx0,
-                    y: p.y,
-                    ch: '▼',
-                },
-            )),
+            "t" | "b" => {
+                let up = slot == "t";
+                let x = xs3[xs3.len() / 2];
+                let tx = mid(p.x, p.w);
+                let path = vwire(x, tx, up, &core, &p);
+                links.push(mk(
+                    path,
+                    if up { D } else { U },
+                    if up { U } else { D },
+                    Port {
+                        x,
+                        y: if up { core.y } else { bottom - 1 },
+                        side: if up { "top" } else { "bottom" },
+                    },
+                    Arrow {
+                        x: tx,
+                        y: if up { p.y + p.h - 1 } else { p.y },
+                        ch: if up { '▲' } else { '▼' },
+                    },
+                ));
+            }
             "l" => links.push(mk(
                 run(vec![(core.x - 1, ym)], p.x + p.w, ym),
                 R,
@@ -1304,20 +1221,20 @@ fn layout_ring(w: i64, h: i64, cards: &[(&'static str, Card)], ph: i64) -> Layou
             _ => {
                 let up = slot.starts_with('t');
                 let left_side = slot.ends_with('l');
-                let tx = if left_side { p.x + p.w - 4 } else { p.x + 3 };
-                let gy = if up {
-                    p.y + p.h + (core.y - (p.y + p.h)).div_euclid(2)
-                } else {
-                    bottom + (p.y - bottom - 1).div_euclid(2)
-                };
-                let end = if up { p.y + p.h } else { p.y - 1 };
+                let tx = mid(p.x, p.w);
                 let arrow = Arrow {
                     x: tx,
                     y: if up { p.y + p.h - 1 } else { p.y },
                     ch: if up { '▲' } else { '▼' },
                 };
                 if side_ports {
-                    let py = if up { core.y + 1 } else { core.y + core.h - 2 };
+                    let gy = if up {
+                        p.y + p.h + (core.y - (p.y + p.h)).div_euclid(2)
+                    } else {
+                        bottom + (p.y - bottom - 1).div_euclid(2)
+                    };
+                    let end = if up { p.y + p.h } else { p.y - 1 };
+                    let py = if up { ys3[0] } else { ys3[2] };
                     let vx = if left_side {
                         core.x - 2
                     } else {
@@ -1350,20 +1267,8 @@ fn layout_ring(w: i64, h: i64, cards: &[(&'static str, Card)], ph: i64) -> Layou
                         arrow,
                     ));
                 } else {
-                    let px = if left_side {
-                        core.x + 2
-                    } else {
-                        core.x + core.w - 3
-                    };
-                    let path = run(
-                        run(
-                            run(vec![(px, if up { top } else { bottom })], px, gy),
-                            tx,
-                            gy,
-                        ),
-                        tx,
-                        end,
-                    );
+                    let px = xs3[if left_side { 0 } else { 2 }];
+                    let path = vwire(px, tx, up, &core, &p);
                     links.push(mk(
                         path,
                         if up { D } else { U },
@@ -1496,6 +1401,16 @@ fn layout_stack(w: i64, h: i64, cards: &[(&'static str, Card)], ph: i64) -> Opti
     let get = |id: &str| pos.iter().find(|(i, _)| *i == id).unwrap().1.clone();
     let core = get("core");
     let mut links = vec![];
+    let is_left = |r: &SRow, c: usize| if cols == 2 { c == 0 } else { r.k % 2 == 1 };
+    let sides = |left: bool| {
+        (order.iter().filter(|r| !r.core && r.k > 0))
+            .map(|r| (0..r.ids.len()).filter(|&c| is_left(r, c) == left).count())
+            .sum::<usize>()
+    };
+    let (n_left, n_right) = (sides(true), sides(false));
+    let ys_left = spread(core.y + 1, core.h - 2, n_left);
+    let ys_right = spread(core.y + 1, core.h - 2, n_right);
+    let xs = spread(core.x + 1, core.w - 2, cols);
     for r in &order {
         if r.core {
             continue;
@@ -1503,55 +1418,42 @@ fn layout_stack(w: i64, h: i64, cards: &[(&'static str, Card)], ph: i64) -> Opti
         for (c, id) in r.ids.iter().enumerate() {
             let p = get(id);
             let up = r.side == "above";
+            let tx = mid(p.x, p.w);
             if r.k == 0 {
-                let x = p.x + p.w - if c == r.ids.len() - 1 { 6 } else { 4 };
-                if up {
-                    links.push(Link {
-                        id,
-                        path: run(vec![(x, core.y - 1)], x, p.y + p.h),
-                        start_bits: D,
-                        end_bits: U,
-                        port: Port {
-                            x,
-                            y: core.y,
-                            side: "top",
-                        },
-                        arrow: Arrow {
-                            x,
-                            y: p.y + p.h - 1,
-                            ch: '▲',
-                        },
-                    });
-                } else {
-                    links.push(Link {
-                        id,
-                        path: run(vec![(x, core.y + core.h)], x, p.y - 1),
-                        start_bits: U,
-                        end_bits: D,
-                        port: Port {
-                            x,
-                            y: core.y + core.h - 1,
-                            side: "bottom",
-                        },
-                        arrow: Arrow {
-                            x, y: p.y, ch: '▼'
-                        },
-                    });
-                }
+                let x = xs[c];
+                links.push(Link {
+                    id,
+                    path: vwire(x, tx, up, &core, &p),
+                    start_bits: if up { D } else { U },
+                    end_bits: if up { U } else { D },
+                    port: Port {
+                        x,
+                        y: if up { core.y } else { core.y + core.h - 1 },
+                        side: if up { "top" } else { "bottom" },
+                    },
+                    arrow: Arrow {
+                        x: tx,
+                        y: if up { p.y + p.h - 1 } else { p.y },
+                        ch: if up { '▲' } else { '▼' },
+                    },
+                });
                 continue;
             }
-            let left_side = if cols == 2 { c == 0 } else { r.k % 2 == 1 };
+            let left_side = is_left(r, c);
             let d = if cols == 2 {
                 r.k as i64
             } else {
                 (r.k as i64 + 1) / 2
-            };
-            let py = if up {
-                core.y + d
+            } as usize;
+            let (ys, n) = if left_side {
+                (&ys_left, n_left)
             } else {
-                core.y + core.h - 1 - d
+                (&ys_right, n_right)
             };
-            let ty = p.y + 1;
+            // up wires fill the side from the top (d = 1 first), down wires from the bottom
+            let py = ys[if up { d - 1 } else { n - d }];
+            let d = d as i64;
+            let ty = mid(p.y, p.h);
             if left_side {
                 let lx = lanes - d;
                 let path = run(
@@ -1619,20 +1521,23 @@ fn layout_fan(w: i64, h: i64, cards: &[(&'static str, Card)], ph: i64) -> Layout
     )];
     let mut links = vec![];
     let bottom = ph + core_h;
+    // the 8 ports sit side by side, centred on the core's bottom edge
+    let xs = spread_by(1, w - 2, FAN.len(), 1);
+    let nx = xs[FAN.len() - 1];
     for (i, id) in FAN.iter().enumerate() {
         let y = bottom + i as i64;
-        let lx = n - i as i64;
+        let lx = xs[FAN.len() - 1 - i];
         pos.push((
             id,
             Pos {
-                x: n + 2,
+                x: nx + 2,
                 y,
-                w: w - n - 2,
+                w: w - nx - 2,
                 h: 1,
                 compact: true,
             },
         ));
-        let path = run(run(vec![(lx, bottom)], lx, y), n, y);
+        let path = run(run(vec![(lx, bottom)], lx, y), nx, y);
         links.push(Link {
             id,
             path,
@@ -1644,7 +1549,7 @@ fn layout_fan(w: i64, h: i64, cards: &[(&'static str, Card)], ph: i64) -> Layout
                 side: "bottom",
             },
             arrow: Arrow {
-                x: n + 1,
+                x: nx + 1,
                 y,
                 ch: '►',
             },
@@ -2225,4 +2130,93 @@ pub fn render_flow(
 pub fn node_counts(s: &Session, now: i64) -> (usize, usize) {
     let nodes = collect_nodes(s, now);
     (nodes.iter().filter(|n| is_busy(n.st)).count(), nodes.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_point_is_the_midpoint_even_edges_take_the_cell_before_the_middle() {
+        assert_eq!(spread(10, 7, 1), [13]);
+        assert_eq!(spread(10, 8, 1), [13]);
+        assert_eq!(spread(0, 1, 1), [0]);
+        // a node box of width 9 / 10: midpoint of the interior (corners excluded)
+        assert_eq!((mid(5, 9), mid(5, 10)), (9, 9));
+        assert_eq!((mid(0, 3), mid(0, 4), mid(0, 5)), (1, 1, 2));
+    }
+
+    #[test]
+    fn points_are_distinct_ordered_inside_and_mirror_symmetric() {
+        for start in [0, 7] {
+            for len in 5..40 {
+                for n in 1..=5usize {
+                    let p = spread(start, len, n);
+                    assert_eq!(p.len(), n);
+                    assert!(p.windows(2).all(|w| w[0] < w[1]), "{p:?} {start} {len}");
+                    assert!(p[0] >= start && p[n - 1] < start + len, "{p:?}");
+                    let c2 = 2 * start + len - 1;
+                    for i in 0..n {
+                        let sum = p[i] + p[n - 1 - i];
+                        // exact mirror, or one cell towards the start when the edge is even
+                        // (odd count) or too short for the spacing
+                        assert!(
+                            sum == c2 || sum == c2 - 1,
+                            "{p:?} start {start} len {len} n {n}"
+                        );
+                    }
+                    if n > 2 {
+                        let d = p[1] - p[0];
+                        assert!(p.windows(2).all(|w| w[1] - w[0] == d), "even spacing {p:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn layouts_attach_at_midpoints_and_symmetrically() {
+        let s = Session::new("s");
+        let nodes = collect_nodes(&s, 0);
+        let ps = phase_state(&s, 0);
+        let cards = build_cards(&s, &nodes, &ps, 0, 0, FlowOpts::default());
+        let mut seen = 0;
+        for w in 24..=200 {
+            for h in (6..=70).step_by(2) {
+                let lay = layout_cards(w, h, &cards);
+                seen += 1;
+                let core = lay.get("core").unwrap().clone();
+                for side in ["top", "bottom", "left", "right"] {
+                    let horiz = side == "top" || side == "bottom";
+                    let mut at: Vec<i64> = lay
+                        .links
+                        .iter()
+                        .filter(|l| l.port.side == side)
+                        .map(|l| if horiz { l.port.x } else { l.port.y })
+                        .collect();
+                    at.sort();
+                    let (start, len) = if horiz {
+                        (core.x + 1, core.w - 2)
+                    } else {
+                        (core.y + 1, core.h - 2)
+                    };
+                    let want = if lay.pos.iter().any(|(_, p)| p.compact) {
+                        spread_by(start, len, at.len(), 1) // fan: side by side
+                    } else {
+                        spread(start, len, at.len())
+                    };
+                    assert_eq!(at, want, "{side} at {w}x{h}");
+                }
+                for l in &lay.links {
+                    let p = lay.get(l.id).unwrap();
+                    if matches!(l.arrow.ch, '▲' | '▼') {
+                        assert_eq!(l.arrow.x, mid(p.x, p.w), "{} at {w}x{h}", l.id);
+                    } else {
+                        assert_eq!(l.arrow.y, mid(p.y, p.h), "{} at {w}x{h}", l.id);
+                    }
+                }
+            }
+        }
+        assert!(seen > 1000, "only {seen} card layouts checked");
+    }
 }

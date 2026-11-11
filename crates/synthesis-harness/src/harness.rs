@@ -420,7 +420,8 @@ pub(crate) struct AgentCtx {
 pub(crate) struct AgentState {
     pub messages: Vec<Message>,
     pub recent: VecDeque<u64>,
-    pub compacted: bool,
+    /// Reactive (overflow) compactions this task; bounded so a hopeless request cannot loop.
+    pub overflow_compactions: u8,
     /// Provider usage anchors the size estimate; see `ContextMeter`.
     pub meter: synthesis_context::ContextMeter,
     /// Estimated tokens of the request apart from `messages` (system, tool definitions).
@@ -434,6 +435,8 @@ pub(crate) struct AgentState {
     pub drain_at: &'static str,
     /// The "model does not take images" notice was given for this agent.
     pub image_note: bool,
+    /// Images already reported as left out of requests (the notice repeats only when more go).
+    pub images_omitted: usize,
 }
 
 impl AgentState {
@@ -441,7 +444,7 @@ impl AgentState {
         Self {
             messages,
             recent: VecDeque::new(),
-            compacted: false,
+            overflow_compactions: 0,
             meter: Default::default(),
             fixed_raw: 0,
             requests: 0,
@@ -449,6 +452,7 @@ impl AgentState {
             auto_pause_until: 0,
             drain_at: "tool_round",
             image_note: false,
+            images_omitted: 0,
         }
     }
 }
@@ -494,12 +498,16 @@ pub struct Harness {
     /// Called with the allow rules a person accepted with "allow always" (to persist them).
     pub(crate) rule_store: Option<RuleStore>,
     pub(crate) verify_ok: Mutex<std::collections::HashSet<String>>,
+    /// Background processes whose `process.exited` was sent (BashOutput etc. report it again).
+    pub(crate) procs_exited: Mutex<std::collections::HashSet<String>>,
     /// Sub-agents of this session and their inboxes (messaging.md Part A).
     pub(crate) hub: crate::hub::Hub,
     /// Cross-session peers (messaging.md Part B); `None` = off.
     pub(crate) peers: Option<Arc<crate::peer::PeerLink>>,
     /// Passed commands of each task's latest verification report; taken by `verified_commands`.
     pub(crate) verified: Mutex<HashMap<String, Vec<VerifiedCommand>>>,
+    /// The "context window unknown" notice was shown.
+    pub(crate) window_noted: AtomicBool,
 }
 
 impl Harness {
@@ -541,7 +549,9 @@ impl Harness {
             read_ledger: Arc::default(),
             compact_wanted: Mutex::default(),
             reasoning_effort: Mutex::default(),
+            window_noted: AtomicBool::new(false),
             verify_ok: Mutex::default(),
+            procs_exited: Mutex::default(),
             rule_store: None,
             hub: crate::hub::Hub::default(),
             peers: None,
@@ -745,6 +755,17 @@ impl Harness {
     pub fn resume_session(&self, session: &AgentSession, resumed_from_seq: u64) {
         self.emit_started(session, "resume", Some(resumed_from_seq));
         self.peer_endpoint_event(true);
+    }
+
+    /// A resumed session continues on another model than the one stored: records `model.changed`.
+    pub fn model_changed(&self, model: &str) {
+        self.sink.emit(
+            &Scope::default(),
+            Event::ModelChanged {
+                model: model.into(),
+                effort: None,
+            },
+        );
     }
 
     /// Runs the `SessionStart` / `SessionEnd` / `Notification` hooks (outside any task) and

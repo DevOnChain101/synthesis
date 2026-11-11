@@ -66,6 +66,11 @@ fn status_json(st: &ProcessStatus) -> Value {
     })
 }
 
+/// `meta.process` for the harness: the `process.exited` payload once the process is gone.
+fn proc_meta(st: &ProcessStatus) -> Value {
+    json!({"process": st.to_event_info(), "running": st.running})
+}
+
 fn unknown(tool: &str, id: &str, e: &Error) -> ToolOutput {
     match e {
         Error::UnknownProcess(_) => ToolOutput::error(format!("{tool}: no process \"{id}\".")),
@@ -215,6 +220,7 @@ pub(crate) fn bash<'a>(
             "exit_code": r.exit_code, "signal": r.signal, "timed_out": r.timed_out,
             "truncated": r.truncated, "total_bytes": r.total_bytes,
             "artifact_path": r.log_path, "shell_kind": shell_kind,
+            "signal_name": r.signal.map(synthesis_terminal::signal_name),
         }));
         out.is_error = failed;
         if let Some(id) = &r.background_id {
@@ -296,7 +302,7 @@ pub(crate) fn bash_output<'a>(
                     ""
                 };
                 lock(&s.cursors).insert(id.into(), cursor);
-                ToolOutput::text(log_text(&data, id, &st, more))
+                ToolOutput::text(log_text(&data, id, &st, more)).with_meta(proc_meta(&st))
             }
             Err(e) => e,
         }
@@ -343,7 +349,8 @@ pub(crate) fn kill_shell<'a>(
         match sh.rt.get_status(&ctx.session_id, id) {
             Err(e) => return unknown("KillShell", id, &e),
             Ok(st) if !st.running => {
-                return ToolOutput::text(format!("{id} had already exited ({}).", state(&st)));
+                return ToolOutput::text(format!("{id} had already exited ({}).", state(&st)))
+                    .with_meta(proc_meta(&st));
             }
             Ok(_) => {}
         }
@@ -351,7 +358,7 @@ pub(crate) fn kill_shell<'a>(
             Ok(st) if st.running => {
                 ToolOutput::error(format!("KillShell: {id} is still running after SIGKILL."))
             }
-            Ok(_) => ToolOutput::text(format!("Killed {id}.")),
+            Ok(st) => ToolOutput::text(format!("Killed {id}.")).with_meta(proc_meta(&st)),
             Err(e) => e,
         }
     })
@@ -486,7 +493,7 @@ pub(crate) fn spawn<'a>(
             Ok((h, st)) => ToolOutput::text(
                 json!({"process_id": h.process_id, "pid": h.pid, "status": status_json(&st)["status"], "ready": h.ready, "log_cursor": h.log_cursor}).to_string(),
             )
-            .with_meta(json!({"process_id": h.process_id, "artifact_path": h.log_path, "shell_kind": kind(sh)})),
+            .with_meta(json!({"process_id": h.process_id, "pid": h.pid, "artifact_path": h.log_path, "shell_kind": kind(sh)})),
             Err(e) => e,
         }
     })
@@ -517,8 +524,9 @@ pub(crate) fn logs<'a>(
             max,
         ) {
             Ok((data, cursor, st, _)) => {
-                ToolOutput::text(log_text(&data, id, &st, &format!(", cursor {cursor}")))
-                    .with_meta(json!({"cursor": cursor}))
+                ToolOutput::text(log_text(&data, id, &st, &format!(", cursor {cursor}"))).with_meta(
+                    json!({"cursor": cursor, "process": st.to_event_info(), "running": st.running}),
+                )
             }
             Err(e) => e,
         }
@@ -541,7 +549,7 @@ pub(crate) fn signal<'a>(
             _ => Signal::Kill,
         };
         match kill(sh, ctx, "terminal_signal", id, sig).await {
-            Ok(st) => ToolOutput::text(status_json(&st).to_string()),
+            Ok(st) => ToolOutput::text(status_json(&st).to_string()).with_meta(proc_meta(&st)),
             Err(e) => e,
         }
     })

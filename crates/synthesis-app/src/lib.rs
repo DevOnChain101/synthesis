@@ -31,6 +31,7 @@ macro_rules! out {
 
 pub mod agents;
 pub mod ctx;
+pub mod doctor;
 pub mod events;
 #[cfg(feature = "test-provider")]
 pub mod fake;
@@ -40,7 +41,9 @@ pub mod mcpinput;
 pub mod memcmd;
 pub mod memory;
 mod memtools;
+pub mod models;
 pub mod peers;
+pub mod rename;
 pub mod rewind;
 pub mod run;
 pub mod taskdb;

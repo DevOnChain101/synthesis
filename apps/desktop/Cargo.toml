@@ -1,0 +1,87 @@
+[package]
+name = "synthesis-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Synthesis desktop app: native GPUI shell (docs/specs/desktop.md)"
+publish = false
+
+[lints]
+workspace = true
+
+# App icon for packaging (macOS .icns, Windows .ico, Linux png), from design/01-brand/app-icons.
+# GPUI has no API to set a window icon at run time; the bundle (or the .desktop file) carries it.
+[package.metadata.bundle]
+name = "Synthesis"
+identifier = "dev.synthesis.desktop"
+icon = ["assets/icons/synthesis.icns", "assets/icons/synthesis.ico", "assets/icons/synthesis-512.png", "assets/icons/synthesis-256.png"]
+
+[lib]
+name = "synthesis_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "synthesis-desktop"
+path = "src/main.rs"
+
+[features]
+# Development only: a scripted model for the engine test.
+test-provider = ["synthesis-app/test-provider"]
+# Development only: `--shot out.png --size WxH` renders the TUI view offscreen (headless Metal/wgpu, no window
+# server, no screen recording) to a PNG.
+shot = ["gpui/test-support", "gpui_platform/test-support", "dep:image"]
+
+[dependencies]
+# Exact pins (ADR: docs/specs/desktop.md section 3). `gpui-pre` is the maintainers' snapshot of
+# Zed's gpui, `gpui-component` pins the same one; never mix with a git `gpui`.
+gpui-component = "=0.8.1"
+gpui = { package = "gpui-pre", version = "=0.3.10" }
+# `font-kit` is what gives the window a text system; without it gpui draws no text at all. `wayland` and `x11` are
+# the Linux backends (gpui-pre-linux has them off by default: without them Linux gets a no-op text system and no window).
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.10", features = ["font-kit", "wayland", "x11"] }
+gpui-kit-assets = "=0.8.1"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+synthesis-app = { path = "../../crates/synthesis-app" }
+synthesis-mcp = { path = "../../crates/synthesis-mcp" }
+synthesis-tools = { path = "../../crates/synthesis-tools" }
+synthesis-events = { path = "../../crates/synthesis-events" }
+clap = { version = "4.6.7", features = ["derive"] }
+synthesis-config = { path = "../../crates/synthesis-config" }
+synthesis-core = { path = "../../crates/synthesis-core" }
+synthesis-harness = { path = "../../crates/synthesis-harness" }
+synthesis-permissions = { path = "../../crates/synthesis-permissions" }
+synthesis-providers = { path = "../../crates/synthesis-providers" }
+synthesis-tui = { path = "../../crates/synthesis-tui" }
+synthesis-tui-render = { path = "../../crates/synthesis-tui-render" }
+synthesis-view = { path = "../../crates/synthesis-view" }
+synthesis-hooks = { path = "../../crates/synthesis-hooks" }
+synthesis-memory = { path = "../../crates/synthesis-memory" }
+synthesis-session = { path = "../../crates/synthesis-session" }
+synthesis-settings = { path = "../../crates/synthesis-settings" }
+synthesis-settings-ui = { path = "../../crates/synthesis-settings-ui" }
+synthesis-terminal = { path = "../../crates/synthesis-terminal" }
+synthesis-tui-base = { path = "../../crates/synthesis-tui-base" }
+time = "0.3"
+serde_json = "1.0.154"
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "time", "sync", "macros"] }
+tokio-util = { version = "0.7.20", default-features = false }
+
+# Command Line Tools only (no Xcode): compile Metal shaders at runtime instead of `xcrun metal`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui-pre-apple = { version = "=0.3.10", features = ["runtime_shaders"] }
+
+# Windows: icon resource (build.rs). gpui already links the manifest. Already in the lock through gpui.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
+
+[dev-dependencies]
+# bounds assertions (`VisualTestContext::debug_bounds`) for the layout tests
+gpui = { package = "gpui-pre", version = "=0.3.10", features = ["test-support"] }
+tempfile = "3.27.0"
+# scripted model for the engine test (tests only; never in a release build)
+synthesis-app = { path = "../../crates/synthesis-app", features = ["test-provider"] }
