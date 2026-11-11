@@ -606,7 +606,7 @@ impl TuiView {
                             } else {
                                 text()
                             })
-                            .child(r.name.clone()),
+                            .child(synthesis_harness::sanitize_for_display(&r.name)),
                     )
                     .children(st.map(|(l, c)| {
                         div()

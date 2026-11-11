@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use synthesis_harness::sanitize_for_display as clean_line;
 
 use synthesis_config::Env;
@@ -372,17 +372,30 @@ fn tree_rows(paths: &[String], status: &HashMap<String, char>) -> (Vec<TreeRow>,
 /// Most files the plain walk collects, and the deepest directory it enters.
 const WALK_FILES: usize = 20_000;
 const WALK_DEPTH: usize = 32;
+/// Entries (files and directories) the walk looks at at most, and its wall-clock limit: a folder of empty
+/// directories or a slow mount ends the walk instead of holding the worker.
+const WALK_ENTRIES: usize = 100_000;
+const WALK_TIME: Duration = Duration::from_secs(2);
 
 /// The tree of a folder WITHOUT git: a plain directory walk, so nothing the folder holds (a `.git/config`
 /// naming programs, attributes, hooks) can run. Links are not followed (nor listed), `.git` is skipped, no
 /// ignore rules and no status letters. For a folder that is not trusted: the user only looks at file names.
 pub fn scan_plain(cwd: &Path) -> ProjectData {
-    fn walk(dir: &Path, rel: &str, depth: usize, out: &mut Vec<String>) {
+    fn walk(
+        dir: &Path,
+        rel: &str,
+        depth: usize,
+        out: &mut Vec<String>,
+        seen: &mut usize,
+        end: Instant,
+    ) {
         let Ok(rd) = std::fs::read_dir(dir) else {
             return;
         };
         for e in rd.flatten() {
-            if out.len() >= WALK_FILES {
+            *seen += 1;
+            if out.len() >= WALK_FILES || *seen >= WALK_ENTRIES || Instant::now() >= end {
+                *seen = WALK_ENTRIES;
                 return;
             }
             let (Ok(ft), Some(name)) = (e.file_type(), e.file_name().to_str().map(str::to_string))
@@ -399,7 +412,7 @@ pub fn scan_plain(cwd: &Path) -> ProjectData {
             };
             if ft.is_dir() {
                 if depth < WALK_DEPTH {
-                    walk(&e.path(), &path, depth + 1, out);
+                    walk(&e.path(), &path, depth + 1, out, seen, end);
                 }
             } else if ft.is_file() {
                 out.push(path);
@@ -407,13 +420,21 @@ pub fn scan_plain(cwd: &Path) -> ProjectData {
         }
     }
     let mut paths = vec![];
-    walk(cwd, "", 0, &mut paths);
+    let mut seen = 0;
+    walk(
+        cwd,
+        "",
+        0,
+        &mut paths,
+        &mut seen,
+        Instant::now() + WALK_TIME,
+    );
     paths.sort();
     let (rows, cut) = tree_rows(&paths, &HashMap::new());
     ProjectData {
         loaded: true,
         rows,
-        truncated: cut || paths.len() >= WALK_FILES,
+        truncated: cut || seen >= WALK_ENTRIES || paths.len() >= WALK_FILES,
         ..Default::default()
     }
 }
