@@ -1892,6 +1892,10 @@ impl TuiView {
                 let Some(e) = lu.live.engine.clone() else {
                     return;
                 };
+                if e.is_remote() {
+                    lu.live.note(crate::engine::NOT_REMOTE, true);
+                    return;
+                }
                 let (env, cwd, trusted) = (e.env.clone(), e.cwd.clone(), lu.live.trusted);
                 let job = cx.background_spawn(async move {
                     synthesis_app::doctor::rows_capped(

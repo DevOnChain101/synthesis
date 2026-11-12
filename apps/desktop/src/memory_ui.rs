@@ -551,6 +551,9 @@ impl Live {
             .engine
             .as_ref()
             .ok_or("the session is still starting")?;
+        if e.is_remote() {
+            return Err(crate::engine::NOT_REMOTE.into());
+        }
         Ctx::new(&e.synthesis_home, Path::new(&e.cwd), &e.env, self.trusted)
     }
 

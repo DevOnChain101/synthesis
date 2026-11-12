@@ -447,17 +447,27 @@ Hidden subcommand, not a public interface: it exists so the desktop app can driv
 - `{"msg":"ask.input","id","req":<NeedsUser>}`: a plan or question dialog.
 - `{"msg":"withdraw","id"}`: the ask is gone (answered, cancelled, expired).
 - `{"msg":"task_done","error":null|"text"}`: the task started by `send` ended.
+- `{"msg":"notice","text"}`: something to show (an event over the line limit was dropped on the engine side).
 Asks are answered by a person only: nothing on either side answers one; an ask nobody can answer is denied (cancel withdraws it).
 
 **Client to engine.** `{"id":N,"method":"...","params":{...}}`; `id` is a number the client chooses; unit methods carry no `params`. A line that does not parse is ignored (a note on stderr), the engine keeps serving.
 
 | method | params | result `ok` |
 |---|---|---|
-| `start` | `{cwd}`: an absolute folder path on the engine's own OS, once per process | `{sid,label,models,effort_tiers,context_window,notices,cwd,root,stale_model,trusted}` |
+| `start` | `{cwd}`: an absolute folder path on the engine's own OS, once per process | `{sid,mode,label,models,effort_tiers,context_window,notices,cwd,root,stale_model,trusted}` (`trusted` is always false) |
 | `send` | `{text}`: starts a task (`task_done` follows; an error result: one is running, or not started) | `{}` |
 | `answer` | `{id,choice}`: `once` \| `always` \| `deny` for an `ask.approval` | `{accepted}` (false: no such ask waiting) |
 | `answer_input` | `{id,reply}`: `{"answers":<json>}`, `{"plan":{"approved","message","mode"}}` or `null` | `{accepted}` |
+| `set_mode` | `{mode}`: any mode except bypassPermissions | `{mode}` |
 | `cancel` | none | `{}` |
 | `close` (alias `shutdown`) | none; the engine ends the session, answers `{worktree}`, and exits | `{worktree}` |
 
 Not yet in the protocol (PR3): sessions list/resume, workspaces, trust, rewind, clean, file system, images, mode and effort changes. A remote `Engine` answers those with "not supported in remote mode yet". The client bounds every wait (hello 15 s, start 120 s, close 10 s), kills the child when it is dropped, when its stream breaks or after 100 unreadable lines, and makes the engine's text printable before the window shows it.
+
+**Trust boundary (PR1 hardening).**
+- The engine is untrusted for project configuration: `synt engine --stdio` refuses `--trust-project` and `--approve-mcp`, and reports `trusted:false`. Per-folder trust over the protocol is a later PR with its own design decision.
+- A remote `Engine` takes `cwd` and `root` from the folder the person chose on the host, never from the engine; what the engine reports is kept as display text (`remote_cwd`, `remote_root`). The trust offer, the memory context and `/doctor` refuse remote mode. `Engine::mode()` is the mode the engine reported (in `start`, and after each accepted `set_mode`); bypassPermissions is never entered or offered remotely, and a plan reply may continue only in default or acceptEdits.
+- The protocol channel is private (unix): the engine dups fd 0 and fd 1 to close-on-exec handles, then points fd 0 at /dev/null and fd 1 at stderr, so hooks, `$EDITOR` and other descendants cannot read requests or forge lines. Windows has no equivalent without unsafe code (not used there today; the engine runs inside WSL).
+- Client limits: at most 5000 lines and 32 MiB per second, 64 open asks, 100 unreadable lines or repeated hellos, a 256-request writer queue; past a limit the engine is killed. A watchdog kills an engine that owes a line (a task runs, a call waits) and is silent for 10 minutes. `close` waits up to 30 s (SessionEnd hooks, MCP), then stdin EOF with a 3 s grace, then kill. Known limit: the window's own queue has no readable length, so the rate limits bound its growth, not its size.
+- The child gets only an allowlisted environment (`remote::allowed_env`: paths, locale, proxy, TLS roots, temp, `XDG_*`, `LC_*`, `SYNT_*`, `SystemRoot`); stderr is piped, capped (200 lines of 2 KiB), made printable and logged, never forwarded raw.
+- TODO (architect decision, not taken): how the provider API key reaches a remote engine and how trust is granted remotely. A key is never passed in argv.

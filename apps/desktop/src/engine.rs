@@ -459,8 +459,11 @@ pub struct Engine {
     /// Slash commands: the local list, skills and MCP prompts.
     pub commands: Vec<Command>,
     pub context_window: Option<u64>,
-    /// The folder is trusted for project config (`--trust-project`).
+    /// The folder is trusted for project config (`--trust-project`). Never true in remote mode.
     pub trusted: bool,
+    /// Remote mode only: what the engine says its folder and root are. Display text, never a path to open.
+    pub remote_cwd: Option<String>,
+    pub remote_root: Option<String>,
     pub synthesis_home: PathBuf,
     /// The environment the session started with (`/memory` and `/doctor` read it, names only).
     pub env: Env,
@@ -564,11 +567,16 @@ impl Engine {
             context_source: String::new(),
             effort_tiers: list("effort_tiers"),
             notices: list("notices"),
-            cwd: text("cwd"),
-            root: text("root"),
+            // `cwd` and `root` are what the host opens files by (the file tree, trust fingerprint, memory,
+            // workspace key): the folder the person chose on this machine, never a string the engine sent
+            cwd: project.to_string_lossy().into_owned(),
+            root: project.to_string_lossy().into_owned(),
+            remote_cwd: Some(text("cwd")),
+            remote_root: Some(text("root")),
             commands: vec![],
             context_window: v["context_window"].as_u64(),
-            trusted: v["trusted"].as_bool().unwrap_or(false),
+            // project trust is not available over the protocol: a remote session is untrusted
+            trusted: false,
             synthesis_home: PathBuf::new(),
             // the desktop's own environment is not the engine's: nothing is read here
             env: Env::from_pairs::<&str, &str>([]),
@@ -740,6 +748,8 @@ impl Engine {
             commands,
             context_window: info.context_window,
             trusted,
+            remote_cwd: None,
+            remote_root: None,
             synthesis_home: info.synthesis_home,
             env: env.clone(),
             live: Some(live),
@@ -796,16 +806,31 @@ impl Engine {
         rt.block_on(live.harness.peer_ask_user(to, text))
     }
 
+    /// The session runs in a child process (see `remote.rs`).
+    pub fn is_remote(&self) -> bool {
+        self.remote.is_some()
+    }
+
+    /// The permission mode in force: the engine's own, as it reported it for a remote engine.
     pub fn mode(&self) -> Mode {
-        self.live.as_ref().map_or(Mode::Default, Live::mode)
+        match (&self.live, &self.remote) {
+            (Some(l), _) => l.mode(),
+            (_, Some(r)) => r.mode(),
+            _ => Mode::Default,
+        }
     }
 
     pub fn set_mode(&self, mode: Mode) {
-        match self.live() {
-            Ok(l) => {
+        match (&self.live, &self.remote) {
+            (Some(l), _) => {
                 let _ = l.harness.set_mode(mode, false);
             }
-            Err(_) => self.unsupported(),
+            (_, Some(r)) => {
+                if let Err(e) = r.set_mode(mode) {
+                    let _ = self.tx.unbounded_send(UiMsg::BadEvent(e));
+                }
+            }
+            _ => {}
         }
     }
 

@@ -48,6 +48,10 @@ pub enum Call {
         id: String,
         reply: Option<Reply>,
     },
+    /// Changes the permission mode (never to bypassPermissions); the result carries `{mode}`.
+    SetMode {
+        mode: String,
+    },
     Cancel,
     #[serde(alias = "shutdown")]
     Close,
@@ -66,7 +70,8 @@ pub enum Reply {
 }
 
 impl Reply {
-    /// bypassPermissions is never entered by a reply (it takes its own confirmation).
+    /// A plan reply continues in default or acceptEdits only: never bypassPermissions, and no other
+    /// mode a reply could use to widen what runs unasked.
     pub fn into_user_reply(self) -> UserReply {
         match self {
             Reply::Answers(v) => UserReply::Answers(v),
@@ -80,7 +85,7 @@ impl Reply {
                 mode: mode
                     .as_deref()
                     .and_then(Mode::parse)
-                    .filter(|m| *m != Mode::BypassPermissions),
+                    .filter(|m| matches!(m, Mode::Default | Mode::AcceptEdits)),
             },
         }
     }
@@ -119,6 +124,9 @@ pub enum Out {
     Withdraw { id: String },
     #[serde(rename = "task_done")]
     TaskDone { error: Option<String> },
+    /// Something the engine wants shown (a dropped oversized event, ...).
+    #[serde(rename = "notice")]
+    Notice { text: String },
 }
 
 impl Out {
@@ -400,14 +408,28 @@ mod tests {
             vec![rule, Suggestion::SetMode(Mode::AcceptEdits)]
         );
         assert!(suggestion_from_json(&json!({"kind":"mode","mode":"bypassPermissions"})).is_none());
-        let plan = Reply::Plan {
+        for m in ["bypassPermissions", "auto", "dontAsk", "plan", "nonsense"] {
+            let plan = Reply::Plan {
+                approved: true,
+                message: None,
+                mode: Some(m.into()),
+            };
+            assert!(matches!(
+                plan.into_user_reply(),
+                UserReply::Plan { mode: None, .. }
+            ));
+        }
+        let ok = Reply::Plan {
             approved: true,
             message: None,
-            mode: Some("bypassPermissions".into()),
+            mode: Some("acceptEdits".into()),
         };
         assert!(matches!(
-            plan.into_user_reply(),
-            UserReply::Plan { mode: None, .. }
+            ok.into_user_reply(),
+            UserReply::Plan {
+                mode: Some(Mode::AcceptEdits),
+                ..
+            }
         ));
     }
 

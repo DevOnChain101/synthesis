@@ -306,3 +306,32 @@ fn stdin_eof_ends_the_session_and_the_process() {
     // what is left on stdout (the end of the session) is still protocol lines only
     while e.line().is_some() {}
 }
+
+#[test]
+fn the_mode_is_reported_and_changes_but_never_to_bypass() {
+    let mut e = engine(|_| json!([{"text": "ok"}]));
+    let info = e.start();
+    assert_eq!(info["mode"], "default");
+    assert_eq!(info["trusted"], false);
+    let id = e.call("set_mode", json!({"mode": "plan"}));
+    assert_eq!(e.result(id).1["ok"]["mode"], "plan");
+    for bad in ["bypassPermissions", "nonsense"] {
+        let id = e.call("set_mode", json!({"mode": bad}));
+        assert!(e.result(id).1["error"].is_string(), "{bad}");
+    }
+}
+
+#[test]
+fn project_trust_flags_are_refused() {
+    for flag in [["--trust-project"], ["--approve-mcp"]] {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
+        c.args(["engine", "--stdio"]).args(flag);
+        if flag[0] == "--approve-mcp" {
+            c.arg("db");
+        }
+        let o = c.stdin(Stdio::null()).output().unwrap();
+        assert!(!o.status.success());
+        assert!(o.stdout.is_empty(), "no protocol line before the refusal");
+        assert!(String::from_utf8_lossy(&o.stderr).contains("not supported"));
+    }
+}

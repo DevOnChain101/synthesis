@@ -19,6 +19,9 @@ use tokio_util::sync::CancellationToken;
 use crate::asks::Asks;
 use crate::run::{Prepared, finish_store};
 
+/// The refusal of a second task while one runs (also what a remote engine says).
+pub const ALREADY_RUNNING: &str = "a task is already running";
+
 pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -275,7 +278,7 @@ impl Live {
     /// Takes the session out of its slot for a task; the caller puts it back.
     pub fn take_session(&self) -> Result<(AgentSession, CancellationToken), &'static str> {
         let Some(session) = lock(&self.session).take() else {
-            return Err("a task is already running");
+            return Err(ALREADY_RUNNING);
         };
         let token = CancellationToken::new();
         *lock(&self.cancel) = Some(token.clone());

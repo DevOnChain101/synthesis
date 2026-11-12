@@ -11,10 +11,11 @@ use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 use synthesis_config::Env;
 use synthesis_harness::sanitize_for_display;
+use synthesis_permissions::Mode;
 
 use crate::asks::Asks;
 use crate::host::{Info, Live, lock};
-use crate::proto::{Call, Out, Request, read_line};
+use crate::proto::{Call, MAX_LINE, Out, Request, read_line};
 use crate::run::{Common, Front, Limits, Native, prepare};
 
 /// The single writer of stdout: whole lines under one lock, flushed.
@@ -46,19 +47,56 @@ impl Wire {
     }
 }
 
-/// The event sink's `Write`: each JSONL line the sink writes becomes one protocol line.
+/// The event sink's `Write`: each JSONL line the sink writes becomes one protocol line. A line over `cap`
+/// is dropped (the rest of it is skipped) and the client is told, so it never has to treat it as hostile.
 struct EventLines {
     wire: Arc<Wire>,
     buf: Vec<u8>,
+    cap: usize,
+    /// Inside a dropped line: skip up to its end.
+    skipping: bool,
+}
+
+impl EventLines {
+    fn new(wire: Arc<Wire>) -> Self {
+        Self {
+            wire,
+            buf: vec![],
+            cap: MAX_LINE,
+            skipping: false,
+        }
+    }
+
+    fn dropped(&self) {
+        self.wire.msg(&Out::Notice {
+            text: "an event over the line limit was dropped".into(),
+        });
+    }
 }
 
 impl std::io::Write for EventLines {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.buf.extend_from_slice(bytes);
-        while let Some(i) = self.buf.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = self.buf.drain(..=i).collect();
-            if line.len() > 1 {
-                self.wire.line(&line[..line.len() - 1]);
+        let mut rest = bytes;
+        while let Some(i) = rest.iter().position(|b| *b == b'\n') {
+            let (head, tail) = rest.split_at(i);
+            rest = &tail[1..];
+            if !self.skipping {
+                self.buf.extend_from_slice(head);
+                if self.buf.len() > self.cap {
+                    self.dropped();
+                } else if !self.buf.is_empty() {
+                    self.wire.line(&self.buf);
+                }
+            }
+            self.skipping = false;
+            self.buf.clear();
+        }
+        if !self.skipping {
+            self.buf.extend_from_slice(rest);
+            if self.buf.len() > self.cap {
+                self.buf.clear();
+                self.skipping = true;
+                self.dropped();
             }
         }
         Ok(bytes.len())
@@ -68,11 +106,11 @@ impl std::io::Write for EventLines {
     }
 }
 
-fn started(info: &Info, sid: &str, trusted: bool) -> Value {
+fn started(info: &Info, live: &Live) -> Value {
     json!({
-        "sid": sid, "label": info.label, "models": info.models, "effort_tiers": info.effort_tiers,
+        "sid": live.sid, "mode": live.mode().as_str(), "label": info.label, "models": info.models, "effort_tiers": info.effort_tiers,
         "context_window": info.context_window, "notices": info.notices, "cwd": info.cwd,
-        "root": info.root, "stale_model": info.stale_model, "trusted": trusted,
+        "root": info.root, "stale_model": info.stale_model, "trusted": false,
     })
 }
 
@@ -92,17 +130,14 @@ fn start(
         Arc::new(move |a| wire.msg(&Out::from_ask(a)))
     };
     let native = Native {
-        out: Box::new(EventLines {
-            wire: wire.clone(),
-            buf: vec![],
-        }),
+        out: Box::new(EventLines::new(wire.clone())),
         approver: asks.approver(notify.clone()),
         input: asks.input(notify),
         pre_start: None,
     };
     let p = prepare(common, cwd, env, &Limits::default(), Front::Native(native))?;
     let (live, info) = Live::begin(p, asks.clone(), vec![], common.cleanup_worktree)?;
-    let v = started(&info, &live.sid, common.trust_project);
+    let v = started(&info, &live);
     Ok((live, v))
 }
 
@@ -167,6 +202,20 @@ pub fn serve(
                 let ok = asks.answer_input(&ask, reply.map(|r| r.into_user_reply()));
                 wire.result(id, Ok(json!({"accepted": ok})));
             }
+            Call::SetMode { mode } => {
+                let r = match (&live, Mode::parse(&mode)) {
+                    (None, _) => Err("not started: send start first".to_string()),
+                    (_, None | Some(Mode::BypassPermissions)) => {
+                        Err("that mode cannot be set over the protocol".to_string())
+                    }
+                    (Some(l), Some(m)) => l
+                        .harness
+                        .set_mode(m, false)
+                        .map(|_| json!({"mode": l.mode().as_str()}))
+                        .map_err(|e| e.to_string()),
+                };
+                wire.result(id, r);
+            }
             Call::Cancel => {
                 if let Some(l) = &live {
                     l.cancel();
@@ -187,8 +236,41 @@ pub fn serve(
     end
 }
 
-/// `synt engine --stdio`: the process's own stdin and stdout.
+/// The protocol's own handles, and the process's fd 0 and fd 1 pointed away from them: hooks, `$EDITOR`
+/// and every other descendant inherits /dev/null as stdin and stderr as stdout, so none can read the
+/// client's requests or forge a protocol line. The private handles are close-on-exec.
+#[cfg(unix)]
+fn protect() -> std::io::Result<(std::fs::File, std::fs::File)> {
+    use std::os::fd::AsFd;
+    let input = std::io::stdin().as_fd().try_clone_to_owned()?;
+    let output = std::io::stdout().as_fd().try_clone_to_owned()?;
+    rustix::stdio::dup2_stdin(std::fs::File::open("/dev/null")?)?;
+    rustix::stdio::dup2_stdout(std::io::stderr().as_fd())?;
+    Ok((input.into(), output.into()))
+}
+
+/// `synt engine --stdio`: stdin and stdout of this process. Project trust is not available over the
+/// protocol yet, so the trust flags are refused: an engine is untrusted for project configuration.
 pub fn run_stdio(common: &Common, env: &Env) -> Result<u8, String> {
+    if common.trust_project || !common.approve_mcp.is_empty() {
+        return Err(
+            "engine --stdio: --trust-project and --approve-mcp are not supported (the project stays untrusted)"
+                .into(),
+        );
+    }
+    #[cfg(unix)]
+    {
+        let (input, output) = protect().map_err(|e| format!("engine: stdio: {e}"))?;
+        serve(
+            common,
+            env,
+            std::io::BufReader::new(input),
+            Box::new(output),
+        )?;
+    }
+    // shortcut: Windows has no private-handle redirection without unsafe code (forbidden here); a
+    // descendant there can still reach the std handles. Upgrade when the engine is run on Windows.
+    #[cfg(not(unix))]
     serve(
         common,
         env,
@@ -196,4 +278,99 @@ pub fn run_stdio(common: &Common, env: &Env) -> Result<u8, String> {
         Box::new(std::io::stdout()),
     )?;
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            lock(&self.0).extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_oversized_event_is_dropped_with_a_notice_and_the_next_one_passes() {
+        let sink = Sink::default();
+        let wire = Arc::new(Wire(Mutex::new(Box::new(sink.clone()))));
+        let mut w = EventLines::new(wire);
+        w.cap = 16;
+        w.write_all(b"short\n").unwrap();
+        // 40 bytes over three writes: dropped as soon as it is over the cap, rest skipped
+        w.write_all(&[b'x'; 20]).unwrap();
+        w.write_all(&[b'x'; 20]).unwrap();
+        w.write_all(b"\nafter\n").unwrap();
+        // a long line that arrives whole
+        w.write_all(&[b'y'; 30]).unwrap();
+        w.write_all(b"\nlast\n").unwrap();
+        let out = String::from_utf8(lock(&sink.0).clone()).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 5, "{out}");
+        assert_eq!(lines[0], "short");
+        assert!(lines[1].contains(r#""msg":"notice""#));
+        assert_eq!(lines[2], "after");
+        assert!(lines[3].contains(r#""msg":"notice""#));
+        assert_eq!(lines[4], "last");
+    }
+
+    /// Body of the re-run child below (ignored: only run when asked for by name).
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn protect_child() {
+        use std::io::BufRead;
+        let (input, mut output) = protect().unwrap();
+        // a descendant inheriting the std handles: it must see /dev/null and stderr
+        let st = std::process::Command::new("sh")
+            .args(["-c", "echo FORGED; read x && echo GOT:$x"])
+            .status()
+            .unwrap();
+        assert!(st.success() || st.code() == Some(1));
+        let mut line = String::new();
+        std::io::BufReader::new(input).read_line(&mut line).unwrap();
+        writeln!(output, "PRIVATE:{}", line.trim()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descendants_cannot_forge_or_steal_protocol_lines() {
+        use std::process::{Command, Stdio};
+        let mut c = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "engine_server::tests::protect_child",
+                "--nocapture",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(c.stdin.take().unwrap(), "STOLEN").unwrap();
+        let o = c.wait_with_output().unwrap();
+        let (out, err) = (
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr),
+        );
+        assert!(out.contains("PRIVATE:STOLEN"), "{out} / {err}");
+        assert!(
+            !out.contains("FORGED"),
+            "a descendant wrote to the protocol: {out}"
+        );
+        assert!(
+            !out.contains("GOT:"),
+            "a descendant read the protocol: {out}"
+        );
+        assert!(err.contains("FORGED"), "{err}");
+    }
 }
