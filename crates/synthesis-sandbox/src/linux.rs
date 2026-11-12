@@ -310,46 +310,66 @@ fn helper_next_to(exe: &Path) -> Option<PathBuf> {
 /// `umask 0002` gives `mkdir -p` and `target/release`.
 #[cfg(any(target_os = "linux", all(test, unix)))]
 pub(crate) fn helper_check(exe: &Path) -> Result<PathBuf, String> {
-    // The owner of /proc/self is the process's effective uid (no libc call needed). Off Linux
-    // (test builds only) there is no such file and the owner checks are skipped.
+    use std::os::unix::fs::MetadataExt;
+    // The owner of /proc/self is the process's effective uid (no libc call needed). If it cannot
+    // be read the helper is NOT trusted (fail closed). Off Linux (test builds only) there is no
+    // /proc: the owner of the executable's directory stands in.
+    #[cfg(target_os = "linux")]
     let euid = std::fs::metadata("/proc/self")
-        .ok()
-        .map(|m| std::os::unix::fs::MetadataExt::uid(&m));
-    let group = std::fs::read_to_string("/etc/group").ok();
-    let trusted = |owner: u32, gid: u32| {
-        let empty = group
-            .as_deref()
-            .is_some_and(|g| group_has_no_members(g, gid));
-        // yours: your private group (gid == uid, no listed members); root's: root's own group, or a
-        // system group (gid < 1000) that lists no members (Debian `/usr/local` is root:staff 2775)
-        (euid == Some(owner) && owner == gid && empty)
-            || (owner == 0 && (gid == 0 || (gid < 1000 && empty)))
-    };
+        .map(|m| m.uid())
+        .map_err(|e| format!("cannot determine the effective uid (/proc/self: {e}); the sandbox helper is not trusted"))?;
+    #[cfg(not(target_os = "linux"))]
+    let euid = exe
+        .parent()
+        .and_then(|d| std::fs::metadata(d).ok())
+        .map(|m| m.uid())
+        .ok_or("cannot determine the effective uid")?;
+    let group = std::fs::read_to_string("/etc/group").unwrap_or_default();
+    let trusted = |owner: u32, gid: u32, own: bool| group_trusted(&group, euid, owner, gid, own);
     helper_check_with(exe, euid, &trusted)
 }
 
-/// `/etc/group` text: the group `gid` exists and lists no members (a user's primary group is not
-/// listed there, so an empty list is what a private user-private group looks like).
+/// Whether write access for group `gid` on a directory owned by `owner` is acceptable, from the
+/// `/etc/group` text. `/etc/group` does not list primary-group members, so only groups that are
+/// private by construction or by name are trusted:
+/// - yours: `owner == euid`, `gid == owner` (user-private group) and EVERY line for that gid
+///   lists nobody;
+/// - root's: `gid == 0` and every line for gid 0 lists nobody;
+/// - `staff` (name `staff`, gid 50: Debian's `/usr/local` is root:staff 2775) on an ANCESTOR
+///   only, never on the helper's own directory.
+///
+/// Everything else (service accounts' groups such as www-data or mail, `users`, ...) is refused.
 #[cfg(any(target_os = "linux", all(test, unix)))]
-fn group_has_no_members(text: &str, gid: u32) -> bool {
-    text.lines().any(|l| {
-        let f: Vec<_> = l.split(':').collect();
-        f.len() >= 4 && f[2].parse() == Ok(gid) && f[3].trim().is_empty()
-    })
+fn group_trusted(text: &str, euid: u32, owner: u32, gid: u32, own: bool) -> bool {
+    let lines: Vec<(&str, bool)> = text
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<_> = l.split(':').collect();
+            (f.len() >= 4 && f[2].parse() == Ok(gid)).then(|| (f[0], f[3].trim().is_empty()))
+        })
+        .collect();
+    let all_empty = !lines.is_empty() && lines.iter().all(|(_, empty)| *empty);
+    (owner == euid && owner == gid && all_empty)
+        || (owner == 0 && gid == 0 && all_empty)
+        || (owner == 0
+            && !own
+            && gid == 50
+            && lines.iter().all(|(n, _)| *n == "staff")
+            && !lines.is_empty())
 }
 
 /// What is wrong with a directory on the helper's path, if anything (pure, so the rules are
 /// tested with root-owned and foreign modes too). `own` = the helper's own directory;
-/// `group_trusted(owner, gid)` says whether write access for that group is acceptable.
+/// `group_trusted(owner, gid, own)` says whether write access for that group is acceptable.
 #[cfg(any(target_os = "linux", all(test, unix)))]
 fn dir_problem(
     (mode, uid, gid): (u32, u32, u32),
     own: bool,
-    euid: Option<u32>,
-    group_trusted: &dyn Fn(u32, u32) -> bool,
+    euid: u32,
+    group_trusted: &dyn Fn(u32, u32, bool) -> bool,
 ) -> Option<&'static str> {
     let (world, sticky, group_w) = (mode & 0o002 != 0, mode & 0o1000 != 0, mode & 0o020 != 0);
-    if !(uid == 0 || euid.is_none_or(|e| uid == e)) {
+    if uid != 0 && uid != euid {
         Some("is not owned by root or you")
     } else if world && (own || !sticky) {
         Some("is world-writable")
@@ -357,8 +377,10 @@ fn dir_problem(
         // A sticky world-writable ancestor (`/tmp`: 1777) is tolerated: others cannot rename or
         // remove entries they do not own. Its group bit is moot, anyone can write it anyway.
         None
-    } else if group_w && !group_trusted(uid, gid) {
-        Some("is group-writable (refused unless it is yours with your private group, or root's)")
+    } else if group_w && !group_trusted(uid, gid, own) {
+        Some(
+            "is group-writable (refused unless it is yours with your private group, root's own group, or `staff` above the helper's directory)",
+        )
     } else {
         None
     }
@@ -369,8 +391,8 @@ fn dir_problem(
 #[cfg(any(target_os = "linux", all(test, unix)))]
 pub(crate) fn helper_check_with(
     exe: &Path,
-    euid: Option<u32>,
-    group_trusted: &dyn Fn(u32, u32) -> bool,
+    euid: u32,
+    group_trusted: &dyn Fn(u32, u32, bool) -> bool,
 ) -> Result<PathBuf, String> {
     use std::os::unix::fs::MetadataExt;
     if exe.to_string_lossy().ends_with(" (deleted)") {
@@ -386,7 +408,7 @@ pub(crate) fn helper_check_with(
             "{name} is not a regular file (a symlink is refused)"
         ));
     }
-    let owner_ok = |m: &std::fs::Metadata| m.uid() == 0 || euid.is_none_or(|e| m.uid() == e);
+    let owner_ok = |m: &std::fs::Metadata| m.uid() == 0 || m.uid() == euid;
     if !owner_ok(&lm) || lm.mode() & 0o022 != 0 {
         return Err(format!(
             "{name} must be owned by root or you and not writable by group/others"
@@ -420,6 +442,29 @@ pub fn helper_status() -> Result<PathBuf, String> {
     }
     #[cfg(not(target_os = "linux"))]
     Err("Linux only".into())
+}
+
+/// The helper is part of the sandbox: a command that may write it could replace it and run the
+/// next one without the filter / Landlock policy. Refused when it lies under any writable root
+/// or the private temp dir (symlinks resolved). Used by EVERY path that runs the helper.
+pub(crate) fn helper_outside_writable(
+    helper: &Path,
+    policy: &SandboxPolicy,
+) -> Result<(), SandboxError> {
+    let real = canon_lossy(helper);
+    match policy
+        .writable_roots
+        .iter()
+        .chain(&policy.tmp_dir)
+        .find(|r| real.starts_with(canon_lossy(r)))
+    {
+        Some(r) => Err(SandboxError::Unavailable(format!(
+            "the sandbox helper {} lies under the writable root {}; a command could replace it. Install synt outside the workspace and the temp dir",
+            helper.display(),
+            r.display()
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// Landlock through the `synthesis-sandbox-exec` helper. `abi` is the kernel's highest Landlock ABI.
@@ -618,6 +663,7 @@ impl SandboxBackend for LinuxLandlockBackend {
         }
         p.writable_roots.extend(existing(SYSTEM_WRITE));
         p.writable_roots.extend(p.tmp_dir.clone());
+        helper_outside_writable(&self.helper, &p)?;
         landlock_rules(&p)?; // overlap errors surface here, not inside the child
         let mut args: Vec<OsString> = vec![
             crate::encode_policy(&p)?.into(),
@@ -837,18 +883,7 @@ impl BwrapBackend {
                     helper_status().err().unwrap_or_else(|| "not found".into())
                 ))
             })?;
-            // a helper the sandboxed commands could replace would defeat the filter
-            if policy
-                .writable_roots
-                .iter()
-                .chain(&policy.tmp_dir)
-                .any(|r| canon_lossy(&helper).starts_with(r))
-            {
-                return Err(SandboxError::Unavailable(format!(
-                    "WSL: the helper {} lies under a writable root; install synt outside the workspace",
-                    helper.display()
-                )));
-            }
+            helper_outside_writable(&helper, policy)?;
             args.splice(0..0, ["--no-vsock".into(), "--".into(), program]);
             program = helper.into();
         }
@@ -1303,9 +1338,9 @@ mod tests {
             |d: &Path, m| std::fs::set_permissions(d, std::fs::Permissions::from_mode(m)).unwrap();
         let me = std::fs::metadata(&dir).unwrap().uid();
         let gid = std::fs::metadata(&dir).unwrap().gid();
-        let mine = |o: u32, g: u32| o == me && g == gid; // "the user's private group"
-        let foreign = |_: u32, _: u32| false;
-        let run = |p: &dyn Fn(u32, u32) -> bool| helper_check_with(&exe, Some(me), p);
+        let mine = |o: u32, g: u32, _own: bool| o == me && g == gid; // "the user's private group"
+        let foreign = |_: u32, _: u32, _: bool| false;
+        let run = |p: &dyn Fn(u32, u32, bool) -> bool| helper_check_with(&exe, me, p);
         mode(&anc, 0o755);
         // 0775 in the user's private group (default umask 0002): accepted
         mode(&dir, 0o775);
@@ -1327,83 +1362,174 @@ mod tests {
         assert!(run(&foreign).unwrap_err().contains("group-writable"));
         assert!(run(&mine).is_ok());
         // a foreign owner is refused whatever the mode
-        assert!(helper_check_with(&exe, Some(me.wrapping_add(1)), &mine).is_err());
+        assert!(helper_check_with(&exe, me.wrapping_add(1), &mine).is_err());
         mode(&anc, 0o755);
     }
 
     #[cfg(unix)]
+    const GROUPS: &str = "root:x:0:\ndaemon:x:1:\nmail:x:8:\nwww-data:x:33:\nstaff:x:50:\nusers:x:100:a,b\nme:x:1001:\nshared:x:1002:\nshared2:x:1002:bob\n";
+
+    #[cfg(unix)]
     #[test]
     fn dir_rules_for_the_layouts_real_machines_have() {
-        let me = Some(1001);
-        let mine = |o: u32, g: u32| o == 1001 && g == 1001;
-        let none = |_: u32, _: u32| false;
-        let sys = |o: u32, g: u32| o == 0 && g < 1000;
-        let p = |m, u, g, own, t: &dyn Fn(u32, u32) -> bool| dir_problem((m, u, g), own, me, t);
+        let t = |o: u32, g: u32, own: bool| group_trusted(GROUPS, 1001, o, g, own);
+        let p = |m, u, g, own| dir_problem((m, u, g), own, 1001, &t);
         // /tmp (1777 root:root), /usr/local/bin (0755 root), the runner's 0700 tempdir, ~/.synt/bin (0775 own group)
         assert_eq!(
-            p(0o41777, 0, 0, false, &none),
+            p(0o41777, 0, 0, false),
             None,
             "sticky world-writable ancestor"
         );
-        assert_eq!(p(0o40755, 0, 0, true, &none), None);
-        assert_eq!(p(0o40700, 1001, 1001, true, &none), None);
-        assert_eq!(p(0o40775, 1001, 1001, true, &mine), None);
+        assert_eq!(p(0o40755, 0, 0, true), None);
+        assert_eq!(p(0o40700, 1001, 1001, true), None);
+        assert_eq!(p(0o40775, 1001, 1001, true), None);
         assert_eq!(
-            p(0o42775, 0, 50, false, &sys),
+            p(0o42775, 0, 0, false),
             None,
-            "Debian /usr/local: root:staff 2775"
+            "root:root group-writable ancestor"
+        );
+        assert_eq!(
+            p(0o42775, 0, 50, false),
+            None,
+            "Debian /usr/local: root:staff 2775 above the helper dir"
         );
         // refused: the security intent
-        assert!(
-            p(0o40777, 1001, 1001, false, &mine)
-                .unwrap()
-                .contains("world-writable"),
-            "no sticky"
+        let refused = |m, u, g, own, why: &str, what: &str| {
+            let e = p(m, u, g, own).unwrap_or_else(|| panic!("{what}: accepted"));
+            assert!(e.contains(why), "{what}: {e}");
+        };
+        refused(0o40777, 1001, 1001, false, "world-writable", "no sticky");
+        refused(
+            0o41777,
+            1001,
+            1001,
+            true,
+            "world-writable",
+            "own dir, even sticky",
         );
-        assert!(
-            p(0o41777, 1001, 1001, true, &mine)
-                .unwrap()
-                .contains("world-writable"),
-            "own dir, even sticky"
+        refused(0o40775, 1001, 100, true, "group-writable", "foreign group");
+        refused(
+            0o40775,
+            0,
+            1500,
+            false,
+            "group-writable",
+            "user group under root",
         );
-        assert!(
-            p(0o40775, 1001, 100, true, &none)
-                .unwrap()
-                .contains("group-writable"),
-            "foreign group"
+        refused(
+            0o40775,
+            0,
+            33,
+            false,
+            "group-writable",
+            "www-data style service group",
         );
-        assert!(
-            p(0o40775, 0, 1500, false, &sys)
-                .unwrap()
-                .contains("group-writable"),
-            "user group under root"
+        refused(0o40775, 0, 8, false, "group-writable", "mail");
+        refused(0o40775, 0, 100, false, "group-writable", "users");
+        refused(
+            0o42775,
+            0,
+            50,
+            true,
+            "group-writable",
+            "staff on the helper's own dir",
         );
-        assert!(
-            p(0o40755, 1002, 1002, false, &mine)
-                .unwrap()
-                .contains("not owned"),
-            "foreign owner"
-        );
-        assert!(
-            p(0o41777, 1002, 1002, false, &mine)
-                .unwrap()
-                .contains("not owned"),
-            "foreign sticky dir"
+        refused(0o40755, 1002, 1002, false, "not owned", "foreign owner");
+        refused(
+            0o41777,
+            1002,
+            1002,
+            false,
+            "not owned",
+            "foreign sticky dir",
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn private_group_means_the_gid_lists_no_members() {
-        let g = "root:x:0:\nme:x:1000:\nusers:x:100:a,b\n";
-        assert!(group_has_no_members(g, 1000) && group_has_no_members(g, 0));
+    fn group_trust_reads_every_etc_group_line() {
+        let g = |text: &str, owner, gid, own| group_trusted(text, 1001, owner, gid, own);
+        assert!(g(GROUPS, 0, 0, true) && g(GROUPS, 1001, 1001, true));
+        // gid 0 that lists members, or a duplicate gid line that lists one: refused
+        assert!(!g("root:x:0:mallory\n", 0, 0, true));
+        assert!(!g("root:x:0:\nroot2:x:0:mallory\n", 0, 0, true));
+        assert!(!g("me:x:1001:\nme2:x:1001:bob\n", 1001, 1001, true));
+        // your private group needs gid == uid; an unknown gid and an unreadable file never trust
+        assert!(!g(GROUPS, 1001, 1002, true) && !g(GROUPS, 0, 4242, false));
+        assert!(!g("", 0, 0, true) && !g("", 1001, 1001, true));
+        // staff only by name AND gid, only above the helper's directory, never for a user's dir
+        assert!(g(GROUPS, 0, 50, false) && !g(GROUPS, 0, 50, true));
         assert!(
-            !group_has_no_members(g, 100),
-            "a shared group is not private"
+            !g("other:x:50:\n", 0, 50, false),
+            "gid 50 under another name"
         );
         assert!(
-            !group_has_no_members(g, 4242),
-            "an unknown gid is not private"
+            !g(GROUPS, 1001, 50, false),
+            "staff on a dir you own is not the /usr/local case"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_must_not_lie_under_any_writable_root_or_the_temp_dir() {
+        let t = tempfile::tempdir().unwrap();
+        let base = t.path().canonicalize().unwrap();
+        let (ws, tmp, bin) = (base.join("ws"), base.join("tmp"), base.join("bin"));
+        for d in [&ws, &tmp, &bin, &ws.join("target/debug")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let pol = |w: Vec<PathBuf>, tmp_dir: Option<PathBuf>| SandboxPolicy {
+            writable_roots: w,
+            tmp_dir,
+            ..Default::default()
+        };
+        let ok = pol(vec![ws.clone()], Some(tmp.clone()));
+        assert!(helper_outside_writable(&bin.join("h"), &ok).is_ok());
+        for (helper, policy, what) in [
+            (ws.join("target/debug/h"), ok.clone(), "under the workspace"),
+            (tmp.join("h"), ok.clone(), "under tmp_dir"),
+            (
+                bin.join("h"),
+                pol(vec![base.clone()], None),
+                "under a writable root above it",
+            ),
+            (
+                bin.join("h"),
+                pol(vec![], Some(bin.clone())),
+                "in tmp_dir itself",
+            ),
+        ] {
+            let e = helper_outside_writable(&helper, &policy).unwrap_err();
+            assert!(
+                matches!(e, SandboxError::Unavailable(_))
+                    && e.to_string().contains("could replace"),
+                "{what}: {e}"
+            );
+        }
+        // every backend that runs the helper applies it: Landlock and the WSL bubblewrap path
+        let l = LinuxLandlockBackend::new(tmp.join("synthesis-sandbox-exec"), 4);
+        let c = SandboxedCommand {
+            cwd: Some(ws.clone()),
+            ..Default::default()
+        };
+        assert!(
+            l.wrap(&ok, &c)
+                .unwrap_err()
+                .to_string()
+                .contains("could replace")
+        );
+        let l = LinuxLandlockBackend::new(bin.join("synthesis-sandbox-exec"), 4);
+        assert!(l.wrap(&ok, &c).is_ok());
+        let ctx = wsl_ctx(Path::new("/mnt/c"), None);
+        let b = BwrapBackend {
+            path: bin.join("bwrap"),
+            helper: Some(ws.join("target/debug/synthesis-sandbox-exec")),
+        };
+        assert!(
+            b.wrap_on(&ok, &c, Some(&ctx))
+                .unwrap_err()
+                .to_string()
+                .contains("could replace")
         );
     }
 
@@ -1424,7 +1550,7 @@ mod tests {
             helper: Some(p("/work/synthesis-sandbox-exec")),
         };
         let e = b.wrap_on(&pol, &c, Some(&ctx)).unwrap_err();
-        assert!(e.to_string().contains("under a writable root"), "{e}");
+        assert!(e.to_string().contains("under the writable root"), "{e}");
         let mut blind = wsl_ctx(Path::new("/mnt/c"), None);
         blind.host.mounts_known = false;
         let ok = BwrapBackend {
