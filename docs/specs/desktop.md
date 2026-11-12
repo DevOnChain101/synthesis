@@ -120,7 +120,7 @@ verification.
 
 Slash commands (all built-ins are wired; `live.rs` `WIRED`, the CLI's semantics): `/files` and `/diff [file]` switch
 the centre panel to its file explorer or diff tab (`/diff FILE` opens that file's diff) and post nothing in the chat;
-an untrusted folder is said by the file explorer itself. `/peers` posts the CLI's table.
+the explorer needs no trust. `/peers` posts the CLI's table.
 `/send` with no arguments opens a picker docked above the prompt (`send_pick.rs`, the `/model` dialog family): the
 live peers of the polled listing (main agents, not this session, not unreachable) grouped by workspace, typing filters
 (session, workspace, short id), each row with the Running panel's activity dot, the short id and the last activity
@@ -218,7 +218,10 @@ shows counters; Ctrl+1..5 switch, Esc returns to the chat, PageUp/PageDown scrol
   duration, output tail, running state. Read-only, not a terminal.
 - browser: the page, the selected saved screenshot (`browser.frame`; the latest by default, history rows select
   another; a PNG inside the session's artifact folder only, <= 8 MiB) and the browser calls with state and duration.
-- file explorer: `project::scan` (git's file list; trusted folders only), directories open on demand (the parents of
+- file explorer (user scope, no trust needed: the agent never reads it): `project::scan` (git's hardened file list and
+  status) in a trusted folder, `project::scan_plain` (a plain directory walk, no git, no links, no `.git`) in an untrusted
+  one, so nothing a repository's config names can run; the Trust dialog is `/trust ask` (a session trust is kept for
+  every session of the same folder while the app runs). The diff tab reads the session's own change events, no git. Directories open on demand (the parents of
   changed files open first), changed files marked M/A/D/?, a click previews a text file read-only (<= 256 KB and 2000
   lines; refuses paths outside the folder, links out of it, secret files and binary content).
 

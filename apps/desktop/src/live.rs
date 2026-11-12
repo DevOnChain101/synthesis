@@ -102,7 +102,7 @@ pub enum PickerKind {
     CloseWorkspace,
     /// `/trust revoke`: confirm forgetting a remembered root (Keep is first and the default).
     Revoke,
-    /// The Files tab was opened in an untrusted folder: trust it for this session? ("Not now" is first and the
+    /// `/trust ask` in an untrusted folder: trust it for this session? ("Not now" is first and the
     /// default.)
     Trust,
 }
@@ -128,6 +128,10 @@ pub enum Action {
     /// `/context <tokens|unset>`: the window of the model in use, written to the user synt.json.
     SetContext(String),
     Resume(String),
+    /// `/trust revoke` ended the trust of this root (and what is under it): a session trust kept for it goes too.
+    TrustRevoked(String),
+    /// `/trust ask`: raises the Trust dialog for the session's folder.
+    AskTrust,
     /// A fresh session in the selected workspace.
     New,
     /// The confirmation of `/close-workspace` was answered yes: close every session of this
@@ -309,9 +313,9 @@ pub fn trust_text(root: &std::path::Path, cwd: &str) -> Vec<String> {
             shown(cwd)
         ));
     }
-    v.push("Enables: the file explorer's git listing, and the project's agents, skills, memory and instruction files (data, not execution). A REMEMBERED trust deliberately goes no further: the project's hooks, MCP servers, permission allow rules, defaultMode, additionalDirectories, env, verification checks and provider settings (URLs, keys, headers) stay as in an untrusted folder, and a notice at every start lists what was ignored. Only \"Trust for this session only\" applies them, for that run, and each MCP server still needs its own approval as NAME@HASH (--approve-mcp at launch or your user settings; `synt mcp get` shows the hash). This is narrower than VS Code's workspace trust. The scripts that hooks and MCP servers name are checked for changes on a best-effort basis; other code those scripts run in turn is NOT covered.".into());
+    v.push("Enables: the project's agents, skills, memory and instruction files (data, not execution). A REMEMBERED trust deliberately goes no further: the project's hooks, MCP servers, permission allow rules, defaultMode, additionalDirectories, env, verification checks and provider settings (URLs, keys, headers) stay as in an untrusted folder, and a notice at every start lists what was ignored. Only \"Trust for this session only\" applies them, for that run, and each MCP server still needs its own approval as NAME@HASH (--approve-mcp at launch or your user settings; `synt mcp get` shows the hash). This is narrower than VS Code's workspace trust. The scripts that hooks and MCP servers name are checked for changes on a best-effort basis; other code those scripts run in turn is NOT covered.".into());
     v.push("Risks: a repository you did not write can carry hooks that run commands (one can run at the restart that follows a session-only trust), allow rules that skip prompts, an env that redirects programs, and provider endpoints that receive your prompts and keys; a session-only trust applies all of that. A later git pull can change agents, skills, instructions or memory without any prompt; if the trusted configuration changes, remembered trust is not honoured: the folder starts untrusted and you are asked again, with the changed file names.".into());
-    v.push("The session restarts now and must be idle: the saved conversation is reloaded (if it cannot be, a fresh session starts and a note says so), this session's 'always allow' grants and its permission mode are reset. \"Trust this folder (remember)\" records the root in your own session store (never in the project) for later sessions, resumed ones included, with the limits above; /trust lists and revokes it. \"Trust for this session only\" saves nothing. Not now changes nothing: no git runs and nothing from the folder is loaded.".into());
+    v.push("The session restarts now and must be idle: the saved conversation is reloaded (if it cannot be, a fresh session starts and a note says so), this session's 'always allow' grants and its permission mode are reset. \"Trust this folder (remember)\" records the root in your own session store (never in the project) for later sessions, resumed ones included, with the limits above; /trust lists and revokes it. \"Trust for this session only\" saves nothing, but it lasts until the app exits and covers every session of that folder (/trust revoke ends it). Not now changes nothing: nothing from the folder is loaded.".into());
     v
 }
 
@@ -612,6 +616,8 @@ pub struct Live {
     pub trust_parent: Option<std::path::PathBuf>,
     /// The remembered root the open revoke confirmation is about.
     pub revoke_root: Option<String>,
+    /// The root of the session-only trust in force (set by the window after each engine start).
+    pub session_grant: Option<String>,
     /// Images for the next message.
     pub images: Vec<Attached>,
     /// A clipboard read is in flight (key repeat starts no second one).
@@ -698,6 +704,7 @@ impl Live {
             trust_root: None,
             trust_parent: None,
             revoke_root: None,
+            session_grant: None,
             images: vec![],
             image_busy: false,
             focus_view: false,
@@ -1214,13 +1221,20 @@ impl Live {
                 {
                     let msg = match synthesis_session::trust::revoke(&e.synthesis_home, &root) {
                         Ok(true) => format!(
-                            "revoked trust of {}: it takes effect at the next engine start (a new session, /model or a restart); this session keeps what it already loaded",
+                            "revoked trust of {}: it takes effect at the next engine start (a new session, /model or a restart); this session keeps what it already loaded. A session-only trust of that folder ends too",
                             sanitize_for_display(&root)
                         ),
-                        Ok(false) => format!("{} was not remembered", sanitize_for_display(&root)),
+                        Ok(false) => format!(
+                            "{} was not remembered (a session-only trust of it, if any, ends)",
+                            sanitize_for_display(&root)
+                        ),
                         Err(err) => format!("could not revoke: {err}"),
                     };
                     self.note(msg, false);
+                    if self.session_grant.as_deref() == Some(root.as_str()) {
+                        self.session_grant = None;
+                    }
+                    return Some(Action::TrustRevoked(root));
                 }
                 return None;
             }
@@ -1897,6 +1911,7 @@ impl Live {
                     true,
                 ),
             },
+            "trust" if arg.trim() == "ask" => return Submitted::Do(Action::AskTrust),
             "trust" => self.trust_cmd(arg),
             "rewind" => {
                 if let Some(a) = self.rewind_command(arg) {
@@ -2637,7 +2652,7 @@ impl Live {
         e.set_mode(next);
     }
 
-    /// The Files tab was opened in a folder that is not trusted: asks whether to trust it for this session.
+    /// `/trust ask` in a folder that is not trusted: asks whether to trust it for this session.
     /// Nothing is read from the folder before the answer. "Not now" is first (selected) and Esc declines; the
     /// dialog needs a deliberate engage and waits out the arming delay like an approval. Returns whether a
     /// dialog was raised (not for a trusted folder, a starting session or one already asked).
@@ -2766,7 +2781,8 @@ impl Live {
                 .and_then(|n| n.checked_sub(1))
                 .and_then(|i| recs.get(i))
                 .or_else(|| recs.iter().find(|r| r.root == which));
-            let Some(r) = pick else {
+            let session = self.session_grant.clone().filter(|g| g == which);
+            let Some(root) = pick.map(|r| r.root.clone()).or(session) else {
                 return self.note(
                     "usage: /trust revoke <number or path>   (numbers are those of /trust)",
                     true,
@@ -2783,7 +2799,6 @@ impl Live {
             }) {
                 return;
             }
-            let root = r.root.clone();
             let shown = clip_left(&sanitize_for_display(&root), 60);
             self.revoke_root = Some(root);
             self.push_dialog(
@@ -2806,7 +2821,7 @@ impl Live {
             return;
         }
         if !arg.is_empty() && arg != "list" {
-            return self.note("usage: /trust [revoke <number or path>]", true);
+            return self.note("usage: /trust [ask | revoke <number or path>]", true);
         }
         let mut lines = vec![format!(
             "this session: {}",
@@ -2827,12 +2842,19 @@ impl Live {
                 "unverified rows ignored: {unverified} (not written by this app)"
             ));
         }
+        if let Some(g) = &self.session_grant {
+            lines.push(format!(
+                "session-only trust active for {}: until the app exits, for every session of that folder; /trust revoke {} ends it",
+                clip_left(&sanitize_for_display(g), 60),
+                clip_left(&sanitize_for_display(g), 60)
+            ));
+        }
         lines.push(
             "a remembered trust is deliberately narrower than a session trust: project hooks, MCP servers, allow rules, env, providers and verification checks are ignored; use \"Trust for this session\" to apply them"
                 .into(),
         );
         if recs.is_empty() {
-            lines.push("no remembered folder (Files tab -> Trust this folder (remember))".into());
+            lines.push("no remembered folder (/trust ask -> Trust this folder (remember))".into());
         }
         for (i, r) in recs.iter().enumerate() {
             let state = if r.scope == synthesis_session::trust::PARENT {
