@@ -47,6 +47,20 @@ fn sub(args: &[String]) -> Option<(&str, &[String])> {
     Some((args[i].as_str(), &args[i + 1..]))
 }
 
+/// git config keys whose value is run as a program.
+const EXEC_KEYS: &[&str] = &[
+    "core.fsmonitor",
+    "core.sshcommand",
+    "core.hookspath",
+    "credential.helper",
+    "core.pager",
+    "core.editor",
+    "diff.external",
+    "gpg.program",
+    "core.askpass",
+    "sequence.editor",
+];
+
 fn git(args: &[String], worktree: bool, out: &mut Vec<Hit>) {
     // global options before the subcommand; `-C`/`--git-dir`/`--work-tree` leave the session worktree
     let (mut i, mut elsewhere) = (0, false);
@@ -58,11 +72,16 @@ fn git(args: &[String], worktree: bool, out: &mut Vec<Hit>) {
             }
             "-c" => {
                 // an alias can be a push in disguise (`-c alias.p=push p`, `-c alias.x=!git push`)
-                if args.get(i + 1).is_some_and(|v| v.starts_with("alias.")) {
-                    out.push(hit(
-                        "git alias",
-                        "git -c alias.* can hide a push or any command",
-                    ));
+                if let Some(v) = args.get(i + 1) {
+                    let k = v.split('=').next().unwrap_or("").to_lowercase();
+                    if k.starts_with("alias.") {
+                        out.push(hit(
+                            "git alias",
+                            "git -c alias.* can hide a push or any command",
+                        ));
+                    } else if EXEC_KEYS.contains(&k.as_str()) {
+                        out.push(hit("git config exec", "this git config key runs a program"));
+                    }
                 }
                 i += 2;
             }
@@ -85,6 +104,7 @@ fn git(args: &[String], worktree: bool, out: &mut Vec<Hit>) {
                     || a.starts_with("--force-")
                     || a == "--mirror"
                     || a == "--delete"
+                    || a == "-d"
                     || (a.starts_with('-') && !a.starts_with("--") && a[1..].contains('f'))
                     || (a.starts_with('+') && a.len() > 1)
                     || a.starts_with(':')
@@ -112,6 +132,13 @@ fn git(args: &[String], worktree: bool, out: &mut Vec<Hit>) {
         }
         "config" if rest.iter().any(|a| a.starts_with("alias.")) => {
             out.push(hit("git alias", "an alias can hide a push or any command"));
+        }
+        "config"
+            if rest
+                .iter()
+                .any(|a| EXEC_KEYS.contains(&a.to_lowercase().as_str())) =>
+        {
+            out.push(hit("git config exec", "this git config key runs a program"));
         }
         "reset" if flag(&|a| a == "--hard") && (!worktree || elsewhere) => out.push(hit(
             "git reset --hard",
@@ -495,6 +522,19 @@ fn cloud(name: &'static str, args: &[String], out: &mut Vec<Hit>) {
             "cloud CLI call that is not a recognised read-only operation",
         ));
     };
+    if args
+        .iter()
+        .any(|a| matches!(a.as_str(), "--version" | "--help" | "-h" | "-v"))
+    {
+        return;
+    }
+    // a URL anywhere (`--endpoint-url https://evil`) sends the call somewhere else
+    if args
+        .iter()
+        .any(|a| a.contains("http://") || a.contains("https://"))
+    {
+        return ask(out);
+    }
     // leading global flags (`--region x`, `--profile=y`)
     let mut a = args;
     while let Some(f) = a.first().filter(|f| f.starts_with('-')) {
@@ -513,11 +553,9 @@ fn cloud(name: &'static str, args: &[String], out: &mut Vec<Hit>) {
         .collect();
     let operands: Vec<&String> = a.iter().filter(|w| !w.starts_with('-')).collect();
     let remote = |w: &str| {
-        [
-            "s3://", "gs://", "http://", "https://", "ftp://", "abfs://", "wasbs://", "az://",
-        ]
-        .iter()
-        .any(|p| w.starts_with(p))
+        ["s3://", "gs://", "ftp://", "abfs://", "wasbs://", "az://"]
+            .iter()
+            .any(|p| w.starts_with(p))
     };
     // aws: `service operation`; a download (remote source, local destination) is not a write
     if name == "aws" && run.first() == Some(&"s3") && matches!(run.get(1), Some(&"cp" | &"sync")) {
@@ -566,21 +604,36 @@ fn is_interpreter(name: &str) -> bool {
 
 /// `localhost`, `127.x`, `::1` (also in a URL or `host:port`).
 fn local_host(w: &str) -> bool {
-    let h = w
-        .split("://")
-        .last()
-        .unwrap_or(w)
-        .trim_start_matches('[')
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("");
-    let h = h.rsplit('@').next().unwrap_or(h);
-    h == "localhost"
-        || h.starts_with("localhost:")
-        || h.starts_with("127.")
-        || h.starts_with("::1")
-        || h.starts_with("[::1")
-        || h.starts_with("0.0.0.0")
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    let rest = w.split("://").last().unwrap_or(w);
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // the host is after the LAST `@` (anything before it is userinfo)
+    let auth = auth.rsplit('@').next().unwrap_or(auth);
+    let host = if let Some(v6) = auth.strip_prefix('[') {
+        // `[::1]:80`; text after `]` must be empty or a port
+        match v6.split_once(']') {
+            Some((h, tail))
+                if tail.is_empty()
+                    || tail
+                        .strip_prefix(':')
+                        .is_some_and(|p| p.bytes().all(|b| b.is_ascii_digit())) =>
+            {
+                h
+            }
+            _ => return false,
+        }
+    } else if auth.matches(':').count() > 1 {
+        auth // bare IPv6 (`::1`)
+    } else {
+        auth.split(':').next().unwrap_or("")
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<Ipv4Addr>()
+            .is_ok_and(|a| a.is_loopback() || a.is_unspecified())
+        || host
+            .parse::<Ipv6Addr>()
+            .is_ok_and(|a| a.is_loopback() || a.is_unspecified())
 }
 
 /// The URLs / hosts among curl-like arguments, all local (and at least one).
@@ -745,34 +798,221 @@ fn unwrap_more(u: &Words) -> Option<Words> {
     .filter(|w| !w.is_empty())
 }
 
-/// Recipe lines of `make`/`just`, or the script text of `npm run NAME`, as shell commands.
-fn project_scripts(first: &str, args: &[String], cwd: &Path) -> Vec<String> {
-    let read = |n: &str| {
-        std::fs::metadata(cwd.join(n))
+/// Total recipe / script lines one scan reads (a bigger one cannot be inspected: it asks).
+const MAX_LINES: usize = 5000;
+
+/// What one `scan` has already read: a (file, target) is scanned once, however many ways reach it.
+#[derive(Default)]
+struct Ctx {
+    seen: std::collections::HashSet<String>,
+    lines: usize,
+}
+
+struct Recipe {
+    names: Vec<String>,
+    prereqs: Vec<String>,
+    body: Vec<String>,
+}
+
+/// Targets of a Makefile / justfile: backslash continuations joined, `target: ; cmd` inline
+/// recipes, `target: a b` prerequisites. Variables and `.PHONY`-style lines have no recipe.
+fn parse_recipes(text: &str, just: bool) -> Vec<Recipe> {
+    static HEAD: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(@?[A-Za-z0-9_./%$()@-][^:=#]*?)\s*:(?:[^=]|$)(.*)$").unwrap()
+    });
+    let text = text.replace("\\\r\n", " ").replace("\\\n", " ");
+    let mut out: Vec<Recipe> = vec![];
+    for l in text.lines() {
+        let indented = l.starts_with(['\t']) || (just && l.starts_with(' '));
+        if indented {
+            if let Some(r) = out.last_mut() {
+                let t = l.trim().trim_start_matches(['@', '-', '+']).trim();
+                if !t.is_empty() && !t.starts_with('#') {
+                    r.body.push(t.to_string());
+                }
+            }
+        } else if let Some(c) = HEAD.captures(l) {
+            let head = c[1].trim();
+            let names: Vec<String> = if just {
+                head.split_whitespace()
+                    .take(1)
+                    .map(|n| n.trim_start_matches('@').to_string())
+                    .collect()
+            } else {
+                head.split_whitespace().map(String::from).collect()
+            };
+            let rhs = c.get(2).map_or("", |m| m.as_str());
+            let (deps, inline) = rhs.split_once(';').unwrap_or((rhs, ""));
+            let mut body = vec![];
+            if !inline.trim().is_empty() {
+                body.push(
+                    inline
+                        .trim()
+                        .trim_start_matches(['@', '-', '+'])
+                        .to_string(),
+                );
+            }
+            out.push(Recipe {
+                names,
+                prereqs: deps
+                    .split_whitespace()
+                    .filter(|d| *d != "|")
+                    .map(String::from)
+                    .collect(),
+                body,
+            });
+        } else if !l.trim().is_empty() && !l.starts_with('#') {
+            // a non-recipe line ends the current recipe
+            out.push(Recipe {
+                names: vec![],
+                prereqs: vec![],
+                body: vec![],
+            });
+        }
+    }
+    out
+}
+
+/// Value of the first of `flags` in `args` (`-f x`, `--file=x`, `-fx` for a one-letter flag).
+fn flag_value<'a>(args: &'a [String], flags: &[&str]) -> Option<&'a str> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        for f in flags {
+            if a == f {
+                return it.next().map(String::as_str);
+            }
+            if let Some(v) = a.strip_prefix(&format!("{f}=")) {
+                return Some(v);
+            }
+            if f.len() == 2 && !f.starts_with("--") && a.len() > 2 && a.starts_with(f) {
+                return Some(&a[2..]);
+            }
+        }
+    }
+    None
+}
+
+/// The commands to scan for `make`/`just`/`npm run NAME`, with the directory they run in. Only
+/// the named targets and their prerequisites (make: the first target when none is named).
+/// `Err(())` = too much to read.
+fn project_scripts(
+    first: &str,
+    args: &[String],
+    cwd: &Path,
+    ctx: &mut Ctx,
+) -> Result<Vec<(String, std::path::PathBuf)>, ()> {
+    let read = |p: &Path| {
+        std::fs::metadata(p)
             .ok()
             .filter(|m| m.len() <= 256 * 1024)
-            .and_then(|_| std::fs::read_to_string(cwd.join(n)).ok())
+            .and_then(|_| std::fs::read_to_string(p).ok())
     };
+    let mut out = vec![];
     match first {
         "make" | "gmake" | "just" => {
-            let names: &[&str] = if first == "just" {
-                &["justfile", "Justfile", ".justfile"]
-            } else {
-                &["Makefile", "makefile", "GNUmakefile"]
+            let just = first == "just";
+            let dir = flag_value(
+                args,
+                if just {
+                    &["--working-directory", "-d"]
+                } else {
+                    &["-C", "--directory"]
+                },
+            )
+            .map_or_else(|| cwd.to_path_buf(), |d| cwd.join(d));
+            let file = flag_value(
+                args,
+                if just {
+                    &["--justfile", "-f"]
+                } else {
+                    &["-f", "--file", "--makefile"]
+                },
+            );
+            let path = match file {
+                Some(f) => dir.join(f),
+                None => {
+                    let names: &[&str] = if just {
+                        &["justfile", "Justfile", ".justfile"]
+                    } else {
+                        &["GNUmakefile", "Makefile", "makefile"]
+                    };
+                    match names.iter().map(|n| dir.join(n)).find(|p| p.is_file()) {
+                        Some(p) => p,
+                        None => return Ok(out),
+                    }
+                }
             };
-            names
-                .iter()
-                .find_map(|n| read(n))
-                .map(|t| {
-                    t.lines()
-                        .filter(|l| l.starts_with(['\t', ' ']) && !l.trim().is_empty())
-                        .map(|l| l.trim().trim_start_matches(['@', '-', '+']).to_string())
-                        .collect()
-                })
-                .unwrap_or_default()
+            let Some(text) = read(&path) else {
+                return Ok(out);
+            };
+            let recipes = parse_recipes(&text, just);
+            // words that are not flags, flag values or VAR=value
+            let mut wanted: Vec<String> = vec![];
+            let mut skip = false;
+            for a in args {
+                if skip {
+                    skip = false;
+                } else if matches!(
+                    a.as_str(),
+                    "-f" | "-C"
+                        | "-d"
+                        | "--file"
+                        | "--directory"
+                        | "--justfile"
+                        | "--working-directory"
+                        | "--makefile"
+                ) {
+                    skip = true;
+                } else if !a.starts_with('-') && !a.contains('=') {
+                    wanted.push(a.clone());
+                }
+            }
+            if wanted.is_empty()
+                && let Some(n) = recipes
+                    .iter()
+                    .flat_map(|r| r.names.iter())
+                    .find(|n| !n.starts_with('.'))
+            {
+                wanted.push(n.clone());
+            }
+            let mut stack = wanted;
+            while let Some(t) = stack.pop() {
+                if !ctx.seen.insert(format!("{}\0{t}", path.display())) {
+                    continue;
+                }
+                for r in recipes.iter().filter(|r| r.names.contains(&t)) {
+                    ctx.lines += r.body.len() + 1;
+                    if ctx.lines > MAX_LINES {
+                        return Err(());
+                    }
+                    stack.extend(r.prereqs.iter().cloned());
+                    out.extend(r.body.iter().map(|l| {
+                        (
+                            l.replace("$(MAKE)", "make").replace("${MAKE}", "make"),
+                            dir.clone(),
+                        )
+                    }));
+                }
+            }
         }
         "npm" | "pnpm" | "yarn" | "bun" => {
-            let words: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+            let dir = flag_value(args, &["--prefix", "--cwd", "-C"])
+                .map_or_else(|| cwd.to_path_buf(), |d| cwd.join(d));
+            // positional words, with the value of --prefix / --cwd / -C left out
+            let mut skip = false;
+            let words: Vec<&String> = args
+                .iter()
+                .filter(|a| {
+                    if std::mem::take(&mut skip) {
+                        return false;
+                    }
+                    if matches!(a.as_str(), "--prefix" | "--cwd" | "-C") {
+                        skip = true;
+                        return false;
+                    }
+                    !a.starts_with('-')
+                })
+                .collect();
             let name = match words.as_slice() {
                 [r, n, ..] if matches!(r.as_str(), "run" | "run-script" | "r") => n.as_str(),
                 [n, ..]
@@ -784,24 +1024,32 @@ fn project_scripts(first: &str, args: &[String], cwd: &Path) -> Vec<String> {
                 [n, ..] if matches!(n.as_str(), "test" | "start" | "stop" | "restart") => {
                     n.as_str()
                 }
-                _ => return vec![],
+                _ => return Ok(out),
             };
-            let Some(pkg) = read("package.json")
-                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            let pj = dir.join("package.json");
+            let Some(pkg) =
+                read(&pj).and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             else {
-                return vec![];
+                return Ok(out);
             };
-            ["pre", "", "post"]
-                .iter()
-                .filter_map(|p| {
-                    pkg.pointer(&format!("/scripts/{p}{name}"))
+            if ctx.seen.insert(format!("{}\0{name}", pj.display())) {
+                for p in ["pre", "", "post"] {
+                    if let Some(v) = pkg
+                        .pointer(&format!("/scripts/{p}{name}"))
                         .and_then(|v| v.as_str())
-                        .map(String::from)
-                })
-                .collect()
+                    {
+                        ctx.lines += 1;
+                        if ctx.lines > MAX_LINES {
+                            return Err(());
+                        }
+                        out.push((v.to_string(), dir.clone()));
+                    }
+                }
+            }
         }
-        _ => vec![],
+        _ => {}
     }
+    Ok(out)
 }
 
 /// Phrases in code that names a table action (inline `python -c`, agent-written files). Matched
@@ -819,8 +1067,8 @@ pub fn text_hits(text: &str) -> bool {
             r"|(?:ssh|scp|sftp|rsync|nc|ncat|netcat|socat|telnet|mosh)\b",
             r"|curl\W+.*-(?:X|d|F|T)\b",
             r"|curl\W+.*--(?:data|form|upload|request)",
-            r"|aws|gcloud",
-            r"|requests\.(?:post|put|patch|delete)|urllib\.request|urlopen|http\.client|smtplib|ftplib|paramiko|socket\.socket",
+            r"|aws\b|gcloud\b",
+            r"|requests\.(?:post|put|patch|delete)|urllib\.request|urlopen|http\.client|smtplib|ftplib|paramiko|socket\.socket\s*\(",
             r"|(?:pulumi|cdk|sam|firebase|vercel|wrangler|fly|flyctl)\W+(?:up|deploy|destroy|publish))",
         ))
         .unwrap()
@@ -832,11 +1080,11 @@ pub fn text_hits(text: &str) -> bool {
 /// `make`/`just`/`npm run` find their recipes.
 pub fn scan(cmd: &str, worktree: bool, cwd: &Path) -> Vec<Hit> {
     let mut out = Vec::new();
-    scan_into(cmd, worktree, cwd, 0, &mut out);
+    scan_into(cmd, worktree, cwd, 0, &mut Ctx::default(), &mut out);
     out
 }
 
-fn scan_into(cmd: &str, worktree: bool, cwd: &Path, depth: u8, out: &mut Vec<Hit>) {
+fn scan_into(cmd: &str, worktree: bool, cwd: &Path, depth: u8, ctx: &mut Ctx, out: &mut Vec<Hit>) {
     if depth > 3 {
         out.push(hit("nested scripts", "scripts nest too deeply to read"));
         return;
@@ -895,6 +1143,9 @@ fn scan_into(cmd: &str, worktree: bool, cwd: &Path, depth: u8, out: &mut Vec<Hit
                         out.push(hit("gh repo", "deletes or changes a repository"));
                     }
                     Some(("api", r)) => gh_api(r, out),
+                    Some(("alias", r)) if has(r, &["set", "import"]) => {
+                        out.push(hit("gh alias", "a gh alias can run any shell command"));
+                    }
                     _ => {}
                 },
                 "aws" => cloud("aws", args, out),
@@ -946,8 +1197,16 @@ fn scan_into(cmd: &str, worktree: bool, cwd: &Path, depth: u8, out: &mut Vec<Hit
                     }
                 }
                 "make" | "gmake" | "just" | "npm" | "pnpm" | "yarn" | "bun" => {
-                    for line in project_scripts(name, args, cwd) {
-                        scan_into(&line, worktree, cwd, depth + 1, out);
+                    match project_scripts(name, args, cwd, ctx) {
+                        Ok(lines) => {
+                            for (line, dir) in lines {
+                                scan_into(&line, worktree, &dir, depth + 1, ctx, out);
+                            }
+                        }
+                        Err(()) => out.push(hit(
+                            "large recipes",
+                            "the recipes or scripts are too large to inspect",
+                        )),
                     }
                 }
                 _ => {}

@@ -61,7 +61,17 @@ pub const PREFIXES: &[&str] = &[
 ];
 
 /// Directories whose files are definitions too (`.cargo/config.toml`, `.devcontainer/`).
-pub const DIRS: &[&str] = &[".cargo", ".devcontainer", ".husky"];
+pub const DIRS: &[&str] = &[
+    ".cargo",
+    ".devcontainer",
+    ".husky",
+    "scripts",
+    "script",
+    "bin",
+    "hack",
+    "ci",
+    "tools",
+];
 
 /// `true` when `path` (any spelling) names a definition file or sits in a definition directory.
 pub fn is_definition(path: &str) -> bool {
@@ -91,6 +101,7 @@ mod tests {
             "playwright.config.js",
             "pom.xml",
             "Gemfile",
+            "scripts/ci.sh",
         ] {
             assert!(is_definition(p), "{p}");
         }

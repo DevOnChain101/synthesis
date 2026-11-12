@@ -128,19 +128,17 @@ fn prompt(task: &TaskRun, call: &Call, input: &Value, engine_note: &str) -> Stri
     .join("\n\n")
 }
 
-/// Actions whose input could have been steered by text drawn in an image: commands, network,
-/// messages, MCP, browser navigation and form filling. File edits, reads and browser clicks,
-/// scrolls and screenshots are not (they cannot carry the text out), so a browser task goes on.
+/// Actions whose input could have been steered by text drawn in an image. Everything is
+/// sensitive except what cannot carry text out or follow a link: file edits and these browser
+/// tools. A browser click can follow a link, so it is sensitive; an unknown tool is too.
 pub(crate) fn image_sensitive(name: &str) -> bool {
     if matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit") {
         return false;
     }
     match name.strip_prefix("browser_") {
-        Some(rest) => [
-            "navigate", "fill", "type", "eval", "upload", "download", "login", "press",
-        ]
-        .iter()
-        .any(|k| rest.starts_with(k)),
+        Some(rest) => !["screenshot", "snapshot", "scroll", "wait", "hover", "get_"]
+            .iter()
+            .any(|k| rest.starts_with(k)),
         None => true,
     }
 }
@@ -317,7 +315,7 @@ mod tests {
     #[test]
     fn browser_navigation_stays_usable_but_exfil_shaped_actions_are_sensitive() {
         for n in [
-            "browser_click",
+            "browser_wait",
             "browser_screenshot",
             "browser_scroll",
             "browser_snapshot",
@@ -327,6 +325,8 @@ mod tests {
             assert!(!image_sensitive(n), "{n}");
         }
         for n in [
+            "browser_click",
+            "browser_something_new",
             "Bash",
             "WebFetch",
             "SendMessage",

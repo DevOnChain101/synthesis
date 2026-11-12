@@ -51,6 +51,7 @@ pub mod rename;
 pub mod rewind;
 pub mod run;
 pub mod taskdb;
+pub mod tracker;
 pub mod transcript;
 pub mod verify_cfg;
 pub mod wt;

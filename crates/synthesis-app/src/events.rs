@@ -24,25 +24,34 @@ const SNAPSHOT_FILES: usize = 200;
 /// absolute paths: files named directly, and the files below a directory operand up to a cap.
 fn bash_snapshot_files(cmd: &str, cwd: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
-    for t in synthesis_permissions::bash::mutation_targets(cmd) {
+    'targets: for t in synthesis_permissions::bash::mutation_targets(cmd) {
         let p = cwd.join(&t);
-        if p.is_dir() {
+        // a symlink operand is not followed: `rm link` removes the link, not what it points at
+        let Ok(md) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
+        if md.is_file() {
+            out.push(p);
+        } else if md.is_dir() {
             let mut stack = vec![p];
             while let Some(d) = stack.pop() {
                 for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
                     let Ok(ft) = e.file_type() else { continue };
                     if ft.is_dir() && e.file_name() != ".git" {
                         stack.push(e.path());
-                    } else if ft.is_file() && out.len() < SNAPSHOT_FILES {
+                    } else if ft.is_file() {
                         out.push(e.path());
+                    }
+                    if out.len() >= SNAPSHOT_FILES {
+                        break 'targets;
                     }
                 }
             }
-        } else if p.is_file() {
-            out.push(p);
+        }
+        if out.len() >= SNAPSHOT_FILES {
+            break;
         }
     }
-    out.truncate(SNAPSHOT_FILES);
     out
 }
 
@@ -112,6 +121,37 @@ impl Persist {
         if let Some(store) = &self.store {
             let bad = |m: String| io::Error::other(m);
             let env: Envelope = serde_json::from_slice(line).map_err(|e| bad(e.to_string()))?;
+            // A mutating Bash command (rm, mv, cp, sed -i) is not tracked by the file tools: when it
+            // actually starts (the event is persisted before the command runs, after the permission
+            // decision) the files it names are snapshotted. The tree walk happens here, not while
+            // the writer lock is held.
+            match &env.event {
+                Event::ToolRequested {
+                    tool_call_id,
+                    name,
+                    input,
+                    ..
+                } if name == "Bash" => {
+                    if let Some(c) = input.get("command").and_then(|c| c.as_str()) {
+                        self.bash_cmds.insert(tool_call_id.clone(), c.to_string());
+                    }
+                }
+                // a call that never starts (denied) or ended: forget it
+                Event::ToolCompleted { tool_call_id, .. } => {
+                    self.bash_cmds.remove(tool_call_id);
+                }
+                _ => {}
+            }
+            let snap = match &env.event {
+                Event::ToolStarted {
+                    tool_call_id, cwd, ..
+                } => self
+                    .bash_cmds
+                    .remove(tool_call_id)
+                    .map(|c| bash_snapshot_files(&c, std::path::Path::new(cwd)))
+                    .unwrap_or_default(),
+                _ => vec![],
+            };
             let mut w = store.lock().unwrap_or_else(|e| e.into_inner());
             w.task_id.clone_from(&env.task_id);
             w.turn_id.clone_from(&env.turn_id);
@@ -162,40 +202,20 @@ impl Persist {
             {
                 eprintln!("synt: warning: checkpoint: {e}");
             }
-            // a mutating Bash command (rm, mv, cp, sed -i) is not tracked by the file tools:
-            // when it actually starts (after the permission decision) snapshot the files it names,
-            // one checkpoint per file so one bad operand cannot stop the rest (best effort)
-            if let Event::ToolRequested {
-                tool_call_id,
-                name,
-                input,
-                ..
-            } = &env.event
-                && name == "Bash"
-                && let Some(cmd) = input.get("command").and_then(|c| c.as_str())
-            {
-                self.bash_cmds.insert(tool_call_id.clone(), cmd.to_string());
-            }
-            if let Event::ToolStarted {
-                tool_call_id, cwd, ..
-            } = &env.event
-                && let Some(cmd) = self.bash_cmds.remove(tool_call_id)
-            {
-                for file in bash_snapshot_files(&cmd, std::path::Path::new(cwd)) {
-                    let key = file.to_string_lossy().into_owned();
-                    if self.checkpointed.contains(&key) {
-                        continue;
+            for file in &snap {
+                let key = file.to_string_lossy().into_owned();
+                if self.checkpointed.contains(&key) {
+                    continue;
+                }
+                match w.create_checkpoint(
+                    &format!("before-bash-{}", self.checkpointed.len() + 1),
+                    std::slice::from_ref(file),
+                ) {
+                    Ok(_) => {
+                        self.checkpointed.insert(key);
                     }
-                    match w.create_checkpoint(
-                        &format!("before-bash-{}", self.checkpointed.len() + 1),
-                        std::slice::from_ref(&file),
-                    ) {
-                        Ok(_) => {
-                            self.checkpointed.insert(key);
-                        }
-                        Err(synthesis_session::Error::Invalid(_)) => {}
-                        Err(e) => eprintln!("synt: warning: checkpoint: {e}"),
-                    }
+                    Err(synthesis_session::Error::Invalid(_)) => {}
+                    Err(e) => eprintln!("synt: warning: checkpoint: {e}"),
                 }
             }
             drop(w);
@@ -340,5 +360,31 @@ mod snapshot_tests {
         );
         assert_eq!(names("cp a.txt sub/b.txt"), ["sub/b.txt"]);
         assert!(names("ls -la").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod snapshot_big_tests {
+    use super::{SNAPSHOT_FILES, bash_snapshot_files};
+
+    #[test]
+    fn a_big_tree_stops_at_the_cap_and_symlink_operands_are_not_followed() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        std::fs::create_dir_all(r.join("big")).unwrap();
+        for i in 0..(SNAPSHOT_FILES * 3) {
+            std::fs::write(r.join("big").join(format!("f{i}")), "x").unwrap();
+        }
+        let t = std::time::Instant::now();
+        assert_eq!(bash_snapshot_files("rm -rf big", r).len(), SNAPSHOT_FILES);
+        assert!(t.elapsed() < std::time::Duration::from_secs(5));
+        #[cfg(unix)]
+        {
+            std::fs::write(r.join("real.txt"), "x").unwrap();
+            std::os::unix::fs::symlink(r.join("real.txt"), r.join("link")).unwrap();
+            std::os::unix::fs::symlink(r.join("big"), r.join("dlink")).unwrap();
+            assert!(bash_snapshot_files("rm link", r).is_empty());
+            assert!(bash_snapshot_files("rm -rf dlink", r).is_empty());
+        }
     }
 }

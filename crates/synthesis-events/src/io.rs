@@ -14,8 +14,8 @@ pub struct Redactor {
     credential: Regex,
 }
 
-/// Most exact values `add_secret` keeps (oldest stay; a flood of reads cannot slow every event).
-const MAX_SECRETS: usize = 256;
+/// Most bytes of exact values `add_secret` keeps; the oldest are dropped first.
+const MAX_SECRET_BYTES: usize = 32 * 1024;
 /// Values too ordinary to mask: they would corrupt unrelated text.
 const TRIVIAL: &[&str] = &[
     "true",
@@ -88,7 +88,7 @@ impl Redactor {
             // `NAME_TOKEN=value`, `"password": "value"`; group 3 is the next character (type syntax
             // such as `token: Option<String>` is told apart from a value there)
             credential: Regex::new(
-                r#"(?i)\b([A-Za-z0-9_]*(?:password|passwd|secret|token|api_?key)["']?\s*[:=]\s*["']?)([^\s"'<>(),;]{6,})(.?)"#,
+                r#"(?i)\b([A-Za-z0-9_]*(?:password|passwd|secret|token|api_?key))(["']?\s*[:=]\s*["']?)([^\s"'<>(),;]{6,})(.?)"#,
             )
             .expect("static regex"),
         }
@@ -96,15 +96,26 @@ impl Redactor {
 
     /// Registers an exact value to mask from now on (a value read from a secret file the user
     /// approved). Values shorter than 6 chars are ignored (they would match everywhere).
-    pub fn add_secret(&self, s: &str) {
+    /// Returns `true` when older values had to be dropped to make room (the caller should warn).
+    pub fn add_secret(&self, s: &str) -> bool {
         let s = s.trim().trim_matches(['"', '\'', ',', ';', '`']);
         if s.chars().count() < 8 || TRIVIAL.contains(&s.to_lowercase().as_str()) {
-            return;
+            return false;
         }
         let mut v = self.secrets.lock().unwrap_or_else(|e| e.into_inner());
-        if v.len() < MAX_SECRETS && !v.iter().any(|x| x == s) {
+        if v.iter().any(|x| x == s) {
+            return false;
+        }
+        let mut evicted = false;
+        while !v.is_empty() && v.iter().map(String::len).sum::<usize>() + s.len() > MAX_SECRET_BYTES
+        {
+            v.remove(0);
+            evicted = true;
+        }
+        if s.len() <= MAX_SECRET_BYTES {
             v.push(s.to_string());
         }
+        evicted
     }
 
     pub fn redact_str(&self, s: &str) -> String {
@@ -122,17 +133,27 @@ impl Redactor {
                 .replace_all(&out, format!("[REDACTED:{kind}]").as_str())
                 .into_owned();
         }
-        // a value looks like a secret when it has a digit or a symbol; `token: string` and `password: Option<String>` are code, not credentials
+        // An ALL-CAPS name with `=` (env style) or a quoted value is always a credential. In
+        // code-like forms (`token: x`, `password = y`) the value must look like a secret: a digit
+        // or a symbol (`token: string` and `token = self.next_token` are code, not credentials).
         self.credential
             .replace_all(&out, |c: &regex::Captures| {
-                let v = &c[2];
+                let (key, sep, v, next) = (&c[1], &c[2], &c[3], &c[4]);
+                let env_style = sep.contains('=')
+                    && key
+                        .chars()
+                        .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_');
+                let quoted = sep.ends_with(['"', '\'']);
                 let valuelike = v
                     .chars()
-                    .any(|ch| ch.is_ascii_digit() || "-_./+=~!@#$%^&*".contains(ch));
-                if v.starts_with("[REDACTED") || !valuelike || matches!(&c[3], "<" | "(" | ">") {
+                    .any(|ch| ch.is_ascii_digit() || "-+/=~!@#%^&*".contains(ch));
+                if v.starts_with(['$', '['])
+                    || matches!(next, "<" | "(" | ">")
+                    || !(env_style || quoted || valuelike)
+                {
                     c[0].to_string()
                 } else {
-                    format!("{}[REDACTED:credential]{}", &c[1], &c[3])
+                    format!("{key}{sep}[REDACTED:credential]{next}")
                 }
             })
             .into_owned()
@@ -964,6 +985,9 @@ mod tests {
             ("DB_PASSWORD=s3cr3t-pass", "credential"),
             ("OPENAI_API_KEY=zzZZ9988yy", "credential"),
             ("export STRIPE_SECRET=Ab12Cd34", "credential"),
+            ("PASSWORD=correcthorsebattery", "credential"),
+            ("DB_PASSWORD=hunterhunter", "credential"),
+            ("password = \"correcthorsebattery\"", "credential"),
             ("\"token\": \"abcdef123\"", "credential"),
         ] {
             let out = r.redact_str(input);
@@ -995,6 +1019,9 @@ mod tests {
             "secret: SecretString",
             "let api_key = get_key();",
             "pub token: String,",
+            "token = self.next_token",
+            "TOKEN=${TOKEN}",
+            "let password = input.value",
         ] {
             assert_eq!(r.redact_str(ok), ok, "{ok}");
         }
@@ -1012,14 +1039,13 @@ mod tests {
             r.redact_str("x db-pass-9981 ab production localhost true postgres 12345"),
             "x [REDACTED:secret] ab production localhost true postgres 12345"
         );
-        for i in 0..400 {
-            r.add_secret(&format!("secret-value-{i:04}"));
+        let mut evicted = false;
+        for i in 0..4000 {
+            evicted |= r.add_secret(&format!("secret-value-{i:04}"));
         }
-        assert!(
-            r.redact_str("secret-value-0399")
-                .contains("secret-value-0399"),
-            "capped"
-        );
+        assert!(evicted, "the byte cap evicts the oldest");
+        assert_eq!(r.redact_str("secret-value-0000"), "secret-value-0000");
+        assert_eq!(r.redact_str("secret-value-3999"), "[REDACTED:secret]");
     }
 
     #[test]

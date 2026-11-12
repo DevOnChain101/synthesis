@@ -31,3 +31,10 @@ See the NOT_FIXED list in the commit message / SECURITY.md limits: Bash writes t
 
 ## Shared list for the verification gate
 `synthesis_core::definitions::{FILES, PREFIXES, DIRS, is_definition}` is the single list of files that define what a build/test command runs. `feat/harness-gate` defines its own list in `crates/synthesis-verification/src/plan.rs`; replace it with this one.
+
+## Round 3 notes
+- Local targets: `irreversible::local_host` parses the host (userinfo, brackets, port) and accepts `localhost` or an IP that `is_loopback`/`is_unspecified`; `127.evil.com` is remote.
+- `is_protected` and `rel_segments` use the lexical path, the realpath and `paths::resolve_links` (dangling links, chains; Windows junctions are followed on the assumption that `FileType::is_symlink` is true for them, not verified).
+- Recipes: `project_scripts` reads only the named targets plus prerequisites, once each (`Ctx.seen`), at most 5000 lines.
+- `Env::enforce_sandbox()` is the only way to get project-code trust (it takes the baseline); `Env.sandbox_enforcing` set by hand without a baseline is untrusted.
+- A Bash snapshot is taken from `tool.started`, which `Persist` writes synchronously before the harness runs the command.

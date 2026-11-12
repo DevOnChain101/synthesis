@@ -787,6 +787,7 @@ async fn trusted_inferred_check_runs_without_an_allow_when_the_agent_did_not_wri
             let approver = ScriptedApprover::new(vec![]);
             let opts = Opts {
                 mode,
+                files: vec![("Makefile".into(), "test:\n\ttouch ran-it\n".into())],
                 ..gate_opts(interactive)
             };
             // the Makefile exists before the task; the agent writes something else
@@ -800,7 +801,6 @@ async fn trusted_inferred_check_runs_without_an_allow_when_the_agent_did_not_wri
                 Turn::text("done again"),
             ];
             let mut rig = gated(opts, turns, Some(approver.clone()));
-            std::fs::write(rig.ws.cwd.join("Makefile"), "test:\n\ttouch ran-it\n").unwrap();
             let out = rig.run("add a file").await;
             let ctx = format!("{mode:?} interactive={interactive}: {}", out.reason);
             assert_ne!(out.status, TaskStatus::Blocked, "{ctx}");

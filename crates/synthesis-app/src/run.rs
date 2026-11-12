@@ -1236,10 +1236,11 @@ pub fn prepare(
         .cloned()
         .collect();
     // build/test commands that run project code are auto-safe only under a confining sandbox
-    perms.env.sandbox_enforcing = sandbox_mode == SandboxMode::Enforce;
+    if sandbox_mode == SandboxMode::Enforce {
+        // takes the definitions baseline too: without it nothing is trusted
+        perms.env.enforce_sandbox();
+    }
     perms.env.worktree = worktree.is_some();
-    // definition files as they are now: a later change by anything cuts the project-code trust
-    perms.env.snapshot_definitions();
     perms.env.auto_mode = synthesis_permissions::AutoModeSettings {
         classify_all_shell: user_settings.auto_mode.classify_all_shell.unwrap_or(false),
         use_auto_mode_during_plan: user_settings
@@ -1632,6 +1633,7 @@ pub fn prepare(
     };
     let context = Arc::new(context);
     let mut harness = Harness::new(res.provider.clone(), toolbox, perms, sink.clone(), hcfg)
+        .with_change_tracker(Arc::new(crate::tracker::MtimeTracker::default()))
         .with_approver(approver)
         .with_agents(agents.table)
         .with_model_resolver(agent_model_resolver(&cfg, &res.label))

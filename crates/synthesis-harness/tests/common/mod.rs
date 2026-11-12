@@ -134,6 +134,9 @@ pub struct Opts {
     pub no_vision: bool,
     /// `capabilities.effort_tiers` of the model.
     pub effort_tiers: Vec<String>,
+    /// Files that exist in the workspace before the session starts (and before the definitions
+    /// baseline is taken).
+    pub files: Vec<(String, String)>,
 }
 
 /// Writes into `buf` until `left` writes are used up, then fails every write.
@@ -172,6 +175,7 @@ impl Default for Opts {
             responder: None,
             no_vision: false,
             effort_tiers: vec![],
+            files: vec![],
         }
     }
 }
@@ -265,8 +269,13 @@ impl Rig {
         };
         let mut env =
             Env::new(root.join("w"), root.join("home"), Mode::Default).interactive(o.interactive);
+        for (name, text) in &o.files {
+            let p = root.join("w").join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
         // the tests assume confined commands; the project-code tests clear it
-        env.sandbox_enforcing = true;
+        env.enforce_sandbox();
         let perms = Permissions::new(rules, env);
         let harness = Harness::new(provider.clone(), o.tools, perms, sink, cfg);
         let h0 = Rig0 {
