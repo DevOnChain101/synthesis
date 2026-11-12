@@ -27,6 +27,7 @@ synthesis-mcp = { path = "../synthesis-mcp" }
 synthesis-peers = { path = "../synthesis-peers" }
 synthesis-permissions = { path = "../synthesis-permissions" }
 synthesis-providers = { path = "../synthesis-providers" }
+synthesis-platform = { path = "../synthesis-platform" }
 synthesis-sandbox = { path = "../synthesis-sandbox" }
 synthesis-session = { path = "../synthesis-session" }
 synthesis-view = { path = "../synthesis-view" }

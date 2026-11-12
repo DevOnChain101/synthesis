@@ -388,6 +388,30 @@ pub fn plan(
     trust: ProjectTrust,
     approve: &[String],
 ) -> Plan {
+    plan_on(
+        user_cfg,
+        settings,
+        user_settings,
+        cwd,
+        trust,
+        approve,
+        synthesis_sandbox::wsl::is_wsl(),
+    )
+}
+
+/// [`plan`] with WSL explicit. On WSL an approved PROJECT stdio server is still refused: stdio
+/// servers run outside the OS sandbox, so a repository could make one start Windows programs
+/// (`cmd.exe`) through interop. User-owned servers (user, local, synthesis scope) are the
+/// person's own choice and run with the scrubbed `Env::child_env`; http servers start nothing.
+pub fn plan_on(
+    user_cfg: &Config,
+    settings: &Settings,
+    user_settings: &Settings,
+    cwd: &Path,
+    trust: ProjectTrust,
+    approve: &[String],
+    wsl: bool,
+) -> Plan {
     let x = &user_cfg.extra;
     let mut all: Vec<McpServerConfig> = vec![];
     let mut project: Vec<McpServerConfig> = vec![];
@@ -451,8 +475,18 @@ pub fn plan(
                 (Appr::No, b) => b,
                 (a, _) => a,
             });
+        let stdio = s.url.is_none()
+            && matches!(
+                s.transport,
+                None | Some(synthesis_mcp::TransportKind::Stdio)
+            );
         let why = if disabled.contains(&s.name) {
             Some("disabled in settings".to_string())
+        } else if wsl && stdio {
+            Some(format!(
+                "WSL: a project stdio MCP server runs outside the sandbox and could start Windows programs through interop; define it in your user settings instead; definition: {}",
+                describe(&s)
+            ))
         } else if trust != ProjectTrust::Trusted {
             Some(format!(
                 "project not trusted (needs --trust-project and approval); definition: {}",
@@ -1591,6 +1625,60 @@ mod tests {
 
     fn started(p: &Plan) -> Vec<&str> {
         p.servers.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    #[test]
+    fn wsl_refuses_an_approved_project_stdio_server_but_not_http_or_user_ones() {
+        let (d, s) = repo(json!({"mcpServers":{
+            "repo":{"command":"x"},
+            "web":{"url":"https://example.com/mcp"}
+        }}));
+        let user = cfg(json!({"mcpServers":{"mine":{"command":"z"}}}));
+        let approve: Vec<String> = ["repo", "web"]
+            .iter()
+            .map(|n| {
+                let srv = parse_claude_servers(
+                    &read_obj(&d.path().join(".mcp.json")).unwrap()["mcpServers"],
+                    Some("project"),
+                )
+                .0
+                .into_iter()
+                .find(|x| x.name == *n)
+                .unwrap();
+                format!("{n}@{}", &definition_hash(&srv)[..HASH_SHOWN])
+            })
+            .collect();
+        let run = |wsl| {
+            plan_on(
+                &user,
+                &s,
+                &s,
+                d.path(),
+                ProjectTrust::Trusted,
+                &approve,
+                wsl,
+            )
+        };
+        let mut off = started(&run(false))
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>();
+        off.sort();
+        assert_eq!(off, ["mine", "repo", "web"]);
+        let p = run(true);
+        let mut on = started(&p)
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>();
+        on.sort();
+        assert_eq!(on, ["mine", "web"]);
+        assert!(
+            p.skipped
+                .iter()
+                .any(|(n, w)| n == "repo" && w.contains("WSL")),
+            "{:?}",
+            p.skipped
+        );
     }
 
     #[test]

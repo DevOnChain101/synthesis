@@ -92,3 +92,5 @@ mod tests {
         assert_eq!(system32("x"), PathBuf::from("x"));
     }
 }
+
+pub mod wsl;

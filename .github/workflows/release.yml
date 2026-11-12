@@ -143,13 +143,31 @@ jobs:
           "$BIN" --version | tee version.txt
           grep -q "Synthesis $VERSION" version.txt
           "$BIN" doctor --cwd "$RUNNER_TEMP"
+          # Linux: the sandbox helper must exist next to synt and its seccomp mode must run.
+          case "$TARGET" in
+            *linux*)
+              if [ -z "${HELPER:-}" ] || [ ! -x "$HELPER" ]; then
+                echo "::error::synthesis-sandbox-exec missing from the Linux build"
+                exit 1
+              fi
+              "$HELPER" --no-vsock -- /bin/true
+              ;;
+          esac
 
       - name: Package
         run: |
           name="synthesis-$VERSION-$TARGET"
           mkdir -p "dist/$name"
           cp "$BIN" "dist/$name/"
-          if [ -n "${HELPER:-}" ]; then cp "$HELPER" "dist/$name/"; fi
+          case "$TARGET" in
+            *linux*)
+              if [ ! -f "$HELPER" ]; then
+                echo "::error::Linux archive needs synthesis-sandbox-exec"
+                exit 1
+              fi
+              cp "$HELPER" "dist/$name/"
+              ;;
+          esac
           cp LICENSE NOTICE README.md "dist/$name/"
           cd dist || exit 1
           if [ "$EXT" = zip ]; then 7z a -tzip "$name.zip" "$name" >/dev/null; else tar -czf "$name.tar.gz" "$name"; fi

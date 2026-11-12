@@ -24,6 +24,7 @@ mod helper;
 mod linux;
 mod seatbelt;
 mod windows;
+pub mod wsl;
 
 use std::ffi::OsString;
 use std::fmt;
@@ -31,10 +32,11 @@ use std::path::{Path, PathBuf};
 
 pub use helper::{HELPER_NAME, decode_policy, encode_policy, parse_helper_args};
 pub use linux::{
-    BwrapBackend, LandlockRule, LinuxLandlockBackend, bwrap_probe, landlock_rules, skipped_backends,
+    BwrapBackend, LandlockRule, LinuxLandlockBackend, bwrap_probe, helper_status, landlock_rules,
+    skipped_backends,
 };
 #[cfg(target_os = "linux")]
-pub use linux::{landlock_abi, restrict_current_process};
+pub use linux::{deny_vsock, landlock_abi, restrict_current_process};
 pub use seatbelt::{SeatbeltBackend, seatbelt_profile};
 pub use windows::WindowsJobBackend;
 
@@ -83,6 +85,10 @@ pub struct SandboxPolicy {
     /// `Loopback`), is below this. Defaults to `Weak`, so an unusable backend
     /// ([`NullSandbox`]) is refused; the terminal's `Enforce` mode never goes below `Weak`.
     pub required: Guarantee,
+    /// WSL only: hide the Windows drives from READS too (a tmpfs over every drvfs mount; the
+    /// workspace and `readable_roots` on a drive are bound back). Default true; the user turns it
+    /// off with `synt.sandbox.wsl.hide_windows_drives` (user or managed settings).
+    pub wsl_hide_drives: bool,
 }
 
 impl Default for SandboxPolicy {
@@ -97,6 +103,7 @@ impl Default for SandboxPolicy {
             allow_exec: true,
             env_passthrough: vec![],
             required: Guarantee::Weak,
+            wsl_hide_drives: true,
         }
     }
 }
@@ -589,6 +596,14 @@ pub(crate) fn validate(p: &SandboxPolicy) -> Result<(), SandboxError> {
 }
 
 pub(crate) fn build_env(p: &SandboxPolicy, c: &SandboxedCommand) -> Vec<(OsString, OsString)> {
+    build_env_on(p, c, wsl::host().as_ref())
+}
+
+pub(crate) fn build_env_on(
+    p: &SandboxPolicy,
+    c: &SandboxedCommand,
+    wsl: Option<&synthesis_platform::wsl::WslHost>,
+) -> Vec<(OsString, OsString)> {
     let mut env: Vec<_> = p
         .env_passthrough
         .iter()
@@ -598,6 +613,9 @@ pub(crate) fn build_env(p: &SandboxPolicy, c: &SandboxedCommand) -> Vec<(OsStrin
     if let Some(t) = &p.tmp_dir {
         env.retain(|(k, _)| k != "TMPDIR");
         env.push(("TMPDIR".into(), t.clone().into_os_string())); // forced: private tmp only
+    }
+    if let Some(host) = wsl {
+        wsl::scrub_env(&mut env, host);
     }
     env
 }
