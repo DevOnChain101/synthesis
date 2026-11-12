@@ -833,3 +833,115 @@ fn parent_trust_of_the_home_folder_and_a_non_enforcing_sandbox_are_reported_by_t
             .contains("refused")
     );
 }
+
+#[test]
+fn a_send_during_a_compaction_is_refused_busy_and_loses_nothing() {
+    let mut e = engine(|ws| {
+        json!([
+            {"text": "first answer"},
+            // the compaction's model turn waits until the file exists
+            {"text": "summary", "after_file": ws.join("go")},
+            {"text": "second answer"}
+        ])
+    });
+    e.start();
+    e.call("send", json!({"text": "one"}));
+    e.until("task_done", is_task_done);
+    assert_eq!(e.ok("compact", json!({}))["started"], false);
+    // the compaction runs on a copy of the history and then replaces it: nothing may start meanwhile
+    let err = e.err("send", json!({"text": "two"}));
+    assert!(err.starts_with("refused: busy"), "{err}");
+    assert!(e.err("session.new", Value::Null).contains("busy"));
+    assert!(e.err("clear", Value::Null).contains("running"));
+    std::fs::write(e.ws.join("go"), "").unwrap();
+    e.until("compacted", |v| v["msg"] == "compacted");
+    e.call("send", json!({"text": "two"}));
+    let seen = e.until("task_done", is_task_done);
+    assert!(seen.last().unwrap()["error"].is_null(), "{seen:?}");
+}
+
+#[test]
+fn a_refused_trust_restart_writes_no_row() {
+    let mut e = engine(write_script);
+    trusted_config(&e);
+    e.start();
+    e.call("send", json!({"text": "write it"}));
+    let ask = e
+        .until("ask", |v| v["msg"] == "ask.approval")
+        .pop()
+        .unwrap();
+    // busy: refused before the engine wrote anything
+    let err = e.err("trust.set", json!({"mode": "remember"}));
+    assert!(err.contains("busy"), "{err}");
+    // an answer is served at once while other requests are queued behind a slow worker
+    let id = e.call("answer", json!({"id": ask["id"], "choice": "deny"}));
+    let r = e.results(&[id]);
+    assert_eq!(r[&id]["ok"]["accepted"], true);
+    e.until("task_done", is_task_done);
+    assert_eq!(
+        e.ok("trust.state", Value::Null)["records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    // the restart gap: a restart right after another is refused before any row is written
+    e.ok("session.new", Value::Null);
+    let err = e.err("trust.set", json!({"mode": "remember"}));
+    assert!(err.contains("too many restarts"), "{err}");
+    assert_eq!(
+        e.ok("trust.state", Value::Null)["records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn workspace_close_hides_sessions_only_after_the_new_one_runs() {
+    let mut e = engine(|_| json!([{"text": "ok"}]));
+    trusted_config(&e);
+    let info = e.start();
+    let old = info["sid"].as_str().unwrap().to_string();
+    e.call("send", json!({"text": "hi"}));
+    e.until("task_done", is_task_done);
+    let ws = e.ok("workspaces.list", Value::Null);
+    let key = ws["workspaces"][0]["key"].as_str().unwrap().to_string();
+    assert!(ws.to_string().contains(&old));
+    // a restart that fails (the trusted configuration changed under a session grant) resumes the session:
+    // it is still listed, nothing was hidden
+    e.ok("trust.set", json!({"mode": "session"}));
+    std::fs::write(e.ws.join(".synt/settings.json"), r#"{"changed":true}"#).unwrap();
+    gap();
+    let v = e.ok("workspace.close", json!({"workspace": key}));
+    assert!(v["notices"].to_string().contains("UNTRUSTED"), "{v}");
+    assert!(
+        e.ok("workspaces.list", Value::Null)
+            .to_string()
+            .contains(&old),
+        "still listed"
+    );
+    // a restart that succeeds hides it
+    gap();
+    let v = e.ok("workspace.close", json!({"workspace": key}));
+    assert!(
+        v["closed_report"]["closed"].to_string().contains(&old),
+        "{v}"
+    );
+    assert!(
+        !e.ok("workspaces.list", Value::Null)
+            .to_string()
+            .contains(&old)
+    );
+}
+
+#[test]
+fn a_restart_says_when_it_resets_the_permission_mode() {
+    let (mut e, _) = used_engine();
+    assert_eq!(e.ok("set_mode", json!({"mode": "plan"}))["mode"], "plan");
+    let v = e.ok("session.new", Value::Null);
+    assert_eq!(v["mode"], "default");
+    let n = v["notices"].to_string();
+    assert!(n.contains("again") && n.contains("plan"), "{n}");
+}

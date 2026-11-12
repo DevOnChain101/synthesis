@@ -1538,6 +1538,16 @@ impl TuiView {
             lu.live
                 .note_kind(NoticeKind::Bookkeeping, "task cancelled: switching");
         }
+        // a background call to the engine is still running: the engine is kept, never dropped under it
+        if lu.live.engine.as_ref().is_some_and(engine::in_use) {
+            lu.live.note(
+                "busy, try again: a call to the engine is still running",
+                true,
+            );
+            lu.dirty = true;
+            cx.notify();
+            return;
+        }
         lu.live.switch_armed = None;
         let project = match &target {
             Target::New(p) => p.clone(),
@@ -2900,6 +2910,10 @@ pub fn read_store(
     cfg: &LiveCfg,
     root: Option<&str>,
 ) -> Result<(WorkspaceList, Vec<synthesis_view::usage::HistoryDay>), String> {
+    // the host's store is never read for a WSL engine (its lists come from the engine); an unreadable setting counts as WSL mode
+    if crate::wsl::enabled(&cfg.synthesis_home).unwrap_or(true) {
+        return Err("WSL mode: the host's session store is not used".into());
+    }
     let _t = crate::trace::span(&cfg.env, "read_store (workspace list, usage)");
     let r = synthesis_session::Reader::open(&cfg.synthesis_home).map_err(|e| e.to_string())?;
     let home = cfg.synthesis_home.clone();
@@ -3117,6 +3131,23 @@ mod tests {
         let local = build.find("Engine::start_with(").expect("local start");
         assert!(gate < local);
         assert!(build[gate..local].contains("return wsl_build("));
+        // the host's store is read in exactly one place, behind the WSL gate, and the window's refresh asks the
+        // engine instead for a remote one
+        let body = &src[src.find("pub fn read_store(").expect("read_store")..];
+        let first = &body[..body
+            .find("let r = synthesis_session::Reader::open")
+            .expect("open")];
+        assert!(
+            first.contains("crate::wsl::enabled(&cfg.synthesis_home)")
+                && first.contains("return Err(")
+        );
+        let refresh = &src[src.find("pub fn refresh_store(").expect("refresh")..];
+        let refresh = &refresh[..refresh.find("fn store_loaded").expect("end")];
+        assert!(
+            refresh.find("read_store_remote").expect("remote")
+                < refresh.find("read_store(&cfg").expect("host"),
+            "a remote engine is asked before the host store is considered"
+        );
         // engine.rs: every local start is `pub(crate)` (the compiler then keeps it inside this crate), the one
         // that only tools use is behind a feature, and the public test wrappers are behind another
         let eng = include_str!("../engine.rs");

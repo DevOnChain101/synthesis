@@ -58,7 +58,8 @@ pub enum UiMsg {
     /// Something a background call to the remote engine has to say (`true`: a problem).
     Note(String, bool),
     /// `/rename` ended (`Ok`: the stored title).
-    Renamed(Result<String, String>),
+    /// `(session id it was asked for, result)`: applied only while that session is the open one.
+    Renamed(String, Result<String, String>),
     /// `/trust` asked the engine for its state.
     TrustList(Result<crate::remote::TrustState, String>),
 }
@@ -985,7 +986,10 @@ impl Engine {
     /// `/rename` for a remote engine, in the background: `UiMsg::Renamed` follows.
     pub fn rename_remote(self: &Arc<Self>, title: &str) {
         let (sid, title) = (self.sid.clone(), title.to_string());
-        self.spawn_remote(move |r| Some(UiMsg::Renamed(r.rename(&sid, &title))));
+        self.spawn_remote(move |r| {
+            let done = r.rename(&sid, &title);
+            Some(UiMsg::Renamed(sid, done))
+        });
     }
 
     /// `/name`: the name other sessions address this one by; `None` when peers are off.
@@ -1070,6 +1074,12 @@ impl Engine {
 
 /// Ends an engine other threads may still hold for a moment (a peer poll): waits for them, then
 /// [`Engine::close`]. Blocking; call it off the UI thread.
+/// Another thread (a background call to the engine, a peer poll) still holds this engine: it must not be
+/// restarted or closed now (the window says "busy, try again" instead of dropping it).
+pub fn in_use(e: &Arc<Engine>) -> bool {
+    Arc::strong_count(e) > 1
+}
+
 /// Takes an engine other threads may still hold for a moment (a peer poll) out of its `Arc`.
 pub fn take_shared(mut e: Arc<Engine>) -> Result<Engine, String> {
     for _ in 0..250 {

@@ -344,14 +344,35 @@ fn a_slow_engine_never_blocks_the_callers_of_rename_clear_and_compact() {
         t0.elapsed() < Duration::from_millis(500),
         "returned at once"
     );
+    // a call in flight keeps the engine from being restarted or closed under it
+    assert!(synthesis_desktop::engine::in_use(&e));
     // the answers arrive later, as messages
     let mut renamed = false;
     let t1 = Instant::now();
     while !renamed {
         assert!(t1.elapsed() < Duration::from_secs(30), "no answer");
-        if let UiMsg::Renamed(Ok(t)) = next(&mut rx, "answer") {
+        if let UiMsg::Renamed(sid, Ok(t)) = next(&mut rx, "answer") {
+            assert_eq!(sid, "s1", "the answer names the session it was asked for");
             renamed = t == "t";
         }
+    }
+}
+
+fn a_busy_engine_is_kept_until_its_calls_ended() {
+    let (e, mut rx) = start("slow").expect("starts");
+    let e = std::sync::Arc::new(e);
+    assert!(!synthesis_desktop::engine::in_use(&e));
+    e.rename_remote("x");
+    assert!(
+        synthesis_desktop::engine::in_use(&e),
+        "the call holds the engine"
+    );
+    // once it answered, the engine is free again
+    while !matches!(next(&mut rx, "answer"), UiMsg::Renamed(..)) {}
+    let t0 = Instant::now();
+    while synthesis_desktop::engine::in_use(&e) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "still held");
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -516,7 +537,7 @@ fn main() {
     if let Some(i) = args.iter().position(|a| a == "--fake-engine") {
         return fake_engine(&args[i + 1]);
     }
-    let tests: [(&str, fn()); 15] = [
+    let tests: [(&str, fn()); 16] = [
         (
             "the_store_methods_are_parsed_bounded_and_made_printable",
             the_store_methods_are_parsed_bounded_and_made_printable,
@@ -536,6 +557,10 @@ fn main() {
         (
             "a_slow_engine_never_blocks_the_callers_of_rename_clear_and_compact",
             a_slow_engine_never_blocks_the_callers_of_rename_clear_and_compact,
+        ),
+        (
+            "a_busy_engine_is_kept_until_its_calls_ended",
+            a_busy_engine_is_kept_until_its_calls_ended,
         ),
         (
             "a_refused_restart_leaves_the_session_running",

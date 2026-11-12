@@ -942,7 +942,9 @@ impl Live {
                 );
             }
             UiMsg::Note(t, err) => self.note(t, err),
-            UiMsg::Renamed(r) => match r {
+            // an answer for a session that is no longer the open one is not applied to this one
+            UiMsg::Renamed(sid, _) if sid != self.sid => {}
+            UiMsg::Renamed(_, r) => match r {
                 Ok(t) => {
                     self.view.workspaces.set_title(&self.sid, &t);
                     self.renamed = Some((self.sid.clone(), t.clone()));
@@ -3244,6 +3246,19 @@ pub fn zone_minutes(t: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rename_answer_for_another_session_is_not_applied() {
+        let mut l = Live::new();
+        l.sid = "open".into();
+        l.on_msg(UiMsg::Renamed("old".into(), Ok("late title".into())), 0);
+        assert!(
+            l.renamed.is_none(),
+            "an answer for a session that is gone changes nothing"
+        );
+        l.on_msg(UiMsg::Renamed("open".into(), Ok("title".into())), 0);
+        assert_eq!(l.renamed, Some(("open".into(), "title".into())));
+    }
 
     #[test]
     fn the_trust_dialog_says_when_a_remembered_trust_will_not_be_honoured() {

@@ -22,7 +22,13 @@ pub const MAX_PREVIEW_EVENTS: usize = 50_000;
 /// One event over this is left out of a preview (a huge tool result).
 const MAX_PREVIEW_EVENT: usize = 1 << 20;
 const MAX_KEY: usize = 4096;
-const PREVIEW_PAGE: usize = 2000;
+/// Events per page of the preview scan.
+const PREVIEW_PAGE: usize = 200;
+/// Bytes of events one preview may scan (the newest ones seen are kept).
+#[cfg(not(test))]
+const MAX_PREVIEW_SCAN: usize = 64 << 20;
+#[cfg(test)]
+const MAX_PREVIEW_SCAN: usize = 6 << 20;
 const MAX_MODEL: usize = 200;
 pub const MAX_INSTRUCTIONS: usize = 8192;
 const MAX_FILES: usize = 20;
@@ -150,11 +156,13 @@ impl Ctx<'_> {
         let rec = r
             .get_session(id)
             .map_err(|_| "unknown session".to_string())?;
-        // only the newest events are read, a page at a time: never the whole log in memory
+        // only the newest events are read, a page at a time, and every limit is in BYTES as well as events: a page
+        // is small, an event over the per-event limit is dropped as soon as it is measured, and the scan stops at
+        // its own byte budget (the newest events seen so far are kept)
         let mut seq = rec.event_cursor.saturating_sub(MAX_PREVIEW_EVENTS as u64);
-        let mut kept: std::collections::VecDeque<(usize, Value)> = Default::default();
-        let (mut bytes, mut truncated) = (0usize, seq > 0);
-        loop {
+        let mut kept: std::collections::VecDeque<(usize, String)> = Default::default();
+        let (mut bytes, mut scanned, mut truncated) = (0usize, 0usize, seq > 0);
+        'pages: loop {
             let recs = r
                 .read_events(id, seq, PREVIEW_PAGE)
                 .map_err(failed("cannot read the session"))?;
@@ -168,20 +176,26 @@ impl Ctx<'_> {
                 let synthesis_events::Record::Known(e) = rec else {
                     continue;
                 };
-                let Ok(v) = serde_json::to_value(&e) else {
+                let Ok(text) = serde_json::to_string(&e) else {
                     continue;
                 };
-                let n = v.to_string().len();
+                drop(e);
+                let n = text.len();
+                scanned += n;
                 if n > MAX_PREVIEW_EVENT {
                     truncated = true;
-                    continue;
+                } else {
+                    bytes += n;
+                    kept.push_back((n, text));
+                    while bytes > MAX_PREVIEW_BYTES || kept.len() > MAX_PREVIEW_EVENTS {
+                        let (n, _) = kept.pop_front().unwrap_or_default();
+                        bytes -= n;
+                        truncated = true;
+                    }
                 }
-                bytes += n;
-                kept.push_back((n, v));
-                while bytes > MAX_PREVIEW_BYTES || kept.len() > MAX_PREVIEW_EVENTS {
-                    let (n, _) = kept.pop_front().unwrap_or_default();
-                    bytes -= n;
+                if scanned > MAX_PREVIEW_SCAN {
                     truncated = true;
+                    break 'pages;
                 }
             }
             if last <= seq {
@@ -189,9 +203,11 @@ impl Ctx<'_> {
             }
             seq = last;
         }
-        Ok(
-            json!({"events": kept.into_iter().map(|(_, v)| v).collect::<Vec<_>>(), "truncated": truncated}),
-        )
+        let events: Vec<Value> = kept
+            .into_iter()
+            .filter_map(|(_, t)| serde_json::from_str(&t).ok())
+            .collect();
+        Ok(json!({"events": events, "truncated": truncated}))
     }
 
     pub fn usage(&self, tz_min: i32, now_ms: i64) -> Result<Value, String> {
@@ -349,21 +365,26 @@ impl Ctx<'_> {
                 Ok(())
             });
         if let Err(e) = done {
-            self.undo(undo);
-            return Err(failed::<String>("cannot write the trust store")(e));
+            let stuck = self.undo(undo);
+            let mut msg = failed::<String>("cannot write the trust store")(e);
+            if !stuck.is_empty() {
+                msg += &format!("; the trust of {} could not be undone", stuck.join(", "));
+            }
+            return Err(msg);
         }
         Ok(((root, Some(fp), false), undo))
     }
 
-    /// Puts the trust rows back as they were (a trusted restart failed).
-    pub fn undo(&self, rows: Vec<Undo>) {
+    /// Puts the trust rows back as they were (a trusted restart failed). A row that cannot be restored is revoked
+    /// instead (fewer trust, never more); the roots of the rows that could be neither restored nor revoked come back,
+    /// for the caller to say.
+    pub fn undo(&self, rows: Vec<Undo>) -> Vec<String> {
         let policy = trust_policy(self.user_home, self.home);
-        for (root, prev) in rows {
-            let _ = match prev {
-                Some(r) => trust::restore(self.home, &r, &policy).map(|()| false),
-                None => trust::revoke(self.home, &root.to_string_lossy()),
-            };
-        }
+        undo_with(
+            rows,
+            |r| trust::restore(self.home, r, &policy).is_ok(),
+            |root| trust::revoke(self.home, root).is_ok(),
+        )
     }
 
     /// Forgets a remembered root. `root` must be one this engine listed (`trust.state`), never any path.
@@ -383,6 +404,23 @@ impl Ctx<'_> {
         let was = trust::revoke(self.home, root).map_err(failed("cannot revoke"))?;
         Ok(json!({"revoked": was, "session_grant_ended": held}))
     }
+}
+
+/// [`Ctx::undo`] over the two store operations (`true`: it worked).
+fn undo_with(
+    rows: Vec<Undo>,
+    restore: impl Fn(&trust::TrustRecord) -> bool,
+    revoke: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut failed = vec![];
+    for (root, prev) in rows {
+        let key = root.to_string_lossy();
+        let restored = prev.as_ref().is_some_and(&restore);
+        if !restored && !revoke(&key) {
+            failed.push(sanitize_for_display(&key));
+        }
+    }
+    failed
 }
 
 /// A trust row before a grant: `(root, previous row)`.
@@ -530,6 +568,115 @@ mod tests {
             let e = c.grant(&proj, m).unwrap_err();
             assert!(e.contains("change detection"), "{m:?}: {e}");
         }
+        assert_eq!(
+            c.trust_state(&proj, None, false)["records"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_preview_is_bounded_in_bytes_whatever_the_events_weigh() {
+        use synthesis_core::{PermissionMode, WorkspaceContext};
+        use synthesis_events::{Budget, Event};
+        use synthesis_session::{NewSession, Store, StoreOptions};
+        let (_t, home, user, proj) = setup();
+        let store = Store::open(&home, StoreOptions::default()).unwrap();
+        let ws = WorkspaceContext::open("w1", &proj, &proj, &[], proj.join(".art"), "pg").unwrap();
+        let mut w = store
+            .create_session(NewSession {
+                id: Some("s1".into()),
+                workspace: &ws,
+                model_config_id: "m".into(),
+                permission_mode: PermissionMode::AcceptEdits,
+                permission_policy_id: "default".into(),
+                budget: Budget::default(),
+                parent: None,
+                title: None,
+            })
+            .unwrap();
+        let mut say = |n: usize| {
+            w.append_event(Event::UserMessage {
+                text: "x".repeat(n),
+                display_text: None,
+                images: vec![],
+            })
+            .unwrap();
+        };
+        // two events over the per-event limit, then more small ones than the scan budget
+        say(MAX_PREVIEW_EVENT + 1000);
+        say(MAX_PREVIEW_EVENT + 5000);
+        for _ in 0..40 {
+            say(300_000);
+        }
+        let env = Env::from_pairs::<&str, &str>([]);
+        let c = Ctx {
+            home: &home,
+            user_home: Some(&user),
+            env: &env,
+            enforcing: true,
+        };
+        let v = c.preview("s1").unwrap();
+        let events = v["events"].as_array().unwrap();
+        assert_eq!(v["truncated"], true);
+        let sizes: Vec<usize> = events.iter().map(|e| e.to_string().len()).collect();
+        assert!(
+            sizes.iter().sum::<usize>() <= MAX_PREVIEW_BYTES,
+            "{}",
+            sizes.iter().sum::<usize>()
+        );
+        assert!(
+            sizes.iter().all(|n| *n <= MAX_PREVIEW_EVENT),
+            "no event over the per-event limit"
+        );
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn a_failed_undo_is_reported_and_a_row_that_cannot_be_restored_is_revoked() {
+        let rec = trust::TrustRecord {
+            root: "/p".into(),
+            scope: trust::FOLDER.into(),
+            trusted_at: "2026-01-01T00:00:00Z".into(),
+            fingerprint: "f".into(),
+        };
+        let rows = || {
+            vec![
+                (PathBuf::from("/p"), Some(rec.clone())),
+                (PathBuf::from("/q"), None),
+            ]
+        };
+        // everything works: nothing to say
+        assert!(undo_with(rows(), |_| true, |_| true).is_empty());
+        // the old row cannot be written back: it is revoked instead (fewer trust), nothing to say
+        let revoked = std::cell::RefCell::new(vec![]);
+        assert!(
+            undo_with(
+                rows(),
+                |_| false,
+                |r| {
+                    revoked.borrow_mut().push(r.to_string());
+                    true
+                }
+            )
+            .is_empty()
+        );
+        assert_eq!(*revoked.borrow(), ["/p", "/q"]);
+        // neither works: both are named
+        assert_eq!(undo_with(rows(), |_| false, |_| false), ["/p", "/q"]);
+        // and on a real store the rows really go back
+        let (_t, home, user, proj) = setup();
+        let env = Env::from_pairs::<&str, &str>([]);
+        let c = Ctx {
+            home: &home,
+            user_home: Some(&user),
+            env: &env,
+            enforcing: true,
+        };
+        let (_, undo) = c.grant(&proj, Mode::Remember).unwrap();
+        assert!(c.undo(undo).is_empty());
         assert_eq!(
             c.trust_state(&proj, None, false)["records"]
                 .as_array()

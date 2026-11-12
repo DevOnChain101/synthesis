@@ -6,7 +6,7 @@
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -138,6 +138,10 @@ struct Spec {
 struct Oob {
     asks: Asks,
     cancel: Mutex<Option<CancelSlot>>,
+    /// Sends queued so far, and how many of them a `cancel` already covers: a cancel that arrives while its send
+    /// still waits in the queue is applied to that send when the worker starts it (a cancel is never lost).
+    sends_queued: AtomicU64,
+    cancel_upto: AtomicU64,
 }
 
 /// One engine process: one folder, one session at a time (restarted in place by the methods below).
@@ -172,6 +176,41 @@ const QUEUE: usize = 64;
 
 fn refused(e: impl std::fmt::Display) -> String {
     format!("{REFUSED}{e}")
+}
+
+/// What a call ends with. The kind is decided where the error is made, never read back from its text: only
+/// code after the old session was closed can make a `Fatal`, and everything else (every `?`) is a `Refused`,
+/// which means nothing was ended.
+#[derive(Debug)]
+enum CallError {
+    /// Nothing was ended; the session goes on.
+    Refused(String),
+    /// The session was ended and none could be started: the engine exits.
+    Fatal(String),
+}
+
+impl From<String> for CallError {
+    fn from(e: String) -> Self {
+        Self::Refused(e)
+    }
+}
+
+impl From<&str> for CallError {
+    fn from(e: &str) -> Self {
+        Self::Refused(e.into())
+    }
+}
+
+impl CallError {
+    /// The wire text. The prefixes mark a restart request's error (the client reads them); the other methods'
+    /// errors are plain text.
+    fn wire(self, restart: bool) -> String {
+        match self {
+            Self::Refused(e) if restart => refused(e),
+            Self::Refused(e) => e,
+            Self::Fatal(e) => format!("{FATAL}{e}"),
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -268,11 +307,21 @@ impl Srv<'_> {
         Ok(())
     }
 
+    /// What a restart needs before it may begin, and what `trust.set` checks BEFORE it writes any row: no task,
+    /// no dialog, no compaction, and not within a second of the last restart.
+    fn preflight(&self) -> Result<(), String> {
+        self.idle()?;
+        if self.last_restart.is_some_and(|t| t.elapsed() < RESTART_GAP) {
+            return Err("too many restarts: wait a second".into());
+        }
+        Ok(())
+    }
+
     /// Ends the session and starts the next: `spec` and `grant` for it. When it cannot start, the session
     /// that was running continues (resumed) and the report says why: as it was, or UNTRUSTED when the failure
     /// was a trust change or the restart was a trust decision (nothing of an earlier grant is re-applied).
-    /// Only if that fails too is the error [`FATAL`]: there is no session and the engine exits. Every other
-    /// `Err` means nothing was ended. `after` runs once the new session is running (store housekeeping of
+    /// Only if that fails too is the error `Fatal`: there is no session and the engine exits. Every other
+    /// `Err` is a `Refused`: nothing was ended. `after` runs once the new session is running (store housekeeping of
     /// `session.close` and `workspace.close`); its failure is a note.
     fn restart(
         &mut self,
@@ -281,28 +330,43 @@ impl Srv<'_> {
         trust_change: bool,
         what: &str,
         after: impl FnOnce(&Ctx, &str, &str) -> Result<Value, String>,
-    ) -> Result<Value, String> {
-        self.idle()?;
-        if self.last_restart.is_some_and(|t| t.elapsed() < RESTART_GAP) {
-            return Err("too many restarts: wait a second".into());
-        }
-        self.last_restart = Some(Instant::now());
+    ) -> Result<Value, CallError> {
+        self.preflight()?;
         let cwd = self.cwd.clone().ok_or("not started")?;
         let h = crate::homes(self.env).map_err(|_| "the home folder is not known".to_string())?;
         let old = self.live.take().ok_or("not started")?;
+        self.last_restart = Some(Instant::now());
+        // from here on nothing is "refused": the old session is ending
+        self.replace(old, &cwd, &h, spec, grant, trust_change, what, after)
+            .map_err(CallError::Fatal)
+    }
+
+    /// The part of a restart after the old session was taken: every `Err` of it is fatal.
+    #[allow(clippy::too_many_arguments)]
+    fn replace(
+        &mut self,
+        old: Live,
+        cwd: &Path,
+        h: &crate::Homes,
+        spec: Spec,
+        grant: Option<Grant>,
+        trust_change: bool,
+        what: &str,
+        after: impl FnOnce(&Ctx, &str, &str) -> Result<Value, String>,
+    ) -> Result<Value, String> {
         let (sid, old_mode) = (old.sid.clone(), old.mode());
         old.close();
         self.trusted = false;
         self.wire.msg(&Out::Restarted);
         let mut notes: Vec<String> = vec![];
-        let first = start(self, &cwd, &spec, grant.as_ref(), true);
+        let first = start(self, cwd, &spec, grant.as_ref(), true);
         let mut extra = Value::Null;
         let (live, mut v, trusted) = match first {
             Ok(r) => {
                 // only a session-only grant with a manifest is carried: a remembered one is read from the store each time
                 (self.spec, self.grant) = (spec, grant.filter(|g| g.2 && g.1.is_some()));
                 if let (Some(n), Some(o)) = (r.1["sid"].as_str(), Some(sid.as_str())) {
-                    match after(&self.ctx(&h), o, n) {
+                    match after(&self.ctx(h), o, n) {
                         Ok(x) => extra = x,
                         Err(e) => notes.push(format!("{what}: {}", sanitize_for_display(&e))),
                     }
@@ -326,7 +390,7 @@ impl Srv<'_> {
                     if i > 0 && !why.starts_with(TRUST_CHANGED) {
                         break;
                     }
-                    match start(self, &cwd, &back, g.as_ref(), remembered) {
+                    match start(self, cwd, &back, g.as_ref(), remembered) {
                         Ok(r) => {
                             let untrusted = g.is_none() && !remembered;
                             notes.push(format!(
@@ -348,7 +412,7 @@ impl Srv<'_> {
                 let Some(r) = done else {
                     self.grant = None;
                     return Err(format!(
-                        "{FATAL}{what}: {}; and the session could not continue: the engine ends",
+                        "{what}: {}; and the session could not continue: the engine ends",
                         sanitize_for_display(&why)
                     ));
                 };
@@ -375,7 +439,7 @@ impl Srv<'_> {
         Ok(v)
     }
 
-    fn call(&mut self, call: Call) -> Result<Value, String> {
+    fn call(&mut self, call: Call) -> Result<Value, CallError> {
         let h = crate::homes(self.env)?;
         let ws_key = |s: &Self| {
             s.live
@@ -383,10 +447,10 @@ impl Srv<'_> {
                 .map(|l| fold_dir(&l.host.workspace.root.to_string_lossy()))
         };
         match call {
-            Call::WorkspacesList => self.ctx(&h).workspaces_list(self.cwd.as_deref()),
-            Call::SessionsList { workspace } => self.ctx(&h).sessions_list(&workspace),
-            Call::SessionPreview { id } => self.ctx(&h).preview(&id),
-            Call::UsageSummary { tz_min } => self.ctx(&h).usage(tz_min, now_ms()),
+            Call::WorkspacesList => Ok(self.ctx(&h).workspaces_list(self.cwd.as_deref())?),
+            Call::SessionsList { workspace } => Ok(self.ctx(&h).sessions_list(&workspace)?),
+            Call::SessionPreview { id } => Ok(self.ctx(&h).preview(&id)?),
+            Call::UsageSummary { tz_min } => Ok(self.ctx(&h).usage(tz_min, now_ms())?),
             Call::TrustState => {
                 let cwd = self.cwd.as_deref().ok_or("not started: send start first")?;
                 Ok(self
@@ -401,7 +465,8 @@ impl Srv<'_> {
                 Ok(r)
             }
             Call::TrustSet { mode } => {
-                self.idle()?;
+                // before ANY row is written: a restart that would be refused must leave the store alone
+                self.preflight()?;
                 if mode == TrustMode::Deny {
                     return Ok(json!({"trusted": self.trusted, "restarted": false}));
                 }
@@ -413,13 +478,24 @@ impl Srv<'_> {
                 };
                 let mut r =
                     self.restart(spec, Some(grant), true, "trust", |_, _, _| Ok(Value::Null));
-                // a restart that did not end up trusted keeps nothing: the rows go back
+                // a restart that did not end up trusted keeps nothing: the rows go back, and a row that cannot
+                // be put back is said (never silently left to trust the next start)
                 if !self.trusted || r.is_err() {
-                    self.ctx(&h).undo(undo);
+                    let failed = self.ctx(&h).undo(undo);
                     if let Ok(v) = &mut r
                         && let Some(n) = v["notices"].as_array_mut()
                     {
                         n.push(Value::String("trust: nothing was remembered".into()));
+                        n.extend(failed.into_iter().map(|f| {
+                            Value::String(format!(
+                                "trust: could not undo the remembered trust of {f}; run /trust revoke for it"
+                            ))
+                        }));
+                    } else if !failed.is_empty() {
+                        r = Err(CallError::Fatal(format!(
+                            "trust: the restart failed and the remembered trust of {} could not be undone; revoke it before the next start",
+                            failed.join(", ")
+                        )));
                     }
                 }
                 r
@@ -491,7 +567,7 @@ impl Srv<'_> {
                         },
                     )
                 } else {
-                    self.ctx(&h).close_workspace(&workspace)
+                    Ok(self.ctx(&h).close_workspace(&workspace)?)
                 }
             }
             Call::SessionRename { id, title } => {
@@ -501,7 +577,7 @@ impl Srv<'_> {
                     return Err("only this engine's own session can be renamed".into());
                 }
                 match &l.host.store {
-                    Some(s) => crate::rename::rename(s, &title).map(|t| json!({"title": t})),
+                    Some(s) => Ok(crate::rename::rename(s, &title).map(|t| json!({"title": t}))?),
                     None => Err("/rename: this session is not stored".into()),
                 }
             }
@@ -517,7 +593,7 @@ impl Srv<'_> {
                 if let Some(i) = &instructions {
                     check_instructions(i)?;
                 }
-                self.compact(instructions)
+                Ok(self.compact(instructions)?)
             }
             _ => Err("not a store method".into()),
         }
@@ -624,6 +700,8 @@ fn read_requests(mut input: impl BufRead, wire: &Wire, oob: &Oob, queue: &mpsc::
         let id = req.id;
         match req.call {
             Call::Cancel => {
+                oob.cancel_upto
+                    .store(oob.sends_queued.load(Ordering::SeqCst), Ordering::SeqCst);
                 if let Some(slot) = lock(&oob.cancel).as_ref()
                     && let Some(t) = lock(slot).as_ref()
                 {
@@ -641,13 +719,20 @@ fn read_requests(mut input: impl BufRead, wire: &Wire, oob: &Oob, queue: &mpsc::
                     .answer_input(&ask, reply.map(|r| r.into_user_reply()));
                 wire.result(id, Ok(json!({"accepted": ok})));
             }
-            call => match queue.try_send(Item::Req(Request { id, call })) {
-                Ok(()) => {}
-                Err(mpsc::TrySendError::Full(_)) => {
-                    wire.result(id, Err(refused("too many requests")));
+            call => {
+                let is_send = matches!(call, Call::Send { .. });
+                match queue.try_send(Item::Req(Request { id, call })) {
+                    Ok(()) => {
+                        if is_send {
+                            oob.sends_queued.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        wire.result(id, Err(refused("too many requests")));
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => return,
                 }
-                Err(mpsc::TrySendError::Disconnected(_)) => return,
-            },
+            }
         }
     };
     // blocks when the queue is full: the worker is alive then (or gone, which unblocks it)
@@ -668,6 +753,8 @@ pub fn serve(
     let oob = Arc::new(Oob {
         asks: asks.clone(),
         cancel: Mutex::new(None),
+        sends_queued: AtomicU64::new(0),
+        cancel_upto: AtomicU64::new(0),
     });
     let (queue, work) = mpsc::sync_channel::<Item>(QUEUE);
     {
@@ -692,6 +779,8 @@ pub fn serve(
     };
     wire.msg(&Out::hello());
     let mut closing = None;
+    // sends dequeued so far: the ordinal a pending cancel is compared with
+    let mut sends_seen: u64 = 0;
     let end = loop {
         let req = match work.recv() {
             Ok(Item::Req(r)) => r,
@@ -715,7 +804,18 @@ pub fn serve(
                     Err(e) => wire.result(id, Err(e)),
                 }
             }
+            Call::Send { .. } if srv.compacting.load(Ordering::SeqCst) => {
+                // the compaction works on a copy of the history and then replaces it: a task started meanwhile would lose its messages
+                sends_seen += 1;
+                wire.result(
+                    id,
+                    Err(refused(
+                        "busy: a compaction is running; try again when it ended",
+                    )),
+                );
+            }
             Call::Send { text } => {
+                sends_seen += 1;
                 let w = wire.clone();
                 let r = match &srv.live {
                     None => Err("not started: send start first"),
@@ -723,6 +823,13 @@ pub fn serve(
                         w.msg(&Out::TaskDone { error: r.err() });
                     }),
                 };
+                // a `cancel` that reached the reader before this send was dequeued applies to it
+                if r.is_ok()
+                    && sends_seen <= srv.oob.cancel_upto.load(Ordering::SeqCst)
+                    && let Some(l) = &srv.live
+                {
+                    l.cancel();
+                }
                 wire.result(id, r.map(|()| json!({})).map_err(String::from));
             }
             Call::SetMode { mode } => {
@@ -748,22 +855,10 @@ pub fn serve(
                 let r = if srv.allow() {
                     srv.call(other)
                 } else {
-                    Err("too many requests".into())
+                    Err(CallError::Refused("too many requests".into()))
                 };
-                // a restart request's error says whether anything was ended: FATAL, or REFUSED (nothing was)
-                let r = if restart {
-                    r.map_err(|e| {
-                        if e.starts_with(FATAL) || e.starts_with(REFUSED) {
-                            e
-                        } else {
-                            refused(e)
-                        }
-                    })
-                } else {
-                    r
-                };
-                let fatal = r.as_ref().is_err_and(|e| e.starts_with(FATAL));
-                wire.result(id, r);
+                let fatal = matches!(r, Err(CallError::Fatal(_)));
+                wire.result(id, r.map_err(|e| e.wire(restart)));
                 if fatal {
                     break Ok(());
                 }
@@ -871,6 +966,8 @@ mod tests {
         let oob = Arc::new(Oob {
             asks: Asks::default(),
             cancel: Mutex::new(None),
+            sends_queued: AtomicU64::new(0),
+            cancel_upto: AtomicU64::new(0),
         });
         // a queue of one that nobody reads: the worker is stuck on a slow call
         let (q, rx) = mpsc::sync_channel(1);
@@ -903,6 +1000,34 @@ mod tests {
         );
         // the two that did not fit were refused, not waited for
         assert_eq!(text.matches("too many requests").count(), 2, "{text}");
+    }
+
+    #[test]
+    fn a_cancel_that_arrives_before_its_queued_send_is_remembered_for_that_send_only() {
+        let sink = Sink::default();
+        let wire = Arc::new(Wire(Mutex::new(Box::new(sink.clone()))));
+        let oob = Arc::new(Oob {
+            asks: Asks::default(),
+            cancel: Mutex::new(None),
+            sends_queued: AtomicU64::new(0),
+            cancel_upto: AtomicU64::new(0),
+        });
+        let (q, rx) = mpsc::sync_channel(8);
+        let input = std::io::Cursor::new(
+            [
+                r#"{"id":1,"method":"send","params":{"text":"a"}}"#,
+                r#"{"id":2,"method":"cancel"}"#,
+                r#"{"id":3,"method":"send","params":{"text":"b"}}"#,
+            ]
+            .join("\n")
+            .into_bytes(),
+        );
+        read_requests(input, &wire, &oob, &q);
+        // the cancel covers send #1 (still queued when it came), not the send queued after it
+        assert_eq!(oob.cancel_upto.load(Ordering::SeqCst), 1);
+        assert_eq!(oob.sends_queued.load(Ordering::SeqCst), 2);
+        let queued = rx.try_iter().filter(|i| matches!(i, Item::Req(_))).count();
+        assert_eq!(queued, 2, "both sends still reach the worker");
     }
 
     /// Body of the re-run child below (ignored: only run when asked for by name).
