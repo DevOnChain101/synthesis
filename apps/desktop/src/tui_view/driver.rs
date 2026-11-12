@@ -15,6 +15,7 @@ use gpui_component::input::{InputEvent, TextareaState};
 use synthesis_cli_ui_base::complete::{self, StdFs};
 use synthesis_cli_ui_base::editor::LineEditor;
 use synthesis_config::Env;
+use synthesis_harness::sanitize_for_display;
 use synthesis_view::convo::{Convo, Item};
 use synthesis_view::workspaces::{LoadOpts, WorkspaceList, fold_dir};
 
@@ -1896,8 +1897,9 @@ impl TuiView {
                 let Some(e) = lu.live.engine.clone() else {
                     return;
                 };
-                let r = crate::reveal::target(&arg, &e.root, e.remote_distro.as_deref())
-                    .and_then(|t| crate::reveal::open(&t));
+                let r =
+                    crate::reveal::target(&arg, &e.root, e.remote_distro.as_deref(), cfg!(windows))
+                        .and_then(|t| crate::reveal::open(&t));
                 if let Err(why) = r {
                     lu.live.note(format!("/reveal: {why}"), true);
                 }
@@ -2404,7 +2406,7 @@ pub fn build(
     let prior_model = model.clone();
     let mut project = project;
     // WSL mode (Windows, Settings toggle): the engine runs in the distro, which has no session store yet
-    if crate::wsl::enabled(&home)? {
+    if crate::wsl::enabled(&home).map_err(|e| sanitize_for_display(&e))? {
         let folder = wsl_folder(&target, &project)?;
         return crate::wsl::start(&cfg.env, &home, &folder).map(|(engine, rx)| Launched {
             engine,
@@ -2857,7 +2859,7 @@ mod tests {
         // structure: the gate precedes the only local engine start in `build`, and returns
         let src = include_str!("driver.rs");
         let build = &src[src.find("fn build(").expect("build")..];
-        let gate = build.find("crate::wsl::enabled(&home)?").expect("gate");
+        let gate = build.find("crate::wsl::enabled(&home)").expect("gate");
         let local = build.find("Engine::start_with(").expect("local start");
         assert!(gate < local);
         assert!(build[gate..local].contains("return crate::wsl::start("));
@@ -2873,13 +2875,19 @@ mod tests {
                 }
                 let name = path.file_name().unwrap().to_string_lossy().into_owned();
                 if !name.ends_with(".rs")
-                    || ["driver.rs", "shot.rs", "wsl.rs"].contains(&name.as_str())
+                    || ["driver.rs", "shot.rs", "engine.rs"].contains(&name.as_str())
                 {
                     continue;
                 }
-                let text = std::fs::read_to_string(&path).unwrap();
+                // whitespace dropped, so `Engine ::\n start(` and an alias (`start_with(`, `as Engine`) count too
+                let text: String = std::fs::read_to_string(&path)
+                    .unwrap()
+                    .split_whitespace()
+                    .collect();
                 assert!(
-                    !text.contains("Engine::start(") && !text.contains("Engine::start_with("),
+                    !["Engine::start(", "start_with(", "asEngine"]
+                        .iter()
+                        .any(|p| text.contains(p)),
                     "{} starts a local engine",
                     path.display()
                 );

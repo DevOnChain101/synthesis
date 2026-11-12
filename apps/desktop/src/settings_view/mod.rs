@@ -396,7 +396,10 @@ impl SettingsView {
     }
 
     /// Puts the cursor in the search box (the shell does it when the view opens).
-    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(m) = &mut self.model {
+            m.recheck_wsl();
+        }
         self.search.update(cx, |s, cx| s.focus(window, cx));
     }
 

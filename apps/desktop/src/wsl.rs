@@ -6,7 +6,6 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::UnboundedReceiver;
@@ -284,7 +283,12 @@ pub fn to_linux(
     let b = drive.as_bytes();
     if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
         let l = wslpath(drive)?;
+        // `wslpath` of a drive root ends in `/`; the engine reports the folder without it
         let l = l.trim();
+        let l = match l.trim_end_matches('/') {
+            "" if l.starts_with('/') => "/",
+            t => t,
+        };
         return if plain(l) {
             Ok(l.into())
         } else {
@@ -305,13 +309,18 @@ pub fn to_display(distro: &str, linux: &str) -> String {
 /// `D:\x`, anything else the distro's UNC path. The path must be absolute, one line, without `.`/`..`.
 pub fn reveal_path(distro: &str, linux: &str) -> Result<String, String> {
     let parts: Vec<&str> = linux.split('/').skip(1).filter(|c| !c.is_empty()).collect();
-    if !plain(linux) || parts.iter().any(|c| matches!(*c, "." | "..")) {
+    // `\ : " < > | * ?` have a meaning in a Windows path: a Linux name holding one is not shown
+    if !plain(linux)
+        || parts.iter().any(|c| {
+            matches!(*c, "." | "..") || c.contains(['\\', ':', '"', '<', '>', '|', '*', '?'])
+        })
+    {
         return Err(format!("{linux:?} is not a path that can be shown"));
     }
     if let [m, d, rest @ ..] = &parts[..]
         && *m == "mnt"
         && d.len() == 1
-        && d.as_bytes()[0].is_ascii_alphabetic()
+        && d.as_bytes()[0].is_ascii_lowercase()
     {
         let drive = d.to_ascii_uppercase();
         return Ok(format!(r"{drive}:\{}", rest.join(r"\")));
@@ -339,6 +348,10 @@ pub fn launcher(wsl_exe: &Path, distro: &str, cwd: &str, synt: &str, env: &Env) 
 /// read by the core's own `read_json`) or holds a wrong type is an error: the caller refuses to start and
 /// never falls back to the local engine.
 pub fn read_setting(home: &Path, managed: &Path) -> Result<(bool, String), String> {
+    read_setting_raw(home, managed).map_err(|e| sanitize_for_display(&e))
+}
+
+fn read_setting_raw(home: &Path, managed: &Path) -> Result<(bool, String), String> {
     let mut out = (false, String::new());
     for (path, what) in [
         (home.join("settings.json"), "user settings"),
@@ -347,13 +360,25 @@ pub fn read_setting(home: &Path, managed: &Path) -> Result<(bool, String), Strin
         let Some(doc) = synthesis_settings::read_json(&path, what)? else {
             continue;
         };
+        // the whole path or nothing: `enabled` at the top, under `synt` or under `synt.desktop` is not ours
         let mut w = &doc;
+        let mut found = true;
         for seg in ["synt", "desktop", "wsl"] {
             match w.get(seg) {
-                None => break,
+                None => {
+                    found = false;
+                    break;
+                }
                 Some(v) if v.is_object() => w = v,
-                Some(_) => return Err(format!("{what}: synt.desktop.wsl is not an object")),
+                Some(_) => {
+                    return Err(format!(
+                        "{what}: {seg} must be an object (synt.desktop.wsl)"
+                    ));
+                }
             }
+        }
+        if !found {
+            continue;
         }
         if let Some(v) = w.get("enabled") {
             out.0 = v
@@ -465,18 +490,20 @@ pub fn start(
     )
 }
 
-/// Why the toggle cannot be turned on (`None`: it can). Off Windows always; on Windows when
-/// `wsl.exe --status` fails (asked once).
-pub fn toggle_lock() -> Option<String> {
-    static LOCK: OnceLock<Option<String>> = OnceLock::new();
-    if !cfg!(windows) {
+/// Why the toggle cannot be turned on (`None`: it can). Off Windows always (`check` is not run); on
+/// Windows whatever `check` (`wsl.exe --status`) says. Never cached: the Settings view asks again each
+/// time it opens, so WSL installed or fixed later turns the toggle back on.
+pub fn lock_with(windows: bool, check: impl FnOnce() -> Result<(), String>) -> Option<String> {
+    if !windows {
         return Some("Windows only".into());
     }
-    LOCK.get_or_init(|| {
-        let r = system_wsl().and_then(|exe| status(&|a, w| run_wsl(&exe, a, w)));
-        r.err().map(|e| sanitize_for_display(&e))
+    check().err().map(|e| sanitize_for_display(&e))
+}
+
+pub fn toggle_lock() -> Option<String> {
+    lock_with(cfg!(windows), || {
+        system_wsl().and_then(|exe| status(&|a, w| run_wsl(&exe, a, w)))
     })
-    .clone()
 }
 
 #[cfg(test)]
@@ -564,7 +591,12 @@ mod tests {
             to_linux(r"C:\Work\Repo", "U", stub).unwrap(),
             "/mnt/c/work/repo"
         );
-        assert_eq!(to_linux(r"\\?\D:\x\", "U", stub).unwrap(), "/mnt/d/x/");
+        assert_eq!(to_linux(r"\\?\D:\x\", "U", stub).unwrap(), "/mnt/d/x");
+        // a drive root: no trailing slash, so check_reported can match it
+        let root = |_: &str| -> Result<String, String> { Ok("/mnt/c/\n".into()) };
+        assert_eq!(to_linux(r"C:\", "U", root).unwrap(), "/mnt/c");
+        assert_eq!(to_linux(r"C:\", "U", |_| Ok("/".into())).unwrap(), "/");
+        assert_eq!(to_linux(r"C:\", "U", |_| Ok("///".into())).unwrap(), "/");
         assert!(to_linux(r"C:\x", "U", |_| Err("boom".into())).is_err());
         // an answer that is not an absolute one-line path is refused
         assert!(to_linux(r"C:\x", "U", |_| Ok("rel\nx".into())).is_err());
@@ -837,5 +869,87 @@ mod tests {
         );
         assert!(check_reported("/h/r", None, Some("/h/r")).is_err());
         assert!(check_reported("/h/r", Some("/h/r"), None).is_err());
+    }
+
+    #[test]
+    fn only_the_full_setting_path_counts_and_wrong_types_fail_closed() {
+        let d = tempfile::tempdir().unwrap();
+        let (user, managed) = (d.path().join("settings.json"), d.path().join("m.json"));
+        for (doc, want) in [
+            (r#"{"enabled":true}"#, Some((false, ""))),
+            (r#"{"distro":"X"}"#, Some((false, ""))),
+            (
+                r#"{"synt":{"enabled":true,"distro":"X"}}"#,
+                Some((false, "")),
+            ),
+            (
+                r#"{"synt":{"desktop":{"enabled":true,"distro":"X"}}}"#,
+                Some((false, "")),
+            ),
+            (r#"{"synt":{"desktop":{"wsl":{}}}}"#, Some((false, ""))),
+            (
+                r#"{"synt":{"desktop":{"wsl":{"enabled":true}}}}"#,
+                Some((true, "")),
+            ),
+            // a wrong type on the way is an error, never "off" and never read from a lower level
+            (r#"{"synt":5}"#, None),
+            (r#"{"synt":{"desktop":"x","enabled":true}}"#, None),
+            (r#"{"synt":{"desktop":{"wsl":[true]}}}"#, None),
+            (r#"{"synt":null}"#, None),
+        ] {
+            for (u, m) in [(doc, "{}"), ("{}", doc)] {
+                std::fs::write(&user, u).unwrap();
+                std::fs::write(&managed, m).unwrap();
+                let r = read_setting(d.path(), &managed);
+                match want {
+                    Some((e, n)) => assert_eq!(r, Ok((e, n.to_string())), "{doc}"),
+                    None => assert!(r.is_err(), "{doc}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reveal_rejects_windows_metacharacters_and_only_lowercase_drive_letters_map() {
+        for bad in [
+            "/a\\b",
+            "/a:b",
+            "/a\"b",
+            "/a<b",
+            "/a>b",
+            "/a|b",
+            "/a*b",
+            "/a?b",
+            "/mnt/c/x?",
+        ] {
+            assert!(reveal_path("U", bad).is_err(), "{bad}");
+        }
+        assert_eq!(
+            reveal_path("U", "/mnt/C/x").unwrap(),
+            r"\\wsl.localhost\U\mnt\C\x"
+        );
+        assert_eq!(reveal_path("U", "/mnt/c/x").unwrap(), r"C:\x");
+    }
+
+    #[test]
+    fn the_toggle_lock_is_asked_every_time_and_never_on_other_systems() {
+        let n = std::cell::Cell::new(0);
+        let check = |r: Result<(), String>| {
+            n.set(n.get() + 1);
+            r
+        };
+        assert_eq!(
+            lock_with(false, || check(Ok(()))).as_deref(),
+            Some("Windows only")
+        );
+        assert_eq!(n.get(), 0, "not asked off Windows");
+        let shown = lock_with(true, || check(Err("no wsl\u{1b}[2J".into()))).unwrap();
+        assert!(
+            shown.starts_with("no wsl") && !shown.contains('\u{1b}'),
+            "{shown}"
+        );
+        // WSL got installed meanwhile: the next ask unlocks the toggle
+        assert_eq!(lock_with(true, || check(Ok(()))), None);
+        assert_eq!(n.get(), 2);
     }
 }

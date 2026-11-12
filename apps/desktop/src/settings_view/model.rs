@@ -190,6 +190,8 @@ pub struct Model {
     doctor_slot: DoctorSlot,
     /// `(name, description, source)`.
     pub skills: Vec<(String, String, String)>,
+    /// Why the WSL toggle is locked on this machine; asked again each time the view opens.
+    pub wsl_lock: Option<String>,
 }
 
 /// `synt.tui` keys the CLI reads and the desktop view does not (it has no mouse mode or queue lines,
@@ -281,9 +283,15 @@ impl Model {
             doctor_error: None,
             doctor_slot: Arc::default(),
             skills: vec![],
+            wsl_lock: crate::wsl::toggle_lock(),
         };
         m.refresh_info();
         m
+    }
+
+    /// Asks `wsl.exe --status` again (the view opened): WSL installed or broken since changes the toggle.
+    pub fn recheck_wsl(&mut self) {
+        self.wsl_lock = crate::wsl::toggle_lock();
     }
 
     /// Starts the doctor checks on their own thread (capped); [`Model::poll_doctor`] collects them.
@@ -488,7 +496,7 @@ impl Model {
     fn lock_reason(&self, key: &str) -> Option<String> {
         self.store.read_only_reason(key).or_else(|| match key {
             "synt.tui.blur" => blur_unsupported().map(Into::into),
-            "synt.desktop.wsl.enabled" => crate::wsl::toggle_lock(),
+            "synt.desktop.wsl.enabled" => self.wsl_lock.clone(),
             "synt.desktop.wsl.distro" => (!cfg!(windows)).then(|| "Windows only".into()),
             _ => None,
         })

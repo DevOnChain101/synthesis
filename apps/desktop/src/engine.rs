@@ -516,7 +516,8 @@ impl Engine {
     }
 
     /// Tests and tools: defaults plus a model, provider and sandbox mode. Blocking, like `start_with`.
-    pub fn start(
+    #[cfg(any(feature = "shot", feature = "local-engine-for-tests"))]
+    pub(crate) fn start(
         project: &Path,
         env: &Env,
         model: Option<&str>,
@@ -605,7 +606,7 @@ impl Engine {
 
     /// Builds the harness and starts (or resumes) the session, like `prepare` + `round` in
     /// `apps/cli/src/tui.rs`. Blocking: call it from a worker thread, never from inside a tokio runtime.
-    pub fn start_with(
+    pub(crate) fn start_with(
         o: StartOpts,
         env: &Env,
     ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
@@ -1467,5 +1468,29 @@ mod tests {
             matches!(rx.try_recv().unwrap(), UiMsg::BadEvent(m) if m.contains("unreadable event"))
         );
         assert!(rx.try_recv().is_err());
+    }
+}
+
+/// The integration tests start a local engine through these (feature `local-engine-for-tests`, a
+/// dev-dependency of this crate only): in the product only `tui_view/driver.rs` may, behind the WSL gate.
+#[cfg(feature = "local-engine-for-tests")]
+pub mod for_tests {
+    use super::*;
+
+    pub fn start(
+        project: &Path,
+        env: &Env,
+        model: Option<&str>,
+        provider: Option<&str>,
+        sandbox: Option<&str>,
+    ) -> Result<(Engine, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
+        Engine::start(project, env, model, provider, sandbox)
+    }
+
+    pub fn start_with(
+        o: StartOpts,
+        env: &Env,
+    ) -> Result<(Engine, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
+        Engine::start_with(o, env)
     }
 }
