@@ -212,24 +212,64 @@ fn downgrade_skips(checks: &mut [CheckResult], baseline: &HashMap<String, u64>) 
 
 /// The planned inferred checks and the workspace as they were when the session's first task
 /// started (verification.md §3b). Taking it reads the whole workspace: run it on a blocking thread.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TaskStart {
     baseline: Baseline,
     frozen: Vec<Check>,
 }
 
 impl TaskStart {
+    /// Paths that differ from this snapshot now.
+    pub fn changed_now(&self) -> Vec<String> {
+        self.baseline.drift().changed
+    }
+
+    /// A resumed session without a saved snapshot is compared with the last
+    /// commit instead of with the (possibly already weakened) current files.
+    pub fn take_resumed(ws: &WorkspaceContext) -> Self {
+        let frozen = detect_checks(&ws.cwd);
+        match Baseline::from_git_head(&ws.root, extra_files(ws, &frozen)) {
+            Some(baseline) => Self { baseline, frozen },
+            None => Self::take(ws),
+        }
+    }
+
+    /// Writes the snapshot (owner-only on unix, atomically) so a restarted process can diff
+    /// against it: tests, definitions and the frozen plan are not re-read after a weakening.
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        use std::io::Write;
+        let tmp = path.with_extension("tmp");
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        o.open(&tmp)?
+            .write_all(&serde_json::to_vec(self).map_err(std::io::Error::other)?)?;
+        std::fs::rename(tmp, path)
+    }
+
+    /// The saved snapshot of `ws`; `None` when absent, unreadable or taken for another root.
+    pub fn load(path: &Path, ws: &WorkspaceContext) -> Option<Self> {
+        let s: Self = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+        (s.baseline.root() == ws.root).then_some(s)
+    }
+
     pub fn take(ws: &WorkspaceContext) -> Self {
         let frozen = detect_checks(&ws.cwd);
-        let prefix = ws.cwd.strip_prefix(&ws.root).unwrap_or(Path::new(""));
-        let extra = referenced_scripts(&ws.cwd, &frozen)
-            .into_iter()
-            .map(|s| prefix.join(s).to_string_lossy().replace('\\', "/"))
-            .collect();
         Self {
-            baseline: Baseline::take(&ws.root, extra),
+            baseline: Baseline::take(&ws.root, extra_files(ws, &frozen)),
             frozen,
         }
     }
+}
+
+/// Files the planned checks invoke, workspace-relative.
+fn extra_files(ws: &WorkspaceContext, frozen: &[Check]) -> Vec<String> {
+    let prefix = ws.cwd.strip_prefix(&ws.root).unwrap_or(Path::new(""));
+    referenced_scripts(&ws.cwd, frozen)
+        .into_iter()
+        .map(|s| prefix.join(s).to_string_lossy().replace('\\', "/"))
+        .collect()
 }
 
 /// Per-task gate: create one per task, call `evaluate` each time the model ends its turn.
@@ -241,6 +281,9 @@ pub struct CompletionGate {
     prev: Option<Prev>,
     /// Frozen checks and the workspace snapshot ([`begin`](Self::begin)).
     start: Option<Arc<TaskStart>>,
+    /// Files already different from the snapshot when this task began (earlier, unverified
+    /// tasks of the session): they alone do not make a Q&A task need the gate.
+    preexisting: BTreeSet<String>,
     /// Commands that failed and then passed on a re-run in this task.
     flaky: BTreeSet<String>,
 }
@@ -260,6 +303,7 @@ impl CompletionGate {
             unverified_round_used: false,
             prev: None,
             start: None,
+            preexisting: BTreeSet::new(),
             flaky: BTreeSet::new(),
         }
     }
@@ -270,6 +314,11 @@ impl CompletionGate {
     /// evaluation time and cannot see shell-made changes.
     pub fn begin(&mut self, start: Arc<TaskStart>) {
         self.start = Some(start);
+    }
+
+    /// Paths that already differ from the snapshot at the start of this task.
+    pub fn set_preexisting(&mut self, changed: Vec<String>) {
+        self.preexisting = changed.into_iter().collect();
     }
 
     /// [`begin`](Self::begin) with a fresh snapshot of this gate's workspace.
@@ -316,7 +365,13 @@ impl CompletionGate {
             ),
             None => None,
         };
-        let drifted = drift.as_ref().is_some_and(|d| !d.changed.is_empty());
+        // New changes since this task began, or weakening and definition changes at all (those
+        // carry over from earlier tasks of the session).
+        let drifted = drift.as_ref().is_some_and(|d| {
+            !d.weakened.is_empty()
+                || !d.defs.is_empty()
+                || d.changed.iter().any(|f| !self.preexisting.contains(f))
+        });
         if !has_user && !st.side_effects && !drifted {
             return GateDecision::Complete(None);
         }

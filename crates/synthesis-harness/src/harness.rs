@@ -365,6 +365,11 @@ pub(crate) struct Counters {
     pub verify_attempts: u32,
 }
 
+/// Where a session keeps its verification baseline (owner-only file in the session's artifact dir).
+fn start_file(ws: &WorkspaceContext) -> PathBuf {
+    ws.artifact_root.join("gate-baseline.json")
+}
+
 /// Shared by the main agent and its sub-agents.
 pub(crate) struct TaskRun {
     pub session_id: String,
@@ -733,6 +738,12 @@ impl Harness {
     // ---- session -------------------------------------------------------------------------
 
     /// `created -> preparing` and `session.started`.
+    /// Forgets the in-memory baselines, as a restart of the process would (tests).
+    #[doc(hidden)]
+    pub fn forget_session_baselines(&self) {
+        lock(&self.starts).clear();
+    }
+
     pub fn start_session(
         &self,
         session: &mut AgentSession,
@@ -892,6 +903,7 @@ impl Harness {
         session.task_id = Some(task_id.clone());
         let (task, mut main) = self.run_ctx(session, task_id.clone(), start, cancel);
         let mut parked_kind = None;
+        let resumed_conversation = !req.history.is_empty();
         let mut st = match &agent {
             None => AgentState::new(req.history),
             Some(TaskAgent::Existing(name)) => {
@@ -1046,23 +1058,49 @@ impl Harness {
                 // Freeze the planned checks and snapshot tests/definitions before anything changes.
                 if let Some(g) = gate.as_mut() {
                     let prior = lock(&self.starts).get(&task.session_id).cloned();
+                    let reused = prior.is_some();
                     let start = match prior {
                         Some(s) => s,
                         None => {
                             let ws = task.workspace.clone();
-                            // a panicked scan is retried inline rather than skipped
+                            let resumed = resumed_conversation;
+                            // A saved snapshot (restart/resume), else HEAD for a resumed
+                            // conversation, else the workspace as it is now. A panicked scan is
+                            // retried inline rather than skipped.
                             let s = tokio::task::spawn_blocking(move || {
-                                synthesis_verification::TaskStart::take(&ws)
+                                let file = start_file(&ws);
+                                if let Some(s) = synthesis_verification::TaskStart::load(&file, &ws) {
+                                    return s;
+                                }
+                                let s = if resumed {
+                                    synthesis_verification::TaskStart::take_resumed(&ws)
+                                } else {
+                                    synthesis_verification::TaskStart::take(&ws)
+                                };
+                                if let Err(e) = std::fs::create_dir_all(&ws.artifact_root)
+                                    .and_then(|()| s.save(&file))
+                                {
+                                    eprintln!("synt: warning: could not save the verification baseline: {e}");
+                                }
+                                s
                             })
                             .await
-                            .unwrap_or_else(|_| {
-                                synthesis_verification::TaskStart::take(&task.workspace)
-                            });
+                            .unwrap_or_else(|_| synthesis_verification::TaskStart::take(&task.workspace));
                             let s = Arc::new(s);
                             lock(&self.starts).insert(task.session_id.clone(), s.clone());
                             s
                         }
                     };
+                    // What earlier unverified tasks already changed is not this task's doing.
+                    let pre = if reused || resumed_conversation {
+                        let s = start.clone();
+                        tokio::task::spawn_blocking(move || s.changed_now())
+                            .await
+                            .unwrap_or_default()
+                    } else {
+                        vec![]
+                    };
+                    g.set_preexisting(pre);
                     g.begin(start);
                 }
                 self.drive(&task, &main, &mut st, &mut gate, &req.criteria)
@@ -1075,6 +1113,7 @@ impl Harness {
         if status == TaskStatus::Completed {
             // verified: the next task starts from this state
             lock(&self.starts).remove(&task.session_id);
+            let _ = std::fs::remove_file(start_file(&task.workspace));
         }
         self.peer_task_ended(status, &final_text, &lock(&task.changed));
         self.peer_snapshot(&main.name, &st.messages);

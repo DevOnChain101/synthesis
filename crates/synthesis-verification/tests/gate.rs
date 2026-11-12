@@ -1212,3 +1212,16 @@ async fn a_shell_that_only_touches_files_still_triggers_the_gate() {
     let d = eval_with(&mut g, &st, None).await;
     assert!(!matches!(d, GateDecision::Complete(None)), "{d:?}");
 }
+
+#[tokio::test]
+async fn changes_from_earlier_tasks_do_not_make_a_question_need_the_gate() {
+    let f = fx(&[]);
+    let mut g = f.gate(GateConfig::default());
+    g.begin_now();
+    fs::write(f.ws.cwd.join("earlier.txt"), "x").unwrap();
+    g.set_preexisting(vec!["earlier.txt".into()]);
+    let mut st = state(vec![], &[]);
+    st.side_effects = false;
+    let d = eval_with(&mut g, &st, None).await;
+    assert!(matches!(d, GateDecision::Complete(None)), "{d:?}");
+}

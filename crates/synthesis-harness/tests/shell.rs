@@ -822,6 +822,45 @@ async fn weakening_carries_over_to_the_next_task_of_the_session() {
     assert_eq!(second.status, TaskStatus::Unverified, "{}", second.reason);
 }
 
+/// Kill and resume: the process forgets everything in memory, the saved baseline still flags the
+/// test deleted by the earlier task.
+#[tokio::test]
+async fn weakening_is_still_flagged_after_a_restart() {
+    let opts = Opts {
+        allow: vec!["Write".into(), "Bash".into()],
+        ..gate_opts(false)
+    };
+    let turns = vec![
+        Turn::tool("b1", "Bash", json!({"command": "rm test/a.test.js"})),
+        Turn::text("done"),
+        Turn::text("done again"),
+        Turn::text("nothing more to do"),
+        Turn::text("still nothing"),
+    ];
+    let mut rig = gated(opts, turns, None);
+    std::fs::create_dir(rig.ws.cwd.join("test")).unwrap();
+    std::fs::write(rig.ws.cwd.join("test/a.test.js"), "test('a', () => {});\n").unwrap();
+    let mut req = synthesis_harness::TaskRequest::new("fix it");
+    req.criteria = vec![Criterion::user("c1", "ok", Some("test -d ."))];
+    let first = rig.run_with(req, CancellationToken::new()).await;
+    assert_eq!(first.status, TaskStatus::Unverified, "{}", first.reason);
+    let saved = rig.ws.artifact_root.join("gate-baseline.json");
+    assert!(
+        saved.is_file(),
+        "baseline saved in the session artifact dir"
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&saved).unwrap().permissions())
+            & 0o777,
+        0o600
+    );
+    rig.harness.forget_session_baselines();
+    rig.session.status = synthesis_core::SessionStatus::Created;
+    let second = rig.run("continue").await;
+    assert_eq!(second.status, TaskStatus::Unverified, "{}", second.reason);
+}
+
 /// D12: a harness-inferred, recognised verification command (`make test` from a Makefile) runs
 /// without an explicit allow in `default` and `acceptEdits`, headless or not, so the task is not
 /// blocked only because a trusted inferred check asked. A deny rule still wins.

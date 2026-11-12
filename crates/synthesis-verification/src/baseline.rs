@@ -9,6 +9,7 @@ use crate::plan::{definition_view, is_definition_file};
 use crate::weaken::{
     FileEdit, count_assertions, count_table_rows, count_test_cases, is_golden_path, is_test_path,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -36,6 +37,7 @@ const MAX_FILES: usize = 100_000;
 const MAX_TEXT: u64 = 1 << 20;
 const MAX_RS_TEXT: u64 = 256 << 10;
 
+#[derive(Serialize, Deserialize)]
 struct Entry {
     len: u64,
     mtime: Option<SystemTime>,
@@ -44,13 +46,20 @@ struct Entry {
     text: Option<String>,
     /// A Rust source file with `#[cfg(test)]` / `#[test]`.
     inline_tests: bool,
+    /// A symlink (to a file or a directory): `text` is its target.
+    #[serde(default)]
+    is_link: bool,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Baseline {
     root: PathBuf,
     extra: HashSet<String>,
     files: HashMap<String, Entry>,
     incomplete: bool,
+    /// Built from `git HEAD` (resume without a saved manifest): holds watched files only.
+    #[serde(default)]
+    from_git: bool,
 }
 
 /// What differs from the baseline now.
@@ -78,7 +87,97 @@ impl Baseline {
             extra,
             files,
             incomplete,
+            from_git: false,
         }
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// A baseline from `git HEAD` for a resumed session that has no saved manifest: the text of
+    /// the test, definition, golden and Rust files as committed. `None` outside a git repository.
+    pub fn from_git_head(root: &Path, extra: Vec<String>) -> Option<Self> {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::process::{Command, Stdio};
+        let ls = Command::new("git")
+            .args(["-C"])
+            .arg(root)
+            .args(["ls-tree", "-r", "-z", "--name-only", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        let extra: HashSet<String> = extra.into_iter().collect();
+        let paths: Vec<String> = String::from_utf8_lossy(&ls.stdout)
+            .split('\0')
+            .filter(|p| {
+                !p.is_empty()
+                    && (is_test_path(p)
+                        || is_definition_file(p)
+                        || extra.contains(*p)
+                        || p.ends_with(".rs"))
+            })
+            .map(String::from)
+            .collect();
+        let mut child = Command::new("git")
+            .args(["-C"])
+            .arg(root)
+            .args(["cat-file", "--batch"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let mut stdin = child.stdin.take()?;
+        let want = paths.clone();
+        let writer = std::thread::spawn(move || {
+            for p in &want {
+                if writeln!(stdin, "HEAD:./{p}").is_err() {
+                    break;
+                }
+            }
+        });
+        let mut out = BufReader::new(child.stdout.take()?);
+        let mut files = HashMap::new();
+        for p in &paths {
+            let mut head = String::new();
+            out.read_line(&mut head).ok()?;
+            let size: usize = match head.split_whitespace().collect::<Vec<_>>().as_slice() {
+                [_, "blob", n] => n.parse().ok()?,
+                _ => continue, // missing or not a blob
+            };
+            let mut buf = vec![0; size + 1];
+            out.read_exact(&mut buf).ok()?;
+            buf.pop();
+            let Ok(text) = String::from_utf8(buf) else {
+                continue;
+            };
+            let inline_tests =
+                p.ends_with(".rs") && (text.contains("#[cfg(test)]") || text.contains("#[test]"));
+            let watched = is_test_path(p) || is_definition_file(p) || extra.contains(p);
+            if (!watched && !inline_tests) || text.len() as u64 > MAX_TEXT {
+                continue;
+            }
+            files.insert(
+                p.clone(),
+                Entry {
+                    len: text.len() as u64,
+                    mtime: None,
+                    text: Some(text),
+                    inline_tests,
+                    is_link: false,
+                },
+            );
+        }
+        let _ = writer.join();
+        let _ = child.wait();
+        Some(Self {
+            root: root.into(),
+            extra,
+            files,
+            incomplete: false,
+            from_git: true,
+        })
     }
 
     pub(crate) fn drift(&self) -> Drift {
@@ -95,6 +194,10 @@ impl Baseline {
             let watched_def = is_definition_file(p) || self.extra.contains(p);
             let Some(new) = now.get(p) else {
                 d.changed.push(p.clone());
+                if old.is_link {
+                    d.weakened
+                        .push(format!("{p} (symlink removed or replaced)"));
+                }
                 if is_test_path(p) || old.inline_tests {
                     d.weakened.push(format!("{p} (deleted or renamed)"));
                 }
@@ -107,6 +210,11 @@ impl Baseline {
                 continue;
             }
             d.changed.push(p.clone());
+            if old.is_link || new.is_link {
+                // a retargeted symlink can point a test directory somewhere else
+                d.weakened.push(format!("{p} (symlink target changed)"));
+                continue;
+            }
             let (Some(o), Some(n)) = (&old.text, &new.text) else {
                 if watched_def {
                     d.defs.push(p.clone()); // too big or not text: any change counts
@@ -147,6 +255,10 @@ impl Baseline {
             }
         }
         for (p, new) in now.iter().filter(|(p, _)| !self.files.contains_key(*p)) {
+            // a git-built baseline only knows the watched files; other new files are not "new"
+            if self.from_git && new.text.is_none() {
+                continue;
+            }
             d.changed.push(p.clone());
             if let (true, Some(n)) = (is_test_path(p), &new.text) {
                 d.edits.push(line_diff(p, "", n)); // a new test file is all additions
@@ -196,6 +308,7 @@ fn entry(path: &Path, rel: &str, extra: &HashSet<String>, is_link: bool) -> Opti
             mtime: m.modified().ok(),
             text: Some(target),
             inline_tests: false,
+            is_link: true,
         });
     }
     let m = fs::metadata(path).ok()?;
@@ -213,6 +326,7 @@ fn entry(path: &Path, rel: &str, extra: &HashSet<String>, is_link: bool) -> Opti
         mtime: m.modified().ok(),
         text: text.filter(|_| watched || inline_tests),
         inline_tests,
+        is_link: false,
     })
 }
 
@@ -360,5 +474,79 @@ mod tests {
         assert!(!d.changed.iter().any(|f| f == "build/out.txt"));
         #[cfg(unix)]
         assert!(d.changed.iter().any(|f| f == "tests/link"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_retargeted_directory_symlink_is_flagged() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path();
+        w(p, "real/a.test.js", "assert(1)\n");
+        w(p, "other/a.test.js", "assert(1)\n");
+        std::os::unix::fs::symlink("real", p.join("tests")).unwrap();
+        let b = Baseline::take(p, vec![]);
+        fs::remove_file(p.join("tests")).unwrap();
+        std::os::unix::fs::symlink("other", p.join("tests")).unwrap();
+        let d = b.drift();
+        assert!(
+            d.weakened
+                .iter()
+                .any(|w| w.starts_with("tests (symlink target changed)")),
+            "{:?}",
+            d.weakened
+        );
+    }
+
+    #[test]
+    fn git_head_baseline_flags_a_deletion_after_the_commit() {
+        let git = |p: &Path, a: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(p)
+                .args(["-c", "user.email=a@b", "-c", "user.name=x"])
+                .args(a)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path();
+        w(p, "tests/a.test.js", "assert(1)\nb\nc\nd\n");
+        w(p, "src.js", "1");
+        if !(git(p, &["init", "-q"]) && git(p, &["add", "-A"]) && git(p, &["commit", "-qm", "x"])) {
+            return; // no git here
+        }
+        let b = Baseline::from_git_head(p, vec![]).expect("git repo");
+        assert!(b.drift().changed.is_empty(), "{:?}", b.drift().changed);
+        fs::remove_file(p.join("tests/a.test.js")).unwrap();
+        w(p, "new-untracked.txt", "x");
+        let d = b.drift();
+        assert!(
+            d.weakened
+                .iter()
+                .any(|w| w.contains("tests/a.test.js (deleted")),
+            "{:?}",
+            d.weakened
+        );
+        assert!(!d.changed.iter().any(|f| f == "new-untracked.txt"));
+    }
+
+    /// Timing of the whole-workspace scan on this repository (`cargo test -p synthesis-verification
+    /// --release -- --ignored --nocapture scan_timing`).
+    #[test]
+    #[ignore]
+    fn scan_timing() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let t = std::time::Instant::now();
+        let b = Baseline::take(&root, vec![]);
+        let take = t.elapsed();
+        let t = std::time::Instant::now();
+        let d = b.drift();
+        println!(
+            "files={} take={take:?} drift={:?} changed={}",
+            b.files.len(),
+            t.elapsed(),
+            d.changed.len()
+        );
     }
 }
