@@ -320,7 +320,10 @@ impl Model {
         self.wsl_lock = Some(crate::wsl::CHECKING.into());
         let slot = self.wsl_slot.clone();
         std::thread::spawn(move || {
-            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(check());
+            // a panicking check must not leave the toggle "checking" forever: it fails closed
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(check))
+                .unwrap_or_else(|_| Some("WSL check failed".into()));
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
         });
         true
     }
@@ -1201,6 +1204,21 @@ mod tests {
             Outcome::Rejected
         );
         assert!(!m.cfg.home.join("settings.json").exists());
+    }
+
+    #[test]
+    fn a_panicking_wsl_check_ends_locked_not_busy() {
+        let (_t, mut m) = model();
+        assert!(m.recheck_with(true, || panic!("boom")));
+        let t0 = std::time::Instant::now();
+        while !m.poll_wsl() {
+            assert!(t0.elapsed().as_secs() < 30, "the check never ended");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(m.wsl_idle());
+        assert_eq!(m.wsl_lock.as_deref(), Some("WSL check failed"));
+        // and the next open can ask again
+        assert!(m.recheck_with(true, || None));
     }
 
     #[test]

@@ -65,9 +65,15 @@ pub fn run_wsl(exe: &Path, args: &[&str], wait: Duration) -> Result<Out, String>
     });
     let t0 = Instant::now();
     let status = loop {
-        match child.try_wait().map_err(|e| e.to_string())? {
-            Some(s) => break s,
-            None if t0.elapsed() > wait => {
+        let waited = child.try_wait();
+        match waited {
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.to_string());
+            }
+            Ok(Some(s)) => break s,
+            Ok(None) if t0.elapsed() > wait => {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!(
@@ -75,7 +81,7 @@ pub fn run_wsl(exe: &Path, args: &[&str], wait: Duration) -> Result<Out, String>
                     wait.as_secs()
                 ));
             }
-            None => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
         }
     };
     Ok(Out {
@@ -988,5 +994,38 @@ mod tests {
         }
         assert!(reveal_path("U", "/.hidden/a.b").is_ok());
         assert!(to_display("Ubuntu-24.04", "/x").is_ok());
+    }
+
+    /// A hung program is killed at the deadline, not left running.
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_wsl_exe_is_killed_at_the_deadline() {
+        let d = tempfile::tempdir().unwrap();
+        let pidfile = d.path().join("pid");
+        let t0 = Instant::now();
+        let r = run_wsl(
+            Path::new("/bin/sh"),
+            &[
+                "-c",
+                r#"echo $$ > "$1"; exec sleep 60"#,
+                "x",
+                pidfile.to_str().unwrap(),
+            ],
+            Duration::from_millis(700),
+        );
+        assert!(r.err().unwrap().contains("did not answer"));
+        assert!(t0.elapsed() < Duration::from_secs(20));
+        let pid = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .to_string();
+        // `kill -0` succeeds only for a live process
+        let alive = Command::new("/bin/kill")
+            .args(["-0", &pid])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(!alive, "the child {pid} is still running");
     }
 }

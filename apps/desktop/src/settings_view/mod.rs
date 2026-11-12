@@ -217,6 +217,8 @@ fn switch(on: bool, locked: bool) -> gpui::Div {
 
 pub struct SettingsView {
     model: Option<Model>,
+    /// A loop is already polling the WSL check (one at a time, however often the view is focused).
+    wsl_polling: bool,
     /// Why there is no model (no home directory).
     err: Option<String>,
     search: Entity<InputState>,
@@ -386,6 +388,7 @@ impl SettingsView {
             tab: TABS[0],
             restart_block: None,
             sliders,
+            wsl_polling: false,
             inset,
             _subs: subs,
         }
@@ -401,7 +404,8 @@ impl SettingsView {
             m.recheck_wsl();
         }
         // the check runs on its own thread: look every 250 ms until it is in, then redraw
-        if self.model.as_ref().is_some_and(|m| !m.wsl_idle()) {
+        if !self.wsl_polling && self.model.as_ref().is_some_and(|m| !m.wsl_idle()) {
+            self.wsl_polling = true;
             cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor()
@@ -410,6 +414,7 @@ impl SettingsView {
                     let Ok(done) = this.update(cx, |v, cx| {
                         let done = v.model.as_mut().is_none_or(|m| m.poll_wsl());
                         if done {
+                            v.wsl_polling = false;
                             cx.notify();
                         }
                         done
