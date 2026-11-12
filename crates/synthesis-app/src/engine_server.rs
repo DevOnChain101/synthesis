@@ -335,10 +335,13 @@ impl Srv<'_> {
         let cwd = self.cwd.clone().ok_or("not started")?;
         let h = crate::homes(self.env).map_err(|_| "the home folder is not known".to_string())?;
         let old = self.live.take().ok_or("not started")?;
-        self.last_restart = Some(Instant::now());
         // from here on nothing is "refused": the old session is ending
-        self.replace(old, &cwd, &h, spec, grant, trust_change, what, after)
-            .map_err(CallError::Fatal)
+        let r = self
+            .replace(old, &cwd, &h, spec, grant, trust_change, what, after)
+            .map_err(CallError::Fatal);
+        // the gap runs from the END of a restart (a slow one must not leave the next one free to follow at once)
+        self.last_restart = Some(Instant::now());
+        r
     }
 
     /// The part of a restart after the old session was taken: every `Err` of it is fatal.
