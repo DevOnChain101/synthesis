@@ -11,7 +11,8 @@ while :; do
     sudo sed -i 's|http://azure\.archive\.ubuntu\.com/ubuntu/|http://archive.ubuntu.com/ubuntu/|g' /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true
   fi
   # update can exit 0 with failed indexes, so update+install form one attempt
-  # shellcheck disable=SC2086
+  # SC2086: $flags is empty or one flag. SC2024: $log is a file of the current user, on purpose.
+  # shellcheck disable=SC2086,SC2024
   if sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=15 update >"$log" 2>&1 \
     && sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=15 install -y $flags "$@" >>"$log" 2>&1; then
     cat "$log"; exit 0
