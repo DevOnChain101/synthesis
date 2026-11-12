@@ -9,7 +9,7 @@ pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_DIAGNOSTICS: usize = 12;
 const MAX_COLLECTION_ITEMS: usize = 4096;
 const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
-const TOP_LEVEL: [&str; 12] = [
+const TOP_LEVEL: [&str; 13] = [
     "$schema",
     "provider",
     "providers",
@@ -22,6 +22,7 @@ const TOP_LEVEL: [&str; 12] = [
     "mcpServers",
     "projects",
     "claude",
+    "fallback",
 ];
 const PROVIDER_FIELDS: [&str; 12] = [
     "npm",
@@ -572,6 +573,17 @@ fn validate_v1(raw: &Value, p: &mut P) {
     for key in ["provider", "providers"] {
         if let Some(x) = raw.get(key) {
             validate_providers(x, &format!("$.{key}"), p);
+        }
+    }
+    if let Some(x) = raw.get("fallback") {
+        match x.as_array() {
+            Some(a)
+                if a.len() <= 4
+                    && a.iter()
+                        .all(|m| m.as_str().is_some_and(|m| m.contains('/'))) => {}
+            _ => {
+                p.push("$.fallback must be an array of at most 4 \"provider/model\" strings".into())
+            }
         }
     }
     if let Some(x) = raw.get("profiles") {

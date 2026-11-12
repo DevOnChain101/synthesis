@@ -88,7 +88,18 @@ impl Rig {
             .arg(ws)
             .arg("--provider")
             .arg(format!("fake:{}", s.display()));
-        c.args(["--prompt", "do it"]).args(args);
+        let keep = args.contains(&"--keep-defaults");
+        c.args(["--prompt", "do it"])
+            .args(args.iter().filter(|a| **a != "--keep-defaults"));
+        // a headless run in a git repository works in a worktree by default: tests that depend
+        // on the directory staying put opt out
+        if !keep && !args.contains(&"--worktree") && !args.contains(&"--resume") {
+            c.arg("--no-worktree");
+        }
+        // headless runs need a cost cap; tests that are not about it opt out
+        if !keep && !args.contains(&"--max-cost-usd") {
+            c.arg("--no-cost-cap");
+        }
         // Tests not about the sandbox must not depend on the host having one. `off`, not
         // `best-effort`: on a Landlock-only host best-effort still confines and then refuses the
         // standard policy, so no command would run.
@@ -423,7 +434,7 @@ fn headless_run_has_a_default_wall_clock_budget_that_a_flag_overrides() {
             .as_u64()
     };
     let (_, ev) = rig.run(json!([{"text": "ok"}]), &[]);
-    assert_eq!(wall(&ev), Some(3_600_000));
+    assert_eq!(wall(&ev), Some(1_800_000));
     let (_, ev) = rig.run(json!([{"text": "ok"}]), &["--max-wall-secs", "90"]);
     assert_eq!(wall(&ev), Some(90_000));
 }
@@ -2143,4 +2154,132 @@ fn e8g_a_delegation_back_to_the_asker_is_a_cycle() {
         payloads(&b.1, "peer.delegation.denied")[0]["reason"],
         "cycle"
     );
+}
+
+// ---- governance (docs/UNATTENDED.md) ------------------------------------------------------
+
+fn synt_home(rig: &Rig, args: &[&str]) -> Output {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
+    c.args(args).env_clear();
+    host_env(&mut c);
+    c.env("HOME", rig.dir.path()).env("SYNT_HOME", rig.home());
+    c.output().unwrap()
+}
+
+#[test]
+fn headless_run_without_a_cost_cap_is_refused_before_anything_runs() {
+    let rig = Rig::new();
+    let (o, _) = rig.run(
+        json!([{"text": "x"}]),
+        &["--keep-defaults", "--sandbox", "off"],
+    );
+    assert_eq!(o.status.code(), Some(2));
+    assert!(o.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("cost cap"));
+}
+
+#[test]
+fn headless_run_in_a_git_repo_uses_a_worktree_and_can_be_resumed_in_it() {
+    let rig = Rig::new();
+    rig.settings(json!({"synt": {"pricing": {"fake/fake-model": {"input_per_mtok": 1.0, "output_per_mtok": 1.0}}}}));
+    git(&rig.ws(), &["init", "-q"]);
+    git(&rig.ws(), &["add", "."]);
+    git(&rig.ws(), &["commit", "-q", "-m", "init"]);
+    let mut script = edit_script();
+    script
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"text": "still done"}));
+    let (o, ev) = rig.run(
+        script,
+        &[
+            "--keep-defaults",
+            "--max-cost-usd",
+            "1",
+            "--permission-mode",
+            "acceptEdits",
+        ],
+    );
+    assert!(
+        o.status.code().is_some_and(|c| c == 0 || c == 3),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    // no --worktree flag: the default put the edit in the worktree, not in the repository
+    assert_eq!(
+        std::fs::read_to_string(rig.ws().join("a.txt")).unwrap(),
+        "hello\n"
+    );
+    let sid = ev[0]["session_id"].as_str().unwrap().to_string();
+    let wt = rig.home().join("worktrees").join(&sid);
+    assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "bye\n");
+
+    // --resume continues in the same worktree (it used to be refused with --worktree)
+    let (o2, ev2) = rig.run(
+        json!([{"tools": [{"name": "Read", "input": {"file_path": "a.txt"}}]}, {"text": "read it"}]),
+        &["--resume", &sid, "--permission-mode", "acceptEdits"],
+    );
+    assert!(
+        o2.status.code().is_some_and(|c| c == 0 || c == 3),
+        "{}",
+        String::from_utf8_lossy(&o2.stderr)
+    );
+    assert_eq!(ev2[0]["session_id"].as_str().unwrap(), sid);
+    let read = outputs(&ev2, "Read");
+    assert!(read.iter().any(|t| t.contains("bye")), "{read:?}");
+    assert_eq!(
+        std::fs::read_to_string(rig.ws().join("a.txt")).unwrap(),
+        "hello\n"
+    );
+
+    // the stored events verify, and a forged one is found
+    let v = synt_home(&rig, &["sessions", "verify", &sid]);
+    assert_eq!(
+        v.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&v.stdout)
+    );
+    let conn = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
+    conn.execute(
+        "UPDATE events SET payload='{\"level\":\"info\",\"text\":\"forged\"}' WHERE session_id=?1 AND seq=3",
+        [&sid],
+    )
+    .unwrap();
+    let v = synt_home(&rig, &["sessions", "verify", &sid]);
+    assert_eq!(v.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&v.stdout).contains("TAMPERED"));
+}
+
+#[test]
+fn stop_cancels_a_running_session_from_another_process() {
+    let rig = Rig::new();
+    let mut c = rig.cmd(json!([{"delay_ms": 60000, "text": "never"}]), &[]);
+    let mut child = c
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // wait for the session row, then ask it to stop
+    let db = rig.home().join("synt.db");
+    let sid = (0..100)
+        .find_map(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let conn = rusqlite::Connection::open(&db).ok()?;
+            conn.query_row("SELECT id FROM sessions LIMIT 1", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok()
+        })
+        .expect("session row");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let s = synt_home(&rig, &["stop", &sid]);
+    assert_eq!(
+        s.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&s.stderr)
+    );
+    let st = child.wait().unwrap();
+    assert_eq!(st.code(), Some(130), "cancelled run exits 130");
 }

@@ -65,6 +65,16 @@ CREATE TABLE checkpoints(                                    -- addition: named 
 "#,
     // v2: `/close` hides a session from the lists; nothing is deleted and it stays resumable by id.
     "ALTER TABLE sessions ADD COLUMN closed_at TEXT;",
+    // v3: governance. `events.prev` + `sessions.chain_head` hash-chain the events (verify with
+    // `Reader::verify_chain`; NULL `prev` = written before the chain existed); `stop_requested_at`
+    // is the out-of-band kill switch (`synt stop`); `git_info` is the worktree a session runs in
+    // (opaque JSON of the caller) so a resume can re-pin it.
+    r#"
+ALTER TABLE events ADD COLUMN prev TEXT;
+ALTER TABLE sessions ADD COLUMN chain_head TEXT;
+ALTER TABLE sessions ADD COLUMN stop_requested_at TEXT;
+ALTER TABLE sessions ADD COLUMN git_info TEXT;
+"#,
 ];
 
 pub const LATEST: i64 = MIGRATIONS.len() as i64;

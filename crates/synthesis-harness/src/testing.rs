@@ -218,6 +218,17 @@ impl Turn {
         self
     }
 
+    /// Cache tokens of the response (on top of `with_usage`).
+    pub fn with_cache(mut self, read: u64, create: u64) -> Self {
+        for s in &mut self.steps {
+            if let Step::Event(StreamEvent::MessageStart { message }) = s {
+                message.usage.cache_read_input_tokens = Some(read);
+                message.usage.cache_creation_input_tokens = Some(create);
+            }
+        }
+        self
+    }
+
     pub fn with_usage(mut self, input: u64, output: u64) -> Self {
         for s in &mut self.steps {
             if let Step::Event(StreamEvent::MessageStart { message }) = s {

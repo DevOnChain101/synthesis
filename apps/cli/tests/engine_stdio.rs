@@ -39,9 +39,16 @@ fn engine(script: impl FnOnce(&Path) -> Value) -> Engine {
     let script_path = root.join("script.json");
     std::fs::write(&script_path, script(&ws).to_string()).unwrap();
     let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
-    c.args(["engine", "--stdio", "--sandbox", "off", "--provider"])
-        .arg(format!("fake:{}", script_path.display()))
-        .env_clear();
+    c.args([
+        "engine",
+        "--stdio",
+        "--no-cost-cap",
+        "--sandbox",
+        "off",
+        "--provider",
+    ])
+    .arg(format!("fake:{}", script_path.display()))
+    .env_clear();
     for k in [
         "PATH",
         "SystemRoot",

@@ -79,6 +79,9 @@ pub struct Budget {
     pub max_cost_usd: Option<f64>,
     pub max_wall_ms: Option<u64>,
     pub max_verify_attempts: u32,
+    /// Input + output tokens of the task (cache tokens count as input); `None` = unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens_total: Option<u64>,
 }
 
 impl Default for Budget {
@@ -89,6 +92,7 @@ impl Default for Budget {
             max_cost_usd: None,
             max_wall_ms: None,
             max_verify_attempts: 3,
+            max_tokens_total: None,
         }
     }
 }
@@ -298,6 +302,14 @@ pub enum Event {
         max: i64,
         error: String,
         delay_ms: u64,
+    },
+    /// The retry layer gave up before the first byte (rate limit, overloaded, server error) and
+    /// the request went to the next `fallback` model. Labels are `provider/model`.
+    #[serde(rename = "model.failover")]
+    ModelFailover {
+        from: String,
+        to: String,
+        reason: String,
     },
     #[serde(rename = "model.error")]
     ModelError {

@@ -62,7 +62,7 @@ impl Rig {
         let s = self.dir.path().join("script.json");
         std::fs::write(&s, script.to_string()).unwrap();
         let o = Command::new(env!("CARGO_BIN_EXE_synt"))
-            .args(["run", "--cwd"])
+            .args(["run", "--no-cost-cap", "--cwd"])
             .arg(self.dir.path().join("ws"))
             .arg("--provider")
             .arg(format!("fake:{}", s.display()))

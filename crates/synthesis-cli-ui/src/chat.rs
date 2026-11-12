@@ -458,6 +458,13 @@ impl Chat {
                     }
                 }
             }
+            Event::ModelFailover { from, to, reason } => {
+                self.hint(
+                    format!("model failover {from} -> {to}: {reason}"),
+                    "warn",
+                    true,
+                );
+            }
             Event::ModelRetry {
                 attempt,
                 max,

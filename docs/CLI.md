@@ -26,7 +26,7 @@ The agent runs tests itself. A call that needs permission is denied unless a rul
 
 **Browser login (`browser_login`, `browser_fill_secret`).** Exception to "never prompts": when a terminal exists (`/dev/tty`, `CONIN$` on Windows), `synt run` asks `[y/N]` there before opening a visible browser for `browser_login` and before the first use of a stored secret on an origin; the person then logs in and presses Enter (or runs `synt browser done PROFILE` from another terminal and types the one-time code that the waiting terminal printed). A saved login (`browser_navigate` with `profile`) asks the same way once per session. Without a terminal all three are refused unless pre-approved in the user settings (`synt.browser.approved`). The credential tools also need `--sandbox enforce` (or `synt.browser.allow_unsandboxed`). Every other ask stays auto-denied. Details, settings (`synt.browser.secrets`) and the threat model: docs/BROWSER-LOGIN.md. `synt doctor` prints the profiles directory and whether a display is available.
 
-**Default limits.** `synt run` ends a task after 3600 s of wall time unless `--max-wall-secs N` says otherwise; turns (50) and tool calls (200) are bounded by default as well. `--max-cost-usd` has no default because it needs a configured price.
+**Default limits.** `synt run` (and `synt engine --stdio`) ends a task after 1800 s of wall time unless `--max-wall-secs N` says otherwise; turns (50) and tool calls (200) are bounded by default as well. A cost cap is REQUIRED: `--max-cost-usd X` (the model needs a price; first-party Anthropic and OpenAI models have a built-in one, any model can be priced in `synt.pricing`) or `--no-cost-cap` to accept unbounded spending; without either the run is refused (exit 2) before it starts. Headless runs also work in a git worktree by default (`--no-worktree` to turn that off) and inferred checks alone leave a task `unverified`. The one-flag preset for unattended runs is `--unattended`; read docs/UNATTENDED.md for what it enforces and what it does not.
 
 **Inferred verification checks.** In `default` and `acceptEdits` the checks the harness infers from the repo (`cargo test`, `npm run test`, `pytest`, `go test`, `make test`, ... see `docs/specs/verification.md` section 4) run without an `--allow`, so `synt run --permission-mode acceptEdits` no longer ends `blocked` only because such a check asked. They stay sandboxed and deny rules still win; any other check command (user-declared or model-registered, or not a recognised test/lint/build invocation) still needs an allow.
 
@@ -117,6 +117,8 @@ Flags of `synt run` and of the interactive app (`synt`):
 | `--allow RULE` | Allow a tool call without asking (repeatable; see above). |
 | `--deny RULE` | Deny a tool call; deny wins over every allow (repeatable). |
 | `--worktree` | Work in an isolated git worktree on branch `synthesis/<session>`; left in place for review. |
+| `--no-worktree` | Headless runs and the engine use a worktree by default in a git repository; this works in the directory itself. |
+| `--unattended` | The safe preset: worktree, sandbox enforce, network deny, wall cap, cost cap required, inferred-only stays unverified, a failing session store ends the task, no peers. Refuses to start when one of these cannot be enforced (docs/UNATTENDED.md). |
 | `--cleanup-worktree` | With `--worktree`: remove the worktree at the end when nothing changed. |
 | `--peers` | Turn cross-session messaging on for this run (see above). |
 | `--name NAME` | Session name other sessions can address (`sess:<name>`). |
@@ -143,8 +145,10 @@ Only `synt run`:
 | `--prompt-command CMD` | An MCP prompt as the task: `"/mcp__<server>__<prompt> arg1 arg2"` (`synt mcp prompts` lists them). |
 | `--max-turns N` | Turn budget (default 50). |
 | `--max-tool-calls N` | Tool-call budget (default 200). |
-| `--max-cost-usd X` | Cost cap; needs a price for the model (`synt.pricing` in the user `settings.json`). |
-| `--max-wall-secs N` | Wall-clock cap in seconds (default 3600). |
+| `--max-cost-usd X` | Cost cap; needs a price for the model (built in for first-party models, else `synt.pricing` in the user `settings.json`). Required unless `--no-cost-cap`. |
+| `--no-cost-cap` | Accept spending without a cost cap (a headless run is otherwise refused). |
+| `--max-tokens N` | Cap on input + output + cache tokens of the task. |
+| `--max-wall-secs N` | Wall-clock cap in seconds (default 1800). |
 | `--criteria-file FILE` | JSON array of `{id?, text, check?}` (or plain strings): the task is not done until they pass. |
 | `--events-out FILE` | Also write the event stream to this file. |
 | `--output-format F` | What stdout carries: `text` (final message), `json` (one result object) or `stream-json` (the JSONL events, default). |
@@ -161,6 +165,9 @@ Other commands:
 | Command | Does |
 |---|---|
 | `synt auth status` | Credential status per provider (variable names and where a key comes from, never values). |
+| `synt stop SESSION` | Ask the process running SESSION to stop, from any terminal: it cancels within a second (a graceful end, exit 130) and is killed, with its commands' process groups, after 15 s if it does not end. Goes through the session store, so it needs the same `SYNT_HOME`. |
+| `synt sessions show SESSION [--events] [--report]` | Status, budget use against the caps, tasks; `--events` lists every event (deltas left out), `--report` the stored verification reports in full. |
+| `synt sessions verify SESSION` | Recompute the event hash chain; exit 1 and the first broken event when one was changed or removed (limits in docs/UNATTENDED.md). |
 | `synt rewind SESSION` | Put the files the agent changed with its file tools (Write, Edit, MultiEdit, NotebookEdit) back to their state at the checkpoint taken before its first such write to each. Moves, renames and deletes done through Bash are not tracked by checkpoints, so a rewind neither undoes nor lists them. A dry run unless `--apply`; a file changed since the run is refused unless `--force`; `--checkpoint NAME` limits it to one checkpoint. A snapshot is restored only if it still matches the hash stored with the checkpoint, and a file is removed only if the checkpoint recorded it as absent; checkpoints of older builds lack both and need `--force`. A session whose workspace root is a filesystem root or the home directory is refused unless `--allow-wide-root` (that also covers a directory that contains the home directory, such as `/Users` or `/home`, and a home directory that is not known: it fails closed). `--force` never overrides a creation proof or a snapshot hash that was recorded, only their absence in older checkpoints. `--apply` takes the per-session lock first and prints each line after its write; a failure prints `FAILED path: reason` and ends with a PARTIAL or FAILED line. Options: `--apply`, `--force`, `--checkpoint`, `--allow-wide-root`. A checkpoint is taken before the first write attempt, so a dry run can list a file whose write was refused. |
 | `synt models [--json] [--refresh]` | List configured models (see below). |
 | `synt doctor` | Diagnose the installation. |

@@ -116,6 +116,7 @@ fn started(info: &Info, live: &Live) -> Value {
 
 fn start(
     common: &Common,
+    limits: &Limits,
     env: &Env,
     wire: &Arc<Wire>,
     asks: &Asks,
@@ -135,7 +136,7 @@ fn start(
         input: asks.input(notify),
         pre_start: None,
     };
-    let p = prepare(common, cwd, env, &Limits::default(), Front::Native(native))?;
+    let p = prepare(common, cwd, env, limits, Front::Native(native))?;
     let (live, info) = Live::begin(p, asks.clone(), vec![], common.cleanup_worktree)?;
     let v = started(&info, &live);
     Ok((live, v))
@@ -145,6 +146,7 @@ fn start(
 /// limit, a read error); the session is ended before returning either way.
 pub fn serve(
     common: &Common,
+    limits: &Limits,
     env: &Env,
     mut input: impl BufRead,
     output: Box<dyn Write + Send>,
@@ -177,7 +179,7 @@ pub fn serve(
         let id = req.id;
         match req.call {
             Call::Start { .. } if live.is_some() => wire.result(id, Err("already started".into())),
-            Call::Start { cwd } => match start(common, env, &wire, &asks, &cwd) {
+            Call::Start { cwd } => match start(common, limits, env, &wire, &asks, &cwd) {
                 Ok((l, v)) => {
                     live = Some(l);
                     wire.result(id, Ok(v));
@@ -251,18 +253,23 @@ fn protect() -> std::io::Result<(std::fs::File, std::fs::File)> {
 
 /// `synt engine --stdio`: stdin and stdout of this process. Project trust is not available over the
 /// protocol yet, so the trust flags are refused: an engine is untrusted for project configuration.
-pub fn run_stdio(common: &Common, env: &Env) -> Result<u8, String> {
+pub fn run_stdio(common: &Common, limits: &Limits, env: &Env) -> Result<u8, String> {
     if common.trust_project || !common.approve_mcp.is_empty() {
         return Err(
             "engine --stdio: --trust-project and --approve-mcp are not supported (the project stays untrusted)"
                 .into(),
         );
     }
+    // an engine session is unattended from this side: the governed defaults apply (wall cap,
+    // cost cap required, worktree, ...); `--no-cost-cap` opts out of the cost cap only
+    let mut common = common.clone();
+    common.governed = true;
     #[cfg(unix)]
     {
         let (input, output) = protect().map_err(|e| format!("engine: stdio: {e}"))?;
         serve(
-            common,
+            &common,
+            limits,
             env,
             std::io::BufReader::new(input),
             Box::new(output),
@@ -272,7 +279,8 @@ pub fn run_stdio(common: &Common, env: &Env) -> Result<u8, String> {
     // descendant there can still reach the std handles. Upgrade when the engine is run on Windows.
     #[cfg(not(unix))]
     serve(
-        common,
+        &common,
+        limits,
         env,
         std::io::stdin().lock(),
         Box::new(std::io::stdout()),

@@ -299,9 +299,15 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     // a fake wsl.exe: the shape of the real command line is checked, then it is the engine
     if args.get(1).map(String::as_str) == Some("-d") {
-        let ok = args.len() == 9
+        let ok = args.len() == 10
             && (args[3].as_str(), args[5].as_str()) == ("--cd", "--exec")
-            && args[6..] == ["/home/me/.synt/bin/synt", "engine", "--stdio"];
+            && args[6..]
+                == [
+                    "/home/me/.synt/bin/synt",
+                    "engine",
+                    "--stdio",
+                    "--no-cost-cap",
+                ];
         if !ok || std::env::var_os("SYNT_API_KEY").is_some() || std::env::var_os("WSLENV").is_some()
         {
             eprintln!("fake wsl.exe: bad command line or environment: {args:?}");

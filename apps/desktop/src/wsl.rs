@@ -356,12 +356,21 @@ pub fn reveal_path(distro: &str, linux: &str) -> Result<String, String> {
     to_display(distro, &format!("/{}", parts.join("/")))
 }
 
-/// `wsl.exe -d <distro> --cd <cwd> --exec <synt> engine --stdio`. The program is injected. wsl.exe gets
+/// `wsl.exe -d <distro> --cd <cwd> --exec <synt> engine --stdio --no-cost-cap` (a person is at the
+/// window; the engine's headless cost-cap requirement does not apply). The program is injected. wsl.exe gets
 /// the allowlisted environment minus every `SYNT_*` (a key is never handed over, and nothing is
 /// exported into the distro: no `WSLENV`).
 pub fn launcher(wsl_exe: &Path, distro: &str, cwd: &str, synt: &str, env: &Env) -> Launcher {
     let args = [
-        "-d", distro, "--cd", cwd, "--exec", synt, "engine", "--stdio",
+        "-d",
+        distro,
+        "--cd",
+        cwd,
+        "--exec",
+        synt,
+        "engine",
+        "--stdio",
+        "--no-cost-cap",
     ];
     let mut l = Launcher::new(wsl_exe, args.map(Into::into).to_vec(), env);
     l.env.retain(|(k, _)| !k.starts_with("SYNT_"));
@@ -729,7 +738,8 @@ mod tests {
                 "--exec",
                 "/h/.synt/bin/synt",
                 "engine",
-                "--stdio"
+                "--stdio",
+                "--no-cost-cap"
             ]
         );
         assert_eq!(l.program, r"C:\Windows\System32\wsl.exe");

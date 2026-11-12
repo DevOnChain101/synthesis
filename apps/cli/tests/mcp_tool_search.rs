@@ -47,7 +47,7 @@ fn run(script: Value, project_settings: Option<Value>) -> Vec<(String, String)> 
     let s = dir.path().join("script.json");
     std::fs::write(&s, script.to_string()).unwrap();
     let o = Command::new(env!("CARGO_BIN_EXE_synt"))
-        .args(["run", "--cwd"])
+        .args(["run", "--no-cost-cap", "--cwd"])
         .arg(&ws)
         .arg("--provider")
         .arg(format!("fake:{}", s.display()))

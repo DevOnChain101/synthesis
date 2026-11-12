@@ -106,15 +106,16 @@ impl Harness {
                     b.max_wall_ms.unwrap_or(0) as f64,
                     wall as f64,
                 ))
-            } else if self
-                .config
-                .max_total_tokens
-                .is_some_and(|t| c.input + c.output >= t)
+            } else if let Some(t) = [self.config.max_total_tokens, b.max_tokens_total]
+                .into_iter()
+                .flatten()
+                .min()
+                .filter(|t| c.input + c.output + c.cache_read + c.cache_create >= *t)
             {
                 Some((
                     "max_tokens",
-                    self.config.max_total_tokens.unwrap_or(0) as f64,
-                    (c.input + c.output) as f64,
+                    t as f64,
+                    (c.input + c.output + c.cache_read + c.cache_create) as f64,
                 ))
             } else if b.max_cost_usd.is_some_and(|m| c.cost >= m) {
                 Some(("max_cost_usd", b.max_cost_usd.unwrap_or(0.0), c.cost))
@@ -222,6 +223,16 @@ impl Harness {
         })
     }
 
+    /// Adds usage of a call that is not a turn (compaction summary) to the task counters.
+    pub(crate) fn charge_usage(&self, task: &TaskRun, u: &synthesis_providers::Usage) {
+        let mut c = lock(&task.counters);
+        c.input += u.input_tokens.unwrap_or(0);
+        c.output += u.output_tokens.unwrap_or(0);
+        c.cache_read += u.cache_read_input_tokens.unwrap_or(0);
+        c.cache_create += u.cache_creation_input_tokens.unwrap_or(0);
+        c.cost += self.config.pricing.map_or(0.0, |p| p.cost(u));
+    }
+
     /// Adds the response usage to the task counters; returns the event form.
     fn account(&self, task: &TaskRun, u: &synthesis_providers::Usage) -> synthesis_events::Usage {
         let mut c = lock(&task.counters);
@@ -231,10 +242,7 @@ impl Harness {
         c.output += o;
         c.cache_read += u.cache_read_input_tokens.unwrap_or(0);
         c.cache_create += u.cache_creation_input_tokens.unwrap_or(0);
-        let cost = self
-            .config
-            .pricing
-            .map(|p| (i as f64 * p.input_per_mtok + o as f64 * p.output_per_mtok) / 1_000_000.0);
+        let cost = self.config.pricing.map(|p| p.cost(u));
         c.cost += cost.unwrap_or(0.0);
         event_usage(u, cost)
     }
@@ -498,6 +506,9 @@ impl Harness {
             () = agent.cancel.cancelled() => Err("cancelled".to_string()),
             r = self.context.compact(&st.messages, instr.trim()) => r,
         };
+        if let Some(u) = self.context.take_usage() {
+            self.charge_usage(task, &u);
+        }
         let c = match result {
             Ok(c) => c,
             Err(e) => {

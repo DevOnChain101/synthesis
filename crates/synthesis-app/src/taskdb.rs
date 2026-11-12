@@ -6,17 +6,24 @@
 //! database whose schema version it was not written for. Follow-up: `begin_task_with_id` /
 //! `record_verification_report_with_id` in synthesis-session would make this module disappear.
 //!
-//! The full `VerificationReport` never leaves the harness (only `verification.completed` does),
-//! so the stored report JSON is the event summary: id, attempt, status, one-line summary.
+//! The event carries only a one-line summary, so the harness hands every full `VerificationReport`
+//! to a stash (`HarnessConfig::report_sink`) just before the event; the row stores that report as
+//! the report type serialises it (redacted), or the event summary when none was stashed.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rusqlite::{Connection, params};
-use serde_json::json;
+use serde_json::{Value, json};
 use synthesis_events::{Envelope, Event, Redactor};
 
+/// Full reports by report id, filled by the harness hook, drained by `on_event`.
+pub type ReportStash = Arc<Mutex<HashMap<String, Value>>>;
+
 pub struct TaskDb {
+    stash: ReportStash,
     conn: Connection,
     session_id: String,
     redactor: Redactor,
@@ -43,10 +50,15 @@ impl TaskDb {
             ));
         }
         Ok(Self {
+            stash: ReportStash::default(),
             conn,
             session_id: session_id.into(),
             redactor: Redactor::new(secrets),
         })
+    }
+
+    pub fn stash(&self) -> ReportStash {
+        self.stash.clone()
     }
 
     pub fn on_event(&self, env: &Envelope) -> Result<(), String> {
@@ -99,10 +111,17 @@ impl TaskDb {
                 attempt,
                 summary,
             } => {
-                let mut report = json!({
-                    "id": report_id, "task_id": task_id, "session_id": self.session_id,
-                    "attempt": attempt, "status": status, "summary": summary,
-                    "partial": "event summary; the full report is not exposed by the harness",
+                let full = self
+                    .stash
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(report_id);
+                let mut report = full.unwrap_or_else(|| {
+                    json!({
+                        "id": report_id, "task_id": task_id, "session_id": self.session_id,
+                        "attempt": attempt, "status": status, "summary": summary,
+                        "partial": "event summary; no full report was handed over",
+                    })
                 });
                 self.redactor.redact_value(&mut report);
                 self.conn

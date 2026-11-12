@@ -36,6 +36,41 @@ pub fn create(
     }
 }
 
+/// Re-pins the worktree a stored session ran in (`info` is what `create` recorded). Refuses when
+/// the directory is gone or its git pointers no longer match the recorded ones.
+pub fn reattach(
+    env: &Env,
+    synthesis_home: &Path,
+    info: GitInfo,
+    artifact_root: PathBuf,
+    workspace_id: String,
+    cwd: &Path,
+    sid: &str,
+) -> Result<(Worktree, WorkspaceContext), String> {
+    if !info.worktree.is_dir() {
+        return Err(format!(
+            "session {sid}: its worktree {} is gone, so it cannot be resumed",
+            info.worktree.display()
+        ));
+    }
+    let mut opts = WorktreeOptions::new(synthesis_home.to_path_buf());
+    opts.worktrees_dir = Some(synthesis_home.join("worktrees"));
+    let mgr = WorktreeManager::new(env, opts).map_err(|e| format!("worktree: {e}"))?;
+    mgr.changes(&info).map_err(|e| {
+        format!("session {sid}: its worktree no longer matches what was recorded: {e}")
+    })?;
+    let cwd = if cwd.starts_with(&info.worktree) {
+        cwd
+    } else {
+        &info.worktree
+    };
+    let mut ctx =
+        WorkspaceContext::open(workspace_id, &info.worktree, cwd, &[], artifact_root, sid)
+            .map_err(|e| e.to_string())?;
+    ctx.git_worktree = Some(ctx.root.clone());
+    Ok((Worktree { mgr, info }, ctx))
+}
+
 /// `(files, added, removed)` of a unified diff.
 pub fn stat(diff: &str) -> (usize, usize, usize) {
     let (mut f, mut a, mut r) = (0, 0, 0);
