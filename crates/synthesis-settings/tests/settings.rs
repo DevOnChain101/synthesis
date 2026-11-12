@@ -844,6 +844,37 @@ fn old_synthesis_key_is_reported_and_not_honoured() {
 }
 
 #[test]
+fn wsl_hide_windows_drives_is_user_or_managed_only() {
+    let f = fx();
+    f.user(json!({"synt":{"sandbox":{"wsl":{"hide_windows_drives":false}}}}));
+    f.project(json!({"synt":{"sandbox":{"wsl":{"hide_windows_drives":true}}}}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(s.synthesis.wsl_hide_windows_drives, Some(false));
+    assert!(
+        s.diagnostics
+            .iter()
+            .any(|d| d.contains("project settings: synt.sandbox.wsl is read from user or managed"))
+    );
+    let f = fx();
+    f.project(json!({"synt":{"sandbox":{"wsl":{"hide_windows_drives":false}}}}));
+    assert_eq!(
+        f.load(ProjectTrust::Trusted)
+            .synthesis
+            .wsl_hide_windows_drives,
+        None
+    );
+    let f = fx();
+    f.user(json!({"synt":{"sandbox":{"wsl":{"hide_windows_drives":"no"}}}}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(s.synthesis.wsl_hide_windows_drives, None);
+    assert!(
+        s.diagnostics
+            .iter()
+            .any(|d| d.contains("must be true or false"))
+    );
+}
+
+#[test]
 fn model_info_fetch_is_a_user_setting_only() {
     let f = fx();
     f.user(json!({"synt":{"modelInfo":{"fetch":false}}}));

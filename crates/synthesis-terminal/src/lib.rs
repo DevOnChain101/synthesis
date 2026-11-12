@@ -585,6 +585,15 @@ struct Session {
     quota: Arc<Quota>,
 }
 
+/// WSL is not isolation (Windows interop), so best-effort never runs unconfined there: only an
+/// explicit `Off` does (with a loud warning). Everything else behaves as `Enforce`.
+fn effective_mode(mode: SandboxMode, wsl: bool) -> SandboxMode {
+    match mode {
+        SandboxMode::BestEffort if wsl => SandboxMode::Enforce,
+        m => m,
+    }
+}
+
 /// Usable backends (best first) and the reasons other backends were skipped.
 type Backends = (Vec<Arc<dyn SandboxBackend>>, Vec<String>);
 
@@ -599,6 +608,8 @@ pub struct TerminalRuntime {
     backends: OnceLock<Backends>,
     /// The unconfined-fallback notice is printed once.
     degraded_noted: AtomicBool,
+    /// The WSL warning for a person-typed unconfined (`!`) command is printed once.
+    unconfined_noted: AtomicBool,
 }
 
 impl Default for TerminalRuntime {
@@ -622,6 +633,7 @@ impl TerminalRuntime {
             next_id: AtomicU64::new(1),
             backends: OnceLock::new(),
             degraded_noted: AtomicBool::new(false),
+            unconfined_noted: AtomicBool::new(false),
         }
     }
 
@@ -726,7 +738,14 @@ impl TerminalRuntime {
         cmd: &SandboxedCommand,
     ) -> Result<Option<(SandboxedCommand, SandboxCapabilities)>> {
         let refuse = |why: String| Err(Error::SandboxUnavailable(why));
-        let policy = match (self.mode, policy) {
+        let wsl = synthesis_sandbox::wsl::is_wsl();
+        let mode = effective_mode(self.mode, wsl);
+        if wsl && mode == SandboxMode::Off && !self.degraded_noted.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "synt: WARNING: sandbox is OFF on WSL: commands can start Windows programs (cmd.exe, powershell.exe) and write your Windows drives with your privileges"
+            );
+        }
+        let policy = match (mode, policy) {
             (SandboxMode::Off, _) | (SandboxMode::BestEffort, None) => return Ok(None),
             (_, Some(p)) => p,
             (_, None) => {
@@ -743,7 +762,7 @@ impl TerminalRuntime {
         let mut why = skipped.clone();
         // Enforce only ever uses the best backend (and refuses with its reason); best-effort
         // degrades to the next one when a backend cannot set up this policy.
-        let usable = match self.mode {
+        let usable = match mode {
             SandboxMode::Enforce => &chain[..chain.len().min(1)],
             _ => &chain[..],
         };
@@ -766,6 +785,11 @@ impl TerminalRuntime {
                     required
                 ));
             }
+            if wsl {
+                // Before anything is created: a drive temp dir or workspace is refused first.
+                synthesis_sandbox::wsl::preflight(policy)
+                    .map_err(|e| Error::InvalidSpec(format!("sandbox policy: {e}")))?;
+            }
             if let Some(t) = &policy.tmp_dir {
                 create_private_dir(t)?;
             }
@@ -775,14 +799,14 @@ impl TerminalRuntime {
                     return Err(Error::InvalidSpec(format!("sandbox policy: {m}")));
                 }
                 Err(e @ (SandboxError::Unsupported(_) | SandboxError::Unavailable(_)))
-                    if self.mode == SandboxMode::BestEffort =>
+                    if mode == SandboxMode::BestEffort =>
                 {
                     why.push(format!("{}: {e}", backend.name()));
                 }
                 Err(e) => return Err(Error::SandboxUnavailable(e.to_string())),
             }
         }
-        if self.mode == SandboxMode::BestEffort {
+        if mode == SandboxMode::BestEffort {
             // Flagged on every result (`sandbox: None`, `unsandboxed_by_request`), loud once.
             if !why.is_empty() && !self.degraded_noted.swap(true, Ordering::Relaxed) {
                 eprintln!(
@@ -859,6 +883,13 @@ impl TerminalRuntime {
         };
         let policy = io.sandbox.take().or(session_policy);
         let confined = if io.unconfined {
+            if synthesis_sandbox::wsl::is_wsl()
+                && !self.unconfined_noted.swap(true, Ordering::Relaxed)
+            {
+                eprintln!(
+                    "synt: WARNING: a command you typed with ! runs OUTSIDE the sandbox on WSL: it can start Windows programs and write your Windows drives"
+                );
+            }
             None
         } else {
             self.sandboxed(policy.as_ref(), &base)?
@@ -1447,5 +1478,19 @@ mod url_tests {
         ] {
             assert!(validate_probe_url(bad).is_err(), "{bad:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod wsl_mode_tests {
+    use super::*;
+
+    #[test]
+    fn best_effort_is_enforce_on_wsl_only() {
+        use SandboxMode::*;
+        assert_eq!(effective_mode(BestEffort, true), Enforce);
+        assert_eq!(effective_mode(BestEffort, false), BestEffort);
+        assert_eq!(effective_mode(Off, true), Off);
+        assert_eq!(effective_mode(Enforce, true), Enforce);
     }
 }

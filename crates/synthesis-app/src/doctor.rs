@@ -86,6 +86,149 @@ pub fn rows_capped(
     capped(move || rows(&env, &cwd, trusted), limit)
 }
 
+/// WSL checks (only called on WSL). Warnings only: Synthesis never edits `/etc/wsl.conf`. Names of
+/// variables only, and counts instead of PATH entries, never a value.
+pub(crate) fn wsl_rows(
+    host: &synthesis_platform::wsl::WslHost,
+    read: synthesis_platform::wsl::Read,
+    path_var: Option<&str>,
+    exe: Option<&Path>,
+    bwrap: &Result<std::path::PathBuf, String>,
+    landlock: Option<u8>,
+) -> Vec<(Level, String)> {
+    use synthesis_platform::wsl::{WslVersion, conf_value, interop_registered};
+    let mut v = vec![];
+    let mut add = |level, text: String| v.push((level, text));
+    let conf = read("/etc/wsl.conf").unwrap_or_default();
+    // wsl.conf says what the next start will do; only the kernel says what is true now
+    let conf_bool = |section: &str, key: &str| {
+        conf_value(&conf, section, key).map(|x| !x.eq_ignore_ascii_case("false"))
+    };
+    match host.version {
+        WslVersion::V2 => add(Level::Ok, "wsl: WSL2".into()),
+        WslVersion::V1 => add(
+            Level::Warn,
+            "wsl: this is WSL1 (no bubblewrap, so no sandbox); convert it from PowerShell: `wsl --set-version <distro> 2`".into(),
+        ),
+        WslVersion::Unknown => add(
+            Level::Warn,
+            "wsl: WSL was detected but the kernel does not say whether it is WSL1 or WSL2 (custom kernel?); the sandbox needs WSL2 with bubblewrap".into(),
+        ),
+    }
+    let (kernel, conf_on) = (interop_registered(read), conf_bool("interop", "enabled"));
+    let how = format!(
+        "/etc/wsl.conf: {}, running kernel: {}",
+        conf_on.map_or("not set", |b| if b { "enabled" } else { "disabled" }),
+        kernel.map_or("unknown", |b| if b { "enabled" } else { "disabled" })
+    );
+    let fix = "To disable it put `[interop]` `enabled=false` in /etc/wsl.conf, then run `wsl --shutdown` in PowerShell";
+    match (kernel, conf_on) {
+        (Some(false), _) => add(
+            Level::Ok,
+            format!("wsl: Windows interop is disabled ({how})"),
+        ),
+        (Some(true), _) | (None, Some(true)) => add(
+            Level::Warn,
+            format!(
+                "wsl: Windows interop is enabled ({how}). Synthesis blocks it only inside its sandbox; your shell, user-level MCP servers and `!` commands can still start cmd.exe/powershell.exe. {fix}"
+            ),
+        ),
+        (None, Some(false)) => add(
+            Level::Ok,
+            format!("wsl: Windows interop is disabled ({how})"),
+        ),
+        (None, None) => add(
+            Level::Warn,
+            format!(
+                "wsl: cannot tell whether Windows interop is enabled ({how}); assume it is. {fix}"
+            ),
+        ),
+    }
+    let win_dirs = path_var.map_or(0, |p| {
+        std::env::split_paths(p)
+            .filter(|d| host.is_windows_path(d))
+            .count()
+    });
+    if win_dirs > 0 || conf_bool("interop", "appendWindowsPath") == Some(true) {
+        add(
+            Level::Warn,
+            format!(
+                "wsl: PATH holds {win_dirs} Windows director{}. Sandboxed commands, hooks and MCP servers get them removed; to drop them everywhere put `[interop]` `appendWindowsPath=false` in /etc/wsl.conf, then run `wsl --shutdown`",
+                if win_dirs == 1 { "y" } else { "ies" },
+            ),
+        );
+    } else {
+        add(Level::Ok, "wsl: no Windows directories in PATH".into());
+    }
+    let mounts = read("/proc/mounts").unwrap_or_default();
+    let opts_of = |m: &Path| {
+        mounts
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split_whitespace();
+                let (_, mnt, _, opts) = (f.next()?, f.next()?, f.next()?, f.next()?);
+                (Path::new(mnt) == m).then(|| opts.to_string())
+            })
+            .next()
+    };
+    let root = conf_value(&conf, "automount", "root").unwrap_or_else(|| "/mnt/".into());
+    let conf_opts = conf_value(&conf, "automount", "options").unwrap_or_default();
+    let metadata = conf_opts.split(',').any(|o| o.trim() == "metadata");
+    let rw = host
+        .windows_mounts
+        .iter()
+        .filter(|m| opts_of(m).is_some_and(|o| o.split(',').any(|x| x == "rw")))
+        .count();
+    add(
+        Level::Ok, // information only: the sandbox hides or read-only-mounts the drives either way
+        format!(
+            "wsl: info: automount root {root}, options \"{conf_opts}\"{}",
+            if metadata {
+                ""
+            } else {
+                " (no `metadata`: Linux permissions on Windows drives are not stored; irrelevant to the sandbox)"
+            }
+        ),
+    );
+    if rw > 0 {
+        add(
+            Level::Warn,
+            format!(
+                "wsl: {rw} Windows drive(s) are mounted read-write (e.g. /mnt/c). The sandbox binds them read-only except the workspace; other processes can write them. To stop mounting drives put `[automount]` `enabled=false` in /etc/wsl.conf, then run `wsl --shutdown`"
+            ),
+        );
+    } else {
+        add(
+            Level::Ok,
+            "wsl: no Windows drive is mounted read-write".into(),
+        );
+    }
+    match (bwrap, landlock) {
+        (Ok(_), l) => add(
+            Level::Ok,
+            format!(
+                "wsl: bubblewrap works (the only sandbox used on WSL; Landlock {} is not used: it cannot hide the interop socket)",
+                l.map_or("unavailable".into(), |a| format!("ABI {a}"))
+            ),
+        ),
+        (Err(e), l) => add(
+            Level::Warn,
+            format!(
+                "wsl: bubblewrap does not work ({}); without it commands are refused (also in best-effort) unless --sandbox off. Install it: `sudo apt install bubblewrap`. Landlock {} is not used on WSL",
+                san(e),
+                l.map_or("unavailable".into(), |a| format!("ABI {a}"))
+            ),
+        ),
+    }
+    if exe.is_some_and(|e| host.is_windows_path(e)) {
+        add(
+            Level::Warn,
+            "wsl: this `synt` binary lives on a Windows drive (/mnt/*), where Windows programs can replace it; install it under your Linux home".into(),
+        );
+    }
+    v
+}
+
 /// Doctor rows for the folder `cwd`. Read-only: nothing is created, started or migrated.
 pub fn rows(env: &Env, cwd: &Path, trusted: bool) -> Vec<Row> {
     let mut v: Vec<Row> = vec![];
@@ -228,12 +371,54 @@ pub fn rows(env: &Env, cwd: &Path, trusted: bool) -> Vec<Row> {
         Err(e) => add(
             Level::Fail,
             format!(
-                "sandbox: {} on {}, enforce NOT ready ({}); a run refuses to start unless --sandbox best-effort|off",
+                "sandbox: {} on {}, enforce NOT ready ({}); a run refuses to start unless --sandbox {}",
                 best.name(),
                 std::env::consts::OS,
-                san(&e)
+                san(&e),
+                if synthesis_sandbox::wsl::is_wsl() {
+                    "off"
+                } else {
+                    "best-effort|off"
+                }
             ),
         ),
+    }
+    #[cfg(target_os = "linux")]
+    if let Err(e) = synthesis_sandbox::helper_status() {
+        // Not needed while bubblewrap works off WSL (Landlock is only the fallback there); on WSL
+        // it installs the seccomp filter, so commands are refused without it.
+        let needed = synthesis_sandbox::wsl::is_wsl() || synthesis_sandbox::bwrap_probe().is_err();
+        add(
+            if needed { Level::Warn } else { Level::Ok },
+            format!(
+                "sandbox helper {}: {} (group-writable and world-writable directories are refused; the Landlock backend and, on WSL, the seccomp filter need it; without it commands are refused under enforce{})",
+                if needed {
+                    "missing or untrusted"
+                } else {
+                    "info: missing or untrusted, not needed while bubblewrap works"
+                },
+                san(&e),
+                if needed { "" } else { "; bubblewrap is in use" }
+            ),
+        );
+    }
+    if let Some(host) = synthesis_sandbox::wsl::host().as_ref() {
+        #[cfg(target_os = "linux")]
+        let landlock = synthesis_sandbox::landlock_abi();
+        #[cfg(not(target_os = "linux"))]
+        let landlock: Option<u8> = None;
+        let read = |p: &str| std::fs::read_to_string(p).ok();
+        let exe = std::env::current_exe().ok();
+        for (level, text) in wsl_rows(
+            host,
+            &read,
+            env.get("PATH"),
+            exe.as_deref(),
+            synthesis_sandbox::bwrap_probe(),
+            landlock,
+        ) {
+            add(level, text);
+        }
     }
     // settings: hooks, refused env, loader diagnostics; MCP servers
     let st = load_settings(
@@ -469,6 +654,117 @@ pub fn legacy_notes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wsl_text(rows: &[(Level, String)]) -> String {
+        rows.iter().map(|(l, t)| format!("{l:?} {t}\n")).collect()
+    }
+
+    #[test]
+    fn wsl_interop_state_comes_from_the_kernel_not_a_default() {
+        use synthesis_platform::wsl::{WslHost, WslVersion};
+        let host = WslHost {
+            version: WslVersion::Unknown,
+            windows_mounts: vec![],
+            mounts_known: true,
+        };
+        let run = |files: &'static [(&'static str, &'static str)]| {
+            let read = move |p: &str| {
+                files
+                    .iter()
+                    .find(|(k, _)| *k == p)
+                    .map(|(_, v)| v.to_string())
+            };
+            wsl_text(&wsl_rows(
+                &host,
+                &read,
+                None,
+                None,
+                &Ok("/usr/bin/bwrap".into()),
+                None,
+            ))
+        };
+        // nothing readable: not "enabled by default", but unknown
+        let t = run(&[]);
+        assert!(
+            t.contains("cannot tell whether Windows interop is enabled"),
+            "{t}"
+        );
+        assert!(t.contains("custom kernel"), "{t}");
+        // the kernel says disabled, whatever wsl.conf says; a trailing comment is parsed
+        let t = run(&[
+            ("/proc/sys/fs/binfmt_misc/status", "enabled"),
+            ("/etc/wsl.conf", "[interop]\nenabled=true\n"),
+        ]);
+        assert!(t.contains("Ok wsl: Windows interop is disabled"), "{t}");
+        let t = run(&[("/etc/wsl.conf", "[interop]\nenabled=false # no\n")]);
+        assert!(t.contains("Ok wsl: Windows interop is disabled"), "{t}");
+    }
+
+    #[test]
+    fn wsl_rows_warn_with_remedies_and_never_print_values() {
+        use synthesis_platform::wsl::{WslHost, WslVersion};
+        let host = WslHost {
+            version: WslVersion::V1,
+            windows_mounts: vec!["/mnt/c".into()],
+            mounts_known: true,
+        };
+        let files = |p: &str| match p {
+            "/proc/sys/fs/binfmt_misc/WSLInterop" => Some("enabled\n".to_string()),
+            "/proc/mounts" => Some("C: /mnt/c drvfs rw,noatime 0 0\n".to_string()),
+            _ => None,
+        };
+        // joined with the host's separator (`;` on Windows), like the real PATH
+        let path = std::env::join_paths(["/usr/bin", "/mnt/c/SECRET-DIR/bin"]).unwrap();
+        let path = path.to_str().unwrap();
+        let r = wsl_rows(
+            &host,
+            &files,
+            Some(path),
+            Some(Path::new("/mnt/c/tools/synt")),
+            &Err("bubblewrap not found".into()),
+            Some(5),
+        );
+        let t = wsl_text(&r);
+        assert!(r.iter().all(|(l, _)| *l != Level::Fail), "{t}");
+        for need in [
+            "WSL1",
+            "wsl --set-version",
+            "interop is enabled",
+            "enabled=false",
+            "1 Windows directory",
+            "appendWindowsPath=false",
+            "info: automount",
+            "read-write",
+            "bubblewrap does not work",
+            "apt install bubblewrap",
+            "lives on a Windows drive",
+        ] {
+            assert!(t.contains(need), "{need} in {t}");
+        }
+        assert!(!t.contains("SECRET-DIR"), "{t}");
+        // a hardened host has no warning
+        let conf =
+            "[interop]\nenabled=false\nappendWindowsPath=false\n[automount]\noptions=metadata\n";
+        let good = |p: &str| match p {
+            "/etc/wsl.conf" => Some(conf.to_string()),
+            "/proc/sys/fs/binfmt_misc/status" => Some("enabled".to_string()),
+            _ => None,
+        };
+        let host2 = WslHost {
+            version: WslVersion::V2,
+            windows_mounts: vec![],
+            mounts_known: true,
+        };
+        let r = wsl_rows(
+            &host2,
+            &good,
+            Some("/usr/bin"),
+            None,
+            &Ok("/usr/bin/bwrap".into()),
+            None,
+        );
+        assert!(r.iter().all(|(l, _)| *l == Level::Ok), "{}", wsl_text(&r));
+    }
 
     #[test]
     fn legacy_notes_detect_old_home_vars_and_path_shadowing() {

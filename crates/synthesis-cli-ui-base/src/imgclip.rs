@@ -61,14 +61,11 @@ pub trait ImageSource: Send + Sync {
 
 // ---------------------------------------------------------------- WSL probing (pure)
 
-/// WSL from the kernel's own words (`/proc/sys/kernel/osrelease`, `/proc/version`): both WSL1
-/// (`...-Microsoft`) and WSL2 (`...-microsoft-standard-WSL2`) contain "microsoft". `read` returns a
+/// WSL from the kernel's own words, through the one shared helper
+/// (`synthesis_platform::wsl::version`): WSL1 and WSL2 both say "microsoft". `read` returns a
 /// file's text.
 pub fn is_wsl(read: &dyn Fn(&str) -> Option<String>) -> bool {
-    ["/proc/sys/kernel/osrelease", "/proc/version"]
-        .iter()
-        .filter_map(|p| read(p))
-        .any(|t| t.to_lowercase().contains("microsoft"))
+    synthesis_platform::wsl::version(read).is_some()
 }
 
 /// Where the Windows C: drive is mounted, from `/proc/mounts` (`C: /mnt/c drvfs ...`, or the

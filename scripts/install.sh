@@ -90,9 +90,14 @@ fi
 tar -xzf "$tmp/$archive" -C "$tmp"
 src="$tmp/synthesis-$version-$target"
 [ -f "$src/synt" ] || die "archive layout unexpected (no synt)"
-mkdir -p "$DIR"
+# The sandbox (Landlock backend; on WSL the seccomp filter) needs this helper next to synt:
+# without it every command is refused, so a Linux archive without it is a broken download.
+case "$target" in
+  *linux*) [ -f "$src/synthesis-sandbox-exec" ] || die "archive layout unexpected (no synthesis-sandbox-exec; the Linux sandbox needs it)" ;;
+esac
+# The sandbox only trusts a helper whose directory others cannot write (a default umask 0002 makes 0775).
+[ -d "$DIR" ] || { mkdir -p "$DIR" && chmod go-w "$DIR"; }
 install -m 0755 "$src/synt" "$DIR/$NAME"
-# Landlock backend looks for this helper next to the executable.
 [ -f "$src/synthesis-sandbox-exec" ] && install -m 0755 "$src/synthesis-sandbox-exec" "$DIR/synthesis-sandbox-exec"
 echo "Installed $DIR/$NAME ($version, $target)"
 

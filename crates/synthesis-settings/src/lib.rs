@@ -108,6 +108,9 @@ pub struct SynthesisSettings {
     pub browser: Map<String, Value>,
     /// `modelInfo.fetch` (user settings only): `Some(false)` turns the startup model-info fetch off.
     pub model_info_fetch: Option<bool>,
+    /// `sandbox.wsl.hide_windows_drives` (user and managed settings only): `Some(false)` keeps the
+    /// Windows drives visible (read-only) inside the WSL sandbox instead of hiding them.
+    pub wsl_hide_windows_drives: Option<bool>,
     pub compat: Compat,
 }
 
@@ -805,6 +808,24 @@ impl Settings {
             } else if m.get("fetch").is_some() {
                 self.diagnostics.push(format!(
                     "{what}: synt.modelInfo.fetch must be true or false"
+                ));
+            }
+        }
+        // A repository must not re-open the Windows drives to the commands it makes the agent run.
+        if let Some(h) = n
+            .get("sandbox")
+            .and_then(|s| s.get("wsl"))
+            .and_then(|w| w.get("hide_windows_drives"))
+        {
+            if what != "user settings" && what != "managed settings" {
+                self.diagnostics.push(format!(
+                    "{what}: synt.sandbox.wsl is read from user or managed settings only, ignored"
+                ));
+            } else if let Some(b) = h.as_bool() {
+                self.synthesis.wsl_hide_windows_drives = Some(b);
+            } else {
+                self.diagnostics.push(format!(
+                    "{what}: synt.sandbox.wsl.hide_windows_drives must be true or false"
                 ));
             }
         }
