@@ -2364,8 +2364,15 @@ fn unattended_refuses_each_protection_that_is_asked_away() {
         &["--keep-defaults", "--unattended", "--max-cost-usd", "1"],
     );
     assert_eq!(o.status.code(), Some(2));
+    // a host without a sandbox (native Windows): the rig adds `--sandbox off`, which --unattended
+    // refuses first, with its own message
+    let want = if host_confines() {
+        "git repository"
+    } else {
+        "--sandbox enforce"
+    };
     assert!(
-        String::from_utf8_lossy(&o.stderr).contains("git repository"),
+        String::from_utf8_lossy(&o.stderr).contains(want),
         "{}",
         String::from_utf8_lossy(&o.stderr)
     );
