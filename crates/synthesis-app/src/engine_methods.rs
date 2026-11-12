@@ -533,18 +533,22 @@ mod tests {
                 .len(),
             0
         );
-        // only a root the engine listed (or its own grant) can be revoked
+        // only a root the engine listed (or its own grant) can be revoked; the client names it as the engine
+        // reported it (on Windows the canonical form carries a `\\?\` prefix a typed path does not)
         assert!(c.revoke("/etc", None).is_err());
-        assert!(c.revoke(&proj.to_string_lossy(), None).is_err());
+        let own = g.0.to_string_lossy().into_owned();
+        assert!(
+            c.revoke(&own, None).is_err(),
+            "a session grant is not a stored row"
+        );
         assert_eq!(
-            c.revoke(&proj.to_string_lossy(), Some(&g)).unwrap()["session_grant_ended"],
+            c.revoke(&own, Some(&g)).unwrap()["session_grant_ended"],
             true
         );
-        let (_, _) = c.grant(&proj, Mode::Remember).unwrap();
-        assert_eq!(
-            c.revoke(&proj.to_string_lossy(), None).unwrap()["revoked"],
-            true
-        );
+        c.grant(&proj, Mode::Remember).unwrap();
+        let st = c.trust_state(&proj, None, false);
+        let listed = st["records"][0]["root"].as_str().unwrap().to_string();
+        assert_eq!(c.revoke(&listed, None).unwrap()["revoked"], true);
     }
 
     #[cfg(unix)]
