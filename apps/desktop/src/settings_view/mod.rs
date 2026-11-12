@@ -217,6 +217,8 @@ fn switch(on: bool, locked: bool) -> gpui::Div {
 
 pub struct SettingsView {
     model: Option<Model>,
+    /// A loop is already polling the WSL check (one at a time, however often the view is focused).
+    wsl_polling: bool,
     /// Why there is no model (no home directory).
     err: Option<String>,
     search: Entity<InputState>,
@@ -336,6 +338,7 @@ impl SettingsView {
                 }
                 let (placeholder, number) = match f.kind {
                     Kind::Int { .. } | Kind::Float { .. } => ("unset", true),
+                    Kind::Text => ("default distro", true),
                     Kind::List(_) => ("add an item, Enter", false),
                     _ => continue,
                 };
@@ -385,6 +388,7 @@ impl SettingsView {
             tab: TABS[0],
             restart_block: None,
             sliders,
+            wsl_polling: false,
             inset,
             _subs: subs,
         }
@@ -395,7 +399,35 @@ impl SettingsView {
     }
 
     /// Puts the cursor in the search box (the shell does it when the view opens).
-    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(m) = &mut self.model {
+            m.recheck_wsl();
+        }
+        // the check runs on its own thread: look every 250 ms until it is in, then redraw
+        if !self.wsl_polling && self.model.as_ref().is_some_and(|m| !m.wsl_idle()) {
+            self.wsl_polling = true;
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(250))
+                        .await;
+                    let Ok(done) = this.update(cx, |v, cx| {
+                        let done = v.model.as_mut().is_none_or(|m| m.poll_wsl());
+                        if done {
+                            v.wsl_polling = false;
+                            cx.notify();
+                        }
+                        done
+                    }) else {
+                        break;
+                    };
+                    if done {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         self.search.update(cx, |s, cx| s.focus(window, cx));
     }
 

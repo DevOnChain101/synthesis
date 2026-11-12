@@ -147,6 +147,8 @@ pub enum Action {
     Panels(String),
     /// `/files`: the centre panel shows its file explorer tab (the project tree and the changes).
     ShowFiles,
+    /// `/reveal [path]`: the folder (or a path the agent printed) in the system file manager.
+    Reveal(String),
     /// `/diff [file]`: the centre panel shows its diff tab, with `file` open when one is named.
     ShowDiff(Option<String>),
     /// The Trust dialog was accepted: the window restarts this session with the folder trusted.
@@ -424,11 +426,12 @@ pub fn panels_command() -> Command {
 }
 
 pub fn is_wired(name: &str) -> bool {
-    // `open`, `send`, `panels`, `doctor`, `trust`, `rewind`, `context` and `clean` exist only in the desktop app
+    // `open`, `reveal`, `send`, `panels`, `doctor`, `trust`, `rewind`, `context` and `clean` exist only in the desktop app
     WIRED.contains(&name)
         || matches!(
             name,
             "open"
+                | "reveal"
                 | "send"
                 | "panels"
                 | "doctor"
@@ -471,6 +474,17 @@ pub fn clean_command() -> Command {
         aliases: vec![],
         description: "permanently delete stored sessions (pick a scope, then confirm)".into(),
         argument_hint: String::new(),
+        local: true,
+    }
+}
+
+/// `/reveal` is the desktop's own command (the CLI has none), so it is not in [`WIRED`].
+pub fn reveal_command() -> Command {
+    Command {
+        name: "reveal".into(),
+        aliases: vec![],
+        description: "show the folder, or a path the agent printed, in the file manager".into(),
+        argument_hint: "[path]".into(),
         local: true,
     }
 }
@@ -550,6 +564,8 @@ pub struct Live {
     pub engine: Option<Arc<Engine>>,
     /// The engine is being built (first start or a relaunch).
     pub starting: bool,
+    /// The engine being built runs in a WSL distro (the line says "starting distro").
+    pub starting_distro: bool,
     /// A task is running (from `send` to the engine's `TaskDone`).
     pub busy: bool,
     /// A `/rewind` is open or writing: no prompt starts (files must not change under a task).
@@ -663,6 +679,7 @@ impl Live {
             ws_new: false,
             engine: None,
             starting: true,
+            starting_distro: false,
             busy: false,
             rewinding: false,
             rewind_job: None,
@@ -783,6 +800,7 @@ impl Live {
         }
         self.busy = false;
         self.starting = false;
+        self.starting_distro = false;
         self.engine = Some(engine);
     }
 
@@ -1877,6 +1895,7 @@ impl Live {
             "permissions" => self.permissions_edit(arg),
             // the file explorer and diff tabs of the centre panel are the views of these two; nothing is posted
             "files" => return Submitted::Do(Action::ShowFiles),
+            "reveal" => return Submitted::Do(Action::Reveal(arg.trim().to_string())),
             "diff" => {
                 let f = arg.trim();
                 return Submitted::Do(Action::ShowDiff((!f.is_empty()).then(|| f.to_string())));
@@ -3095,6 +3114,7 @@ mod tests {
         l.commands = synthesis_cli_ui::local_commands();
         l.commands.push(panels_command());
         l.commands.push(send_command());
+        l.commands.push(reveal_command());
         l.commands.push(rewind_command());
         l.commands.push(clean_command());
         l.commands.push(close_workspace_command());
@@ -3112,6 +3132,10 @@ mod tests {
         let mut l = live_with_commands();
         assert_eq!(l.submit("/exit"), Submitted::Quit);
         assert_eq!(l.submit("/files"), Submitted::Do(Action::ShowFiles));
+        assert_eq!(
+            l.submit("/reveal /home/a"),
+            Submitted::Do(Action::Reveal("/home/a".into()))
+        );
         assert_eq!(l.submit("/diff"), Submitted::Do(Action::ShowDiff(None)));
         assert_eq!(
             l.submit("/diff a.rs"),

@@ -473,6 +473,9 @@ impl TuiView {
             Activity::Agent(kind) => format!("{kind} agent working\u{2026}"),
             Activity::Tool(tool) => format!("Running {tool}\u{2026}"),
             Activity::Verifying => "Verifying the result\u{2026}".to_string(),
+            Activity::Starting if lu.live.starting_distro => {
+                format!("{}\u{2026}", crate::wsl::STARTING)
+            }
             Activity::Starting => "Starting the session\u{2026}".to_string(),
             Activity::Thinking => format!("{}\u{2026}", activity_verb(secs)),
         };
