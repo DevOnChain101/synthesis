@@ -81,6 +81,50 @@ pub fn real_of(p: &Path) -> Option<PathBuf> {
     realpath_lenient(p)
 }
 
+/// `p` with every symlink on it followed by hand, a DANGLING one included (`realpath` gives up
+/// on those): the final path may not exist. Bounded to 40 hops; `None` = loop / too deep.
+pub fn resolve_links(p: &Path) -> Option<PathBuf> {
+    use std::collections::VecDeque;
+    use std::path::Component;
+    let mut todo: VecDeque<std::ffi::OsString> = VecDeque::new();
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::Prefix(_) | Component::RootDir => out.push(c.as_os_str()),
+            other => todo.push_back(other.as_os_str().to_owned()),
+        }
+    }
+    let mut hops = 0;
+    while let Some(c) = todo.pop_front() {
+        if c == ".." {
+            out.pop();
+            continue;
+        }
+        if c == "." {
+            continue;
+        }
+        out.push(&c);
+        if std::fs::symlink_metadata(&out).is_ok_and(|m| m.file_type().is_symlink()) {
+            hops += 1;
+            if hops > 40 {
+                return None;
+            }
+            let target = std::fs::read_link(&out).ok()?;
+            out.pop();
+            if target.is_absolute() {
+                out = PathBuf::new();
+            }
+            for t in target.components().rev() {
+                match t {
+                    Component::Prefix(_) | Component::RootDir => out.push(t.as_os_str()),
+                    other => todo.push_front(other.as_os_str().to_owned()),
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
 /// Link count of an existing regular file with more than one hard link (unix only; else `None`).
 pub fn hard_links(p: &Path) -> Option<u64> {
     #[cfg(unix)]

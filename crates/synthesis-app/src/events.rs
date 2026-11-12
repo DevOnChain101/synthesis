@@ -17,6 +17,35 @@ use crate::transcript::Transcript;
 
 pub type Store = Arc<Mutex<SessionWriter>>;
 
+/// Most files one Bash command's directory operands add to the snapshot.
+const SNAPSHOT_FILES: usize = 200;
+
+/// Existing regular files that `cmd` (rm, mv, cp destination, sed -i) is about to change, as
+/// absolute paths: files named directly, and the files below a directory operand up to a cap.
+fn bash_snapshot_files(cmd: &str, cwd: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for t in synthesis_permissions::bash::mutation_targets(cmd) {
+        let p = cwd.join(&t);
+        if p.is_dir() {
+            let mut stack = vec![p];
+            while let Some(d) = stack.pop() {
+                for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                    let Ok(ft) = e.file_type() else { continue };
+                    if ft.is_dir() && e.file_name() != ".git" {
+                        stack.push(e.path());
+                    } else if ft.is_file() && out.len() < SNAPSHOT_FILES {
+                        out.push(e.path());
+                    }
+                }
+            }
+        } else if p.is_file() {
+            out.push(p);
+        }
+    }
+    out.truncate(SNAPSHOT_FILES);
+    out
+}
+
 pub struct Persist {
     buf: Vec<u8>,
     out: Box<dyn Write + Send>,
@@ -31,6 +60,8 @@ pub struct Persist {
     checkpointed: std::collections::HashSet<String>,
     /// File-changing tool calls in flight: their path, hashed when the call completes.
     writing: std::collections::HashMap<String, String>,
+    /// Bash calls requested but not started yet: their command, for the snapshot at start.
+    bash_cmds: std::collections::HashMap<String, String>,
     /// Raised when a call that taints the task is requested (web, browser, MCP, network Bash):
     /// the Memory tools read it, so a note saved afterwards is `untrusted` at once.
     taint: Option<Arc<AtomicBool>>,
@@ -56,6 +87,7 @@ impl Persist {
             base,
             checkpointed: std::collections::HashSet::new(),
             writing: std::collections::HashMap::new(),
+            bash_cmds: std::collections::HashMap::new(),
             taint: None,
             closed,
         }
@@ -131,25 +163,39 @@ impl Persist {
                 eprintln!("synt: warning: checkpoint: {e}");
             }
             // a mutating Bash command (rm, mv, cp, sed -i) is not tracked by the file tools:
-            // snapshot the files it names once, before it runs (best effort; directories are not)
-            if let Event::ToolRequested { name, input, .. } = &env.event
+            // when it actually starts (after the permission decision) snapshot the files it names,
+            // one checkpoint per file so one bad operand cannot stop the rest (best effort)
+            if let Event::ToolRequested {
+                tool_call_id,
+                name,
+                input,
+                ..
+            } = &env.event
                 && name == "Bash"
                 && let Some(cmd) = input.get("command").and_then(|c| c.as_str())
             {
-                let fresh: Vec<std::path::PathBuf> =
-                    synthesis_permissions::bash::mutation_targets(cmd)
-                        .into_iter()
-                        .filter(|p| self.checkpointed.insert(p.clone()))
-                        .map(std::path::PathBuf::from)
-                        .collect();
-                if !fresh.is_empty()
-                    && let Err(e) = w.create_checkpoint(
-                        &format!("before-first-bash-{}", self.checkpointed.len()),
-                        &fresh,
-                    )
-                    && !matches!(e, synthesis_session::Error::Invalid(_))
-                {
-                    eprintln!("synt: warning: checkpoint: {e}");
+                self.bash_cmds.insert(tool_call_id.clone(), cmd.to_string());
+            }
+            if let Event::ToolStarted {
+                tool_call_id, cwd, ..
+            } = &env.event
+                && let Some(cmd) = self.bash_cmds.remove(tool_call_id)
+            {
+                for file in bash_snapshot_files(&cmd, std::path::Path::new(cwd)) {
+                    let key = file.to_string_lossy().into_owned();
+                    if self.checkpointed.contains(&key) {
+                        continue;
+                    }
+                    match w.create_checkpoint(
+                        &format!("before-bash-{}", self.checkpointed.len() + 1),
+                        std::slice::from_ref(&file),
+                    ) {
+                        Ok(_) => {
+                            self.checkpointed.insert(key);
+                        }
+                        Err(synthesis_session::Error::Invalid(_)) => {}
+                        Err(e) => eprintln!("synt: warning: checkpoint: {e}"),
+                    }
                 }
             }
             drop(w);
@@ -250,5 +296,49 @@ mod tests {
             p.write_all(&requested(name, input)).unwrap();
             assert_eq!(flag.load(Ordering::SeqCst), tainted, "{name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::bash_snapshot_files;
+
+    #[test]
+    fn rm_mv_sed_operands_resolve_through_cd_dotdir_and_directories() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        std::fs::create_dir_all(r.join("sub/tree/deep")).unwrap();
+        for f in [
+            "a.txt",
+            "sub/b.txt",
+            "sub/tree/c.txt",
+            "sub/tree/deep/d.txt",
+        ] {
+            std::fs::write(r.join(f), "x").unwrap();
+        }
+        let names = |cmd: &str| {
+            let mut v: Vec<String> = bash_snapshot_files(cmd, r)
+                .iter()
+                .map(|p| {
+                    p.strip_prefix(r)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        // `./a.txt` and `a.txt` are one file; a missing operand is skipped, the rest still counts
+        assert_eq!(names("rm ./a.txt a.txt nothing.txt"), ["a.txt"]);
+        assert_eq!(names("cd sub && rm b.txt"), ["sub/b.txt"]);
+        assert_eq!(names("cd sub && sed -i s/x/y/ ../a.txt"), ["a.txt"]);
+        // a directory: its files, not the directory
+        assert_eq!(
+            names("rm -rf sub/tree"),
+            ["sub/tree/c.txt", "sub/tree/deep/d.txt"]
+        );
+        assert_eq!(names("cp a.txt sub/b.txt"), ["sub/b.txt"]);
+        assert!(names("ls -la").is_empty());
     }
 }

@@ -128,6 +128,23 @@ fn prompt(task: &TaskRun, call: &Call, input: &Value, engine_note: &str) -> Stri
     .join("\n\n")
 }
 
+/// Actions whose input could have been steered by text drawn in an image: commands, network,
+/// messages, MCP, browser navigation and form filling. File edits, reads and browser clicks,
+/// scrolls and screenshots are not (they cannot carry the text out), so a browser task goes on.
+pub(crate) fn image_sensitive(name: &str) -> bool {
+    if matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit") {
+        return false;
+    }
+    match name.strip_prefix("browser_") {
+        Some(rest) => [
+            "navigate", "fill", "type", "eval", "upload", "download", "login", "press",
+        ]
+        .iter()
+        .any(|k| rest.starts_with(k)),
+        None => true,
+    }
+}
+
 fn key(call: &Call, input: &Value) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (&call.name, input.to_string()).hash(&mut h);
@@ -152,10 +169,7 @@ impl Harness {
         let forced = if input.to_string().chars().count() > INPUT_CAP {
             Some("the action is too long to judge in full (the judge would see a truncated view)")
         } else if task.after_image.load(std::sync::atomic::Ordering::SeqCst)
-            && !matches!(
-                call.name.as_str(),
-                "Write" | "Edit" | "MultiEdit" | "NotebookEdit"
-            )
+            && image_sensitive(&call.name)
         {
             Some(
                 "an earlier tool result of this task carried an image (untrusted text); an action with an external effect is not judged",
@@ -293,5 +307,37 @@ impl Harness {
             v.reason
         };
         Ok((v.decision, cap(&reason, 300)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::image_sensitive;
+
+    #[test]
+    fn browser_navigation_stays_usable_but_exfil_shaped_actions_are_sensitive() {
+        for n in [
+            "browser_click",
+            "browser_screenshot",
+            "browser_scroll",
+            "browser_snapshot",
+            "Write",
+            "Edit",
+        ] {
+            assert!(!image_sensitive(n), "{n}");
+        }
+        for n in [
+            "Bash",
+            "WebFetch",
+            "SendMessage",
+            "mcp__srv__do",
+            "browser_navigate",
+            "browser_fill_secret",
+            "browser_type",
+            "browser_evaluate",
+            "terminal_spawn",
+        ] {
+            assert!(image_sensitive(n), "{n}");
+        }
     }
 }

@@ -1147,11 +1147,19 @@ pub fn fs_operands(name: &str, args: &[String]) -> Option<Vec<String>> {
 pub fn mutation_targets(cmd: &str) -> Vec<String> {
     let segs = parse_simple_commands(cmd).unwrap_or_else(|| lenient_segments(cmd));
     let mut out: Vec<String> = Vec::new();
+    let mut dir = std::path::PathBuf::new();
     for seg in segs {
         let w = unwrap_words(&seg, false);
         let Some(name) = w.first().map(String::as_str) else {
             continue;
         };
+        if name == "cd" {
+            match w.get(1) {
+                Some(d) if !d.starts_with('-') => dir = dir.join(d),
+                _ => dir = std::path::PathBuf::new(),
+            }
+            continue;
+        }
         let in_place = w
             .iter()
             .any(|a| a == "--in-place" || (a.starts_with("-i") && !a.starts_with("--")));
@@ -1162,8 +1170,23 @@ pub fn mutation_targets(cmd: &str) -> Vec<String> {
             _ => None,
         };
         for o in ops.into_iter().flatten() {
-            if !o.contains(['*', '?', '[', '$', '`']) && !out.contains(&o) {
-                out.push(o);
+            if o.contains(['*', '?', '[', '$', '`']) {
+                continue;
+            }
+            // `./a` and `a` are one key; `..` is folded lexically
+            let mut norm = std::path::PathBuf::new();
+            for c in dir.join(&o).components() {
+                match c {
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir if norm.file_name().is_some() => {
+                        norm.pop();
+                    }
+                    c => norm.push(c.as_os_str()),
+                }
+            }
+            let key = norm.to_string_lossy().into_owned();
+            if !key.is_empty() && !out.contains(&key) {
+                out.push(key);
             }
         }
     }

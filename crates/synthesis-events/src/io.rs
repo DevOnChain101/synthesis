@@ -11,12 +11,43 @@ use crate::{Envelope, Event, RawEnvelope, SCHEMA_VERSION};
 pub struct Redactor {
     secrets: std::sync::Mutex<Vec<String>>,
     patterns: Vec<(&'static str, Regex)>,
+    credential: Regex,
 }
+
+/// Most exact values `add_secret` keeps (oldest stay; a flood of reads cannot slow every event).
+const MAX_SECRETS: usize = 256;
+/// Values too ordinary to mask: they would corrupt unrelated text.
+const TRIVIAL: &[&str] = &[
+    "true",
+    "false",
+    "null",
+    "none",
+    "undefined",
+    "production",
+    "development",
+    "staging",
+    "localhost",
+    "postgres",
+    "postgresql",
+    "mysql",
+    "mongodb",
+    "redis",
+    "password",
+    "changeme",
+    "example",
+    "disabled",
+    "enabled",
+    "127.0.0.1",
+    "0.0.0.0",
+    "internal",
+    "external",
+    "default",
+];
 
 impl Redactor {
     pub fn new(secrets: impl IntoIterator<Item = String>) -> Self {
         // Order matters: `sk-ant-` must run before the generic `sk-`.
-        let defs: [(&str, &str); 16] = [
+        let defs: [(&str, &str); 15] = [
             ("sk-ant", r"sk-ant-[A-Za-z0-9_-]+"),
             ("sk", r"sk-[A-Za-z0-9_-]{20,}"),
             (
@@ -46,11 +77,6 @@ impl Redactor {
                 "aws-secret",
                 r"(?i)aws_?secret_?(?:access_?)?key[\x22']?\s*[:=]\s*[\x22']?[A-Za-z0-9/+=]{40}",
             ),
-            // generic `password: x`, `API_KEY=x`; the value must be 6+ visible characters
-            (
-                "credential",
-                r"(?i)\b(?:password|passwd|secret|token|api[_-]?key)[\x22']?\s*[:=]\s*[\x22']?[^\s\x22',;]{6,}",
-            ),
         ];
         Self {
             // Empty secrets would match everywhere.
@@ -59,26 +85,36 @@ impl Redactor {
                 .iter()
                 .map(|(k, p)| (*k, Regex::new(p).expect("static regex")))
                 .collect(),
+            // `NAME_TOKEN=value`, `"password": "value"`; group 3 is the next character (type syntax
+            // such as `token: Option<String>` is told apart from a value there)
+            credential: Regex::new(
+                r#"(?i)\b([A-Za-z0-9_]*(?:password|passwd|secret|token|api_?key)["']?\s*[:=]\s*["']?)([^\s"'<>(),;]{6,})(.?)"#,
+            )
+            .expect("static regex"),
         }
     }
 
     /// Registers an exact value to mask from now on (a value read from a secret file the user
     /// approved). Values shorter than 6 chars are ignored (they would match everywhere).
     pub fn add_secret(&self, s: &str) {
+        let s = s.trim().trim_matches(['"', '\'', ',', ';', '`']);
+        if s.chars().count() < 8 || TRIVIAL.contains(&s.to_lowercase().as_str()) {
+            return;
+        }
         let mut v = self.secrets.lock().unwrap_or_else(|e| e.into_inner());
-        if s.chars().count() >= 6 && !v.iter().any(|x| x == s) {
+        if v.len() < MAX_SECRETS && !v.iter().any(|x| x == s) {
             v.push(s.to_string());
         }
     }
 
     pub fn redact_str(&self, s: &str) -> String {
         let mut out = s.to_string();
-        let secrets = self
+        for secret in self
             .secrets
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        for secret in &secrets {
+            .iter()
+        {
             out = out.replace(secret.as_str(), "[REDACTED:secret]");
         }
         for (kind, re) in &self.patterns {
@@ -86,7 +122,20 @@ impl Redactor {
                 .replace_all(&out, format!("[REDACTED:{kind}]").as_str())
                 .into_owned();
         }
-        out
+        // a value looks like a secret when it has a digit or a symbol; `token: string` and `password: Option<String>` are code, not credentials
+        self.credential
+            .replace_all(&out, |c: &regex::Captures| {
+                let v = &c[2];
+                let valuelike = v
+                    .chars()
+                    .any(|ch| ch.is_ascii_digit() || "-_./+=~!@#$%^&*".contains(ch));
+                if v.starts_with("[REDACTED") || !valuelike || matches!(&c[3], "<" | "(" | ">") {
+                    c[0].to_string()
+                } else {
+                    format!("{}[REDACTED:credential]{}", &c[1], &c[3])
+                }
+            })
+            .into_owned()
     }
 
     pub fn redact_value(&self, v: &mut Value) {
@@ -911,6 +960,10 @@ mod tests {
             ),
             ("password: hunter22", "credential"),
             ("API_KEY=abc123def", "credential"),
+            ("GITHUB_TOKEN=abc123def456", "credential"),
+            ("DB_PASSWORD=s3cr3t-pass", "credential"),
+            ("OPENAI_API_KEY=zzZZ9988yy", "credential"),
+            ("export STRIPE_SECRET=Ab12Cd34", "credential"),
             ("\"token\": \"abcdef123\"", "credential"),
         ] {
             let out = r.redact_str(input);
@@ -936,6 +989,12 @@ mod tests {
             "eyJ.not.ajwt",
             "see npm_config for more",
             "key=short",
+            "token: Option<String>,",
+            "password: string,",
+            "token: Token::new(x)",
+            "secret: SecretString",
+            "let api_key = get_key();",
+            "pub token: String,",
         ] {
             assert_eq!(r.redact_str(ok), ok, "{ok}");
         }
@@ -944,9 +1003,23 @@ mod tests {
     #[test]
     fn add_secret_masks_later_output_and_ignores_short_values() {
         let r = Redactor::new([]);
-        r.add_secret("db-pass-9981");
+        r.add_secret("db-pass-9981\",");
         r.add_secret("ab");
-        assert_eq!(r.redact_str("x db-pass-9981 ab"), "x [REDACTED:secret] ab");
+        for trivial in ["production", "localhost", "true", "postgres", "12345"] {
+            r.add_secret(trivial);
+        }
+        assert_eq!(
+            r.redact_str("x db-pass-9981 ab production localhost true postgres 12345"),
+            "x [REDACTED:secret] ab production localhost true postgres 12345"
+        );
+        for i in 0..400 {
+            r.add_secret(&format!("secret-value-{i:04}"));
+        }
+        assert!(
+            r.redact_str("secret-value-0399")
+                .contains("secret-value-0399"),
+            "capped"
+        );
     }
 
     #[test]

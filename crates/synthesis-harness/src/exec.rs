@@ -1492,6 +1492,25 @@ impl Harness {
         }
 
         let (mut content, text, cut) = self.render(name, &out.content);
+        // `cat .env` and friends: the values the person approved reading are masked from now on
+        if name == "Bash"
+            && !out.is_error
+            && input
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|c| {
+                    let w: Vec<&str> = c.split_whitespace().collect();
+                    matches!(
+                        w.first().copied(),
+                        Some("cat" | "less" | "more" | "head" | "tail" | "bat")
+                    ) && w
+                        .iter()
+                        .skip(1)
+                        .any(|a| synthesis_core::secrets::is_secret_shaped(std::path::Path::new(a)))
+                })
+        {
+            self.sink.add_secrets_from(&text);
+        }
         if name == "Read"
             && !out.is_error
             && input
@@ -1501,10 +1520,12 @@ impl Harness {
         {
             self.sink.add_secrets_from(&text);
         }
-        if matches!(&out.content, ToolContent::Blocks(b) if b.iter().any(|x| !matches!(x, ToolBlock::Text { .. })))
-        {
-            task.after_image.store(true, Ordering::SeqCst);
-        }
+        // an image result taints the next action; a later text-only result clears it, so a browser
+        // task (screenshot, click, screenshot ...) stays usable (classifier.rs `image_sensitive`)
+        task.after_image.store(
+            matches!(&out.content, ToolContent::Blocks(b) if b.iter().any(|x| !matches!(x, ToolBlock::Text { .. }))),
+            Ordering::SeqCst,
+        );
         self.mcp_observe(task, name, &input, &text, out.is_error);
         if let Some(post) = self
             .run_hook(

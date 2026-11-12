@@ -1238,6 +1238,8 @@ pub fn prepare(
     // build/test commands that run project code are auto-safe only under a confining sandbox
     perms.env.sandbox_enforcing = sandbox_mode == SandboxMode::Enforce;
     perms.env.worktree = worktree.is_some();
+    // definition files as they are now: a later change by anything cuts the project-code trust
+    perms.env.snapshot_definitions();
     perms.env.auto_mode = synthesis_permissions::AutoModeSettings {
         classify_all_shell: user_settings.auto_mode.classify_all_shell.unwrap_or(false),
         use_auto_mode_during_plan: user_settings
