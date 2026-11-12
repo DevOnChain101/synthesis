@@ -301,11 +301,48 @@ fn helper_next_to(exe: &Path) -> Option<PathBuf> {
 }
 
 /// Why the helper next to `exe` is (not) usable. Trusted means: `exe` itself still exists (a
-/// replaced binary shows as `... (deleted)` in `/proc`), the helper is a regular file, not a
-/// symlink, owned by root or the current user and not group/world-writable, and its directory is
-/// owned by root or the current user and not group/world-writable either.
+/// replaced binary shows as `... (deleted)` in `/proc`); the helper is a regular file, not a
+/// symlink, owned by root or the current user, not group/world-writable; its directory and every
+/// ancestor up to `/` (symlinks resolved) is owned by root or the current user and not
+/// world-writable (an ancestor with the sticky bit, like `/tmp`, is tolerated; the helper's own
+/// directory is not). A group-writable directory is refused unless the current user owns it and
+/// its group is their private group (gid == uid, no other members): that is what a default
+/// `umask 0002` gives `mkdir -p` and `target/release`.
 #[cfg(any(target_os = "linux", all(test, unix)))]
 pub(crate) fn helper_check(exe: &Path) -> Result<PathBuf, String> {
+    // The owner of /proc/self is the process's effective uid (no libc call needed). Off Linux
+    // (test builds only) there is no such file and the owner checks are skipped.
+    let euid = std::fs::metadata("/proc/self")
+        .ok()
+        .map(|m| std::os::unix::fs::MetadataExt::uid(&m));
+    let group = std::fs::read_to_string("/etc/group").ok();
+    let private = |gid: u32| {
+        euid == Some(gid)
+            && group
+                .as_deref()
+                .is_some_and(|g| group_has_no_members(g, gid))
+    };
+    helper_check_with(exe, euid, &private)
+}
+
+/// `/etc/group` text: the group `gid` exists and lists no members (a user's primary group is not
+/// listed there, so an empty list is what a private user-private group looks like).
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn group_has_no_members(text: &str, gid: u32) -> bool {
+    text.lines().any(|l| {
+        let f: Vec<_> = l.split(':').collect();
+        f.len() >= 4 && f[2].parse() == Ok(gid) && f[3].trim().is_empty()
+    })
+}
+
+/// [`helper_check`] with the effective uid (`None` = skip owner checks) and the "this gid is the
+/// user's private group" test injected.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+pub(crate) fn helper_check_with(
+    exe: &Path,
+    euid: Option<u32>,
+    private_gid: &dyn Fn(u32) -> bool,
+) -> Result<PathBuf, String> {
     use std::os::unix::fs::MetadataExt;
     if exe.to_string_lossy().ends_with(" (deleted)") {
         return Err("the running synt binary was replaced or deleted (an upgrade in progress?); restart synt".into());
@@ -320,21 +357,38 @@ pub(crate) fn helper_check(exe: &Path) -> Result<PathBuf, String> {
             "{name} is not a regular file (a symlink is refused)"
         ));
     }
-    // The owner of /proc/self is the process's effective uid (no libc call needed). Off Linux
-    // (test builds only) there is no such file and the owner check is skipped.
-    let euid = std::fs::metadata("/proc/self").ok().map(|m| m.uid());
     let owner_ok = |m: &std::fs::Metadata| m.uid() == 0 || euid.is_none_or(|e| m.uid() == e);
     if !owner_ok(&lm) || lm.mode() & 0o022 != 0 {
         return Err(format!(
             "{name} must be owned by root or you and not writable by group/others"
         ));
     }
-    let dm = std::fs::metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    if !owner_ok(&dm) || dm.mode() & 0o022 != 0 {
-        return Err(format!(
-            "{} must be owned by root or you and not writable by group/others",
-            dir.display()
-        ));
+    let real = std::fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for (i, d) in real.ancestors().enumerate() {
+        let m = std::fs::metadata(d).map_err(|e| format!("{}: {e}", d.display()))?;
+        let own = i == 0;
+        let world = m.mode() & 0o002 != 0;
+        let sticky = m.mode() & 0o1000 != 0;
+        let group_w = m.mode() & 0o020 != 0;
+        let group_ok = !group_w || (euid == Some(m.uid()) && private_gid(m.gid()));
+        let bad = if !owner_ok(&m) {
+            Some("is not owned by root or you")
+        } else if world && (own || !sticky) {
+            Some("is world-writable")
+        } else if !group_ok {
+            Some(
+                "is group-writable (refused unless it is yours and its group is your private group)",
+            )
+        } else {
+            None
+        };
+        if let Some(why) = bad {
+            return Err(format!(
+                "{} {why}; the sandbox helper must not be replaceable by others: group-writable and world-writable directories are refused (`chmod go-w {}`)",
+                d.display(),
+                d.display()
+            ));
+        }
     }
     Ok(h)
 }
@@ -1202,7 +1256,10 @@ mod tests {
         assert!(helper_check(&exe).is_ok());
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
         let e = helper_check(&exe).unwrap_err();
-        assert!(e.contains("not writable by group/others"), "{e}");
+        assert!(
+            e.contains("world-writable") && e.contains("chmod go-w"),
+            "{e}"
+        );
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         // the running binary was replaced
         let gone = dir.join("synt (deleted)");
@@ -1210,6 +1267,63 @@ mod tests {
             helper_check(&gone)
                 .unwrap_err()
                 .contains("replaced or deleted")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_dir_rules_group_world_and_ancestors() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let t = tempfile::tempdir().unwrap();
+        let anc = t.path().canonicalize().unwrap().join("anc");
+        let dir = anc.join("bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("synt");
+        file_with_mode(&dir, crate::HELPER_NAME, 0o755);
+        let mode =
+            |d: &Path, m| std::fs::set_permissions(d, std::fs::Permissions::from_mode(m)).unwrap();
+        let me = std::fs::metadata(&dir).unwrap().uid();
+        let gid = std::fs::metadata(&dir).unwrap().gid();
+        let mine = |g: u32| g == gid; // "the user's private group"
+        let foreign = |_: u32| false;
+        let run = |p: &dyn Fn(u32) -> bool| helper_check_with(&exe, Some(me), p);
+        mode(&anc, 0o755);
+        // 0775 in the user's private group (default umask 0002): accepted
+        mode(&dir, 0o775);
+        assert!(run(&mine).is_ok());
+        // 0775 in a foreign group, and anything world-writable: refused, with the reason
+        let e = run(&foreign).unwrap_err();
+        assert!(e.contains("group-writable") && e.contains("refused"), "{e}");
+        mode(&dir, 0o777);
+        assert!(run(&mine).unwrap_err().contains("world-writable"));
+        mode(&dir, 0o1777); // sticky does not excuse the helper's own directory
+        assert!(run(&mine).unwrap_err().contains("world-writable"));
+        mode(&dir, 0o755);
+        // ancestors: world-writable without sticky refused, with sticky tolerated, group rule applies
+        mode(&anc, 0o777);
+        assert!(run(&mine).unwrap_err().contains("world-writable"));
+        mode(&anc, 0o1777);
+        assert!(run(&mine).is_ok());
+        mode(&anc, 0o775);
+        assert!(run(&foreign).unwrap_err().contains("group-writable"));
+        assert!(run(&mine).is_ok());
+        // a foreign owner is refused whatever the mode
+        assert!(helper_check_with(&exe, Some(me.wrapping_add(1)), &mine).is_err());
+        mode(&anc, 0o755);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_group_means_the_gid_lists_no_members() {
+        let g = "root:x:0:\nme:x:1000:\nusers:x:100:a,b\n";
+        assert!(group_has_no_members(g, 1000) && group_has_no_members(g, 0));
+        assert!(
+            !group_has_no_members(g, 100),
+            "a shared group is not private"
+        );
+        assert!(
+            !group_has_no_members(g, 4242),
+            "an unknown gid is not private"
         );
     }
 

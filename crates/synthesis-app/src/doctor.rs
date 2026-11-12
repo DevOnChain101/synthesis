@@ -385,11 +385,20 @@ pub fn rows(env: &Env, cwd: &Path, trusted: bool) -> Vec<Row> {
     }
     #[cfg(target_os = "linux")]
     if let Err(e) = synthesis_sandbox::helper_status() {
+        // Not needed while bubblewrap works off WSL (Landlock is only the fallback there); on WSL
+        // it installs the seccomp filter, so commands are refused without it.
+        let needed = synthesis_sandbox::wsl::is_wsl() || synthesis_sandbox::bwrap_probe().is_err();
         add(
-            Level::Warn,
+            if needed { Level::Warn } else { Level::Ok },
             format!(
-                "sandbox helper missing or untrusted: {} (the Landlock backend and, on WSL, the seccomp filter need it; without it commands are refused under enforce)",
-                san(&e)
+                "sandbox helper {}: {} (group-writable and world-writable directories are refused; the Landlock backend and, on WSL, the seccomp filter need it; without it commands are refused under enforce{})",
+                if needed {
+                    "missing or untrusted"
+                } else {
+                    "info: missing or untrusted, not needed while bubblewrap works"
+                },
+                san(&e),
+                if needed { "" } else { "; bubblewrap is in use" }
             ),
         );
     }

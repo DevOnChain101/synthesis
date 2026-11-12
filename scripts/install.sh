@@ -95,7 +95,8 @@ src="$tmp/synthesis-$version-$target"
 case "$target" in
   *linux*) [ -f "$src/synthesis-sandbox-exec" ] || die "archive layout unexpected (no synthesis-sandbox-exec; the Linux sandbox needs it)" ;;
 esac
-mkdir -p "$DIR"
+# The sandbox only trusts a helper whose directory others cannot write (a default umask 0002 makes 0775).
+[ -d "$DIR" ] || { mkdir -p "$DIR" && chmod go-w "$DIR"; }
 install -m 0755 "$src/synt" "$DIR/$NAME"
 [ -f "$src/synthesis-sandbox-exec" ] && install -m 0755 "$src/synthesis-sandbox-exec" "$DIR/synthesis-sandbox-exec"
 echo "Installed $DIR/$NAME ($version, $target)"

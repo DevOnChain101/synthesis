@@ -215,8 +215,12 @@ pub fn drvfs_mounts(proc_mounts: &str) -> Vec<PathBuf> {
         .lines()
         .filter_map(|l| {
             let mut f = l.split_whitespace();
-            let (_dev, mnt, fstype, opts) = (f.next()?, f.next()?, f.next()?, f.next()?);
-            let windows = fstype == "drvfs" || (fstype == "9p" && opts.contains("aname=drvfs"));
+            let (dev, mnt, fstype, opts) = (f.next()?, f.next()?, f.next()?, f.next()?);
+            // virtiofs: newer WSL builds may expose drives that way; the tag or an option naming
+            // drvfs is assumed to mark them. UNVERIFIED on a real host (no such mount was seen).
+            let windows = fstype == "drvfs"
+                || (fstype == "9p" && opts.contains("aname=drvfs"))
+                || (fstype == "virtiofs" && (dev.contains("drvfs") || opts.contains("drvfs")));
             windows.then(|| PathBuf::from(unescape_mount(mnt)))
         })
         .collect()
@@ -302,13 +306,19 @@ mod tests {
     fn mounts_and_paths() {
         let m = "C: /mnt/c drvfs rw,noatime,uid=1000 0 0\n\
                  D:\\ /windir/d\\040x 9p rw,aname=drvfs;uid=1000 0 0\n\
+                 drvfs-d /windir/v virtiofs rw,relatime 0 0\n\
+                 shared /srv/shared virtiofs rw,relatime 0 0\n\
                  tmpfs /run tmpfs rw 0 0\n\
                  /dev/sdc / ext4 rw 0 0\n\
                  drivers /usr/lib/wsl/drivers 9p ro,aname=drivers 0 0\n";
         let mounts = drvfs_mounts(m);
         assert_eq!(
             mounts,
-            [PathBuf::from("/mnt/c"), PathBuf::from("/windir/d x")]
+            [
+                PathBuf::from("/mnt/c"),
+                PathBuf::from("/windir/d x"),
+                PathBuf::from("/windir/v") // virtiofs tagged drvfs (unverified on real hosts)
+            ]
         );
         let h = WslHost {
             version: WslVersion::V2,
