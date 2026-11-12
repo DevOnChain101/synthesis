@@ -219,12 +219,7 @@ impl TuiView {
         live.verbose = cfg.tui.verbose;
         // not `cfg.tui.diffs_expanded`: with it every card started whole (the owner's settings.json has it on); the
         // desktop view always starts clamped to 5 lines and Ctrl+O still expands them all
-        let mut hidden = hidden;
-        for (shown, (key, _)) in cfg.tui.panels.iter().zip(synthesis_settings::UI_PANELS) {
-            if !shown {
-                hidden.hide(key);
-            }
-        }
+        let hidden = super::layout::Hidden::from_ui(&cfg.tui).or(hidden);
         let mut me = Self::new(inset, hidden);
         me.live = Some(LiveUi {
             live,
@@ -1141,7 +1136,8 @@ impl TuiView {
                 }
                 true
             }
-            "tab" if text.is_empty() => {
+            // focus mode has no sidebar lists to move into
+            "tab" if text.is_empty() && !self.hidden.focus => {
                 lu.live.focus = lu.live.focus.next();
                 lu.dirty = true;
                 cx.notify();
@@ -1635,7 +1631,9 @@ impl TuiView {
             self.hidden.set_hidden(k, *off);
         }
         if matches!(cmd, PanelsCmd::List) || !warn {
-            let mut t = String::from("panels (/panels hide-all | show-all | <name> on|off):");
+            let mut t = String::from(
+                "panels (/panels hide-all | show-all | focus [on|off] | header|footer on|off | <name> on|off):",
+            );
             for (k, name) in HIDEABLE {
                 let on = if self.hidden.is_hidden(k) {
                     "off"
@@ -1647,6 +1645,13 @@ impl TuiView {
             for (name, why) in ALWAYS {
                 t += &format!("\n  on   {name}: {why}");
             }
+            let on = |f: bool| if f { "on " } else { "off" };
+            t += &format!(
+                "\n  {}  focus     only the chat and its sub-agent view (the panels above keep their state)\n  {}  header    the title strip\n  {}  footer    the key-hint bar",
+                on(self.hidden.focus),
+                on(!self.hidden.header),
+                on(!self.hidden.footer),
+            );
             if let Some(lu) = &mut self.live {
                 lu.live.note(t, false);
             }
@@ -2031,13 +2036,7 @@ impl TuiView {
 
     /// The Settings popup saved `synt.tui`: what this view reads (panels, thinking, verbose rows, motion) applies now.
     pub fn apply_settings(&mut self, tui: synthesis_settings::UiSettings, cx: &mut Context<Self>) {
-        let mut hidden = super::layout::Hidden::default();
-        for (shown, (key, _)) in tui.panels.iter().zip(synthesis_settings::UI_PANELS) {
-            if !shown {
-                hidden.hide(key);
-            }
-        }
-        self.hidden = hidden;
+        self.hidden = super::layout::Hidden::from_ui(&tui);
         if let Some(lu) = &mut self.live {
             lu.live.show_thinking = tui.show_thinking;
             lu.live.verbose = tui.verbose;
@@ -2852,7 +2851,7 @@ pub fn suggest(text: &str, cursor: usize, live: &Live, cwd: &Path) -> Option<Com
     })
 }
 
-/// Writes `synt.tui.panels.<key>` (true = shown) to the USER settings file, one atomic edit per key.
+/// Writes `synt.tui.panels.<key>` (true = shown), `focus_mode`, `header` or `footer` (`layout::setting_of`) to the USER settings file, one atomic edit per key.
 pub(super) fn save_panels(home: &Path, cwd: &Path, changes: &[(&str, bool)]) -> Result<(), String> {
     use synthesis_config::{LoadContext, ProjectTrust};
     let env = Env::default();
@@ -2868,12 +2867,10 @@ pub(super) fn save_panels(home: &Path, cwd: &Path, changes: &[(&str, bool)]) -> 
         &synthesis_settings::managed_settings_path(),
         None,
     );
-    for (k, off) in changes {
+    for (k, flag) in changes {
+        let (key, v) = super::layout::setting_of(k, *flag);
         store
-            .set(
-                &format!("synt.tui.panels.{k}"),
-                serde_json::Value::Bool(!off),
-            )
+            .set(&key, serde_json::Value::Bool(v))
             .map_err(|e| e.to_string())?;
     }
     Ok(())

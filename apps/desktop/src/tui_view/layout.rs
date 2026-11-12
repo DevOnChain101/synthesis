@@ -183,6 +183,12 @@ pub struct Hidden {
     pub usage: bool,
     /// `status`: the Mission panel (it also needs a task list to show).
     pub status: bool,
+    /// `synt.tui.focus_mode`: ON. Every column is left out, the chat (with its sub-agent view, roster and mode
+    /// bar) keeps the window. The flags above stay as they were, so turning it off restores them.
+    pub focus: bool,
+    /// `synt.tui.header` / `synt.tui.footer` OFF: the title strip and the key-hint bar are left out.
+    pub header: bool,
+    pub footer: bool,
 }
 
 /// The panels `/panels` and Settings can switch: (settings key, name shown).
@@ -218,6 +224,9 @@ impl Hidden {
             "topology" => &mut self.topology,
             "usage" => &mut self.usage,
             "status" | "mission" => &mut self.status,
+            "focus" => &mut self.focus,
+            "header" => &mut self.header,
+            "footer" => &mut self.footer,
             _ => return None,
         })
     }
@@ -237,9 +246,87 @@ impl Hidden {
         c.flag(key).is_some_and(|f| *f)
     }
 
+    /// What the user settings say (`synt.tui.panels.*`, `focus_mode`, `header`, `footer`).
+    pub fn from_ui(tui: &synthesis_settings::UiSettings) -> Self {
+        let mut h = Self {
+            focus: tui.focus_mode,
+            header: !tui.header,
+            footer: !tui.footer,
+            ..Self::default()
+        };
+        for ((key, _), shown) in synthesis_settings::UI_PANELS.iter().zip(tui.panels) {
+            if !shown {
+                h.hide(key);
+            }
+        }
+        h
+    }
+
+    /// Everything hidden in either (the settings plus what a start flag asked for).
+    pub fn or(self, o: Self) -> Self {
+        Self {
+            session: self.session || o.session,
+            mcp: self.mcp || o.mcp,
+            tools: self.tools || o.tools,
+            activity: self.activity || o.activity,
+            tokens: self.tokens || o.tokens,
+            topology: self.topology || o.topology,
+            usage: self.usage || o.usage,
+            status: self.status || o.status,
+            focus: self.focus || o.focus,
+            header: self.header || o.header,
+            footer: self.footer || o.footer,
+        }
+    }
+
     /// Workspace and Running split the left column in halves when everything below them is hidden.
     pub fn left_is_split(&self) -> bool {
         self.session && self.tools && self.activity
+    }
+}
+
+/// The frame of the view for a width: which bars and columns are drawn. Focus mode leaves both columns (and
+/// the drawer buttons that open them) out; the header and the footer follow their own switches.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    pub show_header: bool,
+    pub show_footer: bool,
+    pub left_inline: bool,
+    pub right_inline: bool,
+    /// The top bar's drawer buttons (a column too narrow to be inline opens as a slide-over).
+    pub left_button: bool,
+    pub right_button: bool,
+}
+
+pub fn frame(width: f32, h: &Hidden) -> Frame {
+    let c = cols(width);
+    Frame {
+        show_header: !h.header,
+        show_footer: !h.footer,
+        left_inline: c.left_inline && !h.focus,
+        right_inline: c.right_inline && !h.focus,
+        left_button: !c.left_inline && !h.focus,
+        right_button: !c.right_inline && !h.focus,
+    }
+}
+
+impl Frame {
+    /// Height of the header and of the footer in this frame (0 when left out).
+    pub fn bars(&self) -> (f32, f32) {
+        (
+            if self.show_header { HEADER_H } else { 0. },
+            if self.show_footer { FOOTER_H } else { 0. },
+        )
+    }
+}
+
+/// The settings key and value a `/panels` flag is saved as: a panel's flag is "hidden" (`panels.<k>` is its
+/// negation), `header` and `footer` likewise, `focus` is "on" (`focus_mode`).
+pub fn setting_of(key: &str, flag: bool) -> (String, bool) {
+    match key {
+        "focus" => ("synt.tui.focus_mode".into(), flag),
+        "header" | "footer" => (format!("synt.tui.{key}"), !flag),
+        k => (format!("synt.tui.panels.{k}"), !flag),
     }
 }
 
@@ -249,10 +336,11 @@ pub enum PanelsCmd {
     List,
     HideAll,
     ShowAll,
+    /// A flag of [`Hidden`] by key: panels, `header` and `footer` true = hidden, `focus` true = on.
     Set(&'static str, bool),
 }
 
-/// `/panels [hide-all | show-all | <name> on|off]`. Names are the settings keys, or the panel's name without
+/// `/panels [hide-all | show-all | focus [on|off] | header|footer on|off | <name> on|off]`. Names are the settings keys, or the panel's name without
 /// spaces ("recent-activity" is not needed: `activity`).
 pub fn parse_panels(arg: &str) -> Result<PanelsCmd, String> {
     let w: Vec<&str> = arg.split_whitespace().collect();
@@ -260,6 +348,12 @@ pub fn parse_panels(arg: &str) -> Result<PanelsCmd, String> {
         [] | ["list"] => Ok(PanelsCmd::List),
         ["hide-all"] => Ok(PanelsCmd::HideAll),
         ["show-all"] => Ok(PanelsCmd::ShowAll),
+        ["focus"] | ["focus", "on"] => Ok(PanelsCmd::Set("focus", true)),
+        ["focus", "off"] => Ok(PanelsCmd::Set("focus", false)),
+        [bar @ ("header" | "footer"), state @ ("on" | "off")] => Ok(PanelsCmd::Set(
+            if *bar == "header" { "header" } else { "footer" },
+            *state == "off",
+        )),
         [name, state @ ("on" | "off")] => {
             let key = HIDEABLE.iter().find(|(k, _)| k == name).map(|(k, _)| *k);
             match (key, *name) {
@@ -270,7 +364,10 @@ pub fn parse_panels(arg: &str) -> Result<PanelsCmd, String> {
                 (None, _) => Err(format!("{name} is not a panel ({})", keys())),
             }
         }
-        _ => Err("usage: /panels [hide-all | show-all | <name> on|off]".into()),
+        _ => Err(
+            "usage: /panels [hide-all | show-all | focus [on|off] | header|footer on|off | <name> on|off]"
+                .into(),
+        ),
     }
 }
 
@@ -376,12 +473,97 @@ mod tests {
         assert!(h.set_hidden("activity", false) && !h.is_hidden("activity"));
     }
 
+    /// Focus mode x header x footer at every width: focus leaves both columns and their drawer buttons out, the
+    /// bars follow their own switches, and the default is the full layout.
+    #[test]
+    fn the_frame_for_every_focus_header_footer_combination() {
+        for w in [900., 1100., 1400., 3440.] {
+            let c = cols(w);
+            for (focus, no_header, no_footer) in [
+                (false, false, false),
+                (false, false, true),
+                (false, true, false),
+                (false, true, true),
+                (true, false, false),
+                (true, false, true),
+                (true, true, false),
+                (true, true, true),
+            ] {
+                let h = Hidden {
+                    focus,
+                    header: no_header,
+                    footer: no_footer,
+                    ..Hidden::default()
+                };
+                let f = frame(w, &h);
+                assert_eq!((f.show_header, f.show_footer), (!no_header, !no_footer));
+                assert_eq!(f.left_inline, c.left_inline && !focus, "{w} {focus}");
+                assert_eq!(f.right_inline, c.right_inline && !focus);
+                assert_eq!(f.left_button, !c.left_inline && !focus);
+                assert_eq!(f.right_button, !c.right_inline && !focus);
+                assert_eq!(
+                    f.bars(),
+                    (
+                        if no_header { 0. } else { HEADER_H },
+                        if no_footer { 0. } else { FOOTER_H }
+                    )
+                );
+            }
+        }
+        // the default is the design's layout
+        let f = frame(1400., &Hidden::default());
+        assert!(f.show_header && f.show_footer && f.left_inline && f.right_inline);
+    }
+
+    #[test]
+    fn focus_keeps_the_panel_flags_and_saves_under_its_own_keys() {
+        let mut h = Hidden::default();
+        h.hide("tools");
+        h.set_hidden("focus", true);
+        h.set_hidden("focus", false);
+        assert!(
+            h.tools && !h.focus,
+            "turning focus off restores the panels as they were"
+        );
+        assert_eq!(
+            setting_of("focus", true),
+            ("synt.tui.focus_mode".into(), true)
+        );
+        assert_eq!(
+            setting_of("header", true),
+            ("synt.tui.header".into(), false)
+        );
+        assert_eq!(
+            setting_of("tools", true),
+            ("synt.tui.panels.tools".into(), false)
+        );
+        let ui = synthesis_settings::UiSettings {
+            focus_mode: true,
+            footer: false,
+            ..Default::default()
+        };
+        let h = Hidden::from_ui(&ui);
+        assert!(h.focus && h.footer && !h.header && !h.tools);
+        // the bars are not panels: hide-all and the list of panels leave them alone
+        assert!(
+            HIDEABLE
+                .iter()
+                .all(|(k, _)| !matches!(*k, "focus" | "header" | "footer"))
+        );
+    }
+
     #[test]
     fn panels_command_parsing() {
         use PanelsCmd::*;
         assert_eq!(parse_panels(""), Ok(List));
         assert_eq!(parse_panels(" hide-all "), Ok(HideAll));
         assert_eq!(parse_panels("show-all"), Ok(ShowAll));
+        assert_eq!(parse_panels("focus"), Ok(Set("focus", true)));
+        assert_eq!(parse_panels("focus on"), Ok(Set("focus", true)));
+        assert_eq!(parse_panels("focus off"), Ok(Set("focus", false)));
+        assert_eq!(parse_panels("header off"), Ok(Set("header", true)));
+        assert_eq!(parse_panels("footer on"), Ok(Set("footer", false)));
+        assert!(parse_panels("header").is_err() && parse_panels("footer maybe").is_err());
         assert_eq!(parse_panels("usage off"), Ok(Set("usage", true)));
         assert_eq!(parse_panels("tokens  on"), Ok(Set("tokens", false)));
         assert_eq!(parse_panels("status off"), Ok(Set("status", true)));

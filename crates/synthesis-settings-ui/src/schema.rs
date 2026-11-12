@@ -408,6 +408,28 @@ impl SettingsSchema {
                     .help("Show this panel of the dash."),
             );
         }
+        for (k, l, d, h) in [
+            (
+                "focus_mode",
+                "Focus mode",
+                false,
+                "Hide every panel except the chat and its sub-agent view. The panel switches above keep their values and apply again when this is off.",
+            ),
+            (
+                "header",
+                "Show header",
+                true,
+                "The title strip with the session, model and health chips. Off: the chat reclaims its height.",
+            ),
+            (
+                "footer",
+                "Show footer",
+                true,
+                "The key-hint bar at the bottom. Off: the chat reclaims its height; the permission mode stays under the input.",
+            ),
+        ] {
+            f.push(b(&format!("synt.tui.{k}"), Interface, l, d).live().help(h));
+        }
         for x in &mut f {
             x.group = group_of(&x.key, x.section);
         }
@@ -428,7 +450,14 @@ pub fn group_of(key: &str, section: Section) -> &'static str {
     use Section::*;
     match section {
         Appearance => "Window",
-        Interface if key.starts_with("synt.tui.panels.") => "Panels",
+        Interface
+            if key.starts_with("synt.tui.panels.")
+                || ["focus_mode", "header", "footer"]
+                    .iter()
+                    .any(|k| key == format!("synt.tui.{k}")) =>
+        {
+            "Panels"
+        }
         Interface
             if ["motion", "mouse_capture", "copy_on_select"]
                 .iter()

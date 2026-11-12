@@ -557,6 +557,28 @@ fn tui_opacity_and_blur_are_validated_and_round_trip() {
 }
 
 #[test]
+fn focus_mode_header_and_footer_round_trip_and_default_to_the_full_layout() {
+    let d = UiSettings::default();
+    assert!(!d.focus_mode && d.header && d.footer);
+    let (s, diag) = UiSettings::from_settings(
+        &json!({"synt": {"tui": {"focus_mode": true, "header": false, "footer": false,
+            "panels": {"tools": false}}}}),
+    );
+    assert!(diag.is_empty(), "{diag:?}");
+    assert!(
+        s.focus_mode && !s.header && !s.footer && !s.panels[2],
+        "panels are kept"
+    );
+    let (back, diag) = UiSettings::from_settings(&json!({"synt": {"tui": s.to_value()}}));
+    assert_eq!((back, diag.len()), (s, 0));
+    let (bad, diag) = UiSettings::from_settings(&json!({"synt": {"tui": {"focus_mode": "yes"}}}));
+    assert!(
+        !bad.focus_mode && diag[0].contains("synt.tui.focus_mode"),
+        "{diag:?}"
+    );
+}
+
+#[test]
 fn persisting_tui_keeps_everything_else_never_overwrites_a_bad_file_and_writes_no_credentials() {
     let f = fx();
     let home = f.home.path();
@@ -597,6 +619,9 @@ fn persisting_tui_keeps_everything_else_never_overwrites_a_bad_file_and_writes_n
             "blur",
             "copy_on_select",
             "diffs_expanded",
+            "focus_mode",
+            "footer",
+            "header",
             "logo",
             "motion",
             "mouse_capture",

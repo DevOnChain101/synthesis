@@ -1065,13 +1065,17 @@ impl Render for TuiView {
         }
         let tier = tiers(h);
         let c = cols(w);
-        let (right_in, right_btn) = (c.right_inline, !c.right_inline);
-        let left_in = c.left_inline;
+        let fr = layout::frame(w, &self.hidden);
+        let (right_in, right_btn) = (fr.right_inline, fr.right_button);
+        let left_in = fr.left_inline;
+        let (top_h, bottom_h) = fr.bars();
+        // the right column takes the height of the bars that are left out (it subtracts both of them)
+        let h = h + (HEADER_H - top_h) + (FOOTER_H - bottom_h);
         let side = |on: bool, x: f32| if on { x + GAP } else { 0. };
         self.centre_w = w - 2. * PAD - side(left_in, c.left) - side(right_in, c.right);
         // a collapsed column that was open when the window grew has no drawer any more
         let drawer = self.drawer.filter(|s| match s {
-            Side::Left => !left_in,
+            Side::Left => fr.left_button,
             Side::Right => right_btn,
         });
         let mut body = div()
@@ -1095,8 +1099,8 @@ impl Render for TuiView {
             div()
                 .debug_selector(|| "drawer".to_string())
                 .absolute()
-                .top(px(HEADER_H))
-                .bottom(px(FOOTER_H))
+                .top(px(top_h))
+                .bottom(px(bottom_h))
                 .left_0()
                 .right_0()
                 .flex()
@@ -1132,9 +1136,11 @@ impl Render for TuiView {
             .text_color(text())
             // enables the window's text selection (chat text is selectable and copyable)
             .child(gpui_base::TextSelectionLayer)
-            .child(self.top_bar(w, !left_in, right_btn, cx))
+            .when(fr.show_header, |d| {
+                d.child(self.top_bar(w, fr.left_button, right_btn, cx))
+            })
             .child(body)
-            .child(self.footer())
+            .when(fr.show_footer, |d| d.child(self.footer()))
             .children(drawer)
             .children(self.quote_menu(cx))
     }
