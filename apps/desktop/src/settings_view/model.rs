@@ -1206,9 +1206,21 @@ mod tests {
         assert!(!m.cfg.home.join("settings.json").exists());
     }
 
+    /// `Model::new` starts the real `wsl.exe --status` check on Windows (and none elsewhere): the tests that
+    /// inject their own check first let that one end, so they behave the same on every OS.
+    fn settle_wsl(m: &mut Model) {
+        let t0 = std::time::Instant::now();
+        while !m.poll_wsl() {
+            assert!(t0.elapsed().as_secs() < 60, "the initial check never ended");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(m.wsl_idle());
+    }
+
     #[test]
     fn a_panicking_wsl_check_ends_locked_not_busy() {
         let (_t, mut m) = model();
+        settle_wsl(&mut m);
         assert!(m.recheck_with(true, || panic!("boom")));
         let t0 = std::time::Instant::now();
         while !m.poll_wsl() {
@@ -1224,6 +1236,7 @@ mod tests {
     #[test]
     fn the_wsl_check_runs_on_a_worker_locks_the_toggle_meanwhile_and_starts_once() {
         let (_t, mut m) = model();
+        settle_wsl(&mut m);
         let on = "synt.desktop.wsl.enabled";
         // off Windows: answered at once, nothing runs
         assert!(!m.recheck_with(false, || unreachable!()));
