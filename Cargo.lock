@@ -7175,6 +7175,7 @@ dependencies = [
  "synthesis-memory",
  "synthesis-peers",
  "synthesis-permissions",
+ "synthesis-platform",
  "synthesis-providers",
  "synthesis-sandbox",
  "synthesis-session",
@@ -7310,6 +7311,7 @@ dependencies = [
  "dunce",
  "indexmap",
  "serde_json",
+ "synthesis-platform",
  "tempfile",
  "url",
 ]
@@ -7524,6 +7526,7 @@ dependencies = [
  "landlock",
  "serde",
  "serde_json",
+ "synthesis-platform",
  "tempfile",
 ]
 

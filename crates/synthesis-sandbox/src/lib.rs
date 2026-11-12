@@ -24,6 +24,7 @@ mod helper;
 mod linux;
 mod seatbelt;
 mod windows;
+pub mod wsl;
 
 use std::ffi::OsString;
 use std::fmt;
@@ -589,6 +590,14 @@ pub(crate) fn validate(p: &SandboxPolicy) -> Result<(), SandboxError> {
 }
 
 pub(crate) fn build_env(p: &SandboxPolicy, c: &SandboxedCommand) -> Vec<(OsString, OsString)> {
+    build_env_on(p, c, wsl::host())
+}
+
+pub(crate) fn build_env_on(
+    p: &SandboxPolicy,
+    c: &SandboxedCommand,
+    wsl: Option<&synthesis_platform::wsl::WslHost>,
+) -> Vec<(OsString, OsString)> {
     let mut env: Vec<_> = p
         .env_passthrough
         .iter()
@@ -598,6 +607,9 @@ pub(crate) fn build_env(p: &SandboxPolicy, c: &SandboxedCommand) -> Vec<(OsStrin
     if let Some(t) = &p.tmp_dir {
         env.retain(|(k, _)| k != "TMPDIR");
         env.push(("TMPDIR".into(), t.clone().into_os_string())); // forced: private tmp only
+    }
+    if let Some(host) = wsl {
+        wsl::scrub_env(&mut env, host);
     }
     env
 }

@@ -234,17 +234,24 @@ pub(crate) fn detect_linux() -> Vec<Box<dyn SandboxBackend>> {
     if !skip_bwrap {
         v.extend(BwrapBackend::detect().map(|b| Box::new(b) as Box<dyn SandboxBackend>));
     }
-    v.extend(LinuxLandlockBackend::detect().map(|b| Box::new(b) as Box<dyn SandboxBackend>));
+    // WSL: Landlock cannot hide the interop socket, so it is never offered (see `wsl`).
+    if crate::wsl::refuse_landlock(crate::wsl::host()).is_ok() {
+        v.extend(LinuxLandlockBackend::detect().map(|b| Box::new(b) as Box<dyn SandboxBackend>));
+    }
     v
 }
 
 /// Why a Linux backend that exists on this host is not selected (empty when none is skipped).
 pub fn skipped_backends() -> Vec<String> {
+    let mut v = vec![];
     #[cfg(target_os = "linux")]
     if let Err(e) = bwrap_probe() {
-        return vec![e.clone()];
+        v.push(e.clone());
     }
-    vec![]
+    if crate::wsl::host().is_some() {
+        v.push(crate::wsl::LANDLOCK_NOT_USED.into());
+    }
+    v
 }
 
 static BWRAP_PROBE: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
@@ -359,6 +366,7 @@ impl SandboxBackend for LinuxLandlockBackend {
         c: &SandboxedCommand,
     ) -> Result<SandboxedCommand, SandboxError> {
         validate(policy)?;
+        crate::wsl::refuse_landlock(crate::wsl::host())?;
         if !policy.allow_exec {
             return Err(SandboxError::Unsupported(
                 "landlock helper cannot forbid exec".into(),
@@ -419,6 +427,16 @@ impl BwrapBackend {
     }
 
     pub(crate) fn args(policy: &SandboxPolicy, cmd: &SandboxedCommand) -> Vec<std::ffi::OsString> {
+        Self::args_on(policy, cmd, crate::wsl::host())
+    }
+
+    /// `wsl` = Some on WSL: every Windows drive is bound read-only (before the writable binds, so
+    /// a workspace inside a drive stays writable); `/run`, hence `/run/WSL`, is already a tmpfs.
+    pub(crate) fn args_on(
+        policy: &SandboxPolicy,
+        cmd: &SandboxedCommand,
+        wsl: Option<&synthesis_platform::wsl::WslHost>,
+    ) -> Vec<std::ffi::OsString> {
         let mut a: Vec<std::ffi::OsString> = [
             "--die-with-parent",
             "--unshare-pid",
@@ -445,6 +463,13 @@ impl BwrapBackend {
         // /var/run is normally a symlink to /run (already hidden); mask it only when it is real.
         if std::fs::symlink_metadata("/var/run").is_ok_and(|m| m.is_dir()) {
             push(&[Path::new("/var/run")], "--tmpfs");
+        }
+        for m in wsl
+            .iter()
+            .flat_map(|h| &h.windows_mounts)
+            .filter(|m| m.exists())
+        {
+            push(&[m, m], "--ro-bind");
         }
         for w in policy.writable_roots.iter().chain(&policy.tmp_dir) {
             push(&[w, w], "--bind");
@@ -516,10 +541,25 @@ impl SandboxBackend for BwrapBackend {
                 "bubblewrap cannot forbid exec".into(),
             ));
         }
+        self.wrap_on(policy, c, crate::wsl::host())
+    }
+}
+
+impl BwrapBackend {
+    /// [`SandboxBackend::wrap`] for an explicit host (`Some` = WSL; tests inject one).
+    pub fn wrap_on(
+        &self,
+        policy: &SandboxPolicy,
+        c: &SandboxedCommand,
+        wsl: Option<&synthesis_platform::wsl::WslHost>,
+    ) -> Result<SandboxedCommand, SandboxError> {
+        if let Some(h) = wsl {
+            crate::wsl::check_writable_roots(policy, c.cwd.as_deref(), h)?;
+        }
         Ok(SandboxedCommand {
             program: self.path.clone().into(),
-            args: Self::args(policy, c),
-            env: build_env(policy, c),
+            args: Self::args_on(policy, c, wsl),
+            env: crate::build_env_on(policy, c, wsl),
             cwd: None,
             clear_env: true,
         })
@@ -822,6 +862,39 @@ mod tests {
             landlock_rules(&pol),
             Err(SandboxError::Unsupported(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bwrap_wsl_binds_drives_readonly_before_workspace() {
+        let t = tempfile::tempdir().unwrap();
+        let drive = t.path().join("c");
+        let ws = drive.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let host = synthesis_platform::wsl::WslHost {
+            version: synthesis_platform::wsl::WslVersion::V2,
+            windows_mounts: vec![drive.clone()],
+        };
+        let pol = SandboxPolicy {
+            writable_roots: vec![ws.clone()],
+            ..Default::default()
+        };
+        let j = |h| {
+            BwrapBackend::args_on(&pol, &SandboxedCommand::default(), h)
+                .iter()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let w = j(Some(&host));
+        let ro = w
+            .find(&format!("--ro-bind {0} {0}", drive.display()))
+            .expect(&w);
+        assert!(
+            w.contains("--tmpfs /run")
+                && ro < w.find(&format!("--bind {0} {0}", ws.display())).unwrap()
+        );
+        assert!(!j(None).contains(&format!("--ro-bind {0} {0}", drive.display())));
     }
 
     #[cfg(unix)] // renders POSIX mount arguments (`--bind /work /work`)

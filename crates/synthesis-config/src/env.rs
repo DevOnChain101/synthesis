@@ -61,7 +61,15 @@ impl Env {
     /// and `SYNT_*` names that are not secret-shaped (see [`is_secret_shaped`]). Everything
     /// else (`AWS_*`, `GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, ...) is dropped. The only ways to
     /// opt another variable in are `{env:NAME}` in config and an explicit per-server env map.
+    ///
+    /// On WSL, Windows directories (`/mnt/*`, drvfs mounts) are removed from `PATH` so a child
+    /// cannot find `cmd.exe` / `powershell.exe` (interop); `WSL*` names are not on the allowlist.
     pub fn child_env(&self) -> Env {
+        self.child_env_on(synthesis_platform::wsl::WslHost::real())
+    }
+
+    /// [`Self::child_env`] for an explicit host (tests inject one; `None` = not WSL).
+    pub fn child_env_on(&self, wsl: Option<&synthesis_platform::wsl::WslHost>) -> Env {
         let mut env = Env(self
             .0
             .iter()
@@ -77,6 +85,16 @@ impl Env {
         // Output only (never read as a setting): commands the agent starts can tell they are not
         // the person, so `synt memory` refuses to approve or delete from there.
         env.0.insert(AGENT_SESSION_VAR.into(), "1".into());
+        if let Some(host) = wsl {
+            for k in ["PATH", "Path"] {
+                if let Some(v) = env.0.get_mut(k) {
+                    *v = host
+                        .scrub_path(std::ffi::OsStr::new(v.as_str()))
+                        .to_string_lossy()
+                        .into_owned();
+                }
+            }
+        }
         env
     }
 
@@ -170,4 +188,35 @@ pub fn is_secret_shaped(name: &str) -> bool {
         .iter()
         .any(|s| seg.eq_ignore_ascii_case(s))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use synthesis_platform::wsl::{WslHost, WslVersion};
+
+    #[test]
+    fn child_env_on_wsl_drops_windows_dirs_and_interop_names() {
+        let path = std::env::join_paths(["/usr/bin", "/mnt/c/Windows/System32", "/opt/x"]).unwrap();
+        let env = Env::from_pairs([
+            ("PATH", path.to_str().unwrap()),
+            ("WSL_INTEROP", "/run/WSL/1_interop"),
+            ("WSLENV", "X/p"),
+            ("WSL_DISTRO_NAME", "Ubuntu"),
+        ]);
+        let host = WslHost {
+            version: WslVersion::V2,
+            windows_mounts: vec![],
+        };
+        let on = env.child_env_on(Some(&host));
+        let kept: Vec<_> = std::env::split_paths(on.get("PATH").unwrap()).collect();
+        assert_eq!(kept, ["/usr/bin", "/opt/x"].map(std::path::PathBuf::from));
+        assert!(
+            on.iter()
+                .all(|(k, _)| !synthesis_platform::wsl::is_interop_var(k))
+        );
+        // not WSL: PATH untouched
+        let off = env.child_env_on(None);
+        assert_eq!(off.get("PATH"), Some(path.to_str().unwrap()));
+    }
 }
