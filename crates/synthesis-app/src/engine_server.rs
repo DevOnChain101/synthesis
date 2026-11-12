@@ -642,12 +642,17 @@ impl Srv<'_> {
 
     /// At most [`MAX_CALLS_PER_SEC`] store-backed requests a second; the rest are refused.
     fn allow(&mut self) -> bool {
-        if self.window.0.elapsed() >= Duration::from_secs(1) {
-            self.window = (Instant::now(), 0);
-        }
-        self.window.1 += 1;
-        self.window.1 <= MAX_CALLS_PER_SEC
+        within_limit(&mut self.window, Instant::now())
     }
+}
+
+/// One second's count of requests: true while it is at most [`MAX_CALLS_PER_SEC`].
+fn within_limit(window: &mut (Instant, u32), now: Instant) -> bool {
+    if now.duration_since(window.0) >= Duration::from_secs(1) {
+        *window = (now, 0);
+    }
+    window.1 += 1;
+    window.1 <= MAX_CALLS_PER_SEC
 }
 
 fn now_ms() -> i64 {
@@ -886,6 +891,12 @@ fn protect() -> std::io::Result<(std::fs::File, std::fs::File)> {
     Ok((input.into(), output.into()))
 }
 
+// The reader thread owns its input: it must be `Send` on every OS (a `StdinLock` guard is not on Windows).
+const _: () = {
+    const fn send<T: Send>() {}
+    send::<std::io::BufReader<std::io::Stdin>>();
+};
+
 /// `synt engine --stdio`: stdin and stdout of this process. Project trust is not available over the
 /// protocol yet, so the trust flags are refused: an engine is untrusted for project configuration.
 pub fn run_stdio(common: &Common, env: &Env) -> Result<u8, String> {
@@ -911,7 +922,8 @@ pub fn run_stdio(common: &Common, env: &Env) -> Result<u8, String> {
     serve(
         common,
         env,
-        std::io::stdin().lock(),
+        // `Stdin` (not its lock guard) is `Send`: the reader thread owns it and locks per read
+        std::io::BufReader::new(std::io::stdin()),
         Box::new(std::io::stdout()),
     )?;
     Ok(0)
@@ -1000,6 +1012,21 @@ mod tests {
         );
         // the two that did not fit were refused, not waited for
         assert_eq!(text.matches("too many requests").count(), 2, "{text}");
+    }
+
+    #[test]
+    fn the_rate_limit_is_exactly_fifty_a_second() {
+        let t0 = Instant::now();
+        let mut w = (t0, 0);
+        for i in 1..=MAX_CALLS_PER_SEC {
+            assert!(within_limit(&mut w, t0), "request {i} of the second");
+        }
+        assert!(!within_limit(&mut w, t0), "the 51st is the first refused");
+        assert!(!within_limit(&mut w, t0 + Duration::from_millis(999)));
+        assert!(
+            within_limit(&mut w, t0 + Duration::from_secs(1)),
+            "a new second starts"
+        );
     }
 
     #[test]

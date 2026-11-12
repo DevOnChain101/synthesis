@@ -490,30 +490,6 @@ impl Engine {
 }
 
 #[test]
-fn store_requests_are_limited_to_fifty_a_second_exactly() {
-    let (mut e, _) = used_engine();
-    let ids: Vec<u64> = (0..51)
-        .map(|_| e.call("usage.summary", json!({"tz_min": 0})))
-        .collect();
-    let got = e.results(&ids);
-    let refused: Vec<usize> = ids
-        .iter()
-        .enumerate()
-        .filter(|(_, id)| {
-            got[*id]["error"]
-                .as_str()
-                .is_some_and(|t| t.contains("too many requests"))
-        })
-        .map(|(i, _)| i)
-        .collect();
-    assert_eq!(
-        refused,
-        vec![50],
-        "the 51st request of the second is the first refused"
-    );
-}
-
-#[test]
 fn a_flood_beyond_the_queue_is_refused_not_waited_for() {
     let (mut e, _) = used_engine();
     let ids: Vec<u64> = (0..300)
