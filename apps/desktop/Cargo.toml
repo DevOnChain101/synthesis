@@ -25,6 +25,11 @@ path = "src/lib.rs"
 name = "synthesis-desktop"
 path = "src/main.rs"
 
+# The remote engine test re-runs its own binary as a fake engine: stdout must carry protocol lines only.
+[[test]]
+name = "remote_engine"
+harness = false
+
 [features]
 # Development only: a scripted model for the engine test.
 test-provider = ["synthesis-app/test-provider"]

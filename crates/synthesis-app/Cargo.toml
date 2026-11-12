@@ -39,6 +39,7 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 globset = "0.4"
 synthesis-memory = { path = "../synthesis-memory" }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 jsonschema = { version = "0.60", default-features = false }
 sha2 = "0.10"
@@ -50,7 +51,7 @@ uuid = { version = "1", features = ["v4"] }
 # O_NOFOLLOW constant only (no unsafe): files are never opened through a symlink; tcflush (safe
 # wrapper) drops typed-ahead terminal input before a prompt
 libc = "0.2"
-rustix = { version = "1", features = ["termios"] }
+rustix = { version = "1", features = ["termios", "stdio"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

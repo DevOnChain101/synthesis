@@ -2651,7 +2651,12 @@ impl Live {
                 }
             )
         });
-        let Some(e) = self.engine.as_ref().filter(|_| !self.trusted && !asked) else {
+        // a remote session cannot be trusted (project trust is not in the protocol yet)
+        let Some(e) = self
+            .engine
+            .as_ref()
+            .filter(|e| !e.is_remote() && !self.trusted && !asked)
+        else {
             return false;
         };
         // the grant is the nearest folder with .git or .synt above the session's folder, not the folder itself

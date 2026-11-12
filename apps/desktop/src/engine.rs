@@ -6,32 +6,25 @@
 //! the person answers, a task runs on the engine's own tokio runtime. The API key only lives in the
 //! `Env` snapshot handed to `prepare`, never in the process env.
 //!
-//! Follow-up: `Host` and `end` are copies of the CLI's; both belong in `synthesis-app` so the two
-//! front ends cannot drift.
+//! The session runs in this process (`synthesis_app::host::Live`, shared with `synt engine --stdio`) or, as a
+//! remote engine, in a child process that speaks that protocol (`remote.rs`).
 
-use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use clap::Parser;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use serde_json::{Value, json};
-use synthesis_app::run::{Common, Front, Limits, Native, Prepared, finish_store, prepare};
+use synthesis_app::asks::{Ask, Asks, Notify};
+use synthesis_app::host::{Live, lock};
+use synthesis_app::run::{Common, Front, Limits, Native, prepare};
 use synthesis_cli_ui::Resume;
 use synthesis_cli_ui_base::complete::Command;
 use synthesis_config::Env;
-use synthesis_core::{AgentSession, WorkspaceContext};
-use synthesis_events::{Envelope, Event};
-use synthesis_harness::{
-    Approval, ApprovalRequest, Approver, BoxFut, EventSink, Harness, ImageAttachment,
-    InputProvider, Scope, TaskOutcome, TaskRequest, UserReply, sanitize_for_display,
-};
-use synthesis_hooks::HookEvent;
-use synthesis_permissions::{Mode, Suggestion};
-use synthesis_providers::Message;
-use synthesis_tools::NeedsUser;
-use tokio::sync::oneshot;
+use synthesis_events::Envelope;
+use synthesis_harness::{ImageAttachment, UserReply, sanitize_for_display};
+use synthesis_permissions::Mode;
 use tokio_util::sync::CancellationToken;
 
 /// A `/command` or `!shell` line (its first line starts with the mark): never a send-now delivery.
@@ -62,177 +55,7 @@ pub enum UiMsg {
     Compacted(Result<(), String>),
 }
 
-/// What the dialog shows of an [`ApprovalRequest`]. `suggestions` is the list the person can accept:
-/// "allow always" never switches into bypassPermissions (that takes its own confirmation).
-#[derive(Debug, Clone)]
-pub struct AskApproval {
-    pub id: String,
-    pub agent_id: Option<String>,
-    pub tool: String,
-    pub input: Value,
-    /// `permission` or `outside_read`.
-    pub dialog: &'static str,
-    pub prompt: String,
-    pub reason: String,
-    pub origin: Option<String>,
-    pub suggestions: Vec<Suggestion>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AskInput {
-    pub id: String,
-    pub req: NeedsUser,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Choice {
-    Once,
-    Always,
-    Deny,
-}
-
-const DENY_MESSAGE: &str = "The user denied this tool call. Do not retry it unchanged.";
-
-/// Allow once carries no rule; Always carries the rules the dialog offered; anything else denies.
-pub fn approval_for(choice: Choice, offered: &[Suggestion]) -> Approval {
-    match choice {
-        Choice::Once => Approval::allow(),
-        Choice::Always => Approval {
-            accepted: offered.to_vec(),
-            ..Approval::allow()
-        },
-        Choice::Deny => Approval::deny(DENY_MESSAGE),
-    }
-}
-
-struct Pending {
-    reply: oneshot::Sender<Approval>,
-    offered: Vec<Suggestion>,
-}
-
-type PendingMap = Arc<Mutex<HashMap<String, Pending>>>;
-type InputMap = Arc<Mutex<HashMap<String, oneshot::Sender<Option<UserReply>>>>>;
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Tells the window to drop a dialog when its future is dropped (cancel or answered).
-struct Withdraw {
-    tx: UnboundedSender<UiMsg>,
-    id: String,
-}
-
-impl Drop for Withdraw {
-    fn drop(&mut self) {
-        let _ = self
-            .tx
-            .unbounded_send(UiMsg::Withdraw(std::mem::take(&mut self.id)));
-    }
-}
-
-struct ChanApprover {
-    pending: PendingMap,
-    tx: UnboundedSender<UiMsg>,
-}
-
-impl Approver for ChanApprover {
-    fn approve<'a>(
-        &'a self,
-        req: ApprovalRequest,
-        cancel: &'a CancellationToken,
-    ) -> BoxFut<'a, Approval> {
-        Box::pin(async move {
-            let id = req.approval_id.clone();
-            let offered: Vec<Suggestion> = req
-                .suggestions
-                .into_iter()
-                .filter(|s| !matches!(s, Suggestion::SetMode(Mode::BypassPermissions)))
-                .collect();
-            let (reply, answer) = oneshot::channel();
-            // registered before the window hears of it, so an answer can never land first
-            lock(&self.pending).insert(
-                id.clone(),
-                Pending {
-                    reply,
-                    offered: offered.clone(),
-                },
-            );
-            let ask = AskApproval {
-                id: id.clone(),
-                agent_id: req.agent_id,
-                tool: req.tool,
-                input: req.input,
-                dialog: req.dialog,
-                prompt: req.prompt,
-                reason: req.reason,
-                origin: req.origin,
-                suggestions: offered,
-            };
-            if self
-                .tx
-                .unbounded_send(UiMsg::Approval(Box::new(ask)))
-                .is_err()
-            {
-                lock(&self.pending).remove(&id);
-                return Approval::auto_denied(); // the window is gone: nobody can approve
-            }
-            let _withdraw = Withdraw {
-                tx: self.tx.clone(),
-                id: id.clone(),
-            };
-            let r = tokio::select! {
-                a = answer => a.unwrap_or_else(|_| Approval::auto_denied()),
-                () = cancel.cancelled() => Approval {
-                    reviewer: "policy",
-                    ..Approval::deny("Cancelled before the approval was answered.")
-                },
-            };
-            lock(&self.pending).remove(&id);
-            r
-        })
-    }
-}
-
-/// Plan and question dialogs (`ExitPlanMode`, `AskUserQuestion`).
-struct ChanInput {
-    pending: InputMap,
-    tx: UnboundedSender<UiMsg>,
-}
-
-impl InputProvider for ChanInput {
-    fn ask<'a>(
-        &'a self,
-        req: &'a NeedsUser,
-        cancel: &'a CancellationToken,
-    ) -> BoxFut<'a, Option<UserReply>> {
-        Box::pin(async move {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static N: AtomicU64 = AtomicU64::new(1);
-            let id = format!("ask-{}", N.fetch_add(1, Ordering::Relaxed));
-            let (reply, answer) = oneshot::channel();
-            lock(&self.pending).insert(id.clone(), reply);
-            let ask = AskInput {
-                id: id.clone(),
-                req: req.clone(),
-            };
-            if self.tx.unbounded_send(UiMsg::Input(Box::new(ask))).is_err() {
-                lock(&self.pending).remove(&id);
-                return None;
-            }
-            let _withdraw = Withdraw {
-                tx: self.tx.clone(),
-                id: id.clone(),
-            };
-            let r = tokio::select! {
-                a = answer => a.unwrap_or(None),
-                () = cancel.cancelled() => None,
-            };
-            lock(&self.pending).remove(&id);
-            r
-        })
-    }
-}
+pub use synthesis_app::asks::{AskApproval, AskInput, Choice, approval_for};
 
 /// `Write` that turns the JSONL event lines of the sink into `UiMsg::Event`.
 struct Lines {
@@ -606,80 +429,6 @@ impl TrustCheck {
     }
 }
 
-/// What `synt run` does around its task, for every task the person starts: MCP mentions and
-/// prompts, skills, the memory block for the typed prompt, the memory episode afterwards and the
-/// stored usage (the CLI's `Host`).
-struct Host {
-    mcp: Option<Arc<synthesis_mcp::McpManager>>,
-    memory: Option<Arc<synthesis_app::memcmd::MemoryRun>>,
-    context: Arc<synthesis_app::ctx::SynthesisContext>,
-    harness: Arc<Harness>,
-    sink: EventSink,
-    store: Option<synthesis_app::events::Store>,
-    transcript: Option<Arc<synthesis_app::transcript::Transcript>>,
-    skills: Vec<String>,
-    workspace: WorkspaceContext,
-}
-
-impl Host {
-    /// `/skill-name args` runs that skill: the model is told to load it.
-    fn skill_request(&self, typed: &str) -> Option<String> {
-        let rest = typed.trim_start().strip_prefix('/')?;
-        let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-        self.skills.iter().any(|s| s == name).then(|| {
-            let args = args.trim();
-            if args.is_empty() {
-                format!("Run the skill \"{name}\" with the Skill tool.")
-            } else {
-                format!("Run the skill \"{name}\" with the Skill tool. Arguments: {args}")
-            }
-        })
-    }
-
-    async fn before(&self, typed: &str, cancel: &CancellationToken) -> Result<String, String> {
-        if let Some(r) = self.skill_request(typed) {
-            return Ok(r);
-        }
-        let (request, notes) =
-            synthesis_app::mcpinput::expand(self.mcp.as_ref(), typed, cancel).await?;
-        let (request, files_missing) =
-            synthesis_app::run::expand_file_mentions(&self.harness, &self.workspace, request);
-        for n in notes.into_iter().chain(files_missing) {
-            self.sink.emit(
-                &Scope::default(),
-                Event::Notice {
-                    level: "warning".into(),
-                    text: sanitize_for_display(&n),
-                },
-            );
-        }
-        if let Some(m) = &self.memory {
-            self.context
-                .set_memory(synthesis_app::memcmd::retrieve_for_task(m, typed));
-        }
-        Ok(request)
-    }
-
-    async fn after(&self, typed: &str, out: &TaskOutcome, session: &AgentSession) {
-        if let Some(m) = &self.memory {
-            let verified = self.harness.verified_commands(&out.task_id);
-            synthesis_app::memcmd::task_ended(m, typed, out, &verified);
-            // reflection is a model call (opt-in): the window does not wait for it
-            if m.reflect.is_some() {
-                let m = m.clone();
-                tokio::spawn(async move {
-                    if let Some(rf) = &m.reflect {
-                        synthesis_app::memcmd::reflect_jobs(&m.store, rf, 2).await;
-                    }
-                });
-            }
-        }
-        if let Some(s) = &self.store {
-            finish_store(s, self.transcript.as_deref(), out, &session.usage);
-        }
-    }
-}
-
 /// One row of the MCP panel.
 #[derive(Debug, Clone)]
 pub struct McpInfo {
@@ -688,6 +437,9 @@ pub struct McpInfo {
     pub state: String,
     pub tools: usize,
 }
+
+/// What a method that only the local engine has says in remote mode (PR3 fills them in).
+pub const NOT_REMOTE: &str = "not supported in remote mode yet";
 
 pub struct Engine {
     pub sid: String,
@@ -707,26 +459,18 @@ pub struct Engine {
     /// Slash commands: the local list, skills and MCP prompts.
     pub commands: Vec<Command>,
     pub context_window: Option<u64>,
-    /// The folder is trusted for project config (`--trust-project`).
+    /// The folder is trusted for project config (`--trust-project`). Never true in remote mode.
     pub trusted: bool,
+    /// Remote mode only: what the engine says its folder and root are. Display text, never a path to open.
+    pub remote_cwd: Option<String>,
+    pub remote_root: Option<String>,
     pub synthesis_home: PathBuf,
     /// The environment the session started with (`/memory` and `/doctor` read it, names only).
     pub env: Env,
-    harness: Arc<Harness>,
-    tokio: Option<tokio::runtime::Runtime>,
-    session: Arc<Mutex<Option<AgentSession>>>,
-    history: Arc<Mutex<Vec<Message>>>,
-    last: Arc<Mutex<Option<TaskOutcome>>>,
-    pending: PendingMap,
-    inputs: InputMap,
-    cancel: Mutex<Option<CancellationToken>>,
+    /// The session in this process (`None`: it runs in a child process, see `remote`).
+    live: Option<Live>,
+    remote: Option<crate::remote::Remote>,
     tx: UnboundedSender<UiMsg>,
-    mcp: Option<Arc<synthesis_mcp::McpManager>>,
-    host: Arc<Host>,
-    rt: Arc<synthesis_terminal::TerminalRuntime>,
-    worktree: Option<synthesis_app::wt::Worktree>,
-    cleanup_worktree: bool,
-    began: bool,
     pub sandbox: synthesis_cli_ui::SandboxStatus,
     pub memory_on: bool,
     /// Lines of `/memory`: the instruction files loaded at start and where `#` notes go.
@@ -738,12 +482,24 @@ pub struct Engine {
 }
 
 impl Engine {
+    fn live(&self) -> Result<&Live, &'static str> {
+        self.live.as_ref().ok_or(NOT_REMOTE)
+    }
+
+    /// A method without a result that the remote engine cannot do yet: the window is told.
+    fn unsupported(&self) {
+        let _ = self
+            .tx
+            .unbounded_send(UiMsg::BadEvent(NOT_REMOTE.to_string()));
+    }
+
     /// Stops a background process of this session (the Terminal tab's Kill button). The runtime knows only this
     /// session's processes, so another id is refused. `Ok(true)`: it was running and got the signal; `Ok(false)`:
     /// it had already exited, nothing was sent.
     pub fn kill_process(&self, process_id: &str) -> Result<bool, String> {
+        let live = self.live()?;
         let err = |e: synthesis_terminal::Error| sanitize_for_display(&e.to_string());
-        if !self
+        if !live
             .rt
             .get_status(&self.sid, process_id)
             .map_err(err)?
@@ -751,7 +507,7 @@ impl Engine {
         {
             return Ok(false);
         }
-        self.rt
+        live.rt
             .signal(&self.sid, process_id, synthesis_terminal::Signal::Kill)
             .map_err(err)?;
         Ok(true)
@@ -783,6 +539,67 @@ impl Engine {
         )
     }
 
+    /// Starts the session in a child process that speaks `synt engine --stdio` (the engine of another
+    /// OS or machine). Blocking: call it from a worker thread. The window gets the same [`UiMsg`]s.
+    pub fn start_remote(
+        launcher: &crate::remote::Launcher,
+        project: &Path,
+    ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
+        let (tx, rx) = unbounded();
+        let (remote, v) = crate::remote::Remote::connect(launcher, project, tx.clone())?;
+        let text = |k: &str| v[k].as_str().map(sanitize_for_display).unwrap_or_default();
+        let list = |k: &str| {
+            v[k].as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(sanitize_for_display)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let engine = Self {
+            sid: text("sid"),
+            label: text("label"),
+            models: list("models"),
+            model_rows: vec![],
+            stale_model: v["stale_model"].as_str().map(sanitize_for_display),
+            context_source: String::new(),
+            effort_tiers: list("effort_tiers"),
+            notices: list("notices"),
+            // `cwd` and `root` are what the host opens files by (the file tree, trust fingerprint, memory,
+            // workspace key): the folder the person chose on this machine, never a string the engine sent
+            cwd: project.to_string_lossy().into_owned(),
+            root: project.to_string_lossy().into_owned(),
+            remote_cwd: Some(text("cwd")),
+            remote_root: Some(text("root")),
+            commands: vec![],
+            context_window: v["context_window"].as_u64(),
+            // project trust is not available over the protocol: a remote session is untrusted
+            trusted: false,
+            synthesis_home: PathBuf::new(),
+            // the desktop's own environment is not the engine's: nothing is read here
+            env: Env::from_pairs::<&str, &str>([]),
+            live: None,
+            remote: Some(remote),
+            tx,
+            sandbox: Default::default(),
+            memory_on: false,
+            memory_report: vec![],
+            // empty paths: a `#` note is refused, never written on this machine
+            notes: synthesis_app::memory::Notes {
+                user: PathBuf::new(),
+                project: PathBuf::new(),
+                root: PathBuf::new(),
+                secrets: vec![],
+                loaded: vec![],
+                long_term: false,
+            },
+            followup: Arc::default(),
+        };
+        Ok((engine, rx))
+    }
+
     /// Builds the harness and starts (or resumes) the session, like `prepare` + `round` in
     /// `apps/cli/src/tui.rs`. Blocking: call it from a worker thread, never from inside a tokio runtime.
     pub fn start_with(
@@ -797,8 +614,7 @@ impl Engine {
             verify,
         } = o;
         let (tx, rx) = unbounded();
-        let pending: PendingMap = PendingMap::default();
-        let inputs: InputMap = InputMap::default();
+        let asks = Asks::default();
         // the stored session continues in place; the picker may name a session of another
         // folder, which is why the workspace check is off
         common.resume = resume.as_ref().map(|r| r.record.id.clone());
@@ -806,19 +622,24 @@ impl Engine {
         common.resume_any_workspace = resume.is_some();
         let trusted = common.trust_project;
         let cleanup_worktree = common.cleanup_worktree;
+        let notify: Notify = {
+            let tx = tx.clone();
+            Arc::new(move |a| {
+                tx.unbounded_send(match a {
+                    Ask::Approval(a) => UiMsg::Approval(a),
+                    Ask::Input(a) => UiMsg::Input(a),
+                    Ask::Withdraw(id) => UiMsg::Withdraw(id),
+                })
+                .is_ok()
+            })
+        };
         let native = Native {
             out: Box::new(Lines {
                 tx: tx.clone(),
                 buf: vec![],
             }),
-            approver: Arc::new(ChanApprover {
-                pending: pending.clone(),
-                tx: tx.clone(),
-            }),
-            input: Arc::new(ChanInput {
-                pending: inputs.clone(),
-                tx: tx.clone(),
-            }),
+            approver: asks.approver(notify.clone()),
+            input: asks.input(notify),
             // the approved configuration is checked before the project's files are read and before any MCP
             // server starts (hooks run later still, after the check that follows `prepare`)
             pre_start: verify.clone().map(|v| {
@@ -841,63 +662,16 @@ impl Engine {
         if let Some(Err(files)) = verify.as_ref().map(TrustCheck::verify) {
             return Err(trust_changed_error(&files));
         }
-        let Prepared {
-            harness,
-            context,
-            skills,
-            sink,
-            mut session,
-            sid,
-            rt,
-            store,
-            transcript,
-            mcp,
-            memory,
-            resumed_from_seq,
-            model_changed,
-            stale_model,
-            worktree,
-            label,
-            models,
-            effort_tiers,
-            context_window,
-            sandbox,
-            notices,
-            homes,
-            tokio,
-            notes: memory_notes,
-            ..
-        } = p;
         drop(t_prepare);
         let _t = crate::trace::span(env, "start_with: session start + hooks");
         // Started here (not by the app) so the session hooks follow `session.started`.
-        let started = match resumed_from_seq {
-            Some(seq) => {
-                let _t = crate::trace::span(env, "start_with: harness.resume_session");
-                harness.resume_session(&session, seq);
-                if let Some(m) = &model_changed {
-                    harness.model_changed(m);
-                }
-                Ok(())
-            }
-            None => harness.start_session(&mut session, "startup"),
-        };
-        let source = if resumed_from_seq.is_some() {
-            "resume"
-        } else {
-            "startup"
-        };
-        if started.is_ok() {
-            let _t = crate::trace::span(env, "start_with: SessionStart hook");
-            tokio.block_on(harness.session_hook(
-                HookEvent::SessionStart,
-                json!({"source": source}),
-                Some(source),
-            ));
-        }
-        let cwd = session.workspace.cwd.to_string_lossy().into_owned();
-        let root = session.workspace.root.to_string_lossy().into_owned();
-        let workspace = session.workspace.clone();
+        let (live, info) = Live::begin(
+            p,
+            asks,
+            resume.map(|r| r.history).unwrap_or_default(),
+            cleanup_worktree,
+        )?;
+        let mcp = live.mcp.clone();
         let commands: Vec<Command> = synthesis_cli_ui::local_commands()
             .into_iter()
             // desktop only: a typed folder path as a new workspace
@@ -920,7 +694,7 @@ impl Engine {
             .chain(std::iter::once(crate::live::clean_command()))
             .chain(std::iter::once(crate::live::close_workspace_command()))
             .chain(
-                skills
+                info.skills
                     .iter()
                     .map(|s| {
                         (
@@ -952,91 +726,51 @@ impl Engine {
                     }),
             )
             .collect();
-        let host = Arc::new(Host {
-            mcp: mcp.clone(),
-            memory: memory.clone(),
-            context,
-            harness: harness.clone(),
-            sink,
-            store,
-            transcript,
-            skills: skills.iter().map(|s| s.name.clone()).collect(),
-            workspace,
-        });
-        let mut all_notices = notices;
-        // the worktree's place is the first thing to know (the finish report comes at the end)
-        if let Some(w) = &worktree {
-            all_notices.push(format!(
-                "working in worktree {} on branch {}",
-                w.info.worktree.display(),
-                w.info.branch
-            ));
-        }
+        let mut all_notices = info.notices;
         all_notices.extend(notes);
         let t_note = crate::trace::span(env, "start_with: window_note");
-        let context_source = crate::models::window_note(env, &project, &label);
+        let context_source = crate::models::window_note(env, &project, &info.label);
         drop(t_note);
         let t_rows = crate::trace::span(env, "start_with: models::rows");
         let model_rows = crate::models::rows(env, &project);
         drop(t_rows);
         let engine = Self {
-            sid,
-            label,
-            models,
+            sid: live.sid.clone(),
+            label: info.label,
+            models: info.models,
             model_rows,
-            stale_model,
+            stale_model: info.stale_model,
             context_source,
-            effort_tiers,
+            effort_tiers: info.effort_tiers,
             notices: all_notices,
-            cwd,
-            root,
+            cwd: info.cwd,
+            root: info.root,
             commands,
-            context_window,
+            context_window: info.context_window,
             trusted,
-            synthesis_home: homes.synthesis,
+            remote_cwd: None,
+            remote_root: None,
+            synthesis_home: info.synthesis_home,
             env: env.clone(),
-            harness,
-            tokio: Some(tokio),
-            session: Arc::new(Mutex::new(Some(session))),
-            history: Arc::new(Mutex::new(resume.map(|r| r.history).unwrap_or_default())),
-            last: Arc::default(),
-            pending,
-            inputs,
-            cancel: Mutex::new(None),
+            live: Some(live),
+            remote: None,
             tx,
-            mcp,
-            host,
-            rt,
-            worktree,
-            cleanup_worktree,
-            began: started.is_ok(),
-            sandbox,
-            memory_on: memory.is_some(),
-            memory_report: (memory_notes.clone().hook().report)(),
-            notes: memory_notes,
+            sandbox: info.sandbox,
+            memory_on: info.memory_on,
+            memory_report: (info.notes.clone().hook().report)(),
+            notes: info.notes,
             followup: Arc::default(),
         };
-        // a session never starts in bypassPermissions, whatever a stored session or a setting carried
-        if engine.mode() == Mode::BypassPermissions {
-            engine.set_mode(Mode::Default);
-        }
-        match started {
-            Ok(()) => Ok((engine, rx)),
-            // a start that failed still ends the session and closes what `prepare` opened
-            Err(e) => {
-                engine.close();
-                Err(e.to_string())
-            }
-        }
+        Ok((engine, rx))
     }
 
     pub fn mcp(&self) -> Option<&Arc<synthesis_mcp::McpManager>> {
-        self.mcp.as_ref()
+        self.live.as_ref()?.mcp.as_ref()
     }
 
     /// State of every configured MCP server (the panel's rows).
     pub fn mcp_status(&self) -> Vec<McpInfo> {
-        self.mcp.as_ref().map_or_else(Vec::new, |m| {
+        self.mcp().map_or_else(Vec::new, |m| {
             m.status()
                 .into_iter()
                 .map(|s| McpInfo {
@@ -1050,48 +784,78 @@ impl Engine {
 
     /// `(path, branch)` of the worktree this session works in (`--worktree`).
     pub fn worktree_info(&self) -> Option<(String, String)> {
-        let i = &self.worktree.as_ref()?.info;
+        let i = &self.live.as_ref()?.worktree.as_ref()?.info;
         Some((i.worktree.display().to_string(), i.branch.clone()))
     }
 
     /// Rows of the sessions other processes advertise (`/peers`); `None` when peers are off.
     /// Blocking: call it off the UI thread.
     pub fn peer_rows(&self) -> Option<Vec<Value>> {
-        self.harness.peer_summary()?;
-        self.tokio
+        let live = self.live.as_ref()?;
+        live.harness.peer_summary()?;
+        live.tokio
             .as_ref()
-            .and_then(|rt| rt.block_on(self.harness.peer_rows(true)))
+            .and_then(|rt| rt.block_on(live.harness.peer_rows(true)))
     }
 
     /// `/send`: the user's message to another session's main agent; the reply text, or why not.
     /// Blocking (waits for the answer): call it off the UI thread.
     pub fn peer_ask(&self, to: &str, text: &str) -> Result<String, String> {
-        let rt = self.tokio.as_ref().ok_or("peers are off")?;
-        rt.block_on(self.harness.peer_ask_user(to, text))
+        let live = self.live()?;
+        let rt = live.tokio.as_ref().ok_or("peers are off")?;
+        rt.block_on(live.harness.peer_ask_user(to, text))
     }
 
+    /// The session runs in a child process (see `remote.rs`).
+    pub fn is_remote(&self) -> bool {
+        self.remote.is_some()
+    }
+
+    /// The permission mode in force: the engine's own, as it reported it for a remote engine.
     pub fn mode(&self) -> Mode {
-        lock(&self.harness.permissions()).mode()
+        match (&self.live, &self.remote) {
+            (Some(l), _) => l.mode(),
+            (_, Some(r)) => r.mode(),
+            _ => Mode::Default,
+        }
     }
 
     pub fn set_mode(&self, mode: Mode) {
-        let _ = self.harness.set_mode(mode, false);
+        match (&self.live, &self.remote) {
+            (Some(l), _) => {
+                let _ = l.harness.set_mode(mode, false);
+            }
+            (_, Some(r)) => {
+                if let Err(e) = r.set_mode(mode) {
+                    let _ = self.tx.unbounded_send(UiMsg::BadEvent(e));
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Enters bypassPermissions after the person said yes to the confirmation dialog; the core still takes the
     /// flag from here only and answers with its own error otherwise.
     pub fn enable_bypass(&self) -> Result<(), String> {
-        self.harness
+        self.live()?
+            .harness
             .set_mode(Mode::BypassPermissions, true)
             .map_err(|e| e.to_string())
     }
 
     pub fn set_effort(&self, effort: Option<String>) {
-        self.harness.set_reasoning_effort(effort);
+        match self.live() {
+            Ok(l) => l.harness.set_reasoning_effort(effort),
+            Err(_) => self.unsupported(),
+        }
     }
 
     pub fn running(&self) -> bool {
-        lock(&self.session).is_none()
+        match (&self.live, &self.remote) {
+            (Some(l), _) => l.running(),
+            (_, Some(r)) => r.running(),
+            _ => false,
+        }
     }
 
     /// Starts a task. `Err`: one is already running.
@@ -1106,7 +870,11 @@ impl Engine {
         text: String,
         images: Vec<ImageAttachment>,
     ) -> Result<(), &'static str> {
-        self.start_task(text, images, false)
+        match (&self.remote, images.is_empty()) {
+            (Some(r), true) => r.send(text),
+            (Some(_), false) => Err(NOT_REMOTE),
+            _ => self.start_task(text, images, false),
+        }
     }
 
     /// The model turn after a `!cmd` (see [`Engine::take_followup`]): the harness's own note,
@@ -1121,60 +889,10 @@ impl Engine {
         images: Vec<ImageAttachment>,
         hidden: bool,
     ) -> Result<(), &'static str> {
-        let Some(mut session) = lock(&self.session).take() else {
-            return Err("a task is already running");
-        };
-        let token = CancellationToken::new();
-        *lock(&self.cancel) = Some(token.clone());
-        // The mode applies from here to the end of the task (a later switch never changes a
-        // running turn).
-        let mode = self.mode();
-        session.permission_mode = synthesis_harness::from_mode(mode);
-        let mut req = TaskRequest {
-            history: lock(&self.history).clone(),
-            images,
-            ..TaskRequest::new(text.clone())
-        };
-        let (h, tx, host) = (self.harness.clone(), self.tx.clone(), self.host.clone());
-        let (slot, history, last) = (
-            self.session.clone(),
-            self.history.clone(),
-            self.last.clone(),
-        );
-        let Some(rt) = &self.tokio else {
-            *lock(&self.session) = Some(session);
-            return Err("the engine is closed");
-        };
-        rt.spawn(async move {
-            let before = host.before(&text, &token).await;
-            let r = match before {
-                Ok(request) => {
-                    if hidden {
-                        req.display_text = Some(String::new());
-                    } else if request != text {
-                        req.display_text = Some(text.clone());
-                    }
-                    req.request = request;
-                    h.run_task(&mut session, req, token)
-                        .await
-                        .map_err(|e| e.to_string())
-                }
-                Err(e) => Err(e),
-            };
-            let done = match r {
-                Ok(o) => {
-                    host.after(&text, &o, &session).await;
-                    let warn = h.to_idle(&mut session).err().map(|e| e.to_string());
-                    *lock(&history) = o.messages.clone();
-                    *lock(&last) = Some(o);
-                    warn.map_or(Ok(()), Err)
-                }
-                Err(e) => Err(e),
-            };
-            *lock(&slot) = Some(session);
+        let tx = self.tx.clone();
+        self.live()?.start_task(text, images, hidden, move |done| {
             let _ = tx.unbounded_send(UiMsg::TaskDone(done));
-        });
-        Ok(())
+        })
     }
 
     /// Send now: delivers `text` to `to` (`main` or a sub-agent instance) at its next safe point
@@ -1183,10 +901,11 @@ impl Engine {
         if is_command(&text) {
             return Err("commands are not sent now");
         }
-        let Some(rt) = &self.tokio else {
+        let live = self.live()?;
+        let Some(rt) = &live.tokio else {
             return Err("the engine is closed");
         };
-        let (h, tx) = (self.harness.clone(), self.tx.clone());
+        let (h, tx) = (live.harness.clone(), self.tx.clone());
         rt.spawn(async move {
             if let Err(why) = h.send_user_message(&to, text.clone()).await {
                 let _ = tx.unbounded_send(UiMsg::SendFailed { to, text, why });
@@ -1200,7 +919,10 @@ impl Engine {
     #[doc(hidden)]
     #[cfg(debug_assertions)]
     pub fn check_permission(&self, tool: &str, input: &Value) -> synthesis_permissions::Decision {
-        lock(&self.harness.permissions())
+        let Ok(live) = self.live() else {
+            return synthesis_permissions::Decision::Deny;
+        };
+        lock(&live.harness.permissions())
             .check_current(tool, input)
             .decision
     }
@@ -1210,22 +932,18 @@ impl Engine {
     /// Plan mode refuses it (stricter than the CLI, which lets a typed command through in plan).
     /// `TaskDone` follows. `Err`: a task is running, or the command was refused before it started.
     pub fn user_command(&self, command: String, record_only: bool) -> Result<(), &'static str> {
+        let live = self.live()?;
         if self.mode() == Mode::Plan {
             return Err("plan mode does not run shell commands: Shift+Tab leaves it first");
         }
-        let Some(session) = lock(&self.session).take() else {
-            return Err("a task is already running");
-        };
-        let Some(rt) = &self.tokio else {
-            *lock(&self.session) = Some(session);
+        let Some(rt) = &live.tokio else {
             return Err("the engine is closed");
         };
-        let token = CancellationToken::new();
-        *lock(&self.cancel) = Some(token.clone());
-        let (h, tx) = (self.harness.clone(), self.tx.clone());
+        let (session, token) = live.take_session()?;
+        let (h, tx) = (live.harness.clone(), self.tx.clone());
         let (slot, history, followup) = (
-            self.session.clone(),
-            self.history.clone(),
+            live.session.clone(),
+            live.history.clone(),
             self.followup.clone(),
         );
         rt.spawn(async move {
@@ -1262,7 +980,8 @@ impl Engine {
     /// directory with links resolved (a link out is outside), never a secret file, no read-deny
     /// rule. Read the returned path, not the one given.
     pub fn image_path(&self, p: &Path) -> Result<PathBuf, String> {
-        let real = self
+        let live = self.live()?;
+        let real = live
             .host
             .workspace
             .resolve(&p.to_string_lossy())
@@ -1275,7 +994,7 @@ impl Engine {
         {
             return Err("a secret file is never attached".into());
         }
-        let denied = lock(&self.harness.permissions())
+        let denied = lock(&live.harness.permissions())
             .check(
                 "Read",
                 &json!({ "file_path": real }),
@@ -1291,25 +1010,29 @@ impl Engine {
 
     /// `/clear`: the next task starts without the earlier conversation.
     pub fn clear_history(&self) {
-        lock(&self.history).clear();
+        match self.live() {
+            Ok(l) => lock(&l.history).clear(),
+            Err(_) => self.unsupported(),
+        }
     }
 
     /// `/compact`. While a task runs the harness compacts at its next safe point (`Ok(true)`);
     /// otherwise the conversation between tasks is compacted now and [`UiMsg::Compacted`] follows
     /// (`Ok(false)`). `Err`: nothing to compact.
     pub fn compact(&self, instructions: Option<String>) -> Result<bool, &'static str> {
-        if self.running() {
-            self.harness.request_compact(instructions);
+        let live = self.live()?;
+        if live.running() {
+            live.harness.request_compact(instructions);
             return Ok(true);
         }
-        let Some(session) = lock(&self.session).clone() else {
+        let Some(session) = lock(&live.session).clone() else {
             return Err("a task is running");
         };
-        let history = lock(&self.history).clone();
-        let Some(rt) = self.tokio.as_ref().filter(|_| !history.is_empty()) else {
+        let history = lock(&live.history).clone();
+        let Some(rt) = live.tokio.as_ref().filter(|_| !history.is_empty()) else {
             return Err("nothing to compact yet");
         };
-        let (h, slot, tx) = (self.harness.clone(), self.history.clone(), self.tx.clone());
+        let (h, slot, tx) = (live.harness.clone(), live.history.clone(), self.tx.clone());
         rt.spawn(async move {
             let r = h
                 .compact_now(&session, history, instructions, CancellationToken::new())
@@ -1322,8 +1045,11 @@ impl Engine {
 
     /// `/agents`: this session's agents and the types `@agent:name` starts.
     pub fn agents_report(&self) -> Vec<String> {
+        let Ok(live) = self.live() else {
+            return vec![NOT_REMOTE.into()];
+        };
         let mut v = vec!["Agents in this session (@name routes a line):".to_string()];
-        v.extend(self.harness.agents().into_iter().map(|a| {
+        v.extend(live.harness.agents().into_iter().map(|a| {
             let q = if a.queued > 0 {
                 format!(" \u{b7} {} queued", a.queued)
             } else {
@@ -1336,7 +1062,7 @@ impl Engine {
         }));
         v.push("Types @agent:<type> starts (Task tool and chat):".to_string());
         v.extend(
-            self.harness
+            live.harness
                 .agent_defs()
                 .into_iter()
                 .map(|(n, d)| sanitize_for_display(&format!("  {n} \u{b7} {d}"))),
@@ -1346,7 +1072,10 @@ impl Engine {
 
     /// `/permissions`: the mode and the rules in force.
     pub fn permissions_report(&self) -> Vec<String> {
-        let perms = self.harness.permissions();
+        let Ok(live) = self.live() else {
+            return vec![NOT_REMOTE.into()];
+        };
+        let perms = live.harness.permissions();
         let p = lock(&perms);
         let r = p.rules();
         let mut v = vec![format!("mode: {}", p.mode().as_str())];
@@ -1363,12 +1092,13 @@ impl Engine {
 
     /// `/permissions allow RULE`: a session-only rule, the CLI's check and wording (`Err`: an error line).
     pub fn allow_rule(&self, rule: &str) -> Result<String, String> {
+        let live = self.live()?;
         if !synthesis_permissions::Permissions::is_well_formed_rule(rule) {
             return Err(
                 "expected a rule like Bash(cargo test:*), Edit or mcp__server__tool".into(),
             );
         }
-        if !lock(&self.harness.permissions()).add_allow(rule) {
+        if !lock(&live.harness.permissions()).add_allow(rule) {
             return Err("that allow rule already exists".into());
         }
         Ok(format!(
@@ -1379,8 +1109,9 @@ impl Engine {
 
     /// `/permissions remove RULE`: from allow, ask and deny of this session only.
     pub fn remove_rule(&self, rule: &str) -> Result<String, String> {
+        let live = self.live()?;
         let shown = sanitize_for_display(rule);
-        match lock(&self.harness.permissions()).remove_rule(rule) {
+        match lock(&live.harness.permissions()).remove_rule(rule) {
             0 => Err(format!("no rule {shown}")),
             n => Ok(format!("removed {n} rule(s): {shown}")),
         }
@@ -1388,7 +1119,7 @@ impl Engine {
 
     /// `/rename TITLE`: validates and stores the title of this session; `Ok` is the stored title.
     pub fn rename(&self, title: &str) -> Result<String, String> {
-        match &self.host.store {
+        match &self.live()?.host.store {
             Some(s) => synthesis_app::rename::rename(s, title),
             None => Err("/rename: this session is not stored (--no-session-store)".into()),
         }
@@ -1396,12 +1127,15 @@ impl Engine {
 
     /// `/name`: the name other sessions address this one by; `None` when peers are off.
     pub fn peer_name(&self) -> Option<Option<String>> {
-        self.harness.peer_summary().map(|(n, _)| n)
+        self.live.as_ref()?.harness.peer_summary().map(|(n, _)| n)
     }
 
     /// `/mcp`: one block per server with state, transport, tools and the last error.
     pub fn mcp_report(&self) -> Vec<String> {
-        let Some(m) = &self.mcp else {
+        if self.live.is_none() {
+            return vec![NOT_REMOTE.into()];
+        }
+        let Some(m) = self.mcp() else {
             return vec!["MCP: no servers are configured for this session".into()];
         };
         let status = m.status();
@@ -1434,83 +1168,40 @@ impl Engine {
     }
 
     pub fn cancel(&self) {
-        if let Some(t) = lock(&self.cancel).as_ref() {
-            t.cancel();
+        match (&self.live, &self.remote) {
+            (Some(l), _) => l.cancel(),
+            (_, Some(r)) => r.cancel(),
+            _ => {}
         }
     }
 
     /// Answers the approval `id`; false when it is no longer waiting.
     pub fn answer(&self, id: &str, choice: Choice) -> bool {
-        let Some(p) = lock(&self.pending).remove(id) else {
-            return false;
-        };
-        p.reply.send(approval_for(choice, &p.offered)).is_ok()
+        match (&self.live, &self.remote) {
+            (Some(l), _) => l.asks.answer(id, choice),
+            (_, Some(r)) => r.answer(id, choice),
+            _ => false,
+        }
     }
 
     /// Answers the plan or question `id` (`None`: nobody answers); false when it is gone.
     pub fn answer_input(&self, id: &str, reply: Option<UserReply>) -> bool {
-        let Some(r) = lock(&self.inputs).remove(id) else {
-            return false;
-        };
-        r.send(reply).is_ok()
+        match (&self.live, &self.remote) {
+            (Some(l), _) => l.asks.answer_input(id, reply),
+            (_, Some(r)) => r.answer_input(id, reply),
+            _ => false,
+        }
     }
 
     /// Ends the session like the CLI host does (`round`): the `SessionEnd` hook, the stored usage,
     /// `session.completed`, the MCP servers, the worktree; then stops the runtime. Returns what the
-    /// worktree finish found (path, branch, changes, cleanup), for the caller to show.
+    /// worktree finish found (path, branch, changes, cleanup), for the caller to show. A remote engine is
+    /// asked to close and, if it does not within a few seconds, killed.
     pub fn close(mut self) -> Option<String> {
-        self.cancel();
-        let outcome = lock(&self.last).take();
-        let mut outcome = outcome.unwrap_or(TaskOutcome {
-            task_id: String::new(),
-            status: synthesis_events::TaskStatus::Completed,
-            reason: "closed".into(),
-            verification_report_id: None,
-            final_text: String::new(),
-            usage: synthesis_events::Usage {
-                input_tokens: 0,
-                output_tokens: 0,
-                cache_read_input_tokens: None,
-                cache_creation_input_tokens: None,
-                cost_usd: None,
-            },
-            changed_files: vec![],
-            needed_permissions: vec![],
-            messages: vec![],
-        });
-        if !self.began {
-            outcome.status = synthesis_events::TaskStatus::Failed;
-            outcome.reason = "session_start_failed".into();
+        if let Some(r) = self.remote.take() {
+            return r.close();
         }
-        let rt = self.tokio.take()?;
-        if self.began {
-            rt.block_on(self.harness.session_hook(
-                HookEvent::SessionEnd,
-                json!({"reason": outcome.reason}),
-                Some(&outcome.reason),
-            ));
-        }
-        // the usage of the tasks that ran (the session is back unless a task outlived the window)
-        if let (Some(s), Some(sess)) = (&self.host.store, lock(&self.session).as_ref()) {
-            finish_store(s, self.host.transcript.as_deref(), &outcome, &sess.usage);
-        }
-        self.harness.end_session(&outcome);
-        if let Some(t) = &self.host.transcript {
-            t.clear_notifier(); // break the sink <-> transcript cycle: the next session needs the store lock
-        }
-        self.rt.close_session(&self.sid);
-        if let Some(m) = &self.mcp {
-            rt.block_on(m.close());
-        }
-        let finished = self
-            .worktree
-            .as_ref()
-            .map(|w| w.finish(self.cleanup_worktree));
-        rt.shutdown_background();
-        // the global hook holds the memory run, and with it the event sink and the session
-        // store's write lock: the restarted session (resume, new folder) must be able to open it
-        synthesis_tools::set_learned_skills(None);
-        finished
+        self.live.take()?.close()
     }
 }
 
@@ -1753,36 +1444,9 @@ mod trust_tests {
         );
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use synthesis_harness::ApprovalDecision;
-    use synthesis_permissions::RuleSpec;
-
-    fn offered() -> Vec<Suggestion> {
-        vec![Suggestion::AddRules {
-            rules: vec![RuleSpec {
-                tool_name: "Bash".into(),
-                rule_content: Some("ls".into()),
-            }],
-            behavior: synthesis_permissions::Decision::Allow,
-        }]
-    }
-
-    #[test]
-    fn choices_map_to_decisions_and_only_always_carries_rules() {
-        let s = offered();
-        let once = approval_for(Choice::Once, &s);
-        assert_eq!(once.decision, ApprovalDecision::Allow);
-        assert!(once.accepted.is_empty());
-        let always = approval_for(Choice::Always, &s);
-        assert_eq!(always.decision, ApprovalDecision::Allow);
-        assert_eq!(always.accepted, s);
-        let deny = approval_for(Choice::Deny, &s);
-        assert_eq!(deny.decision, ApprovalDecision::Deny);
-        assert!(deny.accepted.is_empty());
-    }
 
     #[test]
     fn event_lines_split_across_writes_and_a_broken_one_is_reported() {
@@ -1799,90 +1463,5 @@ mod tests {
             matches!(rx.try_recv().unwrap(), UiMsg::BadEvent(m) if m.contains("unreadable event"))
         );
         assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn a_gone_window_denies_instead_of_hanging() {
-        let (tx, rx) = unbounded();
-        drop(rx);
-        let ap = ChanApprover {
-            pending: PendingMap::default(),
-            tx: tx.clone(),
-        };
-        let inp = ChanInput {
-            pending: InputMap::default(),
-            tx,
-        };
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        let cancel = CancellationToken::new();
-        let a = rt.block_on(ap.approve(
-            ApprovalRequest {
-                approval_id: "a".into(),
-                agent_id: None,
-                tool_call_id: "t".into(),
-                tool: "Bash".into(),
-                input: json!({}),
-                dialog: "permission",
-                prompt: String::new(),
-                reason: String::new(),
-                suggestions: vec![],
-                origin: None,
-            },
-            &cancel,
-        ));
-        assert_eq!(a.decision, ApprovalDecision::AutoDenied);
-        let q = NeedsUser::ExitPlanMode { plan: "p".into() };
-        assert!(rt.block_on(inp.ask(&q, &cancel)).is_none());
-    }
-
-    #[test]
-    fn allow_always_never_offers_bypass() {
-        let (tx, mut rx) = unbounded();
-        let pending = PendingMap::default();
-        let ap = ChanApprover {
-            pending: pending.clone(),
-            tx,
-        };
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap();
-        let cancel = CancellationToken::new();
-        let c2 = cancel.clone();
-        // cancelled right after the ask is out: the approver answers with a policy denial
-        let req = ApprovalRequest {
-            approval_id: "a".into(),
-            agent_id: None,
-            tool_call_id: "t".into(),
-            tool: "Bash".into(),
-            input: json!({}),
-            dialog: "permission",
-            prompt: String::new(),
-            reason: "why".into(),
-            suggestions: vec![
-                Suggestion::SetMode(Mode::BypassPermissions),
-                offered().remove(0),
-            ],
-            origin: None,
-        };
-        let r = rt.block_on(async {
-            let f = ap.approve(req, &cancel);
-            tokio::pin!(f);
-            tokio::select! {
-                _ = &mut f => unreachable!("nobody answered"),
-                () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
-            }
-            c2.cancel();
-            f.await
-        });
-        assert_eq!(r.decision, ApprovalDecision::Deny);
-        let Some(UiMsg::Approval(a)) = rx.try_recv().ok() else {
-            panic!("the ask reaches the window")
-        };
-        assert_eq!(a.suggestions, offered());
-        assert_eq!(a.reason, "why");
-        assert!(matches!(rx.try_recv().ok(), Some(UiMsg::Withdraw(id)) if id == "a"));
     }
 }
