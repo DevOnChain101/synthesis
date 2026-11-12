@@ -316,13 +316,16 @@ pub(crate) fn helper_check(exe: &Path) -> Result<PathBuf, String> {
         .ok()
         .map(|m| std::os::unix::fs::MetadataExt::uid(&m));
     let group = std::fs::read_to_string("/etc/group").ok();
-    let private = |gid: u32| {
-        euid == Some(gid)
-            && group
-                .as_deref()
-                .is_some_and(|g| group_has_no_members(g, gid))
+    let trusted = |owner: u32, gid: u32| {
+        let empty = group
+            .as_deref()
+            .is_some_and(|g| group_has_no_members(g, gid));
+        // yours: your private group (gid == uid, no listed members); root's: root's own group, or a
+        // system group (gid < 1000) that lists no members (Debian `/usr/local` is root:staff 2775)
+        (euid == Some(owner) && owner == gid && empty)
+            || (owner == 0 && (gid == 0 || (gid < 1000 && empty)))
     };
-    helper_check_with(exe, euid, &private)
+    helper_check_with(exe, euid, &trusted)
 }
 
 /// `/etc/group` text: the group `gid` exists and lists no members (a user's primary group is not
@@ -335,13 +338,39 @@ fn group_has_no_members(text: &str, gid: u32) -> bool {
     })
 }
 
+/// What is wrong with a directory on the helper's path, if anything (pure, so the rules are
+/// tested with root-owned and foreign modes too). `own` = the helper's own directory;
+/// `group_trusted(owner, gid)` says whether write access for that group is acceptable.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn dir_problem(
+    (mode, uid, gid): (u32, u32, u32),
+    own: bool,
+    euid: Option<u32>,
+    group_trusted: &dyn Fn(u32, u32) -> bool,
+) -> Option<&'static str> {
+    let (world, sticky, group_w) = (mode & 0o002 != 0, mode & 0o1000 != 0, mode & 0o020 != 0);
+    if !(uid == 0 || euid.is_none_or(|e| uid == e)) {
+        Some("is not owned by root or you")
+    } else if world && (own || !sticky) {
+        Some("is world-writable")
+    } else if world {
+        // A sticky world-writable ancestor (`/tmp`: 1777) is tolerated: others cannot rename or
+        // remove entries they do not own. Its group bit is moot, anyone can write it anyway.
+        None
+    } else if group_w && !group_trusted(uid, gid) {
+        Some("is group-writable (refused unless it is yours with your private group, or root's)")
+    } else {
+        None
+    }
+}
+
 /// [`helper_check`] with the effective uid (`None` = skip owner checks) and the "this gid is the
 /// user's private group" test injected.
 #[cfg(any(target_os = "linux", all(test, unix)))]
 pub(crate) fn helper_check_with(
     exe: &Path,
     euid: Option<u32>,
-    private_gid: &dyn Fn(u32) -> bool,
+    group_trusted: &dyn Fn(u32, u32) -> bool,
 ) -> Result<PathBuf, String> {
     use std::os::unix::fs::MetadataExt;
     if exe.to_string_lossy().ends_with(" (deleted)") {
@@ -366,26 +395,14 @@ pub(crate) fn helper_check_with(
     let real = std::fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for (i, d) in real.ancestors().enumerate() {
         let m = std::fs::metadata(d).map_err(|e| format!("{}: {e}", d.display()))?;
-        let own = i == 0;
-        let world = m.mode() & 0o002 != 0;
-        let sticky = m.mode() & 0o1000 != 0;
-        let group_w = m.mode() & 0o020 != 0;
-        let group_ok = !group_w || (euid == Some(m.uid()) && private_gid(m.gid()));
-        let bad = if !owner_ok(&m) {
-            Some("is not owned by root or you")
-        } else if world && (own || !sticky) {
-            Some("is world-writable")
-        } else if !group_ok {
-            Some(
-                "is group-writable (refused unless it is yours and its group is your private group)",
-            )
-        } else {
-            None
-        };
-        if let Some(why) = bad {
+        let facts = (m.mode(), m.uid(), m.gid());
+        if let Some(why) = dir_problem(facts, i == 0, euid, group_trusted) {
             return Err(format!(
-                "{} {why}; the sandbox helper must not be replaceable by others: group-writable and world-writable directories are refused (`chmod go-w {}`)",
+                "{} {why} (mode {:o}, uid {}, gid {}); the sandbox helper must not be replaceable by others: group-writable and world-writable directories are refused (`chmod go-w {}`)",
                 d.display(),
+                facts.0 & 0o7777,
+                facts.1,
+                facts.2,
                 d.display()
             ));
         }
@@ -1143,6 +1160,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     fn wsl_ctx(drive: &Path, resolv: Option<&Path>) -> crate::wsl::WslCtx {
         crate::wsl::WslCtx {
             host: synthesis_platform::wsl::WslHost {
@@ -1161,6 +1179,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn joined(a: Vec<std::ffi::OsString>) -> String {
         a.iter()
             .map(|s| s.to_string_lossy().into_owned())
@@ -1284,9 +1303,9 @@ mod tests {
             |d: &Path, m| std::fs::set_permissions(d, std::fs::Permissions::from_mode(m)).unwrap();
         let me = std::fs::metadata(&dir).unwrap().uid();
         let gid = std::fs::metadata(&dir).unwrap().gid();
-        let mine = |g: u32| g == gid; // "the user's private group"
-        let foreign = |_: u32| false;
-        let run = |p: &dyn Fn(u32) -> bool| helper_check_with(&exe, Some(me), p);
+        let mine = |o: u32, g: u32| o == me && g == gid; // "the user's private group"
+        let foreign = |_: u32, _: u32| false;
+        let run = |p: &dyn Fn(u32, u32) -> bool| helper_check_with(&exe, Some(me), p);
         mode(&anc, 0o755);
         // 0775 in the user's private group (default umask 0002): accepted
         mode(&dir, 0o775);
@@ -1310,6 +1329,67 @@ mod tests {
         // a foreign owner is refused whatever the mode
         assert!(helper_check_with(&exe, Some(me.wrapping_add(1)), &mine).is_err());
         mode(&anc, 0o755);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dir_rules_for_the_layouts_real_machines_have() {
+        let me = Some(1001);
+        let mine = |o: u32, g: u32| o == 1001 && g == 1001;
+        let none = |_: u32, _: u32| false;
+        let sys = |o: u32, g: u32| o == 0 && g < 1000;
+        let p = |m, u, g, own, t: &dyn Fn(u32, u32) -> bool| dir_problem((m, u, g), own, me, t);
+        // /tmp (1777 root:root), /usr/local/bin (0755 root), the runner's 0700 tempdir, ~/.synt/bin (0775 own group)
+        assert_eq!(
+            p(0o41777, 0, 0, false, &none),
+            None,
+            "sticky world-writable ancestor"
+        );
+        assert_eq!(p(0o40755, 0, 0, true, &none), None);
+        assert_eq!(p(0o40700, 1001, 1001, true, &none), None);
+        assert_eq!(p(0o40775, 1001, 1001, true, &mine), None);
+        assert_eq!(
+            p(0o42775, 0, 50, false, &sys),
+            None,
+            "Debian /usr/local: root:staff 2775"
+        );
+        // refused: the security intent
+        assert!(
+            p(0o40777, 1001, 1001, false, &mine)
+                .unwrap()
+                .contains("world-writable"),
+            "no sticky"
+        );
+        assert!(
+            p(0o41777, 1001, 1001, true, &mine)
+                .unwrap()
+                .contains("world-writable"),
+            "own dir, even sticky"
+        );
+        assert!(
+            p(0o40775, 1001, 100, true, &none)
+                .unwrap()
+                .contains("group-writable"),
+            "foreign group"
+        );
+        assert!(
+            p(0o40775, 0, 1500, false, &sys)
+                .unwrap()
+                .contains("group-writable"),
+            "user group under root"
+        );
+        assert!(
+            p(0o40755, 1002, 1002, false, &mine)
+                .unwrap()
+                .contains("not owned"),
+            "foreign owner"
+        );
+        assert!(
+            p(0o41777, 1002, 1002, false, &mine)
+                .unwrap()
+                .contains("not owned"),
+            "foreign sticky dir"
+        );
     }
 
     #[cfg(unix)]
@@ -1571,7 +1651,14 @@ mod tests {
                 .envs(w.env.iter().cloned())
                 .output()
                 .unwrap();
-            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+            assert!(
+                o.status.success(),
+                "bwrap failed ({}): stderr={:?} stdout={:?} args={:?}",
+                o.status,
+                String::from_utf8_lossy(&o.stderr),
+                String::from_utf8_lossy(&o.stdout),
+                &w.args[3..]
+            );
             Some(String::from_utf8_lossy(&o.stdout).into_owned())
         }
 
@@ -1616,7 +1703,7 @@ mod tests {
         fn drive_is_hidden_by_default_and_the_workspace_stays_writable() {
             let f = fx();
             let script = format!(
-                "ls -A {d}; test -e {d}/secret.txt && echo SECRET-VISIBLE; echo a > {w}/ok.txt && echo ws-written; (echo b > {d}/evil.txt) 2>/dev/null && echo DRIVE-WRITTEN",
+                "ls -A {d}; test -e {d}/secret.txt && echo SECRET-VISIBLE; echo a > {w}/ok.txt && echo ws-written; (echo b > {d}/evil.txt) 2>/dev/null && echo DRIVE-WRITTEN; true",
                 d = f.drive.display(),
                 w = f.ws.display()
             );
@@ -1640,7 +1727,7 @@ mod tests {
             std::fs::create_dir_all(&tools).unwrap();
             std::fs::write(tools.join("t.txt"), "t").unwrap();
             let script = format!(
-                "cat {t}/t.txt; test -e {d}/secret.txt && echo SECRET-VISIBLE; (echo x > {t}/n) 2>/dev/null && echo TOOLS-WRITTEN",
+                "cat {t}/t.txt; test -e {d}/secret.txt && echo SECRET-VISIBLE; (echo x > {t}/n) 2>/dev/null && echo TOOLS-WRITTEN; true",
                 t = tools.display(),
                 d = f.drive.display()
             );

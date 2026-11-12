@@ -146,7 +146,10 @@ jobs:
           # Linux: the sandbox helper must exist next to synt and its seccomp mode must run.
           case "$TARGET" in
             *linux*)
-              [ -n "${HELPER:-}" ] && [ -x "$HELPER" ] || { echo "::error::synthesis-sandbox-exec missing from the Linux build"; exit 1; }
+              if [ -z "${HELPER:-}" ] || [ ! -x "$HELPER" ]; then
+                echo "::error::synthesis-sandbox-exec missing from the Linux build"
+                exit 1
+              fi
               "$HELPER" --no-vsock -- /bin/true
               ;;
           esac
@@ -157,7 +160,13 @@ jobs:
           mkdir -p "dist/$name"
           cp "$BIN" "dist/$name/"
           case "$TARGET" in
-            *linux*) [ -f "$HELPER" ] || { echo "::error::Linux archive needs synthesis-sandbox-exec"; exit 1; }; cp "$HELPER" "dist/$name/" ;;
+            *linux*)
+              if [ ! -f "$HELPER" ]; then
+                echo "::error::Linux archive needs synthesis-sandbox-exec"
+                exit 1
+              fi
+              cp "$HELPER" "dist/$name/"
+              ;;
           esac
           cp LICENSE NOTICE README.md "dist/$name/"
           cd dist || exit 1

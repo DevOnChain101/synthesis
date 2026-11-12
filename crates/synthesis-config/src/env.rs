@@ -193,12 +193,11 @@ pub fn is_secret_shaped(name: &str) -> bool {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))] // PATH entries are canonicalised against the real filesystem
 mod tests {
     use super::*;
     use synthesis_platform::wsl::{WslHost, WslVersion};
 
-    #[cfg(unix)] // PATH entries are canonicalised against the real filesystem
     #[test]
     fn child_env_on_wsl_drops_windows_dirs_and_interop_names() {
         let path = std::env::join_paths(["/usr/bin", "/mnt/c/Windows/System32", "/usr"]).unwrap();
