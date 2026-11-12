@@ -261,7 +261,7 @@ pub fn remembered_trust(
 /// else the launch flags as `common_for` leaves them, plus trust when the user store remembers the project, its
 /// trusted configuration is unchanged and the sandbox is enforcing (a shell that can run unconfined could have
 /// written the store; session-only trust and `--trust-project` still work then). A changed configuration starts
-/// the project untrusted with a notice naming the files; the Files tab asks again.
+/// the project untrusted with a notice naming the files; /trust ask asks again.
 pub fn launch_common(
     c: &Common,
     granted: &Path,
@@ -305,7 +305,7 @@ pub fn launch_common(
             chk = Some(check(&root, m));
         }
         Remembered::Changed { files, since } => notes.push(format!(
-            "project config changed since you trusted it on {since} ({}): {shown} starts untrusted; review the files, then open the Files tab to trust it again",
+            "project config changed since you trusted it on {since} ({}): {shown} starts untrusted; review the files, then run /trust ask to trust it again",
             sanitize_for_display(&files.join(", "))
         )),
     }

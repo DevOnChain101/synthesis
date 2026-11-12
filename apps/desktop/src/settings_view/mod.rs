@@ -1158,7 +1158,7 @@ impl SettingsView {
         let mut c = card();
         if m.trusted.is_empty() {
             c = c.child(div().px(px(14.)).py(px(12.)).child(small(
-                "None remembered. The Files tab offers it for a folder.",
+                "None remembered. `/trust ask` offers it for a folder.",
                 t::MUTED,
             )));
         }

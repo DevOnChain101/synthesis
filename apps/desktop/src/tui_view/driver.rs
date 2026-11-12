@@ -367,8 +367,15 @@ impl TuiView {
         lu.live.starting_distro = crate::wsl::enabled(&lu.cfg.synthesis_home).unwrap_or(false);
         lu.live.engine = None;
         lu.dirty = true;
-        // trust follows only a restart of the same session
-        if !matches!(target, Some(Target::Model(_) | Target::Trust)) {
+        // `session_trust` names its root and `launch_common` applies it only to that root, so a session-only
+        // trust with a manifest stays across sessions of the same folder. A remembered one lives in the store
+        // (which honours /trust revoke), and one without a manifest would skip the change check: neither carries
+        if !matches!(target, Some(Target::Trust))
+            && lu
+                .session_trust
+                .as_ref()
+                .is_some_and(|(_, manifest, exec)| manifest.is_none() || !exec)
+        {
             lu.session_trust = None;
         }
         let cfg = lu.cfg.clone();
@@ -437,6 +444,11 @@ impl TuiView {
                 lu.pending_remember.clear();
                 lu.model_override = l.model;
                 lu.live.attach(Arc::new(l.engine), l.replay);
+                lu.live.session_grant = lu
+                    .session_trust
+                    .as_ref()
+                    .filter(|t| t.2)
+                    .map(|t| t.0.to_string_lossy().into_owned());
                 lu.list_reset = true;
                 lu.stick();
                 let rx = l.rx;
@@ -1637,7 +1649,7 @@ impl TuiView {
         let (true, None) = (lu.live.engine.is_some(), why) else {
             lu.live.note(
                 format!(
-                    "trust not applied ({}): open the Files tab again when the session is idle",
+                    "trust not applied ({}): run /trust ask again when the session is idle",
                     why.unwrap_or("the session is still starting")
                 ),
                 true,
@@ -1777,6 +1789,25 @@ impl TuiView {
             ),
             Action::Model(m) => return self.switch(Target::Model(m), "model".into(), cx),
             Action::TrustFolder(grant) => return self.trust_folder(grant, cx),
+            Action::TrustRevoked(root) => {
+                if lu
+                    .session_trust
+                    .as_ref()
+                    .is_some_and(|t| t.0.starts_with(&root))
+                {
+                    lu.session_trust = None;
+                    lu.live.session_grant = None;
+                }
+            }
+            Action::AskTrust => {
+                let home = lu.cfg.home.as_deref().map(Path::new);
+                if !lu.live.ask_trust(now_ms(), home) && !lu.live.trusted {
+                    lu.live.note(
+                        "/trust ask: no dialog (the session is starting or the question is open)",
+                        true,
+                    );
+                }
+            }
             Action::Resume(id) => return self.open_session(&id, cx),
             Action::RefreshModels => {
                 let (env, project) = (lu.cfg.env.clone(), lu.cfg.project.clone());

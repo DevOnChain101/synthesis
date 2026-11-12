@@ -1,4 +1,4 @@
-//! The Trust dialog the Files tab raises in an untrusted folder: the real engine on a scripted model, a
+//! The Trust dialog `/trust ask` raises in an untrusted folder: the real engine on a scripted model, a
 //! temp `SYNT_HOME`. Declining (Not now, Esc), type-ahead and the arming delay never trust anything.
 
 use std::sync::Arc;
@@ -398,7 +398,10 @@ fn trust_lists_and_revokes_with_a_confirmation_that_keeps_by_default() {
     l.submit(&format!("/trust revoke {}", app.display()));
     let k = l.pick(1, i64::MAX).unwrap();
     assert_eq!(k, "revoke");
-    assert_eq!(l.answer(&k, 1000), None);
+    assert_eq!(
+        l.answer(&k, 1000),
+        Some(Action::TrustRevoked(app.display().to_string()))
+    );
     assert!(
         synthesis_session::trust::list(&home)
             .unwrap()
@@ -407,6 +410,25 @@ fn trust_lists_and_revokes_with_a_confirmation_that_keeps_by_default() {
     );
     let last = last_text(&l);
     assert!(last.contains("next engine start"), "{last}");
+}
+
+/// A session-only trust is listed by `/trust` and ended by `/trust revoke` of its root.
+#[test]
+fn a_session_trust_is_listed_and_revoke_ends_it() {
+    let (mut l, _d, app) = rig_nested();
+    let root = app.display().to_string();
+    l.session_grant = Some(root.clone());
+    let mark = l.view.convo.items.len();
+    l.submit("/trust");
+    let t = notices_from(&l, mark);
+    assert!(
+        t.contains("session-only trust active") && t.contains("until the app exits"),
+        "{t}"
+    );
+    l.submit(&format!("/trust revoke {root}"));
+    let k = l.pick(1, i64::MAX).unwrap();
+    assert_eq!(l.answer(&k, 1000), Some(Action::TrustRevoked(root)));
+    assert_eq!(l.session_grant, None);
 }
 
 #[test]
