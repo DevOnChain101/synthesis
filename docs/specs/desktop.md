@@ -432,3 +432,32 @@ desktop behind the window).
   - **Git in the file explorer** (after trust) is the hardened read-only `git` of `synthesis-view::project`: absolute exe, closed environment (`GIT_CONFIG_NOSYSTEM`, `GIT_PAGER=cat`, no askpass, no API keys), `core.fsmonitor`, `core.hooksPath`, `core.pager`, `core.sshCommand`, `core.askPass`, `credential.helper`, `diff.external` and every `filter.*` driver neutralised with `-c`, `protocol.allow=never`, bounded output and a wall-clock limit with a process-group kill.
   - If the restart after "remember" fails, the rows that answer wrote are removed.
 - `/trust` lists the remembered folders (date, fingerprint state); `/trust revoke <n|path>` confirms in the dock (Keep is the default); Settings > Guards lists them with a Revoke button. Revoking takes effect at the next engine start.
+
+## 8. Engine over stdio (`synt engine --stdio`, INTERNAL)
+
+Hidden subcommand, not a public interface: it exists so the desktop app can drive an engine that runs somewhere else (WSL2 on Windows, increment PR2) through a child process. It takes the same flags as `synt run`'s `Common` (`--model`, `--provider`, `--sandbox`, `--trust-project`, ...) and the process environment as every other command. Code: `crates/synthesis-app/src/{proto,engine_server,host,asks}.rs` (protocol, server, the session host shared with the desktop window, the approval/question dialogs), client `apps/desktop/src/remote.rs`, `Engine::start_remote`.
+
+**Transport.** stdin/stdout, one JSON object per line, UTF-8, `\n` (a `\r` before it is dropped). stdout carries protocol lines only; diagnostics go to stderr, printable and short. A line over 8 MiB is a broken stream: the engine ends the session, the client kills the child. stdin EOF ends the session like `close` (hooks, stored usage, MCP, worktree; the engine kills its own process groups as in every session).
+
+**Engine to client.**
+- First line `{"msg":"hello","version":"<synt version>","protocol":1}`. The match is exact on both fields; the client refuses and kills the engine on any difference (no negotiation: install the matching version). `pgid` is not sent yet.
+- Event lines: the ordinary `Envelope` of events.md (`v`, `seq`, `session_id`, ..., `type`, `payload`); they have no `msg` key.
+- `{"msg":"result","id":N,"ok":{...}}` or `{"msg":"result","id":N,"error":"text"}`, the answer to request N.
+- `{"msg":"ask.approval","id","agent_id","tool","input","dialog","prompt","reason","origin","suggestions":[...]}`: a permission ask. `suggestions` are `{"kind":"rules","behavior","rules":[{"tool","content"}]}` or `{"kind":"mode","mode"}`; bypassPermissions is never offered or accepted.
+- `{"msg":"ask.input","id","req":<NeedsUser>}`: a plan or question dialog.
+- `{"msg":"withdraw","id"}`: the ask is gone (answered, cancelled, expired).
+- `{"msg":"task_done","error":null|"text"}`: the task started by `send` ended.
+Asks are answered by a person only: nothing on either side answers one; an ask nobody can answer is denied (cancel withdraws it).
+
+**Client to engine.** `{"id":N,"method":"...","params":{...}}`; `id` is a number the client chooses; unit methods carry no `params`. A line that does not parse is ignored (a note on stderr), the engine keeps serving.
+
+| method | params | result `ok` |
+|---|---|---|
+| `start` | `{cwd}`: an absolute folder path on the engine's own OS, once per process | `{sid,label,models,effort_tiers,context_window,notices,cwd,root,stale_model,trusted}` |
+| `send` | `{text}`: starts a task (`task_done` follows; an error result: one is running, or not started) | `{}` |
+| `answer` | `{id,choice}`: `once` \| `always` \| `deny` for an `ask.approval` | `{accepted}` (false: no such ask waiting) |
+| `answer_input` | `{id,reply}`: `{"answers":<json>}`, `{"plan":{"approved","message","mode"}}` or `null` | `{accepted}` |
+| `cancel` | none | `{}` |
+| `close` (alias `shutdown`) | none; the engine ends the session, answers `{worktree}`, and exits | `{worktree}` |
+
+Not yet in the protocol (PR3): sessions list/resume, workspaces, trust, rewind, clean, file system, images, mode and effort changes. A remote `Engine` answers those with "not supported in remote mode yet". The client bounds every wait (hello 15 s, start 120 s, close 10 s), kills the child when it is dropped, when its stream breaks or after 100 unreadable lines, and makes the engine's text printable before the window shows it.

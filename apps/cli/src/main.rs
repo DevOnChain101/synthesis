@@ -38,6 +38,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// INTERNAL: the engine of one session over stdin/stdout JSON lines (docs/specs/desktop.md).
+    #[command(hide = true)]
+    Engine(Box<EngineArgs>),
     /// Run one task headless; events (JSONL) go to stdout.
     Run(Box<run::RunArgs>),
     /// Credential status per provider.
@@ -73,6 +76,15 @@ enum Cmd {
     },
 }
 
+#[derive(clap::Args)]
+struct EngineArgs {
+    /// The only transport.
+    #[arg(long)]
+    stdio: bool,
+    #[command(flatten)]
+    common: run::Common,
+}
+
 #[derive(Subcommand)]
 enum BrowserCmd {
     /// Tell a waiting `browser_login` that you finished logging in to PROFILE.
@@ -89,6 +101,8 @@ fn main() -> ExitCode {
     let env = Env::from_process();
     let r = match cli.cmd {
         None => cli_app::launch(cli.app, env),
+        Some(Cmd::Engine(a)) if !a.stdio => Err("engine: --stdio is required".into()),
+        Some(Cmd::Engine(a)) => synthesis_app::engine_server::run_stdio(&a.common, &env),
         Some(Cmd::Run(a)) => run::run(*a, env),
         Some(Cmd::Auth {
             cmd: AuthCmd::Status(a),
