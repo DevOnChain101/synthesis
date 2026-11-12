@@ -245,6 +245,9 @@ impl SettingsSchema {
             b("synt.shell.user_commands_unsandboxed", Execution, "Run !cmd outside the sandbox", false)
                 .help("Off: `!cmd` runs in the same sandbox and network mode as the Bash tool.")
                 .edit(Edit::Confirm("this runs your `!` commands without the OS sandbox")),
+            b("synt.sandbox.wsl.hide_windows_drives", Execution, "WSL: hide Windows drives from commands", true)
+                .help("On WSL the sandbox hides /mnt/c and the other Windows drives from commands (the workspace and --sandbox-read folders on a drive stay). Off: drives stay readable (still never writable). Costs when on: sibling projects on a drive and symlinks into /mnt/c are not visible.")
+                .edit(Edit::Confirm("this lets sandboxed commands READ your Windows drives")),
             b("synt.modelInfo.fetch", Execution, "Fetch model info at start", true)
                 .help("Ask each provider's /v1/models for context windows and limits."),
             Field::new("synt.compat.write_node_transcripts", Execution, "Write Node-format transcripts", Bool)
@@ -429,7 +432,13 @@ pub fn group_of(key: &str, section: Section) -> &'static str {
         {
             "Models and context"
         }
-        Execution if key.starts_with("synt.shell.") || key == "env" => "Shell and environment",
+        Execution
+            if key.starts_with("synt.shell.")
+                || key.starts_with("synt.sandbox.")
+                || key == "env" =>
+        {
+            "Shell and environment"
+        }
         Execution if key.starts_with("synt.browser.") => "Browser",
         Execution => "Compatibility",
         Guards if key == "autoMode" => "Auto mode",

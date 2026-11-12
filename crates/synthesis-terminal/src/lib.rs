@@ -608,6 +608,8 @@ pub struct TerminalRuntime {
     backends: OnceLock<Backends>,
     /// The unconfined-fallback notice is printed once.
     degraded_noted: AtomicBool,
+    /// The WSL warning for a person-typed unconfined (`!`) command is printed once.
+    unconfined_noted: AtomicBool,
 }
 
 impl Default for TerminalRuntime {
@@ -631,6 +633,7 @@ impl TerminalRuntime {
             next_id: AtomicU64::new(1),
             backends: OnceLock::new(),
             degraded_noted: AtomicBool::new(false),
+            unconfined_noted: AtomicBool::new(false),
         }
     }
 
@@ -735,7 +738,7 @@ impl TerminalRuntime {
         cmd: &SandboxedCommand,
     ) -> Result<Option<(SandboxedCommand, SandboxCapabilities)>> {
         let refuse = |why: String| Err(Error::SandboxUnavailable(why));
-        let wsl = synthesis_sandbox::wsl::host().is_some();
+        let wsl = synthesis_sandbox::wsl::is_wsl();
         let mode = effective_mode(self.mode, wsl);
         if wsl && mode == SandboxMode::Off && !self.degraded_noted.swap(true, Ordering::Relaxed) {
             eprintln!(
@@ -781,6 +784,11 @@ impl TerminalRuntime {
                     policy.network,
                     required
                 ));
+            }
+            if wsl {
+                // Before anything is created: a drive temp dir or workspace is refused first.
+                synthesis_sandbox::wsl::preflight(policy, cmd.cwd.as_deref())
+                    .map_err(|e| Error::InvalidSpec(format!("sandbox policy: {e}")))?;
             }
             if let Some(t) = &policy.tmp_dir {
                 create_private_dir(t)?;
@@ -875,6 +883,13 @@ impl TerminalRuntime {
         };
         let policy = io.sandbox.take().or(session_policy);
         let confined = if io.unconfined {
+            if synthesis_sandbox::wsl::is_wsl()
+                && !self.unconfined_noted.swap(true, Ordering::Relaxed)
+            {
+                eprintln!(
+                    "synt: WARNING: a command you typed with ! runs OUTSIDE the sandbox on WSL: it can start Windows programs and write your Windows drives"
+                );
+            }
             None
         } else {
             self.sandboxed(policy.as_ref(), &base)?

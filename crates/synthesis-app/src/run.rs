@@ -101,7 +101,11 @@ pub fn sandbox_preflight(
     backend: &dyn SandboxBackend,
     policy: Option<&synthesis_terminal::SandboxPolicy>,
 ) -> Result<(), String> {
-    let hint = "run `synt doctor` to see the sandbox backends, or pass --sandbox best-effort|off to run unconfined";
+    let hint = if synthesis_sandbox::wsl::is_wsl() {
+        "run `synt doctor` to see the sandbox backends, or pass --sandbox off to run unconfined (best-effort is enforce on WSL)"
+    } else {
+        "run `synt doctor` to see the sandbox backends, or pass --sandbox best-effort|off to run unconfined"
+    };
     let skipped = synthesis_sandbox::skipped_backends();
     let skipped = if skipped.is_empty() {
         String::new()
@@ -151,15 +155,36 @@ pub fn default_sandbox_mode(job_object_only: bool) -> SandboxMode {
 
 /// The loud one-liner for a defaulted best-effort mode (`None` when the mode is not defaulted).
 pub fn sandbox_default_notice(c: &Common) -> Option<String> {
+    if matches!(c.sandbox, Some(SandboxArg::BestEffort)) && c.sandbox_mode() == SandboxMode::Enforce
+    {
+        return Some("sandbox: --sandbox best-effort is enforce on WSL (WSL is not isolation: Windows programs and drives stay reachable without the sandbox); only --sandbox off runs commands unconfined".to_string());
+    }
     (c.sandbox.is_none() && c.sandbox_mode() == SandboxMode::BestEffort).then(|| {
         "sandbox: this OS has no command confinement (Windows Job Object only), so commands run UNCONFINED with your privileges; pass --sandbox enforce to refuse them instead".to_string()
     })
 }
 
+/// THE effective mode, resolved once (preflight, notices, browser and exposure warnings all
+/// read it): WSL is not isolation (Windows interop), so best-effort, explicit or defaulted, is
+/// enforce there; only an explicit `off` runs unconfined.
+pub fn resolve_sandbox_mode(
+    explicit: Option<SandboxArg>,
+    job_object_only: bool,
+    wsl: bool,
+) -> SandboxMode {
+    match explicit.map_or_else(|| default_sandbox_mode(job_object_only), SandboxArg::mode) {
+        SandboxMode::BestEffort if wsl => SandboxMode::Enforce,
+        m => m,
+    }
+}
+
 impl Common {
     pub fn sandbox_mode(&self) -> SandboxMode {
-        self.sandbox
-            .map_or_else(|| default_sandbox_mode(cfg!(windows)), SandboxArg::mode)
+        resolve_sandbox_mode(
+            self.sandbox,
+            cfg!(windows),
+            synthesis_sandbox::wsl::is_wsl(),
+        )
     }
 }
 
@@ -569,9 +594,11 @@ pub fn sandbox_status(mode: SandboxMode, unsandboxed: bool) -> synthesis_cli_ui:
 pub fn sandbox_notices(mode: SandboxMode, network: NetworkArg) -> Vec<String> {
     let mut n = vec![];
     match mode {
-        SandboxMode::Off => n.push(
-            "unsandboxed_by_request: --sandbox off, commands run with the agent's full privileges".to_string(),
-        ),
+        SandboxMode::Off => n.push(if synthesis_sandbox::wsl::is_wsl() {
+            "unsandboxed_by_request: --sandbox off on WSL, commands run with the agent's full privileges and can start Windows programs (cmd.exe, powershell.exe) and write your Windows drives".to_string()
+        } else {
+            "unsandboxed_by_request: --sandbox off, commands run with the agent's full privileges".to_string()
+        }),
         SandboxMode::BestEffort => n.push(
             "sandbox best-effort: commands run unconfined (unsandboxed_by_request) when the OS backend cannot confine".to_string(),
         ),
@@ -954,12 +981,14 @@ pub fn prepare(
 
     let sandbox_mode = c.sandbox_mode();
     let net = c.network.policy();
+    let hide_drives = settings.synthesis.wsl_hide_windows_drives != Some(false);
     let git_dir = worktree.as_ref().map(|w| w.info.git_dir.clone());
     let state_paths = synthesis_deny.clone();
     let build = Arc::new(move |ws: &synthesis_core::WorkspaceContext| {
         let mut p = standard_policy_git(ws, net.clone(), git_dir.as_deref())?;
         p.deny_paths.extend(synthesis_deny.clone());
         p.readable_roots.extend(reads.iter().cloned());
+        p.wsl_hide_drives = hide_drives;
         Ok::<_, String>(p)
     });
     // Per call an Err becomes None, which the terminal runtime REFUSES under Enforce (it only
@@ -2632,6 +2661,22 @@ mod tests {
             assert_eq!(c.sandbox_mode(), mode);
             assert!(sandbox_default_notice(&c).is_none());
         }
+    }
+
+    #[test]
+    fn wsl_resolves_best_effort_to_enforce_once_for_everyone() {
+        use SandboxArg::{BestEffort, Enforce, Off};
+        let r = |a, job, wsl| resolve_sandbox_mode(a, job, wsl);
+        assert_eq!(r(Some(BestEffort), false, true), SandboxMode::Enforce);
+        assert_eq!(
+            r(None, true, true),
+            SandboxMode::Enforce,
+            "defaulted best-effort too"
+        );
+        assert_eq!(r(Some(BestEffort), false, false), SandboxMode::BestEffort);
+        assert_eq!(r(None, true, false), SandboxMode::BestEffort);
+        assert_eq!(r(Some(Off), false, true), SandboxMode::Off);
+        assert_eq!(r(Some(Enforce), false, true), SandboxMode::Enforce);
     }
 
     fn outcome(rules: &[&str]) -> TaskOutcome {

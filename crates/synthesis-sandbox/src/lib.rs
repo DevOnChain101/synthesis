@@ -35,7 +35,7 @@ pub use linux::{
     BwrapBackend, LandlockRule, LinuxLandlockBackend, bwrap_probe, landlock_rules, skipped_backends,
 };
 #[cfg(target_os = "linux")]
-pub use linux::{landlock_abi, restrict_current_process};
+pub use linux::{deny_vsock, landlock_abi, restrict_current_process};
 pub use seatbelt::{SeatbeltBackend, seatbelt_profile};
 pub use windows::WindowsJobBackend;
 
@@ -84,6 +84,10 @@ pub struct SandboxPolicy {
     /// `Loopback`), is below this. Defaults to `Weak`, so an unusable backend
     /// ([`NullSandbox`]) is refused; the terminal's `Enforce` mode never goes below `Weak`.
     pub required: Guarantee,
+    /// WSL only: hide the Windows drives from READS too (a tmpfs over every drvfs mount; the
+    /// workspace and `readable_roots` on a drive are bound back). Default true; the user turns it
+    /// off with `synt.sandbox.wsl.hide_windows_drives` (user or managed settings).
+    pub wsl_hide_drives: bool,
 }
 
 impl Default for SandboxPolicy {
@@ -98,6 +102,7 @@ impl Default for SandboxPolicy {
             allow_exec: true,
             env_passthrough: vec![],
             required: Guarantee::Weak,
+            wsl_hide_drives: true,
         }
     }
 }
@@ -590,7 +595,7 @@ pub(crate) fn validate(p: &SandboxPolicy) -> Result<(), SandboxError> {
 }
 
 pub(crate) fn build_env(p: &SandboxPolicy, c: &SandboxedCommand) -> Vec<(OsString, OsString)> {
-    build_env_on(p, c, wsl::host())
+    build_env_on(p, c, wsl::host().as_ref())
 }
 
 pub(crate) fn build_env_on(

@@ -61,6 +61,12 @@ jobs:
           git config --global user.email ci@example.invalid
           git config --global user.name ci
           git config --global init.defaultBranch main
+      - name: Install bubblewrap and relax AppArmor userns restriction (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          scripts/apt-install.sh bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --ro-bind / / --unshare-net true && echo "bwrap works"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --exclude synthesis-desktop --all-targets --locked -- -D warnings
       # test-provider only exists in debug builds (compile_error! in release). This also runs the
@@ -74,6 +80,8 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           # Same as the browser job: Chrome's own helper sandbox fails on macOS/Linux runners (Mach rendezvous).
           SYNT_BROWSER_TEST_NO_SANDBOX: ${{ runner.os != 'Windows' && '1' || '' }}
+          # The WSL sandbox tests need a working bubblewrap: here a skip is a failure, not a pass.
+          SYNT_REQUIRE_BWRAP: ${{ runner.os == 'Linux' && '1' || '' }}
         run: cargo test --workspace --exclude synthesis-desktop --locked --no-fail-fast --features synthesis-cli/test-provider 2>&1 | tee test.log
       - name: Failure digest
         if: always()
@@ -277,6 +285,8 @@ jobs:
           cat /sys/kernel/security/lsm; echo
           grep -q landlock /sys/kernel/security/lsm || { echo "::error::Landlock not enabled on this runner kernel"; exit 1; }
       - name: sandbox tests
+        env:
+          SYNT_REQUIRE_BWRAP: "1" # a skipped bubblewrap test is a failure
         run: cargo test -p synthesis-sandbox -p synthesis-terminal --locked --no-fail-fast -- --nocapture 2>&1 | tee sandbox.log
       - name: Failure digest
         if: always()

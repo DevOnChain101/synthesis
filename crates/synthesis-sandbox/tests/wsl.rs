@@ -1,130 +1,109 @@
-//! WSL hardening against a real bubblewrap. Linux only; skipped (printed) when bwrap is unusable.
-//! A fake WSL host is injected (`BwrapBackend::wrap_on`): a fake interop variable, a fake Windows
-//! drive in a temp dir and a Windows directory on PATH. No real WSL is needed, and none was used.
+//! WSL hardening that needs the helper binary. Linux only.
 //! NOT RUN on the macOS dev machine that wrote it (compiled via --target x86_64-unknown-linux-gnu).
+//! The real-WSL2 test is `#[ignore]`: interop closure is NOT proven until it has been run on WSL2.
 #![cfg(target_os = "linux")]
 
-use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Command;
 
-use synthesis_platform::wsl::{WslHost, WslVersion};
-use synthesis_sandbox::{BwrapBackend, NetworkPolicy, SandboxPolicy, SandboxedCommand};
+use synthesis_sandbox::{
+    BwrapBackend, NetworkPolicy, SandboxBackend, SandboxPolicy, SandboxedCommand,
+};
 
-fn sh(drive: &Path, ws: &Path, script: &str) -> Option<Output> {
-    let b = BwrapBackend::detect().or_else(|| {
-        eprintln!("skipped: bubblewrap is not usable here");
-        None
-    })?;
-    let host = WslHost {
-        version: WslVersion::V2,
-        windows_mounts: vec![drive.to_path_buf()],
-    };
-    let path = std::env::join_paths([
-        "/usr/bin",
-        "/bin",
-        &drive.join("Windows").display().to_string(),
-    ])
-    .unwrap();
+const HELPER: &str = env!("CARGO_BIN_EXE_synthesis-sandbox-exec");
+
+fn have_python() -> bool {
+    Command::new("python3")
+        .arg("-c")
+        .arg("pass")
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn require(ok: bool, what: &str) -> bool {
+    if !ok {
+        assert!(
+            std::env::var_os("SYNT_REQUIRE_BWRAP").is_none_or(|v| v.is_empty()),
+            "SYNT_REQUIRE_BWRAP is set but {what} is not usable here"
+        );
+        eprintln!("skipped: {what} is not usable here");
+    }
+    ok
+}
+
+/// `socket(family, SOCK_STREAM)` through the helper's seccomp filter: the errno, or 0.
+fn socket_errno(family: u32) -> i32 {
+    let py = format!(
+        "import socket,sys\ntry:\n socket.socket({family},socket.SOCK_STREAM)\nexcept OSError as e:\n sys.exit(e.errno)\n"
+    );
+    let o = Command::new(HELPER)
+        .args(["--no-vsock", "--", "python3", "-c", &py])
+        .output()
+        .unwrap();
+    assert_ne!(
+        o.status.code(),
+        Some(126),
+        "seccomp not applied: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    o.status.code().unwrap()
+}
+
+#[test]
+fn helper_denies_af_vsock_and_keeps_other_families() {
+    if !require(have_python(), "python3") {
+        return;
+    }
+    assert_eq!(socket_errno(40), 97, "AF_VSOCK must fail with EAFNOSUPPORT");
+    assert_eq!(socket_errno(1), 0, "AF_UNIX must still work");
+    assert_eq!(socket_errno(2), 0, "AF_INET must still work");
+}
+
+#[test]
+fn helper_refuses_to_exec_when_the_command_is_missing() {
+    let o = Command::new(HELPER)
+        .args(["--no-vsock", "--", "/nonexistent-synt-cmd"])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(127));
+}
+
+/// Needs a real WSL2 distro with interop enabled, bubblewrap, python3 and a mounted `C:`; run by
+/// hand there: `cargo test -p synthesis-sandbox --test wsl -- --ignored --nocapture`.
+#[test]
+#[ignore = "needs a real WSL2 distro with interop enabled, bubblewrap and python3"]
+fn real_wsl2_sandbox_closes_interop() {
+    let t = tempfile::tempdir().unwrap();
+    let ws = t.path().canonicalize().unwrap();
+    let b = BwrapBackend::with_helper(HELPER.into()).expect("bubblewrap not usable");
+    let script = "cmd=/mnt/c/Windows/System32/cmd.exe; \
+        [ -e $cmd ] && echo CMD-VISIBLE; \
+        ($cmd /c echo pwned) 2>&1; \
+        (echo x > /mnt/c/synt-wsl-test.txt) 2>/dev/null && echo DRIVE-WRITTEN; \
+        python3 -c 'import socket;socket.socket(40,1)' 2>&1 | grep -q 'not supported' && echo VSOCK-DENIED";
     let cmd = SandboxedCommand {
         program: "/bin/sh".into(),
         args: vec!["-c".into(), script.into()],
-        env: vec![
-            ("WSL_INTEROP".into(), "/run/WSL/1_interop".into()),
-            ("WSLENV".into(), "X".into()),
-            ("PATH".into(), path),
-        ],
-        cwd: Some(ws.to_path_buf()),
-        ..Default::default()
-    };
-    let pol = SandboxPolicy {
-        writable_roots: vec![ws.to_path_buf()],
-        network: NetworkPolicy::Allow,
-        ..Default::default()
-    };
-    let w = b.wrap_on(&pol, &cmd, Some(&host)).unwrap();
-    Some(
-        Command::new(&w.program)
-            .args(&w.args)
-            .env_clear()
-            .envs(w.env.iter().cloned())
-            .output()
-            .unwrap(),
-    )
-}
-
-fn fake_drive() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
-    let t = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let drive = t.path().canonicalize().unwrap().join("c");
-    let ws = drive.join("ws");
-    std::fs::create_dir_all(&ws).unwrap();
-    (t, drive, ws)
-}
-
-#[test]
-fn child_has_no_interop_env_or_windows_path_and_empty_run() {
-    let (_t, drive, ws) = fake_drive();
-    let Some(o) = sh(
-        &drive,
-        &ws,
-        "echo \"interop=${WSL_INTEROP-unset} env=${WSLENV-unset}\"; echo \"path=$PATH\"; echo \"run=$(ls -A /run | wc -l)\"",
-    ) else {
-        return;
-    };
-    let out = String::from_utf8_lossy(&o.stdout);
-    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    assert!(out.contains("interop=unset env=unset"), "{out}");
-    assert!(out.contains("path=/usr/bin:/bin\n"), "{out}");
-    assert!(
-        out.contains("run=0"),
-        "/run is a fresh tmpfs (so /run/WSL cannot exist): {out}"
-    );
-}
-
-#[test]
-fn drive_is_readonly_except_the_workspace_inside_it() {
-    let (_t, drive, ws) = fake_drive();
-    let script = format!(
-        "echo a > {ws}/ok.txt && echo ws-written; (echo b > {d}/evil.txt) 2>/dev/null || echo drive-denied",
-        ws = ws.display(),
-        d = drive.display()
-    );
-    let Some(o) = sh(&drive, &ws, &script) else {
-        return;
-    };
-    let out = String::from_utf8_lossy(&o.stdout);
-    assert!(
-        out.contains("ws-written") && out.contains("drive-denied"),
-        "{out}"
-    );
-    assert!(ws.join("ok.txt").exists() && !drive.join("evil.txt").exists());
-}
-
-/// Needs a real WSL2 distro with interop enabled; run by hand there: `cargo test -p synthesis-sandbox -- --ignored`.
-#[test]
-#[ignore = "needs a real WSL2 distro with interop enabled and bubblewrap"]
-fn real_wsl_cmd_exe_is_unreachable_in_the_sandbox() {
-    let host = WslHost::real().expect("not running in WSL");
-    let t = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let ws = t.path().canonicalize().unwrap();
-    let b = BwrapBackend::detect().expect("bubblewrap not usable");
-    let cmd = SandboxedCommand {
-        program: "/bin/sh".into(),
-        args: vec![
-            "-c".into(),
-            "/mnt/c/Windows/System32/cmd.exe /c echo pwned".into(),
-        ],
         cwd: Some(ws.clone()),
         ..Default::default()
     };
     let pol = SandboxPolicy {
         writable_roots: vec![ws],
+        network: NetworkPolicy::Deny,
         ..Default::default()
     };
-    let w = b.wrap_on(&pol, &cmd, Some(host)).unwrap();
+    let w = b.wrap(&pol, &cmd).unwrap();
     let o = Command::new(&w.program)
         .args(&w.args)
         .env_clear()
+        .envs(w.env.iter().cloned())
         .output()
         .unwrap();
-    assert!(!String::from_utf8_lossy(&o.stdout).contains("pwned"));
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        !out.contains("pwned") && !out.contains("CMD-VISIBLE"),
+        "cmd.exe reachable: {out}"
+    );
+    assert!(!out.contains("DRIVE-WRITTEN"), "wrote /mnt/c: {out}");
+    assert!(out.contains("VSOCK-DENIED"), "AF_VSOCK not denied: {out}");
+    assert!(!std::path::Path::new("/mnt/c/synt-wsl-test.txt").exists());
 }

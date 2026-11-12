@@ -161,6 +161,54 @@ mod ll {
         Ok(status.ruleset)
     }
 }
+/// WSL2 reaches the Windows host over AF_VSOCK (hv_sock), which a network namespace does not
+/// cover. Install a seccomp filter on the current process (inherited by every descendant, also
+/// through bwrap) that makes `socket(AF_VSOCK, ..)` fail with EAFNOSUPPORT. Fail closed: an
+/// architecture without a filter here, or a kernel that refuses it, is an error. Only the
+/// `socket` syscall is filtered, on the native architecture; a process of another ABI (32-bit
+/// compat) is killed by the filter's architecture check. AF_NETLINK is NOT blocked: it cannot
+/// reach Windows and tools (`ip`, glibc `getifaddrs`) need it. Residual: the x32 ABI is not
+/// covered (the stock WSL2 kernel does not enable it; not verified).
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub fn deny_vsock() -> Result<(), SandboxError> {
+    use seccompiler::{
+        BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+        SeccompRule,
+    };
+    #[cfg(target_arch = "x86_64")]
+    const SYS_SOCKET: i64 = 41;
+    #[cfg(target_arch = "aarch64")]
+    const SYS_SOCKET: i64 = 198;
+    const AF_VSOCK: u64 = 40;
+    const EAFNOSUPPORT: u32 = 97;
+    let un = |e: &dyn std::fmt::Display| SandboxError::Unavailable(format!("seccomp: {e}"));
+    let cond = SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, AF_VSOCK)
+        .map_err(|e| un(&e))?;
+    let rule = SeccompRule::new(vec![cond]).map_err(|e| un(&e))?;
+    let filter = SeccompFilter::new(
+        [(SYS_SOCKET, vec![rule])].into_iter().collect(),
+        SeccompAction::Allow,
+        SeccompAction::Errno(EAFNOSUPPORT),
+        std::env::consts::ARCH.try_into().map_err(|e| un(&e))?,
+    )
+    .map_err(|e| un(&e))?;
+    let bpf: BpfProgram = filter.try_into().map_err(|e| un(&e))?;
+    seccompiler::apply_filter(&bpf).map_err(|e| un(&e))
+}
+
+#[cfg(all(
+    target_os = "linux",
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
+pub fn deny_vsock() -> Result<(), SandboxError> {
+    Err(SandboxError::Unsupported(
+        "no seccomp filter for this CPU architecture (needed on WSL to deny AF_VSOCK)".into(),
+    ))
+}
+
 #[cfg(target_os = "linux")]
 pub use ll::{landlock_abi, restrict_current_process};
 
@@ -235,7 +283,7 @@ pub(crate) fn detect_linux() -> Vec<Box<dyn SandboxBackend>> {
         v.extend(BwrapBackend::detect().map(|b| Box::new(b) as Box<dyn SandboxBackend>));
     }
     // WSL: Landlock cannot hide the interop socket, so it is never offered (see `wsl`).
-    if crate::wsl::refuse_landlock(crate::wsl::host()).is_ok() {
+    if crate::wsl::refuse_landlock(crate::wsl::host().as_ref()).is_ok() {
         v.extend(LinuxLandlockBackend::detect().map(|b| Box::new(b) as Box<dyn SandboxBackend>));
     }
     v
@@ -248,7 +296,7 @@ pub fn skipped_backends() -> Vec<String> {
     if let Err(e) = bwrap_probe() {
         v.push(e.clone());
     }
-    if crate::wsl::host().is_some() {
+    if crate::wsl::is_wsl() {
         v.push(crate::wsl::LANDLOCK_NOT_USED.into());
     }
     v
@@ -366,7 +414,7 @@ impl SandboxBackend for LinuxLandlockBackend {
         c: &SandboxedCommand,
     ) -> Result<SandboxedCommand, SandboxError> {
         validate(policy)?;
-        crate::wsl::refuse_landlock(crate::wsl::host())?;
+        crate::wsl::refuse_landlock(crate::wsl::host().as_ref())?;
         if !policy.allow_exec {
             return Err(SandboxError::Unsupported(
                 "landlock helper cannot forbid exec".into(),
@@ -415,27 +463,47 @@ impl SandboxBackend for LinuxLandlockBackend {
 
 pub struct BwrapBackend {
     path: PathBuf,
+    /// The `synthesis-sandbox-exec` helper; on WSL it runs in front of bwrap to install the
+    /// seccomp filter (no AF_VSOCK). `None` there means commands are refused.
+    helper: Option<PathBuf>,
 }
 
 impl BwrapBackend {
     /// Some only if a trusted `bwrap` passed the cached [`bwrap_probe`].
     pub fn detect() -> Option<Self> {
-        bwrap_probe()
-            .as_ref()
+        #[cfg(target_os = "linux")]
+        let helper = std::env::current_exe()
             .ok()
-            .map(|path| Self { path: path.clone() })
+            .and_then(|e| helper_next_to(&e));
+        #[cfg(not(target_os = "linux"))]
+        let helper = None;
+        bwrap_probe().as_ref().ok().map(|path| Self {
+            path: path.clone(),
+            helper,
+        })
+    }
+
+    /// Like [`Self::detect`] with the seccomp helper injected (tests and embedders; `detect` finds
+    /// it next to the current executable).
+    pub fn with_helper(helper: PathBuf) -> Option<Self> {
+        Self::detect().map(|b| Self {
+            helper: Some(helper),
+            ..b
+        })
     }
 
     pub(crate) fn args(policy: &SandboxPolicy, cmd: &SandboxedCommand) -> Vec<std::ffi::OsString> {
-        Self::args_on(policy, cmd, crate::wsl::host())
+        Self::args_on(policy, cmd, crate::wsl::WslCtx::current().as_ref())
     }
 
-    /// `wsl` = Some on WSL: every Windows drive is bound read-only (before the writable binds, so
-    /// a workspace inside a drive stays writable); `/run`, hence `/run/WSL`, is already a tmpfs.
+    /// `wsl` = Some on WSL: `/mnt/wsl` and `/mnt/wslg` are tmpfs (the real `resolv.conf` target
+    /// is bound back read-only), every Windows drive is hidden (default) or read-only, all
+    /// before the writable binds so a workspace on a drive stays writable; `/run`, hence
+    /// `/run/WSL`, is already a tmpfs. `policy` must be canonical (see `wsl::check_policy`).
     pub(crate) fn args_on(
         policy: &SandboxPolicy,
         cmd: &SandboxedCommand,
-        wsl: Option<&synthesis_platform::wsl::WslHost>,
+        wsl: Option<&crate::wsl::WslCtx>,
     ) -> Vec<std::ffi::OsString> {
         let mut a: Vec<std::ffi::OsString> = [
             "--die-with-parent",
@@ -464,12 +532,34 @@ impl BwrapBackend {
         if std::fs::symlink_metadata("/var/run").is_ok_and(|m| m.is_dir()) {
             push(&[Path::new("/var/run")], "--tmpfs");
         }
-        for m in wsl
-            .iter()
-            .flat_map(|h| &h.windows_mounts)
-            .filter(|m| m.exists())
-        {
-            push(&[m, m], "--ro-bind");
+        if let Some(ctx) = wsl {
+            for m in ["/mnt/wsl", "/mnt/wslg"]
+                .map(Path::new)
+                .iter()
+                .filter(|m| ctx.mask.iter().any(|x| x == *m))
+            {
+                push(&[m], "--tmpfs");
+            }
+            if let Some(r) = &ctx.resolv {
+                push(&[r, r], "--ro-bind"); // DNS keeps working (a symlink into /mnt/wsl)
+            }
+            for m in &ctx.host.windows_mounts {
+                if policy.wsl_hide_drives {
+                    push(&[m], "--tmpfs");
+                } else {
+                    push(&[m, m], "--ro-bind");
+                }
+            }
+            if policy.wsl_hide_drives {
+                // read access to the explicit readable roots on a drive comes back, read-only
+                for r in policy
+                    .readable_roots
+                    .iter()
+                    .filter(|r| ctx.host.windows_mounts.iter().any(|m| r.starts_with(m)))
+                {
+                    push(&[r, r], "--ro-bind");
+                }
+            }
         }
         for w in policy.writable_roots.iter().chain(&policy.tmp_dir) {
             push(&[w, w], "--bind");
@@ -541,25 +631,43 @@ impl SandboxBackend for BwrapBackend {
                 "bubblewrap cannot forbid exec".into(),
             ));
         }
-        self.wrap_on(policy, c, crate::wsl::host())
+        self.wrap_on(policy, c, crate::wsl::WslCtx::current().as_ref())
     }
 }
 
 impl BwrapBackend {
-    /// [`SandboxBackend::wrap`] for an explicit host (`Some` = WSL; tests inject one).
-    pub fn wrap_on(
+    /// [`SandboxBackend::wrap`] for an explicit WSL context (`Some` = WSL; tests inject one).
+    /// On WSL the policy is checked and canonicalised first (any violation is an error, never
+    /// a downgrade) and the command runs behind the helper that denies AF_VSOCK.
+    pub(crate) fn wrap_on(
         &self,
         policy: &SandboxPolicy,
         c: &SandboxedCommand,
-        wsl: Option<&synthesis_platform::wsl::WslHost>,
+        wsl: Option<&crate::wsl::WslCtx>,
     ) -> Result<SandboxedCommand, SandboxError> {
-        if let Some(h) = wsl {
-            crate::wsl::check_writable_roots(policy, c.cwd.as_deref(), h)?;
+        let checked;
+        let policy = match wsl {
+            Some(ctx) => {
+                checked = crate::wsl::check_policy(policy, c.cwd.as_deref(), &ctx.host)?;
+                &checked
+            }
+            None => policy,
+        };
+        let mut args = Self::args_on(policy, c, wsl);
+        let mut program: OsString = self.path.clone().into();
+        if wsl.is_some() {
+            let helper = self.helper.clone().ok_or_else(|| {
+                SandboxError::Unavailable(
+                    "WSL: the synthesis-sandbox-exec helper next to the executable is required to deny AF_VSOCK".into(),
+                )
+            })?;
+            args.splice(0..0, ["--no-vsock".into(), "--".into(), program]);
+            program = helper.into();
         }
         Ok(SandboxedCommand {
-            program: self.path.clone().into(),
-            args: Self::args_on(policy, c, wsl),
-            env: crate::build_env_on(policy, c, wsl),
+            program,
+            args,
+            env: crate::build_env_on(policy, c, wsl.map(|x| &x.host)),
             cwd: None,
             clear_env: true,
         })
@@ -864,37 +972,129 @@ mod tests {
         ));
     }
 
+    fn wsl_ctx(drive: &Path, resolv: Option<&Path>) -> crate::wsl::WslCtx {
+        crate::wsl::WslCtx {
+            host: synthesis_platform::wsl::WslHost {
+                version: synthesis_platform::wsl::WslVersion::V2,
+                windows_mounts: vec![drive.to_path_buf()],
+            },
+            resolv: resolv.map(Path::to_path_buf),
+            mask: vec!["/mnt/wsl".into(), "/mnt/wslg".into()],
+        }
+    }
+
+    fn joined(a: Vec<std::ffi::OsString>) -> String {
+        a.iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     #[cfg(unix)]
     #[test]
-    fn bwrap_wsl_binds_drives_readonly_before_workspace() {
-        let t = tempfile::tempdir().unwrap();
-        let drive = t.path().join("c");
-        let ws = drive.join("ws");
-        std::fs::create_dir_all(&ws).unwrap();
-        let host = synthesis_platform::wsl::WslHost {
-            version: synthesis_platform::wsl::WslVersion::V2,
-            windows_mounts: vec![drive.clone()],
-        };
+    fn bwrap_wsl_masks_wsl_dirs_and_hides_drives_before_binds() {
+        let drive = Path::new("/mnt/c");
+        let ctx = wsl_ctx(drive, Some(Path::new("/mnt/wsl/resolv.conf")));
         let pol = SandboxPolicy {
-            writable_roots: vec![ws.clone()],
+            writable_roots: vec![p("/home/u/ws")],
+            readable_roots: vec![p("/mnt/c/tools"), p("/home/u/.cargo")],
             ..Default::default()
         };
-        let j = |h| {
-            BwrapBackend::args_on(&pol, &SandboxedCommand::default(), h)
-                .iter()
-                .map(|s| s.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        let w = j(Some(&host));
-        let ro = w
-            .find(&format!("--ro-bind {0} {0}", drive.display()))
-            .expect(&w);
+        let j = joined(BwrapBackend::args_on(
+            &pol,
+            &SandboxedCommand::default(),
+            Some(&ctx),
+        ));
+        let at = |n: &str| j.find(n).unwrap_or_else(|| panic!("{n} in {j}"));
+        assert!(at("--tmpfs /run") < at("--tmpfs /mnt/wsl"), "{j}");
+        at("--tmpfs /mnt/wslg");
+        // resolv.conf comes back read-only after the mask
         assert!(
-            w.contains("--tmpfs /run")
-                && ro < w.find(&format!("--bind {0} {0}", ws.display())).unwrap()
+            at("--tmpfs /mnt/wsl ") < at("--ro-bind /mnt/wsl/resolv.conf /mnt/wsl/resolv.conf"),
+            "{j}"
         );
-        assert!(!j(None).contains(&format!("--ro-bind {0} {0}", drive.display())));
+        // drive hidden, then only the explicit readable root on it is bound back (read-only)
+        assert!(
+            at("--tmpfs /mnt/c ") < at("--ro-bind /mnt/c/tools /mnt/c/tools"),
+            "{j}"
+        );
+        assert!(at("--tmpfs /mnt/c ") < at("--bind /home/u/ws"), "{j}");
+        assert!(!j.contains("--ro-bind /mnt/c /mnt/c"), "{j}");
+        assert!(
+            !j.contains("--ro-bind /home/u/.cargo"),
+            "only drive roots are re-bound: {j}"
+        );
+        // opt-out: the drive stays visible but read-only
+        let open = SandboxPolicy {
+            wsl_hide_drives: false,
+            ..pol.clone()
+        };
+        let j = joined(BwrapBackend::args_on(
+            &open,
+            &SandboxedCommand::default(),
+            Some(&ctx),
+        ));
+        assert!(
+            j.contains("--ro-bind /mnt/c /mnt/c") && !j.contains("--tmpfs /mnt/c "),
+            "{j}"
+        );
+        assert!(
+            j.contains("--tmpfs /mnt/wsl "),
+            "masking /mnt/wsl is not optional: {j}"
+        );
+        // not WSL: none of it
+        let j = joined(BwrapBackend::args_on(
+            &pol,
+            &SandboxedCommand::default(),
+            None,
+        ));
+        assert!(!j.contains("/mnt/"), "{j}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bwrap_wsl_wrap_checks_policy_runs_behind_the_vsock_helper_and_scrubs_env() {
+        let b = BwrapBackend {
+            path: p("/usr/bin/bwrap"),
+            helper: Some(p("/h/synthesis-sandbox-exec")),
+        };
+        let ctx = wsl_ctx(Path::new("/mnt/c"), None);
+        let c = SandboxedCommand {
+            program: "ls".into(),
+            env: vec![
+                ("WSL_INTEROP".into(), "x".into()),
+                ("DISPLAY".into(), ":0".into()),
+            ],
+            cwd: Some(p("/work")),
+            ..Default::default()
+        };
+        let pol = SandboxPolicy {
+            writable_roots: vec![p("/work")],
+            ..Default::default()
+        };
+        let w = b.wrap_on(&pol, &c, Some(&ctx)).unwrap();
+        assert_eq!(w.program, p("/h/synthesis-sandbox-exec").into_os_string());
+        assert_eq!(&w.args[..3], ["--no-vsock", "--", "/usr/bin/bwrap"]);
+        assert!(w.env.is_empty(), "{:?}", w.env);
+        // no helper on WSL: refused, not run without the seccomp filter
+        let nohelper = BwrapBackend { helper: None, ..b };
+        assert!(matches!(
+            nohelper.wrap_on(&pol, &c, Some(&ctx)),
+            Err(SandboxError::Unavailable(_))
+        ));
+        // the drive policy is enforced here (a drive root), as InvalidPolicy
+        let bad = SandboxPolicy {
+            writable_roots: vec![p("/mnt/c")],
+            ..Default::default()
+        };
+        assert!(matches!(
+            BwrapBackend {
+                helper: Some(p("/h/x")),
+                path: p("/b")
+            }
+            .wrap_on(&bad, &c, Some(&ctx)),
+            Err(SandboxError::InvalidPolicy(_))
+        ));
     }
 
     #[cfg(unix)] // renders POSIX mount arguments (`--bind /work /work`)
@@ -941,6 +1141,7 @@ mod tests {
         pol.network = NetworkPolicy::Loopback;
         let b = BwrapBackend {
             path: p("/usr/bin/bwrap"),
+            helper: None,
         };
         assert_eq!(
             b.network_guarantee(&NetworkPolicy::Loopback),
@@ -963,5 +1164,184 @@ mod tests {
             crate::encode_policy(&pol),
             Err(SandboxError::Unsupported(_))
         ));
+    }
+
+    // ---- real bubblewrap, Linux only. A skipped test is a PANIC when SYNT_REQUIRE_BWRAP is set (CI).
+    #[cfg(target_os = "linux")]
+    mod real {
+        use super::*;
+        use std::process::Command;
+
+        fn bwrap() -> Option<BwrapBackend> {
+            let b = BwrapBackend::detect().map(|b| BwrapBackend {
+                helper: Some("/not-run-in-these-tests".into()),
+                ..b
+            });
+            if b.is_none() {
+                assert!(
+                    std::env::var_os("SYNT_REQUIRE_BWRAP").is_none_or(|v| v.is_empty()),
+                    "SYNT_REQUIRE_BWRAP is set but bubblewrap is not usable here"
+                );
+                eprintln!("skipped: bubblewrap is not usable here");
+            }
+            b
+        }
+
+        struct Fx {
+            _t: tempfile::TempDir,
+            drive: PathBuf,
+            ws: PathBuf,
+        }
+
+        /// A fake Windows drive (a plain directory) holding a secret, with a workspace in it.
+        fn fx() -> Fx {
+            let t = tempfile::tempdir().unwrap();
+            let drive = t.path().canonicalize().unwrap().join("c");
+            let ws = drive.join("Users/u/ws");
+            std::fs::create_dir_all(&ws).unwrap();
+            std::fs::create_dir_all(drive.join("Windows")).unwrap(); // a real directory on PATH
+            std::fs::write(drive.join("secret.txt"), "windows file").unwrap();
+            Fx { _t: t, drive, ws }
+        }
+
+        /// Run `script` in the sandbox of a fake WSL host (the helper is skipped: the seccomp part
+        /// has its own test).
+        fn run(
+            f: &Fx,
+            hide: bool,
+            readable: Vec<PathBuf>,
+            env: Vec<(&str, String)>,
+            script: &str,
+        ) -> Option<String> {
+            let b = bwrap()?;
+            let ctx = crate::wsl::WslCtx {
+                host: synthesis_platform::wsl::WslHost {
+                    version: synthesis_platform::wsl::WslVersion::V2,
+                    windows_mounts: vec![f.drive.clone()],
+                },
+                resolv: None,
+                mask: vec![],
+            };
+            let c = SandboxedCommand {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), script.into()],
+                env: env.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
+                cwd: Some(f.ws.clone()),
+                ..Default::default()
+            };
+            let pol = SandboxPolicy {
+                writable_roots: vec![f.ws.clone()],
+                readable_roots: readable,
+                network: NetworkPolicy::Allow,
+                wsl_hide_drives: hide,
+                ..Default::default()
+            };
+            let w = b.wrap_on(&pol, &c, Some(&ctx)).unwrap();
+            // behind the helper: [helper, --no-vsock, --, bwrap, args...]; run bwrap directly
+            assert_eq!(&w.args[..2], ["--no-vsock", "--"]);
+            let o = Command::new(&w.args[2])
+                .args(&w.args[3..])
+                .env_clear()
+                .envs(w.env.iter().cloned())
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+            Some(String::from_utf8_lossy(&o.stdout).into_owned())
+        }
+
+        #[test]
+        fn env_path_and_run_are_clean_inside() {
+            let f = fx();
+            let path = format!("/usr/bin:/bin:{}/Windows", f.drive.display());
+            let Some(out) = run(
+                &f,
+                true,
+                vec![],
+                vec![
+                    ("WSL_INTEROP", "/run/WSL/1_interop".into()),
+                    ("WSLENV", "X".into()),
+                    ("DISPLAY", ":0".into()),
+                    ("XDG_RUNTIME_DIR", "/run/user/1".into()),
+                    ("PULSE_SERVER", "x".into()),
+                    ("WAYLAND_DISPLAY", "w".into()),
+                    ("PATH", path),
+                ],
+                "echo \"v=${WSL_INTEROP-u}${WSLENV-u}${DISPLAY-u}${XDG_RUNTIME_DIR-u}${PULSE_SERVER-u}${WAYLAND_DISPLAY-u}\"; echo \"path=$PATH\"; echo \"run=$(ls -A /run | wc -l)\"",
+            ) else {
+                return;
+            };
+            assert!(out.contains("v=uuuuuu"), "{out}");
+            assert!(out.contains("path=/usr/bin:/bin\n"), "{out}");
+            assert!(
+                out.contains("run=0"),
+                "/run is a fresh tmpfs, so /run/WSL cannot exist: {out}"
+            );
+        }
+
+        #[test]
+        fn drive_is_hidden_by_default_and_the_workspace_stays_writable() {
+            let f = fx();
+            let script = format!(
+                "ls -A {d}; test -e {d}/secret.txt && echo SECRET-VISIBLE; echo a > {w}/ok.txt && echo ws-written; (echo b > {d}/evil.txt) 2>/dev/null && echo DRIVE-WRITTEN",
+                d = f.drive.display(),
+                w = f.ws.display()
+            );
+            let Some(out) = run(&f, true, vec![], vec![], &script) else {
+                return;
+            };
+            assert!(out.contains("Users") && out.contains("ws-written"), "{out}");
+            assert!(
+                !out.contains("SECRET-VISIBLE") && !out.contains("DRIVE-WRITTEN"),
+                "{out}"
+            );
+            assert!(f.ws.join("ok.txt").exists() && !f.drive.join("evil.txt").exists());
+        }
+
+        #[test]
+        fn readable_root_on_a_drive_comes_back_read_only() {
+            let f = fx();
+            let tools = f.drive.join("tools");
+            std::fs::create_dir_all(&tools).unwrap();
+            std::fs::write(tools.join("t.txt"), "t").unwrap();
+            let script = format!(
+                "cat {t}/t.txt; test -e {d}/secret.txt && echo SECRET-VISIBLE; (echo x > {t}/n) 2>/dev/null && echo TOOLS-WRITTEN",
+                t = tools.display(),
+                d = f.drive.display()
+            );
+            let Some(out) = run(&f, true, vec![tools.clone()], vec![], &script) else {
+                return;
+            };
+            assert!(
+                out.starts_with('t')
+                    && !out.contains("SECRET-VISIBLE")
+                    && !out.contains("TOOLS-WRITTEN"),
+                "{out}"
+            );
+        }
+
+        #[test]
+        fn opt_out_keeps_the_drive_visible_but_read_only_by_mount_flag() {
+            let f = fx();
+            // the mountinfo options of the bound mounts INSIDE the sandbox (not just a failed write)
+            let script = format!(
+                "cat {d}/secret.txt; echo; awk '$5==\"{d}\"{{print \"drive:\" $6}} $5==\"{w}\"{{print \"ws:\" $6}}' /proc/self/mountinfo",
+                d = f.drive.display(),
+                w = f.ws.display()
+            );
+            let Some(out) = run(&f, false, vec![], vec![], &script) else {
+                return;
+            };
+            let flags = |tag: &str| {
+                out.lines()
+                    .find_map(|l| l.strip_prefix(tag))
+                    .unwrap_or_else(|| panic!("no {tag} mount in {out}"))
+                    .split(',')
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            };
+            assert!(out.contains("windows file"), "{out}");
+            assert!(flags("drive:").contains(&"ro".to_string()), "{out}");
+            assert!(flags("ws:").contains(&"rw".to_string()), "{out}");
+        }
     }
 }

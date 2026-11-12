@@ -65,7 +65,7 @@ impl Env {
     /// On WSL, Windows directories (`/mnt/*`, drvfs mounts) are removed from `PATH` so a child
     /// cannot find `cmd.exe` / `powershell.exe` (interop); `WSL*` names are not on the allowlist.
     pub fn child_env(&self) -> Env {
-        self.child_env_on(synthesis_platform::wsl::WslHost::real())
+        self.child_env_on(synthesis_platform::wsl::WslHost::current().as_ref())
     }
 
     /// [`Self::child_env`] for an explicit host (tests inject one; `None` = not WSL).
@@ -86,6 +86,9 @@ impl Env {
         // the person, so `synt memory` refuses to approve or delete from there.
         env.0.insert(AGENT_SESSION_VAR.into(), "1".into());
         if let Some(host) = wsl {
+            // WSLg / host-integration names (`XDG_*` passes the allowlist by prefix)
+            env.0
+                .retain(|k, _| !synthesis_platform::wsl::is_interop_var(k));
             for k in ["PATH", "Path"] {
                 if let Some(v) = env.0.get_mut(k) {
                     *v = host
@@ -195,14 +198,17 @@ mod tests {
     use super::*;
     use synthesis_platform::wsl::{WslHost, WslVersion};
 
+    #[cfg(unix)] // PATH entries are canonicalised against the real filesystem
     #[test]
     fn child_env_on_wsl_drops_windows_dirs_and_interop_names() {
-        let path = std::env::join_paths(["/usr/bin", "/mnt/c/Windows/System32", "/opt/x"]).unwrap();
+        let path = std::env::join_paths(["/usr/bin", "/mnt/c/Windows/System32", "/usr"]).unwrap();
         let env = Env::from_pairs([
             ("PATH", path.to_str().unwrap()),
             ("WSL_INTEROP", "/run/WSL/1_interop"),
             ("WSLENV", "X/p"),
             ("WSL_DISTRO_NAME", "Ubuntu"),
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+            ("XDG_CONFIG_HOME", "/home/u/.config"),
         ]);
         let host = WslHost {
             version: WslVersion::V2,
@@ -210,7 +216,7 @@ mod tests {
         };
         let on = env.child_env_on(Some(&host));
         let kept: Vec<_> = std::env::split_paths(on.get("PATH").unwrap()).collect();
-        assert_eq!(kept, ["/usr/bin", "/opt/x"].map(std::path::PathBuf::from));
+        assert_eq!(kept, ["/usr/bin", "/usr"].map(std::path::PathBuf::from));
         assert!(
             on.iter()
                 .all(|(k, _)| !synthesis_platform::wsl::is_interop_var(k))
