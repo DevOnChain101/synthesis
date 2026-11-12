@@ -58,7 +58,7 @@ Note: several items are partly MATCH and partly GAP (e.g. 8, 42, 54, 69); they a
 
 **P1-5. No managed/local settings layers (items 30, 31, 15).** No gitignored local layer and no managed layer, so "allow always" cannot persist and an org cannot force deny rules. Fix: add `.synt/settings.local.json` (highest non-managed, same trust rules as project) and persist `Permissions::apply` suggestions there (cap 5 rules). Crate `synthesis-settings`; harness approval path. Larger than the others; plan it.
 
-**P1-6. Enter while a task runs is refused, not queued (item 118).** `crates/synthesis-tui/src/app.rs:898`. Users type ahead in Claude Code. Fix: queue in `AppState`, send on `task.ended`. Test in `crates/synthesis-tui/src/app/tests.rs`.
+**P1-6. Enter while a task runs is refused, not queued (item 118).** `crates/synthesis-cli-ui/src/app.rs:898`. Users type ahead in Claude Code. Fix: queue in `AppState`, send on `task.ended`. Test in `crates/synthesis-cli-ui/src/app/tests.rs`.
 
 **P1-7. Bash timeout kills instead of backgrounding (items 74, 75).** `crates/synthesis-tools/src/terminal.rs:139` ("[timed out after ...]", process killed); official moves to background and keeps it. Also no documented 30 min/2 h background caps. Owner decision D6.
 
@@ -143,7 +143,7 @@ Legend: M = MATCH, G = GAP, D = DIVERGES-BY-DESIGN, U = UNKNOWN, N = N/A.
 | 18 | M |  | protected_path_decision lib.rs:735-748: classify/deny/allow/ask per mode; plan denies edits earlier |
 | 19 | G | P1 | experiment: ask rule `Bash(git push:*)` in bypassPermissions -> Allow (lib.rs:1157 bypass returns before the ask check, harness.rs:520 banner states it). AskUserQuestion/ExitPlanMode and critical rm still ask: MATCH. Golden rules-ask-rule-beats-allow-and-readonly encodes the opposite |
 | 20 | M |  | MAX_CONSECUTIVE_BLOCKS=3, MAX_TOTAL_BLOCKS=20, automode.rs:13-14 |
-| 21 | M |  | CYCLE default, acceptEdits, plan, auto; bypass and dontAsk excluded, synthesis-tui/src/app.rs:66, 860 |
+| 21 | M |  | CYCLE default, acceptEdits, plan, auto; bypass and dontAsk excluded, synthesis-cli-ui/src/app.rs:66, 860 |
 | 22 | M |  | untrusted project: allow/additionalDirectories dropped, deny/ask kept, auto/bypass refused, synthesis-settings/src/lib.rs:5-13, 30-31 |
 | 23 | D |  | Synthesis follows the Claude 6-mode model; no Codex policies |
 | 24 | D |  | sandbox is an independent axis (--sandbox enforce/best-effort/off), one workspace-write-like policy; no read-only preset except plan mode |

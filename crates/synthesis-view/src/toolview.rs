@@ -12,9 +12,9 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 use serde_json::Value;
+use synthesis_cli_ui_base::text::char_width;
 use synthesis_events::ToolStatus;
 use synthesis_harness::sanitize_for_display;
-use synthesis_tui_base::text::char_width;
 
 use crate::convo::{Item, ToolState};
 

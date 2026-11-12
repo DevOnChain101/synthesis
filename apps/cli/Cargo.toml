@@ -36,8 +36,8 @@ time = "0.3"
 synthesis-settings = { path = "../../crates/synthesis-settings" }
 synthesis-terminal = { path = "../../crates/synthesis-terminal" }
 synthesis-tools = { path = "../../crates/synthesis-tools" }
-synthesis-tui = { path = "../../crates/synthesis-tui" }
-synthesis-tui-base = { path = "../../crates/synthesis-tui-base" }
+synthesis-cli-ui = { path = "../../crates/synthesis-cli-ui" }
+synthesis-cli-ui-base = { path = "../../crates/synthesis-cli-ui-base" }
 synthesis-verification = { path = "../../crates/synthesis-verification" }
 synthesis-workspace = { path = "../../crates/synthesis-workspace" }
 rusqlite = { version = "0.41", features = ["bundled"] }

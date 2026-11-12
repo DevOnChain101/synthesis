@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 use synthesis_config::{Env, LoadContext, ProjectTrust};
 use synthesis_harness::{AutoCompact, ShellSettings, ToolSearchMode};
 use synthesis_settings::{
-    TuiSettings, edit_json_atomic, load_settings_layers, local_settings_path, read_json,
+    UiSettings, edit_json_atomic, load_settings_layers, local_settings_path, read_json,
 };
 
 use crate::schema::{Edit, Field, Kind, Scope, SettingsSchema, validate_kind};
@@ -284,7 +284,7 @@ fn apply(doc: &mut Value, path: &[&str], value: Option<Value>) -> std::io::Resul
 /// The loaders' own validators on the document about to be written: a diagnostic that names the
 /// key refuses the write.
 fn check_loaders(doc: &Value, key: &str) -> std::io::Result<()> {
-    let mut diags = TuiSettings::from_settings(doc).1;
+    let mut diags = UiSettings::from_settings(doc).1;
     diags.extend(AutoCompact::from_settings(doc).1);
     diags.extend(ToolSearchMode::from_settings(doc).1);
     diags.extend(ShellSettings::from_settings(doc).1);

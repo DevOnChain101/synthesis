@@ -199,7 +199,7 @@ impl ContextStatus {
     }
 }
 
-/// What the status line shows, folded from the events like the TUI's totals: turns and tool calls
+/// What the status line shows, folded from the events like the CLI's totals: turns and tool calls
 /// count every agent, tokens/cost and the context window only the main one.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct StatusModel {

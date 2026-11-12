@@ -6,7 +6,7 @@ use gpui::{
     Div, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
     Styled as _, div, prelude::*, px,
 };
-use synthesis_tui_render::theme as t;
+use synthesis_cli_ui_render::theme as t;
 
 use super::activity::{Presence, RunState, presence};
 use super::layout::{MONTH_GAP, MonthMode, YEAR_LABEL_W, month_h, year_fit};
@@ -650,7 +650,8 @@ const DOT: f32 = 8.;
 
 fn heat(level: u8) -> gpui::Hsla {
     match level {
-        0 => with_alpha(gpui::white(), 0.16),
+        // no data: decoration, not text; darker than the level 1 step so only days with data stand out
+        0 => with_alpha(gpui::white(), 0.05),
         l => hsla(t::HEAT[usize::from(l).min(4)]),
     }
 }
@@ -669,7 +670,7 @@ fn day_dot(d: Option<DayDot>) -> Div {
             div()
                 .size(px(3.))
                 .rounded_full()
-                .bg(with_alpha(gpui::white(), 0.18)),
+                .bg(with_alpha(gpui::white(), 0.08)),
         ),
         Some(d) => cell.child(div().size(px(DOT)).rounded(px(2.)).bg(heat(d.level))),
     }

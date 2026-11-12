@@ -5,7 +5,7 @@ Naming: text that identifies the product to a reader (version headline, titles, 
 ## Workspace directory (`--cwd`)
 `--cwd DIR` is optional for `synt run`: without it the workspace is the directory `synt` was started in (read once at the CLI boundary; the libraries never read the process cwd). `synt doctor` needs no workspace.
 
-`synt` with no subcommand opens the interactive terminal app (see `docs/TUI.md`); without a terminal on stdin and stdout it prints the usage and exits 2. `synt tui` is the same, `synt run` is headless. The native GPUI desktop app lives at `apps/desktop` (`docs/specs/desktop.md`, a separate binary `synthesis-desktop`); the redesigned (N1-N5) TUI stays removed (archived at tag `archive/ui-before-removal`).
+`synt` with no subcommand opens the CLI app (see `docs/CLI-APP.md`); without a terminal on stdin and stdout it prints the usage and exits 2. `synt run` is headless. The native GPUI desktop app lives at `apps/desktop` (`docs/specs/desktop.md`, a separate binary `synthesis-desktop`); the redesigned (N1-N5) TUI stays removed (archived at tag `archive/ui-before-removal`).
 
 ## Commands the agent runs (tests, builds)
 The agent runs tests itself. A call that needs permission is denied unless a rule allows it. Verification-gate checks (`cargo test`, `npm test`, ...) go through the same permission check as a `Bash` call. Without an approver (`synt run`) the call is not run, the model is told which permission is missing and the task ends `blocked` (`approval_unavailable`); `task.ended.needed_permissions` lists the rules and `synt run` prints, e.g.:
@@ -53,7 +53,7 @@ Off by default. Another live session of the same OS user on the same machine can
 - Turn it on with `"synt": {"peers": {"enabled": true}}` in the USER `settings.json`, or `--peers` for one run. A project `settings.json` is ignored for `synt.peers` (with a diagnostic).
 - `--name NAME` (`[a-z0-9_-]`, at most 32, starting with a letter or digit): the session answers to `sess:NAME`. A name already used by a live session in the same workspace is a usage error (exit 2); it is never suffixed. Without peers on, the name is unused.
 - `--about TEXT` (at most 120 characters): what this session is for. Default: the first non-empty line of `AGENTS.md` at the workspace root. It is redacted and shown to allowed peers in the `session.about` field of `ListSessions` / `ListAgents` rows.
-- `synt run --resume ID --resume-any-workspace` continues a session of another workspace in the CURRENT `--cwd`: the work happens there, and the stored session's `cwd` becomes this directory from then on (the TUI picker instead reopens a session in its own folder). `synt mcp add NAME` refuses a name that already exists in that file unless `--force` is given.
+- `synt run --resume ID --resume-any-workspace` continues a session of another workspace in the CURRENT `--cwd`: the work happens there, and the stored session's `cwd` becomes this directory from then on (the CLI picker instead reopens a session in its own folder). `synt mcp add NAME` refuses a name that already exists in that file unless `--force` is given.
 
 **`synt mcp add` credential guard (best effort).** `mcp add` refuses to write a literal credential into the config file. It matches names by whole words (split on `_ - .`, camelCase and digits): `--api-key`, `API_KEY`, `x-api-key`, `accessToken`, `client_secret`, `--auth-token`, `Authorization` are caught, while `--author`, `--keyboard`, `--design` and `--key-file /path` are not. It also checks the shape of values (known token prefixes, `Bearer <token>`, `user:password@` in a URL) and, in a `--url`, user info, query parameters (split on `&` and `;`, bare keys too), path parameters (`/mcp;key=...`) and the fragment. It cannot recognise every secret: a credential with an unusual name and no known prefix can still get through, so do not rely on it. The supported way is a `${VAR}` reference (for example `--header 'Authorization: Bearer ${MY_TOKEN}'`), which is stored as written and resolved from the environment at start.
 - `synt.peers` keys: `enabled` (false), `allow` (default: this workspace and the other worktrees of the same repository, `["workspace:<root>", "repo:<repo_key>"]`; a list you write is used as written), `deny`, `initiate` (true), `answer` (true), `confirm_replies` (false, not built), `max_hops` (2), `max_cost_usd` (1.0, what peer answers may cost this session), `resume_offline` (false, not built). Rules: `workspace:<path>` (a trailing `*` is a wildcard that stops at a path boundary: `/work/api*` is `/work/api` and below, never `/work/api-evil`), `ws:<label|key-prefix>`, `ws:<label>/sess:<name>`, `sess:<name|id-prefix>`, `repo:<repo_key>`; deny beats allow. The same list says whom this session may ask and who may ask it.
@@ -97,9 +97,9 @@ Lists the configured models, one `provider/model` per line. `--json` adds `conte
 
 ## Flag and command reference
 
-Checked against `--help` by `apps/cli/tests/docs_flags.rs`: a flag that `synt --help`, `synt run --help` or `synt tui --help` lists and this file does not mention fails the test.
+Checked against `--help` by `apps/cli/tests/docs_flags.rs`: a flag that `synt --help`, `synt run --help` lists and this file does not mention fails the test.
 
-Flags of `synt run` and of the interactive app (`synt`, `synt tui`):
+Flags of `synt run` and of the interactive app (`synt`):
 
 | Flag | Does |
 |---|---|

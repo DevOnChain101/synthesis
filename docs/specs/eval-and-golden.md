@@ -7,7 +7,7 @@ Tags as in events.md. Eval and golden tooling may be non-Rust (ADR-010). Nothing
 ## A.1 Principle
 Black-box: the harness starts an agent command, lets it work on a throwaway copy of a fixture repo, then grades the **repository end state** with hidden checks. The JSONL stream (events.md) is used for metrics and for the claimed status, never for pass/fail. That keeps grading agent-agnostic.
 
-Node has no headless/JSONL mode (no such flag in bin/synt.js) and must not get one. The Node baseline therefore runs through an adapter in this repo: `tests/agent-evals/adapters/node/run.js` builds `NativeAgent` [from-node agent.js:297-303] with `interactive=false`, explicit `cwd`, sandbox `SYNT_HOME`, sends the prompt, waits for `status === 'idle'`, then converts the transcript (session-store.md §A.3) into a minimal events.md stream (`task.ended.status` = `completed`, or `failed` on model error, since Node has no gate). Feasibility to be probed (does `NativeAgent` run cleanly without the TUI?).
+Node has no headless/JSONL mode (no such flag in bin/synt.js) and must not get one. The Node baseline therefore runs through an adapter in this repo: `tests/agent-evals/adapters/node/run.js` builds `NativeAgent` [from-node agent.js:297-303] with `interactive=false`, explicit `cwd`, sandbox `SYNT_HOME`, sends the prompt, waits for `status === 'idle'`, then converts the transcript (session-store.md §A.3) into a minimal events.md stream (`task.ended.status` = `completed`, or `failed` on model error, since Node has no gate). Feasibility to be probed (does `NativeAgent` run cleanly without the CLI?).
 
 ## A.2 Layout
 ```

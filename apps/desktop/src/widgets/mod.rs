@@ -1,4 +1,4 @@
-//! Widgets the TUI view and the Agent view share.
+//! Widgets the TUI view and the Super Agent view share.
 
 pub mod chrome;
 pub mod dialog;

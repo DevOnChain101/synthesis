@@ -1,5 +1,5 @@
 //! Wires the live TUI view to the engine: starting and relaunching it off the UI thread, pumping its
-//! messages into [`Live`] (batched, at most one redraw per 16 ms), the keyboard (the classic TUI's keys),
+//! messages into [`Live`] (batched, at most one redraw per 16 ms), the keyboard (the CLI's keys),
 //! the prompt box with its completion popup, and the sidebar clicks.
 
 use std::path::{Path, PathBuf};
@@ -12,9 +12,9 @@ use gpui::{
     ScrollHandle, Subscription, Task, WeakEntity, Window,
 };
 use gpui_component::input::{InputEvent, TextareaState};
+use synthesis_cli_ui_base::complete::{self, StdFs};
+use synthesis_cli_ui_base::editor::LineEditor;
 use synthesis_config::Env;
-use synthesis_tui_base::complete::{self, StdFs};
-use synthesis_tui_base::editor::LineEditor;
 use synthesis_view::convo::{Convo, Item};
 use synthesis_view::workspaces::{LoadOpts, WorkspaceList, fold_dir};
 
@@ -36,7 +36,7 @@ pub struct LiveCfg {
     pub home: Option<String>,
     pub tz_min: i32,
     /// `synt.tui` of the user settings (panels, thinking, verbose, expanded output).
-    pub tui: synthesis_settings::TuiSettings,
+    pub tui: synthesis_settings::UiSettings,
 }
 
 /// Where a relaunch goes.
@@ -199,7 +199,7 @@ impl TuiView {
         // not `cfg.tui.diffs_expanded`: with it every card started whole (the owner's settings.json has it on); the
         // desktop view always starts clamped to 5 lines and Ctrl+O still expands them all
         let mut hidden = hidden;
-        for (shown, (key, _)) in cfg.tui.panels.iter().zip(synthesis_settings::TUI_PANELS) {
+        for (shown, (key, _)) in cfg.tui.panels.iter().zip(synthesis_settings::UI_PANELS) {
             if !shown {
                 hidden.hide(key);
             }
@@ -500,7 +500,7 @@ impl TuiView {
             return;
         };
         let started = match text.strip_prefix('!') {
-            // `!cmd` / `!!cmd` (record only), as in the TUI
+            // `!cmd` / `!!cmd` (record only), as in the CLI
             Some(rest) => {
                 let (record_only, cmd) = match rest.strip_prefix('!') {
                     Some(c) => (true, c),
@@ -1443,7 +1443,7 @@ impl TuiView {
         self.open_session(&row.id, cx);
     }
 
-    /// Resume a stored session: the engine restarts on it (like the TUI's relaunch). While a task
+    /// Resume a stored session: the engine restarts on it (like the CLI's relaunch). While a task
     /// runs, the second request within 5 s cancels it and switches.
     pub fn open_session(&mut self, id: &str, cx: &mut Context<Self>) {
         self.switch(Target::Resume(id.to_string()), id.to_string(), cx);
@@ -1975,9 +1975,9 @@ impl TuiView {
     }
 
     /// The Settings popup saved `synt.tui`: what this view reads (panels, thinking, verbose rows, motion) applies now.
-    pub fn apply_settings(&mut self, tui: synthesis_settings::TuiSettings, cx: &mut Context<Self>) {
+    pub fn apply_settings(&mut self, tui: synthesis_settings::UiSettings, cx: &mut Context<Self>) {
         let mut hidden = super::layout::Hidden::default();
-        for (shown, (key, _)) in tui.panels.iter().zip(synthesis_settings::TUI_PANELS) {
+        for (shown, (key, _)) in tui.panels.iter().zip(synthesis_settings::UI_PANELS) {
             if !shown {
                 hidden.hide(key);
             }
@@ -2084,7 +2084,7 @@ impl TuiView {
             return;
         };
         for p in paths {
-            // the TUI's `@file` rule: inside the workspace, no secret file, links resolved
+            // the CLI's `@file` rule: inside the workspace, no secret file, links resolved
             let r = e
                 .image_path(p)
                 .and_then(|p| read_image_file(&p))
@@ -2284,13 +2284,13 @@ fn stale_rows(old: &[u64], new: &[u64]) -> impl Iterator<Item = usize> {
 
 /// The TUI's checks for a pasted PNG (magic, 4 MB, 8000x8000) and the per-message limits.
 fn attach_png(l: &mut Live, bytes: Vec<u8>) -> Result<String, String> {
-    let img = synthesis_tui_base::imgclip::validate_png(bytes).map_err(|e| e.to_string())?;
+    let img = synthesis_cli_ui_base::imgclip::validate_png(bytes).map_err(|e| e.to_string())?;
     l.attach_image("image/png", &img.png, Some((img.width, img.height)))
 }
 
 /// JPEG: magic bytes and the same 4 MB cap (no decoder in the tree, so no size check in pixels).
 fn attach_jpeg(l: &mut Live, bytes: Vec<u8>) -> Result<String, String> {
-    if bytes.len() > synthesis_tui_base::imgclip::MAX_PNG {
+    if bytes.len() > synthesis_cli_ui_base::imgclip::MAX_PNG {
         return Err("the image is larger than 4 MB".into());
     }
     if !bytes.starts_with(&[0xff, 0xd8, 0xff]) {
@@ -2311,7 +2311,7 @@ pub fn read_image_file(p: &Path) -> Result<(bool, Vec<u8>), String> {
         "jpg" | "jpeg" => false,
         _ => return Err("not an image (png, jpg)".into()),
     };
-    let cap = synthesis_tui_base::imgclip::MAX_PNG as u64;
+    let cap = synthesis_cli_ui_base::imgclip::MAX_PNG as u64;
     // `p` is the resolved path from `Engine::image_path`; a link swapped in since then is refused
     // by the open itself (O_NOFOLLOW / FILE_FLAG_OPEN_REPARSE_POINT), and the opened handle is
     // checked to be a regular file within the cap.
@@ -2404,7 +2404,7 @@ pub fn build(
         notes.extend(engine::housekeeping(&home, &keep));
     }
     let back = |home: &Path, sid: Option<String>| {
-        sid.and_then(|s| synthesis_tui::load_resume(home, &s).ok())
+        sid.and_then(|s| synthesis_cli_ui::load_resume(home, &s).ok())
     };
     let want = match &target {
         Some(Target::Resume(id)) => {
@@ -2501,7 +2501,7 @@ pub fn build(
     }
     drop(t_load);
     let attempt = |project: PathBuf,
-                   resume: Option<synthesis_tui::Resume>,
+                   resume: Option<synthesis_cli_ui::Resume>,
                    model: Option<String>,
                    notes: Vec<String>,
                    trust: Option<&(PathBuf, Option<String>, bool)>,
@@ -2743,7 +2743,7 @@ fn enter_answers(ctrl: bool, cmd: bool, answerable: bool) -> bool {
 fn enter_completes(
     text: &str,
     c: &Comp,
-    cmds: &[synthesis_tui_base::complete::Command],
+    cmds: &[synthesis_cli_ui_base::complete::Command],
 ) -> Option<bool> {
     if c.token.kind != complete::TokenKind::Command {
         return None;
@@ -2918,7 +2918,7 @@ mod tests {
     #[test]
     fn enter_on_a_prefix_completes_and_runs_only_without_args() {
         let mut l = Live::new();
-        l.commands = synthesis_tui::local_commands();
+        l.commands = synthesis_cli_ui::local_commands();
         let c = suggest("/mo", 3, &l, Path::new("/")).unwrap();
         assert!(enter_completes("/mo", &c, &l.commands).is_some());
         let c = suggest("/model", 6, &l, Path::new("/")).unwrap();
@@ -2930,7 +2930,7 @@ mod tests {
     #[test]
     fn a_slash_offers_commands_and_the_cursor_is_in_chars() {
         let mut l = Live::new();
-        l.commands = synthesis_tui::local_commands();
+        l.commands = synthesis_cli_ui::local_commands();
         let c = suggest("/mo", 3, &l, Path::new("/")).expect("commands");
         assert!(c.items.iter().any(|(label, _)| label == "/model"));
         assert!(suggest("plain words", 5, &l, Path::new("/")).is_none());
@@ -2965,7 +2965,7 @@ mod tests {
             &[("usage", true), ("session", true), ("usage", false)],
         )
         .unwrap();
-        let (t, d) = synthesis_settings::read_user_tui(home.path());
+        let (t, d) = synthesis_settings::read_user_ui(home.path(), "tui");
         assert!(d.is_empty(), "{d:?}");
         let h = crate::settings_view::hidden_from(&t);
         assert!(h.session && !h.usage && !h.tools);

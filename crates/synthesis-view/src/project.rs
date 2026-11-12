@@ -1,6 +1,6 @@
 //! Reads the working tree for `/files` and `/diff`: read-only `git`, bounded, run on a worker
 //! thread (never the render thread). Nothing is invented: no git, or not a repository, is a note.
-//! (From the removed new TUI's Mission centre tabs, as data and text only.)
+//! (From the removed redesigned TUI's Mission centre tabs, as data and text only.)
 //!
 //! What is guaranteed about the programs a repository's config can name: `core.fsmonitor`, the
 //! textconv and external diff drivers, and every `filter.<name>.clean|smudge|process` found in the
@@ -18,8 +18,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use synthesis_harness::sanitize_for_display as clean_line;
 
+use synthesis_cli_ui_base::imgclip::{Output, RealExec};
 use synthesis_config::Env;
-use synthesis_tui_base::imgclip::{Output, RealExec};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TreeRow {

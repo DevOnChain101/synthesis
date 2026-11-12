@@ -6,12 +6,12 @@ onboarding, OS credential store). Owner request 2026-11-06; CLAUDE.md "Status" h
 ## 1. Goals and non-goals
 
 A native GPUI app (not Tauri, no webview) for macOS, Linux and Windows that is the desktop version
-of the classic TUI design, in this repo, running the Rust engine in process.
+of the TUI design, in this repo, running the Rust engine in process.
 
-- One interface, plus a placeholder and Settings: **TUI** (the classic TUI design drawn natively from engine
-  data, `cli.html` exactly), **Agent** (a different design, later: the page says "Coming soon") and **Settings**
+- One interface, plus a placeholder and Settings: **TUI** (the terminal-style tab, drawn natively from engine
+  data, `cli.html` exactly), **Super Agent** (a different design, later: the page says "Coming soon") and **Settings**
   (a centred popup over the TUI view, section 6). The design reference is `~/Vibe/synthesis-cli-ui/cli.html` with the platinum
-  palette (`docs/tui-palette.md`), not its blue/green. The first Agent view (`agent_view/`, built on `#view2`) was
+  palette (`docs/cli-palette.md`), not its blue/green. The first Super Agent view (`agent_view/`, built on `#view2`) was
   removed on 2026-11-07 by owner decision; its chat pane, diff/terminal/browser panes and project tree live on in
   the TUI view's centre panel.
 - Non-goals (owner decisions): no launchpad/landing/Ask page; no embedded terminal emulator and no
@@ -26,31 +26,31 @@ of the classic TUI design, in this repo, running the Rust engine in process.
 - `engine.rs`: `synthesis_app::run::prepare(.., Front::Native(Native { out, approver, input }))` builds
   the harness in process. The host supplies the JSONL event writer (parsed to typed `Envelope`s and sent
   to the window over a channel), the `Approver` (pending map answered by the UI) and the
-  `InputProvider` (`ChanInput`: plan and question dialogs, answered by the window). `Front::Native` behaves like `Front::Tui` otherwise.
+  `InputProvider` (`ChanInput`: plan and question dialogs, answered by the window). `Front::Native` behaves like `Front::Cli` otherwise.
 - `crates/synthesis-view` (`synthesis-view`): UI-agnostic view models and reducers, no terminal, no
-  GPUI, no drawing. The classic TUI and the desktop both depend on it. One `state::ViewState` per
+  GPUI, no drawing. The CLI and the desktop both depend on it. One `state::ViewState` per
   session: `apply(&Envelope)` folds an event into every panel; `load_from_store(&Reader,
   &WorkspaceContext, &StoreLoad)` fills the store panels (and replays one session). Panels:
   `convo` (messages, tool cards, pending approvals, sub-agents, todo plan; moved from
   `apps/desktop/src/convo.rs`), `status` (`StatusModel`: context used/window, tokens in/out/cache and
   hit rate, cost, turns, tools, model/effort/mode, cwd, uptime; `SandboxStatus`, `ContextStatus` moved
-  from `synthesis-tui`), `usage` (`UsageHistory`, per-day history; moved), `workspaces`
+  from `synthesis-cli-ui`), `usage` (`UsageHistory`, per-day history; moved), `workspaces`
   (`WorkspaceList`: root, label, session count, `+N -N` when the host marks the folder trusted;
   `SessionRow` with title or `(untitled)`, status, `updated_at`, `is_live`; empty and closed
   sessions hidden by `Reader::list_used_sessions`), `running` (`RunningList`: live sessions and
   `PeerRow`s from the `/peers` listing), `activity` (`ActivityModel`, `ToolsSkillsModel`),
   `topology` (`Topology`: stage pipeline Plan, Guard, Orch, Exec, Verify, Learn, and the
   user/core/guards/skills/agents/hooks/mcp/exec/memory nodes with state and counters), `model`
-  (the transcript-shaped `Session` all of those read; moved from `synthesis-tui-render`),
-  `project` (git tree/diff scan with the trust gate; moved from `synthesis-tui`), `sessions`
-  (`list_saved`; moved). `synthesis-tui` and `synthesis-tui-render` re-export the moved items under
+  (the transcript-shaped `Session` all of those read; moved from `synthesis-cli-ui-render`),
+  `project` (git tree/diff scan with the trust gate; moved from `synthesis-cli-ui`), `sessions`
+  (`list_saved`; moved). `synthesis-cli-ui` and `synthesis-cli-ui-render` re-export the moved items under
   their old paths and keep colours, layout and ANSI. Frontends decide `is_live` and the trust gate
   by closures in `LoadOpts`; the crate never reads the environment itself.
-  Dependency note: `synthesis-view` still depends on `synthesis-tui-base` (only for `is_js_space` and
+  Dependency note: `synthesis-view` still depends on `synthesis-cli-ui-base` (only for `is_js_space` and
   the bounded process runner `imgclip::RealExec` that `project` runs git with) and on
   `synthesis-harness` (only `sanitize_for_display`); moving both into a small base crate is follow-up.
-- `theme.rs` reads the TUI's own tokens (`synthesis-tui-render::theme`), so palette changes land in
-  both UIs at once. Fonts: Inter (UI sans), Fira Code (TUI and Agent views, the design's `--mono`) and JetBrains Mono (settings font choice), SIL OFL, licences in
+- `theme.rs` reads the CLI's own tokens (`synthesis-cli-ui-render::theme`), so palette changes land in
+  both UIs at once. Fonts: Inter (UI sans), Fira Code (TUI and Super Agent views, the design's `--mono`) and JetBrains Mono (settings font choice), SIL OFL, licences in
   `apps/desktop/assets/fonts/*-OFL.txt`; icons: Lucide through `gpui-kit-assets`.
 - Pins (exact): `gpui-pre =0.3.10` (the maintainers' snapshot of Zed's gpui), `gpui-component =0.8.1`,
   `gpui-pre-platform =0.3.10` with `font-kit`, `gpui-kit-assets =0.8.1`; macOS adds `gpui-pre-apple`
@@ -86,9 +86,9 @@ of the classic TUI design, in this repo, running the Rust engine in process.
 
 ## 4. Phases
 
-0. Shell (done): window, title bar (TUI, Agent, Settings icons), placeholders, palette, fonts, `Front::Native`,
+0. Shell (done): window, title bar (TUI, Super Agent, Settings icons), placeholders, palette, fonts, `Front::Native`,
    engine and reducer restored and green against the current crates.
-1. Agent view on `engine` + `synthesis_view::convo` (send, stream, approve/deny), then TUI view panels from the same state.
+1. Super Agent view on `engine` + `synthesis_view::convo` (send, stream, approve/deny), then TUI view panels from the same state.
 2. Settings from `synthesis-settings` (model, permissions, appearance), stored-session resume.
 3. Plan/question dialogs, browser/verification panels, Linux and Windows builds and CI jobs.
 
@@ -99,8 +99,8 @@ model/resume pickers, every built-in slash command, image paste, and peer pollin
 calls `Engine::peer_rows` every fifth second into `ViewState::set_peers`). Linux/Windows run in CI but no
 maintainer has used them on a real machine (no ConPTY need any more).
 
-Chat rows follow the classic TUI's quiet-chat rules (`tui_view/chat.rs` `visible`, reducer in
-`synthesis-view/src/convo.rs`, wording from `synthesis-tui` `chat.rs`). Always shown: budget exceeded, failed
+Chat rows follow the CLI's quiet-chat rules (`tui_view/chat.rs` `visible`, reducer in
+`synthesis-view/src/convo.rs`, wording from `synthesis-cli-ui` `chat.rs`). Always shown: budget exceeded, failed
 hooks, a browser login to confirm, a refused peer request, work a peer asked for, peer replies and agent
 messages, a memory note waiting for review, a failed memory reflection. Internal rows (successful hooks,
 memory retrieved/written/quarantined, peer listening/requests/threads/tool calls) are `Item::Internal`: drawn
@@ -110,7 +110,7 @@ last verification report; `Done` is the only green end. An exceeded budget also 
 next task. With `--worktree`, a chat notice and the Session panel (`worktree`, `branch`) give the path and branch;
 the finish report (changes, cleanup) is a notice of the next session's chat (stderr on quit).
 
-TUI view is LIVE (phase 2b-1): `engine.rs` mirrors `synt tui` (prepare + `round` + `Host`), `live.rs` holds the
+TUI view is LIVE (phase 2b-1): `engine.rs` mirrors `synt` (prepare + `round` + `Host`), `live.rs` holds the
 dialogs/queue/history/focus rules, `tui_view/snapshot.rs` builds the painted `Snapshot` from `ViewState`,
 `driver.rs` pumps engine messages (batched, one redraw per 16 ms), handles keys, completion, resume and
 store refresh, `chat.rs`/`dialog.rs` paint the conversation and the permission/plan/question dialogs.
@@ -118,9 +118,9 @@ store refresh, `chat.rs`/`dialog.rs` paint the conversation and the permission/p
 scripted (fake provider, `--features shot,test-provider`) conversation on the real engine. Not yet: Linux/Windows/IME
 verification.
 
-Slash commands (all built-ins are wired; `live.rs` `WIRED`, the TUI's semantics): `/files` and `/diff [file]` switch
+Slash commands (all built-ins are wired; `live.rs` `WIRED`, the CLI's semantics): `/files` and `/diff [file]` switch
 the centre panel to its file explorer or diff tab (`/diff FILE` opens that file's diff) and post nothing in the chat;
-the explorer needs no trust. `/peers` posts the TUI's table.
+the explorer needs no trust. `/peers` posts the CLI's table.
 `/send` with no arguments opens a picker docked above the prompt (`send_pick.rs`, the `/model` dialog family): the
 live peers of the polled listing (main agents, not this session, not unreachable) grouped by workspace, typing filters
 (session, workspace, short id), each row with the Running panel's activity dot, the short id and the last activity
@@ -129,13 +129,13 @@ none seen = gray). A pick sets a one-shot chip over the prompt (`to <workspace> 
 address; the next plain line goes there and a note echoes `sent to ws:abcd1234../sess:12345678..`. Esc (or Ctrl+T) clears
 the chip, a command leaves it, a peer that left the listing holds the line with a notice. Peers off or none listed: the
 picker's only row says how to enable them. `/send <address> <text>` is unchanged.
-`/name` shows the name peers address the session by; it is fixed for the run (`--name`), as in the TUI, so it
+`/name` shows the name peers address the session by; it is fixed for the run (`--name`), as in the CLI, so it
 does not rename the stored title. `/rename <title>` does (`synthesis_app::rename`, one validator for both frontends):
 the title is trimmed, newlines collapse to a space, 1-120 characters, control/bidi/zero-width characters and
 secret-shaped text are refused; it is stored with `Store::set_title` and shows at once in the Workspace and
 Running lists; without an argument it shows the current title and the usage. `/focus [on|off]` hides tools, thinking, approvals and agent rows (user,
 assistant, result and notices stay). `/permissions allow|remove RULE` edits the rules of this session only
-(`is_well_formed_rule`, nothing is written to settings, as in the TUI; `remove` also drops deny/ask entries).
+(`is_well_formed_rule`, nothing is written to settings, as in the CLI; `remove` also drops deny/ask entries).
 
 TUI view (`src/tui_view/`), rebuilt 1:1 on the owner's design `~/Vibe/synthesis-cli-ui/cli.html` (owner decision
 2026-11-07, "dung lai dung cli.html"): geometry and typography are the design's (Fira Code 500, 12.5px / 1.55,
@@ -156,12 +156,12 @@ cannot be hidden (owner decision 2026-11-09). Mission (was Agent Status, the age
 minutes after all tasks are done, a new list replaces the old, a resumed session clears it. The `* main` switch under
 the prompt shows only while sub-agents exist: a row each, `name - state` left and `online - tokens` right; done ->
 idle after 1 minute -> removed (with its transcript) after 5 (`synthesis_view::lifecycle`; online time freezes when it
-finished; docs/TUI.md has the details). The sub-agents are the Subagents card of Topology; while Topology is hidden a compact Subagents block
+finished; docs/CLI-APP.md has the details). The sub-agents are the Subagents card of Topology; while Topology is hidden a compact Subagents block
 (`p-subagents`) takes its place, so the right column always exists and the chat no longer spans to the right edge.
 `/panels` lists the panels with their state, `/panels hide-all` hides every hideable one, `/panels show-all`
 shows them, `/panels <name> on|off` switches one; it applies at once and saves to `synt.tui.panels` in the user file
 (atomic, via `SettingsStore`). The labels in
-`synthesis-settings::TUI_PANELS` name both the terminal and the desktop panel.
+`synthesis-settings::UI_PANELS` name both the CLI and the desktop panel.
 
 Data: `sample.rs` is the design's own sample (`STATE`), `snapshot.rs` builds the same `Snapshot` from the live
 `ViewState`. Usage & Metrics rows come from `synthesis-view::usage` (`UsageHistory::metrics`: tokens, tool calls,
@@ -193,7 +193,7 @@ mid-glyph); a docked dialog (Trust, approval, pickers) is not taller than its co
 its text box and option list shrink and scroll, and a line `down-arrow more ...: scroll` shows while text is below the
 fold; "approval needed" in the title bar has a fixed line box and only its dot blinks; a side panel body that is cut
 (Tools & Skills, Recent Activity, Workspace, Running) fades out at its bottom edge; the `/model` picker lists only the
-metadata the provider gave; `chrome::dim` is `#8E8F93` (docs/tui-palette.md). At the reference sizes of `design_tests`
+metadata the provider gave; `chrome::dim` is `#8E8F93` (docs/cli-palette.md). At the reference sizes of `design_tests`
 nothing of this changes the rects. Shot flags: `--live SCRIPT` without `--prompt` (empty chat), `--hide-all`, `--bare`
 (Files and Browser tabs unseeded).
 Not ported: topology mode L (tall and narrow falls back to T). The "Latest user prompt" scrolls (16s, repeating,
@@ -201,7 +201,7 @@ Not ported: topology mode L (tall and narrow falls back to T). The "Latest user 
 
 Window shell (`ui.rs`): a 30px title bar over the content, no side rail. The bar follows the Tauri app's chrome
 (`#chrome`: `.cb` buttons 26x22, radius 6, hover and pressed backgrounds): the app mark and drag region on the left,
-the TUI and Agent icons in a group, then the Settings gear; each has a tooltip with its shortcut (Cmd/Ctrl+1,
+the TUI and Super Agent icons in a group, then the Settings gear; each has a tooltip with its shortcut (Cmd/Ctrl+1,
 Cmd/Ctrl+2, Cmd/Ctrl+,). The content below is the design's 1400x900 etc. exactly (the bound tests lay the view out
 without the bar; `ui::tests` checks that the bar adds 30px above it and nothing beside it). macOS: transparent
 native title bar with the traffic lights at (14, 9) and 78px reserved for them. Windows and Linux: client-side
@@ -225,7 +225,7 @@ shows counters; Ctrl+1..5 switch, Esc returns to the chat, PageUp/PageDown scrol
   changed files open first), changed files marked M/A/D/?, a click previews a text file read-only (<= 256 KB and 2000
   lines; refuses paths outside the folder, links out of it, secret files and binary content).
 
-### Feature gaps against the TUI (view-model status)
+### Feature gaps against the CLI (view-model status)
 
 Done in `synthesis-view`: workspaces and sessions, running/peers, usage, status, topology, activity,
 tools and skills, conversation. Not done, with where the data would come from:
@@ -237,7 +237,7 @@ tools and skills, conversation. Not done, with where the data would come from:
   rows; `[exit code N]` parsing stays as the fallback for old sessions. A background process nobody polls
   again never gets `process.exited`. Verification: `verification.check.started|finished` give per-check progress (a card in the chat with one row per check, 5-line clamp for the output tail of a check that did not pass; a line in Recent Activity); sessions recorded before them show the one-line `verification.completed` as before.
 - `/rewind`: done (`apps/desktop/src/rewind.rs`, `tui_view/rewind.rs`). It is `synt rewind` with a dock in place of flags, and
-- `/close-workspace` (desktop only; `apps/desktop/src/close_ws.rs`, `Store::close_workspace`): closes every listed session of a workspace (`sessions.closed_at`; nothing deleted, `/resume <id>` opens one) after a dock confirmation (Cancel selected, Esc cancels, needs engaging like the bypass confirmation) that names the workspace and path, the count, the running sessions with their age, and that running tasks are cancelled. Sessions whose lock another live process holds are never closed and are listed as such. The open folder goes through the engine restart (the confirmation stands for the second press that cancels a running task) and lands on a fresh session in the same folder; the Workspace panel's `x` button (every row but the open folder) closes another folder in the store only. Refused while another dialog is open and, for the open folder, while a rewind is open (`engine_switch_blocker`). At confirm time the ask-time checks run again (`Live::confirm_close_workspace`): the workspace gone or a blocker now applies refuses with a note; a different open/not-open state or session list (id and kind) re-opens the dialog instead of closing. The open folder's dialog names the queued prompts and open dialogs the restart drops. `Store::open` (used to write) creates or tightens the home directory (0700), the database file and migrates the schema to the latest; it prunes nothing (empty-session pruning runs only at the first start of an engine). Folders that differ only by case on a case-sensitive volume are merged by `fold_dir`, as in the existing lists. Not in the terminal TUI.
+- `/close-workspace` (desktop only; `apps/desktop/src/close_ws.rs`, `Store::close_workspace`): closes every listed session of a workspace (`sessions.closed_at`; nothing deleted, `/resume <id>` opens one) after a dock confirmation (Cancel selected, Esc cancels, needs engaging like the bypass confirmation) that names the workspace and path, the count, the running sessions with their age, and that running tasks are cancelled. Sessions whose lock another live process holds are never closed and are listed as such. The open folder goes through the engine restart (the confirmation stands for the second press that cancels a running task) and lands on a fresh session in the same folder; the Workspace panel's `x` button (every row but the open folder) closes another folder in the store only. Refused while another dialog is open and, for the open folder, while a rewind is open (`engine_switch_blocker`). At confirm time the ask-time checks run again (`Live::confirm_close_workspace`): the workspace gone or a blocker now applies refuses with a note; a different open/not-open state or session list (id and kind) re-opens the dialog instead of closing. The open folder's dialog names the queued prompts and open dialogs the restart drops. `Store::open` (used to write) creates or tightens the home directory (0700), the database file and migrates the schema to the latest; it prunes nothing (empty-session pruning runs only at the first start of an engine). Folders that differ only by case on a case-sensitive volume are merged by `fold_dir`, as in the existing lists. Not in the CLI.
   it uses the same code (`synthesis_app::rewind::{load, plan, apply_confirmed}`), so the containment is the CLI's: only files
   inside the session's workspace roots (parent resolved, `..` and relative paths refused), never a symlink or non-regular file,
   never a secret-masked snapshot, never a file changed since the run (the desktop has no `--force`). Steps: (1) a picker of the
@@ -281,7 +281,7 @@ tools and skills, conversation. Not done, with where the data would come from:
   counts, bytes freed and the backup path; the Workspace / Running / Recent lists are read again. While a `/clean` is open or running no
   prompt starts and no engine switch happens (`Live::engine_switch_blocker`). The 10-minute timeout frees the flag only for the counting step; a deletion keeps prompts and engine switches blocked until it reports (a note says it is still working); it is refused while a task, dialog, queued prompt or
   `/rewind` is pending. Not done: directories under `sessions/` with no row (left by a crash) are not swept; `synt.db` is not VACUUMed (the
-  file does not shrink; freed pages are zeroed and the WAL truncated); the classic TUI and `synt` have no `/clean`.
+  file does not shrink; freed pages are zeroed and the WAL truncated); the CLI and `synt` have no `/clean`.
 - Settings: done. Write API in `crates/synthesis-settings-ui`, the popup in `apps/desktop/src/settings_view` (section 6).
 - Multi-session tabs: TODO. `ViewState` is one session; tabs are a `Vec<ViewState>` keyed by session id
   in the desktop, fed by one event channel per `engine` run. Needs the engine to host several sessions.
@@ -291,15 +291,19 @@ tools and skills, conversation. Not done, with where the data would come from:
   with a 5 s limit per call, so load off the UI thread.
 - Interactive PTY: not wanted (owner decision).
 
-### Agent view (removed)
+### Super Agent view (removed)
 
-The first Agent view (phase 3) is gone; the Agent page is "Coming soon". What it built on `synthesis_view::agent`
+The first Super Agent view (phase 3) is gone; the Super Agent page is "Coming soon". What it built on `synthesis_view::agent`
 (`AgentPanes`: sub-agents, commands, verification, browser calls and frames, changed files) is used by the TUI view's
 tabs and its sub-agent transcript (the `* main / developer` switch under the prompt opens a transcript beside the chat).
 Known gaps: browser events carry no image bytes (screenshots are the saved artifacts, no live stream); concurrent
 engines share process-global state (`set_learned_skills`), which no longer matters with one session on screen.
 
 ## 6. Settings (backend: `crates/synthesis-settings-ui`)
+
+**`synt.tui` is the desktop TUI tab's section, `synt.cli` the CLI's** (owner decision 2026-11-11). Both hold the same keys (`UiSettings`) and
+are read and written separately, so the Settings popup never changes how the CLI looks and `/config` never changes the desktop. The
+keys in the table below are `synt.tui.*`. `synt doctor` notes CLI-only keys still sitting under `synt.tui` and `SYNT_TUI_*` variables.
 
 **What the design has.** `cli.html` has no settings form with these sections. USER & PROMPT, MEMORY,
 EXECUTION, GUARDS, HOOKS, MCP, SKILLS and SUB-AGENTS are the status cards of the topology (`topology1`,
@@ -320,8 +324,8 @@ appearance and has no backend key (the desktop owns it). The sections below are 
   document about to be written. Errors name the key and never echo a refused secret. Returns the diagnostics after the write.
 - MCP servers are not in the store. Add and remove call `synthesis_app::mcp::{add_server, remove_server}`, the code `synt mcp add|remove`
   runs (name check, URL/header/env/args credential guards, closed-schema validation, atomic 0600 write); `synt mcp` now calls them too.
-- The TUI `/config` still writes `synt.tui` through `persist_user_tui`; switching it was not zero-risk (it writes the whole subtree and the
-  TUI would gain a dependency on this crate). Both produce the same file.
+- The CLI `/config` still writes `synt.cli` through `persist_user_ui(home, "cli", ..)`; switching it was not zero-risk (it writes the whole subtree and the
+  CLI would gain a dependency on this crate). The desktop reads and writes `synt.tui` (the TUI tab's own section; same keys, `UiSettings`).
 
 **Sections and keys.** Scope: `user file only` = project, local, `--settings` and managed copies are ignored (shown refused with that
 reason); `layered` = user, `--settings`, managed, and project/local only with a trusted project; `may tighten` = an untrusted project may
@@ -401,7 +405,7 @@ Skills, Sub-agents, User & prompt); a search shows the matching rows of every ta
 (default / user / project / local / flag / managed), its default, a reset link (removes the key from the USER file), the validation
 error of a refused edit, and when it applies: `applies now` (panels, thinking, verbose rows, motion, opacity, blur), `applies to the next
 session` with a banner and a working **Restart session** button (a fresh session in the same folder, which reads the files again), or
-`terminal TUI only` (logo, expanded diffs, queue lines, mouse capture, copy on select: the desktop view has nothing to apply). Keys that
+`CLI only` (logo, expanded diffs, queue lines, mouse capture, copy on select: the desktop view has nothing to apply). Keys that
 widen what the agent may do stay read-only with the reason; there is no field for an API key (ADR-011). Every write goes through
 `SettingsStore` (atomic, USER `settings.json`, every other key kept). While the popup is open the TUI view is not `shown`, so it never
 answers a pending approval (the title bar keeps the red "approval needed", a click on it returns to the TUI view).

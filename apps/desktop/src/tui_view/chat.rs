@@ -1,5 +1,5 @@
-//! The centre of the TUI view when it is live: the conversation drawn from `Convo` with the TUI's "quiet
-//! chat" rules (docs/TUI.md "Events": what a person needs, nothing else), the prompt box with its
+//! The centre of the TUI view when it is live: the conversation drawn from `Convo` with the CLI's "quiet
+//! chat" rules (docs/CLI-APP.md "Events": what a person needs, nothing else), the prompt box with its
 //! popups, and the "jump to latest" button.
 
 use gpui::{
@@ -8,7 +8,7 @@ use gpui::{
 };
 use gpui_component::input::Textarea;
 use gpui_component::text::TextView;
-use synthesis_tui_render::theme as t;
+use synthesis_cli_ui_render::theme as t;
 use synthesis_view::convo::{ApprovalState, CheckRow, CheckState, Item, StepState};
 use synthesis_view::toolview::{self, Glyph, Tone};
 
@@ -20,13 +20,13 @@ use crate::live::{clip, label};
 use crate::theme::hsla;
 use crate::widgets::syntax;
 
-/// Lines of a tool's output shown before "ctrl+o" (the TUI's default).
+/// Lines of a tool's output shown before "ctrl+o" (the CLI's default).
 pub const COLLAPSED_LINES: usize = 5;
 
-/// Whether a row of the quiet chat is shown. `verbose` is the TUI's switch for the internal rows
+/// Whether a row of the quiet chat is shown. `verbose` is the CLI's switch for the internal rows
 /// (`Item::Internal`: memory, peer and hook bookkeeping) and widens what approvals show.
 pub fn visible(it: &Item, show_thinking: bool, verbose: bool, focus: bool) -> bool {
-    // `/focus`: prompts, answers, results and notices only (the TUI's focus kinds)
+    // `/focus`: prompts, answers, results and notices only (the CLI's focus kinds)
     if focus
         && !matches!(
             it,

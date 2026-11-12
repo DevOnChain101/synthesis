@@ -1,4 +1,4 @@
-//! `/rename <title>`: the title of the session in the store, for every frontend (TUI, desktop).
+//! `/rename <title>`: the title of the session in the store, for every frontend (CLI, desktop).
 //! The store only holds titles a person set; the first prompt that names an untitled session is
 //! derived when a list is read (`synthesis-view`), never written, so it cannot overwrite one.
 

@@ -1,4 +1,4 @@
-//! JS-compatible string helpers shared by the models (moved from `synthesis-tui-render::util`,
+//! JS-compatible string helpers shared by the models (moved from `synthesis-cli-ui-render::util`,
 //! which re-exports them).
 
 /// `user.message.display_text` of the harness's own notes to the model (empty, verification or
@@ -31,7 +31,7 @@ pub fn slice_u16(s: &str, n: usize) -> &str {
 pub fn one_line(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for w in s
-        .split(synthesis_tui_base::text::is_js_space)
+        .split(synthesis_cli_ui_base::text::is_js_space)
         .filter(|w| !w.is_empty())
     {
         if !out.is_empty() {

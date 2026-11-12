@@ -19,7 +19,7 @@ pub const UI_FONT_FILES: [&[u8]; 3] = [
     include_bytes!("../assets/fonts/Inter-SemiBold.otf"),
 ];
 
-/// Family name of the monospace of the TUI and Agent views (`cli.html` `--mono`, first choice).
+/// Family name of the monospace of the TUI and Super Agent views (`cli.html` `--mono`, first choice).
 pub const MONO_FONT: &str = "Fira Code";
 
 /// Fira Code regular, medium (the design's body weight) and bold, SIL OFL.

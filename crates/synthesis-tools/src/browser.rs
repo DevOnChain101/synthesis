@@ -77,7 +77,7 @@ pub struct LoginRequest {
     pub done_file: PathBuf,
 }
 
-/// The seam to the person (a TUI dialog, the headless terminal prompt). Both calls are in
+/// The seam to the person (a CLI dialog, the headless terminal prompt). Both calls are in
 /// addition to, never instead of, the permission engine, and neither may be auto-answered.
 pub trait BrowserHost: Send + Sync + std::fmt::Debug {
     /// The visible browser is open on `req.origin`. Emit the `browser.login_required` event,

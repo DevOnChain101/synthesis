@@ -6,8 +6,8 @@ Scope: **Part A**, in-session messaging (agent ↔ sub-agent, user `@agent` in c
 ## 0. Non-negotiables
 1. A message never grants anything: no approval, no mode change, no dialog answer, no bypass. Receivers act only with their own permissions and policy.
 2. Messages reach a model only at agent-loop safe points, never between a `tool_use` and its `tool_result`.
-3. Event-driven, no polling. Works on macOS/Linux/Windows, headless `synt run` and the TUI.
-4. Every send and receive is an event (additive v1), redacted, and visible in the TUI of every session involved.
+3. Event-driven, no polling. Works on macOS/Linux/Windows, headless `synt run` and the CLI.
+4. Every send and receive is an event (additive v1), redacted, and visible in the CLI of every session involved.
 5. Addressing never guesses: an address resolves to exactly one agent or fails with the candidate list.
 
 ## 1. Addressing (both parts)
@@ -44,7 +44,7 @@ instance  = name | agent_id-prefix (>= 6 hex) | "main" | "parent" (in-session on
 ## Part A — In-session messaging
 
 ### A1. Today and transport
-Sub-agents live only for one synchronous `Task` call (exec.rs:1563, shared `&TaskRun`). The TUI holds lines typed during a task until it ends (app.rs `next_queued`). Node had `@name` routing [from-node agent.js:1165, 882], a chat target [from-node app.js:803-820] and idle eviction [from-node agent.js:49]. Rust already ranks agents first in `@` completion (synthesis-tui-base complete.rs:280) and has the render side (`visible_subagents`, `subagent_rows`, `chat_target`, `docked`, synthesis-tui-render agent.rs:2055). Nothing feeds them.
+Sub-agents live only for one synchronous `Task` call (exec.rs:1563, shared `&TaskRun`). The CLI holds lines typed during a task until it ends (app.rs `next_queued`). Node had `@name` routing [from-node agent.js:1165, 882], a chat target [from-node app.js:803-820] and idle eviction [from-node agent.js:49]. Rust already ranks agents first in `@` completion (synthesis-cli-ui-base complete.rs:280) and has the render side (`visible_subagents`, `subagent_rows`, `chat_target`, `docked`, synthesis-cli-ui-render agent.rs:2055). Nothing feeds them.
 **Transport: in-process `AgentHub` per session** (`synthesis-harness/src/hub.rs`). It holds the retained sub-agents and a FIFO inbox per agent (main included), and wakes waiters with `tokio::sync::Notify`. Against it: queued messages are lost on a crash. Accepted, because their targets die with the process; the events show `sent` without `delivered`.
 
 ### A2. Sub-agent lifecycle
@@ -53,7 +53,7 @@ Sub-agents live only for one synchronous `Task` call (exec.rs:1563, shared `&Tas
 - **Task (additive):** `name?`, `run_in_background?`. Background returns `{agent_id, instance, kind, status:"running"}`, and the final text reaches the parent as a `result` message. Depth-1 children keep today's restrictions (exec.rs:1611) and get SendMessage/ListAgents/ListSessions.
 - **Retention (D6, accepted):** for the session lifetime, cap 16. At the cap the oldest idle agent is evicted; if none is idle, `Task` errors.
 - **Waiting (D3, accepted):** main's `Finished` waits while background children run or peer replies are outstanding, bounded by `max_wall_ms` and cancel. One gate and one budget per task.
-- **Idle TUI session:** a user message to an idle sub-agent starts a task driven by that agent (`TaskRequest.agent`).
+- **Idle CLI session:** a user message to an idle sub-agent starts a task driven by that agent (`TaskRequest.agent`).
 
 ### A3. Delivery
 - **Record:** `{id, from: Addr, to: Addr, origin:user|agent|system, kind:message|result|notice, text ≤ 32 KiB, summary ≤ 120, notify_when_idle}`. At most 32 queued per inbox; a full inbox makes SendMessage fail (D7, accepted). FIFO, exactly-once in process.
@@ -88,7 +88,7 @@ Sub-agents live only for one synchronous `Task` call (exec.rs:1563, shared `&Tas
 | O3 chips | the picker inserts spans; typed text never routes | spans lost on history and paste |
 | O4 target | a persistent `to:` | modal; misdirection |
 
-**Chosen: O1 narrowed + `@agent:` + O4.** Rules apply on submit (TUI) and to the first token only:
+**Chosen: O1 narrowed + `@agent:` + O4.** Rules apply on submit (CLI) and to the first token only:
 1. A mid-text `@x` is always a file mention (mentions.rs unchanged).
 2. `@agent:<name>` targets a retained instance, or **starts a new one from that definition** (D2, accepted: the only way to start one from chat).
 3. A bare `@<name>` (agent charset: no `.`, `/` or `:`) routes only to `main` or a retained instance **of this session**.
@@ -111,7 +111,7 @@ Sub-agents live only for one synchronous `Task` call (exec.rs:1563, shared `&Tas
 
 **Headless:** never routes; `@x` in `--prompt` is always a file.
 
-### A6. TUI
+### A6. CLI
 - Agent rows: `◆ developer-2 (developer) running · 3 tools · 2 queued`.
 - Main-transcript rows: `→ @developer-2 <summary>`, `← @developer-2 result: …`, `⚠ dropped`.
 - The per-agent view uses the existing `docked`/`chat_target`. `/agents` shows §1.1 columns for this session plus definitions; `/agents --all` includes allowed peers.
@@ -178,7 +178,7 @@ C→S {"t":"cancel","id"}                   closing the connection = cancel
 
 **R2.**
 - **Snapshot:** the hub refreshes a snapshot of each agent's history at every drain point. The responder starts from the **addressed agent's** last-boundary snapshot (main, or the named instance). Mid-tool or mid-approval it uses the pre-call state; while compacting, the pre-compaction state; when idle, the retained history.
-- **Responder** = a sub-agent of A (`kind:"peer-responder"`, instance `peer-<n>`), visible in A's events and TUI.
+- **Responder** = a sub-agent of A (`kind:"peer-responder"`, instance `peer-<n>`), visible in A's events and CLI.
   - Tools: Read, Glob, Grep, git_status, git_diff only. No Bash, Web*, MCP, browser, SendMessage or Task, so hops are at most 1 by construction.
   - Mode: `stricter(A's mode, plan)`; A's deny rules and protected/secret paths apply; asks auto-deny.
   - Budget: 8 turns, 20 tool calls, request timeout. Cost goes into A's usage and `synt.peers.max_cost_usd` (D13).
@@ -219,7 +219,7 @@ C→S {"t":"cancel","id"}                   closing the connection = cancel
    - The same list governs whom I may ask (and see in listings) and who may ask me.
    - Enabled ⇒ the default allow list is the same workspace plus `repo:<repo_key>`, i.e. the other worktrees of the same repository (J1 Q8); an `allow` list written by the user is never widened. Recommended `enabled:false` (D9).
 
-### B9. Listings (tools; the TUI `/agents --all` and `/peers` use the same rows)
+### B9. Listings (tools; the CLI `/agents --all` and `/peers` use the same rows)
 ```json
 ListSessions {}                                   → [Row(agent = main)]
 ListAgents {"scope": "session"|"all"}  (default "session") → [Row]
@@ -227,7 +227,7 @@ Row = {"address": canonical, "display": display,
        "workspace": {"label","key","root"}, "session": {"short_id","name"?, "status"},
        "agent": {"instance","kind","status","queued"}, "task_summary": "≤ 120, redacted by the owner session"}
 ```
-- The TUI renders the rows as the columns `WORKSPACE (label · path) | SESSION (sid8 · name) | AGENT | KIND | STATUS | TASK`.
+- The CLI renders the rows as the columns `WORKSPACE (label · path) | SESSION (sid8 · name) | AGENT | KIND | STATUS | TASK`.
 - Rows from peers that the allow list does not permit are not listed. The caller's own session is listed first.
 
 ### B10. Events (additive v1)
@@ -246,7 +246,7 @@ Row = {"address": canonical, "display": display,
   - `peer.reply {request_id, status:"answered"|"declined"|"failed"|"timeout"|"cancelled"|"offline", text (redacted preview + ArtifactRef), bytes, duration_ms}`.
 - The responder's own tool events carry its `agent_id` in A's stream.
 
-### B11. TUI
+### B11. CLI
 - **B:** `⇄ asked ws:api/sess:backend: <summary>` with a spinner, then partials, then `⇄ replied`.
 - **A:** `⇄ ws:web/sess:3c9e01aa asked developer-2: <summary>` plus a responder row `◆ peer-1 (peer-responder) read-only`.
 - Status bar: `peers on · 1 in flight`.
@@ -309,10 +309,10 @@ Open until 2026-10-29 (recommendations as written; all accepted, see below):
 | R10a-1 Hub, drains, wait, snapshots | new `synthesis-harness/src/hub.rs`; `agent.rs`, `harness.rs`, `context.rs` | **probe first:** `TaskRun` shared across spawned futures (today `&` borrows, exec.rs:1563) |
 | R10a-2 Tools + resolver | `exec.rs`; new `synthesis-core` `address.rs` (grammar, `workspace_key`, folding reused from §4.3 code); `synthesis-tools/src/schemas.json`; specs/tools.md | the judge must ignore agent text |
 | R10a-3 Events | `synthesis-events/src/types.rs`, schema, specs/events.md, golden `tests/golden/events/messaging-basic.jsonl` | additive only |
-| R10a-4 TUI | `synthesis-tui/src/{chat,app,runtime}.rs`, `synthesis-tui-base/src/complete.rs` | colour only |
+| R10a-4 CLI | `synthesis-cli-ui/src/{chat,app,runtime}.rs`, `synthesis-cli-ui-base/src/complete.rs` | colour only |
 | R10b-1 Transport | new crate `crates/synthesis-peers` (registry, per-OS endpoint behind `cfg`, frames, handshake) | Windows DACL assumption, path length; **security-reviewer** |
 | R10b-2 Responder + sender | `synthesis-harness`, `synthesis-settings` (user-only `synt.peers`), `synthesis-permissions` (`$SYNT_HOME/run` protected) | exfil residual (B8.3) |
-| R10b-3 CLI/TUI | `apps/cli` (`--name`, `/name`, `/peers`, `doctor`), rows | — |
+| R10b-3 CLI/CLI | `apps/cli` (`--name`, `/name`, `/peers`, `doctor`), rows | — |
 | R10c Offline resume | `apps/cli` hidden `peer-answer` | needs R8 |
 Order: R10a (after R5) → R10b (after the R7 protected-path/sandbox rules) → R10c (after R8). Each step is verified with `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace` on macOS, Linux and Windows.
 
@@ -328,7 +328,7 @@ The owner accepted every recommendation of D9–D16:
 - **D16** A git worktree session is its own workspace (`workspace_key` of the worktree root). Memory groups worktrees under the repository through `repo_key` (memory.md D3). Both keys are on `WorkspaceContext` and `session.started` carries `workspace_key` (memory M0 F6).
 
 ## F. R10a status (in-session messaging) — Not done
-Built: hub, drain points, wait for background agents, `Task{name,run_in_background}`, SendMessage/ListAgents, `TaskAgent` (a task driven by a retained or new sub-agent), additive events, TUI `@` routing, Tab target cycle, target line, agent rows, `/agents`.
+Built: hub, drain points, wait for background agents, `Task{name,run_in_background}`, SendMessage/ListAgents, `TaskAgent` (a task driven by a retained or new sub-agent), additive events, CLI `@` routing, Tab target cycle, target line, agent rows, `/agents`.
 Not done (left for R10a follow-up or R10b):
 - Cross-session peers: now built, see section G.
 - `@file` mentions in the text routed to a sub-agent are not expanded (the line goes as typed); the picker inserts plain text, not a coloured agent chip.
@@ -369,11 +369,11 @@ Built:
   - Reply `status` and every `from` field are cut to 256 chars on the sender side.
   - `synt doctor` warns when peers are on and the sandbox is not enforcing, and notes the price requirement.
   - Hard-denying Synthesis state for the main agent was checked against its features: memory is injected by the context provider, `#` notes and settings are written/read by Synthesis itself, and tool-output artifacts live under `sessions/`, which is not denied; nothing tells the model to `Read` a denied path.
-- `apps/cli`: `--peers`, `--name`, endpoint + registry entry + server at `prepare` (headless and TUI share it; no TUI file changed), `synt doctor` peers block, `docs/CLI.md`.
+- `apps/cli`: `--peers`, `--name`, endpoint + registry entry + server at `prepare` (headless and CLI share it; no CLI file changed), `synt doctor` peers block, `docs/CLI.md`.
 - Tests: `crates/synthesis-peers/tests/peers.rs` and unit tests (C15, C20-C24 transport side, C10-C12 resolver), `crates/synthesis-harness/tests/peers.rs` (C15-C19, C23: two harnesses, real socket, fake providers, `FakeProvider.requests()` assertions), `apps/cli/tests/e2e.rs` (peers off by default, flagged run registers and cleans up, bad `--name`).
 
 Not done:
-- TUI (built 2026-10-31): `/peers` and `/agents --all` print the B9 columns, `/name` shows the session name (a running session cannot be renamed: use `--name`), `⇄` rows for `peer.request_sent|request_received|reply`, `peers on · N in flight` in the footer. Not rendered: `peer.reply_partial`, a `/peers` panel with live refresh.
+- CLI (built 2026-10-31): `/peers` and `/agents --all` print the B9 columns, `/name` shows the session name (a running session cannot be renamed: use `--name`), `⇄` rows for `peer.request_sent|request_received|reply`, `peers on · N in flight` in the footer. Not rendered: `peer.reply_partial`, a `/peers` panel with live refresh.
 - Responder details: `git_status` / `git_diff` (no such tools exist yet; `git_diff` would print secret files), no separate mid-approval snapshot case, `peer.reply.text` has no ArtifactRef.
 - Liveness for sessions started with `--no-session-store` is unknown (no writer lock): a dead one shows `unreachable`, not `offline`.
 - Windows: written against tokio's named-pipe API and linted with `cargo clippy --target x86_64-pc-windows-msvc`, never run on Windows; the pipe ACL assumption (B3) is unverified.
@@ -430,7 +430,7 @@ Source: messaging-scenarios.md. The owner accepted Q3-Q8 as proposed and CHANGED
 ### J3. Delegation: how a message reaches B
 `SendMessage{to, message, delegate:true, thread_id?}` asks B to **do** the work. The message never enters B's main history (peer text stays out of B's steerable context and cannot derail B's task); it starts a **delegate worker**, a sub-agent of B (`kind:"peer-delegate"`, instance `peer-<n>`) inside B's harness: B's tool runtime, permission engine, hooks, sandbox, approver and workspace.
 - **Running B.** The server accepts at any time; the worker forks from B's last drain-point snapshot (sanitised as for responders), so it never touches B's main loop between a `tool_use` and its `tool_result`. B's main agent is not interrupted.
-- **Idle B** (TUI session between tasks): the worker forks from the retained history. **B not running at all:** the request goes through the offline mailbox as a read-only **question** (the sender is told `delegate:false` in the result): a delegation is never executed from a queue, because the sender's mode, intent and B's user state of that moment are gone.
+- **Idle B** (CLI session between tasks): the worker forks from the retained history. **B not running at all:** the request goes through the offline mailbox as a read-only **question** (the sender is told `delegate:false` in the result): a delegation is never executed from a queue, because the sender's mode, intent and B's user state of that moment are gone.
 - **Thread rounds** continue the worker's transcript.
 - **Result.** The worker's final text returns through the normal reply path (`confirm_replies`, redaction, 32 KiB cap).
 

@@ -657,11 +657,14 @@ impl Settings {
             }
             self.apply_env(raw);
             self.apply_synthesis(raw, what, user);
-            // `user` is also true for the managed file: only the user settings file may set tui
-            if what != "user settings" && raw.get("synt").and_then(|n| n.get("tui")).is_some() {
-                self.diagnostics.push(format!(
-                    "{what}: synt.tui is read from user settings only, ignored"
-                ));
+            // `user` is also true for the managed file: only the user settings file may set cli/tui
+            for section in [CLI_SECTION, TUI_SECTION] {
+                if what != "user settings" && raw.get("synt").and_then(|n| n.get(section)).is_some()
+                {
+                    self.diagnostics.push(format!(
+                        "{what}: synt.{section} is read from user settings only, ignored"
+                    ));
+                }
             }
             if !user && raw.get("synt").and_then(|n| n.get("peers")).is_some() {
                 self.diagnostics.push(format!(
@@ -824,16 +827,16 @@ impl Settings {
     }
 }
 
-// ---------------------------------------------------------------- synt.tui (USER file only)
+// ---------------------------------------------------------------- synt.cli / synt.tui (USER file only)
 
 /// Panels of the dash that can be switched off (Workspace, Running sessions and the chat are
 /// always on). The desktop app maps the same keys onto the panels of its `cli.html` layout (the label
 /// names that panel); the keys never change, so no settings.json breaks.
-pub const TUI_PANELS: [(&str, &str); 8] = [
+pub const UI_PANELS: [(&str, &str); 8] = [
     ("session", "Session info (model, mode, effort, cwd, uptime)"),
     (
         "mcp",
-        "MCP servers (terminal TUI; the desktop shows them in Topology and Tools & Skills)",
+        "MCP servers (the CLI; the desktop shows them in Topology and Tools & Skills)",
     ),
     ("tools", "Tools & Skills used in this session"),
     (
@@ -849,12 +852,13 @@ pub const TUI_PANELS: [(&str, &str); 8] = [
     ("usage", "Usage history (desktop: Usage & Metrics)"),
 ];
 
-/// `synt.tui` of the USER settings.json: what the interactive app shows and how it behaves.
-/// Defined here once; `/config` edits it, the app reads it. Project, local and managed files never
+/// `synt.cli` (the terminal app) or `synt.tui` (the desktop TUI tab) of the USER settings.json: what
+/// the interactive app shows and how it behaves. The same keys under each name, read and written
+/// separately (`CLI_SECTION`, `TUI_SECTION`); `/config` edits `synt.cli`, the desktop Settings `synt.tui`. Project, local and managed files never
 /// set it (a diagnostic says so).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TuiSettings {
-    /// One flag per `TUI_PANELS` entry, in that order: shown.
+pub struct UiSettings {
+    /// One flag per `UI_PANELS` entry, in that order: shown.
     pub panels: [bool; 8],
     /// `logo`: `art` (the braille symbol on the welcome) or `off`.
     pub logo: bool,
@@ -872,17 +876,22 @@ pub struct TuiSettings {
     pub mouse_capture: bool,
     /// Drag-select copies when the button is released.
     pub copy_on_select: bool,
-    /// Desktop app: opacity of the window's backgrounds in percent, `TUI_OPACITY_MIN` to 100. Text stays opaque.
+    /// Desktop app: opacity of the window's backgrounds in percent, `UI_OPACITY_MIN` to 100. Text stays opaque.
     pub opacity: u8,
     /// Desktop app: blur what is behind the window (only visible below 100 % opacity, and only where the
     /// platform supports it).
     pub blur: bool,
 }
 
-/// Lowest `synt.tui.opacity`: under it the window is too faint to read.
-pub const TUI_OPACITY_MIN: u8 = 30;
+/// The settings section of the terminal app (`synt.cli`).
+pub const CLI_SECTION: &str = "cli";
+/// The settings section of the desktop TUI tab (`synt.tui`).
+pub const TUI_SECTION: &str = "tui";
 
-impl Default for TuiSettings {
+/// Lowest `synt.tui.opacity`: under it the window is too faint to read.
+pub const UI_OPACITY_MIN: u8 = 30;
+
+impl Default for UiSettings {
     fn default() -> Self {
         Self {
             panels: [true; 8],
@@ -900,23 +909,29 @@ impl Default for TuiSettings {
     }
 }
 
-impl TuiSettings {
-    /// Reads `synt.tui` of a parsed settings file. A wrong type or an unknown value keeps the
-    /// default and yields a diagnostic that names the key, never the value.
+impl UiSettings {
+    /// Reads `synt.tui` (the desktop TUI tab) of a parsed settings file; see [`Self::from_section`].
     pub fn from_settings(v: &Value) -> (Self, Vec<String>) {
+        Self::from_section(v, TUI_SECTION)
+    }
+
+    /// Reads `synt.<section>` ([`CLI_SECTION`] or [`TUI_SECTION`]) of a parsed settings file. A wrong
+    /// type or an unknown value keeps the default and yields a diagnostic that names the key, never
+    /// the value.
+    pub fn from_section(v: &Value, section: &str) -> (Self, Vec<String>) {
         let mut s = Self::default();
         let mut diags = vec![];
-        let Some(tui) = v.get("synt").and_then(|n| n.get("tui")) else {
+        let Some(tui) = v.get("synt").and_then(|n| n.get(section)) else {
             return (s, diags);
         };
         let Some(tui) = tui.as_object() else {
-            diags.push("synt.tui is not an object, ignored".into());
+            diags.push(format!("synt.{section} is not an object, ignored"));
             return (s, diags);
         };
         let mut flag = |key: &str, slot: &mut bool| match tui.get(key) {
             None => {}
             Some(Value::Bool(b)) => *slot = *b,
-            Some(_) => diags.push(format!("synt.tui.{key} must be true or false, kept")),
+            Some(_) => diags.push(format!("synt.{section}.{key} must be true or false, kept")),
         };
         flag("show_thinking", &mut s.show_thinking);
         flag("verbose", &mut s.verbose);
@@ -930,11 +945,11 @@ impl TuiSettings {
             None => {}
             Some(v) => match v
                 .as_u64()
-                .filter(|n| (u64::from(TUI_OPACITY_MIN)..=100).contains(n))
+                .filter(|n| (u64::from(UI_OPACITY_MIN)..=100).contains(n))
             {
                 Some(n) => s.opacity = n as u8,
                 None => diags.push(format!(
-                    "synt.tui.opacity must be a whole number from {TUI_OPACITY_MIN} to 100, kept"
+                    "synt.{section}.opacity must be a whole number from {UI_OPACITY_MIN} to 100, kept"
                 )),
             },
         }
@@ -942,23 +957,25 @@ impl TuiSettings {
             None => {}
             Some(Some("art")) => s.logo = true,
             Some(Some("off")) => s.logo = false,
-            Some(_) => diags.push("synt.tui.logo must be art or off, using art".into()),
+            Some(_) => diags.push(format!("synt.{section}.logo must be art or off, using art")),
         }
         match tui.get("panels") {
             None => {}
             Some(Value::Object(p)) => {
                 for (k, v) in p {
-                    let Some(i) = TUI_PANELS.iter().position(|(n, _)| n == k) else {
-                        diags.push(format!("synt.tui.panels.{k} is not a panel, ignored"));
+                    let Some(i) = UI_PANELS.iter().position(|(n, _)| n == k) else {
+                        diags.push(format!("synt.{section}.panels.{k} is not a panel, ignored"));
                         continue;
                     };
                     match v {
                         Value::Bool(b) => s.panels[i] = *b,
-                        _ => diags.push(format!("synt.tui.panels.{k} must be true or false, kept")),
+                        _ => diags.push(format!(
+                            "synt.{section}.panels.{k} must be true or false, kept"
+                        )),
                     }
                 }
             }
-            Some(_) => diags.push("synt.tui.panels is not an object, ignored".into()),
+            Some(_) => diags.push(format!("synt.{section}.panels is not an object, ignored")),
         }
         for k in tui.keys() {
             if ![
@@ -976,7 +993,7 @@ impl TuiSettings {
             ]
             .contains(&k.as_str())
             {
-                diags.push(format!("synt.tui.{k} is not a setting, ignored"));
+                diags.push(format!("synt.{section}.{k} is not a setting, ignored"));
             }
         }
         (s, diags)
@@ -984,7 +1001,7 @@ impl TuiSettings {
 
     /// The subtree to write back: every key, so the file shows what is in force.
     pub fn to_value(&self) -> Value {
-        let panels: Map<String, Value> = TUI_PANELS
+        let panels: Map<String, Value> = UI_PANELS
             .iter()
             .zip(self.panels)
             .map(|((n, _), on)| ((*n).to_string(), Value::Bool(on)))
@@ -1005,28 +1022,32 @@ impl TuiSettings {
     }
 }
 
-/// `synt.tui` of `<synthesis_home>/settings.json`; a missing or unreadable file is the
+/// `synt.<section>` of `<synthesis_home>/settings.json`; a missing or unreadable file is the
 /// defaults.
-pub fn read_user_tui(synthesis_home: &Path) -> (TuiSettings, Vec<String>) {
+pub fn read_user_ui(synthesis_home: &Path, section: &str) -> (UiSettings, Vec<String>) {
     let v = std::fs::read(synthesis_home.join("settings.json"))
         .ok()
         .filter(|b| b.len() <= 1 << 20)
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or(Value::Null);
-    TuiSettings::from_settings(&v)
+    UiSettings::from_section(&v, section)
 }
 
-/// Writes `tui` as the `synt.tui` subtree of `<synthesis_home>/settings.json` (the `/config`
+/// Writes `ui` as the `synt.<section>` subtree of `<synthesis_home>/settings.json` (the `/config`
 /// screen). Every other key and the key order are kept; a file that cannot be parsed, or whose
 /// `synthesis` is not an object, is never overwritten (`InvalidData`). Never writes a credential:
-/// only the keys of [`TuiSettings`] go into the subtree. See [`edit_json_atomic`].
-pub fn persist_user_tui(synthesis_home: &Path, tui: &TuiSettings) -> std::io::Result<()> {
-    let tui = tui.to_value();
+/// only the keys of [`UiSettings`] go into the subtree. See [`edit_json_atomic`].
+pub fn persist_user_ui(
+    synthesis_home: &Path,
+    section: &str,
+    ui: &UiSettings,
+) -> std::io::Result<()> {
+    let ui = ui.to_value();
     edit_json_atomic(
         &synthesis_home.join("settings.json"),
         "user settings",
         |v| {
-            let section = v
+            let synt = v
                 .as_object_mut()
                 .map(|o| o.entry("synt").or_insert_with(|| Value::Object(Map::new())))
                 .and_then(Value::as_object_mut)
@@ -1036,7 +1057,7 @@ pub fn persist_user_tui(synthesis_home: &Path, tui: &TuiSettings) -> std::io::Re
                         "user settings: `synthesis` is not an object",
                     )
                 })?;
-            section.insert("tui".into(), tui.clone());
+            synt.insert(section.into(), ui.clone());
             Ok(())
         },
     )

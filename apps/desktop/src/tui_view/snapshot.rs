@@ -1,7 +1,7 @@
 //! The real data behind the TUI view: a [`Snapshot`] built from the live `ViewState` (docs/specs/desktop.md
 //! section 2). Every number comes from `synthesis-view`; this file only picks words and formats.
 
-use synthesis_tui_render::dialogs::mode_name;
+use synthesis_cli_ui_render::dialogs::mode_name;
 use synthesis_view::topology::{Group, Topology, is_busy};
 use synthesis_view::workspaces::{SessionRow, fold_dir};
 

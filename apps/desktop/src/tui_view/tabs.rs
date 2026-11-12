@@ -19,7 +19,7 @@ use gpui::{
     Context, Div, InteractiveElement as _, IntoElement as _, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, div, prelude::*, px,
 };
-use synthesis_tui_render::theme as t;
+use synthesis_cli_ui_render::theme as t;
 use synthesis_view::project::{self, ProjectData};
 
 use super::panels::{OnClick, dim, icon, strong, text, with_alpha};

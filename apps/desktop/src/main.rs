@@ -22,7 +22,7 @@ fn live_cfg(args: Args, env: Env) -> Result<LiveCfg, String> {
     let project =
         synthesis_core::canonicalize(&dir).map_err(|e| format!("--cwd {}: {e}", dir.display()))?;
     let h = homes(&env)?;
-    let (tui, diag) = synthesis_settings::read_user_tui(&h.synthesis);
+    let (tui, diag) = synthesis_settings::read_user_ui(&h.synthesis, "tui");
     for d in diag {
         eprintln!("synthesis-desktop: warning: {d}");
     }

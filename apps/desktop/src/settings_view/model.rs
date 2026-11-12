@@ -112,7 +112,7 @@ pub struct Row {
     pub restart: bool,
     /// The default, as text.
     pub default: String,
-    /// Read by the terminal TUI only: the desktop view has nothing to apply.
+    /// Read by the CLI only: the desktop view has nothing to apply.
     pub terminal_only: bool,
     /// Written in this run and a running session keeps the old value.
     pub changed: bool,
@@ -192,7 +192,7 @@ pub struct Model {
     pub skills: Vec<(String, String, String)>,
 }
 
-/// `synt.tui` keys the terminal TUI reads and the desktop view does not (it has no mouse mode or queue lines,
+/// `synt.tui` keys the CLI reads and the desktop view does not (it has no mouse mode or queue lines,
 /// and its welcome and cards are the design's).
 const TERMINAL_ONLY: [&str; 5] = [
     "synt.tui.logo",
@@ -1070,7 +1070,7 @@ mod tests {
         assert_eq!(f, want);
         let r = row(&m, k);
         assert_eq!((r.origin, r.resettable), (Origin::User, true));
-        let (tui, diag) = synthesis_settings::read_user_tui(&m.cfg.home);
+        let (tui, diag) = synthesis_settings::read_user_ui(&m.cfg.home, "tui");
         assert_eq!((tui.opacity, diag), (55, vec![]));
         // under the minimum, over 100, not a number: refused with the range, the file keeps 55
         for bad in ["29", "101", "abc", "50.5", ""] {
@@ -1120,7 +1120,7 @@ mod tests {
             let r = row(&m, k);
             assert!(!r.restart && !r.terminal_only, "{k}");
         }
-        // the terminal TUI reads these; the desktop view has nothing to apply
+        // the CLI reads these; the desktop view has nothing to apply
         for k in [
             "synt.tui.logo",
             "synt.tui.mouse_capture",
