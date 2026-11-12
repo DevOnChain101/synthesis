@@ -11,6 +11,7 @@ pub mod live;
 pub mod memory_ui;
 pub mod models;
 pub mod perf;
+pub mod remote;
 pub mod rewind;
 pub mod send_pick;
 pub mod settings_view;
