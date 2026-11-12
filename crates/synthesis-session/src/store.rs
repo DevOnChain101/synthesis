@@ -772,7 +772,7 @@ impl Store {
         Ok(n > 0)
     }
 
-    /// `synt stop`: marks the session; the process running it polls [`Reader::stop_requested`].
+    /// `synt stop`: marks the session; the process running it polls [`Reader::stop_requested_since`].
     /// Returns whether a session of that id exists.
     pub fn request_stop(&self, id: &str) -> Result<bool> {
         check_id(id)?;

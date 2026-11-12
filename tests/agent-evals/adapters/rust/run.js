@@ -23,7 +23,7 @@ if (!bin || !fs.existsSync(bin)) die('synt binary not found (cargo build -p synt
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'eval-rust-')));
 // Loopback: tasks start a local server in their tests (still no outside network). The node
 // toolchain (npm lives next to node, often under $HOME) is granted read-only.
-const args = ['run', '--cwd', cwd, '--no-session-store', '--network', 'loopback', '--sandbox-read', path.dirname(path.dirname(fs.realpathSync(process.execPath))), '--permission-mode', process.env.EVAL_PERMISSION_MODE_OVERRIDE || process.env.EVAL_PERMISSION_MODE || 'acceptEdits'];
+const args = ['run', '--cwd', cwd, '--no-cost-cap', '--no-worktree', '--no-session-store', '--network', 'loopback', '--sandbox-read', path.dirname(path.dirname(fs.realpathSync(process.execPath))), '--permission-mode', process.env.EVAL_PERMISSION_MODE_OVERRIDE || process.env.EVAL_PERMISSION_MODE || 'acceptEdits'];
 const env = { ...process.env };
 const fake = process.env.EVAL_FAKE_SCRIPT;
 if (fake) { // never touch the real home in scripted mode
