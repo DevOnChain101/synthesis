@@ -122,7 +122,7 @@ jobs:
       - name: musl build tools
         if: endsWith(matrix.target, '-musl')
         run: |
-          sudo apt-get update && sudo apt-get install -y musl-tools
+          scripts/apt-install.sh musl-tools
           echo "CC_x86_64_unknown_linux_musl=musl-gcc" >>"$GITHUB_ENV"
       - name: Build
         run: |
@@ -210,8 +210,7 @@ jobs:
       - name: System libraries (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config cmake libfontconfig-dev libfreetype-dev \
+          scripts/apt-install.sh --no-install-recommends pkg-config cmake libfontconfig-dev libfreetype-dev \
             libxcb1-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev
       - name: Build
         run: cargo build --release --locked --target "$TARGET" -p synthesis-desktop
