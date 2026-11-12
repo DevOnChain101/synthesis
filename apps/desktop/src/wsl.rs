@@ -18,6 +18,10 @@ use crate::remote::Launcher;
 /// A cold distro (the VM boots) may need this long to say hello.
 pub const COLD_START: Duration = Duration::from_secs(60);
 const QUICK: Duration = Duration::from_secs(15);
+/// The Settings toggle's check, on a worker thread.
+const TOGGLE_CHECK: Duration = Duration::from_secs(4);
+/// The toggle's state while that check runs (it stays locked).
+pub const CHECKING: &str = "Checking WSL...";
 const MAX_OUT: u64 = 1 << 20;
 /// Shown while the distro boots.
 pub const STARTING: &str = "starting distro";
@@ -184,7 +188,12 @@ fn text_of(o: Out) -> Result<String, String> {
 
 /// `wsl.exe --status`: WSL exists and works.
 pub fn status(run: Run) -> Result<(), String> {
-    match run(&["--status"], QUICK) {
+    status_within(run, QUICK)
+}
+
+/// [`status`] with its own deadline (the Settings toggle waits less than a launch does).
+pub fn status_within(run: Run, wait: Duration) -> Result<(), String> {
+    match run(&["--status"], wait) {
         Ok(o) if o.ok => Ok(()),
         Ok(_) => Err("WSL is not available: wsl.exe --status failed (turn on the Windows feature or run wsl.exe --install)".into()),
         Err(e) => Err(format!("WSL is not available: {e}")),
@@ -301,8 +310,19 @@ pub fn to_linux(
 }
 
 /// A path inside the distro as Explorer shows it (for "Reveal").
-pub fn to_display(distro: &str, linux: &str) -> String {
-    format!(r"\\wsl.localhost\{distro}{}", linux.replace('/', r"\"))
+pub fn to_display(distro: &str, linux: &str) -> Result<String, String> {
+    if distro.is_empty()
+        || distro.contains(['\\', '/', ':', '"', '<', '>', '|', '*', '?'])
+        || distro.contains("..")
+        || distro.ends_with(['.', ' '])
+        || distro.chars().any(char::is_control)
+    {
+        return Err(format!("{distro:?} is not a distro name that can be shown"));
+    }
+    Ok(format!(
+        r"\\wsl.localhost\{distro}{}",
+        linux.replace('/', r"\")
+    ))
 }
 
 /// A Linux path of the engine for the system file manager: `/mnt/<drive>/x` is the Windows drive path
@@ -312,7 +332,9 @@ pub fn reveal_path(distro: &str, linux: &str) -> Result<String, String> {
     // `\ : " < > | * ?` have a meaning in a Windows path: a Linux name holding one is not shown
     if !plain(linux)
         || parts.iter().any(|c| {
-            matches!(*c, "." | "..") || c.contains(['\\', ':', '"', '<', '>', '|', '*', '?'])
+            matches!(*c, "." | "..")
+                || c.ends_with(['.', ' '])
+                || c.contains(['\\', ':', '"', '<', '>', '|', '*', '?'])
         })
     {
         return Err(format!("{linux:?} is not a path that can be shown"));
@@ -325,7 +347,7 @@ pub fn reveal_path(distro: &str, linux: &str) -> Result<String, String> {
         let drive = d.to_ascii_uppercase();
         return Ok(format!(r"{drive}:\{}", rest.join(r"\")));
     }
-    Ok(to_display(distro, &format!("/{}", parts.join("/"))))
+    to_display(distro, &format!("/{}", parts.join("/")))
 }
 
 /// `wsl.exe -d <distro> --cd <cwd> --exec <synt> engine --stdio`. The program is injected. wsl.exe gets
@@ -502,7 +524,7 @@ pub fn lock_with(windows: bool, check: impl FnOnce() -> Result<(), String>) -> O
 
 pub fn toggle_lock() -> Option<String> {
     lock_with(cfg!(windows), || {
-        system_wsl().and_then(|exe| status(&|a, w| run_wsl(&exe, a, w)))
+        system_wsl().and_then(|exe| status_within(&|a, w| run_wsl(&exe, a, w), TOGGLE_CHECK))
     })
 }
 
@@ -605,7 +627,7 @@ mod tests {
     #[test]
     fn the_explorer_path_of_a_linux_folder() {
         assert_eq!(
-            to_display("Ubuntu", "/home/me"),
+            to_display("Ubuntu", "/home/me").unwrap(),
             r"\\wsl.localhost\Ubuntu\home\me"
         );
     }
@@ -951,5 +973,20 @@ mod tests {
         // WSL got installed meanwhile: the next ask unlocks the toggle
         assert_eq!(lock_with(true, || check(Ok(()))), None);
         assert_eq!(n.get(), 2);
+    }
+
+    #[test]
+    fn a_shown_path_refuses_odd_distros_and_trailing_dots_or_spaces() {
+        for d in [
+            "", "a\\b", "a/b", "a:b", "..", "a..b", "a.", "a ", "a\nb", "a|b", "a?b",
+        ] {
+            assert!(to_display(d, "/x").is_err(), "{d:?}");
+            assert!(reveal_path(d, "/x").is_err(), "{d:?}");
+        }
+        for l in ["/a.", "/a /b", "/a/b.", "/a/b "] {
+            assert!(reveal_path("U", l).is_err(), "{l:?}");
+        }
+        assert!(reveal_path("U", "/.hidden/a.b").is_ok());
+        assert!(to_display("Ubuntu-24.04", "/x").is_ok());
     }
 }

@@ -400,6 +400,29 @@ impl SettingsView {
         if let Some(m) = &mut self.model {
             m.recheck_wsl();
         }
+        // the check runs on its own thread: look every 250 ms until it is in, then redraw
+        if self.model.as_ref().is_some_and(|m| !m.wsl_idle()) {
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(250))
+                        .await;
+                    let Ok(done) = this.update(cx, |v, cx| {
+                        let done = v.model.as_mut().is_none_or(|m| m.poll_wsl());
+                        if done {
+                            cx.notify();
+                        }
+                        done
+                    }) else {
+                        break;
+                    };
+                    if done {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         self.search.update(cx, |s, cx| s.focus(window, cx));
     }
 

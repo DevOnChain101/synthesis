@@ -2863,7 +2863,47 @@ mod tests {
         let local = build.find("Engine::start_with(").expect("local start");
         assert!(gate < local);
         assert!(build[gate..local].contains("return crate::wsl::start("));
-        // no other product code starts a local engine (the screenshot tool is a developer tool)
+        // engine.rs: every local start is `pub(crate)` (the compiler then keeps it inside this crate), the one
+        // that only tools use is behind a feature, and the public test wrappers are behind another
+        let eng = include_str!("../engine.rs");
+        let (head, _) = eng.split_once("pub mod for_tests").expect("for_tests");
+        assert!(
+            head.trim_end()
+                .ends_with("#[cfg(feature = \"local-engine-for-tests\")]"),
+            "for_tests must be behind its feature"
+        );
+        let lines: Vec<&str> = head.lines().collect();
+        let mut seen = 0;
+        for (i, l) in lines.iter().enumerate() {
+            let t = l.trim();
+            if t.contains("fn start(") || t.contains("fn start_with(") {
+                seen += 1;
+                assert!(t.starts_with("pub(crate) fn"), "not pub(crate): {t}");
+                if t.contains("fn start(") {
+                    assert!(
+                        lines[i.saturating_sub(3)..i]
+                            .iter()
+                            .any(|p| p.contains("#[cfg(")),
+                        "`start` must be behind a cfg(feature)"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            seen, 2,
+            "the local starts of engine.rs changed: review them"
+        );
+        // the screenshot tool, a developer tool, is behind its feature
+        let ui = include_str!("mod.rs");
+        assert!(ui.contains("#[cfg(feature = \"shot\")]\npub mod shot;"));
+        // nothing else in the product starts a local engine, or aliases `Engine`
+        let own = &include_str!("driver.rs")[..include_str!("driver.rs")
+            .find("#[cfg(test)]\nmod tests")
+            .unwrap()];
+        assert!(
+            !own.contains("for_tests"),
+            "driver.rs must not use the test wrappers"
+        );
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut stack = vec![dir];
         while let Some(d) = stack.pop() {
@@ -2879,16 +2919,22 @@ mod tests {
                 {
                     continue;
                 }
-                // whitespace dropped, so `Engine ::\n start(` and an alias (`start_with(`, `as Engine`) count too
-                let text: String = std::fs::read_to_string(&path)
-                    .unwrap()
-                    .split_whitespace()
-                    .collect();
+                let src = std::fs::read_to_string(&path).unwrap();
+                // whitespace dropped, so `Engine ::\n start(` counts too
+                let text: String = src.split_whitespace().collect();
                 assert!(
-                    !["Engine::start(", "start_with(", "asEngine"]
+                    !["Engine::start(", "start_with(", "for_tests::start"]
                         .iter()
                         .any(|p| text.contains(p)),
                     "{} starts a local engine",
+                    path.display()
+                );
+                // `use ...::Engine as E;` / `as Engine` would hide a call from the patterns above
+                let words: Vec<&str> = src.split_whitespace().collect();
+                assert!(
+                    !words.windows(2).any(|w| w[0] == "Engine" && w[1] == "as"
+                        || w[0] == "as" && w[1].trim_end_matches([';', ',']) == "Engine"),
+                    "{} aliases Engine",
                     path.display()
                 );
             }

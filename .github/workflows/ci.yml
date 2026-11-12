@@ -105,6 +105,8 @@ jobs:
             libxcb1-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
             mesa-vulkan-drivers libvulkan1
       - run: cargo build -p synthesis-desktop --locked
+      # the test-only local engine start must never be in a release build (docs/specs/desktop.md section 9)
+      - run: node --test scripts/check-release-features.test.mjs && node scripts/check-release-features.mjs
       - run: cargo clippy -p synthesis-desktop --all-targets --locked -- -D warnings
       - run: cargo test -p synthesis-desktop --locked
       # Runtime evidence: offscreen renders (Metal on macOS, lavapipe on Linux) or a real window (Windows);

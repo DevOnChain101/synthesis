@@ -10,7 +10,8 @@ use crate::wsl;
 
 /// Characters that never belong in a path handed to a program: control characters (CR and LF too), the
 /// quote that would end Explorer's quoted argument, and the Windows wildcard and redirection characters.
-const FORBIDDEN: [char; 6] = ['"', '|', '<', '>', '*', '?'];
+/// `%` is expanded by Explorer (`%USERPROFILE%`).
+const FORBIDDEN: [char; 7] = ['"', '|', '<', '>', '*', '?', '%'];
 
 fn safe(p: &str) -> Result<(), String> {
     if p.is_empty()
@@ -29,9 +30,15 @@ fn absolute(p: &str, windows: bool) -> bool {
     if !windows {
         return p.starts_with('/');
     }
+    // no component may be `.`, `..`, end in `.` or a space (Windows drops those, so the name shown is not
+    // the one opened), or hold `:` (an alternate data stream); an empty one (a trailing `\`) is fine
+    let clean = |rest: &str| {
+        rest.split(['\\', '/'])
+            .all(|c| !matches!(c, "." | "..") && !c.ends_with(['.', ' ']) && !c.contains(':'))
+    };
     let b = p.as_bytes();
     if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/') {
-        return true;
+        return clean(&p[3..]);
     }
     let Some(after) = p.strip_prefix(r"\\").or_else(|| p.strip_prefix("//")) else {
         return false;
@@ -41,6 +48,7 @@ fn absolute(p: &str, windows: bool) -> bool {
     let distro = it.next().unwrap_or("");
     (host.eq_ignore_ascii_case("wsl.localhost") || host.eq_ignore_ascii_case("wsl$"))
         && !distro.is_empty()
+        && clean(&after[host.len() + 1..])
 }
 
 /// What to show for `arg` (empty: the session folder `root`). Linux paths of a WSL engine become Windows
@@ -64,6 +72,20 @@ pub fn target(
     Ok(t)
 }
 
+/// Explorer's documented raw command line for a checked path. A trailing `\` would read as an escaped
+/// quote (`"X:\dir\"`), so it is dropped and the folder is opened instead of selected; a drive root keeps
+/// its `\` (a bare `X:` is "the current folder of X"), unquoted (it holds no space).
+pub fn explorer_arg(path: &str) -> String {
+    let trimmed = path.trim_end_matches(['\\', '/']);
+    if trimmed.len() == path.len() {
+        format!("/select,\"{path}\"")
+    } else if trimmed.ends_with(':') {
+        format!("{trimmed}\\")
+    } else {
+        format!("\"{trimmed}\"")
+    }
+}
+
 /// `(program, argument)` for this OS. On Windows the argument is the raw text of Explorer's documented
 /// form `/select,"path"` (the path holds no quote, see [`safe`]).
 pub fn command(path: &str, windows: bool, mac: bool) -> (PathBuf, String) {
@@ -74,7 +96,7 @@ pub fn command(path: &str, windows: bool, mac: bool) -> (PathBuf, String) {
             .and_then(Path::parent)
             .map(Path::to_path_buf)
             .unwrap_or_default();
-        (root.join("explorer.exe"), format!("/select,\"{path}\""))
+        (root.join("explorer.exe"), explorer_arg(path))
     } else if mac {
         ("/usr/bin/open".into(), path.into())
     } else {
@@ -233,5 +255,92 @@ mod tests {
             PathBuf::from("/usr/bin/xdg-open")
         );
         assert_eq!(command("/nonexistent/f", false, false).1, "/nonexistent");
+    }
+
+    #[test]
+    fn windows_components_that_windows_would_rewrite_are_refused() {
+        for bad in [
+            r"C:\a\..\b",
+            r"C:\a\.\b",
+            r"C:\a.\b",
+            r"C:\a \b",
+            r"C:\a\b.",
+            r"C:\a\b:stream",
+            r"\\wsl.localhost\U.\x",
+            r"\\wsl.localhost\U \x",
+            r"\\wsl.localhost\..\x",
+            r"\\wsl.localhost\U\a\..\b",
+            r"\\wsl$\U\.\x",
+            r"\\wsl$\U\x.",
+            r"C:\%USERPROFILE%\x",
+        ] {
+            assert!(target(bad, "", None, true).is_err(), "{bad}");
+        }
+        for ok in [
+            r"C:\",
+            r"C:\a b\c.d",
+            r"C:\a\",
+            r"\\wsl.localhost\U",
+            r"\\wsl$\U-1\a b\",
+        ] {
+            assert!(target(ok, "", None, true).is_ok(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn a_trailing_backslash_never_ends_up_before_the_closing_quote() {
+        assert_eq!(explorer_arg(r"C:\dir\f.txt"), r#"/select,"C:\dir\f.txt""#);
+        assert_eq!(
+            explorer_arg(r"C:\dir\"),
+            r#""C:\dir""#,
+            "the folder is opened"
+        );
+        assert_eq!(explorer_arg(r"C:\a b\\"), r#""C:\a b""#);
+        assert_eq!(
+            explorer_arg(r"C:\"),
+            r"C:\",
+            "a drive root keeps its backslash, unquoted"
+        );
+        assert_eq!(
+            explorer_arg(r"\\wsl.localhost\U\x\"),
+            r#""\\wsl.localhost\U\x""#
+        );
+        assert_eq!(
+            explorer_arg(r"\\wsl.localhost\U"),
+            r#"/select,"\\wsl.localhost\U""#
+        );
+        assert!(!explorer_arg(r"C:\x\").contains(r#"\""#));
+    }
+
+    /// Runs on the Windows CI only: the real Explorer path and the real command line for awkward paths.
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_explorer_is_found_and_awkward_paths_become_safe_command_lines() {
+        let (prog, _) = command(r"C:\Windows", true, false);
+        assert!(prog.is_absolute() && prog.exists(), "{}", prog.display());
+        for (p, want) in [
+            (r"C:\Program Files\x y\", r#""C:\Program Files\x y""#),
+            (
+                r"C:\Windows\System32\drivers\etc\hosts",
+                r#"/select,"C:\Windows\System32\drivers\etc\hosts""#,
+            ),
+            (
+                r"\\wsl.localhost\Ubuntu\home\me\a b.txt",
+                r#"/select,"\\wsl.localhost\Ubuntu\home\me\a b.txt""#,
+            ),
+            (r"D:\", r"D:\"),
+        ] {
+            let t = target(p, "", None, true).unwrap();
+            assert_eq!(command(&t, true, false).1, want, "{p}");
+        }
+        for bad in [
+            r"C:\50%\x",
+            r"C:\%TEMP%",
+            "C:\\a b\\x\"",
+            r"http://x/y",
+            r"\\evil\share\x",
+        ] {
+            assert!(target(bad, "", None, true).is_err(), "{bad}");
+        }
     }
 }

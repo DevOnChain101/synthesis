@@ -190,8 +190,11 @@ pub struct Model {
     doctor_slot: DoctorSlot,
     /// `(name, description, source)`.
     pub skills: Vec<(String, String, String)>,
-    /// Why the WSL toggle is locked on this machine; asked again each time the view opens.
+    /// Why the WSL toggle is locked on this machine; asked again (on a worker thread) each time the view
+    /// opens, and [`crate::wsl::CHECKING`] meanwhile.
     pub wsl_lock: Option<String>,
+    wsl_busy: bool,
+    wsl_slot: Arc<Mutex<Option<Option<String>>>>,
 }
 
 /// `synt.tui` keys the CLI reads and the desktop view does not (it has no mouse mode or queue lines,
@@ -283,15 +286,68 @@ impl Model {
             doctor_error: None,
             doctor_slot: Arc::default(),
             skills: vec![],
-            wsl_lock: crate::wsl::toggle_lock(),
+            wsl_lock: None,
+            wsl_busy: false,
+            wsl_slot: Arc::default(),
         };
+        m.recheck_wsl();
         m.refresh_info();
         m
     }
 
     /// Asks `wsl.exe --status` again (the view opened): WSL installed or broken since changes the toggle.
-    pub fn recheck_wsl(&mut self) {
-        self.wsl_lock = crate::wsl::toggle_lock();
+    /// True when a check was started (poll it with [`Model::poll_wsl`]); false when one is already running.
+    pub fn recheck_wsl(&mut self) -> bool {
+        self.recheck_with(cfg!(windows), crate::wsl::toggle_lock)
+    }
+
+    /// [`Model::recheck_wsl`] with the platform and the check given. Off Windows the answer is immediate.
+    /// On Windows the check runs on its own thread, the toggle stays locked ("Checking WSL...") until it ends,
+    /// and a second call while it runs starts nothing.
+    pub fn recheck_with(
+        &mut self,
+        windows: bool,
+        check: impl FnOnce() -> Option<String> + Send + 'static,
+    ) -> bool {
+        if !windows {
+            self.wsl_lock = Some("Windows only".into());
+            return false;
+        }
+        if self.wsl_busy {
+            return false;
+        }
+        self.wsl_busy = true;
+        self.wsl_lock = Some(crate::wsl::CHECKING.into());
+        let slot = self.wsl_slot.clone();
+        std::thread::spawn(move || {
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(check());
+        });
+        true
+    }
+
+    /// No WSL check is running.
+    pub fn wsl_idle(&self) -> bool {
+        !self.wsl_busy
+    }
+
+    /// True once no check is running (its answer, if one came, is in `wsl_lock`).
+    pub fn poll_wsl(&mut self) -> bool {
+        if !self.wsl_busy {
+            return true;
+        }
+        let done = self
+            .wsl_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        match done {
+            Some(r) => {
+                self.wsl_lock = r;
+                self.wsl_busy = false;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Starts the doctor checks on their own thread (capped); [`Model::poll_doctor`] collects them.
@@ -1145,6 +1201,41 @@ mod tests {
             Outcome::Rejected
         );
         assert!(!m.cfg.home.join("settings.json").exists());
+    }
+
+    #[test]
+    fn the_wsl_check_runs_on_a_worker_locks_the_toggle_meanwhile_and_starts_once() {
+        let (_t, mut m) = model();
+        let on = "synt.desktop.wsl.enabled";
+        // off Windows: answered at once, nothing runs
+        assert!(!m.recheck_with(false, || unreachable!()));
+        assert_eq!(m.wsl_lock.as_deref(), Some("Windows only"));
+        // Windows: a check that is still running keeps the toggle locked and the caller unblocked
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let rx = std::sync::Mutex::new(rx);
+        assert!(m.recheck_with(true, move || {
+            rx.lock().unwrap().recv().ok();
+            Some("no wsl".into())
+        }));
+        assert_eq!(row(&m, on).locked.as_deref(), Some(crate::wsl::CHECKING));
+        assert!(!m.wsl_idle() && !m.poll_wsl());
+        assert!(
+            !m.recheck_with(true, || unreachable!()),
+            "one in flight at a time"
+        );
+        tx.send(()).unwrap();
+        let t0 = std::time::Instant::now();
+        while !m.poll_wsl() {
+            assert!(t0.elapsed().as_secs() < 30, "the check never ended");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(row(&m, on).locked.as_deref(), Some("no wsl"));
+        // asked again (the view opened again): WSL works now and the toggle unlocks
+        assert!(m.recheck_with(true, || None));
+        while !m.poll_wsl() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(row(&m, on).locked, None);
     }
 
     #[test]
