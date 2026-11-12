@@ -101,8 +101,7 @@ jobs:
       - name: System libraries (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config cmake libfontconfig-dev libfreetype-dev \
+          scripts/apt-install.sh --no-install-recommends pkg-config cmake libfontconfig-dev libfreetype-dev \
             libxcb1-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
             mesa-vulkan-drivers libvulkan1
       - run: cargo build -p synthesis-desktop --locked
@@ -270,8 +269,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Install bubblewrap and relax AppArmor userns restriction
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap
+          scripts/apt-install.sh bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bwrap --ro-bind / / --unshare-net true && echo "bwrap works"
       - name: Require Landlock (otherwise the tests silently skip)
@@ -353,6 +351,8 @@ jobs:
         run: node scripts/check-no-legacy-name.mjs
       - name: Release tag policy tests (local origin + stub gh)
         run: bash scripts/test-check-release-tag.sh
+      - name: apt-install retry tests (stub apt-get)
+        run: bash scripts/test-apt-install.sh
       - uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2
 
   ci-ok:
