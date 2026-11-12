@@ -301,6 +301,24 @@ pub fn to_display(distro: &str, linux: &str) -> String {
     format!(r"\\wsl.localhost\{distro}{}", linux.replace('/', r"\"))
 }
 
+/// A Linux path of the engine for the system file manager: `/mnt/<drive>/x` is the Windows drive path
+/// `D:\x`, anything else the distro's UNC path. The path must be absolute, one line, without `.`/`..`.
+pub fn reveal_path(distro: &str, linux: &str) -> Result<String, String> {
+    let parts: Vec<&str> = linux.split('/').skip(1).filter(|c| !c.is_empty()).collect();
+    if !plain(linux) || parts.iter().any(|c| matches!(*c, "." | "..")) {
+        return Err(format!("{linux:?} is not a path that can be shown"));
+    }
+    if let [m, d, rest @ ..] = &parts[..]
+        && *m == "mnt"
+        && d.len() == 1
+        && d.as_bytes()[0].is_ascii_alphabetic()
+    {
+        let drive = d.to_ascii_uppercase();
+        return Ok(format!(r"{drive}:\{}", rest.join(r"\")));
+    }
+    Ok(to_display(distro, &format!("/{}", parts.join("/"))))
+}
+
 /// `wsl.exe -d <distro> --cd <cwd> --exec <synt> engine --stdio`. The program is injected. wsl.exe gets
 /// the allowlisted environment minus every `SYNT_*` (a key is never handed over, and nothing is
 /// exported into the distro: no `WSLENV`).
@@ -358,10 +376,32 @@ fn managed_path() -> PathBuf {
 /// Is the WSL mode on? Windows only: elsewhere the toggle is disabled and nothing is read. An unusable
 /// settings file is an `Err` to show, not "off".
 pub fn enabled(home: &Path) -> Result<bool, String> {
-    if !cfg!(windows) {
+    enabled_on(cfg!(windows), home, &managed_path())
+}
+
+/// [`enabled`] with the platform and the managed file given (tests).
+pub fn enabled_on(windows: bool, home: &Path, managed: &Path) -> Result<bool, String> {
+    if !windows {
         return Ok(false);
     }
-    read_setting(home, &managed_path()).map(|s| s.0)
+    read_setting(home, managed).map(|s| s.0)
+}
+
+/// The engine's own report of its folder against the Linux path that was asked for: the session folder
+/// must be exactly it, and the root (the repository top) it or an ancestor. Anything else is refused:
+/// the agent would work somewhere other than where the person chose (a symlink, a failed `--cd`).
+pub fn check_reported(asked: &str, cwd: Option<&str>, root: Option<&str>) -> Result<(), String> {
+    let inside = |r: &str| {
+        asked == r || r == "/" || asked.starts_with(&format!("{}/", r.trim_end_matches('/')))
+    };
+    match (cwd, root) {
+        (Some(c), Some(r)) if c == asked && inside(r) => Ok(()),
+        (c, r) => Err(format!(
+            "the engine reports its folder as {} (root {}) but {asked} was asked; open the real path of the folder (no links)",
+            c.unwrap_or("nothing"),
+            r.unwrap_or("nothing")
+        )),
+    }
 }
 
 /// Probes, converts the folder and starts the engine in the distro. Blocking. `project` is the folder the
@@ -388,12 +428,9 @@ pub fn start_via(
         })?;
         let (mut e, rx) =
             Engine::start_remote(&launcher(wsl_exe, d, &cwd, &ready.synt, env), project)?;
-        // the engine's own report is display text; a folder other than the one asked for is said
-        if e.remote_cwd.as_deref() != Some(cwd.as_str()) {
-            let said = e.remote_cwd.clone().unwrap_or_default();
-            e.notices
-                .push(format!("the engine works in {said}, not in {cwd} as asked"));
-        }
+        // refused (the engine is dropped, which closes it) when it is not where it was asked to be
+        check_reported(&cwd, e.remote_cwd.as_deref(), e.remote_root.as_deref())?;
+        e.remote_distro = Some(d.to_string());
         Ok((e, rx))
     };
     go().map_err(|e: String| sanitize_for_display(&e))
@@ -709,5 +746,96 @@ mod tests {
                 .contains("not installed")
         );
         assert!(install_command("1.2.3").contains("releases/download/v1.2.3/install.sh"));
+    }
+
+    #[test]
+    fn managed_policy_beats_the_user_file_in_every_combination() {
+        let d = tempfile::tempdir().unwrap();
+        let (user, managed) = (d.path().join("settings.json"), d.path().join("m.json"));
+        let doc = |v: Option<&str>| match v {
+            None => String::from("{}"),
+            Some(x) => format!(r#"{{"synt":{{"desktop":{{"wsl":{x}}}}}}}"#),
+        };
+        let t = r#"{"enabled":true}"#;
+        let f = r#"{"enabled":false}"#;
+        // (user, managed) -> enabled
+        for (u, m, want) in [
+            (None, None, false),
+            (Some(t), None, true),
+            (Some(f), None, false),
+            (None, Some(t), true),
+            (None, Some(f), false),
+            (Some(t), Some(f), false), // managed off cannot be overridden
+            (Some(f), Some(t), true),  // managed on cannot be switched off
+            (Some(t), Some(t), true),
+            (Some(f), Some(f), false),
+        ] {
+            std::fs::write(&user, doc(u)).unwrap();
+            std::fs::write(&managed, doc(m)).unwrap();
+            assert_eq!(
+                enabled_on(true, d.path(), &managed),
+                Ok(want),
+                "{u:?} {m:?}"
+            );
+        }
+        // a managed distro wins; a user one stays when managed sets none
+        std::fs::write(&user, doc(Some(r#"{"enabled":true,"distro":"U"}"#))).unwrap();
+        std::fs::write(&managed, doc(Some(r#"{"distro":"M"}"#))).unwrap();
+        assert_eq!(read_setting(d.path(), &managed), Ok((true, "M".into())));
+        std::fs::write(&managed, doc(Some(r#"{"enabled":true}"#))).unwrap();
+        assert_eq!(read_setting(d.path(), &managed), Ok((true, "U".into())));
+        // an invalid managed file fails closed, whatever the user file says (also when it says off)
+        std::fs::write(&user, doc(Some(f))).unwrap();
+        for bad in [
+            "{nope",
+            "[]",
+            &doc(Some(r#"{"enabled":"on"}"#)),
+            &doc(Some(r#"{"distro":1}"#)),
+        ] {
+            std::fs::write(&managed, bad).unwrap();
+            assert!(enabled_on(true, d.path(), &managed).is_err(), "{bad}");
+            assert!(read_setting(d.path(), &managed).is_err(), "{bad}");
+        }
+        // not Windows: nothing is read, nothing runs in WSL
+        assert_eq!(enabled_on(false, d.path(), &managed), Ok(false));
+    }
+
+    #[test]
+    fn a_reveal_path_is_a_windows_drive_path_or_the_distro_unc() {
+        for (l, want) in [
+            ("/mnt/c/work/a b.rs", r"C:\work\a b.rs"),
+            ("/mnt/d", r"D:\"),
+            ("/mnt/c/", r"C:\"),
+            ("/home/me/x/", r"\\wsl.localhost\U\home\me\x"),
+            ("/mnt/wsl/x", r"\\wsl.localhost\U\mnt\wsl\x"),
+            ("/", r"\\wsl.localhost\U\"),
+        ] {
+            assert_eq!(reveal_path("U", l).as_deref(), Ok(want), "{l}");
+        }
+        for bad in ["rel", "/a/../b", "/a/./b", "/a\nb", ""] {
+            assert!(reveal_path("U", bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_engine_must_be_where_it_was_asked_to_be() {
+        let ok = |a, c, r| check_reported(a, Some(c), Some(r));
+        assert!(ok("/h/r", "/h/r", "/h/r").is_ok());
+        assert!(
+            ok("/h/r/sub", "/h/r/sub", "/h/r").is_ok(),
+            "root is an ancestor"
+        );
+        assert!(ok("/h/r", "/h/r", "/").is_ok());
+        assert!(ok("/h/r", "/h/other", "/h/other").is_err());
+        assert!(
+            ok("/h/r", "/h/r", "/h/r/sub").is_err(),
+            "root below the folder"
+        );
+        assert!(
+            ok("/h/r", "/h/r", "/h/rx").is_err(),
+            "a prefix is not an ancestor"
+        );
+        assert!(check_reported("/h/r", None, Some("/h/r")).is_err());
+        assert!(check_reported("/h/r", Some("/h/r"), None).is_err());
     }
 }

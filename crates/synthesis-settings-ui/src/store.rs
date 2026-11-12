@@ -344,6 +344,9 @@ fn refusal(f: &Field, o: Origin, v: &Value, trusted: bool) -> Option<String> {
         Scope::UserOnly if o != Origin::User => {
             Some("this key is read from the user settings file only".into())
         }
+        Scope::UserManaged if !matches!(o, Origin::User | Origin::Managed) => {
+            Some("this key is read from the user and managed settings files only".into())
+        }
         Scope::Layered if project && !trusted => {
             Some("project not trusted: it can only add deny/ask rules and MCP disables".into())
         }
