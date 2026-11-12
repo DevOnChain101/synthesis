@@ -4,7 +4,7 @@
 //! timeout, a silent engine is killed by a watchdog, its stderr is drained, capped and sanitized, and
 //! the child is closed (stdin EOF, grace) and then killed when this value is dropped.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
@@ -48,6 +48,8 @@ const WRITE_QUEUE: usize = 256;
 /// stderr: longest line kept, and lines logged in all.
 const STDERR_LINE: usize = 2048;
 const STDERR_LINES: u32 = 200;
+/// Last stderr lines kept to say why an engine ended.
+const TAIL_LINES: usize = 5;
 
 /// How to start the engine process. The child gets exactly `env` (see [`allowed_env`]), nothing else.
 #[derive(Clone, Debug)]
@@ -57,6 +59,10 @@ pub struct Launcher {
     pub env: Vec<(String, String)>,
     /// See [`IDLE_TIMEOUT`].
     pub idle_timeout: Duration,
+    /// How long `hello` may take (a cold WSL distro needs more than a local process).
+    pub hello_timeout: Duration,
+    /// The folder `start` names on the engine's side when it is not the host path (WSL: a Linux path).
+    pub start_cwd: Option<String>,
 }
 
 impl Launcher {
@@ -68,6 +74,8 @@ impl Launcher {
             args,
             env: allowed_env(env),
             idle_timeout: IDLE_TIMEOUT,
+            hello_timeout: HELLO_TIMEOUT,
+            start_cwd: None,
         }
     }
 }
@@ -135,9 +143,24 @@ struct Shared {
     last: AtomicU64,
     born: Instant,
     tx: UnboundedSender<UiMsg>,
+    /// The last sanitized stderr lines.
+    tail: Mutex<VecDeque<String>>,
 }
 
 impl Shared {
+    /// `msg` plus the engine's last stderr lines, when it said any.
+    fn why(&self, msg: &str) -> String {
+        let t = lock(&self.tail);
+        if t.is_empty() {
+            msg.into()
+        } else {
+            format!(
+                "{msg}: {}",
+                t.iter().cloned().collect::<Vec<_>>().join(" | ")
+            )
+        }
+    }
+
     fn touch(&self) {
         let ms = u64::try_from(self.born.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.last.store(ms, Ordering::SeqCst);
@@ -175,10 +198,13 @@ impl Remote {
         project: &Path,
         tx: UnboundedSender<UiMsg>,
     ) -> Result<(Self, Value), String> {
-        let cwd = project
-            .to_str()
-            .ok_or("the project path is not valid text")?
-            .to_string();
+        let cwd = match &l.start_cwd {
+            Some(c) => c.clone(),
+            None => project
+                .to_str()
+                .ok_or("the project path is not valid text")?
+                .to_string(),
+        };
         let mut cmd = Command::new(&l.program);
         cmd.args(&l.args)
             .env_clear()
@@ -210,6 +236,7 @@ impl Remote {
             last: AtomicU64::new(0),
             born: Instant::now(),
             tx,
+            tail: Mutex::default(),
         });
         let (line_tx, line_rx) = mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE);
         // from here a failure drops `remote`, which closes and then kills the child
@@ -226,16 +253,21 @@ impl Remote {
                 }
             }
         });
-        std::thread::spawn(move || drain_stderr(stderr));
+        let s = shared.clone();
+        std::thread::spawn(move || drain_stderr(stderr, &s));
         let (hello_tx, hello_rx) = mpsc::channel();
         let s = shared.clone();
         std::thread::spawn(move || read_loop(BufReader::new(stdout), &s, &hello_tx));
         let idle = l.idle_timeout;
         std::thread::spawn(move || watchdog(&shared, idle));
+        let why = |e: String| remote.shared.why(&e);
         hello_rx
-            .recv_timeout(HELLO_TIMEOUT)
-            .map_err(|_| "the engine did not say hello in time".to_string())??;
-        let v = remote.call(Call::Start { cwd }, START_TIMEOUT)?;
+            .recv_timeout(l.hello_timeout)
+            .map_err(|_| why("the engine did not say hello in time".into()))?
+            .map_err(why)?;
+        let v = remote
+            .call(Call::Start { cwd }, START_TIMEOUT)
+            .map_err(why)?;
         // an engine that does not say its mode is not trusted to be in the default one
         let mode = v["mode"]
             .as_str()
@@ -391,7 +423,7 @@ impl Drop for Remote {
 }
 
 /// Logs the engine's stderr: line length and line count capped, made printable, never forwarded raw.
-fn drain_stderr(r: std::process::ChildStderr) {
+fn drain_stderr(r: std::process::ChildStderr, s: &Shared) {
     let mut r = BufReader::new(r);
     let (mut logged, mut buf) = (0, vec![]);
     loop {
@@ -415,14 +447,23 @@ fn drain_stderr(r: std::process::ChildStderr) {
                 }
             }
         }
+        // wsl.exe's own messages are UTF-16LE: dropping the NULs keeps their ASCII text readable
+        buf.retain(|b| *b != 0);
+        let text = sanitize_for_display(String::from_utf8_lossy(&buf).trim_end());
         if logged < STDERR_LINES {
             logged += 1;
-            let text = String::from_utf8_lossy(&buf);
-            eprintln!(
-                "synthesis-desktop: engine: {}",
-                sanitize_for_display(text.trim_end())
-            );
+            eprintln!("synthesis-desktop: engine: {text}");
         }
+        let mut t = lock(&s.tail);
+        if t.len() == TAIL_LINES {
+            t.pop_front();
+        }
+        t.push_back(
+            synthesis_view::toolview::redact_text(&text)
+                .chars()
+                .take(200)
+                .collect(),
+        );
     }
 }
 
@@ -497,9 +538,10 @@ fn read_loop(
     lock(&s.waiting).clear(); // every waiting call sees the process ended
     s.dead.store(true, Ordering::SeqCst);
     if ok && !s.closing.load(Ordering::SeqCst) {
-        s.tell(UiMsg::BadEvent("the engine process ended".into()));
+        let m = s.why("the engine process ended");
+        s.tell(UiMsg::BadEvent(m.clone()));
         if s.running.swap(false, Ordering::SeqCst) {
-            s.tell(UiMsg::TaskDone(Err("the engine process ended".into())));
+            s.tell(UiMsg::TaskDone(Err(m)));
         }
     }
 }

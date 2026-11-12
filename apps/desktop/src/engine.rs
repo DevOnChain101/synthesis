@@ -464,6 +464,8 @@ pub struct Engine {
     /// Remote mode only: what the engine says its folder and root are. Display text, never a path to open.
     pub remote_cwd: Option<String>,
     pub remote_root: Option<String>,
+    /// WSL mode only: the distro the engine runs in (to turn its Linux paths into Windows ones).
+    pub remote_distro: Option<String>,
     pub synthesis_home: PathBuf,
     /// The environment the session started with (`/memory` and `/doctor` read it, names only).
     pub env: Env,
@@ -514,7 +516,8 @@ impl Engine {
     }
 
     /// Tests and tools: defaults plus a model, provider and sandbox mode. Blocking, like `start_with`.
-    pub fn start(
+    #[cfg(any(feature = "shot", feature = "local-engine-for-tests"))]
+    pub(crate) fn start(
         project: &Path,
         env: &Env,
         model: Option<&str>,
@@ -573,7 +576,8 @@ impl Engine {
             root: project.to_string_lossy().into_owned(),
             remote_cwd: Some(text("cwd")),
             remote_root: Some(text("root")),
-            commands: vec![],
+            remote_distro: None,
+            commands: vec![crate::live::reveal_command()],
             context_window: v["context_window"].as_u64(),
             // project trust is not available over the protocol: a remote session is untrusted
             trusted: false,
@@ -602,7 +606,7 @@ impl Engine {
 
     /// Builds the harness and starts (or resumes) the session, like `prepare` + `round` in
     /// `apps/cli/src/tui.rs`. Blocking: call it from a worker thread, never from inside a tokio runtime.
-    pub fn start_with(
+    pub(crate) fn start_with(
         o: StartOpts,
         env: &Env,
     ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
@@ -689,7 +693,7 @@ impl Engine {
                 argument_hint: "<tokens|unset>".into(),
                 local: true,
             }))
-            .chain(std::iter::once(crate::live::send_command()))
+            .chain([crate::live::send_command(), crate::live::reveal_command()])
             .chain(std::iter::once(crate::live::rewind_command()))
             .chain(std::iter::once(crate::live::clean_command()))
             .chain(std::iter::once(crate::live::close_workspace_command()))
@@ -750,6 +754,7 @@ impl Engine {
             trusted,
             remote_cwd: None,
             remote_root: None,
+            remote_distro: None,
             synthesis_home: info.synthesis_home,
             env: env.clone(),
             live: Some(live),
@@ -1463,5 +1468,29 @@ mod tests {
             matches!(rx.try_recv().unwrap(), UiMsg::BadEvent(m) if m.contains("unreadable event"))
         );
         assert!(rx.try_recv().is_err());
+    }
+}
+
+/// The integration tests start a local engine through these (feature `local-engine-for-tests`, a
+/// dev-dependency of this crate only): in the product only `tui_view/driver.rs` may, behind the WSL gate.
+#[cfg(feature = "local-engine-for-tests")]
+pub mod for_tests {
+    use super::*;
+
+    pub fn start(
+        project: &Path,
+        env: &Env,
+        model: Option<&str>,
+        provider: Option<&str>,
+        sandbox: Option<&str>,
+    ) -> Result<(Engine, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
+        Engine::start(project, env, model, provider, sandbox)
+    }
+
+    pub fn start_with(
+        o: StartOpts,
+        env: &Env,
+    ) -> Result<(Engine, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
+        Engine::start_with(o, env)
     }
 }

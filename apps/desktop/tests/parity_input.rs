@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::UnboundedReceiver;
 use synthesis_config::Env;
+use synthesis_desktop::engine::for_tests;
 use synthesis_desktop::engine::{Engine, UiMsg};
 use synthesis_desktop::live::{DialogKind, Live, PickerKind, Submitted};
 use synthesis_permissions::Mode;
@@ -32,7 +33,7 @@ fn rig() -> Rig {
         ("HOME", home.to_str().unwrap()),
         ("SYNT_HOME", home.to_str().unwrap()),
     ]);
-    let (engine, rx) = Engine::start(
+    let (engine, rx) = for_tests::start(
         &ws,
         &env,
         None,

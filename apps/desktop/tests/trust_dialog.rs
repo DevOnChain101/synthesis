@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use synthesis_config::Env;
-use synthesis_desktop::engine::Engine;
+use synthesis_desktop::engine::for_tests;
 use synthesis_desktop::live::{ARM_MS, Action, DialogKind, Live, PickerKind, TrustGrant};
 
 /// A home folder that exists nowhere, spelled as an absolute path on every platform.
@@ -54,7 +54,7 @@ fn rig_in(sub: &str) -> (Live, tempfile::TempDir) {
         ("HOME", home.to_str().unwrap()),
         ("SYNT_HOME", home.to_str().unwrap()),
     ]);
-    let (engine, _rx) = Engine::start(
+    let (engine, _rx) = for_tests::start(
         &ws,
         &env,
         None,
@@ -301,7 +301,7 @@ fn rig_nested() -> (Live, tempfile::TempDir, std::path::PathBuf) {
         ("HOME", home.to_str().unwrap()),
         ("SYNT_HOME", home.to_str().unwrap()),
     ]);
-    let (engine, _rx) = Engine::start(
+    let (engine, _rx) = for_tests::start(
         &app,
         &env,
         None,
@@ -474,7 +474,7 @@ fn an_unknown_home_folder_offers_no_trust() {
 fn a_file_changed_between_the_check_and_the_load_aborts_the_trusted_start() {
     use clap::Parser as _;
     use std::sync::Arc;
-    use synthesis_desktop::engine::{Args, Engine, StartOpts, TRUST_CHANGED, TrustCheck};
+    use synthesis_desktop::engine::{Args, StartOpts, TRUST_CHANGED, TrustCheck};
 
     let dir = tempfile::tempdir().unwrap();
     let base = synthesis_core::canonicalize(dir.path()).unwrap();
@@ -501,7 +501,7 @@ fn a_file_changed_between_the_check_and_the_load_aborts_the_trusted_start() {
     .common;
     let manifest = synthesis_session::trust::fingerprint(&ws, &ws).unwrap();
     let start = |hook: Option<Arc<dyn Fn() + Send + Sync>>| {
-        Engine::start_with(
+        for_tests::start_with(
             StartOpts {
                 project: ws.clone(),
                 common: common.clone(),
@@ -539,7 +539,7 @@ fn nothing_the_project_names_runs_before_the_trusted_configuration_is_verified()
     use clap::Parser as _;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use synthesis_desktop::engine::{Args, Engine, StartOpts, TRUST_CHANGED, TrustCheck};
+    use synthesis_desktop::engine::{Args, StartOpts, TRUST_CHANGED, TrustCheck};
 
     let dir = tempfile::tempdir().unwrap();
     let base = synthesis_core::canonicalize(dir.path()).unwrap();
@@ -606,7 +606,7 @@ fn nothing_the_project_names_runs_before_the_trusted_configuration_is_verified()
                 }
             }) as Arc<dyn Fn() + Send + Sync>
         });
-        let r = Engine::start_with(
+        let r = for_tests::start_with(
             StartOpts {
                 project: ws.clone(),
                 common: args(trust),
@@ -662,7 +662,7 @@ fn nothing_the_project_names_runs_before_the_trusted_configuration_is_verified()
 #[test]
 fn a_remembered_trust_leaves_project_hooks_and_mcp_servers_inert_and_says_so() {
     use clap::Parser as _;
-    use synthesis_desktop::engine::{Args, Engine, StartOpts};
+    use synthesis_desktop::engine::{Args, StartOpts};
 
     let dir = tempfile::tempdir().unwrap();
     let base = synthesis_core::canonicalize(dir.path()).unwrap();
@@ -712,7 +712,7 @@ fn a_remembered_trust_leaves_project_hooks_and_mcp_servers_inert_and_says_so() {
     let start = |inert: bool| {
         let _ = std::fs::remove_file(&hook_mark);
         let _ = std::fs::remove_file(&mcp_mark);
-        let (e, _rx) = Engine::start_with(
+        let (e, _rx) = for_tests::start_with(
             StartOpts {
                 project: ws.clone(),
                 common: common(inert),
@@ -775,7 +775,7 @@ fn a_remembered_trust_leaves_project_hooks_and_mcp_servers_inert_and_says_so() {
 #[test]
 fn a_remembered_trust_ignores_project_allow_rules_env_and_disable_all_hooks() {
     use clap::Parser as _;
-    use synthesis_desktop::engine::{Args, Engine, StartOpts, UiMsg};
+    use synthesis_desktop::engine::{Args, StartOpts, UiMsg};
     use synthesis_permissions::Decision;
 
     let dir = tempfile::tempdir().unwrap();
@@ -827,7 +827,7 @@ fn a_remembered_trust_ignores_project_allow_rules_env_and_disable_all_hooks() {
         .unwrap()
         .common;
         c.project_exec_inert = inert;
-        let (e, mut rx) = Engine::start_with(
+        let (e, mut rx) = for_tests::start_with(
             StartOpts {
                 project: ws.clone(),
                 common: c,

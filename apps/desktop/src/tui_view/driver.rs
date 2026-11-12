@@ -15,6 +15,7 @@ use gpui_component::input::{InputEvent, TextareaState};
 use synthesis_cli_ui_base::complete::{self, StdFs};
 use synthesis_cli_ui_base::editor::LineEditor;
 use synthesis_config::Env;
+use synthesis_harness::sanitize_for_display;
 use synthesis_view::convo::{Convo, Item};
 use synthesis_view::workspaces::{LoadOpts, WorkspaceList, fold_dir};
 
@@ -75,6 +76,26 @@ pub enum Row {
     Item(usize),
     Plan,
     Activity,
+}
+
+/// The folder a launch may use in WSL mode. Only a first start or a new session in a folder may; every
+/// other target needs the session store, which a WSL engine has not got yet, and is refused, so no
+/// target can fall through to the local engine. Exhaustive on purpose: a new `Target` must decide here.
+fn wsl_folder(target: &Option<Target>, project: &Path) -> Result<PathBuf, String> {
+    match target {
+        None => Ok(project.to_path_buf()),
+        Some(Target::New(p)) => Ok(p.clone()),
+        Some(
+            Target::Resume(_)
+            | Target::Model(_)
+            | Target::Close
+            | Target::CloseWorkspace(_)
+            | Target::Trust,
+        ) => Err(format!(
+            "this needs the session store: {}",
+            crate::wsl::LATER
+        )),
+    }
 }
 
 /// What the worker thread hands back.
@@ -342,6 +363,8 @@ impl TuiView {
         }
         lu.want = None;
         lu.live.starting = true;
+        // an unreadable setting shows no "starting distro": the build reports it
+        lu.live.starting_distro = crate::wsl::enabled(&lu.cfg.synthesis_home).unwrap_or(false);
         lu.live.engine = None;
         lu.dirty = true;
         // `session_trust` names its root and `launch_common` applies it only to that root, so a session-only
@@ -1901,6 +1924,17 @@ impl TuiView {
                 return self.launch(project, None, vec![], cx);
             }
             Action::ShowFiles => return self.show_tab(super::ChatTab::Files, None, cx),
+            Action::Reveal(arg) => {
+                let Some(e) = lu.live.engine.clone() else {
+                    return;
+                };
+                let r =
+                    crate::reveal::target(&arg, &e.root, e.remote_distro.as_deref(), cfg!(windows))
+                        .and_then(|t| crate::reveal::open(&t));
+                if let Err(why) = r {
+                    lu.live.note(format!("/reveal: {why}"), true);
+                }
+            }
             Action::ShowDiff(f) => return self.show_tab(super::ChatTab::Diff, f, cx),
             Action::Send { to, text } => {
                 let Some(e) = lu.live.engine.clone() else {
@@ -2402,6 +2436,16 @@ pub fn build(
     let mut model = model;
     let prior_model = model.clone();
     let mut project = project;
+    // WSL mode (Windows, Settings toggle): the engine runs in the distro, which has no session store yet
+    if crate::wsl::enabled(&home).map_err(|e| sanitize_for_display(&e))? {
+        let folder = wsl_folder(&target, &project)?;
+        return crate::wsl::start(&cfg.env, &home, &folder).map(|(engine, rx)| Launched {
+            engine,
+            rx,
+            replay: None,
+            model: None,
+        });
+    }
     let mut resume = None;
     if first_start {
         let keep = cfg.args.common.resume.clone().unwrap_or_default();
@@ -2822,6 +2866,111 @@ pub(super) fn save_panels(home: &Path, cwd: &Path, changes: &[(&str, bool)]) -> 
 mod tests {
     use super::*;
     use synthesis_view::convo::ToolState;
+
+    #[test]
+    fn in_wsl_mode_only_a_start_or_a_new_session_goes_on_and_nothing_reaches_the_local_engine() {
+        let p = Path::new("/p");
+        // start (no target) and new session
+        assert_eq!(wsl_folder(&None, p), Ok(PathBuf::from("/p")));
+        assert_eq!(
+            wsl_folder(&Some(Target::New("/q".into())), p),
+            Ok(PathBuf::from("/q"))
+        );
+        // resume, model change, trust, close and close-workspace are refused, never run locally
+        for t in [
+            Target::Resume("s".into()),
+            Target::Model("a/b".into()),
+            Target::Close,
+            Target::CloseWorkspace("k".into()),
+            Target::Trust,
+        ] {
+            let e = wsl_folder(&Some(t), p).unwrap_err();
+            assert!(e.contains(crate::wsl::LATER), "{e}");
+        }
+        // structure: the gate precedes the only local engine start in `build`, and returns
+        let src = include_str!("driver.rs");
+        let build = &src[src.find("fn build(").expect("build")..];
+        let gate = build.find("crate::wsl::enabled(&home)").expect("gate");
+        let local = build.find("Engine::start_with(").expect("local start");
+        assert!(gate < local);
+        assert!(build[gate..local].contains("return crate::wsl::start("));
+        // engine.rs: every local start is `pub(crate)` (the compiler then keeps it inside this crate), the one
+        // that only tools use is behind a feature, and the public test wrappers are behind another
+        let eng = include_str!("../engine.rs");
+        let (head, _) = eng.split_once("pub mod for_tests").expect("for_tests");
+        assert!(
+            head.trim_end()
+                .ends_with("#[cfg(feature = \"local-engine-for-tests\")]"),
+            "for_tests must be behind its feature"
+        );
+        let lines: Vec<&str> = head.lines().collect();
+        let mut seen = 0;
+        for (i, l) in lines.iter().enumerate() {
+            let t = l.trim();
+            if t.contains("fn start(") || t.contains("fn start_with(") {
+                seen += 1;
+                assert!(t.starts_with("pub(crate) fn"), "not pub(crate): {t}");
+                if t.contains("fn start(") {
+                    assert!(
+                        lines[i.saturating_sub(3)..i]
+                            .iter()
+                            .any(|p| p.contains("#[cfg(")),
+                        "`start` must be behind a cfg(feature)"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            seen, 2,
+            "the local starts of engine.rs changed: review them"
+        );
+        // the screenshot tool, a developer tool, is behind its feature
+        let ui = include_str!("mod.rs");
+        assert!(ui.contains("#[cfg(feature = \"shot\")]\npub mod shot;"));
+        // nothing else in the product starts a local engine, or aliases `Engine`
+        let own = &include_str!("driver.rs")[..include_str!("driver.rs")
+            .find("#[cfg(test)]\nmod tests")
+            .unwrap()];
+        assert!(
+            !own.contains("for_tests"),
+            "driver.rs must not use the test wrappers"
+        );
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![dir];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(d).unwrap().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                if !name.ends_with(".rs")
+                    || ["driver.rs", "shot.rs", "engine.rs"].contains(&name.as_str())
+                {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&path).unwrap();
+                // whitespace dropped, so `Engine ::\n start(` counts too
+                let text: String = src.split_whitespace().collect();
+                assert!(
+                    !["Engine::start(", "start_with(", "for_tests::start"]
+                        .iter()
+                        .any(|p| text.contains(p)),
+                    "{} starts a local engine",
+                    path.display()
+                );
+                // `use ...::Engine as E;` / `as Engine` would hide a call from the patterns above
+                let words: Vec<&str> = src.split_whitespace().collect();
+                assert!(
+                    !words.windows(2).any(|w| w[0] == "Engine" && w[1] == "as"
+                        || w[0] == "as" && w[1].trim_end_matches([';', ',']) == "Engine"),
+                    "{} aliases Engine",
+                    path.display()
+                );
+            }
+        }
+    }
 
     fn tool(state: ToolState, output: &str) -> Item {
         Item::Tool {

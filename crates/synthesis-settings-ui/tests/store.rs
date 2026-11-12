@@ -365,3 +365,82 @@ fn every_key_belongs_to_a_named_group_of_its_tab() {
         assert!(uniq.len() <= 7, "{sec:?}: {uniq:?}");
     }
 }
+
+#[test]
+fn the_wsl_keys_round_trip_and_a_project_file_cannot_set_them() {
+    let f = Fx::new();
+    f.write(
+        &f.proj.path().join(".synt/settings.json"),
+        json!({"synt": {"desktop": {"wsl": {"enabled": true, "distro": "Evil"}}}}),
+    );
+    // even a trusted project is ignored: user file only
+    let mut st = f.open(ProjectTrust::Trusted);
+    for (k, default) in [
+        ("synt.desktop.wsl.enabled", json!(false)),
+        ("synt.desktop.wsl.distro", Value::Null),
+    ] {
+        let e = st.entry(k).unwrap();
+        assert_eq!((&e.value, e.origin), (&default, Origin::Default), "{k}");
+        assert_eq!(e.refused[0].0, Origin::Project, "{k}");
+    }
+    st.set("synt.desktop.wsl.enabled", json!(true)).unwrap();
+    st.set("synt.desktop.wsl.distro", json!("Ubuntu-24.04"))
+        .unwrap();
+    assert_eq!(
+        f.read()["synt"]["desktop"]["wsl"],
+        json!({"enabled": true, "distro": "Ubuntu-24.04"})
+    );
+    assert_eq!(
+        st.entry("synt.desktop.wsl.distro").unwrap().value,
+        json!("Ubuntu-24.04")
+    );
+    for bad in [json!(""), json!("-x"), json!("a\nb"), json!(3)] {
+        assert!(st.set("synt.desktop.wsl.distro", bad).is_err());
+    }
+    assert!(st.set("synt.desktop.wsl.enabled", json!("yes")).is_err());
+}
+
+#[test]
+fn the_managed_file_decides_the_wsl_keys_and_locks_them() {
+    let f = Fx::new();
+    f.write(
+        &f.user(),
+        json!({"synt": {"desktop": {"wsl": {"enabled": false, "distro": "Mine"}}}}),
+    );
+    f.write(
+        &f.managed(),
+        json!({"synt": {"desktop": {"wsl": {"enabled": true}}}}),
+    );
+    let mut st = f.open(ProjectTrust::Untrusted);
+    let e = st.entry("synt.desktop.wsl.enabled").unwrap();
+    assert_eq!((&e.value, e.origin), (&json!(true), Origin::Managed));
+    assert!(e.refused.is_empty());
+    // the user cannot switch it off from here, and their own key the managed file leaves alone stays theirs
+    assert!(matches!(
+        st.set("synt.desktop.wsl.enabled", json!(false)),
+        Err(SetError::Locked { .. })
+    ));
+    assert_eq!(
+        st.read_only_reason("synt.desktop.wsl.enabled").as_deref(),
+        Some("set by the managed settings file")
+    );
+    let d = st.entry("synt.desktop.wsl.distro").unwrap();
+    assert_eq!((&d.value, d.origin), (&json!("Mine"), Origin::User));
+    // a --settings file never sets them
+    let flag = f.home.path().join("flag.json");
+    f.write(
+        &flag,
+        json!({"synt": {"desktop": {"wsl": {"enabled": false}}}}),
+    );
+    let env = Env::default();
+    let ctx = LoadContext {
+        cwd: f.proj.path(),
+        synthesis_home: f.home.path(),
+        user_home: f.home.path(),
+        env: &env,
+    };
+    let st = SettingsStore::open(&ctx, ProjectTrust::Untrusted, &f.managed(), Some(&flag));
+    let e = st.entry("synt.desktop.wsl.enabled").unwrap();
+    assert_eq!(e.value, json!(true));
+    assert!(e.refused.iter().any(|(o, _)| *o == Origin::Flag));
+}

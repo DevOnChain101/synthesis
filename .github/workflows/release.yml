@@ -221,6 +221,8 @@ jobs:
         run: |
           scripts/apt-install.sh --no-install-recommends pkg-config cmake libfontconfig-dev libfreetype-dev \
             libxcb1-dev libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev
+      - name: The test-only local engine start is not in a release build
+        run: node scripts/check-release-features.mjs
       - name: Build
         run: cargo build --release --locked --target "$TARGET" -p synthesis-desktop
       - name: Locate binary and prove the scripted test provider is absent
