@@ -13,6 +13,14 @@ impl TuiView {
         let Some(e) = lu.live.engine.clone() else {
             return;
         };
+        // the store and the files are the engine's own machine's: PR3b brings them over the protocol
+        if e.is_remote() {
+            lu.live.note(
+                format!("this needs the engine's store: {}", crate::wsl::LATER),
+                true,
+            );
+            return;
+        }
         let home = rewind::Homes {
             synthesis: e.synthesis_home.clone(),
             user: rewind::user_home(&lu.cfg.env),

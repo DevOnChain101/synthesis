@@ -31,12 +31,19 @@ impl Drop for Engine {
 
 /// Starts the engine (not the session) on a script of model turns (given the workspace folder).
 fn engine(script: impl FnOnce(&Path) -> Value) -> Engine {
-    let dir = tempfile::tempdir().unwrap();
+    engine_in(tempfile::tempdir().unwrap(), script)
+}
+
+/// [`engine`] in an existing folder (a second engine process on the same home and store).
+fn engine_in(dir: tempfile::TempDir, script: impl FnOnce(&Path) -> Value) -> Engine {
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let (ws, home) = (root.join("ws"), root.join("home"));
     std::fs::create_dir_all(&ws).unwrap();
     std::fs::create_dir_all(&home).unwrap();
-    let script_path = root.join("script.json");
+    let script_path = root.join(format!(
+        "script{}.json",
+        std::process::id() as u64 + rand_tag()
+    ));
     std::fs::write(&script_path, script(&ws).to_string()).unwrap();
     let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
     c.args(["engine", "--stdio", "--sandbox", "off", "--provider"])
@@ -140,7 +147,7 @@ impl Engine {
         let h = self.line().unwrap();
         assert_eq!(h["msg"], "hello");
         assert_eq!(h["version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(h["protocol"], 1);
+        assert_eq!(h["protocol"], 2);
     }
 
     fn start(&mut self) -> Value {
@@ -264,6 +271,14 @@ fn bad_input_is_survived_and_a_second_start_is_refused() {
     ] {
         e.raw(bad);
     }
+    // the two with a usable id are answered with an error (the client does not wait out a timeout)
+    for want in [1, 2] {
+        let r = e.line().unwrap();
+        assert!(
+            r["msg"] == "result" && r["id"] == want && r["error"].is_string(),
+            "{r}"
+        );
+    }
     let ws = e.ws.to_str().unwrap().to_string();
     // a relative or missing folder is refused with an error result, not a crash
     let id = e.call("start", json!({"cwd": "relative/dir"}));
@@ -333,5 +348,295 @@ fn project_trust_flags_are_refused() {
         assert!(!o.status.success());
         assert!(o.stdout.is_empty(), "no protocol line before the refusal");
         assert!(String::from_utf8_lossy(&o.stderr).contains("not supported"));
+    }
+}
+
+fn rand_tag() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::from(d.subsec_nanos()))
+}
+
+impl Engine {
+    /// A request and its result (events and notices in between are skipped).
+    fn ask(&mut self, method: &str, params: Value) -> Value {
+        let id = self.call(method, params);
+        self.result(id).1
+    }
+
+    fn ok(&mut self, method: &str, params: Value) -> Value {
+        let r = self.ask(method, params);
+        assert!(r["error"].is_null(), "{method}: {r}");
+        r["ok"].clone()
+    }
+
+    fn err(&mut self, method: &str, params: Value) -> String {
+        let r = self.ask(method, params);
+        r["error"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{method} should fail: {r}"))
+            .to_string()
+    }
+}
+
+/// An engine that already ran one task (so the store holds a session with messages and events).
+fn used_engine() -> (Engine, Value) {
+    let mut e = engine(|_| json!([{"text": "one"}, {"text": "two"}, {"text": "three"}]));
+    let info = e.start();
+    e.call("send", json!({"text": "first"}));
+    e.until("task_done", is_task_done);
+    (e, info)
+}
+
+#[test]
+fn the_store_methods_round_trip() {
+    let (mut e, info) = used_engine();
+    let sid = info["sid"].as_str().unwrap().to_string();
+    let ws = e.ok("workspaces.list", Value::Null);
+    let rows = ws["workspaces"].as_array().unwrap();
+    let row = rows
+        .iter()
+        .find(|w| {
+            w["sessions"]
+                .as_array()
+                .is_some_and(|s| s.iter().any(|s| s["id"] == sid.as_str()))
+        })
+        .unwrap_or_else(|| panic!("the session is listed: {ws}"));
+    let key = row["key"].as_str().unwrap().to_string();
+    let list = e.ok("sessions.list", json!({"workspace": key}));
+    assert_eq!(list["sessions"][0]["id"], sid.as_str());
+    let p = e.ok("session.preview", json!({"id": sid}));
+    let evs = p["events"].as_array().unwrap();
+    assert!(evs.iter().any(|v| v["type"] == "task.started"), "{p}");
+    assert_eq!(p["truncated"], false);
+    let u = e.ok("usage.summary", json!({"tz_min": 0}));
+    assert!(u["days"].is_array());
+    assert!(e.ok("session.rename", json!({"id": sid, "title": "my title"}))["title"] == "my title");
+    let ws = e.ok("workspaces.list", Value::Null);
+    assert!(ws.to_string().contains("my title"));
+}
+
+#[test]
+fn hostile_parameters_are_refused_and_leak_no_host_path() {
+    let (mut e, info) = used_engine();
+    let sid = info["sid"].as_str().unwrap().to_string();
+    let root = e.ws.parent().unwrap().to_str().unwrap().to_string();
+    let long = "a".repeat(5000);
+    let mut errors = vec![];
+    for (m, p) in [
+        ("session.preview", json!({"id": "../../etc/passwd"})),
+        ("session.preview", json!({"id": ""})),
+        ("session.preview", json!({"id": long})),
+        ("session.preview", json!({"id": "nope"})),
+        ("session.preview", json!({"id": "a\nb"})),
+        ("sessions.list", json!({"workspace": "/etc"})),
+        ("sessions.list", json!({"workspace": "x\u{0}y"})),
+        ("sessions.list", json!({"workspace": long})),
+        ("usage.summary", json!({"tz_min": 100_000})),
+        ("session.resume", json!({"id": "../x"})),
+        ("session.resume", json!({"id": "nope"})),
+        ("session.close", json!({"id": "nope"})),
+        ("session.rename", json!({"id": "nope", "title": "t"})),
+        (
+            "session.rename",
+            json!({"id": sid, "title": "x".repeat(500)}),
+        ),
+        (
+            "session.rename",
+            json!({"id": sid, "title": "bad\u{202e}title"}),
+        ),
+        ("model.set", json!({"model": "--sandbox=off"})),
+        ("model.set", json!({"model": ""})),
+        ("trust.set", json!({"mode": "always"})),
+        ("trust.set", json!({"mode": "bypass"})),
+        ("trust.revoke", json!({"root": "/"})),
+        ("trust.revoke", json!({"root": "/etc"})),
+        ("workspace.close", json!({"workspace": ""})),
+        ("compact", json!({"instructions": "i".repeat(20_000)})),
+        ("session.preview", json!({})),
+        ("session.preview", json!({"id": 5})),
+    ] {
+        let r = e.ask(m, p.clone());
+        let t = r["error"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{m} {p} should fail: {r}"));
+        errors.push(t.to_string());
+    }
+    assert!(errors.iter().all(|t| !t.contains(&root)), "{errors:?}");
+    // the session is untouched by all of that
+    assert_eq!(e.ok("set_mode", json!({"mode": "plan"}))["mode"], "plan");
+}
+
+#[test]
+fn store_requests_are_rate_limited() {
+    let (mut e, _) = used_engine();
+    let ids: Vec<u64> = (0..120)
+        .map(|_| e.call("usage.summary", json!({"tz_min": 0})))
+        .collect();
+    let mut refused = 0;
+    for id in ids {
+        if e.result(id).1["error"] == "too many requests" {
+            refused += 1;
+        }
+    }
+    assert!(refused > 0, "a burst of 120 requests must be cut");
+}
+
+#[test]
+fn bypass_and_plan_cannot_be_lifted_through_the_new_methods() {
+    let (mut e, _) = used_engine();
+    assert_eq!(e.ok("set_mode", json!({"mode": "plan"}))["mode"], "plan");
+    // a restart returns to the default mode (never to bypass, never keeping a client-chosen one)
+    let v = e.ok("session.new", Value::Null);
+    assert_ne!(v["mode"], "bypassPermissions");
+    assert_eq!(v["trusted"], false);
+}
+
+#[test]
+fn session_new_and_resume_restart_in_place_in_the_same_folder() {
+    let (mut e, info) = used_engine();
+    let old = info["sid"].as_str().unwrap().to_string();
+    let v = e.ok("session.new", Value::Null);
+    let new = v["sid"].as_str().unwrap().to_string();
+    assert_ne!(new, old);
+    let v = e.ok("session.resume", json!({"id": old}));
+    assert_eq!(v["sid"], old.as_str());
+    // a session id that exists but is the engine's own empty one of another start cannot be closed by a stranger id
+    assert!(e.err("session.close", json!({"id": new})).contains("own"));
+}
+
+#[test]
+fn trust_is_decided_by_the_engine_and_only_for_the_exact_root() {
+    let mut e = engine(|_| json!([{"text": "ok"}]));
+    std::fs::create_dir_all(e.ws.join(".synt")).unwrap();
+    std::fs::write(e.ws.join(".synt/settings.json"), "{}").unwrap();
+    let info = e.start();
+    assert_eq!(info["trusted"], false);
+    let st = e.ok("trust.state", Value::Null);
+    assert_eq!(st["trusted"], false);
+    assert_eq!(st["remembered"], "no");
+    assert!(st["refusal"].is_null(), "{st}");
+    // Not now / deny changes nothing and restarts nothing
+    let d = e.ok("trust.set", json!({"mode": "deny"}));
+    assert_eq!(
+        (d["trusted"].as_bool(), d["restarted"].as_bool()),
+        (Some(false), Some(false))
+    );
+    // session-only: restarted trusted, grant for exactly this root
+    let v = e.ok("trust.set", json!({"mode": "session"}));
+    assert_eq!(v["trusted"], true, "{v}");
+    let st = e.ok("trust.state", Value::Null);
+    assert_eq!(st["trusted"], true);
+    assert_eq!(st["session_grant"], st["root"]);
+    assert_eq!(
+        st["records"].as_array().unwrap().len(),
+        0,
+        "session-only writes nothing"
+    );
+    // revoke accepts only a root this engine listed (or its own grant), never a path
+    assert!(
+        e.err("trust.revoke", json!({"root": "/etc"}))
+            .contains("not remembered")
+    );
+    let r = e.ok("trust.revoke", json!({"root": st["root"]}));
+    assert_eq!(r["session_grant_ended"], true);
+}
+
+#[test]
+fn remember_is_stored_with_the_engines_own_key_and_revoked() {
+    let mut e = engine(|_| json!([{"text": "ok"}]));
+    std::fs::create_dir_all(e.ws.join(".synt")).unwrap();
+    std::fs::write(e.ws.join(".synt/settings.json"), "{}").unwrap();
+    e.start();
+    let v = e.ok("trust.set", json!({"mode": "remember"}));
+    assert_eq!(v["trusted"], true, "{v}");
+    let st = e.ok("trust.state", Value::Null);
+    let rows = st["records"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{st}");
+    assert_eq!(rows[0]["scope"], "folder");
+    // a remembered grant is not kept in memory: the store is the only source
+    assert!(st["session_grant"].is_null(), "{st}");
+    let root = rows[0]["root"].as_str().unwrap().to_string();
+    assert_eq!(e.ok("trust.revoke", json!({"root": root}))["revoked"], true);
+    assert_eq!(
+        e.ok("trust.state", Value::Null)["records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn a_remembered_trust_is_not_honoured_by_a_new_engine_without_an_enforcing_sandbox() {
+    let mut e = engine(|_| json!([{"text": "ok"}]));
+    std::fs::create_dir_all(e.ws.join(".synt")).unwrap();
+    std::fs::write(e.ws.join(".synt/settings.json"), "{}").unwrap();
+    e.start();
+    e.ok("trust.set", json!({"mode": "remember"}));
+    let root = e.ws.parent().unwrap().to_path_buf();
+    // the same home, a new process (the test engine runs with --sandbox off)
+    drop(e.stdin.take());
+    let _ = e.child.wait();
+    let keep = tempfile::tempdir_in(&root).unwrap();
+    drop(keep);
+    // a second engine process on the same store: not trusted, and says why
+    let mut e2 = engine_same_home(&root);
+    let info = e2.start();
+    assert_eq!(info["trusted"], false, "{info}");
+    assert!(
+        info["notices"].to_string().contains("not honoured"),
+        "{info}"
+    );
+}
+
+/// A new engine process on the home and workspace of an earlier one.
+fn engine_same_home(root: &Path) -> Engine {
+    let (ws, home) = (root.join("ws"), root.join("home"));
+    let script_path = root.join("script-again.json");
+    std::fs::write(&script_path, json!([{"text": "ok"}]).to_string()).unwrap();
+    let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
+    c.args(["engine", "--stdio", "--sandbox", "off", "--provider"])
+        .arg(format!("fake:{}", script_path.display()))
+        .env_clear();
+    for k in [
+        "PATH",
+        "SystemRoot",
+        "PATHEXT",
+        "ComSpec",
+        "USERPROFILE",
+        "TEMP",
+        "TMP",
+    ] {
+        if let Some(v) = std::env::var_os(k) {
+            c.env(k, v);
+        }
+    }
+    let mut child = c
+        .env("HOME", root)
+        .env("SYNT_HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.take();
+    let out = child.stdout.take().unwrap();
+    let (tx, lines) = channel();
+    std::thread::spawn(move || {
+        for l in BufReader::new(out).lines() {
+            let Ok(l) = l else { break };
+            if tx.send(l).is_err() {
+                break;
+            }
+        }
+    });
+    Engine {
+        child,
+        stdin,
+        lines,
+        ws,
+        next: 1,
+        _dir: tempfile::tempdir().unwrap(),
     }
 }

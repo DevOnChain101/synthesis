@@ -102,6 +102,11 @@ impl Asks {
         })
     }
 
+    /// No dialog waits for an answer.
+    pub fn is_idle(&self) -> bool {
+        lock(&self.pending).is_empty() && lock(&self.inputs).is_empty()
+    }
+
     /// Answers the approval `id`; false when it is no longer waiting.
     pub fn answer(&self, id: &str, choice: Choice) -> bool {
         let Some(p) = lock(&self.pending).remove(id) else {

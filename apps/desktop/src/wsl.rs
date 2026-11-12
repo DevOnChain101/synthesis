@@ -13,7 +13,7 @@ use synthesis_config::Env;
 use synthesis_harness::sanitize_for_display;
 
 use crate::engine::{Engine, UiMsg};
-use crate::remote::Launcher;
+use crate::remote::{Launcher, StartSpec};
 
 /// A cold distro (the VM boots) may need this long to say hello.
 pub const COLD_START: Duration = Duration::from_secs(60);
@@ -466,6 +466,7 @@ pub fn start_via(
     version: &str,
     env: &Env,
     project: &Path,
+    spec: &StartSpec,
 ) -> Result<(Engine, UnboundedReceiver<UiMsg>), String> {
     let go = || {
         let ready = probe(run, wanted, version)?;
@@ -480,7 +481,7 @@ pub fn start_via(
             )?)
         })?;
         let (mut e, rx) =
-            Engine::start_remote(&launcher(wsl_exe, d, &cwd, &ready.synt, env), project)?;
+            Engine::start_remote(&launcher(wsl_exe, d, &cwd, &ready.synt, env), project, spec)?;
         // refused (the engine is dropped, which closes it) when it is not where it was asked to be
         check_reported(&cwd, e.remote_cwd.as_deref(), e.remote_root.as_deref())?;
         e.remote_distro = Some(d.to_string());
@@ -504,6 +505,7 @@ pub fn start(
     env: &Env,
     home: &Path,
     project: &Path,
+    spec: &StartSpec,
 ) -> Result<(Engine, UnboundedReceiver<UiMsg>), String> {
     let exe = system_wsl()?;
     let (_, distro) = read_setting(home, &managed_path())?;
@@ -515,7 +517,28 @@ pub fn start(
         synthesis_app::proto::VERSION,
         env,
         project,
+        spec,
     )
+}
+
+/// The result of [`restart`]: the engine, its new receiver, why the engine refused (the session went on as it
+/// was) and the start report.
+pub type Restarted = (
+    Engine,
+    UnboundedReceiver<UiMsg>,
+    Option<String>,
+    serde_json::Value,
+);
+
+/// Ends the session of `prior` and starts another in the same engine process (the engine decides: trust, model,
+/// resume, close). The folder must stay the one that was asked for at the start, else the engine is dropped.
+pub fn restart(prior: Engine, call: synthesis_app::proto::Call) -> Result<Restarted, String> {
+    let asked = prior.remote_cwd.clone().unwrap_or_default();
+    let (e, rx, note, v) = prior
+        .restart_remote(call)
+        .map_err(|e| sanitize_for_display(&e))?;
+    check_reported(&asked, e.remote_cwd.as_deref(), e.remote_root.as_deref())?;
+    Ok((e, rx, note.map(|n| sanitize_for_display(&n)), v))
 }
 
 /// Why the toggle cannot be turned on (`None`: it can). Off Windows always (`check` is not run); on

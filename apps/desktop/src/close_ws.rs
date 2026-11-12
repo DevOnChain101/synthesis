@@ -54,7 +54,11 @@ pub struct Asked {
 impl Live {
     /// The folder the engine runs in, as a workspace key.
     pub fn live_ws_key(&self) -> String {
-        fold_dir(self.engine.as_ref().map_or(&self.cwd, |e| &e.root))
+        fold_dir(
+            self.engine
+                .as_ref()
+                .map_or(&self.cwd, |e| e.remote_root.as_ref().unwrap_or(&e.root)),
+        )
     }
 
     /// The checks of both the asking and the confirming: what the workspace is now.

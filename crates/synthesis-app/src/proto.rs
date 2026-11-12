@@ -16,7 +16,7 @@ use synthesis_tools::NeedsUser;
 use crate::asks::{Ask, AskApproval, Choice};
 
 /// Bumped when a message changes shape. The version handshake is exact: both numbers must match.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 /// The engine's own version (one workspace version for the app and the engine).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Longest accepted line (a tool result can carry a big file).
@@ -35,6 +35,12 @@ pub enum Call {
     /// Prepares the session (once). `cwd` is a folder path on the engine's own OS.
     Start {
         cwd: String,
+        /// Continue this stored session of the same folder (an id from `workspaces.list`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume: Option<String>,
+        /// Start on this `provider/model`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// Starts a task; `{msg:"task_done"}` follows when it ended.
     Send {
@@ -52,6 +58,67 @@ pub enum Call {
     SetMode {
         mode: String,
     },
+    /// The workspaces of the store (and this session's folder) with their sessions; bounded.
+    #[serde(rename = "workspaces.list")]
+    WorkspacesList,
+    #[serde(rename = "sessions.list")]
+    SessionsList {
+        workspace: String,
+    },
+    /// The stored conversation of a session, read-only (newest events within the bounds).
+    #[serde(rename = "session.preview")]
+    SessionPreview {
+        id: String,
+    },
+    /// Ends this session and continues the stored one of the same folder (a new `started` report).
+    #[serde(rename = "session.resume")]
+    SessionResume {
+        id: String,
+    },
+    /// Ends this session and starts a fresh one in the same folder.
+    #[serde(rename = "session.new")]
+    SessionNew,
+    #[serde(rename = "session.rename")]
+    SessionRename {
+        id: String,
+        title: String,
+    },
+    /// Hides this session (only the engine's own) and starts a fresh one.
+    #[serde(rename = "session.close")]
+    SessionClose {
+        id: String,
+    },
+    /// Hides every session of the workspace key that no other process holds; the own workspace also
+    /// continues in a fresh session.
+    #[serde(rename = "workspace.close")]
+    WorkspaceClose {
+        workspace: String,
+    },
+    #[serde(rename = "usage.summary")]
+    UsageSummary {
+        tz_min: i32,
+    },
+    #[serde(rename = "trust.state")]
+    TrustState,
+    /// The person's choice; the engine decides, stores and restarts the session trusted.
+    #[serde(rename = "trust.set")]
+    TrustSet {
+        mode: crate::engine_methods::Mode,
+    },
+    #[serde(rename = "trust.revoke")]
+    TrustRevoke {
+        root: String,
+    },
+    /// Ends this session and continues it on `model`.
+    #[serde(rename = "model.set")]
+    ModelSet {
+        model: String,
+    },
+    /// `{started}`: false when it ran between tasks (`{msg:"compacted"}` follows).
+    Compact {
+        instructions: Option<String>,
+    },
+    Clear,
     Cancel,
     #[serde(alias = "shutdown")]
     Close,
@@ -124,6 +191,12 @@ pub enum Out {
     Withdraw { id: String },
     #[serde(rename = "task_done")]
     TaskDone { error: Option<String> },
+    /// The session was ended for a restart (`trust.set`, `model.set`, `session.*`): what follows is the new one.
+    #[serde(rename = "restarted")]
+    Restarted,
+    /// `compact` between tasks ended.
+    #[serde(rename = "compacted")]
+    Compacted { error: Option<String> },
     /// Something the engine wants shown (a dropped oversized event, ...).
     #[serde(rename = "notice")]
     Notice { text: String },
@@ -322,7 +395,11 @@ mod tests {
         ));
         let s = serde_json::to_string(&Request {
             id: 1,
-            call: Call::Start { cwd: "/w".into() },
+            call: Call::Start {
+                cwd: "/w".into(),
+                resume: None,
+                model: None,
+            },
         })
         .unwrap();
         assert_eq!(s, r#"{"id":1,"method":"start","params":{"cwd":"/w"}}"#);

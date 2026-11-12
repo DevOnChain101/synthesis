@@ -29,6 +29,7 @@ synthesis-permissions = { path = "../synthesis-permissions" }
 synthesis-providers = { path = "../synthesis-providers" }
 synthesis-sandbox = { path = "../synthesis-sandbox" }
 synthesis-session = { path = "../synthesis-session" }
+synthesis-view = { path = "../synthesis-view" }
 synthesis-settings = { path = "../synthesis-settings" }
 synthesis-terminal = { path = "../synthesis-terminal" }
 synthesis-tools = { path = "../synthesis-tools" }

@@ -1237,7 +1237,12 @@ impl Live {
                 if let (Some(e), Some(root), "revoke") =
                     (&self.engine, self.revoke_root.take(), key)
                 {
-                    let msg = match synthesis_session::trust::revoke(&e.synthesis_home, &root) {
+                    let done = match e.remote() {
+                        Some(r) => r.trust_revoke(&root),
+                        None => synthesis_session::trust::revoke(&e.synthesis_home, &root)
+                            .map_err(|e| e.to_string()),
+                    };
+                    let msg = match done {
                         Ok(true) => format!(
                             "revoked trust of {}: it takes effect at the next engine start (a new session, /model or a restart); this session keeps what it already loaded. A session-only trust of that folder ends too",
                             sanitize_for_display(&root)
@@ -2254,6 +2259,10 @@ impl Live {
             t if tiers.iter().any(|x| x == t) => Some(t.to_string()),
             _ => return self.note(format!("usage: /effort [auto|{}]", tiers.join("|")), true),
         };
+        // the engine's state lives on its own machine: nothing of it is written here
+        if e.is_remote() {
+            return self.note(format!("/effort: {}", crate::wsl::LATER), true);
+        }
         // kept for the next start too (state.json), like the CLI
         if let Err(err) = synthesis_config::save_effort(&e.synthesis_home, next.as_deref()) {
             self.note(format!("/effort: not saved ({err})"), false);
@@ -2685,28 +2694,65 @@ impl Live {
                 }
             )
         });
-        // a remote session cannot be trusted (project trust is not in the protocol yet)
-        let Some(e) = self
-            .engine
-            .as_ref()
-            .filter(|e| !e.is_remote() && !self.trusted && !asked)
-        else {
+        let Some(e) = self.engine.as_ref().filter(|_| !self.trusted && !asked) else {
             return false;
         };
-        // the grant is the nearest folder with .git or .synt above the session's folder, not the folder itself
-        let root = crate::engine::root_of(std::path::Path::new(&e.cwd));
-        if let Some(why) = crate::engine::trust_refusal(&root, home, &e.synthesis_home) {
+        // what the dialog needs to know: the local engine's folder is read here; a remote engine says it (it
+        // decides and checks everything itself, the paths are display text)
+        let (root, unfit, changed, parent, refusal) = if let Some(r) = e.remote() {
+            let st = match r.trust_state() {
+                Ok(s) => s,
+                Err(why) => {
+                    self.note(format!("trust: cannot ask the engine ({why})"), true);
+                    return false;
+                }
+            };
+            let changed = (st.remembered == "changed").then(|| {
+                (
+                    st.changed_files.clone(),
+                    st.since.clone().unwrap_or_default(),
+                )
+            });
+            (
+                std::path::PathBuf::from(&st.root),
+                st.unfit.clone(),
+                changed,
+                st.parent.clone().map(std::path::PathBuf::from),
+                st.refusal.clone(),
+            )
+        } else {
+            // the grant is the nearest folder with .git or .synt above the session's folder, not the folder itself
+            let root = crate::engine::root_of(std::path::Path::new(&e.cwd));
+            // the trusted configuration must be fingerprintable: it is what a change is detected against
+            let unfit = synthesis_session::trust::fingerprint(&root, std::path::Path::new(&e.cwd))
+                .err()
+                .map(|u| u.to_string());
+            // trusted before, but the configuration moved on: say what changed (names only)
+            let changed =
+                match crate::engine::remembered_trust(&e.synthesis_home, home, &root, false) {
+                    crate::engine::Remembered::Changed { files, since } => Some((files, since)),
+                    _ => None,
+                };
+            // "all its subfolders" only for a real project parent: never the home folder, a filesystem or drive
+            // root, a parent of home or the config folder (the same refusal as for the root)
+            let parent = root
+                .parent()
+                .filter(|p| {
+                    p.is_dir()
+                        && crate::engine::parent_refusal(p, home, &e.synthesis_home).is_none()
+                })
+                .map(std::path::Path::to_path_buf)
+                .filter(|_| unfit.is_none());
+            let refusal = crate::engine::trust_refusal(&root, home, &e.synthesis_home);
+            (root, unfit, changed, parent, refusal)
+        };
+        let cwd = e.remote_cwd.clone().unwrap_or_else(|| e.cwd.clone());
+        if let Some(why) = refusal {
             self.note(why, true);
             return false;
         }
-        // the trusted configuration must be fingerprintable: it is what a change is detected against
-        let unfit =
-            synthesis_session::trust::fingerprint(&root, std::path::Path::new(&e.cwd)).err();
-        let mut paragraphs = trust_text(&root, &e.cwd);
-        // trusted before, but the configuration moved on: say what changed (names only)
-        if let crate::engine::Remembered::Changed { files, since } =
-            crate::engine::remembered_trust(&e.synthesis_home, home, &root, false)
-        {
+        let mut paragraphs = trust_text(&root, &cwd);
+        if let Some((files, since)) = &changed {
             paragraphs.insert(
                 1,
                 format!(
@@ -2724,15 +2770,6 @@ impl Live {
             );
         }
         let headers = paragraphs.into_iter().map(|t| (0, t)).collect();
-        // "all its subfolders" only for a real project parent: never the home folder, a filesystem or drive
-        // root, a parent of home or the config folder (the same refusal as for the root)
-        let parent = root
-            .parent()
-            .filter(|p| {
-                p.is_dir() && crate::engine::parent_refusal(p, home, &e.synthesis_home).is_none()
-            })
-            .map(std::path::Path::to_path_buf);
-        let parent = parent.filter(|_| unfit.is_none());
         let mut options = vec![(
             "no".to_string(),
             "Not now (keep the folder untrusted)".to_string(),
@@ -2781,17 +2818,48 @@ impl Live {
         let Some(e) = &self.engine else {
             return self.note("/trust: the session is still starting", true);
         };
-        let listing = match synthesis_session::trust::list(&e.synthesis_home) {
-            Ok(r) => r,
-            Err(err) => return self.note(format!("/trust: cannot read the store: {err}"), true),
+        // WSL mode: the engine lists its own store (display text only, `/trust revoke` names one of its rows)
+        let remote = match e.remote().map(|r| r.trust_state()) {
+            Some(Ok(st)) => Some(st),
+            Some(Err(err)) => {
+                return self.note(format!("/trust: cannot ask the engine ({err})"), true);
+            }
+            None => None,
         };
-        let unverified = listing.unverified;
+        let listing = if remote.is_some() {
+            synthesis_session::trust::Listing {
+                records: vec![],
+                unverified: 0,
+            }
+        } else {
+            match synthesis_session::trust::list(&e.synthesis_home) {
+                Ok(r) => r,
+                Err(err) => {
+                    return self.note(format!("/trust: cannot read the store: {err}"), true);
+                }
+            }
+        };
+        let unverified = remote
+            .as_ref()
+            .map_or(listing.unverified, |r| r.unverified as usize);
         // the per-project baselines of a parent grant are bookkeeping, not something to list
-        let recs: Vec<_> = listing
-            .records
-            .into_iter()
-            .filter(|r| r.scope != synthesis_session::trust::CHILD)
-            .collect();
+        let recs: Vec<_> = if let Some(st) = &remote {
+            st.records
+                .iter()
+                .map(|r| synthesis_session::trust::TrustRecord {
+                    root: r.root.clone(),
+                    scope: r.scope.clone(),
+                    trusted_at: r.trusted_at.clone(),
+                    fingerprint: r.state.clone(),
+                })
+                .collect()
+        } else {
+            listing
+                .records
+                .into_iter()
+                .filter(|r| r.scope != synthesis_session::trust::CHILD)
+                .collect()
+        };
         let arg = arg.trim();
         if let Some(which) = arg.strip_prefix("revoke").map(str::trim) {
             let pick = which
@@ -2850,7 +2918,9 @@ impl Live {
                 "folder not trusted"
             }
         )];
-        if e.sandbox.mode != "enforce" {
+        if remote.as_ref().is_some_and(|r| !r.enforcing)
+            || (remote.is_none() && e.sandbox.mode != "enforce")
+        {
             lines.push(format!(
                 "remembered trust is NOT honoured now: the sandbox is {} (a command that can run unconfined could have written the store); session-only trust and --trust-project still work",
                 if e.sandbox.mode.is_empty() { "not reported" } else { e.sandbox.mode.as_str() }
@@ -2876,7 +2946,10 @@ impl Live {
             lines.push("no remembered folder (/trust ask -> Trust this folder (remember))".into());
         }
         for (i, r) in recs.iter().enumerate() {
-            let state = if r.scope == synthesis_session::trust::PARENT {
+            let state = if remote.is_some() {
+                // the engine's own verdict (the fingerprint field carries it)
+                r.fingerprint.as_str()
+            } else if r.scope == synthesis_session::trust::PARENT {
                 "each project is checked at its first start"
             } else if std::path::Path::new(&r.root).is_dir() {
                 match synthesis_session::trust::fingerprint_root(std::path::Path::new(&r.root)) {

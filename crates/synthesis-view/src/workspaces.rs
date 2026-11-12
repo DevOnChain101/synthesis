@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use synthesis_config::Env;
 use synthesis_core::SessionStatus;
 use synthesis_session::{Reader, SessionRecord};
@@ -19,14 +19,15 @@ const TITLED: usize = 100;
 pub fn fold_dir(p: &str) -> String {
     let c = std::fs::canonicalize(p)
         .map_or_else(|_| p.to_string(), |p| p.to_string_lossy().into_owned());
-    if cfg!(any(windows, target_os = "macos")) {
+    // a path inside a WSL distro (`/home/x`, reported by its engine) is case-sensitive: never folded
+    if cfg!(any(windows, target_os = "macos")) && !(cfg!(windows) && c.starts_with('/')) {
         c.to_lowercase()
     } else {
         c
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionRow {
     pub id: String,
     /// The stored title, else the first prompt, else `(untitled)`.
@@ -40,14 +41,14 @@ pub struct SessionRow {
 }
 
 /// Uncommitted changes of a trusted folder: `git diff --numstat` summed.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Changes {
     pub added: u64,
     pub deleted: u64,
     pub files: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceRow {
     /// The folder as stored (what `/new` opens).
     pub root: String,
@@ -68,7 +69,7 @@ impl WorkspaceRow {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceList {
     /// Newest session first; a workspace without sessions (the current one) comes last.
     pub workspaces: Vec<WorkspaceRow>,
@@ -217,6 +218,19 @@ mod tests {
                 images: vec![],
             })
             .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_distro_path_is_never_case_folded_on_windows() {
+        // a path an engine inside WSL reported is case-sensitive; a Windows path is folded
+        if cfg!(windows) {
+            assert_eq!(fold_dir("/home/Me/Proj"), "/home/Me/Proj");
+            assert_eq!(fold_dir(r"C:\Work\Repo"), r"c:\work\repo");
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(fold_dir("/Nope/Dir"), "/nope/dir");
+        } else {
+            assert_eq!(fold_dir("/Nope/Dir"), "/Nope/Dir");
         }
     }
 
