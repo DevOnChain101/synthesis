@@ -312,7 +312,7 @@ const BLOCKED_URLS: [&str; 4] = ["ws://*", "wss://*", "ftp://*", "blob:*"];
 const NO_SOCKETS: &str = "(()=>{for(const k of['WebSocket','WebTransport'])if(k in globalThis)Object.defineProperty(globalThis,k,{value:function(){throw new DOMException('blocked by URL policy','SecurityError')},writable:false,configurable:false})})()";
 
 /// Installs the URL policy hooks on one session and makes it hand out new children paused.
-async fn enable_policy(cdp: &Cdp, session: &str) -> Result<()> {
+async fn enable_policy(cdp: &Cdp, session: &str, evaluate: bool) -> Result<()> {
     let s = Some(session);
     cdp.send(
         s,
@@ -344,9 +344,13 @@ async fn enable_policy(cdp: &Cdp, session: &str) -> Result<()> {
             json!({"source": NO_SOCKETS, "runImmediately": true}),
         )
         .await;
-    let _ = cdp
-        .send(s, "Runtime.evaluate", json!({"expression": NO_SOCKETS}))
-        .await;
+    // Not for a paused frame: its Runtime.evaluate is only answered after resume (the page load then
+    // waits on this very call), and the new-document script above already covers it.
+    if evaluate {
+        let _ = cdp
+            .send(s, "Runtime.evaluate", json!({"expression": NO_SOCKETS}))
+            .await;
+    }
     Ok(())
 }
 
@@ -356,7 +360,11 @@ async fn secure_child(cdp: Arc<Cdp>, params: Value) {
     let Some(session) = params["sessionId"].as_str() else {
         return;
     };
-    if enable_policy(&cdp, session).await.is_err() {
+    let frame = matches!(
+        params["targetInfo"]["type"].as_str(),
+        Some("page" | "iframe")
+    );
+    if enable_policy(&cdp, session, !frame).await.is_err() {
         if let Some(t) = params["targetInfo"]["targetId"].as_str() {
             let _ = cdp
                 .send(None, "Target.closeTarget", json!({"targetId": t}))
@@ -848,7 +856,7 @@ impl BrowserRuntime {
         ] {
             self.call(&tab, m, json!({})).await?;
         }
-        enable_policy(&self.cdp, &tab.session).await?;
+        enable_policy(&self.cdp, &tab.session, true).await?;
         if self.opts.headless {
             let (w, h) = self.opts.viewport;
             let m = json!({"width": w, "height": h, "deviceScaleFactor": 1, "mobile": false});
