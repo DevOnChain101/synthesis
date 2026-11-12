@@ -18,6 +18,7 @@ use super::tracked;
 use super::{TuiView, layout};
 use crate::live::{clip, label};
 use crate::theme::hsla;
+use crate::widgets::seltext::SelText;
 use crate::widgets::syntax;
 
 /// Lines of a tool's output shown before "ctrl+o" (the CLI's default).
@@ -183,16 +184,15 @@ fn tone_bg(tone: Tone) -> Option<gpui::Hsla> {
     }
 }
 
-fn line_box(s: &str, c: gpui::Hsla) -> Div {
+fn line_box(id: gpui::ElementId, s: &str, c: gpui::Hsla) -> Div {
     div()
         .min_w(px(0.))
         .whitespace_normal()
         .text_color(c)
-        .child(if s.is_empty() {
-            " ".to_string()
-        } else {
-            s.to_string()
-        })
+        .child(SelText::new(
+            id,
+            if s.is_empty() { " " } else { s }.to_string(),
+        ))
 }
 
 impl TuiView {
@@ -598,7 +598,7 @@ impl TuiView {
                     &time,
                     div()
                         .text_color(strong())
-                        .child(head)
+                        .child(SelText::new(("user-text", idx), head))
                         .children(super::quote::blocks(&quoted)),
                 )
                 .into_any_element()
@@ -616,7 +616,7 @@ impl TuiView {
                 div()
                     .min_w(px(0.))
                     .text_color(strong())
-                    .child(TextView::markdown(("assistant", idx), s.clone())),
+                    .child(TextView::markdown(("assistant", idx), s.clone()).selectable(true)),
             )
             .into_any_element(),
             Item::Thinking(s) => div()
@@ -768,8 +768,13 @@ impl TuiView {
             .children(
                 rows.into_iter()
                     .take(if cut { COLLAPSED_LINES } else { usize::MAX })
-                    .map(|(s, fg, bg)| {
-                        let d = line_box(&s, fg);
+                    .enumerate()
+                    .map(|(n, (s, fg, bg))| {
+                        let d = line_box(
+                            gpui::ElementId::NamedInteger(format!("out-{key}").into(), n as u64),
+                            &s,
+                            fg,
+                        );
                         match bg {
                             Some(b) => d.bg(b),
                             None => d,
@@ -1026,14 +1031,18 @@ impl TuiView {
             .child(head);
         if !card.rows.is_empty() {
             card_el = card_el.child(div().px(px(10.)).py(px(4.)).flex().flex_col().children(
-                card.rows.iter().map(|r| {
+                card.rows.iter().enumerate().map(|(n, r)| {
                     let (fg, bg) = (tone_fg(r.tone), tone_bg(r.tone));
+                    let id = gpui::ElementId::NamedInteger(format!("card-{idx}").into(), n as u64);
                     let line = if r.text.is_empty() {
                         div().child(" ")
                     } else if r.code {
-                        div().child(syntax::styled(&r.text))
+                        div().child(
+                            SelText::new(id, r.text.clone())
+                                .highlights(syntax::highlights(&r.text)),
+                        )
                     } else {
-                        div().child(r.text.clone())
+                        div().child(SelText::new(id, r.text.clone()))
                     };
                     div()
                         .flex()
@@ -1204,15 +1213,38 @@ impl TuiView {
                     .mx(px(12.))
                     .mb(px(2.))
                     .flex()
+                    .items_center()
                     .gap(px(6.))
-                    .children(l.images.iter().map(|a| {
+                    .children(l.images.iter().enumerate().map(|(i, a)| {
                         div()
-                            .px(px(8.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .pl(px(8.))
                             .rounded(px(10.))
                             .border_1()
                             .border_color(hsla(t::ACCENT))
                             .text_color(strong())
                             .child(format!("{} {:.1} MB", a.name, a.bytes as f64 / 1e6))
+                            .child(
+                                div()
+                                    .id(("unattach", i))
+                                    .debug_selector(move || format!("unattach-{i}"))
+                                    .flex_none()
+                                    .px(px(6.))
+                                    .rounded_r(px(10.))
+                                    .text_color(dim())
+                                    .cursor_pointer()
+                                    .hover(|d| d.text_color(strong()))
+                                    .child("\u{d7}")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if let Some(lu) = &mut this.live {
+                                            lu.live.remove_image(i);
+                                            lu.dirty = true;
+                                        }
+                                        cx.notify();
+                                    })),
+                            )
                     }))
                     .child(div().text_color(dim()).child("/images clear drops them")),
             );
@@ -1291,7 +1323,7 @@ impl TuiView {
                     )),
             );
         }
-        let busy = l.busy || l.starting;
+        let chat_focused = l.focus == crate::live::Focus::Chat;
         col.child(input_box(
             div()
                 .relative()
@@ -1300,9 +1332,12 @@ impl TuiView {
                 .child(NativeCaret(false))
                 .child(Textarea::new(&lu.prompt).appearance(false).bordered(false))
                 .child(NativeCaret(true))
-                .child(block_cursor(lu.prompt.clone(), lu.blink.clone())),
-            l.focus == crate::live::Focus::Chat,
-            busy,
+                .child(block_cursor(
+                    lu.prompt.clone(),
+                    lu.blink.clone(),
+                    chat_focused,
+                )),
+            chat_focused,
             Some(Box::new(cx.listener(|this, _, window, cx| {
                 this.submit_prompt(false, window, cx)
             }))),
@@ -1395,11 +1430,17 @@ impl RenderOnce for NativeCaret {
     }
 }
 
+/// The block caret shows only while the chat pane has the focus, the input holds the keys and the window is active.
+fn show_caret(chat_focused: bool, input_focused: bool, window_active: bool) -> bool {
+    chat_focused && input_focused && window_active
+}
+
 /// The prompt's caret: a block as high as the text's line box, one cell wide, blinking while the
 /// prompt has the keys. The input's own thin bar is hidden by [`NativeCaret`].
 fn block_cursor(
     prompt: gpui::Entity<gpui_component::input::TextareaState>,
     blink: Blink,
+    chat_focused: bool,
 ) -> impl IntoElement {
     gpui::canvas(
         |_, _, _| (),
@@ -1408,7 +1449,12 @@ fn block_cursor(
             let Some((cb, _)) = st.cursor_layout() else {
                 return;
             };
-            if !gpui::Focusable::focus_handle(st, cx).is_focused(window) {
+            // no block while the chat pane is not the focused one or the window is in the background
+            if !show_caret(
+                chat_focused,
+                gpui::Focusable::focus_handle(st, cx).is_focused(window),
+                window.is_window_active(),
+            ) {
                 blink.seen.set(None);
                 return;
             }
@@ -1451,12 +1497,17 @@ fn block_cursor(
     .size_full()
 }
 
+/// The input box's border and the send button's border: the chat panel's own focused border (accent) while the
+/// chat has the keys, the normal border otherwise.
+fn input_border(focused: bool) -> gpui::Hsla {
+    hsla(if focused { t::ACCENT } else { t::BORDER })
+}
+
 /// `.inputbar`: 46px box (border + 44px form), margin 0 12px 12px, the `>` prompt mark, `content`, and the
 /// 28px send button. The border takes the accent while the prompt has the keys.
 pub fn input_box(
     content: impl IntoElement,
     focused: bool,
-    busy: bool,
     send: Option<super::panels::OnClick>,
 ) -> Div {
     div()
@@ -1470,19 +1521,10 @@ pub fn input_box(
         .gap(px(10.))
         .px(px(12.))
         .border_1()
-        // the focus frame is the chat panel's own border now; the box only keeps a quiet tint while focused
-        .border_color(if focused {
-            with_alpha(hsla(t::ACCENT), 0.35)
-        } else {
-            hsla(t::BORDER)
-        })
+        .border_color(input_border(focused))
         .rounded(px(layout::PANEL_RADIUS))
         .bg(hsla(t::SURFACE))
-        .child(
-            div()
-                .text_color(strong())
-                .child(if busy { "\u{2026}" } else { ">" }),
-        )
+        .child(div().text_color(strong()).child(">"))
         .child(content)
         .child(
             div()
@@ -1495,7 +1537,8 @@ pub fn input_box(
                 .justify_center()
                 .rounded(px(6.))
                 .border_1()
-                .border_color(hsla(t::BORDER))
+                .border_color(input_border(focused))
+                .when(focused, |d| d.bg(with_alpha(hsla(t::ACCENT), 0.18)))
                 .cursor_pointer()
                 .when_some(send, |d, f| d.on_click(f))
                 .child(icon("send", 14., hsla(t::ACCENT))),
@@ -1505,6 +1548,16 @@ pub fn input_box(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_caret_and_the_focus_border_follow_the_chat_focus() {
+        assert!(show_caret(true, true, true));
+        assert!(!show_caret(false, true, true), "focus in another panel");
+        assert!(!show_caret(true, false, true), "input not holding the keys");
+        assert!(!show_caret(true, true, false), "window in the background");
+        assert_eq!(input_border(true), hsla(t::ACCENT));
+        assert_eq!(input_border(false), hsla(t::BORDER));
+    }
 
     #[test]
     fn the_caret_blinks_530_ms_on_530_ms_off() {

@@ -4,4 +4,5 @@ pub mod chrome;
 pub mod dialog;
 pub mod icons;
 pub mod panes;
+pub mod seltext;
 pub mod syntax;

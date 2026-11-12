@@ -959,16 +959,33 @@ impl TuiView {
             self.show_search_hit(window, cx);
             return true;
         }
-        // Backspace on an empty input drops the newest quote chip
+        // Backspace on an empty input drops the newest chip under it: a quote, else an attached image (only
+        // from the pending message, never the file)
         if key == "backspace"
             && !ctrl
             && !cmd
-            && !self.ts.quotes.is_empty()
+            && (!self.ts.quotes.is_empty() || !lu.live.images.is_empty())
             && text_of(&lu.prompt, cx).is_empty()
         {
-            self.ts.quotes.pop();
+            if self.ts.quotes.pop().is_none() {
+                lu.live.images.pop();
+            }
+            lu.dirty = true;
             cx.notify();
             return true;
+        }
+        // Cmd/Ctrl+C with text selected in the chat copies it as displayed (not while text is selected in the input)
+        if key == "c"
+            && (ks.modifiers.platform || ctrl)
+            && self.ts.tab == super::ChatTab::Chat
+            && lu.prompt.read(cx).selected_range().is_empty()
+            && gpui_base::TextSelection::has_selection(window, cx)
+        {
+            let t = gpui_base::TextSelection::selected_text(window, cx);
+            if !t.is_empty() {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(t));
+                return true;
+            }
         }
         // Cmd/Ctrl+C with lines selected in the file explorer copies them (not while text is selected in the input)
         if key == "c"
