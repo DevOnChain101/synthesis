@@ -14,7 +14,7 @@ const GIT = ['-c', 'user.name=eval', '-c', 'user.email=eval@localhost', '-c', 'c
 export function loadTasks(ids) {
   const dir = path.join(ROOT, 'tasks');
   const all = fs.readdirSync(dir).sort().map((d) => JSON.parse(fs.readFileSync(path.join(dir, d, 'task.json'), 'utf8')));
-  if (!ids || !ids.length) return all;
+  if (!ids || !ids.length) return all.filter((t) => !t.gaming); // gaming scenarios run only by id (selftest)
   const missing = ids.filter((i) => !all.some((t) => t.id === i));
   if (missing.length) throw new Error('unknown task(s): ' + missing.join(', '));
   return all.filter((t) => ids.includes(t.id));

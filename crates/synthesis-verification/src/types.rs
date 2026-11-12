@@ -106,6 +106,22 @@ pub struct Check {
 pub(crate) const SKIPPED_TESTS: &str = "skipped tests";
 pub(crate) const TEST_FILES_MODIFIED: &str = "test files modified";
 pub(crate) const PREREQ_GUARD_REMOVED: &str = "prerequisite guard removed";
+pub(crate) const PLANNED_TEST: &str = "planned test check not passed";
+pub(crate) const MODEL_ONLY: &str = "model-declared checks only";
+pub(crate) const NOOP_CHECK: &str = "no-op check";
+pub(crate) const FLAKY: &str = "flaky";
+pub(crate) const DEFS_CHANGED: &str = "check definitions changed";
+/// Limitations the one-line summary (and so `verification.completed`) repeats.
+const SUMMARY_LIMITATIONS: [&str; 8] = [
+    SKIPPED_TESTS,
+    TEST_FILES_MODIFIED,
+    PREREQ_GUARD_REMOVED,
+    PLANNED_TEST,
+    MODEL_ONLY,
+    NOOP_CHECK,
+    FLAKY,
+    DEFS_CHANGED,
+];
 
 /// Default per-check timeout (verification.md §6).
 pub const DEFAULT_TIMEOUT_MS: u64 = 600_000;
@@ -176,11 +192,7 @@ impl VerificationReport {
         ) + &self
             .limitations
             .iter()
-            .filter(|l| {
-                [SKIPPED_TESTS, TEST_FILES_MODIFIED, PREREQ_GUARD_REMOVED]
-                    .iter()
-                    .any(|p| l.starts_with(p))
-            })
+            .filter(|l| SUMMARY_LIMITATIONS.iter().any(|p| l.starts_with(p)))
             .map(|l| format!("; {l}"))
             .collect::<String>()
     }

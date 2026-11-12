@@ -27,6 +27,9 @@ static SKIP: LazyLock<Regex> = LazyLock::new(|| {
         r"\.(skip|only|todo)\b|\b(xit|xdescribe|xtest|fit|fdescribe)\(|\bskip\s*[:=(]|@(pytest\.mark\.(skip|skipif|xfail)|unittest\.(skip|expectedFailure)|Disabled|Ignore)|pytest\.(skip|xfail)\(|#\[ignore|\bt\.Skip|\bxfail\b|\bpending\(",
     )
 });
+static TEST_CASE: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"#\[(tokio::)?test\b|\b(it|test)(\.\w+)?\(|\bdef test_|\bfunc Test\w*\(|@Test\b")
+});
 static ENV_SHORTCUT: LazyLock<Regex> = LazyLock::new(|| {
     re(
         r"(process\.env\.\w+|process\.env\[[^\]]+\]|os\.environ(\[[^\]]+\]|\.setdefault)|env::set_var|os\.Setenv|putenv)\s*(\?\?=|\|\|=|=[^=]|\()|os\.environ\.setdefault",
@@ -46,6 +49,15 @@ static GUARD: LazyLock<Regex> = LazyLock::new(|| {
 });
 static ENV_NAME: LazyLock<Regex> = LazyLock::new(|| re(r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b|(?i)\benv"));
 
+/// Whether `path` (workspace-relative) is a test or fixture file.
+pub(crate) fn is_test_path(path: &str) -> bool {
+    TEST_PATH.is_match(&path.replace('\\', "/"))
+}
+
+pub(crate) fn count_assertions(lines: &[String]) -> usize {
+    count(lines, &ASSERT)
+}
+
 fn count(lines: &[String], r: &Regex) -> usize {
     lines.iter().filter(|l| r.is_match(l)).count()
 }
@@ -56,7 +68,7 @@ fn count(lines: &[String], r: &Regex) -> usize {
 pub fn weakened_tests(edits: &[FileEdit]) -> Option<String> {
     let mut found = vec![];
     for e in edits {
-        let is_test = TEST_PATH.is_match(&e.path.replace('\\', "/"));
+        let is_test = is_test_path(&e.path);
         let mut why = vec![];
         // `#[ignore]` is unambiguous in any Rust file (unit tests live next to the code).
         if (is_test && count(&e.added, &SKIP) > 0)
@@ -69,6 +81,9 @@ pub fn weakened_tests(edits: &[FileEdit]) -> Option<String> {
         }
         if is_test && count(&e.removed, &ASSERT) > count(&e.added, &ASSERT) {
             why.push("removed assertions");
+        }
+        if is_test && count(&e.removed, &TEST_CASE) > count(&e.added, &TEST_CASE) {
+            why.push("removed test cases");
         }
         if !why.is_empty() {
             found.push(format!("{} ({})", e.path, why.join("; ")));

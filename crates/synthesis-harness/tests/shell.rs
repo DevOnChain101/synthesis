@@ -750,7 +750,7 @@ async fn a_test_file_that_fakes_an_env_var_ends_unverified_with_a_limitation() {
     let approver = ScriptedApprover::new(vec![Approval::allow(), Approval::allow()]);
     let mut rig = gated(gate_opts(true), turns, Some(approver));
     let mut req = synthesis_harness::TaskRequest::new("fix db");
-    req.criteria = vec![Criterion::user("c1", "db", Some("echo ok"))];
+    req.criteria = vec![Criterion::user("c1", "db", Some("test -d ."))];
     let out = rig.run_with(req, CancellationToken::new()).await;
     assert_eq!(out.status, TaskStatus::Unverified, "{}", out.reason);
     let v = rig.find(|e| match e {
@@ -765,15 +765,50 @@ async fn a_test_file_that_fakes_an_env_var_ends_unverified_with_a_limitation() {
     );
 }
 
+/// A test deleted through the shell leaves no Edit/Write diff, yet the task-start snapshot sees it.
+#[tokio::test]
+async fn deleting_a_test_with_bash_ends_unverified() {
+    let opts = Opts {
+        allow: vec!["Write".into(), "Bash".into()],
+        ..gate_opts(false)
+    };
+    let turns = vec![
+        Turn::tool("b1", "Bash", json!({"command": "rm test/a.test.js"})),
+        Turn::text("done"),
+        Turn::text("done again"),
+    ];
+    let mut rig = gated(opts, turns, None);
+    std::fs::create_dir(rig.ws.cwd.join("test")).unwrap();
+    std::fs::write(rig.ws.cwd.join("test/a.test.js"), "test('a', () => {});\n").unwrap();
+    let mut req = synthesis_harness::TaskRequest::new("fix it");
+    req.criteria = vec![Criterion::user("c1", "ok", Some("test -d ."))];
+    let out = rig.run_with(req, CancellationToken::new()).await;
+    assert_eq!(out.status, TaskStatus::Unverified, "{}", out.reason);
+    let v = rig.find(|e| match e {
+        Event::VerificationCompleted { summary, .. } => Some(summary.clone()),
+        _ => None,
+    });
+    assert!(
+        !v.is_empty() && v.iter().all(|s| s.contains("test/a.test.js (deleted")),
+        "{v:?}"
+    );
+}
+
 /// D12: a harness-inferred, recognised verification command (`make test` from a Makefile) runs
 /// without an explicit allow in `default` and `acceptEdits`, headless or not, so the task is not
 /// blocked only because a trusted inferred check asked. A deny rule still wins.
+/// The Makefile exists when the task starts: the gate freezes inferred checks at task start, so a
+/// Makefile the agent writes itself is never one of them.
+fn seed_makefile(rig: &Rig) {
+    std::fs::write(rig.ws.cwd.join("Makefile"), "test:\n\ttouch ran-it\n").unwrap();
+}
+
 fn makefile_turns() -> Vec<Turn> {
     vec![
         Turn::tool(
             "w1",
             "Write",
-            json!({"file_path": "Makefile", "content": "test:\n\ttouch ran-it\n"}),
+            json!({"file_path": "app.js", "content": "1\n"}),
         ),
         Turn::text("done"),
         Turn::text("done again"),
@@ -790,6 +825,7 @@ async fn trusted_inferred_check_runs_without_an_allow_in_default_and_accept_edit
                 ..gate_opts(interactive)
             };
             let mut rig = gated(opts, makefile_turns(), Some(approver.clone()));
+            seed_makefile(&rig);
             let out = rig.run("add a makefile").await;
             let ctx = format!("{mode:?} interactive={interactive}: {}", out.reason);
             assert_ne!(out.status, TaskStatus::Blocked, "{ctx}");
@@ -810,6 +846,7 @@ async fn trusted_inferred_check_is_still_subject_to_deny_rules() {
         ..gate_opts(false)
     };
     let mut rig = gated(opts, makefile_turns(), None);
+    seed_makefile(&rig);
     let out = rig.run("add a makefile").await;
     assert_ne!(out.status, TaskStatus::Completed, "{}", out.reason);
     assert!(!rig.ws.cwd.join("ran-it").exists());

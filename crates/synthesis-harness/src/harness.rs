@@ -1039,6 +1039,10 @@ impl Harness {
                 )
             } else {
                 self.tracker.begin(&task.workspace, &task.task_id).await;
+                // Freeze the planned checks and snapshot tests/definitions before anything changes.
+                if let Some(g) = gate.as_mut() {
+                    g.begin();
+                }
                 self.drive(&task, &main, &mut st, &mut gate, &req.criteria)
                     .await
             }

@@ -1,5 +1,6 @@
 // Runs `synt run` (the Rust binary) on the task. Binary: $SYNT_BIN, else target/{debug,release}/synt.
 //   EVAL_FAKE_SCRIPT=<script.json>  scripted model (needs a build with --features test-provider; selftest only)
+//   EVAL_EXTRA_ARGS='["--deny","Bash(npm run test:*)"]'  extra `synt run` arguments (JSON array; selftest only)
 //   EVAL_PERMISSION_MODE_OVERRIDE=<mode>  diagnostic only (e.g. bypassPermissions under the sandbox); the task's mode otherwise
 //   EVAL_MODEL="provider/model"      optional; real mode needs SYNT_* credentials in the environment
 import fs from 'node:fs';
@@ -32,6 +33,7 @@ if (fake) { // never touch the real home in scripted mode
 } else if (process.env.EVAL_MODEL) {
   args.push('--model', process.env.EVAL_MODEL);
 }
+if (process.env.EVAL_EXTRA_ARGS) args.push(...JSON.parse(process.env.EVAL_EXTRA_ARGS)); // selftest scenarios, e.g. a --deny rule
 for (const [env_, flag] of [['EVAL_MAX_TURNS', '--max-turns'], ['EVAL_MAX_TOOL_CALLS', '--max-tool-calls']]) if (process.env[env_]) args.push(flag, process.env[env_]);
 if (process.env.EVAL_MAX_WALL_MS) args.push('--max-wall-secs', String(Math.ceil(Number(process.env.EVAL_MAX_WALL_MS) / 1000)));
 
