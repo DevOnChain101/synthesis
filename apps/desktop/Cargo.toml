@@ -65,6 +65,7 @@ synthesis-memory = { path = "../../crates/synthesis-memory" }
 synthesis-session = { path = "../../crates/synthesis-session" }
 synthesis-settings = { path = "../../crates/synthesis-settings" }
 synthesis-settings-ui = { path = "../../crates/synthesis-settings-ui" }
+synthesis-platform = { path = "../../crates/synthesis-platform" }
 synthesis-terminal = { path = "../../crates/synthesis-terminal" }
 synthesis-cli-ui-base = { path = "../../crates/synthesis-cli-ui-base" }
 time = "0.3"

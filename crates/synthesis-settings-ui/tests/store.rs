@@ -365,3 +365,37 @@ fn every_key_belongs_to_a_named_group_of_its_tab() {
         assert!(uniq.len() <= 7, "{sec:?}: {uniq:?}");
     }
 }
+
+#[test]
+fn the_wsl_keys_round_trip_and_a_project_file_cannot_set_them() {
+    let f = Fx::new();
+    f.write(
+        &f.proj.path().join(".synt/settings.json"),
+        json!({"synt": {"desktop": {"wsl": {"enabled": true, "distro": "Evil"}}}}),
+    );
+    // even a trusted project is ignored: user file only
+    let mut st = f.open(ProjectTrust::Trusted);
+    for (k, default) in [
+        ("synt.desktop.wsl.enabled", json!(false)),
+        ("synt.desktop.wsl.distro", Value::Null),
+    ] {
+        let e = st.entry(k).unwrap();
+        assert_eq!((&e.value, e.origin), (&default, Origin::Default), "{k}");
+        assert_eq!(e.refused[0].0, Origin::Project, "{k}");
+    }
+    st.set("synt.desktop.wsl.enabled", json!(true)).unwrap();
+    st.set("synt.desktop.wsl.distro", json!("Ubuntu-24.04"))
+        .unwrap();
+    assert_eq!(
+        f.read()["synt"]["desktop"]["wsl"],
+        json!({"enabled": true, "distro": "Ubuntu-24.04"})
+    );
+    assert_eq!(
+        st.entry("synt.desktop.wsl.distro").unwrap().value,
+        json!("Ubuntu-24.04")
+    );
+    for bad in [json!(""), json!("-x"), json!("a\nb"), json!(3)] {
+        assert!(st.set("synt.desktop.wsl.distro", bad).is_err());
+    }
+    assert!(st.set("synt.desktop.wsl.enabled", json!("yes")).is_err());
+}

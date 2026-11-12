@@ -474,6 +474,11 @@ impl Model {
                 max,
                 value: value.as_u64().unwrap_or(max),
             },
+            // a text field is drawn like a number field (an input)
+            Kind::Text => Control::Number {
+                text: value.as_str().unwrap_or_default().into(),
+                range: "name".into(),
+            },
             Kind::List(_) => Control::List(self.list_items(&f.key)),
             Kind::ReadOnly => Control::Static(show_value(value)),
         }
@@ -481,11 +486,11 @@ impl Model {
 
     /// Why the UI must not edit `key`: the schema, the managed file, or this platform.
     fn lock_reason(&self, key: &str) -> Option<String> {
-        self.store.read_only_reason(key).or_else(|| {
-            (key == "synt.tui.blur")
-                .then(blur_unsupported)
-                .flatten()
-                .map(Into::into)
+        self.store.read_only_reason(key).or_else(|| match key {
+            "synt.tui.blur" => blur_unsupported().map(Into::into),
+            "synt.desktop.wsl.enabled" => crate::wsl::toggle_lock(),
+            "synt.desktop.wsl.distro" => (!cfg!(windows)).then(|| "Windows only".into()),
+            _ => None,
         })
     }
 
@@ -550,7 +555,10 @@ impl Model {
         let Some(f) = self.store.schema.field(key).cloned() else {
             return Outcome::Rejected;
         };
-        if let Some(why) = self.lock_reason(key).filter(|_| key == "synt.tui.blur") {
+        if let Some(why) = self
+            .lock_reason(key)
+            .filter(|_| key == "synt.tui.blur" || key.starts_with("synt.desktop.wsl."))
+        {
             self.errors
                 .insert(key.into(), format!("{key}: not editable here: {why}"));
             return Outcome::Rejected;
@@ -563,6 +571,7 @@ impl Model {
                 .trim()
                 .parse::<u64>()
                 .map_or(Value::String(t), |n| json!(n)),
+            (Change::Text(t), Kind::Text) => Value::String(t.trim().into()),
             (Change::Text(t), Kind::Float { .. }) => t
                 .trim()
                 .parse::<f64>()
@@ -623,7 +632,10 @@ impl Model {
 
     /// Back to the default (or the lower layer): removes the key from the USER file.
     pub fn reset(&mut self, key: &str) -> Outcome {
-        if let Some(why) = self.lock_reason(key).filter(|_| key == "synt.tui.blur") {
+        if let Some(why) = self
+            .lock_reason(key)
+            .filter(|_| key == "synt.tui.blur" || key.starts_with("synt.desktop.wsl."))
+        {
             self.errors
                 .insert(key.into(), format!("{key}: not editable here: {why}"));
             return Outcome::Rejected;
@@ -1105,6 +1117,26 @@ mod tests {
                 assert!(!m.cfg.home.join("settings.json").exists());
             }
         }
+    }
+
+    #[test]
+    fn the_wsl_toggle_is_locked_off_windows_and_the_distro_is_a_text_row() {
+        let (_t, mut m) = model();
+        let (on, distro) = ("synt.desktop.wsl.enabled", "synt.desktop.wsl.distro");
+        assert_eq!(row(&m, on).control, Control::Switch(false));
+        assert!(matches!(row(&m, distro).control, Control::Number { .. }));
+        if cfg!(windows) {
+            return; // there it depends on wsl.exe, not testable here
+        }
+        for k in [on, distro] {
+            assert_eq!(row(&m, k).locked.as_deref(), Some("Windows only"));
+        }
+        assert_eq!(m.change(on, Change::Bool(true)), Outcome::Rejected);
+        assert_eq!(
+            m.change(distro, Change::Text("U".into())),
+            Outcome::Rejected
+        );
+        assert!(!m.cfg.home.join("settings.json").exists());
     }
 
     #[test]

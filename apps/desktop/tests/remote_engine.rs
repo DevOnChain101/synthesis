@@ -3,6 +3,7 @@
 //! `harness = false`: the fake engine's stdout must carry protocol lines only.
 
 use std::io::{BufRead, Write};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::UnboundedReceiver;
@@ -11,6 +12,7 @@ use synthesis_app::proto::{PROTOCOL, VERSION};
 use synthesis_config::Env;
 use synthesis_desktop::engine::{Choice, Engine, NOT_REMOTE, UiMsg};
 use synthesis_desktop::remote::Launcher;
+use synthesis_desktop::wsl;
 use synthesis_permissions::Mode;
 
 const EVENT: &str = r#"{"v":1,"seq":1,"ts":"2026-01-01T00:00:00Z","session_id":"s1","task_id":null,"turn_id":null,"agent_id":null,"type":"notice","payload":{"level":"info","text":"hi"}}"#;
@@ -46,9 +48,15 @@ fn fake_engine(mode: &str) {
         let req: Value = serde_json::from_str(&line.unwrap()).unwrap();
         let id = req["id"].clone();
         match req["method"].as_str().unwrap() {
-            "start" => say(
-                json!({"msg":"result","id":id,"ok":{"sid":"s1","label":"fake/model","models":["fake/model"],"mode":"acceptEdits","trusted":true,"cwd":"/engine/side","root":"/engine/side","notices":["n\u{1b}[31m1"]}}),
-            ),
+            "start" => {
+                // as a fake wsl.exe: `cwd` is what `--cd` set, `root` what `start` asked for
+                let cd = std::env::args().skip_while(|a| a != "--cd").nth(1);
+                let cwd = cd.as_deref().unwrap_or("/engine/side");
+                let root = req["params"]["cwd"].as_str().filter(|_| cd.is_some());
+                say(
+                    json!({"msg":"result","id":id,"ok":{"sid":"s1","label":"fake/model","models":["fake/model"],"mode":"acceptEdits","trusted":true,"cwd":cwd,"root":root.unwrap_or("/engine/side"),"notices":["n\u{1b}[31m1"]}}),
+                )
+            }
             "send" => {
                 say(json!({"msg":"result","id":id,"ok":{}}));
                 println!("{EVENT}");
@@ -224,12 +232,87 @@ fn a_chatty_stderr_does_not_stall_the_engine() {
     assert!(e.close().is_none());
 }
 
+/// The whole WSL path with a fake `wsl.exe` (this binary, re-run with wsl.exe's arguments) that checks
+/// them, then acts as the engine, and a table standing in for what `wsl.exe` prints.
+fn a_session_through_a_fake_wsl() {
+    let utf16 = |s: &str| -> Vec<u8> {
+        let mut v = vec![0xFF, 0xFE];
+        v.extend(s.encode_utf16().flat_map(u16::to_le_bytes));
+        v
+    };
+    let seen = std::sync::Mutex::new(vec![]);
+    let run = |a: &[&str], _: Duration| {
+        seen.lock().unwrap().push(a.join(" "));
+        let out = |b: Vec<u8>| {
+            Ok(wsl::Out {
+                ok: true,
+                stdout: b,
+            })
+        };
+        match a {
+            ["--status"] => out(vec![]),
+            ["-l", "-v"] => out(utf16("  NAME STATE VERSION\r\n* Ubuntu Stopped 2\r\n")),
+            ["-d", "Ubuntu", "--exec", "sh", ..] => out(b"/home/me/.synt/bin/synt\n".to_vec()),
+            [
+                "-d",
+                "Ubuntu",
+                "--exec",
+                "/home/me/.synt/bin/synt",
+                "--version",
+            ] => out(format!("synt {VERSION}\n").into_bytes()),
+            ["-d", "Ubuntu", "--exec", "wslpath", "-u", p] => out(format!(
+                "/mnt/c{}\n",
+                p.trim_start_matches("C:").replace('\\', "/")
+            )
+            .into_bytes()),
+            _ => Err(format!("unexpected wsl.exe call {a:?}")),
+        }
+    };
+    let exe = std::env::current_exe().unwrap();
+    let env = Env::from_pairs([("SYNT_API_KEY", "must-not-travel")]);
+    for (folder, linux) in [
+        (r"C:\work\repo", "/mnt/c/work/repo"),
+        (r"\\wsl.localhost\ubuntu\home\me\repo", "/home/me/repo"),
+    ] {
+        let (e, mut rx) = wsl::start_via(&run, &exe, "", VERSION, &env, Path::new(folder))
+            .unwrap_or_else(|e| panic!("{folder}: {e}"));
+        // the engine got the Linux folder twice (--cd and start); the host kept the Windows one
+        assert_eq!(e.remote_cwd.as_deref(), Some(linux), "--cd");
+        assert_eq!(e.remote_root.as_deref(), Some(linux), "start");
+        assert_eq!(e.cwd, folder);
+        e.send("go".into()).unwrap();
+        assert!(matches!(next(&mut rx, "event"), UiMsg::Event(_)));
+        assert!(e.close().is_none());
+    }
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("-d Ubuntu --exec wslpath -u C:"))
+    );
+    // another distro's folder is refused before any engine starts
+    let e = wsl::start_via(&run, &exe, "", VERSION, &env, Path::new(r"\\wsl$\Debian\x"));
+    assert!(e.err().unwrap().contains("Debian"));
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // a fake wsl.exe: the shape of the real command line is checked, then it is the engine
+    if args.get(1).map(String::as_str) == Some("-d") {
+        let ok = args.len() == 9
+            && (args[3].as_str(), args[5].as_str()) == ("--cd", "--exec")
+            && args[6..] == ["/home/me/.synt/bin/synt", "engine", "--stdio"];
+        if !ok || std::env::var_os("SYNT_API_KEY").is_some() || std::env::var_os("WSLENV").is_some()
+        {
+            eprintln!("fake wsl.exe: bad command line or environment: {args:?}");
+            std::process::exit(2);
+        }
+        return fake_engine("wsl");
+    }
     if let Some(i) = args.iter().position(|a| a == "--fake-engine") {
         return fake_engine(&args[i + 1]);
     }
-    let tests: [(&str, fn()); 7] = [
+    let tests: [(&str, fn()); 8] = [
         ("mismatch_is_refused", mismatch_is_refused),
         (
             "exit_before_hello_is_an_error",
@@ -252,6 +335,7 @@ fn main() {
             "a_chatty_stderr_does_not_stall_the_engine",
             a_chatty_stderr_does_not_stall_the_engine,
         ),
+        ("a_session_through_a_fake_wsl", a_session_through_a_fake_wsl),
     ];
     for (name, t) in tests {
         t();

@@ -2371,6 +2371,25 @@ pub fn build(
     let mut model = model;
     let prior_model = model.clone();
     let mut project = project;
+    // WSL mode (Windows, Settings toggle): the engine runs in the distro, which has no session store yet
+    if crate::wsl::enabled(&home) {
+        let folder = match &target {
+            None => project,
+            Some(Target::New(p)) => p.clone(),
+            Some(_) => {
+                return Err(format!(
+                    "this needs the session store: {}",
+                    crate::wsl::LATER
+                ));
+            }
+        };
+        return crate::wsl::start(&cfg.env, &home, &folder).map(|(engine, rx)| Launched {
+            engine,
+            rx,
+            replay: None,
+            model: None,
+        });
+    }
     let mut resume = None;
     if first_start {
         let keep = cfg.args.common.resume.clone().unwrap_or_default();

@@ -336,6 +336,7 @@ impl SettingsView {
                 }
                 let (placeholder, number) = match f.kind {
                     Kind::Int { .. } | Kind::Float { .. } => ("unset", true),
+                    Kind::Text => ("default distro", true),
                     Kind::List(_) => ("add an item, Enter", false),
                     _ => continue,
                 };

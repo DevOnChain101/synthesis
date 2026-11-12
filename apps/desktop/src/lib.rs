@@ -20,3 +20,4 @@ pub mod trace;
 pub mod tui_view;
 pub mod ui;
 pub mod widgets;
+pub mod wsl;

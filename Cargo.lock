@@ -7368,6 +7368,7 @@ dependencies = [
  "synthesis-mcp",
  "synthesis-memory",
  "synthesis-permissions",
+ "synthesis-platform",
  "synthesis-providers",
  "synthesis-session",
  "synthesis-settings",

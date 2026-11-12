@@ -98,6 +98,8 @@ pub enum Kind {
         max: u64,
     },
     List(ListItem),
+    /// A single-line name of at most 255 characters (no control characters, not starting with `-`).
+    Text,
     /// An object or list the UI shows but never writes.
     ReadOnly,
 }
@@ -304,6 +306,15 @@ impl SettingsSchema {
             Field::new("synt.peers", SubAgents, "Peer sessions", ReadOnly)
                 .shown("messaging between sessions (off by default); edit settings.json by hand"),
         ];
+        // ---- WSL (Windows desktop only; user file only, a project file can never turn it on)
+        f.push(
+            b("synt.desktop.wsl.enabled", Execution, "Run the agent in WSL2", false)
+                .help("Windows only. Runs the Linux engine inside WSL2 and works on Linux paths there. Engine settings and API keys live inside WSL (~/.synt there), not on Windows; use {file:} provider keys, because wsl.exe --exec does not load the shell profile."),
+        );
+        f.push(
+            Field::new("synt.desktop.wsl.distro", Execution, "WSL distro", Text)
+                .help("Windows only. The distro to use; empty is WSL's default. WSL1 is refused."),
+        );
         // ---- APPEARANCE
         f.push(
             Field::new(
@@ -431,6 +442,7 @@ pub fn group_of(key: &str, section: Section) -> &'static str {
         }
         Execution if key.starts_with("synt.shell.") || key == "env" => "Shell and environment",
         Execution if key.starts_with("synt.browser.") => "Browser",
+        Execution if key.starts_with("synt.desktop.wsl.") => "WSL",
         Execution => "Compatibility",
         Guards if key == "autoMode" => "Auto mode",
         Guards => "Permissions",
@@ -481,6 +493,17 @@ pub fn validate_kind(kind: Kind, v: &Value) -> Result<(), String> {
                 Err("must be a list of valid strings".into())
             }
         }
+        Kind::Text => match v.as_str() {
+            Some(s)
+                if !s.is_empty()
+                    && s.chars().count() <= 255
+                    && !s.starts_with('-')
+                    && !s.chars().any(char::is_control) =>
+            {
+                Ok(())
+            }
+            _ => Err("must be a name of up to 255 characters, not starting with `-`".into()),
+        },
         Kind::ReadOnly => Err("is read-only".into()),
     }
 }
