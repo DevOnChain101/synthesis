@@ -17,7 +17,7 @@ use synthesis_cli_ui_base::editor::LineEditor;
 use synthesis_config::Env;
 use synthesis_harness::sanitize_for_display;
 use synthesis_view::convo::{Convo, Item};
-use synthesis_view::workspaces::{LoadOpts, WorkspaceList, fold_dir};
+use synthesis_view::workspaces::{LoadOpts, WorkspaceList};
 
 use super::{TuiView, panels};
 use crate::engine::{self, Args, Engine, StartOpts, UiMsg};
@@ -595,11 +595,7 @@ impl TuiView {
                     .iter()
                     .all(|w| w.key != l.ws_key)
                 {
-                    l.ws_key = fold_dir(
-                        l.engine
-                            .as_ref()
-                            .map_or(&l.cwd, |e| e.remote_root.as_ref().unwrap_or(&e.root)),
-                    );
+                    l.ws_key = l.live_ws_key();
                 }
             }
             Err(e) => lu
@@ -2513,6 +2509,16 @@ fn wsl_build(
 ) -> Result<Launched, String> {
     use crate::remote::StartSpec;
     let home = &cfg.synthesis_home;
+    // flags that name a stored session or grant trust belong to the local engine: refused, never ignored
+    if prior.is_none() && target.is_none() {
+        let c = &cfg.args.common;
+        if c.resume.is_some() || c.continue_session || c.fork_session {
+            return Err("--resume, --continue and --fork-session are not supported in WSL mode: open the session from the list".into());
+        }
+        if c.trust_project || !c.approve_mcp.is_empty() {
+            return Err("--trust-project and --approve-mcp are not supported in WSL mode: use the Trust dialog (the engine decides)".into());
+        }
+    }
     let sid = prior.as_ref().map(|p| p.sid.clone()).unwrap_or_default();
     let mut plan = wsl_plan(&target, &project, &sid);
     // a stored session of another folder opens in a new process in that folder (its row says which)
@@ -3424,7 +3430,7 @@ mod switch_tests {
         l.starting = false;
         l.sid = "session-a".into();
         l.cwd = dir.to_string_lossy().into();
-        l.ws_key = fold_dir(&l.cwd);
+        l.ws_key = synthesis_view::workspaces::fold_dir(&l.cwd);
         let row = |id: &str, mtime| SessionRow {
             id: id.into(),
             title: id.into(),
@@ -3618,7 +3624,7 @@ mod switch_tests {
             assert!(lu.live.ws_new && !lu.live.starting && lu.engine_task.is_none());
             assert_eq!(
                 lu.live.ws_key,
-                fold_dir(&lu.live.cwd),
+                synthesis_view::workspaces::fold_dir(&lu.live.cwd),
                 "the workspace list keeps its pick"
             );
         });

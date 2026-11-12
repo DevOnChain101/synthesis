@@ -357,6 +357,11 @@ fn rand_tag() -> u64 {
         .map_or(0, |d| u64::from(d.subsec_nanos()))
 }
 
+/// Restarts are limited to one a second.
+fn gap() {
+    std::thread::sleep(Duration::from_millis(1100));
+}
+
 impl Engine {
     /// A request and its result (events and notices in between are skipped).
     fn ask(&mut self, method: &str, params: Value) -> Value {
@@ -467,19 +472,60 @@ fn hostile_parameters_are_refused_and_leak_no_host_path() {
     assert_eq!(e.ok("set_mode", json!({"mode": "plan"}))["mode"], "plan");
 }
 
+impl Engine {
+    /// The results of all of `ids`, whatever order they come in (the reader answers some by itself).
+    fn results(&self, ids: &[u64]) -> std::collections::HashMap<u64, Value> {
+        let mut got = std::collections::HashMap::new();
+        while got.len() < ids.len() {
+            let v = self.line().expect("the engine ended");
+            if v["msg"] == "result"
+                && let Some(id) = v["id"].as_u64()
+                && ids.contains(&id)
+            {
+                got.insert(id, v);
+            }
+        }
+        got
+    }
+}
+
 #[test]
-fn store_requests_are_rate_limited() {
+fn store_requests_are_limited_to_fifty_a_second_exactly() {
     let (mut e, _) = used_engine();
-    let ids: Vec<u64> = (0..120)
+    let ids: Vec<u64> = (0..51)
         .map(|_| e.call("usage.summary", json!({"tz_min": 0})))
         .collect();
-    let mut refused = 0;
-    for id in ids {
-        if e.result(id).1["error"] == "too many requests" {
-            refused += 1;
-        }
-    }
-    assert!(refused > 0, "a burst of 120 requests must be cut");
+    let got = e.results(&ids);
+    let refused: Vec<usize> = ids
+        .iter()
+        .enumerate()
+        .filter(|(_, id)| {
+            got[*id]["error"]
+                .as_str()
+                .is_some_and(|t| t.contains("too many requests"))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        refused,
+        vec![50],
+        "the 51st request of the second is the first refused"
+    );
+}
+
+#[test]
+fn a_flood_beyond_the_queue_is_refused_not_waited_for() {
+    let (mut e, _) = used_engine();
+    let ids: Vec<u64> = (0..300)
+        .map(|_| e.call("usage.summary", json!({"tz_min": 0})))
+        .collect();
+    let got = e.results(&ids);
+    assert!(got.values().any(|v| {
+        v["error"]
+            .as_str()
+            .is_some_and(|t| t.contains("too many requests"))
+    }));
+    assert!(got.values().any(|v| v["error"].is_null()));
 }
 
 #[test]
@@ -499,8 +545,15 @@ fn session_new_and_resume_restart_in_place_in_the_same_folder() {
     let v = e.ok("session.new", Value::Null);
     let new = v["sid"].as_str().unwrap().to_string();
     assert_ne!(new, old);
+    // a second restart within a second is refused, nothing is ended by the refusal
+    assert!(
+        e.err("session.resume", json!({"id": old}))
+            .contains("too many restarts")
+    );
+    gap();
     let v = e.ok("session.resume", json!({"id": old}));
     assert_eq!(v["sid"], old.as_str());
+    gap();
     // a session id that exists but is the engine's own empty one of another start cannot be closed by a stranger id
     assert!(e.err("session.close", json!({"id": new})).contains("own"));
 }
@@ -592,7 +645,13 @@ fn a_remembered_trust_is_not_honoured_by_a_new_engine_without_an_enforcing_sandb
 
 /// A new engine process on the home and workspace of an earlier one.
 fn engine_same_home(root: &Path) -> Engine {
-    let (ws, home) = (root.join("ws"), root.join("home"));
+    engine_in_folder(root, "ws")
+}
+
+/// A new engine process on the home of an earlier one, working in `root/<folder>`.
+fn engine_in_folder(root: &Path, folder: &str) -> Engine {
+    let (ws, home) = (root.join(folder), root.join("home"));
+    std::fs::create_dir_all(&ws).unwrap();
     let script_path = root.join("script-again.json");
     std::fs::write(&script_path, json!([{"text": "ok"}]).to_string()).unwrap();
     let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
@@ -639,4 +698,138 @@ fn engine_same_home(root: &Path) -> Engine {
         next: 1,
         _dir: tempfile::tempdir().unwrap(),
     }
+}
+
+fn trusted_config(e: &Engine) {
+    std::fs::create_dir_all(e.ws.join(".synt")).unwrap();
+    std::fs::write(e.ws.join(".synt/settings.json"), "{}").unwrap();
+}
+
+#[test]
+fn a_session_of_another_folder_is_never_resumed() {
+    let (mut a, info) = used_engine();
+    let sid_a = info["sid"].as_str().unwrap().to_string();
+    let root = a.ws.parent().unwrap().to_path_buf();
+    drop(a.stdin.take());
+    let _ = a.child.wait();
+    // a second folder on the same store
+    let mut b = engine_in_folder(&root, "ws2");
+    b.hello();
+    let cwd = b.ws.to_str().unwrap().to_string();
+    let id = b.call("start", json!({"cwd": cwd, "resume": sid_a}));
+    let err = b.result(id).1["error"].as_str().unwrap().to_string();
+    assert!(err.contains("another folder"), "{err}");
+    assert!(!err.contains(root.to_str().unwrap()), "no host path: {err}");
+    // nothing started: a plain start works, and the in-place resume is refused too
+    let id = b.call("start", json!({"cwd": cwd}));
+    assert!(b.result(id).1["error"].is_null());
+    let err = b.err("session.resume", json!({"id": sid_a}));
+    assert!(
+        err.starts_with("refused: ") && err.contains("another folder"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_restart_during_a_task_is_refused_busy_and_the_task_goes_on() {
+    let mut e = engine(write_script);
+    e.start();
+    e.call("send", json!({"text": "write it"}));
+    let ask = e
+        .until("ask", |v| v["msg"] == "ask.approval")
+        .pop()
+        .unwrap();
+    let err = e.err("session.new", Value::Null);
+    assert!(err.starts_with("refused: busy"), "{err}");
+    let err = e.err("trust.set", json!({"mode": "session"}));
+    assert!(err.starts_with("refused: "), "{err}");
+    // the cancel is answered by the reader at once and ends the task
+    e.call("cancel", Value::Null);
+    let seen = e.until("task_done", is_task_done);
+    assert!(
+        seen.iter()
+            .any(|v| v["msg"] == "withdraw" && v["id"] == ask["id"])
+    );
+    assert!(e.ok("clear", Value::Null).is_object());
+}
+
+#[test]
+fn a_failed_restart_resumes_the_session_it_ended_untrusted_when_the_trust_was_the_failure() {
+    let mut e = engine(|_| json!([{"text": "ok"}]));
+    trusted_config(&e);
+    let info = e.start();
+    e.ok("trust.set", json!({"mode": "session"}));
+    gap();
+    let old = e.ok("session.new", Value::Null)["sid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // the configuration changes under a trusted session; the model switch cannot start trusted
+    std::fs::write(e.ws.join(".synt/settings.json"), r#"{"changed":true}"#).unwrap();
+    gap();
+    let v = e.ok("model.set", json!({"model": "a/b"}));
+    // the session it ended is the one that continues (resumed), without trust, and the report says so
+    assert_eq!(v["sid"], old.as_str(), "{v}");
+    assert_ne!(v["sid"], info["sid"]);
+    assert_eq!(
+        (
+            v["trusted"].as_bool(),
+            v["notices"].to_string().contains("UNTRUSTED")
+        ),
+        (Some(false), true),
+        "{v}"
+    );
+}
+
+#[test]
+fn a_restart_that_cannot_resume_anything_ends_the_engine_with_a_fatal_error() {
+    let (mut e, _) = used_engine();
+    // the folder vanishes: neither the new session nor the old one can start
+    std::fs::remove_dir_all(&e.ws).unwrap();
+    let err = e.err("session.new", Value::Null);
+    assert!(err.starts_with("fatal: "), "{err}");
+    drop(e.stdin.take());
+    // and the engine is gone: nothing more is answered, a second `start` is not possible
+    while e.line().is_some() {}
+}
+
+#[test]
+fn a_grant_needs_a_fingerprint_a_session_grant_survives_restarts_and_a_changed_config_drops_it() {
+    let mut e = engine(|_| json!([{"text": "ok"}]));
+    trusted_config(&e);
+    e.start();
+    let v = e.ok("trust.set", json!({"mode": "session"}));
+    assert_eq!(v["trusted"], true, "{v}");
+    gap();
+    // carried across a restart of this process, for the same root and an unchanged configuration
+    let v = e.ok("session.new", Value::Null);
+    assert_eq!(v["trusted"], true, "{v}");
+    let st = e.ok("trust.state", Value::Null);
+    assert_eq!(st["session_grant"], st["root"]);
+    // the (trusted) agent edits the configuration it was trusted for: the next restart does not apply the
+    // stale grant, it continues untrusted and says so; the grant is gone
+    std::fs::write(e.ws.join(".synt/settings.json"), r#"{"changed":true}"#).unwrap();
+    gap();
+    let v = e.ok("session.new", Value::Null);
+    assert_eq!(v["trusted"], false, "{v}");
+    assert!(v["notices"].to_string().contains("UNTRUSTED"), "{v}");
+    assert!(e.ok("trust.state", Value::Null)["session_grant"].is_null());
+}
+
+#[test]
+fn parent_trust_of_the_home_folder_and_a_non_enforcing_sandbox_are_reported_by_the_engine() {
+    let mut e = engine(|_| json!([{"text": "ok"}]));
+    trusted_config(&e);
+    e.start();
+    let st = e.ok("trust.state", Value::Null);
+    assert_eq!(
+        st["enforcing"], false,
+        "the test engine runs with --sandbox off"
+    );
+    // the project's parent is this test's home: never offered, never granted
+    assert!(st["parent"].is_null(), "{st}");
+    assert!(
+        e.err("trust.set", json!({"mode": "parent"}))
+            .contains("refused")
+    );
 }

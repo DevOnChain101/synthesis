@@ -19,8 +19,7 @@ const TITLED: usize = 100;
 pub fn fold_dir(p: &str) -> String {
     let c = std::fs::canonicalize(p)
         .map_or_else(|_| p.to_string(), |p| p.to_string_lossy().into_owned());
-    // a path inside a WSL distro (`/home/x`, reported by its engine) is case-sensitive: never folded
-    if cfg!(any(windows, target_os = "macos")) && !(cfg!(windows) && c.starts_with('/')) {
+    if cfg!(any(windows, target_os = "macos")) {
         c.to_lowercase()
     } else {
         c
@@ -218,19 +217,6 @@ mod tests {
                 images: vec![],
             })
             .unwrap();
-        }
-    }
-
-    #[test]
-    fn a_distro_path_is_never_case_folded_on_windows() {
-        // a path an engine inside WSL reported is case-sensitive; a Windows path is folded
-        if cfg!(windows) {
-            assert_eq!(fold_dir("/home/Me/Proj"), "/home/Me/Proj");
-            assert_eq!(fold_dir(r"C:\Work\Repo"), r"c:\work\repo");
-        } else if cfg!(target_os = "macos") {
-            assert_eq!(fold_dir("/Nope/Dir"), "/nope/dir");
-        } else {
-            assert_eq!(fold_dir("/Nope/Dir"), "/Nope/Dir");
         }
     }
 

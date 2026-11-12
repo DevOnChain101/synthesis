@@ -11,6 +11,16 @@ use crate::live::{Dialog, DialogKind, Live, PickerKind, age};
 /// Sessions named per list before "and N more".
 const LISTED: usize = 8;
 
+/// The workspace key of `raw`: a local folder is canonical (and case-folded where the file system folds); a
+/// folder reported by a remote engine is already the engine's own key and is used unchanged.
+pub fn workspace_key(remote: bool, raw: &str) -> String {
+    if remote {
+        raw.to_string()
+    } else {
+        fold_dir(raw)
+    }
+}
+
 /// A session is working now (or waits for an answer), by its stored status.
 fn working(s: SessionStatus) -> bool {
     matches!(
@@ -54,11 +64,26 @@ pub struct Asked {
 impl Live {
     /// The folder the engine runs in, as a workspace key.
     pub fn live_ws_key(&self) -> String {
-        fold_dir(
-            self.engine
-                .as_ref()
-                .map_or(&self.cwd, |e| e.remote_root.as_ref().unwrap_or(&e.root)),
-        )
+        match &self.engine {
+            // the key the engine issued for its own folder, as it is: a path of another machine is never
+            // canonicalized or case-folded on this one
+            Some(e) if e.is_remote() => e.remote_root.clone().unwrap_or_default(),
+            Some(e) => fold_dir(&e.root),
+            None => fold_dir(&self.cwd),
+        }
+    }
+
+    /// The key of a folder as this session's workspace list issues them (see [`workspace_key`]).
+    pub fn key_of(&self, raw: &str) -> String {
+        workspace_key(self.engine.as_ref().is_some_and(|e| e.is_remote()), raw)
+    }
+
+    /// The key of the session's own folder (`cwd`).
+    pub fn cwd_key(&self) -> String {
+        match &self.engine {
+            Some(e) if e.is_remote() => e.remote_cwd.clone().unwrap_or_default(),
+            _ => fold_dir(&self.cwd),
+        }
     }
 
     /// The checks of both the asking and the confirming: what the workspace is now.
@@ -303,6 +328,32 @@ pub fn close_in_store(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_remote_key_is_never_canonicalized_or_folded_on_this_machine() {
+        // a path that also EXISTS here (a macOS or Linux host path, or a drive path in Git-Bash style) with
+        // capitals: the host rules (canonical, folded where the file system folds) must not touch a remote key
+        let t = tempfile::tempdir().unwrap();
+        let real = t.path().join("Real");
+        std::fs::create_dir_all(&real).unwrap();
+        let raw = real.to_string_lossy().into_owned();
+        assert_eq!(workspace_key(true, &raw), raw, "remote: as issued");
+        assert_eq!(workspace_key(true, "/Users/X/Proj"), "/Users/X/Proj");
+        assert_eq!(
+            workspace_key(false, &raw),
+            fold_dir(&raw),
+            "local: the host rules"
+        );
+        #[cfg(unix)]
+        {
+            // a link on the host does not make a remote path another one
+            let link = t.path().join("Link");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            let l = link.to_string_lossy().into_owned();
+            assert_eq!(workspace_key(true, &l), l);
+            assert_ne!(workspace_key(false, &l), l, "local keys resolve links");
+        }
+    }
     use synthesis_view::convo::Item;
     use synthesis_view::workspaces::{SessionRow, WorkspaceRow};
 

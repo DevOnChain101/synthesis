@@ -53,6 +53,14 @@ pub enum UiMsg {
     },
     /// `/compact` between tasks ended (`Err`: the reason, history unchanged).
     Compacted(Result<(), String>),
+    /// `/compact` was accepted while a task runs: the harness compacts at its next safe point.
+    CompactQueued,
+    /// Something a background call to the remote engine has to say (`true`: a problem).
+    Note(String, bool),
+    /// `/rename` ended (`Ok`: the stored title).
+    Renamed(Result<String, String>),
+    /// `/trust` asked the engine for its state.
+    TrustList(Result<crate::remote::TrustState, String>),
 }
 
 pub use synthesis_app::asks::{AskApproval, AskInput, Choice, approval_for};
@@ -229,6 +237,8 @@ pub struct Engine {
     pub remote_root: Option<String>,
     /// WSL mode only: the distro the engine runs in (to turn its Linux paths into Windows ones).
     pub remote_distro: Option<String>,
+    /// Remote mode: what the engine said the Trust dialog should show, in its start report.
+    pub trust: Option<crate::remote::TrustState>,
     pub synthesis_home: PathBuf,
     /// The environment the session started with (`/memory` and `/doctor` read it, names only).
     pub env: Env,
@@ -351,6 +361,7 @@ impl Engine {
             remote_cwd: Some(text("cwd")),
             remote_root: Some(text("root")),
             remote_distro: None,
+            trust: crate::remote::TrustState::parse(v["trust"].clone()).ok(),
             commands: vec![crate::live::reveal_command()],
             context_window: v["context_window"].as_u64(),
             // the engine decided it (the person's choice went through `trust.set`); display state only
@@ -404,13 +415,14 @@ impl Engine {
                 e.remote_distro = distro;
                 Ok((e, rx, None, v))
             }
-            // nothing was ended: the same session continues on the new channel
-            Err(why) if !remote.is_dead() => {
+            // the engine refused before ending anything: the same session continues on the new channel
+            Err(e) if e.kept => {
                 self.remote = Some(remote);
                 self.tx = tx;
-                Ok((self, rx, Some(why), Value::Null))
+                Ok((self, rx, Some(sanitize_for_display(&e.why)), Value::Null))
             }
-            Err(why) => Err(why),
+            // anything else: the engine is dropped (killed), never kept
+            Err(e) => Err(sanitize_for_display(&e.why)),
         }
     }
 
@@ -565,6 +577,7 @@ impl Engine {
             remote_cwd: None,
             remote_root: None,
             remote_distro: None,
+            trust: None,
             synthesis_home: info.synthesis_home,
             env: env.clone(),
             live: Some(live),
@@ -619,6 +632,20 @@ impl Engine {
         let live = self.live()?;
         let rt = live.tokio.as_ref().ok_or("peers are off")?;
         rt.block_on(live.harness.peer_ask_user(to, text))
+    }
+
+    /// Runs `f` against the remote engine on a worker thread (never the UI thread: a store call can take
+    /// seconds); the message it returns reaches the window like any other. Bounded by the call's own timeout.
+    pub fn spawn_remote(
+        self: &Arc<Self>,
+        f: impl FnOnce(&crate::remote::Remote) -> Option<UiMsg> + Send + 'static,
+    ) {
+        let e = self.clone();
+        std::thread::spawn(move || {
+            if let Some(m) = e.remote().and_then(f) {
+                let _ = e.tx.unbounded_send(m);
+            }
+        });
     }
 
     /// The remote engine's handle: its store, trust and restarts (`None`: the session runs in this process).
@@ -829,14 +856,10 @@ impl Engine {
     }
 
     /// `/clear`: the next task starts without the earlier conversation.
-    pub fn clear_history(&self) {
+    pub fn clear_history(self: &Arc<Self>) {
         match (self.live(), &self.remote) {
             (Ok(l), _) => lock(&l.history).clear(),
-            (_, Some(r)) => {
-                if let Err(e) = r.clear() {
-                    let _ = self.tx.unbounded_send(UiMsg::BadEvent(e));
-                }
-            }
+            (_, Some(_)) => self.spawn_remote(|r| r.clear().err().map(|e| UiMsg::Note(e, true))),
             _ => self.unsupported(),
         }
     }
@@ -844,12 +867,15 @@ impl Engine {
     /// `/compact`. While a task runs the harness compacts at its next safe point (`Ok(true)`);
     /// otherwise the conversation between tasks is compacted now and [`UiMsg::Compacted`] follows
     /// (`Ok(false)`). `Err`: nothing to compact.
-    pub fn compact(&self, instructions: Option<String>) -> Result<bool, &'static str> {
-        if let Some(r) = &self.remote {
-            return r.compact(instructions).map_err(|e| {
-                let _ = self.tx.unbounded_send(UiMsg::BadEvent(e));
-                "/compact: not done"
+    pub fn compact(self: &Arc<Self>, instructions: Option<String>) -> Result<bool, &'static str> {
+        if self.remote.is_some() {
+            // asked in the background: `Compacted` follows (or `CompactQueued` while a task runs, or the error)
+            self.spawn_remote(move |r| match r.compact(instructions) {
+                Ok(true) => Some(UiMsg::CompactQueued),
+                Ok(false) => None,
+                Err(e) => Some(UiMsg::Compacted(Err(e))),
             });
+            return Ok(false);
         }
         let live = self.live()?;
         if live.running() {
@@ -950,13 +976,16 @@ impl Engine {
 
     /// `/rename TITLE`: validates and stores the title of this session; `Ok` is the stored title.
     pub fn rename(&self, title: &str) -> Result<String, String> {
-        if let Some(r) = &self.remote {
-            return r.rename(&self.sid, title);
-        }
         match &self.live()?.host.store {
             Some(s) => synthesis_app::rename::rename(s, title),
             None => Err("/rename: this session is not stored (--no-session-store)".into()),
         }
+    }
+
+    /// `/rename` for a remote engine, in the background: `UiMsg::Renamed` follows.
+    pub fn rename_remote(self: &Arc<Self>, title: &str) {
+        let (sid, title) = (self.sid.clone(), title.to_string());
+        self.spawn_remote(move |r| Some(UiMsg::Renamed(r.rename(&sid, &title))));
     }
 
     /// `/name`: the name other sessions address this one by; `None` when peers are off.

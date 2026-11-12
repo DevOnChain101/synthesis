@@ -94,8 +94,19 @@ fn fake_engine(mode: &str) {
             "trust.state" => say(
                 json!({"msg":"result","id":id,"ok":{"root":"/home/me/re\u{1b}po","cwd":"/home/me/repo","trusted":false,"remembered":"changed","changed_files":["a"],"since":"2026-01-01","records":[{"root":"/x","scope":"folder","trusted_at":"2026-01-01","state":"config unchanged"}]}}),
             ),
-            "trust.set" | "model.set" | "session.new" if mode == "busy" => {
-                say(json!({"msg":"result","id":id,"error":"busy: finish or cancel the task first"}))
+            "trust.set" | "model.set" | "session.new" if mode == "busy" => say(
+                json!({"msg":"result","id":id,"error":"refused: busy: finish or cancel the task first"}),
+            ),
+            "trust.set" | "model.set" | "session.new" if mode == "fatal" => {
+                say(json!({"msg":"result","id":id,"error":"fatal: the session could not continue"}))
+            }
+            // an error the engine did not mark as a refusal: nothing says the session is still there
+            "trust.set" | "model.set" | "session.new" if mode == "unmarked" => {
+                say(json!({"msg":"result","id":id,"error":"something went wrong"}))
+            }
+            "session.rename" | "clear" | "compact" if mode == "slow" => {
+                std::thread::sleep(Duration::from_millis(1500));
+                say(json!({"msg":"result","id":id,"ok":{"title":"t","started":true}}))
             }
             "model.set" if mode == "wsl" => say(
                 json!({"msg":"result","id":id,"ok":{"sid":"s2","label":"fake/model","models":[],"mode":"default","trusted":false,"cwd":"/elsewhere","root":"/elsewhere","notices":[]}}),
@@ -103,6 +114,12 @@ fn fake_engine(mode: &str) {
             "trust.set" | "model.set" | "session.new" => {
                 // the old session's trailing line, the marker, then the new session
                 println!("{EVENT}");
+                if mode == "stale" {
+                    // the ending session's last words: all dropped by the client
+                    say(json!({"msg":"task_done","error":null}));
+                    say(json!({"msg":"notice","text":"old"}));
+                    say(json!({"msg":"compacted","error":null}));
+                }
                 say(json!({"msg":"restarted"}));
                 println!(
                     "{}",
@@ -238,8 +255,13 @@ fn a_session_over_the_pipe() {
     assert!(!e.running());
     // what the local engine has and the remote one does not yet says so
     assert_eq!(e.mcp_report(), vec![NOT_REMOTE.to_string()]);
+    // remote compact/rename are background calls: they return at once and answer as messages
+    let e = std::sync::Arc::new(e);
     assert_eq!(e.compact(None), Ok(false));
-    assert!(e.rename("x").is_ok());
+    // no host store, no note file: a `#` note has no place to go in remote mode
+    assert!(e.notes.save(true, "x").is_err());
+    assert!(e.synthesis_home.as_os_str().is_empty());
+    let e = std::sync::Arc::try_unwrap(e).ok().expect("sole owner");
     assert!(e.close().is_none());
 }
 
@@ -290,6 +312,47 @@ fn a_restart_moves_the_window_to_the_new_session_and_drops_the_old_lines() {
         "the old window hears nothing more"
     );
     assert!(e.close().is_none());
+}
+
+fn the_old_sessions_last_lines_are_dropped_not_shown_in_the_new_window() {
+    let (e, _old) = start("stale").expect("starts");
+    let (e, mut rx, _, _) = e
+        .restart_remote(synthesis_app::proto::Call::SessionNew)
+        .expect("restarts");
+    // the first thing the new window hears is the new session's event: no old task end, notice or compaction
+    assert!(matches!(next(&mut rx, "new event"), UiMsg::Event(ev) if ev.seq == 2));
+    assert!(rx.try_recv().is_err());
+    assert!(e.close().is_none());
+}
+
+fn only_a_marked_refusal_keeps_the_engine_everything_else_ends_it() {
+    for mode in ["fatal", "unmarked"] {
+        let (e, _old) = start(mode).expect("starts");
+        let r = e.restart_remote(synthesis_app::proto::Call::SessionNew);
+        assert!(r.is_err(), "{mode}: the engine is dropped, not kept");
+    }
+}
+
+fn a_slow_engine_never_blocks_the_callers_of_rename_clear_and_compact() {
+    let (e, mut rx) = start("slow").expect("starts");
+    let e = std::sync::Arc::new(e);
+    let t0 = Instant::now();
+    e.rename_remote("x");
+    e.clear_history();
+    assert_eq!(e.compact(None), Ok(false));
+    assert!(
+        t0.elapsed() < Duration::from_millis(500),
+        "returned at once"
+    );
+    // the answers arrive later, as messages
+    let mut renamed = false;
+    let t1 = Instant::now();
+    while !renamed {
+        assert!(t1.elapsed() < Duration::from_secs(30), "no answer");
+        if let UiMsg::Renamed(Ok(t)) = next(&mut rx, "answer") {
+            renamed = t == "t";
+        }
+    }
 }
 
 fn a_refused_restart_leaves_the_session_running() {
@@ -453,7 +516,7 @@ fn main() {
     if let Some(i) = args.iter().position(|a| a == "--fake-engine") {
         return fake_engine(&args[i + 1]);
     }
-    let tests: [(&str, fn()); 12] = [
+    let tests: [(&str, fn()); 15] = [
         (
             "the_store_methods_are_parsed_bounded_and_made_printable",
             the_store_methods_are_parsed_bounded_and_made_printable,
@@ -461,6 +524,18 @@ fn main() {
         (
             "a_restart_moves_the_window_to_the_new_session_and_drops_the_old_lines",
             a_restart_moves_the_window_to_the_new_session_and_drops_the_old_lines,
+        ),
+        (
+            "the_old_sessions_last_lines_are_dropped_not_shown_in_the_new_window",
+            the_old_sessions_last_lines_are_dropped_not_shown_in_the_new_window,
+        ),
+        (
+            "only_a_marked_refusal_keeps_the_engine_everything_else_ends_it",
+            only_a_marked_refusal_keeps_the_engine_everything_else_ends_it,
+        ),
+        (
+            "a_slow_engine_never_blocks_the_callers_of_rename_clear_and_compact",
+            a_slow_engine_never_blocks_the_callers_of_rename_clear_and_compact,
         ),
         (
             "a_refused_restart_leaves_the_session_running",

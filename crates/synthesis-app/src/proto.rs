@@ -22,6 +22,12 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Longest accepted line (a tool result can carry a big file).
 pub const MAX_LINE: usize = 8 << 20;
 
+/// Starts the error of a restart request that was refused BEFORE anything was ended: the session goes on.
+/// Any other error of a restart request means the engine cannot be trusted to have a session: the client drops it.
+pub const REFUSED: &str = "refused: ";
+/// Starts the error of a restart that ended the session and could not start any: the engine exits.
+pub const FATAL: &str = "fatal: ";
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
     pub id: u64,
@@ -122,6 +128,21 @@ pub enum Call {
     Cancel,
     #[serde(alias = "shutdown")]
     Close,
+}
+
+impl Call {
+    /// The calls that end the session and start another in this process.
+    pub fn is_restart(&self) -> bool {
+        matches!(
+            self,
+            Call::TrustSet { .. }
+                | Call::ModelSet { .. }
+                | Call::SessionNew
+                | Call::SessionResume { .. }
+                | Call::SessionClose { .. }
+                | Call::WorkspaceClose { .. }
+        )
+    }
 }
 
 /// The answer to a plan or question dialog.

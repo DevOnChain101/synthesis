@@ -203,6 +203,14 @@ impl Shared {
     }
 }
 
+/// Why a restart did not give a new session: `kept` (the engine refused before ending anything: the session
+/// goes on) or not (the engine is killed).
+#[derive(Debug)]
+pub struct RestartError {
+    pub kept: bool,
+    pub why: String,
+}
+
 /// `(closed, held, failed)` of a `workspace.close`.
 pub type ClosedIds = (Vec<String>, Vec<String>, Vec<(String, String)>);
 
@@ -391,11 +399,7 @@ impl Remote {
     }
 
     pub fn trust_state(&self) -> Result<TrustState, String> {
-        let v = self.store_call(Call::TrustState)?;
-        let mut t: TrustState =
-            serde_json::from_value(v).map_err(|e| format!("unreadable trust state: {e}"))?;
-        t.clean();
-        Ok(t)
+        TrustState::parse(self.store_call(Call::TrustState)?)
     }
 
     pub fn trust_revoke(&self, root: &str) -> Result<bool, String> {
@@ -455,29 +459,38 @@ impl Remote {
     /// (the next session's window); the old session's trailing lines are dropped. `Ok`: the start report of
     /// the new session. An `Err` leaves the session running (nothing was ended) or, when the engine could not
     /// continue at all, a dead engine (the caller sees it as ended).
-    pub fn restart(&self, call: Call, tx: UnboundedSender<UiMsg>) -> Result<Value, String> {
-        debug_assert!(matches!(
-            call,
-            Call::TrustSet { .. }
-                | Call::ModelSet { .. }
-                | Call::SessionNew
-                | Call::SessionResume { .. }
-                | Call::SessionClose { .. }
-                | Call::WorkspaceClose { .. }
-        ));
+    pub fn restart(&self, call: Call, tx: UnboundedSender<UiMsg>) -> Result<Value, RestartError> {
+        debug_assert!(call.is_restart());
+        let refused = |why: &str| RestartError {
+            kept: true,
+            why: why.into(),
+        };
         if !lock(&self.shared.asks).is_empty() || self.running() {
-            return Err("busy: finish or cancel the task and answer the open dialogs first".into());
+            return Err(refused(
+                "busy: finish or cancel the task and answer the open dialogs first",
+            ));
         }
         *lock(&self.shared.tx) = tx;
         self.shared.discard.store(true, Ordering::SeqCst);
         let r = self.call(call, START_TIMEOUT);
         self.shared.discard.store(false, Ordering::SeqCst);
-        let v = r?;
+        // fail closed: only an error the engine marked as a refusal BEFORE it ended anything leaves the session
+        // as it was; any other (a fatal restart, a timeout, an unmarked error, a dead process) ends this engine
+        let dead = |why: String| {
+            self.shared.kill();
+            RestartError { kept: false, why }
+        };
+        let v = match r {
+            Ok(v) => v,
+            Err(e) if e.starts_with(synthesis_app::proto::REFUSED) => {
+                return Err(refused(&e[synthesis_app::proto::REFUSED.len()..]));
+            }
+            Err(e) => return Err(dead(e)),
+        };
         // an engine that does not say its mode is not trusted to be in the default one
-        let mode = v["mode"]
-            .as_str()
-            .and_then(Mode::parse)
-            .ok_or("the engine did not report its permission mode")?;
+        let Some(mode) = v["mode"].as_str().and_then(Mode::parse) else {
+            return Err(dead("the engine did not report its permission mode".into()));
+        };
         *lock(&self.shared.mode) = mode;
         Ok(v)
     }
@@ -739,15 +752,21 @@ fn open_ask(s: &Shared, id: &str) -> bool {
 }
 
 fn dispatch(s: &Shared, m: Incoming) -> Verdict {
+    let discarding = s.discard.load(Ordering::SeqCst);
     let m = match m {
         Incoming::Event(e) => {
-            if !s.discard.load(Ordering::SeqCst) {
+            if !discarding {
                 s.tell(UiMsg::Event(e));
             }
             return Verdict::Fine;
         }
         Incoming::Msg(m) => *m,
     };
+    // while a restart is under way every line of the session being ended is dropped (task ends, asks, notices,
+    // compaction results): only the marker and the answer to the call are of this moment
+    if discarding && !matches!(m, Out::Restarted | Out::Result { .. } | Out::Hello { .. }) {
+        return Verdict::Fine;
+    }
     match m {
         Out::Hello { .. } => {
             s.tell(UiMsg::BadEvent("unexpected hello".into()));
@@ -856,6 +875,14 @@ pub struct TrustRow {
 }
 
 impl TrustState {
+    /// The engine's state, bounded and made printable.
+    pub fn parse(v: Value) -> Result<Self, String> {
+        let mut t: Self =
+            serde_json::from_value(v).map_err(|e| format!("unreadable trust state: {e}"))?;
+        t.clean();
+        Ok(t)
+    }
+
     fn clean(&mut self) {
         let c = |s: &mut String| *s = clean(s);
         c(&mut self.root);

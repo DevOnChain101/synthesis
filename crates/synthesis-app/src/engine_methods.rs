@@ -22,9 +22,12 @@ pub const MAX_PREVIEW_EVENTS: usize = 50_000;
 /// One event over this is left out of a preview (a huge tool result).
 const MAX_PREVIEW_EVENT: usize = 1 << 20;
 const MAX_KEY: usize = 4096;
+const PREVIEW_PAGE: usize = 2000;
 const MAX_MODEL: usize = 200;
 pub const MAX_INSTRUCTIONS: usize = 8192;
 const MAX_FILES: usize = 20;
+/// Rows of `trust.state` whose configuration is fingerprinted again.
+const MAX_FINGERPRINTS: usize = 20;
 
 /// The detail of a failure goes to stderr; the wire gets `what` (no path of this machine in it).
 pub fn failed<E: Display>(what: &'static str) -> impl FnOnce(E) -> String {
@@ -144,32 +147,47 @@ impl Ctx<'_> {
     pub fn preview(&self, id: &str) -> Result<Value, String> {
         check_id(id)?;
         let r = self.reader()?;
-        r.get_session(id)
+        let rec = r
+            .get_session(id)
             .map_err(|_| "unknown session".to_string())?;
-        let recs = r
-            .read_events(id, 0, usize::MAX >> 1)
-            .map_err(failed("cannot read the session"))?;
+        // only the newest events are read, a page at a time: never the whole log in memory
+        let mut seq = rec.event_cursor.saturating_sub(MAX_PREVIEW_EVENTS as u64);
         let mut kept: std::collections::VecDeque<(usize, Value)> = Default::default();
-        let (mut bytes, mut truncated) = (0usize, false);
-        for rec in recs {
-            let synthesis_events::Record::Known(e) = rec else {
-                continue;
+        let (mut bytes, mut truncated) = (0usize, seq > 0);
+        loop {
+            let recs = r
+                .read_events(id, seq, PREVIEW_PAGE)
+                .map_err(failed("cannot read the session"))?;
+            let Some(last) = recs.last().map(|r| match r {
+                synthesis_events::Record::Known(e) => e.seq,
+                synthesis_events::Record::Unknown(e) => e.seq,
+            }) else {
+                break;
             };
-            let Ok(v) = serde_json::to_value(&e) else {
-                continue;
-            };
-            let n = v.to_string().len();
-            if n > MAX_PREVIEW_EVENT {
-                truncated = true;
-                continue;
+            for rec in recs {
+                let synthesis_events::Record::Known(e) = rec else {
+                    continue;
+                };
+                let Ok(v) = serde_json::to_value(&e) else {
+                    continue;
+                };
+                let n = v.to_string().len();
+                if n > MAX_PREVIEW_EVENT {
+                    truncated = true;
+                    continue;
+                }
+                bytes += n;
+                kept.push_back((n, v));
+                while bytes > MAX_PREVIEW_BYTES || kept.len() > MAX_PREVIEW_EVENTS {
+                    let (n, _) = kept.pop_front().unwrap_or_default();
+                    bytes -= n;
+                    truncated = true;
+                }
             }
-            bytes += n;
-            kept.push_back((n, v));
-            while bytes > MAX_PREVIEW_BYTES || kept.len() > MAX_PREVIEW_EVENTS {
-                let (n, _) = kept.pop_front().unwrap_or_default();
-                bytes -= n;
-                truncated = true;
+            if last <= seq {
+                break;
             }
+            seq = last;
         }
         Ok(
             json!({"events": kept.into_iter().map(|(_, v)| v).collect::<Vec<_>>(), "truncated": truncated}),
@@ -251,9 +269,13 @@ impl Ctx<'_> {
             .iter()
             .filter(|r| r.scope != trust::CHILD)
             .take(trust::MAX_ROWS)
-            .map(|r| {
+            .enumerate()
+            .map(|(i, r)| {
                 let state = if r.scope == trust::PARENT {
                     "each project is checked at its first start"
+                } else if i >= MAX_FINGERPRINTS {
+                    // a fingerprint walks the folder: only the first rows are compared
+                    "not checked (too many rows)"
                 } else if Path::new(&r.root).is_dir() {
                     match trust::fingerprint_root(Path::new(&r.root)) {
                         Ok(f) if f == r.fingerprint => "config unchanged",
@@ -282,16 +304,16 @@ impl Ctx<'_> {
         if let Some(why) = trust_refusal(&root, self.user_home, self.home) {
             return Err(why);
         }
-        let manifest = trust::fingerprint(&root, cwd);
-        if mode == Mode::Session {
-            return Ok(((root, manifest.ok(), true), vec![]));
-        }
-        let fp = manifest.map_err(|e| {
+        // no grant of any kind without a manifest: without it nothing could detect a change of what was reviewed
+        let fp = trust::fingerprint(&root, cwd).map_err(|e| {
             format!(
-                "this folder cannot be remembered: {}",
+                "this folder cannot be trusted: change detection is not possible ({})",
                 sanitize_for_display(&e.to_string())
             )
         })?;
+        if mode == Mode::Session {
+            return Ok(((root, Some(fp), true), vec![]));
+        }
         let (at, scope) = match mode {
             Mode::Parent => {
                 let p = root
@@ -484,6 +506,36 @@ mod tests {
         assert_eq!(
             c.revoke(&proj.to_string_lossy(), None).unwrap()["revoked"],
             true
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_grant_of_any_kind_without_a_fingerprint() {
+        let (t, home, user, proj) = setup();
+        let env = Env::from_pairs::<&str, &str>([]);
+        let c = Ctx {
+            home: &home,
+            user_home: Some(&user),
+            env: &env,
+            enforcing: true,
+        };
+        // a configuration file that is a link leaving the project cannot be fingerprinted
+        let outside = t.path().join("outside.json");
+        std::fs::write(&outside, "{}").unwrap();
+        std::fs::remove_file(proj.join(".synt/settings.json")).unwrap();
+        std::os::unix::fs::symlink(&outside, proj.join(".synt/settings.json")).unwrap();
+        assert!(trust::fingerprint(&proj, &proj).is_err(), "the premise");
+        for m in [Mode::Session, Mode::Remember, Mode::Parent] {
+            let e = c.grant(&proj, m).unwrap_err();
+            assert!(e.contains("change detection"), "{m:?}: {e}");
+        }
+        assert_eq!(
+            c.trust_state(&proj, None, false)["records"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
         );
     }
 
