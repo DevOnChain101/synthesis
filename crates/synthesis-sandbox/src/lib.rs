@@ -32,7 +32,8 @@ use std::path::{Path, PathBuf};
 
 pub use helper::{HELPER_NAME, decode_policy, encode_policy, parse_helper_args};
 pub use linux::{
-    BwrapBackend, LandlockRule, LinuxLandlockBackend, bwrap_probe, landlock_rules, skipped_backends,
+    BwrapBackend, LandlockRule, LinuxLandlockBackend, bwrap_probe, helper_status, landlock_rules,
+    skipped_backends,
 };
 #[cfg(target_os = "linux")]
 pub use linux::{deny_vsock, landlock_abi, restrict_current_process};

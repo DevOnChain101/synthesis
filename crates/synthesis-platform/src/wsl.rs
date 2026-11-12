@@ -54,14 +54,25 @@ pub fn version(read: Read) -> Option<WslVersion> {
     })
 }
 
-/// Whether the running kernel has the `WSLInterop` binfmt entry enabled: `Some(false)` when the
-/// entry is missing or disabled (interop off), `None` when binfmt_misc itself cannot be read.
+/// binfmt entries WSL registers for Windows executables; interop is on if either is enabled.
+const INTEROP_ENTRIES: [&str; 2] = [
+    "/proc/sys/fs/binfmt_misc/WSLInterop",
+    "/proc/sys/fs/binfmt_misc/WSLInterop-late",
+];
+
+/// Whether the running kernel has a `WSLInterop` or `WSLInterop-late` binfmt entry enabled:
+/// `Some(true)` if either is; `Some(false)` only when binfmt_misc is readable and neither is
+/// enabled; `None` when binfmt_misc cannot be read at all.
 pub fn interop_registered(read: Read) -> Option<bool> {
     let status = read("/proc/sys/fs/binfmt_misc/status");
-    match read("/proc/sys/fs/binfmt_misc/WSLInterop") {
-        Some(t) => Some(t.lines().next().is_some_and(|l| l.trim() == "enabled")),
-        None => status.map(|_| false),
+    let entries: Vec<_> = INTEROP_ENTRIES.iter().filter_map(|p| read(p)).collect();
+    if entries
+        .iter()
+        .any(|t| t.lines().next().is_some_and(|l| l.trim() == "enabled"))
+    {
+        return Some(true);
     }
+    (status.is_some() || !entries.is_empty()).then_some(false)
 }
 
 /// Variables that carry Windows interop state (`WSL_INTEROP`, `WSL_DISTRO_NAME`, `WSLENV`,
@@ -111,6 +122,9 @@ pub struct WslHost {
     pub version: WslVersion,
     /// Mount points of `drvfs` (and `9p` with `aname=drvfs`) filesystems, from `/proc/mounts`.
     pub windows_mounts: Vec<PathBuf>,
+    /// `false` when `/proc/mounts` could not be read (or WSL was only remembered): the list
+    /// above is then unknown, not empty, and callers must fail closed.
+    pub mounts_known: bool,
 }
 
 impl WslHost {
@@ -121,17 +135,18 @@ impl WslHost {
     pub fn probe(p: &Probe) -> Option<Self> {
         let kernel = version(p.read);
         let signal = kernel.is_some()
-            || (p.read)("/proc/sys/fs/binfmt_misc/WSLInterop").is_some()
-            || (p.exists)("/proc/sys/fs/binfmt_misc/WSLInterop")
+            || INTEROP_ENTRIES
+                .iter()
+                .any(|e| (p.read)(e).is_some() || (p.exists)(e))
             || (p.exists)("/run/WSL")
             || (p.exists)("/mnt/wsl")
             || (p.env_set)("WSL_INTEROP")
             || (p.env_set)("WSL_DISTRO_NAME");
+        let mounts = (p.read)("/proc/mounts");
         signal.then(|| Self {
             version: kernel.unwrap_or(WslVersion::Unknown),
-            windows_mounts: (p.read)("/proc/mounts")
-                .map(|m| drvfs_mounts(&m))
-                .unwrap_or_default(),
+            mounts_known: mounts.is_some(),
+            windows_mounts: mounts.map(|m| drvfs_mounts(&m)).unwrap_or_default(),
         })
     }
 
@@ -159,6 +174,7 @@ impl WslHost {
             None if SEEN.load(Ordering::Relaxed) => Some(Self {
                 version: WslVersion::Unknown,
                 windows_mounts: vec![],
+                mounts_known: false,
             }),
             None => None,
         }
@@ -183,9 +199,12 @@ impl WslHost {
         path_var: &OsStr,
         canon: &dyn Fn(&Path) -> Option<PathBuf>,
     ) -> OsString {
+        // The canonical path is what is kept: the entry is the directory that was checked, so
+        // a symlink swapped in later cannot lead somewhere else.
         let kept = std::env::split_paths(path_var)
             .filter(|d| d.has_root())
-            .filter(|d| canon(d).is_some_and(|c| !self.is_windows_path(&c)));
+            .filter_map(|d| canon(&d))
+            .filter(|c| !self.is_windows_path(c));
         std::env::join_paths(kept).unwrap_or_default()
     }
 }
@@ -264,6 +283,19 @@ mod tests {
         assert_eq!(interop_registered(&off), Some(false));
         assert_eq!(interop_registered(&gone), Some(false));
         assert_eq!(interop_registered(&|_| None), None);
+        // WSLInterop-late counts: enabled if either entry says so, disabled only if neither does
+        let late = files(&[
+            ("/proc/sys/fs/binfmt_misc/WSLInterop", "disabled\n"),
+            ("/proc/sys/fs/binfmt_misc/WSLInterop-late", "enabled\n"),
+        ]);
+        assert_eq!(interop_registered(&late), Some(true));
+        let late_only = files(&[("/proc/sys/fs/binfmt_misc/WSLInterop-late", "enabled\n")]);
+        assert_eq!(interop_registered(&late_only), Some(true));
+        let both_off = files(&[
+            ("/proc/sys/fs/binfmt_misc/WSLInterop", "disabled\n"),
+            ("/proc/sys/fs/binfmt_misc/WSLInterop-late", "disabled\n"),
+        ]);
+        assert_eq!(interop_registered(&both_off), Some(false));
     }
 
     #[test]
@@ -281,6 +313,7 @@ mod tests {
         let h = WslHost {
             version: WslVersion::V2,
             windows_mounts: mounts,
+            mounts_known: true,
         };
         for yes in ["/mnt/c/Windows", "/mnt/wsl", "/windir/d x/proj", "/mnt"] {
             assert!(h.is_windows_path(Path::new(yes)), "{yes}");
@@ -295,6 +328,7 @@ mod tests {
         let h = WslHost {
             version: WslVersion::V2,
             windows_mounts: vec!["/windir/d".into()],
+            mounts_known: true,
         };
         let input = std::env::join_paths([
             "/usr/bin",
@@ -303,6 +337,7 @@ mod tests {
             "rel/bin",
             "/gone/bin",
             "/link-to-c/bin",
+            "/link-ok/bin",
             "/home/u/.cargo/bin",
         ])
         .unwrap();
@@ -310,6 +345,7 @@ mod tests {
         let canon = |d: &Path| match d.to_str().unwrap() {
             "/gone/bin" => None,
             "/link-to-c/bin" => Some(PathBuf::from("/mnt/c/Tools")),
+            "/link-ok/bin" => Some(PathBuf::from("/opt/real/bin")),
             _ => Some(d.to_path_buf()),
         };
         let out = h.scrub_path_with(&input, &canon);
@@ -318,6 +354,7 @@ mod tests {
             kept,
             [
                 PathBuf::from("/usr/bin"),
+                PathBuf::from("/opt/real/bin"), // the canonical path, not the symlink
                 PathBuf::from("/home/u/.cargo/bin")
             ]
         );
@@ -334,6 +371,7 @@ mod tests {
         let h = WslHost {
             version: WslVersion::V2,
             windows_mounts: vec![real],
+            mounts_known: true,
         };
         let input = std::env::join_paths([t.join("link"), "/usr/bin".into()]).unwrap();
         let out = h.scrub_path(&input);
@@ -353,7 +391,7 @@ mod tests {
             &'static [&'static str],
         );
         // (name, files, existing paths, env names)
-        let cases: [Case; 8] = [
+        let cases: [Case; 9] = [
             ("kernel", &["/proc/version"], &[], &[]),
             (
                 "binfmt text",
@@ -377,6 +415,12 @@ mod tests {
                 &["/proc/version:custom"],
                 &[],
                 &["WSL_DISTRO_NAME"],
+            ),
+            (
+                "binfmt late",
+                &[],
+                &["/proc/sys/fs/binfmt_misc/WSLInterop-late"],
+                &[],
             ),
         ];
         for (name, files, exist, envs) in cases {

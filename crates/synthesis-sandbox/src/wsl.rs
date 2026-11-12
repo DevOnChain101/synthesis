@@ -11,13 +11,14 @@
 //!   anything relative, unresolvable or on a Windows path dropped. Not a boundary.
 //! - bubblewrap: `/run` is a fresh tmpfs (no `/run/WSL`), `/mnt/wsl` and `/mnt/wslg` are tmpfs
 //!   (the real `resolv.conf` target is bound back read-only), Windows drives are hidden (default)
-//!   or read-only, writes only in a workspace that passes [`check_policy`].
-//! - seccomp (helper `--no-vsock`, in front of bwrap): `socket(AF_VSOCK)` fails.
+//!   or read-only, and no writable root may be on a drive ([`check_policy`]).
+//! - seccomp (helper `--no-vsock`, in front of bwrap): `socket(AF_VSOCK)`, io_uring and the x32
+//!   ABI fail.
 //! - Landlock is REFUSED on WSL: it cannot stop `connect()` to a pathname unix socket.
 //!
 //! What remains: the binfmt entry cannot be removed without root; a process started before the
-//! sandbox, or one holding the socket fd, is not covered; a Windows workspace cannot protect
-//! `.git/hooks` (see [`check_policy`]) so it is refused; interop closure is NOT proven until the
+//! sandbox, or one holding the socket fd, is not covered; a workspace on a Windows drive is
+//! always refused (see [`check_policy`]); interop closure is NOT proven until the
 //! ignored real-WSL2 test has been run.
 
 use std::ffi::OsString;
@@ -41,8 +42,29 @@ pub(crate) struct WslCtx {
     pub host: WslHost,
     /// `/etc/resolv.conf` resolves into `/mnt/wsl` or `/mnt/wslg` (WSL generates it there).
     pub resolv: Option<PathBuf>,
-    /// Of `/mnt/wsl` and `/mnt/wslg`, the ones that exist: masked with a tmpfs.
+    /// Of `/mnt/wsl`, `/mnt/wslg` and `/usr/lib/wsl/drivers`, the ones that exist: masked with a
+    /// tmpfs (the last one, the Windows driver store, only while drives are hidden: GPU
+    /// compute needs it, and `hide_windows_drives=false` is the opt-out).
     pub mask: Vec<PathBuf>,
+    /// Every Windows drive: the drvfs mounts plus any existing `/mnt/<single letter>` directory,
+    /// so a drive that `/proc/mounts` does not show is still hidden / read-only.
+    pub drives: Vec<PathBuf>,
+}
+
+/// The mask candidates of [`WslCtx::mask`].
+pub(crate) const MASKABLE: [&str; 3] = ["/mnt/wsl", "/mnt/wslg", "/usr/lib/wsl/drivers"];
+pub(crate) const DRIVER_STORE: &str = "/usr/lib/wsl/drivers";
+
+/// Drives = mounts plus the `/mnt/<letter>` directories in `mnt_letters` (names, injectable).
+pub(crate) fn drives_of(host: &WslHost, mnt_letters: &[String]) -> Vec<PathBuf> {
+    let mut v = host.windows_mounts.clone();
+    for l in mnt_letters.iter().filter(|l| l.len() == 1 && l.is_ascii()) {
+        let d = Path::new(DEFAULT_MOUNT_ROOT).join(l);
+        if !v.contains(&d) {
+            v.push(d);
+        }
+    }
+    v
 }
 
 impl WslCtx {
@@ -51,12 +73,25 @@ impl WslCtx {
         let resolv = std::fs::canonicalize("/etc/resolv.conf")
             .ok()
             .filter(|t| t.starts_with("/mnt/wsl") || t.starts_with("/mnt/wslg"));
-        let mask = ["/mnt/wsl", "/mnt/wslg"]
+        let mask = MASKABLE
             .map(PathBuf::from)
             .into_iter()
             .filter(|m| m.exists())
             .collect();
-        Some(Self { host, resolv, mask })
+        let letters: Vec<String> = std::fs::read_dir(DEFAULT_MOUNT_ROOT)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        let drives = drives_of(&host, &letters);
+        Some(Self {
+            host,
+            resolv,
+            mask,
+            drives,
+        })
     }
 }
 
@@ -70,43 +105,23 @@ pub fn scrub_env(env: &mut Vec<(OsString, OsString)>, host: &WslHost) {
     }
 }
 
-/// Directory names (case-insensitive) below a drive that no writable root may contain.
-const SYSTEM_DIRS: &[&str] = &[
-    "windows",
-    "appdata",
-    "programdata",
-    "program files",
-    "program files (x86)",
-    "$recycle.bin",
-    "system volume information",
-];
-
-/// Fewest path components a workspace on a drive must have below the drive root (`Users/u/ws`).
-const MIN_DEPTH_BELOW_DRIVE: usize = 3;
-
 /// Canonicalise every path of `policy` (so the check and the bind arguments agree), then apply
-/// the WSL rules; returns the canonical policy to use. Violations are `InvalidPolicy`, never a
-/// degradation to unconfined. Rules, for each writable root and the temp dir:
-/// - a root that contains a Windows drive (`/`, `/mnt`, a mount point, an ancestor of a custom
-///   mount) is refused, wherever it is;
-/// - on a drive: not the temp dir; below a real drive (`/mnt/<letter>` or a drvfs mount; `/mnt/wsl`
-///   is not one); at least [`MIN_DEPTH_BELOW_DRIVE`] components deep; no [`SYSTEM_DIRS`] component;
-///   it must contain the cwd;
-/// - `deny_paths` / `readonly_paths` inside such a root are refused: names on a drive are case
-///   insensitive and may have 8.3 aliases, so a bind mount cannot protect `.git/hooks` there.
-///   Move the project into the Linux filesystem (`~/`).
-pub fn check_policy(
-    policy: &SandboxPolicy,
-    cwd: Option<&Path>,
-    host: &WslHost,
-) -> Result<SandboxPolicy, SandboxError> {
-    check_policy_with(policy, cwd, host, &canon_lossy)
+/// the one WSL rule for writes: NO writable root and no temp dir may be on a Windows drive
+/// (anything under `/mnt`, a drvfs mount point, or a root that contains one, `/` included).
+/// A workspace on a drive is therefore ALWAYS refused today. An allow-list of drive workspaces
+/// was dropped on purpose: the standard policy always carries `.git/hooks`, `.synt` and
+/// `AGENTS.md` as protected paths, and a bind mount cannot protect them there (names on a drive
+/// are case-insensitive and may have 8.3 aliases, trailing dots or spaces, NTFS streams), so
+/// every such workspace would be refused anyway; a deny-list of system directories would only
+/// invite bypasses. Move the project into the Linux filesystem (`~/`). Violations are
+/// `InvalidPolicy`, never a degradation to unconfined. Returns the canonical policy to use.
+pub fn check_policy(policy: &SandboxPolicy, host: &WslHost) -> Result<SandboxPolicy, SandboxError> {
+    check_policy_with(policy, host, &canon_lossy)
 }
 
 /// [`check_policy`] with an injected canonicaliser (tests use the identity).
 pub fn check_policy_with(
     policy: &SandboxPolicy,
-    cwd: Option<&Path>,
     host: &WslHost,
     canon_one: &dyn Fn(&Path) -> PathBuf,
 ) -> Result<SandboxPolicy, SandboxError> {
@@ -117,76 +132,37 @@ pub fn check_policy_with(
     p.deny_paths = canon(&p.deny_paths);
     p.readonly_paths = canon(&p.readonly_paths);
     p.tmp_dir = p.tmp_dir.as_deref().map(canon_one);
-    let cwd = cwd.map(canon_one);
-    let deny = |root: &Path, why: &str| {
-        Err(SandboxError::InvalidPolicy(format!(
-            "WSL: writable root {} {why}; writes under /mnt are denied outside a workspace",
-            root.display()
-        )))
-    };
     for root in p.writable_roots.iter().chain(&p.tmp_dir) {
-        if Path::new(DEFAULT_MOUNT_ROOT).starts_with(root)
-            || host.windows_mounts.iter().any(|m| m.starts_with(root))
-        {
-            return deny(root, "contains the Windows drives");
-        }
-        if !host.is_windows_path(root) {
-            continue;
-        }
-        if p.tmp_dir.as_deref() == Some(root.as_path()) {
-            return deny(root, "is on a Windows drive and cannot be the temp dir");
-        }
-        let Some(rel) = below_drive(root, host) else {
-            return deny(root, "is under /mnt but not on a Windows drive");
-        };
-        if rel.components().count() < MIN_DEPTH_BELOW_DRIVE {
-            return deny(root, "is too close to the drive root");
-        }
-        let sys = rel.components().any(|c| {
-            let n = c.as_os_str().to_string_lossy().to_lowercase();
-            SYSTEM_DIRS.contains(&n.as_str())
-        });
-        if sys {
-            return deny(root, "is inside a Windows system or profile directory");
-        }
-        if !cwd.as_ref().is_some_and(|c| c.starts_with(root)) {
-            return deny(root, "does not contain the working directory");
-        }
-        if p.deny_paths
-            .iter()
-            .chain(&p.readonly_paths)
-            .any(|d| d.starts_with(root))
-        {
-            return deny(
-                root,
-                "holds protected paths (.git/hooks, .synt, ...) that cannot be enforced on a Windows drive (case-insensitive names, 8.3 aliases); move the project into the Linux filesystem (~/)",
-            );
+        let contains_drive = Path::new(DEFAULT_MOUNT_ROOT).starts_with(root)
+            || host.windows_mounts.iter().any(|m| m.starts_with(root));
+        if contains_drive || host.is_windows_path(root) {
+            return Err(SandboxError::InvalidPolicy(format!(
+                "WSL: {} is on (or contains) a Windows drive; writes under /mnt are always denied and a workspace there cannot be protected (.git/hooks, .synt); move the project into the Linux filesystem (~/)",
+                root.display()
+            )));
         }
     }
     Ok(p)
 }
 
-/// `root` relative to its Windows drive: a drvfs mount point, else `/mnt/<single letter>`.
-fn below_drive(root: &Path, host: &WslHost) -> Option<PathBuf> {
-    if let Some(rel) = host
-        .windows_mounts
-        .iter()
-        .find_map(|m| root.strip_prefix(m).ok())
-    {
-        return Some(rel.to_path_buf());
-    }
-    let rel = root.strip_prefix(DEFAULT_MOUNT_ROOT).ok()?;
-    let mut c = rel.components();
-    let drive = c.next()?.as_os_str().to_string_lossy().into_owned();
-    (drive.len() == 1 && drive.is_ascii()).then(|| c.as_path().to_path_buf())
-}
-
 /// [`check_policy`] against the real host, for callers that must refuse before they create
 /// anything (the terminal creates the private temp dir only after this passes).
-pub fn preflight(policy: &SandboxPolicy, cwd: Option<&Path>) -> Result<(), SandboxError> {
+pub fn preflight(policy: &SandboxPolicy) -> Result<(), SandboxError> {
     match host() {
-        Some(h) => check_policy(policy, cwd, &h).map(|_| ()),
+        Some(h) => check_policy(policy, &h).map(|_| ()),
         None => Ok(()),
+    }
+}
+
+/// Fail closed when the drives cannot be located: a host that was detected as WSL but whose
+/// `/proc/mounts` is unreadable (or only remembered) has unknown drives.
+pub(crate) fn require_known_mounts(host: &WslHost) -> Result<(), SandboxError> {
+    if host.mounts_known {
+        Ok(())
+    } else {
+        Err(SandboxError::Unavailable(
+            "WSL: /proc/mounts could not be read, so the Windows drives cannot be located; refusing to run commands (use --sandbox off at your own risk)".into(),
+        ))
     }
 }
 
@@ -212,14 +188,11 @@ mod tests {
         WslHost {
             version: WslVersion::V2,
             windows_mounts: vec![PathBuf::from("/mnt/c"), PathBuf::from("/windir/d")],
+            mounts_known: true,
         }
     }
-    fn check(
-        p: &SandboxPolicy,
-        cwd: Option<&Path>,
-        h: &WslHost,
-    ) -> Result<SandboxPolicy, SandboxError> {
-        check_policy_with(p, cwd, h, &|x| x.to_path_buf())
+    fn check(p: &SandboxPolicy, h: &WslHost) -> Result<SandboxPolicy, SandboxError> {
+        check_policy_with(p, h, &|x| x.to_path_buf())
     }
     fn pol(roots: &[&str], tmp: Option<&str>) -> SandboxPolicy {
         SandboxPolicy {
@@ -266,74 +239,60 @@ mod tests {
     }
 
     #[test]
-    fn mount_policy_refuses_everything_but_a_deep_workspace() {
+    fn writable_roots_on_a_drive_are_always_refused() {
         let h = host();
-        let ok = |p: &SandboxPolicy, cwd: &str| check(p, Some(Path::new(cwd)), &h);
-        // linux paths, and a workspace deep inside a drive containing the cwd
-        assert!(ok(&pol(&["/home/u/ws"], Some("/home/u/t")), "/home/u/ws").is_ok());
-        assert!(ok(&pol(&["/mnt/c/Users/u/ws"], None), "/mnt/c/Users/u/ws/sub").is_ok());
-        assert!(ok(&pol(&["/windir/d/a/b/ws"], None), "/windir/d/a/b/ws").is_ok());
-        for (roots, tmp, cwd) in [
-            (vec!["/"], None, "/home/u"),
-            (vec!["/mnt"], None, "/mnt/c/a"),
-            (vec!["/mnt/c"], None, "/mnt/c/a"),
-            (vec!["/mnt/c/Users"], None, "/mnt/c/Users/u"),
-            (vec!["/mnt/c/Users/u"], None, "/mnt/c/Users/u/ws"),
-            (vec!["/mnt/wsl/x/y"], None, "/mnt/wsl/x/y"),
-            (vec!["/mnt/wslg/a/b/c"], None, "/mnt/wslg/a/b/c"),
-            // a custom mount is a drive; its ancestor contains the drive
-            (vec!["/windir"], None, "/windir/d/a"),
-            (vec!["/windir/d"], None, "/windir/d/a"),
-            (vec!["/windir/d/a"], None, "/windir/d/a"),
-            // system / profile directories, any case
-            (
-                vec!["/mnt/c/Users/u/AppData/x"],
-                None,
-                "/mnt/c/Users/u/AppData/x",
-            ),
-            (vec!["/mnt/c/Windows/a/b"], None, "/mnt/c/Windows/a/b"),
-            (
-                vec!["/mnt/c/a/Program Files/b"],
-                None,
-                "/mnt/c/a/Program Files/b",
-            ),
-            (
-                vec!["/mnt/c/ProgramData/a/b"],
-                None,
-                "/mnt/c/ProgramData/a/b",
-            ),
-            // another tree on the drive next to a Linux workspace; cwd elsewhere; drive temp dir
-            (vec!["/home/u/ws", "/mnt/c/Users/u/ws"], None, "/home/u/ws"),
-            (vec!["/mnt/c/Users/u/ws"], None, "/home/u/ws"),
-            (vec!["/home/u/ws"], Some("/mnt/c/Users/u/tmp"), "/home/u/ws"),
+        // Linux paths pass, with the standard policy of a Linux workspace
+        assert!(check(&pol(&["/home/u/ws"], Some("/home/u/t")), &h).is_ok());
+        let std = SandboxPolicy::standard(Path::new("/home/u/ws"), Path::new("/home/u/t"));
+        assert!(check(&std, &h).is_ok());
+        for (roots, tmp) in [
+            (vec!["/"], None),
+            (vec!["/mnt"], None),
+            (vec!["/mnt/c"], None),
+            (vec!["/mnt/c/Users"], None),
+            (vec!["/mnt/c/Users/u"], None),
+            (vec!["/mnt/c/Users/u/ws"], None), // deep workspace: refused too
+            (vec!["/mnt/wsl/x/y"], None),
+            (vec!["/mnt/wslg/a/b/c"], None),
+            (vec!["/windir"], None), // ancestor of a custom mount
+            (vec!["/windir/d"], None),
+            (vec!["/windir/d/a/b/ws"], None),
+            (vec!["/home/u/ws", "/mnt/c/Users/u/ws"], None),
+            (vec!["/home/u/ws"], Some("/mnt/c/Users/u/tmp")),
+            (vec!["/home/u/ws"], Some("/windir/d/t")),
         ] {
-            let e = ok(&pol(&roots, tmp), cwd);
+            let e = check(&pol(&roots, tmp), &h);
             assert!(
                 matches!(e, Err(SandboxError::InvalidPolicy(_))),
                 "{roots:?} {tmp:?}"
             );
         }
-        assert!(check(&pol(&["/mnt/c/Users/u/ws"], None), None, &h).is_err());
+        let e = check(&pol(&["/mnt/c/Users/u/ws"], None), &h).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("move the project into the Linux filesystem"),
+            "{e}"
+        );
     }
 
     #[test]
-    fn protected_paths_on_a_drive_workspace_are_refused() {
-        let h = host();
-        let mut p = pol(&["/mnt/c/Users/u/ws"], None);
-        assert!(check(&p, Some(Path::new("/mnt/c/Users/u/ws")), &h).is_ok());
-        p.readonly_paths = vec!["/mnt/c/Users/u/ws/.git/hooks".into()];
-        let e = check(&p, Some(Path::new("/mnt/c/Users/u/ws")), &h).unwrap_err();
-        assert!(
-            e.to_string()
-                .contains("cannot be enforced on a Windows drive"),
-            "{e}"
+    fn drives_include_unlisted_mnt_letters_and_unknown_mounts_fail_closed() {
+        let mut h = host();
+        let d = drives_of(&h, &["c".into(), "z".into(), "wsl".into(), "ab".into()]);
+        assert_eq!(
+            d,
+            [
+                PathBuf::from("/mnt/c"),
+                PathBuf::from("/windir/d"),
+                PathBuf::from("/mnt/z")
+            ]
         );
-        let mut p = pol(&["/mnt/c/Users/u/ws"], None);
-        p.deny_paths = vec!["/mnt/c/Users/u/ws/secret".into()];
-        assert!(check(&p, Some(Path::new("/mnt/c/Users/u/ws")), &h).is_err());
-        // the standard policy of a Linux workspace is fine
-        let std = SandboxPolicy::standard(Path::new("/home/u/ws"), Path::new("/home/u/t"));
-        assert!(check(&std, Some(Path::new("/home/u/ws")), &h).is_ok());
+        assert!(require_known_mounts(&h).is_ok());
+        h.mounts_known = false;
+        assert!(matches!(
+            require_known_mounts(&h),
+            Err(SandboxError::Unavailable(_))
+        ));
     }
 
     #[test]

@@ -213,6 +213,7 @@ mod tests {
         let host = WslHost {
             version: WslVersion::V2,
             windows_mounts: vec![],
+            mounts_known: true,
         };
         let on = env.child_env_on(Some(&host));
         let kept: Vec<_> = std::env::split_paths(on.get("PATH").unwrap()).collect();

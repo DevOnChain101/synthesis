@@ -162,13 +162,20 @@ mod ll {
     }
 }
 /// WSL2 reaches the Windows host over AF_VSOCK (hv_sock), which a network namespace does not
-/// cover. Install a seccomp filter on the current process (inherited by every descendant, also
-/// through bwrap) that makes `socket(AF_VSOCK, ..)` fail with EAFNOSUPPORT. Fail closed: an
-/// architecture without a filter here, or a kernel that refuses it, is an error. Only the
-/// `socket` syscall is filtered, on the native architecture; a process of another ABI (32-bit
-/// compat) is killed by the filter's architecture check. AF_NETLINK is NOT blocked: it cannot
-/// reach Windows and tools (`ip`, glibc `getifaddrs`) need it. Residual: the x32 ABI is not
-/// covered (the stock WSL2 kernel does not enable it; not verified).
+/// cover. Install seccomp filters on the current process (inherited by every descendant, also
+/// through bwrap), all fail closed (an architecture without a filter here, or a kernel that
+/// refuses one, is an error):
+/// 1. `socket(AF_VSOCK, ..)` fails with EPERM (a distinctive errno: an unfiltered kernel says
+///    EAFNOSUPPORT or succeeds, so a test can tell the filter from a missing vsock module);
+/// 2. `io_uring_setup/enter/register` fail with ENOSYS (IORING_OP_SOCKET, kernel >= 5.19, would
+///    otherwise create a vsock socket without a `socket` syscall; programs fall back as on a
+///    kernel without io_uring);
+/// 3. x86_64 only: every syscall number with bit 30 set (the x32 ABI, `nr >= 0x40000000`) fails
+///    with ENOSYS, so the number checks above cannot be dodged through x32.
+///
+/// Only the native architecture is allowed: a 32-bit compat process is killed by the filters'
+/// architecture check. AF_NETLINK is NOT blocked: it cannot reach Windows and tools (`ip`, glibc
+/// `getifaddrs`) need it.
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
@@ -178,25 +185,71 @@ pub fn deny_vsock() -> Result<(), SandboxError> {
         BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
         SeccompRule,
     };
+    // Same numbers on x86_64 and aarch64 for io_uring (the generic table), not for socket.
     #[cfg(target_arch = "x86_64")]
     const SYS_SOCKET: i64 = 41;
     #[cfg(target_arch = "aarch64")]
     const SYS_SOCKET: i64 = 198;
-    const AF_VSOCK: u64 = 40;
-    const EAFNOSUPPORT: u32 = 97;
+    const IO_URING: [i64; 3] = [425, 426, 427];
     let un = |e: &dyn std::fmt::Display| SandboxError::Unavailable(format!("seccomp: {e}"));
+    let arch = || std::env::consts::ARCH.try_into().map_err(|e| un(&e));
+    let install = |f: SeccompFilter| -> Result<(), SandboxError> {
+        let bpf: BpfProgram = f.try_into().map_err(|e| un(&e))?;
+        seccompiler::apply_filter(&bpf).map_err(|e| un(&e))
+    };
     let cond = SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, AF_VSOCK)
         .map_err(|e| un(&e))?;
     let rule = SeccompRule::new(vec![cond]).map_err(|e| un(&e))?;
-    let filter = SeccompFilter::new(
-        [(SYS_SOCKET, vec![rule])].into_iter().collect(),
-        SeccompAction::Allow,
-        SeccompAction::Errno(EAFNOSUPPORT),
-        std::env::consts::ARCH.try_into().map_err(|e| un(&e))?,
-    )
-    .map_err(|e| un(&e))?;
-    let bpf: BpfProgram = filter.try_into().map_err(|e| un(&e))?;
-    seccompiler::apply_filter(&bpf).map_err(|e| un(&e))
+    install(
+        SeccompFilter::new(
+            [(SYS_SOCKET, vec![rule])].into_iter().collect(),
+            SeccompAction::Allow,
+            SeccompAction::Errno(EPERM),
+            arch()?,
+        )
+        .map_err(|e| un(&e))?,
+    )?;
+    // an empty rule list matches the syscall unconditionally
+    install(
+        SeccompFilter::new(
+            IO_URING.into_iter().map(|n| (n, vec![])).collect(),
+            SeccompAction::Allow,
+            SeccompAction::Errno(ENOSYS),
+            arch()?,
+        )
+        .map_err(|e| un(&e))?,
+    )?;
+    #[cfg(target_arch = "x86_64")]
+    {
+        let prog = x32_deny_program();
+        seccompiler::apply_filter(&prog).map_err(|e| un(&e))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+const AF_VSOCK: u64 = 40;
+#[cfg(target_os = "linux")]
+const EPERM: u32 = 1;
+#[cfg(target_os = "linux")]
+const ENOSYS: u32 = 38;
+
+/// Classic BPF: `if (nr >= 0x40000000) return ERRNO(ENOSYS); return ALLOW;`. The architecture
+/// check of the other filters kills foreign ABIs, so only the x32 bit matters here.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub(crate) fn x32_deny_program() -> Vec<seccompiler::sock_filter> {
+    const BPF_LD_W_ABS: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS
+    const BPF_JGE_K: u16 = 0x35; // BPF_JMP | BPF_JGE | BPF_K
+    const BPF_RET_K: u16 = 0x06;
+    const RET_ERRNO: u32 = 0x0005_0000;
+    const RET_ALLOW: u32 = 0x7fff_0000;
+    let i = |code, jt, jf, k| seccompiler::sock_filter { code, jt, jf, k };
+    vec![
+        i(BPF_LD_W_ABS, 0, 0, 0), // seccomp_data.nr
+        i(BPF_JGE_K, 0, 1, 0x4000_0000),
+        i(BPF_RET_K, 0, 0, RET_ERRNO | ENOSYS),
+        i(BPF_RET_K, 0, 0, RET_ALLOW),
+    ]
 }
 
 #[cfg(all(
@@ -244,8 +297,58 @@ fn trusted_file(p: &Path) -> bool {
 /// The helper binary: only in the same directory as `exe`, and trusted.
 #[cfg(any(target_os = "linux", all(test, unix)))]
 fn helper_next_to(exe: &Path) -> Option<PathBuf> {
-    let h = exe.parent()?.join(crate::HELPER_NAME);
-    trusted_file(&h).then_some(h)
+    helper_check(exe).ok()
+}
+
+/// Why the helper next to `exe` is (not) usable. Trusted means: `exe` itself still exists (a
+/// replaced binary shows as `... (deleted)` in `/proc`), the helper is a regular file, not a
+/// symlink, owned by root or the current user and not group/world-writable, and its directory is
+/// owned by root or the current user and not group/world-writable either.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+pub(crate) fn helper_check(exe: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::MetadataExt;
+    if exe.to_string_lossy().ends_with(" (deleted)") {
+        return Err("the running synt binary was replaced or deleted (an upgrade in progress?); restart synt".into());
+    }
+    let dir = exe.parent().ok_or("the executable has no directory")?;
+    let h = dir.join(crate::HELPER_NAME);
+    let name = crate::HELPER_NAME;
+    let lm = std::fs::symlink_metadata(&h)
+        .map_err(|_| format!("{name} is missing next to {}; reinstall synt (the archive and `scripts/install.sh` ship it; `cargo install` / `cargo build -p synthesis-cli` do not build it: also run `cargo build -p synthesis-sandbox`)", exe.display()))?;
+    if lm.file_type().is_symlink() || !lm.is_file() {
+        return Err(format!(
+            "{name} is not a regular file (a symlink is refused)"
+        ));
+    }
+    // The owner of /proc/self is the process's effective uid (no libc call needed). Off Linux
+    // (test builds only) there is no such file and the owner check is skipped.
+    let euid = std::fs::metadata("/proc/self").ok().map(|m| m.uid());
+    let owner_ok = |m: &std::fs::Metadata| m.uid() == 0 || euid.is_none_or(|e| m.uid() == e);
+    if !owner_ok(&lm) || lm.mode() & 0o022 != 0 {
+        return Err(format!(
+            "{name} must be owned by root or you and not writable by group/others"
+        ));
+    }
+    let dm = std::fs::metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    if !owner_ok(&dm) || dm.mode() & 0o022 != 0 {
+        return Err(format!(
+            "{} must be owned by root or you and not writable by group/others",
+            dir.display()
+        ));
+    }
+    Ok(h)
+}
+
+/// Whether the seccomp/Landlock helper next to the running executable is usable; the error says
+/// why not (for `synt doctor`).
+pub fn helper_status() -> Result<PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let exe = std::env::current_exe().map_err(|e| format!("current executable: {e}"))?;
+        helper_check(&exe)
+    }
+    #[cfg(not(target_os = "linux"))]
+    Err("Linux only".into())
 }
 
 /// Landlock through the `synthesis-sandbox-exec` helper. `abi` is the kernel's highest Landlock ABI.
@@ -533,17 +636,17 @@ impl BwrapBackend {
             push(&[Path::new("/var/run")], "--tmpfs");
         }
         if let Some(ctx) = wsl {
-            for m in ["/mnt/wsl", "/mnt/wslg"]
-                .map(Path::new)
-                .iter()
-                .filter(|m| ctx.mask.iter().any(|x| x == *m))
-            {
+            for m in &ctx.mask {
+                // the driver store is only masked together with the drives (GPU opt-out)
+                if m == Path::new(crate::wsl::DRIVER_STORE) && !policy.wsl_hide_drives {
+                    continue;
+                }
                 push(&[m], "--tmpfs");
             }
             if let Some(r) = &ctx.resolv {
                 push(&[r, r], "--ro-bind"); // DNS keeps working (a symlink into /mnt/wsl)
             }
-            for m in &ctx.host.windows_mounts {
+            for m in &ctx.drives {
                 if policy.wsl_hide_drives {
                     push(&[m], "--tmpfs");
                 } else {
@@ -555,7 +658,7 @@ impl BwrapBackend {
                 for r in policy
                     .readable_roots
                     .iter()
-                    .filter(|r| ctx.host.windows_mounts.iter().any(|m| r.starts_with(m)))
+                    .filter(|r| ctx.drives.iter().any(|m| r.starts_with(m)))
                 {
                     push(&[r, r], "--ro-bind");
                 }
@@ -648,7 +751,8 @@ impl BwrapBackend {
         let checked;
         let policy = match wsl {
             Some(ctx) => {
-                checked = crate::wsl::check_policy(policy, c.cwd.as_deref(), &ctx.host)?;
+                crate::wsl::require_known_mounts(&ctx.host)?;
+                checked = crate::wsl::check_policy(policy, &ctx.host)?;
                 &checked
             }
             None => policy,
@@ -657,10 +761,23 @@ impl BwrapBackend {
         let mut program: OsString = self.path.clone().into();
         if wsl.is_some() {
             let helper = self.helper.clone().ok_or_else(|| {
-                SandboxError::Unavailable(
-                    "WSL: the synthesis-sandbox-exec helper next to the executable is required to deny AF_VSOCK".into(),
-                )
+                SandboxError::Unavailable(format!(
+                    "WSL: the sandbox helper is required to deny AF_VSOCK: {}",
+                    helper_status().err().unwrap_or_else(|| "not found".into())
+                ))
             })?;
+            // a helper the sandboxed commands could replace would defeat the filter
+            if policy
+                .writable_roots
+                .iter()
+                .chain(&policy.tmp_dir)
+                .any(|r| canon_lossy(&helper).starts_with(r))
+            {
+                return Err(SandboxError::Unavailable(format!(
+                    "WSL: the helper {} lies under a writable root; install synt outside the workspace",
+                    helper.display()
+                )));
+            }
             args.splice(0..0, ["--no-vsock".into(), "--".into(), program]);
             program = helper.into();
         }
@@ -977,9 +1094,16 @@ mod tests {
             host: synthesis_platform::wsl::WslHost {
                 version: synthesis_platform::wsl::WslVersion::V2,
                 windows_mounts: vec![drive.to_path_buf()],
+                mounts_known: true,
             },
             resolv: resolv.map(Path::to_path_buf),
-            mask: vec!["/mnt/wsl".into(), "/mnt/wslg".into()],
+            mask: vec![
+                "/mnt/wsl".into(),
+                "/mnt/wslg".into(),
+                "/usr/lib/wsl/drivers".into(),
+            ],
+            // an unlisted /mnt/z drive is hidden too
+            drives: vec![drive.to_path_buf(), "/mnt/z".into()],
         }
     }
 
@@ -1008,6 +1132,9 @@ mod tests {
         let at = |n: &str| j.find(n).unwrap_or_else(|| panic!("{n} in {j}"));
         assert!(at("--tmpfs /run") < at("--tmpfs /mnt/wsl"), "{j}");
         at("--tmpfs /mnt/wslg");
+        // the driver store and an unlisted /mnt/<letter> drive are hidden by default
+        at("--tmpfs /usr/lib/wsl/drivers");
+        at("--tmpfs /mnt/z ");
         // resolv.conf comes back read-only after the mask
         assert!(
             at("--tmpfs /mnt/wsl ") < at("--ro-bind /mnt/wsl/resolv.conf /mnt/wsl/resolv.conf"),
@@ -1049,6 +1176,87 @@ mod tests {
             None,
         ));
         assert!(!j.contains("/mnt/"), "{j}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_trust_rejects_symlink_writable_dir_deleted_exe_and_missing() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("bin");
+        std::fs::create_dir(&dir).unwrap();
+        let exe = dir.join("synt");
+        let real = file_with_mode(t.path(), "real-helper", 0o755);
+        // missing: the message says how to get it
+        let e = helper_check(&exe).unwrap_err();
+        assert!(
+            e.contains("missing") && e.contains("cargo build -p synthesis-sandbox"),
+            "{e}"
+        );
+        // a symlink (even to a good file) is refused
+        std::os::unix::fs::symlink(&real, dir.join(crate::HELPER_NAME)).unwrap();
+        assert!(helper_check(&exe).unwrap_err().contains("symlink"));
+        std::fs::remove_file(dir.join(crate::HELPER_NAME)).unwrap();
+        // a good file, then a group/world-writable directory
+        file_with_mode(&dir, crate::HELPER_NAME, 0o755);
+        assert!(helper_check(&exe).is_ok());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let e = helper_check(&exe).unwrap_err();
+        assert!(e.contains("not writable by group/others"), "{e}");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // the running binary was replaced
+        let gone = dir.join("synt (deleted)");
+        assert!(
+            helper_check(&gone)
+                .unwrap_err()
+                .contains("replaced or deleted")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bwrap_wsl_wrap_refuses_unknown_mounts_and_a_helper_in_the_workspace() {
+        let ctx = wsl_ctx(Path::new("/mnt/c"), None);
+        let c = SandboxedCommand {
+            cwd: Some(p("/work")),
+            ..Default::default()
+        };
+        let pol = SandboxPolicy {
+            writable_roots: vec![p("/work")],
+            ..Default::default()
+        };
+        let b = BwrapBackend {
+            path: p("/b"),
+            helper: Some(p("/work/synthesis-sandbox-exec")),
+        };
+        let e = b.wrap_on(&pol, &c, Some(&ctx)).unwrap_err();
+        assert!(e.to_string().contains("under a writable root"), "{e}");
+        let mut blind = wsl_ctx(Path::new("/mnt/c"), None);
+        blind.host.mounts_known = false;
+        let ok = BwrapBackend {
+            path: p("/b"),
+            helper: Some(p("/h/x")),
+        };
+        let e = ok.wrap_on(&pol, &c, Some(&blind)).unwrap_err();
+        assert!(
+            matches!(e, SandboxError::Unavailable(_)) && e.to_string().contains("/proc/mounts"),
+            "{e}"
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn x32_program_denies_bit_30_syscalls_only() {
+        let p = x32_deny_program();
+        assert_eq!(p.len(), 4);
+        // ld nr; jge 0x40000000 (true -> next, false -> skip one); ret errno(ENOSYS); ret allow
+        assert_eq!((p[0].code, p[0].k), (0x20, 0));
+        assert_eq!(
+            (p[1].code, p[1].jt, p[1].jf, p[1].k),
+            (0x35, 0, 1, 0x4000_0000)
+        );
+        assert_eq!((p[2].code, p[2].k), (0x06, 0x0005_0000 | 38));
+        assert_eq!((p[3].code, p[3].k), (0x06, 0x7fff_0000));
     }
 
     #[cfg(unix)]
@@ -1193,12 +1401,14 @@ mod tests {
             ws: PathBuf,
         }
 
-        /// A fake Windows drive (a plain directory) holding a secret, with a workspace in it.
+        /// A fake Windows drive (a plain directory) holding a secret, and a workspace beside it.
         fn fx() -> Fx {
             let t = tempfile::tempdir().unwrap();
             let drive = t.path().canonicalize().unwrap().join("c");
-            let ws = drive.join("Users/u/ws");
+            // the workspace is NOT on the drive: a drive workspace is always refused
+            let ws = t.path().canonicalize().unwrap().join("ws");
             std::fs::create_dir_all(&ws).unwrap();
+            std::fs::create_dir_all(&drive).unwrap();
             std::fs::create_dir_all(drive.join("Windows")).unwrap(); // a real directory on PATH
             std::fs::write(drive.join("secret.txt"), "windows file").unwrap();
             Fx { _t: t, drive, ws }
@@ -1218,9 +1428,11 @@ mod tests {
                 host: synthesis_platform::wsl::WslHost {
                     version: synthesis_platform::wsl::WslVersion::V2,
                     windows_mounts: vec![f.drive.clone()],
+                    mounts_known: true,
                 },
                 resolv: None,
                 mask: vec![],
+                drives: vec![f.drive.clone()],
             };
             let c = SandboxedCommand {
                 program: "/bin/sh".into(),
@@ -1271,7 +1483,15 @@ mod tests {
                 return;
             };
             assert!(out.contains("v=uuuuuu"), "{out}");
-            assert!(out.contains("path=/usr/bin:/bin\n"), "{out}");
+            // canonical entries (/bin is /usr/bin on merged-usr), and the drive directory is gone
+            let path = out
+                .lines()
+                .find_map(|l| l.strip_prefix("path="))
+                .expect(&out);
+            assert!(
+                path.starts_with("/usr/bin") && !path.contains("Windows"),
+                "{out}"
+            );
             assert!(
                 out.contains("run=0"),
                 "/run is a fresh tmpfs, so /run/WSL cannot exist: {out}"
@@ -1289,11 +1509,13 @@ mod tests {
             let Some(out) = run(&f, true, vec![], vec![], &script) else {
                 return;
             };
-            assert!(out.contains("Users") && out.contains("ws-written"), "{out}");
+            assert!(out.contains("ws-written"), "{out}");
             assert!(
-                !out.contains("SECRET-VISIBLE") && !out.contains("DRIVE-WRITTEN"),
-                "{out}"
+                !out.contains("secret.txt"),
+                "the hidden drive lists nothing: {out}"
             );
+            assert!(!out.contains("SECRET-VISIBLE"), "{out}");
+            // a write to the hidden drive lands in the throwaway tmpfs, never on the real directory
             assert!(f.ws.join("ok.txt").exists() && !f.drive.join("evil.txt").exists());
         }
 

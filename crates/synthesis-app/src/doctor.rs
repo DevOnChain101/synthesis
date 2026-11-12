@@ -383,6 +383,16 @@ pub fn rows(env: &Env, cwd: &Path, trusted: bool) -> Vec<Row> {
             ),
         ),
     }
+    #[cfg(target_os = "linux")]
+    if let Err(e) = synthesis_sandbox::helper_status() {
+        add(
+            Level::Warn,
+            format!(
+                "sandbox helper missing or untrusted: {} (the Landlock backend and, on WSL, the seccomp filter need it; without it commands are refused under enforce)",
+                san(&e)
+            ),
+        );
+    }
     if let Some(host) = synthesis_sandbox::wsl::host().as_ref() {
         #[cfg(target_os = "linux")]
         let landlock = synthesis_sandbox::landlock_abi();
@@ -646,6 +656,7 @@ mod tests {
         let host = WslHost {
             version: WslVersion::Unknown,
             windows_mounts: vec![],
+            mounts_known: true,
         };
         let run = |files: &'static [(&'static str, &'static str)]| {
             let read = move |p: &str| {
@@ -686,6 +697,7 @@ mod tests {
         let host = WslHost {
             version: WslVersion::V1,
             windows_mounts: vec!["/mnt/c".into()],
+            mounts_known: true,
         };
         let files = |p: &str| match p {
             "/proc/sys/fs/binfmt_misc/WSLInterop" => Some("enabled\n".to_string()),
@@ -730,6 +742,7 @@ mod tests {
         let host2 = WslHost {
             version: WslVersion::V2,
             windows_mounts: vec![],
+            mounts_known: true,
         };
         let r = wsl_rows(
             &host2,

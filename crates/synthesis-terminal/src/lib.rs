@@ -787,7 +787,7 @@ impl TerminalRuntime {
             }
             if wsl {
                 // Before anything is created: a drive temp dir or workspace is refused first.
-                synthesis_sandbox::wsl::preflight(policy, cmd.cwd.as_deref())
+                synthesis_sandbox::wsl::preflight(policy)
                     .map_err(|e| Error::InvalidSpec(format!("sandbox policy: {e}")))?;
             }
             if let Some(t) = &policy.tmp_dir {

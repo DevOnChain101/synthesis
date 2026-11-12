@@ -30,15 +30,31 @@ fn require(ok: bool, what: &str) -> bool {
     ok
 }
 
-/// `socket(family, SOCK_STREAM)` through the helper's seccomp filter: the errno, or 0.
-fn socket_errno(family: u32) -> i32 {
-    let py = format!(
-        "import socket,sys\ntry:\n socket.socket({family},socket.SOCK_STREAM)\nexcept OSError as e:\n sys.exit(e.errno)\n"
-    );
-    let o = Command::new(HELPER)
-        .args(["--no-vsock", "--", "python3", "-c", &py])
-        .output()
-        .unwrap();
+const SOCKET_PY: &str = "import socket,sys\ntry:\n socket.socket(int(sys.argv[1]),socket.SOCK_STREAM)\nexcept OSError as e:\n sys.exit(e.errno)\n";
+// io_uring_setup(0, NULL): an unfiltered kernel answers EINVAL (22), the filter ENOSYS (38)
+const URING_PY: &str = "import ctypes,sys\nl=ctypes.CDLL(None,use_errno=True)\nl.syscall(425,0,0)\nsys.exit(ctypes.get_errno())\n";
+
+/// Exit code of `python3 -c script arg` run through the helper (and bwrap when `bwrap` is set).
+fn run_py(script: &str, arg: &str, bwrap: bool) -> i32 {
+    let mut c = Command::new(HELPER);
+    c.args(["--no-vsock", "--"]);
+    if bwrap {
+        let b = synthesis_sandbox::bwrap_probe()
+            .as_ref()
+            .expect("bubblewrap probe");
+        c.arg(b).args([
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--unshare-pid",
+            "--",
+        ]);
+    }
+    let o = c.args(["python3", "-c", script, arg]).output().unwrap();
     assert_ne!(
         o.status.code(),
         Some(126),
@@ -49,13 +65,37 @@ fn socket_errno(family: u32) -> i32 {
 }
 
 #[test]
-fn helper_denies_af_vsock_and_keeps_other_families() {
+fn helper_denies_af_vsock_and_io_uring_and_keeps_other_families() {
     if !require(have_python(), "python3") {
         return;
     }
-    assert_eq!(socket_errno(40), 97, "AF_VSOCK must fail with EAFNOSUPPORT");
-    assert_eq!(socket_errno(1), 0, "AF_UNIX must still work");
-    assert_eq!(socket_errno(2), 0, "AF_INET must still work");
+    // EPERM is distinctive: an unfiltered kernel answers EAFNOSUPPORT (97) or succeeds (0)
+    assert_eq!(
+        run_py(SOCKET_PY, "40", false),
+        1,
+        "AF_VSOCK must fail with EPERM"
+    );
+    assert_eq!(run_py(SOCKET_PY, "1", false), 0, "AF_UNIX must still work");
+    assert_eq!(run_py(SOCKET_PY, "2", false), 0, "AF_INET must still work");
+    // IORING_OP_SOCKET could create a vsock socket without the socket syscall
+    assert_eq!(
+        run_py(URING_PY, "", false),
+        38,
+        "io_uring_setup must fail with ENOSYS"
+    );
+}
+
+#[test]
+fn the_filters_survive_bubblewrap_end_to_end() {
+    if !require(have_python(), "python3")
+        || !require(BwrapBackend::detect().is_some(), "bubblewrap")
+    {
+        return;
+    }
+    // [helper, --no-vsock, --, bwrap, ..., python3 ...]: the same chain a WSL command runs
+    assert_eq!(run_py(SOCKET_PY, "40", true), 1);
+    assert_eq!(run_py(URING_PY, "", true), 38);
+    assert_eq!(run_py(SOCKET_PY, "1", true), 0);
 }
 
 #[test]
@@ -79,7 +119,7 @@ fn real_wsl2_sandbox_closes_interop() {
         [ -e $cmd ] && echo CMD-VISIBLE; \
         ($cmd /c echo pwned) 2>&1; \
         (echo x > /mnt/c/synt-wsl-test.txt) 2>/dev/null && echo DRIVE-WRITTEN; \
-        python3 -c 'import socket;socket.socket(40,1)' 2>&1 | grep -q 'not supported' && echo VSOCK-DENIED";
+        python3 -c 'import socket;socket.socket(40,1)' 2>&1 | grep -q 'not permitted' && echo VSOCK-DENIED";
     let cmd = SandboxedCommand {
         program: "/bin/sh".into(),
         args: vec!["-c".into(), script.into()],
