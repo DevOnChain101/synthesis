@@ -1,7 +1,7 @@
 //! Status aggregation (verification.md §3), completion gate (§4) and bounded
 //! self-correction (§5).
 
-use crate::baseline::Baseline;
+use crate::baseline::{Baseline, Drift};
 use crate::plan::{
     detect_checks, is_noop_check, plan_checks, plan_checks_from, referenced_scripts,
 };
@@ -10,6 +10,8 @@ use crate::types::*;
 use crate::weaken::{FileEdit, removed_prerequisite_guards, weakened_tests};
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
+use std::sync::Arc;
+use synthesis_core::WorkspaceContext;
 use synthesis_events::TaskStatus;
 use tokio_util::sync::CancellationToken;
 
@@ -186,12 +188,12 @@ pub fn aggregate(
     (status, lim)
 }
 
-/// Whether the failure output names a file the agent changed (a real regression, not noise).
+/// Whether the failure output names a file the agent changed (a real regression, not noise):
+/// the full workspace-relative path, with either separator.
 fn mentions_changed(summary: &str, changed: &[String]) -> bool {
-    changed.iter().any(|f| {
-        let name = f.rsplit('/').next().unwrap_or(f);
-        summary.contains(f.as_str()) || summary.contains(name)
-    })
+    changed
+        .iter()
+        .any(|f| summary.contains(f.as_str()) || summary.contains(&f.replace('/', "\\")))
 }
 
 /// A passed check that skipped tests (beyond its baseline) is not a clean pass.
@@ -208,6 +210,28 @@ fn downgrade_skips(checks: &mut [CheckResult], baseline: &HashMap<String, u64>) 
     }
 }
 
+/// The planned inferred checks and the workspace as they were when the session's first task
+/// started (verification.md §3b). Taking it reads the whole workspace: run it on a blocking thread.
+pub struct TaskStart {
+    baseline: Baseline,
+    frozen: Vec<Check>,
+}
+
+impl TaskStart {
+    pub fn take(ws: &WorkspaceContext) -> Self {
+        let frozen = detect_checks(&ws.cwd);
+        let prefix = ws.cwd.strip_prefix(&ws.root).unwrap_or(Path::new(""));
+        let extra = referenced_scripts(&ws.cwd, &frozen)
+            .into_iter()
+            .map(|s| prefix.join(s).to_string_lossy().replace('\\', "/"))
+            .collect();
+        Self {
+            baseline: Baseline::take(&ws.root, extra),
+            frozen,
+        }
+    }
+}
+
 /// Per-task gate: create one per task, call `evaluate` each time the model ends its turn.
 pub struct CompletionGate {
     runner: VerifyRunner,
@@ -215,9 +239,8 @@ pub struct CompletionGate {
     attempt: u32,
     unverified_round_used: bool,
     prev: Option<Prev>,
-    /// Inferred checks as they were at task start ([`begin`](Self::begin)).
-    frozen: Option<Vec<Check>>,
-    baseline: Option<Baseline>,
+    /// Frozen checks and the workspace snapshot ([`begin`](Self::begin)).
+    start: Option<Arc<TaskStart>>,
     /// Commands that failed and then passed on a re-run in this task.
     flaky: BTreeSet<String>,
 }
@@ -236,26 +259,24 @@ impl CompletionGate {
             attempt: 0,
             unverified_round_used: false,
             prev: None,
-            frozen: None,
-            baseline: None,
+            start: None,
             flaky: BTreeSet::new(),
         }
     }
 
-    /// Call once when the task starts, before the agent changes anything: freezes the inferred
-    /// check commands and snapshots the files that define them and the test files, so the agent
-    /// cannot redefine what "passing" means (verification.md §3b). Without it the gate falls
-    /// back to re-reading the project at evaluation time and cannot see shell-made changes.
-    pub fn begin(&mut self) {
-        let ws = self.runner.workspace();
-        let checks = detect_checks(&ws.cwd);
-        let prefix = ws.cwd.strip_prefix(&ws.root).unwrap_or(Path::new(""));
-        let extra = referenced_scripts(&ws.cwd, &checks)
-            .into_iter()
-            .map(|s| prefix.join(s).to_string_lossy().replace('\\', "/"))
-            .collect();
-        self.baseline = Some(Baseline::take(&ws.root, extra));
-        self.frozen = Some(checks);
+    /// Call when the task starts, before the agent changes anything, with the [`TaskStart`] of
+    /// the session (taken once, reused by later tasks until one ends verified, so weakening
+    /// carries over from "continue" prompts). Without it the gate re-reads the project at
+    /// evaluation time and cannot see shell-made changes.
+    pub fn begin(&mut self, start: Arc<TaskStart>) {
+        self.start = Some(start);
+    }
+
+    /// [`begin`](Self::begin) with a fresh snapshot of this gate's workspace.
+    pub fn begin_now(&mut self) -> Arc<TaskStart> {
+        let s = Arc::new(TaskStart::take(self.runner.workspace()));
+        self.start = Some(s.clone());
+        s
     }
 
     /// `claimed_done == false` means the harness forces a final evaluation (budget exhausted):
@@ -282,13 +303,25 @@ impl CompletionGate {
             .criteria
             .iter()
             .any(|c| c.source == CriterionSource::User);
-        if !has_user && !st.side_effects {
+        // What changed, from the baseline snapshot as well as from the tools' own records: a
+        // shell command that looked read-only can still have changed files.
+        let drift = match self.start.clone() {
+            Some(t) => Some(
+                tokio::task::spawn_blocking(move || t.baseline.drift())
+                    .await
+                    .unwrap_or_else(|_| Drift {
+                        incomplete: true,
+                        ..Default::default()
+                    }),
+            ),
+            None => None,
+        };
+        let drifted = drift.as_ref().is_some_and(|d| !d.changed.is_empty());
+        if !has_user && !st.side_effects && !drifted {
             return GateDecision::Complete(None);
         }
         self.attempt += 1;
         let started_at = now();
-        // What changed, from the baseline snapshot as well as from the tools' own records.
-        let drift = self.baseline.as_ref().map(Baseline::drift);
         let mut changed_files = st.changed_files.clone();
         if let Some(d) = &drift {
             for f in &d.changed {
@@ -299,12 +332,12 @@ impl CompletionGate {
             changed_files.sort();
         }
         let cwd = self.runner.workspace().cwd.clone();
-        let plan = match &self.frozen {
-            Some(f) => plan_checks_from(
+        let plan = match &self.start {
+            Some(t) => plan_checks_from(
                 &st.criteria,
                 &st.model_checks,
                 &cwd,
-                f.clone(),
+                t.frozen.clone(),
                 &changed_files,
             ),
             None => plan_checks(&st.criteria, &st.model_checks, &cwd, &changed_files),
@@ -312,21 +345,35 @@ impl CompletionGate {
         let mut checks = self.runner.run_with(&plan, cancel, auth).await;
         let mut limitations = vec![];
         for k in checks.iter_mut() {
-            let noop = k.status == VerificationStatus::Passed
-                && k.command.as_deref().is_some_and(|c| is_noop_check(&cwd, c));
-            if noop {
+            if k.status != VerificationStatus::Passed {
+                continue;
+            }
+            let cmd = k.command.clone().unwrap_or_default();
+            // A planned test check must have counted at least one passing test.
+            let counted = k.tests.as_ref().is_some_and(|t| t.passed > 0);
+            let why = if is_noop_check(&cwd, &cmd) {
+                Some("runs nothing that can fail")
+            } else if !counted
+                && k.declared_by != Declarer::Model
+                && matches!(
+                    k.kind,
+                    CheckKind::Unit | CheckKind::Integration | CheckKind::BrowserE2e
+                )
+            {
+                Some("exited 0 but its output counts no passing test")
+            } else {
+                None
+            };
+            if let Some(why) = why {
                 k.status = VerificationStatus::Unverified;
-                k.blocked_reason = Some("no-op command proves nothing".into());
-                limitations.push(format!(
-                    "{NOOP_CHECK}: {} ({}) runs nothing that can fail",
-                    k.id,
-                    k.command.as_deref().unwrap_or("")
-                ));
+                k.blocked_reason = Some(format!("proves nothing: {why}"));
+                limitations.push(format!("{NOOP_CHECK}: {} ({cmd}) {why}", k.id));
             }
         }
         downgrade_skips(&mut checks, &st.baseline_skipped);
-        // A harness or model check failing without mentioning what the agent changed gets one re-run: a pass on the
-        // second run is flaky evidence, not a clean pass.
+        // A harness or model check failing without mentioning what the agent changed gets one
+        // re-run. A pass on the re-run is flaky: the check stays `failed` (never silently
+        // upgraded or downgraded) and says so.
         for i in 0..checks.len() {
             let k = &checks[i];
             // A user-declared check is about the change itself: its failure is real.
@@ -341,41 +388,51 @@ impl CompletionGate {
             if again.status == VerificationStatus::Passed {
                 let cmd = again.command.clone().unwrap_or_default();
                 limitations.push(format!(
-                    "{FLAKY}: check {} ({cmd}) failed, then passed on an identical re-run; not a clean pass",
+                    "{FLAKY}: check {} ({cmd}) failed, then passed on an identical re-run; reported as failed",
                     again.id
                 ));
                 self.flaky.insert(cmd);
-                checks[i] = CheckResult {
-                    status: VerificationStatus::Unverified,
-                    blocked_reason: Some("flaky: failed once, passed on re-run".into()),
-                    ..again
-                };
             }
         }
-        // A command that flaked earlier in this task stays flaky evidence even when it now passes.
-        for k in checks.iter_mut().filter(|k| {
-            k.status == VerificationStatus::Passed
-                && k.command.as_ref().is_some_and(|c| self.flaky.contains(c))
-        }) {
-            k.status = VerificationStatus::Unverified;
-            k.blocked_reason =
-                Some("flaky: failed earlier in this task without a code change".into());
-            limitations.push(format!(
-                "{FLAKY}: check {} failed earlier in this task without a code change; a later pass is not a clean pass",
-                k.id
-            ));
+        // A command that flaked earlier in this task passes only if it passes 3 runs in a row.
+        for i in 0..checks.len() {
+            let flaky_before = checks[i].status == VerificationStatus::Passed
+                && checks[i]
+                    .command
+                    .as_ref()
+                    .is_some_and(|c| self.flaky.contains(c));
+            if !flaky_before {
+                continue;
+            }
+            for _ in 0..2 {
+                let again = self.runner.run_one_with(&plan[i], cancel, auth).await;
+                if again.status != VerificationStatus::Passed {
+                    limitations.push(format!(
+                        "{FLAKY}: check {} passed once but failed on a confirmation run; reported as failed",
+                        again.id
+                    ));
+                    checks[i] = again;
+                    break;
+                }
+            }
+            if checks[i].status == VerificationStatus::Passed {
+                limitations.push(format!(
+                    "{FLAKY}: check {} flaked earlier in this task; it now passed 3 runs in a row",
+                    checks[i].id
+                ));
+            }
         }
         let mut criteria = st.criteria.clone();
         let (mut status, lim) = aggregate(&mut criteria, &checks, self.cfg.inferred_only);
         limitations.extend(lim);
         // Editing what the checks assert or run voids a pass: it is reported, never `passed`.
         let mut weak: Vec<String> = vec![];
-        let edits = match &drift {
-            Some(d) => &d.edits,
-            None => &st.edits,
-        };
-        weak.extend(weakened_tests(edits));
-        weak.extend(removed_prerequisite_guards(&st.edits));
+        // Tool diffs and snapshot diffs together, one edit per path (the snapshot's wins).
+        let mut edits: Vec<FileEdit> = drift.as_ref().map_or(vec![], |d| d.edits.clone());
+        let seen: BTreeSet<String> = edits.iter().map(|e| e.path.clone()).collect();
+        edits.extend(st.edits.iter().filter(|e| !seen.contains(&e.path)).cloned());
+        weak.extend(weakened_tests(&edits));
+        weak.extend(removed_prerequisite_guards(&edits));
         if let Some(d) = &drift {
             if !d.weakened.is_empty() {
                 weak.push(format!("{TEST_FILES_MODIFIED}: {}", d.weakened.join(", ")));
@@ -387,13 +444,13 @@ impl CompletionGate {
                 ));
             }
             if d.incomplete {
-                weak.push(
-                    "workspace too large to snapshot completely; changes may be missed".into(),
-                );
+                weak.push(format!(
+                    "{TEST_FILES_MODIFIED}: workspace too large to snapshot completely; changes may be missed"
+                ));
             }
         }
         for l in weak {
-            if !l.starts_with("workspace too large") && status == VerificationStatus::Passed {
+            if status == VerificationStatus::Passed {
                 status = VerificationStatus::Unverified;
             }
             limitations.push(l);

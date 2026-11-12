@@ -703,7 +703,7 @@ async fn edit_without_a_relevant_check_is_unverified_not_not_applicable() {
 /// A check whose stdout is a node:test summary (portable: no node needed).
 fn summary_criteria(pass: u32, skipped: u32) -> Vec<Criterion> {
     let cmd = format!(
-        "echo 'ok 1 - needs db # SKIP'; echo '# pass {pass}'; echo '# fail 0'; echo '# skipped {skipped}'; echo '# todo 0'; cd ."
+        "echo 'ok 1 - needs db # SKIP'; echo '# pass {pass}'; echo '# fail 0'; echo '# skipped {skipped}'; echo '# todo 0'; hostname"
     );
     vec![Criterion::user("c1", "db works", Some(&cmd))]
 }
@@ -940,7 +940,7 @@ async fn fmt_passes_while_cargo_test_is_blocked_ends_unverified() {
         ("lib.rs", "#[test]\nfn t() {\n    assert_eq!(1, 1);\n}\n"),
     ]);
     let mut g = f.gate(GateConfig::default());
-    g.begin();
+    g.begin_now();
     let auth = block(&["cargo test", "cargo clippy"]);
     let r = unverified(eval_with(&mut g, &state(vec![], &["lib.rs"]), Some(&auth)).await);
     let fmt = r
@@ -965,7 +965,7 @@ fn pkg_fixture(extra: &[(&str, &str)]) -> Fx {
 
 /// A user criterion whose check passes on any host (no tool needed).
 fn cd_criteria() -> Vec<Criterion> {
-    vec![Criterion::user("c1", "ok", Some("cd ."))]
+    vec![Criterion::user("c1", "ok", Some("hostname"))]
 }
 
 #[tokio::test]
@@ -973,7 +973,7 @@ async fn changing_a_check_definition_during_the_task_caps_at_unverified() {
     let auth = block(&["npm"]);
     let f = pkg_fixture(&[]);
     let mut g = f.gate(GateConfig::default());
-    g.begin();
+    g.begin_now();
     let d = eval_with(&mut g, &state(cd_criteria(), &[]), Some(&auth)).await;
     assert!(
         matches!(d, GateDecision::Complete(Some(_))),
@@ -982,7 +982,7 @@ async fn changing_a_check_definition_during_the_task_caps_at_unverified() {
 
     let f = pkg_fixture(&[]);
     let mut g = f.gate(GateConfig::default());
-    g.begin();
+    g.begin_now();
     fs::write(
         f.ws.cwd.join("package.json"),
         r#"{"scripts":{"lint":"true"}}"#,
@@ -1048,7 +1048,7 @@ async fn shell_made_test_changes_are_seen_without_any_edit_record() {
         fs::create_dir(f.ws.cwd.join("tests")).unwrap();
         fs::write(f.ws.cwd.join(t), body).unwrap();
         let mut g = f.gate(GateConfig::default());
-        g.begin();
+        g.begin_now();
         let d = eval_with(&mut g, &state(cd_criteria(), &[]), None).await;
         assert!(
             matches!(d, GateDecision::Complete(Some(_))),
@@ -1097,7 +1097,7 @@ async fn no_op_checks_are_unverified() {
 }
 
 #[tokio::test]
-async fn a_check_failing_then_passing_is_flaky_not_verified() {
+async fn a_check_failing_then_passing_is_flaky_and_stays_failed() {
     if !have("node") {
         return;
     }
@@ -1106,11 +1106,109 @@ async fn a_check_failing_then_passing_is_flaky_not_verified() {
     let mut st = state(vec![], &["x.rs"]);
     st.model_checks = vec![check(&f, "m1", "node flaky.js", 60_000)];
     let mut g = f.gate(GateConfig::default());
+    // failed once, passed on the re-run: reported as failed, with the flake named
     let r = unverified(eval_with(&mut g, &st, None).await);
-    assert_eq!(r.status, VerificationStatus::Unverified);
+    assert_eq!(r.status, VerificationStatus::Failed);
     assert!(r.summary().contains("flaky"), "{}", r.summary());
-    // the next attempt passes on its first run, and is still flaky evidence
+    // later it passes 3 runs in a row: not blocked forever, but the earlier flake is on record
     let r = unverified(eval_with(&mut g, &st, None).await);
+    assert!(
+        r.limitations
+            .iter()
+            .any(|l| l.contains("passed 3 runs in a row")),
+        "{:?}",
+        r.limitations
+    );
+}
+
+#[tokio::test]
+async fn a_model_check_with_a_planned_command_cannot_stand_in_for_it() {
+    let f = fx(&[("package.json", r#"{"scripts":{"test":"node --test"}}"#)]);
+    let mut g = f.gate(GateConfig::default());
+    g.begin_now();
+    let mut st = state(vec![], &["a.js"]);
+    st.model_checks = vec![check(&f, "m1", "npm run test", 60_000)];
+    let auth = block(&["npm"]);
+    let r = unverified(eval_with(&mut g, &st, Some(&auth)).await);
     assert_eq!(r.status, VerificationStatus::Unverified);
-    assert!(r.summary().contains("flaky"), "{}", r.summary());
+    assert!(
+        r.limitations
+            .iter()
+            .any(|l| l.starts_with("planned test check not passed")),
+        "{:?}",
+        r.limitations
+    );
+    assert!(
+        r.checks.iter().all(|k| k.declared_by != Declarer::Model),
+        "model duplicate was planned"
+    );
+}
+
+#[tokio::test]
+async fn inline_rust_tests_and_ignore_in_src_are_seen() {
+    let lib = "pub fn f() -> u8 { 1 }\n#[cfg(test)]\nmod t {\n    #[test]\n    fn a() {\n        assert_eq!(super::f(), 1);\n    }\n}\n";
+    for (name, new) in [
+        (
+            "deleted assert",
+            "pub fn f() -> u8 { 1 }\n#[cfg(test)]\nmod t {\n    #[test]\n    fn a() {\n    }\n}\n",
+        ),
+        (
+            "ignore",
+            "pub fn f() -> u8 { 1 }\n#[cfg(test)]\nmod t {\n    #[test]\n    #[ignore]\n    fn a() {\n        assert_eq!(super::f(), 1);\n    }\n}\n",
+        ),
+    ] {
+        let f = fx(&[]);
+        fs::create_dir(f.ws.cwd.join("src")).unwrap();
+        fs::write(f.ws.cwd.join("src/lib.rs"), lib).unwrap();
+        let mut g = f.gate(GateConfig::default());
+        g.begin_now();
+        fs::write(f.ws.cwd.join("src/lib.rs"), new).unwrap();
+        let r = unverified(eval_with(&mut g, &state(cd_criteria(), &[]), None).await);
+        let lim = r.limitations.join("|");
+        assert!(
+            lim.contains("test files modified") && lim.contains("src/lib.rs"),
+            "{name}: {lim}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_planned_test_that_counts_no_tests_is_unverified() {
+    if !have("npm") {
+        return;
+    }
+    let f = fx(&[(
+        "package.json",
+        r#"{"scripts":{"test":"node -e \"console.log(1)\""}}"#,
+    )]);
+    let r = unverified(
+        eval_with(
+            &mut f.gate(GateConfig::default()),
+            &state(vec![], &["a.js"]),
+            None,
+        )
+        .await,
+    );
+    assert_eq!(r.status, VerificationStatus::Unverified);
+    assert!(
+        r.limitations
+            .iter()
+            .any(|l| l.contains("counts no passing test")),
+        "{:?}",
+        r.limitations
+    );
+}
+
+#[tokio::test]
+async fn a_shell_that_only_touches_files_still_triggers_the_gate() {
+    let f = fx(&[]);
+    let mut g = f.gate(GateConfig::default());
+    g.begin_now();
+    let mut st = state(vec![], &[]);
+    st.side_effects = false;
+    let d = eval_with(&mut g, &st, None).await;
+    assert!(matches!(d, GateDecision::Complete(None)), "control: {d:?}");
+    fs::write(f.ws.cwd.join("made-by-an-inert-looking-command.txt"), "x").unwrap();
+    let d = eval_with(&mut g, &st, None).await;
+    assert!(!matches!(d, GateDecision::Complete(None)), "{d:?}");
 }

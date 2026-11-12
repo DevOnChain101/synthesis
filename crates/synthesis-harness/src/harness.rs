@@ -487,6 +487,9 @@ pub struct Harness {
     pub(crate) model_resolver: Option<crate::agents::ModelResolver>,
     pub(crate) tracker: Arc<dyn ChangeTracker>,
     pub(crate) gate: Option<GateFactory>,
+    /// Per session: the frozen checks and workspace snapshot of its first task, kept until a
+    /// task ends verified, so weakening done in one task is still seen by the next.
+    pub(crate) starts: Mutex<HashMap<String, Arc<synthesis_verification::TaskStart>>>,
     pub(crate) config: HarnessConfig,
     pub(crate) env: Arc<BTreeMap<String, String>>,
     pub(crate) read_ledger: Arc<Mutex<HashMap<PathBuf, SystemTime>>>,
@@ -544,6 +547,7 @@ impl Harness {
             model_resolver: None,
             tracker: Arc::new(NoChangeTracker),
             gate: None,
+            starts: Mutex::default(),
             config,
             env: Arc::new(env),
             read_ledger: Arc::default(),
@@ -1041,7 +1045,25 @@ impl Harness {
                 self.tracker.begin(&task.workspace, &task.task_id).await;
                 // Freeze the planned checks and snapshot tests/definitions before anything changes.
                 if let Some(g) = gate.as_mut() {
-                    g.begin();
+                    let prior = lock(&self.starts).get(&task.session_id).cloned();
+                    let start = match prior {
+                        Some(s) => s,
+                        None => {
+                            let ws = task.workspace.clone();
+                            // a panicked scan is retried inline rather than skipped
+                            let s = tokio::task::spawn_blocking(move || {
+                                synthesis_verification::TaskStart::take(&ws)
+                            })
+                            .await
+                            .unwrap_or_else(|_| {
+                                synthesis_verification::TaskStart::take(&task.workspace)
+                            });
+                            let s = Arc::new(s);
+                            lock(&self.starts).insert(task.session_id.clone(), s.clone());
+                            s
+                        }
+                    };
+                    g.begin(start);
                 }
                 self.drive(&task, &main, &mut st, &mut gate, &req.criteria)
                     .await
@@ -1050,6 +1072,10 @@ impl Harness {
         let (status, reason, report_id, final_text) =
             self.with_background(&task, &mut bg_rx, work).await;
         self.hub.end_task();
+        if status == TaskStatus::Completed {
+            // verified: the next task starts from this state
+            lock(&self.starts).remove(&task.session_id);
+        }
         self.peer_task_ended(status, &final_text, &lock(&task.changed));
         self.peer_snapshot(&main.name, &st.messages);
         match parked_kind {

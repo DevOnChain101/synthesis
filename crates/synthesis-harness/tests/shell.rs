@@ -794,6 +794,34 @@ async fn deleting_a_test_with_bash_ends_unverified() {
     );
 }
 
+/// The snapshot belongs to the session: a test deleted in one task is still held against the next
+/// task ("continue"), which would otherwise start from the weakened state and look clean.
+#[tokio::test]
+async fn weakening_carries_over_to_the_next_task_of_the_session() {
+    let opts = Opts {
+        allow: vec!["Write".into(), "Bash".into()],
+        ..gate_opts(false)
+    };
+    let turns = vec![
+        Turn::tool("b1", "Bash", json!({"command": "rm test/a.test.js"})),
+        Turn::text("done"),
+        Turn::text("done again"),
+        Turn::text("nothing more to do"),
+        Turn::text("still nothing"),
+    ];
+    let mut rig = gated(opts, turns, None);
+    std::fs::create_dir(rig.ws.cwd.join("test")).unwrap();
+    std::fs::write(rig.ws.cwd.join("test/a.test.js"), "test('a', () => {});\n").unwrap();
+    let mut req = synthesis_harness::TaskRequest::new("fix it");
+    req.criteria = vec![Criterion::user("c1", "ok", Some("test -d ."))];
+    let first = rig.run_with(req, CancellationToken::new()).await;
+    assert_eq!(first.status, TaskStatus::Unverified, "{}", first.reason);
+    // the same session id again (a host that keeps the conversation going)
+    rig.session.status = synthesis_core::SessionStatus::Created;
+    let second = rig.run("continue").await;
+    assert_eq!(second.status, TaskStatus::Unverified, "{}", second.reason);
+}
+
 /// D12: a harness-inferred, recognised verification command (`make test` from a Makefile) runs
 /// without an explicit allow in `default` and `acceptEdits`, headless or not, so the task is not
 /// blocked only because a trusted inferred check asked. A deny rule still wins.

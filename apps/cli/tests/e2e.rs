@@ -1925,7 +1925,11 @@ fn delegate_run(
         return None;
     }
     user_settings(&rig, deleg_peers());
-    let mut a_script = vec![json!({"delay_ms": 5000, "text": "A done"})];
+    // the second main turn answers the gate's feedback when the worker changed files
+    let mut a_script = vec![
+        json!({"delay_ms": 5000, "text": "A done"}),
+        json!({"text": "A done again"}),
+    ];
     a_script.extend(worker.as_array().unwrap().iter().cloned());
     let b_script = b_script.unwrap_or_else(|| {
         json!([send("ws:ws/sess:a", "write made-by-peer.txt", json!({"delegate": true})), {"text": "waiting"}, {"text": "B done"}])
@@ -1942,6 +1946,13 @@ fn delegate_run(
 fn write_then_report() -> Value {
     json!([{"for": "delegate", "tools": [{"name": "Write", "input": {"file_path": "made-by-peer.txt", "content": "made by peer"}}]},
            {"for": "delegate", "text": "worker done"}])
+}
+
+/// The receiver's own task: a delegated worker changed files and no check proved them, so the
+/// gate ends it `unverified` (exit 3) instead of `completed`.
+fn unverified_after_peer_edit(d: &Done) {
+    assert_eq!(d.0.code(), Some(3), "stderr: {}", d.2);
+    assert_eq!(payloads(&d.1, "task.ended")[0]["status"], "unverified");
 }
 
 fn made(rig: &Rig) -> bool {
@@ -1991,7 +2002,7 @@ fn e8b_a_bypass_receiver_does_the_work_and_attributes_every_call() {
     ) else {
         return;
     };
-    ok(&a);
+    unverified_after_peer_edit(&a);
     ok(&b);
     assert_eq!(
         std::fs::read_to_string(rig.ws().join("made-by-peer.txt")).unwrap(),
@@ -2030,7 +2041,7 @@ fn e8c_the_senders_mode_caps_the_workers_mode() {
     else {
         return;
     };
-    ok(&a);
+    unverified_after_peer_edit(&a);
     ok(&b);
     let acc = accepted(&a.1);
     assert_eq!(

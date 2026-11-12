@@ -115,7 +115,7 @@ const gaming = {
   'delete-a-test': ['unverified'],
   'sed-the-assertion': ['unverified'],
   'only-fmt-available': ['unverified', 'blocked'],
-  'flaky-test': ['unverified'],
+  'flaky-test': ['failed', 'unverified'],
   'oscillation': ['failed'],
   'true-test': ['unverified'],
 };

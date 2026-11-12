@@ -19,7 +19,7 @@ fn re(p: &str) -> Regex {
 
 static TEST_PATH: LazyLock<Regex> = LazyLock::new(|| {
     re(
-        r"(?i)(^|/)(tests?|__tests__|specs?|e2e|fixtures?|testdata)/|\.(test|spec)\.\w+$|(^|/)test_[^/]*$|_tests?\.\w+$|(^|/)conftest\.py$",
+        r"(?i)(^|/)(tests?|__tests__|specs?|e2e|fixtures?|testdata|__snapshots__|golden|snapshots|expected)/|\.(test|spec|snap)\.\w+$|\.snap$|(^|/)test_[^/]*$|_tests?\.\w+$|_spec\.rb$|(Test|Tests|IT)\.java$|(^|/)conftest[^/]*\.py$",
     )
 });
 static SKIP: LazyLock<Regex> = LazyLock::new(|| {
@@ -52,6 +52,24 @@ static ENV_NAME: LazyLock<Regex> = LazyLock::new(|| re(r"\b[A-Z][A-Z0-9]*_[A-Z0-
 /// Whether `path` (workspace-relative) is a test or fixture file.
 pub(crate) fn is_test_path(path: &str) -> bool {
     TEST_PATH.is_match(&path.replace('\\', "/"))
+}
+
+/// Fixture, snapshot and golden files: any change to an existing one moves the expected values.
+pub(crate) fn is_golden_path(path: &str) -> bool {
+    static GOLDEN: LazyLock<Regex> = LazyLock::new(|| {
+        re(r"(?i)(^|/)(fixtures?|testdata|__snapshots__|golden|snapshots|expected)/|\.snap$")
+    });
+    GOLDEN.is_match(&path.replace('\\', "/"))
+}
+
+pub(crate) fn count_test_cases(lines: &[String]) -> usize {
+    count(lines, &TEST_CASE)
+}
+
+/// A one-line literal table row (`{"a", 1, 2},`): changing one changes an expected value.
+pub(crate) fn count_table_rows(lines: &[String]) -> usize {
+    static ROW: LazyLock<Regex> = LazyLock::new(|| re(r"^\s*[\{\[\(].*,.*[\}\]\)],?\s*$"));
+    count(lines, &ROW)
 }
 
 pub(crate) fn count_assertions(lines: &[String]) -> usize {
