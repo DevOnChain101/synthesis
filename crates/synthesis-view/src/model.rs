@@ -405,7 +405,7 @@ fn text_of_content(content: &Value) -> String {
 }
 
 fn is_synthetic_prompt(text: &str) -> bool {
-    let t = text.trim_matches(synthesis_tui_base::text::is_js_space);
+    let t = text.trim_matches(synthesis_cli_ui_base::text::is_js_space);
     t.is_empty()
         || [
             "<system-reminder>",
@@ -705,7 +705,7 @@ fn handle_assistant(s: &mut Session, entry: &Value, ts: Option<i64>) {
             }
             "text" => {
                 let t = str_of(block, "text");
-                let tt = t.trim_matches(synthesis_tui_base::text::is_js_space);
+                let tt = t.trim_matches(synthesis_cli_ui_base::text::is_js_space);
                 if !tt.is_empty() && tt != "(empty)" {
                     push_feed(s, ts, "text", short(t, 120));
                     if !s.turn_replied {

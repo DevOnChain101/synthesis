@@ -32,7 +32,7 @@ pub struct StoreLoad<'a> {
 #[derive(Clone, Debug, Default)]
 pub struct ViewState {
     pub convo: Convo,
-    /// Sub-agent transcripts, commands, verification, browser calls and changed files (Agent view).
+    /// Sub-agent transcripts, commands, verification, browser calls and changed files (Super Agent view).
     pub panes: AgentPanes,
     /// Activity, Tools & Skills and Topology are read off this.
     pub session: Session,

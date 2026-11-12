@@ -7,7 +7,7 @@ use gpui::{
     ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div, prelude::*, px,
     svg,
 };
-use synthesis_tui_render::theme as t;
+use synthesis_cli_ui_render::theme as t;
 
 use crate::{brand, theme::hsla};
 
@@ -786,7 +786,7 @@ pub fn chat_head(
 #[cfg(test)]
 mod contrast_tests {
     use super::*;
-    use synthesis_tui_render::theme::measure::contrast;
+    use synthesis_cli_ui_render::theme::measure::contrast;
 
     /// WCAG AA for body text (4.5:1): the text colours the view draws, on every ground they sit on.
     #[test]

@@ -40,14 +40,14 @@ P1
 - Hover, empty and loading states for the file explorer, browser and terminal tabs. Check: a shot of each tab with no data shows a sentence, not a blank.
 
 P2
-- CLI parity features not yet in the TUI view (see `docs/tui-feature-port.md`): list there is the source; pick by owner priority. Check: each ported command has a `--cmd` shot test.
+- CLI parity features not yet in the TUI view (see `docs/cli-feature-port.md`): list there is the source; pick by owner priority. Check: each ported command has a `--cmd` shot test.
 - Per-widget min-width table for all header items, tested in one place. Check: one unit test covers every header item at 900, 1100, 1400.
 - Real-window pass on Linux and Windows (not run here).
 
 ## Status of the plan (2026-11-10, branch `feat/desktop-ui-polish-p0`)
 
 P0 all three and P1 all items done, verified by shots (above) and tests. Details not in the table:
-- Contrast: `MUTED` is 4.84:1 on SURFACE but 4.06:1 on ELEVATED (selected rows, open tab), so `chrome::dim` is now `#8E8F93` (4.57:1 on ELEVATED); the terminal TUI keeps `MUTED`. The red `ERROR` is 5.6:1 on SURFACE; the earlier unreadable look was the blink's 0.25-alpha phase, now only the dot blinks. Test `contrast_tests` (dim, TEXT, TEXT_STRONG, ERROR, WARN, ACCENT on BG, SURFACE, ELEVATED), `docs/tui-palette.md` updated.
+- Contrast: `MUTED` is 4.84:1 on SURFACE but 4.06:1 on ELEVATED (selected rows, open tab), so `chrome::dim` is now `#8E8F93` (4.57:1 on ELEVATED); the CLI keeps `MUTED`. The red `ERROR` is 5.6:1 on SURFACE; the earlier unreadable look was the blink's 0.25-alpha phase, now only the dot blinks. Test `contrast_tests` (dim, TEXT, TEXT_STRONG, ERROR, WARN, ACCENT on BG, SURFACE, ELEVATED), `docs/cli-palette.md` updated.
 - Empty states: terminal ("No command ran yet...") and browser ("no page opened yet", "No screenshot saved yet.") already had sentences (shots empty-terminal-*, empty-browser-* with `--bare`). The file explorer in a trusted folder that is not a git repo showed `not a git repository` but rescanned on every frame (the stale check treated any note as the untrusted one): fixed to compare with the untrusted note only. No hover states were added.
 - Not done: the Trust dialog at 900x600 still cuts its text and option list mid-line inside their scroll boxes (that is what scrolling is; the cue says so); the chat stage above the dock is nearly empty while it is open at that height.
 
@@ -58,7 +58,7 @@ P0 all three and P1 all items done, verified by shots (above) and tests. Details
 - Trust dialog at 900x600 / 1100x700 / 1400x900: done. The text box is cut at a multiple of the line height (paragraph gap is one line, line height `LINE`), the option list at a row edge (`whole_rows` from the previous frame's row bounds), both sized from the window height so the options and the prompt stay visible; the cues stay. Verified by eye on shots in `/private/tmp/claude-501/p2-shots` (trust1-*): no line is cut inside either box at the three sizes. At 900x600 the stage above the dock is a thin strip and shows 3 text lines and 2 options (scroll for the rest); at 1100x700 the explorer note above is still clipped mid-line inside its own box (not touched).
 - Header min-width table: done. `HEADER_MIN` / `HeaderItem` / `header_min` / `top_fixed` in `widgets/chrome.rs`; `top_bar` and `chat_head` read it. Test `every_header_item_fits_its_row_at_900_1100_1400`.
 - Hover: done in code (tabs, Workspace and Running rows, panel header fold labels, the two "new ..." rows, same white 5% fill as the existing file/diff rows; picker options and chat cards already had it). NOT verified visually: the offscreen harness has no pointer. Empty file explorer now says "No files to list yet: the project has no tracked or new files." (loading and not-loaded sentences already existed).
-- CLI parity (from `docs/tui-feature-port.md` and `synthesis_tui::local_commands`; every other local command is already wired): `/quit` = `/exit`, `/perms` = `/permissions` (the terminal TUI's two aliases, previously "unknown command"), `/agents --all|-a` also prints the other sessions' table. Tests in `live.rs` (`slash_commands_are_never_dropped_silently`) and `tests/commands_fake.rs`; shot `--cmd "/perms;;/agents --all"` at 1100x700 shows the permissions report, the agents report and the "peers are off" line.
+- CLI parity (from `docs/cli-feature-port.md` and `synthesis_cli_ui::local_commands`; every other local command is already wired): `/quit` = `/exit`, `/perms` = `/permissions` (the CLI's two aliases, previously "unknown command"), `/agents --all|-a` also prints the other sessions' table. Tests in `live.rs` (`slash_commands_are_never_dropped_silently`) and `tests/commands_fake.rs`; shot `--cmd "/perms;;/agents --all"` at 1100x700 shows the permissions report, the agents report and the "peers are off" line.
 
 ## Status of the owner's 2026-11-10 findings (branch `fix/desktop-chat-pad-activity-usage`)
 

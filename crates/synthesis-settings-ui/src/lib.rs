@@ -1,4 +1,4 @@
-//! Settings model for the desktop Settings view (and later the TUI `/config`): a typed catalogue
+//! Settings model for the desktop Settings view (and later the CLI `/config`): a typed catalogue
 //! ([`SettingsSchema`]) and a store ([`SettingsStore`]) that shows the effective value and origin of
 //! every key and writes the USER settings file atomically. No UI dependencies.
 //!

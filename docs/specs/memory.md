@@ -6,7 +6,7 @@ Status: accepted (2026-10-29); decisions D1–D8 are settled (§15); M0 (F1–F7
 1. Memory is **data, never instructions or permission grants**. It never reaches the permission engine, the auto-mode judge's user intent, approval dialogs or `set_mode`.
 2. Synthesis never edits an instruction file or skill by itself. It writes a *proposal*, and the owner applies it.
 3. No secrets are stored: every field passes the `Redactor` (synthesis-events io.rs:11) and the secret-path rules.
-4. Local only (`$SYNT_HOME`). Works on macOS/Linux/Windows, headless and in the TUI.
+4. Local only (`$SYNT_HOME`). Works on macOS/Linux/Windows, headless and in the CLI.
 5. Retrieval is BM25 (SQLite FTS5) by default; embeddings are optional and off.
 6. Every model call made for memory is capped (tokens, wall time, daily spend); a memory failure never changes a task result.
 
@@ -25,7 +25,7 @@ Synthesis has **session (short-term) memory plus static instruction files**. It 
 | Todos | in memory (tools tasks.rs) | session | process | agent | tool results | — | — |
 | Store rows | `synt.db` sessions/tasks/events/verification_reports | per session | permanent | automatic | never | — | no repo key (F6) |
 | Auto-memory | `$SYNT_HOME/projects/<cwd>/memory/*.md`, staged by import (import.rs:1714) | per cwd | files | import | **not loaded** | — | F5 |
-| `#` mode, `/memory` | synthesis-tui-render only (agent.rs:2728, dialogs.rs:111) | — | — | — | — | — | not wired (F4) |
+| `#` mode, `/memory` | synthesis-cli-ui-render only (agent.rs:2728, dialogs.rs:111) | — | — | — | — | — | not wired (F4) |
 
 **M0 findings** (static reading; each needs a test first):
 - **F1** `WorkspaceContext::open(.., cwd, cwd, ..)` (run.rs:548) makes the launch dir the root. Started in `repo/src`, Synthesis misses `repo/AGENTS.md` (`load_one` rejects it as outside) and `repo/.synt/skills`, while settings use `find_project_root` (synthesis-settings lib.rs:131). Unverified by a run.
@@ -177,7 +177,7 @@ Rules use the existing syntax (`MemoryWrite(scope:user)`). In headless runs an a
 - **Store protection:** `$SYNT_HOME/memory` goes into the sandbox `deny_paths` (read and write) and the permission layer's protected paths, so `Bash`/`Write` cannot read or forge it. Permissions follow store.rs:93-139: 0700/0600, symlinks refused (helpers made `pub`).
 - **Privacy:** `synt.memory.enabled` (D1). Per-workspace opt-out: `synt.memory.disabled_workspaces` globs in user settings, or `memory.enabled:false` in a project `.synt/settings.json` (off only, never on), or `--no-memory`. `synt memory delete --workspace` purges.
 
-## 10. CLI and TUI
+## 10. CLI and CLI
 - **Commands:** `synt memory list|search|show|add|edit|delete|review|proposals|apply|export|import|stats|prune|reflect`.
   - `edit` opens `$EDITOR` on the markdown form and saves a new `owner` version.
   - `export` writes `jsonl` (lossless) or `md` (for review).
@@ -188,7 +188,7 @@ Rules use the existing syntax (`MemoryWrite(scope:user)`). In headless runs an a
 slot cmd.test · used 12 (ok 11) · session 1a2b3c4d task 3 · 2026-10-20
 Tests: `cargo test --workspace`
 ```
-- **TUI:**
+- **CLI:**
   - `/memory` shows this workspace's records, what is injected now, and pending review items, with actions open, forget and pin.
   - `#text` saves an `owner` fact. It wires the existing render mode (F4) and its hint changes to "remember this (Synthesis memory)".
   - `/status` gets a `memory` row.
@@ -221,7 +221,7 @@ Gate: if (2) fails after one tuning round, injection defaults to off and `Memory
 | Phase | Scope | Main files |
 |---|---|---|
 | **M0** audit fixes | F1–F7; `workspace_key` in synthesis-core (shared with messaging R10a-2, whichever lands first) | apps/cli run.rs, ctx.rs; synthesis-context instructions.rs; synthesis-core; synthesis-harness; config.md |
-| **M1** store, CLI, retrieval | new crate `crates/synthesis-memory` (schema, store, query builder, scorer, scanner, export); deterministic episodes; `<memory>` block; 4 tools; `synt memory`; `#`, `/memory`; events | synthesis-memory; synthesis-context assemble.rs, lib.rs; synthesis-harness context.rs, exec.rs, toolbox.rs; synthesis-tools schemas.json; synthesis-permissions; synthesis-settings; synthesis-events; apps/cli main.rs, memory.rs, run.rs; synthesis-tui app.rs; specs tools/events/config, CLI.md |
+| **M1** store, CLI, retrieval | new crate `crates/synthesis-memory` (schema, store, query builder, scorer, scanner, export); deterministic episodes; `<memory>` block; 4 tools; `synt memory`; `#`, `/memory`; events | synthesis-memory; synthesis-context assemble.rs, lib.rs; synthesis-harness context.rs, exec.rs, toolbox.rs; synthesis-tools schemas.json; synthesis-permissions; synthesis-settings; synthesis-events; apps/cli main.rs, memory.rs, run.rs; synthesis-cli-ui app.rs; specs tools/events/config, CLI.md |
 | **M2** reflection, skills | jobs, prompt/parser, trust from evidence, slots, proposals, `Learned` skills, `review`/`apply` | synthesis-memory reflect.rs; apps/cli ctx.rs; synthesis-tools skill.rs |
 | **M3** consolidation, embeddings | decay/archive/prune, anchors; feature `memory-embeddings`: `Embedder` in synthesis-providers (OpenAI-compatible `/v1/embeddings` only), brute-force cosine, hybrid score; optional `messages_fts` (D6) | synthesis-memory, synthesis-providers, synthesis-session schema v2 |
 | **M4** evaluation | §12 | tests/agent-evals |
@@ -266,7 +266,7 @@ The owner accepted every recommendation above:
 - **F1** The workspace root is the repository root (nearest ancestor with `.git` or `.synt`, never `$HOME`; else the launch dir); the launch dir stays the cwd. `AGENTS.md` of every ancestor between root and cwd (root first) and `<root>/.synt/skills` load when Synthesis starts in a subfolder. Side effect: the sandbox write root is now the repository, not the launch dir (file tools still resolve against the cwd).
 - **F2** Instruction files and their `@imports` honour `Read` deny rules; a denied file is not injected and is reported as a startup notice.
 - **F3** `TaskState` records successfully edited files (`Write`/`Edit`/`NotebookEdit`) and open failed `Bash` checks (closed by a later success of the same command), derived from the history before each request and each compaction.
-- **F4** TUI `# note` and `/memory`: the person picks the file (project: root `AGENTS.md`, else `AGENTS.md`, else `.synt/AGENTS.md`; user: `$SYNT_HOME/AGENTS.md`), the note is one line, secrets are masked, and nothing is written before the choice. `.synt/AGENTS.md` is loaded beside the winning instruction file. Notes apply to new sessions.
+- **F4** CLI `# note` and `/memory`: the person picks the file (project: root `AGENTS.md`, else `AGENTS.md`, else `.synt/AGENTS.md`; user: `$SYNT_HOME/AGENTS.md`), the note is one line, secrets are masked, and nothing is written before the choice. `.synt/AGENTS.md` is loaded beside the winning instruction file. Notes apply to new sessions.
 - **F5** Auto-memory staged by `synt import claude` (`$SYNT_HOME/projects/<sanitized dir>/memory/*.md`) loads at the lowest priority, `MEMORY.md` first, 8 KiB per file and 16 KiB in total, inside the untrusted-data fence.
 - **F6** `workspace_key`, `workspace_label` and `repo_key` (synthesis-core `key.rs`) are on `WorkspaceContext`; `session.started.workspace.workspace_key` carries the key (events.md). `repo_key` follows the `.git` file and `commondir` as `git rev-parse --git-common-dir` does, without spawning git.
 - **F7** Confirmed on macOS: without a deny rule a sandboxed command read `synt.db` and the memory files. `synthesis_sandbox::synthesis_state_paths` (`auth.json`, `settings.json`, `synt.db`, `-wal`, `-shm`, `memory/`) is now denied in the sandbox policy (also in the standard credential list for `~/.synt`) and in the permission engine's protected paths (`Env::protect`), so it also holds for a custom `SYNT_HOME`.
@@ -281,7 +281,7 @@ Done, in new crate `crates/synthesis-memory`:
 
 Deviations and gaps (to do):
 - The block is the last system block, after `<task_state>`, not before it (the skills block is appended the same way).
-- The 4 in-task tools (`MemorySearch/Write/Update/Forget`), the `memory` permission class, `/memory`, `#` wiring, the TUI `/status` row, the typed `memory.*` events and the `synt doctor` rows are not built (they touch the TUI, tools, permissions and events crates). `synt memory edit` is not built.
+- The 4 in-task tools (`MemorySearch/Write/Update/Forget`), the `memory` permission class, `/memory`, `#` wiring, the CLI `/status` row, the typed `memory.*` events and the `synt doctor` rows are not built (they touch the CLI, tools, permissions and events crates). `synt memory edit` is not built.
 - The memory directory is protected by M0's `synthesis_state_paths` (sandbox and permission engine); no further protection was added.
 - Verified-command facts (`cmd.verify.<hash>`) need the verification report commands, which `TaskOutcome` does not carry; only the episode is written. Compaction checkpoints are not stored.
 - A project `.synt/settings.json` opt-out (D7) and the `disabled_workspaces` globs are not read; `--no-memory`, the user setting and `optout` are.
@@ -338,7 +338,7 @@ Built (`crates/synthesis-app/src/memtools.rs`, `memcmd.rs`, synthesis-events, sy
 - **Reflection is opt-in.** The earlier default (on) is replaced by `synt.memory.reflection: true` in the user settings.json, because it sends task content to the provider and the owner has not confirmed a default policy (D5 is therefore not in force). `synt run` writes the episode locally either way.
 - **D7.** A project `.synt/settings.json` can turn memory off; user `disabled_workspaces` globs are read.
 
-Still open: retrieval again after a compaction and compaction checkpoints; verified-command facts (`cmd.verify.<hash>`) and the command list in the episode (`TaskOutcome` lacks them); `agent` scope and pinned-only memory for sub-agents; consolidation merge; USD cost cap; `stats` p50/p95 tokens, hit rate and reflection cost; import of Claude auto-memory; the block position before `<task_state>`; TUI `#`, `/memory`, `/status` (UI paused).
+Still open: retrieval again after a compaction and compaction checkpoints; verified-command facts (`cmd.verify.<hash>`) and the command list in the episode (`TaskOutcome` lacks them); `agent` scope and pinned-only memory for sub-agents; consolidation merge; USD cost cap; `stats` p50/p95 tokens, hit rate and reflection cost; import of Claude auto-memory; the block position before `<task_state>`; CLI `#`, `/memory`, `/status` (UI paused).
 
 ### Backend completion, round 2 (2026-11-01, UI paused)
 - **Permissions.** `MemoryUpdate`/`MemoryForget` allow a note the agent saved for this workspace and ask for any other (denied headless and in `dontAsk`): the engine gets a `NoteOracle` (`Env.memory_notes`) from the run's store. After a yes the tool acts on workspace or user notes (never another workspace's); an `owner` note is archived but never rewritten.
@@ -350,7 +350,7 @@ Still open: retrieval again after a compaction and compaction checkpoints; verif
 - **Consolidation (§7).** `Store::consolidate`: non-owner, unslotted, unpinned notes with near-identical titles (Jaccard 0.8) merge into the stronger one; runs on every 20th task and in `prune`.
 - **Import (§10).** `synt memory import --claude`; notes arrive `untrusted` and `proposed` (stricter than the first text, per the security review).
 - **Bugs found re-reading the merged code, each with a test:** (1) concurrent first opens of a fresh store failed (`disk I/O error` on the WAL switch) and a second process could re-run a migration it had just lost the race for; (2) an existing directory made 0755 was not tightened to 0700; (3) retrieval scaled bm25 min-max, so the weakest of several candidates always scored 0 and was dropped: two equally relevant notes returned one. It is now the ratio to the best match (raised to the 4th power, keeping the 0.3 floor and the quality gate: precision@k 1.00, wrong 0.00 on the corpus); (4) a command such as `grep permission` in the episode quarantined the whole episode; (5) the checkpoint would have been fed back into its own retrieval, so it is written after.
-- **Still open (superseded by round 3 below):** the cold/warm evaluation and dogfooding (need provider keys and the owner); TUI `#`, `/memory`, `/status` (UI paused).
+- **Still open (superseded by round 3 below):** the cold/warm evaluation and dogfooding (need provider keys and the owner); CLI `#`, `/memory`, `/status` (UI paused).
 
 ### Backend completion, round 3 (2026-11-01, UI paused)
 - **Schema newer than the build (§11).** `Store::open` opens it read-only (`PRAGMA query_only`, `Store::read_only()`): retrieval and `list/search/show/export` work; every write fails with "memory is read-only: its schema is newer than this build". A run prints one warning, injects notes, but writes no episode, checkpoint or job and has no reflector. `synt doctor` says READ-ONLY.
@@ -361,4 +361,4 @@ Still open: retrieval again after a compaction and compaction checkpoints; verif
 - **`MemorySearch` in a sub-agent (§4 vs §8).** §4 wins: a sub-agent's `MemorySearch` returns pinned notes only (`ToolContext.sub_agent`); its own `agent` notes are in the block it is given at start. §8's "Sub-agents get `MemorySearch` only" still holds, with that filter.
 - **Reflection tokens.** A provider that sends no usage gets a chars/4 estimate of the prompt and the reply; `memory.reflection.completed` then carries `"estimated": true` and the estimate also feeds `stats` and the daily USD cap (when the model has a price).
 - **Out on purpose.** Optional embeddings (M3) are not built; retrieval is FTS5/BM25 only.
-- **Still open:** the cold/warm evaluation and dogfooding (need provider keys and the owner); TUI `#`, `/memory`, `/status` (UI paused).
+- **Still open:** the cold/warm evaluation and dogfooding (need provider keys and the owner); CLI `#`, `/memory`, `/status` (UI paused).

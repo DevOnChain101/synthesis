@@ -121,7 +121,7 @@ pub enum Item {
         warning: bool,
         text: String,
     },
-    /// An internal row (memory, peer and hook bookkeeping): drawn only with `synt.tui.verbose`.
+    /// An internal row (memory, peer and hook bookkeeping): drawn only with `synt.cli.verbose` (CLI) or `synt.tui.verbose` (desktop).
     Internal(String),
 }
 
@@ -388,7 +388,7 @@ impl Convo {
                         checks: String::new(),
                     }
                 } else {
-                    // wording of the classic TUI: a task that is not `completed` is never a success
+                    // wording of the CLI: a task that is not `completed` is never a success
                     let word = match status {
                         TaskStatus::Failed => "failed",
                         TaskStatus::Cancelled => "cancelled",
@@ -703,7 +703,7 @@ impl Convo {
                 warning: level != "info",
                 text: text.clone(),
             }),
-            // The rows below are the classic TUI's wording (`synthesis-tui` chat.rs): what a person
+            // The rows below are the CLI's wording (`synthesis-cli-ui` chat.rs): what a person
             // must see is a notice, bookkeeping is an `Internal` row (verbose only).
             Event::BudgetExceeded {
                 budget,

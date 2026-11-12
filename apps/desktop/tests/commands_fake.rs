@@ -446,7 +446,7 @@ fn files_diff_focus_peers_name_and_permission_rules() {
     live.submit("/focus");
     assert!(live.focus_view);
 
-    // session-only rules, the TUI's check
+    // session-only rules, the CLI's check
     live.submit("/permissions allow Bash(git status:*)");
     assert_eq!(
         last_note(&live),

@@ -3,7 +3,7 @@
 //! (docs/specs/config.md §6.1); nothing here is invented.
 
 use serde_json::{Value, json};
-use synthesis_settings::TUI_PANELS;
+use synthesis_settings::UI_PANELS;
 
 /// Sections of the Settings view. Titles follow the topology cards of `cli.html`; the design has no
 /// settings form for them (see docs/specs/desktop.md §6), so each is mapped to real keys below.
@@ -17,7 +17,7 @@ pub enum Section {
     Mcp,
     Skills,
     SubAgents,
-    /// Not a card in the design: the `synt.tui` toggles the classic TUI already has.
+    /// Not a card in the design: the `synt.tui` toggles the CLI already has.
     Interface,
     /// Not a card in the design: how the desktop window looks (`synt.tui.opacity`, `blur`, logo, motion).
     Appearance,
@@ -311,7 +311,7 @@ impl SettingsSchema {
                 Appearance,
                 "Window opacity",
                 Percent {
-                    min: u64::from(synthesis_settings::TUI_OPACITY_MIN),
+                    min: u64::from(synthesis_settings::UI_OPACITY_MIN),
                     max: 100,
                 },
             )
@@ -382,7 +382,7 @@ impl SettingsSchema {
         ] {
             f.push(b(&format!("synt.tui.{k}"), Interface, l, d).live().help(h));
         }
-        for (k, l) in TUI_PANELS {
+        for (k, l) in UI_PANELS {
             f.push(
                 b(&format!("synt.tui.panels.{k}"), Interface, l, true)
                     .live()

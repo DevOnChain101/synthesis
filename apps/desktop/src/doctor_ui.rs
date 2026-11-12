@@ -2,7 +2,7 @@
 //! each with an ok / warn / fail glyph, and the summary the Settings view shows. Names of variables only.
 
 use synthesis_app::doctor::{Level, Row, summary};
-use synthesis_tui_base::complete::Command;
+use synthesis_cli_ui_base::complete::Command;
 
 use crate::live::{Action, Live, NoticeKind, Submitted};
 

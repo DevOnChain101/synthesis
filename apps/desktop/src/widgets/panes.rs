@@ -9,7 +9,7 @@ use gpui::{
     Styled as _, div, prelude::*, px,
 };
 use serde_json::Value;
-use synthesis_tui_render::theme as t;
+use synthesis_cli_ui_render::theme as t;
 use synthesis_view::agent::{CmdSource, CmdState};
 
 use crate::live::Live;
@@ -204,7 +204,7 @@ pub fn rel(cwd: &str, path: &str) -> String {
 
 /// The files the session changed, each with its diff when open (`open` holds the paths); `toggle(path)` is
 /// the click handler of a file header and `jump(call_id)` the one of its "show in chat" button (the tool row
-/// of the latest edit). Shared by the TUI view's diff tab and the Agent view's.
+/// of the latest edit). Shared by the TUI view's diff tab and the Super Agent view's.
 pub fn diff(
     live: &Live,
     open: &HashSet<String>,

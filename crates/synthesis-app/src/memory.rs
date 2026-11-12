@@ -1,4 +1,4 @@
-//! `#` notes and `/memory` in the TUI: the person's own, confirmed append to an instruction file.
+//! `#` notes and `/memory` in the CLI: the person's own, confirmed append to an instruction file.
 //! Nothing here is automatic and nothing here runs for the model.
 
 use std::io::Write;
@@ -9,7 +9,7 @@ use synthesis_events::Redactor;
 
 const NOTE_CAP: usize = 2048;
 
-/// What the TUI needs to save `#` notes and to answer `/memory`.
+/// What the CLI needs to save `#` notes and to answer `/memory`.
 #[derive(Clone)]
 pub struct Notes {
     pub user: PathBuf,
@@ -57,7 +57,7 @@ impl Notes {
         final_note(text, &Redactor::new(self.secrets.clone())).0
     }
 
-    pub fn hook(self) -> synthesis_tui::MemoryHook {
+    pub fn hook(self) -> synthesis_cli_ui::MemoryHook {
         let report = {
             let mut v = vec!["Instruction files loaded at start:".to_string()];
             v.extend(self.loaded.iter().cloned());
@@ -76,7 +76,7 @@ impl Notes {
             v
         };
         let shown = |p: &Path| p.display().to_string();
-        synthesis_tui::MemoryHook {
+        synthesis_cli_ui::MemoryHook {
             user_file: shown(&self.user),
             project_file: shown(&self.project),
             report: Box::new(move || report.clone()),

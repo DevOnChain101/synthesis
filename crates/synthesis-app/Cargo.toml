@@ -32,7 +32,7 @@ synthesis-session = { path = "../synthesis-session" }
 synthesis-settings = { path = "../synthesis-settings" }
 synthesis-terminal = { path = "../synthesis-terminal" }
 synthesis-tools = { path = "../synthesis-tools" }
-synthesis-tui = { path = "../synthesis-tui" }
+synthesis-cli-ui = { path = "../synthesis-cli-ui" }
 synthesis-verification = { path = "../synthesis-verification" }
 synthesis-workspace = { path = "../synthesis-workspace" }
 rusqlite = { version = "0.41", features = ["bundled"] }

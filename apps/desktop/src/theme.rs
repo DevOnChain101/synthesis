@@ -1,11 +1,11 @@
-//! Platinum palette (docs/tui-palette.md) as GPUI colours. The values are the TUI's own tokens
-//! (`synthesis-tui-render::theme`), so the two views cannot drift apart.
+//! Platinum palette (docs/cli-palette.md) as GPUI colours. The values are the CLI's own tokens
+//! (`synthesis-cli-ui-render::theme`), so the two views cannot drift apart.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use gpui::{App, Hsla, SharedString, WindowBackgroundAppearance};
 use gpui_component::{Theme, ThemeMode};
-use synthesis_tui_render::theme as t;
+use synthesis_cli_ui_render::theme as t;
 
 pub fn hsla(c: t::Rgb) -> Hsla {
     gpui::rgb(u32::from_be_bytes([0, c[0], c[1], c[2]])).into()
@@ -16,7 +16,7 @@ static OPACITY: AtomicU8 = AtomicU8::new(100);
 /// Sets the window opacity (percent) that [`fill`] paints with. One window per process, so a global.
 pub fn set_opacity(pct: u8) {
     OPACITY.store(
-        pct.clamp(synthesis_settings::TUI_OPACITY_MIN, 100),
+        pct.clamp(synthesis_settings::UI_OPACITY_MIN, 100),
         Ordering::Relaxed,
     );
 }
@@ -36,7 +36,7 @@ pub fn solid(c: t::Rgb) -> Hsla {
 
 /// What the window asks the platform for: nothing behind it at 100 %, else see-through, blurred if wanted
 /// and supported.
-pub fn background(tui: &synthesis_settings::TuiSettings) -> WindowBackgroundAppearance {
+pub fn background(tui: &synthesis_settings::UiSettings) -> WindowBackgroundAppearance {
     if tui.opacity >= 100 {
         WindowBackgroundAppearance::Opaque
     } else if tui.blur && crate::settings_view::model::blur_unsupported().is_none() {
@@ -61,7 +61,7 @@ pub fn mode_look(m: synthesis_permissions::Mode) -> (t::Rgb, &'static str) {
 
 /// Colours of the values in the Session and Context panels (labels stay dim). One place, platinum tokens only.
 pub mod value {
-    use synthesis_tui_render::theme as t;
+    use synthesis_cli_ui_render::theme as t;
     pub const MODE: t::Rgb = t::CYAN;
     pub const MODEL: t::Rgb = t::ACCENT_LIGHT;
     pub const PATH: t::Rgb = t::INFO;
@@ -155,7 +155,7 @@ mod tests {
                         .is_some()
                 );
                 (
-                    synthesis_tui_render::dialogs::mode_name(Some(m.as_str())),
+                    synthesis_cli_ui_render::dialogs::mode_name(Some(m.as_str())),
                     c,
                     i,
                 )
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn background_asks_for_what_the_settings_and_platform_allow() {
-        let mut s = synthesis_settings::TuiSettings::default();
+        let mut s = synthesis_settings::UiSettings::default();
         assert_eq!(background(&s), WindowBackgroundAppearance::Opaque);
         s.blur = true;
         assert_eq!(

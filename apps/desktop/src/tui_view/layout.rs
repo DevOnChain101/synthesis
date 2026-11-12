@@ -163,7 +163,7 @@ pub fn tiers(height: f32) -> Tiers {
     }
 }
 
-/// The `synt.tui.panels.*` settings keys (docs/TUI.md "Settings"), mapped onto the panels of `cli.html`:
+/// The `synt.tui.panels.*` settings keys (docs/CLI-APP.md "Settings"), mapped onto the panels of `cli.html`:
 /// `session` = Session, `tools` = Tools & Skills, `activity` = Recent Activity (prompts and answers in one
 /// panel), `tokens` = Context, `topology` = Synthesis Topology, `usage` = Usage & Metrics, `status` = Mission.
 /// Never hideable (owner decision 2026-11-09): Workspace, Running, the chat (with the sub-agent transcript beside
@@ -196,7 +196,7 @@ pub const HIDEABLE: [(&str, &str); 7] = [
     ("status", "Mission"),
 ];
 
-/// The panels that stay when everything else is hidden, with the reason (docs/TUI.md).
+/// The panels that stay when everything else is hidden, with the reason (docs/CLI-APP.md).
 pub const ALWAYS: [(&str, &str); 4] = [
     ("Workspace", "always shown"),
     ("Running", "always shown"),

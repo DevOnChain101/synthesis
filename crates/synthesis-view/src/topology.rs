@@ -1,7 +1,7 @@
 //! State of the Topology panel: node states (dispatch / working / returning / failed / done), the
 //! stage pipeline Plan -> Guard -> Orch -> Exec -> Verify -> Learn, and per-node counters, derived
-//! from a [`Session`] (itself built from `Event`s). The TUI draws it as a character canvas
-//! (`synthesis-tui-render::flow`); a GUI can draw the same [`Topology`] its own way.
+//! from a [`Session`] (itself built from `Event`s). The CLI draws it as a character canvas
+//! (`synthesis-cli-ui-render::flow`); a GUI can draw the same [`Topology`] its own way.
 
 use std::collections::BTreeSet;
 

@@ -1,6 +1,6 @@
-//! The modal dialogs shared by the TUI view and the Agent view: permission asks (`permission` and
+//! The modal dialogs shared by the TUI view and the Super Agent view: permission asks (`permission` and
 //! `outside_read`), the plan, the questions (with the free-text "Other" answer) and the pickers. The text
-//! is what the harness sent, shown the way the TUI shows it: the reason first, then every line of the
+//! is what the harness sent, shown the way the CLI shows it: the reason first, then every line of the
 //! tool input.
 
 use gpui::{
@@ -8,7 +8,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, div, prelude::*, px,
 };
 use gpui_component::text::TextView;
-use synthesis_tui_render::theme as t;
+use synthesis_cli_ui_render::theme as t;
 
 use crate::live::{DialogKind, Live, PickerKind, input_lines};
 use crate::rewind::GROUP_LINES;

@@ -19,8 +19,8 @@ use gpui::{
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::Scrollbar;
 use gpui_component::slider::{Slider, SliderEvent, SliderState};
+use synthesis_cli_ui_render::theme as t;
 use synthesis_settings_ui::{Kind, Origin, Section};
-use synthesis_tui_render::theme as t;
 
 use crate::theme::hsla;
 use crate::tui_view::layout::Hidden;
@@ -110,9 +110,9 @@ fn tab_label(s: Section) -> &'static str {
 }
 
 /// The dash panels switched off in `synt.tui.panels.*` (applied when the TUI view starts).
-pub fn hidden_from(tui: &synthesis_settings::TuiSettings) -> Hidden {
+pub fn hidden_from(tui: &synthesis_settings::UiSettings) -> Hidden {
     let mut h = Hidden::default();
-    for ((key, _), shown) in synthesis_settings::TUI_PANELS.iter().zip(tui.panels) {
+    for ((key, _), shown) in synthesis_settings::UI_PANELS.iter().zip(tui.panels) {
         if !shown {
             h.hide(key);
         }
@@ -124,7 +124,7 @@ pub fn hidden_from(tui: &synthesis_settings::TuiSettings) -> Hidden {
 pub struct Close;
 
 /// `synt.tui` changed (a saved edit, or a slider being dragged): the shell applies it to the window and the TUI view.
-pub struct Applied(pub synthesis_settings::TuiSettings);
+pub struct Applied(pub synthesis_settings::UiSettings);
 
 /// "Restart session": the shell opens a fresh session, which reads the settings again.
 pub struct Restart;
@@ -400,10 +400,10 @@ impl SettingsView {
     }
 
     /// `synt.tui` as the file holds it now (what the shell applies).
-    fn tui_now(&self) -> synthesis_settings::TuiSettings {
+    fn tui_now(&self) -> synthesis_settings::UiSettings {
         self.model
             .as_ref()
-            .map(|m| synthesis_settings::read_user_tui(&m.cfg.home).0)
+            .map(|m| synthesis_settings::read_user_ui(&m.cfg.home, "tui").0)
             .unwrap_or_default()
     }
 
@@ -444,7 +444,7 @@ impl SettingsView {
     fn preview(&mut self, key: &str, v: u64, cx: &mut Context<Self>) {
         if key == "synt.tui.opacity" {
             let mut t = self.tui_now();
-            t.opacity = v.clamp(u64::from(synthesis_settings::TUI_OPACITY_MIN), 100) as u8;
+            t.opacity = v.clamp(u64::from(synthesis_settings::UI_OPACITY_MIN), 100) as u8;
             cx.emit(Applied(t));
             cx.notify();
         }
@@ -1815,7 +1815,7 @@ mod tests {
 
     #[test]
     fn interface_panel_flags_become_hidden_panels() {
-        let mut t = synthesis_settings::TuiSettings::default();
+        let mut t = synthesis_settings::UiSettings::default();
         assert_eq!(hidden_from(&t), Hidden::default());
         t.panels[1] = false; // mcp
         t.panels[7] = false; // usage
@@ -2141,7 +2141,7 @@ mod tests {
         assert_eq!((seen[0].opacity, seen[0].motion), (60, true));
         assert_eq!((seen[1].opacity, seen[1].motion), (60, false));
         assert_eq!((seen[2].opacity, seen[2].motion), (45, false));
-        let on_disk = synthesis_settings::read_user_tui(&dir.path().join("home")).0;
+        let on_disk = synthesis_settings::read_user_ui(&dir.path().join("home"), "tui").0;
         assert_eq!(on_disk.opacity, 60, "the preview wrote nothing");
         // the memory change waits for a session: the banner has a working button. Clicking only asks the shell:
         // nothing is cleared and the popup stays until the shell says the session was restarted
@@ -2225,7 +2225,7 @@ mod tests {
                 s.apply("synt.tui.panels.usage", Change::Bool(false), window, cx)
             });
         });
-        let t: synthesis_settings::TuiSettings = seen.get().expect("Applied emitted");
+        let t: synthesis_settings::UiSettings = seen.get().expect("Applied emitted");
         let h = hidden_from(&t);
         assert!(h.usage && !h.session);
         assert!(dir.path().join("home/settings.json").exists());

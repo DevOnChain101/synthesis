@@ -1,4 +1,4 @@
-//! What the desktop Agent view shows beyond the conversation, as one reducer over the event stream:
+//! What the desktop Super Agent view shows beyond the conversation, as one reducer over the event stream:
 //! a transcript per sub-agent, the command history (Bash calls and `process.*`), verification
 //! reports, browser calls (with the latest screenshot path) and the files the session changed.
 //! Pure state, no GPUI. The main conversation stays in [`crate::convo`].

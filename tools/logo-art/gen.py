@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generates crates/synthesis-tui-render/src/logo_art.rs (braille art of the brand symbol) offline.
+"""Generates crates/synthesis-cli-ui-render/src/logo_art.rs (braille art of the brand symbol) offline.
 
 Python standard library only (zlib decodes the PNG). Usage, from the repository root:
     python3 tools/logo-art/gen.py [--png PATH] [--out PATH] [--preview]
@@ -127,7 +127,7 @@ def rust(art, shade, png):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--png", default="design/01-brand/logo/png/synthesis-symbol-transparent-512.png")
-    ap.add_argument("--out", default="crates/synthesis-tui-render/src/logo_art.rs")
+    ap.add_argument("--out", default="crates/synthesis-cli-ui-render/src/logo_art.rs")
     ap.add_argument("--preview", action="store_true", help="print the art instead of writing the file")
     a = ap.parse_args()
     art, shade = build(sample(*read_png(a.png)))

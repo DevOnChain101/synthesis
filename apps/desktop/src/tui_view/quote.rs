@@ -7,7 +7,7 @@ use gpui::{
     AnyElement, ClipboardItem, Context, InteractiveElement as _, IntoElement as _,
     ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, prelude::*, px,
 };
-use synthesis_tui_render::theme as t;
+use synthesis_cli_ui_render::theme as t;
 
 use super::TuiView;
 use super::panels::{dim, strong, text, with_alpha};
