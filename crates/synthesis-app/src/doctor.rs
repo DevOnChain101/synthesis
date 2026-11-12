@@ -713,7 +713,9 @@ mod tests {
             "/proc/mounts" => Some("C: /mnt/c drvfs rw,noatime 0 0\n".to_string()),
             _ => None,
         };
-        let path = "/usr/bin:/mnt/c/SECRET-DIR/bin";
+        // joined with the host's separator (`;` on Windows), like the real PATH
+        let path = std::env::join_paths(["/usr/bin", "/mnt/c/SECRET-DIR/bin"]).unwrap();
+        let path = path.to_str().unwrap();
         let r = wsl_rows(
             &host,
             &files,
