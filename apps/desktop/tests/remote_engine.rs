@@ -252,7 +252,7 @@ fn a_session_through_a_fake_wsl() {
         match a {
             ["--status"] => out(vec![]),
             ["-l", "-v"] => out(utf16("  NAME STATE VERSION\r\n* Ubuntu Stopped 2\r\n")),
-            ["-d", "Ubuntu", "--exec", "sh", ..] => out(b"/home/me/.synt/bin/synt\n".to_vec()),
+            ["-d", "Ubuntu", "--exec", "/bin/sh", ..] => out(b"/home/me/.synt/bin/synt\n".to_vec()),
             [
                 "-d",
                 "Ubuntu",
@@ -260,7 +260,7 @@ fn a_session_through_a_fake_wsl() {
                 "/home/me/.synt/bin/synt",
                 "--version",
             ] => out(format!("synt {VERSION}\n").into_bytes()),
-            ["-d", "Ubuntu", "--exec", "wslpath", "-u", p] => out(format!(
+            ["-d", "Ubuntu", "--exec", "/usr/bin/wslpath", "-u", p] => out(format!(
                 "/mnt/c{}\n",
                 p.trim_start_matches("C:").replace('\\', "/")
             )
@@ -288,7 +288,7 @@ fn a_session_through_a_fake_wsl() {
         seen.lock()
             .unwrap()
             .iter()
-            .any(|c| c.starts_with("-d Ubuntu --exec wslpath -u C:"))
+            .any(|c| c.starts_with("-d Ubuntu --exec /usr/bin/wslpath -u C:"))
     );
     // another distro's folder is refused before any engine starts
     let e = wsl::start_via(&run, &exe, "", VERSION, &env, Path::new(r"\\wsl$\Debian\x"));

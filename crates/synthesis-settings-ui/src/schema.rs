@@ -309,7 +309,7 @@ impl SettingsSchema {
         // ---- WSL (Windows desktop only; user file only, a project file can never turn it on)
         f.push(
             b("synt.desktop.wsl.enabled", Execution, "Run the agent in WSL2", false)
-                .help("Windows only. Runs the Linux engine inside WSL2 and works on Linux paths there. Engine settings and API keys live inside WSL (~/.synt there), not on Windows; use {file:} provider keys, because wsl.exe --exec does not load the shell profile."),
+                .help("Windows only. Runs the Linux engine inside WSL2 and works on Linux paths there. Engine settings and API keys live inside WSL (~/.synt there), not on Windows; use {file:} provider keys, because wsl.exe --exec does not load the shell profile. This is NOT isolation: until the sandbox work lands, the agent can run Windows programs (interop) and write /mnt/c."),
         );
         f.push(
             Field::new("synt.desktop.wsl.distro", Execution, "WSL distro", Text)

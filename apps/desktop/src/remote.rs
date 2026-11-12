@@ -458,7 +458,12 @@ fn drain_stderr(r: std::process::ChildStderr, s: &Shared) {
         if t.len() == TAIL_LINES {
             t.pop_front();
         }
-        t.push_back(text.chars().take(200).collect());
+        t.push_back(
+            synthesis_view::toolview::redact_text(&text)
+                .chars()
+                .take(200)
+                .collect(),
+        );
     }
 }
 

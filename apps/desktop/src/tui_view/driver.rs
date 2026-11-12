@@ -2372,7 +2372,7 @@ pub fn build(
     let prior_model = model.clone();
     let mut project = project;
     // WSL mode (Windows, Settings toggle): the engine runs in the distro, which has no session store yet
-    if crate::wsl::enabled(&home) {
+    if crate::wsl::enabled(&home)? {
         let folder = match &target {
             None => project,
             Some(Target::New(p)) => p.clone(),

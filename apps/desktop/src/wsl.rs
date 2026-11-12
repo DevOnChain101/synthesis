@@ -10,8 +10,8 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::UnboundedReceiver;
-use serde_json::Value;
 use synthesis_config::Env;
+use synthesis_harness::sanitize_for_display;
 
 use crate::engine::{Engine, UiMsg};
 use crate::remote::Launcher;
@@ -46,14 +46,19 @@ pub fn run_wsl(exe: &Path, args: &[&str], wait: Duration) -> Result<Out, String>
         .stderr(Stdio::null());
     #[cfg(windows)]
     std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000);
+    // the exe is <root>\System32\wsl.exe and wsl.exe needs SystemRoot even in a closed environment
+    if let Some(root) = exe.parent().and_then(Path::parent) {
+        cmd.env("SystemRoot", root);
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("cannot run wsl.exe ({}): {e}", exe.display()))?;
     let mut stdout = child.stdout.take().ok_or("wsl.exe has no pipe")?;
-    let reader = std::thread::spawn(move || {
+    let (done, got) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut b = vec![];
         let _ = stdout.by_ref().take(MAX_OUT).read_to_end(&mut b);
-        b
+        let _ = done.send(b);
     });
     let t0 = Instant::now();
     let status = loop {
@@ -72,7 +77,8 @@ pub fn run_wsl(exe: &Path, args: &[&str], wait: Duration) -> Result<Out, String>
     };
     Ok(Out {
         ok: status.success(),
-        stdout: reader.join().unwrap_or_default(),
+        // bounded: a descendant that kept the pipe open must not hang this call
+        stdout: got.recv_timeout(Duration::from_secs(2)).unwrap_or_default(),
     })
 }
 
@@ -148,7 +154,7 @@ pub fn pick(all: &[Distro], wanted: &str) -> Result<Distro, String> {
         ));
     }
     // the name goes to wsl.exe as an argument: it must not read as an option
-    if d.name.starts_with('-') {
+    if d.name.starts_with('-') || d.name.chars().any(char::is_control) {
         return Err(format!("{:?} is not a usable distro name", d.name));
     }
     Ok(d.clone())
@@ -158,10 +164,11 @@ pub fn pick(all: &[Distro], wanted: &str) -> Result<Distro, String> {
 /// button is a later increment).
 pub fn install_command(version: &str) -> String {
     format!(
-        "curl --proto '=https' --tlsv1.2 -fsSL https://github.com/DevOnChain101/synthesis/releases/latest/download/install.sh | SYNT_VERSION={version} SYNT_INSTALL_DIR=\"$HOME/.synt/bin\" sh"
+        "curl --proto '=https' --tlsv1.2 -fsSL https://github.com/DevOnChain101/synthesis/releases/download/v{version}/install.sh | SYNT_VERSION={version} SYNT_INSTALL_DIR=\"$HOME/.synt/bin\" sh"
     )
 }
 
+#[derive(Debug)]
 pub struct Ready {
     pub distro: Distro,
     /// Absolute path of `synt` in the distro.
@@ -188,14 +195,18 @@ pub fn status(run: Run) -> Result<(), String> {
 /// Checks WSL, picks the distro and finds an engine of exactly `version` in it. The error is the text
 /// to show.
 pub fn probe(run: Run, wanted: &str, version: &str) -> Result<Ready, String> {
+    probe_raw(run, wanted, version).map_err(|e| sanitize_for_display(&e))
+}
+
+fn probe_raw(run: Run, wanted: &str, version: &str) -> Result<Ready, String> {
     status(run)?;
     let list = text_of(run(&["-l", "-v"], QUICK)?).map_err(|e| format!("wsl.exe -l -v: {e}"))?;
     let distro = pick(&parse_distros(&list), wanted)?;
-    // `--exec` does not expand `~` or load the profile, so a login shell resolves the path
-    let script =
-        r#"p="$HOME/.synt/bin/synt"; if [ -x "$p" ]; then echo "$p"; else command -v synt; fi"#;
+    // `--exec` expands no `~`, so a fixed shell resolves it. No login shell and a fixed PATH: nothing a
+    // profile or the Windows PATH (which WSL appends, /mnt/c/...) adds can be picked.
+    let script = r#"PATH=/usr/local/bin:/usr/bin:/bin; p="$HOME/.synt/bin/synt"; if [ -x "$p" ]; then echo "$p"; elif [ -x /usr/local/bin/synt ]; then echo /usr/local/bin/synt; fi"#;
     let found = run(
-        &["-d", &distro.name, "--exec", "sh", "-lc", script],
+        &["-d", &distro.name, "--exec", "/bin/sh", "-c", script],
         COLD_START,
     )
     .map_err(|e| format!("the distro {} did not start: {e}", distro.name))?;
@@ -204,7 +215,7 @@ pub fn probe(run: Run, wanted: &str, version: &str) -> Result<Ready, String> {
         .rev()
         .map(str::trim)
         .find(|l| !l.is_empty())
-        .filter(|l| found.ok && plain(l))
+        .filter(|l| found.ok && native(l))
         .map(String::from)
         .ok_or_else(|| {
             format!(
@@ -229,6 +240,11 @@ pub fn probe(run: Run, wanted: &str, version: &str) -> Result<Ready, String> {
 /// An absolute Linux path on one line.
 fn plain(s: &str) -> bool {
     s.starts_with('/') && !s.chars().any(char::is_control)
+}
+
+/// `plain`, and not on a Windows-mounted drive (`/mnt/c/...` is writable by any Windows process).
+fn native(s: &str) -> bool {
+    plain(s) && s != "/mnt" && !s.starts_with("/mnt/")
 }
 
 /// `\\wsl.localhost\D\rest` and `\\wsl$\D\rest` (also `//` and `\\?\UNC\`): `D\rest`.
@@ -257,10 +273,9 @@ pub fn to_linux(
             ));
         }
         let parts: Vec<&str> = rest.split(['\\', '/']).filter(|c| !c.is_empty()).collect();
-        if parts
-            .iter()
-            .any(|c| *c == ".." || c.chars().any(char::is_control))
-        {
+        if parts.iter().any(|c| {
+            matches!(*c, "." | "..") || c.ends_with(['.', ' ']) || c.chars().any(char::is_control)
+        }) {
             return Err("that folder path is not valid".into());
         }
         return Ok(format!("/{}", parts.join("/")));
@@ -300,23 +315,53 @@ pub fn launcher(wsl_exe: &Path, distro: &str, cwd: &str, synt: &str, env: &Env) 
     l
 }
 
-/// `(enabled, distro)` from the USER settings file only; a project file is never read here.
-pub fn read_setting(home: &Path) -> (bool, String) {
-    let v: Value = std::fs::read(home.join("settings.json"))
-        .ok()
-        .filter(|b| b.len() <= 1 << 20)
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or(Value::Null);
-    let w = &v["synt"]["desktop"]["wsl"];
-    (
-        w["enabled"].as_bool().unwrap_or(false),
-        w["distro"].as_str().unwrap_or_default().into(),
-    )
+/// `(enabled, distro)` from the USER settings file, then the MANAGED one, which wins per key (the
+/// Settings view locks a key the managed file sets). A project or local file is never read. A file that
+/// is absent is "off"; one that exists but cannot be read, is over 1 MiB, is not JSON (BOM tolerated,
+/// read by the core's own `read_json`) or holds a wrong type is an error: the caller refuses to start and
+/// never falls back to the local engine.
+pub fn read_setting(home: &Path, managed: &Path) -> Result<(bool, String), String> {
+    let mut out = (false, String::new());
+    for (path, what) in [
+        (home.join("settings.json"), "user settings"),
+        (managed.to_path_buf(), "managed settings"),
+    ] {
+        let Some(doc) = synthesis_settings::read_json(&path, what)? else {
+            continue;
+        };
+        let mut w = &doc;
+        for seg in ["synt", "desktop", "wsl"] {
+            match w.get(seg) {
+                None => break,
+                Some(v) if v.is_object() => w = v,
+                Some(_) => return Err(format!("{what}: synt.desktop.wsl is not an object")),
+            }
+        }
+        if let Some(v) = w.get("enabled") {
+            out.0 = v
+                .as_bool()
+                .ok_or_else(|| format!("{what}: synt.desktop.wsl.enabled must be true or false"))?;
+        }
+        if let Some(v) = w.get("distro") {
+            synthesis_settings_ui::validate_kind(synthesis_settings_ui::Kind::Text, v)
+                .map_err(|e| format!("{what}: synt.desktop.wsl.distro {e}"))?;
+            out.1 = v.as_str().unwrap_or_default().into();
+        }
+    }
+    Ok(out)
 }
 
-/// Is the WSL mode on? Windows only: elsewhere the toggle is disabled and nothing reads it.
-pub fn enabled(home: &Path) -> bool {
-    cfg!(windows) && read_setting(home).0
+fn managed_path() -> PathBuf {
+    synthesis_settings::managed_settings_path()
+}
+
+/// Is the WSL mode on? Windows only: elsewhere the toggle is disabled and nothing is read. An unusable
+/// settings file is an `Err` to show, not "off".
+pub fn enabled(home: &Path) -> Result<bool, String> {
+    if !cfg!(windows) {
+        return Ok(false);
+    }
+    read_setting(home, &managed_path()).map(|s| s.0)
 }
 
 /// Probes, converts the folder and starts the engine in the distro. Blocking. `project` is the folder the
@@ -329,15 +374,39 @@ pub fn start_via(
     env: &Env,
     project: &Path,
 ) -> Result<(Engine, UnboundedReceiver<UiMsg>), String> {
-    let ready = probe(run, wanted, version)?;
-    let d = ready.distro.name.as_str();
-    let host = project
-        .to_str()
-        .ok_or("the folder path is not valid text")?;
-    let cwd = to_linux(host, d, |p| {
-        text_of(run(&["-d", d, "--exec", "wslpath", "-u", p], QUICK)?)
-    })?;
-    Engine::start_remote(&launcher(wsl_exe, d, &cwd, &ready.synt, env), project)
+    let go = || {
+        let ready = probe(run, wanted, version)?;
+        let d = ready.distro.name.as_str();
+        let host = project
+            .to_str()
+            .ok_or("the folder path is not valid text")?;
+        let cwd = to_linux(host, d, |p| {
+            text_of(run(
+                &["-d", d, "--exec", "/usr/bin/wslpath", "-u", p],
+                QUICK,
+            )?)
+        })?;
+        let (mut e, rx) =
+            Engine::start_remote(&launcher(wsl_exe, d, &cwd, &ready.synt, env), project)?;
+        // the engine's own report is display text; a folder other than the one asked for is said
+        if e.remote_cwd.as_deref() != Some(cwd.as_str()) {
+            let said = e.remote_cwd.clone().unwrap_or_default();
+            e.notices
+                .push(format!("the engine works in {said}, not in {cwd} as asked"));
+        }
+        Ok((e, rx))
+    };
+    go().map_err(|e: String| sanitize_for_display(&e))
+}
+
+/// `System32\wsl.exe` by absolute path; refused if `SystemRoot` is not an absolute path.
+fn system_wsl() -> Result<PathBuf, String> {
+    let exe = synthesis_platform::system32("wsl.exe");
+    if exe.is_absolute() {
+        Ok(exe)
+    } else {
+        Err("SystemRoot is not an absolute path; refusing to run wsl.exe".into())
+    }
 }
 
 /// The real thing, on Windows: `System32\wsl.exe` and this app's exact version.
@@ -346,12 +415,13 @@ pub fn start(
     home: &Path,
     project: &Path,
 ) -> Result<(Engine, UnboundedReceiver<UiMsg>), String> {
-    let exe: PathBuf = synthesis_platform::system32("wsl.exe");
+    let exe = system_wsl()?;
+    let (_, distro) = read_setting(home, &managed_path())?;
     let run = |a: &[&str], w| run_wsl(&exe, a, w);
     start_via(
         &run,
         &exe,
-        &read_setting(home).1,
+        &distro,
         synthesis_app::proto::VERSION,
         env,
         project,
@@ -366,8 +436,8 @@ pub fn toggle_lock() -> Option<String> {
         return Some("Windows only".into());
     }
     LOCK.get_or_init(|| {
-        let exe = synthesis_platform::system32("wsl.exe");
-        status(&|a, w| run_wsl(&exe, a, w)).err()
+        let r = system_wsl().and_then(|exe| status(&|a, w| run_wsl(&exe, a, w)));
+        r.err().map(|e| sanitize_for_display(&e))
     })
     .clone()
 }
@@ -491,7 +561,7 @@ mod tests {
                     stdout: vec![],
                 }),
                 ["-l", "-v"] => ok(utf16(LIST, true)),
-                ["-d", _, "--exec", "sh", ..] => match &s {
+                ["-d", _, "--exec", "/bin/sh", ..] => match &s {
                     Some(p) => ok(format!("motd\n{p}\n").into_bytes()),
                     None => Ok(Out {
                         ok: false,
@@ -577,18 +647,67 @@ mod tests {
     }
 
     #[test]
-    fn the_setting_is_read_from_the_user_file_and_defaults_off() {
+    fn the_setting_is_read_user_then_managed_and_a_bad_file_is_an_error_not_off() {
         let d = tempfile::tempdir().unwrap();
-        assert_eq!(read_setting(d.path()), (false, String::new()));
-        std::fs::write(
+        let (user, managed) = (
             d.path().join("settings.json"),
-            r#"{"synt":{"desktop":{"wsl":{"enabled":true,"distro":"Debian"}}}}"#,
+            d.path().join("managed.json"),
+        );
+        let read = || read_setting(d.path(), &managed);
+        assert_eq!(read(), Ok((false, String::new())), "absent files: off");
+        std::fs::write(
+            &user,
+            "\u{feff}{\"synt\":{\"desktop\":{\"wsl\":{\"enabled\":true,\"distro\":\"Debian\"}}}}",
         )
         .unwrap();
-        assert_eq!(read_setting(d.path()), (true, "Debian".into()));
-        assert_eq!(enabled(d.path()), cfg!(windows));
+        assert_eq!(read(), Ok((true, "Debian".into())), "BOM tolerated");
+        // the managed file wins per key; a key it does not set stays the user's
+        std::fs::write(
+            &managed,
+            r#"{"synt":{"desktop":{"wsl":{"enabled":false}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(read(), Ok((false, "Debian".into())));
+        std::fs::remove_file(&managed).unwrap();
+        for bad in [
+            "{not json",
+            "[]",
+            r#"{"synt":{"desktop":{"wsl":{"enabled":"yes"}}}}"#,
+            r#"{"synt":{"desktop":{"wsl":{"enabled":1}}}}"#,
+            r#"{"synt":{"desktop":{"wsl":{"distro":3}}}}"#,
+            r#"{"synt":{"desktop":{"wsl":{"distro":"-x"}}}}"#,
+            r#"{"synt":{"desktop":{"wsl":5}}}"#,
+        ] {
+            std::fs::write(&user, bad).unwrap();
+            assert!(read().is_err(), "{bad}");
+        }
+        std::fs::write(&user, vec![b' '; (1 << 20) + 1]).unwrap();
+        assert!(read().is_err(), "oversized");
+        std::fs::remove_file(&user).unwrap();
+        std::fs::create_dir(&user).unwrap();
+        assert!(read().is_err(), "not a file");
         if !cfg!(windows) {
             assert_eq!(toggle_lock().as_deref(), Some("Windows only"));
+            assert_eq!(enabled(d.path()), Ok(false));
         }
+    }
+
+    #[test]
+    fn engine_paths_on_a_windows_drive_are_refused_and_odd_components_too() {
+        assert!(native("/home/me/.synt/bin/synt") && native("/usr/local/bin/synt"));
+        for p in ["/mnt/c/x/synt", "/mnt", "rel", "/a\nb"] {
+            assert!(!native(p), "{p}");
+        }
+        let no = |_: &str| -> Result<String, String> { unreachable!() };
+        for p in [r"\\wsl$\U\a\.\b", r"\\wsl$\U\a.\b", r"\\wsl$\U\a \b"] {
+            assert!(to_linux(p, "U", no).is_err(), "{p}");
+        }
+        let t = table("synt 1.2.3", Some("/mnt/c/evil/synt"), true);
+        assert!(
+            probe(&t, "", "1.2.3")
+                .unwrap_err()
+                .contains("not installed")
+        );
+        assert!(install_command("1.2.3").contains("releases/download/v1.2.3/install.sh"));
     }
 }
