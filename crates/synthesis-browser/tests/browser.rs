@@ -749,7 +749,14 @@ fetch(URL.createObjectURL(new Blob(['x']))).then(()=>document.title='blob:leak',
     rt.click(&ref_of(tree.expose(), "button \"Pop\""))
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(2500)).await;
+    for _ in 0..100 {
+        if hits(&main_hits) >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // absence checks: give a leaked request time to arrive after the page and worker.js were served
+    tokio::time::sleep(Duration::from_millis(1500)).await;
     assert!(hits(&main_hits) >= 2, "page and worker.js were served");
     assert_eq!(
         rt.snapshot(10).await.unwrap().page.title.expose(),
@@ -762,6 +769,124 @@ fetch(URL.createObjectURL(new Blob(['x']))).then(()=>document.title='blob:leak',
     );
     assert_eq!(hits(&ws_hits), 0, "WebSocket handshake reached the server");
     rt.close().await.unwrap();
+}
+
+/// A page on an ALLOWED cross-site origin (`localhost`; the opener is 127.0.0.1) runs script that opens a
+/// WebSocket, from its document and from a worker. Loaded as an iframe, as a popup and as a noopener
+/// popup, and the opener also reaches into a fresh `about:blank` popup (`w.WebSocket`; the popup is
+/// attached paused, so the policy script is in place before the opener can touch it). No handshake may arrive.
+#[tokio::test(flavor = "multi_thread")]
+async fn websockets_blocked_in_allowed_cross_site_frames_and_popups() {
+    traced(
+        "websockets_blocked_in_allowed_cross_site_frames_and_popups",
+        websockets_blocked_in_allowed_cross_site_frames_and_popups_body(),
+    )
+    .await;
+}
+
+async fn websockets_blocked_in_allowed_cross_site_frames_and_popups_body() {
+    let Some(env) = browser_env() else { return };
+    let ws = bind_loopback().await;
+    let ws_port = ws.local_addr().unwrap().port();
+    let ws_hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let h = ws_hits.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = ws.accept().await {
+            let h = h.clone();
+            tokio::spawn(async move {
+                let mut b = [0u8; 1024];
+                if s.read(&mut b).await.unwrap_or(0) > 0 {
+                    h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+        }
+    });
+    let (inner, inner_hits) = counting_server(move |path| match path {
+        "/w.js" => ("text/javascript", sock_js_inline(ws_port)),
+        _ => (
+            "text/html",
+            format!(
+                "<title>Inner</title><script>{}new Worker('/w.js')</script>",
+                sock_js_inline(ws_port)
+            ),
+        ),
+    })
+    .await;
+    let (main_port, _) = counting_server(move |_| {
+        (
+            "text/html",
+            format!(
+                "<title>Main</title><body>
+<button onclick=\"window.open('http://localhost:{inner}/')\">Pop</button>
+<button onclick=\"window.open('http://localhost:{inner}/','_blank','noopener')\">Nopen</button>
+<button onclick=\"const w=window.open('about:blank');try{{new w.WebSocket('ws://127.0.0.1:{ws_port}/')}}catch(e){{}}\">Blank</button>
+<script>const f=document.createElement('iframe');f.src='http://localhost:{inner}/';document.body.appendChild(f)</script></body>"
+            ),
+        )
+    })
+    .await;
+
+    let art = tempfile::tempdir().unwrap();
+    let rt = launch(local_opts(art.path()), &env).await;
+    rt.navigate(&format!("http://127.0.0.1:{main_port}/"), WaitUntil::Load)
+        .await
+        .unwrap();
+    let tree = rt.snapshot(50).await.unwrap().tree;
+    // (button, inner requests it adds: the popup document; a worker script request is not counted,
+    // workers are closed unresumed when the policy cannot be installed on them)
+    for _ in 0..50 {
+        if hits(&inner_hits) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        hits(&ws_hits),
+        0,
+        "iframe: WebSocket handshake reached the server"
+    );
+    let mut want = 1; // the iframe document
+    for (b, adds) in [
+        ("button \"Pop\"", 2),
+        ("button \"Nopen\"", 2),
+        ("button \"Blank\"", 0),
+    ] {
+        rt.click(&ref_of(tree.expose(), b)).await.unwrap();
+        want += adds;
+        for _ in 0..100 {
+            if hits(&inner_hits) >= want {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            hits(&inner_hits) >= want,
+            "{b}: frames and popups ran: {} of {want} requests",
+            hits(&inner_hits)
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await; // a handshake lags the script that starts it
+        assert_eq!(
+            hits(&ws_hits),
+            0,
+            "{b}: WebSocket handshake reached the server"
+        );
+        // close the popup so the opener's buttons are visible again (a popup takes focus)
+        let tabs = rt.tabs().await.unwrap();
+        for t in tabs
+            .iter()
+            .rev()
+            .filter(|t| !t.page.url.expose().contains(&format!(":{main_port}/")))
+        {
+            rt.close_tab(t.index).await.unwrap();
+        }
+    }
+    assert_eq!(hits(&ws_hits), 0, "WebSocket handshake reached the server");
+    rt.close().await.unwrap();
+}
+
+fn sock_js_inline(port: u16) -> String {
+    format!("try{{new WebSocket('ws://127.0.0.1:{port}/')}}catch(e){{}}")
 }
 
 fn local_opts_deny_localhost(dir: &std::path::Path) -> BrowserOptions {
