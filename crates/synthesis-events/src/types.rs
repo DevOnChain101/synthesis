@@ -489,6 +489,10 @@ pub enum Event {
         status: String,
         attempt: i64,
         summary: String,
+        /// sha256 (hex) of the full report as serialised JSON (sorted keys), so the stored report
+        /// can be checked against this event; absent in events of older builds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        report_sha256: Option<String>,
     },
     /// The gate reached a check; it fires BEFORE the check is authorised, so a refused check shows
     /// `started` and then `finished` with status `blocked`. `index` counts from 0 within the

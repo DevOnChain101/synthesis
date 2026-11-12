@@ -964,7 +964,7 @@ fn worktree_run_produces_a_branch_and_a_diff_and_leaves_the_original_alone() {
     let notice = find(&ev, "notice")
         .into_iter()
         .map(|n| n["payload"]["text"].as_str().unwrap().to_string())
-        .find(|t| t.contains("worktree"))
+        .find(|t| t.contains("file(s) changed"))
         .expect("worktree notice");
     assert!(
         notice.contains("branch synthesis/") && notice.contains("1 file(s) changed, +1 -1"),
@@ -2282,4 +2282,126 @@ fn stop_cancels_a_running_session_from_another_process() {
     );
     let st = child.wait().unwrap();
     assert_eq!(st.code(), Some(130), "cancelled run exits 130");
+}
+
+fn priced_rig() -> Rig {
+    let rig = Rig::new();
+    rig.settings(json!({"synt": {"pricing": {"fake/fake-model": {"input_per_mtok": 1000.0, "output_per_mtok": 1000.0}}}}));
+    rig
+}
+
+/// The cap is enforced on a real run: the first response (2000 tokens at $1000/M = $2) passes the $1
+/// cap, so the model is not asked again and the task ends `budget_exceeded`.
+#[test]
+fn a_cost_cap_stops_spend_after_the_response_that_crossed_it() {
+    let rig = priced_rig();
+    let script = json!([
+        {"tools": [{"name": "Read", "input": {"file_path": "a.txt"}}], "usage": [1000, 1000]},
+        {"text": "never asked", "usage": [1000, 1000]}
+    ]);
+    let (o, ev) = rig.run(
+        script,
+        &["--keep-defaults", "--max-cost-usd", "1", "--sandbox", "off"],
+    );
+    assert_eq!(
+        o.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let b = find(&ev, "budget.exceeded");
+    assert_eq!(b.len(), 1, "{:?}", types(&ev));
+    assert!(
+        b[0]["payload"]["budget"]
+            .as_str()
+            .is_some_and(|k| k.contains("max_cost_usd")),
+        "{}",
+        b[0]
+    );
+    assert_eq!(
+        find(&ev, "turn.started").len(),
+        1,
+        "no second model request after the cap"
+    );
+}
+
+/// Every protection `--unattended` promises is refused (exit 2, nothing on stdout) when asked away.
+#[test]
+fn unattended_refuses_each_protection_that_is_asked_away() {
+    let rig = priced_rig();
+    git(&rig.ws(), &["init", "-q"]);
+    git(&rig.ws(), &["add", "."]);
+    git(&rig.ws(), &["commit", "-q", "-m", "init"]);
+    let cases: [(&[&str], &str); 11] = [
+        (&["--sandbox", "off"], "sandbox"),
+        (&["--sandbox", "best-effort"], "sandbox"),
+        (&["--network", "allow"], "network"),
+        (&["--network", "loopback"], "network"),
+        (&["--permission-mode", "bypassPermissions"], "bypass"),
+        (&["--trust-project"], "trust-project"),
+        (&["--no-worktree"], "no-worktree"),
+        (&["--no-session-store"], "no-session-store"),
+        (&["--peers"], "peers"),
+        (&["--no-cost-cap"], "no-cost-cap"),
+        (&["--approve-mcp", "x"], "approve-mcp"),
+    ];
+    for (extra, what) in cases {
+        let mut args = vec!["--keep-defaults", "--unattended", "--max-cost-usd", "1"];
+        args.extend(extra);
+        let (o, _) = rig.run(json!([{"text": "x"}]), &args);
+        assert_eq!(
+            o.status.code(),
+            Some(2),
+            "{what}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        assert!(o.stdout.is_empty(), "{what}");
+    }
+    // and outside a git repository there is no worktree to promise
+    let plain = priced_rig();
+    let (o, _) = plain.run(
+        json!([{"text": "x"}]),
+        &["--keep-defaults", "--unattended", "--max-cost-usd", "1"],
+    );
+    assert_eq!(o.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("git repository"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
+/// The implicit worktree starts from the tree as it is: uncommitted work is there, and a detached
+/// HEAD works.
+#[test]
+fn the_default_worktree_carries_uncommitted_work_and_works_from_a_detached_head() {
+    let rig = priced_rig();
+    git(&rig.ws(), &["init", "-q"]);
+    git(&rig.ws(), &["add", "."]);
+    git(&rig.ws(), &["commit", "-q", "-m", "init"]);
+    git(&rig.ws(), &["checkout", "-q", "--detach"]);
+    std::fs::write(rig.ws().join("a.txt"), "dirty\n").unwrap();
+    std::fs::write(rig.ws().join("new.txt"), "untracked\n").unwrap();
+    let (o, ev) = rig.run(
+        json!([{"tools": [{"name": "Read", "input": {"file_path": "a.txt"}}]}, {"text": "ok"}]),
+        &["--keep-defaults", "--max-cost-usd", "1", "--sandbox", "off"],
+    );
+    assert!(
+        o.status.code().is_some_and(|c| c == 0 || c == 3),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let sid = ev[0]["session_id"].as_str().unwrap();
+    let wt = rig.home().join("worktrees").join(sid);
+    assert_eq!(
+        std::fs::read_to_string(wt.join("a.txt")).unwrap(),
+        "dirty\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt.join("new.txt")).unwrap(),
+        "untracked\n"
+    );
+    assert!(outputs(&ev, "Read").iter().any(|t| t.contains("dirty")));
+    // the notice names the place
+    assert!(String::from_utf8_lossy(&o.stderr).contains("working in worktree"));
 }

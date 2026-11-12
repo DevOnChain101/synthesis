@@ -234,7 +234,26 @@ impl Harness {
     }
 
     /// Adds the response usage to the task counters; returns the event form.
-    fn account(&self, task: &TaskRun, u: &synthesis_providers::Usage) -> synthesis_events::Usage {
+    /// The price of the model that answered: the failover target if the provider switched, else the
+    /// agent's own model; the run's price when no row exists.
+    fn price_of(&self, agent: &AgentCtx) -> Option<crate::harness::Pricing> {
+        let model = self
+            .provider
+            .answered_by()
+            .unwrap_or_else(|| self.model_of(agent));
+        self.config
+            .pricing_for
+            .as_ref()
+            .and_then(|f| f(&model))
+            .or(self.config.pricing)
+    }
+
+    fn account(
+        &self,
+        task: &TaskRun,
+        agent: &AgentCtx,
+        u: &synthesis_providers::Usage,
+    ) -> synthesis_events::Usage {
         let mut c = lock(&task.counters);
         c.turns += 1;
         let (i, o) = (u.input_tokens.unwrap_or(0), u.output_tokens.unwrap_or(0));
@@ -242,7 +261,7 @@ impl Harness {
         c.output += o;
         c.cache_read += u.cache_read_input_tokens.unwrap_or(0);
         c.cache_create += u.cache_creation_input_tokens.unwrap_or(0);
-        let cost = self.config.pricing.map(|p| p.cost(u));
+        let cost = self.price_of(agent).map(|p| p.cost(u));
         c.cost += cost.unwrap_or(0.0);
         event_usage(u, cost)
     }
@@ -724,7 +743,7 @@ impl Harness {
             recoveries = 0;
 
             let Streamed { mut msg, unstopped } = streamed;
-            let usage = self.account(task, &msg.usage);
+            let usage = self.account(task, agent, &msg.usage);
             self.report_usage(task, agent, st, raw, &msg.usage);
             let has_tools = msg
                 .content

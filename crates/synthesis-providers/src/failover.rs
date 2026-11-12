@@ -1,10 +1,13 @@
 //! Provider failover: when the primary gives up BEFORE the first byte (after its own retries) with
 //! a rate limit, overload or server error, the same request goes to the next entry. A stream that
-//! already produced an event is never switched or replayed. The switch is sticky: later requests
-//! start at the entry that answered.
+//! already produced an event is never switched or replayed. The switch is sticky for `reprobe`: later
+//! requests start at the entry that answered, then the primary is tried again (and a notice says
+//! when it answered again).
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
@@ -34,6 +37,9 @@ pub struct FailoverProvider {
     fallbacks: Arc<Vec<Fallback>>,
     /// 0 = primary, n = `fallbacks[n - 1]`.
     active: Arc<AtomicUsize>,
+    /// When the session last left the primary.
+    switched_at: Arc<Mutex<Option<Instant>>>,
+    reprobe: Duration,
     on_failover: OnFailover,
 }
 
@@ -42,6 +48,7 @@ impl FailoverProvider {
         primary: Arc<dyn ModelProvider>,
         primary_label: String,
         fallbacks: Vec<Fallback>,
+        reprobe: Duration,
         on_failover: OnFailover,
     ) -> Self {
         Self {
@@ -49,6 +56,8 @@ impl FailoverProvider {
             primary_label,
             fallbacks: Arc::new(fallbacks),
             active: Arc::new(AtomicUsize::new(0)),
+            switched_at: Arc::default(),
+            reprobe,
             on_failover,
         }
     }
@@ -74,17 +83,37 @@ impl ModelProvider for FailoverProvider {
         self.primary.capabilities(model)
     }
 
+    fn answered_by(&self) -> Option<String> {
+        match self.active.load(Ordering::SeqCst) {
+            0 => None,
+            n => self.fallbacks.get(n - 1).map(|f| f.label.clone()),
+        }
+    }
+
     fn stream(&self, req: &Request, cancel: CancellationToken) -> EventStream {
-        let (primary, label, fbs, active, notify) = (
+        let (primary, label, fbs, active, notify, switched, reprobe) = (
             self.primary.clone(),
             self.primary_label.clone(),
             self.fallbacks.clone(),
             self.active.clone(),
             self.on_failover.clone(),
+            self.switched_at.clone(),
+            self.reprobe,
         );
         let req = req.clone();
         let run = async move {
             let mut at = active.load(Ordering::SeqCst);
+            // after `reprobe` away from the primary, ask it again first
+            let probing = at > 0
+                && switched
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some_and(|t| t.elapsed() >= reprobe);
+            let was = at;
+            if probing {
+                at = 0;
+                active.store(0, Ordering::SeqCst);
+            }
             let start = |at: usize| {
                 if at == 0 {
                     primary.stream(&req, cancel.clone())
@@ -105,8 +134,13 @@ impl ModelProvider for FailoverProvider {
                 notify(from, &fbs[at].label, e.kind.as_str());
                 at += 1;
                 active.store(at, Ordering::SeqCst);
+                *switched.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
                 cur = start(at);
                 first = cur.next().await;
+            }
+            if probing && at == 0 && matches!(first, Some(Ok(_))) {
+                notify(&fbs[was - 1].label, &label, "primary_recovered");
+                *switched.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
             stream::iter(first).chain(cur)
         };
@@ -187,6 +221,14 @@ mod tests {
     }
 
     fn setup(primary: Arc<Mock>, fb: Arc<Mock>) -> (FailoverProvider, Arc<Mutex<Vec<String>>>) {
+        setup_with(primary, fb, 3_600_000)
+    }
+
+    fn setup_with(
+        primary: Arc<Mock>,
+        fb: Arc<Mock>,
+        reprobe_ms: u64,
+    ) -> (FailoverProvider, Arc<Mutex<Vec<String>>>) {
         let seen = Arc::new(Mutex::new(vec![]));
         let s = seen.clone();
         let p = FailoverProvider::new(
@@ -197,6 +239,7 @@ mod tests {
                 model: "m2".into(),
                 label: "b/m2".into(),
             }],
+            Duration::from_millis(reprobe_ms),
             Arc::new(move |f, t, r| s.lock().unwrap().push(format!("{f}->{t}:{r}"))),
         );
         (p, seen)
@@ -218,6 +261,62 @@ mod tests {
         drain(&p).await;
         assert_eq!(primary.models.lock().unwrap().len(), 1);
         assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_primary_is_asked_again_after_the_reprobe_time_and_a_notice_says_it_answered() {
+        // a primary that fails the first time and then recovers
+        struct Flaky(Mutex<u32>);
+        impl ModelProvider for Flaky {
+            fn id(&self) -> &str {
+                "flaky"
+            }
+            fn protocol(&self) -> Protocol {
+                Protocol::Anthropic
+            }
+            fn capabilities(&self, _: &str) -> ProviderCapabilities {
+                ProviderCapabilities::defaults(Protocol::Anthropic)
+            }
+            fn stream(&self, _: &Request, _: CancellationToken) -> EventStream {
+                let mut n = self.0.lock().unwrap();
+                *n += 1;
+                let item = if *n == 1 {
+                    Err(ProviderError::new(ErrorKind::Overloaded, "busy"))
+                } else {
+                    Ok(StreamEvent::Ping)
+                };
+                stream::iter(vec![item]).boxed()
+            }
+            fn list_models<'a>(
+                &'a self,
+                _: &'a CancellationToken,
+            ) -> BoxFuture<'a, Result<Vec<ModelInfo>, ProviderError>> {
+                Box::pin(async { Ok(vec![]) })
+            }
+        }
+        let seen = Arc::new(Mutex::new(vec![]));
+        let s = seen.clone();
+        let fb = mock(vec![Ok(StreamEvent::Ping)]);
+        let p = FailoverProvider::new(
+            Arc::new(Flaky(Mutex::new(0))),
+            "a/m1".into(),
+            vec![Fallback {
+                provider: fb.clone(),
+                model: "m2".into(),
+                label: "b/m2".into(),
+            }],
+            Duration::from_millis(20),
+            Arc::new(move |f, t, r| s.lock().unwrap().push(format!("{f}->{t}:{r}"))),
+        );
+        drain(&p).await; // primary fails, fallback answers
+        assert_eq!(p.answered_by().as_deref(), Some("b/m2"));
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        drain(&p).await; // re-probe: the primary answers
+        assert_eq!(p.answered_by(), None);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["a/m1->b/m2:overloaded", "b/m2->a/m1:primary_recovered"]
+        );
     }
 
     #[tokio::test]

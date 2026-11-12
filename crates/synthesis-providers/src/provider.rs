@@ -117,6 +117,11 @@ pub trait ModelProvider: Send + Sync {
     /// retried per policy; after the first byte this layer never replays the stream (the harness
     /// may re-request the whole turn: it runs no tool before a stream has completed).
     fn stream(&self, req: &Request, cancel: CancellationToken) -> EventStream;
+    /// `provider/model` label of the fallback that answered the last request, `None` when it was
+    /// the model the request named (only a failover wrapper answers otherwise).
+    fn answered_by(&self) -> Option<String> {
+        None
+    }
     fn list_models<'a>(
         &'a self,
         cancel: &'a CancellationToken,

@@ -110,6 +110,7 @@ impl TaskDb {
                 status,
                 attempt,
                 summary,
+                report_sha256,
             } => {
                 let full = self
                     .stash
@@ -123,6 +124,8 @@ impl TaskDb {
                         "partial": "event summary; no full report was handed over",
                     })
                 });
+                // the event's hash of the report as the harness serialised it (before redaction)
+                report["report_sha256"] = json!(report_sha256);
                 self.redactor.redact_value(&mut report);
                 self.conn
                     .execute(

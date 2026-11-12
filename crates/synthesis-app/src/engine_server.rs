@@ -253,17 +253,23 @@ fn protect() -> std::io::Result<(std::fs::File, std::fs::File)> {
 
 /// `synt engine --stdio`: stdin and stdout of this process. Project trust is not available over the
 /// protocol yet, so the trust flags are refused: an engine is untrusted for project configuration.
-pub fn run_stdio(common: &Common, limits: &Limits, env: &Env) -> Result<u8, String> {
+pub fn run_stdio(
+    common: &Common,
+    limits: &Limits,
+    governed: bool,
+    env: &Env,
+) -> Result<u8, String> {
     if common.trust_project || !common.approve_mcp.is_empty() {
         return Err(
             "engine --stdio: --trust-project and --approve-mcp are not supported (the project stays untrusted)"
                 .into(),
         );
     }
-    // an engine session is unattended from this side: the governed defaults apply (wall cap,
-    // cost cap required, worktree, ...); `--no-cost-cap` opts out of the cost cap only
+    // a headless engine is unattended: the governed defaults apply (wall cap, cost cap required,
+    // worktree, ...; `--no-cost-cap` opts out of the cost cap only). A desktop host (`--host
+    // desktop`) has a person at the window and keeps the interactive behaviour.
     let mut common = common.clone();
-    common.governed = true;
+    common.governed = governed;
     #[cfg(unix)]
     {
         let (input, output) = protect().map_err(|e| format!("engine: stdio: {e}"))?;

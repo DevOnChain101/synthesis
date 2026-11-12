@@ -220,7 +220,13 @@ pub struct HarnessConfig {
     /// Called with every verification report just before `verification.completed` is emitted
     /// (the event carries only a summary; a host that stores the full report hooks in here).
     pub report_sink: Option<ReportSink>,
+    /// Price of the model that actually answered: a bare model name (the run's own model and
+    /// sub-agent models) or a `provider/model` label (a failover target). `None` = `pricing` for
+    /// everything.
+    pub pricing_for: Option<PriceFn>,
 }
+
+pub type PriceFn = std::sync::Arc<dyn Fn(&str) -> Option<Pricing> + Send + Sync>;
 
 pub type ReportSink =
     std::sync::Arc<dyn Fn(&synthesis_verification::VerificationReport) + Send + Sync>;
@@ -287,6 +293,7 @@ impl HarnessConfig {
             tool_search: ToolSearchMode::default(),
             auto: crate::classifier::AutoJudge::default(),
             report_sink: None,
+            pricing_for: None,
         }
     }
 }
@@ -1451,7 +1458,19 @@ impl Harness {
         if let Some(f) = &self.config.report_sink {
             f(r);
         }
-        self.emit(task, agent, None, r.to_event());
+        let mut event = r.to_event();
+        if let Event::VerificationCompleted { report_sha256, .. } = &mut event
+            && let Ok(v) = serde_json::to_value(r)
+        {
+            use sha2::{Digest, Sha256};
+            *report_sha256 = Some(
+                Sha256::digest(v.to_string().as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect(),
+            );
+        }
+        self.emit(task, agent, None, event);
         Some(r.id.clone())
     }
 

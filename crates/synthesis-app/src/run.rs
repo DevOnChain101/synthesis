@@ -473,13 +473,19 @@ pub struct Prepared {
     pub stale_model: Option<String>,
 }
 
-/// A session of this directory: it ran here, or in a worktree of the repository containing here.
+/// A session of this directory: it ran exactly here, or in the worktree this exact directory
+/// (the repository top or the same subfolder of it) got. A sibling or parent directory never matches.
 fn is_here(s: &synthesis_session::SessionRecord, here: &Path) -> bool {
     Path::new(&s.cwd) == here
         || s.git_info
             .as_deref()
             .and_then(|j| serde_json::from_str::<synthesis_workspace::GitInfo>(j).ok())
-            .is_some_and(|g| here.starts_with(&g.repo_root))
+            .is_some_and(|g| {
+                matches!(
+                    (Path::new(&s.cwd).strip_prefix(&g.worktree), here.strip_prefix(&g.repo_root)),
+                    (Ok(a), Ok(b)) if a == b
+                )
+            })
 }
 
 /// The stored session `--resume ID` / `--continue` names and its live (non-compacted) messages.
@@ -559,16 +565,34 @@ pub(crate) fn pricing(user_settings: &Path, label: &str, model: &str) -> Option<
         .or_else(|| builtin_pricing(label, model))
 }
 
-/// USD per million tokens of the first-party models (`anthropic/...`, `openai/...`), so a cost cap
-/// works without a settings file. The list is approximate and keeps the DEARER price of a family
-/// (a cap should not under-count); override any entry with `synt.pricing` (docs/UNATTENDED.md).
-/// A gateway or local provider has no built-in price on purpose.
+/// `-YYYYMMDD` or `-YYYY-MM-DD`: the only suffix a built-in price accepts after a model id.
+fn is_date_suffix(rest: &str) -> bool {
+    let d = rest.strip_prefix('-').unwrap_or("x");
+    let digits = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_digit());
+    digits(d, 8)
+        || matches!(d.split('-').collect::<Vec<_>>().as_slice(),
+            [y, m, dd] if digits(y, 4) && digits(m, 2) && digits(dd, 2))
+}
+
+/// USD per million tokens of first-party models (`anthropic/...`, `openai/...`), so a cost cap
+/// works without a settings file. EXACT ids (or the id plus a date suffix) only: a variant that is
+/// not listed (`gpt-5-pro`, `o3-pro`, `o4-mini-deep-research`, a newer Claude) has no built-in
+/// price, so a run under a cap is refused until `synt.pricing` prices it. Approximate; the dearer
+/// price of a family. Not modelled: tiers by prompt length (Sonnet above 200k input tokens costs
+/// more), so set the dearer tier in `synt.pricing` when you use long contexts. A gateway or local
+/// provider has no built-in price on purpose (docs/UNATTENDED.md).
 pub fn builtin_pricing(label: &str, model: &str) -> Option<Pricing> {
-    // (prefix, input, output, cache read, cache write); longer prefixes first
-    const ANTHROPIC: [(&str, f64, f64, f64, f64); 3] = [
-        ("claude-opus", 15.0, 75.0, 1.5, 18.75),
-        ("claude-sonnet", 3.0, 15.0, 0.3, 3.75),
-        ("claude-haiku", 1.0, 5.0, 0.1, 1.25),
+    // (id, input, output, cache read, cache write)
+    const ANTHROPIC: [(&str, f64, f64, f64, f64); 9] = [
+        ("claude-opus-4-1", 15.0, 75.0, 1.5, 18.75),
+        ("claude-opus-4-5", 15.0, 75.0, 1.5, 18.75),
+        ("claude-opus-4", 15.0, 75.0, 1.5, 18.75),
+        ("claude-sonnet-4-5", 3.0, 15.0, 0.3, 3.75),
+        ("claude-sonnet-4", 3.0, 15.0, 0.3, 3.75),
+        ("claude-3-7-sonnet", 3.0, 15.0, 0.3, 3.75),
+        ("claude-haiku-4-5", 1.0, 5.0, 0.1, 1.25),
+        ("claude-3-5-haiku", 1.0, 5.0, 0.1, 1.25),
+        ("claude-3-5-sonnet", 3.0, 15.0, 0.3, 3.75),
     ];
     const OPENAI: [(&str, f64, f64); 9] = [
         ("gpt-5-nano", 0.05, 0.4),
@@ -587,17 +611,15 @@ pub fn builtin_pricing(label: &str, model: &str) -> Option<Pricing> {
         .next()
         .unwrap_or(model)
         .to_ascii_lowercase();
+    let exact = |id: &str| m == id || m.strip_prefix(id).is_some_and(is_date_suffix);
     match provider {
-        "anthropic" => ANTHROPIC
-            .iter()
-            .find(|r| m.starts_with(r.0))
-            .map(|r| Pricing {
-                input_per_mtok: r.1,
-                output_per_mtok: r.2,
-                cache_read_per_mtok: Some(r.3),
-                cache_write_per_mtok: Some(r.4),
-            }),
-        "openai" => OPENAI.iter().find(|r| m.starts_with(r.0)).map(|r| Pricing {
+        "anthropic" => ANTHROPIC.iter().find(|r| exact(r.0)).map(|r| Pricing {
+            input_per_mtok: r.1,
+            output_per_mtok: r.2,
+            cache_read_per_mtok: Some(r.3),
+            cache_write_per_mtok: Some(r.4),
+        }),
+        "openai" => OPENAI.iter().find(|r| exact(r.0)).map(|r| Pricing {
             input_per_mtok: r.1,
             output_per_mtok: r.2,
             ..Pricing::default()
@@ -763,6 +785,12 @@ pub fn check_governance(c: &Common, limits: &Limits, governed: bool) -> Result<(
                 "--unattended needs --max-cost-usd; it cannot run without a cost cap".into(),
             );
         }
+        if matches!(c.permission_mode, Some(ModeArg::BypassPermissions)) {
+            return Err("--unattended refuses --permission-mode bypassPermissions (nobody could answer what it would skip)".into());
+        }
+        if c.trust_project || !c.approve_mcp.is_empty() {
+            return Err("--unattended refuses --trust-project and --approve-mcp: a repository must not run its own settings, hooks or MCP servers unattended".into());
+        }
         if matches!(c.sandbox, Some(SandboxArg::Off | SandboxArg::BestEffort)) {
             return Err("--unattended needs --sandbox enforce (the default); it cannot run commands unconfined".into());
         }
@@ -820,6 +848,9 @@ pub fn prepare(
     );
     let is_cli = matches!(front, Front::Cli | Front::Native(_));
     let governed = c.governed || !is_cli;
+    // a stop request made before this process began (an earlier run of the session) is not ours
+    let stop_since = synthesis_session::timestamp();
+    let watch_stop = governed || matches!(front, Front::Cli);
     let gate: Option<PreStart> = match &front {
         Front::Native(n) => n.pre_start.clone(),
         _ => None,
@@ -888,7 +919,8 @@ pub fn prepare(
     let mut vs = crate::verify_cfg::parse(&settings.synthesis.verification);
     // inferred checks alone never mark an unattended task passed (a user's own explicit
     // `allow_passed` still holds for a plain headless run, not under --unattended)
-    let explicit_allow = settings
+    // the USER's file only: a trusted project must not switch it back on
+    let explicit_allow = user_settings
         .synthesis
         .verification
         .get("inferred_only")
@@ -1021,6 +1053,7 @@ pub fn prepare(
     // `fallback` of the USER config: tried in order when the primary fails before the first byte
     let failover_slot: Arc<Mutex<Option<EventSink>>> = Arc::default();
     let mut fallbacks = vec![];
+    let mut fallback_models: Vec<(String, String)> = vec![];
     for spec in user_cfg
         .extra
         .get("fallback")
@@ -1032,6 +1065,7 @@ pub fn prepare(
         match resolve_provider(None, Some(spec), &user_cfg, &h.synthesis, env) {
             Ok(f) => {
                 res.secrets.extend(f.secrets.clone());
+                fallback_models.push((f.label.clone(), f.model.clone()));
                 fallbacks.push(synthesis_providers::Fallback {
                     provider: f.provider,
                     model: f.model,
@@ -1053,6 +1087,13 @@ pub fn prepare(
             res.provider.clone(),
             res.label.clone(),
             fallbacks,
+            std::time::Duration::from_secs(
+                60 * user_cfg
+                    .extra
+                    .get("fallbackReprobeMinutes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(5),
+            ),
             Arc::new(move |from, to, why| {
                 if let Some(sink) = slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
                     sink.emit(
@@ -1194,15 +1235,23 @@ pub fn prepare(
                 eprintln!("synt: warning: additionalDirectories are ignored with a worktree");
                 extra_dirs.clear();
             }
-            match crate::wt::create(env, &h.synthesis, cwd, &sid, artifact_root.clone()) {
+            // the implicit worktree starts from the state of the tree (uncommitted work included),
+            // so the run sees what the directory shows; an explicit --worktree keeps its old meaning
+            match crate::wt::create(
+                env,
+                &h.synthesis,
+                cwd,
+                &sid,
+                artifact_root.clone(),
+                !c.worktree,
+            ) {
                 Ok((w, ctx)) => (ctx, Some(w)),
-                // only the implicit worktree of a plain headless run may fall back
-                Err(e)
-                    if !must_wt
-                        && (e.contains("needs a git repository") || e.contains("no commits")) =>
-                {
+                // only the implicit worktree of a plain headless run may fall back, and loudly
+                Err(e) if !must_wt => {
+                    let quiet = e.contains("needs a git repository") || e.contains("no commits");
                     eprintln!(
-                        "synt: notice: no worktree ({e}); edits land in {}",
+                        "synt: {}no worktree ({e}); edits land in {} itself (--no-worktree silences this)",
+                        if quiet { "notice: " } else { "WARNING: " },
                         cwd.display()
                     );
                     (
@@ -1264,7 +1313,17 @@ pub fn prepare(
         _ => {}
     }
     if sandbox_mode == SandboxMode::Enforce {
-        sandbox_preflight(&*synthesis_sandbox::detect(), policy.as_ref().ok())?;
+        sandbox_preflight(&*synthesis_sandbox::detect(), policy.as_ref().ok()).map_err(|e| {
+            if governed {
+                // an unattended run never offers best-effort: only an explicit `off` runs commands unconfined
+                e.replace(
+                    "--sandbox best-effort|off",
+                    "--sandbox off (explicit, unconfined)",
+                )
+            } else {
+                e
+            }
+        })?;
     }
     let mut notices = sandbox_notices(sandbox_mode, c.network);
     notices.extend(sandbox_default_notice(c));
@@ -1285,6 +1344,20 @@ pub fn prepare(
             if is_cli { "you answer in a dialog" } else { "this run denies" }
         )),
         _ => {}
+    }
+    if let Some(w) = &worktree {
+        let mut n = format!(
+            "working in worktree {} on branch {}; {} is not changed (the result is left there for review)",
+            w.info.worktree.display(),
+            w.info.branch,
+            cwd.display()
+        );
+        if w.info.repo_root.join(".gitmodules").is_file() {
+            n.push_str("; submodules are NOT checked out in the worktree");
+        }
+        if !is_cli {
+            notices.push(n);
+        }
     }
     for n in &notices {
         eprintln!("synt: WARNING: {n}");
@@ -1660,6 +1733,48 @@ pub fn prepare(
         context = context.with_transcript(t.clone());
     }
     let agents = crate::agents::load(&h.synthesis, &settings.project_root, trust);
+    // Price per answering model: the run's own model and sub-agent models (same provider) by bare
+    // name, failover targets by label. Under a cap every one of them must have a price, or the cap
+    // could not be counted when that model answers.
+    {
+        let user_settings_file = h.synthesis.join("settings.json");
+        let provider_id = res.label.split_once('/').map_or("", |(p, _)| p).to_string();
+        let mut table: std::collections::HashMap<String, Pricing> = Default::default();
+        if let Some(p) = price {
+            table.insert(res.model.clone(), p);
+        }
+        let capped = limits.max_cost_usd.is_some();
+        let resolve = agent_model_resolver(&cfg, &res.label);
+        let mut wanted: Vec<(String, String, String)> = fallback_models
+            .iter()
+            .map(|(l, m)| (l.clone(), l.clone(), m.clone()))
+            .collect();
+        for m in agents.table.iter().filter_map(|d| d.model.as_deref()) {
+            if m != "inherit"
+                && let Ok(model) = resolve(m)
+            {
+                wanted.push((model.clone(), format!("{provider_id}/{model}"), model));
+            }
+        }
+        for (key, label, model) in wanted {
+            match pricing(&user_settings_file, &label, &model) {
+                Some(p) => {
+                    table.insert(key, p);
+                }
+                None if capped => {
+                    return Err(format!(
+                        "--max-cost-usd: no price for {label} (a fallback or a sub-agent model); add synt.pricing[\"{label}\"] to {} or remove it",
+                        user_settings_file.display()
+                    ));
+                }
+                None => {}
+            }
+        }
+        if !table.is_empty() {
+            let table = Arc::new(table);
+            hcfg.pricing_for = Some(Arc::new(move |m| table.get(m).copied()));
+        }
+    }
     if let Some(m) = &memory {
         let (pinned, per) = crate::memcmd::sub_agent_blocks(
             m,
@@ -1972,6 +2087,20 @@ pub fn prepare(
         }
         tokio_rt.spawn(server.run(l));
     }
+    if watch_stop && store.is_some() {
+        let _enter = tokio_rt.enter();
+        let (c2, hard) = (
+            cancel.clone(),
+            crate::sessions::hard_stop(rt.clone(), sid.clone(), store.clone()),
+        );
+        crate::sessions::watch_stop(
+            h.synthesis.clone(),
+            sid.clone(),
+            stop_since,
+            Arc::new(move || c2.cancel()),
+            hard,
+        );
+    }
     Ok(Prepared {
         harness,
         context,
@@ -2083,7 +2212,6 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
         history,
         resumed_from_seq,
         model_changed,
-        homes,
         ..
     } = p;
     // `@server:uri` mentions and `/mcp__server__prompt` commands; memory below sees what was typed
@@ -2107,14 +2235,8 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
     }
     let cleanup = a.common.cleanup_worktree;
     let code = tokio_rt.block_on(async {
-        let hard: Arc<dyn Fn() + Send + Sync> = {
-            let (rt, sid) = (rt.clone(), sid.clone());
-            Arc::new(move || rt.close_session(&sid))
-        };
-        on_signals(cancel.clone(), hard.clone()).map_err(|e| format!("signal handlers: {e}"))?;
-        if store.is_some() {
-            crate::sessions::watch_stop(homes.synthesis.clone(), sid.clone(), cancel.clone(), hard);
-        }
+        let hard = crate::sessions::hard_stop(rt.clone(), sid.clone(), store.clone());
+        on_signals(cancel.clone(), hard).map_err(|e| format!("signal handlers: {e}"))?;
         let (store2, sink2, h2) = (store.clone(), sink.clone(), harness.clone());
         let (memory2, request2) = (memory.clone(), prompt.clone());
         let task = tokio::spawn(async move {
@@ -2193,24 +2315,32 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
                 Ok::<_, synthesis_harness::HarnessError>(out)
             }
             .await;
-            if let (Some(s), Ok(out)) = (&store2, &r) {
-                finish_store(s, transcript.as_deref(), out, &session.usage);
-            }
+            let store_err = match (&store2, &r) {
+                (Some(s), Ok(out)) => {
+                    finish_store(s, transcript.as_deref(), out, &session.usage).err()
+                }
+                _ => None,
+            };
             // reflection (a model call, opt-in) runs after the result and the session end are final
             if let (Some(m), Ok(_)) = (&memory2, &r)
                 && let Some(rf) = &m.reflect
             {
                 crate::memcmd::reflect_jobs(&m.store, rf, 2).await;
             }
-            r
+            (r, store_err)
         });
         let code = match task.await {
-            Ok(Ok(out)) => {
+            Ok((Ok(out), store_err)) => {
                 eprintln!("{}", task_line(out.status, &out.reason));
                 if let Some(h) = blocked_hint(&out) {
                     eprintln!("{h}");
                 }
                 let mut code = exit_code(out.status);
+                // nothing the run says is on record: it did not succeed, whatever the model said
+                if store_err.is_some() || sink.is_broken() {
+                    eprintln!("synt: error: the session record is incomplete (session_store); the task is reported failed");
+                    code = code.max(1);
+                }
                 let structured = match schema.as_ref().map(|(_, v)| check_schema(v, &out.final_text)) {
                     Some(Err(e)) => {
                         eprintln!("synt: --json-schema: {e}");
@@ -2223,7 +2353,7 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
                 print_result(format, &out, &sid, code, structured);
                 code
             }
-            Ok(Err(e)) => {
+            Ok((Err(e), _)) => {
                 eprintln!("synt: internal error: {e}");
                 70
             }
@@ -2323,23 +2453,33 @@ fn print_result(
 }
 
 /// Flushes the conversation tail and the usage to the store.
+/// Final sync of the conversation and the usage row. `Err`: something could not be stored; a
+/// governed run turns that into a failed exit, the interactive app only tells the person.
 pub fn finish_store(
     store: &Store,
     tr: Option<&Transcript>,
     out: &TaskOutcome,
     usage: &BudgetUsage,
-) {
+) -> Result<(), String> {
+    let mut err = None;
     if let Some(t) = tr
         && let Err(e) = t.sync(&out.messages)
     {
-        eprintln!("synt: error: {e}");
+        err = Some(e);
     }
     if let Err(e) = store
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .update_usage(usage)
     {
-        eprintln!("synt: warning: session store: {e}");
+        err.get_or_insert(format!("session_store: {e}"));
+    }
+    match err {
+        Some(e) => {
+            eprintln!("synt: error: {e}");
+            Err(e)
+        }
+        None => Ok(()),
     }
 }
 
@@ -2835,6 +2975,31 @@ mod tests {
 
     #[test]
     fn builtin_prices_cover_first_party_models_only_and_settings_win() {
+        for (l, m) in [
+            ("openai/gpt-5-pro", "gpt-5-pro"),
+            ("openai/o3-pro", "o3-pro"),
+            ("openai/o4-mini-deep-research", "o4-mini-deep-research"),
+            ("openai/gpt-5-codex", "gpt-5-codex"),
+            (
+                "anthropic/claude-sonnet-4-5-preview",
+                "claude-sonnet-4-5-preview",
+            ),
+            ("anthropic/claude-sonnet-5", "claude-sonnet-5"),
+        ] {
+            assert!(
+                builtin_pricing(l, m).is_none(),
+                "{m} must not match a shorter id"
+            );
+        }
+        // an id with a date suffix is the same model
+        assert!(builtin_pricing("openai/gpt-5-2025-08-07", "gpt-5-2025-08-07").is_some());
+        assert!(
+            builtin_pricing(
+                "anthropic/claude-sonnet-4-5-20250929",
+                "claude-sonnet-4-5-20250929"
+            )
+            .is_some()
+        );
         let p = builtin_pricing("anthropic/claude-sonnet-4-5", "claude-sonnet-4-5").unwrap();
         assert_eq!((p.input_per_mtok, p.output_per_mtok), (3.0, 15.0));
         assert!(p.cache_read_per_mtok.is_some());

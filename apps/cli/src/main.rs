@@ -83,8 +83,20 @@ enum Cmd {
     },
 }
 
+/// Who is on the other end of the engine's pipe.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum HostArg {
+    /// The desktop window: a person watches, so the headless defaults (worktree, wall cap, strict
+    /// store, required cost cap) do not apply. The desktop passes its own `--max-cost-usd`.
+    Desktop,
+}
+
 #[derive(clap::Args)]
 struct EngineArgs {
+    /// Without it the engine is a headless worker and gets the unattended defaults
+    /// (docs/UNATTENDED.md).
+    #[arg(long, value_enum)]
+    host: Option<HostArg>,
     /// The only transport.
     #[arg(long)]
     stdio: bool,
@@ -132,7 +144,7 @@ fn main() -> ExitCode {
                     no_cost_cap: a.no_cost_cap,
                     ..run::Limits::default()
                 };
-                synthesis_app::engine_server::run_stdio(&a.common, &limits, &env)
+                synthesis_app::engine_server::run_stdio(&a.common, &limits, a.host.is_none(), &env)
             }
         }
         Some(Cmd::Run(a)) => run::run(*a, env),

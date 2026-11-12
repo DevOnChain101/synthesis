@@ -7,10 +7,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 use synthesis_config::Env;
-use synthesis_events::Record;
+use synthesis_events::{Record, Redactor};
 use synthesis_harness::sanitize_for_display;
 use synthesis_session::{Reader, Store, StoreOptions};
-use tokio_util::sync::CancellationToken;
 
 use crate::homes;
 
@@ -40,16 +39,26 @@ pub enum SessionsCmd {
 }
 
 /// Asks the process running SESSION to stop: it cancels gracefully, then is killed after
-/// [`STOP_GRACE_SECS`]. Works across processes through the session store.
+/// [`STOP_GRACE_SECS`]. Works across processes through the session store, and only reaches a
+/// process that is alive and holds the session (`synt run`, `synt engine --stdio`, the CLI);
+/// anything else is an error, never a silent success.
 pub fn stop_cmd(env: &Env, a: StopArgs) -> Result<u8, String> {
     let h = homes(env)?;
     let store = Store::open(&h.synthesis, StoreOptions::default()).map_err(|e| e.to_string())?;
-    if !store.request_stop(&a.session).map_err(|e| e.to_string())? {
-        return Err(format!("no session {}", sanitize_for_display(&a.session)));
+    let shown = sanitize_for_display(&a.session);
+    let reader = store.reader().map_err(|e| e.to_string())?;
+    reader
+        .get_session(&a.session)
+        .map_err(|_| format!("no session {shown}"))?;
+    if !store.session_held(&a.session).map_err(|e| e.to_string())? {
+        eprintln!(
+            "synt: no live process holds session {shown}, so there is nothing to stop (a desktop window or a process of another SYNT_HOME is not reachable this way)"
+        );
+        return Ok(1);
     }
+    store.request_stop(&a.session).map_err(|e| e.to_string())?;
     out!(
-        "stop requested for {}; the running process cancels within a second and is killed after {STOP_GRACE_SECS}s if it does not end",
-        sanitize_for_display(&a.session)
+        "stop requested for {shown}; the running process cancels within a second and is killed after {STOP_GRACE_SECS}s if it does not end"
     );
     Ok(0)
 }
@@ -86,8 +95,11 @@ pub fn run_cmd(env: &Env, cmd: SessionsCmd) -> Result<u8, String> {
     }
 }
 
+/// Text from the store for a terminal: key-shaped secrets masked again, control characters made
+/// harmless, one line, at most `n` characters.
 fn short(v: &Value, n: usize) -> String {
     let s = v.as_str().map_or_else(|| v.to_string(), String::from);
+    let s = Redactor::new(vec![]).redact_str(&s);
     sanitize_for_display(&s.chars().take(n).collect::<String>()).replace('\n', " ")
 }
 
@@ -133,7 +145,12 @@ fn show(r: &Reader, id: &str, events: bool, report: bool) -> Result<u8, String> 
         if report {
             for (attempt, status, rep) in r.verification_reports(&tid).map_err(e)? {
                 out!("  verification attempt {attempt}: {status}");
-                out!("{}", serde_json::to_string_pretty(&rep).unwrap_or_default());
+                let mut rep = rep;
+                Redactor::new(vec![]).redact_value(&mut rep);
+                out!(
+                    "{}",
+                    sanitize_for_display(&serde_json::to_string_pretty(&rep).unwrap_or_default())
+                );
             }
         }
     }
@@ -172,31 +189,77 @@ fn show(r: &Reader, id: &str, events: bool, report: bool) -> Result<u8, String> 
     Ok(0)
 }
 
-/// Polls the store once a second; on a stop request cancels `cancel`, and after the grace period
-/// calls `hard` (kill the process groups) and exits 130.
+/// What a stop does once the grace period is over: kill the commands' process groups, mark the
+/// session row, bounded to a few seconds so a wedged kill or a held lock cannot keep us alive.
+pub fn hard_stop(
+    rt: Arc<synthesis_terminal::TerminalRuntime>,
+    sid: String,
+    store: Option<crate::events::Store>,
+) -> Arc<dyn Fn() + Send + Sync> {
+    Arc::new(move || {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (rt, sid, store) = (rt.clone(), sid.clone(), store.clone());
+        std::thread::spawn(move || {
+            rt.close_session(&sid);
+            if let Some(s) = store {
+                let mut w = s.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = w.update_status(
+                    synthesis_core::SessionStatus::Interrupted,
+                    Some("killed (synt stop or a second signal)"),
+                );
+            }
+            let _ = tx.send(());
+        });
+        let _ = rx.recv_timeout(Duration::from_secs(3));
+    })
+}
+
+/// Consecutive unreadable polls after which the session is stopped anyway: a stop that cannot be
+/// read must not be treated as "not asked".
+const STOP_POLL_FAILURES: u32 = 5;
+
+/// Polls the store once a second for a stop request made at or after `since`; on one calls
+/// `cancel`, and after the grace period `hard` and exits 130. Five failed polls in a row count as a
+/// request (fail closed) and are said on stderr.
 pub fn watch_stop(
     home: PathBuf,
     sid: String,
-    cancel: CancellationToken,
+    since: String,
+    cancel: Arc<dyn Fn() + Send + Sync>,
     hard: Arc<dyn Fn() + Send + Sync>,
 ) {
     tokio::spawn(async move {
+        let mut failures = 0u32;
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            let asked = Reader::open(&home)
-                .and_then(|r| r.stop_requested(&sid))
-                .unwrap_or(false);
-            if !asked {
-                continue;
+            match Reader::open(&home).and_then(|r| r.stop_requested_since(&sid, &since)) {
+                Ok(false) => failures = 0,
+                Ok(true) => {
+                    eprintln!(
+                        "synt: stop requested (synt stop); cancelling, killing in {STOP_GRACE_SECS}s"
+                    );
+                    break;
+                }
+                Err(e) => {
+                    failures += 1;
+                    if failures == 1 {
+                        eprintln!(
+                            "synt: warning: cannot read the stop flag ({e}); will stop the session after {STOP_POLL_FAILURES} failed polls"
+                        );
+                    }
+                    if failures >= STOP_POLL_FAILURES {
+                        eprintln!(
+                            "synt: error: the stop flag stayed unreadable; stopping the session (fail closed)"
+                        );
+                        break;
+                    }
+                }
             }
-            eprintln!(
-                "synt: stop requested (synt stop); cancelling, killing in {STOP_GRACE_SECS}s"
-            );
-            cancel.cancel();
-            tokio::time::sleep(Duration::from_secs(STOP_GRACE_SECS)).await;
-            eprintln!("synt: did not end in time; killing");
-            hard();
-            std::process::exit(130);
         }
+        cancel();
+        tokio::time::sleep(Duration::from_secs(STOP_GRACE_SECS)).await;
+        eprintln!("synt: did not end in time; killing");
+        hard();
+        std::process::exit(130);
     });
 }

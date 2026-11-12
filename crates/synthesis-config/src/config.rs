@@ -53,7 +53,14 @@ const PROJECT_DENIED_PROVIDER_KEYS: [&str; 6] = [
     "headers",
     "options",
 ];
-const PROJECT_DENIED_TOP_KEYS: [&str; 5] = ["mcp", "mcpServers", "projects", "claude", "fallback"];
+const PROJECT_DENIED_TOP_KEYS: [&str; 6] = [
+    "mcp",
+    "mcpServers",
+    "projects",
+    "claude",
+    "fallback",
+    "fallbackReprobeMinutes",
+];
 
 fn strip_untrusted(raw: &mut Value, warnings: &mut Vec<String>) {
     let Some(top) = raw.as_object_mut() else {

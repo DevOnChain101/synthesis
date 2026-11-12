@@ -18,6 +18,7 @@ struct Engine {
     stdin: Option<ChildStdin>,
     lines: Receiver<String>,
     ws: PathBuf,
+    home: PathBuf,
     next: u64,
     _dir: tempfile::TempDir,
 }
@@ -31,24 +32,59 @@ impl Drop for Engine {
 
 /// Starts the engine (not the session) on a script of model turns (given the workspace folder).
 fn engine(script: impl FnOnce(&Path) -> Value) -> Engine {
+    engine_with(&["--no-cost-cap"], None, false, script)
+}
+
+/// [`engine`] with its own flags, optional user settings, and optionally a git repository as the
+/// workspace (one commit holding `a.txt`).
+fn engine_with(
+    flags: &[&str],
+    settings: Option<Value>,
+    git: bool,
+    script: impl FnOnce(&Path) -> Value,
+) -> Engine {
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let (ws, home) = (root.join("ws"), root.join("home"));
     std::fs::create_dir_all(&ws).unwrap();
     std::fs::create_dir_all(&home).unwrap();
+    if let Some(v) = settings {
+        std::fs::write(home.join("settings.json"), v.to_string()).unwrap();
+    }
+    if git {
+        std::fs::write(ws.join("a.txt"), "hello\n").unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["add", "."],
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&ws)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+    }
     let script_path = root.join("script.json");
     std::fs::write(&script_path, script(&ws).to_string()).unwrap();
     let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
-    c.args([
-        "engine",
-        "--stdio",
-        "--no-cost-cap",
-        "--sandbox",
-        "off",
-        "--provider",
-    ])
-    .arg(format!("fake:{}", script_path.display()))
-    .env_clear();
+    c.args(["engine", "--stdio"])
+        .args(flags)
+        .args(["--sandbox", "off", "--provider"])
+        .arg(format!("fake:{}", script_path.display()))
+        .env_clear();
     for k in [
         "PATH",
         "SystemRoot",
@@ -86,6 +122,7 @@ fn engine(script: impl FnOnce(&Path) -> Value) -> Engine {
         stdin,
         lines,
         ws,
+        home,
         next: 1,
         _dir: dir,
     }
@@ -341,4 +378,134 @@ fn project_trust_flags_are_refused() {
         assert!(o.stdout.is_empty(), "no protocol line before the refusal");
         assert!(String::from_utf8_lossy(&o.stderr).contains("not supported"));
     }
+}
+
+fn priced() -> Value {
+    json!({"synt": {"pricing": {"fake/fake-model": {"input_per_mtok": 1.0, "output_per_mtok": 1.0}}}})
+}
+
+fn hello_txt_script(_ws: &Path) -> Value {
+    // relative paths: the session's folder is whatever the engine chose (the opened folder or a worktree)
+    json!([
+        {"tools": [{"id": "r1", "name": "Read", "input": {"file_path": "a.txt"}}]},
+        {"tools": [{"id": "e1", "name": "Edit", "input": {"file_path": "a.txt", "old_string": "hello", "new_string": "bye"}}]},
+        {"text": "Done."}
+    ])
+}
+
+/// What `synt engine --stdio` does when a desktop launches it: the edit lands in the folder that was
+/// opened (no worktree under ~/.synt), with a cost cap passed by the host.
+#[test]
+fn a_desktop_hosted_engine_edits_the_opened_folder_not_a_worktree() {
+    let mut e = engine_with(
+        &[
+            "--host",
+            "desktop",
+            "--max-cost-usd",
+            "5",
+            "--permission-mode",
+            "acceptEdits",
+        ],
+        Some(priced()),
+        true,
+        hello_txt_script,
+    );
+    e.start();
+    e.call("send", json!({"text": "change it"}));
+    e.until("task_done", is_task_done);
+    assert_eq!(
+        std::fs::read_to_string(e.ws.join("a.txt")).unwrap(),
+        "bye\n"
+    );
+    assert!(
+        !e.home.join("worktrees").exists(),
+        "no worktree for a desktop host"
+    );
+}
+
+/// Without `--host` the engine is a headless worker: a worktree, and the file in the folder stays.
+#[test]
+fn a_headless_engine_without_a_host_uses_a_worktree() {
+    let mut e = engine_with(
+        &["--no-cost-cap", "--permission-mode", "acceptEdits"],
+        None,
+        true,
+        hello_txt_script,
+    );
+    e.start();
+    e.call("send", json!({"text": "change it"}));
+    e.until("task_done", is_task_done);
+    assert_eq!(
+        std::fs::read_to_string(e.ws.join("a.txt")).unwrap(),
+        "hello\n"
+    );
+    assert!(e.home.join("worktrees").is_dir());
+}
+
+#[test]
+fn a_headless_engine_without_a_cost_cap_refuses_to_start_a_session() {
+    let mut e = engine_with(&[], None, false, |_| json!([{"text": "x"}]));
+    e.hello();
+    let ws = e.ws.to_str().unwrap().to_string();
+    let id = e.call("start", json!({"cwd": ws}));
+    let (_, r) = e.result(id);
+    assert!(
+        r["error"].as_str().is_some_and(|e| e.contains("cost cap")),
+        "{r}"
+    );
+}
+
+/// `synt stop` from another process reaches the engine: the running task is cancelled.
+#[test]
+fn synt_stop_cancels_a_task_of_a_running_engine() {
+    let mut e = engine_with(
+        &["--no-cost-cap"],
+        None,
+        false,
+        |_| json!([{"delay_ms": 60000, "text": "never"}]),
+    );
+    let info = e.start();
+    let sid = info["sid"].as_str().unwrap().to_string();
+    e.call("send", json!({"text": "slow"}));
+    std::thread::sleep(Duration::from_millis(1500));
+    let o = Command::new(env!("CARGO_BIN_EXE_synt"))
+        .args(["stop", &sid])
+        .env_clear()
+        .env("HOME", e.home.parent().unwrap())
+        .env("SYNT_HOME", &e.home)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .output()
+        .unwrap();
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let seen = e.until("task_done", is_task_done);
+    let ended = seen
+        .iter()
+        .find(|v| v["type"] == "task.ended")
+        .expect("task.ended");
+    assert_eq!(ended["payload"]["status"], "cancelled", "{ended}");
+}
+
+/// A session nobody holds cannot be stopped, and saying so is not a success.
+#[test]
+fn synt_stop_on_a_session_no_process_holds_is_an_error_exit() {
+    let mut e = engine_with(&["--no-cost-cap"], None, false, |_| json!([{"text": "x"}]));
+    let info = e.start();
+    let sid = info["sid"].as_str().unwrap().to_string();
+    e.call("close", Value::Null);
+    let _ = e.child.wait();
+    let o = Command::new(env!("CARGO_BIN_EXE_synt"))
+        .args(["stop", &sid])
+        .env_clear()
+        .env("HOME", e.home.parent().unwrap())
+        .env("SYNT_HOME", &e.home)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("no live process holds"));
 }

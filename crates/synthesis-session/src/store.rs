@@ -49,6 +49,11 @@ const RUNNING_STATES: [SessionStatus; 3] = [
     SessionStatus::Verifying,
 ];
 
+/// The store's timestamp format (UTC, milliseconds), comparable as text.
+pub fn timestamp() -> String {
+    now()
+}
+
 pub(crate) fn now() -> String {
     let fmt = time::macros::format_description!(
         "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
@@ -331,6 +336,10 @@ pub struct ChainReport {
     pub chained: u64,
     /// Events from before the chain existed (not covered).
     pub unchained: u64,
+    /// The session predates the chain (created by an older build): nothing proves its history.
+    pub legacy: bool,
+    /// Events exist but the per-user chain key is gone, so nothing could be checked.
+    pub no_key: bool,
     pub broken: Option<ChainBreak>,
 }
 
@@ -764,7 +773,7 @@ impl Store {
     }
 
     /// `synt stop`: marks the session; the process running it polls [`Reader::stop_requested`].
-    /// Returns whether a session of that id exists. A resume clears the mark.
+    /// Returns whether a session of that id exists.
     pub fn request_stop(&self, id: &str) -> Result<bool> {
         check_id(id)?;
         let conn = connect(&self.home, false)?;
@@ -773,6 +782,19 @@ impl Store {
             (id, now()),
         )?;
         Ok(n > 0)
+    }
+
+    /// Whether a live process holds the session's writer lock (it can then see a stop request).
+    pub fn session_held(&self, id: &str) -> Result<bool> {
+        check_id(id)?;
+        if !self.home.join("sessions").join(id).join("lock").exists() {
+            return Ok(false);
+        }
+        match lock_session(&self.home, id) {
+            Ok(_released_on_drop) => Ok(false),
+            Err(Error::Locked(_)) => Ok(true),
+            Err(e) => Err(e),
+        }
     }
 
     /// `/close-workspace`: [`Self::close_session`] for every listed (used, open) session whose
@@ -850,8 +872,8 @@ impl Store {
         let r = conn.execute(
             "INSERT INTO sessions(id,status,workspace_id,workspace_root,cwd,additional_dirs,git_worktree,
                model_config,permission_mode,permission_policy_id,budget,usage,title,parent_session_id,
-               parent_tool_call_id,legacy_transcript_path,created_at,updated_at)
-             VALUES (?1,'created',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?16)",
+               parent_tool_call_id,legacy_transcript_path,created_at,updated_at,chained)
+             VALUES (?1,'created',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?16,1)",
             params![
                 id,
                 ws.workspace_id,
@@ -883,7 +905,7 @@ impl Store {
             }
             r => r?,
         };
-        Ok(self.writer(conn, id, lock, mirror_path, cwd, root, dirs))
+        self.writer(conn, id, lock, mirror_path, cwd, root, dirs)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -896,7 +918,8 @@ impl Store {
         cwd: String,
         root: String,
         dirs: Vec<String>,
-    ) -> SessionWriter {
+    ) -> Result<SessionWriter> {
+        let chain_key = crate::trust::chain_key(&self.home)?;
         let roots = std::iter::once(root)
             .chain(dirs)
             .map(PathBuf::from)
@@ -917,9 +940,10 @@ impl Store {
             task_id: None,
             turn_id: None,
             agent_id: None,
+            chain_key,
         };
         w.sweep_orphan_artifacts(); // we hold the session lock: nothing else is mid-write
-        w
+        Ok(w)
     }
 
     /// Takes the writer lock of an existing session. A session left `running` by a dead
@@ -927,10 +951,6 @@ impl Store {
     /// the Node JSONL it mirrors was modified by someone else, unless `accept_external_changes`.
     pub fn resume_session(&self, id: &str, accept_external_changes: bool) -> Result<SessionWriter> {
         let mut w = self.open_locked(id)?;
-        w.conn.execute(
-            "UPDATE sessions SET stop_requested_at=NULL WHERE id=?1",
-            [id],
-        )?;
         let rec = w.get_session(id)?;
         if let (Some(p), false) = (&rec.legacy_transcript_path, accept_external_changes)
             && transcript_changed(&w.conn, id, Path::new(p))?
@@ -960,7 +980,7 @@ impl Store {
             .as_ref()
             .filter(|_| self.mirror)
             .map(PathBuf::from);
-        Ok(self.writer(
+        self.writer(
             conn,
             id.to_string(),
             lock,
@@ -968,7 +988,7 @@ impl Store {
             rec.cwd,
             rec.workspace_root,
             rec.additional_dirs,
-        ))
+        )
     }
 
     /// Node -> Rust (C.1): messages, title and permission mode become rows plus one
@@ -1158,20 +1178,28 @@ impl Reader {
             .ok_or_else(|| Error::NotFound(format!("session {id}")))
     }
 
-    /// Recomputes the hash chain of the session's events (see [`ChainReport`]).
+    /// Recomputes the hash chain of the session's events (see [`ChainReport`]). The links are
+    /// HMACs under the per-user key (`chain.key` in the home).
     pub fn verify_chain(&self, id: &str) -> Result<ChainReport> {
         let rec = self.get_session(id)?;
-        let head: Option<String> =
-            self.conn
-                .query_row("SELECT chain_head FROM sessions WHERE id=?1", [id], |r| {
-                    r.get(0)
-                })?;
+        let (head, chained): (Option<String>, bool) = self.conn.query_row(
+            "SELECT chain_head, chained FROM sessions WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
+        )?;
+        let mut rep = ChainReport {
+            legacy: !chained,
+            ..ChainReport::default()
+        };
+        let Some(key) = crate::trust::existing_chain_key(&self.home) else {
+            rep.no_key = rec.event_cursor > 0;
+            return Ok(rep);
+        };
         let mut st = self.conn.prepare(
             "SELECT seq,v,ts,task_id,turn_id,agent_id,type,payload,payload_ref,prev FROM events
              WHERE session_id=?1 ORDER BY seq",
         )?;
         let mut rows = st.query([id])?;
-        let mut rep = ChainReport::default();
         let mut last: Option<String> = None;
         let mut expect_seq = 1;
         while let Some(r) = rows.next()? {
@@ -1188,7 +1216,7 @@ impl Reader {
             }
             expect_seq += 1;
             let Some(prev) = prev else {
-                if last.is_some() {
+                if last.is_some() || chained {
                     rep.broken = Some(broken("chain link removed".into()));
                     return Ok(rep);
                 }
@@ -1203,6 +1231,7 @@ impl Reader {
                 return Ok(rep);
             }
             last = Some(chain_hash(
+                &key,
                 &prev,
                 &EventRow {
                     sid: id,
@@ -1220,19 +1249,35 @@ impl Reader {
         if last != head {
             rep.broken = Some(ChainBreak {
                 seq: rec.event_cursor as i64,
-                why: "the last event does not match the head kept in the session row (events were changed or cut off at the end)".into(),
+                why: "the last event does not match the head kept in the session row (events were changed or cut off at the end, or the key changed)".into(),
             });
         }
         Ok(rep)
     }
 
-    /// Whether `synt stop` asked this session to stop.
-    pub fn stop_requested(&self, id: &str) -> Result<bool> {
+    /// The payload of the newest event of type `kind` (inline payloads only), if any.
+    pub fn last_payload(&self, session_id: &str, kind: &str) -> Result<Option<Value>> {
+        let raw: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT payload FROM events WHERE session_id=?1 AND type=?2 AND payload IS NOT NULL
+                 ORDER BY seq DESC LIMIT 1",
+                params![session_id, kind],
+                |r| r.get(0),
+            )
+            .optional()?;
+        raw.map(|r| serde_json::from_str(&r).map_err(Into::into))
+            .transpose()
+    }
+
+    /// Whether `synt stop` asked this session to stop at or after `since` (a [`timestamp`]): a
+    /// request left over from an earlier run of the session does not stop this one.
+    pub fn stop_requested_since(&self, id: &str, since: &str) -> Result<bool> {
         Ok(self
             .conn
             .query_row(
-                "SELECT stop_requested_at IS NOT NULL FROM sessions WHERE id=?1",
-                [id],
+                "SELECT stop_requested_at >= ?2 FROM sessions WHERE id=?1 AND stop_requested_at IS NOT NULL",
+                params![id, since],
                 |r| r.get(0),
             )
             .optional()?
@@ -1740,6 +1785,7 @@ pub struct SessionWriter {
     pub task_id: Option<String>,
     pub turn_id: Option<String>,
     pub agent_id: Option<String>,
+    chain_key: [u8; 32],
 }
 
 impl Deref for SessionWriter {
@@ -1829,6 +1875,7 @@ impl SessionWriter {
         let ts = now();
         let seq = append_tx(
             &tx,
+            &self.chain_key,
             &self.reader.home,
             &self.limits,
             &self.id,
@@ -1885,6 +1932,7 @@ impl SessionWriter {
         self.redactor.redact_value(&mut payload);
         let seq = append_tx(
             &tx,
+            &self.chain_key,
             &self.reader.home,
             &self.limits,
             &self.id,
@@ -2409,6 +2457,7 @@ impl SessionWriter {
 #[allow(clippy::too_many_arguments)]
 fn append_tx(
     tx: &Transaction<'_>,
+    key: &[u8; 32],
     home: &Path,
     limits: &Limits,
     sid: &str,
@@ -2456,6 +2505,7 @@ fn append_tx(
     };
     let prev = head.unwrap_or_default();
     let link = chain_hash(
+        key,
         &prev,
         &EventRow {
             sid,
@@ -2506,15 +2556,16 @@ struct EventRow<'a> {
 
 /// `sha256(prev | row)`, hex. `model.delta` bodies are left out: `compact_deltas` rewrites them
 /// in place (their text is folded into the final `assistant.message`, which is covered).
-fn chain_hash(prev: &str, r: &EventRow<'_>) -> String {
+fn chain_hash(key: &[u8; 32], prev: &str, r: &EventRow<'_>) -> String {
     let body = if r.kind == "model.delta" {
         ""
     } else {
         r.body.unwrap_or("")
     };
     let [task, turn, agent] = r.ids.map(|i| i.unwrap_or(""));
-    sha_hex(
-        format!(
+    crate::trust::chain_mac(
+        key,
+        &format!(
             "{prev}\n{}\n{}\n{}\n{}\n{task}\n{turn}\n{agent}\n{}\n{}\n{body}",
             r.sid,
             r.seq,
@@ -2522,8 +2573,7 @@ fn chain_hash(prev: &str, r: &EventRow<'_>) -> String {
             r.ts,
             r.kind,
             r.pref.unwrap_or("")
-        )
-        .as_bytes(),
+        ),
     )
 }
 

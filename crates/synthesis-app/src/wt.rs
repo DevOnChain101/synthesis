@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use synthesis_config::Env;
 use synthesis_core::WorkspaceContext;
+use synthesis_harness::sanitize_for_display;
 use synthesis_workspace::{GitInfo, WorktreeManager, WorktreeOptions};
 
 pub struct Worktree {
@@ -20,12 +21,13 @@ pub fn create(
     source: &Path,
     sid: &str,
     artifact_root: PathBuf,
+    include_uncommitted: bool,
 ) -> Result<(Worktree, WorkspaceContext), String> {
     let mut opts = WorktreeOptions::new(synthesis_home.to_path_buf());
     opts.worktrees_dir = Some(synthesis_home.join("worktrees"));
     let mgr = WorktreeManager::new(env, opts).map_err(|e| format!("--worktree: {e}"))?;
     let a = mgr
-        .create(source, sid, artifact_root, false)
+        .create(source, sid, artifact_root, include_uncommitted)
         .map_err(|e| format!("--worktree: {e}"))?;
     match a.git {
         Some(info) if !a.not_a_git_repo => Ok((Worktree { mgr, info }, a.context)),
@@ -47,6 +49,22 @@ pub fn reattach(
     cwd: &Path,
     sid: &str,
 ) -> Result<(Worktree, WorkspaceContext), String> {
+    // the record comes from a database: it must name one of OUR worktrees of the recorded repository
+    let ours = synthesis_core::canonicalize(synthesis_home.join("worktrees")).ok();
+    let wt = synthesis_core::canonicalize(&info.worktree).ok();
+    let sane = wt.as_ref().zip(ours.as_ref()).is_some_and(|(w, o)| {
+        w.starts_with(o)
+            && w.file_name()
+                .is_some_and(|n| n == std::ffi::OsStr::new(sid))
+    }) && info
+        .git_dir
+        .starts_with(info.repo_root.join(".git").join("worktrees"));
+    if !sane {
+        return Err(format!(
+            "session {sid}: the recorded worktree is not one of this tool's worktrees ({}); refusing to resume in it",
+            sanitize_for_display(&info.worktree.display().to_string())
+        ));
+    }
     if !info.worktree.is_dir() {
         return Err(format!(
             "session {sid}: its worktree {} is gone, so it cannot be resumed",

@@ -75,6 +75,9 @@ ALTER TABLE sessions ADD COLUMN chain_head TEXT;
 ALTER TABLE sessions ADD COLUMN stop_requested_at TEXT;
 ALTER TABLE sessions ADD COLUMN git_info TEXT;
 "#,
+    // v4: 1 = the session was created with the chain on, so a missing link or head is damage, not
+    // history (a downgrade cannot be passed off as an old session).
+    "ALTER TABLE sessions ADD COLUMN chained INTEGER NOT NULL DEFAULT 0;",
 ];
 
 pub const LATEST: i64 = MIGRATIONS.len() as i64;
