@@ -21,6 +21,8 @@ Goal: R1–R9, hand over the full Synthesis autonomous coding agent. Not complet
 - R5 CLI: the CLI was restored on the current core (crates `synthesis-cli-ui*`, `apps/cli/src/cli_app.rs`; platinum palette, logo welcome, `/config`, peers, image paste, `/close`, hideable panels). The GPUI desktop app is rebuilt at `apps/desktop` on the shared `synthesis-view` models and `synthesis-settings-ui` (PRs #40-#54; packaged for macOS, Windows and Linux by `release.yml`); the redesigned TUI remains removed (archive tag `archive/ui-before-removal`).
 - R6 browser (own CDP client); browser login hand-off (`browser_login`, headed, persistent profile) and secret fill by reference (`browser_fill_secret`): implemented on branch feat/browser-login, headless paths tested with real Chrome, headed window unverified on a real desktop (docs/BROWSER-LOGIN.md). R7 sandbox (Seatbelt tested; Landlock/bwrap; Windows Job Object). R8 sessions (SQLite) and worktrees. R9a CI + release pipeline.
 
+- Harness audit hardening (branch feat/harness-perms, 2026-11-12): read-only set for the edit tools, irreversible-action table, auto-judge fail-closed rules, project-code trust, rm asks and Bash checkpoints, wider redaction (docs/specs/permissions.md, docs/SECURITY.md). Unverified on Linux/Windows CI; behaviours that now ask or deny are listed in the commit message.
+
 ## Decisions on record
 Product rename to Synthesis (owner, 2026-10-30; see CHANGELOG): command `synt`, crates `synthesis-*`, env `SYNT_*`, home `~/.synt`; the old names are detected by `synt doctor` and never read (docs/MIGRATION.md). Not verified yet after the rename: Linux and Windows CI (run it on the next push); GitHub repository variables must be recreated under the new names (docs/RELEASE.md).
 

@@ -69,6 +69,7 @@
 pub mod automode;
 mod automode_defaults;
 pub mod bash;
+pub mod irreversible;
 pub mod paths;
 
 use std::path::{Component, Path, PathBuf};
@@ -337,6 +338,34 @@ pub struct Env {
     pub project_root: Option<PathBuf>,
     /// Memory authorship (see [`NoteOracle`]); `None` = no store, so every note asks.
     pub memory_notes: Option<NoteOracle>,
+    /// Allow rules written in USER-level settings (`$SYNT_HOME`), never a project's. Only these
+    /// can lift the read-only-path refusal of the edit tools and the irreversible-action table.
+    pub user_allow: Vec<String>,
+    /// Commands are confined by an ENFORCING sandbox (not Strong/Weak-by-request, not `off`).
+    /// Without it, build/test commands that run project code are not auto-safe.
+    pub sandbox_enforcing: bool,
+    /// The session runs in its own git worktree (`git reset --hard` / `clean -f` there are the
+    /// session's own business).
+    pub worktree: bool,
+    /// Files (workspace-root relative, as the harness records them) the agent wrote this task.
+    pub written: Vec<String>,
+}
+
+/// A path that names a test: a `test`/`tests`/`spec` directory or a test-shaped file name.
+fn is_test_path(p: &str) -> bool {
+    let low = p.to_lowercase();
+    let segs: Vec<&str> = low.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+    let file = segs.last().copied().unwrap_or("");
+    segs.iter().any(|s| {
+        matches!(
+            *s,
+            "test" | "tests" | "__tests__" | "spec" | "specs" | "e2e"
+        )
+    }) || file.starts_with("test_")
+        || file == "conftest.py"
+        || [".test.", "_test.", ".spec.", "_spec."]
+            .iter()
+            .any(|m| file.contains(m))
 }
 
 /// `/proc/...` and `/dev/fd/...` (also `/dev/fd` itself), by their spelling.
@@ -396,6 +425,10 @@ impl Env {
             protected_hard: false,
             project_root: None,
             memory_notes: None,
+            user_allow: vec![],
+            sandbox_enforcing: false,
+            worktree: false,
+            written: vec![],
         }
     }
 
@@ -1136,6 +1169,232 @@ impl Permissions {
             })
     }
 
+    // --- tool-layer read-only set, irreversible actions, files the agent wrote ----------------
+
+    /// Workspace-root relative, case-folded segments of `p` (or the whole path outside a root).
+    fn rel_segments(&self, p: &Path) -> Vec<Vec<String>> {
+        let policy = self.policy();
+        let roots: Vec<PathBuf> = self
+            .roots()
+            .into_iter()
+            .flat_map(|r| [Some(r.clone()), paths::real_of(&r)])
+            .flatten()
+            .collect();
+        [Some(paths::lexical_normalize(p)), paths::real_of(p)]
+            .into_iter()
+            .flatten()
+            .map(|c| {
+                let root = roots
+                    .iter()
+                    .filter(|r| paths::within(r, &c, policy))
+                    .max_by_key(|r| r.as_os_str().len());
+                let s = root.map_or_else(
+                    || c.to_string_lossy().into_owned(),
+                    |r| paths::relative(r, &c),
+                );
+                s.split(['\\', '/'])
+                    .filter(|x| !x.is_empty())
+                    .map(|x| paths::fold(x, policy))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// The set the sandbox keeps read-only inside the workspace (`SandboxPolicy::standard`:
+    /// `.git/hooks`, `.git/config`, `.git/modules`, `.gitmodules`, `.synt`, `AGENTS.md`) plus what
+    /// git, direnv and hook managers run on their own (`.envrc`, `.gitattributes`, `.husky`,
+    /// `.mcp.json`). The in-process edit tools are not sandboxed, so they refuse these themselves.
+    fn is_tool_readonly(&self, p: &Path) -> bool {
+        const FILES: &[&str] = &[
+            ".gitmodules",
+            ".gitattributes",
+            ".envrc",
+            ".mcp.json",
+            "agents.md",
+        ];
+        self.rel_segments(p).iter().any(|segs| {
+            segs.iter().enumerate().any(|(i, s)| {
+                (s == ".git"
+                    && segs.get(i + 1).is_some_and(|n| {
+                        matches!(
+                            n.as_str(),
+                            "hooks" | "config" | "modules" | "config.worktree"
+                        )
+                    }))
+                    || s == ".synt"
+                    || s == ".husky"
+            }) || segs.last().is_some_and(|l| FILES.contains(&l.as_str()))
+        })
+    }
+
+    /// Rules of the user's own settings that name something: a tool-wide rule never counts.
+    /// `key`: a Bash rule must also contain this text (`git push`).
+    fn user_named(&self, key: Option<&str>) -> Vec<String> {
+        self.env
+            .user_allow
+            .iter()
+            .filter(|r| match bash::parse_rule(r) {
+                ("Bash", Some(s)) => {
+                    !s.contains('*') || s.ends_with(":*") && !s[..s.len() - 2].contains('*')
+                }
+                (_, Some(s)) => !s.trim_matches(['/', '*', '.', '?']).is_empty(),
+                _ => false,
+            })
+            .filter(|r| key.is_none_or(|k| bash::parse_rule(r).1.is_some_and(|s| s.contains(k))))
+            .cloned()
+            .collect()
+    }
+
+    /// A user-level allow rule (never a project's) that covers this one edit-tool call.
+    fn user_lifts_edit(&self, tool: &str, input: &Value) -> bool {
+        self.allow_match(&self.user_named(None), tool, input)
+    }
+
+    /// A user-level Bash rule that names the hit and covers the command.
+    fn user_lifts_hit(&self, cmd: &str, h: &irreversible::Hit) -> bool {
+        self.user_named(Some(h.key)).iter().any(|r| {
+            bash::bash_all_match_or(std::slice::from_ref(r), cmd, |seg| {
+                bash::is_read_only_simple(seg) || seg.first().is_some_and(|w| w == "cd")
+            })
+        })
+    }
+
+    /// The irreversible-action table (`irreversible.rs`), before any mode, allow rule or judge.
+    fn irreversible_verdict(&self, cmd: &str, mode: Mode) -> Option<Verdict> {
+        let hits = irreversible::scan(cmd, self.env.worktree);
+        let open: Vec<&irreversible::Hit> = hits
+            .iter()
+            .filter(|h| !self.user_lifts_hit(cmd, h))
+            .collect();
+        let h = open.iter().find(|h| h.force).or(open.first())?;
+        let why = format!("irreversible external action: {}", h.reason);
+        if h.force || matches!(mode, Mode::DontAsk | Mode::Plan) {
+            return Some(Verdict::new(Decision::Deny, why));
+        }
+        let mut v = Verdict::new(Decision::Ask, why);
+        v.hard = true;
+        Some(v)
+    }
+
+    /// Build/test commands may run code the agent wrote or can rewrite (test files, `package.json`
+    /// scripts, `Makefile`, `conftest.py`, `build.rs`): they are auto-safe only when an
+    /// ENFORCING sandbox confines them and the agent has not touched the definitions this task.
+    pub fn project_code_trusted(&self) -> bool {
+        const DEFS: &[&str] = &[
+            "package.json",
+            "makefile",
+            "gnumakefile",
+            "justfile",
+            "rakefile",
+            "conftest.py",
+            "build.rs",
+            "pyproject.toml",
+            "setup.py",
+            "setup.cfg",
+            "tox.ini",
+            "noxfile.py",
+            "pytest.ini",
+            "cargo.toml",
+            "go.mod",
+        ];
+        self.env.sandbox_enforcing
+            && !self.env.written.iter().any(|w| {
+                let n = w.rsplit(['/', '\\']).next().unwrap_or("").to_lowercase();
+                DEFS.contains(&n.as_str())
+                    || n.starts_with("jest.config")
+                    || n.starts_with("vitest.config")
+            })
+    }
+
+    /// Does the command run or source a file the agent wrote this task (`bash x.sh`, `python x.py`,
+    /// `node x.js`, `./x`)? Unparsable counts when anything was written.
+    fn runs_written(&self, cmd: &str) -> bool {
+        if self.env.written.is_empty() {
+            return false;
+        }
+        let Some(segs) = bash::deep_segments(cmd, 0) else {
+            return true;
+        };
+        let policy = self.policy();
+        let key = |p: PathBuf| paths::fold(&paths::lexical_normalize(&p).to_string_lossy(), policy);
+        let wrote: Vec<String> = self
+            .env
+            .written
+            .iter()
+            .map(|w| key(self.env.anchor().join(w)))
+            .collect();
+        segs.iter().any(|seg| {
+            let u = bash::unwrap_words(seg, true);
+            let Some(first) = u.first() else { return false };
+            let name = first.rsplit(['/', '\\']).next().unwrap_or("");
+            let lang = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+            let ops: Vec<&String> = if first.contains('/') || first.contains('\\') {
+                vec![first]
+            } else if bash::SHELLS.contains(&lang)
+                || matches!(
+                    lang,
+                    "python"
+                        | "pypy"
+                        | "node"
+                        | "nodejs"
+                        | "deno"
+                        | "bun"
+                        | "ruby"
+                        | "perl"
+                        | "php"
+                        | "source"
+                        | "."
+                )
+            {
+                u[1..].iter().filter(|a| !a.starts_with('-')).collect()
+            } else {
+                vec![]
+            };
+            ops.into_iter()
+                .any(|o| wrote.contains(&key(paths::resolve(&self.env.cwd, o))))
+        })
+    }
+
+    /// `rm` that deletes a test file, more than `MAX_RM` files, or a directory tree that is not a
+    /// build output: not rewound by file checkpoints, so a person decides (acceptEdits / auto).
+    fn risky_delete(&self, cmd: &str) -> bool {
+        const MAX_RM: usize = 10;
+        const BUILD: &[&str] = &[
+            "target",
+            "node_modules",
+            "dist",
+            "build",
+            "out",
+            ".next",
+            ".cache",
+            "__pycache__",
+            ".pytest_cache",
+            ".turbo",
+            "coverage",
+        ];
+        let Some(segs) = bash::parse_simple_commands(cmd) else {
+            return false;
+        };
+        segs.iter().any(|seg| {
+            let w = bash::unwrap_words(seg, false);
+            if w.first().map(String::as_str) != Some("rm") {
+                return false;
+            }
+            let recursive = w[1..].iter().any(|a| {
+                a == "--recursive"
+                    || (a.starts_with('-') && !a.starts_with("--") && a.contains(['r', 'R']))
+            });
+            let Some(ops) = bash::fs_operands("rm", &w[1..]) else {
+                return true;
+            };
+            // a build output anywhere on the path (`build/*.o`, `a/target`) is rebuilt, not lost
+            let in_build = |o: &str| o.split(['/', '\\']).any(|x| BUILD.contains(&x));
+            ops.len() > MAX_RM
+                || ops.iter().any(|o| is_test_path(o))
+                || (recursive && ops.iter().any(|o| !in_build(o)))
+        })
+    }
+
     /// Per-mode answer for a write to a protected path. `Classify` = ask the auto mode classifier.
     pub fn protected_path_decision(&self, mode: Mode) -> Verdict {
         if self.env.protected_hard && mode != Mode::DontAsk {
@@ -1335,7 +1594,8 @@ impl Permissions {
     /// operand resolves, from `base`, inside the workspace.
     fn seg_safe(&self, w: &[String], base: Option<&Path>, auto: bool) -> bool {
         let ok = if auto {
-            bash::is_auto_safe_simple(w)
+            bash::is_read_only_simple(w)
+                || (bash::is_auto_safe_simple(w) && self.project_code_trusted())
         } else {
             bash::is_read_only_simple(w)
         };
@@ -1954,6 +2214,14 @@ impl Permissions {
             );
         }
 
+        // Publishing, pushing, deploying, remote shells, cloud writes: ask (a force push: deny) in
+        // EVERY mode, bypass and the judge included, unless a user-level rule names the action.
+        if tool == "Bash"
+            && let Some(r) = self.irreversible_verdict(bash_cmd, mode)
+        {
+            return r;
+        }
+
         // Read/Grep/Glob outside the working directories
         let outside = self.outside_read(tool, input);
         if outside.is_some() && self.block_outside_reads {
@@ -1982,6 +2250,18 @@ impl Permissions {
                 .as_ref()
                 .is_some_and(|i| i.targets.iter().any(|t| self.is_protected(t)))
             || (tool == "Bash" && self.bash_hits_protected(bash_cmd));
+
+        // The edit tools are not sandboxed: the sandbox's read-only set (hooks, .git/config,
+        // .gitmodules, .synt, AGENTS.md ...) is refused here in EVERY mode, bypass included, unless
+        // a user-level rule names the path. A hard link or symlink into it resolves to it.
+        if fp.is_some_and(|f| self.is_tool_readonly(&paths::resolve(&self.env.cwd, f)))
+            && !self.user_lifts_edit(tool, input)
+        {
+            return v(
+                Deny,
+                "read-only path: git hooks/config, .gitmodules, .synt, AGENTS.md and similar are never written by the edit tools (a user-level rule can allow one)",
+            );
+        }
 
         // an ask rule is a tripwire the user set on purpose: it prompts in every mode but dontAsk;
         // work for a peer (`protected_hard`) also never skips the protected-path check
@@ -2180,6 +2460,14 @@ impl Permissions {
             if auto && self.bash_safe(bash_cmd, true) {
                 return v(Allow, "auto mode: safe command");
             }
+            // code the agent wrote this task is the person's call, not the judge's (a test runner
+            // under an enforcing sandbox excepted)
+            if auto
+                && self.runs_written(bash_cmd)
+                && !(self.env.sandbox_enforcing && bash::is_test_runner(bash_cmd))
+            {
+                return v(Ask, "runs a file the agent wrote this task");
+            }
             // Official behaviour: a compound command is allowed when every part is, and a read-only
             // part (`| tail -15`, `echo ---`, `2>&1`) needs no rule of its own.
             {
@@ -2196,6 +2484,12 @@ impl Permissions {
                 }
             }
             if matches!(mode, Mode::AcceptEdits | Mode::Auto) && fs_info.ok {
+                if self.risky_delete(bash_cmd) {
+                    return v(
+                        Ask,
+                        "deletes test files, many files or a directory tree (file checkpoints do not cover rm)",
+                    );
+                }
                 return v(
                     Allow,
                     format!("{} mode: file commands inside workspace", mode.as_str()),

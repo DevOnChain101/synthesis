@@ -263,8 +263,10 @@ impl Rig {
             deny: o.deny,
             ..Default::default()
         };
-        let env =
+        let mut env =
             Env::new(root.join("w"), root.join("home"), Mode::Default).interactive(o.interactive);
+        // the tests assume confined commands; the project-code tests clear it
+        env.sandbox_enforcing = true;
         let perms = Permissions::new(rules, env);
         let harness = Harness::new(provider.clone(), o.tools, perms, sink, cfg);
         let h0 = Rig0 {

@@ -9,14 +9,14 @@ use crate::{Envelope, Event, RawEnvelope, SCHEMA_VERSION};
 /// Masks secrets in string values. Built-in patterns follow spec §5.2; `secrets` are exact
 /// values (e.g. env values of API keys) masked wherever they appear.
 pub struct Redactor {
-    secrets: Vec<String>,
+    secrets: std::sync::Mutex<Vec<String>>,
     patterns: Vec<(&'static str, Regex)>,
 }
 
 impl Redactor {
     pub fn new(secrets: impl IntoIterator<Item = String>) -> Self {
         // Order matters: `sk-ant-` must run before the generic `sk-`.
-        let defs: [(&str, &str); 6] = [
+        let defs: [(&str, &str); 16] = [
             ("sk-ant", r"sk-ant-[A-Za-z0-9_-]+"),
             ("sk", r"sk-[A-Za-z0-9_-]{20,}"),
             (
@@ -29,10 +29,32 @@ impl Redactor {
                 r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)",
             ),
             ("bearer", r"Bearer [A-Za-z0-9._~+/=-]+"),
+            ("slack", r"xox[baprs]-[A-Za-z0-9-]{10,}"),
+            ("stripe", r"(?:sk|rk|pk)_live_[A-Za-z0-9]{10,}"),
+            ("gcp", r"AIza[0-9A-Za-z_-]{35}"),
+            (
+                "jwt",
+                r"eyJ[A-Za-z0-9_-]{5,}\.eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]+",
+            ),
+            ("npm", r"npm_[A-Za-z0-9]{30,}"),
+            ("pypi", r"pypi-[A-Za-z0-9_-]{20,}"),
+            ("gitlab", r"glpat-[A-Za-z0-9_-]{20,}"),
+            // `user:pass@host` in a URL: keep the scheme and host, drop the credentials
+            ("url-userinfo", r"[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@"),
+            // 40-char base64 value next to an AWS secret key name
+            (
+                "aws-secret",
+                r"(?i)aws_?secret_?(?:access_?)?key[\x22']?\s*[:=]\s*[\x22']?[A-Za-z0-9/+=]{40}",
+            ),
+            // generic `password: x`, `API_KEY=x`; the value must be 6+ visible characters
+            (
+                "credential",
+                r"(?i)\b(?:password|passwd|secret|token|api[_-]?key)[\x22']?\s*[:=]\s*[\x22']?[^\s\x22',;]{6,}",
+            ),
         ];
         Self {
             // Empty secrets would match everywhere.
-            secrets: secrets.into_iter().filter(|s| !s.is_empty()).collect(),
+            secrets: std::sync::Mutex::new(secrets.into_iter().filter(|s| !s.is_empty()).collect()),
             patterns: defs
                 .iter()
                 .map(|(k, p)| (*k, Regex::new(p).expect("static regex")))
@@ -40,9 +62,23 @@ impl Redactor {
         }
     }
 
+    /// Registers an exact value to mask from now on (a value read from a secret file the user
+    /// approved). Values shorter than 6 chars are ignored (they would match everywhere).
+    pub fn add_secret(&self, s: &str) {
+        let mut v = self.secrets.lock().unwrap_or_else(|e| e.into_inner());
+        if s.chars().count() >= 6 && !v.iter().any(|x| x == s) {
+            v.push(s.to_string());
+        }
+    }
+
     pub fn redact_str(&self, s: &str) -> String {
         let mut out = s.to_string();
-        for secret in &self.secrets {
+        let secrets = self
+            .secrets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        for secret in &secrets {
             out = out.replace(secret.as_str(), "[REDACTED:secret]");
         }
         for (kind, re) in &self.patterns {
@@ -853,6 +889,64 @@ mod tests {
         assert!(text.contains("login [REDACTED:secret] now"));
         assert!(text.contains("[REDACTED:bearer]") && text.contains("[REDACTED:sk-ant]"));
         assert!(text.contains("\"n\":7"));
+    }
+
+    #[test]
+    fn redactor_new_shapes_and_false_positive_guards() {
+        let r = Redactor::new([]);
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.abcDEF_123-x";
+        for (input, kind) in [
+            ("xoxb-1234567890-abcdefghij", "slack"),
+            ("sk_live_abcdefghij1234", "stripe"),
+            ("rk_live_abcdefghij1234", "stripe"),
+            ("pk_live_abcdefghij1234", "stripe"),
+            ("AIzaSyA-1234567890abcdefghijklmnopqrstuv", "gcp"),
+            (jwt, "jwt"),
+            ("npm_abcdefghijklmnopqrstuvwxyz0123456789", "npm"),
+            ("pypi-AgEIcHlwaS5vcmcCJGFiY2RlZmdoaWprbG1u", "pypi"),
+            ("glpat-abcdefghij1234567890", "gitlab"),
+            (
+                "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                "aws-secret",
+            ),
+            ("password: hunter22", "credential"),
+            ("API_KEY=abc123def", "credential"),
+            ("\"token\": \"abcdef123\"", "credential"),
+        ] {
+            let out = r.redact_str(input);
+            assert!(
+                out.contains(&format!("[REDACTED:{kind}]")),
+                "{input} -> {out}"
+            );
+        }
+        let url = r.redact_str("clone https://bob:s3cret@example.com/r.git now");
+        assert!(
+            !url.contains("s3cret") && url.contains("example.com"),
+            "{url}"
+        );
+        // plain prose and code are left alone
+        for ok in [
+            "https://example.com/a?b=c",
+            "git@github.com:a/b.git",
+            "the password field is required",
+            "token = ''",
+            "tokens: 12",
+            "password:",
+            "max_tokens=4096",
+            "eyJ.not.ajwt",
+            "see npm_config for more",
+            "key=short",
+        ] {
+            assert_eq!(r.redact_str(ok), ok, "{ok}");
+        }
+    }
+
+    #[test]
+    fn add_secret_masks_later_output_and_ignores_short_values() {
+        let r = Redactor::new([]);
+        r.add_secret("db-pass-9981");
+        r.add_secret("ab");
+        assert_eq!(r.redact_str("x db-pass-9981 ab"), "x [REDACTED:secret] ab");
     }
 
     #[test]

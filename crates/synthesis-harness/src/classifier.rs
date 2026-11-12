@@ -53,6 +53,7 @@ pub(crate) struct AutoState {
     pub cache: HashMap<u64, (ClassifierDecision, String)>,
 }
 
+/// A pending action longer than this is never judged (it would be cut): it asks.
 const INPUT_CAP: usize = 4000;
 const TEXT_CAP: usize = 1500;
 
@@ -71,6 +72,40 @@ pub(crate) fn user_texts(history: &[Message], request: &str) -> Vec<String> {
     v
 }
 
+/// Paths (workspace-relative), sizes and short sha256 prefixes of the files the agent wrote this
+/// task: what a command in the pending action may be about to run.
+fn written_digest(task: &TaskRun) -> String {
+    use sha2::{Digest, Sha256};
+    const MAX_FILES: usize = 40;
+    const MAX_HASHED: u64 = 1 << 20;
+    let changed = lock(&task.changed);
+    let mut lines: Vec<String> = changed
+        .iter()
+        .take(MAX_FILES)
+        .map(|rel| {
+            let abs = task.workspace.root.join(rel);
+            match std::fs::metadata(&abs) {
+                Ok(m) if m.is_file() && m.len() <= MAX_HASHED => {
+                    let h = std::fs::read(&abs).map(Sha256::digest).ok();
+                    let hex: String = h
+                        .iter()
+                        .flatten()
+                        .take(4)
+                        .map(|b| format!("{b:02x}"))
+                        .collect();
+                    format!("{rel} {} bytes sha256:{hex}", m.len())
+                }
+                Ok(m) => format!("{rel} {} bytes", m.len()),
+                Err(_) => format!("{rel} (gone)"),
+            }
+        })
+        .collect();
+    if changed.len() > MAX_FILES {
+        lines.push(format!("... and {} more", changed.len() - MAX_FILES));
+    }
+    lines.join("\n")
+}
+
 fn prompt(task: &TaskRun, call: &Call, input: &Value, engine_note: &str) -> String {
     let texts = lock(&task.user_texts);
     let (task_text, earlier) = texts
@@ -86,6 +121,7 @@ fn prompt(task: &TaskRun, call: &Call, input: &Value, engine_note: &str) -> Stri
         untrusted_block("user_task", task_text),
         untrusted_block("earlier_user_messages", &earlier.join("\n---\n")),
         untrusted_block("workspace", &task.workspace.root.to_string_lossy()),
+        untrusted_block("files_written_by_the_agent_this_task", &written_digest(task)),
         untrusted_block("pending_action", &action),
         untrusted_block("engine_note", engine_note),
     ]
@@ -112,7 +148,24 @@ impl Harness {
     ) -> (ClassifierDecision, String) {
         let k = key(call, input);
         let cached = lock(&task.auto).cache.get(&k).cloned();
-        let (out, source) = if let Some(c) = cached {
+        // Fail closed BEFORE the cache or the model: a cached allow never covers these classes.
+        let forced = if input.to_string().chars().count() > INPUT_CAP {
+            Some("the action is too long to judge in full (the judge would see a truncated view)")
+        } else if task.after_image.load(std::sync::atomic::Ordering::SeqCst)
+            && !matches!(
+                call.name.as_str(),
+                "Write" | "Edit" | "MultiEdit" | "NotebookEdit"
+            )
+        {
+            Some(
+                "an earlier tool result of this task carried an image (untrusted text); an action with an external effect is not judged",
+            )
+        } else {
+            None
+        };
+        let (out, source) = if let Some(why) = forced {
+            ((ClassifierDecision::Ask, why.to_string()), "fail_closed")
+        } else if let Some(c) = cached {
             (c, "cache")
         } else if !self.reserve_call(&task.auto) {
             (

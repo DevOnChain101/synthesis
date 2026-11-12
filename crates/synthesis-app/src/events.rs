@@ -130,6 +130,28 @@ impl Persist {
             {
                 eprintln!("synt: warning: checkpoint: {e}");
             }
+            // a mutating Bash command (rm, mv, cp, sed -i) is not tracked by the file tools:
+            // snapshot the files it names once, before it runs (best effort; directories are not)
+            if let Event::ToolRequested { name, input, .. } = &env.event
+                && name == "Bash"
+                && let Some(cmd) = input.get("command").and_then(|c| c.as_str())
+            {
+                let fresh: Vec<std::path::PathBuf> =
+                    synthesis_permissions::bash::mutation_targets(cmd)
+                        .into_iter()
+                        .filter(|p| self.checkpointed.insert(p.clone()))
+                        .map(std::path::PathBuf::from)
+                        .collect();
+                if !fresh.is_empty()
+                    && let Err(e) = w.create_checkpoint(
+                        &format!("before-first-bash-{}", self.checkpointed.len()),
+                        &fresh,
+                    )
+                    && !matches!(e, synthesis_session::Error::Invalid(_))
+                {
+                    eprintln!("synt: warning: checkpoint: {e}");
+                }
+            }
             drop(w);
             if seq != env.seq + self.base {
                 return Err(bad(format!("store seq {seq} != stream seq {}", env.seq)));

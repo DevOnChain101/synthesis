@@ -781,7 +781,7 @@ fn makefile_turns() -> Vec<Turn> {
 }
 
 #[tokio::test]
-async fn trusted_inferred_check_runs_without_an_allow_in_default_and_accept_edits() {
+async fn trusted_inferred_check_runs_without_an_allow_when_the_agent_did_not_write_the_makefile() {
     for mode in [PermissionMode::Default, PermissionMode::AcceptEdits] {
         for interactive in [false, true] {
             let approver = ScriptedApprover::new(vec![]);
@@ -789,16 +789,50 @@ async fn trusted_inferred_check_runs_without_an_allow_in_default_and_accept_edit
                 mode,
                 ..gate_opts(interactive)
             };
-            let mut rig = gated(opts, makefile_turns(), Some(approver.clone()));
-            let out = rig.run("add a makefile").await;
+            // the Makefile exists before the task; the agent writes something else
+            let turns = vec![
+                Turn::tool(
+                    "w1",
+                    "Write",
+                    json!({"file_path": "a.c", "content": "int x;"}),
+                ),
+                Turn::text("done"),
+                Turn::text("done again"),
+            ];
+            let mut rig = gated(opts, turns, Some(approver.clone()));
+            std::fs::write(rig.ws.cwd.join("Makefile"), "test:\n\ttouch ran-it\n").unwrap();
+            let out = rig.run("add a file").await;
             let ctx = format!("{mode:?} interactive={interactive}: {}", out.reason);
             assert_ne!(out.status, TaskStatus::Blocked, "{ctx}");
-            assert!(out.needed_permissions.is_empty(), "{ctx}");
             assert!(
                 rig.ws.cwd.join("ran-it").exists(),
                 "check did not run: {ctx}"
             );
             assert!(approver.asked.lock().unwrap().is_empty(), "{ctx}");
+        }
+    }
+}
+
+/// P4: the agent wrote the Makefile this task, so `make test` would run code it controls: it is
+/// no longer trusted (headless: blocked, interactive: asked).
+#[tokio::test]
+async fn trusted_inferred_check_is_not_trusted_when_the_agent_wrote_the_makefile() {
+    for interactive in [false, true] {
+        let approver = ScriptedApprover::new(vec![]);
+        let mut rig = gated(
+            gate_opts(interactive),
+            makefile_turns(),
+            Some(approver.clone()),
+        );
+        let out = rig.run("add a makefile").await;
+        assert!(
+            !rig.ws.cwd.join("ran-it").exists(),
+            "interactive={interactive}: ran unapproved"
+        );
+        if !interactive {
+            assert_eq!(out.status, TaskStatus::Blocked, "{}", out.reason);
+        } else {
+            assert!(!approver.asked.lock().unwrap().is_empty());
         }
     }
 }
