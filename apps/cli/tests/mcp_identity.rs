@@ -83,7 +83,7 @@ impl Rig {
         std::fs::write(&s, script.to_string()).unwrap();
         let o = self
             .cmd(extra_env)
-            .args(["run", "--cwd"])
+            .args(["run", "--no-cost-cap", "--cwd"])
             .arg(self.ws())
             .arg("--provider")
             .arg(format!("fake:{}", s.display()))

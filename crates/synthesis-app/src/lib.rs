@@ -50,6 +50,7 @@ pub mod proto;
 pub mod rename;
 pub mod rewind;
 pub mod run;
+pub mod sessions;
 pub mod taskdb;
 pub mod tracker;
 pub mod transcript;

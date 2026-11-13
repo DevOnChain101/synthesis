@@ -57,11 +57,23 @@ impl Summarizer for Sum {
 struct Real {
     sum: Arc<Sum>,
     keep: u64,
+    /// Compactions whose summarizer usage was already handed out by `take_usage`.
+    taken: AtomicUsize,
 }
 
 impl ContextProvider for Real {
     fn build(&self, history: &[Message], p: Option<&str>) -> Result<Built, String> {
         StaticContext::default().build(history, p)
+    }
+    fn take_usage(&self) -> Option<synthesis_providers::Usage> {
+        // each summarizer call costs 5000 in / 700 out
+        let n = self.sum.calls();
+        let new = n - self.taken.swap(n, Ordering::SeqCst);
+        (new > 0).then(|| synthesis_providers::Usage {
+            input_tokens: Some(5000 * new as u64),
+            output_tokens: Some(700 * new as u64),
+            ..Default::default()
+        })
     }
     fn compact<'a>(
         &'a self,
@@ -119,7 +131,11 @@ fn rig(turns: Vec<Turn>, sum: &Arc<Sum>, keep: u64, out: &str) -> Rig {
     let p = Probe::new("Probe", SideEffectClass::Read, 0, out);
     let sum = sum.clone();
     Rig::build(opts(&p), turns, move |h, _| {
-        h.with_context(Arc::new(Real { sum, keep }))
+        h.with_context(Arc::new(Real {
+            sum,
+            keep,
+            taken: AtomicUsize::new(0),
+        }))
     })
 }
 
@@ -154,6 +170,11 @@ async fn threshold_crossing_compacts_once_before_the_request_and_refreshes_usage
     let out = r.run(&long_request()).await;
     assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
     assert_eq!(sum.calls(), 1, "exactly one compaction");
+    // the summarizer call is charged to the task: 3 responses + 5000 in / 700 out
+    assert_eq!(
+        (out.usage.input_tokens, out.usage.output_tokens),
+        (BIG + 2 * SMALL + 5000, 10 + 10 + 5 + 700)
+    );
     assert_eq!(
         ctx_events(&r),
         [
@@ -295,6 +316,7 @@ async fn low_gain_pauses_auto_compact_and_warns() {
         h.with_context(Arc::new(Real {
             sum: s2,
             keep: 10_500,
+            taken: AtomicUsize::new(0),
         }))
     });
     let out = r.run(&"q".repeat(4000)).await;
@@ -323,7 +345,13 @@ async fn disabled_setting_and_static_context_never_compact() {
     let mut r = Rig::build(
         o,
         vec![tool(0, BIG), tool(1, BIG), Turn::text("done")],
-        move |h, _| h.with_context(Arc::new(Real { sum: s2, keep: 20 })),
+        move |h, _| {
+            h.with_context(Arc::new(Real {
+                sum: s2,
+                keep: 20,
+                taken: AtomicUsize::new(0),
+            }))
+        },
     );
     r.run(&long_request()).await;
     assert_eq!(sum.calls(), 0);
@@ -353,7 +381,13 @@ async fn threshold_setting_moves_the_trigger() {
     let mut r = Rig::build(
         o,
         vec![tool(0, 110_000), Turn::text("done")],
-        move |h, _| h.with_context(Arc::new(Real { sum: s2, keep: 20 })),
+        move |h, _| {
+            h.with_context(Arc::new(Real {
+                sum: s2,
+                keep: 20,
+                taken: AtomicUsize::new(0),
+            }))
+        },
     );
     r.run(&long_request()).await;
     assert_eq!(sum.calls(), 1, "55% >= 50%");
@@ -481,7 +515,11 @@ async fn the_window_of_the_current_model_sets_the_threshold_and_the_percent() {
         let turns = vec![tool(0, BIG), tool(1, SMALL), Turn::text("done")];
         let s2 = sum.clone();
         let mut r = Rig::build(o, turns, move |h, _| {
-            h.with_context(Arc::new(Real { sum: s2, keep: 20 }))
+            h.with_context(Arc::new(Real {
+                sum: s2,
+                keep: 20,
+                taken: AtomicUsize::new(0),
+            }))
         });
         let out = r.run(&long_request()).await;
         assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);
@@ -510,7 +548,11 @@ async fn an_unknown_window_is_reported_as_zero_and_compacts_against_200k_with_on
     let turns = vec![tool(0, BIG), tool(1, SMALL), Turn::text("done")];
     let s2 = sum.clone();
     let mut r = Rig::build(o, turns, move |h, _| {
-        h.with_context(Arc::new(Real { sum: s2, keep: 20 }))
+        h.with_context(Arc::new(Real {
+            sum: s2,
+            keep: 20,
+            taken: AtomicUsize::new(0),
+        }))
     });
     let out = r.run(&long_request()).await;
     assert_eq!(out.status, TaskStatus::Completed, "{}", out.reason);

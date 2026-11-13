@@ -33,10 +33,34 @@ use crate::traits::{
 };
 use crate::util::{lock, status_str, uuid};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Pricing {
     pub input_per_mtok: f64,
     pub output_per_mtok: f64,
+    /// Price of a cache read; `None` = 10% of the input price (Anthropic's rate).
+    pub cache_read_per_mtok: Option<f64>,
+    /// Price of a cache write; `None` = 125% of the input price (Anthropic's rate, the dearer
+    /// side, so a cap is never under-counted).
+    pub cache_write_per_mtok: Option<f64>,
+}
+
+impl Pricing {
+    /// USD of one response. `input_tokens` excludes the cache tokens (Anthropic's accounting),
+    /// which are priced on their own.
+    pub fn cost(&self, u: &synthesis_providers::Usage) -> f64 {
+        let n = |t: Option<u64>| t.unwrap_or(0) as f64;
+        let read = self
+            .cache_read_per_mtok
+            .unwrap_or(self.input_per_mtok * 0.1);
+        let write = self
+            .cache_write_per_mtok
+            .unwrap_or(self.input_per_mtok * 1.25);
+        (n(u.input_tokens) * self.input_per_mtok
+            + n(u.output_tokens) * self.output_per_mtok
+            + n(u.cache_read_input_tokens) * read
+            + n(u.cache_creation_input_tokens) * write)
+            / 1_000_000.0
+    }
 }
 
 /// Proactive compaction (`synt.context.*` of the user settings.json).
@@ -193,7 +217,19 @@ pub struct HarnessConfig {
     pub tool_search: ToolSearchMode,
     /// The judge of auto mode.
     pub auto: crate::classifier::AutoJudge,
+    /// Called with every verification report just before `verification.completed` is emitted
+    /// (the event carries only a summary; a host that stores the full report hooks in here).
+    pub report_sink: Option<ReportSink>,
+    /// Price of the model that actually answered: a bare model name (the run's own model and
+    /// sub-agent models) or a `provider/model` label (a failover target). `None` = `pricing` for
+    /// everything.
+    pub pricing_for: Option<PriceFn>,
 }
+
+pub type PriceFn = std::sync::Arc<dyn Fn(&str) -> Option<Pricing> + Send + Sync>;
+
+pub type ReportSink =
+    std::sync::Arc<dyn Fn(&synthesis_verification::VerificationReport) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModeError {
@@ -256,6 +292,8 @@ impl HarnessConfig {
             shell: ShellSettings::default(),
             tool_search: ToolSearchMode::default(),
             auto: crate::classifier::AutoJudge::default(),
+            report_sink: None,
+            pricing_for: None,
         }
     }
 }
@@ -1490,7 +1528,22 @@ impl Harness {
                 .collect(),
         );
         lock(&task.counters).verify_attempts += 1;
-        self.emit(task, agent, None, r.to_event());
+        if let Some(f) = &self.config.report_sink {
+            f(r);
+        }
+        let mut event = r.to_event();
+        if let Event::VerificationCompleted { report_sha256, .. } = &mut event
+            && let Ok(v) = serde_json::to_value(r)
+        {
+            use sha2::{Digest, Sha256};
+            *report_sha256 = Some(
+                Sha256::digest(v.to_string().as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect(),
+            );
+        }
+        self.emit(task, agent, None, event);
         Some(r.id.clone())
     }
 

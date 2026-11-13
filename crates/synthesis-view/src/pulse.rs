@@ -105,6 +105,7 @@ pub fn touch_of(e: &Event) -> Touch {
         ModelDelta { .. }
         | AssistantMessage { .. }
         | ModelRetry { .. }
+        | ModelFailover { .. }
         | ModelError { .. }
         | TodoUpdated { .. } => Touch::Pulse(Core),
         ContextCompacting { .. } => open(Core, "compact", ""),

@@ -435,6 +435,11 @@ mod tests {
                 error: s("e"),
                 delay_ms: 10,
             },
+            Event::ModelFailover {
+                from: s("a/m1"),
+                to: s("b/m2"),
+                reason: s("overloaded"),
+            },
             Event::ModelError {
                 status: Some(429),
                 message: s("m"),
@@ -574,6 +579,7 @@ mod tests {
                 status: s("passed"),
                 attempt: 1,
                 summary: s("ok"),
+                report_sha256: Some(s("ab")),
             },
             Event::VerificationCheckStarted {
                 check_id: s("k1"),

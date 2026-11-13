@@ -204,6 +204,7 @@ impl VerificationReport {
             status: self.status.as_str().into(),
             attempt: i64::from(self.attempt),
             summary: self.summary(),
+            report_sha256: None,
         }
     }
 }

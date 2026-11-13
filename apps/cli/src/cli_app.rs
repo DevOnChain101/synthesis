@@ -596,7 +596,7 @@ fn round(
         }),
     ) = (&store, &exit)
     {
-        finish_store(s, transcript.as_deref(), out, &sess.usage);
+        let _ = finish_store(s, transcript.as_deref(), out, &sess.usage); // told on stderr
     }
     harness.end_session(&outcome);
     if let Some(t) = &transcript {
@@ -700,7 +700,7 @@ impl TaskHost for Host {
                 }
             }
             if let Some(s) = &self.store {
-                finish_store(s, self.transcript.as_deref(), out, &session.usage);
+                let _ = finish_store(s, self.transcript.as_deref(), out, &session.usage); // told on stderr
             }
         })
     }

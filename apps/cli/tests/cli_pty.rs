@@ -644,6 +644,7 @@ fn resume_with_a_removed_stored_model_shows_a_notice() {
         .env("SYNT_HOME", rig.home())
         .args([
             "run",
+            "--no-cost-cap",
             "--sandbox",
             "off",
             "--model",

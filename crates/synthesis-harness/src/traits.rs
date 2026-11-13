@@ -218,4 +218,10 @@ pub trait ContextProvider: Send + Sync {
     fn can_compact(&self) -> bool {
         true
     }
+
+    /// Model usage `compact` spent since the last call (summarizer requests, a failed one too);
+    /// the harness charges it to the task counters.
+    fn take_usage(&self) -> Option<synthesis_providers::Usage> {
+        None
+    }
 }

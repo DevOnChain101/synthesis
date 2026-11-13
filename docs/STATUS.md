@@ -23,6 +23,9 @@ Goal: R1–R9, hand over the full Synthesis autonomous coding agent. Not complet
 
 - Harness audit hardening (branch feat/harness-perms, 2026-11-12): read-only set for the edit tools, irreversible-action table, auto-judge fail-closed rules, project-code trust, rm asks and Bash checkpoints, wider redaction (docs/specs/permissions.md, docs/SECURITY.md). Unverified on Linux/Windows CI; behaviours that now ask or deny are listed in the commit message.
 
+## Governance of unattended runs (branch feat/harness-governance)
+Cost accounting prices cache tokens and compaction calls, `--max-tokens`, built-in prices for first-party models; `synt run`/`engine --stdio` default to a 30 min wall cap, a required cost cap, a worktree, inferred-only = unverified; `--unattended` preset; fatal session-store failure when unattended; resume of worktree sessions; `synt stop`; hash-chained events with `synt sessions verify`/`show`; full verification report stored; provider `fallback`. Details, limits and NOT_FIXED items: docs/UNATTENDED.md. Verified on macOS only; Windows/Linux CI not run for this branch.
+
 ## Decisions on record
 Product rename to Synthesis (owner, 2026-10-30; see CHANGELOG): command `synt`, crates `synthesis-*`, env `SYNT_*`, home `~/.synt`; the old names are detected by `synt doctor` and never read (docs/MIGRATION.md). Not verified yet after the rename: Linux and Windows CI (run it on the next push); GitHub repository variables must be recreated under the new names (docs/RELEASE.md).
 

@@ -4,6 +4,12 @@ Format: Keep a Changelog. Versioning: SemVer (pre-1.0: minor versions may break)
 
 ## [Unreleased]
 
+### Changed (governance of unattended runs)
+- `synt run` and `synt engine --stdio` now REQUIRE a cost cap (`--max-cost-usd` or `--no-cost-cap`), default to a 30 minute wall cap, work in a git worktree when the directory is a repository (`--no-worktree` to opt out), and leave tasks with only inferred checks `unverified`. `--unattended` is the strict preset (docs/UNATTENDED.md). A desktop host starts the engine with `--host desktop` and keeps the interactive behaviour; the Windows desktop passes `synt.desktop.max_cost_usd` (default 10) or honours `synt.desktop.no_cost_cap`.
+- Cost accounting prices cache tokens and compaction calls, uses the price of the model that answered (failover targets, sub-agents), and has built-in prices for exact first-party model ids.
+- Session database schema 3 and 4 (events get `prev`, sessions get `chain_head`, `chained`, `stop_requested_at`, `git_info`) and a `chain.key` file in the home. DOWNGRADE: an older `synt` does not know these columns and refuses to open the database ("schema too new"); to go back, keep a copy of `synt.db` made before upgrading. Sessions created by this build verify with `synt sessions verify`; older ones report NOT VERIFIED.
+- New: `synt stop`, `synt sessions show|verify`, `--max-tokens`, config `fallback` / `fallbackReprobeMinutes`, event `model.failover`, `report_sha256` on `verification.completed`.
+
 ### Changed (owner decision 2026-11-11, terminology)
 - CLI = the terminal interface (`synt`); TUI = the terminal-style tab of the desktop app; Super Agent = the desktop's "Agent" tab (coming soon). The terminal app's crates are now `synthesis-cli-ui`, `synthesis-cli-ui-base`, `synthesis-cli-ui-render` (were `synthesis-tui*`), `docs/TUI.md` is `docs/CLI-APP.md`. The `synt tui` subcommand is removed (no alias; plain `synt` opens the app). The CLI reads `synt.cli.*` (was `synt.tui.*`); the desktop keeps `synt.tui.*` for its TUI tab. `synt doctor` names CLI-only keys left under `synt.tui` and `SYNT_TUI_*` variables.
 

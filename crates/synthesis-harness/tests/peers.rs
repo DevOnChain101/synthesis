@@ -216,6 +216,7 @@ fn side_x(
                     c.pricing = Some(synthesis_harness::Pricing {
                         input_per_mtok: 1.0,
                         output_per_mtok: 1.0,
+                        ..Default::default()
                     });
                 }
             } else {

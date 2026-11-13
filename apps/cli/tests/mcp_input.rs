@@ -92,7 +92,7 @@ impl Rig {
     /// `synt run` with the prompt flag and extra args; returns the output and the user message.
     fn run(&self, prompt_args: &[&str], extra: &[&str]) -> (Output, Option<String>) {
         let script = self.dir.path().join("synthesis/script.json");
-        let mut c = self.base(&["run", "--cwd"]);
+        let mut c = self.base(&["run", "--no-cost-cap", "--cwd"]);
         c.arg(self.ws())
             .arg("--provider")
             .arg(format!("fake:{}", script.display()))
@@ -151,7 +151,7 @@ fn stdin_and_prompt_file_prompts_get_mentions_too() {
     let (_, t) = rig.run(&["--prompt-file", f.to_str().unwrap()], &[]);
     assert!(t.unwrap().contains("doc body"));
     let script = rig.dir.path().join("synthesis/script.json");
-    let mut c = rig.base(&["run", "--cwd"]);
+    let mut c = rig.base(&["run", "--no-cost-cap", "--cwd"]);
     c.arg(rig.ws())
         .arg("--provider")
         .arg(format!("fake:{}", script.display()))
