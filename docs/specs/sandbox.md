@@ -1,5 +1,7 @@
 # Sandbox on WSL (draft)
 
+See also `docs/specs/sandbox-hardening.md` (egress proxy for `--network hosts`, read allow-list, resource limits, Windows).
+
 Scope: the Linux engine (`synt run`, `synt engine --stdio`, the desktop TUI tab through WSL2) when it detects it runs inside WSL. Code: `crates/synthesis-platform/src/wsl.rs` (detection, PATH scrub), `crates/synthesis-sandbox/src/{wsl,linux}.rs` (controls), `crates/synthesis-sandbox/src/bin/synthesis-sandbox-exec.rs` (seccomp), `crates/synthesis-terminal` (mode, preflight), `crates/synthesis-app` (`resolve_sandbox_mode`, MCP plan, `synt doctor`). Owner decisions: WSL is NOT isolation, so the sandbox blocks interop itself (users are not asked to edit `/etc/wsl.conf`); `synt doctor` only warns; fail closed.
 
 **Interop closure is NOT proven until `cargo test -p synthesis-sandbox --test wsl -- --ignored` has passed on a real WSL2 distro.** Everything below was written and unit-tested without WSL; the Linux bubblewrap and seccomp tests run in CI (ubuntu), not on WSL.

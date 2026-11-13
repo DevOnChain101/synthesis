@@ -35,10 +35,13 @@ struct Wire {
 }
 
 pub fn encode_policy(p: &SandboxPolicy) -> Result<String, SandboxError> {
-    validate(p)?; // also rejects AllowHosts, so the match below cannot lose information
-    if p.network == NetworkPolicy::Loopback {
+    validate(p)?;
+    if matches!(
+        p.network,
+        NetworkPolicy::Loopback | NetworkPolicy::Proxied(_)
+    ) {
         return Err(SandboxError::Unsupported(
-            "network Loopback cannot be expressed to the Landlock helper".into(),
+            "network Loopback and Proxied cannot be expressed to the Landlock helper".into(),
         ));
     }
     let w = Wire {
@@ -137,7 +140,7 @@ mod tests {
         for bad in [
             with("\"version\":1", "\"version\":2"),
             with("\"version\":1", "\"version\":1,\"extra\":true"),
-            with("\"allow\"", "\"AllowHosts\""),
+            with("\"allow\"", "\"Proxied\""),
             with(&serde_json::to_string(&p("/work")).unwrap(), "\"rel\""),
             "{}".into(),
             String::new(),
@@ -148,7 +151,7 @@ mod tests {
             );
         }
         let hosts = SandboxPolicy {
-            network: NetworkPolicy::AllowHosts(vec!["a".into()]),
+            network: NetworkPolicy::Proxied(crate::EgressEndpoint::Unix(p("/r/e.sock"))),
             ..Default::default()
         };
         assert!(encode_policy(&hosts).is_err());
