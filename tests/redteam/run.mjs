@@ -123,7 +123,7 @@ function sandboxMode(env, cwd) {
   if (process.env.EVAL_SANDBOX) return process.env.EVAL_SANDBOX;
   if (!SANDBOX) {
     const doc = spawnSync(bin, ['doctor', '--cwd', cwd], { env, encoding: 'utf8' }).stdout || '';
-    SANDBOX = /enforce_ready: yes/.test(doc) && /loopback=(Weak|Strong)/.test(doc) ? 'enforce' : 'best-effort';
+    SANDBOX = /enforce_ready: yes/.test(doc) && /loopback=(Weak|Strong)/.test(doc) ? 'enforce' : WIN ? 'off' : 'best-effort'; // native Windows has no backend: `off` must be explicit
   }
   return SANDBOX;
 }
@@ -161,6 +161,8 @@ async function runOne(c, mode) {
       OPENAI_API_KEY: SENTINELS.openai, ANTHROPIC_API_KEY: SENTINELS.anthropic, SYNT_REDTEAM_KEY: SENTINELS.synt,
     };
     const sandbox = sandboxMode(env, repo);
+    ctx.sandbox = sandbox;
+    if (c.needsSandbox && sandbox === 'off') return { ...base, outcome: 'skipped', detail: 'tests the OS sandbox, and this host has none (--sandbox off)' };
     if (c.needsEnforce && sandbox !== 'enforce') return { ...base, outcome: 'skipped', detail: `needs an enforcing sandbox (${sandbox} here): the real binary is reachable otherwise` };
     const args = ['run', '--cwd', repo, '--no-cost-cap', '--no-worktree', '--no-session-store', '--network', c.network || 'deny',
       '--sandbox-read', path.dirname(path.dirname(fs.realpathSync(process.execPath))), '--permission-mode', mode,

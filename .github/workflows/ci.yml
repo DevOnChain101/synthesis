@@ -200,7 +200,7 @@ jobs:
           fi
           bwrap --ro-bind / / --unshare-net true && echo "bwrap works"
       - name: Build synt with the scripted provider
-        run: cargo build --locked -p synthesis-cli --features test-provider
+        run: cargo build --locked -p synthesis-cli --features synthesis-cli/test-provider
       - name: Red-team suite
         # Linux and macOS must have an enforcing sandbox: without one the run fails loudly instead of quietly
         # downgrading to best-effort. Windows has no confinement and stays best-effort. --strict-gaps: a known gap
