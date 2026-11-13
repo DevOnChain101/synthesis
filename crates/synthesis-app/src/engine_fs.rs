@@ -762,7 +762,9 @@ mod tests {
         std::fs::write(w.join(".env"), "SECRET-ENV").unwrap();
         std::fs::write(w.join("ok.txt"), "fine").unwrap();
         std::fs::write(w.join("d/config"), "fine-d").unwrap();
-        std::fs::write(w.join("stable.txt"), "stable").unwrap();
+        // a folder the swapper never touches: its file must always read
+        std::fs::create_dir_all(w.join("quiet")).unwrap();
+        std::fs::write(w.join("quiet/stable.txt"), "stable").unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let swapper = {
             let (w, stop) = (w.clone(), stop.clone());
@@ -784,7 +786,9 @@ mod tests {
         let (mut ok, mut refused, mut stable) = (0, 0, 0);
         while t0.elapsed() < Duration::from_millis(1500) {
             // a file nobody touches must always read: a reader that refuses everything must not pass
-            assert_eq!(read(&w, "stable.txt").unwrap()["lines"][0], "stable");
+            let v = read(&w, "quiet/stable.txt")
+                .unwrap_or_else(|e| panic!("an untouched file was refused: {e}"));
+            assert_eq!(v["lines"][0], "stable");
             stable += 1;
             for rel in ["ok.txt", "d/config"] {
                 match read(&w, rel) {

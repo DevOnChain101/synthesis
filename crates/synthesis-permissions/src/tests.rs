@@ -5058,6 +5058,7 @@ fn an_ordinary_8_3_temp_folder_above_the_root_does_not_make_the_project_protecte
         &roots,
         &root.join("GIT~1/hooks/x")
     ));
+}
 
 #[test]
 fn r9_written_set_matches_absolute_relative_and_backslash_spellings() {
