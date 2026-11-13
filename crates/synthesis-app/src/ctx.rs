@@ -93,6 +93,8 @@ pub struct ProviderSummarizer {
     cancel: CancellationToken,
     last: Mutex<String>,
     usage: Mutex<synthesis_providers::Usage>,
+    /// Sum of every call since the last `take_spent` (what compaction cost the task).
+    spent: Mutex<synthesis_providers::Usage>,
     max_tokens: u32,
 }
 
@@ -100,6 +102,12 @@ impl ProviderSummarizer {
     /// Tokens the last call reported (fields stay `None` when the provider sent none).
     pub fn last_usage(&self) -> synthesis_providers::Usage {
         *self.usage.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Tokens of all calls since the last take (`None` when there were none).
+    pub fn take_spent(&self) -> Option<synthesis_providers::Usage> {
+        let u = std::mem::take(&mut *self.spent.lock().unwrap_or_else(|e| e.into_inner()));
+        (u != synthesis_providers::Usage::default()).then_some(u)
     }
 
     pub fn with_max_tokens(mut self, n: u32) -> Self {
@@ -114,6 +122,7 @@ impl ProviderSummarizer {
             cancel,
             last: Mutex::default(),
             usage: Mutex::default(),
+            spent: Mutex::default(),
             max_tokens: 4096,
         }
     }
@@ -137,6 +146,21 @@ impl Summarizer for ProviderSummarizer {
         let mut stream = self.provider.stream(&req, self.cancel.clone());
         let mut text = String::new();
         let mut usage = synthesis_providers::Usage::default();
+        let add = |usage: &synthesis_providers::Usage| {
+            let mut s = self.spent.lock().unwrap_or_else(|e| e.into_inner());
+            let sum = |a: Option<u64>, b: Option<u64>| match (a, b) {
+                (None, None) => None,
+                (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+            };
+            s.input_tokens = sum(s.input_tokens, usage.input_tokens);
+            s.output_tokens = sum(s.output_tokens, usage.output_tokens);
+            s.cache_read_input_tokens =
+                sum(s.cache_read_input_tokens, usage.cache_read_input_tokens);
+            s.cache_creation_input_tokens = sum(
+                s.cache_creation_input_tokens,
+                usage.cache_creation_input_tokens,
+            );
+        };
         while let Some(ev) = stream.next().await {
             match ev {
                 Ok(StreamEvent::ContentBlockDelta {
@@ -147,6 +171,7 @@ impl Summarizer for ProviderSummarizer {
                 Ok(StreamEvent::MessageDelta { usage: Some(u), .. }) => usage.merge(&u),
                 Ok(_) => {}
                 Err(e) => {
+                    add(&usage);
                     let mark = if e.context_overflow() {
                         OVERFLOW_MARK
                     } else {
@@ -156,6 +181,7 @@ impl Summarizer for ProviderSummarizer {
                 }
             }
         }
+        add(&usage);
         *self.last.lock().unwrap_or_else(|e| e.into_inner()) = text.clone();
         *self.usage.lock().unwrap_or_else(|e| e.into_inner()) = usage;
         Ok(text)
@@ -350,6 +376,7 @@ impl SynthesisContext {
                 cancel,
                 last: Mutex::default(),
                 usage: Mutex::default(),
+                spent: Mutex::default(),
                 max_tokens: 4096,
             }),
             put,
@@ -636,7 +663,7 @@ impl ContextProvider for SynthesisContext {
         if agent_prompt.is_none()
             && let Some(t) = &self.transcript
         {
-            t.sync(history); // before the request: a crash during it keeps the conversation
+            t.sync(history)?; // before the request: a crash during it keeps the conversation
         }
         assemble(&input, &unbounded, &CharsPerToken::default())
             .map(|mut a| {
@@ -660,6 +687,10 @@ impl ContextProvider for SynthesisContext {
                 }
             })
             .map_err(|e| e.to_string())
+    }
+
+    fn take_usage(&self) -> Option<synthesis_providers::Usage> {
+        self.summarizer.take_spent()
     }
 
     fn compact<'a>(

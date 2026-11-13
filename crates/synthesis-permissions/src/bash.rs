@@ -928,6 +928,29 @@ pub fn is_auto_safe_simple(words: &[String]) -> bool {
     }
 }
 
+/// Every segment is a known test runner (`cargo test`, `pytest`, `npm test`, `node --test` ...).
+pub fn is_test_runner(cmd: &str) -> bool {
+    parse_simple_commands(cmd).is_some_and(|s| {
+        !s.is_empty()
+            && s.iter().all(|w| {
+                let w = unwrap_words(w, false);
+                let n = |i: usize| w.get(i).map(String::as_str);
+                match n(0) {
+                    Some("pytest" | "jest" | "vitest" | "tox" | "nox") => true,
+                    Some("cargo") => matches!(n(1), Some("test" | "nextest")),
+                    Some("go") => n(1) == Some("test"),
+                    Some("npm" | "yarn" | "pnpm" | "bun") => {
+                        n(1) == Some("test") || (n(1) == Some("run") && n(2) == Some("test"))
+                    }
+                    Some("make") => n(1) == Some("test"),
+                    Some("node") => n(1) == Some("--test"),
+                    Some("python" | "python3") => n(1) == Some("-m") && n(2) == Some("pytest"),
+                    _ => false,
+                }
+            })
+    })
+}
+
 fn all_segments(cmd: &str, ok: fn(&[String]) -> bool) -> bool {
     parse_simple_commands(cmd).is_some_and(|s| !s.is_empty() && s.iter().all(|w| ok(w)))
 }
@@ -1115,6 +1138,59 @@ pub fn fs_operands(name: &str, args: &[String]) -> Option<Vec<String>> {
         .iter()
         .all(|s| sed_script_ok(s.as_deref()))
         .then_some(ops)
+}
+
+/// Operands of the file-changing commands in `cmd` as written (relative to the cwd), for a
+/// checkpoint before they run: `rm`/`mv` operands, the destination of `cp`, files of `sed -i`.
+/// shortcut: no `cd` tracking, no globs, no redirects or `tee`; the file checkpoint covers what
+/// this finds, `rm -r` of a directory is not snapshotted (the checkpoint store holds files).
+pub fn mutation_targets(cmd: &str) -> Vec<String> {
+    let segs = parse_simple_commands(cmd).unwrap_or_else(|| lenient_segments(cmd));
+    let mut out: Vec<String> = Vec::new();
+    let mut dir = std::path::PathBuf::new();
+    for seg in segs {
+        let w = unwrap_words(&seg, false);
+        let Some(name) = w.first().map(String::as_str) else {
+            continue;
+        };
+        if name == "cd" {
+            match w.get(1) {
+                Some(d) if !d.starts_with('-') => dir = dir.join(d),
+                _ => dir = std::path::PathBuf::new(),
+            }
+            continue;
+        }
+        let in_place = w
+            .iter()
+            .any(|a| a == "--in-place" || (a.starts_with("-i") && !a.starts_with("--")));
+        let ops = match name {
+            "rm" | "mv" => fs_operands(name, &w[1..]),
+            "cp" => fs_operands(name, &w[1..]).and_then(|o| o.last().cloned().map(|l| vec![l])),
+            "sed" if in_place => fs_operands(name, &w[1..]),
+            _ => None,
+        };
+        for o in ops.into_iter().flatten() {
+            if o.contains(['*', '?', '[', '$', '`']) {
+                continue;
+            }
+            // `./a` and `a` are one key; `..` is folded lexically
+            let mut norm = std::path::PathBuf::new();
+            for c in dir.join(&o).components() {
+                match c {
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir if norm.file_name().is_some() => {
+                        norm.pop();
+                    }
+                    c => norm.push(c.as_os_str()),
+                }
+            }
+            let key = norm.to_string_lossy().into_owned();
+            if !key.is_empty() && !out.contains(&key) {
+                out.push(key);
+            }
+        }
+    }
+    out
 }
 
 /// Like `parse_simple_commands` but never gives up: used only to FIND rm/rmdir targets inside

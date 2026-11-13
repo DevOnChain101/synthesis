@@ -204,6 +204,7 @@ async fn budget_tokens_and_cost() {
         c.pricing = Some(Pricing {
             input_per_mtok: 1000.0,
             output_per_mtok: 1000.0,
+            ..Pricing::default()
         })
     };
     let turns: Vec<Turn> = many_tool_turns(4)
@@ -219,6 +220,95 @@ async fn budget_tokens_and_cost() {
         reason_of(&out)
     );
     assert_eq!(out.usage.cost_usd, Some(2.0));
+}
+
+#[tokio::test]
+async fn budget_max_tokens_total_counts_cache_and_stops_the_task() {
+    let p = Probe::new("Probe", SideEffectClass::Read, 0, "r");
+    let mut o = probe_opts(&p);
+    o.budget = Budget {
+        max_tokens_total: Some(1000),
+        ..Budget::default()
+    };
+    let turns: Vec<Turn> = many_tool_turns(4)
+        .into_iter()
+        .map(|t| t.with_usage(10, 10).with_cache(900, 100))
+        .collect();
+    let mut rig = Rig::new(o, turns);
+    let out = rig.run("x").await;
+    assert_eq!(
+        out.reason,
+        "budget_exceeded:max_tokens",
+        "{}",
+        reason_of(&out)
+    );
+    assert_eq!(rig.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn cache_tokens_are_priced() {
+    let p = Probe::new("Probe", SideEffectClass::Read, 0, "r");
+    let mut o = probe_opts(&p);
+    o.config = |c| {
+        c.pricing = Some(Pricing {
+            input_per_mtok: 10.0,
+            output_per_mtok: 20.0,
+            cache_read_per_mtok: Some(1.0),
+            cache_write_per_mtok: None, // 125% of input = 12.5
+        })
+    };
+    let mut rig = Rig::new(
+        o,
+        vec![
+            Turn::text("done")
+                .with_usage(1_000_000, 1_000_000)
+                .with_cache(1_000_000, 1_000_000),
+        ],
+    );
+    let out = rig.run("x").await;
+    assert_eq!(out.usage.cost_usd, Some(10.0 + 20.0 + 1.0 + 12.5));
+}
+
+/// A failover target that costs more than the model the run was priced for is charged at ITS
+/// price, so a cap cannot be overrun by a switch the cost accounting never saw.
+#[tokio::test]
+async fn cost_is_priced_by_the_model_that_answered() {
+    let p = Probe::new("Probe", SideEffectClass::Read, 0, "r");
+    let mut o = probe_opts(&p);
+    o.budget = Budget {
+        max_cost_usd: Some(5.0),
+        ..Budget::default()
+    };
+    o.config = |c| {
+        let cheap = Pricing {
+            input_per_mtok: 1.0,
+            output_per_mtok: 1.0,
+            ..Pricing::default()
+        };
+        c.pricing = Some(cheap);
+        c.pricing_for = Some(std::sync::Arc::new(|m: &str| {
+            (m == "b/dear").then_some(Pricing {
+                input_per_mtok: 100.0,
+                output_per_mtok: 100.0,
+                ..Pricing::default()
+            })
+        }));
+    };
+    let turns: Vec<Turn> = many_tool_turns(4)
+        .into_iter()
+        .map(|t| t.with_usage(30_000, 30_000).answered_by("b/dear"))
+        .collect();
+    let mut rig = Rig::new(o, turns);
+    let out = rig.run("x").await;
+    // 60k tokens at $100/M = $6 per response: the first response already passes the $5 cap
+    assert_eq!(
+        out.reason,
+        "budget_exceeded:max_cost_usd",
+        "{}",
+        reason_of(&out)
+    );
+    assert_eq!(rig.requests().len(), 1);
+    assert_eq!(out.usage.cost_usd, Some(6.0));
 }
 
 #[test]

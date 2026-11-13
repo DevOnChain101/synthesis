@@ -45,7 +45,7 @@ impl Rig {
         let s = self.dir.path().join("script.json");
         std::fs::write(&s, script.to_string()).unwrap();
         let mut c = self.base();
-        c.args(["run", "--cwd"])
+        c.args(["run", "--no-cost-cap", "--cwd"])
             .arg(self.ws())
             .arg("--provider")
             .arg(format!("fake:{}", s.display()))
@@ -255,7 +255,7 @@ fn a_stored_model_that_cannot_be_built_is_kept_and_warned_about() {
     .unwrap();
     let go = |extra: &[&str]| {
         rig.base()
-            .args(["run", "--cwd"])
+            .args(["run", "--no-cost-cap", "--cwd"])
             .arg(rig.ws())
             .args(["--sandbox", "off", "--prompt", "hi"])
             .args(extra)
@@ -297,7 +297,7 @@ fn a_stored_model_removed_from_its_provider_list_warns_and_is_kept() {
     std::fs::write(rig.home().join("synt.json"), conf(r#"["big","other"]"#)).unwrap();
     let go = |extra: &[&str]| {
         rig.base()
-            .args(["run", "--cwd"])
+            .args(["run", "--no-cost-cap", "--cwd"])
             .arg(rig.ws())
             .args(["--sandbox", "off", "--prompt", "hi"])
             .args(extra)
@@ -363,7 +363,7 @@ fn run_resume_by_id_is_limited_to_the_current_workspace_unless_asked() {
     std::fs::write(&script, text_script("second").to_string()).unwrap();
     let go = |extra: &[&str]| {
         rig.base()
-            .args(["run", "--cwd"])
+            .args(["run", "--no-cost-cap", "--cwd"])
             .arg(&other)
             .arg("--provider")
             .arg(format!("fake:{}", script.display()))
@@ -498,7 +498,7 @@ fn stdin_over_10mb_is_a_usage_error() {
     let s = rig.dir.path().join("script.json");
     std::fs::write(&s, text_script("x").to_string()).unwrap();
     let mut c = rig.base();
-    c.args(["run", "--cwd"])
+    c.args(["run", "--no-cost-cap", "--cwd"])
         .arg(rig.ws())
         .arg("--provider")
         .arg(format!("fake:{}", s.display()))
@@ -549,7 +549,7 @@ fn closed_stderr_does_not_panic() {
         .env("SYNT_HOME", rig.home())
         .stdin(Stdio::null())
         .arg("-c")
-        .arg("exec \"$0\" run --cwd \"$1\" --provider \"fake:$2\" --prompt hi --sandbox off 2>&-")
+        .arg("exec \"$0\" run --cwd \"$1\" --provider \"fake:$2\" --prompt hi --sandbox off --no-cost-cap 2>&-")
         .arg(env!("CARGO_BIN_EXE_synt"))
         .arg(rig.ws())
         .arg(&s);
@@ -568,7 +568,7 @@ fn stderr_pipe_closed_by_the_reader_does_not_panic() {
     let s = rig.dir.path().join("script.json");
     std::fs::write(&s, text_script("x").to_string()).unwrap();
     let mut c = rig.base();
-    c.args(["run", "--cwd"])
+    c.args(["run", "--no-cost-cap", "--cwd"])
         .arg(rig.ws())
         .arg("--provider")
         .arg(format!("fake:{}", s.display()))

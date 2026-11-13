@@ -18,6 +18,7 @@ struct Engine {
     stdin: Option<ChildStdin>,
     lines: Receiver<String>,
     ws: PathBuf,
+    home: PathBuf,
     next: u64,
     _dir: tempfile::TempDir,
 }
@@ -31,22 +32,63 @@ impl Drop for Engine {
 
 /// Starts the engine (not the session) on a script of model turns (given the workspace folder).
 fn engine(script: impl FnOnce(&Path) -> Value) -> Engine {
-    engine_in(tempfile::tempdir().unwrap(), script)
+    engine_with(&["--no-cost-cap"], None, false, script)
 }
 
-/// [`engine`] in an existing folder (a second engine process on the same home and store).
-fn engine_in(dir: tempfile::TempDir, script: impl FnOnce(&Path) -> Value) -> Engine {
+/// The engine as the desktop starts it: `--host desktop` (a person at the window: the interactive behaviour,
+/// no worktree, no required cost cap).
+fn desktop_engine(script: impl FnOnce(&Path) -> Value) -> Engine {
+    engine_with(&["--host", "desktop"], None, false, script)
+}
+
+/// [`engine`] with its own flags, optional user settings, and optionally a git repository as the
+/// workspace (one commit holding `a.txt`).
+fn engine_with(
+    flags: &[&str],
+    settings: Option<Value>,
+    git: bool,
+    script: impl FnOnce(&Path) -> Value,
+) -> Engine {
+    let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let (ws, home) = (root.join("ws"), root.join("home"));
     std::fs::create_dir_all(&ws).unwrap();
     std::fs::create_dir_all(&home).unwrap();
-    let script_path = root.join(format!(
-        "script{}.json",
-        std::process::id() as u64 + rand_tag()
-    ));
+    if let Some(v) = settings {
+        std::fs::write(home.join("settings.json"), v.to_string()).unwrap();
+    }
+    if git {
+        std::fs::write(ws.join("a.txt"), "hello\n").unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["add", "."],
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&ws)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+    }
+    let script_path = root.join("script.json");
     std::fs::write(&script_path, script(&ws).to_string()).unwrap();
     let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
-    c.args(["engine", "--stdio", "--sandbox", "off", "--provider"])
+    c.args(["engine", "--stdio"])
+        .args(flags)
+        .args(["--sandbox", "off", "--provider"])
         .arg(format!("fake:{}", script_path.display()))
         .env_clear();
     for k in [
@@ -86,6 +128,7 @@ fn engine_in(dir: tempfile::TempDir, script: impl FnOnce(&Path) -> Value) -> Eng
         stdin,
         lines,
         ws,
+        home,
         next: 1,
         _dir: dir,
     }
@@ -351,12 +394,6 @@ fn project_trust_flags_are_refused() {
     }
 }
 
-fn rand_tag() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::from(d.subsec_nanos()))
-}
-
 /// Restarts are limited to one a second.
 fn gap() {
     std::thread::sleep(Duration::from_millis(1100));
@@ -386,7 +423,7 @@ impl Engine {
 
 /// An engine that already ran one task (so the store holds a session with messages and events).
 fn used_engine() -> (Engine, Value) {
-    let mut e = engine(|_| json!([{"text": "one"}, {"text": "two"}, {"text": "three"}]));
+    let mut e = desktop_engine(|_| json!([{"text": "one"}, {"text": "two"}, {"text": "three"}]));
     let info = e.start();
     e.call("send", json!({"text": "first"}));
     e.until("task_done", is_task_done);
@@ -536,7 +573,7 @@ fn session_new_and_resume_restart_in_place_in_the_same_folder() {
 
 #[test]
 fn trust_is_decided_by_the_engine_and_only_for_the_exact_root() {
-    let mut e = engine(|_| json!([{"text": "ok"}]));
+    let mut e = desktop_engine(|_| json!([{"text": "ok"}]));
     std::fs::create_dir_all(e.ws.join(".synt")).unwrap();
     std::fs::write(e.ws.join(".synt/settings.json"), "{}").unwrap();
     let info = e.start();
@@ -573,7 +610,7 @@ fn trust_is_decided_by_the_engine_and_only_for_the_exact_root() {
 
 #[test]
 fn remember_is_stored_with_the_engines_own_key_and_revoked() {
-    let mut e = engine(|_| json!([{"text": "ok"}]));
+    let mut e = desktop_engine(|_| json!([{"text": "ok"}]));
     std::fs::create_dir_all(e.ws.join(".synt")).unwrap();
     std::fs::write(e.ws.join(".synt/settings.json"), "{}").unwrap();
     e.start();
@@ -598,7 +635,7 @@ fn remember_is_stored_with_the_engines_own_key_and_revoked() {
 
 #[test]
 fn a_remembered_trust_is_not_honoured_by_a_new_engine_without_an_enforcing_sandbox() {
-    let mut e = engine(|_| json!([{"text": "ok"}]));
+    let mut e = desktop_engine(|_| json!([{"text": "ok"}]));
     std::fs::create_dir_all(e.ws.join(".synt")).unwrap();
     std::fs::write(e.ws.join(".synt/settings.json"), "{}").unwrap();
     e.start();
@@ -631,9 +668,17 @@ fn engine_in_folder(root: &Path, folder: &str) -> Engine {
     let script_path = root.join("script-again.json");
     std::fs::write(&script_path, json!([{"text": "ok"}]).to_string()).unwrap();
     let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
-    c.args(["engine", "--stdio", "--sandbox", "off", "--provider"])
-        .arg(format!("fake:{}", script_path.display()))
-        .env_clear();
+    c.args([
+        "engine",
+        "--stdio",
+        "--host",
+        "desktop",
+        "--sandbox",
+        "off",
+        "--provider",
+    ])
+    .arg(format!("fake:{}", script_path.display()))
+    .env_clear();
     for k in [
         "PATH",
         "SystemRoot",
@@ -671,6 +716,7 @@ fn engine_in_folder(root: &Path, folder: &str) -> Engine {
         stdin,
         lines,
         ws,
+        home,
         next: 1,
         _dir: tempfile::tempdir().unwrap(),
     }
@@ -708,7 +754,7 @@ fn a_session_of_another_folder_is_never_resumed() {
 
 #[test]
 fn a_restart_during_a_task_is_refused_busy_and_the_task_goes_on() {
-    let mut e = engine(write_script);
+    let mut e = desktop_engine(write_script);
     e.start();
     e.call("send", json!({"text": "write it"}));
     let ask = e
@@ -731,7 +777,7 @@ fn a_restart_during_a_task_is_refused_busy_and_the_task_goes_on() {
 
 #[test]
 fn a_failed_restart_resumes_the_session_it_ended_untrusted_when_the_trust_was_the_failure() {
-    let mut e = engine(|_| json!([{"text": "ok"}]));
+    let mut e = desktop_engine(|_| json!([{"text": "ok"}]));
     trusted_config(&e);
     let info = e.start();
     e.ok("trust.set", json!({"mode": "session"}));
@@ -771,7 +817,7 @@ fn a_restart_that_cannot_resume_anything_ends_the_engine_with_a_fatal_error() {
 
 #[test]
 fn a_grant_needs_a_fingerprint_a_session_grant_survives_restarts_and_a_changed_config_drops_it() {
-    let mut e = engine(|_| json!([{"text": "ok"}]));
+    let mut e = desktop_engine(|_| json!([{"text": "ok"}]));
     trusted_config(&e);
     e.start();
     let v = e.ok("trust.set", json!({"mode": "session"}));
@@ -794,7 +840,7 @@ fn a_grant_needs_a_fingerprint_a_session_grant_survives_restarts_and_a_changed_c
 
 #[test]
 fn parent_trust_of_the_home_folder_and_a_non_enforcing_sandbox_are_reported_by_the_engine() {
-    let mut e = engine(|_| json!([{"text": "ok"}]));
+    let mut e = desktop_engine(|_| json!([{"text": "ok"}]));
     trusted_config(&e);
     e.start();
     let st = e.ok("trust.state", Value::Null);
@@ -812,7 +858,7 @@ fn parent_trust_of_the_home_folder_and_a_non_enforcing_sandbox_are_reported_by_t
 
 #[test]
 fn a_send_during_a_compaction_is_refused_busy_and_loses_nothing() {
-    let mut e = engine(|ws| {
+    let mut e = desktop_engine(|ws| {
         json!([
             {"text": "first answer"},
             // the compaction's model turn waits until the file exists
@@ -838,7 +884,7 @@ fn a_send_during_a_compaction_is_refused_busy_and_loses_nothing() {
 
 #[test]
 fn a_refused_trust_restart_writes_no_row() {
-    let mut e = engine(write_script);
+    let mut e = desktop_engine(write_script);
     trusted_config(&e);
     e.start();
     e.call("send", json!({"text": "write it"}));
@@ -876,7 +922,7 @@ fn a_refused_trust_restart_writes_no_row() {
 
 #[test]
 fn workspace_close_hides_sessions_only_after_the_new_one_runs() {
-    let mut e = engine(|_| json!([{"text": "ok"}]));
+    let mut e = desktop_engine(|_| json!([{"text": "ok"}]));
     trusted_config(&e);
     let info = e.start();
     let old = info["sid"].as_str().unwrap().to_string();
@@ -920,4 +966,236 @@ fn a_restart_says_when_it_resets_the_permission_mode() {
     assert_eq!(v["mode"], "default");
     let n = v["notices"].to_string();
     assert!(n.contains("again") && n.contains("plan"), "{n}");
+}
+
+fn priced() -> Value {
+    json!({"synt": {"pricing": {"fake/fake-model": {"input_per_mtok": 1.0, "output_per_mtok": 1.0}}}})
+}
+
+fn hello_txt_script(_ws: &Path) -> Value {
+    // relative paths: the session's folder is whatever the engine chose (the opened folder or a worktree)
+    json!([
+        {"tools": [{"id": "r1", "name": "Read", "input": {"file_path": "a.txt"}}]},
+        {"tools": [{"id": "e1", "name": "Edit", "input": {"file_path": "a.txt", "old_string": "hello", "new_string": "bye"}}]},
+        {"text": "Done."}
+    ])
+}
+
+/// What `synt engine --stdio` does when a desktop launches it: the edit lands in the folder that was
+/// opened (no worktree under ~/.synt), with a cost cap passed by the host.
+#[test]
+fn a_desktop_hosted_engine_edits_the_opened_folder_not_a_worktree() {
+    let mut e = engine_with(
+        &[
+            "--host",
+            "desktop",
+            "--max-cost-usd",
+            "5",
+            "--permission-mode",
+            "acceptEdits",
+        ],
+        Some(priced()),
+        true,
+        hello_txt_script,
+    );
+    e.start();
+    e.call("send", json!({"text": "change it"}));
+    e.until("task_done", is_task_done);
+    assert_eq!(
+        std::fs::read_to_string(e.ws.join("a.txt")).unwrap(),
+        "bye\n"
+    );
+    assert!(
+        !e.home.join("worktrees").exists(),
+        "no worktree for a desktop host"
+    );
+}
+
+/// Without `--host` the engine is a headless worker: a worktree, and the file in the folder stays.
+#[test]
+fn a_headless_engine_without_a_host_uses_a_worktree() {
+    let mut e = engine_with(
+        &["--no-cost-cap", "--permission-mode", "acceptEdits"],
+        None,
+        true,
+        hello_txt_script,
+    );
+    e.start();
+    e.call("send", json!({"text": "change it"}));
+    e.until("task_done", is_task_done);
+    assert_eq!(
+        std::fs::read_to_string(e.ws.join("a.txt")).unwrap(),
+        "hello\n"
+    );
+    assert!(e.home.join("worktrees").is_dir());
+}
+
+#[test]
+fn a_headless_engine_without_a_cost_cap_refuses_to_start_a_session() {
+    let mut e = engine_with(&[], None, false, |_| json!([{"text": "x"}]));
+    e.hello();
+    let ws = e.ws.to_str().unwrap().to_string();
+    let id = e.call("start", json!({"cwd": ws}));
+    let (_, r) = e.result(id);
+    assert!(
+        r["error"].as_str().is_some_and(|e| e.contains("cost cap")),
+        "{r}"
+    );
+}
+
+/// `synt stop` from another process reaches the engine: the running task is cancelled.
+#[test]
+fn synt_stop_cancels_a_task_of_a_running_engine() {
+    let mut e = engine_with(
+        &["--no-cost-cap"],
+        None,
+        false,
+        |_| json!([{"delay_ms": 60000, "text": "never"}]),
+    );
+    let info = e.start();
+    let sid = info["sid"].as_str().unwrap().to_string();
+    e.call("send", json!({"text": "slow"}));
+    std::thread::sleep(Duration::from_millis(1500));
+    let o = Command::new(env!("CARGO_BIN_EXE_synt"))
+        .args(["stop", &sid])
+        .env_clear()
+        .env("HOME", e.home.parent().unwrap())
+        .env("SYNT_HOME", &e.home)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .output()
+        .unwrap();
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let seen = e.until("task_done", is_task_done);
+    let ended = seen
+        .iter()
+        .find(|v| v["type"] == "task.ended")
+        .expect("task.ended");
+    assert_eq!(ended["payload"]["status"], "cancelled", "{ended}");
+}
+
+/// A session nobody holds cannot be stopped, and saying so is not a success.
+#[test]
+fn synt_stop_on_a_session_no_process_holds_is_an_error_exit() {
+    let mut e = engine_with(&["--no-cost-cap"], None, false, |_| json!([{"text": "x"}]));
+    let info = e.start();
+    let sid = info["sid"].as_str().unwrap().to_string();
+    e.call("close", Value::Null);
+    let _ = e.child.wait();
+    let o = Command::new(env!("CARGO_BIN_EXE_synt"))
+        .args(["stop", &sid])
+        .env_clear()
+        .env("HOME", e.home.parent().unwrap())
+        .env("SYNT_HOME", &e.home)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("no live process holds"));
+}
+
+/// `synt stop SID` as another process.
+fn synt_stop(e: &Engine, sid: &str) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_synt"))
+        .args(["stop", sid])
+        .env_clear()
+        .env("HOME", e.home.parent().unwrap())
+        .env("SYNT_HOME", &e.home)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn synt_stop_follows_the_new_session_after_a_restart_and_the_old_id_does_nothing() {
+    let mut e = engine_with(
+        &["--no-cost-cap"],
+        None,
+        false,
+        |_| json!([{"delay_ms": 60000, "text": "never"}]),
+    );
+    let old = e.start()["sid"].as_str().unwrap().to_string();
+    let new = e.ok("session.new", Value::Null)["sid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(old, new);
+    e.call("send", json!({"text": "slow"}));
+    std::thread::sleep(Duration::from_millis(1500));
+    // the ended session's id is held by nobody: an error, and the new session's task goes on
+    assert_eq!(synt_stop(&e, &old).status.code(), Some(1));
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_secs(3) {
+        if let Ok(l) = e.lines.recv_timeout(Duration::from_millis(200)) {
+            assert!(
+                !l.contains("task_done") && !l.contains("task.ended"),
+                "the old id ended the new session's task: {l}"
+            );
+        }
+    }
+    assert!(e.child.try_wait().unwrap().is_none(), "the engine lives");
+    // the new session's watcher is armed: its stop cancels its task
+    assert_eq!(synt_stop(&e, &new).status.code(), Some(0));
+    let seen = e.until("task_done", is_task_done);
+    let ended = seen
+        .iter()
+        .find(|v| v["type"] == "task.ended")
+        .expect("task.ended");
+    assert_eq!(ended["payload"]["status"], "cancelled", "{ended}");
+}
+
+#[test]
+fn a_resumed_session_continues_its_hash_chain_and_each_session_has_its_own_baseline() {
+    // a governed (headless) engine in a git repository: the sessions run in worktrees
+    let mut e = engine_with(
+        &["--no-cost-cap"],
+        None,
+        true,
+        |_| json!([{"text": "one"}, {"text": "two"}, {"text": "three"}]),
+    );
+    let a = e.start()["sid"].as_str().unwrap().to_string();
+    e.call("send", json!({"text": "first"}));
+    e.until("task_done", is_task_done);
+    gap();
+    let b = e.ok("session.new", Value::Null)["sid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(a, b);
+    e.call("send", json!({"text": "in the new one"}));
+    e.until("task_done", is_task_done);
+    gap();
+    // the session of a worktree resumes in place (its folder is the repository the engine was opened in)
+    let v = e.ok("session.resume", json!({"id": a}));
+    assert_eq!(v["sid"], a.as_str(), "{v}");
+    e.call("send", json!({"text": "second"}));
+    e.until("task_done", is_task_done);
+    // the event chain of the resumed session verifies across the restart, and the other one's too
+    for sid in [&a, &b] {
+        let o = Command::new(env!("CARGO_BIN_EXE_synt"))
+            .args(["sessions", "verify", sid])
+            .env_clear()
+            .env("HOME", e.home.parent().unwrap())
+            .env("SYNT_HOME", &e.home)
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .output()
+            .unwrap();
+        assert_eq!(
+            o.status.code(),
+            Some(0),
+            "{sid}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+    // the verification baseline lives in the session's own artifact folder (`gate-baseline.json`, keyed by the
+    // session id): each session has its own folder, so a resumed or new session never shares a baseline
+    let dirs: Vec<_> = [&a, &b]
+        .iter()
+        .map(|sid| e.home.join("sessions").join(sid))
+        .collect();
+    assert!(dirs.iter().all(|d| d.is_dir()) && dirs[0] != dirs[1]);
 }

@@ -1675,6 +1675,7 @@ impl Harness {
                 RESPONDER_WALL_MS
             }),
             max_verify_attempts: 0,
+            max_tokens_total: None,
         };
         let task_id = self.hub.task_id().unwrap_or_else(uuid);
         let (task, _) = self.run_ctx(

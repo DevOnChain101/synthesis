@@ -312,7 +312,7 @@ const BLOCKED_URLS: [&str; 4] = ["ws://*", "wss://*", "ftp://*", "blob:*"];
 const NO_SOCKETS: &str = "(()=>{for(const k of['WebSocket','WebTransport'])if(k in globalThis)Object.defineProperty(globalThis,k,{value:function(){throw new DOMException('blocked by URL policy','SecurityError')},writable:false,configurable:false})})()";
 
 /// Installs the URL policy hooks on one session and makes it hand out new children paused.
-async fn enable_policy(cdp: &Cdp, session: &str) -> Result<()> {
+async fn enable_policy(cdp: &Cdp, session: &str, evaluate: bool) -> Result<()> {
     let s = Some(session);
     cdp.send(
         s,
@@ -336,17 +336,29 @@ async fn enable_policy(cdp: &Cdp, session: &str) -> Result<()> {
         json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true}),
     )
     .await?;
-    // Both are best effort: workers have no Page domain, and a fresh context may not exist yet.
-    let _ = cdp
-        .send(
-            s,
-            "Page.addScriptToEvaluateOnNewDocument",
-            json!({"source": NO_SOCKETS, "runImmediately": true}),
-        )
-        .await;
-    let _ = cdp
-        .send(s, "Runtime.evaluate", json!({"expression": NO_SOCKETS}))
-        .await;
+    if !evaluate {
+        // without Page.enable the new-document script is not applied to a paused frame (a test caught the leak)
+        cdp.send(s, "Page.enable", json!({})).await?;
+    }
+    let script = cdp.send(
+        s,
+        "Page.addScriptToEvaluateOnNewDocument",
+        json!({"source": NO_SOCKETS, "runImmediately": true}),
+    );
+    // For a paused frame this is the only WebSocket guard, so it must succeed. Workers have no Page
+    // domain and the main tab's context may not exist yet: both fall back to `Runtime.evaluate`.
+    if evaluate {
+        let _ = script.await;
+    } else {
+        script.await?;
+    }
+    // Not for a paused frame: its Runtime.evaluate is only answered after resume (the page load then
+    // waits on this very call), and the new-document script above already covers it.
+    if evaluate {
+        let _ = cdp
+            .send(s, "Runtime.evaluate", json!({"expression": NO_SOCKETS}))
+            .await;
+    }
     Ok(())
 }
 
@@ -356,7 +368,14 @@ async fn secure_child(cdp: Arc<Cdp>, params: Value) {
     let Some(session) = params["sessionId"].as_str() else {
         return;
     };
-    if enable_policy(&cdp, session).await.is_err() {
+    let frame = matches!(
+        params["targetInfo"]["type"].as_str(),
+        Some("page" | "iframe")
+    );
+    // shortcut: no Network.enable here, so the responseReceived rebinding check does not see child
+    // sessions (only the pre-send DNS check in Fetch does). A child can be a second session on a
+    // tab's own target, and enabling Network twice duplicates its log events (breaks the network log).
+    if enable_policy(&cdp, session, !frame).await.is_err() {
         if let Some(t) = params["targetInfo"]["targetId"].as_str() {
             let _ = cdp
                 .send(None, "Target.closeTarget", json!({"targetId": t}))
@@ -848,7 +867,7 @@ impl BrowserRuntime {
         ] {
             self.call(&tab, m, json!({})).await?;
         }
-        enable_policy(&self.cdp, &tab.session).await?;
+        enable_policy(&self.cdp, &tab.session, true).await?;
         if self.opts.headless {
             let (w, h) = self.opts.viewport;
             let m = json!({"width": w, "height": h, "deviceScaleFactor": 1, "mobile": false});

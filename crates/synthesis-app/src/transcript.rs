@@ -29,6 +29,9 @@ pub struct Transcript {
     /// Problems found while a persisted event was being handled. That runs inside the event sink,
     /// which must not be re-entered, so they are told at the next `sync`.
     pending: Mutex<Vec<String>>,
+    /// Unattended: a message that cannot be stored ends the task (`session_store`) instead of a
+    /// notice nobody reads.
+    strict: AtomicBool,
 }
 
 impl Transcript {
@@ -39,7 +42,12 @@ impl Transcript {
             compacted: AtomicBool::new(false),
             notifier: Mutex::new(None),
             pending: Mutex::new(vec![]),
+            strict: AtomicBool::new(false),
         }
+    }
+
+    pub fn set_strict(&self, on: bool) {
+        self.strict.store(on, Ordering::SeqCst);
     }
 
     pub fn set_notifier(&self, n: Notifier) {
@@ -78,22 +86,26 @@ impl Transcript {
         }
     }
 
-    fn flush_pending(&self) {
-        let v = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
-        for t in v {
-            self.tell(t);
-        }
-    }
-
     /// Persists `history[done..]`. After a compaction the history was rewritten: its summary is
     /// not a new message, so the counter just moves to its end. A message over the store's size
     /// limit is stored with its images replaced by `[image]` (it keeps its place and the later
     /// messages are not held up); any other failure stops here and is told once.
-    pub fn sync(&self, history: &[Message]) {
-        self.flush_pending();
+    pub fn sync(&self, history: &[Message]) -> Result<(), String> {
+        let strict = self.strict.load(Ordering::SeqCst);
+        let mut fatal: Option<String> = None;
+        let pending = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
+        if strict && let Some(p) = pending.first() {
+            fatal = Some(p.clone());
+        }
+        for t in pending {
+            self.tell(t);
+        }
+        if let Some(f) = fatal {
+            return Err(format!("session_store: {f}"));
+        }
         if self.compacted.swap(false, Ordering::SeqCst) {
             self.done.store(history.len(), Ordering::SeqCst);
-            return;
+            return Ok(());
         }
         let mut n = self.done.load(Ordering::SeqCst);
         while let Some(m) = history.get(n) {
@@ -112,25 +124,36 @@ impl Transcript {
                         .ok()
                         .is_some_and(|c| self.append(new(c)).is_ok());
                     if !stored {
-                        self.tell(format!(
+                        let m = format!(
                             "session store: message {n} is {size} bytes (limit {max}) and could not be stored; later messages are not saved"
-                        ));
-                        break;
+                        );
+                        self.tell(m.clone());
+                        return if strict {
+                            Err(format!("session_store: {m}"))
+                        } else {
+                            Ok(())
+                        };
                     }
                     self.tell(format!(
                         "session store: message {n} is {size} bytes (limit {max}); it was stored with its images replaced by [image]"
                     ));
                 }
                 Err(e) => {
-                    self.tell(format!(
+                    let m = format!(
                         "session store: {e}; this and later messages are not saved (use --no-session-store to run without it)"
-                    ));
-                    break;
+                    );
+                    self.tell(m.clone());
+                    return if strict {
+                        Err(format!("session_store: {m}"))
+                    } else {
+                        Ok(())
+                    };
                 }
             }
             n += 1;
             self.done.store(n, Ordering::SeqCst);
         }
+        Ok(())
     }
 
     /// Called for every persisted event line.
@@ -207,6 +230,28 @@ mod tests {
         }
     }
 
+    /// Unattended: a message that cannot be stored at all fails the sync (the task ends), where
+    /// the interactive default only tells the person.
+    #[test]
+    fn strict_mode_fails_the_sync_when_a_message_cannot_be_stored() {
+        let big = || {
+            vec![user(vec![Block::Text {
+                text: "x".repeat(9 * 1024 * 1024),
+            }])]
+        };
+        let (_d, _store, t) = rig();
+        t.set_notifier(Arc::new(|_| {}));
+        assert!(
+            t.sync(&big()).is_ok(),
+            "interactive: a notice, not an error"
+        );
+        let (_d, _store, t) = rig();
+        t.set_notifier(Arc::new(|_| {}));
+        t.set_strict(true);
+        let e = t.sync(&big()).unwrap_err();
+        assert!(e.starts_with("session_store:"), "{e}");
+    }
+
     /// An over-limit message is stored without its images (same place), the later ones follow,
     /// and the person is told through the notifier, not stderr.
     #[test]
@@ -221,7 +266,7 @@ mod tests {
             user(vec![text("with picture"), image(9 * 1024 * 1024)]),
             user(vec![text("third")]),
         ];
-        t.sync(&history);
+        t.sync(&history).unwrap();
         let rows = store.lock().unwrap().read_messages("s1").unwrap();
         assert_eq!(rows.len(), 3, "the later message was not held up");
         let second = rows[1].content.to_string();
@@ -236,7 +281,7 @@ mod tests {
             "{told:?}"
         );
         // a second sync stores nothing twice
-        t.sync(&history);
+        t.sync(&history).unwrap();
         assert_eq!(store.lock().unwrap().read_messages("s1").unwrap().len(), 3);
     }
 
@@ -261,7 +306,7 @@ mod tests {
                 text: "after".into(),
             }]),
         ];
-        t.sync(&history);
+        t.sync(&history).unwrap();
         let rows = store.lock().unwrap().read_messages("s1").unwrap();
         assert_eq!(rows.len(), 2, "persistence did not stall at the screenshot");
         let first = rows[0].content.to_string();

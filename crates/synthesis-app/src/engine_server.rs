@@ -147,6 +147,7 @@ struct Oob {
 /// One engine process: one folder, one session at a time (restarted in place by the methods below).
 struct Srv<'a> {
     common: &'a Common,
+    limits: &'a Limits,
     env: &'a Env,
     wire: Arc<Wire>,
     asks: Asks,
@@ -263,7 +264,7 @@ fn start(
                 as crate::run::PreStart
         }),
     };
-    let mut p = prepare(&c, cwd, srv.env, &Limits::default(), Front::Native(native))?;
+    let mut p = prepare(&c, cwd, srv.env, srv.limits, Front::Native(native))?;
     if let Some(Err(files)) = verify.as_ref().map(TrustCheck::verify) {
         return Err(trust_changed_error(&files));
     }
@@ -752,6 +753,7 @@ fn read_requests(mut input: impl BufRead, wire: &Wire, oob: &Oob, queue: &mpsc::
 /// (it may sit in a blocking read): the process exits after this returns.
 pub fn serve(
     common: &Common,
+    limits: &Limits,
     env: &Env,
     input: impl BufRead + Send + 'static,
     output: Box<dyn Write + Send>,
@@ -771,6 +773,7 @@ pub fn serve(
     }
     let mut srv = Srv {
         common,
+        limits,
         env,
         wire: wire.clone(),
         asks,
@@ -902,18 +905,34 @@ const _: () = {
 
 /// `synt engine --stdio`: stdin and stdout of this process. Project trust is not available over the
 /// protocol yet, so the trust flags are refused: an engine is untrusted for project configuration.
-pub fn run_stdio(common: &Common, env: &Env) -> Result<u8, String> {
+pub fn run_stdio(
+    common: &Common,
+    limits: &Limits,
+    governed: bool,
+    env: &Env,
+) -> Result<u8, String> {
     if common.trust_project || !common.approve_mcp.is_empty() {
         return Err(
             "engine --stdio: --trust-project and --approve-mcp are not supported (the project stays untrusted)"
                 .into(),
         );
     }
+    // a headless engine is unattended: the governed defaults apply (wall cap, cost cap required,
+    // worktree, ...; `--no-cost-cap` opts out of the cost cap only). A desktop host (`--host
+    // desktop`) has a person at the window and keeps the interactive behaviour.
+    let mut common = common.clone();
+    common.governed = governed;
+    // a headless engine is unattended: the governed defaults apply (wall cap, cost cap required, worktree, ...;
+    // `--no-cost-cap` opts out of the cost cap only). A desktop host (`--host desktop`) has a person at the window
+    // and keeps the interactive behaviour.
+    let mut common = common.clone();
+    common.governed = governed;
     #[cfg(unix)]
     {
         let (input, output) = protect().map_err(|e| format!("engine: stdio: {e}"))?;
         serve(
-            common,
+            &common,
+            limits,
             env,
             std::io::BufReader::new(input),
             Box::new(output),
@@ -923,7 +942,8 @@ pub fn run_stdio(common: &Common, env: &Env) -> Result<u8, String> {
     // descendant there can still reach the std handles. Upgrade when the engine is run on Windows.
     #[cfg(not(unix))]
     serve(
-        common,
+        &common,
+        limits,
         env,
         // `Stdin` (not its lock guard) is `Send`: the reader thread owns it and locks per read
         std::io::BufReader::new(std::io::stdin()),

@@ -473,6 +473,7 @@ fn a_session_through_a_fake_wsl() {
             &env,
             Path::new(folder),
             &Default::default(),
+            wsl::CostCap::Usd(10.0),
         )
         .unwrap_or_else(|e| panic!("{folder}: {e}"));
         // the engine got the Linux folder twice (--cd and start); the host kept the Windows one
@@ -491,6 +492,7 @@ fn a_session_through_a_fake_wsl() {
             &env,
             Path::new(folder),
             &Default::default(),
+            wsl::CostCap::Usd(10.0),
         )
         .unwrap();
         let drift = wsl::restart(
@@ -516,6 +518,7 @@ fn a_session_through_a_fake_wsl() {
         &env,
         Path::new(r"\\wsl$\Debian\x"),
         &Default::default(),
+        wsl::CostCap::Usd(10.0),
     );
     assert!(e.err().unwrap().contains("Debian"));
 }
@@ -524,9 +527,18 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     // a fake wsl.exe: the shape of the real command line is checked, then it is the engine
     if args.get(1).map(String::as_str) == Some("-d") {
-        let ok = args.len() == 9
+        let ok = args.len() == 13
             && (args[3].as_str(), args[5].as_str()) == ("--cd", "--exec")
-            && args[6..] == ["/home/me/.synt/bin/synt", "engine", "--stdio"];
+            && args[6..]
+                == [
+                    "/home/me/.synt/bin/synt",
+                    "engine",
+                    "--stdio",
+                    "--host",
+                    "desktop",
+                    "--max-cost-usd",
+                    "10",
+                ];
         if !ok || std::env::var_os("SYNT_API_KEY").is_some() || std::env::var_os("WSLENV").is_some()
         {
             eprintln!("fake wsl.exe: bad command line or environment: {args:?}");

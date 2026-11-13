@@ -97,7 +97,7 @@ impl Host {
             }
         }
         if let Some(s) = &self.store {
-            finish_store(s, self.transcript.as_deref(), out, &session.usage);
+            let _ = finish_store(s, self.transcript.as_deref(), out, &session.usage); // told on stderr
         }
     }
 }
@@ -134,6 +134,8 @@ pub struct Live {
     pub session: Arc<Mutex<Option<AgentSession>>>,
     pub history: Arc<Mutex<Vec<Message>>>,
     pub last: Arc<Mutex<Option<TaskOutcome>>>,
+    /// The session-wide token (`synt stop` cancels it); every task's token is its child.
+    root_cancel: CancellationToken,
     cancel: CancelSlot,
 }
 
@@ -173,6 +175,7 @@ impl Live {
             homes,
             tokio,
             notes,
+            cancel: root_cancel,
             ..
         } = p;
         let started = match resumed_from_seq {
@@ -234,6 +237,7 @@ impl Live {
             session: Arc::new(Mutex::new(Some(session))),
             history: Arc::new(Mutex::new(history)),
             last: Arc::default(),
+            root_cancel,
             cancel: Arc::default(),
         };
         // a session never starts in bypassPermissions, whatever a stored session or a setting carried
@@ -287,7 +291,7 @@ impl Live {
         let Some(session) = lock(&self.session).take() else {
             return Err(ALREADY_RUNNING);
         };
-        let token = CancellationToken::new();
+        let token = self.root_cancel.child_token();
         *lock(&self.cancel) = Some(token.clone());
         Ok((session, token))
     }
@@ -388,7 +392,7 @@ impl Live {
         }
         // the usage of the tasks that ran (the session is back unless a task outlived the window)
         if let (Some(s), Some(sess)) = (&self.host.store, lock(&self.session).as_ref()) {
-            finish_store(s, self.host.transcript.as_deref(), &outcome, &sess.usage);
+            let _ = finish_store(s, self.host.transcript.as_deref(), &outcome, &sess.usage); // told on stderr
         }
         self.harness.end_session(&outcome);
         if let Some(t) = &self.host.transcript {

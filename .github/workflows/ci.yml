@@ -151,6 +151,16 @@ jobs:
       - run: |
           git config --global user.email ci@example.invalid
           git config --global user.name ci
+      # The scripted adapter runs `npm run ...`, which is auto-safe only under an enforcing sandbox:
+      # give Linux bubblewrap (and the AppArmor userns relaxation) like the sandbox job does.
+      - name: Install bubblewrap and relax AppArmor userns restriction (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          scripts/apt-install.sh bubblewrap
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --unshare-net true && echo "bwrap works"
       - name: eval selftest
         run: node tests/agent-evals/harness/selftest.js 2>&1 | tee evals.log
       - name: Failure digest

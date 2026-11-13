@@ -458,6 +458,13 @@ impl Chat {
                     }
                 }
             }
+            Event::ModelFailover { from, to, reason } => {
+                self.hint(
+                    format!("model failover {from} -> {to}: {reason}"),
+                    "warn",
+                    true,
+                );
+            }
             Event::ModelRetry {
                 attempt,
                 max,
@@ -1007,6 +1014,7 @@ mod tests {
                     status: "unverified".into(),
                     attempt: 1,
                     summary: "0 passed".into(),
+                    report_sha256: None,
                 },
                 "verification unverified: 0 passed",
             ),
@@ -1094,6 +1102,7 @@ mod tests {
                     status: "failed".into(),
                     attempt: 1,
                     summary: "tests".into(),
+                    report_sha256: None,
                 },
                 "verification failed: tests",
             ),

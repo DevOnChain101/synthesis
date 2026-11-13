@@ -471,13 +471,16 @@ async fn verify_run_checks_reach_the_gate() {
         },
     );
     rig.run("x").await;
-    // The gate ran the model's `true` check itself (inferred-only evidence still leaves the
-    // task unverified, which is the gate's rule, not this test's subject).
+    // The gate ran the model's `true` check itself; a no-op never counts as a pass, so the task
+    // is unverified and the summary says why.
     let summaries = rig.find(|e| match e {
         Event::VerificationCompleted { summary, .. } => Some(summary.clone()),
         _ => None,
     });
-    assert!(summaries[0].contains("1 passed"), "{summaries:?}");
+    assert!(
+        summaries[0].contains("0 passed") && summaries[0].contains("no-op check"),
+        "{summaries:?}"
+    );
 }
 
 // ---- event sink failure ---------------------------------------------------------------------

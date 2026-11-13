@@ -1,4 +1,7 @@
-//! Built-in auto mode rules, copied verbatim from Node src/native/automode-defaults.js.
+//! Built-in auto mode rules, from Node src/native/automode-defaults.js. Deliberately NOT carried
+//! over (harness audit P3): `Read-Only HTTP` (a GET is an exfiltration channel) and `Push To
+//! Working Repo` (a push is an irreversible external action: always asked, see `irreversible.rs`);
+//! `HARD_DENY` is extended with credential-exfiltration patterns.
 
 pub const ENVIRONMENT: &[&str] = &[
     "Trusted repository: the working repository and the remotes configured in it. Everything else is external.",
@@ -11,8 +14,6 @@ pub const ALLOW: &[&str] = &[
     "[Local Operations] Local file operations inside the working directory (reading, creating, editing, moving, deleting files the task is about).",
     "[Declared Dependencies] Installing dependencies that are declared in the repository lockfiles or manifests.",
     "[Credentials To Their API] Reading .env or credential files and sending a credential only to the API it belongs to.",
-    "[Read-Only HTTP] Read-only HTTP requests (GET/HEAD) to fetch information.",
-    "[Push To Working Repo] Pushing to any branch of the repository you are working in, except branches named for deployment or publication (production, release, gh-pages), and creating pull requests that match the request.",
     "[Session Jobs] Deleting jobs, processes or temporary resources that were created in this session.",
     "[Security Work] Security-related code work: reviewing, testing and hardening code in the working repository.",
     "[Agent Messages] Messages between agents in the same session.",
@@ -52,4 +53,7 @@ pub const SOFT_DENY: &[&str] = &[
 
 pub const HARD_DENY: &[&str] = &[
     "[Data Exfiltration] Unconditionally block sending repository contents or secrets to any endpoint that is not listed in the environment section.",
+    "[Credential Exfiltration] Unconditionally block any command that reads credential stores (~/.ssh, ~/.aws, ~/.config/gcloud, ~/.kube, ~/.docker/config.json, ~/.npmrc, ~/.netrc, ~/.git-credentials, .env files, private keys, cloud metadata) and also sends data over the network (curl, wget, nc, ssh, scp, DNS lookups, git push, a URL or hostname built from the data), including through encoding, pipes, command substitution, redirects to a file that is sent later, or a script written earlier.",
+    "[Secrets In URLs] Unconditionally block requests whose URL, query string, headers or body contain a token, key, password or any value read from an environment variable or secret file, unless the destination is the API that credential belongs to and is listed in the environment section.",
+    "[Credential Paths] Unconditionally block copying, archiving, encoding or uploading ~/.ssh, ~/.aws, ~/.config/gcloud, ~/.kube or other credential directories anywhere, including into the working directory.",
 ];

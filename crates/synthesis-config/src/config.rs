@@ -53,7 +53,14 @@ const PROJECT_DENIED_PROVIDER_KEYS: [&str; 6] = [
     "headers",
     "options",
 ];
-const PROJECT_DENIED_TOP_KEYS: [&str; 4] = ["mcp", "mcpServers", "projects", "claude"];
+const PROJECT_DENIED_TOP_KEYS: [&str; 6] = [
+    "mcp",
+    "mcpServers",
+    "projects",
+    "claude",
+    "fallback",
+    "fallbackReprobeMinutes",
+];
 
 fn strip_untrusted(raw: &mut Value, warnings: &mut Vec<String>) {
     let Some(top) = raw.as_object_mut() else {
@@ -95,7 +102,8 @@ pub struct Config {
     pub schema: Option<String>,
     pub model: Option<String>,
     pub small_model: Option<String>,
-    /// Deep-merged passthrough keys: `profiles`, `mcp`, `mcpServers`, `projects`, `claude`.
+    /// Deep-merged passthrough keys: `profiles`, `mcp`, `mcpServers`, `projects`, `claude`,
+    /// `fallback` (user config only: `["provider/model", ...]`, tried in order, see `docs/UNATTENDED.md`).
     pub extra: Map<String, Value>,
     pub model_explicit: bool,
     pub explicit_aliases: BTreeSet<String>,
@@ -324,10 +332,17 @@ fn load_config_file(
     );
     let warnings = [trust_warnings, warnings].concat();
     let text = |k: &str| raw.get(k).and_then(Value::as_str).map(String::from);
-    let extra = ["profiles", "mcp", "mcpServers", "projects", "claude"]
-        .iter()
-        .filter_map(|k| raw.get(*k).map(|v| (k.to_string(), v.clone())))
-        .collect();
+    let extra = [
+        "profiles",
+        "mcp",
+        "mcpServers",
+        "projects",
+        "claude",
+        "fallback",
+    ]
+    .iter()
+    .filter_map(|k| raw.get(*k).map(|v| (k.to_string(), v.clone())))
+    .collect();
     Ok(Some(FileConfig {
         schema: text("$schema"),
         model: text("model"),

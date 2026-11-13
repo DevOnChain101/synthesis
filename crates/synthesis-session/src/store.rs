@@ -49,6 +49,11 @@ const RUNNING_STATES: [SessionStatus; 3] = [
     SessionStatus::Verifying,
 ];
 
+/// The store's timestamp format (UTC, milliseconds), comparable as text.
+pub fn timestamp() -> String {
+    now()
+}
+
 pub(crate) fn now() -> String {
     let fmt = time::macros::format_description!(
         "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
@@ -321,6 +326,29 @@ pub struct UsageDay {
     pub mcp: u64,
 }
 
+/// `(id, status, reason, request)` of a task.
+pub type TaskRow = (String, String, Option<String>, String);
+
+/// Result of [`Reader::verify_chain`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChainReport {
+    /// Events whose link and hash were recomputed and matched.
+    pub chained: u64,
+    /// Events from before the chain existed (not covered).
+    pub unchained: u64,
+    /// The session predates the chain (created by an older build): nothing proves its history.
+    pub legacy: bool,
+    /// Events exist but the per-user chain key is gone, so nothing could be checked.
+    pub no_key: bool,
+    pub broken: Option<ChainBreak>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainBreak {
+    pub seq: i64,
+    pub why: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionRecord {
     pub id: String,
@@ -330,6 +358,8 @@ pub struct SessionRecord {
     pub cwd: String,
     pub additional_dirs: Vec<String>,
     pub git_worktree: Option<String>,
+    /// Opaque JSON the creator stored with [`SessionWriter::set_git_info`] (the worktree's pins).
+    pub git_info: Option<String>,
     pub model_config_id: String,
     pub permission_mode: PermissionMode,
     pub permission_policy_id: String,
@@ -742,6 +772,31 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// `synt stop`: marks the session; the process running it polls [`Reader::stop_requested_since`].
+    /// Returns whether a session of that id exists.
+    pub fn request_stop(&self, id: &str) -> Result<bool> {
+        check_id(id)?;
+        let conn = connect(&self.home, false)?;
+        let n = conn.execute(
+            "UPDATE sessions SET stop_requested_at=?2 WHERE id=?1",
+            (id, now()),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Whether a live process holds the session's writer lock (it can then see a stop request).
+    pub fn session_held(&self, id: &str) -> Result<bool> {
+        check_id(id)?;
+        if !self.home.join("sessions").join(id).join("lock").exists() {
+            return Ok(false);
+        }
+        match lock_session(&self.home, id) {
+            Ok(_released_on_drop) => Ok(false),
+            Err(Error::Locked(_)) => Ok(true),
+            Err(e) => Err(e),
+        }
+    }
+
     /// `/close-workspace`: [`Self::close_session`] for every listed (used, open) session whose
     /// `workspace_root` satisfies `belongs`. One UPDATE per session, so each is atomic. A session
     /// whose lock another live process holds is left alone (`held`); the caller must have released
@@ -817,8 +872,8 @@ impl Store {
         let r = conn.execute(
             "INSERT INTO sessions(id,status,workspace_id,workspace_root,cwd,additional_dirs,git_worktree,
                model_config,permission_mode,permission_policy_id,budget,usage,title,parent_session_id,
-               parent_tool_call_id,legacy_transcript_path,created_at,updated_at)
-             VALUES (?1,'created',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?16)",
+               parent_tool_call_id,legacy_transcript_path,created_at,updated_at,chained)
+             VALUES (?1,'created',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?16,1)",
             params![
                 id,
                 ws.workspace_id,
@@ -850,7 +905,7 @@ impl Store {
             }
             r => r?,
         };
-        Ok(self.writer(conn, id, lock, mirror_path, cwd, root, dirs))
+        self.writer(conn, id, lock, mirror_path, cwd, root, dirs)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -863,7 +918,8 @@ impl Store {
         cwd: String,
         root: String,
         dirs: Vec<String>,
-    ) -> SessionWriter {
+    ) -> Result<SessionWriter> {
+        let chain_key = crate::trust::chain_key(&self.home)?;
         let roots = std::iter::once(root)
             .chain(dirs)
             .map(PathBuf::from)
@@ -884,9 +940,10 @@ impl Store {
             task_id: None,
             turn_id: None,
             agent_id: None,
+            chain_key,
         };
         w.sweep_orphan_artifacts(); // we hold the session lock: nothing else is mid-write
-        w
+        Ok(w)
     }
 
     /// Takes the writer lock of an existing session. A session left `running` by a dead
@@ -923,7 +980,7 @@ impl Store {
             .as_ref()
             .filter(|_| self.mirror)
             .map(PathBuf::from);
-        Ok(self.writer(
+        self.writer(
             conn,
             id.to_string(),
             lock,
@@ -931,7 +988,7 @@ impl Store {
             rec.cwd,
             rec.workspace_root,
             rec.additional_dirs,
-        ))
+        )
     }
 
     /// Node -> Rust (C.1): messages, title and permission mode become rows plus one
@@ -1056,7 +1113,7 @@ pub struct Reader {
 
 const SESSION_COLS: &str = "id,status,workspace_id,workspace_root,cwd,additional_dirs,git_worktree,model_config,
   permission_mode,permission_policy_id,budget,usage,event_cursor,checkpoint_id,title,parent_session_id,
-  parent_tool_call_id,legacy_transcript_path,created_at,updated_at";
+  parent_tool_call_id,legacy_transcript_path,created_at,updated_at,git_info";
 
 fn bad(e: impl std::fmt::Display) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, e.to_string().into())
@@ -1089,6 +1146,7 @@ fn session_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
         legacy_transcript_path: r.get(17)?,
         created_at: r.get(18)?,
         updated_at: r.get(19)?,
+        git_info: r.get(20)?,
     })
 }
 
@@ -1118,6 +1176,112 @@ impl Reader {
             )
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("session {id}")))
+    }
+
+    /// Recomputes the hash chain of the session's events (see [`ChainReport`]). The links are
+    /// HMACs under the per-user key (`chain.key` in the home).
+    pub fn verify_chain(&self, id: &str) -> Result<ChainReport> {
+        let rec = self.get_session(id)?;
+        let (head, chained): (Option<String>, bool) = self.conn.query_row(
+            "SELECT chain_head, chained FROM sessions WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
+        )?;
+        let mut rep = ChainReport {
+            legacy: !chained,
+            ..ChainReport::default()
+        };
+        let Some(key) = crate::trust::existing_chain_key(&self.home) else {
+            rep.no_key = rec.event_cursor > 0;
+            return Ok(rep);
+        };
+        let mut st = self.conn.prepare(
+            "SELECT seq,v,ts,task_id,turn_id,agent_id,type,payload,payload_ref,prev FROM events
+             WHERE session_id=?1 ORDER BY seq",
+        )?;
+        let mut rows = st.query([id])?;
+        let mut last: Option<String> = None;
+        let mut expect_seq = 1;
+        while let Some(r) = rows.next()? {
+            let (seq, kind): (i64, String) = (r.get(0)?, r.get(6)?);
+            let (task, turn, agent): (Option<String>, Option<String>, Option<String>) =
+                (r.get(3)?, r.get(4)?, r.get(5)?);
+            let (body, pref, prev): (Option<String>, Option<String>, Option<String>) =
+                (r.get(7)?, r.get(8)?, r.get(9)?);
+            let ts: String = r.get(2)?;
+            let broken = |why: String| ChainBreak { seq, why };
+            if seq != expect_seq {
+                rep.broken = Some(broken(format!("event {expect_seq} is missing")));
+                return Ok(rep);
+            }
+            expect_seq += 1;
+            let Some(prev) = prev else {
+                if last.is_some() || chained {
+                    rep.broken = Some(broken("chain link removed".into()));
+                    return Ok(rep);
+                }
+                rep.unchained += 1; // written before the chain existed
+                continue;
+            };
+            if last.as_deref().unwrap_or("") != prev {
+                rep.broken = Some(broken(
+                    "link does not match the previous event (an earlier event was changed or removed)"
+                        .into(),
+                ));
+                return Ok(rep);
+            }
+            last = Some(chain_hash(
+                &key,
+                &prev,
+                &EventRow {
+                    sid: id,
+                    seq,
+                    v: r.get(1)?,
+                    ts: &ts,
+                    ids: [task.as_deref(), turn.as_deref(), agent.as_deref()],
+                    kind: &kind,
+                    body: body.as_deref(),
+                    pref: pref.as_deref(),
+                },
+            ));
+            rep.chained += 1;
+        }
+        if last != head {
+            rep.broken = Some(ChainBreak {
+                seq: rec.event_cursor as i64,
+                why: "the last event does not match the head kept in the session row (events were changed or cut off at the end, or the key changed)".into(),
+            });
+        }
+        Ok(rep)
+    }
+
+    /// The payload of the newest event of type `kind` (inline payloads only), if any.
+    pub fn last_payload(&self, session_id: &str, kind: &str) -> Result<Option<Value>> {
+        let raw: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT payload FROM events WHERE session_id=?1 AND type=?2 AND payload IS NOT NULL
+                 ORDER BY seq DESC LIMIT 1",
+                params![session_id, kind],
+                |r| r.get(0),
+            )
+            .optional()?;
+        raw.map(|r| serde_json::from_str(&r).map_err(Into::into))
+            .transpose()
+    }
+
+    /// Whether `synt stop` asked this session to stop at or after `since` (a [`timestamp`]): a
+    /// request left over from an earlier run of the session does not stop this one.
+    pub fn stop_requested_since(&self, id: &str, since: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT stop_requested_at >= ?2 FROM sessions WHERE id=?1 AND stop_requested_at IS NOT NULL",
+                params![id, since],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
     }
 
     /// Newest first; `cwd` filters by the persisted working directory.
@@ -1290,6 +1454,17 @@ impl Reader {
                 decision: r.get(6)?,
                 duration_ms: r.get(7)?,
             })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// `(id, status, reason, request)` of the session's tasks, oldest first.
+    pub fn tasks(&self, session_id: &str) -> Result<Vec<TaskRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT id,status,reason,request FROM tasks WHERE session_id=?1 ORDER BY started_at, id",
+        )?;
+        let rows = st.query_map([session_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -1610,6 +1785,7 @@ pub struct SessionWriter {
     pub task_id: Option<String>,
     pub turn_id: Option<String>,
     pub agent_id: Option<String>,
+    chain_key: [u8; 32],
 }
 
 impl Deref for SessionWriter {
@@ -1699,6 +1875,7 @@ impl SessionWriter {
         let ts = now();
         let seq = append_tx(
             &tx,
+            &self.chain_key,
             &self.reader.home,
             &self.limits,
             &self.id,
@@ -1755,6 +1932,7 @@ impl SessionWriter {
         self.redactor.redact_value(&mut payload);
         let seq = append_tx(
             &tx,
+            &self.chain_key,
             &self.reader.home,
             &self.limits,
             &self.id,
@@ -1765,6 +1943,16 @@ impl SessionWriter {
         )?;
         tx.commit()?;
         Ok(seq)
+    }
+
+    /// Records where this session's git worktree is pinned (opaque JSON; read back as
+    /// [`SessionRecord::git_info`] to re-pin on resume).
+    pub fn set_git_info(&mut self, json: &str) -> Result<()> {
+        self.reader.conn.execute(
+            "UPDATE sessions SET git_info=?2 WHERE id=?1",
+            params![self.id, json],
+        )?;
+        Ok(())
     }
 
     pub fn update_usage(&mut self, usage: &BudgetUsage) -> Result<()> {
@@ -2269,6 +2457,7 @@ impl SessionWriter {
 #[allow(clippy::too_many_arguments)]
 fn append_tx(
     tx: &Transaction<'_>,
+    key: &[u8; 32],
     home: &Path,
     limits: &Limits,
     sid: &str,
@@ -2285,10 +2474,10 @@ fn append_tx(
             max: MAX_PAYLOAD_BYTES,
         });
     }
-    let cursor: i64 = tx.query_row(
-        "SELECT event_cursor FROM sessions WHERE id=?1",
+    let (cursor, head): (i64, Option<String>) = tx.query_row(
+        "SELECT event_cursor, chain_head FROM sessions WHERE id=?1",
         [sid],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let seq = cursor + 1;
     if let Some(max) = limits.max_events
@@ -2314,9 +2503,24 @@ fn append_tx(
         )?;
         (None, Some(a.artifact_id))
     };
+    let prev = head.unwrap_or_default();
+    let link = chain_hash(
+        key,
+        &prev,
+        &EventRow {
+            sid,
+            seq,
+            v: i64::from(SCHEMA_VERSION),
+            ts,
+            ids: [task.as_deref(), turn.as_deref(), agent.as_deref()],
+            kind,
+            body: inline.as_deref(),
+            pref: pref.as_deref(),
+        },
+    );
     tx.execute(
-        "INSERT INTO events(session_id,seq,v,ts,task_id,turn_id,agent_id,type,payload,payload_ref)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        "INSERT INTO events(session_id,seq,v,ts,task_id,turn_id,agent_id,type,payload,payload_ref,prev)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
         params![
             sid,
             seq,
@@ -2327,14 +2531,50 @@ fn append_tx(
             agent,
             kind,
             inline,
-            pref
+            pref,
+            prev
         ],
     )?;
     tx.execute(
-        "UPDATE sessions SET event_cursor=?2, updated_at=?3 WHERE id=?1",
-        params![sid, seq, ts],
+        "UPDATE sessions SET event_cursor=?2, updated_at=?3, chain_head=?4 WHERE id=?1",
+        params![sid, seq, ts, link],
     )?;
     Ok(seq as u64)
+}
+
+/// The fields of an event row the chain covers.
+struct EventRow<'a> {
+    sid: &'a str,
+    seq: i64,
+    v: i64,
+    ts: &'a str,
+    ids: [Option<&'a str>; 3],
+    kind: &'a str,
+    body: Option<&'a str>,
+    pref: Option<&'a str>,
+}
+
+/// `sha256(prev | row)`, hex. `model.delta` bodies are left out: `compact_deltas` rewrites them
+/// in place (their text is folded into the final `assistant.message`, which is covered).
+fn chain_hash(key: &[u8; 32], prev: &str, r: &EventRow<'_>) -> String {
+    let body = if r.kind == "model.delta" {
+        ""
+    } else {
+        r.body.unwrap_or("")
+    };
+    let [task, turn, agent] = r.ids.map(|i| i.unwrap_or(""));
+    crate::trust::chain_mac(
+        key,
+        &format!(
+            "{prev}\n{}\n{}\n{}\n{}\n{task}\n{turn}\n{agent}\n{}\n{}\n{body}",
+            r.sid,
+            r.seq,
+            r.v,
+            r.ts,
+            r.kind,
+            r.pref.unwrap_or("")
+        ),
+    )
 }
 
 fn event_bytes(conn: &Connection, sid: &str) -> Result<u64> {

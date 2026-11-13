@@ -356,14 +356,78 @@ pub fn reveal_path(distro: &str, linux: &str) -> Result<String, String> {
     to_display(distro, &format!("/{}", parts.join("/")))
 }
 
-/// `wsl.exe -d <distro> --cd <cwd> --exec <synt> engine --stdio`. The program is injected. wsl.exe gets
+/// The spend limit the desktop puts on a WSL session (`synt.desktop.max_cost_usd`, per task).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CostCap {
+    Usd(f64),
+    /// `synt.desktop.no_cost_cap: true`: an explicit choice to run without one.
+    None,
+}
+
+/// Cap when nothing is set.
+pub const DEFAULT_COST_CAP_USD: f64 = 10.0;
+
+/// `synt.desktop.max_cost_usd` (number > 0) and `synt.desktop.no_cost_cap` (bool) from the user file
+/// and the managed file (managed wins). A wrong type is an error, never a silent default.
+pub fn read_cost_cap(home: &Path, managed: &Path) -> Result<CostCap, String> {
+    let mut cap = CostCap::Usd(DEFAULT_COST_CAP_USD);
+    for (path, what) in [
+        (home.join("settings.json"), "user settings"),
+        (managed.to_path_buf(), "managed settings"),
+    ] {
+        let Some(doc) = synthesis_settings::read_json(&path, what)? else {
+            continue;
+        };
+        let Some(d) = doc.get("synt").and_then(|s| s.get("desktop")) else {
+            continue;
+        };
+        if let Some(v) = d.get("max_cost_usd") {
+            let n = v
+                .as_f64()
+                .filter(|n| n.is_finite() && *n > 0.0)
+                .ok_or_else(|| {
+                    format!("{what}: synt.desktop.max_cost_usd must be a number above 0")
+                })?;
+            cap = CostCap::Usd(n);
+        }
+        if let Some(v) = d.get("no_cost_cap") {
+            match v.as_bool() {
+                Some(true) => cap = CostCap::None,
+                Some(false) => {}
+                None => {
+                    return Err(format!(
+                        "{what}: synt.desktop.no_cost_cap must be true or false"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(cap)
+}
+
+/// `wsl.exe -d <distro> --cd <cwd> --exec <synt> engine --stdio --host desktop [--max-cost-usd N]`.
+/// `--host desktop` keeps the interactive behaviour (no worktree, no default wall cap); the cap is the
+/// desktop setting, absent only when the person chose "no cap". The program is injected. wsl.exe gets
 /// the allowlisted environment minus every `SYNT_*` (a key is never handed over, and nothing is
 /// exported into the distro: no `WSLENV`).
-pub fn launcher(wsl_exe: &Path, distro: &str, cwd: &str, synt: &str, env: &Env) -> Launcher {
-    let args = [
-        "-d", distro, "--cd", cwd, "--exec", synt, "engine", "--stdio",
-    ];
-    let mut l = Launcher::new(wsl_exe, args.map(Into::into).to_vec(), env);
+pub fn launcher(
+    wsl_exe: &Path,
+    distro: &str,
+    cwd: &str,
+    synt: &str,
+    env: &Env,
+    cap: CostCap,
+) -> Launcher {
+    let mut args: Vec<String> = [
+        "-d", distro, "--cd", cwd, "--exec", synt, "engine", "--stdio", "--host", "desktop",
+    ]
+    .map(String::from)
+    .to_vec();
+    if let CostCap::Usd(n) = cap {
+        args.push("--max-cost-usd".into());
+        args.push(n.to_string());
+    }
+    let mut l = Launcher::new(wsl_exe, args.into_iter().map(Into::into).collect(), env);
     l.env.retain(|(k, _)| !k.starts_with("SYNT_"));
     l.hello_timeout = COLD_START;
     l.start_cwd = Some(cwd.into());
@@ -459,6 +523,7 @@ pub fn check_reported(asked: &str, cwd: Option<&str>, root: Option<&str>) -> Res
 
 /// Probes, converts the folder and starts the engine in the distro. Blocking. `project` is the folder the
 /// person chose on Windows and stays the session's host-side folder; the engine gets the Linux path.
+#[allow(clippy::too_many_arguments)]
 pub fn start_via(
     run: Run,
     wsl_exe: &Path,
@@ -467,6 +532,7 @@ pub fn start_via(
     env: &Env,
     project: &Path,
     spec: &StartSpec,
+    cap: CostCap,
 ) -> Result<(Engine, UnboundedReceiver<UiMsg>), String> {
     let go = || {
         let ready = probe(run, wanted, version)?;
@@ -480,8 +546,11 @@ pub fn start_via(
                 QUICK,
             )?)
         })?;
-        let (mut e, rx) =
-            Engine::start_remote(&launcher(wsl_exe, d, &cwd, &ready.synt, env), project, spec)?;
+        let (mut e, rx) = Engine::start_remote(
+            &launcher(wsl_exe, d, &cwd, &ready.synt, env, cap),
+            project,
+            spec,
+        )?;
         // refused (the engine is dropped, which closes it) when it is not where it was asked to be
         check_reported(&cwd, e.remote_cwd.as_deref(), e.remote_root.as_deref())?;
         e.remote_distro = Some(d.to_string());
@@ -509,6 +578,7 @@ pub fn start(
 ) -> Result<(Engine, UnboundedReceiver<UiMsg>), String> {
     let exe = system_wsl()?;
     let (_, distro) = read_setting(home, &managed_path())?;
+    let cap = read_cost_cap(home, &managed_path()).map_err(|e| sanitize_for_display(&e))?;
     let run = |a: &[&str], w| run_wsl(&exe, a, w);
     start_via(
         &run,
@@ -518,6 +588,7 @@ pub fn start(
         env,
         project,
         spec,
+        cap,
     )
 }
 
@@ -727,6 +798,30 @@ mod tests {
     }
 
     #[test]
+    fn the_cost_cap_setting_has_a_default_an_explicit_off_and_managed_wins() {
+        let d = tempfile::tempdir().unwrap();
+        let managed = d.path().join("managed.json");
+        let user = d.path().join("settings.json");
+        let read = || read_cost_cap(d.path(), &managed);
+        assert_eq!(read(), Ok(CostCap::Usd(DEFAULT_COST_CAP_USD)));
+        std::fs::write(&user, r#"{"synt":{"desktop":{"max_cost_usd":2.5}}}"#).unwrap();
+        assert_eq!(read(), Ok(CostCap::Usd(2.5)));
+        std::fs::write(&user, r#"{"synt":{"desktop":{"no_cost_cap":true}}}"#).unwrap();
+        assert_eq!(read(), Ok(CostCap::None));
+        std::fs::write(&managed, r#"{"synt":{"desktop":{"max_cost_usd":1}}}"#).unwrap();
+        assert_eq!(read(), Ok(CostCap::Usd(1.0)), "managed settings win");
+        for bad in [
+            r#"{"synt":{"desktop":{"max_cost_usd":0}}}"#,
+            r#"{"synt":{"desktop":{"max_cost_usd":"x"}}}"#,
+            r#"{"synt":{"desktop":{"no_cost_cap":1}}}"#,
+        ] {
+            std::fs::write(&user, bad).unwrap();
+            let _ = std::fs::remove_file(&managed);
+            assert!(read().is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn the_launcher_is_the_documented_command_and_hands_over_no_key() {
         let env = Env::from_pairs([
             ("SystemRoot", r"C:\Windows"),
@@ -740,6 +835,7 @@ mod tests {
             "/home/me/r",
             "/h/.synt/bin/synt",
             &env,
+            CostCap::Usd(10.0),
         );
         let args: Vec<_> = l.args.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
@@ -752,9 +848,17 @@ mod tests {
                 "--exec",
                 "/h/.synt/bin/synt",
                 "engine",
-                "--stdio"
+                "--stdio",
+                "--host",
+                "desktop",
+                "--max-cost-usd",
+                "10"
             ]
         );
+        // "no cap" is an explicit setting and leaves the flag out
+        let none = launcher(Path::new("w"), "U", "/r", "/s", &env, CostCap::None);
+        assert!(!none.args.iter().any(|a| a == "--max-cost-usd"));
+        assert!(none.args.iter().any(|a| a == "desktop"));
         assert_eq!(l.program, r"C:\Windows\System32\wsl.exe");
         assert_eq!(
             l.env,

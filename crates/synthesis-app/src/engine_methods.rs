@@ -227,9 +227,16 @@ impl Ctx<'_> {
             .get_session(id)
             .map_err(|_| "unknown session".to_string())?;
         let real = |p: &Path| synthesis_core::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        if fold_dir(&real(Path::new(&rec.cwd)).to_string_lossy())
-            != fold_dir(&real(cwd).to_string_lossy())
-        {
+        let key = |p: &Path| fold_dir(&real(p).to_string_lossy());
+        // the folder it was started in; for a session that ran in a worktree (a governed engine's default) that
+        // is the repository the worktree was made from
+        let origin = rec
+            .git_info
+            .as_deref()
+            .and_then(|j| serde_json::from_str::<synthesis_workspace::GitInfo>(j).ok())
+            .map(|g| g.repo_root);
+        let here = key(cwd);
+        if key(Path::new(&rec.cwd)) != here && origin.is_none_or(|o| key(&o) != here) {
             return Err("that session was started in another folder".into());
         }
         if !Path::new(&rec.cwd).is_dir() {

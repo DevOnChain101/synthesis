@@ -23,6 +23,8 @@ pub enum Step {
     /// Waits until the file exists (cancellable): a test opens it when the world is ready.
     Gate(std::path::PathBuf),
     Fail(ProviderError),
+    /// Not played: makes `answered_by` report this label for the turn (a failover target).
+    AnsweredBy(String),
 }
 
 /// One scripted provider response (one `stream` call).
@@ -218,6 +220,23 @@ impl Turn {
         self
     }
 
+    /// The turn is answered by a failover target `label` (`provider/model`).
+    pub fn answered_by(mut self, label: &str) -> Self {
+        self.steps.push(Step::AnsweredBy(label.into()));
+        self
+    }
+
+    /// Cache tokens of the response (on top of `with_usage`).
+    pub fn with_cache(mut self, read: u64, create: u64) -> Self {
+        for s in &mut self.steps {
+            if let Step::Event(StreamEvent::MessageStart { message }) = s {
+                message.usage.cache_read_input_tokens = Some(read);
+                message.usage.cache_creation_input_tokens = Some(create);
+            }
+        }
+        self
+    }
+
     pub fn with_usage(mut self, input: u64, output: u64) -> Self {
         for s in &mut self.steps {
             if let Step::Event(StreamEvent::MessageStart { message }) = s {
@@ -237,6 +256,7 @@ pub struct FakeProvider {
     script: Mutex<VecDeque<Turn>>,
     requests: Mutex<Vec<Request>>,
     responder: Option<Responder>,
+    answered: Mutex<Option<String>>,
 }
 
 /// Chooses the answer from the request (for tests with several agents asking in any order);
@@ -254,6 +274,7 @@ impl FakeProvider {
             script: Mutex::new(turns.into_iter().collect()),
             requests: Mutex::default(),
             responder: None,
+            answered: Mutex::default(),
         }
     }
 
@@ -292,6 +313,13 @@ impl ModelProvider for FakeProvider {
         self.caps.clone()
     }
 
+    fn answered_by(&self) -> Option<String> {
+        self.answered
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     fn stream(&self, req: &Request, cancel: CancellationToken) -> EventStream {
         self.requests
             .lock()
@@ -303,7 +331,7 @@ impl ModelProvider for FakeProvider {
                 .unwrap_or_else(|e| e.into_inner())
                 .pop_front()
         });
-        let steps: VecDeque<Step> = match turn {
+        let mut steps: VecDeque<Step> = match turn {
             Some(t) => t.steps.into(),
             None => [Step::Fail(ProviderError::new(
                 ErrorKind::InvalidRequest,
@@ -311,12 +339,19 @@ impl ModelProvider for FakeProvider {
             ))]
             .into(),
         };
+        let at = steps.iter().position(|s| matches!(s, Step::AnsweredBy(_)));
+        let label = at.and_then(|i| match steps.remove(i) {
+            Some(Step::AnsweredBy(l)) => Some(l),
+            _ => None,
+        });
+        *self.answered.lock().unwrap_or_else(|e| e.into_inner()) = label;
         Box::pin(futures_util::stream::unfold(
             (steps, cancel),
             |(mut steps, cancel)| async move {
                 match steps.pop_front()? {
                     Step::Event(e) => Some((Ok(e), (steps, cancel))),
                     Step::Fail(e) => Some((Err(e), (VecDeque::new(), cancel))),
+                    Step::AnsweredBy(_) => None, // removed above
                     wait @ (Step::Delay(_) | Step::Gate(_)) => {
                         let waited = async {
                             match wait {
@@ -339,7 +374,7 @@ impl ModelProvider for FakeProvider {
                         match steps.pop_front()? {
                             Step::Event(e) => Some((Ok(e), (steps, cancel))),
                             Step::Fail(e) => Some((Err(e), (VecDeque::new(), cancel))),
-                            Step::Delay(_) | Step::Gate(_) => None,
+                            Step::Delay(_) | Step::Gate(_) | Step::AnsweredBy(_) => None,
                         }
                     }
                 }

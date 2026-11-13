@@ -51,6 +51,7 @@ impl Rig {
         let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.args([
             "run",
+            "--no-cost-cap",
             "--cwd",
             cwd(&self.repo()),
             "--prompt",
@@ -179,6 +180,7 @@ mod run {
         let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
         c.args([
             "run",
+            "--no-cost-cap",
             "--cwd",
             cwd(&r.repo()),
             "--prompt",
@@ -251,12 +253,19 @@ mod reflection {
         let path = r.dir.path().join("script.json");
         std::fs::write(&path, script.to_string()).unwrap();
         let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
-        c.args(["run", "--cwd", cwd(&r.repo()), "--prompt", "read a.txt"])
-            .arg("--provider")
-            .arg(format!("fake:{}", path.display()))
-            .args(["--sandbox", "off"])
-            .args(trust.then_some("--trust-project"))
-            .env_clear();
+        c.args([
+            "run",
+            "--no-cost-cap",
+            "--cwd",
+            cwd(&r.repo()),
+            "--prompt",
+            "read a.txt",
+        ])
+        .arg("--provider")
+        .arg(format!("fake:{}", path.display()))
+        .args(["--sandbox", "off"])
+        .args(trust.then_some("--trust-project"))
+        .env_clear();
         for k in ["PATH", "SystemRoot", "PATHEXT", "ComSpec", "TEMP", "TMP"] {
             if let Some(v) = std::env::var_os(k) {
                 c.env(k, v);
