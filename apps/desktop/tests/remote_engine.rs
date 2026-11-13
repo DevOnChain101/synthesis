@@ -274,8 +274,16 @@ fn a_session_through_a_fake_wsl() {
         (r"C:\work\repo", "/mnt/c/work/repo"),
         (r"\\wsl.localhost\ubuntu\home\me\repo", "/home/me/repo"),
     ] {
-        let (e, mut rx) = wsl::start_via(&run, &exe, "", VERSION, &env, Path::new(folder))
-            .unwrap_or_else(|e| panic!("{folder}: {e}"));
+        let (e, mut rx) = wsl::start_via(
+            &run,
+            &exe,
+            "",
+            VERSION,
+            &env,
+            Path::new(folder),
+            wsl::CostCap::Usd(10.0),
+        )
+        .unwrap_or_else(|e| panic!("{folder}: {e}"));
         // the engine got the Linux folder twice (--cd and start); the host kept the Windows one
         assert_eq!(e.remote_cwd.as_deref(), Some(linux), "--cd");
         assert_eq!(e.remote_root.as_deref(), Some(linux), "start");
@@ -291,7 +299,15 @@ fn a_session_through_a_fake_wsl() {
             .any(|c| c.starts_with("-d Ubuntu --exec /usr/bin/wslpath -u C:"))
     );
     // another distro's folder is refused before any engine starts
-    let e = wsl::start_via(&run, &exe, "", VERSION, &env, Path::new(r"\\wsl$\Debian\x"));
+    let e = wsl::start_via(
+        &run,
+        &exe,
+        "",
+        VERSION,
+        &env,
+        Path::new(r"\\wsl$\Debian\x"),
+        wsl::CostCap::Usd(10.0),
+    );
     assert!(e.err().unwrap().contains("Debian"));
 }
 
@@ -299,9 +315,18 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     // a fake wsl.exe: the shape of the real command line is checked, then it is the engine
     if args.get(1).map(String::as_str) == Some("-d") {
-        let ok = args.len() == 9
+        let ok = args.len() == 13
             && (args[3].as_str(), args[5].as_str()) == ("--cd", "--exec")
-            && args[6..] == ["/home/me/.synt/bin/synt", "engine", "--stdio"];
+            && args[6..]
+                == [
+                    "/home/me/.synt/bin/synt",
+                    "engine",
+                    "--stdio",
+                    "--host",
+                    "desktop",
+                    "--max-cost-usd",
+                    "10",
+                ];
         if !ok || std::env::var_os("SYNT_API_KEY").is_some() || std::env::var_os("WSLENV").is_some()
         {
             eprintln!("fake wsl.exe: bad command line or environment: {args:?}");

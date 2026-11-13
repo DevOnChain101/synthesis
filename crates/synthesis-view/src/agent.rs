@@ -707,6 +707,7 @@ impl AgentPanes {
                 status,
                 attempt,
                 summary,
+                ..
             } => self.verify.push(VerifyRun {
                 report_id: report_id.clone(),
                 task_id: e.task_id.clone().unwrap_or_default(),

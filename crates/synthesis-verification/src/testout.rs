@@ -50,6 +50,8 @@ fn words(line: &str, c: &mut TestCounts) {
     }
 }
 
+static UNITTEST: LazyLock<Regex> =
+    LazyLock::new(|| re(r"(?m)^Ran (\d+) tests? in [\d.]+s\s*\n\s*\n(OK|FAILED)[^\n]*"));
 /// Counts from whichever known runner summaries `out` contains (summed); `None` when none is
 /// recognised (for example `go test` without `-v`, or a custom script).
 pub fn parse_counts(out: &str) -> Option<TestCounts> {
@@ -89,6 +91,20 @@ pub fn parse_counts(out: &str) -> Option<TestCounts> {
             "PASS" => c.passed += 1,
             "SKIP" => c.skipped += 1,
             _ => c.failed += 1,
+        }
+    }
+    for m in UNITTEST.captures_iter(out) {
+        seen = true;
+        let run = n(&m[1]);
+        let skipped = m[0]
+            .split("skipped=")
+            .nth(1)
+            .map_or(0, |t| n(t.trim_end_matches(')').trim()));
+        if &m[2] == "OK" {
+            c.passed += run.saturating_sub(skipped);
+            c.skipped += skipped;
+        } else {
+            c.failed += run;
         }
     }
     if let Some(m) = MAVEN.captures_iter(out).last() {

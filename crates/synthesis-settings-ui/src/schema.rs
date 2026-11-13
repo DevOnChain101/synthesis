@@ -323,6 +323,17 @@ impl SettingsSchema {
                 .scope(Scope::UserManaged)
                 .help("Windows only. The distro to use; unset is WSL's default. WSL1 is refused. A managed settings file may set it and then wins."),
         );
+        f.push(
+            Field::new("synt.desktop.max_cost_usd", Execution, "WSL cost cap per task (USD)", Float { min: 0.01, max: 1_000_000.0 })
+                .def(json!(10.0))
+                .scope(Scope::UserManaged)
+                .help("Windows only. The spend limit the desktop puts on each task of a WSL session (default 10). Needs a price for the model: built in for Anthropic and OpenAI models, else synt.pricing inside WSL. A managed settings file wins."),
+        );
+        f.push(
+            b("synt.desktop.no_cost_cap", Execution, "WSL: no cost cap", false)
+                .scope(Scope::UserManaged)
+                .help("Windows only. Explicitly run WSL sessions without a spend limit (the cost cap above is then not passed). A managed settings file wins."),
+        );
         // ---- APPEARANCE
         f.push(
             Field::new(
@@ -468,7 +479,13 @@ pub fn group_of(key: &str, section: Section) -> &'static str {
         Interface => "Chat",
         Memory if key.starts_with("synt.images.") => "Images",
         Memory => "Memory",
-        Execution if key.starts_with("synt.budget.") => "Limits",
+        Execution
+            if key.starts_with("synt.budget.")
+                || key == "synt.desktop.max_cost_usd"
+                || key == "synt.desktop.no_cost_cap" =>
+        {
+            "Limits"
+        }
         Execution if key.starts_with("synt.verification.") => "Verification",
         Execution
             if key.starts_with("synt.context.")

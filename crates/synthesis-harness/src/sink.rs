@@ -63,6 +63,34 @@ impl EventSink {
         w.redactor().redact_str(s)
     }
 
+    /// Masks every value of a `KEY=value` / `key: value` file read from now on (a secret file the
+    /// user approved reading), wherever it appears in events and logs.
+    pub fn add_secrets_from(&self, text: &str) {
+        let w = self.0.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let r = w.redactor();
+        let mut evicted = false;
+        let mut add = |v: &str| evicted |= r.add_secret(v);
+        // a PEM body: every base64 line is a secret by itself
+        let mut in_pem = false;
+        for line in text.lines().take(2000) {
+            let l = line.trim();
+            if l.starts_with("-----BEGIN") {
+                in_pem = true;
+            } else if l.starts_with("-----END") {
+                in_pem = false;
+            } else if in_pem {
+                add(l);
+            } else if let Some((_, v)) = l.split_once(['=', ':']) {
+                add(v.trim());
+            }
+        }
+        if evicted {
+            eprintln!(
+                "synt: warning: the list of secret values to mask is full; the oldest were dropped"
+            );
+        }
+    }
+
     pub fn is_broken(&self) -> bool {
         self.0.broken.load(Ordering::SeqCst)
     }

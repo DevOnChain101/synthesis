@@ -18,7 +18,7 @@ fn run(prompt: &str) -> (String, String) {
     std::fs::write(ws.join(".env"), "TOKEN=hunter2\n").unwrap();
     std::fs::write(dir.path().join("outside.txt"), "delta\n").unwrap();
     let o = Command::new(env!("CARGO_BIN_EXE_synt"))
-        .args(["run", "--cwd"])
+        .args(["run", "--no-cost-cap", "--cwd"])
         .arg(&ws)
         .arg("--provider")
         .arg(format!("fake:{}", home.join("script.json").display()))

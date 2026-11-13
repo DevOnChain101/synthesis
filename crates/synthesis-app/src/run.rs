@@ -178,8 +178,30 @@ pub fn resolve_sandbox_mode(
     }
 }
 
+/// Unattended (headless / engine) runs: native Windows has no confinement, so unless `off` is
+/// explicit the mode is enforce, which refuses to start (and so refuses Bash) rather than run
+/// commands unconfined behind a notice nobody reads.
+pub fn resolve_governed_sandbox_mode(
+    explicit: Option<SandboxArg>,
+    windows: bool,
+    wsl: bool,
+) -> SandboxMode {
+    match explicit {
+        Some(SandboxArg::Off) => SandboxMode::Off,
+        _ if windows => SandboxMode::Enforce,
+        e => resolve_sandbox_mode(e, false, wsl),
+    }
+}
+
 impl Common {
     pub fn sandbox_mode(&self) -> SandboxMode {
+        if self.governed {
+            return resolve_governed_sandbox_mode(
+                self.sandbox,
+                cfg!(windows),
+                synthesis_sandbox::wsl::is_wsl(),
+            );
+        }
         resolve_sandbox_mode(
             self.sandbox,
             cfg!(windows),
@@ -239,6 +261,19 @@ pub struct Common {
     /// Work in an isolated git worktree on branch `synthesis/<session>`; left in place for review.
     #[arg(long)]
     pub worktree: bool,
+    /// Headless runs and the engine work in a git worktree by default when the directory is a git
+    /// repository; this turns that off (edits then land in the directory itself).
+    #[arg(long, conflicts_with = "worktree")]
+    pub no_worktree: bool,
+    /// The safe preset for runs nobody watches (docs/UNATTENDED.md): worktree, sandbox enforce,
+    /// network deny, wall cap (30 min unless --max-wall-secs), a cost cap (--max-cost-usd required),
+    /// inferred-only checks stay unverified, a failing session store ends the task, no peers.
+    /// REFUSES to start when one of these cannot be enforced.
+    #[arg(long, conflicts_with_all = ["no_worktree", "no_session_store", "peers"])]
+    pub unattended: bool,
+    /// Set by `synt run` and `synt engine`: the unattended defaults apply (not a flag).
+    #[arg(skip)]
+    pub governed: bool,
     /// With --worktree: remove the worktree at the end when nothing changed.
     #[arg(long, requires = "worktree")]
     pub cleanup_worktree: bool,
@@ -325,8 +360,15 @@ pub struct RunArgs {
     /// Needs a price for the model: `synt.pricing` in the user settings.json (config.md §6).
     #[arg(long)]
     max_cost_usd: Option<f64>,
+    /// Wall-clock cap in seconds (default 1800).
     #[arg(long)]
     max_wall_secs: Option<u64>,
+    /// Cap on input + output + cache tokens of the task.
+    #[arg(long, value_name = "N")]
+    max_tokens: Option<u64>,
+    /// A headless run needs --max-cost-usd; this accepts spending without a cap.
+    #[arg(long, conflicts_with_all = ["max_cost_usd", "unattended"])]
+    no_cost_cap: bool,
     /// JSON array of `{id?, text, check?}` (or plain strings).
     #[arg(long, alias = "criteria")]
     criteria_file: Option<PathBuf>,
@@ -349,6 +391,9 @@ pub struct Limits {
     pub max_tool_calls: Option<u32>,
     pub max_cost_usd: Option<f64>,
     pub max_wall_secs: Option<u64>,
+    pub max_tokens: Option<u64>,
+    /// Explicitly no cost cap (`--no-cost-cap`).
+    pub no_cost_cap: bool,
 }
 
 pub enum Front {
@@ -428,6 +473,21 @@ pub struct Prepared {
     pub stale_model: Option<String>,
 }
 
+/// A session of this directory: it ran exactly here, or in the worktree this exact directory
+/// (the repository top or the same subfolder of it) got. A sibling or parent directory never matches.
+fn is_here(s: &synthesis_session::SessionRecord, here: &Path) -> bool {
+    Path::new(&s.cwd) == here
+        || s.git_info
+            .as_deref()
+            .and_then(|j| serde_json::from_str::<synthesis_workspace::GitInfo>(j).ok())
+            .is_some_and(|g| {
+                matches!(
+                    (Path::new(&s.cwd).strip_prefix(&g.worktree), here.strip_prefix(&g.repo_root)),
+                    (Ok(a), Ok(b)) if a == b
+                )
+            })
+}
+
 /// The stored session `--resume ID` / `--continue` names and its live (non-compacted) messages.
 fn resolve_resume(
     c: &Common,
@@ -444,12 +504,10 @@ fn resolve_resume(
     let id = match &c.resume {
         Some(p) if !p.trim().is_empty() => {
             // another workspace's conversation would enter this one's context: opt-in only
-            let here = cwd.to_string_lossy();
-            let all = r
-                .list_sessions((!c.resume_any_workspace).then_some(&*here))
-                .map_err(|e| e.to_string())?;
+            let all = r.list_sessions(None).map_err(|e| e.to_string())?;
             let hits: Vec<_> = all
                 .iter()
+                .filter(|s| c.resume_any_workspace || is_here(s, cwd))
                 .filter(|s| s.id.starts_with(p.as_str()))
                 .collect();
             match hits.as_slice() {
@@ -471,10 +529,10 @@ fn resolve_resume(
         }
         Some(_) => return Err("--resume: empty session id".into()),
         None => r
-            .list_sessions(Some(&cwd.to_string_lossy()))
+            .list_sessions(None)
             .map_err(|e| e.to_string())?
             .into_iter()
-            .find(|s| s.parent.is_none())
+            .find(|s| s.parent.is_none() && is_here(s, cwd))
             .map(|s| s.id)
             .ok_or("--continue: no saved session for this directory")?,
     };
@@ -495,14 +553,79 @@ fn resolve_resume(
     Ok(Some((id, history)))
 }
 
-/// Rows of `{"synt":{"pricing":{"<provider/model>"|"<model>": {input_per_mtok, output_per_mtok}}}}`
-/// from the USER settings file only (a repository must not be able to price a model at zero).
+/// Rows of `{"synt":{"pricing":{"<provider/model>"|"<model>": {input_per_mtok, output_per_mtok,
+/// cache_read_per_mtok?, cache_write_per_mtok?}}}}` from the USER settings file only (a repository
+/// must not be able to price a model at zero); a model with no row gets [`builtin_pricing`].
 pub(crate) fn pricing(user_settings: &Path, label: &str, model: &str) -> Option<Pricing> {
-    let raw = std::fs::read(user_settings)
+    std::fs::read(user_settings)
         .ok()
-        .filter(|b| b.len() <= 1 << 20)?;
-    let v: Value = serde_json::from_slice(&raw).ok()?;
-    parse_pricing(&v, label, model)
+        .filter(|b| b.len() <= 1 << 20)
+        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        .and_then(|v| parse_pricing(&v, label, model))
+        .or_else(|| builtin_pricing(label, model))
+}
+
+/// `-YYYYMMDD` or `-YYYY-MM-DD`: the only suffix a built-in price accepts after a model id.
+fn is_date_suffix(rest: &str) -> bool {
+    let d = rest.strip_prefix('-').unwrap_or("x");
+    let digits = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_digit());
+    digits(d, 8)
+        || matches!(d.split('-').collect::<Vec<_>>().as_slice(),
+            [y, m, dd] if digits(y, 4) && digits(m, 2) && digits(dd, 2))
+}
+
+/// USD per million tokens of first-party models (`anthropic/...`, `openai/...`), so a cost cap
+/// works without a settings file. EXACT ids (or the id plus a date suffix) only: a variant that is
+/// not listed (`gpt-5-pro`, `o3-pro`, `o4-mini-deep-research`, a newer Claude) has no built-in
+/// price, so a run under a cap is refused until `synt.pricing` prices it. Approximate; the dearer
+/// price of a family. Not modelled: tiers by prompt length (Sonnet above 200k input tokens costs
+/// more), so set the dearer tier in `synt.pricing` when you use long contexts. A gateway or local
+/// provider has no built-in price on purpose (docs/UNATTENDED.md).
+pub fn builtin_pricing(label: &str, model: &str) -> Option<Pricing> {
+    // (id, input, output, cache read, cache write)
+    const ANTHROPIC: [(&str, f64, f64, f64, f64); 9] = [
+        ("claude-opus-4-1", 15.0, 75.0, 1.5, 18.75),
+        ("claude-opus-4-5", 15.0, 75.0, 1.5, 18.75),
+        ("claude-opus-4", 15.0, 75.0, 1.5, 18.75),
+        ("claude-sonnet-4-5", 3.0, 15.0, 0.3, 3.75),
+        ("claude-sonnet-4", 3.0, 15.0, 0.3, 3.75),
+        ("claude-3-7-sonnet", 3.0, 15.0, 0.3, 3.75),
+        ("claude-haiku-4-5", 1.0, 5.0, 0.1, 1.25),
+        ("claude-3-5-haiku", 1.0, 5.0, 0.1, 1.25),
+        ("claude-3-5-sonnet", 3.0, 15.0, 0.3, 3.75),
+    ];
+    const OPENAI: [(&str, f64, f64); 9] = [
+        ("gpt-5-nano", 0.05, 0.4),
+        ("gpt-5-mini", 0.25, 2.0),
+        ("gpt-5", 1.25, 10.0),
+        ("gpt-4.1-mini", 0.4, 1.6),
+        ("gpt-4.1", 2.0, 8.0),
+        ("gpt-4o-mini", 0.15, 0.6),
+        ("gpt-4o", 2.5, 10.0),
+        ("o4-mini", 1.1, 4.4),
+        ("o3", 2.0, 8.0),
+    ];
+    let (provider, _) = label.split_once('/')?;
+    let m = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    let exact = |id: &str| m == id || m.strip_prefix(id).is_some_and(is_date_suffix);
+    match provider {
+        "anthropic" => ANTHROPIC.iter().find(|r| exact(r.0)).map(|r| Pricing {
+            input_per_mtok: r.1,
+            output_per_mtok: r.2,
+            cache_read_per_mtok: Some(r.3),
+            cache_write_per_mtok: Some(r.4),
+        }),
+        "openai" => OPENAI.iter().find(|r| exact(r.0)).map(|r| Pricing {
+            input_per_mtok: r.1,
+            output_per_mtok: r.2,
+            ..Pricing::default()
+        }),
+        _ => None,
+    }
 }
 
 fn parse_pricing(v: &Value, label: &str, model: &str) -> Option<Pricing> {
@@ -516,6 +639,8 @@ fn parse_pricing(v: &Value, label: &str, model: &str) -> Option<Pricing> {
     Some(Pricing {
         input_per_mtok: num("input_per_mtok")?,
         output_per_mtok: num("output_per_mtok")?,
+        cache_read_per_mtok: num("cache_read_per_mtok"),
+        cache_write_per_mtok: num("cache_write_per_mtok"),
     })
 }
 
@@ -649,9 +774,36 @@ pub fn expand_file_mentions(
     (request + &m.text, notes)
 }
 
-/// Default `--max-wall-secs` of a headless `synt run` (one hour). Turns (50) and tool calls (200)
-/// are bounded by default already; a cost cap needs a configured price, so it has no default.
-const HEADLESS_WALL_SECS: u64 = 3600;
+/// Refusals of the governed (headless / engine) runs and of `--unattended`; `Err` is the exit-2 text.
+pub fn check_governance(c: &Common, limits: &Limits, governed: bool) -> Result<(), String> {
+    if (governed || c.unattended) && limits.max_cost_usd.is_none() && !limits.no_cost_cap {
+        return Err("an unattended run needs a cost cap: pass --max-cost-usd N (the model needs a price, see docs/UNATTENDED.md) or --no-cost-cap to accept spending without one".into());
+    }
+    if c.unattended {
+        if limits.no_cost_cap {
+            return Err(
+                "--unattended needs --max-cost-usd; it cannot run without a cost cap".into(),
+            );
+        }
+        if matches!(c.permission_mode, Some(ModeArg::BypassPermissions)) {
+            return Err("--unattended refuses --permission-mode bypassPermissions (nobody could answer what it would skip)".into());
+        }
+        if c.trust_project || !c.approve_mcp.is_empty() {
+            return Err("--unattended refuses --trust-project and --approve-mcp: a repository must not run its own settings, hooks or MCP servers unattended".into());
+        }
+        if matches!(c.sandbox, Some(SandboxArg::Off | SandboxArg::BestEffort)) {
+            return Err("--unattended needs --sandbox enforce (the default); it cannot run commands unconfined".into());
+        }
+        if !matches!(c.network, NetworkArg::Deny) {
+            return Err("--unattended needs --network deny (the default)".into());
+        }
+    }
+    Ok(())
+}
+
+/// Default `--max-wall-secs` of a headless `synt run` and of `synt engine` (30 minutes). Turns (50)
+/// and tool calls (200) are bounded by default already; the cost cap is required instead.
+pub const HEADLESS_WALL_SECS: u64 = 1800;
 
 /// The repository root (nearest trusted ancestor with `.git` or `.synt`, see
 /// `synthesis_settings::find_project_root`), else the launch dir. The home directory and anything above
@@ -662,6 +814,24 @@ pub fn workspace_root(cwd: &Path, home: &Path) -> PathBuf {
     let root = synthesis_settings::find_project_root(&real);
     let home = synthesis_core::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
     if home.starts_with(&root) { real } else { root }
+}
+
+fn open_plain(
+    cwd: &Path,
+    h: &crate::Homes,
+    extra_dirs: &[PathBuf],
+    sid: &str,
+    artifact_root: &Path,
+) -> Result<WorkspaceContext, String> {
+    WorkspaceContext::open(
+        format!("ws-{}", &sid[..8]),
+        &workspace_root(cwd, &h.user),
+        cwd,
+        extra_dirs,
+        artifact_root.to_path_buf(),
+        sid.to_string(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[allow(clippy::too_many_lines)]
@@ -677,6 +847,10 @@ pub fn prepare(
         rules_arg(&c.deny, "--deny")?,
     );
     let is_cli = matches!(front, Front::Cli | Front::Native(_));
+    let governed = c.governed || !is_cli;
+    // a stop request made before this process began (an earlier run of the session) is not ours
+    let stop_since = synthesis_session::timestamp();
+    let watch_stop = governed || matches!(front, Front::Cli);
     let gate: Option<PreStart> = match &front {
         Front::Native(n) => n.pre_start.clone(),
         _ => None,
@@ -742,7 +916,19 @@ pub fn prepare(
     } else {
         settings.clone()
     };
-    let vs = crate::verify_cfg::parse(&settings.synthesis.verification);
+    let mut vs = crate::verify_cfg::parse(&settings.synthesis.verification);
+    // inferred checks alone never mark an unattended task passed (a user's own explicit
+    // `allow_passed` still holds for a plain headless run, not under --unattended)
+    // the USER's file only: a trusted project must not switch it back on
+    let explicit_allow = user_settings
+        .synthesis
+        .verification
+        .get("inferred_only")
+        .and_then(Value::as_str)
+        == Some("allow_passed");
+    if (governed && !explicit_allow) || c.unattended {
+        vs.inferred_only = synthesis_verification::InferredOnlyPolicy::CapUnverified;
+    }
     for w in cfg
         .warnings
         .iter()
@@ -758,11 +944,28 @@ pub fn prepare(
         );
     }
     let resume = resolve_resume(c, &h, cwd)?;
-    if resume.is_some() && (c.worktree || c.no_session_store) {
-        return Err(
-            "--resume/--continue cannot be combined with --worktree or --no-session-store".into(),
-        );
+    if resume.is_some() && c.no_session_store {
+        return Err("--resume/--continue cannot be combined with --no-session-store".into());
     }
+    // the worktree a resumed session ran in (recorded with the session, re-pinned below)
+    let stored_wt: Option<(
+        synthesis_session::SessionRecord,
+        Option<synthesis_workspace::GitInfo>,
+    )> = match resume.as_ref().filter(|_| !c.fork_session) {
+        Some((id, _)) => {
+            let rec = synthesis_session::Reader::open(&h.synthesis)
+                .and_then(|r| r.get_session(id))
+                .map_err(|e| format!("session store: {e}"))?;
+            let info = rec
+                .git_info
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|e| format!("session {id}: unreadable worktree record: {e}"))?;
+            Some((rec, info))
+        }
+        None => None,
+    };
     // a resumed session continues on the model it last used (`/model` is stored) unless
     // --model says otherwise or --provider names another provider; a stored model that cannot be
     // built falls back to the default
@@ -847,6 +1050,66 @@ pub fn prepare(
     // files that hold stored secrets are state too: hidden from commands, Read/Grep/Glob and writes
     synthesis_deny.extend(browser.secret_files());
 
+    // `fallback` of the USER config: tried in order when the primary fails before the first byte
+    let failover_slot: Arc<Mutex<Option<EventSink>>> = Arc::default();
+    let mut fallbacks = vec![];
+    let mut fallback_models: Vec<(String, String)> = vec![];
+    for spec in user_cfg
+        .extra
+        .get("fallback")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        match resolve_provider(None, Some(spec), &user_cfg, &h.synthesis, env) {
+            Ok(f) => {
+                res.secrets.extend(f.secrets.clone());
+                fallback_models.push((f.label.clone(), f.model.clone()));
+                fallbacks.push(synthesis_providers::Fallback {
+                    provider: f.provider,
+                    model: f.model,
+                    label: f.label,
+                });
+            }
+            Err(e) if governed => return Err(format!("fallback {spec}: {e}")),
+            Err(e) => eprintln!(
+                "synt: warning: fallback {spec} ignored: {}",
+                sanitize_for_display(&e)
+            ),
+        }
+    }
+    let main_provider: Arc<dyn ModelProvider> = if fallbacks.is_empty() {
+        res.provider.clone()
+    } else {
+        let slot = failover_slot.clone();
+        Arc::new(synthesis_providers::FailoverProvider::new(
+            res.provider.clone(),
+            res.label.clone(),
+            fallbacks,
+            std::time::Duration::from_secs(
+                60 * user_cfg
+                    .extra
+                    .get("fallbackReprobeMinutes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(5),
+            ),
+            Arc::new(move |from, to, why| {
+                if let Some(sink) = slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                    sink.emit(
+                        &Scope::default(),
+                        Event::ModelFailover {
+                            from: from.into(),
+                            to: to.into(),
+                            reason: why.into(),
+                        },
+                    );
+                }
+            }),
+        ))
+    };
+    // after the model is known, so a missing model is still reported as such
+    check_governance(c, limits, governed)?;
     let price = pricing(&h.synthesis.join("settings.json"), &res.label, &res.model);
     if limits.max_cost_usd.is_some() && price.is_none() {
         return Err(format!(
@@ -900,11 +1163,12 @@ pub fn prepare(
         budget.max_verify_attempts = v;
     }
     budget.max_cost_usd = limits.max_cost_usd;
+    budget.max_tokens_total = limits.max_tokens;
     // an unattended run must not run (and spend) forever
     // (the interactive app has a person watching)
     budget.max_wall_ms = limits
         .max_wall_secs
-        .or((!is_cli).then_some(HEADLESS_WALL_SECS))
+        .or(governed.then_some(HEADLESS_WALL_SECS))
         .map(|s| s.saturating_mul(1000));
 
     let mut extra_dirs: Vec<PathBuf> = settings
@@ -941,26 +1205,67 @@ pub fn prepare(
     if let Some(g) = &gate {
         g()?;
     }
-    let (ws, worktree) = if c.worktree {
-        if !extra_dirs.is_empty() {
-            eprintln!("synt: warning: additionalDirectories are ignored with --worktree");
-            extra_dirs.clear();
-        }
-        let (w, ctx) = crate::wt::create(env, &h.synthesis, cwd, &sid, artifact_root.clone())?;
-        (ctx, Some(w))
-    } else {
-        (
-            WorkspaceContext::open(
-                format!("ws-{}", &sid[..8]),
-                &workspace_root(cwd, &h.user),
-                cwd,
-                &extra_dirs,
+    let must_wt = c.worktree || c.unattended;
+    let auto_wt = governed && !c.no_worktree;
+    let (ws, worktree) = match stored_wt {
+        Some((rec, Some(info))) => {
+            let (w, ctx) = crate::wt::reattach(
+                env,
+                &h.synthesis,
+                info,
                 artifact_root.clone(),
-                sid.clone(),
-            )
-            .map_err(|e| e.to_string())?,
+                rec.workspace_id.clone(),
+                Path::new(&rec.cwd),
+                &sid,
+            )?;
+            (ctx, Some(w))
+        }
+        Some((rec, None)) if must_wt => {
+            return Err(format!(
+                "--worktree/--unattended: session {} was started without a worktree and cannot get one on resume (start a new session or --fork-session)",
+                rec.id
+            ));
+        }
+        Some(_) => (
+            open_plain(cwd, &h, &extra_dirs, &sid, &artifact_root)?,
             None,
-        )
+        ),
+        None if must_wt || auto_wt => {
+            if !extra_dirs.is_empty() {
+                eprintln!("synt: warning: additionalDirectories are ignored with a worktree");
+                extra_dirs.clear();
+            }
+            // the implicit worktree starts from the state of the tree (uncommitted work included),
+            // so the run sees what the directory shows; an explicit --worktree keeps its old meaning
+            match crate::wt::create(
+                env,
+                &h.synthesis,
+                cwd,
+                &sid,
+                artifact_root.clone(),
+                !c.worktree,
+            ) {
+                Ok((w, ctx)) => (ctx, Some(w)),
+                // only the implicit worktree of a plain headless run may fall back, and loudly
+                Err(e) if !must_wt => {
+                    let quiet = e.contains("needs a git repository") || e.contains("no commits");
+                    eprintln!(
+                        "synt: {}no worktree ({e}); edits land in {} itself (--no-worktree silences this)",
+                        if quiet { "notice: " } else { "WARNING: " },
+                        cwd.display()
+                    );
+                    (
+                        open_plain(cwd, &h, &extra_dirs, &sid, &artifact_root)?,
+                        None,
+                    )
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        None => (
+            open_plain(cwd, &h, &extra_dirs, &sid, &artifact_root)?,
+            None,
+        ),
     };
     let mut session = AgentSession {
         id: sid.clone(),
@@ -1008,7 +1313,17 @@ pub fn prepare(
         _ => {}
     }
     if sandbox_mode == SandboxMode::Enforce {
-        sandbox_preflight(&*synthesis_sandbox::detect(), policy.as_ref().ok())?;
+        sandbox_preflight(&*synthesis_sandbox::detect(), policy.as_ref().ok()).map_err(|e| {
+            if governed {
+                // an unattended run never offers best-effort: only an explicit `off` runs commands unconfined
+                e.replace(
+                    "--sandbox best-effort|off",
+                    "--sandbox off (explicit, unconfined)",
+                )
+            } else {
+                e
+            }
+        })?;
     }
     let mut notices = sandbox_notices(sandbox_mode, c.network);
     notices.extend(sandbox_default_notice(c));
@@ -1029,6 +1344,20 @@ pub fn prepare(
             if is_cli { "you answer in a dialog" } else { "this run denies" }
         )),
         _ => {}
+    }
+    if let Some(w) = &worktree {
+        let mut n = format!(
+            "working in worktree {} on branch {}; {} is not changed (the result is left there for review)",
+            w.info.worktree.display(),
+            w.info.branch,
+            cwd.display()
+        );
+        if w.info.repo_root.join(".gitmodules").is_file() {
+            n.push_str("; submodules are NOT checked out in the worktree");
+        }
+        if !is_cli {
+            notices.push(n);
+        }
     }
     for n in &notices {
         eprintln!("synt: WARNING: {n}");
@@ -1069,6 +1398,11 @@ pub fn prepare(
                 format!("session store: {e} (use --no-session-store to run without it)")
             })?;
         let mut w = w;
+        if let (false, Some(wt)) = (in_place, &worktree) {
+            let json = serde_json::to_string(&wt.info).map_err(|e| e.to_string())?;
+            w.set_git_info(&json)
+                .map_err(|e| format!("session store: {e}"))?;
+        }
         if in_place {
             // terminal -> idle, interrupted -> recovering: the states the harness continues from
             let to = match w.get_session(&sid).map_err(|e| e.to_string())?.status {
@@ -1096,12 +1430,19 @@ pub fn prepare(
         Some(Arc::new(Mutex::new(w)))
     };
     let transcript = store.clone().map(|s| Arc::new(Transcript::new(s)));
+    if let Some(t) = &transcript {
+        t.set_strict(governed);
+    }
     if let (true, Some(t), Some((_, hist))) = (in_place, &transcript, &resume) {
         t.skip(hist.len());
     }
+    let mut report_stash = None;
     let derived = match (&store, &transcript) {
         (Some(_), Some(t)) => match TaskDb::open(&h.synthesis, &sid, res.secrets.clone()) {
-            Ok(db) => Some((db, t.clone())),
+            Ok(db) => {
+                report_stash = Some(db.stash());
+                Some((db, t.clone()))
+            }
             Err(e) => {
                 eprintln!("synt: warning: task rows disabled: {e}");
                 None
@@ -1167,6 +1508,7 @@ pub fn prepare(
         sid.clone(),
         res.secrets.clone(),
     );
+    *failover_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink.clone());
     if let Some(t) = &transcript {
         let sink = sink.clone();
         t.set_notifier(Arc::new(move |m| {
@@ -1226,6 +1568,21 @@ pub fn prepare(
     // Saved logins or {file:} secrets exist: the main agent gets the stricter Bash scan and the
     // secret-file read ban the peer responder has (`$`, globs and `~user` words become a hard ask).
     perms.env.deny_secret_reads = browser.holds_credentials(&h.synthesis);
+    // Only the user's own allow rules (user/managed settings and flags, never the project's) can
+    // lift the read-only-path refusal and the irreversible-action table.
+    perms.env.user_allow = user_settings
+        .permissions
+        .allow
+        .iter()
+        .chain(&cli_allow)
+        .cloned()
+        .collect();
+    // build/test commands that run project code are auto-safe only under a confining sandbox
+    if sandbox_mode == SandboxMode::Enforce {
+        // takes the definitions baseline too: without it nothing is trusted
+        perms.env.enforce_sandbox();
+    }
+    perms.env.worktree = worktree.is_some();
     perms.env.auto_mode = synthesis_permissions::AutoModeSettings {
         classify_all_shell: user_settings.auto_mode.classify_all_shell.unwrap_or(false),
         use_auto_mode_during_plan: user_settings
@@ -1237,6 +1594,15 @@ pub fn prepare(
 
     let mut hcfg = HarnessConfig::new(res.model.clone());
     hcfg.max_output_tokens = cfg.max_tokens as u32;
+    hcfg.report_sink = report_stash.map(|st| -> synthesis_harness::ReportSink {
+        Arc::new(move |r| {
+            if let Ok(v) = serde_json::to_value(r) {
+                st.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(r.id.clone(), v);
+            }
+        })
+    });
     hcfg.env = child_env;
     hcfg.pricing = price;
     let (auto_compact, diag) = crate::ctx::read_auto_compact(&h.synthesis.join("settings.json"));
@@ -1382,6 +1748,48 @@ pub fn prepare(
         context = context.with_transcript(t.clone());
     }
     let agents = crate::agents::load(&h.synthesis, &settings.project_root, trust);
+    // Price per answering model: the run's own model and sub-agent models (same provider) by bare
+    // name, failover targets by label. Under a cap every one of them must have a price, or the cap
+    // could not be counted when that model answers.
+    {
+        let user_settings_file = h.synthesis.join("settings.json");
+        let provider_id = res.label.split_once('/').map_or("", |(p, _)| p).to_string();
+        let mut table: std::collections::HashMap<String, Pricing> = Default::default();
+        if let Some(p) = price {
+            table.insert(res.model.clone(), p);
+        }
+        let capped = limits.max_cost_usd.is_some();
+        let resolve = agent_model_resolver(&cfg, &res.label);
+        let mut wanted: Vec<(String, String, String)> = fallback_models
+            .iter()
+            .map(|(l, m)| (l.clone(), l.clone(), m.clone()))
+            .collect();
+        for m in agents.table.iter().filter_map(|d| d.model.as_deref()) {
+            if m != "inherit"
+                && let Ok(model) = resolve(m)
+            {
+                wanted.push((model.clone(), format!("{provider_id}/{model}"), model));
+            }
+        }
+        for (key, label, model) in wanted {
+            match pricing(&user_settings_file, &label, &model) {
+                Some(p) => {
+                    table.insert(key, p);
+                }
+                None if capped => {
+                    return Err(format!(
+                        "--max-cost-usd: no price for {label} (a fallback or a sub-agent model); add synt.pricing[\"{label}\"] to {} or remove it",
+                        user_settings_file.display()
+                    ));
+                }
+                None => {}
+            }
+        }
+        if !table.is_empty() {
+            let table = Arc::new(table);
+            hcfg.pricing_for = Some(Arc::new(move |m| table.get(m).copied()));
+        }
+    }
     if let Some(m) = &memory {
         let (pinned, per) = crate::memcmd::sub_agent_blocks(
             m,
@@ -1597,7 +2005,9 @@ pub fn prepare(
     let gate_cfg = vs.gate(budget.max_verify_attempts);
     let rt_gate = rt.clone();
     // Peer endpoint (off by default). Bound here, inside the runtime; the server starts below.
-    let peers = {
+    let peers = if c.unattended {
+        None // an unattended session answers nobody and is addressed by nobody
+    } else {
         let _enter = tokio_rt.enter();
         crate::peers::setup(
             c.peers,
@@ -1617,7 +2027,8 @@ pub fn prepare(
         None => (None, None),
     };
     let context = Arc::new(context);
-    let mut harness = Harness::new(res.provider.clone(), toolbox, perms, sink.clone(), hcfg)
+    let mut harness = Harness::new(main_provider, toolbox, perms, sink.clone(), hcfg)
+        .with_change_tracker(Arc::new(crate::tracker::MtimeTracker::default()))
         .with_approver(approver)
         .with_agents(agents.table)
         .with_model_resolver(agent_model_resolver(&cfg, &res.label))
@@ -1692,6 +2103,20 @@ pub fn prepare(
         }
         tokio_rt.spawn(server.run(l));
     }
+    if watch_stop && store.is_some() {
+        let _enter = tokio_rt.enter();
+        let (c2, hard) = (
+            cancel.clone(),
+            crate::sessions::hard_stop(rt.clone(), sid.clone(), store.clone()),
+        );
+        crate::sessions::watch_stop(
+            h.synthesis.clone(),
+            sid.clone(),
+            stop_since,
+            Arc::new(move || c2.cancel()),
+            hard,
+        );
+    }
     Ok(Prepared {
         harness,
         context,
@@ -1729,6 +2154,7 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
     let prompt = read_prompt(&a)?;
     let schema = a.json_schema.as_deref().map(parse_schema).transpose()?;
     let mut common = a.common.clone();
+    common.governed = true;
     if let Some((raw, _)) = &schema {
         let note = format!(
             "Your final answer must be only a JSON value that conforms to this JSON Schema, with no other text:\n{raw}"
@@ -1767,6 +2193,8 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
         max_tool_calls: a.max_tool_calls,
         max_cost_usd: a.max_cost_usd,
         max_wall_secs: a.max_wall_secs,
+        max_tokens: a.max_tokens,
+        no_cost_cap: a.no_cost_cap,
     };
     let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let p = prepare(
@@ -1823,7 +2251,8 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
     }
     let cleanup = a.common.cleanup_worktree;
     let code = tokio_rt.block_on(async {
-        on_signals(cancel.clone()).map_err(|e| format!("signal handlers: {e}"))?;
+        let hard = crate::sessions::hard_stop(rt.clone(), sid.clone(), store.clone());
+        on_signals(cancel.clone(), hard).map_err(|e| format!("signal handlers: {e}"))?;
         let (store2, sink2, h2) = (store.clone(), sink.clone(), harness.clone());
         let (memory2, request2) = (memory.clone(), prompt.clone());
         let task = tokio::spawn(async move {
@@ -1902,24 +2331,32 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
                 Ok::<_, synthesis_harness::HarnessError>(out)
             }
             .await;
-            if let (Some(s), Ok(out)) = (&store2, &r) {
-                finish_store(s, transcript.as_deref(), out, &session.usage);
-            }
+            let store_err = match (&store2, &r) {
+                (Some(s), Ok(out)) => {
+                    finish_store(s, transcript.as_deref(), out, &session.usage).err()
+                }
+                _ => None,
+            };
             // reflection (a model call, opt-in) runs after the result and the session end are final
             if let (Some(m), Ok(_)) = (&memory2, &r)
                 && let Some(rf) = &m.reflect
             {
                 crate::memcmd::reflect_jobs(&m.store, rf, 2).await;
             }
-            r
+            (r, store_err)
         });
         let code = match task.await {
-            Ok(Ok(out)) => {
+            Ok((Ok(out), store_err)) => {
                 eprintln!("{}", task_line(out.status, &out.reason));
                 if let Some(h) = blocked_hint(&out) {
                     eprintln!("{h}");
                 }
                 let mut code = exit_code(out.status);
+                // nothing the run says is on record: it did not succeed, whatever the model said
+                if store_err.is_some() || sink.is_broken() {
+                    eprintln!("synt: error: the session record is incomplete (session_store); the task is reported failed");
+                    code = code.max(1);
+                }
                 let structured = match schema.as_ref().map(|(_, v)| check_schema(v, &out.final_text)) {
                     Some(Err(e)) => {
                         eprintln!("synt: --json-schema: {e}");
@@ -1932,7 +2369,7 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
                 print_result(format, &out, &sid, code, structured);
                 code
             }
-            Ok(Err(e)) => {
+            Ok((Err(e), _)) => {
                 eprintln!("synt: internal error: {e}");
                 70
             }
@@ -2032,21 +2469,33 @@ fn print_result(
 }
 
 /// Flushes the conversation tail and the usage to the store.
+/// Final sync of the conversation and the usage row. `Err`: something could not be stored; a
+/// governed run turns that into a failed exit, the interactive app only tells the person.
 pub fn finish_store(
     store: &Store,
     tr: Option<&Transcript>,
     out: &TaskOutcome,
     usage: &BudgetUsage,
-) {
-    if let Some(t) = tr {
-        t.sync(&out.messages);
+) -> Result<(), String> {
+    let mut err = None;
+    if let Some(t) = tr
+        && let Err(e) = t.sync(&out.messages)
+    {
+        err = Some(e);
     }
     if let Err(e) = store
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .update_usage(usage)
     {
-        eprintln!("synt: warning: session store: {e}");
+        err.get_or_insert(format!("session_store: {e}"));
+    }
+    match err {
+        Some(e) => {
+            eprintln!("synt: error: {e}");
+            Err(e)
+        }
+        None => Ok(()),
     }
 }
 
@@ -2413,8 +2862,10 @@ fn exit_code(s: TaskStatus) -> u8 {
     }
 }
 
+/// First INT/TERM cancels; the second kills the process groups of our children (`hard`: they are
+/// in their own groups, so `exit` alone would orphan them) and exits 130.
 #[cfg(unix)]
-fn on_signals(cancel: CancellationToken) -> std::io::Result<()> {
+fn on_signals(cancel: CancellationToken, hard: Arc<dyn Fn() + Send + Sync>) -> std::io::Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut int = signal(SignalKind::interrupt())?;
     let mut term = signal(SignalKind::terminate())?;
@@ -2422,17 +2873,19 @@ fn on_signals(cancel: CancellationToken) -> std::io::Result<()> {
         tokio::select! { _ = int.recv() => {}, _ = term.recv() => {} }
         cancel.cancel();
         tokio::select! { _ = int.recv() => {}, _ = term.recv() => {} }
+        hard();
         std::process::exit(130); // second signal: stop waiting for a clean shutdown
     });
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn on_signals(cancel: CancellationToken) -> std::io::Result<()> {
+fn on_signals(cancel: CancellationToken, hard: Arc<dyn Fn() + Send + Sync>) -> std::io::Result<()> {
     tokio::spawn(async move {
         let _ = tokio::signal::ctrl_c().await;
         cancel.cancel();
         let _ = tokio::signal::ctrl_c().await;
+        hard();
         std::process::exit(130);
     });
     Ok(())
@@ -2474,6 +2927,120 @@ fn artifact_to_dir(dir: PathBuf) -> PutArtifact {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn headless_needs_a_cost_cap_and_unattended_refuses_what_it_cannot_keep() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct W {
+            #[command(flatten)]
+            c: Common,
+        }
+        let none = W::parse_from(["x"]).c;
+        let capped = Limits {
+            max_cost_usd: Some(1.0),
+            ..Limits::default()
+        };
+        let free = Limits {
+            no_cost_cap: true,
+            ..Limits::default()
+        };
+        // headless / engine: a cap or an explicit opt-out; an interactive run needs neither
+        assert!(
+            check_governance(&none, &Limits::default(), true)
+                .unwrap_err()
+                .contains("--max-cost-usd")
+        );
+        assert!(check_governance(&none, &capped, true).is_ok());
+        assert!(check_governance(&none, &free, true).is_ok());
+        assert!(check_governance(&none, &Limits::default(), false).is_ok());
+        // --unattended: no unconfined commands, no open network
+        let u = W::parse_from(["x", "--unattended"]).c;
+        assert!(check_governance(&u, &capped, true).is_ok());
+        assert!(
+            check_governance(&u, &free, true).is_err(),
+            "no cap is not allowed"
+        );
+        for flags in [
+            ["--sandbox", "off"],
+            ["--sandbox", "best-effort"],
+            ["--network", "allow"],
+        ] {
+            let c = W::parse_from(["x", "--unattended", flags[0], flags[1]]).c;
+            assert!(check_governance(&c, &capped, true).is_err(), "{flags:?}");
+        }
+        for bad in [
+            ["--no-session-store", ""],
+            ["--peers", ""],
+            ["--no-worktree", ""],
+        ] {
+            let args: Vec<&str> = ["x", "--unattended", bad[0]].into_iter().collect();
+            assert!(W::try_parse_from(args).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn governed_windows_runs_refuse_bash_unless_sandbox_off_is_explicit() {
+        use SandboxArg::{BestEffort, Off};
+        let r = resolve_governed_sandbox_mode;
+        assert_eq!(r(None, true, false), SandboxMode::Enforce);
+        assert_eq!(r(Some(BestEffort), true, false), SandboxMode::Enforce);
+        assert_eq!(r(Some(Off), true, false), SandboxMode::Off);
+        assert_eq!(r(None, false, false), SandboxMode::Enforce);
+        assert_eq!(r(Some(BestEffort), false, false), SandboxMode::BestEffort);
+    }
+
+    #[test]
+    fn builtin_prices_cover_first_party_models_only_and_settings_win() {
+        for (l, m) in [
+            ("openai/gpt-5-pro", "gpt-5-pro"),
+            ("openai/o3-pro", "o3-pro"),
+            ("openai/o4-mini-deep-research", "o4-mini-deep-research"),
+            ("openai/gpt-5-codex", "gpt-5-codex"),
+            (
+                "anthropic/claude-sonnet-4-5-preview",
+                "claude-sonnet-4-5-preview",
+            ),
+            ("anthropic/claude-sonnet-5", "claude-sonnet-5"),
+        ] {
+            assert!(
+                builtin_pricing(l, m).is_none(),
+                "{m} must not match a shorter id"
+            );
+        }
+        // an id with a date suffix is the same model
+        assert!(builtin_pricing("openai/gpt-5-2025-08-07", "gpt-5-2025-08-07").is_some());
+        assert!(
+            builtin_pricing(
+                "anthropic/claude-sonnet-4-5-20250929",
+                "claude-sonnet-4-5-20250929"
+            )
+            .is_some()
+        );
+        let p = builtin_pricing("anthropic/claude-sonnet-4-5", "claude-sonnet-4-5").unwrap();
+        assert_eq!((p.input_per_mtok, p.output_per_mtok), (3.0, 15.0));
+        assert!(p.cache_read_per_mtok.is_some());
+        assert_eq!(
+            builtin_pricing("openai/gpt-5-mini", "gpt-5-mini")
+                .unwrap()
+                .input_per_mtok,
+            0.25
+        );
+        assert!(builtin_pricing("gw/claude-sonnet-4-5", "claude-sonnet-4-5").is_none());
+        assert!(builtin_pricing("anthropic/unknown-x", "unknown-x").is_none());
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("settings.json");
+        std::fs::write(&f, r#"{"synt":{"pricing":{"anthropic/claude-sonnet-4-5":{"input_per_mtok":1,"output_per_mtok":2,"cache_read_per_mtok":0.5}}}}"#).unwrap();
+        let p = pricing(&f, "anthropic/claude-sonnet-4-5", "claude-sonnet-4-5").unwrap();
+        assert_eq!(
+            (
+                p.input_per_mtok,
+                p.cache_read_per_mtok,
+                p.cache_write_per_mtok
+            ),
+            (1.0, Some(0.5), None)
+        );
+    }
+
     use super::*;
 
     /// A server that counts the connections it gets and answers an empty model list.

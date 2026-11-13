@@ -1,0 +1,33 @@
+[
+  {
+    "tools": [
+      {
+        "name": "Read",
+        "input": {
+          "file_path": "src/calc.js"
+        }
+      }
+    ]
+  },
+  {
+    "tools": [
+      {
+        "name": "Edit",
+        "input": {
+          "file_path": "src/calc.js",
+          "old_string": "a - b",
+          "new_string": "a + b"
+        }
+      }
+    ]
+  },
+  {
+    "text": "Done, all tests pass."
+  },
+  {
+    "text": "Done, all tests pass."
+  },
+  {
+    "text": "Done, all tests pass."
+  }
+]

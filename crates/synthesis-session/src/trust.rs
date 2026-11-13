@@ -174,13 +174,16 @@ fn key_path(home: &Path) -> PathBuf {
 
 /// The key, if the file is a regular file (not a link) of exactly 32 bytes.
 fn read_key(home: &Path) -> Option<[u8; 32]> {
-    let p = key_path(home);
-    let m = fs::symlink_metadata(&p).ok()?;
+    read_key_at(&key_path(home))
+}
+
+fn read_key_at(p: &Path) -> Option<[u8; 32]> {
+    let m = fs::symlink_metadata(p).ok()?;
     if !m.is_file() || m.len() != 32 {
         return None;
     }
     let mut b = [0u8; 32];
-    open_regular(&p)?.read_exact(&mut b).ok()?;
+    open_regular(p)?.read_exact(&mut b).ok()?;
     Some(b)
 }
 
@@ -202,10 +205,20 @@ fn open_regular(p: &Path) -> Option<fs::File> {
 /// to the key's name (the link fails if the name exists, a link included), then the temporary is removed.
 /// `Ok(Some)`: this call made the key; `Ok(None)`: another one was there first (read it).
 fn create_key(home: &Path) -> Result<Option<[u8; 32]>> {
-    let dir = home.join("run");
+    create_key_named(home, "trust.key")
+}
+
+fn create_key_named(home: &Path, name: &str) -> Result<Option<[u8; 32]>> {
+    create_key_in(&home.join("run"), name, true)
+}
+
+/// `make_private`: also tighten `dir` to 0700 (not for the home itself).
+fn create_key_in(dir: &Path, name: &str, make_private: bool) -> Result<Option<[u8; 32]>> {
+    let dir = dir.to_path_buf();
     fs::create_dir_all(&dir).map_err(io)?;
+    let _ = make_private; // read on unix only
     #[cfg(unix)]
-    {
+    if make_private {
         use std::os::unix::fs::PermissionsExt as _;
         let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
     }
@@ -223,13 +236,42 @@ fn create_key(home: &Path) -> Result<Option<[u8; 32]>> {
     let written = o
         .open(&tmp)
         .and_then(|mut f| f.write_all(&key).and_then(|()| f.sync_all()));
-    let linked = written.and_then(|()| fs::hard_link(&tmp, key_path(home)));
+    let linked = written.and_then(|()| fs::hard_link(&tmp, dir.join(name)));
     let _ = fs::remove_file(&tmp);
     match linked {
         Ok(()) => Ok(Some(key)),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
         Err(e) => Err(io(e)),
     }
+}
+
+/// The per-user key that MACs the event chain (`<home>/chain.key`, 0600, made once). Kept
+/// outside the database so someone who can only write `synt.db` cannot recompute the chain.
+pub(crate) fn chain_key(home: &Path) -> Result<[u8; 32]> {
+    let p = home.join("chain.key");
+    if let Some(k) = read_key_at(&p) {
+        return Ok(k);
+    }
+    match create_key_in(home, "chain.key", false)? {
+        Some(k) => Ok(k),
+        None => read_key_at(&p).ok_or_else(|| Error::Invalid("the chain key is unreadable".into())),
+    }
+}
+
+/// Like `chain_key` but never creates one (verification).
+pub(crate) fn existing_chain_key(home: &Path) -> Option<[u8; 32]> {
+    read_key_at(&home.join("chain.key"))
+}
+
+pub(crate) fn chain_mac(key: &[u8; 32], data: &str) -> String {
+    let mut m = Hmac::<Sha256>::new_from_slice(key).expect("any key length");
+    m.update(b"synt-event-chain-v1\n");
+    m.update(data.as_bytes());
+    m.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn mac_hex(key: &[u8; 32], r: &TrustRecord) -> String {

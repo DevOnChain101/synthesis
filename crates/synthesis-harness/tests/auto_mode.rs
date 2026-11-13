@@ -232,3 +232,39 @@ fn set_mode_guards_bypass_in_the_core_and_emits_events() {
     });
     assert_eq!(loud, vec!["warning".to_string()]);
 }
+
+/// P3a: an action longer than the judge's input cap is never judged on a cut view.
+#[tokio::test]
+async fn an_action_over_the_input_cap_asks_without_a_judge_call() {
+    let w = Probe::new("Mutate", SideEffectClass::Write, 0, "changed");
+    let mut rig = Rig::new(
+        opts(&w),
+        vec![
+            Turn::tool("m1", "Mutate", json!({"x": "a".repeat(5000)})),
+            Turn::text("could not"),
+        ],
+    );
+    let out = rig.run("go").await;
+    assert_eq!(w.runs(), 0);
+    assert_eq!(out.status, TaskStatus::Blocked);
+    assert_eq!(verdicts(&rig), vec![("ask".into(), "fail_closed".into())]);
+    // only the agent's own two requests: no judge request was made
+    assert_eq!(rig.requests().len(), 2);
+}
+
+/// P3b: the judge is told which files the agent wrote this task.
+#[tokio::test]
+async fn the_judge_prompt_lists_the_files_written_this_task() {
+    let w = Probe::new("Mutate", SideEffectClass::Write, 0, "changed");
+    let mut rig = Rig::new(
+        opts(&w),
+        vec![
+            Turn::tool("m1", "Mutate", json!({})),
+            Turn::text(ALLOW),
+            Turn::text("done"),
+        ],
+    );
+    rig.run("go").await;
+    let p = judge_text(&rig.requests()[1]);
+    assert!(p.contains("files_written_by_the_agent_this_task"), "{p}");
+}

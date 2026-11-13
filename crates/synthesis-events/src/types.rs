@@ -79,6 +79,9 @@ pub struct Budget {
     pub max_cost_usd: Option<f64>,
     pub max_wall_ms: Option<u64>,
     pub max_verify_attempts: u32,
+    /// Input + output tokens of the task (cache tokens count as input); `None` = unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens_total: Option<u64>,
 }
 
 impl Default for Budget {
@@ -89,6 +92,7 @@ impl Default for Budget {
             max_cost_usd: None,
             max_wall_ms: None,
             max_verify_attempts: 3,
+            max_tokens_total: None,
         }
     }
 }
@@ -299,6 +303,14 @@ pub enum Event {
         error: String,
         delay_ms: u64,
     },
+    /// The retry layer gave up before the first byte (rate limit, overloaded, server error) and
+    /// the request went to the next `fallback` model. Labels are `provider/model`.
+    #[serde(rename = "model.failover")]
+    ModelFailover {
+        from: String,
+        to: String,
+        reason: String,
+    },
     #[serde(rename = "model.error")]
     ModelError {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -477,6 +489,10 @@ pub enum Event {
         status: String,
         attempt: i64,
         summary: String,
+        /// sha256 (hex) of the full report as serialised JSON (sorted keys), so the stored report
+        /// can be checked against this event; absent in events of older builds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        report_sha256: Option<String>,
     },
     /// The gate reached a check; it fires BEFORE the check is authorised, so a refused check shows
     /// `started` and then `finished` with status `blocked`. `index` counts from 0 within the

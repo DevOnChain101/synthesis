@@ -88,7 +88,18 @@ impl Rig {
             .arg(ws)
             .arg("--provider")
             .arg(format!("fake:{}", s.display()));
-        c.args(["--prompt", "do it"]).args(args);
+        let keep = args.contains(&"--keep-defaults");
+        c.args(["--prompt", "do it"])
+            .args(args.iter().filter(|a| **a != "--keep-defaults"));
+        // a headless run in a git repository works in a worktree by default: tests that depend
+        // on the directory staying put opt out
+        if !keep && !args.contains(&"--worktree") && !args.contains(&"--resume") {
+            c.arg("--no-worktree");
+        }
+        // headless runs need a cost cap; tests that are not about it opt out
+        if !keep && !args.contains(&"--max-cost-usd") {
+            c.arg("--no-cost-cap");
+        }
         // Tests not about the sandbox must not depend on the host having one. `off`, not
         // `best-effort`: on a Landlock-only host best-effort still confines and then refuses the
         // standard policy, so no command would run.
@@ -423,7 +434,7 @@ fn headless_run_has_a_default_wall_clock_budget_that_a_flag_overrides() {
             .as_u64()
     };
     let (_, ev) = rig.run(json!([{"text": "ok"}]), &[]);
-    assert_eq!(wall(&ev), Some(3_600_000));
+    assert_eq!(wall(&ev), Some(1_800_000));
     let (_, ev) = rig.run(json!([{"text": "ok"}]), &["--max-wall-secs", "90"]);
     assert_eq!(wall(&ev), Some(90_000));
 }
@@ -953,7 +964,7 @@ fn worktree_run_produces_a_branch_and_a_diff_and_leaves_the_original_alone() {
     let notice = find(&ev, "notice")
         .into_iter()
         .map(|n| n["payload"]["text"].as_str().unwrap().to_string())
-        .find(|t| t.contains("worktree"))
+        .find(|t| t.contains("file(s) changed"))
         .expect("worktree notice");
     assert!(
         notice.contains("branch synthesis/") && notice.contains("1 file(s) changed, +1 -1"),
@@ -1925,7 +1936,11 @@ fn delegate_run(
         return None;
     }
     user_settings(&rig, deleg_peers());
-    let mut a_script = vec![json!({"delay_ms": 5000, "text": "A done"})];
+    // the second main turn answers the gate's feedback when the worker changed files
+    let mut a_script = vec![
+        json!({"delay_ms": 5000, "text": "A done"}),
+        json!({"text": "A done again"}),
+    ];
     a_script.extend(worker.as_array().unwrap().iter().cloned());
     let b_script = b_script.unwrap_or_else(|| {
         json!([send("ws:ws/sess:a", "write made-by-peer.txt", json!({"delegate": true})), {"text": "waiting"}, {"text": "B done"}])
@@ -1942,6 +1957,13 @@ fn delegate_run(
 fn write_then_report() -> Value {
     json!([{"for": "delegate", "tools": [{"name": "Write", "input": {"file_path": "made-by-peer.txt", "content": "made by peer"}}]},
            {"for": "delegate", "text": "worker done"}])
+}
+
+/// The receiver's own task: a delegated worker changed files and no check proved them, so the
+/// gate ends it `unverified` (exit 3) instead of `completed`.
+fn unverified_after_peer_edit(d: &Done) {
+    assert_eq!(d.0.code(), Some(3), "stderr: {}", d.2);
+    assert_eq!(payloads(&d.1, "task.ended")[0]["status"], "unverified");
 }
 
 fn made(rig: &Rig) -> bool {
@@ -1991,7 +2013,7 @@ fn e8b_a_bypass_receiver_does_the_work_and_attributes_every_call() {
     ) else {
         return;
     };
-    ok(&a);
+    unverified_after_peer_edit(&a);
     ok(&b);
     assert_eq!(
         std::fs::read_to_string(rig.ws().join("made-by-peer.txt")).unwrap(),
@@ -2030,7 +2052,7 @@ fn e8c_the_senders_mode_caps_the_workers_mode() {
     else {
         return;
     };
-    ok(&a);
+    unverified_after_peer_edit(&a);
     ok(&b);
     let acc = accepted(&a.1);
     assert_eq!(
@@ -2143,4 +2165,261 @@ fn e8g_a_delegation_back_to_the_asker_is_a_cycle() {
         payloads(&b.1, "peer.delegation.denied")[0]["reason"],
         "cycle"
     );
+}
+
+// ---- governance (docs/UNATTENDED.md) ------------------------------------------------------
+
+fn synt_home(rig: &Rig, args: &[&str]) -> Output {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_synt"));
+    c.args(args).env_clear();
+    host_env(&mut c);
+    c.env("HOME", rig.dir.path()).env("SYNT_HOME", rig.home());
+    c.output().unwrap()
+}
+
+#[test]
+fn headless_run_without_a_cost_cap_is_refused_before_anything_runs() {
+    let rig = Rig::new();
+    let (o, _) = rig.run(
+        json!([{"text": "x"}]),
+        &["--keep-defaults", "--sandbox", "off"],
+    );
+    assert_eq!(o.status.code(), Some(2));
+    assert!(o.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("cost cap"));
+}
+
+#[test]
+fn headless_run_in_a_git_repo_uses_a_worktree_and_can_be_resumed_in_it() {
+    let rig = Rig::new();
+    rig.settings(json!({"synt": {"pricing": {"fake/fake-model": {"input_per_mtok": 1.0, "output_per_mtok": 1.0}}}}));
+    git(&rig.ws(), &["init", "-q"]);
+    git(&rig.ws(), &["add", "."]);
+    git(&rig.ws(), &["commit", "-q", "-m", "init"]);
+    let mut script = edit_script();
+    script
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"text": "still done"}));
+    let (o, ev) = rig.run(
+        script,
+        &[
+            "--keep-defaults",
+            "--max-cost-usd",
+            "1",
+            "--permission-mode",
+            "acceptEdits",
+        ],
+    );
+    assert!(
+        o.status.code().is_some_and(|c| c == 0 || c == 3),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    // no --worktree flag: the default put the edit in the worktree, not in the repository
+    assert_eq!(
+        std::fs::read_to_string(rig.ws().join("a.txt")).unwrap(),
+        "hello\n"
+    );
+    let sid = ev[0]["session_id"].as_str().unwrap().to_string();
+    let wt = rig.home().join("worktrees").join(&sid);
+    assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "bye\n");
+
+    // --resume continues in the same worktree (it used to be refused with --worktree)
+    let (o2, ev2) = rig.run(
+        json!([{"tools": [{"name": "Read", "input": {"file_path": "a.txt"}}]}, {"text": "read it"}]),
+        &["--resume", &sid, "--permission-mode", "acceptEdits"],
+    );
+    assert!(
+        o2.status.code().is_some_and(|c| c == 0 || c == 3),
+        "{}",
+        String::from_utf8_lossy(&o2.stderr)
+    );
+    assert_eq!(ev2[0]["session_id"].as_str().unwrap(), sid);
+    let read = outputs(&ev2, "Read");
+    assert!(read.iter().any(|t| t.contains("bye")), "{read:?}");
+    assert_eq!(
+        std::fs::read_to_string(rig.ws().join("a.txt")).unwrap(),
+        "hello\n"
+    );
+
+    // the stored events verify, and a forged one is found
+    let v = synt_home(&rig, &["sessions", "verify", &sid]);
+    assert_eq!(
+        v.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&v.stdout)
+    );
+    let conn = rusqlite::Connection::open(rig.home().join("synt.db")).unwrap();
+    conn.execute(
+        "UPDATE events SET payload='{\"level\":\"info\",\"text\":\"forged\"}' WHERE session_id=?1 AND seq=3",
+        [&sid],
+    )
+    .unwrap();
+    let v = synt_home(&rig, &["sessions", "verify", &sid]);
+    assert_eq!(v.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&v.stdout).contains("TAMPERED"));
+}
+
+#[test]
+fn stop_cancels_a_running_session_from_another_process() {
+    let rig = Rig::new();
+    let mut c = rig.cmd(json!([{"delay_ms": 60000, "text": "never"}]), &[]);
+    let mut child = c
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // wait for the session row, then ask it to stop
+    let db = rig.home().join("synt.db");
+    let sid = (0..100)
+        .find_map(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let conn = rusqlite::Connection::open(&db).ok()?;
+            conn.query_row("SELECT id FROM sessions LIMIT 1", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok()
+        })
+        .expect("session row");
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let s = synt_home(&rig, &["stop", &sid]);
+    assert_eq!(
+        s.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&s.stderr)
+    );
+    let st = child.wait().unwrap();
+    assert_eq!(st.code(), Some(130), "cancelled run exits 130");
+}
+
+fn priced_rig() -> Rig {
+    let rig = Rig::new();
+    rig.settings(json!({"synt": {"pricing": {"fake/fake-model": {"input_per_mtok": 1000.0, "output_per_mtok": 1000.0}}}}));
+    rig
+}
+
+/// The cap is enforced on a real run: the first response (2000 tokens at $1000/M = $2) passes the $1
+/// cap, so the model is not asked again and the task ends `budget_exceeded`.
+#[test]
+fn a_cost_cap_stops_spend_after_the_response_that_crossed_it() {
+    let rig = priced_rig();
+    let script = json!([
+        {"tools": [{"name": "Read", "input": {"file_path": "a.txt"}}], "usage": [1000, 1000]},
+        {"text": "never asked", "usage": [1000, 1000]}
+    ]);
+    let (o, ev) = rig.run(
+        script,
+        &["--keep-defaults", "--max-cost-usd", "1", "--sandbox", "off"],
+    );
+    assert_eq!(
+        o.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let b = find(&ev, "budget.exceeded");
+    assert_eq!(b.len(), 1, "{:?}", types(&ev));
+    assert!(
+        b[0]["payload"]["budget"]
+            .as_str()
+            .is_some_and(|k| k.contains("max_cost_usd")),
+        "{}",
+        b[0]
+    );
+    assert_eq!(
+        find(&ev, "turn.started").len(),
+        1,
+        "no second model request after the cap"
+    );
+}
+
+/// Every protection `--unattended` promises is refused (exit 2, nothing on stdout) when asked away.
+#[test]
+fn unattended_refuses_each_protection_that_is_asked_away() {
+    let rig = priced_rig();
+    git(&rig.ws(), &["init", "-q"]);
+    git(&rig.ws(), &["add", "."]);
+    git(&rig.ws(), &["commit", "-q", "-m", "init"]);
+    let cases: [(&[&str], &str); 11] = [
+        (&["--sandbox", "off"], "sandbox"),
+        (&["--sandbox", "best-effort"], "sandbox"),
+        (&["--network", "allow"], "network"),
+        (&["--network", "loopback"], "network"),
+        (&["--permission-mode", "bypassPermissions"], "bypass"),
+        (&["--trust-project"], "trust-project"),
+        (&["--no-worktree"], "no-worktree"),
+        (&["--no-session-store"], "no-session-store"),
+        (&["--peers"], "peers"),
+        (&["--no-cost-cap"], "no-cost-cap"),
+        (&["--approve-mcp", "x"], "approve-mcp"),
+    ];
+    for (extra, what) in cases {
+        let mut args = vec!["--keep-defaults", "--unattended", "--max-cost-usd", "1"];
+        args.extend(extra);
+        let (o, _) = rig.run(json!([{"text": "x"}]), &args);
+        assert_eq!(
+            o.status.code(),
+            Some(2),
+            "{what}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        assert!(o.stdout.is_empty(), "{what}");
+    }
+    // and outside a git repository there is no worktree to promise
+    let plain = priced_rig();
+    let (o, _) = plain.run(
+        json!([{"text": "x"}]),
+        &["--keep-defaults", "--unattended", "--max-cost-usd", "1"],
+    );
+    assert_eq!(o.status.code(), Some(2));
+    // a host without a sandbox (native Windows): the rig adds `--sandbox off`, which --unattended
+    // refuses first, with its own message
+    let want = if host_confines() {
+        "git repository"
+    } else {
+        "--sandbox enforce"
+    };
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains(want),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
+/// The implicit worktree starts from the tree as it is: uncommitted work is there, and a detached
+/// HEAD works.
+#[test]
+fn the_default_worktree_carries_uncommitted_work_and_works_from_a_detached_head() {
+    let rig = priced_rig();
+    git(&rig.ws(), &["init", "-q"]);
+    git(&rig.ws(), &["add", "."]);
+    git(&rig.ws(), &["commit", "-q", "-m", "init"]);
+    git(&rig.ws(), &["checkout", "-q", "--detach"]);
+    std::fs::write(rig.ws().join("a.txt"), "dirty\n").unwrap();
+    std::fs::write(rig.ws().join("new.txt"), "untracked\n").unwrap();
+    let (o, ev) = rig.run(
+        json!([{"tools": [{"name": "Read", "input": {"file_path": "a.txt"}}]}, {"text": "ok"}]),
+        &["--keep-defaults", "--max-cost-usd", "1", "--sandbox", "off"],
+    );
+    assert!(
+        o.status.code().is_some_and(|c| c == 0 || c == 3),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let sid = ev[0]["session_id"].as_str().unwrap();
+    let wt = rig.home().join("worktrees").join(sid);
+    assert_eq!(
+        std::fs::read_to_string(wt.join("a.txt")).unwrap(),
+        "dirty\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt.join("new.txt")).unwrap(),
+        "untracked\n"
+    );
+    assert!(outputs(&ev, "Read").iter().any(|t| t.contains("dirty")));
+    // the notice names the place
+    assert!(String::from_utf8_lossy(&o.stderr).contains("working in worktree"));
 }

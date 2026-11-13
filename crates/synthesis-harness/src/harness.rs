@@ -33,10 +33,34 @@ use crate::traits::{
 };
 use crate::util::{lock, status_str, uuid};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Pricing {
     pub input_per_mtok: f64,
     pub output_per_mtok: f64,
+    /// Price of a cache read; `None` = 10% of the input price (Anthropic's rate).
+    pub cache_read_per_mtok: Option<f64>,
+    /// Price of a cache write; `None` = 125% of the input price (Anthropic's rate, the dearer
+    /// side, so a cap is never under-counted).
+    pub cache_write_per_mtok: Option<f64>,
+}
+
+impl Pricing {
+    /// USD of one response. `input_tokens` excludes the cache tokens (Anthropic's accounting),
+    /// which are priced on their own.
+    pub fn cost(&self, u: &synthesis_providers::Usage) -> f64 {
+        let n = |t: Option<u64>| t.unwrap_or(0) as f64;
+        let read = self
+            .cache_read_per_mtok
+            .unwrap_or(self.input_per_mtok * 0.1);
+        let write = self
+            .cache_write_per_mtok
+            .unwrap_or(self.input_per_mtok * 1.25);
+        (n(u.input_tokens) * self.input_per_mtok
+            + n(u.output_tokens) * self.output_per_mtok
+            + n(u.cache_read_input_tokens) * read
+            + n(u.cache_creation_input_tokens) * write)
+            / 1_000_000.0
+    }
 }
 
 /// Proactive compaction (`synt.context.*` of the user settings.json).
@@ -193,7 +217,19 @@ pub struct HarnessConfig {
     pub tool_search: ToolSearchMode,
     /// The judge of auto mode.
     pub auto: crate::classifier::AutoJudge,
+    /// Called with every verification report just before `verification.completed` is emitted
+    /// (the event carries only a summary; a host that stores the full report hooks in here).
+    pub report_sink: Option<ReportSink>,
+    /// Price of the model that actually answered: a bare model name (the run's own model and
+    /// sub-agent models) or a `provider/model` label (a failover target). `None` = `pricing` for
+    /// everything.
+    pub pricing_for: Option<PriceFn>,
 }
+
+pub type PriceFn = std::sync::Arc<dyn Fn(&str) -> Option<Pricing> + Send + Sync>;
+
+pub type ReportSink =
+    std::sync::Arc<dyn Fn(&synthesis_verification::VerificationReport) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModeError {
@@ -256,6 +292,8 @@ impl HarnessConfig {
             shell: ShellSettings::default(),
             tool_search: ToolSearchMode::default(),
             auto: crate::classifier::AutoJudge::default(),
+            report_sink: None,
+            pricing_for: None,
         }
     }
 }
@@ -365,6 +403,11 @@ pub(crate) struct Counters {
     pub verify_attempts: u32,
 }
 
+/// Where a session keeps its verification baseline (owner-only file in the session's artifact dir).
+fn start_file(ws: &WorkspaceContext) -> PathBuf {
+    ws.artifact_root.join("gate-baseline.json")
+}
+
 /// Shared by the main agent and its sub-agents.
 pub(crate) struct TaskRun {
     pub session_id: String,
@@ -392,6 +435,9 @@ pub(crate) struct TaskRun {
     pub needed: Mutex<BTreeSet<String>>,
     /// A gate check was blocked for lack of an approval.
     pub gate_blocked: AtomicBool,
+    /// A tool result of this task carried an image: its text is untrusted pixels, so in auto an
+    /// action with an external effect is asked, never judged (classifier.rs).
+    pub after_image: AtomicBool,
     /// Recent user messages, the task last: what the auto-mode judge is told the task is.
     pub user_texts: Mutex<Vec<String>>,
     pub auto: Mutex<crate::classifier::AutoState>,
@@ -487,6 +533,9 @@ pub struct Harness {
     pub(crate) model_resolver: Option<crate::agents::ModelResolver>,
     pub(crate) tracker: Arc<dyn ChangeTracker>,
     pub(crate) gate: Option<GateFactory>,
+    /// Per session: the frozen checks and workspace snapshot of its first task, kept until a
+    /// task ends verified, so weakening done in one task is still seen by the next.
+    pub(crate) starts: Mutex<HashMap<String, Arc<synthesis_verification::TaskStart>>>,
     pub(crate) config: HarnessConfig,
     pub(crate) env: Arc<BTreeMap<String, String>>,
     pub(crate) read_ledger: Arc<Mutex<HashMap<PathBuf, SystemTime>>>,
@@ -544,6 +593,7 @@ impl Harness {
             model_resolver: None,
             tracker: Arc::new(NoChangeTracker),
             gate: None,
+            starts: Mutex::default(),
             config,
             env: Arc::new(env),
             read_ledger: Arc::default(),
@@ -729,6 +779,12 @@ impl Harness {
     // ---- session -------------------------------------------------------------------------
 
     /// `created -> preparing` and `session.started`.
+    /// Forgets the in-memory baselines, as a restart of the process would (tests).
+    #[doc(hidden)]
+    pub fn forget_session_baselines(&self) {
+        lock(&self.starts).clear();
+    }
+
     pub fn start_session(
         &self,
         session: &mut AgentSession,
@@ -888,6 +944,7 @@ impl Harness {
         session.task_id = Some(task_id.clone());
         let (task, mut main) = self.run_ctx(session, task_id.clone(), start, cancel);
         let mut parked_kind = None;
+        let resumed_conversation = !req.history.is_empty();
         let mut st = match &agent {
             None => AgentState::new(req.history),
             Some(TaskAgent::Existing(name)) => {
@@ -1039,6 +1096,54 @@ impl Harness {
                 )
             } else {
                 self.tracker.begin(&task.workspace, &task.task_id).await;
+                // Freeze the planned checks and snapshot tests/definitions before anything changes.
+                if let Some(g) = gate.as_mut() {
+                    let prior = lock(&self.starts).get(&task.session_id).cloned();
+                    let reused = prior.is_some();
+                    let start = match prior {
+                        Some(s) => s,
+                        None => {
+                            let ws = task.workspace.clone();
+                            let resumed = resumed_conversation;
+                            // A saved snapshot (restart/resume), else HEAD for a resumed
+                            // conversation, else the workspace as it is now. A panicked scan is
+                            // retried inline rather than skipped.
+                            let s = tokio::task::spawn_blocking(move || {
+                                let file = start_file(&ws);
+                                if let Some(s) = synthesis_verification::TaskStart::load(&file, &ws) {
+                                    return s;
+                                }
+                                let s = if resumed {
+                                    synthesis_verification::TaskStart::take_resumed(&ws)
+                                } else {
+                                    synthesis_verification::TaskStart::take(&ws)
+                                };
+                                if let Err(e) = std::fs::create_dir_all(&ws.artifact_root)
+                                    .and_then(|()| s.save(&file))
+                                {
+                                    eprintln!("synt: warning: could not save the verification baseline: {e}");
+                                }
+                                s
+                            })
+                            .await
+                            .unwrap_or_else(|_| synthesis_verification::TaskStart::take(&task.workspace));
+                            let s = Arc::new(s);
+                            lock(&self.starts).insert(task.session_id.clone(), s.clone());
+                            s
+                        }
+                    };
+                    // What earlier unverified tasks already changed is not this task's doing.
+                    let pre = if reused || resumed_conversation {
+                        let s = start.clone();
+                        tokio::task::spawn_blocking(move || s.changed_now())
+                            .await
+                            .unwrap_or_default()
+                    } else {
+                        vec![]
+                    };
+                    g.set_preexisting(pre);
+                    g.begin(start);
+                }
                 self.drive(&task, &main, &mut st, &mut gate, &req.criteria)
                     .await
             }
@@ -1046,6 +1151,11 @@ impl Harness {
         let (status, reason, report_id, final_text) =
             self.with_background(&task, &mut bg_rx, work).await;
         self.hub.end_task();
+        if status == TaskStatus::Completed {
+            // verified: the next task starts from this state
+            lock(&self.starts).remove(&task.session_id);
+            let _ = std::fs::remove_file(start_file(&task.workspace));
+        }
         self.peer_task_ended(status, &final_text, &lock(&task.changed));
         self.peer_snapshot(&main.name, &st.messages);
         match parked_kind {
@@ -1139,6 +1249,7 @@ impl Harness {
             pending_approval: AtomicBool::new(false),
             needed: Mutex::default(),
             gate_blocked: AtomicBool::new(false),
+            after_image: AtomicBool::new(false),
             user_texts: Mutex::default(),
             auto: Mutex::default(),
             tool_search: Mutex::default(),
@@ -1417,7 +1528,22 @@ impl Harness {
                 .collect(),
         );
         lock(&task.counters).verify_attempts += 1;
-        self.emit(task, agent, None, r.to_event());
+        if let Some(f) = &self.config.report_sink {
+            f(r);
+        }
+        let mut event = r.to_event();
+        if let Event::VerificationCompleted { report_sha256, .. } = &mut event
+            && let Ok(v) = serde_json::to_value(r)
+        {
+            use sha2::{Digest, Sha256};
+            *report_sha256 = Some(
+                Sha256::digest(v.to_string().as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect(),
+            );
+        }
+        self.emit(task, agent, None, event);
         Some(r.id.clone())
     }
 
