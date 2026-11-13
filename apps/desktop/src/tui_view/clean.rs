@@ -13,14 +13,8 @@ impl TuiView {
         let Some(e) = lu.live.engine.clone() else {
             return;
         };
-        // the store and the files are the engine's own machine's: PR3b brings them over the protocol
-        if e.is_remote() {
-            lu.live.note(
-                format!("this needs the engine's store: {}", crate::wsl::LATER),
-                true,
-            );
-            return;
-        }
+        // WSL mode: the engine plans and deletes in its own store; a plan's single "id" is its token
+        let remote = e.is_remote();
         let home = e.synthesis_home.clone();
         // a counting step that never answers frees the prompt; a deletion keeps it blocked
         if matches!(a, Action::CleanApply { .. }) {
@@ -38,7 +32,12 @@ impl TuiView {
         match a {
             Action::Clean => {
                 let keep = vec![e.sid.clone()];
-                let job = cx.background_spawn(async move { clean::plans(&home, &keep) });
+                let job = cx.background_spawn(async move {
+                    match remote.then(|| e.remote()).flatten() {
+                        Some(r) => r.clean_plan(),
+                        None => clean::plans(&home, &keep),
+                    }
+                });
                 cx.spawn(async move |this, cx| {
                     let r = job.await;
                     this.update(cx, |t, cx| t.live_do(cx, |l| l.clean_listed(r)))
@@ -52,10 +51,15 @@ impl TuiView {
                 backup,
                 keep,
             } => {
-                let job =
-                    cx.background_spawn(
-                        async move { clean::apply(&home, scope, &keep, &ids, backup) },
-                    );
+                let job = cx.background_spawn(async move {
+                    match remote.then(|| e.remote()).flatten() {
+                        Some(r) => ids
+                            .first()
+                            .ok_or_else(|| "the plan has no token".to_string())
+                            .and_then(|t| r.clean_apply(t, backup)),
+                        None => clean::apply(&home, scope, &keep, &ids, backup),
+                    }
+                });
                 cx.spawn(async move |this, cx| {
                     let r = job.await;
                     this.update(cx, |t, cx| {

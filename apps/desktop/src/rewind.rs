@@ -46,6 +46,8 @@ impl CheckpointRow {
 pub struct Preview {
     pub checkpoint: Option<String>,
     pub entries: Vec<Entry>,
+    /// WSL mode: what the engine issued for this dry run (the entries are its display rows). Applying needs it.
+    pub token: Option<String>,
 }
 
 /// One block of rows in the confirmation: a title and the rows, CLI style.
@@ -217,6 +219,7 @@ pub fn preview(h: &Homes, sid: &str, checkpoint: Option<String>) -> Result<Previ
     Ok(Preview {
         checkpoint,
         entries,
+        token: None,
     })
 }
 
@@ -498,6 +501,7 @@ mod tests {
         Preview {
             checkpoint: None,
             entries,
+            token: None,
         }
     }
 

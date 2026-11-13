@@ -62,6 +62,10 @@ pub enum UiMsg {
     Renamed(String, Result<String, String>),
     /// `/trust` asked the engine for its state.
     TrustList(Result<crate::remote::TrustState, String>),
+    /// `/effort` on a WSL engine: what it saved (`None`: auto), or why not.
+    Effort(Result<Option<String>, String>),
+    /// `/doctor` on a WSL engine.
+    Doctor(Result<Vec<synthesis_app::doctor::Row>, String>),
 }
 
 pub use synthesis_app::asks::{AskApproval, AskInput, Choice, approval_for};
@@ -708,19 +712,37 @@ impl Engine {
 
     /// Starts a task. `Err`: one is already running.
     pub fn send(&self, text: String) -> Result<(), &'static str> {
-        self.send_images(text, vec![])
+        match &self.remote {
+            Some(r) => r.send(text),
+            None => self.start_task(text, vec![], false),
+        }
     }
 
     /// [`Engine::send`] with pasted images (the harness keeps the 2 newest messages' images in a
     /// request and drops them for a model without vision).
     pub fn send_images(
-        &self,
+        self: &Arc<Self>,
         text: String,
         images: Vec<ImageAttachment>,
     ) -> Result<(), &'static str> {
         match (&self.remote, images.is_empty()) {
             (Some(r), true) => r.send(text),
-            (Some(_), false) => Err(NOT_REMOTE),
+            // the upload waits for the engine: a worker thread, never the window's
+            (Some(r), false) => {
+                if r.running() {
+                    return Err("a task is already running");
+                }
+                let e = self.clone();
+                std::thread::spawn(move || {
+                    if let Some(r) = e.remote()
+                        && let Err(why) = r.send_images(text, &images)
+                    {
+                        // a race with another send says so; the task that runs is not ended by it
+                        let _ = e.tx.unbounded_send(UiMsg::BadEvent(why.to_string()));
+                    }
+                });
+                Ok(())
+            }
             _ => self.start_task(text, images, false),
         }
     }

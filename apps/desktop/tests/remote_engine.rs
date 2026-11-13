@@ -59,6 +59,9 @@ fn fake_engine(mode: &str) {
             }
             "send" => {
                 say(json!({"msg":"result","id":id,"ok":{}}));
+                if let Some(i) = req["params"].get("images") {
+                    say(json!({"msg":"notice","text":format!("images:{i}")}));
+                }
                 println!("{EVENT}");
                 match mode {
                     "die-after-send" => std::process::exit(3),
@@ -89,6 +92,69 @@ fn fake_engine(mode: &str) {
             }
             "session.preview" => say(
                 json!({"msg":"result","id":id,"ok":{"events":[serde_json::from_str::<Value>(EVENT).unwrap(), {"junk":true}],"truncated":false}}),
+            ),
+            "fs.list" => {
+                // a hostile tree: escapes, a name with a slash, an empty name, a huge depth, a bad status, and
+                // pages without end
+                let off = req["params"]["offset"].as_u64().unwrap_or(0);
+                let mut rows = vec![];
+                if off == 0 {
+                    rows.push(json!([0, "a\u{1b}[31m.rs", false, "M"]));
+                    rows.push(json!([0, "x/y", false, null]));
+                    rows.push(json!([0, "", false, null]));
+                    rows.push(json!([99999, "deep", true, "Z"]));
+                }
+                rows.extend((0..196).map(|i| json!([0, format!("f{off}-{i}"), false, null])));
+                say(
+                    json!({"msg":"result","id":id,"ok":{"rows":rows,"total":99999,"next":off+200,"truncated":false,"note":"n\u{1b}[2J","trusted":false}}),
+                )
+            }
+            "fs.read" => {
+                let lines: Vec<String> = (0..5000).map(|i| format!("l{i}\u{1b}[31m")).collect();
+                say(json!({"msg":"result","id":id,"ok":{"lines":lines,"size":123,"cut":true}}))
+            }
+            "image.put" => {
+                let p = &req["params"];
+                let data = p["data"].as_str().unwrap_or_default();
+                let bad = data.len() > 400_000
+                    || !data.len().is_multiple_of(4) && p["last"] != true
+                    || (p["seq"] == 0 && (p["mime"] != "image/png" || p["size"] != 600_000));
+                if bad {
+                    say(json!({"msg":"result","id":id,"error":"bad chunk"}))
+                } else if p["last"] == true {
+                    say(json!({"msg":"result","id":id,"ok":{"id":"img-1","bytes":600_000}}))
+                } else {
+                    say(json!({"msg":"result","id":id,"ok":{"upload":"u1"}}))
+                }
+            }
+            "rewind.list" => say(
+                json!({"msg":"result","id":id,"ok":{"checkpoints":[{"name":"c\u{1b}1","when":"2026-11-09 14:02 UTC","after_message":3,"files":["a.txt"]}]}}),
+            ),
+            "rewind.dry_run" => say(
+                json!({"msg":"result","id":id,"ok":{"token":"rw-1","entries":[{"shown":"/w/a\u{1b}.txt","kind":"restore","size":5,"reason":null},{"shown":"/w/b","kind":"skip","size":0,"reason":"why\u{1b}"}]}}),
+            ),
+            "rewind.apply" if req["params"]["token"] == "rw-1" => say(
+                json!({"msg":"result","id":id,"ok":{"restored":1,"removed":0,"skipped":1,"failed":["f\u{1b}"],"changed":[]}}),
+            ),
+            "rewind.apply" => say(json!({"msg":"result","id":id,"error":"no longer valid"})),
+            "clean.plan" => {
+                let plans: Vec<Value> = ["ClosedEmpty", "Inactive", "All"]
+                    .iter()
+                    .map(|s| json!({"scope":s,"token":format!("cl-{s}"),"counts":{"sessions":2,"workspaces":1,"messages":4,"events":9,"disk_bytes":2048,"screenshot_bytes":0,"snapshot_bytes":0,"log_bytes":0,"skipped_running":0,"skipped_other":0}}))
+                    .collect();
+                say(json!({"msg":"result","id":id,"ok":{"plans":plans}}))
+            }
+            "clean.apply" => say(
+                json!({"msg":"result","id":id,"ok":{"deleted":2,"events":9,"skipped_running":0,"skipped_other":0,"failed":[],"freed_bytes":2048,"backup":null}}),
+            ),
+            "memory.list" => say(
+                json!({"msg":"result","id":id,"ok":{"records":[{"id":"m-1","kind":"fact","scope":"user","trust":"owner","title":"t\u{1b}[31mitle"}],"note":null}}),
+            ),
+            "mcp.list" => say(
+                json!({"msg":"result","id":id,"ok":{"servers":[{"name":"s\u{1b}","state":"connected","transport":"stdio","tool_count":1,"error":null,"tools":[["t","d\u{1b}"]]}]}}),
+            ),
+            "doctor.summary" => say(
+                json!({"msg":"result","id":id,"ok":{"rows":[{"level":"warn","text":"w\u{1b}[31m"},{"level":"mystery","text":"x"}]}}),
             ),
             "usage.summary" => say(json!({"msg":"result","id":id,"ok":{"days":[]}})),
             "trust.state" => say(
@@ -290,6 +356,85 @@ fn the_store_methods_are_parsed_bounded_and_made_printable() {
         ("changed", 1, 1)
     );
     assert!(e.close().is_none());
+}
+
+fn files_images_rewind_clean_and_settings_are_parsed_bounded_and_made_printable() {
+    let (e, mut rx) = start("ok").expect("starts");
+    let e = std::sync::Arc::new(e);
+    let r = e.remote().expect("remote");
+    // the tree: bounded, printable, no row that could corrupt a path, depth and status clamped
+    let t = r.fs_list().unwrap();
+    assert!(
+        t.rows.len() <= 1000 && t.truncated || t.rows.len() == 1000,
+        "{}",
+        t.rows.len()
+    );
+    assert!(
+        t.rows
+            .iter()
+            .all(|x| !x.name.is_empty() && !x.name.contains('/') && !x.name.contains('\u{1b}'))
+    );
+    assert!(
+        t.rows
+            .iter()
+            .all(|x| x.depth <= 64 && x.status != Some('Z'))
+    );
+    assert_eq!(t.rows[0].status, Some('M'));
+    assert!(!t.note.as_deref().unwrap().contains('\u{1b}'));
+    let (lines, size, cut) = r.fs_read("a.txt").unwrap();
+    assert!(
+        lines.len() <= 2000 && lines.iter().all(|l| !l.contains('\u{1b}')) && size == 123 && cut
+    );
+    // an image goes in bounded chunks and is named in the send by the id the engine issued
+    let img = synthesis_harness::ImageAttachment {
+        media_type: "image/png".into(),
+        data_base64: "QUJD".repeat(200_000),
+    };
+    e.send_images("look".into(), vec![img]).unwrap();
+    assert!(matches!(next(&mut rx, "images"), UiMsg::BadEvent(m) if m == r#"images:["img-1"]"#));
+    // a hostile size is refused by the client before it matters (the fake refuses a wrong first chunk too)
+    let bad = r.image_put("image/png", &"QUJD".repeat(10));
+    assert!(bad.is_err());
+    // rewind: the dry run carries the engine's token, rows are printable; apply needs exactly that token
+    let cps = r.rewind_list().unwrap();
+    assert!(!cps[0].name.contains('\u{1b}') && cps[0].files == ["a.txt"]);
+    let p = r.rewind_dry_run(None).unwrap();
+    assert_eq!(p.token.as_deref(), Some("rw-1"));
+    assert!(p.entries.iter().all(|x| !x.shown.contains('\u{1b}')));
+    let o = r.rewind_apply("rw-1").unwrap();
+    assert_eq!(
+        (o.restored, o.removed, o.skipped, o.failed.len()),
+        (1, 0, 1, 1)
+    );
+    assert!(!o.failed[0].contains('\u{1b}'));
+    assert!(r.rewind_apply("rw-2").is_err());
+    // clean: the plan's only "id" is the token
+    let plans = r.clean_plan().unwrap();
+    assert_eq!(plans.len(), 3);
+    assert_eq!(plans[2].1.ids, ["cl-All"]);
+    assert_eq!(
+        (plans[0].1.counts.sessions, plans[0].1.counts.events),
+        (2, 9)
+    );
+    assert_eq!(r.clean_apply("cl-All", false).unwrap().deleted, 2);
+    // memory, mcp, doctor
+    let m = r.memory_rows(None).unwrap();
+    assert!(m[0].starts_with("m-1") && !m[0].contains('\u{1b}') && m[1].contains("1 record"));
+    assert!(
+        r.mcp_report()
+            .unwrap()
+            .iter()
+            .all(|l| !l.contains('\u{1b}'))
+    );
+    let d = r.doctor_rows().unwrap();
+    assert!(d.len() == 2 && d.iter().all(|x| !x.text.contains('\u{1b}')));
+    assert!(
+        std::sync::Arc::try_unwrap(e)
+            .ok()
+            .expect("sole owner")
+            .close()
+            .is_none()
+    );
 }
 
 fn a_restart_moves_the_window_to_the_new_session_and_drops_the_old_lines() {
@@ -549,7 +694,11 @@ fn main() {
     if let Some(i) = args.iter().position(|a| a == "--fake-engine") {
         return fake_engine(&args[i + 1]);
     }
-    let tests: [(&str, fn()); 16] = [
+    let tests: [(&str, fn()); 17] = [
+        (
+            "files_images_rewind_clean_and_settings_are_parsed_bounded_and_made_printable",
+            files_images_rewind_clean_and_settings_are_parsed_bounded_and_made_printable,
+        ),
         (
             "the_store_methods_are_parsed_bounded_and_made_printable",
             the_store_methods_are_parsed_bounded_and_made_printable,

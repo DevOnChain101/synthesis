@@ -13,14 +13,8 @@ impl TuiView {
         let Some(e) = lu.live.engine.clone() else {
             return;
         };
-        // the store and the files are the engine's own machine's: PR3b brings them over the protocol
-        if e.is_remote() {
-            lu.live.note(
-                format!("this needs the engine's store: {}", crate::wsl::LATER),
-                true,
-            );
-            return;
-        }
+        // WSL mode: the store and the files are the engine's own machine's; the engine does each step
+        let remote = e.is_remote();
         let home = rewind::Homes {
             synthesis: e.synthesis_home.clone(),
             user: rewind::user_home(&lu.cfg.env),
@@ -38,7 +32,12 @@ impl TuiView {
         .detach();
         match a {
             Action::Rewind => {
-                let job = cx.background_spawn(async move { rewind::list(&home, &sid) });
+                let job = cx.background_spawn(async move {
+                    match remote.then(|| e.remote()).flatten() {
+                        Some(r) => r.rewind_list(),
+                        None => rewind::list(&home, &sid),
+                    }
+                });
                 cx.spawn(async move |this, cx| {
                     let r = job.await;
                     this.update(cx, |t, cx| t.live_do(cx, |l| l.rewind_listed(r)))
@@ -47,7 +46,12 @@ impl TuiView {
                 .detach();
             }
             Action::RewindPreview(cp) => {
-                let job = cx.background_spawn(async move { rewind::preview(&home, &sid, cp) });
+                let job = cx.background_spawn(async move {
+                    match remote.then(|| e.remote()).flatten() {
+                        Some(r) => r.rewind_dry_run(cp),
+                        None => rewind::preview(&home, &sid, cp),
+                    }
+                });
                 cx.spawn(async move |this, cx| {
                     let r = job.await;
                     this.update(cx, |t, cx| t.live_do(cx, |l| l.rewind_previewed(r)))
@@ -57,7 +61,16 @@ impl TuiView {
             }
             Action::RewindApply(p) => {
                 lu.live.rewinding = true;
-                let job = cx.background_spawn(async move { rewind::apply(&home, &sid, &p) });
+                let job = cx.background_spawn(async move {
+                    match remote.then(|| e.remote()).flatten() {
+                        Some(r) => p
+                            .token
+                            .as_deref()
+                            .ok_or_else(|| "the dry run has no token".to_string())
+                            .and_then(|t| r.rewind_apply(t)),
+                        None => rewind::apply(&home, &sid, &p),
+                    }
+                });
                 cx.spawn(async move |this, cx| {
                     let r = job.await;
                     this.update(cx, |t, cx| {

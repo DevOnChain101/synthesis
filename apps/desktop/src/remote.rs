@@ -528,11 +528,46 @@ impl Remote {
         if self.shared.running.swap(true, Ordering::SeqCst) {
             return Err("a task is already running");
         }
+        self.write_send(text, vec![])
+    }
+
+    /// [`Remote::send`] with images the engine holds (`image_put` made them). A worker thread's call: the
+    /// upload waits for the engine. A failed upload ends the task like any other refusal.
+    pub fn send_images(
+        &self,
+        text: String,
+        images: &[synthesis_harness::ImageAttachment],
+    ) -> Result<(), &'static str> {
+        if images.is_empty() {
+            return self.send(text);
+        }
+        if self.shared.running.swap(true, Ordering::SeqCst) {
+            return Err("a task is already running");
+        }
+        let mut ids = vec![];
+        for i in images {
+            match self.image_put(&i.media_type, &i.data_base64) {
+                Ok(id) => ids.push(id),
+                Err(e) => {
+                    for id in ids {
+                        let _ = self.store_call(Call::ImageDrop { id });
+                    }
+                    self.shared.running.store(false, Ordering::SeqCst);
+                    self.shared
+                        .tell(UiMsg::TaskDone(Err(format!("image not sent: {e}"))));
+                    return Ok(());
+                }
+            }
+        }
+        self.write_send(text, ids)
+    }
+
+    fn write_send(&self, text: String, images: Vec<String>) -> Result<(), &'static str> {
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         self.shared.send_id.store(id, Ordering::SeqCst);
         let sent = self.write(&Request {
             id,
-            call: Call::Send { text },
+            call: Call::Send { text, images },
         });
         // `dead` is re-read after `running` is set: the reader's last act cannot miss this task
         if sent.is_err() || self.shared.dead.load(Ordering::SeqCst) {
@@ -842,6 +877,400 @@ fn dispatch(s: &Shared, m: Incoming) -> Verdict {
 
 fn clean(s: &str) -> String {
     sanitize_for_display(s)
+}
+
+// ---- files, images, rewind, clean, memory and settings (protocol 3). The engine does the work on its own
+// machine; what it answers is bounded and made printable again here (it is not trusted), and a path in an
+// answer is display text, never something this side opens.
+
+/// A scan, a doctor run or a clean plan can take a while on the engine's side.
+const SLOW_TIMEOUT: Duration = Duration::from_secs(30);
+/// A rewind or a deletion is not cut short: the engine finishes it (and says so).
+const APPLY_TIMEOUT: Duration = Duration::from_secs(300);
+const MAX_TREE_ROWS: usize = 1000;
+const MAX_TREE_PAGES: usize = 10;
+const MAX_LINES: usize = 2000;
+const MAX_RECORDS: usize = 100;
+const MAX_ENTRIES: usize = 2000;
+/// Base64 characters per `image.put` chunk (a multiple of 4: a chunk is whole 3-byte groups).
+const IMAGE_CHUNK: usize = 400_000;
+
+fn text(v: &Value) -> String {
+    clean(v.as_str().unwrap_or_default())
+}
+
+fn rows_of(v: &Value, key: &str, max: usize) -> Result<Vec<Value>, String> {
+    Ok(v[key]
+        .as_array()
+        .ok_or_else(|| format!("unreadable answer: no {key}"))?
+        .iter()
+        .take(max)
+        .cloned()
+        .collect())
+}
+
+impl Remote {
+    /// The project tree of the session folder, as the engine scanned it (git in a trusted folder, a plain walk
+    /// otherwise: the engine decides). A row that could corrupt a path (a `/` in a name) is dropped.
+    pub fn fs_list(&self) -> Result<synthesis_view::project::ProjectData, String> {
+        use synthesis_view::project::{ProjectData, TreeRow};
+        let mut data = ProjectData {
+            loaded: true,
+            ..Default::default()
+        };
+        let mut offset = 0u64;
+        for _ in 0..MAX_TREE_PAGES {
+            let call = || {
+                self.call(
+                    Call::FsList {
+                        dir: String::new(),
+                        offset: offset as u32,
+                    },
+                    SLOW_TIMEOUT,
+                )
+            };
+            let mut v = call();
+            // scans are a few a second: one short wait, once
+            if offset == 0 && v.as_ref().is_err_and(|e| e.contains("too many requests")) {
+                std::thread::sleep(Duration::from_millis(350));
+                v = call();
+            }
+            let v = v?;
+            for r in rows_of(&v, "rows", MAX_TREE_ROWS)? {
+                let name = text(&r[1]);
+                if data.rows.len() >= MAX_TREE_ROWS || name.is_empty() || name.contains('/') {
+                    continue;
+                }
+                data.rows.push(TreeRow {
+                    depth: u16::try_from(r[0].as_u64().unwrap_or(0))
+                        .unwrap_or(0)
+                        .min(64),
+                    name,
+                    dir: r[2].as_bool().unwrap_or(false),
+                    status: r[3]
+                        .as_str()
+                        .and_then(|s| s.chars().next())
+                        .filter(|c| "MADR?".contains(*c)),
+                });
+            }
+            data.note = v["note"].as_str().map(clean);
+            data.truncated |= v["truncated"].as_bool().unwrap_or(false);
+            match v["next"].as_u64() {
+                Some(n) if data.rows.len() < MAX_TREE_ROWS => offset = n,
+                _ => return Ok(data),
+            }
+        }
+        data.truncated = true;
+        Ok(data)
+    }
+
+    /// A text preview of `rel` (a path of the tree): `(lines, size, cut)`. The engine refuses secrets, links,
+    /// binary files and anything outside the folder; the path is sent as the tree listed it.
+    pub fn fs_read(&self, rel: &str) -> Result<(Vec<String>, u64, bool), String> {
+        let v = self.call(Call::FsRead { path: rel.into() }, STORE_TIMEOUT)?;
+        let lines = v["lines"]
+            .as_array()
+            .ok_or("unreadable file preview")?
+            .iter()
+            .take(MAX_LINES)
+            .map(text)
+            .collect();
+        Ok((
+            lines,
+            v["size"].as_u64().unwrap_or(0),
+            v["cut"].as_bool().unwrap_or(false),
+        ))
+    }
+
+    /// Hands one image (`data_base64`, the whole file) to the engine in bounded chunks; the id it issues is what
+    /// `send` names.
+    pub fn image_put(&self, mime: &str, data_base64: &str) -> Result<String, String> {
+        let pad = data_base64.bytes().rev().take_while(|b| *b == b'=').count();
+        let size = (data_base64.len() / 4 * 3).saturating_sub(pad) as u64;
+        let chunks: Vec<&str> = data_base64
+            .as_bytes()
+            .chunks(IMAGE_CHUNK)
+            .map(|c| std::str::from_utf8(c).unwrap_or_default())
+            .collect();
+        let mut upload: Option<String> = None;
+        for (i, c) in chunks.iter().enumerate() {
+            let last = i + 1 == chunks.len();
+            let v = self.store_call(Call::ImagePut {
+                upload: upload.clone(),
+                seq: i as u32,
+                mime: (i == 0).then(|| mime.to_string()),
+                size: (i == 0).then_some(size),
+                data: (*c).to_string(),
+                last,
+            })?;
+            if last {
+                return v["id"]
+                    .as_str()
+                    .map(clean)
+                    .ok_or_else(|| "the engine did not name the image".into());
+            }
+            upload = v["upload"].as_str().map(clean);
+        }
+        Err("there is no image data".into())
+    }
+
+    pub fn image_drop(&self, id: &str) {
+        let _ = self.store_call(Call::ImageDrop { id: id.into() });
+    }
+
+    pub fn rewind_list(&self) -> Result<Vec<crate::rewind::CheckpointRow>, String> {
+        let v = self.store_call(Call::RewindList)?;
+        Ok(rows_of(&v, "checkpoints", 500)?
+            .iter()
+            .map(|c| crate::rewind::CheckpointRow {
+                name: text(&c["name"]),
+                when: text(&c["when"]),
+                after_message: c["after_message"].as_u64().unwrap_or(0),
+                files: c["files"]
+                    .as_array()
+                    .map(|a| a.iter().take(200).map(text).collect())
+                    .unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    /// The dry run. The entries are display rows (the paths are the engine's own text); `token` is what
+    /// applies exactly this.
+    pub fn rewind_dry_run(
+        &self,
+        checkpoint: Option<String>,
+    ) -> Result<crate::rewind::Preview, String> {
+        use synthesis_app::rewind::{Entry, Step};
+        let v = self.call(
+            Call::RewindDryRun {
+                checkpoint: checkpoint.clone(),
+            },
+            SLOW_TIMEOUT,
+        )?;
+        let token = v["token"]
+            .as_str()
+            .map(clean)
+            .ok_or("the engine issued no token")?;
+        let entries = rows_of(&v, "entries", MAX_ENTRIES)?
+            .iter()
+            .map(|e| Entry {
+                path: std::path::PathBuf::new(),
+                shown: text(&e["shown"]),
+                step: match e["kind"].as_str() {
+                    Some("restore") => Step::Restore {
+                        artifact_id: String::new(),
+                        sha256: None,
+                    },
+                    Some("remove") => Step::Remove,
+                    _ => Step::Skip {
+                        reason: text(&e["reason"]),
+                        forceable: false,
+                    },
+                },
+                size: e["size"].as_u64().unwrap_or(0),
+                state: String::new(),
+            })
+            .collect();
+        Ok(crate::rewind::Preview {
+            checkpoint,
+            entries,
+            token: Some(token),
+        })
+    }
+
+    pub fn rewind_apply(&self, token: &str) -> Result<crate::rewind::Outcome, String> {
+        let v = self.call(
+            Call::RewindApply {
+                token: token.into(),
+            },
+            APPLY_TIMEOUT,
+        )?;
+        let n = |k: &str| usize::try_from(v[k].as_u64().unwrap_or(0)).unwrap_or(0);
+        Ok(crate::rewind::Outcome {
+            restored: n("restored"),
+            removed: n("removed"),
+            skipped: n("skipped"),
+            failed: rows_of(&v, "failed", 100)?.iter().map(text).collect(),
+            changed: vec![],
+        })
+    }
+
+    /// The three scopes with counts; each plan's `ids` holds the ONE token the engine issued for it.
+    pub fn clean_plan(
+        &self,
+    ) -> Result<Vec<(synthesis_session::CleanScope, synthesis_session::CleanPlan)>, String> {
+        use synthesis_session::{CleanCounts, CleanPlan, CleanScope};
+        let v = self.call(Call::CleanPlan, SLOW_TIMEOUT)?;
+        rows_of(&v, "plans", 3)?
+            .iter()
+            .map(|p| {
+                let scope = match p["scope"].as_str() {
+                    Some("ClosedEmpty") => CleanScope::ClosedEmpty,
+                    Some("Inactive") => CleanScope::Inactive,
+                    Some("All") => CleanScope::All,
+                    _ => return Err("unreadable clean plan".to_string()),
+                };
+                let c = &p["counts"];
+                let n = |k: &str| c[k].as_u64().unwrap_or(0);
+                let u = |k: &str| usize::try_from(n(k)).unwrap_or(0);
+                Ok((
+                    scope,
+                    CleanPlan {
+                        ids: vec![text(&p["token"])],
+                        counts: CleanCounts {
+                            sessions: u("sessions"),
+                            workspaces: u("workspaces"),
+                            messages: n("messages"),
+                            events: n("events"),
+                            disk_bytes: n("disk_bytes"),
+                            screenshot_bytes: n("screenshot_bytes"),
+                            snapshot_bytes: n("snapshot_bytes"),
+                            log_bytes: n("log_bytes"),
+                            skipped_running: u("skipped_running"),
+                            skipped_other: u("skipped_other"),
+                        },
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    pub fn clean_apply(
+        &self,
+        token: &str,
+        backup: bool,
+    ) -> Result<synthesis_session::CleanResult, String> {
+        let v = self.call(
+            Call::CleanApply {
+                token: token.into(),
+                backup,
+            },
+            APPLY_TIMEOUT,
+        )?;
+        let n = |k: &str| usize::try_from(v[k].as_u64().unwrap_or(0)).unwrap_or(0);
+        Ok(synthesis_session::CleanResult {
+            deleted: n("deleted"),
+            events: v["events"].as_u64().unwrap_or(0),
+            skipped_running: n("skipped_running"),
+            skipped_other: n("skipped_other"),
+            failed: rows_of(&v, "failed", 100)?.iter().map(text).collect(),
+            freed_bytes: v["freed_bytes"].as_u64().unwrap_or(0),
+            backup: v["backup"]
+                .as_str()
+                .map(|b| std::path::PathBuf::from(clean(b))),
+        })
+    }
+
+    /// `/memory list|search`: one text row per record, then the engine's note when project memory is off.
+    pub fn memory_rows(&self, query: Option<&str>) -> Result<Vec<String>, String> {
+        let v = match query {
+            Some(q) => self.store_call(Call::MemoryRetrieve { query: q.into() })?,
+            None => self.store_call(Call::MemoryList)?,
+        };
+        let mut rows: Vec<String> = rows_of(&v, "records", MAX_RECORDS)?
+            .iter()
+            .map(|m| {
+                let title: String = text(&m["title"]).chars().take(100).collect();
+                format!(
+                    "{}  {}  {}  {}  {title}",
+                    text(&m["id"]),
+                    text(&m["kind"]),
+                    text(&m["scope"]),
+                    text(&m["trust"])
+                )
+            })
+            .collect();
+        rows.push(format!("{} record(s); /memory show ID for one", rows.len()));
+        rows.extend(v["note"].as_str().map(|n| format!("note: {}", clean(n))));
+        Ok(rows)
+    }
+
+    pub fn memory_show(&self, id: &str) -> Result<String, String> {
+        Ok(text(
+            &self.store_call(Call::MemoryShow { id: id.into() })?["text"],
+        ))
+    }
+
+    pub fn memory_add(&self, text_: &str, user: bool) -> Result<String, String> {
+        Ok(text(
+            &self.store_call(Call::MemoryAdd {
+                text: text_.into(),
+                user,
+            })?["text"],
+        ))
+    }
+
+    pub fn memory_forget(&self, id: &str) -> Result<String, String> {
+        Ok(text(
+            &self.store_call(Call::MemoryForget { id: id.into() })?["text"],
+        ))
+    }
+
+    /// A `#` note, appended to an instruction file on the engine's machine.
+    pub fn memory_note(&self, text_: &str, user: bool) -> Result<String, String> {
+        Ok(text(
+            &self.store_call(Call::MemoryNote {
+                text: text_.into(),
+                user,
+            })?["text"],
+        ))
+    }
+
+    pub fn config_effort(&self, effort: Option<String>) -> Result<(), String> {
+        self.store_call(Call::ConfigEffort { effort }).map(|_| ())
+    }
+
+    /// `/context`: `Some(tokens)` when set, `None` when removed.
+    pub fn context_set(&self, value: &str) -> Result<Option<u64>, String> {
+        Ok(self.store_call(Call::ContextSet {
+            value: value.into(),
+        })?["tokens"]
+            .as_u64())
+    }
+
+    pub fn doctor_rows(&self) -> Result<Vec<synthesis_app::doctor::Row>, String> {
+        use synthesis_app::doctor::{Level, Row};
+        let v = self.call(Call::DoctorSummary, SLOW_TIMEOUT + Duration::from_secs(10))?;
+        Ok(rows_of(&v, "rows", 300)?
+            .iter()
+            .map(|r| Row {
+                level: match r["level"].as_str() {
+                    Some("ok") => Level::Ok,
+                    Some("warn") => Level::Warn,
+                    _ => Level::Fail,
+                },
+                text: text(&r["text"]),
+            })
+            .collect())
+    }
+
+    /// `/mcp`: the report lines, as the local one prints them.
+    pub fn mcp_report(&self) -> Result<Vec<String>, String> {
+        let v = self.store_call(Call::McpList)?;
+        let servers = rows_of(&v, "servers", 100)?;
+        if servers.is_empty() {
+            return Ok(vec![
+                "MCP: no servers are configured for this session".into(),
+            ]);
+        }
+        let mut out = vec![format!("MCP servers ({}):", servers.len())];
+        for s in &servers {
+            out.push(format!(
+                "  {} \u{b7} {} \u{b7} {} \u{b7} {} tools",
+                text(&s["name"]),
+                text(&s["state"]),
+                text(&s["transport"]),
+                s["tool_count"].as_u64().unwrap_or(0)
+            ));
+            if let Some(e) = s["error"].as_str() {
+                out.push(format!("    error: {}", clean(e)));
+            }
+            for t in s["tools"].as_array().into_iter().flatten().take(100) {
+                out.push(format!("    {} \u{b7} {}", text(&t[0]), text(&t[1])));
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// What `trust.state` says (display text and the engine's verdicts; the client decides nothing from it).
