@@ -9,7 +9,7 @@
 //! doing the resolving) passes; upgrade by connecting through a validating resolver as synthesis-tools
 //! `web.rs` does.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -36,32 +36,9 @@ impl std::fmt::Display for SseError {
 }
 impl std::error::Error for SseError {}
 
-fn blocked_v4(ip: Ipv4Addr) -> bool {
-    let o = ip.octets();
-    ip.is_unspecified()
-        || ip.is_private()
-        || ip.is_link_local() // includes the cloud metadata address
-        || ip.is_broadcast()
-        || ip.is_multicast()
-        || (o[0] == 100 && (64..128).contains(&o[1])) // CGNAT
-        || o[0] >= 240
-}
-
-/// Loopback is judged separately (allowed for explicit loopback hosts only).
+/// The one list of addresses an agent-driven connection must never reach (`synthesis_platform::net`).
 fn blocked(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v) => blocked_v4(v),
-        IpAddr::V6(v) => match v.to_ipv4_mapped() {
-            Some(m) => blocked_v4(m) || m.is_loopback(),
-            None => {
-                let s = v.segments();
-                v.is_unspecified()
-                    || v.is_multicast()
-                    || (s[0] & 0xfe00) == 0xfc00 // ULA
-                    || (s[0] & 0xffc0) == 0xfe80 // link-local
-            }
-        },
-    }
+    synthesis_platform::net::ip_blocked(ip)
 }
 
 fn is_loopback_host(host: &str) -> bool {

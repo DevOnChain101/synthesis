@@ -22,6 +22,7 @@ synthesis-browser = { path = "../synthesis-browser" }
 synthesis-config = { path = "../synthesis-config" }
 synthesis-context = { path = "../synthesis-context" }
 synthesis-core = { path = "../synthesis-core" }
+synthesis-egress = { path = "../synthesis-egress" }
 synthesis-events = { path = "../synthesis-events" }
 synthesis-harness = { path = "../synthesis-harness" }
 synthesis-hooks = { path = "../synthesis-hooks" }
@@ -39,6 +40,7 @@ synthesis-tools = { path = "../synthesis-tools" }
 synthesis-cli-ui = { path = "../synthesis-cli-ui" }
 synthesis-verification = { path = "../synthesis-verification" }
 synthesis-workspace = { path = "../synthesis-workspace" }
+tempfile = "3.27.0"
 rusqlite = { version = "0.41", features = ["bundled"] }
 globset = "0.4"
 synthesis-memory = { path = "../synthesis-memory" }
@@ -58,4 +60,3 @@ libc = "0.2"
 rustix = { version = "1", features = ["termios", "stdio", "fs"] }
 
 [dev-dependencies]
-tempfile = "3.27.0"

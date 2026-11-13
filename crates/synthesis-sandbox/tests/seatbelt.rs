@@ -487,3 +487,68 @@ fn standard_policy_blocks_planting_synthesis_settings_and_instruction_files() {
         "rules\n"
     );
 }
+
+/// `NetworkPolicy::Proxied`: the only reachable address is the egress proxy's loopback port, and
+/// the proxy lets through only the allowed literal. Runs the real proxy.
+#[test]
+fn proxied_reaches_the_allowed_literal_through_the_proxy_and_nothing_else() {
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+    use synthesis_egress::{Allowlist, Proxy, system_lookup};
+    use synthesis_sandbox::EgressEndpoint;
+
+    let server = || {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut s in l.incoming().flatten() {
+                let mut b = [0u8; 1024];
+                let _ = s.read(&mut b);
+                let _ = s.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+                );
+            }
+        });
+        port
+    };
+    let (allowed, other) = (server(), server());
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let allow = Allowlist::parse(&[format!("127.0.0.1:{allowed}")]).unwrap();
+    let proxy = rt
+        .block_on(async {
+            Proxy::new(allow, system_lookup(), Arc::new(|_| {}))
+                .serve_tcp()
+                .await
+        })
+        .unwrap();
+    let (port, token) = proxy.tcp.clone().unwrap();
+    let dir = tmp();
+    let mut p = pol(dir.path());
+    p.network = NetworkPolicy::Proxied(EgressEndpoint::Tcp { port, token });
+    let curl = |args: &[&str]| {
+        let mut a = vec!["-sS", "--max-time", "8"];
+        a.extend_from_slice(args);
+        run(&p, dir.path(), "/usr/bin/curl", &a)
+    };
+    // through the proxy: a tunnel (NO_PROXY would otherwise skip 127.0.0.1)
+    let o = curl(&[
+        "--noproxy",
+        "",
+        "-p",
+        &format!("http://127.0.0.1:{allowed}/"),
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(o.stdout, b"hello");
+    // another loopback port: denied by the proxy, and directly by the sandbox
+    let url = format!("http://127.0.0.1:{other}/");
+    assert!(!curl(&["--noproxy", "", "-p", &url]).status.success());
+    for direct in [url.as_str(), "http://1.1.1.1/"] {
+        assert!(
+            !curl(&["--noproxy", "*", direct]).status.success(),
+            "{direct} must be unreachable without the proxy"
+        );
+    }
+}

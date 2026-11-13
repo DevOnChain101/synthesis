@@ -946,3 +946,45 @@ fn synt_cli_and_synt_tui_are_separate_sections_of_the_user_file() {
     let (_, d) = UiSettings::from_section(&json!({"synt": {"cli": {"motion": 1}}}), CLI_SECTION);
     assert!(d[0].contains("synt.cli.motion"), "{d:?}");
 }
+
+#[test]
+fn network_allowed_hosts_is_user_or_managed_only_and_managed_wins() {
+    let f = fx();
+    f.user(json!({"synt":{"sandbox":{"network":{"allowedHosts":["a.test"]}}}}));
+    f.project(json!({"synt":{"sandbox":{"network":{"allowedHosts":["evil.test"]}}}}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(
+        s.synthesis.network_allowed_hosts,
+        Some(vec!["a.test".into()])
+    );
+    assert!(!s.synthesis.network_allowed_hosts_managed);
+    assert!(s.diagnostics.iter().any(|d| {
+        d.contains("project settings: synt.sandbox.network is read from user or managed")
+    }));
+    let f = fx();
+    f.project(json!({"synt":{"sandbox":{"network":{"allowedHosts":["evil.test"]}}}}));
+    assert_eq!(
+        f.load(ProjectTrust::Trusted)
+            .synthesis
+            .network_allowed_hosts,
+        None
+    );
+    let f = fx();
+    f.user(json!({"synt":{"sandbox":{"network":{"allowedHosts":["a.test"]}}}}));
+    write(
+        f.home.path(),
+        "managed.json",
+        json!({"synt":{"sandbox":{"network":{"allowedHosts":["corp.test"]}}}}),
+    );
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(
+        s.synthesis.network_allowed_hosts,
+        Some(vec!["corp.test".into()])
+    );
+    assert!(s.synthesis.network_allowed_hosts_managed);
+    let f = fx();
+    f.user(json!({"synt":{"sandbox":{"network":{"allowedHosts":"a.test"}}}}));
+    let s = f.load(ProjectTrust::Trusted);
+    assert_eq!(s.synthesis.network_allowed_hosts, None);
+    assert!(s.diagnostics.iter().any(|d| d.contains("list of strings")));
+}

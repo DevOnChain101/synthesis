@@ -7180,6 +7180,7 @@ dependencies = [
  "synthesis-config",
  "synthesis-context",
  "synthesis-core",
+ "synthesis-egress",
  "synthesis-events",
  "synthesis-harness",
  "synthesis-hooks",
@@ -7217,6 +7218,7 @@ dependencies = [
  "rustix",
  "serde_json",
  "synthesis-config",
+ "synthesis-platform",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
@@ -7400,6 +7402,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "synthesis-egress"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.3.4",
+ "httparse",
+ "synthesis-events",
+ "synthesis-platform",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "synthesis-events"
 version = "0.1.0"
 dependencies = [
@@ -7463,6 +7478,7 @@ dependencies = [
  "serde_json",
  "sha1 0.10.7",
  "synthesis-config",
+ "synthesis-platform",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
@@ -7544,8 +7560,10 @@ dependencies = [
  "seccompiler",
  "serde",
  "serde_json",
+ "synthesis-egress",
  "synthesis-platform",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -7627,6 +7645,7 @@ dependencies = [
  "synthesis-browser",
  "synthesis-config",
  "synthesis-core",
+ "synthesis-platform",
  "synthesis-sandbox",
  "synthesis-terminal",
  "synthesis-verification",

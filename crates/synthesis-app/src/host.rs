@@ -132,6 +132,8 @@ pub struct Live {
     pub notes: crate::memory::Notes,
     pub began: bool,
     pub tokio: Option<tokio::runtime::Runtime>,
+    /// Keeps the `--network hosts` proxy alive for the session.
+    _egress: Option<crate::egress::EgressRun>,
     pub asks: Asks,
     pub session: Arc<Mutex<Option<AgentSession>>>,
     pub history: Arc<Mutex<Vec<Message>>>,
@@ -178,6 +180,7 @@ impl Live {
             tokio,
             notes,
             cancel: root_cancel,
+            egress,
             ..
         } = p;
         let started = match resumed_from_seq {
@@ -236,6 +239,7 @@ impl Live {
             notes: notes.clone(),
             began: started.is_ok(),
             tokio: Some(tokio),
+            _egress: egress,
             asks,
             session: Arc::new(Mutex::new(Some(session))),
             history: Arc::new(Mutex::new(history)),
