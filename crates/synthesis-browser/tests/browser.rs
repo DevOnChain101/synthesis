@@ -1302,3 +1302,315 @@ async fn two_tabs_body() {
     );
     rt.close().await.unwrap();
 }
+
+/// Records every request path a `counting_server` answers, so a test can tell WHICH request arrived.
+fn paths_of(
+    store: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    page: impl Fn(&str) -> (&'static str, String) + Send + Sync + 'static,
+) -> impl Fn(&str) -> (&'static str, String) + Send + Sync + 'static {
+    let store = store.clone();
+    move |p| {
+        store.lock().unwrap().push(p.to_owned());
+        page(p)
+    }
+}
+
+fn seen(store: &std::sync::Mutex<Vec<String>>, prefix: &str) -> usize {
+    store
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| p.starts_with(prefix))
+        .count()
+}
+
+/// Child targets (cross-site iframe = OOPIF, popup) need their own `responseReceived` rebinding check:
+/// the page's session does not see their traffic. The resolver is lied to (public answer) while Chrome
+/// maps `evil.test` to loopback; each child page schedules a beacon to the main server 800 ms after it
+/// loads, which only fires if the page was NOT replaced by about:blank. The `localhost` frame is the
+/// control (allowed loopback port, so no stop): its beacon must arrive.
+#[tokio::test(flavor = "multi_thread")]
+async fn rebinding_to_private_ip_is_stopped_in_child_targets() {
+    traced(
+        "rebinding_to_private_ip_is_stopped_in_child_targets",
+        rebinding_in_child_targets_body(),
+    )
+    .await;
+}
+
+async fn rebinding_in_child_targets_body() {
+    let Some(env) = browser_env() else { return };
+    let beacons = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (beacon_port, _) =
+        counting_server(paths_of(&beacons, |_| ("text/plain", "ok".into()))).await;
+    let (child_port, child_hits) = counting_server(move |p| {
+        let tag = p.trim_start_matches('/');
+        (
+            "text/html",
+            format!(
+                "<title>SECRETBODY</title><body>SECRETBODY<script>setTimeout(()=>fetch('http://127.0.0.1:{beacon_port}/beacon-{tag}'),800)</script>"
+            ),
+        )
+    })
+    .await;
+    let (main_port, _) = counting_server(move |_| {
+        (
+            "text/html",
+            format!(
+                "<title>Main</title><body><button onclick=\"window.open('http://evil.test:{child_port}/popup')\">Pop</button>
+<iframe src=\"http://evil.test:{child_port}/evil-frame\"></iframe>
+<script>/* the control comes late: stopping a page stops the whole tab's loads */
+setTimeout(()=>{{const f=document.createElement('iframe');f.src='http://localhost:{child_port}/ctl-frame';document.body.appendChild(f)}},2500)</script></body>"
+            ),
+        )
+    })
+    .await;
+    let art = tempfile::tempdir().unwrap();
+    let mut o = local_opts(art.path());
+    // The lying resolver answers a public address for every name; loopback is reachable only on the
+    // control server's port and the main page's, and only under a loopback host name.
+    o.policy = UrlPolicy {
+        loopback_ports: vec![main_port, child_port, beacon_port],
+        resolver: synthesis_browser::Resolver::new(|_| Ok(vec!["93.184.216.34".parse().unwrap()])),
+        ..Default::default()
+    };
+    o.chrome_args = vec!["--host-resolver-rules=MAP evil.test 127.0.0.1".into()];
+    let rt = launch(o, &env).await;
+    rt.navigate(&format!("http://127.0.0.1:{main_port}/"), WaitUntil::Load)
+        .await
+        .unwrap();
+    let tree = rt.snapshot(50).await.unwrap().tree;
+    rt.click(&ref_of(tree.expose(), "button \"Pop\""))
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if hits(&child_hits) >= 3 && seen(&beacons, "/beacon-ctl-frame") >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // absence checks: the stopped pages' timers (800 ms) would have fired by now
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        hits(&child_hits) >= 3,
+        "control frame, evil frame and popup were all fetched (blind GET)"
+    );
+    assert!(
+        seen(&beacons, "/beacon-ctl-frame") >= 1,
+        "control: an allowed child page keeps running: {:?}",
+        beacons.lock().unwrap()
+    );
+    assert_eq!(
+        seen(&beacons, "/beacon-evil-frame"),
+        0,
+        "rebinding iframe kept running"
+    );
+    assert_eq!(
+        seen(&beacons, "/beacon-popup"),
+        0,
+        "rebinding popup kept running"
+    );
+    for t in rt.tabs().await.unwrap() {
+        assert!(
+            !t.page.title.expose().contains("SECRETBODY"),
+            "popup shows the rebound page: {:?}",
+            t.page.title.expose()
+        );
+    }
+    rt.close().await.unwrap();
+}
+
+/// Every route to a WebSocket / WebTransport / upgrade handshake that this suite knows. `Fetch` and
+/// `Network.setBlockedURLs` do not see handshakes (see `NO_SOCKETS`), so the guard is the constructor
+/// replacement in every document, plus: workers cannot be given the Fetch hooks and are closed unresumed,
+/// so they never run. Control: the same page's main thread fetches `/ran-main` (allowed) and it arrives,
+/// the worker/service-worker/shared-worker versions of the same fetch must not. See docs/SECURITY.md.
+#[tokio::test(flavor = "multi_thread")]
+async fn socket_bypass_matrix_and_closed_workers_run_no_code() {
+    traced(
+        "socket_bypass_matrix_and_closed_workers_run_no_code",
+        socket_bypass_matrix_body(),
+    )
+    .await;
+}
+
+async fn socket_bypass_matrix_body() {
+    let Some(env) = browser_env() else { return };
+    // "path upgrade=<bool>" of the first bytes of every connection to the socket server
+    let ws_seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let ws = bind_loopback().await;
+    let ws_port = ws.local_addr().unwrap().port();
+    let w = ws_seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = ws.accept().await {
+            let w = w.clone();
+            tokio::spawn(async move {
+                let mut b = [0u8; 2048];
+                let n = s.read(&mut b).await.unwrap_or(0);
+                if n > 0 {
+                    let t = String::from_utf8_lossy(&b[..n]).to_lowercase();
+                    let path = t.split(' ').nth(1).unwrap_or("?").to_owned();
+                    let up = t.contains("upgrade: websocket");
+                    w.lock().unwrap().push(format!("{path} upgrade={up}"));
+                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n").await;
+                }
+            });
+        }
+    });
+    // WebTransport over QUIC is UDP: a datagram on the same port number is a connection attempt
+    let udp_seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    if let Ok(u) = tokio::net::UdpSocket::bind(("127.0.0.1", ws_port)).await {
+        let n = udp_seen.clone();
+        tokio::spawn(async move {
+            let mut b = [0u8; 2048];
+            while u.recv_from(&mut b).await.is_ok() {
+                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+    }
+    // KNOWN GAP: the first inline script of a sandboxed srcdoc iframe (attached unpaused) can start a WebTransport
+    // connection; the constructor override is late and CSP connect-src allows https:. A separate port keeps it
+    // out of the assertions above.
+    let gap_seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let gap_udp = tokio::net::UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+    let gap_port = gap_udp.local_addr().unwrap().port();
+    {
+        let n = gap_seen.clone();
+        tokio::spawn(async move {
+            let mut b = [0u8; 2048];
+            while gap_udp.recv_from(&mut b).await.is_ok() {
+                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+    }
+    let ran = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sock =
+        |tag: &str| format!("try{{new WebSocket('ws://127.0.0.1:{ws_port}/{tag}')}}catch(e){{}}");
+    let worker_js = format!("fetch('/ran-worker');{}", sock("worker"));
+    let shared_js = format!("fetch('/ran-shared');{}", sock("shared"));
+    let sw_js = format!("fetch('/ran-sw');{}", sock("sw"));
+    // an XML document: the meta CSP is a no-op there, so only the constructor override covers it
+    let svg_doc = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg'><script>{}</script></svg>",
+        sock("svg")
+    );
+    let sandboxed_html = format!("<script>{}</script>", sock("sandboxed-src"));
+    let sandboxed_js = format!(
+        "{}try{{new WebTransport('https://127.0.0.1:{gap_port}/wt-sandboxed')}}catch(e){{}}",
+        sock("srcdoc-sandboxed")
+    );
+    let page = format!(
+        r#"<title>Main</title><body>
+<button onclick="const w=open('about:blank');try{{new w.WebSocket('ws://127.0.0.1:{ws_port}/popup-blank')}}catch(e){{}}">Blank</button>
+<script>
+fetch('/ran-main');
+document.addEventListener('securitypolicyviolation',e=>fetch('/csp-'+e.violatedDirective+'-'+encodeURIComponent(e.blockedURI)));
+fetch('ftp://127.0.0.1:1/x').catch(()=>{{}});
+new Worker('/worker.js');
+try{{new SharedWorker('/shared.js')}}catch(e){{}}
+try{{navigator.serviceWorker.register('/sw.js')}}catch(e){{}}
+const s=document.createElement('iframe');s.srcdoc="<script>{srcdoc}<\/script>";document.body.appendChild(s);
+const sb=document.createElement('iframe');sb.setAttribute('sandbox','allow-scripts');sb.srcdoc="<script>{sandboxed}<\/script>";document.body.appendChild(sb);
+const svg=document.createElement('iframe');svg.src='/s.svg';document.body.appendChild(svg);
+const sbs=document.createElement('iframe');sbs.setAttribute('sandbox','allow-scripts');sbs.src='/sandboxed.html';document.body.appendChild(sbs);
+const f=document.createElement('iframe');document.body.appendChild(f);
+try{{new f.contentWindow.WebSocket('ws://127.0.0.1:{ws_port}/blank-iframe')}}catch(e){{}}
+try{{new WebTransport('https://127.0.0.1:{ws_port}/wt')}}catch(e){{fetch('/wt-'+e.name)}}
+fetch('http://127.0.0.1:{ws_port}/fetch-upgrade',{{headers:{{Upgrade:'websocket',Connection:'Upgrade','Sec-WebSocket-Version':'13','Sec-WebSocket-Key':'AAAAAAAAAAAAAAAAAAAAAA=='}}}}).then(()=>fetch('/fu-ok'),e=>fetch('/fu-err-'+e));
+</script></body>"#,
+        srcdoc = sock("srcdoc"),
+        sandboxed = sandboxed_js,
+    );
+    let (main_port, _) = counting_server(paths_of(&ran, move |p| match p {
+        "/worker.js" => ("text/javascript", worker_js.clone()),
+        "/shared.js" => ("text/javascript", shared_js.clone()),
+        "/sw.js" => ("text/javascript", sw_js.clone()),
+        "/s.svg" => ("image/svg+xml", svg_doc.clone()),
+        "/sandboxed.html" => ("text/html", sandboxed_html.clone()),
+        _ => ("text/html", page.clone()),
+    }))
+    .await;
+    let art = tempfile::tempdir().unwrap();
+    let rt = launch(local_opts(art.path()), &env).await;
+    rt.navigate(&format!("http://127.0.0.1:{main_port}/"), WaitUntil::Load)
+        .await
+        .unwrap();
+    let tree = rt.snapshot(50).await.unwrap().tree;
+    rt.click(&ref_of(tree.expose(), "button \"Blank\""))
+        .await
+        .unwrap();
+    for _ in 0..50 {
+        if seen(&ran, "/ran-main") >= 1 && seen(&ran, "/wt-") >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(2000)).await; // absence checks
+    eprintln!(
+        "MATRIX sockets={:?} requests={:?}",
+        ws_seen.lock().unwrap(),
+        ran.lock().unwrap()
+    );
+    assert!(
+        seen(&ran, "/ran-main") >= 1,
+        "control: the main thread's allowed fetch arrives"
+    );
+    assert!(
+        seen(&ran, "/worker.js") >= 1,
+        "control: the dedicated worker was created"
+    );
+    // dedicated workers: Fetch.enable fails on them, so they are closed unresumed and never run
+    // (a service worker never even gets to fetch its script here)
+    for p in ["/ran-worker", "/ran-sw"] {
+        assert_eq!(
+            seen(&ran, p),
+            0,
+            "{p}: a worker ran user code (it must be closed unresumed)"
+        );
+    }
+    // a shared worker takes the hooks and runs: its allowed fetch arrives, its WebSocket does not
+    assert!(
+        seen(&ran, "/ran-shared") >= 1,
+        "shared worker runs under the policy hooks"
+    );
+    assert!(
+        seen(&ran, "/wt-SecurityError") >= 1,
+        "WebTransport constructor is replaced"
+    );
+    assert_eq!(
+        ws_seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| !l.starts_with("/fetch-upgrade"))
+            .count(),
+        0,
+        "a WebSocket handshake reached the server: {:?}",
+        ws_seen.lock().unwrap()
+    );
+    assert_eq!(
+        hits(&udp_seen),
+        0,
+        "a QUIC datagram (WebTransport) reached the server"
+    );
+    eprintln!(
+        "KNOWN_GAP sandboxed-srcdoc-webtransport: {}",
+        if hits(&gap_seen) > 0 {
+            "still open (QUIC datagrams sent)"
+        } else {
+            "CLOSED, update docs/SECURITY.md"
+        }
+    );
+    // fetch cannot upgrade: Chrome drops the forbidden `Upgrade` header, the request is plain HTTP
+    assert!(
+        ws_seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.starts_with("/fetch-upgrade"))
+            .all(|l| l.ends_with("upgrade=false")),
+        "{:?}",
+        ws_seen.lock().unwrap()
+    );
+    rt.close().await.unwrap();
+}

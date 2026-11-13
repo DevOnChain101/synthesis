@@ -29,6 +29,9 @@ Pre-turn worst-case cost estimate (`budget_exceeded:max_cost_usd_estimate`); jud
 ## Governance of unattended runs (branch feat/harness-governance)
 Cost accounting prices cache tokens and compaction calls, `--max-tokens`, built-in prices for first-party models; `synt run`/`engine --stdio` default to a 30 min wall cap, a required cost cap, a worktree, inferred-only = unverified; `--unattended` preset; fatal session-store failure when unattended; resume of worktree sessions; `synt stop`; hash-chained events with `synt sessions verify`/`show`; full verification report stored; provider `fallback`. Details, limits and NOT_FIXED items: docs/UNATTENDED.md. Verified on macOS only; Windows/Linux CI not run for this branch.
 
+## Browser child targets and red-team suite (branch feat/browser-redteam, 2026-11-13)
+Browser: the DNS-rebinding check (`Network.responseReceived`) now covers child targets (popups, iframes) with `Network.enable` on every auto-attached session, kept out of the network log; workers are proven closed unresumed; a socket bypass matrix is tested and the former sandboxed-srcdoc WebSocket leak is closed by an injected connect-src CSP (docs/SECURITY.md). `tests/redteam` (CI job `redteam`) and `evals-nightly.yml` (real model, skipped without `SYNT_API_KEY`) added; known gaps are listed in docs/SECURITY.md. Verified on macOS only; Linux and Windows results of the new job are unknown until CI runs.
+
 ## Decisions on record
 Product rename to Synthesis (owner, 2026-10-30; see CHANGELOG): command `synt`, crates `synthesis-*`, env `SYNT_*`, home `~/.synt`; the old names are detected by `synt doctor` and never read (docs/MIGRATION.md). Not verified yet after the rename: Linux and Windows CI (run it on the next push); GitHub repository variables must be recreated under the new names (docs/RELEASE.md).
 
