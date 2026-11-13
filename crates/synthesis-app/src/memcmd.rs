@@ -600,7 +600,7 @@ pub fn run_cmd(env: &Env, cmd: MemoryCmd) -> Result<u8, String> {
                 .enable_all()
                 .build()
                 .map_err(|x| x.to_string())?;
-            let (done, failed) = rt.block_on(reflect_jobs(&store, &rf, limit));
+            let (done, failed, _) = rt.block_on(reflect_jobs(&store, &rf, limit));
             out!("reflection: {done} done, {failed} failed");
         }
         MemoryCmd::Proposals => {
@@ -1602,8 +1602,8 @@ const REFLECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Drains up to `max` queued jobs, one capped model call each (60 s, daily call cap). A failure
 /// puts the job back; nothing here can change a task result. Returns (done, failed).
-pub async fn reflect_jobs(store: &Mutex<Store>, r: &Reflector, max: usize) -> (usize, usize) {
-    let (mut done, mut failed) = (0, 0);
+pub async fn reflect_jobs(store: &Mutex<Store>, r: &Reflector, max: usize) -> (usize, usize, f64) {
+    let (mut done, mut failed, mut spent) = (0, 0, 0.0);
     for _ in 0..max {
         let now = synthesis_memory::OffsetDateTime::now_utc();
         let job = {
@@ -1647,10 +1647,27 @@ pub async fn reflect_jobs(store: &Mutex<Store>, r: &Reflector, max: usize) -> (u
                         usage.output_tokens.unwrap_or(0),
                     )
                 };
-                let tokens = inp + out;
+                let tokens = inp
+                    + out
+                    + if estimated {
+                        0
+                    } else {
+                        usage.cache_read_input_tokens.unwrap_or(0)
+                            + usage.cache_creation_input_tokens.unwrap_or(0)
+                    };
+                // priced like a turn: cache tokens and the long-context tier included
                 let cost = r.pricing.map(|p| {
-                    (inp as f64 * p.input_per_mtok + out as f64 * p.output_per_mtok) / 1e6
+                    p.cost(&if estimated {
+                        synthesis_providers::Usage {
+                            input_tokens: Some(inp),
+                            output_tokens: Some(out),
+                            ..Default::default()
+                        }
+                    } else {
+                        usage
+                    })
                 });
+                spent += cost.unwrap_or(0.0);
                 if let Err(e) = s.record_job_usage(&job.id, tokens, cost) {
                     warn(e);
                 }
@@ -1690,7 +1707,7 @@ pub async fn reflect_jobs(store: &Mutex<Store>, r: &Reflector, max: usize) -> (u
             }
         }
     }
-    (done, failed)
+    (done, failed, spent)
 }
 
 async fn reflect_one(

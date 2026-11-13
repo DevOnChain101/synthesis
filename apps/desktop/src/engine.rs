@@ -473,6 +473,16 @@ impl Engine {
                 Arc::new(move || v.verify().map_err(|files| trust_changed_error(&files)))
                     as synthesis_app::run::PreStart
             }),
+            // `synt stop` on this in-process session: cancel it without exiting the app, and say so
+            on_stop: Some({
+                let tx = tx.clone();
+                Arc::new(move || {
+                    let _ = tx.unbounded_send(UiMsg::Note(
+                        "stopped by `synt stop`: the session is cancelled".into(),
+                        true,
+                    ));
+                })
+            }),
         };
         let t_prepare = crate::trace::span(
             env,

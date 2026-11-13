@@ -222,15 +222,22 @@ fn map_finish(r: &str) -> StopReason {
     }
 }
 
+/// `prompt_tokens` includes the cached ones; `input_tokens` here excludes them (Anthropic's
+/// accounting) so a cached token is priced once, at the cache-read price.
 fn map_usage(u: &OaUsage) -> Usage {
+    let cached = u
+        .prompt_tokens_details
+        .as_ref()
+        .and_then(|d| d.cached_tokens)
+        .filter(|c| *c > 0);
     Usage {
-        input_tokens: Some(u.prompt_tokens.unwrap_or(0)),
+        input_tokens: Some(
+            u.prompt_tokens
+                .unwrap_or(0)
+                .saturating_sub(cached.unwrap_or(0)),
+        ),
         output_tokens: Some(u.completion_tokens.unwrap_or(0)),
-        cache_read_input_tokens: u
-            .prompt_tokens_details
-            .as_ref()
-            .and_then(|d| d.cached_tokens)
-            .filter(|c| *c > 0),
+        cache_read_input_tokens: cached,
         cache_creation_input_tokens: None,
     }
 }

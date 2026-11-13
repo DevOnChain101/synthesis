@@ -205,7 +205,8 @@ async fn budget_tokens_and_cost() {
             input_per_mtok: 1000.0,
             output_per_mtok: 1000.0,
             ..Pricing::default()
-        })
+        });
+        c.max_output_tokens = 100; // keeps the pre-turn worst case under the $1 cap
     };
     let turns: Vec<Turn> = many_tool_turns(4)
         .into_iter()
@@ -220,6 +221,75 @@ async fn budget_tokens_and_cost() {
         reason_of(&out)
     );
     assert_eq!(out.usage.cost_usd, Some(2.0));
+}
+
+/// The cap is also checked BEFORE a call: a request whose worst case (prompt + all of `max_tokens`
+/// at the output price) would cross it is never sent.
+#[tokio::test]
+async fn pre_turn_estimate_refuses_a_call_that_could_cross_the_cost_cap() {
+    let p = Probe::new("Probe", SideEffectClass::Read, 0, "r");
+    let mut o = probe_opts(&p);
+    o.budget = Budget {
+        max_cost_usd: Some(1.0),
+        ..Budget::default()
+    };
+    // 8192 output tokens at $1000/M = $8.2 > $1
+    o.config = |c| {
+        c.pricing = Some(Pricing {
+            input_per_mtok: 1000.0,
+            output_per_mtok: 1000.0,
+            ..Pricing::default()
+        })
+    };
+    let mut rig = Rig::new(o, many_tool_turns(2));
+    let out = rig.run("x").await;
+    assert_eq!(
+        out.reason,
+        "budget_exceeded:max_cost_usd_estimate",
+        "{}",
+        reason_of(&out)
+    );
+    assert_eq!(rig.requests().len(), 0, "no request may be sent");
+    assert_ne!(out.status, synthesis_events::TaskStatus::Completed);
+    let hits = rig.find(|e| match e {
+        synthesis_events::Event::BudgetExceeded {
+            budget,
+            limit,
+            used,
+        } => Some((budget.clone(), *limit, *used)),
+        _ => None,
+    });
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].0, "max_cost_usd_estimate");
+    assert!(hits[0].2 > hits[0].1);
+}
+
+#[test]
+fn long_context_tier_prices_the_whole_request_dearer() {
+    use synthesis_harness::LongTier;
+    let p = Pricing {
+        input_per_mtok: 3.0,
+        output_per_mtok: 15.0,
+        cache_read_per_mtok: Some(0.3),
+        cache_write_per_mtok: Some(3.75),
+        long: Some(LongTier {
+            above_tokens: 200_000,
+            input_mult: 2.0,
+            output_mult: 1.5,
+        }),
+    };
+    let u = |input, read| synthesis_providers::Usage {
+        input_tokens: Some(input),
+        output_tokens: Some(1_000_000),
+        cache_read_input_tokens: Some(read),
+        cache_creation_input_tokens: None,
+    };
+    // 100k + 100k = 200k is not above the threshold
+    assert!((p.cost(&u(100_000, 100_000)) - (0.3 + 0.03 + 15.0)).abs() < 1e-9);
+    // above it (cache tokens count towards the prompt): input side x2, output x1.5
+    assert!((p.cost(&u(100_001, 100_000)) - ((0.300_003 + 0.03) * 2.0 + 22.5)).abs() < 1e-6);
+    // the worst case uses the dearer cache-write price and the tier
+    assert!((p.worst_case(1_000_000, 0) - 7.5).abs() < 1e-9);
 }
 
 #[tokio::test]
@@ -255,6 +325,7 @@ async fn cache_tokens_are_priced() {
             output_per_mtok: 20.0,
             cache_read_per_mtok: Some(1.0),
             cache_write_per_mtok: None, // 125% of input = 12.5
+            long: None,
         })
     };
     let mut rig = Rig::new(

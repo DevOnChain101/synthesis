@@ -57,9 +57,18 @@ pub fn stop_cmd(env: &Env, a: StopArgs) -> Result<u8, String> {
         return Ok(1);
     }
     store.request_stop(&a.session).map_err(|e| e.to_string())?;
-    out!(
-        "stop requested for {shown}; the running process cancels within a second and is killed after {STOP_GRACE_SECS}s if it does not end"
-    );
+    // the holder says how it stops (`stop-mode`): a process that exits, or a session inside an app
+    let in_process = std::fs::read_to_string(mode_file(&h.synthesis, &a.session))
+        .is_ok_and(|m| m.trim() == IN_PROCESS);
+    if in_process {
+        out!(
+            "stop requested for {shown} (mechanism: in-process; the app that holds this session stays open): the session is cancelled within a second and its commands are killed after {STOP_GRACE_SECS}s if the task does not end"
+        );
+    } else {
+        out!(
+            "stop requested for {shown} (mechanism: process exit): the running process cancels within a second and is killed after {STOP_GRACE_SECS}s if it does not end"
+        );
+    }
     Ok(0)
 }
 
@@ -214,6 +223,23 @@ pub fn hard_stop(
     })
 }
 
+/// What the stop watcher does after the grace period.
+pub enum StopAction {
+    /// `synt run`, the CLI, an engine process: cancel, kill the commands, exit 130.
+    ExitProcess,
+    /// A session inside an app (the desktop window): exiting would close the whole app. Cancels
+    /// the session, kills its commands after the grace period, marks it stopped and returns; the
+    /// callback tells the host (it runs right after the cancel).
+    InProcess(Option<Arc<dyn Fn() + Send + Sync>>),
+}
+
+const IN_PROCESS: &str = "in-process";
+
+/// `sessions/<id>/stop-mode`: written by the watcher, read by `synt stop` to say what acts.
+fn mode_file(home: &std::path::Path, sid: &str) -> PathBuf {
+    home.join("sessions").join(sid).join("stop-mode")
+}
+
 /// Consecutive unreadable polls after which the session is stopped anyway: a stop that cannot be
 /// read must not be treated as "not asked".
 const STOP_POLL_FAILURES: u32 = 5;
@@ -227,7 +253,16 @@ pub fn watch_stop(
     since: String,
     cancel: Arc<dyn Fn() + Send + Sync>,
     hard: Arc<dyn Fn() + Send + Sync>,
+    action: StopAction,
+    grace: Duration,
 ) {
+    let mode = if matches!(action, StopAction::InProcess(_)) {
+        IN_PROCESS
+    } else {
+        "process"
+    };
+    // best effort: without it `synt stop` describes the process mechanism
+    let _ = std::fs::write(mode_file(&home, &sid), mode);
     tokio::spawn(async move {
         let mut failures = 0u32;
         loop {
@@ -257,9 +292,81 @@ pub fn watch_stop(
             }
         }
         cancel();
-        tokio::time::sleep(Duration::from_secs(STOP_GRACE_SECS)).await;
+        if let StopAction::InProcess(Some(on_stop)) = &action {
+            on_stop();
+        }
+        tokio::time::sleep(grace).await;
         eprintln!("synt: did not end in time; killing");
         hard();
-        std::process::exit(130);
+        if matches!(action, StopAction::ExitProcess) {
+            // `exit` runs no destructors: give the interactive CLI its terminal back (last, so
+            // nothing redraws after it)
+            synthesis_cli_ui::restore_terminal();
+            std::process::exit(130);
+        }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    use synthesis_core::{PermissionMode, WorkspaceContext};
+    use synthesis_events::Budget;
+    use synthesis_session::NewSession;
+
+    /// A session held by this process, like the desktop's in-process local session.
+    #[tokio::test]
+    async fn in_process_stop_cancels_marks_and_does_not_exit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(tmp.path()).unwrap();
+        let (home, dir) = (base.join("home"), base.join("proj"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ws = WorkspaceContext::open("w1", &dir, &dir, &[], dir.join(".art"), "s1").unwrap();
+        let store = Store::open(&home, StoreOptions::default()).unwrap();
+        let _held = store
+            .create_session(NewSession {
+                id: Some("s1".into()),
+                workspace: &ws,
+                model_config_id: "a/m".into(),
+                permission_mode: PermissionMode::AcceptEdits,
+                permission_policy_id: "default".into(),
+                budget: Budget::default(),
+                parent: None,
+                title: None,
+            })
+            .unwrap();
+        let flag = |b: &Arc<AtomicBool>| {
+            let b = b.clone();
+            Arc::new(move || b.store(true, SeqCst)) as Arc<dyn Fn() + Send + Sync>
+        };
+        let (cancelled, told, killed) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        watch_stop(
+            home.clone(),
+            "s1".into(),
+            synthesis_session::timestamp(),
+            flag(&cancelled),
+            flag(&killed),
+            StopAction::InProcess(Some(flag(&told))),
+            Duration::from_millis(50),
+        );
+        assert_eq!(
+            std::fs::read_to_string(mode_file(&home, "s1")).unwrap(),
+            IN_PROCESS
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(store.request_stop("s1").unwrap());
+        for _ in 0..40 {
+            if killed.load(SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // reaching this line at all shows the process was not exited
+        assert!(cancelled.load(SeqCst) && told.load(SeqCst) && killed.load(SeqCst));
+    }
 }

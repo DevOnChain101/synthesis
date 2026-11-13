@@ -8,7 +8,7 @@ scenario: {"argv": [...], "env": {...}, "steps": [["send", "bytes"] | ["wait", s
 screen output (escape sequences removed); out.txt.raw gets the raw bytes between the last `mark` and `cut`
 (start / end without them); out.txt.span is the same span as text and the exit state, the last line is `STATE ok|failed <exit>`.
 """
-import pty,os,sys,time,select,re,json,struct,fcntl,termios,signal,sqlite3
+import pty,os,sys,time,select,re,json,struct,fcntl,termios,signal,sqlite3,subprocess
 sc=json.load(open(sys.argv[1]))
 env={"PATH":os.environ["PATH"],"TERM":"xterm-256color","COLORTERM":"truecolor"}
 env.update(sc["env"])
@@ -41,6 +41,7 @@ def hang(*_):
     os._exit(1)
 signal.signal(signal.SIGALRM,hang); signal.alarm(sc.get("deadline",120))
 ok=True
+extra=""
 killed=False
 sent_at=0
 raw_from=0
@@ -66,6 +67,26 @@ for st in sc["steps"]:
             except ChildProcessError: break
         else:
             print("kill: child not reaped in 10 s")
+    elif st[0]=="stop":
+        # `synt stop <the session>` from another process, then wait (st[1] s) for the app to die and
+        # read the terminal's mode: a hard kill must leave it cooked (ICANON and ECHO on)
+        c=sqlite3.connect(os.path.join(sc["env"]["SYNT_HOME"],"synt.db"),timeout=1)
+        sid=c.execute("SELECT id FROM sessions LIMIT 1").fetchone()[0]; c.close()
+        r=subprocess.run([sc["argv"][0],"stop",sid],env=env,capture_output=True,timeout=30)
+        out_stop=r.stdout.decode("utf8","replace")
+        end=time.time()+st[1]; reaped=None
+        while time.time()<end and reaped is None:
+            rd(0.1)
+            try:
+                p0,stt0=os.waitpid(pid,os.WNOHANG)
+                if p0==pid: reaped=stt0
+            except ChildProcessError: reaped=-1
+        try:
+            lf=termios.tcgetattr(fd)[3]
+            mode="cooked" if lf&termios.ICANON and lf&termios.ECHO else "raw"
+        except termios.error as e: mode="unknown "+str(e)
+        extra="\nSTOP "+out_stop.strip()+"\nEXIT "+str(reaped)+"\nTERMIOS "+mode
+        killed=True
     elif st[0]=="quiet":
         # no output for st[1] seconds; capped, because a spinner never goes quiet
         end=time.time()+20
@@ -106,4 +127,4 @@ if p==0:
         os.kill(pid,9); stt="killed"
 open(sys.argv[2]+".span","w").write(text(buf[raw_from:raw_to]))
 open(sys.argv[2]+".raw","wb").write(buf[raw_from:raw_to])
-open(sys.argv[2],"w").write(text()+"\nSTATE "+("ok" if ok else "failed")+" "+str(stt)+"\n")
+open(sys.argv[2],"w").write(text()+extra+"\nSTATE "+("ok" if ok else "failed")+" "+str(stt)+"\n")

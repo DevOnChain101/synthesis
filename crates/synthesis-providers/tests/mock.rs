@@ -374,7 +374,8 @@ async fn openai_tool_deltas_usage_and_bearer() {
         }
     );
     assert_eq!(m.usage.cache_read_input_tokens, Some(5));
-    assert_eq!(m.usage.input_tokens, Some(9));
+    // prompt_tokens 9 includes 5 cached: input excludes them
+    assert_eq!(m.usage.input_tokens, Some(4));
     let raw = mock.req(0).to_lowercase();
     assert!(
         raw.starts_with("post /chat/completions ")

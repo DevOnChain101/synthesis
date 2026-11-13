@@ -4,7 +4,6 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use synthesis_config::Protocol;
 use synthesis_context::{CharsPerToken, fixed_tokens, messages_tokens};
 use synthesis_events::{Event, ToolStatus};
 use synthesis_hooks::HookEvent;
@@ -24,13 +23,11 @@ const GAIN_PAUSE_REQUESTS: u64 = 5;
 
 /// Input size of a request as the provider counts it. Anthropic reports cached input apart from
 /// `input_tokens`; OpenAI includes it.
-fn provider_used(p: Protocol, u: &synthesis_providers::Usage) -> Option<u64> {
-    let input = u.input_tokens.filter(|n| *n > 0)?;
-    Some(if p == Protocol::Anthropic {
-        input + u.cache_read_input_tokens.unwrap_or(0) + u.cache_creation_input_tokens.unwrap_or(0)
-    } else {
-        input
-    })
+/// Providers report `input_tokens` without the cache tokens (the OpenAI adapter subtracts them).
+fn provider_used(u: &synthesis_providers::Usage) -> Option<u64> {
+    let n = |t: Option<u64>| t.unwrap_or(0);
+    let all = n(u.input_tokens) + n(u.cache_read_input_tokens) + n(u.cache_creation_input_tokens);
+    (all > 0).then_some(all)
 }
 
 pub(crate) enum StreamFail {
@@ -129,6 +126,27 @@ impl Harness {
         })
     }
 
+    /// Pre-turn cost check: refuses a call whose worst case (the estimated prompt plus all
+    /// `max_tokens` of output, at the dearer prices) would take the spend past the cost cap.
+    /// Conservative: it may stop a task that the real, cheaper response would have fitted.
+    fn estimate_stop(
+        &self,
+        task: &TaskRun,
+        agent: &AgentCtx,
+        req: &Request,
+        prompt_tokens: u64,
+    ) -> Option<&'static str> {
+        let cap = task.budget.max_cost_usd?;
+        let worst = self
+            .price_of(agent)?
+            .worst_case(prompt_tokens, u64::from(req.max_tokens));
+        let spent = lock(&task.counters).cost;
+        (spent + worst > cap).then(|| {
+            self.mark_budget(task, agent, "max_cost_usd_estimate", cap, spent + worst);
+            "max_cost_usd_estimate"
+        })
+    }
+
     /// Records the first exceeded budget and emits `budget.exceeded` once.
     pub(crate) fn mark_budget(
         &self,
@@ -224,13 +242,20 @@ impl Harness {
     }
 
     /// Adds usage of a call that is not a turn (compaction summary) to the task counters.
-    pub(crate) fn charge_usage(&self, task: &TaskRun, u: &synthesis_providers::Usage) {
+    /// Priced as `model` (its row of `pricing_for`, else the run's price).
+    pub(crate) fn charge_usage(&self, task: &TaskRun, model: &str, u: &synthesis_providers::Usage) {
+        let price = self
+            .config
+            .pricing_for
+            .as_ref()
+            .and_then(|f| f(model))
+            .or(self.config.pricing);
         let mut c = lock(&task.counters);
         c.input += u.input_tokens.unwrap_or(0);
         c.output += u.output_tokens.unwrap_or(0);
         c.cache_read += u.cache_read_input_tokens.unwrap_or(0);
         c.cache_create += u.cache_creation_input_tokens.unwrap_or(0);
-        c.cost += self.config.pricing.map_or(0.0, |p| p.cost(u));
+        c.cost += price.map_or(0.0, |p| p.cost(u));
     }
 
     /// Adds the response usage to the task counters; returns the event form.
@@ -453,7 +478,7 @@ impl Harness {
         raw: u64,
         u: &synthesis_providers::Usage,
     ) {
-        match provider_used(self.provider.protocol(), u) {
+        match provider_used(u) {
             Some(used) => {
                 st.meter.observe(raw, used);
                 self.emit_usage(task, agent, used, "provider", false);
@@ -526,7 +551,7 @@ impl Harness {
             r = self.context.compact(&st.messages, instr.trim()) => r,
         };
         if let Some(u) = self.context.take_usage() {
-            self.charge_usage(task, &u);
+            self.charge_usage(task, &self.config.model, &u);
         }
         let c = match result {
             Ok(c) => c,
@@ -659,6 +684,9 @@ impl Harness {
                 };
             }
             let raw = st.fixed_raw + self.messages_raw(st);
+            if let Some(kind) = self.estimate_stop(task, agent, &req, st.meter.estimate(raw)) {
+                return AgentEnd::Budget(kind);
+            }
             let turn = uuid();
             iteration += 1;
             let t0 = std::time::Instant::now();

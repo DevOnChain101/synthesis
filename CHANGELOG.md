@@ -4,6 +4,9 @@ Format: Keep a Changelog. Versioning: SemVer (pre-1.0: minor versions may break)
 
 ## [Unreleased]
 
+### Changed (governance leftovers)
+- The cost cap is also checked before each model call against a conservative worst case (`budget_exceeded:max_cost_usd_estimate`); judge and reflection calls are priced; long-context price tiers (`long_above_tokens`, `long_input_mult`, `long_output_mult` in `synt.pricing`); OpenAI-compatible `input_tokens` now excludes cached tokens (no double count). New optional `synt.notify` (user/managed settings) and `synt.worktree.submodules`; `synt stop` reaches the desktop's in-process session without exiting the app and says which mechanism acts; the CLI's hard stop restores the terminal (docs/UNATTENDED.md).
+
 ### Changed (governance of unattended runs)
 - `synt run` and `synt engine --stdio` now REQUIRE a cost cap (`--max-cost-usd` or `--no-cost-cap`), default to a 30 minute wall cap, work in a git worktree when the directory is a repository (`--no-worktree` to opt out), and leave tasks with only inferred checks `unverified`. `--unattended` is the strict preset (docs/UNATTENDED.md). A desktop host starts the engine with `--host desktop` and keeps the interactive behaviour; the Windows desktop passes `synt.desktop.max_cost_usd` (default 10) or honours `synt.desktop.no_cost_cap`.
 - Cost accounting prices cache tokens and compaction calls, uses the price of the model that answered (failover targets, sub-agents), and has built-in prices for exact first-party model ids.

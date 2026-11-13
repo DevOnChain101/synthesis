@@ -2297,22 +2297,23 @@ fn stop_cancels_a_running_session_from_another_process() {
 
 fn priced_rig() -> Rig {
     let rig = Rig::new();
-    rig.settings(json!({"synt": {"pricing": {"fake/fake-model": {"input_per_mtok": 1000.0, "output_per_mtok": 1000.0}}}}));
+    rig.settings(json!({"synt": {"pricing": {"fake/fake-model": {"input_per_mtok": 3.0, "output_per_mtok": 3.0}}}}));
     rig
 }
 
-/// The cap is enforced on a real run: the first response (2000 tokens at $1000/M = $2) passes the $1
-/// cap, so the model is not asked again and the task ends `budget_exceeded`.
+/// The cap is enforced on a real run: the first response (2M tokens at $3/M = $6) passes the $5
+/// cap (the pre-turn worst case of that call, about $0.03, fits), so the model is not asked again and
+/// the task ends `budget_exceeded`.
 #[test]
 fn a_cost_cap_stops_spend_after_the_response_that_crossed_it() {
     let rig = priced_rig();
     let script = json!([
-        {"tools": [{"name": "Read", "input": {"file_path": "a.txt"}}], "usage": [1000, 1000]},
+        {"tools": [{"name": "Read", "input": {"file_path": "a.txt"}}], "usage": [1000000, 1000000]},
         {"text": "never asked", "usage": [1000, 1000]}
     ]);
     let (o, ev) = rig.run(
         script,
-        &["--keep-defaults", "--max-cost-usd", "1", "--sandbox", "off"],
+        &["--keep-defaults", "--max-cost-usd", "5", "--sandbox", "off"],
     );
     assert_eq!(
         o.status.code(),
@@ -2333,6 +2334,60 @@ fn a_cost_cap_stops_spend_after_the_response_that_crossed_it() {
         find(&ev, "turn.started").len(),
         1,
         "no second model request after the cap"
+    );
+}
+
+/// The cap is also checked before the call: at $1000/M the worst case of one request (8192 output
+/// tokens alone is $8) crosses a $1 cap, so no request is made at all.
+#[test]
+fn the_pre_turn_estimate_refuses_a_call_that_could_cross_the_cap() {
+    let rig = Rig::new();
+    rig.settings(json!({"synt": {"pricing": {"fake/fake-model": {"input_per_mtok": 1000.0, "output_per_mtok": 1000.0}}}}));
+    let (o, ev) = rig.run(
+        json!([{"text": "never asked", "usage": [10, 10]}]),
+        &["--keep-defaults", "--max-cost-usd", "1", "--sandbox", "off"],
+    );
+    assert_eq!(
+        o.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let b = find(&ev, "budget.exceeded");
+    assert_eq!(b.len(), 1, "{:?}", types(&ev));
+    assert_eq!(b[0]["payload"]["budget"], "max_cost_usd_estimate");
+    assert!(
+        find(&ev, "turn.started").is_empty(),
+        "no model request was made"
+    );
+}
+
+/// `synt.notify` of the user settings: the command gets `task.ended` as JSON on stdin and none of the
+/// run's secrets in its env.
+#[cfg(unix)]
+#[test]
+fn the_notify_command_receives_task_ended_without_secrets() {
+    let rig = priced_rig();
+    let out = rig.home().join("notified.txt");
+    let script = format!("cat > {o}; env >> {o}", o = out.display());
+    rig.settings(json!({"synt": {
+        "pricing": {"fake/fake-model": {"input_per_mtok": 3.0, "output_per_mtok": 3.0}},
+        "notify": {"command": ["/bin/sh", "-c", script]}
+    }}));
+    let (o, _) = rig.run(
+        json!([{"text": "done"}]),
+        &["--keep-defaults", "--max-cost-usd", "5", "--sandbox", "off"],
+    );
+    assert!(
+        o.status.code().is_some_and(|c| c == 0 || c == 3),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    let got = std::fs::read_to_string(&out).expect("the notify command ran before synt exited");
+    assert!(got.contains(r#""event":"task.ended""#), "{got}");
+    assert!(
+        !got.contains("SYNT_HOME") && !got.contains("SYNT_API"),
+        "{got}"
     );
 }
 

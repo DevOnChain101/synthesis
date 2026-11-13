@@ -46,6 +46,7 @@ pub mod memcmd;
 pub mod memory;
 mod memtools;
 pub mod models;
+pub mod notify;
 pub mod peers;
 pub mod proto;
 pub mod rename;

@@ -1,4 +1,5 @@
 {"divergences":[
+{"case":"openai-stream-two-parallel-tool-calls-interleaved","kind":"events_override","pointer":"/12/usage/input_tokens","value":32,"reason":"Node reported prompt_tokens (42) as input_tokens although 10 of them are cached tokens that it also reports as cache_read_input_tokens, so a cached token was priced twice. Rust subtracts them (42 - 10 = 32): input_tokens excludes cache tokens for every provider (owner governance item G2)."},
 {"case":"anthropic-client-options","kind":"ignore_keys","keys":["maxRetries"],"reason":"Node passed SDK maxRetries 4 under the agent's 3 retries. Rust has one retry layer (RetryPolicy, default 3), so there is no SDK-level retry setting."},
 {"case":"openai-client-options","kind":"ignore_keys","keys":["maxRetries"],"reason":"Same as anthropic-client-options: single retry layer."},
 {"case":"anthropic-stream-empty","kind":"eof_error","reason":"Node returns silently from an empty stream; Rust reports InvalidResponse 'empty stream' so the harness never treats it as an empty answer."},

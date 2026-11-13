@@ -19,6 +19,23 @@ use std::sync::{Arc, Mutex};
 
 pub use crossterm::terminal::size;
 
+/// Every guard that is alive, so code that must end the process with `process::exit` (which runs
+/// no destructors: the `synt stop` hard kill, a second Ctrl-C) can still leave a usable terminal.
+static ACTIVE: Mutex<Vec<std::sync::Weak<Inner>>> = Mutex::new(Vec::new());
+
+/// Restores the terminal of every live [`TerminalGuard`] (cooked mode, main screen, cursor);
+/// guards restore only once, so calling it twice or before a drop is harmless.
+pub fn restore_active() {
+    let all: Vec<_> = {
+        let mut a = ACTIVE.lock().unwrap_or_else(|p| p.into_inner());
+        a.retain(|w| w.strong_count() > 0);
+        a.iter().filter_map(std::sync::Weak::upgrade).collect()
+    };
+    for i in all {
+        i.restore();
+    }
+}
+
 struct Inner {
     out: Mutex<Box<dyn Write + Send>>,
     raw: bool,
@@ -62,6 +79,10 @@ impl TerminalGuard {
             done: AtomicBool::new(false),
         });
 
+        ACTIVE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(Arc::downgrade(&inner));
         let (weak, owner, prev) = (
             Arc::downgrade(&inner),
             std::thread::current().id(),
@@ -154,6 +175,17 @@ mod tests {
         g.restore();
         drop(g);
         assert_eq!(text(&out), terminal_restore_sequence());
+    }
+
+    #[test]
+    fn restore_active_restores_a_live_guard_once() {
+        let out = Shared::default();
+        let g = TerminalGuard::enter(out.clone(), GuardOptions { raw_mode: false }).unwrap();
+        restore_active(); // what the process-exit paths call: no destructor runs there
+        assert_eq!(text(&out), terminal_restore_sequence());
+        drop(g);
+        restore_active();
+        assert_eq!(text(&out), terminal_restore_sequence(), "written once");
     }
 
     /// Blocks inside `write` until released, to hold a restore half done.
