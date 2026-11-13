@@ -5058,6 +5058,16 @@ fn an_ordinary_8_3_temp_folder_above_the_root_does_not_make_the_project_protecte
         &roots,
         &root.join("GIT~1/hooks/x")
     ));
+    // and with the Windows spelling of the same folders: a verbatim root and a plain path to the same file
+    #[cfg(windows)]
+    {
+        let verbatim = vec![std::path::PathBuf::from(format!(r"\\?\{}", root.display()))];
+        assert!(!crate::is_protected_path(&verbatim, &root.join("src/a.rs")));
+        assert!(!crate::is_protected_path(
+            &roots,
+            &verbatim[0].join("src").join("a.rs")
+        ));
+    }
 }
 
 #[test]

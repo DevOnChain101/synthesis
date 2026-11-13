@@ -1280,9 +1280,16 @@ fn the_files_methods_list_read_and_refuse_what_must_not_leave() {
         l["trusted"], false,
         "an untrusted folder is walked, git is not run"
     );
+    // previews are served by a unix engine only (the race-free open); a Windows engine refuses them all
+    #[cfg(unix)]
     assert_eq!(
         e.ok("fs.read", json!({"path": "src/a.rs"}))["lines"][0],
         "fn main() {}"
+    );
+    #[cfg(not(unix))]
+    assert!(
+        e.err("fs.read", json!({"path": "src/a.rs"}))
+            .contains("Linux or macOS")
     );
     let root = e.ws.parent().unwrap().to_str().unwrap().to_string();
     let mut errors = vec![];

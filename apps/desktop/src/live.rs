@@ -105,6 +105,8 @@ pub enum PickerKind {
     /// `/trust ask` in an untrusted folder: trust it for this session? ("Not now" is first and the
     /// default.)
     Trust,
+    /// A command typed without an argument: its options to choose from ([`crate::menu`]).
+    Menu,
 }
 
 /// What the Trust dialog granted: the project root the session restarts trusted for, and, when the person chose
@@ -264,7 +266,7 @@ impl Dialog {
         !matches!(
             self.kind,
             DialogKind::Picker {
-                kind: PickerKind::Model | PickerKind::Send,
+                kind: PickerKind::Model | PickerKind::Send | PickerKind::Menu,
                 ..
             }
         )
@@ -679,6 +681,10 @@ pub struct Live {
     pub held_prompt: Option<String>,
     /// A prompt handed back unsent (Esc in that picker, a failed switch): the window puts it in the input box.
     pub returned_prompt: Option<String>,
+    /// The open command picker's rows and filter.
+    pub menu: Option<crate::menu::Menu>,
+    /// The `/panels` picker picked a row: the window shows it again with the new states.
+    pub menu_reopen: bool,
     /// Notes shown once the next engine is attached (the conversation is rebuilt on a restart).
     pub after_attach: Vec<String>,
     /// What the open memory confirmation will do if the person says yes.
@@ -758,6 +764,8 @@ impl Live {
             stale_model: None,
             held_prompt: None,
             returned_prompt: None,
+            menu: None,
+            menu_reopen: false,
             after_attach: vec![],
             mem_pending: None,
         }
@@ -778,8 +786,14 @@ impl Live {
                 self.view.convo = v.convo;
                 self.view.session = v.session;
                 self.view.status = v.status;
+                // another session: its diff, commands and browser frames, not the one left (a restart of the
+                // same session keeps its live panes)
+                if self.sid != engine.sid {
+                    self.view.panes = v.panes;
+                }
             }
             None => {
+                self.view.panes = Default::default();
                 self.view.convo = Default::default();
                 self.view.session = synthesis_view::model::Session::new(&engine.sid);
                 self.view.status = Default::default();
@@ -1149,6 +1163,7 @@ impl Live {
             }
             self.close_model_pick();
             self.send_pick = None;
+            self.menu = None;
             return None;
         }
         if let Some(Dialog {
@@ -1217,6 +1232,18 @@ impl Live {
     /// [`Live::pick`] / [`Live::reject`].
     pub fn answer(&mut self, key: &str, now: i64) -> Option<Action> {
         if self.dialogs.is_empty() {
+            return None;
+        }
+        // a command picker's inert row (empty filter result) leaves it open
+        if key == "info"
+            && matches!(
+                self.dialogs[0].kind,
+                DialogKind::Picker {
+                    kind: PickerKind::Menu,
+                    ..
+                }
+            )
+        {
             return None;
         }
         // "Set the context window": the picker closes and the input box gets `/context `
@@ -1363,6 +1390,9 @@ impl Live {
                 }
                 return None;
             }
+            if kind == PickerKind::Menu {
+                return self.menu_answer(key);
+            }
             if kind == PickerKind::Model {
                 self.close_model_pick();
             }
@@ -1384,6 +1414,7 @@ impl Live {
                 | PickerKind::Rewind
                 | PickerKind::Clean
                 | PickerKind::Send
+                | PickerKind::Menu
                 | PickerKind::MemReview
                 | PickerKind::MemConfirm
                 | PickerKind::Trust
@@ -1928,8 +1959,9 @@ impl Live {
             "model" => return Submitted::Do(Action::Model(arg.into())),
             "open" if arg.is_empty() => self.note("/open: type a folder path", true),
             "open" => return Submitted::Do(Action::Open(arg.into())),
-            "context" if arg.is_empty() => self.context_info(),
+            "context" if arg.is_empty() => self.context_menu(),
             "context" => return Submitted::Do(Action::SetContext(arg.into())),
+            "effort" if arg.is_empty() => self.effort_menu(),
             "effort" => self.set_effort(arg),
             "mcp" | "memory" | "agents" | "permissions" | "status" | "name" | "rename"
                 if self.engine.is_none() =>
@@ -1947,6 +1979,8 @@ impl Live {
                 }
             }
             "mcp" => self.info(|e| e.mcp_report()),
+            "memory" if arg.is_empty() && self.local() => self.open_menu(crate::menu::memory()),
+            "memory" if arg == "status" => self.info(|e| e.memory_report.clone()),
             "memory" if !arg.is_empty() => self.memory_cmd(arg, now_ms()),
             "memory" => self.info(|e| e.memory_report.clone()),
             // `--all` (or `-a`): the other sessions too, as the `/peers` table
@@ -1954,7 +1988,11 @@ impl Live {
                 self.info(|e| e.agents_report());
                 return self.command("peers", "");
             }
+            "agents" if arg.is_empty() => self.open_menu(crate::menu::agents()),
             "agents" => self.info(|e| e.agents_report()),
+            "permissions" if arg.is_empty() && self.local() => {
+                self.open_menu(crate::menu::permissions())
+            }
             "permissions" if arg.is_empty() || arg == "list" => {
                 self.info(|e| e.permissions_report())
             }
@@ -1971,7 +2009,15 @@ impl Live {
                 );
                 self.note(v, false);
             }
+            "images" if arg.is_empty() && !self.images.is_empty() => {
+                self.open_menu(crate::menu::images(self.images.len()))
+            }
             "images" => self.images_command(arg),
+            "verbose" if arg.is_empty() => self.open_menu(crate::menu::on_off(
+                "verbose",
+                "Verbose (internal rows in the chat)",
+                self.verbose,
+            )),
             "verbose" => {
                 self.verbose = match arg {
                     "on" => true,
@@ -2022,6 +2068,10 @@ impl Live {
                 ),
             },
             "trust" if arg.trim() == "ask" => return Submitted::Do(Action::AskTrust),
+            "trust" if arg.is_empty() && self.local() => {
+                let any = !self.trust_roots().is_empty();
+                self.open_menu(crate::menu::trust(any))
+            }
             "trust" => self.trust_cmd(arg),
             "rewind" => {
                 if let Some(a) = self.rewind_command(arg) {
@@ -2035,6 +2085,11 @@ impl Live {
             }
             "name" => self.name(arg),
             "rename" => self.rename(arg),
+            "focus" if arg.is_empty() => self.open_menu(crate::menu::on_off(
+                "focus",
+                "Focus view (prompts, answers, results)",
+                self.focus_view,
+            )),
             "focus" => {
                 self.focus_view = match arg {
                     "on" => true,
@@ -2263,11 +2318,11 @@ impl Live {
                 let n = std::mem::take(&mut self.images).len();
                 self.note(format!("{n} attached image(s) dropped"), false);
             }
-            "" if self.images.is_empty() => self.note(
+            "" | "list" if self.images.is_empty() => self.note(
                 "no images attached \u{b7} Cmd/Ctrl+V pastes one, or drop a file on the window",
                 false,
             ),
-            "" => {
+            "" | "list" => {
                 let list: Vec<String> = self
                     .images
                     .iter()
@@ -2374,6 +2429,140 @@ impl Live {
             false,
         );
         self.view.status.effort = next;
+    }
+
+    /// The engine runs on this machine (the pickers of `/permissions`, `/memory` and `/trust` read its state).
+    fn local(&self) -> bool {
+        self.engine.as_ref().is_some_and(|e| !e.is_remote())
+    }
+
+    /// Shows a command picker in front (the highlight starts on the current row).
+    pub fn open_menu(&mut self, m: crate::menu::Menu) {
+        self.dialogs.insert(
+            0,
+            Dialog {
+                kind: DialogKind::Picker {
+                    kind: PickerKind::Menu,
+                    title: m.title.clone(),
+                    headers: vec![],
+                },
+                options: vec![],
+                sel: 0,
+                armed_until: 0,
+                engaged: false,
+            },
+        );
+        self.menu = Some(m);
+        self.rebuild_menu_dialog();
+    }
+
+    /// The command picker's options from its rows and filter.
+    fn rebuild_menu_dialog(&mut self) {
+        let Some(m) = &self.menu else { return };
+        let (options, at) = m.options();
+        let header = m.header();
+        if let Some(d) = self.dialogs.first_mut()
+            && let DialogKind::Picker {
+                kind: PickerKind::Menu,
+                headers,
+                ..
+            } = &mut d.kind
+        {
+            *headers = header.map(|h| (0, h)).into_iter().collect();
+            d.options = options;
+            d.sel = at;
+        }
+    }
+
+    /// The picked row of a command picker: run the command, open the next picker, or ask for text.
+    fn menu_answer(&mut self, key: &str) -> Option<Action> {
+        self.menu = None;
+        if let Some(text) = key.strip_prefix(crate::menu::TYPE) {
+            self.returned_prompt = Some(text.into());
+            return None;
+        }
+        if let Some((cmd, level)) = crate::menu::split(key) {
+            self.open_menu_level(cmd, level);
+            return None;
+        }
+        let line = key.strip_prefix('/')?;
+        let (name, arg) = line.split_once(' ').unwrap_or((line, ""));
+        self.menu_reopen = name == "panels";
+        match self.command(name, arg.trim()) {
+            Submitted::Do(a) => Some(a),
+            Submitted::Quit => Some(Action::Quit),
+            _ => None,
+        }
+    }
+
+    /// The second level of a chained picker, built from the session's state.
+    fn open_menu_level(&mut self, cmd: &str, level: &str) {
+        let Some(e) = self.engine.clone() else { return };
+        match (cmd, level) {
+            ("permissions", "remove") => {
+                let rules = e.permission_rules();
+                if rules.is_empty() {
+                    return self.note("/permissions: no rules to remove", false);
+                }
+                let rows: Vec<_> = rules
+                    .into_iter()
+                    .map(|r| (r.clone(), sanitize_for_display(&r)))
+                    .collect();
+                self.open_menu(crate::menu::permissions_remove(&rows));
+            }
+            ("trust", "revoke") => {
+                let rows: Vec<_> = self
+                    .trust_roots()
+                    .into_iter()
+                    .map(|r| {
+                        let shown = clip_left(&sanitize_for_display(&r), 70);
+                        (r, shown)
+                    })
+                    .collect();
+                if rows.is_empty() {
+                    return self.note("/trust: no remembered folder to revoke", false);
+                }
+                self.open_menu(crate::menu::trust_revoke(&rows));
+            }
+            _ => {}
+        }
+    }
+
+    /// The remembered folders (and the session-only grant) `/trust revoke` can name; local engine only.
+    fn trust_roots(&self) -> Vec<String> {
+        let Some(e) = self.engine.as_ref().filter(|e| !e.is_remote()) else {
+            return vec![];
+        };
+        let mut roots: Vec<String> = synthesis_session::trust::list(&e.synthesis_home)
+            .map(|l| {
+                l.records
+                    .into_iter()
+                    .filter(|r| r.scope != synthesis_session::trust::CHILD)
+                    .map(|r| r.root)
+                    .collect()
+            })
+            .unwrap_or_default();
+        roots.extend(self.session_grant.clone().filter(|g| !roots.contains(g)));
+        roots
+    }
+
+    fn effort_menu(&mut self) {
+        let Some(e) = self.engine.clone() else { return };
+        if e.effort_tiers.is_empty() {
+            return self.note("/effort: this model declares no effort tiers", true);
+        }
+        let cur = self.view.status.effort.clone();
+        self.open_menu(crate::menu::effort(&e.effort_tiers, cur.as_deref()));
+    }
+
+    fn context_menu(&mut self) {
+        let Some(e) = &self.engine else { return };
+        let title = format!(
+            "Context window of {}: {}",
+            sanitize_for_display(&e.label),
+            sanitize_for_display(window_short(&e.context_source))
+        );
+        self.open_menu(crate::menu::context(title));
     }
 
     /// `/model`: the models of the config (and aliases) with what is known of each, the one in use
@@ -2526,6 +2715,27 @@ impl Live {
     /// A printable key (or Backspace) typed into the filter of the model or send picker. False: not
     /// one of them, the key is the dialog's.
     pub fn model_filter_key(&mut self, text: Option<&str>, backspace: bool) -> bool {
+        if matches!(
+            self.dialogs.first().map(|d| &d.kind),
+            Some(DialogKind::Picker {
+                kind: PickerKind::Menu,
+                ..
+            })
+        ) {
+            let Some(m) = self.menu.as_mut() else {
+                return false;
+            };
+            if backspace {
+                m.filter.pop();
+            } else if let Some(t) = text.filter(|t| !t.chars().any(char::is_control)) {
+                m.filter.push_str(t);
+            } else {
+                return false;
+            }
+            self.dialogs[0].engaged = true;
+            self.rebuild_menu_dialog();
+            return true;
+        }
         let send = matches!(
             self.dialogs.first().map(|d| &d.kind),
             Some(DialogKind::Picker {
@@ -2731,7 +2941,7 @@ impl Live {
             "Enter sends; Shift+Enter adds a line. Esc interrupts a running task (partial output is kept).".to_string(),
             "Up/Down walk the prompt history, Ctrl+R searches it; Tab walks chat, Workspace, Running; Shift+Tab cycles the permission mode.".into(),
             "Ctrl+N opens a folder as a new workspace; Cmd/Ctrl+V pastes text or an image; Ctrl+O shows every tool output whole; Ctrl+C twice quits.".into(),
-            "@ mentions a file, / completes a command. Commands:".into(),
+            "@ mentions a file, / completes a command. A command with options (/effort, /model, /resume, /panels, /permissions, /trust, /memory, /verbose, /focus, /context, /images, /agents, /send) opens a picker when typed without an argument: arrows or click choose, Enter picks, typing filters, Esc closes; the current value is marked. A typed argument still works. Commands:".into(),
         ];
         for c in &self.commands {
             let tag = if c.local && !is_wired(&c.name) {
@@ -3390,7 +3600,10 @@ mod tests {
         ));
         l.reject();
         assert!(!l.focus_view);
+        // no argument: the on/off picker (it is no longer a bare toggle)
         assert_eq!(l.submit("/focus"), Submitted::Nothing);
+        assert!(!l.focus_view && l.dialogs.len() == 1);
+        picked(&mut l, "/focus on");
         assert!(l.focus_view);
         l.submit("/focus off");
         assert!(!l.focus_view);
@@ -3793,6 +4006,71 @@ mod tests {
         );
     }
 
+    fn picked(l: &mut Live, key: &str) -> Option<Action> {
+        let i = l.dialogs[0]
+            .options
+            .iter()
+            .position(|o| o.0 == key)
+            .unwrap_or_else(|| panic!("no row {key}"));
+        let k = l.pick(i, now_ms() + 10_000).expect("answerable");
+        l.answer(&k, 0)
+    }
+
+    #[test]
+    fn a_command_without_an_argument_opens_its_options_with_the_current_marked() {
+        let mut l = Live::new();
+        l.commands = synthesis_cli_ui::local_commands();
+        assert!(matches!(l.submit("/verbose"), Submitted::Nothing));
+        let d = &l.dialogs[0];
+        assert!(matches!(
+            d.kind,
+            DialogKind::Picker {
+                kind: PickerKind::Menu,
+                ..
+            }
+        ));
+        // verbose is off: that row is current and holds the highlight
+        assert!(d.options[d.sel].1.contains("(current)") && d.options[d.sel].0 == "/verbose off");
+        // picking "on" runs `/verbose on`
+        assert!(picked(&mut l, "/verbose on").is_none());
+        assert!(l.verbose && l.dialogs.is_empty());
+        // typed arguments keep working and open nothing
+        l.submit("/verbose off");
+        assert!(!l.verbose && l.dialogs.is_empty());
+        // the filter narrows the rows; Esc closes without a change
+        l.submit("/focus");
+        assert!(l.model_filter_key(Some("o"), false) && l.model_filter_key(Some("n"), false));
+        assert_eq!(l.dialogs[0].options.len(), 1);
+        assert!(l.model_filter_key(Some("z"), false));
+        assert_eq!(l.dialogs[0].options[0].0, "info");
+        assert_eq!(picked(&mut l, "info"), None);
+        assert_eq!(l.dialogs.len(), 1, "the inert row leaves the picker open");
+        assert!(l.reject().is_none() && l.dialogs.is_empty() && l.menu.is_none());
+        assert!(!l.focus_view);
+    }
+
+    #[test]
+    fn a_free_text_row_hands_the_command_to_the_input_box() {
+        let mut l = Live::new();
+        l.open_menu(crate::menu::permissions());
+        assert!(picked(&mut l, "type:/permissions allow ").is_none());
+        assert_eq!(l.returned_prompt.as_deref(), Some("/permissions allow "));
+        assert!(l.dialogs.is_empty() && l.menu.is_none());
+    }
+
+    #[test]
+    fn images_open_a_picker_only_when_something_is_attached() {
+        let mut l = Live::new();
+        l.commands = synthesis_cli_ui::local_commands();
+        l.submit("/images");
+        assert!(l.dialogs.is_empty(), "nothing attached: the sentence");
+        l.attach_image("image/png", b"x", None).unwrap();
+        l.submit("/images");
+        assert_eq!(l.dialogs[0].options.len(), 2);
+        picked(&mut l, "/images clear");
+        assert!(l.images.is_empty());
+    }
+
     #[test]
     fn a_picker_closes_with_esc_and_never_answers_the_engine() {
         let mut l = Live::new();
@@ -4013,8 +4291,8 @@ mod tests {
     #[test]
     fn the_verbose_command_result_shows_even_when_it_turns_verbose_off() {
         let mut l = live_with_commands();
-        l.submit("/verbose");
-        l.submit("/verbose");
+        l.submit("/verbose on");
+        l.submit("/verbose off");
         assert_eq!(drawn(&l, false, false), ["verbose on", "verbose off"]);
     }
 
