@@ -207,59 +207,8 @@ pub(crate) fn plan_checks_from(
 /// Files that define what the checks run (workspace-relative, `/`-separated, at any depth): a
 /// change to one during a task is a weakening candidate.
 pub(crate) fn is_definition_file(rel: &str) -> bool {
-    const EXACT: [&str; 26] = [
-        "Cargo.toml",
-        "package.json",
-        "Makefile",
-        "makefile",
-        "GNUmakefile",
-        "pyproject.toml",
-        "pytest.ini",
-        "tox.ini",
-        "setup.cfg",
-        "setup.py",
-        "noxfile.py",
-        "rust-toolchain",
-        "rust-toolchain.toml",
-        "go.mod",
-        "clippy.toml",
-        ".clippy.toml",
-        "rustfmt.toml",
-        ".rustfmt.toml",
-        "ruff.toml",
-        ".ruff.toml",
-        ".flake8",
-        "mypy.ini",
-        ".npmrc",
-        "build.rs",
-        ".babelrc",
-        ".gitlab-ci.yml",
-    ];
-    const PREFIX: [&str; 12] = [
-        "tsconfig",
-        "jest.config.",
-        "jest.setup.",
-        "vitest.config.",
-        "vite.config.",
-        "playwright.config.",
-        "babel.config.",
-        ".mocharc",
-        "ava.config.",
-        ".eslintrc",
-        "eslint.config.",
-        "karma.conf",
-    ];
-    let name = rel.rsplit('/').next().unwrap_or(rel);
-    EXACT.contains(&name)
-        || PREFIX.iter().any(|p| name.starts_with(p))
-        || name.ends_with(".mk")
-        || (rel.contains(".github/workflows/") && (name.ends_with(".yml") || name.ends_with(".yaml")))
-        || ((rel.starts_with(".cargo/") || rel.contains("/.cargo/"))
-            && matches!(name, "config" | "config.toml"))
-        // the executables a check resolves through PATH (`npm run` adds node_modules/.bin)
-        || ["node_modules/.bin/", ".venv/bin/", "venv/bin/"]
-            .iter()
-            .any(|d| rel.starts_with(d))
+    // ONE list for the gate and the permission engine: synthesis_core::definitions
+    synthesis_core::definitions::is_check_definition(rel)
 }
 
 /// What of a definition file counts: `package.json` only by the keys that decide how tests run,
@@ -721,6 +670,19 @@ mod tests {
             assert!(is_definition_file(f), "{f}");
         }
         assert!(!is_definition_file("src/a.rs") && !is_definition_file("src/main.js"));
+        // the gate and the permission engine read the same list
+        for f in synthesis_core::definitions::FILES {
+            assert!(is_definition_file(f), "{f}");
+            assert!(synthesis_core::definitions::is_definition(f), "{f}");
+        }
+        for p in synthesis_core::definitions::PREFIXES {
+            assert!(is_definition_file(&format!("sub/{p}x.ts")), "{p}");
+        }
+        // script directories cut the permission trust only: source in `bin/` is not a weakening
+        assert!(
+            !is_definition_file("bin/run.sh")
+                && synthesis_core::definitions::is_definition("bin/run.sh")
+        );
         assert_eq!(
             definition_view(
                 "Cargo.toml",

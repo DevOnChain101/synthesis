@@ -47,6 +47,13 @@ if (!sandbox) {
 }
 process.stderr.write(`adapter "rust": --sandbox ${sandbox}\n`);
 args.push('--sandbox', sandbox);
+// Without an enforcing sandbox, `npm run` / `npm test` are not auto-safe (they run project code the
+// agent may have rewritten), so a headless run would deny them. A scripted run on such a host (a CI
+// Linux box without bubblewrap, Windows) states the permission the operator would: a USER-level
+// allow for the fixture's runners. Hosts that enforce keep the real defaults.
+if (process.env.EVAL_FAKE_SCRIPT && sandbox !== 'enforce') {
+  for (const pre of ['npm run', 'npm test', 'node --test']) args.push('--allow', `Bash(${pre}:*)`);
+}
 
 // `node --test test/*.test.js` -> `node --test`; `python3 -m unittest discover -s tests` -> `python3 -m unittest`;
 // `cargo test --offline` -> `cargo test`: the program, its mode flag (`--test`, `-m <module>`) or subcommand.

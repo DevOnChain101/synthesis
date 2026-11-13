@@ -883,25 +883,67 @@ fn makefile_turns() -> Vec<Turn> {
 }
 
 #[tokio::test]
-async fn trusted_inferred_check_runs_without_an_allow_in_default_and_accept_edits() {
+async fn trusted_inferred_check_runs_without_an_allow_when_the_agent_did_not_write_the_makefile() {
     for mode in [PermissionMode::Default, PermissionMode::AcceptEdits] {
         for interactive in [false, true] {
             let approver = ScriptedApprover::new(vec![]);
             let opts = Opts {
                 mode,
+                files: vec![("Makefile".into(), "test:\n\ttouch ran-it\n".into())],
                 ..gate_opts(interactive)
             };
+            // the Makefile exists before the session starts (`files`), so the definitions
+            // baseline includes it; the agent writes app.js
             let mut rig = gated(opts, makefile_turns(), Some(approver.clone()));
-            seed_makefile(&rig);
             let out = rig.run("add a makefile").await;
             let ctx = format!("{mode:?} interactive={interactive}: {}", out.reason);
             assert_ne!(out.status, TaskStatus::Blocked, "{ctx}");
-            assert!(out.needed_permissions.is_empty(), "{ctx}");
             assert!(
                 rig.ws.cwd.join("ran-it").exists(),
                 "check did not run: {ctx}"
             );
             assert!(approver.asked.lock().unwrap().is_empty(), "{ctx}");
+        }
+    }
+}
+
+/// P4: a Bash command (not seen by the file tools) rewrites the Makefile, so `make test` would run
+/// code the agent controls: the definitions baseline catches it and the check is no longer trusted
+/// (headless: blocked, interactive: asked).
+#[tokio::test]
+async fn trusted_inferred_check_is_not_trusted_when_bash_rewrote_the_makefile() {
+    for interactive in [false, true] {
+        let approver = ScriptedApprover::new(vec![]);
+        let opts = Opts {
+            allow: vec!["Bash(sed:*)".into()],
+            files: vec![("Makefile".into(), "test:\n\ttouch ran-it\n".into())],
+            ..gate_opts(interactive)
+        };
+        let turns = vec![
+            Turn::tool(
+                "b1",
+                "Bash",
+                json!({"command": "sed -i.bak s/ran-it/ran-it2/ Makefile"}),
+            ),
+            Turn::text("done"),
+            Turn::text("done again"),
+        ];
+        let mut rig = gated(opts, turns, Some(approver.clone()));
+        let out = rig.run("tweak the makefile").await;
+        let mk = std::fs::read_to_string(rig.ws.cwd.join("Makefile")).unwrap();
+        assert!(
+            mk.contains("ran-it2"),
+            "the Bash call did not run: {mk:?} {}",
+            out.reason
+        );
+        assert!(
+            !rig.ws.cwd.join("ran-it2").exists() && !rig.ws.cwd.join("ran-it").exists(),
+            "interactive={interactive}: ran unapproved"
+        );
+        if !interactive {
+            assert_ne!(out.status, TaskStatus::Completed, "{}", out.reason);
+        } else {
+            assert!(!approver.asked.lock().unwrap().is_empty());
         }
     }
 }

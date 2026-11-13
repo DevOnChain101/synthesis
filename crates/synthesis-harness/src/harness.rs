@@ -397,6 +397,9 @@ pub(crate) struct TaskRun {
     pub needed: Mutex<BTreeSet<String>>,
     /// A gate check was blocked for lack of an approval.
     pub gate_blocked: AtomicBool,
+    /// A tool result of this task carried an image: its text is untrusted pixels, so in auto an
+    /// action with an external effect is asked, never judged (classifier.rs).
+    pub after_image: AtomicBool,
     /// Recent user messages, the task last: what the auto-mode judge is told the task is.
     pub user_texts: Mutex<Vec<String>>,
     pub auto: Mutex<crate::classifier::AutoState>,
@@ -1208,6 +1211,7 @@ impl Harness {
             pending_approval: AtomicBool::new(false),
             needed: Mutex::default(),
             gate_blocked: AtomicBool::new(false),
+            after_image: AtomicBool::new(false),
             user_texts: Mutex::default(),
             auto: Mutex::default(),
             tool_search: Mutex::default(),

@@ -1226,6 +1226,21 @@ pub fn prepare(
     // Saved logins or {file:} secrets exist: the main agent gets the stricter Bash scan and the
     // secret-file read ban the peer responder has (`$`, globs and `~user` words become a hard ask).
     perms.env.deny_secret_reads = browser.holds_credentials(&h.synthesis);
+    // Only the user's own allow rules (user/managed settings and flags, never the project's) can
+    // lift the read-only-path refusal and the irreversible-action table.
+    perms.env.user_allow = user_settings
+        .permissions
+        .allow
+        .iter()
+        .chain(&cli_allow)
+        .cloned()
+        .collect();
+    // build/test commands that run project code are auto-safe only under a confining sandbox
+    if sandbox_mode == SandboxMode::Enforce {
+        // takes the definitions baseline too: without it nothing is trusted
+        perms.env.enforce_sandbox();
+    }
+    perms.env.worktree = worktree.is_some();
     perms.env.auto_mode = synthesis_permissions::AutoModeSettings {
         classify_all_shell: user_settings.auto_mode.classify_all_shell.unwrap_or(false),
         use_auto_mode_during_plan: user_settings
@@ -1618,6 +1633,7 @@ pub fn prepare(
     };
     let context = Arc::new(context);
     let mut harness = Harness::new(res.provider.clone(), toolbox, perms, sink.clone(), hcfg)
+        .with_change_tracker(Arc::new(crate::tracker::MtimeTracker::default()))
         .with_approver(approver)
         .with_agents(agents.table)
         .with_model_resolver(agent_model_resolver(&cfg, &res.label))
