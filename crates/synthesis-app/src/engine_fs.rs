@@ -10,7 +10,6 @@
 //! - `image.put`: a pasted or dropped image in bounded base64 chunks, sniffed, held in memory until `send`
 //!   names it by the id the engine issued.
 
-use std::io::Read;
 use std::path::{Component, Path};
 use std::time::{Duration, Instant};
 
@@ -18,7 +17,6 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
 use synthesis_config::Env;
-use synthesis_core::{PathPolicy, contains};
 use synthesis_harness::{ImageAttachment, sanitize_for_display as clean};
 use synthesis_view::project::{self, ProjectData};
 
@@ -172,7 +170,9 @@ pub fn read(_root: &Path, _rel: &str) -> Result<Value, String> {
 
 #[cfg(unix)]
 pub fn read(root: &Path, rel: &str) -> Result<Value, String> {
+    use std::io::Read as _;
     use std::os::unix::fs::MetadataExt as _;
+    use synthesis_core::{PathPolicy, contains};
     check_rel(rel, false)?;
     let p = Path::new(rel);
     fn gone<E>(_: E) -> String {
@@ -671,6 +671,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_preview_refuses_what_must_not_be_shown() {
         let d = tempfile::tempdir().unwrap();
@@ -940,5 +941,13 @@ mod tests {
             im.put(&p, t0 + UPLOAD_IDLE + Duration::from_secs(1))
                 .is_ok()
         );
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod windows_tests {
+    #[test]
+    fn an_engine_without_the_race_free_open_serves_no_previews() {
+        assert!(super::read(std::path::Path::new("."), "a.txt").is_err());
     }
 }
