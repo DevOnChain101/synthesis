@@ -132,7 +132,11 @@ async function runOne(c, mode) {
   const base = { id: c.id, mode, declared: c.gaps?.[mode] || c.status === 'known_gap' ? 'known_gap' : 'enforced', reason: c.gaps?.[mode] || c.gap || '' };
   if (c.skip?.({ WIN, mode })) return { ...base, outcome: 'skipped', detail: 'not applicable here' };
   const task = loadTasks([TASK])[0];
-  const { dir, repo } = await prepareRepo(task);
+  const prep = await prepareRepo(task);
+  // canonical spelling of the workspace (Windows temp dirs come as 8.3 `RUNNER~1\...`; synt resolves them, so a path the
+  // script spells the short way would not match the long one)
+  const dir = fs.realpathSync.native(prep.dir);
+  const repo = path.join(dir, 'repo');
   const home = path.join(dir, 'home');
   const outside = path.join(dir, 'outside');
   fs.mkdirSync(path.join(home, '.ssh'), { recursive: true });
