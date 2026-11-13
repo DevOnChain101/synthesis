@@ -36,7 +36,7 @@ pub use linux::{
     skipped_backends,
 };
 #[cfg(target_os = "linux")]
-pub use linux::{deny_vsock, landlock_abi, restrict_current_process};
+pub use linux::{deny_vsock, landlock_abi, restrict_current_process, run_egress_bridge};
 pub use seatbelt::{SeatbeltBackend, seatbelt_profile};
 pub use windows::WindowsJobBackend;
 
@@ -56,8 +56,49 @@ pub enum NetworkPolicy {
     /// - Windows: no network confinement at all.
     Loopback,
     Allow,
-    /// No OS primitive here can filter by host; every backend rejects this (fail closed).
-    AllowHosts(Vec<String>),
+    /// The only way out is the per-run egress proxy (`synthesis-egress`) at this endpoint; the
+    /// host allowlist stays in the proxy, this crate only does the plumbing. Backends that
+    /// cannot confine the process to that endpoint report `Guarantee::None` and `wrap` refuses
+    /// (fail closed): Landlock, Windows and the null sandbox always; bubblewrap takes
+    /// [`EgressEndpoint::Unix`], Seatbelt [`EgressEndpoint::Tcp`].
+    Proxied(EgressEndpoint),
+}
+
+/// Where the egress proxy listens.
+#[derive(Clone, PartialEq, Eq)]
+pub enum EgressEndpoint {
+    /// A unix socket in a private (0700) directory; bubblewrap binds the directory read-only
+    /// into the sandbox and bridges `127.0.0.1:3128` inside it to the socket.
+    Unix(PathBuf),
+    /// `127.0.0.1:port` on the host with HTTP Basic credentials `synt:<token>` (Seatbelt).
+    Tcp { port: u16, token: String },
+}
+
+// The token is a credential: never print it.
+impl fmt::Debug for EgressEndpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unix(p) => f.debug_tuple("Unix").field(p).finish(),
+            Self::Tcp { port, .. } => f
+                .debug_struct("Tcp")
+                .field("port", port)
+                .field("token", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
+/// Port of the in-sandbox bridge to the proxy socket (bubblewrap).
+pub const EGRESS_BRIDGE_PORT: u16 = 3128;
+
+impl EgressEndpoint {
+    /// Proxy URL for `HTTP_PROXY` and friends.
+    fn proxy_url(&self) -> String {
+        match self {
+            Self::Unix(_) => format!("http://127.0.0.1:{EGRESS_BRIDGE_PORT}"),
+            Self::Tcp { port, token } => format!("http://synt:{token}@127.0.0.1:{port}"),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -346,7 +387,7 @@ pub(crate) fn network_guarantee_for(
         NetworkPolicy::Allow => Guarantee::Strong,
         NetworkPolicy::Deny => deny,
         NetworkPolicy::Loopback => loopback,
-        NetworkPolicy::AllowHosts(_) => Guarantee::None,
+        NetworkPolicy::Proxied(_) => Guarantee::None, // only backends that implement it say more
     }
 }
 
@@ -371,6 +412,11 @@ impl SandboxBackend for NullSandbox {
         c: &SandboxedCommand,
     ) -> Result<SandboxedCommand, SandboxError> {
         validate(policy)?;
+        if matches!(policy.network, NetworkPolicy::Proxied(_)) {
+            return Err(SandboxError::Unsupported(
+                "no sandbox: a proxied network cannot be enforced".into(),
+            ));
+        }
         Ok(SandboxedCommand {
             env: build_env(policy, c),
             clear_env: true,
@@ -458,6 +504,14 @@ fn credential_paths(home: &Path, appdata: Option<&Path>, local: Option<&Path>) -
         ".gnupg",
         ".config/gh",
         ".docker/run",
+        // container runtimes and agents keep pathname sockets under the profile (Docker Desktop,
+        // Colima, Rancher Desktop, Lima, rootless podman): a connect() would hand over the host
+        ".docker",
+        ".colima",
+        ".rd",
+        ".lima",
+        ".local/share/containers",
+        ".config/containers",
         ".netrc",
         ".npmrc",
         ".pypirc",
@@ -580,10 +634,12 @@ fn path_install_prefixes(home: &Path, path_var: Option<&std::ffi::OsStr>) -> Vec
 }
 
 pub(crate) fn validate(p: &SandboxPolicy) -> Result<(), SandboxError> {
-    if let NetworkPolicy::AllowHosts(_) = p.network {
-        return Err(SandboxError::Unsupported(
-            "per-host network allowlists cannot be enforced by OS sandboxes".into(),
-        ));
+    if let NetworkPolicy::Proxied(EgressEndpoint::Unix(sock)) = &p.network
+        && !sock.is_absolute()
+    {
+        return Err(SandboxError::InvalidPolicy(format!(
+            "path must be absolute: {sock:?}"
+        )));
     }
     for path in p.all_paths() {
         if !path.is_absolute() {
@@ -613,6 +669,25 @@ pub(crate) fn build_env_on(
     if let Some(t) = &p.tmp_dir {
         env.retain(|(k, _)| k != "TMPDIR");
         env.push(("TMPDIR".into(), t.clone().into_os_string())); // forced: private tmp only
+    }
+    if let NetworkPolicy::Proxied(ep) = &p.network {
+        // Every inherited proxy setting goes (a host `HTTPS_PROXY` would bypass ours or leak its
+        // credentials), then ours is the only one.
+        env.retain(|(k, _)| !k.to_string_lossy().to_ascii_lowercase().ends_with("_proxy"));
+        let url = ep.proxy_url();
+        for k in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            env.push((k.into(), url.clone().into()));
+        }
+        env.push(("NO_PROXY".into(), "localhost,127.0.0.1".into()));
+        env.push(("no_proxy".into(), "localhost,127.0.0.1".into()));
+        env.push(("NODE_USE_ENV_PROXY".into(), "1".into()));
     }
     if let Some(host) = wsl {
         wsl::scrub_env(&mut env, host);
@@ -661,15 +736,81 @@ mod tests {
     }
 
     #[test]
-    fn rejects_relative_and_host_allowlist() {
+    fn rejects_relative_paths_and_a_relative_proxy_socket() {
         let mut p = SandboxPolicy {
             readable_roots: vec!["rel".into()],
             ..Default::default()
         };
         assert!(matches!(validate(&p), Err(SandboxError::InvalidPolicy(_))));
         p.readable_roots.clear();
-        p.network = NetworkPolicy::AllowHosts(vec!["a".into()]);
-        assert!(matches!(validate(&p), Err(SandboxError::Unsupported(_))));
+        p.network = NetworkPolicy::Proxied(EgressEndpoint::Unix("rel.sock".into()));
+        assert!(matches!(validate(&p), Err(SandboxError::InvalidPolicy(_))));
+    }
+
+    #[test]
+    fn proxied_env_replaces_every_inherited_proxy_variable() {
+        let pol = SandboxPolicy {
+            network: NetworkPolicy::Proxied(EgressEndpoint::Tcp {
+                port: 4321,
+                token: "s3cr3t".into(),
+            }),
+            env_passthrough: vec!["Https_Proxy".into(), "FTP_PROXY".into(), "KEEP".into()],
+            ..Default::default()
+        };
+        let c = SandboxedCommand {
+            env: vec![
+                ("http_proxy".into(), "http://evil".into()),
+                ("NODE_USE_ENV_PROXY".into(), "0".into()),
+            ],
+            ..Default::default()
+        };
+        let env = build_env_on(&pol, &c, None);
+        let get = |k: &str| {
+            let v: Vec<_> = env.iter().filter(|(n, _)| n == k).collect();
+            assert!(v.len() <= 1, "{k} set twice");
+            v.first().map(|(_, v)| v.to_string_lossy().into_owned())
+        };
+        let url = "http://synt:s3cr3t@127.0.0.1:4321";
+        for k in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            assert_eq!(get(k).as_deref(), Some(url), "{k}");
+        }
+        assert_eq!(get("NO_PROXY").as_deref(), Some("localhost,127.0.0.1"));
+        assert_eq!(get("NODE_USE_ENV_PROXY").as_deref(), Some("1"));
+        assert_eq!(get("FTP_PROXY"), None);
+        assert_eq!(get("Https_Proxy"), None);
+        let unix = EgressEndpoint::Unix(p("/run/e.sock"));
+        assert_eq!(unix.proxy_url(), "http://127.0.0.1:3128");
+        assert!(!format!("{:?}", pol.network).contains("s3cr3t"));
+    }
+
+    #[test]
+    fn only_bubblewrap_and_seatbelt_can_proxy() {
+        let proxied = NetworkPolicy::Proxied(EgressEndpoint::Unix(p("/r/e.sock")));
+        assert_eq!(NullSandbox.network_guarantee(&proxied), Guarantee::None);
+        assert!(matches!(
+            NullSandbox.wrap(
+                &SandboxPolicy {
+                    network: proxied,
+                    ..Default::default()
+                },
+                &SandboxedCommand::default()
+            ),
+            Err(SandboxError::Unsupported(_))
+        ));
+        assert_eq!(
+            WindowsJobBackend.network_guarantee(&NetworkPolicy::Proxied(EgressEndpoint::Tcp {
+                port: 1,
+                token: String::new()
+            })),
+            Guarantee::None
+        );
     }
 
     #[test]

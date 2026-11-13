@@ -262,6 +262,78 @@ pub fn deny_vsock() -> Result<(), SandboxError> {
     ))
 }
 
+/// `synthesis-sandbox-exec --egress-bridge`: runs INSIDE the bubblewrap network namespace.
+/// Listens on `127.0.0.1:port` (the namespace's private loopback), forwards every connection to
+/// the proxy's unix socket with plain threads, and runs `program` as a child so it stays the
+/// parent. Returns the child's exit code (`128 + signal` when killed). Binds before the child
+/// starts, so the proxy address works from its first instruction.
+#[cfg(target_os = "linux")]
+pub fn run_egress_bridge(
+    sock: &Path,
+    port: u16,
+    program: &std::ffi::OsStr,
+    args: &[OsString],
+) -> Result<i32, SandboxError> {
+    use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::ExitStatusExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// Forwards in flight; more are dropped (a runaway command cannot make the bridge spawn
+    /// threads without bound).
+    const MAX_FORWARDS: usize = 128;
+    /// A silent connection ends after this (the proxy has its own, longer, idle limit).
+    const IO_TIMEOUT: Duration = Duration::from_secs(300);
+    static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+    struct Slot;
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            ACTIVE.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    fn forward(tcp: TcpStream, sock: PathBuf, _slot: Slot) {
+        let Ok(unix) = UnixStream::connect(sock) else {
+            return;
+        };
+        let _ = tcp.set_read_timeout(Some(IO_TIMEOUT));
+        let _ = unix.set_read_timeout(Some(IO_TIMEOUT));
+        let (Ok(tcp2), Ok(unix2)) = (tcp.try_clone(), unix.try_clone()) else {
+            return;
+        };
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut &tcp2, &mut &unix2);
+            let _ = unix2.shutdown(Shutdown::Write);
+        });
+        let _ = std::io::copy(&mut &unix, &mut &tcp);
+        let _ = tcp.shutdown(Shutdown::Write);
+    }
+
+    let unavailable = |m: String| SandboxError::Unavailable(format!("egress bridge: {m}"));
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+        .map_err(|e| unavailable(format!("cannot listen on 127.0.0.1:{port}: {e}")))?;
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .spawn()
+        .map_err(|e| unavailable(format!("{}: {e}", program.to_string_lossy())))?;
+    let sock = sock.to_path_buf();
+    std::thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            if ACTIVE.fetch_add(1, Ordering::SeqCst) >= MAX_FORWARDS {
+                ACTIVE.fetch_sub(1, Ordering::SeqCst);
+                continue; // dropped: the command sees a reset
+            }
+            let (sock, slot) = (sock.clone(), Slot);
+            std::thread::spawn(move || forward(conn, sock, slot));
+        }
+    });
+    let status = child.wait().map_err(|e| unavailable(e.to_string()))?;
+    Ok(status
+        .code()
+        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)))
+}
+
 #[cfg(target_os = "linux")]
 pub use ll::{landlock_abi, restrict_current_process};
 
@@ -622,7 +694,7 @@ impl SandboxBackend for LinuxLandlockBackend {
                 format!("landlock ABI {}; kernel-enforced and inherited by all descendants", self.abi),
                 "allow-list only: deny_paths overlapping an allowed root are rejected".into(),
                 "network Deny blocks TCP bind/connect only (ABI >= 4); UDP and AF_UNIX stay open (Strong network needs bubblewrap)".into(),
-                "network Loopback is unsupported (TCP ports only, no addresses); allow_exec=false and AllowHosts are rejected; tree kill is the terminal runtime's job".into(),
+                "network Loopback is unsupported (TCP ports only, no addresses); allow_exec=false and Proxied are rejected; tree kill is the terminal runtime's job".into(),
             ],
         }
     }
@@ -642,6 +714,11 @@ impl SandboxBackend for LinuxLandlockBackend {
         if policy.network == NetworkPolicy::Loopback {
             return Err(SandboxError::Unsupported(
                 "landlock filters TCP ports, not addresses: network Loopback needs bubblewrap or Seatbelt".into(),
+            ));
+        }
+        if matches!(policy.network, NetworkPolicy::Proxied(_)) {
+            return Err(SandboxError::Unsupported(
+                "landlock cannot confine a command to the egress proxy: --network hosts needs bubblewrap or Seatbelt".into(),
             ));
         }
         if policy.network == NetworkPolicy::Deny && self.abi < 4 {
@@ -800,11 +877,15 @@ impl BwrapBackend {
             }
         }
         // Loopback: same namespace; bwrap itself brings `lo` up in it (private to the sandbox).
-        if matches!(
-            policy.network,
-            NetworkPolicy::Deny | NetworkPolicy::Loopback
-        ) {
-            a.push("--unshare-net".into());
+        if !matches!(policy.network, NetworkPolicy::Allow) {
+            push(&[], "--unshare-net");
+        }
+        // Proxied: the proxy's private run dir (after the tmpfs mounts above, which may hide it);
+        // read-only is enough to connect to the socket.
+        if let NetworkPolicy::Proxied(EgressEndpoint::Unix(sock)) = &policy.network
+            && let Some(dir) = sock.parent()
+        {
+            push(&[dir, dir], "--ro-bind");
         }
         if let Some(cwd) = &cmd.cwd {
             a.extend(["--chdir".into(), cwd.as_os_str().to_owned()]);
@@ -822,7 +903,17 @@ impl SandboxBackend for BwrapBackend {
     }
 
     fn network_guarantee(&self, mode: &NetworkPolicy) -> Guarantee {
-        network_guarantee_for(mode, self.capabilities().network, Guarantee::Strong)
+        match mode {
+            // Fresh net namespace whose only exit is the bridge; needs the helper (bridge, seccomp).
+            // Capped at Weak: the root is bound read-only, not hidden, so a command can still
+            // connect() to a host PATHNAME unix socket outside /run, /var/run, /tmp and the denied
+            // paths (docs/specs/sandbox-hardening.md, residual risk). Strong waits for the read
+            // allow-list.
+            NetworkPolicy::Proxied(EgressEndpoint::Unix(_)) if self.helper.is_some() => {
+                Guarantee::Weak
+            }
+            _ => network_guarantee_for(mode, self.capabilities().network, Guarantee::Strong),
+        }
     }
 
     fn capabilities(&self) -> SandboxCapabilities {
@@ -833,7 +924,7 @@ impl SandboxBackend for BwrapBackend {
             notes: vec![
                 "writes confined to writable_roots, tmp_dir and a private /tmp; /run is a fresh tmpfs; reads are NOT confined except deny_paths (whole fs mounted read-only)".into(),
                 "Weak: defence in depth, not a security boundary".into(),
-                "network Deny/Loopback use a fresh net namespace; with Loopback its `lo` is up but PRIVATE to the sandbox: a dev server and tests inside it work, host loopback services are unreachable; AllowHosts and allow_exec=false are rejected".into(),
+                "network Deny/Loopback use a fresh net namespace; with Loopback its `lo` is up but PRIVATE to the sandbox: a dev server and tests inside it work, host loopback services are unreachable; Proxied keeps the fresh namespace and bridges 127.0.0.1:3128 to the proxy's unix socket (needs the helper) but is Weak: host pathname unix sockets outside /run, /var/run, /tmp and the denied paths stay connectable until the read allow-list lands; allow_exec=false is rejected".into(),
                 "requires unprivileged user namespaces (blocked by default on Ubuntu 24.04 AppArmor)".into(),
                 "nonexistent deny_paths/readonly_paths are not protected; mount points make existing ones rename-proof".into(),
             ],
@@ -874,14 +965,50 @@ impl BwrapBackend {
             }
             None => policy,
         };
-        let mut args = Self::args_on(policy, c, wsl);
-        let mut program: OsString = self.path.clone().into();
-        if wsl.is_some() {
-            let helper = self.helper.clone().ok_or_else(|| {
+        let bridge = match &policy.network {
+            NetworkPolicy::Proxied(EgressEndpoint::Unix(sock)) => Some(sock),
+            NetworkPolicy::Proxied(EgressEndpoint::Tcp { .. }) => {
+                return Err(SandboxError::Unsupported(
+                    "bubblewrap reaches the egress proxy over a unix socket, not TCP".into(),
+                ));
+            }
+            _ => None,
+        };
+        let helper_or_err = |why: &str| {
+            self.helper.clone().ok_or_else(|| {
                 SandboxError::Unavailable(format!(
-                    "WSL: the sandbox helper is required to deny AF_VSOCK: {}",
+                    "{why}: the sandbox helper is required: {}",
                     helper_status().err().unwrap_or_else(|| "not found".into())
                 ))
+            })
+        };
+        let mut inner = c.clone();
+        if let Some(sock) = bridge {
+            // Inside the namespace the helper stays the parent of the command and forwards
+            // 127.0.0.1:3128 to the proxy socket.
+            let helper = helper_or_err("--network hosts")?;
+            helper_outside_writable(&helper, policy)?;
+            inner.program = helper.into();
+            inner.args = [
+                "--egress-bridge".into(),
+                sock.clone().into_os_string(),
+                EGRESS_BRIDGE_PORT.to_string().into(),
+                "--".into(),
+                c.program.clone(),
+            ]
+            .into_iter()
+            .chain(c.args.iter().cloned())
+            .collect();
+        }
+        let mut args = Self::args_on(policy, &inner, wsl);
+        let mut program: OsString = self.path.clone().into();
+        // The seccomp deny (vsock, io_uring, x32) runs in front of bwrap: on WSL, and whenever
+        // the network is proxied (io_uring could otherwise open sockets around the namespace).
+        if wsl.is_some() || bridge.is_some() {
+            let helper = helper_or_err(if wsl.is_some() {
+                "WSL"
+            } else {
+                "--network hosts"
             })?;
             helper_outside_writable(&helper, policy)?;
             args.splice(0..0, ["--no-vsock".into(), "--".into(), program]);
@@ -1623,6 +1750,72 @@ mod tests {
             .wrap_on(&bad, &c, Some(&ctx)),
             Err(SandboxError::InvalidPolicy(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bwrap_proxied_bridges_the_socket_behind_the_seccomp_helper() {
+        let b = BwrapBackend {
+            path: p("/usr/bin/bwrap"),
+            helper: Some(p("/h/synthesis-sandbox-exec")),
+        };
+        let c = SandboxedCommand {
+            program: "curl".into(),
+            args: vec!["-V".into()],
+            cwd: Some(p("/work")),
+            ..Default::default()
+        };
+        let mut pol = SandboxPolicy {
+            writable_roots: vec![p("/work")],
+            network: NetworkPolicy::Proxied(EgressEndpoint::Unix(p("/run-dir/e.sock"))),
+            ..Default::default()
+        };
+        // not WSL: the seccomp deny still runs in front of bwrap
+        let w = b.wrap_on(&pol, &c, None).unwrap();
+        assert_eq!(w.program, p("/h/synthesis-sandbox-exec").into_os_string());
+        assert_eq!(&w.args[..3], ["--no-vsock", "--", "/usr/bin/bwrap"]);
+        let j = joined(w.args.clone());
+        assert!(j.contains("--unshare-net") && !j.contains("--share-net"));
+        assert!(j.contains("--ro-bind /run-dir /run-dir"), "{j}");
+        assert!(
+            j.ends_with(
+                "-- /h/synthesis-sandbox-exec --egress-bridge /run-dir/e.sock 3128 -- curl -V"
+            ),
+            "{j}"
+        );
+        assert!(
+            w.env
+                .iter()
+                .any(|(k, v)| k == "HTTPS_PROXY" && v == "http://127.0.0.1:3128")
+        );
+        assert_eq!(b.network_guarantee(&pol.network), Guarantee::Weak);
+        // no helper: no bridge and no seccomp, so refused (and not claimed)
+        let nohelper = BwrapBackend { helper: None, ..b };
+        assert!(matches!(
+            nohelper.wrap_on(&pol, &c, None),
+            Err(SandboxError::Unavailable(_))
+        ));
+        assert_eq!(nohelper.network_guarantee(&pol.network), Guarantee::None);
+        // a helper inside the writable root could be replaced by the command
+        let inside = BwrapBackend {
+            helper: Some(p("/work/h")),
+            path: p("/b"),
+        };
+        assert!(inside.wrap_on(&pol, &c, None).is_err());
+        // TCP endpoints are Seatbelt's
+        pol.network = NetworkPolicy::Proxied(EgressEndpoint::Tcp {
+            port: 1,
+            token: "t".into(),
+        });
+        let b2 = BwrapBackend {
+            path: p("/b"),
+            helper: Some(p("/h/x")),
+        };
+        assert!(matches!(
+            b2.wrap_on(&pol, &c, None),
+            Err(SandboxError::Unsupported(_))
+        ));
+        assert_eq!(b2.network_guarantee(&pol.network), Guarantee::None);
     }
 
     #[cfg(unix)] // renders POSIX mount arguments (`--bind /work /work`)

@@ -208,7 +208,7 @@ Legend: M = MATCH, G = GAP, D = DIVERGES-BY-DESIGN, U = UNKNOWN, N = N/A.
 | 83 | M |  | WebFetch/WebSearch always ask outside bypass (lib.rs:1215); sandbox network flag does not cover them |
 | 84 | D |  | Seatbelt, bwrap, Landlock; ON by default (official off); Windows has no confinement (windows.rs:1-6) and the default Enforce mode refuses to run there (terminal lib.rs:22-25) |
 | 85 | D |  | writable = workspace + private per-command temp; readable = allow-list (narrower than official); ~/.ssh etc. denied, sandbox lib.rs:60-70, 404 |
-| 86 | D |  | only deny/loopback/allow; AllowHosts rejected on every backend (lib.rs:50-52); no domain allowlist |
+| 86 | D |  | deny/loopback/allow plus `hosts` (per-run egress proxy, docs/specs/sandbox-hardening.md; bubblewrap and Seatbelt only) |
 | 87 | D |  | no per-host prompts |
 | 88 | D |  | Enforce (fail closed) is the default; BestEffort is opt-in (terminal lib.rs:105-111, 700-715) |
 | 89 | U |  | per-call `unconfined` spec exists (terminal.rs:132); no excludedCommands setting found |
