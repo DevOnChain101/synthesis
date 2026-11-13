@@ -1964,9 +1964,13 @@ fn e7_notify_on_end_hands_over_the_result_and_refuses_a_cycle() {
     ok(&a);
     ok(&b);
     assert!(
-        outputs(&a.1, "SendMessage")[0].contains("cycle"),
-        "{:?}",
         outputs(&a.1, "SendMessage")
+            .first()
+            .is_some_and(|o| o.contains("cycle")),
+        "no cycle answer to the worker's SendMessage: {:?}\nA events: {:?}\nA stderr: {}",
+        outputs(&a.1, "SendMessage"),
+        types(&a.1),
+        a.2
     );
     assert_eq!(payloads(&b.1, "peer.reply")[0]["status"], "answered");
 }
@@ -1993,7 +1997,8 @@ fn delegate_run(
     user_settings(&rig, deleg_peers());
     // the second main turn answers the gate's feedback when the worker changed files
     let mut a_script = vec![
-        json!({"delay_ms": 5000, "text": "A done"}),
+        // A's own task waits for B's delegation to arrive; a slow runner (Windows) needs longer
+        json!({"delay_ms": if cfg!(windows) { 20000 } else { 5000 }, "text": "A done"}),
         json!({"text": "A done again"}),
     ];
     a_script.extend(worker.as_array().unwrap().iter().cloned());

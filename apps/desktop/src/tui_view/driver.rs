@@ -500,9 +500,10 @@ impl TuiView {
                 let found = job.await;
                 this.update(cx, |t, cx| {
                     if let Some(lu) = &mut t.live {
-                        // `close` returns the worktree report; it has no failure value
+                        // `close` returns the worktree report and, after "close problems:", what did not end cleanly
                         if let Some(m) = found {
-                            lu.live.note(m, false);
+                            let bad = m.contains("close problems:");
+                            lu.live.note(m, bad);
                         }
                         lu.dirty = true;
                     }

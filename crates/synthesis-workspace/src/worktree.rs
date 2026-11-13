@@ -1306,7 +1306,13 @@ mod submodule_tests {
             assert!(p.check(bad).is_err(), "{bad}");
         }
         // the test-only policy is the only way to get a file URL through
-        assert!(test_policy().check("/abs/path").is_ok());
+        // an absolute path of the platform (`/abs/path` is relative on Windows)
+        let abs = if cfg!(windows) {
+            "C:/abs/path"
+        } else {
+            "/abs/path"
+        };
+        assert!(test_policy().check(abs).is_ok());
     }
 
     #[test]
