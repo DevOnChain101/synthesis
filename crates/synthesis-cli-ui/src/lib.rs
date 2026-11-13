@@ -31,6 +31,7 @@ pub use runtime::{
 };
 pub use setup::{SetupExit, SetupOptions, card as setup_card, run_setup};
 pub use status::{SandboxStatus, status_line};
+pub use synthesis_cli_ui_base::terminal::{EXIT_RESTORE_WAIT, restore_active_bounded};
 pub use synthesis_view::sessions::{SavedSession, list_saved};
 pub use tty::{ScriptedTty, Tty, replay};
 

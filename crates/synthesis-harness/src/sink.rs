@@ -18,7 +18,11 @@ struct Inner {
     writer: Mutex<EventWriter<Box<dyn Write + Send>>>,
     broken: AtomicBool,
     last_seq: AtomicU64,
+    observer: Mutex<Option<Observer>>,
 }
+
+/// Called with every persisted (already redacted) envelope, outside the writer lock. Must not block.
+pub type Observer = Arc<dyn Fn(&Envelope) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct EventSink(Arc<Inner>);
@@ -35,7 +39,13 @@ impl EventSink {
             writer: Mutex::new(EventWriter::new(out, session_id, Redactor::new(secrets))),
             broken: AtomicBool::new(false),
             last_seq: AtomicU64::new(0),
+            observer: Mutex::new(None),
         }))
+    }
+
+    /// Taps the stream of persisted events (the notifier); replaces a previous observer.
+    pub fn observe(&self, f: Observer) {
+        *self.0.observer.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
     }
 
     /// A failed write marks the sink broken (the harness then stops the task: an unauditable
@@ -45,9 +55,20 @@ impl EventSink {
         w.task_id.clone_from(&scope.task_id);
         w.turn_id.clone_from(&scope.turn_id);
         w.agent_id.clone_from(&scope.agent_id);
-        match w.emit(event) {
+        let written = w.emit(event);
+        drop(w);
+        match written {
             Ok(env) => {
                 self.0.last_seq.store(env.seq, Ordering::SeqCst);
+                let obs = self
+                    .0
+                    .observer
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                if let Some(o) = obs {
+                    o(&env);
+                }
                 Some(env)
             }
             Err(_) => {

@@ -57,9 +57,18 @@ pub fn stop_cmd(env: &Env, a: StopArgs) -> Result<u8, String> {
         return Ok(1);
     }
     store.request_stop(&a.session).map_err(|e| e.to_string())?;
-    out!(
-        "stop requested for {shown}; the running process cancels within a second and is killed after {STOP_GRACE_SECS}s if it does not end"
-    );
+    // the holder says how it stops (`stop-mode`): a process that exits, or a session inside an app
+    let in_process = std::fs::read_to_string(mode_file(&h.synthesis, &a.session))
+        .is_ok_and(|m| m.trim() == IN_PROCESS);
+    if in_process {
+        out!(
+            "stop requested for {shown} (mechanism: in-process; the app that holds this session stays open): the session is cancelled within a second and its commands are killed after {STOP_GRACE_SECS}s if the task does not end"
+        );
+    } else {
+        out!(
+            "stop requested for {shown} (mechanism: process exit): the running process cancels within a second and is killed after {STOP_GRACE_SECS}s if it does not end"
+        );
+    }
     Ok(0)
 }
 
@@ -214,24 +223,60 @@ pub fn hard_stop(
     })
 }
 
+/// What the stop watcher does after the grace period.
+pub enum StopAction {
+    /// `synt run`, the CLI, an engine process: cancel, kill the commands, exit 130.
+    ExitProcess,
+    /// A session inside an app (the desktop window): exiting would close the whole app. Cancels
+    /// the session, kills its commands after the grace period, marks it stopped and returns; the
+    /// callback tells the host (it runs right after the cancel).
+    InProcess(Option<Arc<dyn Fn() + Send + Sync>>),
+}
+
+const IN_PROCESS: &str = "in-process";
+
+/// `sessions/<id>/stop-mode`: written by the watcher, read by `synt stop` to say what acts.
+fn mode_file(home: &std::path::Path, sid: &str) -> PathBuf {
+    home.join("sessions").join(sid).join("stop-mode")
+}
+
 /// Consecutive unreadable polls after which the session is stopped anyway: a stop that cannot be
 /// read must not be treated as "not asked".
 const STOP_POLL_FAILURES: u32 = 5;
 
 /// Polls the store once a second for a stop request made at or after `since`; on one calls
-/// `cancel`, and after the grace period `hard` and exits 130. Five failed polls in a row count as a
+/// `cancel`, and after the grace period `hard` and exits 130 (or, in-process, returns). `ended`
+/// stops the watcher when the session or process ends: it then neither polls nor acts. Five failed polls in a row count as a
 /// request (fail closed) and are said on stderr.
+#[allow(clippy::too_many_arguments)] // one call site per front end; a struct would only move the list
 pub fn watch_stop(
     home: PathBuf,
     sid: String,
     since: String,
     cancel: Arc<dyn Fn() + Send + Sync>,
     hard: Arc<dyn Fn() + Send + Sync>,
+    action: StopAction,
+    grace: Duration,
+    ended: tokio_util::sync::CancellationToken,
 ) {
+    let mode = if matches!(action, StopAction::InProcess(_)) {
+        IN_PROCESS
+    } else {
+        "process"
+    };
+    // best effort: without it `synt stop` describes the process mechanism
+    let _ = std::fs::write(mode_file(&home, &sid), mode);
     tokio::spawn(async move {
         let mut failures = 0u32;
         loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            // the session or process ended: nothing left to stop, and no more polling
+            tokio::select! {
+                () = ended.cancelled() => {
+                    let _ = std::fs::remove_file(mode_file(&home, &sid));
+                    return;
+                }
+                () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
             match Reader::open(&home).and_then(|r| r.stop_requested_since(&sid, &since)) {
                 Ok(false) => failures = 0,
                 Ok(true) => {
@@ -256,10 +301,185 @@ pub fn watch_stop(
                 }
             }
         }
+        // the session closed between the request and now: nothing to stop
+        if ended.is_cancelled() {
+            return;
+        }
         cancel();
-        tokio::time::sleep(Duration::from_secs(STOP_GRACE_SECS)).await;
+        if let StopAction::InProcess(Some(on_stop)) = &action {
+            on_stop();
+        }
+        tokio::select! {
+            () = ended.cancelled() => {
+                // it ended in time: nothing to kill or mark
+                let _ = std::fs::remove_file(mode_file(&home, &sid));
+                return;
+            }
+            () = tokio::time::sleep(grace) => {}
+        }
         eprintln!("synt: did not end in time; killing");
         hard();
-        std::process::exit(130);
+        if matches!(action, StopAction::ExitProcess) {
+            // `exit` runs no destructors: give the interactive CLI its terminal back (last, so
+            // nothing redraws after it)
+            synthesis_cli_ui::restore_active_bounded(synthesis_cli_ui::EXIT_RESTORE_WAIT);
+            std::process::exit(130);
+        }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    use synthesis_core::{PermissionMode, SessionStatus, WorkspaceContext};
+    use synthesis_events::Budget;
+    use synthesis_session::{NewSession, SessionWriter};
+    use tokio_util::sync::CancellationToken;
+
+    struct Fx {
+        _tmp: tempfile::TempDir,
+        home: PathBuf,
+        store: Store,
+        writer: Arc<Mutex<SessionWriter>>,
+    }
+
+    /// A session held by this process, like the desktop's in-process local session.
+    fn fx() -> Fx {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(tmp.path()).unwrap();
+        let (home, dir) = (base.join("home"), base.join("proj"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ws = WorkspaceContext::open("w1", &dir, &dir, &[], dir.join(".art"), "s1").unwrap();
+        let store = Store::open(&home, StoreOptions::default()).unwrap();
+        let writer = store
+            .create_session(NewSession {
+                id: Some("s1".into()),
+                workspace: &ws,
+                model_config_id: "a/m".into(),
+                permission_mode: PermissionMode::AcceptEdits,
+                permission_policy_id: "default".into(),
+                budget: Budget::default(),
+                parent: None,
+                title: None,
+            })
+            .unwrap();
+        Fx {
+            _tmp: tmp,
+            home,
+            store,
+            writer: Arc::new(Mutex::new(writer)),
+        }
+    }
+
+    fn flag(b: &Arc<AtomicBool>) -> Arc<dyn Fn() + Send + Sync> {
+        let b = b.clone();
+        Arc::new(move || b.store(true, SeqCst))
+    }
+
+    fn flags() -> [Arc<AtomicBool>; 3] {
+        [(); 3].map(|()| Arc::new(AtomicBool::new(false)))
+    }
+
+    #[tokio::test]
+    async fn in_process_stop_cancels_marks_interrupted_and_does_not_exit() {
+        let f = fx();
+        let [cancelled, told, _] = flags();
+        // a running session, as the stopped one is
+        for to in [
+            SessionStatus::Preparing,
+            SessionStatus::Idle,
+            SessionStatus::Running,
+        ] {
+            f.writer.lock().unwrap().update_status(to, None).unwrap();
+        }
+        // the real kind of `hard`: mark the stored row
+        let w = f.writer.clone();
+        let marked = Arc::new(AtomicBool::new(false));
+        let m2 = marked.clone();
+        let hard: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            let r = w
+                .lock()
+                .unwrap()
+                .update_status(SessionStatus::Interrupted, Some("killed"));
+            m2.store(r.is_ok(), SeqCst);
+        });
+        watch_stop(
+            f.home.clone(),
+            "s1".into(),
+            synthesis_session::timestamp(),
+            flag(&cancelled),
+            hard,
+            StopAction::InProcess(Some(flag(&told))),
+            Duration::from_millis(50),
+            CancellationToken::new(),
+        );
+        assert_eq!(
+            std::fs::read_to_string(mode_file(&f.home, "s1")).unwrap(),
+            IN_PROCESS
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(f.store.request_stop("s1").unwrap());
+        for _ in 0..40 {
+            if marked.load(SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // reaching this line at all shows the process was not exited
+        assert!(cancelled.load(SeqCst) && told.load(SeqCst) && marked.load(SeqCst));
+        let row = f.store.reader().unwrap().get_session("s1").unwrap();
+        assert_eq!(row.status, SessionStatus::Interrupted);
+    }
+
+    /// A watcher whose session ended neither polls nor acts: a late `synt stop` changes nothing.
+    #[tokio::test]
+    async fn an_ended_session_is_not_stopped_by_a_late_request() {
+        let f = fx();
+        let [cancelled, told, killed] = flags();
+        let ended = CancellationToken::new();
+        watch_stop(
+            f.home.clone(),
+            "s1".into(),
+            synthesis_session::timestamp(),
+            flag(&cancelled),
+            flag(&killed),
+            StopAction::InProcess(Some(flag(&told))),
+            Duration::from_millis(50),
+            ended.clone(),
+        );
+        ended.cancel();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(f.store.request_stop("s1").unwrap());
+        assert!(
+            !mode_file(&f.home, "s1").exists(),
+            "the stop-mode file goes with the session"
+        );
+        tokio::time::sleep(Duration::from_millis(1600)).await;
+        assert!(!cancelled.load(SeqCst) && !told.load(SeqCst) && !killed.load(SeqCst));
+        // and one that ends during the grace period is not killed or marked
+        let [c2, t2, k2] = flags();
+        let ended = CancellationToken::new();
+        watch_stop(
+            f.home.clone(),
+            "s1".into(),
+            "1970-01-01T00:00:00.000Z".into(),
+            flag(&c2),
+            flag(&k2),
+            StopAction::InProcess(Some(flag(&t2))),
+            Duration::from_millis(1500),
+            ended.clone(),
+        );
+        for _ in 0..40 {
+            if c2.load(SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(c2.load(SeqCst), "the standing request was acted on");
+        ended.cancel();
+        tokio::time::sleep(Duration::from_millis(1800)).await;
+        assert!(!k2.load(SeqCst), "it ended in time: nothing killed");
+    }
 }

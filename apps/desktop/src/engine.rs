@@ -55,6 +55,9 @@ pub enum UiMsg {
     Compacted(Result<(), String>),
     /// `/compact` was accepted while a task runs: the harness compacts at its next safe point.
     CompactQueued,
+    /// `synt stop` cancelled this in-process session: the window closes its engine (off the UI
+    /// thread) and says so. Sent from the session's own runtime, which cannot close itself.
+    Stopped,
     /// Something a background call to the remote engine has to say (`true`: a problem).
     Note(String, bool),
     /// `/rename` ended (`Ok`: the stored title).
@@ -66,6 +69,13 @@ pub enum UiMsg {
     Effort(Result<Option<String>, String>),
     /// `/doctor` on a WSL engine.
     Doctor(Result<Vec<synthesis_app::doctor::Row>, String>),
+}
+
+/// What `synt stop` calls for an in-process session: tells the window, which closes the engine.
+pub(crate) fn stop_callback(tx: UnboundedSender<UiMsg>) -> Arc<dyn Fn() + Send + Sync> {
+    Arc::new(move || {
+        let _ = tx.unbounded_send(UiMsg::Stopped);
+    })
 }
 
 pub use synthesis_app::asks::{AskApproval, AskInput, Choice, approval_for};
@@ -477,6 +487,8 @@ impl Engine {
                 Arc::new(move || v.verify().map_err(|files| trust_changed_error(&files)))
                     as synthesis_app::run::PreStart
             }),
+            // `synt stop` on this in-process session: cancel it without exiting the app
+            on_stop: Some(stop_callback(tx.clone())),
         };
         let t_prepare = crate::trace::span(
             env,
@@ -1373,6 +1385,14 @@ mod trust_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `synt stop` on an in-process session reaches the window as `Stopped`, which closes the engine.
+    #[test]
+    fn the_stop_callback_tells_the_window_to_close_the_engine() {
+        let (tx, mut rx) = unbounded();
+        stop_callback(tx)();
+        assert!(matches!(rx.try_recv(), Ok(UiMsg::Stopped)));
+    }
 
     #[test]
     fn event_lines_split_across_writes_and_a_broken_one_is_reported() {

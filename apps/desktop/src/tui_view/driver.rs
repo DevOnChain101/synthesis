@@ -487,8 +487,31 @@ impl TuiView {
         let Some(lu) = &mut self.live else { return };
         let now = now_ms();
         let mut ended = false;
+        let mut stopped = false;
         for m in batch {
+            stopped |= matches!(m, UiMsg::Stopped);
             ended |= lu.live.on_msg(m, now);
+        }
+        if stopped && let Some(e) = lu.live.engine.take() {
+            // `synt stop` cancelled the session: end it for real (hooks, store, runtime) off the UI
+            // thread, and say what the close found (or that it did not end cleanly)
+            let job = cx.background_spawn(async move { engine::close_shared(e) });
+            cx.spawn(async move |this, cx| {
+                let found = job.await;
+                this.update(cx, |t, cx| {
+                    if let Some(lu) = &mut t.live {
+                        // `close` returns the worktree report and, after "close problems:", what did not end cleanly
+                        if let Some(m) = found {
+                            let bad = m.contains("close problems:");
+                            lu.live.note(m, bad);
+                        }
+                        lu.dirty = true;
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
         }
         lu.dirty = true;
         if ended {

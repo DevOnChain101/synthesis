@@ -121,6 +121,14 @@ impl Turn {
         Self { steps }
     }
 
+    /// Text cut off at `max_tokens`.
+    pub fn cut_text(text: &str) -> Self {
+        let mut steps = Self::begin();
+        Self::text_block(&mut steps, 0, text);
+        Self::end(&mut steps, StopReason::MaxTokens);
+        Self { steps }
+    }
+
     /// One tool call, `tool_use`.
     pub fn tool(id: &str, name: &str, input: Value) -> Self {
         Self::tools(&[(id, name, input)])

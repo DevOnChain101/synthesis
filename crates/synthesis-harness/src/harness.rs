@@ -42,12 +42,27 @@ pub struct Pricing {
     /// Price of a cache write; `None` = 125% of the input price (Anthropic's rate, the dearer
     /// side, so a cap is never under-counted).
     pub cache_write_per_mtok: Option<f64>,
+    /// Long-context tier: a request whose prompt is longer costs more.
+    pub long: Option<LongTier>,
+}
+
+/// A request whose prompt (input + cache tokens) is above `above_tokens` is priced as a whole at
+/// the multiplied rates: `input_mult` on every input-side price, `output_mult` on output.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LongTier {
+    pub above_tokens: u64,
+    pub input_mult: f64,
+    pub output_mult: f64,
 }
 
 impl Pricing {
-    /// USD of one response. `input_tokens` excludes the cache tokens (Anthropic's accounting),
-    /// which are priced on their own.
+    /// USD of one response. `input_tokens` excludes the cache tokens (Anthropic's accounting; the
+    /// OpenAI adapter subtracts them), which are priced on their own.
     pub fn cost(&self, u: &synthesis_providers::Usage) -> f64 {
+        let n = |t: Option<u64>| t.unwrap_or(0);
+        let prompt =
+            n(u.input_tokens) + n(u.cache_read_input_tokens) + n(u.cache_creation_input_tokens);
+        let (im, om) = self.mults(prompt);
         let n = |t: Option<u64>| t.unwrap_or(0) as f64;
         let read = self
             .cache_read_per_mtok
@@ -55,11 +70,36 @@ impl Pricing {
         let write = self
             .cache_write_per_mtok
             .unwrap_or(self.input_per_mtok * 1.25);
-        (n(u.input_tokens) * self.input_per_mtok
-            + n(u.output_tokens) * self.output_per_mtok
+        (im * (n(u.input_tokens) * self.input_per_mtok
             + n(u.cache_read_input_tokens) * read
             + n(u.cache_creation_input_tokens) * write)
+            + om * n(u.output_tokens) * self.output_per_mtok)
             / 1_000_000.0
+    }
+
+    /// Upper bound of one request: the whole prompt at the dearer of the input and cache-write
+    /// prices and `max_output` tokens of output. Conservative on purpose (the cache would make the
+    /// real cost lower, a stopped output higher never).
+    pub fn worst_case(&self, prompt_tokens: u64, max_output: u64) -> f64 {
+        let (im, om) = self.mults(prompt_tokens);
+        let input = self.input_per_mtok.max(
+            self.cache_write_per_mtok
+                .unwrap_or(self.input_per_mtok * 1.25),
+        );
+        (im * prompt_tokens as f64 * input + om * max_output as f64 * self.output_per_mtok)
+            / 1_000_000.0
+    }
+
+    /// The smallest cap one call can fit under (the output floor of 4096 tokens plus a prompt of
+    /// `prompt_tokens`): see the pre-turn estimate in docs/UNATTENDED.md.
+    pub fn min_usable_cap(&self, prompt_tokens: u64) -> f64 {
+        self.worst_case(prompt_tokens, 4096)
+    }
+
+    fn mults(&self, prompt: u64) -> (f64, f64) {
+        self.long
+            .filter(|t| prompt > t.above_tokens)
+            .map_or((1.0, 1.0), |t| (t.input_mult, t.output_mult))
     }
 }
 
@@ -400,6 +440,9 @@ pub(crate) struct Counters {
     pub cache_read: u64,
     pub cache_create: u64,
     pub cost: f64,
+    /// Worst-case USD of the model calls in flight (reserved before the call, released when it is
+    /// accounted), so parallel agents cannot all spend the same remainder of the cap.
+    pub reserved: f64,
     pub verify_attempts: u32,
 }
 
@@ -486,6 +529,8 @@ pub(crate) struct AgentState {
     pub image_note: bool,
     /// Images already reported as left out of requests (the notice repeats only when more go).
     pub images_omitted: usize,
+    /// The "output limit lowered to fit the cost cap" notice was given.
+    pub clamp_note: bool,
 }
 
 impl AgentState {
@@ -502,6 +547,7 @@ impl AgentState {
             drain_at: "tool_round",
             image_note: false,
             images_omitted: 0,
+            clamp_note: false,
         }
     }
 }

@@ -280,6 +280,7 @@ fn start(
             Arc::new(move || v.verify().map_err(|f| trust_changed_error(&f)))
                 as crate::run::PreStart
         }),
+        on_stop: None,
     };
     let mut p = prepare(&c, cwd, srv.env, srv.limits, Front::Native(native))?;
     if let Some(Err(files)) = verify.as_ref().map(TrustCheck::verify) {
@@ -1196,11 +1197,6 @@ pub fn run_stdio(
     // a headless engine is unattended: the governed defaults apply (wall cap, cost cap required,
     // worktree, ...; `--no-cost-cap` opts out of the cost cap only). A desktop host (`--host
     // desktop`) has a person at the window and keeps the interactive behaviour.
-    let mut common = common.clone();
-    common.governed = governed;
-    // a headless engine is unattended: the governed defaults apply (wall cap, cost cap required, worktree, ...;
-    // `--no-cost-cap` opts out of the cost cap only). A desktop host (`--host desktop`) has a person at the window
-    // and keeps the interactive behaviour.
     let mut common = common.clone();
     common.governed = governed;
     #[cfg(unix)]

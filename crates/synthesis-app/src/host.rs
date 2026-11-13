@@ -141,6 +141,9 @@ pub struct Live {
     /// The session-wide token (`synt stop` cancels it); every task's token is its child.
     root_cancel: CancellationToken,
     cancel: CancelSlot,
+    /// Ends the `synt stop` watcher with the session.
+    stop_end: CancellationToken,
+    notifier: Option<Arc<crate::notify::Notifier>>,
 }
 
 impl Live {
@@ -180,6 +183,8 @@ impl Live {
             tokio,
             notes,
             cancel: root_cancel,
+            stop_end,
+            notifier,
             egress,
             ..
         } = p;
@@ -246,6 +251,8 @@ impl Live {
             last: Arc::default(),
             root_cancel,
             cancel: Arc::default(),
+            stop_end,
+            notifier,
         };
         // a session never starts in bypassPermissions, whatever a stored session or a setting carried
         if live.mode() == Mode::BypassPermissions {
@@ -366,6 +373,7 @@ impl Live {
     /// `session.completed`, the MCP servers, the worktree; then stops the runtime. Returns what the
     /// worktree finish found (path, branch, changes, cleanup), for the caller to show.
     pub fn close(mut self) -> Option<String> {
+        self.stop_end.cancel();
         self.cancel();
         let outcome = lock(&self.last).take();
         let mut outcome = outcome.unwrap_or(TaskOutcome {
@@ -398,10 +406,18 @@ impl Live {
             ));
         }
         // the usage of the tasks that ran (the session is back unless a task outlived the window)
-        if let (Some(s), Some(sess)) = (&self.host.store, lock(&self.session).as_ref()) {
-            let _ = finish_store(s, self.host.transcript.as_deref(), &outcome, &sess.usage); // told on stderr
+        let mut problems: Vec<String> = Vec::new();
+        if let (Some(s), Some(sess)) = (&self.host.store, lock(&self.session).as_ref())
+            && let Err(e) = finish_store(s, self.host.transcript.as_deref(), &outcome, &sess.usage)
+        {
+            problems.push(e); // also told on stderr
         }
         self.harness.end_session(&outcome);
+        // the last notification (bounded by its timeout), then the notifier's runtime session
+        if let Some(n) = &self.notifier {
+            n.flush();
+            n.close();
+        }
         if let Some(t) = &self.host.transcript {
             t.clear_notifier(); // break the sink <-> transcript cycle: the next session needs the store lock
         }
@@ -417,6 +433,12 @@ impl Live {
         // the global hook holds the memory run, and with it the event sink and the session
         // store's write lock: the restarted session (resume, new folder) must be able to open it
         synthesis_tools::set_learned_skills(None);
-        finished
+        // what the window shows: the worktree report, and anything that did not end cleanly
+        if problems.is_empty() {
+            finished
+        } else {
+            let p = format!("close problems: {}", problems.join("; "));
+            Some(finished.map_or(p.clone(), |f| format!("{f}; {p}")))
+        }
     }
 }

@@ -1051,6 +1051,34 @@ fn usage_panel_shows_stored_history_after_a_prompt() {
     assert!(squash(&out).contains("7d"), "{}", squash(&out));
 }
 
+/// `synt stop` from another process on the interactive CLI: the app cancels, is hard-killed after the
+/// grace period and exits 130 through `process::exit`, which runs no destructors; the terminal must
+/// still be left cooked (raw mode off) and on the main screen.
+#[test]
+fn stop_hard_kill_leaves_the_terminal_usable() {
+    let rig = Rig::new(json!([{"text": "never", "delay_ms": 120000}]));
+    let out = rig.drive(json!([
+        expect("Enter send"),
+        quiet(),
+        send("hi\r"),
+        json!(["events", "user.message", 1, 20]),
+        json!(["wait", 1.0]),
+        json!(["mark"]),
+        json!(["stop", 40]),
+        json!(["cut"]),
+    ]));
+    assert!(out.contains("mechanism: process exit"), "{out}");
+    assert!(
+        out.contains("EXIT 33280"),
+        "exit 130 (wait status 130 << 8): {out}"
+    );
+    assert!(out.contains("TERMIOS cooked"), "raw mode left on: {out}");
+    // the restore sequence (leave the alternate screen, show the cursor) was written
+    let raw = String::from_utf8_lossy(&std::fs::read(rig.root().join("out.txt.raw")).unwrap())
+        .into_owned();
+    assert!(raw.contains("\x1b[?1049l"), "alternate screen not left");
+}
+
 /// The process dies (SIGKILL, as when the terminal window is closed) in the middle of a task,
 /// once while the model is still answering and once while a tool runs. Opening the session again
 /// shows it idle: the phase of a fresh process comes from its own runtime, not from the replay.

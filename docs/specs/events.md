@@ -79,7 +79,7 @@ Doc §5.12 types are kept verbatim; additions are marked. Payload field types: `
 | `session.mode_changed` | `from:str, to:str, reason:str?` | [new] permission mode switched while the session runs (CLI Shift+Tab, a future GUI via `Harness::set_mode`); not emitted for the starting mode. Entering `bypassPermissions` also emits a `notice` |
 | `permission.auto_verdict` | `tool_call_id:str, name:str, verdict:"allow"\|"deny"\|"ask", reason:str, source:"model"\|"cache"\|"fail_closed"` | [new] auto mode: the judge's decision on one call before it runs (audit trail; `fail_closed` = judge unavailable, unparseable, timed out or over the per-task cap, so the call is an ask) |
 | `model.changed` | `model:str, effort:str?` | [from-node agent.js:1539 'model-changed'] |
-| `budget.exceeded` | `budget:str, limit:number, used:number` | [new] |
+| `budget.exceeded` | `budget:str, limit:number, used:number, estimate?:true, estimate_usd?:number` (`budget` also `max_cost_usd_estimate`: the pre-turn worst case `estimate_usd` of the next call would cross the cap, `used` stays the actual spend; and `max_cost_usd_unpriced`: the model has no price) | [new] |
 | `memory.retrieved` | `ids:[str], tokens:u64, candidates:u64` | [new] the notes injected at task start (ids only, never text); memory.md §11 |
 | `memory.written` | `id:str, op:"added"\|"deduped"\|"superseded"\|"proposed"\|"quarantined"\|"updated"\|"archived", kind:str, scope:str, trust:str, status:str` | [new] a record was written by the episode writer, a `Memory*` tool or a reflection |
 | `memory.quarantined` | `id:str, rule:str` | [new] the poisoning scanner parked a record (also sent as `memory.written` with `op:"quarantined"`) |
