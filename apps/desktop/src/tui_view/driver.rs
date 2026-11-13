@@ -1687,6 +1687,13 @@ impl TuiView {
     fn panels_command(&mut self, arg: &str, cx: &mut Context<Self>) {
         use super::layout::{ALWAYS, HIDEABLE, PanelsCmd, parse_panels};
         let Some(lu) = &mut self.live else { return };
+        let reopen = std::mem::take(&mut lu.live.menu_reopen);
+        // no argument: the picker with every panel's state (`/panels list` prints the text)
+        if arg.trim().is_empty() {
+            lu.live.open_menu(crate::menu::panels(&self.hidden));
+            lu.dirty = true;
+            return cx.notify();
+        }
         let cmd = match parse_panels(arg) {
             Ok(c) => c,
             Err(e) => {
@@ -1722,7 +1729,7 @@ impl TuiView {
         for (k, off) in &changes {
             self.hidden.set_hidden(k, *off);
         }
-        if matches!(cmd, PanelsCmd::List) || !warn {
+        if !reopen && (matches!(cmd, PanelsCmd::List) || !warn) {
             let mut t = String::from(
                 "panels (/panels hide-all | show-all | focus [on|off] | header|footer on|off | <name> on|off):",
             );
@@ -1749,6 +1756,10 @@ impl TuiView {
             }
         }
         if let Some(lu) = &mut self.live {
+            // a pick in the picker keeps it open with the new states
+            if reopen && !warn {
+                lu.live.open_menu(crate::menu::panels(&self.hidden));
+            }
             lu.dirty = true;
         }
         cx.notify();

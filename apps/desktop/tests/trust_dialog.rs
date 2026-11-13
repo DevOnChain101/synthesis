@@ -373,7 +373,7 @@ fn trust_lists_and_revokes_with_a_confirmation_that_keeps_by_default() {
         synthesis_session::trust::add(&home, &app, "folder", &fp, &policy).unwrap();
     }
     let mark = l.view.convo.items.len();
-    l.submit("/trust");
+    l.submit("/trust list");
     let last = notices_from(&l, mark);
     assert!(
         last.contains("1.")
@@ -419,7 +419,7 @@ fn a_session_trust_is_listed_and_revoke_ends_it() {
     let root = app.display().to_string();
     l.session_grant = Some(root.clone());
     let mark = l.view.convo.items.len();
-    l.submit("/trust");
+    l.submit("/trust list");
     let t = notices_from(&l, mark);
     assert!(
         t.contains("session-only trust active") && t.contains("until the app exits"),
@@ -437,7 +437,7 @@ fn trust_says_when_remembered_trust_is_off_and_counts_rows_it_ignores() {
     let (mut l, _d, app) = rig_nested();
     let home = l.engine.as_ref().unwrap().synthesis_home.clone();
     let mark = l.view.convo.items.len();
-    l.submit("/trust");
+    l.submit("/trust list");
     let t = notices_from(&l, mark);
     assert!(
         t.contains("NOT honoured") && t.contains("sandbox is off"),
@@ -453,7 +453,7 @@ fn trust_says_when_remembered_trust_is_off_and_counts_rows_it_ignores() {
     synthesis_session::trust::add(&home, &app, "folder", &fp, &policy).unwrap();
     std::fs::remove_file(home.join("run/trust.key")).unwrap();
     let mark = l.view.convo.items.len();
-    l.submit("/trust");
+    l.submit("/trust list");
     let t = notices_from(&l, mark);
     assert!(t.contains("unverified rows ignored: 1"), "{t}");
     assert!(t.contains("no remembered folder"), "{t}");

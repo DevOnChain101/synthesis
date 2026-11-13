@@ -948,6 +948,23 @@ impl Engine {
         v
     }
 
+    /// The rules of this session (allow, ask, deny), for the `/permissions` remove picker.
+    pub fn permission_rules(&self) -> Vec<String> {
+        let Ok(live) = self.live() else {
+            return vec![];
+        };
+        let perms = live.harness.permissions();
+        let p = lock(&perms);
+        let r = p.rules();
+        let mut all: Vec<String> = [&r.allow, &r.ask, &r.deny]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+        all.dedup();
+        all
+    }
+
     /// `/permissions allow RULE`: a session-only rule, the CLI's check and wording (`Err`: an error line).
     pub fn allow_rule(&self, rule: &str) -> Result<String, String> {
         let live = self.live()?;

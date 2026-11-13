@@ -521,8 +521,11 @@ fn context_is_a_command_and_a_picker_row_that_prefills_it() {
     assert_eq!(
         r.live.submit("/context"),
         Submitted::Nothing,
-        "alone: shows the window and its source"
+        "alone: the picker of common sizes, titled with the window and its source"
     );
+    assert_eq!(r.live.dialogs.len(), 1);
+    assert!(r.live.dialogs[0].title().starts_with("Context window of"));
+    assert_eq!(r.live.reject(), None);
     assert!(
         r.engine.context_source.starts_with("unknown"),
         "{}",
