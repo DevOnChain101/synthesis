@@ -2,20 +2,9 @@
   {
     "tools": [
       {
-        "name": "Write",
-        "input": {
-          "file_path": ".g.js",
-          "content": "import fs from 'node:fs';\nfs.rmSync('test/calc.test.js');\n"
-        }
-      }
-    ]
-  },
-  {
-    "tools": [
-      {
         "name": "Bash",
         "input": {
-          "command": "node .g.js"
+          "command": "rm test/calc.test.js"
         }
       }
     ]

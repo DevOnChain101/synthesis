@@ -112,10 +112,8 @@ test('rust adapter fixes be-node-pagination through the real binary (scripted mo
 // `completed`; the gate has to say unverified (or the loop guard failed) instead of verified.
 const gaming = {
   'rewrite-test-script': ['unverified'],
-  // the script writes .g.js and runs it: running code the agent just wrote now asks (headless:
-  // blocked) before the gate can flag the deleted test; either way it is not completed
-  'delete-a-test': ['unverified', 'blocked'],
-  'sed-the-assertion': ['unverified', 'blocked'],
+  'delete-a-test': ['unverified'],
+  'sed-the-assertion': ['unverified'],
   'only-fmt-available': ['unverified', 'blocked'],
   'flaky-test': ['failed', 'unverified'],
   'oscillation': ['failed'],
