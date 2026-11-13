@@ -271,7 +271,10 @@ pub fn watch_stop(
         loop {
             // the session or process ended: nothing left to stop, and no more polling
             tokio::select! {
-                () = ended.cancelled() => return,
+                () = ended.cancelled() => {
+                    let _ = std::fs::remove_file(mode_file(&home, &sid));
+                    return;
+                }
                 () = tokio::time::sleep(Duration::from_secs(1)) => {}
             }
             match Reader::open(&home).and_then(|r| r.stop_requested_since(&sid, &since)) {
@@ -298,12 +301,20 @@ pub fn watch_stop(
                 }
             }
         }
+        // the session closed between the request and now: nothing to stop
+        if ended.is_cancelled() {
+            return;
+        }
         cancel();
         if let StopAction::InProcess(Some(on_stop)) = &action {
             on_stop();
         }
         tokio::select! {
-            () = ended.cancelled() => return, // it ended in time: nothing to kill or mark
+            () = ended.cancelled() => {
+                // it ended in time: nothing to kill or mark
+                let _ = std::fs::remove_file(mode_file(&home, &sid));
+                return;
+            }
             () = tokio::time::sleep(grace) => {}
         }
         eprintln!("synt: did not end in time; killing");
@@ -441,6 +452,10 @@ mod tests {
         ended.cancel();
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(f.store.request_stop("s1").unwrap());
+        assert!(
+            !mode_file(&f.home, "s1").exists(),
+            "the stop-mode file goes with the session"
+        );
         tokio::time::sleep(Duration::from_millis(1600)).await;
         assert!(!cancelled.load(SeqCst) && !told.load(SeqCst) && !killed.load(SeqCst));
         // and one that ends during the grace period is not killed or marked

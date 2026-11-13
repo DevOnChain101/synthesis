@@ -32,6 +32,8 @@ use tokio_util::sync::CancellationToken;
 const MAX_SENT: usize = 50;
 /// Reserved for `task.ended`, so a flood of approvals can never crowd the final event out.
 const MAX_ENDED: usize = 50;
+/// Commands running at once; the rest wait for a slot (so a burst is not a fork bomb).
+const MAX_CONCURRENT: usize = 4;
 const MAX_REASON: usize = 200;
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
 const MAX_TIMEOUT_SECS: u64 = 60;
@@ -231,6 +233,7 @@ pub struct Notifier {
     ended: AtomicUsize,
     seen: Mutex<HashSet<String>>,
     pending: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    slots: (Mutex<usize>, std::sync::Condvar),
 }
 
 impl Notifier {
@@ -289,6 +292,7 @@ impl Notifier {
             ended: AtomicUsize::new(0),
             seen: Mutex::new(HashSet::new()),
             pending: Mutex::new(vec![]),
+            slots: (Mutex::new(0), std::sync::Condvar::new()),
         });
         let me = n.clone();
         sink.observe(Arc::new(move |env| {
@@ -335,7 +339,25 @@ impl Notifier {
         }
     }
 
+    /// Waits for one of [`MAX_CONCURRENT`] slots; the returned guard gives it back.
+    fn slot(&self) -> impl Drop + '_ {
+        struct Slot<'a>(&'a (Mutex<usize>, std::sync::Condvar));
+        impl Drop for Slot<'_> {
+            fn drop(&mut self) {
+                *self.0.0.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+                self.0.1.notify_one();
+            }
+        }
+        let mut n = self.slots.0.lock().unwrap_or_else(|e| e.into_inner());
+        while *n >= MAX_CONCURRENT {
+            n = self.slots.1.wait(n).unwrap_or_else(|e| e.into_inner());
+        }
+        *n += 1;
+        Slot(&self.slots)
+    }
+
     async fn run(&self, payload: Value) {
+        let _slot = self.slot();
         let words: Vec<String> = self.argv.iter().map(|a| quote(a)).collect();
         let mut spec = ExecSpec::new(format!("exec {}", words.join(" ")));
         spec.stdin = Some(payload.to_string().into_bytes());

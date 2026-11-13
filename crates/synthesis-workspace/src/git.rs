@@ -56,6 +56,12 @@ impl Git {
             ("core.sshCommand", "false"),
             ("protocol.allow", "never"),
             ("diff.external", ""),
+            // never descend into a submodule: its git directory is agent-writable, and a filter or
+            // fsmonitor in it would run on the host (docs/UNATTENDED.md, worktree submodules)
+            ("diff.ignoreSubmodules", "all"),
+            ("status.submoduleSummary", "false"),
+            ("submodule.recurse", "false"),
+            ("fetch.recurseSubmodules", "false"),
             ("core.pager", "cat"),
             ("core.editor", "true"),
             ("core.askPass", ""),
@@ -165,19 +171,34 @@ impl Git {
         limit: std::time::Duration,
     ) -> Result<Output> {
         use std::io::Read;
+        use std::sync::{Arc, Mutex, mpsc};
         let guards = self.guards(dir)?;
         let mut c = self.command(dir, &guards, args, false);
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut c, 0);
         let mut child = c.spawn()?;
+        // Readers fill shared buffers and signal when the pipe closes. A grandchild that escaped
+        // the kill (own session, a transport helper) can keep a pipe open for ever, so the wait for
+        // them is bounded and they are detached.
+        let (done_tx, done_rx) = mpsc::channel();
         let drain = |r: Option<Box<dyn Read + Send>>| {
+            let buf = Arc::new(Mutex::new(Vec::new()));
+            let (b2, tx) = (buf.clone(), done_tx.clone());
             std::thread::spawn(move || {
-                let mut v = Vec::new();
                 if let Some(mut r) = r {
-                    let _ = r.read_to_end(&mut v);
+                    let mut chunk = [0u8; 8192];
+                    while let Ok(n) = r.read(&mut chunk) {
+                        if n == 0 {
+                            break;
+                        }
+                        b2.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .extend_from_slice(&chunk[..n]);
+                    }
                 }
-                v
-            })
+                let _ = tx.send(());
+            });
+            buf
         };
         let out = drain(
             child
@@ -191,26 +212,30 @@ impl Git {
                 .take()
                 .map(|s| Box::new(s) as Box<dyn Read + Send>),
         );
+        drop(done_tx);
         let start = std::time::Instant::now();
         let status = loop {
             if let Some(st) = child.try_wait()? {
                 break Some(st);
             }
             if start.elapsed() >= limit {
-                #[cfg(unix)]
-                if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
-                    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-                }
-                let _ = child.kill();
+                kill_tree(&mut child);
                 let _ = child.wait();
                 break None;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         };
-        let (stdout, stderr) = (
-            out.join().unwrap_or_default(),
-            err.join().unwrap_or_default(),
-        );
+        let grace = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        for _ in 0..2 {
+            let left = grace.saturating_duration_since(std::time::Instant::now());
+            if done_rx.recv_timeout(left).is_err() {
+                break;
+            }
+        }
+        let take = |b: Arc<Mutex<Vec<u8>>>| {
+            std::mem::take(&mut *b.lock().unwrap_or_else(|e| e.into_inner()))
+        };
+        let (stdout, stderr) = (take(out), take(err));
         match status {
             Some(status) => Ok(Output {
                 status,
@@ -271,4 +296,25 @@ pub fn find_git(env: &Env) -> Option<PathBuf> {
         .filter(|d| d.is_absolute())
         .map(|d| d.join(name))
         .find(|p| p.is_file())
+}
+
+/// Kills git and everything it started: the process group on Unix; on Windows `taskkill /T /F`
+/// (System32, absolute path) so git-remote-https and ssh die with it.
+fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+    #[cfg(windows)]
+    {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        let exe = PathBuf::from(root).join("System32").join("taskkill.exe");
+        let _ = Command::new(exe)
+            .args(["/T", "/F", "/PID", &child.id().to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
 }

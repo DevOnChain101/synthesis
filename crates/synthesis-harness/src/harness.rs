@@ -90,6 +90,12 @@ impl Pricing {
             / 1_000_000.0
     }
 
+    /// The smallest cap one call can fit under (the output floor of 4096 tokens plus a prompt of
+    /// `prompt_tokens`): see the pre-turn estimate in docs/UNATTENDED.md.
+    pub fn min_usable_cap(&self, prompt_tokens: u64) -> f64 {
+        self.worst_case(prompt_tokens, 4096)
+    }
+
     fn mults(&self, prompt: u64) -> (f64, f64) {
         self.long
             .filter(|t| prompt > t.above_tokens)
@@ -434,6 +440,9 @@ pub(crate) struct Counters {
     pub cache_read: u64,
     pub cache_create: u64,
     pub cost: f64,
+    /// Worst-case USD of the model calls in flight (reserved before the call, released when it is
+    /// accounted), so parallel agents cannot all spend the same remainder of the cap.
+    pub reserved: f64,
     pub verify_attempts: u32,
 }
 
@@ -517,6 +526,8 @@ pub(crate) struct AgentState {
     pub image_note: bool,
     /// Images already reported as left out of requests (the notice repeats only when more go).
     pub images_omitted: usize,
+    /// The "output limit lowered to fit the cost cap" notice was given.
+    pub clamp_note: bool,
 }
 
 impl AgentState {
@@ -533,6 +544,7 @@ impl AgentState {
             drain_at: "tool_round",
             image_note: false,
             images_omitted: 0,
+            clamp_note: false,
         }
     }
 }

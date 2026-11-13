@@ -487,8 +487,18 @@ impl TuiView {
         let Some(lu) = &mut self.live else { return };
         let now = now_ms();
         let mut ended = false;
+        let mut stopped = false;
         for m in batch {
+            stopped |= matches!(m, UiMsg::Stopped);
             ended |= lu.live.on_msg(m, now);
+        }
+        if stopped && let Some(e) = lu.live.engine.take() {
+            // `synt stop` cancelled the session: end it for real (hooks, store, runtime), off the UI thread
+            std::thread::spawn(move || {
+                if let Some(m) = engine::close_shared(e) {
+                    eprintln!("synthesis-desktop: {m}");
+                }
+            });
         }
         lu.dirty = true;
         if ended {

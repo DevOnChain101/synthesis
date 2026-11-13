@@ -942,6 +942,16 @@ impl Live {
                 );
             }
             UiMsg::Note(t, err) => self.note(t, err),
+            // the window closes the engine itself (`apply_batch`); here only the state
+            UiMsg::Stopped => {
+                self.busy = false;
+                self.dialogs.clear();
+                self.note(
+                    "stopped by `synt stop`: the session is cancelled and closed",
+                    true,
+                );
+                return true;
+            }
             // an answer for a session that is no longer the open one is not applied to this one
             UiMsg::Renamed(sid, _) if sid != self.sid => {}
             UiMsg::Renamed(_, r) => match r {

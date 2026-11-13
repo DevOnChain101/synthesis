@@ -2337,10 +2337,10 @@ fn a_cost_cap_stops_spend_after_the_response_that_crossed_it() {
     );
 }
 
-/// The cap is also checked before the call: at $1000/M the worst case of one request (8192 output
-/// tokens alone is $8) crosses a $1 cap, so no request is made at all.
+/// A cap that not even one small call fits under is refused at start (exit 2) with the price of one
+/// call; at run time the pre-turn estimate clamps or refuses (harness tests).
 #[test]
-fn the_pre_turn_estimate_refuses_a_call_that_could_cross_the_cap() {
+fn a_cap_below_the_price_of_one_call_is_refused_at_start() {
     let rig = Rig::new();
     rig.settings(json!({"synt": {"pricing": {"fake/fake-model": {"input_per_mtok": 1000.0, "output_per_mtok": 1000.0}}}}));
     let (o, ev) = rig.run(
@@ -2349,13 +2349,15 @@ fn the_pre_turn_estimate_refuses_a_call_that_could_cross_the_cap() {
     );
     assert_eq!(
         o.status.code(),
-        Some(1),
+        Some(2),
         "{}",
         String::from_utf8_lossy(&o.stderr)
     );
-    let b = find(&ev, "budget.exceeded");
-    assert_eq!(b.len(), 1, "{:?}", types(&ev));
-    assert_eq!(b[0]["payload"]["budget"], "max_cost_usd_estimate");
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("too low for"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     assert!(
         find(&ev, "turn.started").is_empty(),
         "no model request was made"

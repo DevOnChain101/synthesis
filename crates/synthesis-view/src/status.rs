@@ -247,8 +247,16 @@ impl StatusModel {
                 budget,
                 limit,
                 used,
+                estimate_usd,
                 ..
-            } => self.budget_exceeded = Some(format!("{budget} {used} / {limit}")),
+            } => {
+                self.budget_exceeded = Some(synthesis_events::budget_text(
+                    budget,
+                    *limit,
+                    *used,
+                    *estimate_usd,
+                ));
+            }
             Event::TurnStarted { .. } => self.turns += 1,
             Event::ToolRequested { .. } => self.tools += 1,
             Event::TurnCompleted { usage: Some(u), .. } if main => {

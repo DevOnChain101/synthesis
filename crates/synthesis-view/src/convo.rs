@@ -709,8 +709,15 @@ impl Convo {
                 budget,
                 limit,
                 used,
+                estimate_usd,
                 ..
-            } => self.notice(true, format!("budget exceeded: {budget} {used} / {limit}")),
+            } => self.notice(
+                true,
+                format!(
+                    "budget exceeded: {}",
+                    synthesis_events::budget_text(budget, *limit, *used, *estimate_usd)
+                ),
+            ),
             Event::HookRan {
                 event,
                 hook_name,

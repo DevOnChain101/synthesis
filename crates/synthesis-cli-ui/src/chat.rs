@@ -677,9 +677,13 @@ impl Chat {
                 budget,
                 limit,
                 used,
+                estimate_usd,
                 ..
             } => self.note(
-                format!("budget exceeded: {budget} {used} / {limit}"),
+                format!(
+                    "budget exceeded: {}",
+                    synthesis_events::budget_text(budget, *limit, *used, *estimate_usd)
+                ),
                 "warn",
             ),
             Event::SubagentStarted(i) => {

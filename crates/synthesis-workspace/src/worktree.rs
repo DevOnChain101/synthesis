@@ -341,6 +341,7 @@ impl WorktreeManager {
                 "--binary",
                 "--no-ext-diff",
                 "--no-textconv",
+                "--ignore-submodules=all",
                 "--no-color",
                 head,
             ],
@@ -392,6 +393,7 @@ impl WorktreeManager {
                 "--no-renames",
                 "--no-ext-diff",
                 "--no-textconv",
+                "--ignore-submodules=all",
                 base,
             ],
         )?;
@@ -442,11 +444,28 @@ impl WorktreeManager {
         })
     }
 
+    /// `git add <flag>` of everything EXCEPT the submodules (gitlinks of the index). `git add`
+    /// otherwise descends into a checked-out submodule, whose git directory the agent can replace
+    /// with one that has a filter in its config, and the host would run that filter.
+    fn add_all(&self, g: &Git, dir: &Path, flag: &str) -> Result<()> {
+        let staged = g.out(dir, &["ls-files", "--stage", "-z"])?;
+        let links: Vec<String> = nul_split(&staged)
+            .filter_map(|e| {
+                let (meta, path) = e.split_once('\t')?;
+                meta.starts_with("160000 ")
+                    .then(|| format!(":(exclude,literal){path}"))
+            })
+            .collect();
+        let mut args = vec!["add", flag, "--", "."];
+        args.extend(links.iter().map(String::as_str));
+        g.out(dir, &args).map(|_| ())
+    }
+
     /// Unified diff of the agent's work vs the baseline (untracked files included via
     /// intent-to-add in the agent's own worktree).
     pub fn diff(&self, info: &GitInfo) -> Result<String> {
         let g = self.pinned(info)?;
-        g.out(&info.worktree, &["add", "--intent-to-add", "--all"])?;
+        self.add_all(&g, &info.worktree, "--intent-to-add")?;
         let d = g.out(
             &info.worktree,
             &[
@@ -454,6 +473,7 @@ impl WorktreeManager {
                 "--binary",
                 "--no-ext-diff",
                 "--no-textconv",
+                "--ignore-submodules=all",
                 "--no-color",
                 &info.baseline,
             ],
@@ -464,10 +484,14 @@ impl WorktreeManager {
     /// Commits everything in the worktree; returns the new tip, or `None` if nothing changed.
     pub fn commit_all(&self, info: &GitInfo, message: &str) -> Result<Option<String>> {
         let g = self.pinned(info)?;
-        g.out(&info.worktree, &["add", "-A"])?;
-        if g.run(&info.worktree, &["diff", "--cached", "--quiet"], None)?
-            .status
-            .success()
+        self.add_all(&g, &info.worktree, "--all")?;
+        if g.run(
+            &info.worktree,
+            &["diff", "--cached", "--quiet", "--ignore-submodules=all"],
+            None,
+        )?
+        .status
+        .success()
         {
             return Ok(None);
         }
@@ -744,8 +768,26 @@ const MAX_SUBMODULES: usize = 50;
 const MAX_DEPTH: usize = 3;
 /// Total time for all clones; the git process group is killed after it.
 const SUBMODULE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
-/// `git submodule` needs the hardening flags below; older versions lack some of them.
-const MIN_GIT: (u32, u32) = (2, 30);
+/// Releases that carry the fixes for the submodule path-handling CVEs (CVE-2024-32002 and
+/// CVE-2025-48384, which let a crafted `.gitmodules` write or run code outside the checkout):
+/// 2.50.1 and later, or the last patched release of each older branch. Anything else is refused
+/// (this also covers `GIT_CONFIG_GLOBAL`, which needs 2.32, and the other flags used here).
+const PATCHED_GIT: [(u32, u32, u32); 7] = [
+    (2, 43, 7),
+    (2, 44, 4),
+    (2, 45, 4),
+    (2, 46, 4),
+    (2, 47, 3),
+    (2, 48, 2),
+    (2, 49, 1),
+];
+
+fn git_version_ok(v: (u32, u32, u32)) -> bool {
+    v >= (2, 50, 1)
+        || PATCHED_GIT
+            .iter()
+            .any(|&(a, b, c)| v.0 == a && v.1 == b && v.2 >= c)
+}
 
 /// `url` without credentials (`user:pass@`), for messages: anything up to the last `@` of the
 /// first path segment is dropped.
@@ -782,6 +824,40 @@ fn host_ok(h: &str) -> bool {
         && !h.starts_with('-')
         && h.bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
+}
+
+/// A host that is not a literal private, loopback, link-local or otherwise internal address, and
+/// not `localhost`. Ambiguous numeric forms (`2130706433`, `0x7f.1`) are refused. A NAME that
+/// resolves to an internal address cannot be seen here (no DNS lookup): that is the network
+/// policy's job, see docs/UNATTENDED.md.
+fn host_public(h: &str) -> bool {
+    let h = h.to_ascii_lowercase();
+    if h == "localhost"
+        || h.ends_with(".localhost")
+        || h.ends_with(".local")
+        || h.ends_with(".internal")
+    {
+        return false;
+    }
+    let numeric = h.bytes().all(|b| b.is_ascii_digit() || b == b'.') || h.contains("0x");
+    if !numeric {
+        return true;
+    }
+    match h.parse::<std::net::Ipv4Addr>() {
+        Ok(a) => {
+            let o = a.octets();
+            !(a.is_private()
+                || a.is_loopback()
+                || a.is_link_local()
+                || a.is_unspecified()
+                || a.is_broadcast()
+                || a.is_documentation()
+                || (o[0] == 100 && (64..128).contains(&o[1])) // carrier-grade NAT
+                || o[0] == 0
+                || o[0] >= 224)
+        }
+        Err(_) => false,
+    }
 }
 
 fn user_ok(u: &str) -> bool {
@@ -847,13 +923,13 @@ impl SubmodulePolicy {
                 }
                 _ => hostport,
             };
-            return if host_ok(host) && rest.len() > authority.len() {
+            return if host_ok(host) && host_public(host) && rest.len() > authority.len() {
                 Ok(())
             } else {
                 bad("bad host or no path")
             };
         }
-        if self.file_allowed() && (lower.starts_with("file://") || url.starts_with('/')) {
+        if self.file_allowed() && (lower.starts_with("file://") || Path::new(url).is_absolute()) {
             return Ok(());
         }
         // scp-like `[user@]host:path`: a `:` before any `/`, no scheme
@@ -868,7 +944,8 @@ impl SubmodulePolicy {
                 Some((u, h)) => (Some(u), h),
                 None => (None, hostpart),
             };
-            if user.is_none_or(user_ok) && host_ok(host) && !host.contains(':') {
+            if user.is_none_or(user_ok) && host_ok(host) && host_public(host) && !host.contains(':')
+            {
                 return Ok(());
             }
             return bad("bad user or host");
@@ -877,11 +954,15 @@ impl SubmodulePolicy {
     }
 }
 
-/// `(git major, minor)` from `git version 2.39.2 (Apple Git-143)`.
-fn parse_git_version(s: &str) -> Option<(u32, u32)> {
+/// `(major, minor, patch)` from `git version 2.39.2 (Apple Git-143)`.
+fn parse_git_version(s: &str) -> Option<(u32, u32, u32)> {
     let v = s.split_whitespace().nth(2)?;
     let mut p = v.split('.');
-    Some((p.next()?.parse().ok()?, p.next()?.parse().ok()?))
+    Some((
+        p.next()?.parse().ok()?,
+        p.next()?.parse().ok()?,
+        p.next().and_then(|x| x.parse().ok()).unwrap_or(0),
+    ))
 }
 
 impl WorktreeManager {
@@ -945,17 +1026,14 @@ impl WorktreeManager {
         }
         let v =
             String::from_utf8_lossy(&self.git.out(&info.worktree, &["--version"])?).into_owned();
-        if parse_git_version(&v).is_none_or(|g| g < MIN_GIT) {
+        if !policy.file_allowed() && !parse_git_version(&v).is_some_and(git_version_ok) {
             return Err(Error::Refused(format!(
-                "git >= {}.{} is needed to check out submodules safely (found: {})",
-                MIN_GIT.0,
-                MIN_GIT.1,
+                "a git with the submodule security fixes is needed (2.50.1 or later, or 2.49.1, 2.48.2, 2.47.3, 2.46.4, 2.45.4, 2.44.4, 2.43.7); found: {}",
                 v.trim()
             )));
         }
         let started = std::time::Instant::now();
         let root = self.pinned(info)?;
-        let common = self.common_dir(&info.repo_root)?;
         let mut done = Vec::new();
         // (git to use, directory, name prefix)
         let mut level = vec![(root, info.worktree.clone(), String::new())];
@@ -1005,9 +1083,20 @@ impl WorktreeManager {
                     .checked_sub(started.elapsed())
                     .ok_or_else(|| Error::Refused("submodule checkout deadline passed".into()))?;
                 // every name gets its update mode pinned to a plain checkout
+                // url/active come from -c (already checked above), so nothing is written to the
+                // shared `.git/config` and no repository lock is needed for the (long) clone
                 let guards: Vec<String> = urls
                     .iter()
-                    .flat_map(|(n, _)| ["-c".to_string(), format!("submodule.{n}.update=checkout")])
+                    .flat_map(|(n, u)| {
+                        [
+                            "-c".to_string(),
+                            format!("submodule.{n}.update=checkout"),
+                            "-c".to_string(),
+                            format!("submodule.{n}.url={u}"),
+                            "-c".to_string(),
+                            format!("submodule.{n}.active=true"),
+                        ]
+                    })
                     .collect();
                 let mut args: Vec<&str> = vec![
                     "-c",
@@ -1027,8 +1116,8 @@ impl WorktreeManager {
                     args.extend(["-c", "protocol.file.allow=always"]);
                 }
                 args.extend(guards.iter().map(String::as_str));
-                args.extend(["submodule", "update", "--init", "--"]);
-                let o = with_repo_lock(&common, || g.run_deadline(dir, &args, left))??;
+                args.extend(["submodule", "update", "--"]);
+                let o = g.run_deadline(dir, &args, left)?;
                 if !o.status.success() {
                     return Err(Error::Refused(format!(
                         "git submodule update failed (exit {}): {}",
@@ -1072,7 +1161,7 @@ impl WorktreeManager {
 /// A relative path made of plain components (no `..`, no root).
 fn safe_rel(p: &str) -> bool {
     !p.is_empty()
-        && !p.contains('\0')
+        && !p.chars().any(char::is_control) // NUL, CR, LF, TAB: they confuse git's config and path parsing
         && Path::new(p)
             .components()
             .all(|c| matches!(c, std::path::Component::Normal(_)))
@@ -1082,12 +1171,28 @@ fn safe_rel(p: &str) -> bool {
 mod submodule_tests {
     use super::*;
 
+    /// Plain git for fixtures: a clean env that keeps what Windows needs to run anything.
     fn git(dir: &Path, args: &[&str]) {
-        let o = std::process::Command::new("git")
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap())
+        let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        let mut c = std::process::Command::new("git");
+        c.env_clear()
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_GLOBAL", null);
+        for k in [
+            "PATH",
+            "SYSTEMROOT",
+            "SystemRoot",
+            "HOME",
+            "USERPROFILE",
+            "TEMP",
+            "TMP",
+            "TMPDIR",
+        ] {
+            if let Some(v) = std::env::var_os(k) {
+                c.env(k, v);
+            }
+        }
+        let o = c
             .current_dir(dir)
             .args([
                 "-c",
@@ -1108,12 +1213,18 @@ mod submodule_tests {
         );
     }
 
+    /// A path as a submodule URL: forward slashes, so Windows paths survive `.gitmodules`.
+    fn url_of(p: &Path) -> String {
+        p.to_str().unwrap().replace('\\', "/")
+    }
+
     #[test]
     fn urls_other_than_plain_https_and_ssh_are_refused() {
         let p = SubmodulePolicy::default();
         for ok in [
             "https://h.example/r.git",
             "https://h.example:8443/r.git",
+            "https://93.184.216.34/r.git",
             "ssh://git@h/r.git",
             "ssh://h:22/r.git",
             "git@h.example:o/r.git",
@@ -1150,6 +1261,14 @@ mod submodule_tests {
             "https://h.example",
             "https://h.example@evil/r.git",
             "u:p@h:path",
+            "https://127.0.0.1/r.git",
+            "https://10.0.0.5/r.git",
+            "ssh://169.254.169.254/r.git",
+            "git@192.168.1.1:o/r.git",
+            "https://localhost/r.git",
+            "https://2130706433/r.git",
+            "https://0x7f.1/r.git",
+            "https://100.64.0.1/r.git",
             "https://[::1]/r.git", // "::" is a transport-helper marker; IPv6 literals are not supported
         ] {
             assert!(p.check(bad).is_err(), "{bad}");
@@ -1183,11 +1302,38 @@ mod submodule_tests {
     fn git_versions_parse() {
         assert_eq!(
             parse_git_version("git version 2.39.2 (Apple Git-143)"),
-            Some((2, 39))
+            Some((2, 39, 2))
         );
-        assert_eq!(parse_git_version("git version 2.30.0"), Some((2, 30)));
-        assert!(parse_git_version("git version 2.29.9").is_some_and(|v| v < MIN_GIT));
+        assert_eq!(parse_git_version("git version 2.50"), Some((2, 50, 0)));
         assert_eq!(parse_git_version("nonsense"), None);
+        for ok in [
+            (2, 50, 1),
+            (2, 51, 0),
+            (3, 0, 0),
+            (2, 45, 4),
+            (2, 49, 1),
+            (2, 43, 9),
+        ] {
+            assert!(git_version_ok(ok), "{ok:?}");
+        }
+        for bad in [
+            (2, 50, 0),
+            (2, 45, 3),
+            (2, 39, 5),
+            (2, 30, 0),
+            (2, 49, 0),
+            (2, 42, 9),
+            (1, 99, 9),
+        ] {
+            assert!(!git_version_ok(bad), "{bad:?}");
+        }
+        assert!(
+            safe_rel("vendor/sub")
+                && !safe_rel("a\tb")
+                && !safe_rel("a\nb")
+                && !safe_rel("a\rb")
+                && !safe_rel("../x")
+        );
     }
 
     fn repo_with_submodule(base: &Path, extra_gitmodules: Option<&str>) -> (PathBuf, PathBuf) {
@@ -1204,13 +1350,7 @@ mod submodule_tests {
         git(&repo, &["commit", "-qm", "init"]);
         git(
             &repo,
-            &[
-                "submodule",
-                "add",
-                "-q",
-                sub.to_str().unwrap(),
-                "vendor/sub",
-            ],
+            &["submodule", "add", "-q", &url_of(&sub), "vendor/sub"],
         );
         if let Some(x) = extra_gitmodules {
             let mut t = fs::read_to_string(repo.join(".gitmodules")).unwrap();
@@ -1246,6 +1386,7 @@ mod submodule_tests {
         let a = mgr.create(&repo, "s1", base.join("art"), false).unwrap();
         let info = a.git.unwrap();
         let wt_file = info.worktree.join("vendor/sub/lib.txt");
+        let before = fs::read_to_string(repo.join(".git/config")).unwrap();
         assert!(
             !wt_file.exists(),
             "git worktree add does not populate submodules"
@@ -1262,6 +1403,12 @@ mod submodule_tests {
             .unwrap();
         assert_eq!(names, ["vendor/sub"]);
         assert_eq!(fs::read_to_string(wt_file).unwrap(), "lib\n");
+        // nothing was written to the shared config of the repository
+        assert_eq!(
+            fs::read_to_string(repo.join(".git/config")).unwrap(),
+            before,
+            "the shared config of the repository was written"
+        );
     }
 
     #[test]
@@ -1294,6 +1441,44 @@ mod submodule_tests {
         assert!(!Path::new("/tmp/pwned").exists());
     }
 
+    /// A helper that left the process group and keeps the pipes open must not hold the call.
+    #[cfg(unix)]
+    #[test]
+    fn an_escaped_grandchild_holding_the_pipes_does_not_hang_the_deadline() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+            || std::process::Command::new("python3")
+                .arg("--version")
+                .output()
+                .is_err()
+        {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(tmp.path()).unwrap();
+        git(&base, &["init", "-q"]);
+        let mgr = manager(&base);
+        let alias = "alias.slow=!python3 -c \"import subprocess,time; subprocess.Popen(['sleep','30'], start_new_session=True); time.sleep(30)\"";
+        let t0 = std::time::Instant::now();
+        let e = mgr
+            .git
+            .run_deadline(
+                &base,
+                &["-c", alias, "slow"],
+                std::time::Duration::from_millis(300),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("was killed"), "{e}");
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(8),
+            "took {:?}",
+            t0.elapsed()
+        );
+    }
+
     #[test]
     fn a_stuck_git_is_killed_at_the_deadline() {
         if std::process::Command::new("git")
@@ -1307,13 +1492,19 @@ mod submodule_tests {
         let base = synthesis_core::canonicalize(tmp.path()).unwrap();
         git(&base, &["init", "-q"]);
         let mgr = manager(&base);
-        // an alias that sleeps stands in for a stalled transfer
+        // an alias that waits stands in for a stalled transfer (on Windows a tree: sh -> ping, which
+        // taskkill /T must end)
+        let slow = if cfg!(windows) {
+            "alias.slow=!ping -n 60 127.0.0.1 > /dev/null"
+        } else {
+            "alias.slow=!sleep 30"
+        };
         let t0 = std::time::Instant::now();
         let e = mgr
             .git
             .run_deadline(
                 &base,
-                &["-c", "alias.slow=!sleep 30", "slow"],
+                &["-c", slow, "slow"],
                 std::time::Duration::from_millis(300),
             )
             .unwrap_err()
@@ -1345,20 +1536,11 @@ mod submodule_tests {
             d
         };
         let (inner, sub, repo) = (mk("inner"), mk("sub"), mk("repo"));
-        git(
-            &sub,
-            &["submodule", "add", "-q", inner.to_str().unwrap(), "deep"],
-        );
+        git(&sub, &["submodule", "add", "-q", &url_of(&inner), "deep"]);
         git(&sub, &["commit", "-qm", "nest"]);
         git(
             &repo,
-            &[
-                "submodule",
-                "add",
-                "-q",
-                sub.to_str().unwrap(),
-                "vendor/sub",
-            ],
+            &["submodule", "add", "-q", &url_of(&sub), "vendor/sub"],
         );
         git(&repo, &["commit", "-qm", "add"]);
         let mgr = manager(&base);
@@ -1384,6 +1566,67 @@ mod submodule_tests {
         assert!(
             mgr.init_submodules(&info2, SubmodulePolicy::default())
                 .is_err()
+        );
+    }
+
+    /// PoC: the agent can rewrite the `.git` file of a checked-out submodule to point at a git
+    /// directory it controls, with a clean filter and a `.gitattributes` using it. The host's own
+    /// git calls on the superproject (changes, diff, commit) must never descend into it.
+    #[cfg(unix)]
+    #[test]
+    fn a_filter_planted_in_a_submodule_gitdir_never_runs_on_the_host() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(tmp.path()).unwrap();
+        let (_sub, repo) = repo_with_submodule(&base, None);
+        let mgr = manager(&base);
+        let info = mgr
+            .create(&repo, "s5", base.join("art"), false)
+            .unwrap()
+            .git
+            .unwrap();
+        mgr.init_submodules(&info, SubmodulePolicy { allow_file: true })
+            .unwrap();
+        let subdir = info.worktree.join("vendor/sub");
+        // the agent's move: a gitdir of its own, a filter in it, an attribute that selects it
+        let gitfile = fs::read_to_string(subdir.join(".git")).unwrap();
+        let real = subdir.join(gitfile.trim().strip_prefix("gitdir: ").unwrap());
+        let real = synthesis_core::canonicalize(real).unwrap();
+        let evil = base.join("evil-gitdir");
+        let cp = std::process::Command::new("cp")
+            .arg("-R")
+            .arg(&real)
+            .arg(&evil)
+            .status()
+            .unwrap();
+        assert!(cp.success());
+        let marker = base.join("PWNED");
+        let mut cfg = fs::read_to_string(evil.join("config")).unwrap();
+        cfg.push_str(&format!(
+            "[core]\n\tworktree = {w}\n[filter \"x\"]\n\tclean = touch {m}; cat\n\tsmudge = cat\n\trequired = false\n",
+            w = subdir.display(),
+            m = marker.display()
+        ));
+        fs::write(evil.join("config"), cfg).unwrap();
+        fs::write(subdir.join(".git"), format!("gitdir: {}\n", evil.display())).unwrap();
+        fs::write(subdir.join(".gitattributes"), "* filter=x\n").unwrap();
+        // same size as before: git must hash the file (and so run the filter) to see the change
+        fs::write(subdir.join("lib.txt"), "LIB\n").unwrap();
+        fs::write(subdir.join("new.txt"), "new\n").unwrap();
+        let _ = mgr.changes(&info);
+        assert!(!marker.exists(), "changes() ran a submodule filter");
+        let _ = mgr.diff(&info);
+        assert!(!marker.exists(), "diff() ran a submodule filter");
+        let _ = mgr.commit_all(&info, "agent work");
+        assert!(
+            !marker.exists(),
+            "a filter of a submodule's git directory ran on the host"
         );
     }
 }

@@ -276,6 +276,36 @@ async fn pre_turn_estimate_refuses_a_call_that_could_cross_the_cost_cap() {
     assert!(est[0].0 && est[0].1.is_some_and(|w| w > 1.0));
 }
 
+/// A $1 cap on a dear model (Opus-class prices, 32000 output tokens wanted: $2.4 alone) works: the
+/// output limit of the request is lowered to what the cap affords instead of refusing the call.
+#[tokio::test]
+async fn a_low_cap_on_a_dear_model_clamps_the_output_limit() {
+    let p = Probe::new("Probe", SideEffectClass::Read, 0, "r");
+    let mut o = probe_opts(&p);
+    o.budget = Budget {
+        max_cost_usd: Some(1.0),
+        ..Budget::default()
+    };
+    o.config = |c| {
+        c.pricing = Some(Pricing {
+            input_per_mtok: 15.0,
+            output_per_mtok: 75.0,
+            ..Pricing::default()
+        });
+        c.max_output_tokens = 32_000;
+    };
+    let mut rig = Rig::new(o, vec![Turn::text("done")]);
+    let out = rig.run("x").await;
+    assert_eq!(
+        out.status,
+        synthesis_events::TaskStatus::Completed,
+        "{}",
+        reason_of(&out)
+    );
+    let sent = rig.requests()[0].max_tokens;
+    assert!((4096..32_000).contains(&sent), "max_tokens sent: {sent}");
+}
+
 /// A model without a price never borrows the run's: under a cap the call is refused.
 #[tokio::test]
 async fn a_model_without_a_price_is_refused_under_a_cap() {

@@ -923,11 +923,6 @@ pub fn run_stdio(
     // desktop`) has a person at the window and keeps the interactive behaviour.
     let mut common = common.clone();
     common.governed = governed;
-    // a headless engine is unattended: the governed defaults apply (wall cap, cost cap required, worktree, ...;
-    // `--no-cost-cap` opts out of the cost cap only). A desktop host (`--host desktop`) has a person at the window
-    // and keeps the interactive behaviour.
-    let mut common = common.clone();
-    common.governed = governed;
     #[cfg(unix)]
     {
         let (input, output) = protect().map_err(|e| format!("engine: stdio: {e}"))?;

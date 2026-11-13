@@ -103,10 +103,11 @@ impl TerminalGuard {
             done: AtomicBool::new(false),
         });
 
-        ACTIVE
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(Arc::downgrade(&inner));
+        {
+            let mut a = ACTIVE.lock().unwrap_or_else(|p| p.into_inner());
+            a.retain(|w| w.strong_count() > 0);
+            a.push(Arc::downgrade(&inner));
+        }
         let (weak, owner, prev) = (
             Arc::downgrade(&inner),
             std::thread::current().id(),

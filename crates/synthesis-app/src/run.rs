@@ -596,6 +596,8 @@ pub fn builtin_pricing(label: &str, model: &str) -> Option<Pricing> {
     // (id, input, output, cache read, cache write)
     const ANTHROPIC: [(&str, f64, f64, f64, f64); 9] = [
         ("claude-opus-4-1", 15.0, 75.0, 1.5, 18.75),
+        // opus-4-5 is probably cheaper than the 4/4.1 price used here (unverified: nothing in the
+        // repo confirms the vendor price); kept at the dearer price so a cap never under-counts
         ("claude-opus-4-5", 15.0, 75.0, 1.5, 18.75),
         ("claude-opus-4", 15.0, 75.0, 1.5, 18.75),
         ("claude-sonnet-4-5", 3.0, 15.0, 0.3, 3.75),
@@ -1188,6 +1190,22 @@ pub fn prepare(
             res.label,
             h.synthesis.join("settings.json").display()
         ));
+    }
+    // a cap that not even one small call fits under could never run anything
+    if let (Some(cap), Some(p)) = (limits.max_cost_usd, &price) {
+        let (floor, typical) = (p.min_usable_cap(0), p.min_usable_cap(12_000));
+        if cap < floor {
+            return Err(format!(
+                "--max-cost-usd {cap}: too low for {}; one call needs at least about ${typical:.2} (a 12000 token prompt and 4096 output tokens at its price)",
+                res.label
+            ));
+        }
+        if cap < typical {
+            eprintln!(
+                "synt: WARNING: --max-cost-usd {cap} is below about ${typical:.2}, what one call with a 12000 token prompt and 4096 output tokens costs on {}; the run may stop at its first call",
+                res.label
+            );
+        }
     }
 
     let mode = match c.permission_mode {
