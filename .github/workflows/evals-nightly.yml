@@ -1,0 +1,106 @@
+# Nightly / manual evals with a REAL model (tests/agent-evals, adapter "rust"). Skipped cleanly when the repository has no
+# credentials: add the secret SYNT_API_KEY (credential for SYNT_PROVIDER, docs/specs/config.md) and optionally the
+# variables SYNT_EVAL_PROVIDER (default anthropic), SYNT_EVAL_MODEL (provider/model) and SYNT_EVAL_MAX_COST_USD
+# (per run, default 1). Publishes status-ok / false-success / cost as the job summary and as an artifact.
+# The key is only in the environment of the eval step; nothing here echoes it.
+name: Evals nightly
+
+on:
+  schedule:
+    - cron: "43 3 * * *"
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "runs per task"
+        default: "1"
+      tasks:
+        description: "comma-separated task ids (empty: all non-gaming tasks)"
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evals-nightly
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  evals:
+    name: evals (real model)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      HAVE_KEY: ${{ secrets.SYNT_API_KEY != '' && 'yes' || 'no' }}
+    steps:
+      - name: Credentials present?
+        run: |
+          if [ "$HAVE_KEY" != yes ]; then
+            echo "SKIP: the repository secret SYNT_API_KEY is not set, so no real-model evals ran." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.HAVE_KEY == 'yes'
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        if: env.HAVE_KEY == 'yes'
+        run: rustup toolchain install && rustc -Vv
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        if: env.HAVE_KEY == 'yes'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: env.HAVE_KEY == 'yes'
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        if: env.HAVE_KEY == 'yes'
+        with:
+          python-version: "3.x"
+      - name: Git identity (fixture repos commit)
+        if: env.HAVE_KEY == 'yes'
+        run: |
+          git config --global user.email ci@example.invalid
+          git config --global user.name ci
+          git config --global init.defaultBranch main
+      - name: Install bubblewrap and relax AppArmor userns restriction
+        if: env.HAVE_KEY == 'yes'
+        run: |
+          scripts/apt-install.sh bubblewrap
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: Build synt
+        if: env.HAVE_KEY == 'yes'
+        run: cargo build --locked -p synthesis-cli
+      - name: Run the evals
+        if: env.HAVE_KEY == 'yes'
+        env:
+          SYNT_API_KEY: ${{ secrets.SYNT_API_KEY }}
+          SYNT_PROVIDER: ${{ vars.SYNT_EVAL_PROVIDER || 'anthropic' }}
+          EVAL_MODEL: ${{ vars.SYNT_EVAL_MODEL }}
+          EVAL_MAX_COST_USD: ${{ vars.SYNT_EVAL_MAX_COST_USD || '1' }}
+          RUNS: ${{ inputs.runs || '1' }}
+          TASKS: ${{ inputs.tasks }}
+        run: |
+          args=(--agent rust --runs "$RUNS" --out evals-out)
+          if [ -n "$TASKS" ]; then args+=(--task "$TASKS"); fi
+          # exit 70 = an adapter error; a failed task is a result, not a job failure
+          node tests/agent-evals/harness/run.js "${args[@]}" 2>&1 | tee evals.log
+      - name: Publish the summary
+        if: env.HAVE_KEY == 'yes' && always()
+        run: |
+          node tests/agent-evals/harness/summary.mjs evals-out | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: env.HAVE_KEY == 'yes' && always()
+        with:
+          name: evals-nightly
+          path: |
+            evals-out/
+            evals.log
+          if-no-files-found: ignore

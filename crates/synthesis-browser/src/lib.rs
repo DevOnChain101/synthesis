@@ -205,6 +205,10 @@ fn spawn_events(
     let mut rx = cdp.subscribe();
     let weak = Arc::downgrade(cdp);
     tokio::spawn(async move {
+        // Sessions the browser-level auto-attach handed us (popups, iframes, workers, and a second
+        // session on every tab's own page target). Their Network events feed the rebinding check
+        // only: a tab target has its own logging session, so logging both duplicates every request.
+        let mut children = std::collections::HashSet::<String>::new();
         loop {
             let ev = match rx.recv().await {
                 Ok(ev) => ev,
@@ -233,6 +237,13 @@ fn spawn_events(
                 Err(broadcast::error::RecvError::Closed) => break,
             };
             if ev.method == "Target.attachedToTarget" {
+                // Every attach except our own `attachToTarget` of a tab (a `page` that is not paused).
+                // Iframes and workers are always children (Chrome reports an iframe as not paused).
+                let own_tab = ev.params["targetInfo"]["type"] == "page"
+                    && ev.params["waitingForDebugger"].as_bool() != Some(true);
+                if let (Some(s), false) = (ev.params["sessionId"].as_str(), own_tab) {
+                    children.insert(s.to_owned());
+                }
                 if let Some(cdp) = weak.upgrade() {
                     tokio::spawn(secure_child(cdp, ev.params));
                 }
@@ -264,7 +275,11 @@ fn spawn_events(
                 }
             }
             if ev.method != "Fetch.requestPaused" {
-                lock(&logs).handle(&ev);
+                let child_net = ev.method.starts_with("Network.")
+                    && ev.session_id.as_ref().is_some_and(|s| children.contains(s));
+                if !child_net {
+                    lock(&logs).handle(&ev);
+                }
                 continue;
             }
             // Every request (redirect hops, iframes, subresources) passes the URL policy.
@@ -372,10 +387,13 @@ async fn secure_child(cdp: Arc<Cdp>, params: Value) {
         params["targetInfo"]["type"].as_str(),
         Some("page" | "iframe")
     );
-    // shortcut: no Network.enable here, so the responseReceived rebinding check does not see child
-    // sessions (only the pre-send DNS check in Fetch does). A child can be a second session on a
-    // tab's own target, and enabling Network twice duplicates its log events (breaks the network log).
-    if enable_policy(&cdp, session, !frame).await.is_err() {
+    // Network.enable feeds the `responseReceived` rebinding check of this session (spawn_events keeps
+    // child Network events out of the logs, so a tab's second session does not duplicate them).
+    let hooked = async {
+        enable_policy(&cdp, session, !frame).await?;
+        cdp.send(Some(session), "Network.enable", json!({})).await
+    };
+    if hooked.await.is_err() {
         if let Some(t) = params["targetInfo"]["targetId"].as_str() {
             let _ = cdp
                 .send(None, "Target.closeTarget", json!({"targetId": t}))

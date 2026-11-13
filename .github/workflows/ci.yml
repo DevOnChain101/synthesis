@@ -167,6 +167,52 @@ jobs:
         if: always()
         run: DIGEST_ENV=1 bash scripts/ci-digest.sh evals.log "eval selftest (${{ matrix.os }})"
 
+  redteam:
+    # Scripted model obeys attacks, the real binary must refuse or contain them (tests/redteam, docs/SECURITY.md).
+    # No real model, no network. Known gaps are listed in the summary and never fail the job.
+    name: redteam (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustc -Vv
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - run: |
+          git config --global user.email ci@example.invalid
+          git config --global user.name ci
+          git config --global init.defaultBranch main
+      - name: Install bubblewrap and relax AppArmor userns restriction (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          scripts/apt-install.sh bubblewrap
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --unshare-net true && echo "bwrap works"
+      - name: Build synt with the scripted provider
+        run: cargo build --locked -p synthesis-cli --features test-provider
+      - name: Red-team suite
+        run: node tests/redteam/run.mjs --out redteam-out 2>&1 | tee redteam.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: redteam-${{ runner.os }}
+          path: redteam-out/
+          if-no-files-found: ignore
+      - name: Failure digest
+        if: always()
+        run: DIGEST_ENV=1 bash scripts/ci-digest.sh redteam.log "redteam (${{ matrix.os }})"
+
   browser:
     # Real Chrome from browser-actions/setup-chrome (stable channel). Synthesis never downloads a browser,
     # so SYNT_BROWSER_PATH points at the one installed here.
@@ -384,7 +430,7 @@ jobs:
   ci-ok:
     # Single required status check for branch protection.
     if: always()
-    needs: [test, desktop, evals-selftest, browser, sandbox-linux, msrv, docs, deny, audit, shell-scripts]
+    needs: [test, desktop, evals-selftest, redteam, browser, sandbox-linux, msrv, docs, deny, audit, shell-scripts]
     runs-on: ubuntu-latest
     env:
       NEEDS: ${{ toJSON(needs) }}

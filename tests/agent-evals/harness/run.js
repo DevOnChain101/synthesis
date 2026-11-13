@@ -30,9 +30,11 @@ export function killTree(pid) {
   }
 }
 
-function cleanEnv(extra) {
+// Only the adapter gets credentials: setup and graded checks run code the agent wrote.
+function cleanEnv(extra, { credentials = false } = {}) {
   const env = { ...process.env, PYTHONDONTWRITEBYTECODE: '1', ...extra };
   delete env.NODE_TEST_CONTEXT; // an outer `node --test` must not leak into the graded `node --test`
+  if (!credentials) for (const k of Object.keys(env)) if (/^SYNT_(API_KEY|AUTH_TOKEN)$|_API_KEY$|_AUTH_TOKEN$/.test(k)) delete env[k];
   return env;
 }
 
@@ -184,7 +186,7 @@ async function runOne(task, run, agent, outRoot, opts) {
       if (fs.existsSync(p)) adapterEnv.EVAL_ORACLE_PATCH = p;
       adapterEnv.EVAL_ORACLE_STATUS = task.expected_status;
     }
-    const a = await runCmd(process.execPath, { cwd: repo, env: cleanEnv(adapterEnv), timeoutMs: Math.min(task.budget.max_wall_ms, opts.maxWallMs ?? Infinity), args: [path.join(ROOT, 'adapters', agent, 'run.js')] });
+    const a = await runCmd(process.execPath, { cwd: repo, env: cleanEnv(adapterEnv, { credentials: true }), timeoutMs: Math.min(task.budget.max_wall_ms, opts.maxWallMs ?? Infinity), args: [path.join(ROOT, 'adapters', agent, 'run.js')] });
     if (a.code === 3 && !a.timedOut) return { ...base, skipped: true, reason: 'adapter unavailable: ' + a.err.trim().split('\n')[0] };
     const graceMs = Number(process.env.EVAL_LEAK_GRACE_MS ?? 5000);
     const leaked = a.timedOut ? (killTree(a.pid), 0) : await leakCheck(a.pid, graceMs);
