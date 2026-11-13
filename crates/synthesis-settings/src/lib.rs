@@ -111,6 +111,12 @@ pub struct SynthesisSettings {
     /// `sandbox.wsl.hide_windows_drives` (user and managed settings only): `Some(false)` keeps the
     /// Windows drives visible (read-only) inside the WSL sandbox instead of hiding them.
     pub wsl_hide_windows_drives: Option<bool>,
+    /// `sandbox.network.allowedHosts` (user and managed settings only): the hosts `--network hosts`
+    /// lets commands reach. Managed replaces the user's list; a project can only tighten, so its
+    /// copy is ignored. Entries are validated by `synthesis-egress`.
+    pub network_allowed_hosts: Option<Vec<String>>,
+    /// The list above came from managed settings (the command line cannot add to it).
+    pub network_allowed_hosts_managed: bool,
     pub compat: Compat,
 }
 
@@ -826,6 +832,28 @@ impl Settings {
             } else {
                 self.diagnostics.push(format!(
                     "{what}: synt.sandbox.wsl.hide_windows_drives must be true or false"
+                ));
+            }
+        }
+        // Which hosts a command may reach is the person's or the organisation's call, never a repository's.
+        if let Some(h) = n
+            .get("sandbox")
+            .and_then(|s| s.get("network"))
+            .and_then(|w| w.get("allowedHosts"))
+        {
+            if what != "user settings" && what != "managed settings" {
+                self.diagnostics.push(format!(
+                    "{what}: synt.sandbox.network is read from user or managed settings only, ignored"
+                ));
+            } else if let Some(v) = h
+                .as_array()
+                .and_then(|a| a.iter().map(|x| x.as_str().map(String::from)).collect())
+            {
+                self.synthesis.network_allowed_hosts = Some(v);
+                self.synthesis.network_allowed_hosts_managed = what == "managed settings";
+            } else {
+                self.diagnostics.push(format!(
+                    "{what}: synt.sandbox.network.allowedHosts must be a list of strings"
                 ));
             }
         }

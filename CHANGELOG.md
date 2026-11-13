@@ -4,6 +4,9 @@ Format: Keep a Changelog. Versioning: SemVer (pre-1.0: minor versions may break)
 
 ## [Unreleased]
 
+### Added (egress control)
+- `--network hosts` with repeatable `--allow-host H` and the user/managed setting `synt.sandbox.network.allowedHosts`: commands reach only the listed hosts through a per-run proxy inside `synt` (new crate `synthesis-egress`; Linux bubblewrap and macOS Seatbelt, refused on Landlock and Windows). Events `egress.allowed` / `egress.denied`. `--unattended` accepts `hosts`. `NetworkPolicy::AllowHosts` is replaced by `Proxied`; the blocked-address list moved to `synthesis-platform::net` (shared with WebFetch and the browser; documentation ranges are now blocked too). Design: docs/specs/sandbox-hardening.md.
+
 ### Changed (governance of unattended runs)
 - `synt run` and `synt engine --stdio` now REQUIRE a cost cap (`--max-cost-usd` or `--no-cost-cap`), default to a 30 minute wall cap, work in a git worktree when the directory is a repository (`--no-worktree` to opt out), and leave tasks with only inferred checks `unverified`. `--unattended` is the strict preset (docs/UNATTENDED.md). A desktop host starts the engine with `--host desktop` and keeps the interactive behaviour; the Windows desktop passes `synt.desktop.max_cost_usd` (default 10) or honours `synt.desktop.no_cost_cap`.
 - Cost accounting prices cache tokens and compaction calls, uses the price of the model that answered (failover targets, sub-agents), and has built-in prices for exact first-party model ids.

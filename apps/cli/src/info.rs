@@ -123,12 +123,20 @@ fn guarantees(b: &dyn SandboxBackend) -> String {
     )
 }
 
-/// Per-mode guarantee of one backend, e.g. `deny=Weak loopback=None allow=Strong`.
+/// Per-mode guarantee of one backend, e.g. `deny=Weak loopback=None allow=Strong hosts=None`.
 fn network_support(b: &dyn SandboxBackend) -> String {
-    use synthesis_sandbox::NetworkPolicy::{Allow, Deny, Loopback};
+    use synthesis_sandbox::EgressEndpoint::{Tcp, Unix};
+    use synthesis_sandbox::NetworkPolicy::{Allow, Deny, Loopback, Proxied};
+    let hosts = b
+        .network_guarantee(&Proxied(Unix("/proxy.sock".into())))
+        .max(b.network_guarantee(&Proxied(Tcp {
+            port: 1,
+            token: String::new(),
+        })));
     [("deny", Deny), ("loopback", Loopback), ("allow", Allow)]
         .iter()
         .map(|(n, m)| format!("{n}={:?}", b.network_guarantee(m)))
+        .chain([format!("hosts={hosts:?}")])
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -208,7 +216,7 @@ pub fn doctor(env: &Env, cwd: Option<&Path>) -> Result<u8, String> {
     }
     out!("  selected {}", guarantees(&*synthesis_sandbox::detect()));
     out!(
-        "  network (`synt run --network deny|loopback|allow`, default deny): {}",
+        "  network (`synt run --network deny|loopback|hosts|allow`, default deny): {}",
         network_support(&*best)
     );
     #[cfg(target_os = "macos")]

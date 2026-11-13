@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 synthesis-browser = { path = "../synthesis-browser" }
 synthesis-config = { path = "../synthesis-config" }
+synthesis-platform = { path = "../synthesis-platform" }
 synthesis-core = { path = "../synthesis-core" }
 synthesis-terminal = { path = "../synthesis-terminal" }
 synthesis-verification = { path = "../synthesis-verification" }
