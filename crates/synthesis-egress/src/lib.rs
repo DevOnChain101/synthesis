@@ -551,11 +551,12 @@ mod tests {
             format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n{auth}\r\n").as_bytes(),
         )
         .await
-        .unwrap();
+        .ok(); // a refused connection may already be closed (reset on Windows)
         let mut got = vec![];
         let mut b = [0u8; 1];
         while !got.ends_with(b"\r\n\r\n") {
-            if c.read(&mut b).await.unwrap() == 0 {
+            // EOF and a reset both mean "closed": the caller checks what arrived
+            if !matches!(c.read(&mut b).await, Ok(1)) {
                 break;
             }
             got.push(b[0]);
@@ -742,7 +743,9 @@ mod tests {
         let (_held, line) = connect(port, Some(&token), &format!("127.0.0.1:{echo}")).await;
         assert!(line.contains("200"));
         let (_c, line) = connect(port, Some(&token), &format!("127.0.0.1:{echo}")).await;
-        assert!(line.contains("503"), "{line}");
+        // the observable outcome: no tunnel (a 503, or just a closed/reset connection on Windows)
+        assert!(!line.contains("200"), "{line}");
+        assert!(line.is_empty() || line.contains("503"), "{line}");
         assert!(
             ev.lock()
                 .unwrap()

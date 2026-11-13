@@ -1310,10 +1310,11 @@ pub fn prepare(
     let (net, egress) = match c.network.policy() {
         Some(p) => (p, None),
         None => {
+            // entries first: the most specific error wins on every OS
+            let hosts = crate::egress::effective_hosts(&c.allow_host, &settings.synthesis, env)?;
             if sandbox_mode != SandboxMode::Enforce {
                 return Err("--network hosts needs --sandbox enforce: the proxy is the only way out of the sandbox, so without it nothing limits the hosts".into());
             }
-            let hosts = crate::egress::effective_hosts(&c.allow_host, &settings.synthesis, env)?;
             let (run, ep) = crate::egress::start(
                 hosts,
                 synthesis_sandbox::detect().name(),
