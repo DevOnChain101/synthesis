@@ -543,6 +543,11 @@ fn activity_rows(l: &Live, tz_min: i32) -> Vec<ActivityRow> {
     v.into_iter().skip(skip).map(|(_, r)| r).collect()
 }
 
+/// The header chip's text for `n` dialogs that wait for the person (also shown in the input strip).
+pub fn need_label(n: usize) -> String {
+    format!("{n} need{} you", if n == 1 { "s" } else { "" })
+}
+
 /// What the view paints, from the live state. `now` is epoch ms, `tz_min` minutes east of UTC.
 pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
     let v = &l.view;
@@ -571,7 +576,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
     let health = if l.starting {
         "starting".to_string()
     } else if needs > 0 {
-        format!("{needs} need{} you", if needs == 1 { "s" } else { "" })
+        need_label(needs)
     } else if topo.errors > 0 {
         format!(
             "{} error{}",

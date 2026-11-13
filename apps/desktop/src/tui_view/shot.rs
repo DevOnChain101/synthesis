@@ -38,6 +38,12 @@ pub struct Args {
     inject: Option<PathBuf>,
     verbose: bool,
     focus: bool,
+    /// `--attach-image FILE.png`: the image is attached to the next message (the chip with its x shows).
+    attach_image: Option<PathBuf>,
+    /// `--focus chat|input|panel|none`: where the keys are in the frame (see [`FocusAt`]); `--active-window
+    /// true|false` makes the window count as active or in the background (the block caret needs it active).
+    focus_at: Option<FocusAt>,
+    window_active: Option<bool>,
     /// `--bare`: the Files and Browser tabs get no seeded project or screenshots (their empty states).
     bare: bool,
     /// `--expand`: every tool card open (Ctrl+O).
@@ -75,6 +81,27 @@ fn sel_spec(s: &str) -> Option<Sel> {
     let (f, r) = s.rsplit_once(':')?;
     let (a, b) = r.split_once('-')?;
     Some((f.into(), a.parse().ok()?, b.parse().ok()?))
+}
+
+/// Where the keys are: `input` the prompt (accent border, caret), `chat` the chat pane without the prompt
+/// holding them, `panel` the Workspace list, `none` nothing (today drawn like `chat`: the pane flag and the
+/// input's own focus are the only two things the frame shows).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FocusAt {
+    Input,
+    Chat,
+    Panel,
+    None,
+}
+
+fn focus_at(s: &str) -> Option<FocusAt> {
+    Some(match s {
+        "input" => FocusAt::Input,
+        "chat" => FocusAt::Chat,
+        "panel" => FocusAt::Panel,
+        "none" => FocusAt::None,
+        _ => return None,
+    })
 }
 
 pub struct LiveShot {
@@ -295,7 +322,12 @@ pub fn parse(args: &[String]) -> Option<Args> {
         },
         inject: val("--inject").map(PathBuf::from),
         verbose: args.iter().any(|a| a == "--verbose"),
-        focus: args.iter().any(|a| a == "--focus"),
+        // a bare `--focus` is the quiet-chat switch; `--focus chat|input|panel|none` says where the keys are
+        focus: args.iter().any(|a| a == "--focus")
+            && val("--focus").and_then(|v| focus_at(v)).is_none(),
+        attach_image: val("--attach-image").map(PathBuf::from),
+        focus_at: val("--focus").and_then(|v| focus_at(v)),
+        window_active: val("--active-window").and_then(|v| v.parse().ok()),
         bare: args.iter().any(|a| a == "--bare"),
         expand: args.iter().any(|a| a == "--expand"),
         dialog_scroll: val("--dialog-scroll").and_then(|n| n.parse().ok()),
@@ -634,6 +666,9 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     a.live.as_ref().is_some_and(|l| l.untrusted),
                 )?;
             }
+            if let Some(p) = &a.attach_image {
+                super::driver::attach_png(&mut l, std::fs::read(p)?)?;
+            }
             l.verbose = a.verbose;
             l.focus_view = a.focus;
             l.expand_all = a.expand;
@@ -770,11 +805,22 @@ pub fn render(a: Args) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
     if let Some(tui) = tui_slot.borrow().clone() {
-        // the prompt has the keys, as in the real window (the block caret shows only then)
+        // the prompt has the keys, as in the real window (the block caret shows only then), unless `--focus` says else
+        let at = a.focus_at.unwrap_or(FocusAt::Input);
         win.update(&mut cx, |_, window, cx| {
             tui.update(cx, |t, cx| {
-                if let Some(lu) = &t.live {
+                t.window_active = a.window_active;
+                let Some(lu) = &mut t.live else { return };
+                lu.live.focus = if at == FocusAt::Panel {
+                    crate::live::Focus::Workspace
+                } else {
+                    crate::live::Focus::Chat
+                };
+                lu.dirty = true;
+                if at == FocusAt::Input {
                     lu.prompt.update(cx, |s, cx| s.focus(window, cx));
+                } else {
+                    window.blur(cx);
                 }
             })
         })?;

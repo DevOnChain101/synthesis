@@ -7,6 +7,7 @@
 
 pub mod activity;
 pub mod chat;
+mod chat_sel;
 mod clean;
 #[cfg(test)]
 mod design_tests;
@@ -186,6 +187,11 @@ pub struct TuiView {
     pub(crate) drawer: Option<Side>,
     /// Side-panel sections folded to their header (by panel id), kept for the session.
     folded: std::collections::HashSet<&'static str>,
+    /// `Some` with the header hidden: the drawer buttons it would hold (left, right) move to a strip over the
+    /// input, which also carries the "N need you" count the header chip would show.
+    input_strip: Option<(bool, bool)>,
+    /// `--shot --active-window`: the window counts as active (or not) whatever the platform says.
+    pub(crate) window_active: Option<bool>,
 }
 
 /// A side column of the view.
@@ -250,6 +256,8 @@ impl TuiView {
             centre_w: 600.,
             drawer: None,
             folded: Default::default(),
+            input_strip: None,
+            window_active: None,
         }
     }
 
@@ -1069,6 +1077,7 @@ impl Render for TuiView {
         let (right_in, right_btn) = (fr.right_inline, fr.right_button);
         let left_in = fr.left_inline;
         let (top_h, bottom_h) = fr.bars();
+        self.input_strip = (!fr.show_header).then_some((fr.left_button, fr.right_button));
         // the right column takes the height of the bars that are left out (it subtracts both of them)
         let h = h + (HEADER_H - top_h) + (FOOTER_H - bottom_h);
         let side = |on: bool, x: f32| if on { x + GAP } else { 0. };
@@ -1143,6 +1152,7 @@ impl Render for TuiView {
             .when(fr.show_footer, |d| d.child(self.footer()))
             .children(drawer)
             .children(self.quote_menu(cx))
+            .children(self.chat_menu_view(cx))
     }
 }
 
