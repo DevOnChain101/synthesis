@@ -24,6 +24,10 @@ pub fn normalise_host(raw: &str) -> Option<Target> {
         return Some(Target::Ip(v4.into()));
     }
     let name = raw.strip_suffix('.').unwrap_or(raw).to_ascii_lowercase();
+    // `1.2.3.4.` is an IP spelled with a dot: never a name (it would dodge the literal rules)
+    if name.parse::<Ipv4Addr>().is_ok() {
+        return None;
+    }
     let ok = !name.is_empty()
         && name.len() <= 253
         && name.split('.').all(|l| {
@@ -32,6 +36,80 @@ pub fn normalise_host(raw: &str) -> Option<Target> {
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
         });
     ok.then_some(Target::Name(name))
+}
+
+/// Public suffixes whose subdomains belong to unrelated parties: a wildcard on one allows
+/// anybody's site. A small built-in list of the common multi-tenant ones (ICANN second-level
+/// registries and hosting platforms), not the full Public Suffix List: a new dependency and data
+/// that goes stale for a check that only guards a typo. shortcut: extend this list, or take the
+/// `psl` crate (already used by synthesis-browser), when a platform is missing.
+const PUBLIC_SUFFIXES: &[&str] = &[
+    "co.uk",
+    "org.uk",
+    "ac.uk",
+    "gov.uk",
+    "me.uk",
+    "com.au",
+    "net.au",
+    "org.au",
+    "co.nz",
+    "co.jp",
+    "or.jp",
+    "ne.jp",
+    "com.br",
+    "com.cn",
+    "com.mx",
+    "com.ar",
+    "com.tr",
+    "com.sg",
+    "com.hk",
+    "co.in",
+    "co.za",
+    "co.kr",
+    "co.il",
+    "github.io",
+    "githubusercontent.com",
+    "gitlab.io",
+    "herokuapp.com",
+    "vercel.app",
+    "netlify.app",
+    "pages.dev",
+    "workers.dev",
+    "web.app",
+    "firebaseapp.com",
+    "appspot.com",
+    "azurewebsites.net",
+    "cloudfront.net",
+    "amazonaws.com",
+    "s3.amazonaws.com",
+    "elasticbeanstalk.com",
+    "blogspot.com",
+    "wordpress.com",
+    "fly.dev",
+    "onrender.com",
+    "railway.app",
+    "repl.co",
+    "glitch.me",
+    "surge.sh",
+    "ngrok.io",
+    "ngrok-free.app",
+    "trycloudflare.com",
+    "myshopify.com",
+    "cloudapp.azure.com",
+    "azureedge.net",
+    "r2.dev",
+    "vercel.dev",
+    "now.sh",
+    "deno.dev",
+    "netlify.com",
+    "pythonanywhere.com",
+    "weebly.com",
+    "wixsite.com",
+    "s3.us-east-1.amazonaws.com",
+];
+
+fn is_public_suffix(n: &str) -> bool {
+    !n.contains('.') || PUBLIC_SUFFIXES.contains(&n)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,6 +144,18 @@ impl Allowlist {
         self.0.is_empty()
     }
 
+    /// IP-literal entries that are private, loopback, link-local or metadata addresses: the
+    /// only way a command can reach one. Shown to the person at start.
+    pub fn private_ips(&self) -> Vec<(IpAddr, u16)> {
+        self.0
+            .iter()
+            .filter_map(|e| match e.pattern {
+                Pattern::Ip(ip) if synthesis_platform::net::ip_blocked(ip) => Some((ip, e.port)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Does an entry cover this target and port? Names only match name patterns, IP literals
     /// only match IP entries.
     pub fn allows(&self, t: &Target, port: u16) -> bool {
@@ -88,8 +178,10 @@ impl Allowlist {
 /// Split `host[:port]` / `[v6][:port]` / bare v6; the port defaults to `default`.
 pub(crate) fn split_host_port(s: &str, default: Option<u16>) -> Result<(&str, u16), String> {
     let port = |p: &str| {
-        p.parse::<u16>()
-            .ok()
+        // all digits: `+443` parses as a u16 otherwise
+        (!p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| p.parse::<u16>().ok())
+            .flatten()
             .filter(|p| *p != 0)
             .ok_or_else(|| format!("bad port {p:?}"))
     };
@@ -117,6 +209,9 @@ fn parse_entry(s: &str) -> Result<Entry, String> {
     let (host, port) = split_host_port(s, Some(443))?;
     if let Some(suffix) = host.strip_prefix("*.") {
         return match normalise_host(suffix) {
+            Some(Target::Name(n)) if is_public_suffix(&n) => Err(format!(
+                "*.{n} spans unrelated tenants (a public suffix); name the host, or a domain you control"
+            )),
             Some(Target::Name(n)) if n.contains('.') => Ok(Entry {
                 pattern: Pattern::Suffix(n),
                 port,
@@ -124,7 +219,13 @@ fn parse_entry(s: &str) -> Result<Entry, String> {
             _ => Err("a wildcard needs a domain of at least two labels (*.example.com)".into()),
         };
     }
-    match normalise_host(host).ok_or("not a hostname or IP literal (use punycode)")? {
+    let bare_v6 = host.contains(':') && !host.starts_with('[');
+    let parsed = if bare_v6 {
+        normalise_host(&format!("[{host}]"))
+    } else {
+        normalise_host(host)
+    };
+    match parsed.ok_or("not a hostname or IP literal (use punycode)")? {
         Target::Name(n) => Ok(Entry {
             pattern: Pattern::Name(n),
             port,
@@ -199,8 +300,77 @@ mod tests {
 
     #[test]
     fn bad_entries_are_rejected() {
-        for e in ["", "a:b", "a:0", "a:99999", "bücher.de", "[::1", "a b"] {
+        for e in [
+            "",
+            "a:b",
+            "a:0",
+            "a:99999",
+            "a:65536",
+            "a:+443",
+            "a:-1",
+            "a:",
+            "bücher.de",
+            "[::1",
+            "a b",
+            "user@h:443",
+            "h:443:80",
+            "1.2.3.4.",
+        ] {
             assert!(Allowlist::parse(&[e]).is_err(), "{e:?}");
         }
+        // a bare IPv6 literal without a port means 443; with brackets too
+        assert!(Allowlist::parse(&["[::1]", "::1"]).is_ok());
+    }
+
+    #[test]
+    fn connect_targets_need_a_clean_port_and_host() {
+        for t in [
+            "h",
+            "[::1]",
+            "h:65536",
+            "h:+443",
+            "h:443:80",
+            "h:",
+            ":443",
+            "1.2.3.4.:443",
+        ] {
+            let ok = split_host_port(t, None)
+                .ok()
+                .and_then(|(h, _)| normalise_host(h));
+            assert_eq!(ok, None, "{t:?}");
+        }
+        assert_eq!(normalise_host("user@h"), None);
+        assert_eq!(normalise_host("1.2.3.4."), None);
+        assert_eq!(split_host_port("h:443", None), Ok(("h", 443)));
+    }
+
+    #[test]
+    fn public_suffix_wildcards_are_refused() {
+        for e in [
+            "*.github.io",
+            "*.co.uk",
+            "*.com.au",
+            "*.herokuapp.com",
+            "*.pages.dev",
+            "*.s3.amazonaws.com",
+        ] {
+            let err = Allowlist::parse(&[e]).unwrap_err();
+            assert!(
+                err.contains("public suffix") || err.contains("two labels"),
+                "{e}: {err}"
+            );
+        }
+        assert!(Allowlist::parse(&["*.example.com", "me.github.io"]).is_ok());
+    }
+
+    #[test]
+    fn private_literals_are_listed_for_the_start_notice() {
+        let l = list(&[
+            "127.0.0.1:8080",
+            "10.0.0.5:22",
+            "1.1.1.1:443",
+            "example.com",
+        ]);
+        assert_eq!(l.private_ips().len(), 2);
     }
 }

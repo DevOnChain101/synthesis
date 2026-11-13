@@ -811,6 +811,11 @@ pub fn check_governance(c: &Common, limits: &Limits, governed: bool) -> Result<(
         if !matches!(c.network, NetworkArg::Deny | NetworkArg::Hosts) {
             return Err("--unattended needs --network deny (the default) or hosts".into());
         }
+        // The list of an unattended run is set beforehand by the person (user settings) or the
+        // organisation (managed settings), never on a command line a script or agent may build.
+        if !c.allow_host.is_empty() {
+            return Err("--unattended refuses --allow-host: set synt.sandbox.network.allowedHosts in your user or managed settings and pass --network hosts".into());
+        }
     }
     Ok(())
 }
@@ -1314,6 +1319,10 @@ pub fn prepare(
                 synthesis_sandbox::detect().name(),
                 failover_slot.clone(),
             )?;
+            // the proxy URL carries the token: mask it in events, transcript and database
+            if let synthesis_sandbox::EgressEndpoint::Tcp { token, .. } = &ep {
+                res.secrets.push(token.clone());
+            }
             (NetworkPolicy::Proxied(ep), Some(run))
         }
     };
@@ -1362,6 +1371,12 @@ pub fn prepare(
             "--network hosts: commands reach only {} (through a local proxy); an allowlist limits destinations, it does not stop data sent to an allowed host that accepts uploads",
             sanitize_for_display(&e.hosts.join(", "))
         ));
+        if !e.private_ips.is_empty() {
+            notices.push(format!(
+                "--network hosts: commands can reach the private, loopback or link-local address(es) {} (named exactly in the allowed hosts)",
+                sanitize_for_display(&e.private_ips.join(", "))
+            ));
+        }
     }
     notices.extend(sandbox_default_notice(c));
     if ws.root != ws.cwd {
@@ -2998,7 +3013,10 @@ mod tests {
             check_governance(&u, &free, true).is_err(),
             "no cap is not allowed"
         );
-        // strictly tighter than allow: a host list through the proxy is accepted
+        // strictly tighter than allow: hosts through the proxy are accepted, but the list must come
+        // from settings, not from --allow-host
+        let h = W::parse_from(["x", "--unattended", "--network", "hosts"]).c;
+        assert!(check_governance(&h, &capped, true).is_ok());
         let h = W::parse_from([
             "x",
             "--unattended",
@@ -3008,7 +3026,11 @@ mod tests {
             "a.test",
         ])
         .c;
-        assert!(check_governance(&h, &capped, true).is_ok());
+        assert!(
+            check_governance(&h, &capped, true)
+                .unwrap_err()
+                .contains("--allow-host")
+        );
         for flags in [
             ["--sandbox", "off"],
             ["--sandbox", "best-effort"],

@@ -51,16 +51,27 @@ fn http_server() -> u16 {
 }
 
 fn run_in(sock: &Path, work: &Path, program: &str, args: &[&str]) -> Output {
+    run_in_denying(sock, work, program, args, &[])
+}
+
+fn run_in_denying(
+    sock: &Path,
+    work: &Path,
+    program: &str,
+    args: &[&str],
+    deny: &[&Path],
+) -> Output {
     let bwrap = BwrapBackend::with_helper(HELPER.into()).expect("bubblewrap");
     let policy = SandboxPolicy {
         writable_roots: vec![work.to_path_buf()],
+        deny_paths: deny.iter().map(|p| p.to_path_buf()).collect(),
         network: NetworkPolicy::Proxied(EgressEndpoint::Unix(sock.to_path_buf())),
         env_passthrough: vec!["PATH".into(), "HTTPS_PROXY".into()],
         ..Default::default()
     };
     assert_eq!(
         bwrap.network_guarantee(&policy.network),
-        synthesis_sandbox::Guarantee::Strong
+        synthesis_sandbox::Guarantee::Weak // not Strong: see the pathname-socket test below
     );
     let c = SandboxedCommand {
         program: program.into(),
@@ -134,4 +145,100 @@ fn only_the_allowed_literal_is_reachable_through_the_bridge() {
     // no DNS either
     let o = run_in(&sock, work.path(), &getent, &["hosts", "example.com"]);
     assert!(!o.status.success());
+}
+
+fn python() -> Option<String> {
+    tool("python3")
+}
+
+/// Connects to the AF_UNIX path in argv[1]; prints `ok` or `errno=<n>`.
+const UNIX_CONNECT_PY: &str = "import socket,sys\ns=socket.socket(socket.AF_UNIX)\ntry:\n s.connect(sys.argv[1])\n print('ok')\nexcept OSError as e:\n print('errno=%d' % e.errno)\n";
+const SOCKET_PY: &str = "import socket,sys\ntry:\n socket.socket(int(sys.argv[1]),socket.SOCK_STREAM)\n print('errno=0')\nexcept OSError as e:\n print('errno=%d' % e.errno)\n";
+
+fn unix_listener(dir: &Path) -> (std::os::unix::net::UnixListener, std::path::PathBuf) {
+    let path = dir.join("host.sock");
+    let l = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    std::thread::spawn({
+        let l = l.try_clone().unwrap();
+        move || for _ in l.incoming() {}
+    });
+    (l, path)
+}
+
+#[test]
+fn vsock_is_denied_inside_a_proxied_run_but_inet_and_unix_work() {
+    let Some(py) = python() else {
+        require(false, "python3");
+        return;
+    };
+    if !require(BwrapBackend::detect().is_some(), "bubblewrap") {
+        return;
+    }
+    let run_dir = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let sock = run_dir.path().join("egress.sock");
+    let errno = |family: &str| {
+        let o = run_in(&sock, work.path(), &py, &["-c", SOCKET_PY, family]);
+        String::from_utf8_lossy(&o.stdout).trim().to_owned()
+    };
+    assert_eq!(
+        errno("40"),
+        "errno=1",
+        "AF_VSOCK must fail with EPERM (seccomp, not a missing module)"
+    );
+    assert_eq!(
+        errno("2"),
+        "errno=0",
+        "AF_INET still works (loopback bridge)"
+    );
+    assert_eq!(errno("1"), "errno=0", "AF_UNIX still works");
+}
+
+/// What `--ro-bind / /` exposes, precisely: /tmp, /run, /var/run and the denied paths are masked
+/// (a host socket there is unreachable); a pathname socket ANYWHERE else on the host filesystem
+/// (the workspace parent, `$HOME` outside the denied credential dirs) can still be connect()ed:
+/// a read-only bind does not stop connect(). That is why Proxied is Weak on Linux until the read
+/// allow-list lands. The last assertion pins the residual: when it starts failing, the allow-list
+/// landed; raise the guarantee and update the docs.
+#[test]
+fn host_pathname_unix_sockets_are_masked_only_in_tmp_run_and_denied_paths() {
+    let Some(py) = python() else {
+        require(false, "python3");
+        return;
+    };
+    if !require(BwrapBackend::detect().is_some(), "bubblewrap") {
+        return;
+    }
+    let run_dir = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let proxy_sock = run_dir.path().join("egress.sock");
+    let in_tmp = tempfile::tempdir().unwrap(); // the system temp dir (/tmp)
+    let denied = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let exposed = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let reach = |dir: &Path, deny: &[&Path]| {
+        let (_l, path) = unix_listener(dir);
+        let o = run_in_denying(
+            &proxy_sock,
+            work.path(),
+            &py,
+            &["-c", UNIX_CONNECT_PY, path.to_str().unwrap()],
+            deny,
+        );
+        String::from_utf8_lossy(&o.stdout).trim().to_owned()
+    };
+    assert_ne!(
+        reach(in_tmp.path(), &[]),
+        "ok",
+        "a socket under /tmp must be hidden"
+    );
+    assert_ne!(
+        reach(denied.path(), &[denied.path()]),
+        "ok",
+        "a socket in a denied dir must be hidden"
+    );
+    assert_eq!(
+        reach(exposed.path(), &[]),
+        "ok",
+        "residual risk: other host pathname sockets are reachable"
+    );
 }

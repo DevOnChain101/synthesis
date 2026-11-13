@@ -17,6 +17,8 @@ pub struct EgressRun {
     /// Holds the 0700 directory of the unix socket (bubblewrap).
     _dir: Option<tempfile::TempDir>,
     pub hosts: Vec<String>,
+    /// Entries that name a private, loopback or link-local address (`ip:port`), for the start notice.
+    pub private_ips: Vec<String>,
 }
 
 impl Drop for EgressRun {
@@ -81,6 +83,14 @@ pub fn start(
         }
     };
     let allow = Allowlist::parse(&hosts)?;
+    let private_ips = allow
+        .private_ips()
+        .into_iter()
+        .map(|(ip, port)| match ip {
+            std::net::IpAddr::V4(_) => format!("{ip}:{port}"),
+            std::net::IpAddr::V6(_) => format!("[{ip}]:{port}"),
+        })
+        .collect();
     let sink: synthesis_egress::Sink = Arc::new(move |e| {
         if let Some(s) = slot.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
             s.emit(&Scope::default(), e);
@@ -121,6 +131,7 @@ pub fn start(
             _running: running,
             rt: Some(rt),
             _dir: dir,
+            private_ips,
             hosts,
         },
         ep,
@@ -160,6 +171,18 @@ mod tests {
         let proxied = Env::from_pairs([("https_proxy", "http://p:8080")]);
         let err = effective_hosts(&cli(&["a.test"]), &s(None, false), &proxied).unwrap_err();
         assert!(err.contains("HTTPS_PROXY") && !err.contains("p:8080"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_literal_entries_are_reported() {
+        let (run, _) = start(
+            cli(&["127.0.0.1:8080", "a.test"]),
+            "bubblewrap",
+            Arc::default(),
+        )
+        .unwrap();
+        assert_eq!(run.private_ips, ["127.0.0.1:8080"]);
     }
 
     #[test]

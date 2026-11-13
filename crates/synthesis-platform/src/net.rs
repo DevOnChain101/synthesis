@@ -17,6 +17,7 @@ pub fn blocked_v4(ip: Ipv4Addr) -> bool {
         || (o[0] == 100 && (64..128).contains(&o[1])) // CGNAT
         || (o[0] == 192 && o[1] == 0 && o[2] == 0) // IETF protocol assignments
         || (o[0] == 192 && o[1] == 0 && o[2] == 2) // documentation (TEST-NET-1)
+        || (o[0] == 192 && o[1] == 88 && o[2] == 99) // 6to4 relay anycast (deprecated)
         || (o[0] == 198 && o[1] == 51 && o[2] == 100) // documentation (TEST-NET-2)
         || (o[0] == 203 && o[1] == 0 && o[2] == 113) // documentation (TEST-NET-3)
         || (o[0] == 198 && (o[1] & 0xfe) == 18) // benchmarking
@@ -45,6 +46,9 @@ pub fn blocked_v6(ip: Ipv6Addr) -> bool {
         || (s[0] & 0xffc0) == 0xfe80 // link-local
         || (s[0] & 0xffc0) == 0xfec0 // site-local
         || (s[0] == 0x64 && s[1] == 0xff9b && s[2..6] == [0; 4] && embedded(s[6], s[7])) // NAT64
+        || (s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1) // local-use NAT64 (64:ff9b:1::/48)
+        || (s[0] == 0x100 && s[1..4] == [0; 3]) // discard-only (100::/64)
+        || (s[0] == 0x2001 && s[1] == 0xdb8) // documentation (2001:db8::/32)
         || (s[0] == 0x2002 && embedded(s[1], s[2])) // 6to4
         || (s[0] == 0x2001 && s[1] == 0) // Teredo: embeds a v4 server and an obfuscated client
 }
@@ -84,7 +88,11 @@ mod tests {
             ("2002:0a00:0001::1", true),
             ("2002:5db8:d822::1", false),
             ("2001:0:4136:e378:8000:63bf:3fff:fdd2", true),
-            ("2001:db8::1", false),
+            ("2001:db8::1", true),
+            ("64:ff9b:1::1", true),
+            ("100::1", true),
+            ("192.88.99.1", true),
+            ("100:0:0:1::1", false),
             ("2606:4700::1111", false),
         ] {
             assert_eq!(ip_blocked(ip.parse().unwrap()), blocked, "{ip}");

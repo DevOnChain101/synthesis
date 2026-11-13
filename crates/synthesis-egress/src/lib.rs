@@ -28,7 +28,7 @@ use synthesis_events::Event;
 use synthesis_platform::net::ip_blocked;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 
 use allow::split_host_port;
@@ -37,10 +37,16 @@ use head::{HeadError, read_head};
 
 pub const MAX_CONNECTIONS: usize = 64;
 const IDLE: Duration = Duration::from_secs(300);
+/// A tunnel never lives longer than this, active or not.
+const MAX_LIFE: Duration = Duration::from_secs(3600);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// At most this many `egress.denied` events per window (a looping client must not flood the log).
+/// Event budgets per window (a looping client must not flood the log): denials, and
+/// allowed/closed pairs. Over budget the events are dropped and one `egress.suppressed` follows.
 const DENY_EVENTS: u32 = 20;
-const DENY_WINDOW: Duration = Duration::from_secs(10);
+const OPEN_EVENTS: u32 = 200;
+const EVENT_WINDOW: Duration = Duration::from_secs(10);
+/// Consecutive accept failures (after a 50 ms pause each) before the listener gives up.
+const ACCEPT_FAILURES: u32 = 100;
 
 pub type Lookup = Arc<
     dyn Fn(String) -> Pin<Box<dyn Future<Output = io::Result<Vec<IpAddr>>> + Send>> + Send + Sync,
@@ -67,16 +73,64 @@ pub struct Stats {
     pub down: AtomicU64,
 }
 
+/// Fixed-window event budget; what it drops is counted for the summary event.
+struct Limiter {
+    limit: u32,
+    /// window start, events seen in the window, events dropped since the last summary
+    st: Mutex<(Instant, u32, u64)>,
+}
+
+impl Limiter {
+    fn new(limit: u32) -> Self {
+        Self {
+            limit,
+            st: Mutex::new((Instant::now(), 0, 0)),
+        }
+    }
+
+    /// (send this event?, dropped count to report before it)
+    fn admit(&self) -> (bool, u64) {
+        let mut g = self.st.lock().unwrap_or_else(|e| e.into_inner());
+        let mut summary = 0;
+        if g.0.elapsed() > EVENT_WINDOW {
+            summary = std::mem::take(&mut g.2);
+            *g = (Instant::now(), 0, 0);
+        }
+        g.1 += 1;
+        if g.1 <= self.limit {
+            (true, summary)
+        } else {
+            g.2 += 1;
+            (false, summary)
+        }
+    }
+
+    fn take_dropped(&self) -> u64 {
+        std::mem::take(&mut self.st.lock().unwrap_or_else(|e| e.into_inner()).2)
+    }
+}
+
 struct Inner {
     allow: Allowlist,
     lookup: Lookup,
     sink: Sink,
     /// Expected `Proxy-Authorization` value; `None` on unix-socket listeners.
     auth: Option<String>,
-    slots: Semaphore,
+    slots: Arc<Semaphore>,
     idle: Duration,
+    max_life: Duration,
     stats: Arc<Stats>,
-    deny_log: Mutex<(Instant, u32)>,
+    deny_events: Limiter,
+    open_events: Limiter,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        let n = self.deny_events.take_dropped() + self.open_events.take_dropped();
+        if n > 0 {
+            (self.sink)(Event::EgressSuppressed { count: n });
+        }
+    }
 }
 
 /// A proxy that is not listening yet.
@@ -86,9 +140,11 @@ pub struct Proxy {
     sink: Sink,
     max_conns: usize,
     idle: Duration,
+    max_life: Duration,
 }
 
-/// A listening proxy; dropping it stops accepting and aborts every open connection.
+/// A listening proxy; dropping it stops accepting and aborts every open connection (each open
+/// tunnel still reports its `egress.closed`).
 pub struct Running {
     pub stats: Arc<Stats>,
     /// TCP only: the loopback port and the Basic credential (`synt:<token>`).
@@ -102,6 +158,28 @@ impl Drop for Running {
     }
 }
 
+/// What the accept loop needs from a client stream.
+trait Conn: AsyncRead + AsyncWrite + Unpin + Send + 'static {
+    /// Best-effort refusal without waiting (the slot limit is checked before a task exists).
+    fn refuse(&self);
+}
+
+const BUSY: &[u8] =
+    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+impl Conn for TcpStream {
+    fn refuse(&self) {
+        let _ = self.try_write(BUSY);
+    }
+}
+
+#[cfg(unix)]
+impl Conn for tokio::net::UnixStream {
+    fn refuse(&self) {
+        let _ = self.try_write(BUSY);
+    }
+}
+
 impl Proxy {
     pub fn new(allow: Allowlist, lookup: Lookup, sink: Sink) -> Self {
         Self {
@@ -110,6 +188,7 @@ impl Proxy {
             sink,
             max_conns: MAX_CONNECTIONS,
             idle: IDLE,
+            max_life: MAX_LIFE,
         }
     }
 
@@ -120,10 +199,12 @@ impl Proxy {
             lookup: self.lookup,
             sink: self.sink,
             auth,
-            slots: Semaphore::new(self.max_conns),
+            slots: Arc::new(Semaphore::new(self.max_conns)),
             idle: self.idle,
+            max_life: self.max_life,
             stats: stats.clone(),
-            deny_log: Mutex::new((Instant::now(), 0)),
+            deny_events: Limiter::new(DENY_EVENTS),
+            open_events: Limiter::new(OPEN_EVENTS),
         });
         (inner, stats)
     }
@@ -134,17 +215,13 @@ impl Proxy {
         getrandom::fill(&mut raw).map_err(|e| io::Error::other(e.to_string()))?;
         let token = URL_SAFE_NO_PAD.encode(raw);
         let auth = format!("Basic {}", STANDARD.encode(format!("synt:{token}")));
-        let l = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let l = Arc::new(tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?);
         let port = l.local_addr()?.port();
         let (inner, stats) = self.inner(Some(auth));
-        let task = tokio::spawn(async move {
-            let mut conns = JoinSet::new();
-            loop {
-                let Ok((s, _)) = l.accept().await else { break };
-                while conns.try_join_next().is_some() {}
-                conns.spawn(handle(inner.clone(), s));
-            }
-        });
+        let task = tokio::spawn(accept_loop(inner, move || {
+            let l = l.clone();
+            async move { l.accept().await.map(|(s, _)| s) }
+        }));
         Ok(Running {
             stats,
             tcp: Some((port, token)),
@@ -155,16 +232,12 @@ impl Proxy {
     /// Listen on a unix socket; the caller makes its directory 0700 (Linux bwrap).
     #[cfg(unix)]
     pub async fn serve_unix(self, path: &std::path::Path) -> io::Result<Running> {
-        let l = tokio::net::UnixListener::bind(path)?;
+        let l = Arc::new(tokio::net::UnixListener::bind(path)?);
         let (inner, stats) = self.inner(None);
-        let task = tokio::spawn(async move {
-            let mut conns = JoinSet::new();
-            loop {
-                let Ok((s, _)) = l.accept().await else { break };
-                while conns.try_join_next().is_some() {}
-                conns.spawn(handle(inner.clone(), s));
-            }
-        });
+        let task = tokio::spawn(accept_loop(inner, move || {
+            let l = l.clone();
+            async move { l.accept().await.map(|(s, _)| s) }
+        }));
         Ok(Running {
             stats,
             tcp: None,
@@ -173,8 +246,51 @@ impl Proxy {
     }
 }
 
+/// Accept, take a connection slot BEFORE spawning (so a flood cannot create unbounded tasks), and
+/// survive transient accept errors (EMFILE, ...): pause and retry, give up only after
+/// [`ACCEPT_FAILURES`] in a row, and say so.
+async fn accept_loop<S, F, Fut>(inner: Arc<Inner>, mut accept: F)
+where
+    S: Conn,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = io::Result<S>>,
+{
+    let mut conns = JoinSet::new();
+    let mut failures = 0u32;
+    loop {
+        match accept().await {
+            Ok(s) => {
+                failures = 0;
+                while conns.try_join_next().is_some() {}
+                match inner.slots.clone().try_acquire_owned() {
+                    Ok(permit) => {
+                        conns.spawn(handle(inner.clone(), s, permit));
+                    }
+                    Err(_) => {
+                        s.refuse();
+                        inner.deny("", 0, "limit");
+                    }
+                }
+            }
+            Err(_) => {
+                failures += 1;
+                if failures >= ACCEPT_FAILURES {
+                    (inner.sink)(Event::Notice {
+                        level: "warning".into(),
+                        text: "egress proxy stopped accepting connections (the listener kept failing); commands have no network until the run restarts".into(),
+                    });
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+}
+
+/// ASCII only: control characters, bidi/format characters and anything non-ASCII become escapes,
+/// so a name chosen by the sandboxed command cannot spoof or break a log line.
 fn clean(s: &str) -> String {
-    s.chars().filter(|c| !c.is_control()).take(200).collect()
+    s.chars().flat_map(char::escape_default).take(200).collect()
 }
 
 fn ct_eq(a: &str, b: &str) -> bool {
@@ -182,20 +298,55 @@ fn ct_eq(a: &str, b: &str) -> bool {
 }
 
 impl Inner {
+    fn send(&self, lim: &Limiter, ev: Event) {
+        let (ok, dropped) = lim.admit();
+        if dropped > 0 {
+            (self.sink)(Event::EgressSuppressed { count: dropped });
+        }
+        if ok {
+            (self.sink)(ev);
+        }
+    }
+
     fn deny(&self, host: &str, port: u16, reason: &str) {
         self.stats.denied.fetch_add(1, Relaxed);
-        let mut g = self.deny_log.lock().unwrap_or_else(|e| e.into_inner());
-        if g.0.elapsed() > DENY_WINDOW {
-            *g = (Instant::now(), 0);
-        }
-        g.1 += 1;
-        if g.1 <= DENY_EVENTS {
-            (self.sink)(Event::EgressDenied {
+        self.send(
+            &self.deny_events,
+            Event::EgressDenied {
                 host: clean(host),
                 port,
                 reason: reason.into(),
-            });
-        }
+            },
+        );
+    }
+}
+
+/// An open tunnel. Reports `egress.closed` when dropped, also when the run is shut down and the
+/// connection task is aborted.
+struct Open {
+    inner: Arc<Inner>,
+    host: String,
+    port: u16,
+    up: AtomicU64,
+    down: AtomicU64,
+    started: Instant,
+}
+
+impl Drop for Open {
+    fn drop(&mut self) {
+        let (up, down) = (self.up.load(Relaxed), self.down.load(Relaxed));
+        self.inner.stats.up.fetch_add(up, Relaxed);
+        self.inner.stats.down.fetch_add(down, Relaxed);
+        self.inner.send(
+            &self.inner.open_events,
+            Event::EgressClosed {
+                host: clean(&self.host),
+                port: self.port,
+                up,
+                down,
+                ms: self.started.elapsed().as_millis() as u64,
+            },
+        );
     }
 }
 
@@ -204,11 +355,11 @@ async fn reply<S: AsyncWrite + Unpin>(s: &mut S, status: &str, extra: &str) {
     let _ = tokio::time::timeout(Duration::from_secs(2), s.write_all(msg.as_bytes())).await;
 }
 
-async fn handle<S: AsyncRead + AsyncWrite + Unpin>(inner: Arc<Inner>, mut s: S) {
-    let Ok(_slot) = inner.slots.try_acquire() else {
-        reply(&mut s, "503 Service Unavailable", "").await;
-        return inner.deny("", 0, "limit");
-    };
+async fn handle<S: AsyncRead + AsyncWrite + Unpin>(
+    inner: Arc<Inner>,
+    mut s: S,
+    _slot: OwnedSemaphorePermit,
+) {
     let head = match read_head(&mut s).await {
         Ok(h) => h,
         Err(HeadError::Bad(_)) => {
@@ -281,12 +432,24 @@ async fn handle<S: AsyncRead + AsyncWrite + Unpin>(inner: Arc<Inner>, mut s: S) 
     {
         return;
     }
-    let started = Instant::now();
-    let (up, down) = (
-        Arc::new(AtomicU64::new(head.rest.len() as u64)),
-        Arc::new(AtomicU64::new(0)),
+    inner.stats.allowed.fetch_add(1, Relaxed);
+    inner.send(
+        &inner.open_events,
+        Event::EgressAllowed {
+            host: clean(&shown),
+            port,
+            ip: ip.to_string(),
+        },
     );
-    let last = Arc::new(Mutex::new(Instant::now()));
+    let open = Open {
+        inner: inner.clone(),
+        host: shown,
+        port,
+        up: AtomicU64::new(head.rest.len() as u64),
+        down: AtomicU64::new(0),
+        started: Instant::now(),
+    };
+    let last = Mutex::new(Instant::now());
     let (mut cr, mut cw) = tokio::io::split(s);
     let (mut ur, mut uw) = up_s.split();
     let watchdog = async {
@@ -299,21 +462,10 @@ async fn handle<S: AsyncRead + AsyncWrite + Unpin>(inner: Arc<Inner>, mut s: S) 
         }
     };
     tokio::select! {
-        _ = async { tokio::join!(pump(&mut cr, &mut uw, &up, &last), pump(&mut ur, &mut cw, &down, &last)) } => {}
+        _ = async { tokio::join!(pump(&mut cr, &mut uw, &open.up, &last), pump(&mut ur, &mut cw, &open.down, &last)) } => {}
         _ = watchdog => {}
+        _ = tokio::time::sleep(inner.max_life) => {}
     }
-    let (u, d) = (up.load(Relaxed), down.load(Relaxed));
-    inner.stats.allowed.fetch_add(1, Relaxed);
-    inner.stats.up.fetch_add(u, Relaxed);
-    inner.stats.down.fetch_add(d, Relaxed);
-    (inner.sink)(Event::EgressAllowed {
-        host: shown,
-        port,
-        ip: ip.to_string(),
-        up: u,
-        down: d,
-        ms: started.elapsed().as_millis() as u64,
-    });
 }
 
 /// Copy `r` to `w`, then half-close `w`; bumps the byte counter and the shared activity clock.
@@ -436,16 +588,21 @@ mod tests {
         let mut b = [0u8; 4];
         c.read_exact(&mut b).await.unwrap();
         assert_eq!(&b, b"ping");
+        // opened: reported at the 200, before any close
+        assert!(
+            matches!(&ev.lock().unwrap()[0], Event::EgressAllowed { host, port, ip }
+            if host == "127.0.0.1" && *port == echo && ip == "127.0.0.1")
+        );
         drop(c);
         tokio::time::timeout(Duration::from_secs(5), async {
-            while ev.lock().unwrap().is_empty() {
+            while ev.lock().unwrap().len() < 2 {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
         .unwrap();
-        match &ev.lock().unwrap()[0] {
-            Event::EgressAllowed {
+        match &ev.lock().unwrap()[1] {
+            Event::EgressClosed {
                 host,
                 port,
                 up,
@@ -587,8 +744,119 @@ mod tests {
         let (_c, line) = connect(port, Some(&token), &format!("127.0.0.1:{echo}")).await;
         assert!(line.contains("503"), "{line}");
         assert!(
-            matches!(&ev.lock().unwrap()[0], Event::EgressDenied { reason, .. } if reason == "limit")
+            ev.lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, Event::EgressDenied { reason, .. } if reason == "limit"))
         );
+    }
+
+    #[tokio::test]
+    async fn stopping_the_proxy_still_reports_the_close() {
+        let echo = echo_server().await;
+        let (r, ev, port, token) = start(&[&format!("127.0.0.1:{echo}")], fixed(&[]).0).await;
+        let (mut c, _) = connect(port, Some(&token), &format!("127.0.0.1:{echo}")).await;
+        c.write_all(b"abc").await.unwrap();
+        let mut b = [0u8; 3];
+        c.read_exact(&mut b).await.unwrap();
+        drop(r); // the run ends with the tunnel open
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !ev
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, Event::EgressClosed { up: 3, down: 3, .. }))
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("close event flushed on abort");
+    }
+
+    #[tokio::test]
+    async fn tunnels_end_at_the_maximum_lifetime_even_when_active() {
+        let echo = echo_server().await;
+        let (sk, ev) = sink();
+        let mut p = Proxy::new(
+            Allowlist::parse(&[format!("127.0.0.1:{echo}")]).unwrap(),
+            fixed(&[]).0,
+            sk,
+        );
+        p.max_life = Duration::from_millis(200);
+        let r = p.serve_tcp().await.unwrap();
+        let (port, token) = r.tcp.clone().unwrap();
+        let (mut c, _) = connect(port, Some(&token), &format!("127.0.0.1:{echo}")).await;
+        let mut closed = false;
+        for _ in 0..100 {
+            if c.write_all(b"x").await.is_err() {
+                closed = true;
+                break;
+            }
+            let mut b = [0u8; 1];
+            if !matches!(c.read(&mut b).await, Ok(1)) {
+                closed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(closed, "an active tunnel must still end");
+        assert!(
+            ev.lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, Event::EgressClosed { .. }))
+        );
+    }
+
+    #[test]
+    fn the_limiter_drops_over_budget_and_reports_the_count_once() {
+        let l = Limiter::new(2);
+        assert_eq!(l.admit(), (true, 0));
+        assert_eq!(l.admit(), (true, 0));
+        assert_eq!(l.admit(), (false, 0));
+        assert_eq!(l.admit(), (false, 0));
+        assert_eq!(l.take_dropped(), 2);
+        assert_eq!(l.take_dropped(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_flood_of_denials_is_cut_and_summarised_on_shutdown() {
+        let (r, ev, port, token) = start(&["a.test"], fixed(&[]).0).await;
+        for _ in 0..(DENY_EVENTS + 5) {
+            let _ = connect(port, Some(&token), "x.test:443").await;
+        }
+        drop(r);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !ev
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, Event::EgressSuppressed { count: 5 }))
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("suppressed summary");
+        let denied = ev
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, Event::EgressDenied { .. }))
+            .count();
+        assert_eq!(denied as u32, DENY_EVENTS);
+    }
+
+    #[test]
+    fn hosts_in_events_are_ascii_escaped() {
+        let c = clean("a\u{202e}b\u{200b}\n\u{fc}.test");
+        assert!(
+            c.is_ascii() && !c.contains('\n') && !c.contains('\u{202e}'),
+            "{c}"
+        );
+        assert!(c.contains("202e") && c.contains("200b"));
+        assert_eq!(clean(&"a".repeat(500)).len(), 200);
     }
 
     #[cfg(unix)]

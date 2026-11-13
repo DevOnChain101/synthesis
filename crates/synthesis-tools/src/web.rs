@@ -1001,7 +1001,7 @@ mod tests {
         for (ip, blocked) in [
             ("2001:0:4136:e378:8000:63bf:3fff:fdd2", true), // Teredo
             ("2001::1", true),
-            ("2001:db8::1", false),
+            ("2001:db8::1", true), // documentation range
             ("2001:4860:4860::8888", false),
             ("2001:1::1", false),
         ] {

@@ -106,7 +106,7 @@ Flags of `synt run` and of the interactive app (`synt`):
 | `--cwd DIR` | Start folder / workspace directory (default: the current directory). |
 | `--sandbox MODE` | Command confinement: `enforce` (default), `best-effort` or `off` (loud warning). On Windows the default is `best-effort` with a notice. |
 | `--network MODE` | Network for tool commands: `deny` (default), `loopback`, `hosts` (only the `--allow-host` hosts, through a per-run proxy; Linux bubblewrap and macOS Seatbelt) or `allow` (loud warning). |
-| `--allow-host HOST` | Host commands may reach with `--network hosts`: `host` (port 443), `host:port`, `*.suffix`, or an exact `ip:port` for a private address (repeatable; adds to the user's `synt.sandbox.network.allowedHosts`, refused when managed settings set that list). Limits destinations, not what is sent to an allowed host (docs/specs/sandbox-hardening.md). |
+| `--allow-host HOST` | Host commands may reach with `--network hosts`: `host` (port 443), `host:port`, `*.suffix`, or an exact `ip:port` for a private address (repeatable; adds to the user's `synt.sandbox.network.allowedHosts`, refused when managed settings set that list, and by `--unattended`, which takes the list from settings only). Limits destinations, not what is sent to an allowed host (docs/specs/sandbox-hardening.md). |
 | `--sandbox-read PATH` | Extra read-only path for commands, e.g. a toolchain dir. Must exist; `$HOME`, filesystem roots and credential-store directories are refused (repeatable). |
 | `--provider ID` | Provider id (with `--model NAME`); `fake:<script.json>` in test-provider builds. |
 | `--model NAME` | `provider/model`, an alias or a bare model name. |

@@ -277,11 +277,28 @@ pub fn run_egress_bridge(
     use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::ExitStatusExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
-    fn forward(tcp: TcpStream, sock: PathBuf) {
+    /// Forwards in flight; more are dropped (a runaway command cannot make the bridge spawn
+    /// threads without bound).
+    const MAX_FORWARDS: usize = 128;
+    /// A silent connection ends after this (the proxy has its own, longer, idle limit).
+    const IO_TIMEOUT: Duration = Duration::from_secs(300);
+    static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+    struct Slot;
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            ACTIVE.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    fn forward(tcp: TcpStream, sock: PathBuf, _slot: Slot) {
         let Ok(unix) = UnixStream::connect(sock) else {
             return;
         };
+        let _ = tcp.set_read_timeout(Some(IO_TIMEOUT));
+        let _ = unix.set_read_timeout(Some(IO_TIMEOUT));
         let (Ok(tcp2), Ok(unix2)) = (tcp.try_clone(), unix.try_clone()) else {
             return;
         };
@@ -303,8 +320,12 @@ pub fn run_egress_bridge(
     let sock = sock.to_path_buf();
     std::thread::spawn(move || {
         for conn in listener.incoming().flatten() {
-            let sock = sock.clone();
-            std::thread::spawn(move || forward(conn, sock));
+            if ACTIVE.fetch_add(1, Ordering::SeqCst) >= MAX_FORWARDS {
+                ACTIVE.fetch_sub(1, Ordering::SeqCst);
+                continue; // dropped: the command sees a reset
+            }
+            let (sock, slot) = (sock.clone(), Slot);
+            std::thread::spawn(move || forward(conn, sock, slot));
         }
     });
     let status = child.wait().map_err(|e| unavailable(e.to_string()))?;
@@ -883,9 +904,13 @@ impl SandboxBackend for BwrapBackend {
 
     fn network_guarantee(&self, mode: &NetworkPolicy) -> Guarantee {
         match mode {
-            // fresh net namespace whose only exit is the bridge; needs the helper (bridge, seccomp)
+            // Fresh net namespace whose only exit is the bridge; needs the helper (bridge, seccomp).
+            // Capped at Weak: the root is bound read-only, not hidden, so a command can still
+            // connect() to a host PATHNAME unix socket outside /run, /var/run, /tmp and the denied
+            // paths (docs/specs/sandbox-hardening.md, residual risk). Strong waits for the read
+            // allow-list.
             NetworkPolicy::Proxied(EgressEndpoint::Unix(_)) if self.helper.is_some() => {
-                Guarantee::Strong
+                Guarantee::Weak
             }
             _ => network_guarantee_for(mode, self.capabilities().network, Guarantee::Strong),
         }
@@ -899,7 +924,7 @@ impl SandboxBackend for BwrapBackend {
             notes: vec![
                 "writes confined to writable_roots, tmp_dir and a private /tmp; /run is a fresh tmpfs; reads are NOT confined except deny_paths (whole fs mounted read-only)".into(),
                 "Weak: defence in depth, not a security boundary".into(),
-                "network Deny/Loopback use a fresh net namespace; with Loopback its `lo` is up but PRIVATE to the sandbox: a dev server and tests inside it work, host loopback services are unreachable; Proxied keeps the fresh namespace and bridges 127.0.0.1:3128 to the proxy's unix socket (needs the helper); allow_exec=false is rejected".into(),
+                "network Deny/Loopback use a fresh net namespace; with Loopback its `lo` is up but PRIVATE to the sandbox: a dev server and tests inside it work, host loopback services are unreachable; Proxied keeps the fresh namespace and bridges 127.0.0.1:3128 to the proxy's unix socket (needs the helper) but is Weak: host pathname unix sockets outside /run, /var/run, /tmp and the denied paths stay connectable until the read allow-list lands; allow_exec=false is rejected".into(),
                 "requires unprivileged user namespaces (blocked by default on Ubuntu 24.04 AppArmor)".into(),
                 "nonexistent deny_paths/readonly_paths are not protected; mount points make existing ones rename-proof".into(),
             ],
@@ -1763,7 +1788,7 @@ mod tests {
                 .iter()
                 .any(|(k, v)| k == "HTTPS_PROXY" && v == "http://127.0.0.1:3128")
         );
-        assert_eq!(b.network_guarantee(&pol.network), Guarantee::Strong);
+        assert_eq!(b.network_guarantee(&pol.network), Guarantee::Weak);
         // no helper: no bridge and no seccomp, so refused (and not claimed)
         let nohelper = BwrapBackend { helper: None, ..b };
         assert!(matches!(

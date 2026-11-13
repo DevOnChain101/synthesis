@@ -545,7 +545,7 @@ fn network_hosts_needs_hosts_an_enforced_sandbox_and_valid_entries() {
         (&["--allow-host", "a.test"][..], "--network hosts"),
         (
             &["--network", "hosts", "--allow-host", "*.com"][..],
-            "wildcard",
+            "public suffix",
         ),
         (
             &[
@@ -2398,11 +2398,15 @@ fn unattended_refuses_each_protection_that_is_asked_away() {
     git(&rig.ws(), &["init", "-q"]);
     git(&rig.ws(), &["add", "."]);
     git(&rig.ws(), &["commit", "-q", "-m", "init"]);
-    let cases: [(&[&str], &str); 12] = [
+    let cases: [(&[&str], &str); 13] = [
         (&["--sandbox", "off"], "sandbox"),
         (&["--sandbox", "best-effort"], "sandbox"),
         (&["--network", "allow"], "network"),
         (&["--network", "loopback"], "network"),
+        (
+            &["--allow-host", "a.test", "--network", "hosts"],
+            "allow-host",
+        ), // the list must come from settings
         (&["--network", "hosts"], "network"), // allowed in principle, but with no host listed
         (&["--permission-mode", "bypassPermissions"], "bypass"),
         (&["--trust-project"], "trust-project"),

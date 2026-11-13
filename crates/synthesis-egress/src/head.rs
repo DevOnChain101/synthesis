@@ -26,7 +26,14 @@ pub enum HeadError {
 /// shortcut: absolute-form forwarding (`GET http://host/...`) for the browser plugs in here
 /// by returning another variant; today it is refused as a bad request.
 pub async fn read_head<R: AsyncRead + Unpin>(r: &mut R) -> Result<Head, HeadError> {
-    tokio::time::timeout(HEAD_DEADLINE, async {
+    read_head_within(r, HEAD_DEADLINE).await
+}
+
+async fn read_head_within<R: AsyncRead + Unpin>(
+    r: &mut R,
+    deadline: Duration,
+) -> Result<Head, HeadError> {
+    tokio::time::timeout(deadline, async {
         let mut buf = Vec::with_capacity(512);
         loop {
             let mut chunk = [0u8; 1024];
@@ -92,6 +99,20 @@ mod tests {
         assert_eq!(h.authority, "a.test:443");
         assert_eq!(h.auth.as_deref(), Some("Basic abc"));
         assert_eq!(h.rest, b"XYZ");
+    }
+
+    #[tokio::test]
+    async fn a_head_that_trickles_in_hits_the_deadline() {
+        let (mut client, mut server) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            for b in b"CONNECT a.test:443 HTTP/1.1\r\nX: y\r\n" {
+                let _ = client.write_all(&[*b]).await;
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        });
+        let r = read_head_within(&mut server, Duration::from_millis(200)).await;
+        assert_eq!(r, Err(HeadError::Bad("head timed out")));
     }
 
     #[tokio::test]
