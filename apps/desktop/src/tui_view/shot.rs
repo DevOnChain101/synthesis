@@ -237,6 +237,10 @@ pub fn parse(args: &[String]) -> Option<Args> {
             hidden.hide(k);
         }
     }
+    // `--focus-mode`, `--no-header`, `--no-footer`: what `/panels focus`, `header off` and `footer off` do
+    hidden.focus = args.iter().any(|a| a == "--focus-mode");
+    hidden.header = args.iter().any(|a| a == "--no-header");
+    hidden.footer = args.iter().any(|a| a == "--no-footer");
     let live = val("--live").map(|script| LiveShot {
         script: PathBuf::from(script),
         prompt: val("--prompt").cloned(),

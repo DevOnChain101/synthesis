@@ -881,6 +881,12 @@ pub const UI_PANELS: [(&str, &str); 8] = [
 pub struct UiSettings {
     /// One flag per `UI_PANELS` entry, in that order: shown.
     pub panels: [bool; 8],
+    /// `focus_mode`: the desktop shows only the chat (with its sub-agent view); every panel is hidden without
+    /// touching `panels`, so turning it off brings back what was set.
+    pub focus_mode: bool,
+    /// `header` / `footer`: the desktop's title strip and key-hint bar are shown.
+    pub header: bool,
+    pub footer: bool,
     /// `logo`: `art` (the braille symbol on the welcome) or `off`.
     pub logo: bool,
     pub show_thinking: bool,
@@ -916,6 +922,9 @@ impl Default for UiSettings {
     fn default() -> Self {
         Self {
             panels: [true; 8],
+            focus_mode: false,
+            header: true,
+            footer: true,
             logo: true,
             show_thinking: true,
             verbose: false,
@@ -962,6 +971,9 @@ impl UiSettings {
         flag("mouse_capture", &mut s.mouse_capture);
         flag("copy_on_select", &mut s.copy_on_select);
         flag("blur", &mut s.blur);
+        flag("focus_mode", &mut s.focus_mode);
+        flag("header", &mut s.header);
+        flag("footer", &mut s.footer);
         match tui.get("opacity") {
             None => {}
             Some(v) => match v
@@ -1011,6 +1023,9 @@ impl UiSettings {
                 "copy_on_select",
                 "opacity",
                 "blur",
+                "focus_mode",
+                "header",
+                "footer",
             ]
             .contains(&k.as_str())
             {
@@ -1029,6 +1044,9 @@ impl UiSettings {
             .collect();
         serde_json::json!({
             "panels": panels,
+            "focus_mode": self.focus_mode,
+            "header": self.header,
+            "footer": self.footer,
             "logo": if self.logo { "art" } else { "off" },
             "show_thinking": self.show_thinking,
             "verbose": self.verbose,

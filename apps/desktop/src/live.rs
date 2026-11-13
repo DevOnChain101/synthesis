@@ -2297,6 +2297,13 @@ impl Live {
         })
     }
 
+    /// The x on an attachment chip: drops image `i` from the pending message (the file on disk is not touched).
+    pub fn remove_image(&mut self, i: usize) {
+        if i < self.images.len() {
+            self.images.remove(i);
+        }
+    }
+
     /// The images of the message being sent, as the harness takes them.
     pub fn take_images(&mut self) -> Vec<synthesis_harness::ImageAttachment> {
         std::mem::take(&mut self.images)
@@ -3677,6 +3684,19 @@ mod tests {
                 .unwrap_err()
                 .contains("at most 6 MB")
         );
+    }
+
+    #[test]
+    fn an_attachment_chip_can_be_removed() {
+        let mut l = Live::new();
+        for _ in 0..3 {
+            l.attach_image("image/png", &[1], None).unwrap();
+        }
+        let second = l.images[1].name.clone();
+        l.remove_image(1);
+        l.remove_image(9);
+        assert_eq!(l.images.len(), 2);
+        assert!(l.images.iter().all(|a| a.name != second));
     }
 
     fn question(multi: bool) -> Live {

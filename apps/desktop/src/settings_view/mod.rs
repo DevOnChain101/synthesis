@@ -111,13 +111,7 @@ fn tab_label(s: Section) -> &'static str {
 
 /// The dash panels switched off in `synt.tui.panels.*` (applied when the TUI view starts).
 pub fn hidden_from(tui: &synthesis_settings::UiSettings) -> Hidden {
-    let mut h = Hidden::default();
-    for ((key, _), shown) in synthesis_settings::UI_PANELS.iter().zip(tui.panels) {
-        if !shown {
-            h.hide(key);
-        }
-    }
-    h
+    Hidden::from_ui(tui)
 }
 
 /// The person closed the popup (x button, Esc or a click on the backdrop).

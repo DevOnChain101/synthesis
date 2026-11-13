@@ -176,6 +176,8 @@ pub struct TuiView {
     /// Scroll handles of the Tools & Skills and Recent Activity bodies (the fade shows when one is cut).
     tools_scroll: gpui::ScrollHandle,
     act_scroll: gpui::ScrollHandle,
+    /// Entries Recent Activity had at the last frame (a new one scrolls it to the end when it was at the end).
+    act_len: std::cell::Cell<usize>,
     /// Height of the Topology panel from the last frame, and what the Usage month section took from it then:
     /// together they say how much the column can give the section now (`layout::month_mode`).
     topo_h: std::rc::Rc<std::cell::Cell<f32>>,
@@ -191,6 +193,12 @@ pub struct TuiView {
 pub enum Side {
     Left,
     Right,
+}
+
+/// Whether Recent Activity scrolls to its end: entries were added (`was` -> `now`) and the view was at the end
+/// of the old content (`offset` <= 0 px, `max` the scroll range; a few px of slack).
+fn follow_activity(was: usize, now: usize, offset: f32, max: f32) -> bool {
+    now > was && offset + max <= 3.
 }
 
 /// The top bar's chips: live count, workspace, session, model, effort, context on the left; health and the
@@ -220,6 +228,7 @@ impl TuiView {
             win_h: 900.,
             tools_scroll: gpui::ScrollHandle::new(),
             act_scroll: gpui::ScrollHandle::new(),
+            act_len: Default::default(),
             topo_h: Default::default(),
             month_used: Default::default(),
             snap: sample(),
@@ -502,6 +511,16 @@ impl TuiView {
             col = col.child(self.fit(p, "p-tools", |p| p.flex_initial().min_h(min)));
         }
         if !h.activity {
+            // oldest first: a new entry lands at the bottom; keep it in view unless the person scrolled up
+            let (o, m) = (self.act_scroll.offset().y, self.act_scroll.max_offset().y);
+            if follow_activity(
+                self.act_len.replace(s.activity.len()),
+                s.activity.len(),
+                f32::from(o),
+                f32::from(m),
+            ) {
+                self.act_scroll.scroll_to_bottom();
+            }
             // one `.grow` panel (flex 1 1 0) for the prompts and the agent's activity together
             let act_click = |i: usize| -> panels::OnClick {
                 Box::new(cx.listener(move |this, _, _, cx| this.click_activity(i, cx)))
@@ -788,7 +807,6 @@ impl TuiView {
                 .text_color(dim())
                 .child("Ask Synthesis anything... (Ctrl+R for history)"),
             false,
-            false,
             None,
         )
     }
@@ -1047,13 +1065,17 @@ impl Render for TuiView {
         }
         let tier = tiers(h);
         let c = cols(w);
-        let (right_in, right_btn) = (c.right_inline, !c.right_inline);
-        let left_in = c.left_inline;
+        let fr = layout::frame(w, &self.hidden);
+        let (right_in, right_btn) = (fr.right_inline, fr.right_button);
+        let left_in = fr.left_inline;
+        let (top_h, bottom_h) = fr.bars();
+        // the right column takes the height of the bars that are left out (it subtracts both of them)
+        let h = h + (HEADER_H - top_h) + (FOOTER_H - bottom_h);
         let side = |on: bool, x: f32| if on { x + GAP } else { 0. };
         self.centre_w = w - 2. * PAD - side(left_in, c.left) - side(right_in, c.right);
         // a collapsed column that was open when the window grew has no drawer any more
         let drawer = self.drawer.filter(|s| match s {
-            Side::Left => !left_in,
+            Side::Left => fr.left_button,
             Side::Right => right_btn,
         });
         let mut body = div()
@@ -1077,8 +1099,8 @@ impl Render for TuiView {
             div()
                 .debug_selector(|| "drawer".to_string())
                 .absolute()
-                .top(px(HEADER_H))
-                .bottom(px(FOOTER_H))
+                .top(px(top_h))
+                .bottom(px(bottom_h))
                 .left_0()
                 .right_0()
                 .flex()
@@ -1112,9 +1134,13 @@ impl Render for TuiView {
             .text_size(px(12.5))
             .line_height(gpui::relative(1.55))
             .text_color(text())
-            .child(self.top_bar(w, !left_in, right_btn, cx))
+            // enables the window's text selection (chat text is selectable and copyable)
+            .child(gpui_base::TextSelectionLayer)
+            .when(fr.show_header, |d| {
+                d.child(self.top_bar(w, fr.left_button, right_btn, cx))
+            })
             .child(body)
-            .child(self.footer())
+            .when(fr.show_footer, |d| d.child(self.footer()))
             .children(drawer)
             .children(self.quote_menu(cx))
     }
@@ -1346,6 +1372,14 @@ mod tests {
             vcx.run_until_parked();
             assert!(vcx.debug_bounds(body).is_some(), "{id}: not reopened");
         }
+    }
+
+    #[test]
+    fn recent_activity_follows_the_end_unless_scrolled_up() {
+        assert!(follow_activity(0, 3, 0., 0.), "first entries");
+        assert!(follow_activity(3, 4, -120., 120.), "at the end: follows");
+        assert!(!follow_activity(3, 4, -40., 120.), "scrolled up: stays");
+        assert!(!follow_activity(4, 4, -120., 120.), "nothing new");
     }
 
     /// A dialog is a panel in the chat column right above the prompt (not a window-wide modal), and while it
