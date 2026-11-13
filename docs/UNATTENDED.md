@@ -54,7 +54,7 @@ The worktree's pins (`GitInfo`) are stored in the session row. `--resume ID` re-
 
 ## Red-team suite and nightly evals
 
-`tests/redteam` (CI job `redteam`, all three OSes) runs about 50 scripted attacks against the real binary in default, acceptEdits, auto (always-allow fake judge) and bypassPermissions, and `evals-nightly.yml` runs `tests/agent-evals` with a real model when the secret `SYNT_API_KEY` exists (variables `SYNT_EVAL_PROVIDER`, `SYNT_EVAL_MODEL`, `SYNT_EVAL_MAX_COST_USD`, default 1 USD per run; the summary shows status-ok, false-success and cost; the key reaches only the adapter, never the graded checks). What an unattended run does NOT stop is listed in docs/SECURITY.md ("Red-team suite"): a repo git alias or script in `auto`/`bypassPermissions`, no disk quota, no process limit.
+`tests/redteam` (CI job `redteam`, all three OSes) runs about 50 scripted attacks against the real binary in default, acceptEdits, auto (always-allow fake judge) and bypassPermissions, and `evals-nightly.yml` runs `tests/agent-evals` with a real model when the secret `SYNT_API_KEY` exists (variables `SYNT_EVAL_PROVIDER`, `SYNT_EVAL_MODEL`, `SYNT_EVAL_MAX_COST_USD`, default 1 USD per run; the summary shows status-ok, false-success and cost; the key reaches only the adapter, never the graded checks). What an unattended run does NOT stop is listed in docs/SECURITY.md ("Red-team suite"): a repo git alias or script in `auto`/`bypassPermissions`, no disk quota, no process limit. The nightly secret belongs in the Environment `evals-nightly` (docs/SECURITY.md).
 
 ## Not fixed / residual risks
 

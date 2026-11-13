@@ -30,12 +30,14 @@ export function killTree(pid) {
   }
 }
 
-// Only the adapter gets credentials: setup and graded checks run code the agent wrote.
+// ALLOWLISTED environments (nothing else of the parent leaks in). Setup and graded checks run code the agent wrote, so
+// they get no credentials; the adapter additionally gets SYNT_*/EVAL_* (its credentials and settings) and proxy/CA vars.
+const BASE_ENV = /^(PATH|HOME|USERPROFILE|TMPDIR|TMP|TEMP|SystemRoot|SYSTEMROOT|ComSpec|COMSPEC|PATHEXT|windir|WINDIR|SystemDrive|SYSTEMDRIVE|APPDATA|LOCALAPPDATA|ProgramData|ProgramFiles(\(x86\))?|USERNAME|LANG|LC_[A-Z]+|TERM|CI|RUSTUP_HOME|CARGO_HOME|CARGO_TARGET_DIR|PYTHONDONTWRITEBYTECODE)$/;
+const ADAPTER_ENV = /^(SYNT_[A-Z0-9_]+|EVAL_[A-Z0-9_]+|NEMO_NODE_REF|(HTTPS?|ALL|NO)_PROXY|(https?|all|no)_proxy|SSL_CERT_(FILE|DIR))$/;
 function cleanEnv(extra, { credentials = false } = {}) {
-  const env = { ...process.env, PYTHONDONTWRITEBYTECODE: '1', ...extra };
-  delete env.NODE_TEST_CONTEXT; // an outer `node --test` must not leak into the graded `node --test`
-  if (!credentials) for (const k of Object.keys(env)) if (/^SYNT_(API_KEY|AUTH_TOKEN)$|_API_KEY$|_AUTH_TOKEN$/.test(k)) delete env[k];
-  return env;
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) if (BASE_ENV.test(k) || (credentials && ADAPTER_ENV.test(k))) env[k] = v;
+  return { ...env, PYTHONDONTWRITEBYTECODE: '1', ...extra };
 }
 
 // Runs a command (shell for check commands, direct for the adapter) in its own process group.

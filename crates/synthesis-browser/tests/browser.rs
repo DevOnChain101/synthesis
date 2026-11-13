@@ -1463,20 +1463,24 @@ async fn socket_bypass_matrix_body() {
     let worker_js = format!("fetch('/ran-worker');{}", sock("worker"));
     let shared_js = format!("fetch('/ran-shared');{}", sock("shared"));
     let sw_js = format!("fetch('/ran-sw');{}", sock("sw"));
+    let sandboxed_html = format!("<script>{}</script>", sock("sandboxed-src"));
     let page = format!(
         r#"<title>Main</title><body>
 <button onclick="const w=open('about:blank');try{{new w.WebSocket('ws://127.0.0.1:{ws_port}/popup-blank')}}catch(e){{}}">Blank</button>
 <script>
 fetch('/ran-main');
+document.addEventListener('securitypolicyviolation',e=>fetch('/csp-'+e.violatedDirective+'-'+encodeURIComponent(e.blockedURI)));
+fetch('ftp://127.0.0.1:1/x').catch(()=>{{}});
 new Worker('/worker.js');
 try{{new SharedWorker('/shared.js')}}catch(e){{}}
 try{{navigator.serviceWorker.register('/sw.js')}}catch(e){{}}
 const s=document.createElement('iframe');s.srcdoc="<script>{srcdoc}<\/script>";document.body.appendChild(s);
 const sb=document.createElement('iframe');sb.setAttribute('sandbox','allow-scripts');sb.srcdoc="<script>{sandboxed}<\/script>";document.body.appendChild(sb);
+const sbs=document.createElement('iframe');sbs.setAttribute('sandbox','allow-scripts');sbs.src='/sandboxed.html';document.body.appendChild(sbs);
 const f=document.createElement('iframe');document.body.appendChild(f);
 try{{new f.contentWindow.WebSocket('ws://127.0.0.1:{ws_port}/blank-iframe')}}catch(e){{}}
 try{{new WebTransport('https://127.0.0.1:{ws_port}/wt')}}catch(e){{fetch('/wt-'+e.name)}}
-fetch('http://127.0.0.1:{ws_port}/fetch-upgrade',{{headers:{{Upgrade:'websocket',Connection:'Upgrade','Sec-WebSocket-Version':'13','Sec-WebSocket-Key':'AAAAAAAAAAAAAAAAAAAAAA=='}}}}).catch(()=>{{}});
+fetch('http://127.0.0.1:{ws_port}/fetch-upgrade',{{headers:{{Upgrade:'websocket',Connection:'Upgrade','Sec-WebSocket-Version':'13','Sec-WebSocket-Key':'AAAAAAAAAAAAAAAAAAAAAA=='}}}}).then(()=>fetch('/fu-ok'),e=>fetch('/fu-err-'+e));
 </script></body>"#,
         srcdoc = sock("srcdoc"),
         sandboxed = sock("srcdoc-sandboxed"),
@@ -1485,6 +1489,7 @@ fetch('http://127.0.0.1:{ws_port}/fetch-upgrade',{{headers:{{Upgrade:'websocket'
         "/worker.js" => ("text/javascript", worker_js.clone()),
         "/shared.js" => ("text/javascript", shared_js.clone()),
         "/sw.js" => ("text/javascript", sw_js.clone()),
+        "/sandboxed.html" => ("text/html", sandboxed_html.clone()),
         _ => ("text/html", page.clone()),
     }))
     .await;
@@ -1535,30 +1540,12 @@ fetch('http://127.0.0.1:{ws_port}/fetch-upgrade',{{headers:{{Upgrade:'websocket'
         seen(&ran, "/wt-SecurityError") >= 1,
         "WebTransport constructor is replaced"
     );
-    // KNOWN GAP (docs/SECURITY.md): a sandboxed (opaque-origin) srcdoc iframe is attached by Chrome
-    // unpaused, so its first inline script runs before the constructor is replaced. Not asserted, so a
-    // fix does not break the build; the line tells which state the suite found.
-    let leaked = |tag: &str| {
-        ws_seen
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|l| l.starts_with(&format!("/{tag} ")))
-    };
-    eprintln!(
-        "KNOWN_GAP sandboxed-srcdoc-websocket: {}",
-        if leaked("srcdoc-sandboxed") {
-            "still open"
-        } else {
-            "CLOSED, update docs/SECURITY.md"
-        }
-    );
     assert_eq!(
         ws_seen
             .lock()
             .unwrap()
             .iter()
-            .filter(|l| !l.starts_with("/fetch-upgrade") && !l.starts_with("/srcdoc-sandboxed"))
+            .filter(|l| !l.starts_with("/fetch-upgrade"))
             .count(),
         0,
         "a WebSocket handshake reached the server: {:?}",

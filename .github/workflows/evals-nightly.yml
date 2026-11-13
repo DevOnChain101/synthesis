@@ -1,7 +1,9 @@
 # Nightly / manual evals with a REAL model (tests/agent-evals, adapter "rust"). Skipped cleanly when the repository has no
 # credentials: add the secret SYNT_API_KEY (credential for SYNT_PROVIDER, docs/specs/config.md) and optionally the
 # variables SYNT_EVAL_PROVIDER (default anthropic), SYNT_EVAL_MODEL (provider/model) and SYNT_EVAL_MAX_COST_USD
-# (per run, default 1). Publishes status-ok / false-success / cost as the job summary and as an artifact.
+# (per run, default 1). The secret lives in the GitHub Environment `evals-nightly` (repository Settings > Environments:
+# create it, add SYNT_API_KEY there, restrict "Deployment branches" to `main`, optionally add required reviewers); the job
+# also refuses to run from any other ref. Publishes status-ok / false-success / cost as the job summary and as an artifact.
 # The key is only in the environment of the eval step; nothing here echoes it.
 name: Evals nightly
 
@@ -35,6 +37,8 @@ defaults:
 jobs:
   evals:
     name: evals (real model)
+    if: github.ref == 'refs/heads/main'
+    environment: evals-nightly
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -88,6 +92,9 @@ jobs:
           RUNS: ${{ inputs.runs || '1' }}
           TASKS: ${{ inputs.tasks }}
         run: |
+          # inputs are untrusted text: integer 1..5 runs, at most 10 task ids of [a-z0-9-]
+          [[ "$RUNS" =~ ^[1-5]$ ]] || { echo "runs must be an integer from 1 to 5"; exit 2; }
+          [[ -z "$TASKS" || "$TASKS" =~ ^[a-z0-9-]+(,[a-z0-9-]+){0,9}$ ]] || { echo "tasks must be up to 10 comma-separated task ids"; exit 2; }
           args=(--agent rust --runs "$RUNS" --out evals-out)
           if [ -n "$TASKS" ]; then args+=(--task "$TASKS"); fi
           # exit 70 = an adapter error; a failed task is a result, not a job failure
@@ -96,11 +103,18 @@ jobs:
         if: env.HAVE_KEY == 'yes' && always()
         run: |
           node tests/agent-evals/harness/summary.mjs evals-out | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: The key must not be in anything that gets uploaded
+        if: env.HAVE_KEY == 'yes' && always()
+        env:
+          SYNT_API_KEY: ${{ secrets.SYNT_API_KEY }}
+        run: |
+          if grep -rqF -- "$SYNT_API_KEY" evals-out evals.log 2>/dev/null; then
+            echo "::error::the API key appears in the eval output; artifact NOT uploaded"; rm -rf evals-out evals.log; exit 1
+          fi
+          echo "no key material found in evals-out or evals.log"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: env.HAVE_KEY == 'yes' && always()
         with:
           name: evals-nightly
-          path: |
-            evals-out/
-            evals.log
+          path: evals-out/
           if-no-files-found: ignore
