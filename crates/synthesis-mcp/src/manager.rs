@@ -741,6 +741,7 @@ fn http_client(auth: Option<&str>) -> Result<reqwest::Client, String> {
         h.insert(http::header::AUTHORIZATION, v);
     }
     reqwest::Client::builder()
+        .dns_resolver(crate::guard::GuardResolver::system())
         .default_headers(h)
         .pool_max_idle_per_host(0)
         .redirect(reqwest::redirect::Policy::custom(|a| {

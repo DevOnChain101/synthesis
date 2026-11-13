@@ -279,10 +279,14 @@ pub fn is_protected_path(roots: &[PathBuf], p: &Path) -> bool {
         additional_directories: more.to_vec(),
         ..PermissionRules::default()
     };
-    let perms = Permissions::new(
-        rules,
-        Env::new(first.clone(), PathBuf::new(), Mode::Default),
-    );
+    let mut env = Env::new(first.clone(), PathBuf::new(), Mode::Default);
+    // judged as on the strictest file system (case folded, Windows aliases reduced) on every OS: `.ENV` and
+    // `.GIT/hooks` are the same files on macOS and Windows, and over-protecting on Linux is the safe side
+    env.path_policy = PathPolicy {
+        case_insensitive: true,
+        windows_separators: true,
+    };
+    let perms = Permissions::new(rules, env);
     perms.is_protected(p) || perms.is_tool_readonly(p)
 }
 

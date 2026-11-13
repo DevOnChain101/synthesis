@@ -49,26 +49,21 @@ fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
-/// `Err` = the request must not be made.
+/// `Err` = the request must not be made. Strict for every host but an explicit loopback name or address (which a
+/// person may write by hand, with `http` too): `https` only, no private or internal address, and a name that
+/// does not resolve, or resolves to such an address, is refused (the connection itself is then restricted to
+/// validated addresses by [`crate::guard::GuardResolver`], so what was checked is what is connected to).
 pub(crate) async fn check_url(u: &Url) -> Result<(), String> {
-    check(u, false).await
+    check(u, !u.host_str().is_some_and(is_loopback_host)).await
 }
 
-/// The check for a URL a CLIENT chose (`mcp.add` over the engine protocol, and again at every connect): `https`
-/// only, no user:password, no loopback host (not even `localhost`), no private, link-local (the cloud metadata
-/// address), CGNAT or multicast address, and a name that resolves to one is refused too.
+/// The check for a URL a CLIENT chose (`mcp.add` over the engine protocol): strict for every host, loopback
+/// included, and no user:password.
 pub async fn check_remote_url(u: &Url) -> Result<(), String> {
     if !u.username().is_empty() || u.password().is_some() {
         return Err("a URL with a user name or password is not allowed".into());
     }
     check(u, true).await
-}
-
-/// Is any of the resolved addresses one a request must not go to.
-fn any_blocked(addrs: impl IntoIterator<Item = std::net::SocketAddr>) -> bool {
-    addrs
-        .into_iter()
-        .any(|a| blocked(a.ip()) || a.ip().is_loopback())
 }
 
 async fn check(u: &Url, strict: bool) -> Result<(), String> {
@@ -102,19 +97,9 @@ async fn check(u: &Url, strict: bool) -> Result<(), String> {
             Ok(())
         };
     }
-    let port = u.port_or_known_default().unwrap_or(443);
-    match tokio::net::lookup_host((host.as_str(), port)).await {
-        Ok(addrs) => {
-            if any_blocked(addrs) {
-                Err(format!("{host} resolves to a private/internal address"))
-            } else {
-                Ok(())
-            }
-        }
-        // a name that does not resolve cannot be connected to; the strict check does not take it on trust
-        Err(_) if strict => Err(format!("{host} does not resolve")),
-        Err(_) => Ok(()),
-    }
+    crate::guard::resolve_validated(&host, &crate::guard::system_lookup())
+        .await
+        .map(drop)
 }
 
 /// GET with manual redirects; every hop passes [`check_url`]. Configured headers are not forwarded
@@ -249,6 +234,7 @@ pub async fn connect(url: &str, headers: HeaderMap) -> Result<(SseTx, SseRx), St
     // redirects are handled above; no automatic ones
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(crate::guard::GuardResolver::system())
         .build()
         .map_err(|e| e.to_string())?;
     let resp = get_stream(&client, &url, &headers).await?;
@@ -380,16 +366,5 @@ mod url_tests {
         // the existing (connect-time) check keeps allowing http to localhost for a server the person configured
         assert!(check_url(&u("http://localhost:3000/mcp")).await.is_ok());
         assert!(check_url(&u("http://10.0.0.5/")).await.is_err());
-    }
-
-    #[test]
-    fn a_name_that_resolves_to_a_private_address_is_refused() {
-        let sa = |s: &str| format!("{s}:443").parse::<std::net::SocketAddr>().unwrap();
-        assert!(
-            any_blocked([sa("8.8.8.8"), sa("10.1.2.3")]),
-            "one private answer is enough"
-        );
-        assert!(any_blocked([sa("169.254.169.254")]) && any_blocked([sa("127.0.0.1")]));
-        assert!(!any_blocked([sa("8.8.8.8"), sa("1.1.1.1")]));
     }
 }

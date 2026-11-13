@@ -45,6 +45,8 @@ pub async fn connect(
         })
         .map_err(|()| "invalid url".to_string())?;
     crate::sse::check_url(&check).await?;
+    let host = u.host_str().ok_or("URL has no host")?.to_string();
+    let port = u.port_or_known_default().unwrap_or(443);
     let mut req = url.into_client_request().map_err(|e| e.to_string())?;
     req.headers_mut()
         .insert("Sec-WebSocket-Protocol", HeaderValue::from_static("mcp"));
@@ -60,7 +62,21 @@ pub async fn connect(
     let cfg = WebSocketConfig::default()
         .max_message_size(Some(MAX_MESSAGE))
         .max_frame_size(Some(MAX_MESSAGE));
-    let (ws, _) = tokio_tungstenite::connect_async_with_config(req, Some(cfg), false)
+    // connect to the addresses that were validated (an IP literal was checked above), not to whatever the name
+    // resolves to a second time; TLS still names the host
+    let addrs: Vec<std::net::SocketAddr> =
+        match host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+            Ok(ip) => vec![std::net::SocketAddr::new(ip, port)],
+            Err(_) => crate::guard::resolve_validated(&host, &crate::guard::system_lookup())
+                .await?
+                .into_iter()
+                .map(|ip| std::net::SocketAddr::new(ip, port))
+                .collect(),
+        };
+    let tcp = tokio::net::TcpStream::connect(&addrs[..])
+        .await
+        .map_err(|e| format!("websocket: {e}"))?;
+    let (ws, _) = tokio_tungstenite::client_async_tls_with_config(req, tcp, Some(cfg), None)
         .await
         .map_err(|e| format!("websocket: {e}"))?;
     let (tx, rx) = ws.split();

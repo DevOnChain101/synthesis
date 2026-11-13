@@ -762,6 +762,7 @@ mod tests {
         std::fs::write(w.join(".env"), "SECRET-ENV").unwrap();
         std::fs::write(w.join("ok.txt"), "fine").unwrap();
         std::fs::write(w.join("d/config"), "fine-d").unwrap();
+        std::fs::write(w.join("stable.txt"), "stable").unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let swapper = {
             let (w, stop) = (w.clone(), stop.clone());
@@ -780,8 +781,11 @@ mod tests {
             })
         };
         let t0 = Instant::now();
-        let (mut ok, mut refused) = (0, 0);
+        let (mut ok, mut refused, mut stable) = (0, 0, 0);
         while t0.elapsed() < Duration::from_millis(1500) {
+            // a file nobody touches must always read: a reader that refuses everything must not pass
+            assert_eq!(read(&w, "stable.txt").unwrap()["lines"][0], "stable");
+            stable += 1;
             for rel in ["ok.txt", "d/config"] {
                 match read(&w, rel) {
                     Ok(v) => {
@@ -794,7 +798,18 @@ mod tests {
         }
         stop.store(true, Ordering::SeqCst);
         swapper.join().unwrap();
-        assert!(ok + refused > 0);
+        assert!(ok + refused > 0 && stable > 0);
+        // quiet phase: with the swapper stopped (and the files back as they were) the very same reads work
+        let _ = std::fs::remove_file(w.join("ok.txt"));
+        std::fs::write(w.join("ok.txt"), "fine").unwrap();
+        if std::fs::symlink_metadata(w.join("d")).is_ok_and(|m| m.file_type().is_symlink()) {
+            std::fs::remove_file(w.join("d")).unwrap();
+        }
+        if !w.join("d").exists() && w.join("d.real").exists() {
+            std::fs::rename(w.join("d.real"), w.join("d")).unwrap();
+        }
+        assert_eq!(read(&w, "ok.txt").unwrap()["lines"][0], "fine");
+        assert_eq!(read(&w, "d/config").unwrap()["lines"][0], "fine-d");
     }
 
     #[cfg(target_os = "linux")]

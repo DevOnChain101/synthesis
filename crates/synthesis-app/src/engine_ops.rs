@@ -537,7 +537,9 @@ pub fn mcp_add(ctx: &Ctx, a: McpAdd, hide: &[&Path]) -> Result<Value, String> {
         return Err("not an https server URL".into());
     }
     // https only, no user:password, no loopback, and nothing that is or resolves to a private, link-local
-    // (the cloud metadata address) or other internal address: checked here and again at every connect
+    // (the cloud metadata address) or other internal address. This is the add-time check only: at every connect
+    // the transports resolve the name themselves and connect ONLY to addresses that pass the same blocklist
+    // (`synthesis_mcp`'s guard resolver), so a name that later answers differently is not followed
     let parsed =
         synthesis_mcp::Url::parse(&url).map_err(|_| "not an https server URL".to_string())?;
     let rt = tokio::runtime::Builder::new_current_thread()
