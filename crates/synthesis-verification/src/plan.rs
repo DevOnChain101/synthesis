@@ -1,8 +1,10 @@
 //! Check planning (verification.md §4.2). Reads files only; never runs anything.
 
 use crate::types::*;
+use regex::Regex;
 use std::fs;
 use std::path::Path;
+use std::sync::LazyLock;
 
 fn chk(kind: CheckKind, cmd: &str, cwd: &Path) -> Check {
     Check {
@@ -81,7 +83,7 @@ pub fn detect_checks(dir: &Path) -> Vec<Check> {
         out.push(chk(CheckKind::Unit, "make test", dir));
     }
     if has("go.mod") {
-        out.push(chk(CheckKind::Unit, "go test ./...", dir));
+        out.push(chk(CheckKind::Unit, "go test -v ./...", dir)); // -v: per-test lines the gate can count
     }
     out
 }
@@ -149,13 +151,24 @@ fn relevant(cmd: &str, changed: &[String]) -> bool {
     })
 }
 
-/// Plan order: user-declared criterion checks, model-registered checks, inferred checks.
+/// Plan order: user-declared criterion checks, inferred checks, model-registered checks.
 /// Inferred checks duplicating an earlier command are dropped; ids `k1..` are assigned to
 /// checks that have none. With a non-empty `changed`, inferred checks unrelated to it are dropped.
 pub fn plan_checks(
     criteria: &[Criterion],
     model_checks: &[Check],
     dir: &Path,
+    changed: &[String],
+) -> Vec<Check> {
+    plan_checks_from(criteria, model_checks, dir, detect_checks(dir), changed)
+}
+
+/// [`plan_checks`] with the inferred checks given (frozen at task start) instead of re-read.
+pub(crate) fn plan_checks_from(
+    criteria: &[Criterion],
+    model_checks: &[Check],
+    dir: &Path,
+    inferred: Vec<Check>,
     changed: &[String],
 ) -> Vec<Check> {
     let mut out: Vec<Check> = vec![];
@@ -170,13 +183,16 @@ pub fn plan_checks(
             out.push(k);
         }
     }
-    out.extend(model_checks.iter().cloned().map(|mut k| {
-        k.declared_by = Declarer::Model;
-        k
-    }));
-    for k in detect_checks(dir) {
+    for k in inferred {
         let rel = changed.is_empty() || k.command.as_deref().is_none_or(|c| relevant(c, changed));
         if rel && !out.iter().any(|o| o.command == k.command) {
+            out.push(k);
+        }
+    }
+    // A model-registered check never replaces a planned one with the same command.
+    for mut k in model_checks.iter().cloned() {
+        if !out.iter().any(|o| o.command == k.command) {
+            k.declared_by = Declarer::Model;
             out.push(k);
         }
     }
@@ -185,6 +201,259 @@ pub fn plan_checks(
             k.id = format!("k{}", i + 1);
         }
     }
+    out
+}
+
+/// Files that define what the checks run (workspace-relative, `/`-separated, at any depth): a
+/// change to one during a task is a weakening candidate.
+pub(crate) fn is_definition_file(rel: &str) -> bool {
+    // ONE list for the gate and the permission engine: synthesis_core::definitions
+    synthesis_core::definitions::is_check_definition(rel)
+}
+
+/// What of a definition file counts: `package.json` only by the keys that decide how tests run,
+/// `Cargo.toml` without its dependency tables (adding a dependency does not change what
+/// `cargo test` runs).
+pub(crate) fn definition_view(rel: &str, text: &str) -> String {
+    match rel.rsplit('/').next().unwrap_or(rel) {
+        "package.json" => serde_json::from_str::<serde_json::Value>(text).map_or_else(
+            |_| text.into(),
+            |v| {
+                let keep: serde_json::Map<String, serde_json::Value> = [
+                    "scripts",
+                    "jest",
+                    "mocha",
+                    "ava",
+                    "vitest",
+                    "nyc",
+                    "c8",
+                    "workspaces",
+                    "type",
+                    "bin",
+                    "main",
+                    "exports",
+                    "packageManager",
+                ]
+                .iter()
+                .filter_map(|k| Some((k.to_string(), v.get(k)?.clone())))
+                .collect();
+                serde_json::Value::Object(keep).to_string()
+            },
+        ),
+        "Cargo.toml" => {
+            let mut skip = false;
+            let mut out = String::new();
+            for l in text.lines() {
+                if l.trim_start().starts_with('[') {
+                    skip = l.contains("dependencies");
+                }
+                if !skip {
+                    out += l;
+                    out.push('\n');
+                }
+            }
+            out
+        }
+        _ => text.into(),
+    }
+}
+
+/// `&&` / `;` separated parts of a shell line, quotes respected.
+fn split_parts(cmd: &str) -> Vec<String> {
+    let (mut parts, mut cur, mut quote) = (vec![], String::new(), None::<char>);
+    let mut it = cmd.chars().peekable();
+    while let Some(c) = it.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (None, '"' | '\'') => quote = Some(c),
+            (None, ';') => parts.push(std::mem::take(&mut cur)),
+            (None, '&') if it.peek() == Some(&'&') => {
+                it.next();
+                parts.push(std::mem::take(&mut cur));
+                continue;
+            }
+            _ => {}
+        }
+        cur.push(c);
+    }
+    parts.push(cur);
+    parts
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+fn make_body(mk: &str, target: &str, depth: u8) -> Option<String> {
+    let mut lines = mk.lines().skip_while(|l| {
+        l.split_once(':').is_none_or(|(t, rest)| {
+            t.trim() != target || rest.starts_with(['=', ':']) || l.starts_with('\t')
+        })
+    });
+    let head = lines.next()?;
+    let rest = head.split_once(':')?.1.split('#').next().unwrap_or("");
+    let mut out: Vec<String> = vec![];
+    if depth > 0 {
+        for pre in rest
+            .split_whitespace()
+            .filter(|p| !p.starts_with('.') && !p.contains(['=', '%', '$']))
+        {
+            out.extend(make_body(mk, pre, depth - 1));
+        }
+    }
+    out.extend(
+        lines
+            .take_while(|l| l.starts_with('\t'))
+            .map(|l| l.trim().trim_start_matches(['@', '-', '+']).to_string()),
+    );
+    Some(out.join(";"))
+}
+
+/// Source of the script a check command runs (`npm run x` -> pre/main/post bodies of
+/// `scripts.x`, `make test` -> its recipe and prerequisites), read from the files as they are now.
+/// `None` for anything else, and for a command with shell operators.
+fn script_body(dir: &Path, cmd: &str) -> Option<String> {
+    if cmd.contains(['|', '>', '<', '`', '$']) {
+        return None;
+    }
+    let t: Vec<&str> = cmd.split_whitespace().collect();
+    let npm = |name: &str| -> Option<String> {
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("package.json")).ok()?).ok()?;
+        let get = |n: String| v["scripts"][n].as_str().map(String::from);
+        let main = get(name.into())?;
+        Some(
+            [
+                get(format!("pre{name}")),
+                Some(main),
+                get(format!("post{name}")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(";"),
+        )
+    };
+    match t.as_slice() {
+        ["npm" | "pnpm" | "yarn", "run", name, ..] => npm(name),
+        ["npm" | "pnpm" | "yarn", "test" | "t"] => npm("test"),
+        ["yarn", name] => npm(name),
+        ["make", target, ..] if !target.starts_with('-') => {
+            make_body(&fs::read_to_string(dir.join("Makefile")).ok()?, target, 4)
+        }
+        _ => None,
+    }
+}
+
+/// The shell text a check really runs: runner invocations replaced by their script bodies.
+fn effective(dir: &Path, cmd: &str, depth: u8) -> String {
+    match script_body(dir, cmd).filter(|_| depth > 0) {
+        Some(b) => split_parts(&b)
+            .iter()
+            .map(|p| effective(dir, p, depth - 1))
+            .collect::<Vec<_>>()
+            .join(";"),
+        None => cmd.into(),
+    }
+}
+
+fn unquote(s: &str) -> &str {
+    s.trim().trim_matches(['"', '\''])
+}
+
+fn part_is_noop(part: &str) -> bool {
+    if part.contains(['|', '>', '<', '`']) || part.contains("$(") {
+        return false; // a pipe, redirect or substitution does real work (`echo "$X" | grep -q ok`)
+    }
+    let w: Vec<&str> = part.split_whitespace().collect();
+    let arg = |from: usize| unquote(&w[from.min(w.len())..].join(" ")).to_string();
+    match w.as_slice() {
+        [] => true,
+        [
+            ":" | "true" | "/bin/true" | "/usr/bin/true" | "echo" | "printf" | "cd" | "sleep"
+            | "pwd",
+            ..,
+        ] => true,
+        ["exit"] | ["exit", "0"] => true,
+        ["test" | "[", "1"] | ["test" | "[", "1", "]"] => true,
+        ["test" | "[", "-n", x] | ["[", "-n", x, "]"] => !x.contains('$'),
+        ["sh" | "bash" | "zsh" | "dash", flag, ..]
+            if flag.starts_with('-') && flag.ends_with('c') =>
+        {
+            is_noop_command(&arg(2))
+        }
+        ["python" | "python3" | "py", "-c", ..] => matches!(
+            arg(2).as_str(),
+            "pass"
+                | ""
+                | "0"
+                | "1"
+                | "None"
+                | "True"
+                | "exit(0)"
+                | "quit()"
+                | "import sys; sys.exit(0)"
+        ),
+        ["node" | "deno", "-e" | "-p", ..] => matches!(
+            arg(2).as_str(),
+            "0" | "1" | "" | "true" | "undefined" | "process.exit(0)"
+        ),
+        _ => false,
+    }
+}
+
+/// A command that cannot test anything: only `true`, `:`, `exit 0`, `echo`, `cd`, `sleep`,
+/// `python -c pass`, `sh -c true` ... in every `&&`/`;` part; or one that cannot fail
+/// (`cmd || true`, `cmd; exit 0`, `set +e`, `cmd | true`); or that lists/compiles instead of
+/// running (`--list`, `--no-run`, `--collect-only`, `--help`, `--dry-run`).
+pub(crate) fn is_noop_command(cmd: &str) -> bool {
+    static MASK: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"\|\|\s*(true|:|exit\s+0|echo\b)|;\s*(true|:|exit(\s+0)?)\s*$|\bset\s+\+e\b|\|\s*(true|:)\s*$",
+        )
+        .expect("static regex")
+    });
+    const LISTING: [&str; 9] = [
+        "--list",
+        "--list-tests",
+        "--listTests",
+        "--no-run",
+        "--collect-only",
+        "--help",
+        "--dry-run",
+        "--version",
+        "-h",
+    ];
+    !cmd.trim().is_empty()
+        && (cmd.split_whitespace().any(|t| LISTING.contains(&t))
+            || MASK.is_match(cmd)
+            || split_parts(cmd).iter().all(|p| part_is_noop(p)))
+}
+
+/// Whether the check proves nothing now: its command, or the scripts behind it (through
+/// `npm run`, `yarn`, `pnpm`, `make` prerequisites, pre/post scripts), is a no-op.
+pub(crate) fn is_noop_check(dir: &Path, cmd: &str) -> bool {
+    is_noop_command(cmd) || is_noop_command(&effective(dir, cmd, 5))
+}
+
+/// Existing files named in the scripts behind `checks` (`node scripts/t.js` -> `scripts/t.js`).
+pub(crate) fn referenced_scripts(dir: &Path, checks: &[Check]) -> Vec<String> {
+    let mut out: Vec<String> = checks
+        .iter()
+        .map(|c| effective(dir, c.command.as_deref().unwrap_or(""), 5))
+        .flat_map(|b| {
+            b.split_whitespace()
+                .map(|t| {
+                    t.trim_matches(['"', '\''])
+                        .trim_start_matches("./")
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|t| !t.starts_with('-') && !t.starts_with('/') && dir.join(t).is_file())
+        .collect();
+    out.sort();
+    out.dedup();
     out
 }
 
@@ -215,7 +484,7 @@ mod tests {
             "npm run build",
             "cargo test",
             "cargo fmt --check",
-            "go test ./...",
+            "go test -v ./...",
             "make test",
         ] {
             assert!(cmds.iter().any(|c| c == want), "{want} in {cmds:?}");
@@ -322,5 +591,132 @@ mod tests {
         )
         .unwrap();
         assert!(detect_checks(d.path()).is_empty());
+    }
+
+    #[test]
+    fn noop_and_definition_helpers() {
+        for n in [
+            "true",
+            ":",
+            "exit 0",
+            "echo ok",
+            "echo a && true",
+            "/bin/true",
+            "python3 -c pass",
+            "sh -c ':'",
+            "bash -c true",
+            "node -e 0",
+            "test 1",
+            "[ 1 ]",
+            "sleep 1",
+            "cd .",
+            "cargo test || true",
+            "cargo test; exit 0",
+            "set +e; cargo test",
+            "cargo test | true",
+            "cargo test --no-run",
+            "pytest --collect-only",
+            "node --test --help",
+        ] {
+            assert!(is_noop_command(n), "{n}");
+        }
+        for r in [
+            "",
+            "node --test",
+            "echo x && exit 1",
+            "cargo test",
+            "true && node t.js",
+            "echo \"$X\" | grep -q ok",
+            "test -f a.txt",
+            "python3 -m pytest",
+            "sh -c 'node --test'",
+        ] {
+            assert!(!is_noop_command(r), "{r}");
+        }
+        let d = tempfile::tempdir().unwrap();
+        fs::write(
+            d.path().join("package.json"),
+            r#"{"scripts":{"test":"true","lint":"node scripts/l.js","t2":"npm run test","t3":"npm run lint || true","pretest2":"node x.js","t4":"yarn test"}}"#,
+        )
+        .unwrap();
+        fs::create_dir(d.path().join("scripts")).unwrap();
+        fs::write(d.path().join("scripts/l.js"), "").unwrap();
+        fs::write(
+            d.path().join("Makefile"),
+            "test: build\n\t@true\nbuild:\n\t:\nreal:\n\tnode --test\nall: real\n",
+        )
+        .unwrap();
+        assert!(is_noop_check(d.path(), "npm run test"));
+        assert!(is_noop_check(d.path(), "npm run t2")); // through another script
+        assert!(is_noop_check(d.path(), "npm run t3")); // exit masking behind a script
+        assert!(is_noop_check(d.path(), "make test")); // recipe and prerequisite are no-ops
+        assert!(!is_noop_check(d.path(), "make all"));
+        assert!(!is_noop_check(d.path(), "npm run lint"));
+        let checks = detect_checks(d.path());
+        assert_eq!(referenced_scripts(d.path(), &checks), ["scripts/l.js"]);
+        assert!(is_definition_file("package.json") && is_definition_file("crates/a/Cargo.toml"));
+        for f in [
+            ".github/workflows/ci.yml",
+            "sub/.npmrc",
+            "app/vitest.config.ts",
+            "clippy.toml",
+            "sub/conf.mk",
+            "node_modules/.bin/jest",
+            ".venv/bin/pytest",
+            "build.rs",
+            ".cargo/config.toml",
+            "x/eslint.config.js",
+        ] {
+            assert!(is_definition_file(f), "{f}");
+        }
+        assert!(!is_definition_file("src/a.rs") && !is_definition_file("src/main.js"));
+        // the gate and the permission engine read the same list
+        for f in synthesis_core::definitions::FILES {
+            assert!(is_definition_file(f), "{f}");
+            assert!(synthesis_core::definitions::is_definition(f), "{f}");
+        }
+        for p in synthesis_core::definitions::PREFIXES {
+            assert!(is_definition_file(&format!("sub/{p}x.ts")), "{p}");
+        }
+        // script directories cut the permission trust only: source in `bin/` is not a weakening
+        assert!(
+            !is_definition_file("bin/run.sh")
+                && synthesis_core::definitions::is_definition("bin/run.sh")
+        );
+        assert_eq!(
+            definition_view(
+                "Cargo.toml",
+                "[package]\nname=\"a\"\n[dependencies]\nx=1\n[[test]]\nname=\"t\"\n"
+            ),
+            "[package]\nname=\"a\"\n[[test]]\nname=\"t\"\n"
+        );
+        assert_ne!(
+            definition_view("package.json", r#"{"jest":{"testMatch":[]}}"#),
+            definition_view("package.json", r#"{"jest":{"testMatch":["x"]}}"#)
+        );
+    }
+
+    #[test]
+    fn a_model_check_never_replaces_a_planned_one() {
+        let d = tempfile::tempdir().unwrap();
+        let mut planned = chk(CheckKind::Unit, "cargo test", d.path());
+        planned.id = "k1".into();
+        let mut model = chk(CheckKind::Custom, "cargo test", d.path());
+        model.declared_by = Declarer::Model;
+        let other = Check {
+            command: Some("echo hi".into()),
+            ..model.clone()
+        };
+        let plan = plan_checks_from(&[], &[model, other], d.path(), vec![planned], &[]);
+        let by: Vec<_> = plan
+            .iter()
+            .map(|c| (c.command.clone().unwrap(), c.declared_by, c.kind))
+            .collect();
+        assert_eq!(by.len(), 2, "{by:?}");
+        assert_eq!(
+            by[0],
+            ("cargo test".into(), Declarer::Harness, CheckKind::Unit)
+        );
+        assert_eq!(by[1].1, Declarer::Model);
     }
 }

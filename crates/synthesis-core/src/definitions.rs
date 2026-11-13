@@ -4,6 +4,7 @@
 //! list decides which commands run code the agent can rewrite. Names are matched lowercase on the
 //! file name; `PREFIXES` match the start of the name (`vite.config.ts`).
 
+/// Exact file names (lowercase), at any depth.
 pub const FILES: &[&str] = &[
     "package.json",
     "makefile",
@@ -22,6 +23,17 @@ pub const FILES: &[&str] = &[
     "pytest.ini",
     "cargo.toml",
     "go.mod",
+    "rust-toolchain",
+    "rust-toolchain.toml",
+    "clippy.toml",
+    ".clippy.toml",
+    "rustfmt.toml",
+    ".rustfmt.toml",
+    "ruff.toml",
+    ".ruff.toml",
+    ".flake8",
+    "mypy.ini",
+    ".gitlab-ci.yml",
     "dockerfile",
     "docker-compose.yml",
     "docker-compose.yaml",
@@ -45,8 +57,11 @@ pub const FILES: &[&str] = &[
     ".eslintrc.cjs",
 ];
 
+/// File-name prefixes (lowercase): `vite.config.ts`, `tsconfig.build.json`, `lefthook.yml`.
 pub const PREFIXES: &[&str] = &[
+    "tsconfig",
     "jest.config",
+    "jest.setup",
     "vitest.config",
     "vite.config",
     "webpack.config",
@@ -54,27 +69,30 @@ pub const PREFIXES: &[&str] = &[
     "babel.config",
     "playwright.config",
     "rollup.config",
+    "ava.config",
     "karma.conf",
     "lefthook",
     "eslint.config",
+    ".eslintrc",
     ".mocharc",
 ];
 
-/// Directories whose files are definitions too (`.cargo/config.toml`, `.devcontainer/`).
-pub const DIRS: &[&str] = &[
-    ".cargo",
-    ".devcontainer",
-    ".husky",
-    "scripts",
-    "script",
-    "bin",
-    "hack",
-    "ci",
-    "tools",
-];
+/// File-name suffixes: included makefiles.
+pub const SUFFIXES: &[&str] = &[".mk"];
 
-/// `true` when `path` (any spelling) names a definition file or sits in a definition directory.
-pub fn is_definition(path: &str) -> bool {
+/// Directories whose files are definitions (config that runs code), at any depth.
+pub const DIRS: &[&str] = &[".cargo", ".devcontainer", ".husky"];
+
+/// Directories of scripts the build and test commands call. A definition for the permission
+/// engine (trust cut) but NOT for the verification gate, where ordinary source can live in them.
+pub const SCRIPT_DIRS: &[&str] = &["scripts", "script", "bin", "hack", "ci", "tools"];
+
+/// Executables a check resolves through PATH (`npm run` adds `node_modules/.bin`); path prefixes.
+pub const EXEC_DIRS: &[&str] = &["node_modules/.bin/", ".venv/bin/", "venv/bin/"];
+
+/// A file that defines what the checks run (the verification gate's view; also the permission
+/// engine's): names, prefixes, suffixes, config directories, CI workflows, PATH executables.
+pub fn is_check_definition(path: &str) -> bool {
     let low = path.replace('\\', "/").to_lowercase();
     let mut parts: Vec<&str> = low.split('/').filter(|s| !s.is_empty()).collect();
     let Some(name) = parts.pop() else {
@@ -82,7 +100,22 @@ pub fn is_definition(path: &str) -> bool {
     };
     FILES.contains(&name)
         || PREFIXES.iter().any(|p| name.starts_with(p))
+        || SUFFIXES.iter().any(|s| name.ends_with(s))
         || parts.iter().any(|d| DIRS.contains(d))
+        || (low.contains(".github/workflows/")
+            && (name.ends_with(".yml") || name.ends_with(".yaml")))
+        || EXEC_DIRS.iter().any(|d| low.starts_with(d))
+}
+
+/// `is_check_definition` plus the script directories: what cuts the project-code trust.
+pub fn is_definition(path: &str) -> bool {
+    if is_check_definition(path) {
+        return true;
+    }
+    let low = path.replace('\\', "/").to_lowercase();
+    let mut parts: Vec<&str> = low.split('/').filter(|s| !s.is_empty()).collect();
+    parts.pop();
+    parts.iter().any(|d| SCRIPT_DIRS.contains(d))
 }
 
 #[cfg(test)]

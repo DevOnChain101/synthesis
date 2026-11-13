@@ -1,0 +1,9 @@
+{
+  "name": "gaming-node",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "node scripts/lint.js",
+    "test": "node --test test/*.test.js"
+  }
+}

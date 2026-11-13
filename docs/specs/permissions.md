@@ -30,7 +30,7 @@ The whole `.git` tree and pointer file, `.gitmodules`, `.gitattributes`, `.synt/
 See the NOT_FIXED list in the commit message / SECURITY.md limits: Bash writes to the read-only set rely on the sandbox; MCP tools are not covered by P1; the table is not exhaustive; the image rule has no setting to relax it.
 
 ## Shared list for the verification gate
-`synthesis_core::definitions::{FILES, PREFIXES, DIRS, is_definition}` is the single list of files that define what a build/test command runs. `feat/harness-gate` defines its own list in `crates/synthesis-verification/src/plan.rs`; replace it with this one.
+`synthesis_core::definitions::{FILES, PREFIXES, DIRS, is_definition}` is the single list of files that define what a build/test command runs. The verification gate (`synthesis-verification/src/plan.rs::is_definition_file`) now calls `is_check_definition` from the same module (one source of names; the gate's semantic stays "a change caps the report at unverified", the engine's "cuts the project-code trust" via `is_definition`, which also covers `SCRIPT_DIRS`). The two baselines are separate on purpose: the gate's `Baseline` is per task and keyed to tests and check definitions it must diff for weakening, the engine's `Env.def_baseline` is per session and a plain stat+hash watch for trust; sharing them would couple the permission engine to the gate, so they only share the list.
 
 ## Round 3 notes
 - Local targets: `irreversible::local_host` parses the host (userinfo, brackets, port) and accepts `localhost` or an IP that `is_loopback`/`is_unspecified`; `127.evil.com` is remote.

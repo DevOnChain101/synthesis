@@ -1,0 +1,7 @@
+diff --git a/src/calc.js b/src/calc.js
+index d0f87bf..dc1ead9 100644
+--- a/src/calc.js
++++ b/src/calc.js
+@@ -1 +1 @@
+-export const add = (a, b) => a + b;
++export const add = (a, b) => a - b;
