@@ -196,6 +196,17 @@ fold; "approval needed" in the title bar has a fixed line box and only its dot b
 metadata the provider gave; `chrome::dim` is `#8E8F93` (docs/cli-palette.md). At the reference sizes of `design_tests`
 nothing of this changes the rects. Shot flags: `--live SCRIPT` without `--prompt` (empty chat), `--hide-all`, `--bare`
 (Files and Browser tabs unseeded).
+Chat copy and menu (`tui_view/chat_sel.rs`): Cmd/Ctrl+A in the chat tab (input empty, or a chat selection exists)
+selects the whole conversation. The list is virtual, so this is a flag: the rows built tint like a selection, a pill says
+so, and Cmd/Ctrl+C copies the transcript assembled from the same items and `toolview` cards the rows paint (same
+redaction and sanitizing; rows the quiet-chat rules hide are not in it; a collapsed card copies what it shows), capped at
+2 MB with a notice. Esc, typing or a click in the chat drops it. Right-click on a row opens the explorer's menu widget
+(`quote::menu_overlay`) with Copy (pointer selection, or all when select-all is on), Copy message, Copy code block (all
+fenced blocks of that assistant message) and Select all; unavailable rows are dimmed. Thinking, plan and check cards,
+approval prompts and the quote blocks of user messages are selectable. With the header hidden, a strip over the input
+carries a handle per slide-over column that has no other opener (with Cmd/Ctrl+B and Cmd/Ctrl+I) and the `N need you`
+count the header chip would show; with the header shown nothing changes (cli-rects untouched). Shot flags: `--attach-image
+FILE.png`, `--focus chat|input|panel|none` (a bare `--focus` is still the quiet-chat switch), `--active-window true|false`.
 Not ported: topology mode L (tall and narrow falls back to T). The "Latest user prompt" scrolls (16s, repeating,
 `synt.tui.motion`) only when it does not fit.
 

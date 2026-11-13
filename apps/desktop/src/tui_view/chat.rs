@@ -65,10 +65,10 @@ fn notices_only(rows: &[super::driver::Row], items: &[Item]) -> Option<Option<(b
 }
 
 /// Left edge of what sits under a speaker's text: the row's 10px padding, the 34px avatar column, the 10px gap.
-const INDENT: f32 = 54.;
+pub(super) const INDENT: f32 = 54.;
 
 /// Characters of monospace text (7.5 px each) that fit in `avail` px.
-fn cols_for(avail: f32) -> usize {
+pub(super) fn cols_for(avail: f32) -> usize {
     ((avail / 7.5) as usize).max(20)
 }
 
@@ -379,6 +379,7 @@ impl TuiView {
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
+                    (this.ts.chat_all, this.ts.chat_menu) = (false, None);
                     if let Some(lu) = &mut this.live {
                         lu.live.focus = crate::live::Focus::Chat;
                         lu.dirty = true;
@@ -388,6 +389,24 @@ impl TuiView {
                 }),
             )
             .child(rows);
+        if self.ts.chat_all {
+            wrap = wrap.child(
+                div()
+                    .absolute()
+                    .top(px(14.))
+                    .right(px(24.))
+                    .px(px(12.))
+                    .py(px(4.))
+                    .rounded(px(14.))
+                    .border_1()
+                    .border_color(hsla(t::ACCENT))
+                    .bg(hsla(t::ELEVATED))
+                    .text_color(strong())
+                    .child(
+                        "whole conversation selected \u{b7} Cmd/Ctrl+C copies \u{b7} Esc clears",
+                    ),
+            );
+        }
         // only when the content is taller than the viewport and the person has scrolled up away from the end
         let max = f32::from(lu.list.max_offset_for_scrollbar().y);
         let at = -f32::from(lu.list.scroll_px_offset_for_scrollbar().y);
@@ -443,12 +462,24 @@ impl TuiView {
             }
             _ => false,
         };
+        // Cmd/Ctrl+A: the rows built tint like a selection; the text copied is the whole transcript
+        let all = self
+            .ts
+            .chat_all
+            .then(|| gpui_component::Theme::global(cx).selection);
         div()
             .pb(px(10.))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, ev: &gpui::MouseDownEvent, window, cx| {
+                    this.open_chat_menu(ix, ev.position, window, cx)
+                }),
+            )
             .child(
                 div()
                     .rounded(px(6.))
                     .when(flash, |d| d.bg(with_alpha(hsla(t::ACCENT), 0.22)))
+                    .when_some(all, |d, c| d.bg(c))
                     .child(el),
             )
             .into_any_element()
@@ -550,7 +581,7 @@ impl TuiView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Plan"),
             )
-            .children(steps.iter().map(|s| {
+            .children(steps.iter().enumerate().map(|(n, s)| {
                 let (mark, c) = match s.state {
                     StepState::Done => ("\u{2611}", hsla(t::SUCCESS)),
                     StepState::Active => ("\u{25D0}", hsla(t::ACCENT)),
@@ -569,7 +600,7 @@ impl TuiView {
                             } else {
                                 text()
                             })
-                            .child(s.text.clone()),
+                            .child(SelText::new(("plan-step", n), s.text.clone())),
                     )
             }))
     }
@@ -599,7 +630,7 @@ impl TuiView {
                     div()
                         .text_color(strong())
                         .child(SelText::new(("user-text", idx), head))
-                        .children(super::quote::blocks(&quoted)),
+                        .children(super::quote::blocks(idx, &quoted)),
                 )
                 .into_any_element()
             }
@@ -625,7 +656,7 @@ impl TuiView {
                 .border_color(hsla(t::BORDER))
                 .text_color(dim())
                 .italic()
-                .child(s.clone())
+                .child(SelText::new(("thinking", idx), s.clone()))
                 .into_any_element(),
             Item::Tool { .. } => self.tool_card(idx, it, cx),
             Item::Verification { status, summary } => {
@@ -637,9 +668,12 @@ impl TuiView {
                     .child(
                         div()
                             .text_color(if ok { hsla(t::SUCCESS) } else { hsla(t::WARN) })
-                            .child(format!(
-                                "{} verification {status}",
-                                if ok { "\u{2713}" } else { "!" }
+                            .child(SelText::new(
+                                ("verif", idx),
+                                format!(
+                                    "{} verification {status}",
+                                    if ok { "\u{2713}" } else { "!" }
+                                ),
                             )),
                     )
                     .child(
@@ -675,7 +709,7 @@ impl TuiView {
                             .flex_1()
                             .min_w(px(0.))
                             .text_color(dim())
-                            .child(prompt.clone()),
+                            .child(SelText::new(("approval", idx), prompt.clone())),
                     )
                     .into_any_element()
             }
@@ -835,7 +869,10 @@ impl TuiView {
             .flex()
             .flex_col()
             .gap(px(2.))
-            .child(div().text_color(c).child(format!("verification {word}")))
+            .child(div().text_color(c).child(SelText::new(
+                ("checks-head", idx),
+                format!("verification {word}"),
+            )))
             .children(rows.iter().enumerate().map(|(i, r)| {
                 let (mark, fg) = match r.state {
                     CheckState::Running if motion => {
@@ -859,16 +896,23 @@ impl TuiView {
                             .flex()
                             .gap(px(8.))
                             .child(div().flex_none().text_color(fg).child(mark))
-                            .child(div().flex_none().text_color(text()).child(r.name.clone()))
+                            .child(div().flex_none().text_color(text()).child(SelText::new(
+                                ("check-name", idx * 1000 + i),
+                                r.name.clone(),
+                            )))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w(px(0.))
                                     .truncate()
                                     .text_color(dim())
-                                    .child(format!(
-                                        "{}{secs}",
-                                        r.command.as_deref().unwrap_or("(nothing to run)")
+                                    .whitespace_nowrap()
+                                    .child(SelText::new(
+                                        ("check-cmd", idx * 1000 + i),
+                                        format!(
+                                            "{}{secs}",
+                                            r.command.as_deref().unwrap_or("(nothing to run)")
+                                        ),
                                     )),
                             ),
                     )
@@ -892,11 +936,10 @@ impl TuiView {
                     )
             }))
             .when(done.is_some() && !summary.is_empty(), |d| {
-                d.child(
-                    div()
-                        .text_color(dim())
-                        .child(synthesis_harness::sanitize_for_display(summary)),
-                )
+                d.child(div().text_color(dim()).child(SelText::new(
+                    ("checks-sum", idx),
+                    synthesis_harness::sanitize_for_display(summary),
+                )))
             })
             .into_any_element()
     }
@@ -1323,6 +1366,12 @@ impl TuiView {
                     )),
             );
         }
+        // header hidden: the drawer handles (a narrow window has no other opener) and the pending count
+        if let Some((left, right)) = self.input_strip
+            && let Some(strip) = self.input_strip_row(left, right, l.dialogs.len(), cx)
+        {
+            col = col.child(strip);
+        }
         let chat_focused = l.focus == crate::live::Focus::Chat;
         col.child(input_box(
             div()
@@ -1336,12 +1385,99 @@ impl TuiView {
                     lu.prompt.clone(),
                     lu.blink.clone(),
                     chat_focused,
+                    self.window_active,
                 )),
             chat_focused,
             Some(Box::new(cx.listener(|this, _, window, cx| {
                 this.submit_prompt(false, window, cx)
             }))),
         ))
+    }
+}
+
+impl TuiView {
+    /// The strip over the input while the header is hidden: a handle per slide-over column that has no other
+    /// opener (with its shortcut), and the count of dialogs that wait for the person. `None` when it would be empty.
+    fn input_strip_row(
+        &self,
+        left: bool,
+        right: bool,
+        needs: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        if !left && !right && needs == 0 {
+            return None;
+        }
+        let key = if cfg!(target_os = "macos") {
+            "Cmd"
+        } else {
+            "Ctrl"
+        };
+        let handle = |side: super::Side,
+                      id: &'static str,
+                      glyph: &'static str,
+                      k: &'static str,
+                      cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .debug_selector(|| id.to_string())
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px(px(8.))
+                .h(px(22.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(hsla(t::BORDER))
+                .text_color(dim())
+                .cursor_pointer()
+                .when(self.drawer == Some(side), |d| {
+                    d.bg(with_alpha(hsla(t::ACCENT), 0.18))
+                })
+                .hover(|d| d.text_color(strong()))
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_drawer(side, cx)))
+                .child(icon(glyph, 14., text()))
+                .child(format!("{key}+{k}"))
+        };
+        Some(
+            div()
+                .debug_selector(|| "input-strip".to_string())
+                .mx(px(12.))
+                .mb(px(6.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .when(left, |d| {
+                    d.child(handle(super::Side::Left, "handle-left", "folder", "B", cx))
+                })
+                .when(right, |d| {
+                    d.child(handle(
+                        super::Side::Right,
+                        "handle-right",
+                        "network",
+                        "I",
+                        cx,
+                    ))
+                })
+                .child(div().flex_1())
+                .when(needs > 0, |d| {
+                    d.child(
+                        div()
+                            .debug_selector(|| "need-you".to_string())
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(super::panels::dot(
+                                self.attention_colour().unwrap_or(hsla(t::WARN)),
+                                false,
+                            ))
+                            .text_color(strong())
+                            .child(super::snapshot::need_label(needs)),
+                    )
+                }),
+        )
     }
 }
 
@@ -1441,6 +1577,7 @@ fn block_cursor(
     prompt: gpui::Entity<gpui_component::input::TextareaState>,
     blink: Blink,
     chat_focused: bool,
+    window_active: Option<bool>,
 ) -> impl IntoElement {
     gpui::canvas(
         |_, _, _| (),
@@ -1453,7 +1590,7 @@ fn block_cursor(
             if !show_caret(
                 chat_focused,
                 gpui::Focusable::focus_handle(st, cx).is_focused(window),
-                window.is_window_active(),
+                window_active.unwrap_or_else(|| window.is_window_active()),
             ) {
                 blink.seen.set(None);
                 return;

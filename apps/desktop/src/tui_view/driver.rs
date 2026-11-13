@@ -990,6 +990,36 @@ impl TuiView {
             cx.notify();
             return true;
         }
+        // chat select-all: Cmd/Ctrl+A takes the whole conversation (the input keeps its own while it holds text),
+        // Cmd/Ctrl+C then copies all of it; Esc, typing or a click in the chat drops it
+        if self.ts.tab == super::ChatTab::Chat {
+            let input_idle = lu.prompt.read(cx).selected_range().is_empty();
+            if key == "a"
+                && (ks.modifiers.platform || ctrl)
+                && !shift
+                && super::chat_sel::select_all_applies(
+                    self.ts.tab,
+                    text_of(&lu.prompt, cx).is_empty(),
+                    gpui_base::TextSelection::has_selection(window, cx),
+                )
+            {
+                self.select_all_chat(cx);
+                return true;
+            }
+            if key == "c" && (ks.modifiers.platform || ctrl) && self.ts.chat_all && input_idle {
+                self.copy_transcript(cx);
+                return true;
+            }
+            if key == "escape" && (self.ts.chat_all || self.ts.chat_menu.is_some()) {
+                (self.ts.chat_all, self.ts.chat_menu) = (false, None);
+                cx.notify();
+                return true;
+            }
+            if self.ts.chat_all && !ctrl && !cmd && (ks.key_char.is_some() || key == "backspace") {
+                self.ts.chat_all = false;
+                cx.notify();
+            }
+        }
         // Cmd/Ctrl+C with text selected in the chat copies it as displayed (not while text is selected in the input)
         if key == "c"
             && (ks.modifiers.platform || ctrl)
@@ -2432,7 +2462,7 @@ fn stale_rows(old: &[u64], new: &[u64]) -> impl Iterator<Item = usize> {
 }
 
 /// The TUI's checks for a pasted PNG (magic, 4 MB, 8000x8000) and the per-message limits.
-fn attach_png(l: &mut Live, bytes: Vec<u8>) -> Result<String, String> {
+pub(super) fn attach_png(l: &mut Live, bytes: Vec<u8>) -> Result<String, String> {
     let img = synthesis_cli_ui_base::imgclip::validate_png(bytes).map_err(|e| e.to_string())?;
     l.attach_image("image/png", &img.png, Some((img.width, img.height)))
 }
