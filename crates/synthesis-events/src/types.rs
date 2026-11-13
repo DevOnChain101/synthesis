@@ -672,7 +672,14 @@ pub enum Event {
     BudgetExceeded {
         budget: String,
         limit: f64,
+        /// Actual spend (or count) so far.
         used: f64,
+        /// `true`: the pre-turn worst case of the NEXT call would have crossed the limit; nothing
+        /// beyond `used` was spent. `estimate_usd` is that worst case.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        estimate: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        estimate_usd: Option<f64>,
     },
     /// Long-term memory (memory.md §11): the notes injected at task start. No text, ids only.
     #[serde(rename = "memory.retrieved")]
@@ -778,4 +785,30 @@ pub enum Event {
     },
     #[serde(rename = "notice")]
     Notice { level: String, text: String },
+}
+
+/// How a person reads `budget.exceeded`: a count or spend against its limit, or, for a stop on the
+/// pre-turn estimate, what the next call could have cost (nothing beyond `used` was spent).
+pub fn budget_text(budget: &str, limit: f64, used: f64, estimate_usd: Option<f64>) -> String {
+    match estimate_usd {
+        Some(w) => format!(
+            "stopped before the next call: it could cost up to ${w:.2}, ${used:.2} of the ${limit:.2} cap is spent"
+        ),
+        None => format!("{budget} {used} / {limit}"),
+    }
+}
+
+#[cfg(test)]
+mod budget_text_tests {
+    use super::budget_text;
+
+    #[test]
+    fn an_estimate_stop_reads_as_a_next_call_cost() {
+        assert_eq!(budget_text("turns", 5.0, 5.0, None), "turns 5 / 5");
+        let t = budget_text("max_cost_usd_estimate", 1.0, 0.25, Some(2.7));
+        assert!(
+            t.contains("up to $2.70") && t.contains("$0.25") && t.contains("$1.00"),
+            "{t}"
+        );
+    }
 }

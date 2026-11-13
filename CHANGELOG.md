@@ -4,6 +4,9 @@ Format: Keep a Changelog. Versioning: SemVer (pre-1.0: minor versions may break)
 
 ## [Unreleased]
 
+### Changed (governance leftovers)
+- The cost cap is also checked before each model call against a conservative worst case (`budget_exceeded:max_cost_usd_estimate`); judge and reflection calls are priced; long-context price tiers (`long_above_tokens`, `long_input_mult`, `long_output_mult` in `synt.pricing`); OpenAI-compatible `input_tokens` now excludes cached tokens (no double count). New optional `synt.notify` (user/managed settings) and `synt.worktree.submodules`; `synt stop` reaches the desktop's in-process session without exiting the app and says which mechanism acts; the CLI's hard stop restores the terminal (docs/UNATTENDED.md).
+
 ### Added (egress control)
 - `--network hosts` with repeatable `--allow-host H` and the user/managed setting `synt.sandbox.network.allowedHosts`: commands reach only the listed hosts through a per-run proxy inside `synt` (new crate `synthesis-egress`; Linux bubblewrap and macOS Seatbelt, refused on Landlock and Windows). Events `egress.allowed` / `egress.denied`. `--unattended` accepts `hosts`. `NetworkPolicy::AllowHosts` is replaced by `Proxied`; the blocked-address list moved to `synthesis-platform::net` (shared with WebFetch and the browser; documentation ranges are now blocked too). Design: docs/specs/sandbox-hardening.md.
 

@@ -77,11 +77,13 @@ fn stream_case(case: &str, input: &Value, expected: &Value, allow: &Allow) {
                 .unwrap_or_else(|| panic!("{case}: unlisted eof error"));
         }
     }
-    assert_eq!(
-        std::mem::take(&mut got),
-        expected["events"],
-        "{case}: events"
-    );
+    let mut want_events = expected["events"].clone();
+    if let Some(a) = allow.find(case, "events_override") {
+        *want_events
+            .pointer_mut(a["pointer"].as_str().unwrap())
+            .unwrap() = a["value"].clone();
+    }
+    assert_eq!(std::mem::take(&mut got), want_events, "{case}: events");
 }
 
 #[test]

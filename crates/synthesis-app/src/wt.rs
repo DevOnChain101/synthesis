@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use synthesis_config::Env;
 use synthesis_core::WorkspaceContext;
 use synthesis_harness::sanitize_for_display;
-use synthesis_workspace::{GitInfo, WorktreeManager, WorktreeOptions};
+use synthesis_workspace::{GitInfo, SubmodulePolicy, WorktreeManager, WorktreeOptions};
 
 pub struct Worktree {
     mgr: WorktreeManager,
@@ -23,8 +23,7 @@ pub fn create(
     artifact_root: PathBuf,
     include_uncommitted: bool,
 ) -> Result<(Worktree, WorkspaceContext), String> {
-    let mut opts = WorktreeOptions::new(synthesis_home.to_path_buf());
-    opts.worktrees_dir = Some(synthesis_home.join("worktrees"));
+    let opts = options(synthesis_home).map_err(|e| format!("--worktree: {e}"))?;
     let mgr = WorktreeManager::new(env, opts).map_err(|e| format!("--worktree: {e}"))?;
     let a = mgr
         .create(source, sid, artifact_root, include_uncommitted)
@@ -71,8 +70,7 @@ pub fn reattach(
             info.worktree.display()
         ));
     }
-    let mut opts = WorktreeOptions::new(synthesis_home.to_path_buf());
-    opts.worktrees_dir = Some(synthesis_home.join("worktrees"));
+    let opts = options(synthesis_home).map_err(|e| format!("worktree: {e}"))?;
     let mgr = WorktreeManager::new(env, opts).map_err(|e| format!("worktree: {e}"))?;
     mgr.changes(&info).map_err(|e| {
         format!("session {sid}: its worktree no longer matches what was recorded: {e}")
@@ -104,7 +102,102 @@ pub fn stat(diff: &str) -> (usize, usize, usize) {
     (f, a, r)
 }
 
+/// `synt.worktree.gitPath` (absolute path) from the USER file, then the MANAGED one: the git the
+/// worktree code runs, for a machine whose own git is older than the submodule floor (macOS: the
+/// git of `brew install git`). Its version is checked like any other. A project file never sets it.
+pub fn git_path(home: &Path, managed: &Path) -> Result<Option<PathBuf>, String> {
+    let mut out = None;
+    for (path, what) in [
+        (home.join("settings.json"), "user settings"),
+        (managed.to_path_buf(), "managed settings"),
+    ] {
+        let Some(doc) = synthesis_settings::read_json(&path, what)? else {
+            continue;
+        };
+        if let Some(v) = doc
+            .get("synt")
+            .and_then(|s| s.get("worktree"))
+            .and_then(|w| w.get("gitPath"))
+        {
+            let p = v
+                .as_str()
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .ok_or_else(|| format!("{what}: synt.worktree.gitPath must be an absolute path"))?;
+            out = Some(p);
+        }
+    }
+    Ok(out)
+}
+
+/// Options of the worktree manager: the state dir, the worktrees dir and the configured git.
+fn options(synthesis_home: &Path) -> Result<WorktreeOptions, String> {
+    let mut opts = WorktreeOptions::new(synthesis_home.to_path_buf());
+    opts.worktrees_dir = Some(synthesis_home.join("worktrees"));
+    opts.git_path = git_path(synthesis_home, &synthesis_settings::managed_settings_path())?;
+    Ok(opts)
+}
+
+/// `synt.worktree.submodules` (bool) from the USER file, then the MANAGED one (managed wins). A
+/// repository's own settings never enable it: its `.gitmodules` URLs are untrusted.
+pub fn submodules_enabled(home: &Path, managed: &Path) -> Result<bool, String> {
+    let mut on = false;
+    for (path, what) in [
+        (home.join("settings.json"), "user settings"),
+        (managed.to_path_buf(), "managed settings"),
+    ] {
+        let Some(doc) = synthesis_settings::read_json(&path, what)? else {
+            continue;
+        };
+        if let Some(v) = doc
+            .get("synt")
+            .and_then(|s| s.get("worktree"))
+            .and_then(|w| w.get("submodules"))
+        {
+            on = v
+                .as_bool()
+                .ok_or_else(|| format!("{what}: synt.worktree.submodules must be true or false"))?;
+        }
+    }
+    Ok(on)
+}
+
 impl Worktree {
+    /// The submodule step after `create`: `git worktree add` leaves them empty. With `enabled` it
+    /// runs the hardened `git submodule update --init --recursive`; either way the returned notice
+    /// says what happened (`None`: no `.gitmodules`).
+    pub fn submodule_notice(&self, enabled: Result<bool, String>) -> Option<String> {
+        let subs = match self.mgr.submodules(&self.info) {
+            Ok(s) if s.is_empty() => return None,
+            Ok(s) => s,
+            Err(e) => return Some(format!("submodules are NOT checked out ({e})")),
+        };
+        let names = subs
+            .iter()
+            .map(|(n, _)| sanitize_for_display(n))
+            .collect::<Vec<_>>()
+            .join(", ");
+        match enabled {
+            Ok(true) => match self
+                .mgr
+                .init_submodules(&self.info, SubmodulePolicy::default())
+            {
+                Ok(n) => Some(format!("checked out {} submodule(s): {names}", n.len())),
+                Err(e) => Some(format!(
+                    "submodules are NOT checked out ({}): {names}",
+                    sanitize_for_display(&e.to_string())
+                )),
+            },
+            Ok(false) => Some(format!(
+                "submodules are NOT checked out in the worktree: {names}. To check them out (https and ssh URLs only) set {{\"synt\":{{\"worktree\":{{\"submodules\":true}}}}}} in your user settings"
+            )),
+            Err(e) => Some(format!(
+                "submodules are NOT checked out ({}): {names}",
+                sanitize_for_display(&e)
+            )),
+        }
+    }
+
     /// One-line report for the `task.ended` notice; removes the worktree when asked and clean.
     pub fn finish(&self, cleanup: bool) -> String {
         let i = &self.info;
@@ -139,6 +232,50 @@ impl Worktree {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_git_path_setting_is_absolute_and_user_or_managed() {
+        let d = tempfile::tempdir().unwrap();
+        let (home, managed) = (d.path(), d.path().join("m.json"));
+        assert_eq!(super::git_path(home, &managed), Ok(None));
+        let abs = if cfg!(windows) {
+            "C:\\\\git\\\\git.exe"
+        } else {
+            "/opt/homebrew/bin/git"
+        };
+        std::fs::write(
+            home.join("settings.json"),
+            format!(r#"{{"synt":{{"worktree":{{"gitPath":"{abs}"}}}}}}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            super::git_path(home, &managed),
+            Ok(Some(std::path::PathBuf::from(abs.replace("\\\\", "\\"))))
+        );
+        std::fs::write(&managed, r#"{"synt":{"worktree":{"gitPath":"git"}}}"#).unwrap();
+        assert!(
+            super::git_path(home, &managed).is_err(),
+            "relative path refused"
+        );
+    }
+
+    #[test]
+    fn submodules_setting_is_user_or_managed_and_defaults_off() {
+        let d = tempfile::tempdir().unwrap();
+        let (home, managed) = (d.path(), d.path().join("m.json"));
+        let on = || super::submodules_enabled(home, &managed);
+        assert_eq!(on(), Ok(false));
+        std::fs::write(
+            home.join("settings.json"),
+            r#"{"synt":{"worktree":{"submodules":true}}}"#,
+        )
+        .unwrap();
+        assert_eq!(on(), Ok(true));
+        std::fs::write(&managed, r#"{"synt":{"worktree":{"submodules":false}}}"#).unwrap();
+        assert_eq!(on(), Ok(false), "managed wins");
+        std::fs::write(&managed, r#"{"synt":{"worktree":{"submodules":"yes"}}}"#).unwrap();
+        assert!(on().is_err());
+    }
+
     #[test]
     fn counts_files_and_lines_not_headers() {
         let d = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1,2 @@\n-old\n+new\n+more\n";

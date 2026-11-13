@@ -501,7 +501,7 @@ impl Harness {
         };
         drop(c);
         let (kind, limit, used) = over?;
-        self.mark_budget(task, agent, kind, limit, used);
+        self.mark_budget(task, agent, kind, limit, used, None);
         Some(self.not_run(
             task,
             agent,

@@ -50,9 +50,9 @@ pub use classifier::AutoJudge;
 pub use comm::{AgentInfo, NO_TASK_RUNNING, TaskAgent};
 pub use context::{RULES, StaticContext, wrap_tool_output};
 pub use harness::{
-    AutoCompact, GateFactory, Harness, HarnessConfig, HarnessError, ImageAttachment, ModeError,
-    PriceFn, Pricing, ReportSink, ShellSettings, TaskOutcome, TaskRequest, ToolSearchMode,
-    VerifiedCommand, browser_config, budget_from_settings,
+    AutoCompact, GateFactory, Harness, HarnessConfig, HarnessError, ImageAttachment, LongTier,
+    ModeError, PriceFn, Pricing, ReportSink, ShellSettings, TaskOutcome, TaskRequest,
+    ToolSearchMode, VerifiedCommand, browser_config, budget_from_settings,
 };
 pub use mcp_guard::{Check, GuardConfig, McpCatalog, McpGuard, McpToolInfo, ServerRules};
 pub use peer::PeerLink;

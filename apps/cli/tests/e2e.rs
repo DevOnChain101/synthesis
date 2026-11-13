@@ -1964,9 +1964,13 @@ fn e7_notify_on_end_hands_over_the_result_and_refuses_a_cycle() {
     ok(&a);
     ok(&b);
     assert!(
-        outputs(&a.1, "SendMessage")[0].contains("cycle"),
-        "{:?}",
         outputs(&a.1, "SendMessage")
+            .first()
+            .is_some_and(|o| o.contains("cycle")),
+        "no cycle answer to the worker's SendMessage: {:?}\nA events: {:?}\nA stderr: {}",
+        outputs(&a.1, "SendMessage"),
+        types(&a.1),
+        a.2
     );
     assert_eq!(payloads(&b.1, "peer.reply")[0]["status"], "answered");
 }
@@ -1993,7 +1997,8 @@ fn delegate_run(
     user_settings(&rig, deleg_peers());
     // the second main turn answers the gate's feedback when the worker changed files
     let mut a_script = vec![
-        json!({"delay_ms": 5000, "text": "A done"}),
+        // A's own task waits for B's delegation to arrive; a slow runner (Windows) needs longer
+        json!({"delay_ms": if cfg!(windows) { 20000 } else { 5000 }, "text": "A done"}),
         json!({"text": "A done again"}),
     ];
     a_script.extend(worker.as_array().unwrap().iter().cloned());
@@ -2352,22 +2357,23 @@ fn stop_cancels_a_running_session_from_another_process() {
 
 fn priced_rig() -> Rig {
     let rig = Rig::new();
-    rig.settings(json!({"synt": {"pricing": {"fake/fake-model": {"input_per_mtok": 1000.0, "output_per_mtok": 1000.0}}}}));
+    rig.settings(json!({"synt": {"pricing": {"fake/fake-model": {"input_per_mtok": 3.0, "output_per_mtok": 3.0}}}}));
     rig
 }
 
-/// The cap is enforced on a real run: the first response (2000 tokens at $1000/M = $2) passes the $1
-/// cap, so the model is not asked again and the task ends `budget_exceeded`.
+/// The cap is enforced on a real run: the first response (2M tokens at $3/M = $6) passes the $5
+/// cap (the pre-turn worst case of that call, about $0.03, fits), so the model is not asked again and
+/// the task ends `budget_exceeded`.
 #[test]
 fn a_cost_cap_stops_spend_after_the_response_that_crossed_it() {
     let rig = priced_rig();
     let script = json!([
-        {"tools": [{"name": "Read", "input": {"file_path": "a.txt"}}], "usage": [1000, 1000]},
+        {"tools": [{"name": "Read", "input": {"file_path": "a.txt"}}], "usage": [1000000, 1000000]},
         {"text": "never asked", "usage": [1000, 1000]}
     ]);
     let (o, ev) = rig.run(
         script,
-        &["--keep-defaults", "--max-cost-usd", "1", "--sandbox", "off"],
+        &["--keep-defaults", "--max-cost-usd", "5", "--sandbox", "off"],
     );
     assert_eq!(
         o.status.code(),
@@ -2389,6 +2395,62 @@ fn a_cost_cap_stops_spend_after_the_response_that_crossed_it() {
         1,
         "no second model request after the cap"
     );
+}
+
+/// A cap that not even one small call fits under is refused at start (exit 2) with the price of one
+/// call; at run time the pre-turn estimate clamps or refuses (harness tests).
+#[test]
+fn a_cap_below_the_price_of_one_call_is_refused_at_start() {
+    let rig = Rig::new();
+    rig.settings(json!({"synt": {"pricing": {"fake/fake-model": {"input_per_mtok": 1000.0, "output_per_mtok": 1000.0}}}}));
+    let (o, ev) = rig.run(
+        json!([{"text": "never asked", "usage": [10, 10]}]),
+        &["--keep-defaults", "--max-cost-usd", "1", "--sandbox", "off"],
+    );
+    assert_eq!(
+        o.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("too low for"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(
+        find(&ev, "turn.started").is_empty(),
+        "no model request was made"
+    );
+}
+
+/// `synt.notify` is not started for a run that is not sandboxed (`--sandbox off`): the command would
+/// run unconfined. The run itself is unaffected and says why.
+#[cfg(unix)]
+#[test]
+fn the_notify_command_is_refused_when_the_run_is_not_sandboxed() {
+    let rig = priced_rig();
+    let out = rig.home().join("notified.txt");
+    let script = format!("cat > {o}", o = out.display());
+    rig.settings(json!({"synt": {
+        "pricing": {"fake/fake-model": {"input_per_mtok": 3.0, "output_per_mtok": 3.0}},
+        "notify": {"command": ["/bin/sh", "-c", script]}
+    }}));
+    let (o, _) = rig.run(
+        json!([{"text": "done"}]),
+        &["--keep-defaults", "--max-cost-usd", "5", "--sandbox", "off"],
+    );
+    assert!(
+        o.status.code().is_some_and(|c| c == 0 || c == 3),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("notifications are off"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(!out.exists(), "the command must not have run");
 }
 
 /// Every protection `--unattended` promises is refused (exit 2, nothing on stdout) when asked away.

@@ -277,19 +277,8 @@ impl Harness {
                 return Err("timed out".into());
             }
         };
-        // The judge's tokens and cost count towards the task (not as a turn).
-        {
-            let u = &msg.usage;
-            let (i, o) = (u.input_tokens.unwrap_or(0), u.output_tokens.unwrap_or(0));
-            let mut c = lock(&task.counters);
-            c.input += i;
-            c.output += o;
-            c.cache_read += u.cache_read_input_tokens.unwrap_or(0);
-            c.cache_create += u.cache_creation_input_tokens.unwrap_or(0);
-            c.cost += self.config.pricing.map_or(0.0, |p| {
-                (i as f64 * p.input_per_mtok + o as f64 * p.output_per_mtok) / 1_000_000.0
-            });
-        }
+        // The judge's tokens and cost count towards the task (not as a turn), at its own model's price.
+        self.charge_usage(task, &req.model, &msg.usage);
         let text: String = msg
             .content
             .iter()

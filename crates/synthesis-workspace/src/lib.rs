@@ -50,7 +50,8 @@ pub use restore::{
     restore_files,
 };
 pub use worktree::{
-    Allocation, Change, Changes, GitInfo, MergePlan, WorktreeManager, WorktreeOptions,
+    Allocation, Change, Changes, GitInfo, MergePlan, SubmodulePolicy, WorktreeManager,
+    WorktreeOptions,
 };
 
 use std::fmt;

@@ -61,6 +61,7 @@ async fn budget_max_turns() {
             budget,
             limit,
             used,
+            ..
         } => Some((budget.clone(), *limit, *used)),
         _ => None,
     });
@@ -205,7 +206,8 @@ async fn budget_tokens_and_cost() {
             input_per_mtok: 1000.0,
             output_per_mtok: 1000.0,
             ..Pricing::default()
-        })
+        });
+        c.max_output_tokens = 100; // keeps the pre-turn worst case under the $1 cap
     };
     let turns: Vec<Turn> = many_tool_turns(4)
         .into_iter()
@@ -220,6 +222,203 @@ async fn budget_tokens_and_cost() {
         reason_of(&out)
     );
     assert_eq!(out.usage.cost_usd, Some(2.0));
+}
+
+/// The cap is also checked BEFORE a call: a request whose worst case (prompt + all of `max_tokens`
+/// at the output price) would cross it is never sent.
+#[tokio::test]
+async fn pre_turn_estimate_refuses_a_call_that_could_cross_the_cost_cap() {
+    let p = Probe::new("Probe", SideEffectClass::Read, 0, "r");
+    let mut o = probe_opts(&p);
+    o.budget = Budget {
+        max_cost_usd: Some(1.0),
+        ..Budget::default()
+    };
+    // 8192 output tokens at $1000/M = $8.2 > $1
+    o.config = |c| {
+        c.pricing = Some(Pricing {
+            input_per_mtok: 1000.0,
+            output_per_mtok: 1000.0,
+            ..Pricing::default()
+        })
+    };
+    let mut rig = Rig::new(o, many_tool_turns(2));
+    let out = rig.run("x").await;
+    assert_eq!(
+        out.reason,
+        "budget_exceeded:max_cost_usd_estimate",
+        "{}",
+        reason_of(&out)
+    );
+    assert_eq!(rig.requests().len(), 0, "no request may be sent");
+    assert_ne!(out.status, synthesis_events::TaskStatus::Completed);
+    let hits = rig.find(|e| match e {
+        synthesis_events::Event::BudgetExceeded {
+            budget,
+            limit,
+            used,
+            ..
+        } => Some((budget.clone(), *limit, *used)),
+        _ => None,
+    });
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].0, "max_cost_usd_estimate");
+    // `used` is the actual spend (nothing yet); the worst case is reported on its own
+    assert_eq!(hits[0].2, 0.0);
+    let est = rig.find(|e| match e {
+        synthesis_events::Event::BudgetExceeded {
+            estimate,
+            estimate_usd,
+            ..
+        } => Some((*estimate, *estimate_usd)),
+        _ => None,
+    });
+    assert!(est[0].0 && est[0].1.is_some_and(|w| w > 1.0));
+}
+
+/// A $1 cap on a dear model (Opus-class prices, 32000 output tokens wanted: $2.4 alone) works: the
+/// output limit of the request is lowered to what the cap affords instead of refusing the call.
+#[tokio::test]
+async fn a_low_cap_on_a_dear_model_clamps_the_output_limit() {
+    let p = Probe::new("Probe", SideEffectClass::Read, 0, "r");
+    let mut o = probe_opts(&p);
+    o.budget = Budget {
+        max_cost_usd: Some(1.0),
+        ..Budget::default()
+    };
+    o.config = |c| {
+        c.pricing = Some(Pricing {
+            input_per_mtok: 15.0,
+            output_per_mtok: 75.0,
+            ..Pricing::default()
+        });
+        c.max_output_tokens = 32_000;
+    };
+    let mut rig = Rig::new(o, vec![Turn::text("done")]);
+    let out = rig.run("x").await;
+    assert_eq!(
+        out.status,
+        synthesis_events::TaskStatus::Completed,
+        "{}",
+        reason_of(&out)
+    );
+    let sent = rig.requests()[0].max_tokens;
+    assert!((4096..32_000).contains(&sent), "max_tokens sent: {sent}");
+}
+
+fn clamped_opts(p: &Arc<Probe>) -> Opts {
+    let mut o = probe_opts(p);
+    o.budget = Budget {
+        max_cost_usd: Some(1.0),
+        ..Budget::default()
+    };
+    o.config = |c| {
+        c.pricing = Some(Pricing {
+            input_per_mtok: 15.0,
+            output_per_mtok: 75.0,
+            ..Pricing::default()
+        });
+        c.max_output_tokens = 32_000;
+    };
+    o
+}
+
+/// An answer cut at the (clamped) output limit is not presented as a finished one.
+#[tokio::test]
+async fn a_final_answer_cut_at_the_output_limit_is_marked_and_noticed() {
+    let p = Probe::new("Probe", SideEffectClass::Read, 0, "r");
+    let mut rig = Rig::new(clamped_opts(&p), vec![Turn::cut_text("the report begins")]);
+    let out = rig.run("x").await;
+    assert!(
+        out.final_text.contains("[answer cut at the output limit]"),
+        "{}",
+        out.final_text
+    );
+    assert!(out.final_text.starts_with("the report begins"));
+    let notes = rig.find(|e| match e {
+        synthesis_events::Event::Notice { text, .. }
+            if text.contains("cut at the output limit") =>
+        {
+            Some(text.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(notes.len(), 1, "{notes:?}");
+}
+
+/// Tool calls that keep being cut off under a lowered limit end the task with a clear reason.
+#[tokio::test]
+async fn repeated_cut_tool_calls_under_a_clamp_end_the_task() {
+    let p = Probe::new("Probe", SideEffectClass::Read, 0, "r");
+    let turns: Vec<Turn> = (0..5)
+        .map(|i| Turn::truncated_tool(&format!("c{i}"), "Probe", "{\"x\": \"par"))
+        .collect();
+    let mut rig = Rig::new(clamped_opts(&p), turns);
+    let out = rig.run("x").await;
+    assert_eq!(
+        out.reason,
+        "budget_exceeded:max_tokens_clamp",
+        "{}",
+        reason_of(&out)
+    );
+    assert_eq!(rig.requests().len(), 3);
+}
+
+/// A model without a price never borrows the run's: under a cap the call is refused.
+#[tokio::test]
+async fn a_model_without_a_price_is_refused_under_a_cap() {
+    let p = Probe::new("Probe", SideEffectClass::Read, 0, "r");
+    let mut o = probe_opts(&p);
+    o.budget = Budget {
+        max_cost_usd: Some(5.0),
+        ..Budget::default()
+    };
+    o.config = |c| {
+        c.pricing = Some(Pricing {
+            input_per_mtok: 1.0,
+            output_per_mtok: 1.0,
+            ..Pricing::default()
+        });
+        // the host priced models one by one and this one is not in the table
+        c.pricing_for = Some(std::sync::Arc::new(|_: &str| None));
+    };
+    let mut rig = Rig::new(o, many_tool_turns(2));
+    let out = rig.run("x").await;
+    assert_eq!(
+        out.reason,
+        "budget_exceeded:max_cost_usd_unpriced",
+        "{}",
+        reason_of(&out)
+    );
+    assert_eq!(rig.requests().len(), 0);
+}
+
+#[test]
+fn long_context_tier_prices_the_whole_request_dearer() {
+    use synthesis_harness::LongTier;
+    let p = Pricing {
+        input_per_mtok: 3.0,
+        output_per_mtok: 15.0,
+        cache_read_per_mtok: Some(0.3),
+        cache_write_per_mtok: Some(3.75),
+        long: Some(LongTier {
+            above_tokens: 200_000,
+            input_mult: 2.0,
+            output_mult: 1.5,
+        }),
+    };
+    let u = |input, read| synthesis_providers::Usage {
+        input_tokens: Some(input),
+        output_tokens: Some(1_000_000),
+        cache_read_input_tokens: Some(read),
+        cache_creation_input_tokens: None,
+    };
+    // 100k + 100k = 200k is not above the threshold
+    assert!((p.cost(&u(100_000, 100_000)) - (0.3 + 0.03 + 15.0)).abs() < 1e-9);
+    // above it (cache tokens count towards the prompt): input side x2, output x1.5
+    assert!((p.cost(&u(100_001, 100_000)) - ((0.300_003 + 0.03) * 2.0 + 22.5)).abs() < 1e-6);
+    // the worst case uses the dearer cache-write price and the tier
+    assert!((p.worst_case(1_000_000, 0) - 7.5).abs() < 1e-9);
 }
 
 #[tokio::test]
@@ -255,6 +454,7 @@ async fn cache_tokens_are_priced() {
             output_per_mtok: 20.0,
             cache_read_per_mtok: Some(1.0),
             cache_write_per_mtok: None, // 125% of input = 12.5
+            long: None,
         })
     };
     let mut rig = Rig::new(
@@ -286,11 +486,15 @@ async fn cost_is_priced_by_the_model_that_answered() {
             ..Pricing::default()
         };
         c.pricing = Some(cheap);
-        c.pricing_for = Some(std::sync::Arc::new(|m: &str| {
-            (m == "b/dear").then_some(Pricing {
-                input_per_mtok: 100.0,
-                output_per_mtok: 100.0,
-                ..Pricing::default()
+        c.pricing_for = Some(std::sync::Arc::new(move |m: &str| {
+            Some(if m == "b/dear" {
+                Pricing {
+                    input_per_mtok: 100.0,
+                    output_per_mtok: 100.0,
+                    ..Pricing::default()
+                }
+            } else {
+                cheap
             })
         }));
     };

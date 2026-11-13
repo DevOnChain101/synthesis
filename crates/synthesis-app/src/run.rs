@@ -13,8 +13,9 @@ use synthesis_config::{Config, Env, LoadContext, ProjectTrust, parse_model, reso
 use synthesis_core::{AgentSession, BudgetUsage, SessionStatus, WorkspaceContext};
 use synthesis_events::{ArtifactRef, Event, SessionEnd, TaskStatus};
 use synthesis_harness::{
-    Approval, ApprovalRequest, Approver, BoxFut, EventSink, Harness, HarnessConfig, Pricing, Scope,
-    TaskOutcome, TaskRequest, ToolBox, budget_from_settings, from_mode, sanitize_for_display,
+    Approval, ApprovalRequest, Approver, BoxFut, EventSink, Harness, HarnessConfig, LongTier,
+    Pricing, Scope, TaskOutcome, TaskRequest, ToolBox, budget_from_settings, from_mode,
+    sanitize_for_display,
 };
 use synthesis_hooks::{HookEvent, Hooks};
 use synthesis_mcp::McpManager;
@@ -434,6 +435,9 @@ pub struct Native {
     /// `Err` ends the start with that message, so nothing the project names has run. The desktop uses it to
     /// check that a folder's trusted configuration is still the approved one.
     pub pre_start: Option<PreStart>,
+    /// Asked to show that `synt stop` cancelled this in-process session (see
+    /// `sessions::StopAction::InProcess`); an engine process leaves it `None`.
+    pub on_stop: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// See [`Native::pre_start`].
@@ -483,6 +487,10 @@ pub struct Prepared {
     pub model_changed: Option<String>,
     /// The stored model that could not be used (the session runs on `label`; the stored id is kept).
     pub stale_model: Option<String>,
+    /// Set when a governed run has `synt.notify` (user/managed settings).
+    pub notifier: Option<Arc<crate::notify::Notifier>>,
+    /// Cancelled when the session ends (`Live::close`): stops the `synt stop` watcher.
+    pub stop_end: CancellationToken,
     /// The `--network hosts` proxy; the commands' only way out for as long as this lives.
     pub egress: Option<crate::egress::EgressRun>,
 }
@@ -568,7 +576,8 @@ fn resolve_resume(
 }
 
 /// Rows of `{"synt":{"pricing":{"<provider/model>"|"<model>": {input_per_mtok, output_per_mtok,
-/// cache_read_per_mtok?, cache_write_per_mtok?}}}}` from the USER settings file only (a repository
+/// cache_read_per_mtok?, cache_write_per_mtok?, long_above_tokens?, long_input_mult?,
+/// long_output_mult?}}}}` from the USER settings file only (a repository
 /// must not be able to price a model at zero); a model with no row gets [`builtin_pricing`].
 pub(crate) fn pricing(user_settings: &Path, label: &str, model: &str) -> Option<Pricing> {
     std::fs::read(user_settings)
@@ -592,13 +601,17 @@ fn is_date_suffix(rest: &str) -> bool {
 /// works without a settings file. EXACT ids (or the id plus a date suffix) only: a variant that is
 /// not listed (`gpt-5-pro`, `o3-pro`, `o4-mini-deep-research`, a newer Claude) has no built-in
 /// price, so a run under a cap is refused until `synt.pricing` prices it. Approximate; the dearer
-/// price of a family. Not modelled: tiers by prompt length (Sonnet above 200k input tokens costs
-/// more), so set the dearer tier in `synt.pricing` when you use long contexts. A gateway or local
-/// provider has no built-in price on purpose (docs/UNATTENDED.md).
+/// price of a family. Long-context tiers (a prompt above 200k tokens costs 2x input, 1.5x output)
+/// are built in for the models with a context that long, also where the vendor's tier is not
+/// certain (conservative); `long_above_tokens`/`long_input_mult`/`long_output_mult` of a
+/// `synt.pricing` row override them. A gateway or local provider has no built-in price on purpose
+/// (docs/UNATTENDED.md).
 pub fn builtin_pricing(label: &str, model: &str) -> Option<Pricing> {
     // (id, input, output, cache read, cache write)
     const ANTHROPIC: [(&str, f64, f64, f64, f64); 9] = [
         ("claude-opus-4-1", 15.0, 75.0, 1.5, 18.75),
+        // opus-4-5 is probably cheaper than the 4/4.1 price used here (unverified: nothing in the
+        // repo confirms the vendor price); kept at the dearer price so a cap never under-counts
         ("claude-opus-4-5", 15.0, 75.0, 1.5, 18.75),
         ("claude-opus-4", 15.0, 75.0, 1.5, 18.75),
         ("claude-sonnet-4-5", 3.0, 15.0, 0.3, 3.75),
@@ -626,16 +639,28 @@ pub fn builtin_pricing(label: &str, model: &str) -> Option<Pricing> {
         .unwrap_or(model)
         .to_ascii_lowercase();
     let exact = |id: &str| m == id || m.strip_prefix(id).is_some_and(is_date_suffix);
+    let tier = |long: bool| {
+        long.then_some(LongTier {
+            above_tokens: 200_000,
+            input_mult: 2.0,
+            output_mult: 1.5,
+        })
+    };
     match provider {
+        // only Sonnet 4/4.5 have a 1M-token context
         "anthropic" => ANTHROPIC.iter().find(|r| exact(r.0)).map(|r| Pricing {
             input_per_mtok: r.1,
             output_per_mtok: r.2,
             cache_read_per_mtok: Some(r.3),
             cache_write_per_mtok: Some(r.4),
+            long: tier(matches!(r.0, "claude-sonnet-4-5" | "claude-sonnet-4")),
         }),
+        // cache read: 10% of input for gpt-5, the dearer 50% for the rest
         "openai" => OPENAI.iter().find(|r| exact(r.0)).map(|r| Pricing {
             input_per_mtok: r.1,
             output_per_mtok: r.2,
+            cache_read_per_mtok: Some(r.1 * if r.0.starts_with("gpt-5") { 0.1 } else { 0.5 }),
+            long: tier(r.0.starts_with("gpt-5") || r.0.starts_with("gpt-4.1")),
             ..Pricing::default()
         }),
         _ => None,
@@ -645,17 +670,58 @@ pub fn builtin_pricing(label: &str, model: &str) -> Option<Pricing> {
 fn parse_pricing(v: &Value, label: &str, model: &str) -> Option<Pricing> {
     let table = v.get("synt")?.get("pricing")?;
     let e = table.get(label).or_else(|| table.get(model))?;
-    let num = |k: &str| {
-        e.get(k)
-            .and_then(Value::as_f64)
-            .filter(|n| n.is_finite() && *n >= 0.0)
+    // `None` for an absent key; a present key that is not a number in range makes the whole row
+    // unusable (named on stderr, never its value): a wrong price must not count money wrongly
+    let bad = |k: &str| {
+        eprintln!(
+            "synt: warning: synt.pricing row for {label}: {k} is not valid; the row is ignored"
+        );
     };
-    Some(Pricing {
-        input_per_mtok: num("input_per_mtok")?,
-        output_per_mtok: num("output_per_mtok")?,
-        cache_read_per_mtok: num("cache_read_per_mtok"),
-        cache_write_per_mtok: num("cache_write_per_mtok"),
-    })
+    let num = |k: &str, min: f64| -> Result<Option<f64>, ()> {
+        match e.get(k) {
+            None => Ok(None),
+            Some(x) => match x.as_f64().filter(|n| n.is_finite() && *n >= min) {
+                Some(n) => Ok(Some(n)),
+                None => {
+                    bad(k);
+                    Err(())
+                }
+            },
+        }
+    };
+    let row = || -> Result<Pricing, ()> {
+        let (Some(input_per_mtok), Some(output_per_mtok)) =
+            (num("input_per_mtok", 0.0)?, num("output_per_mtok", 0.0)?)
+        else {
+            return Err(());
+        };
+        let cache_read_per_mtok = num("cache_read_per_mtok", 0.0)?;
+        let cache_write_per_mtok = num("cache_write_per_mtok", 0.0)?;
+        // a tier can only make a request dearer (multipliers >= 1)
+        let (im, om) = (num("long_input_mult", 1.0)?, num("long_output_mult", 1.0)?);
+        let long = match e.get("long_above_tokens") {
+            None => builtin_pricing(label, model).and_then(|b| b.long),
+            Some(t) => match t.as_u64() {
+                Some(above_tokens) => Some(LongTier {
+                    above_tokens,
+                    input_mult: im.unwrap_or(1.0),
+                    output_mult: om.unwrap_or(1.0),
+                }),
+                None => {
+                    bad("long_above_tokens");
+                    return Err(());
+                }
+            },
+        };
+        Ok(Pricing {
+            input_per_mtok,
+            output_per_mtok,
+            cache_read_per_mtok,
+            cache_write_per_mtok,
+            long,
+        })
+    };
+    row().ok()
 }
 
 /// `--allow` / `--deny` values: non-empty, one line, `Tool` or `Tool(content)`.
@@ -869,7 +935,13 @@ pub fn prepare(
     let governed = c.governed || !is_cli;
     // a stop request made before this process began (an earlier run of the session) is not ours
     let stop_since = synthesis_session::timestamp();
-    let watch_stop = governed || matches!(front, Front::Cli);
+    // a native front end that is not governed lives inside an app: its stop must not exit the process
+    let in_process_stop = matches!(front, Front::Native(_)) && !governed;
+    let watch_stop = governed || matches!(front, Front::Cli) || in_process_stop;
+    let on_stop = match &front {
+        Front::Native(n) => n.on_stop.clone(),
+        _ => None,
+    };
     let gate: Option<PreStart> = match &front {
         Front::Native(n) => n.pre_start.clone(),
         _ => None,
@@ -1138,6 +1210,22 @@ pub fn prepare(
             h.synthesis.join("settings.json").display()
         ));
     }
+    // a cap that not even one small call fits under could never run anything
+    if let (Some(cap), Some(p)) = (limits.max_cost_usd, &price) {
+        let (floor, typical) = (p.min_usable_cap(0), p.min_usable_cap(12_000));
+        if cap < floor {
+            return Err(format!(
+                "--max-cost-usd {cap}: too low for {}; one call needs at least about ${typical:.2} (a 12000 token prompt and 4096 output tokens at its price)",
+                res.label
+            ));
+        }
+        if cap < typical {
+            eprintln!(
+                "synt: WARNING: --max-cost-usd {cap} is below about ${typical:.2}, what one call with a 12000 token prompt and 4096 output tokens costs on {}; the run may stop at its first call",
+                res.label
+            );
+        }
+    }
 
     let mode = match c.permission_mode {
         Some(ModeArg::Default) => Mode::Default,
@@ -1399,18 +1487,21 @@ pub fn prepare(
         _ => {}
     }
     if let Some(w) = &worktree {
-        let mut n = format!(
+        let n = format!(
             "working in worktree {} on branch {}; {} is not changed (the result is left there for review)",
             w.info.worktree.display(),
             w.info.branch,
             cwd.display()
         );
-        if w.info.repo_root.join(".gitmodules").is_file() {
-            n.push_str("; submodules are NOT checked out in the worktree");
-        }
         if !is_cli {
             notices.push(n);
         }
+        // `git worktree add` leaves submodules empty: check them out only when the user asked
+        let on = crate::wt::submodules_enabled(
+            &h.synthesis,
+            &synthesis_settings::managed_settings_path(),
+        );
+        notices.extend(w.submodule_notice(on));
     }
     for n in &notices {
         eprintln!("synt: WARNING: {n}");
@@ -1588,7 +1679,44 @@ pub fn prepare(
         }
     }
     let rt = Arc::new(TerminalRuntime::new(sandbox_mode));
+    let notify_policy = policy.as_ref().ok().cloned();
     rt.open_session_sandboxed(&sid, ws.clone(), child_env.clone(), policy.ok());
+    // Notifier (`synt.notify`, user/managed settings only): governed runs, nobody watching.
+    let notifier = if governed {
+        match crate::notify::read_config(&h.synthesis, &synthesis_settings::managed_settings_path())
+        {
+            Ok(Some(cfg)) => match crate::notify::Notifier::start(
+                &cfg,
+                rt.clone(),
+                &sid,
+                ws.clone(),
+                &child_env,
+                notify_policy,
+                &sink,
+            ) {
+                Ok(n) => Some(n),
+                Err(e) => {
+                    eprintln!(
+                        "synt: WARNING: notifications are off: {}",
+                        sanitize_for_display(&e)
+                    );
+                    notices.push(format!("notifications are off: {e}"));
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(e) => {
+                eprintln!(
+                    "synt: WARNING: notifications are off: {}",
+                    sanitize_for_display(&e)
+                );
+                notices.push(format!("notifications are off: {e}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let rules = PermissionRules {
         allow: settings
@@ -1818,10 +1946,21 @@ pub fn prepare(
             .map(|(l, m)| (l.clone(), l.clone(), m.clone()))
             .collect();
         for m in agents.table.iter().filter_map(|d| d.model.as_deref()) {
-            if m != "inherit"
-                && let Ok(model) = resolve(m)
-            {
-                wanted.push((model.clone(), format!("{provider_id}/{model}"), model));
+            if m == "inherit" {
+                continue;
+            }
+            match resolve(m) {
+                Ok(model) => {
+                    wanted.push((model.clone(), format!("{provider_id}/{model}"), model));
+                }
+                // its answers could not be priced, and a call without a price is refused under a cap
+                Err(_) if capped => {
+                    return Err(format!(
+                        "--max-cost-usd: the model {} of a sub-agent definition cannot be resolved, so it cannot be priced; fix or remove it",
+                        sanitize_for_display(m)
+                    ));
+                }
+                Err(_) => {}
             }
         }
         for (key, label, model) in wanted {
@@ -2156,6 +2295,7 @@ pub fn prepare(
         }
         tokio_rt.spawn(server.run(l));
     }
+    let stop_end = CancellationToken::new();
     if watch_stop && store.is_some() {
         let _enter = tokio_rt.enter();
         let (c2, hard) = (
@@ -2168,6 +2308,13 @@ pub fn prepare(
             stop_since,
             Arc::new(move || c2.cancel()),
             hard,
+            if in_process_stop {
+                crate::sessions::StopAction::InProcess(on_stop)
+            } else {
+                crate::sessions::StopAction::ExitProcess
+            },
+            std::time::Duration::from_secs(crate::sessions::STOP_GRACE_SECS),
+            stop_end.clone(),
         );
     }
     Ok(Prepared {
@@ -2200,6 +2347,8 @@ pub fn prepare(
         resumed_from_seq,
         model_changed,
         stale_model,
+        notifier,
+        stop_end,
         egress,
     })
 }
@@ -2282,6 +2431,7 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
         history,
         resumed_from_seq,
         model_changed,
+        notifier,
         ..
     } = p;
     // `@server:uri` mentions and `/mcp__server__prompt` commands; memory below sees what was typed
@@ -2392,10 +2542,17 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
                 _ => None,
             };
             // reflection (a model call, opt-in) runs after the result and the session end are final
-            if let (Some(m), Ok(_)) = (&memory2, &r)
+            if let (Some(m), Ok(out)) = (&memory2, &r)
                 && let Some(rf) = &m.reflect
             {
-                crate::memcmd::reflect_jobs(&m.store, rf, 2).await;
+                let (_, _, cost) = crate::memcmd::reflect_jobs(&m.store, rf, 2).await;
+                // the reflection's USD belongs to the session's counters too
+                if cost > 0.0
+                    && let Some(s) = &store2
+                {
+                    session.usage.cost_usd += cost;
+                    let _ = finish_store(s, None, out, &session.usage);
+                }
             }
             (r, store_err)
         });
@@ -2444,6 +2601,10 @@ pub fn run(a: RunArgs, env: Env) -> Result<u8, String> {
         }
         Ok::<u8, String>(code)
     })?;
+    if let Some(n) = &notifier {
+        n.flush(); // the last event (task.ended) is sent by now; wait for the command
+        n.close();
+    }
     rt.close_session(&sid); // kills leftover background processes
     drop(harness);
     let code = if closed.load(std::sync::atomic::Ordering::SeqCst) {
@@ -2928,6 +3089,7 @@ fn on_signals(cancel: CancellationToken, hard: Arc<dyn Fn() + Send + Sync>) -> s
         cancel.cancel();
         tokio::select! { _ = int.recv() => {}, _ = term.recv() => {} }
         hard();
+        synthesis_cli_ui::restore_active_bounded(synthesis_cli_ui::EXIT_RESTORE_WAIT);
         std::process::exit(130); // second signal: stop waiting for a clean shutdown
     });
     Ok(())
@@ -2940,6 +3102,7 @@ fn on_signals(cancel: CancellationToken, hard: Arc<dyn Fn() + Send + Sync>) -> s
         cancel.cancel();
         let _ = tokio::signal::ctrl_c().await;
         hard();
+        synthesis_cli_ui::restore_active_bounded(synthesis_cli_ui::EXIT_RESTORE_WAIT);
         std::process::exit(130);
     });
     Ok(())
@@ -3059,6 +3222,37 @@ mod tests {
         assert_eq!(r(Some(Off), true, false), SandboxMode::Off);
         assert_eq!(r(None, false, false), SandboxMode::Enforce);
         assert_eq!(r(Some(BestEffort), false, false), SandboxMode::BestEffort);
+    }
+
+    #[test]
+    fn long_context_tiers_are_built_in_and_overridable() {
+        let t = |l: &str, m: &str| builtin_pricing(l, m).unwrap().long;
+        assert_eq!(
+            t("anthropic/claude-sonnet-4-5", "claude-sonnet-4-5"),
+            Some(LongTier {
+                above_tokens: 200_000,
+                input_mult: 2.0,
+                output_mult: 1.5
+            })
+        );
+        assert!(t("anthropic/claude-haiku-4-5", "claude-haiku-4-5").is_none());
+        assert!(t("openai/gpt-5", "gpt-5").is_some());
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("settings.json");
+        std::fs::write(&f, r#"{"synt":{"pricing":{"anthropic/claude-sonnet-4-5":{"input_per_mtok":1,"output_per_mtok":2,"long_above_tokens":100000,"long_input_mult":3}}}}"#).unwrap();
+        let p = pricing(&f, "anthropic/claude-sonnet-4-5", "claude-sonnet-4-5").unwrap();
+        assert_eq!(
+            p.long,
+            Some(LongTier {
+                above_tokens: 100_000,
+                input_mult: 3.0,
+                output_mult: 1.0
+            })
+        );
+        // a row without tier fields keeps the model's built-in tier
+        std::fs::write(&f, r#"{"synt":{"pricing":{"anthropic/claude-sonnet-4-5":{"input_per_mtok":1,"output_per_mtok":2}}}}"#).unwrap();
+        let p = pricing(&f, "anthropic/claude-sonnet-4-5", "claude-sonnet-4-5").unwrap();
+        assert_eq!(p.long.map(|l| l.above_tokens), Some(200_000));
     }
 
     #[test]

@@ -15,14 +15,34 @@ const NULL_DEVICE: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
 #[derive(Clone)]
 pub(crate) struct Git {
     exe: PathBuf,
+    /// `%SystemRoot%` (from the injected env) for the Windows tree kill.
+    system_root: Option<String>,
     env: BTreeMap<String, String>,
     base_c: Vec<String>,
 }
 
 impl Git {
     /// `state_dir` hosts an empty directory used as `core.hooksPath`.
-    pub fn new(env: &Env, state_dir: &Path, allow_global_config: bool) -> Result<Git> {
-        let exe = find_git(env).ok_or(Error::GitMissing)?;
+    pub fn new(
+        env: &Env,
+        state_dir: &Path,
+        allow_global_config: bool,
+        exe_override: Option<&Path>,
+    ) -> Result<Git> {
+        let system_root = env
+            .get("SystemRoot")
+            .or_else(|| env.get("SYSTEMROOT"))
+            .map(str::to_string);
+        let exe = match exe_override {
+            Some(p) if p.is_absolute() && p.is_file() => p.to_path_buf(),
+            Some(p) => {
+                return Err(Error::Invalid(format!(
+                    "the configured git {} is not an absolute path to a file",
+                    p.display()
+                )));
+            }
+            None => find_git(env).ok_or(Error::GitMissing)?,
+        };
         let empty = state_dir.join("git-empty-hooks");
         std::fs::create_dir_all(&empty)?;
         let empty = synthesis_core::canonicalize(empty)?;
@@ -56,6 +76,12 @@ impl Git {
             ("core.sshCommand", "false"),
             ("protocol.allow", "never"),
             ("diff.external", ""),
+            // never descend into a submodule: its git directory is agent-writable, and a filter or
+            // fsmonitor in it would run on the host (docs/UNATTENDED.md, worktree submodules)
+            ("diff.ignoreSubmodules", "all"),
+            ("status.submoduleSummary", "false"),
+            ("submodule.recurse", "false"),
+            ("fetch.recurseSubmodules", "false"),
             ("core.pager", "cat"),
             ("core.editor", "true"),
             ("core.askPass", ""),
@@ -70,7 +96,12 @@ impl Git {
         .iter()
         .flat_map(|(k, v)| s(k, v))
         .collect();
-        Ok(Git { exe, env, base_c })
+        Ok(Git {
+            exe,
+            system_root,
+            env,
+            base_c,
+        })
     }
 
     /// A copy whose every call is pinned to `git_dir` / `work_tree` (env beats `.git` discovery).
@@ -155,13 +186,107 @@ impl Git {
         Ok(out)
     }
 
-    fn exec(
+    /// Like [`Self::run`] but gives up after `limit`: git runs in its own process group (Unix) that
+    /// is killed at the deadline (Windows: the git process itself), and the call returns
+    /// `Error::Refused`. For network operations (submodule clones). The reader threads of an escaped
+    /// helper are detached after a 2 s grace (an explicit error, never cut output as success); they
+    /// end when that helper exits or closes the pipe, which the deadline bounds for everything git
+    /// started in its process group.
+    pub fn run_deadline(
         &self,
         dir: &Path,
-        extra: &[String],
         args: &[&str],
-        stdin: Option<&[u8]>,
+        limit: std::time::Duration,
     ) -> Result<Output> {
+        use std::io::Read;
+        use std::sync::{Arc, Mutex, mpsc};
+        let guards = self.guards(dir)?;
+        let mut c = self.command(dir, &guards, args, false);
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut c, 0);
+        let mut child = c.spawn()?;
+        // Readers fill shared buffers and signal when the pipe closes. A grandchild that escaped
+        // the kill (own session, a transport helper) can keep a pipe open for ever, so the wait for
+        // them is bounded and they are detached.
+        let (done_tx, done_rx) = mpsc::channel();
+        let drain = |r: Option<Box<dyn Read + Send>>| {
+            let buf = Arc::new(Mutex::new(Vec::new()));
+            let (b2, tx) = (buf.clone(), done_tx.clone());
+            std::thread::spawn(move || {
+                if let Some(mut r) = r {
+                    let mut chunk = [0u8; 8192];
+                    while let Ok(n) = r.read(&mut chunk) {
+                        if n == 0 {
+                            break;
+                        }
+                        b2.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .extend_from_slice(&chunk[..n]);
+                    }
+                }
+                let _ = tx.send(());
+            });
+            buf
+        };
+        let out = drain(
+            child
+                .stdout
+                .take()
+                .map(|s| Box::new(s) as Box<dyn Read + Send>),
+        );
+        let err = drain(
+            child
+                .stderr
+                .take()
+                .map(|s| Box::new(s) as Box<dyn Read + Send>),
+        );
+        drop(done_tx);
+        let start = std::time::Instant::now();
+        let status = loop {
+            if let Some(st) = child.try_wait()? {
+                break Some(st);
+            }
+            if start.elapsed() >= limit {
+                kill_tree(&mut child, self.system_root.as_deref());
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let grace = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut drained = 0;
+        for _ in 0..2 {
+            let left = grace.saturating_duration_since(std::time::Instant::now());
+            if done_rx.recv_timeout(left).is_err() {
+                break;
+            }
+            drained += 1;
+        }
+        let take = |b: Arc<Mutex<Vec<u8>>>| {
+            std::mem::take(&mut *b.lock().unwrap_or_else(|e| e.into_inner()))
+        };
+        let (stdout, stderr) = (take(out), take(err));
+        match status {
+            // git ended but a helper it started still holds a pipe: the output is incomplete
+            Some(_) if drained < 2 => Err(Error::Refused(
+                "git output truncated: a helper process kept its pipes open".into(),
+            )),
+            Some(status) => Ok(Output {
+                status,
+                stdout,
+                stderr,
+            }),
+            None => Err(Error::Refused(format!(
+                "git {} did not finish in {} s and was killed",
+                args.iter()
+                    .find(|a| !a.starts_with('-') && !a.contains('='))
+                    .unwrap_or(&""),
+                limit.as_secs()
+            ))),
+        }
+    }
+
+    fn command(&self, dir: &Path, extra: &[String], args: &[&str], piped_stdin: bool) -> Command {
         let mut c = Command::new(&self.exe);
         c.env_clear()
             .envs(&self.env)
@@ -169,14 +294,24 @@ impl Git {
             .args(&self.base_c)
             .args(extra)
             .args(args)
-            .stdin(if stdin.is_some() {
+            .stdin(if piped_stdin {
                 Stdio::piped()
             } else {
                 Stdio::null()
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = c.spawn()?;
+        c
+    }
+
+    fn exec(
+        &self,
+        dir: &Path,
+        extra: &[String],
+        args: &[&str],
+        stdin: Option<&[u8]>,
+    ) -> Result<Output> {
+        let mut child = self.command(dir, extra, args, stdin.is_some()).spawn()?;
         if let (Some(data), Some(mut si)) = (stdin, child.stdin.take()) {
             // Feed from a thread so a full stdout pipe cannot deadlock us.
             let data = data.to_vec();
@@ -195,4 +330,27 @@ pub fn find_git(env: &Env) -> Option<PathBuf> {
         .filter(|d| d.is_absolute())
         .map(|d| d.join(name))
         .find(|p| p.is_file())
+}
+
+/// Kills git and everything it started: the process group on Unix; on Windows `taskkill /T /F`
+/// (System32, absolute path) so git-remote-https and ssh die with it.
+fn kill_tree(child: &mut std::process::Child, system_root: Option<&str>) {
+    #[cfg(not(windows))]
+    let _ = system_root;
+    #[cfg(unix)]
+    if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+    #[cfg(windows)]
+    {
+        let root = system_root.unwrap_or("C:\\Windows");
+        let exe = PathBuf::from(root).join("System32").join("taskkill.exe");
+        let _ = Command::new(exe)
+            .args(["/T", "/F", "/PID", &child.id().to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
 }
