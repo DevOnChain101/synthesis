@@ -52,6 +52,10 @@ The worktree's pins (`GitInfo`) are stored in the session row. `--resume ID` re-
 
 `"fallback": ["provider/model", ...]` in the user `config.json` (docs/specs/config.md). Only before the first byte and only for rate limit, overload and server errors; emits `model.failover`. The switch holds for `fallbackReprobeMinutes` (default 5), then the primary is asked again and a `model.failover` event with reason `primary_recovered` says when it answers. `synt sessions show` names the active model. DATA EGRESS: a failover sends the conversation (prompts, file contents the model read, tool output) to the fallback provider, under that provider's data policy and key; only list providers you accept for the same work. A fallback that cannot be built stops an unattended run and is warned about in the CLI.
 
+## Red-team suite and nightly evals
+
+`tests/redteam` (CI job `redteam`, all three OSes) runs about 50 scripted attacks against the real binary in default, acceptEdits, auto (always-allow fake judge) and bypassPermissions, and `evals-nightly.yml` runs `tests/agent-evals` with a real model when the secret `SYNT_API_KEY` exists (variables `SYNT_EVAL_PROVIDER`, `SYNT_EVAL_MODEL`, `SYNT_EVAL_MAX_COST_USD`, default 1 USD per run; the summary shows status-ok, false-success and cost; the key reaches only the adapter, never the graded checks). What an unattended run does NOT stop is listed in docs/SECURITY.md ("Red-team suite"): a repo git alias or script in `auto`/`bypassPermissions`, no disk quota, no process limit. The nightly secret belongs in the Environment `evals-nightly` (docs/SECURITY.md).
+
 ## Not fixed / residual risks
 
 - NOT_FIXED notifications on blocked/done (V9): use `--events-out` plus your own watcher or `synt sessions show`; a built-in hook is a later feature.
@@ -64,3 +68,4 @@ The worktree's pins (`GitInfo`) are stored in the session row. `--resume ID` re-
 - The pre-turn cost estimate (see Cost accounting) is not built.
 - The auto-mode classifier and memory reflection still price input/output only and with the run's price.
 - A wall cap bounds a task, not a long-lived engine session of many tasks.
+- No disk or process quota for commands (red-team known gaps `large-write`, `fork-fanout`); a git alias or repo script runs in `bypassPermissions` and in `auto` when the judge allows it.

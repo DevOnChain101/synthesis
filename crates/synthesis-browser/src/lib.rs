@@ -205,6 +205,10 @@ fn spawn_events(
     let mut rx = cdp.subscribe();
     let weak = Arc::downgrade(cdp);
     tokio::spawn(async move {
+        // Sessions the browser-level auto-attach handed us (popups, iframes, workers, and a second
+        // session on every tab's own page target). Their Network events feed the rebinding check
+        // only: a tab target has its own logging session, so logging both duplicates every request.
+        let mut children = std::collections::HashSet::<String>::new();
         loop {
             let ev = match rx.recv().await {
                 Ok(ev) => ev,
@@ -232,7 +236,20 @@ fn spawn_events(
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             };
+            if let (true, Some(s)) = (
+                ev.method == "Target.detachedFromTarget",
+                ev.params["sessionId"].as_str(),
+            ) {
+                children.remove(s);
+            }
             if ev.method == "Target.attachedToTarget" {
+                // Every attach except our own `attachToTarget` of a tab (a `page` that is not paused).
+                // Iframes and workers are always children (Chrome reports an iframe as not paused).
+                let own_tab = ev.params["targetInfo"]["type"] == "page"
+                    && ev.params["waitingForDebugger"].as_bool() != Some(true);
+                if let (Some(s), false) = (ev.params["sessionId"].as_str(), own_tab) {
+                    children.insert(s.to_owned());
+                }
                 if let Some(cdp) = weak.upgrade() {
                     tokio::spawn(secure_child(cdp, ev.params));
                 }
@@ -264,7 +281,11 @@ fn spawn_events(
                 }
             }
             if ev.method != "Fetch.requestPaused" {
-                lock(&logs).handle(&ev);
+                let child_net = ev.method.starts_with("Network.")
+                    && ev.session_id.as_ref().is_some_and(|s| children.contains(s));
+                if !child_net {
+                    lock(&logs).handle(&ev);
+                }
                 continue;
             }
             // Every request (redirect hops, iframes, subresources) passes the URL policy.
@@ -307,9 +328,14 @@ fn spawn_events(
 /// reaches the server with `ws://*` blocked), hence `NO_SOCKETS` as well.
 const BLOCKED_URLS: [&str; 4] = ["ws://*", "wss://*", "ftp://*", "blob:*"];
 
-/// WebSocket/WebTransport constructors are replaced in every document and worker. shortcut:
-/// script-level, not network-level; a Chrome that exposes handshakes to Fetch should replace it.
-const NO_SOCKETS: &str = "(()=>{for(const k of['WebSocket','WebTransport'])if(k in globalThis)Object.defineProperty(globalThis,k,{value:function(){throw new DOMException('blocked by URL policy','SecurityError')},writable:false,configurable:false})})()";
+/// WebSocket/WebTransport constructors are replaced in every document and worker, and every document gets a
+/// `<meta>` CSP `connect-src http: https: data:` (`ws:` is not matched by `http:`), which child documents
+/// (srcdoc, about:blank) inherit at creation: that covers the sandboxed srcdoc iframe Chrome attaches
+/// unpaused, whose first script runs before the constructor replacement. shortcut: script-level (a meta
+/// CSP cannot be added from the network layer in Chrome 156: `Fetch.continueResponse` ignores header
+/// overrides on navigations and `fulfillRequest` drops the remote address the rebinding check needs); a
+/// Chrome that exposes handshakes to Fetch should replace it. Nothing may call `Page.setBypassCSP`.
+const NO_SOCKETS: &str = "(()=>{for(const k of['WebSocket','WebTransport'])if(k in globalThis)Object.defineProperty(globalThis,k,{value:function(){throw new DOMException('blocked by URL policy','SecurityError')},writable:false,configurable:false})})();if(typeof document!=='undefined'){const add=()=>{const m=document.createElementNS('http://www.w3.org/1999/xhtml','meta');m.httpEquiv='Content-Security-Policy';m.content='connect-src http: https: data:';(document.head||document.documentElement).appendChild(m)};if(document.documentElement)add();else new MutationObserver((_,o)=>{if(document.documentElement){o.disconnect();add()}}).observe(document,{childList:true})}";
 
 /// Installs the URL policy hooks on one session and makes it hand out new children paused.
 async fn enable_policy(cdp: &Cdp, session: &str, evaluate: bool) -> Result<()> {
@@ -317,7 +343,9 @@ async fn enable_policy(cdp: &Cdp, session: &str, evaluate: bool) -> Result<()> {
     cdp.send(
         s,
         "Fetch.enable",
-        json!({"patterns": [{"urlPattern": "*", "requestStage": "Request"}]}),
+        json!({"patterns": [
+            {"urlPattern": "*", "requestStage": "Request"},
+        ]}),
     )
     .await?;
     let patterns: Vec<Value> = BLOCKED_URLS
@@ -372,10 +400,13 @@ async fn secure_child(cdp: Arc<Cdp>, params: Value) {
         params["targetInfo"]["type"].as_str(),
         Some("page" | "iframe")
     );
-    // shortcut: no Network.enable here, so the responseReceived rebinding check does not see child
-    // sessions (only the pre-send DNS check in Fetch does). A child can be a second session on a
-    // tab's own target, and enabling Network twice duplicates its log events (breaks the network log).
-    if enable_policy(&cdp, session, !frame).await.is_err() {
+    // Network.enable feeds the `responseReceived` rebinding check of this session (spawn_events keeps
+    // child Network events out of the logs, so a tab's second session does not duplicate them).
+    let hooked = async {
+        enable_policy(&cdp, session, !frame).await?;
+        cdp.send(Some(session), "Network.enable", json!({})).await
+    };
+    if hooked.await.is_err() {
         if let Some(t) = params["targetInfo"]["targetId"].as_str() {
             let _ = cdp
                 .send(None, "Target.closeTarget", json!({"targetId": t}))
@@ -610,6 +641,10 @@ impl BrowserRuntime {
                 "--disable-sync",
                 "--disable-background-networking",
                 // bfcache would make back/forward skip the load event we wait for
+                // Not a WebTransport block (verified: WebTransport still sends QUIC datagrams with it and
+                // `--disable-blink-features=WebTransport` does not remove the interface); it only keeps
+                // ordinary requests off HTTP/3. See docs/SECURITY.md, WebTransport.
+                "--disable-quic",
                 "--disable-features=BackForwardCache,Translate",
                 "--disable-save-password-bubble",
                 "--password-store=basic",
@@ -1565,6 +1600,18 @@ fn group_alive(pgid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The connect-src CSP is only a guard while nothing turns CSP off for a page.
+    #[test]
+    fn nothing_bypasses_csp() {
+        let src = include_str!("lib.rs");
+        let needle = ["setBypass", "CSP"].concat();
+        assert_eq!(
+            src.matches(needle.as_str()).count(),
+            1,
+            "only this test names it"
+        );
+    }
+
     use super::*;
 
     #[cfg(unix)]
