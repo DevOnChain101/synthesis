@@ -16,7 +16,7 @@ use super::TuiView;
 use super::driver::LiveCfg;
 use super::layout::Hidden;
 use crate::engine::{Choice, Engine, UiMsg};
-use crate::live::{Live, Submitted, now_ms};
+use crate::live::{Action, Live, Submitted, now_ms};
 
 pub struct Args {
     path: PathBuf,
@@ -555,7 +555,12 @@ fn run_live(l: &LiveShot) -> Result<(Live, LiveCfg, Arc<Engine>, PathBuf), Err> 
     // `;;` separates commands typed one after the other (a command that opens a picker ends the list)
     for c in l.cmd.iter().flat_map(|c| c.split(";;")) {
         live.busy |= l.busy;
-        live.submit(c.trim());
+        // `/panels` is carried out by the view (it owns the panel state): its picker is shown here
+        if let Submitted::Do(Action::Panels(a)) = live.submit(c.trim())
+            && a.trim().is_empty()
+        {
+            live.open_menu(crate::menu::panels(&Hidden::default()));
+        }
         if !live.dialogs.is_empty() {
             break;
         }

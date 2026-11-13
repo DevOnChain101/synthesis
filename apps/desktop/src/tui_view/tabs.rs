@@ -143,6 +143,60 @@ pub struct Tree {
     pub at_changes: usize,
     /// Whether the folder was trusted at the scan (git) or not (plain walk).
     pub trusted: bool,
+    /// Bumped when the session shown changes: a scan or preview read that began under an older one is dropped.
+    pub epoch: u64,
+}
+
+impl Tree {
+    /// Another session's explorer: nothing of the old tree stays, and what is still being read for it is dropped.
+    pub fn reset(&mut self) {
+        *self = Tree {
+            epoch: self.epoch + 1,
+            ..Tree::default()
+        };
+    }
+
+    /// A scan starts; the token it must present when it lands.
+    pub fn begin(&mut self) -> u64 {
+        self.loading = true;
+        self.epoch
+    }
+
+    /// A scan of `cwd` landed: kept only when it began under the current session and its folder is still the
+    /// one shown (`now_cwd`); false means it was dropped (a stale result changes nothing, not even `loading`).
+    pub fn land(
+        &mut self,
+        epoch: u64,
+        now_cwd: &str,
+        d: ProjectData,
+        cwd: String,
+        changes: usize,
+        trusted: bool,
+    ) -> bool {
+        if epoch != self.epoch || cwd != now_cwd {
+            return false;
+        }
+        *self = Tree {
+            data: Some(d),
+            for_cwd: cwd,
+            loading: false,
+            at_changes: changes,
+            trusted,
+            epoch,
+        };
+        true
+    }
+}
+
+/// What a tab says while a session that is not open yet is previewed in the chat (the tabs read the OPEN
+/// session's engine, so they would show another session's data): its own data needs the session opened.
+pub fn preview_note(tab: ChatTab) -> &'static str {
+    match tab {
+        ChatTab::Diff => "Open this session (Enter) to see the files it changed.",
+        ChatTab::Terminal => "Open this session (Enter) to see its commands.",
+        ChatTab::Browser => "Open this session (Enter) to see its browser.",
+        _ => "Open this session (Enter) to browse its files.",
+    }
 }
 
 /// Paths of the tree rows (`dir/sub/file`), in row order.
@@ -235,6 +289,9 @@ impl TuiView {
     /// read, its changed directories open). Cheap when nothing is due.
     pub(super) fn tabs_tick(&mut self, cx: &mut Context<Self>) {
         let Some(lu) = &self.live else { return };
+        if self.previewing() {
+            return;
+        }
         let changes = lu.live.view.panes.files.len();
         if self.ts.tab == ChatTab::Diff
             && !self.ts.diff_init
@@ -324,13 +381,16 @@ impl TuiView {
     /// Reads the project tree off the UI thread: git (read-only) in a trusted folder, a plain walk without git
     /// in an untrusted one.
     pub fn request_scan(&mut self, cx: &mut Context<Self>) {
+        if self.previewing() {
+            return;
+        }
         let Some(lu) = &self.live else { return };
         let cwd = lu.live.cwd.clone();
         let changes = lu.live.view.panes.files.len();
         if cwd.is_empty() {
             return;
         }
-        self.tree.loading = true;
+        let epoch = self.tree.begin();
         let (dir, env, trusted) = (PathBuf::from(&cwd), lu.cfg.env.clone(), lu.live.trusted);
         let job = cx.background_spawn(async move {
             if trusted {
@@ -342,15 +402,18 @@ impl TuiView {
         cx.spawn(async move |this, cx| {
             let d = job.await;
             this.update(cx, |t, cx| {
-                t.tree.loading = false;
-                if !t.ts.tree_init {
-                    t.ts.tree_open = dirs_of_changes(&d);
+                let now = t
+                    .live
+                    .as_ref()
+                    .map(|l| l.live.cwd.clone())
+                    .unwrap_or_default();
+                let open = (!t.ts.tree_init).then(|| dirs_of_changes(&d));
+                if t.tree.land(epoch, &now, d, cwd, changes, trusted)
+                    && let Some(open) = open
+                {
+                    t.ts.tree_open = open;
                     t.ts.tree_init = true;
                 }
-                t.tree.data = Some(d);
-                t.tree.for_cwd = cwd;
-                t.tree.at_changes = changes;
-                t.tree.trusted = trusted;
                 cx.notify();
             })
             .ok();
@@ -366,11 +429,13 @@ impl TuiView {
         self.ts.preview = None;
         (self.ts.sel, self.ts.menu) = (None, None);
         let rel = path.clone();
+        let epoch = self.tree.epoch;
         let job = cx.background_spawn(async move { read_preview(&root, &rel) });
         cx.spawn(async move |this, cx| {
             let body = job.await;
             this.update(cx, |t, cx| {
-                if t.ts.tree_sel.as_deref() == Some(path.as_str()) {
+                // a file read under another session's root is not this session's preview
+                if t.tree.epoch == epoch && t.ts.tree_sel.as_deref() == Some(path.as_str()) {
                     t.ts.preview = Some(Preview { path, body });
                     cx.notify();
                 }
@@ -383,6 +448,9 @@ impl TuiView {
 
     /// Up/Down in the file explorer: the next visible row; a file opens its preview, a directory is only marked.
     pub(super) fn step_tree(&mut self, down: bool, cx: &mut Context<Self>) -> bool {
+        if self.previewing() {
+            return false;
+        }
         let Some(d) = &self.tree.data else {
             return false;
         };
@@ -407,6 +475,11 @@ impl TuiView {
         true
     }
 
+    /// A session that is not open is previewed in the chat: the tabs have nothing of it (see [`preview_note`]).
+    pub(super) fn previewing(&self) -> bool {
+        self.live.as_ref().is_some_and(|l| l.live.preview.is_some())
+    }
+
     /// Whether the file explorer has read the tree (the offscreen shots wait for it).
     pub fn tree_loaded(&self) -> bool {
         self.tree.data.is_some() && !self.tree.loading
@@ -419,6 +492,9 @@ impl TuiView {
 
     /// The counters of the tab strip: changed files, commands, browser calls.
     pub(super) fn badge(&self, tab: ChatTab) -> Option<String> {
+        if self.previewing() {
+            return None;
+        }
         let p = &self.live.as_ref()?.live.view.panes;
         let n = match tab {
             ChatTab::Diff => p.files.len(),
@@ -440,6 +516,15 @@ impl TuiView {
             }
         };
         let tz = self.live.as_ref().map_or(0, |l| l.cfg.tz_min);
+        if self.previewing() && self.ts.tab != ChatTab::Chat {
+            return div()
+                .debug_selector(|| "tab-pane".to_string())
+                .flex_1()
+                .min_h(px(0.))
+                .p(px(14.))
+                .child(note(preview_note(self.ts.tab)))
+                .into_any_element();
+        }
         let inner = match self.ts.tab {
             ChatTab::Chat => div(),
             ChatTab::Diff => {
@@ -833,6 +918,74 @@ mod tests {
             name: name.into(),
             dir,
             status,
+        }
+    }
+
+    fn of(rows: Vec<TreeRow>) -> ProjectData {
+        ProjectData {
+            loaded: true,
+            rows,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_scan_that_began_under_another_session_is_dropped() {
+        let mut t = Tree::default();
+        // session A starts a scan, the person switches to B before it ends
+        let a = t.begin();
+        t.reset();
+        assert!(t.data.is_none() && !t.loading);
+        let b = t.begin();
+        assert_ne!(a, b);
+        // A's result lands late: nothing changes, B is still loading
+        assert!(!t.land(
+            a,
+            "/b",
+            of(vec![row(0, "a.rs", false, None)]),
+            "/b".into(),
+            0,
+            true
+        ));
+        assert!(t.data.is_none() && t.loading);
+        // B's own result is kept
+        assert!(t.land(
+            b,
+            "/b",
+            of(vec![row(0, "b.rs", false, None)]),
+            "/b".into(),
+            0,
+            true
+        ));
+        assert!(t.data.as_ref().is_some_and(|d| d.rows[0].name == "b.rs") && !t.loading);
+        assert_eq!(t.for_cwd, "/b");
+        // the same session with another folder (a result for a folder no longer shown) is dropped too
+        let c = t.begin();
+        assert!(!t.land(c, "/c", of(vec![]), "/b".into(), 0, true));
+        // back to A: a fresh scan, B's tree is gone
+        t.reset();
+        assert!(t.data.is_none() && t.for_cwd.is_empty());
+        let a2 = t.begin();
+        assert!(t.land(
+            a2,
+            "/a",
+            of(vec![row(0, "a.rs", false, None)]),
+            "/a".into(),
+            0,
+            true
+        ));
+        assert_eq!(t.for_cwd, "/a");
+    }
+
+    #[test]
+    fn every_tab_says_to_open_a_previewed_session() {
+        for tab in [
+            ChatTab::Diff,
+            ChatTab::Terminal,
+            ChatTab::Browser,
+            ChatTab::Files,
+        ] {
+            assert!(preview_note(tab).starts_with("Open this session"));
         }
     }
 

@@ -381,10 +381,10 @@ fn pickers_and_info_commands() {
     // the info commands answer in the chat
     for (cmd, needle) in [
         ("/mcp", "MCP"),
-        ("/memory", "Instruction files"),
-        ("/agents", "Agents in this session"),
-        ("/permissions", "mode:"),
-        ("/perms", "mode:"),
+        ("/memory status", "Instruction files"),
+        ("/agents list", "Agents in this session"),
+        ("/permissions list", "mode:"),
+        ("/perms list", "mode:"),
         ("/status", "session:"),
         ("/terminal", "no shell commands"),
         ("/images", "no images"),
@@ -396,6 +396,14 @@ fn pickers_and_info_commands() {
             "{cmd}: {}",
             last_note(&live)
         );
+    }
+    // without an argument these open a picker (nothing is posted); a typed argument keeps working
+    for cmd in ["/memory", "/agents", "/permissions", "/perms"] {
+        let n = live.view.convo.items.len();
+        assert_eq!(live.submit(cmd), Submitted::Nothing, "{cmd}");
+        assert_eq!(live.dialogs.len(), 1, "{cmd} opens a picker");
+        assert_eq!(live.view.convo.items.len(), n, "{cmd}");
+        assert_eq!(live.reject(), None);
     }
     // `/agents --all` adds the other sessions (peers are off in this rig, and it says so); `/quit` is `/exit`
     for cmd in ["/agents --all", "/agents -a"] {
@@ -443,7 +451,7 @@ fn files_diff_focus_peers_name_and_permission_rules() {
     live.submit("/name beta");
     assert!(last_note(&live).starts_with("/name: peers are off"));
 
-    live.submit("/focus");
+    live.submit("/focus on");
     assert!(live.focus_view);
 
     // session-only rules, the CLI's check
@@ -463,6 +471,26 @@ fn files_diff_focus_peers_name_and_permission_rules() {
     assert!(last_note(&live).starts_with("expected a rule like"));
     live.submit("/permissions allow");
     assert!(last_note(&live).starts_with("usage:"));
+    // the picker chain: /permissions -> remove a rule -> the session's rules, the pick removes it
+    live.submit("/permissions");
+    let i = live.dialogs[0]
+        .options
+        .iter()
+        .position(|o| o.0.starts_with("menu:"))
+        .unwrap();
+    let k = live.pick(i, i64::MAX).unwrap();
+    assert_eq!(live.answer(&k, 0), None);
+    let key = "/permissions remove Bash(git status:*)";
+    assert!(live.dialogs[0].options.iter().any(|o| o.0 == key));
+    let i = live.dialogs[0]
+        .options
+        .iter()
+        .position(|o| o.0 == key)
+        .unwrap();
+    let k = live.pick(i, i64::MAX).unwrap();
+    assert_eq!(live.answer(&k, 0), None);
+    assert_eq!(last_note(&live), "removed 1 rule(s): Bash(git status:*)");
+    live.submit("/permissions allow Bash(git status:*)");
     live.submit("/permissions remove Bash(git status:*)");
     assert_eq!(last_note(&live), "removed 1 rule(s): Bash(git status:*)");
     live.submit("/permissions remove Bash(git status:*)");

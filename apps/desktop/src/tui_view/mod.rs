@@ -297,7 +297,7 @@ impl TuiView {
                 let old = std::mem::take(&mut self.ts);
                 self.tabs_saved.insert(prev, old);
                 self.ts = self.tabs_saved.remove(&self.tab_sid).unwrap_or_default();
-                self.tree = Default::default();
+                self.tree.reset();
             }
         }
         if lu.dirty {
@@ -1250,6 +1250,96 @@ mod tests {
             );
             let d = t.tree.data.as_ref().unwrap();
             assert!(d.note.is_none() && d.rows.iter().any(|r| r.name == "a.txt"));
+        });
+    }
+
+    /// Sessions A -> B -> A: the explorer follows the open session's folder, a scan of the folder left cannot
+    /// land in the new one, and a previewed (not open) session shows an explicit state, not the open one's files.
+    #[gpui::test]
+    fn the_file_explorer_follows_the_active_session(cx: &mut TestAppContext) {
+        use crate::live::Live;
+        cx.update(gpui_component::init);
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::write(a.path().join("only_in_a.txt"), "a").unwrap();
+        std::fs::write(b.path().join("only_in_b.txt"), "b").unwrap();
+        let live = |sid: &str, dir: &tempfile::TempDir| {
+            let mut l = Live::new();
+            l.starting = false;
+            l.sid = sid.into();
+            l.cwd = dir.path().to_string_lossy().into_owned();
+            l
+        };
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
+        });
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.simulate_resize(size(px(1400.), px(900.)));
+            vcx.run_until_parked();
+        };
+        let names = |view: &gpui::Entity<TuiView>, vcx: &mut gpui::VisualTestContext| {
+            view.read_with(vcx, |t, _| {
+                (
+                    t.tree.for_cwd.clone(),
+                    t.tree.data.as_ref().map_or(vec![], |d| {
+                        d.rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>()
+                    }),
+                )
+            })
+        };
+        view.update(vcx, |t, _| t.set_live(live("a", &a)));
+        draw(vcx);
+        view.update(vcx, |t, cx| {
+            t.select_tab(ChatTab::Files, cx);
+            t.tabs_tick(cx);
+        });
+        vcx.run_until_parked();
+        let (cwd, rows) = names(&view, vcx);
+        assert!(cwd.ends_with(a.path().file_name().unwrap().to_str().unwrap()));
+        assert_eq!(rows, ["only_in_a.txt"]);
+        // select a file of A: B must not inherit the selection
+        view.update(vcx, |t, cx| t.select_file("only_in_a.txt", cx));
+        vcx.run_until_parked();
+        assert!(view.read_with(vcx, |t, _| t.ts.preview.is_some()));
+        // switch to B with a scan of A still in flight
+        view.update(vcx, |t, cx| {
+            t.tree.for_cwd.clear();
+            t.tree.data = None;
+            t.request_scan(cx);
+            t.set_live(live("b", &b));
+        });
+        draw(vcx);
+        view.update(vcx, |t, cx| {
+            assert!(t.tree.data.is_none(), "A's tree is gone");
+            assert!(t.ts.tree_sel.is_none() && t.ts.preview.is_none());
+            t.select_tab(ChatTab::Files, cx);
+            t.tabs_tick(cx);
+        });
+        vcx.run_until_parked();
+        let (_, rows) = names(&view, vcx);
+        assert_eq!(rows, ["only_in_b.txt"], "A's late scan did not land");
+        // back to A: its selection and preview are as left, its tree is read again
+        view.update(vcx, |t, _| t.set_live(live("a", &a)));
+        draw(vcx);
+        view.update(vcx, |t, cx| {
+            assert!(t.ts.tree_sel.as_deref() == Some("only_in_a.txt") && t.ts.preview.is_some());
+            t.select_tab(ChatTab::Files, cx);
+            t.tabs_tick(cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(names(&view, vcx).1, ["only_in_a.txt"]);
+        // a previewed session: no scan, no badge, the explicit state
+        view.update(vcx, |t, cx| {
+            t.live.as_mut().unwrap().live.preview = Some(crate::live::Preview {
+                sid: "b".into(),
+                convo: Default::default(),
+            });
+            assert!(t.previewing() && t.badge(ChatTab::Diff).is_none());
+            t.tree.reset();
+            t.tabs_tick(cx);
+            assert!(
+                !t.tree.loading && t.tree.data.is_none(),
+                "no scan while previewing"
+            );
         });
     }
 
