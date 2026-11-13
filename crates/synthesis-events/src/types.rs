@@ -672,7 +672,14 @@ pub enum Event {
     BudgetExceeded {
         budget: String,
         limit: f64,
+        /// Actual spend (or count) so far.
         used: f64,
+        /// `true`: the pre-turn worst case of the NEXT call would have crossed the limit; nothing
+        /// beyond `used` was spent. `estimate_usd` is that worst case.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        estimate: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        estimate_usd: Option<f64>,
     },
     /// Long-term memory (memory.md §11): the notes injected at task start. No text, ids only.
     #[serde(rename = "memory.retrieved")]

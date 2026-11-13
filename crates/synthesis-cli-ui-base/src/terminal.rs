@@ -23,6 +23,30 @@ pub use crossterm::terminal::size;
 /// no destructors: the `synt stop` hard kill, a second Ctrl-C) can still leave a usable terminal.
 static ACTIVE: Mutex<Vec<std::sync::Weak<Inner>>> = Mutex::new(Vec::new());
 
+/// How long the exit paths wait for the restore (a writer stuck mid-write or a stopped output
+/// must not keep a process that is being killed alive).
+pub const EXIT_RESTORE_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// [`restore_active`] for code that is about to `process::exit`: runs it on a helper thread and
+/// waits at most `wait`; if it is stuck, switches raw mode off directly (no lock, no write) and
+/// returns anyway. Returns false when the helper did not finish.
+pub fn restore_active_bounded(wait: std::time::Duration) -> bool {
+    run_bounded(restore_active, wait)
+}
+
+fn run_bounded(f: impl FnOnce() + Send + 'static, wait: std::time::Duration) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new().spawn(move || {
+        f();
+        let _ = tx.send(());
+    });
+    if spawned.is_ok() && rx.recv_timeout(wait).is_ok() {
+        return true;
+    }
+    let _ = crossterm::terminal::disable_raw_mode();
+    false
+}
+
 /// Restores the terminal of every live [`TerminalGuard`] (cooked mode, main screen, cursor);
 /// guards restore only once, so calling it twice or before a drop is harmless.
 pub fn restore_active() {
@@ -152,6 +176,12 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
+    /// `restore_active` is global: tests that make guards must not overlap.
+    static SERIAL: Mutex<()> = Mutex::new(());
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     #[derive(Clone, Default)]
     struct Shared(Arc<Mutex<Vec<u8>>>);
     impl Write for Shared {
@@ -169,6 +199,7 @@ mod tests {
 
     #[test]
     fn restores_once_on_drop() {
+        let _s = serial();
         let out = Shared::default();
         let g = TerminalGuard::enter(out.clone(), GuardOptions { raw_mode: false }).unwrap();
         assert_eq!(text(&out), "");
@@ -179,6 +210,7 @@ mod tests {
 
     #[test]
     fn restore_active_restores_a_live_guard_once() {
+        let _s = serial();
         let out = Shared::default();
         let g = TerminalGuard::enter(out.clone(), GuardOptions { raw_mode: false }).unwrap();
         restore_active(); // what the process-exit paths call: no destructor runs there
@@ -186,6 +218,37 @@ mod tests {
         drop(g);
         restore_active();
         assert_eq!(text(&out), terminal_restore_sequence(), "written once");
+    }
+
+    #[test]
+    fn the_exit_restore_is_bounded_when_the_writer_is_stuck() {
+        let _s = serial();
+        let (tx, rx) = mpsc::channel();
+        let buf = Arc::default();
+        // a writer that never returns in time, as a terminal stopped with ^S
+        let g =
+            TerminalGuard::enter(StuckWrite(tx, buf), GuardOptions { raw_mode: false }).unwrap();
+        let t0 = std::time::Instant::now();
+        let inner = Arc::clone(&g.inner);
+        let finished = run_bounded(
+            move || inner.restore(),
+            std::time::Duration::from_millis(100),
+        );
+        assert!(!finished && t0.elapsed() < std::time::Duration::from_secs(2));
+        rx.recv().unwrap(); // the writer really was entered
+    }
+
+    struct StuckWrite(mpsc::Sender<()>, Arc<Mutex<Vec<u8>>>);
+    impl Write for StuckWrite {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.0.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            self.1.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     /// Blocks inside `write` until released, to hold a restore half done.
@@ -204,6 +267,7 @@ mod tests {
 
     #[test]
     fn a_second_restore_waits_for_the_first_to_finish_writing() {
+        let _s = serial();
         let (tx, rx) = mpsc::channel();
         let buf = Arc::default();
         let g = TerminalGuard::enter(Slow(tx, Arc::clone(&buf)), GuardOptions { raw_mode: false })
@@ -221,6 +285,7 @@ mod tests {
 
     #[test]
     fn restores_when_unwinding() {
+        let _s = serial();
         let out = Shared::default();
         let o = out.clone();
         let r = std::panic::catch_unwind(move || {

@@ -61,6 +61,7 @@ async fn budget_max_turns() {
             budget,
             limit,
             used,
+            ..
         } => Some((budget.clone(), *limit, *used)),
         _ => None,
     });
@@ -256,12 +257,52 @@ async fn pre_turn_estimate_refuses_a_call_that_could_cross_the_cost_cap() {
             budget,
             limit,
             used,
+            ..
         } => Some((budget.clone(), *limit, *used)),
         _ => None,
     });
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].0, "max_cost_usd_estimate");
-    assert!(hits[0].2 > hits[0].1);
+    // `used` is the actual spend (nothing yet); the worst case is reported on its own
+    assert_eq!(hits[0].2, 0.0);
+    let est = rig.find(|e| match e {
+        synthesis_events::Event::BudgetExceeded {
+            estimate,
+            estimate_usd,
+            ..
+        } => Some((*estimate, *estimate_usd)),
+        _ => None,
+    });
+    assert!(est[0].0 && est[0].1.is_some_and(|w| w > 1.0));
+}
+
+/// A model without a price never borrows the run's: under a cap the call is refused.
+#[tokio::test]
+async fn a_model_without_a_price_is_refused_under_a_cap() {
+    let p = Probe::new("Probe", SideEffectClass::Read, 0, "r");
+    let mut o = probe_opts(&p);
+    o.budget = Budget {
+        max_cost_usd: Some(5.0),
+        ..Budget::default()
+    };
+    o.config = |c| {
+        c.pricing = Some(Pricing {
+            input_per_mtok: 1.0,
+            output_per_mtok: 1.0,
+            ..Pricing::default()
+        });
+        // the host priced models one by one and this one is not in the table
+        c.pricing_for = Some(std::sync::Arc::new(|_: &str| None));
+    };
+    let mut rig = Rig::new(o, many_tool_turns(2));
+    let out = rig.run("x").await;
+    assert_eq!(
+        out.reason,
+        "budget_exceeded:max_cost_usd_unpriced",
+        "{}",
+        reason_of(&out)
+    );
+    assert_eq!(rig.requests().len(), 0);
 }
 
 #[test]
@@ -357,11 +398,15 @@ async fn cost_is_priced_by_the_model_that_answered() {
             ..Pricing::default()
         };
         c.pricing = Some(cheap);
-        c.pricing_for = Some(std::sync::Arc::new(|m: &str| {
-            (m == "b/dear").then_some(Pricing {
-                input_per_mtok: 100.0,
-                output_per_mtok: 100.0,
-                ..Pricing::default()
+        c.pricing_for = Some(std::sync::Arc::new(move |m: &str| {
+            Some(if m == "b/dear" {
+                Pricing {
+                    input_per_mtok: 100.0,
+                    output_per_mtok: 100.0,
+                    ..Pricing::default()
+                }
+            } else {
+                cheap
             })
         }));
     };

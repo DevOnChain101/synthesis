@@ -155,13 +155,79 @@ impl Git {
         Ok(out)
     }
 
-    fn exec(
+    /// Like [`Self::run`] but gives up after `limit`: git runs in its own process group (Unix) that
+    /// is killed at the deadline (Windows: the git process itself), and the call returns
+    /// `Error::Refused`. For network operations (submodule clones).
+    pub fn run_deadline(
         &self,
         dir: &Path,
-        extra: &[String],
         args: &[&str],
-        stdin: Option<&[u8]>,
+        limit: std::time::Duration,
     ) -> Result<Output> {
+        use std::io::Read;
+        let guards = self.guards(dir)?;
+        let mut c = self.command(dir, &guards, args, false);
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut c, 0);
+        let mut child = c.spawn()?;
+        let drain = |r: Option<Box<dyn Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut v = Vec::new();
+                if let Some(mut r) = r {
+                    let _ = r.read_to_end(&mut v);
+                }
+                v
+            })
+        };
+        let out = drain(
+            child
+                .stdout
+                .take()
+                .map(|s| Box::new(s) as Box<dyn Read + Send>),
+        );
+        let err = drain(
+            child
+                .stderr
+                .take()
+                .map(|s| Box::new(s) as Box<dyn Read + Send>),
+        );
+        let start = std::time::Instant::now();
+        let status = loop {
+            if let Some(st) = child.try_wait()? {
+                break Some(st);
+            }
+            if start.elapsed() >= limit {
+                #[cfg(unix)]
+                if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
+                    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let (stdout, stderr) = (
+            out.join().unwrap_or_default(),
+            err.join().unwrap_or_default(),
+        );
+        match status {
+            Some(status) => Ok(Output {
+                status,
+                stdout,
+                stderr,
+            }),
+            None => Err(Error::Refused(format!(
+                "git {} did not finish in {} s and was killed",
+                args.iter()
+                    .find(|a| !a.starts_with('-') && !a.contains('='))
+                    .unwrap_or(&""),
+                limit.as_secs()
+            ))),
+        }
+    }
+
+    fn command(&self, dir: &Path, extra: &[String], args: &[&str], piped_stdin: bool) -> Command {
         let mut c = Command::new(&self.exe);
         c.env_clear()
             .envs(&self.env)
@@ -169,14 +235,24 @@ impl Git {
             .args(&self.base_c)
             .args(extra)
             .args(args)
-            .stdin(if stdin.is_some() {
+            .stdin(if piped_stdin {
                 Stdio::piped()
             } else {
                 Stdio::null()
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = c.spawn()?;
+        c
+    }
+
+    fn exec(
+        &self,
+        dir: &Path,
+        extra: &[String],
+        args: &[&str],
+        stdin: Option<&[u8]>,
+    ) -> Result<Output> {
+        let mut child = self.command(dir, extra, args, stdin.is_some()).spawn()?;
         if let (Some(data), Some(mut si)) = (stdin, child.stdin.take()) {
             // Feed from a thread so a full stdout pipe cannot deadlock us.
             let data = data.to_vec();

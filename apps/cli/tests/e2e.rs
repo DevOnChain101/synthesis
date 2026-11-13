@@ -2362,14 +2362,14 @@ fn the_pre_turn_estimate_refuses_a_call_that_could_cross_the_cap() {
     );
 }
 
-/// `synt.notify` of the user settings: the command gets `task.ended` as JSON on stdin and none of the
-/// run's secrets in its env.
+/// `synt.notify` is not started for a run that is not sandboxed (`--sandbox off`): the command would
+/// run unconfined. The run itself is unaffected and says why.
 #[cfg(unix)]
 #[test]
-fn the_notify_command_receives_task_ended_without_secrets() {
+fn the_notify_command_is_refused_when_the_run_is_not_sandboxed() {
     let rig = priced_rig();
     let out = rig.home().join("notified.txt");
-    let script = format!("cat > {o}; env >> {o}", o = out.display());
+    let script = format!("cat > {o}", o = out.display());
     rig.settings(json!({"synt": {
         "pricing": {"fake/fake-model": {"input_per_mtok": 3.0, "output_per_mtok": 3.0}},
         "notify": {"command": ["/bin/sh", "-c", script]}
@@ -2383,12 +2383,12 @@ fn the_notify_command_receives_task_ended_without_secrets() {
         "{}",
         String::from_utf8_lossy(&o.stderr)
     );
-    let got = std::fs::read_to_string(&out).expect("the notify command ran before synt exited");
-    assert!(got.contains(r#""event":"task.ended""#), "{got}");
     assert!(
-        !got.contains("SYNT_HOME") && !got.contains("SYNT_API"),
-        "{got}"
+        String::from_utf8_lossy(&o.stderr).contains("notifications are off"),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
     );
+    assert!(!out.exists(), "the command must not have run");
 }
 
 /// Every protection `--unattended` promises is refused (exit 2, nothing on stdout) when asked away.

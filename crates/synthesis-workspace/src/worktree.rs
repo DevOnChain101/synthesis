@@ -728,13 +728,67 @@ fn with_repo_lock<T>(common: &Path, f: impl FnOnce() -> T) -> Result<T> {
 }
 
 /// What a submodule URL may be. `.gitmodules` comes from the repository, so it is untrusted:
-/// only `https://`, `ssh://` and scp-like `host:path` URLs are cloned; `file:`, `ext::` and other
-/// transport helpers, `git://`, `http://`, relative paths and option-like values are refused.
+/// only `https://`, `ssh://` and scp-like `[user@]host:path` URLs are cloned, with a host that is
+/// a plain name or address (never starting with `-`), no credentials in the URL, and `ssh` with at
+/// most a user name. `file:`, `ext::` and other transport helpers, `git://`, `http://`, relative
+/// paths and option-like values are refused.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SubmodulePolicy {
     /// Tests only: a local fixture repository needs the `file` transport.
     #[cfg(test)]
     allow_file: bool,
+}
+
+/// Most submodules (all levels together) and deepest nesting one init will clone.
+const MAX_SUBMODULES: usize = 50;
+const MAX_DEPTH: usize = 3;
+/// Total time for all clones; the git process group is killed after it.
+const SUBMODULE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+/// `git submodule` needs the hardening flags below; older versions lack some of them.
+const MIN_GIT: (u32, u32) = (2, 30);
+
+/// `url` without credentials (`user:pass@`), for messages: anything up to the last `@` of the
+/// first path segment is dropped.
+pub(crate) fn strip_userinfo(url: &str) -> String {
+    let start = url.find("://").map_or(0, |i| i + 3);
+    let end = url[start..].find('/').map_or(url.len(), |i| start + i);
+    match url[start..end].rfind('@') {
+        Some(at) => format!("{}{}", &url[..start], &url[start + at + 1..]),
+        None => url.to_string(),
+    }
+}
+
+/// Text from git (an error message) with every URL-looking word stripped of credentials.
+fn scrub(text: &str) -> String {
+    text.split_whitespace()
+        .map(|w| {
+            let t = w.trim_matches(['\'', '"', ':', ',']);
+            if t.contains('@') {
+                strip_userinfo(t)
+            } else {
+                w.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn host_ok(h: &str) -> bool {
+    let h = h
+        .strip_prefix('[')
+        .and_then(|r| r.strip_suffix(']'))
+        .unwrap_or(h);
+    !h.is_empty()
+        && !h.starts_with('-')
+        && h.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':'))
+}
+
+fn user_ok(u: &str) -> bool {
+    !u.is_empty()
+        && !u.starts_with('-')
+        && u.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'+'))
 }
 
 impl SubmodulePolicy {
@@ -745,140 +799,283 @@ impl SubmodulePolicy {
         false
     }
 
-    /// `Err` is the reason, without the URL's text beyond a short escaped excerpt.
+    /// `Err` is the reason; the URL appears only as a short excerpt without credentials.
     fn check(self, url: &str) -> std::result::Result<(), String> {
         let excerpt = || {
-            url.chars()
+            strip_userinfo(url)
+                .chars()
                 .take(80)
                 .collect::<String>()
                 .escape_debug()
                 .to_string()
         };
-        if url.is_empty() || url.starts_with('-') || url.chars().any(|c| c.is_control() || c == ' ')
+        let bad = |why: &str| Err(format!("{why} \"{}\"", excerpt()));
+        if url.is_empty()
+            || url.starts_with('-')
+            || url.chars().any(|c| c.is_control() || c == ' ' || c == '\\')
         {
-            return Err(format!("empty or malformed URL \"{}\"", excerpt()));
+            return bad("empty or malformed URL");
         }
         let lower = url.to_ascii_lowercase();
         if lower.contains("::") {
-            return Err(format!("transport helper \"{}\"", excerpt()));
+            return bad("transport helper");
         }
-        for s in ["https://", "ssh://"] {
-            if lower.starts_with(s) {
-                return if url.len() > s.len() && !url[s.len()..].starts_with('/') {
-                    Ok(())
-                } else {
-                    Err(format!("URL without a host \"{}\"", excerpt()))
-                };
+        if let Some((scheme, rest)) = lower
+            .strip_prefix("https://")
+            .map(|r| ("https", r))
+            .or_else(|| lower.strip_prefix("ssh://").map(|r| ("ssh", r)))
+        {
+            let authority = rest.split('/').next().unwrap_or("");
+            // credentials in a URL are never accepted; ssh may name a user (no password)
+            let (user, hostport) = match authority.rsplit_once('@') {
+                Some((u, h)) => (Some(u), h),
+                None => (None, authority),
+            };
+            if scheme == "https" && user.is_some() {
+                return bad("credentials in the URL");
             }
+            if user.is_some_and(|u| !user_ok(u)) {
+                return bad("bad user in the URL");
+            }
+            let host = match hostport.rsplit_once(':') {
+                // `host:port`, but not the colons of a bracketed IPv6 address
+                Some((h, port)) if !hostport.ends_with(']') && !port.contains(']') => {
+                    if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+                        return bad("bad port");
+                    }
+                    h
+                }
+                _ => hostport,
+            };
+            return if host_ok(host) && rest.len() > authority.len() {
+                Ok(())
+            } else {
+                bad("bad host or no path")
+            };
         }
         if self.file_allowed() && (lower.starts_with("file://") || url.starts_with('/')) {
             return Ok(());
         }
-        // scp-like `user@host:path`: a `:` before any `/`, no scheme
-        let scp = url.split_once(':').is_some_and(|(host, path)| {
-            host.len() > 1
-                && !host.contains('/')
-                && host
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'@'))
-                && !path.is_empty()
-                && !path.starts_with(':')
-                && !path.starts_with("//")
-        });
-        if scp {
-            Ok(())
-        } else {
-            Err(format!(
-                "scheme not allowed (https, ssh only) \"{}\"",
-                excerpt()
-            ))
+        // scp-like `[user@]host:path`: a `:` before any `/`, no scheme
+        if let Some((hostpart, path)) = url.split_once(':')
+            && !hostpart.contains('/')
+            && !path.is_empty()
+            && !path.starts_with(':')
+            && !path.starts_with("//")
+            && hostpart.len() > 1
+        {
+            let (user, host) = match hostpart.rsplit_once('@') {
+                Some((u, h)) => (Some(u), h),
+                None => (None, hostpart),
+            };
+            if user.is_none_or(user_ok) && host_ok(host) && !host.contains(':') {
+                return Ok(());
+            }
+            return bad("bad user or host");
         }
+        bad("scheme not allowed (https, ssh only)")
     }
+}
+
+/// `(git major, minor)` from `git version 2.39.2 (Apple Git-143)`.
+fn parse_git_version(s: &str) -> Option<(u32, u32)> {
+    let v = s.split_whitespace().nth(2)?;
+    let mut p = v.split('.');
+    Some((p.next()?.parse().ok()?, p.next()?.parse().ok()?))
 }
 
 impl WorktreeManager {
     /// `(name, url)` of the submodules `.gitmodules` of the worktree declares (empty without one).
     pub fn submodules(&self, info: &GitInfo) -> Result<Vec<(String, String)>> {
-        let file = info.worktree.join(".gitmodules");
+        Ok(self
+            .gitmodules(&self.git, &info.worktree, "url")?
+            .into_iter()
+            .collect())
+    }
+
+    /// `(name, value)` of every `submodule.<name>.<key>` entry of `<dir>/.gitmodules`.
+    fn gitmodules(&self, g: &Git, dir: &Path, key: &str) -> Result<Vec<(String, String)>> {
+        let file = dir.join(".gitmodules");
         // a symlink would let the repository make git read a file outside the worktree
         match fs::symlink_metadata(&file) {
             Ok(m) if m.is_file() => {}
             Ok(_) => return Err(Error::Refused(".gitmodules is not a regular file".into())),
             Err(_) => return Ok(vec![]),
         }
-        let o = self.git.probe(
-            &info.worktree,
+        let pattern = format!(r"^submodule\..*\.{key}$");
+        let o = g.probe(
+            dir,
             &[
                 "config",
                 "--file",
                 ".gitmodules",
                 "-z",
                 "--get-regexp",
-                r"^submodule\..*\.url$",
+                &pattern,
             ],
         )?;
         if o.status.code() == Some(1) {
             return Ok(vec![]); // no matching key
         }
-        let out = self.git.check(&["config", "--file", ".gitmodules"], o)?;
+        let out = g.check(&["config", "--file", ".gitmodules"], o)?;
+        let suffix = format!(".{key}");
         Ok(nul_split(&out)
             .filter_map(|e| {
                 let (k, v) = e.split_once('\n')?;
                 let name = k
                     .strip_prefix("submodule")?
                     .strip_prefix('.')?
-                    .strip_suffix(".url")?;
+                    .strip_suffix(suffix.as_str())?;
                 Some((name.to_string(), v.to_string()))
             })
             .collect())
     }
 
-    /// Checks out the submodules recursively (`git worktree add` does not). All or nothing at the
-    /// gate: if any URL of the top-level `.gitmodules` is refused by `policy`, nothing is cloned.
-    /// Only https and ssh are enabled as transports for the clone (nested submodules too:
-    /// `protocol.allow=never` stays for everything else); a stalled transfer is aborted by git's
-    /// low-speed limits. Returns the submodule names.
+    /// Checks out the submodules recursively (`git worktree add` does not), one level at a time so
+    /// the URL policy also runs on the `.gitmodules` of every submodule BEFORE it is cloned. All or
+    /// nothing at each gate: a refused URL ends the step (what is already cloned stays). Only https
+    /// and ssh are enabled as transports; at most `MAX_SUBMODULES` submodules in `MAX_DEPTH`
+    /// levels, one `SUBMODULE_DEADLINE` for everything (the git process group is killed after
+    /// it), git >= 2.30. An `update = !command` entry or a path that leaves its directory is
+    /// refused. Returns the names (nested ones as `parent/path`).
     pub fn init_submodules(&self, info: &GitInfo, policy: SubmodulePolicy) -> Result<Vec<String>> {
-        let subs = self.submodules(info)?;
-        if subs.is_empty() {
+        let top = self.submodules(info)?;
+        if top.is_empty() {
             return Ok(vec![]);
         }
-        let bad: Vec<String> = subs
-            .iter()
-            .filter_map(|(n, u)| {
-                policy
-                    .check(u)
-                    .err()
-                    .map(|e| format!("{}: {e}", n.escape_debug()))
-            })
-            .collect();
-        if !bad.is_empty() {
+        let v =
+            String::from_utf8_lossy(&self.git.out(&info.worktree, &["--version"])?).into_owned();
+        if parse_git_version(&v).is_none_or(|g| g < MIN_GIT) {
             return Err(Error::Refused(format!(
-                "submodule URL refused ({}); nothing was cloned",
-                bad.join("; ")
+                "git >= {}.{} is needed to check out submodules safely (found: {})",
+                MIN_GIT.0,
+                MIN_GIT.1,
+                v.trim()
             )));
         }
-        let g = self.pinned(info)?;
-        let mut args = vec![
-            "-c",
-            "protocol.https.allow=always",
-            "-c",
-            "protocol.ssh.allow=always",
-            "-c",
-            "core.sshCommand=ssh -o BatchMode=yes",
-            "-c",
-            "http.lowSpeedLimit=1000",
-            "-c",
-            "http.lowSpeedTime=30",
-        ];
-        if policy.file_allowed() {
-            args.extend(["-c", "protocol.file.allow=always"]);
-        }
-        args.extend(["submodule", "update", "--init", "--recursive", "--"]);
+        let started = std::time::Instant::now();
+        let root = self.pinned(info)?;
         let common = self.common_dir(&info.repo_root)?;
-        with_repo_lock(&common, || g.out(&info.worktree, &args))??;
-        Ok(subs.into_iter().map(|(n, _)| n).collect())
+        let mut done = Vec::new();
+        // (git to use, directory, name prefix)
+        let mut level = vec![(root, info.worktree.clone(), String::new())];
+        for depth in 0..MAX_DEPTH {
+            let mut next = Vec::new();
+            for (g, dir, prefix) in &level {
+                let urls = self.gitmodules(g, dir, "url")?;
+                if urls.is_empty() {
+                    continue;
+                }
+                let paths: BTreeMap<String, String> =
+                    self.gitmodules(g, dir, "path")?.into_iter().collect();
+                let updates = self.gitmodules(g, dir, "update")?;
+                if done.len() + urls.len() > MAX_SUBMODULES {
+                    return Err(Error::Refused(format!(
+                        "more than {MAX_SUBMODULES} submodules; nothing more was cloned"
+                    )));
+                }
+                let mut bad: Vec<String> = Vec::new();
+                for (n, u) in &urls {
+                    if n.chars().any(|c| c.is_control() || c == '=') {
+                        bad.push(format!("{}: bad name", n.escape_debug()));
+                    }
+                    if let Err(e) = policy.check(u) {
+                        bad.push(format!("{}: {e}", n.escape_debug()));
+                    }
+                    match paths.get(n) {
+                        Some(p) if safe_rel(p) => {}
+                        _ => bad.push(format!(
+                            "{}: path missing or leaves its directory",
+                            n.escape_debug()
+                        )),
+                    }
+                }
+                for (n, u) in &updates {
+                    if u.starts_with('!') {
+                        bad.push(format!("{}: update runs a command", n.escape_debug()));
+                    }
+                }
+                if !bad.is_empty() {
+                    return Err(Error::Refused(format!(
+                        "submodule refused at level {depth} ({}); nothing was cloned there",
+                        bad.join("; ")
+                    )));
+                }
+                let left = SUBMODULE_DEADLINE
+                    .checked_sub(started.elapsed())
+                    .ok_or_else(|| Error::Refused("submodule checkout deadline passed".into()))?;
+                // every name gets its update mode pinned to a plain checkout
+                let guards: Vec<String> = urls
+                    .iter()
+                    .flat_map(|(n, _)| ["-c".to_string(), format!("submodule.{n}.update=checkout")])
+                    .collect();
+                let mut args: Vec<&str> = vec![
+                    "-c",
+                    "protocol.https.allow=always",
+                    "-c",
+                    "protocol.ssh.allow=always",
+                    "-c",
+                    "core.sshCommand=ssh -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=2",
+                    "-c",
+                    "http.lowSpeedLimit=1000",
+                    "-c",
+                    "http.lowSpeedTime=30",
+                    "-c",
+                    "submodule.recurse=false",
+                ];
+                if policy.file_allowed() {
+                    args.extend(["-c", "protocol.file.allow=always"]);
+                }
+                args.extend(guards.iter().map(String::as_str));
+                args.extend(["submodule", "update", "--init", "--"]);
+                let o = with_repo_lock(&common, || g.run_deadline(dir, &args, left))??;
+                if !o.status.success() {
+                    return Err(Error::Refused(format!(
+                        "git submodule update failed (exit {}): {}",
+                        o.status.code().map_or("none".into(), |c| c.to_string()),
+                        scrub(
+                            String::from_utf8_lossy(&o.stderr)
+                                .lines()
+                                .next()
+                                .unwrap_or("")
+                        )
+                    )));
+                }
+                for (n, _) in &urls {
+                    let rel = &paths[n];
+                    let name = format!("{prefix}{rel}");
+                    let sub = dir.join(rel);
+                    if sub.is_dir() {
+                        next.push((self.git.clone(), sub, format!("{name}/")));
+                    }
+                    done.push(name);
+                }
+            }
+            if next.is_empty() {
+                return Ok(done);
+            }
+            level = next;
+        }
+        // deeper levels than MAX_DEPTH are not cloned
+        if level
+            .iter()
+            .any(|(g, d, _)| self.gitmodules(g, d, "url").is_ok_and(|u| !u.is_empty()))
+        {
+            return Err(Error::Refused(format!(
+                "submodules nested deeper than {MAX_DEPTH} levels were not cloned"
+            )));
+        }
+        Ok(done)
     }
+}
+
+/// A relative path made of plain components (no `..`, no root).
+fn safe_rel(p: &str) -> bool {
+    !p.is_empty()
+        && !p.contains('\0')
+        && Path::new(p)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
 #[cfg(test)]
@@ -912,12 +1109,15 @@ mod submodule_tests {
     }
 
     #[test]
-    fn urls_other_than_https_and_ssh_are_refused() {
+    fn urls_other_than_plain_https_and_ssh_are_refused() {
         let p = SubmodulePolicy::default();
         for ok in [
             "https://h.example/r.git",
+            "https://h.example:8443/r.git",
             "ssh://git@h/r.git",
+            "ssh://h:22/r.git",
             "git@h.example:o/r.git",
+            "h.example:o/r.git",
         ] {
             assert!(p.check(ok).is_ok(), "{ok}");
         }
@@ -937,6 +1137,20 @@ mod submodule_tests {
             "C:\\x",
             "h:",
             "a b:c",
+            // credentials, option-like hosts and users
+            "https://user:pass@h.example/r.git",
+            "https://token@h.example/r.git",
+            "ssh://user:pw@h/r.git",
+            "ssh://-oProxyCommand=id/r.git",
+            "ssh://u@-oFoo/r.git",
+            "u@-oFoo:p",
+            "-u@h:p",
+            "ssh://h:/r.git",
+            "ssh://h:2x/r.git",
+            "https://h.example",
+            "https://h.example@evil/r.git",
+            "u:p@h:path",
+            "https://[::1]/r.git", // "::" is a transport-helper marker; IPv6 literals are not supported
         ] {
             assert!(p.check(bad).is_err(), "{bad}");
         }
@@ -949,16 +1163,34 @@ mod submodule_tests {
     }
 
     #[test]
-    fn submodules_are_checked_out_only_through_the_policy() {
-        if std::process::Command::new("git")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let base = synthesis_core::canonicalize(tmp.path()).unwrap();
+    fn credentials_never_reach_messages() {
+        assert_eq!(
+            strip_userinfo("https://user:pw@h.example/r.git"),
+            "https://h.example/r.git"
+        );
+        assert_eq!(strip_userinfo("u@h:p/q"), "h:p/q");
+        assert_eq!(strip_userinfo("https://h/a@b"), "https://h/a@b");
+        let e = SubmodulePolicy::default()
+            .check("https://user:s3cret@h.example/r.git")
+            .unwrap_err();
+        assert!(!e.contains("s3cret") && !e.contains("user:"), "{e}");
+        assert!(
+            !scrub("fatal: unable to access 'https://user:s3cret@h/r.git/': x").contains("s3cret")
+        );
+    }
+
+    #[test]
+    fn git_versions_parse() {
+        assert_eq!(
+            parse_git_version("git version 2.39.2 (Apple Git-143)"),
+            Some((2, 39))
+        );
+        assert_eq!(parse_git_version("git version 2.30.0"), Some((2, 30)));
+        assert!(parse_git_version("git version 2.29.9").is_some_and(|v| v < MIN_GIT));
+        assert_eq!(parse_git_version("nonsense"), None);
+    }
+
+    fn repo_with_submodule(base: &Path, extra_gitmodules: Option<&str>) -> (PathBuf, PathBuf) {
         let (sub, repo) = (base.join("sub"), base.join("repo"));
         for d in [&sub, &repo] {
             fs::create_dir_all(d).unwrap();
@@ -980,13 +1212,37 @@ mod submodule_tests {
                 "vendor/sub",
             ],
         );
+        if let Some(x) = extra_gitmodules {
+            let mut t = fs::read_to_string(repo.join(".gitmodules")).unwrap();
+            t.push_str(x);
+            fs::write(repo.join(".gitmodules"), t).unwrap();
+            git(&repo, &["add", ".gitmodules"]);
+        }
         git(&repo, &["commit", "-qm", "add submodule"]);
+        (sub, repo)
+    }
 
-        let mgr = WorktreeManager::new(
+    fn manager(base: &Path) -> WorktreeManager {
+        WorktreeManager::new(
             &Env::from_process(),
             WorktreeOptions::new(base.join("state")),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn submodules_are_checked_out_only_through_the_policy() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(tmp.path()).unwrap();
+        let (_sub, repo) = repo_with_submodule(&base, None);
+        let mgr = manager(&base);
         let a = mgr.create(&repo, "s1", base.join("art"), false).unwrap();
         let info = a.git.unwrap();
         let wt_file = info.worktree.join("vendor/sub/lib.txt");
@@ -1006,5 +1262,128 @@ mod submodule_tests {
             .unwrap();
         assert_eq!(names, ["vendor/sub"]);
         assert_eq!(fs::read_to_string(wt_file).unwrap(), "lib\n");
+    }
+
+    #[test]
+    fn an_update_command_entry_is_refused() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(tmp.path()).unwrap();
+        let (_sub, repo) = repo_with_submodule(&base, Some("\tupdate = !touch /tmp/pwned\n"));
+        let mgr = manager(&base);
+        // current git already refuses such a value when it reads the repository; either way
+        // nothing is cloned and nothing runs
+        match mgr.create(&repo, "s2", base.join("art"), false) {
+            Err(e) => assert!(e.to_string().contains("invalid value"), "{e}"),
+            Ok(a) => {
+                let info = a.git.unwrap();
+                let e = mgr
+                    .init_submodules(&info, SubmodulePolicy { allow_file: true })
+                    .unwrap_err()
+                    .to_string();
+                assert!(e.contains("update runs a command"), "{e}");
+                assert!(!info.worktree.join("vendor/sub/lib.txt").exists());
+            }
+        }
+        assert!(!Path::new("/tmp/pwned").exists());
+    }
+
+    #[test]
+    fn a_stuck_git_is_killed_at_the_deadline() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(tmp.path()).unwrap();
+        git(&base, &["init", "-q"]);
+        let mgr = manager(&base);
+        // an alias that sleeps stands in for a stalled transfer
+        let t0 = std::time::Instant::now();
+        let e = mgr
+            .git
+            .run_deadline(
+                &base,
+                &["-c", "alias.slow=!sleep 30", "slow"],
+                std::time::Duration::from_millis(300),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("was killed") && t0.elapsed() < std::time::Duration::from_secs(10),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn nested_submodules_are_checked_out_level_by_level() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(tmp.path()).unwrap();
+        let mk = |n: &str| {
+            let d = base.join(n);
+            fs::create_dir_all(&d).unwrap();
+            git(&d, &["init", "-q"]);
+            fs::write(d.join("f.txt"), n).unwrap();
+            git(&d, &["add", "."]);
+            git(&d, &["commit", "-qm", n]);
+            d
+        };
+        let (inner, sub, repo) = (mk("inner"), mk("sub"), mk("repo"));
+        git(
+            &sub,
+            &["submodule", "add", "-q", inner.to_str().unwrap(), "deep"],
+        );
+        git(&sub, &["commit", "-qm", "nest"]);
+        git(
+            &repo,
+            &[
+                "submodule",
+                "add",
+                "-q",
+                sub.to_str().unwrap(),
+                "vendor/sub",
+            ],
+        );
+        git(&repo, &["commit", "-qm", "add"]);
+        let mgr = manager(&base);
+        let info = mgr
+            .create(&repo, "s3", base.join("art"), false)
+            .unwrap()
+            .git
+            .unwrap();
+        let names = mgr
+            .init_submodules(&info, SubmodulePolicy { allow_file: true })
+            .unwrap();
+        assert_eq!(names, ["vendor/sub", "vendor/sub/deep"]);
+        assert_eq!(
+            fs::read_to_string(info.worktree.join("vendor/sub/deep/f.txt")).unwrap(),
+            "inner"
+        );
+        // without the test policy even the first level is refused before any clone
+        let info2 = mgr
+            .create(&repo, "s4", base.join("art"), false)
+            .unwrap()
+            .git
+            .unwrap();
+        assert!(
+            mgr.init_submodules(&info2, SubmodulePolicy::default())
+                .is_err()
+        );
     }
 }

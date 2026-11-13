@@ -1,14 +1,17 @@
 //! Optional notifications for unattended runs (docs/UNATTENDED.md, "Notifications").
 //!
-//! `{"synt":{"notify":{"command":["/path/to/prog","arg"],"timeout_secs":10,"network":false}}}` in
+//! `{"synt":{"notify":{"command":["/path/to/prog","arg"],"timeout_secs":10,"network":false,"include_text":false}}}` in
 //! the USER or MANAGED settings (managed wins as a whole; a project file is never read). The
 //! command gets one JSON event on stdin: `task.ended` (any status), `approval.blocked` (a headless
 //! run denied an ask; once per task) and `budget.exceeded`. It runs through the sandboxed terminal
 //! runtime in its own session with a scrubbed env (PATH/locale only: no API key, no `SYNT_*`), the
-//! workspace as cwd, a short timeout, and at most 50 times per process.
+//! workspace as cwd, a short timeout, and at most 50 times per process (plus 50 more reserved for
+//! `task.ended`). It is NOT started when the run is not sandboxed (`--sandbox off`, best-effort or
+//! no policy): a command must never run unconfined on behalf of a run that asked for confinement.
 //!
 //! Threat model: the payload is built from the already redacted event stream and holds only ids,
-//! the status, the redacted and truncated stop reason and the budget numbers; never the final
+//! the status, a reason CODE and the budget numbers (the redacted, truncated stop reason text only
+//! with `include_text: true`); never the final
 //! answer, tool input or output, file contents or the request. The command is the user's own
 //! (project files cannot set it); it is not a shell string: every argv element is single-quoted.
 
@@ -27,6 +30,8 @@ use tokio_util::sync::CancellationToken;
 
 /// Most notifications sent by one process (a runaway approval loop cannot flood a channel).
 const MAX_SENT: usize = 50;
+/// Reserved for `task.ended`, so a flood of approvals can never crowd the final event out.
+const MAX_ENDED: usize = 50;
 const MAX_REASON: usize = 200;
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
 const MAX_TIMEOUT_SECS: u64 = 60;
@@ -57,6 +62,8 @@ pub struct NotifyConfig {
     pub timeout: Duration,
     /// Lets the command reach the network (a webhook); off by default.
     pub network: bool,
+    /// Send the redacted stop reason text too (default: a reason code only).
+    pub include_text: bool,
 }
 
 /// `synt.notify` from the user file, then the managed file (which replaces it as a whole). A wrong
@@ -90,6 +97,10 @@ fn parse(n: &Value) -> Result<NotifyConfig, String> {
         None => false,
         Some(v) => v.as_bool().ok_or("network must be true or false")?,
     };
+    let include_text = match o.get("include_text") {
+        None => false,
+        Some(v) => v.as_bool().ok_or("include_text must be true or false")?,
+    };
     let kind = match o.get("kind").and_then(Value::as_str).unwrap_or("command") {
         "desktop" => Kind::Desktop,
         "command" => {
@@ -117,7 +128,20 @@ fn parse(n: &Value) -> Result<NotifyConfig, String> {
         kind,
         timeout: Duration::from_secs(timeout_secs),
         network,
+        include_text,
     })
+}
+
+/// The notify command runs only under an enforcing sandbox with a policy: with `--sandbox off`,
+/// best-effort or a policy that could not be built it would run unconfined (and with the host's
+/// network), which a run that did not ask for that must not get.
+fn confined(mode: synthesis_terminal::SandboxMode, has_policy: bool) -> Result<(), String> {
+    if mode != synthesis_terminal::SandboxMode::Enforce || !has_policy {
+        return Err(
+            "synt.notify needs an enforcing sandbox (not --sandbox off or best-effort, and a buildable policy); skipped".into(),
+        );
+    }
+    Ok(())
 }
 
 /// POSIX single quoting: the shell sees one literal word, so nothing in an argument is expanded.
@@ -127,7 +151,7 @@ fn quote(a: &str) -> String {
 
 /// The JSON event for an envelope the notifier cares about; `None` for all others. `seen` holds
 /// the tasks whose blocked approval was already reported.
-pub fn payload(env: &Envelope, seen: &mut HashSet<String>) -> Option<Value> {
+pub fn payload(env: &Envelope, seen: &mut HashSet<String>, include_text: bool) -> Option<Value> {
     let short = |s: &str| s.chars().take(MAX_REASON).collect::<String>();
     let (event, detail) = match &env.event {
         Event::TaskEnded {
@@ -135,10 +159,13 @@ pub fn payload(env: &Envelope, seen: &mut HashSet<String>) -> Option<Value> {
             reason,
             usage,
             ..
-        } => (
-            "task.ended",
-            json!({"status": status, "reason": short(reason), "cost_usd": usage.cost_usd}),
-        ),
+        } => ("task.ended", {
+            let mut d = json!({"status": status, "reason_code": reason_code(reason), "cost_usd": usage.cost_usd});
+            if include_text {
+                d["reason"] = json!(short(reason));
+            }
+            d
+        }),
         Event::ToolApprovalResolved {
             reviewer, decision, ..
         } if reviewer.starts_with("policy:non-interactive")
@@ -154,9 +181,12 @@ pub fn payload(env: &Envelope, seen: &mut HashSet<String>) -> Option<Value> {
             budget,
             limit,
             used,
+            estimate,
+            estimate_usd,
         } => (
             "budget.exceeded",
-            json!({"budget": short(budget), "limit": limit, "used": used}),
+            // `used` is the actual spend; `estimate_usd` the refused call's worst case
+            json!({"budget": short(budget), "limit": limit, "used": used, "estimate": estimate, "estimate_usd": estimate_usd}),
         ),
         _ => return None,
     };
@@ -172,12 +202,33 @@ pub fn payload(env: &Envelope, seen: &mut HashSet<String>) -> Option<Value> {
     Some(v)
 }
 
+/// A fixed vocabulary for the stop reason, so the default payload never carries free text.
+fn reason_code(reason: &str) -> &'static str {
+    const CODES: [(&str, &str); 9] = [
+        ("budget_exceeded", "budget_exceeded"),
+        ("cancelled", "cancelled"),
+        ("no_progress", "no_progress"),
+        ("model_error", "model_error"),
+        ("context_error", "context_error"),
+        ("verified", "verified"),
+        ("unverified", "unverified"),
+        ("needs_approval", "approval_unavailable"),
+        ("event_sink_failed", "internal"),
+    ];
+    CODES
+        .iter()
+        .find(|(p, _)| reason.starts_with(p))
+        .map_or("other", |(_, c)| c)
+}
+
 pub struct Notifier {
     argv: Vec<String>,
     timeout: Duration,
     rt: Arc<TerminalRuntime>,
     sid: String,
+    include_text: bool,
     sent: AtomicUsize,
+    ended: AtomicUsize,
     seen: Mutex<HashSet<String>>,
     pending: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
@@ -186,6 +237,19 @@ impl Notifier {
     /// Opens the notifier's own runtime session (scrubbed env, the run's sandbox policy, network
     /// per the setting) and taps `sink`. `Err` is a one-line reason the notifier is off.
     pub fn start(
+        cfg: &NotifyConfig,
+        rt: Arc<TerminalRuntime>,
+        run_sid: &str,
+        ws: Arc<WorkspaceContext>,
+        run_env: &BTreeMap<String, String>,
+        policy: Option<SandboxPolicy>,
+        sink: &EventSink,
+    ) -> Result<Arc<Self>, String> {
+        confined(rt.mode(), policy.is_some())?;
+        Self::start_unchecked(cfg, rt, run_sid, ws, run_env, policy, sink)
+    }
+
+    fn start_unchecked(
         cfg: &NotifyConfig,
         rt: Arc<TerminalRuntime>,
         run_sid: &str,
@@ -220,13 +284,19 @@ impl Notifier {
             timeout: cfg.timeout,
             rt,
             sid,
+            include_text: cfg.include_text,
             sent: AtomicUsize::new(0),
+            ended: AtomicUsize::new(0),
             seen: Mutex::new(HashSet::new()),
             pending: Mutex::new(vec![]),
         });
         let me = n.clone();
         sink.observe(Arc::new(move |env| {
-            let p = payload(env, &mut me.seen.lock().unwrap_or_else(|e| e.into_inner()));
+            let p = payload(
+                env,
+                &mut me.seen.lock().unwrap_or_else(|e| e.into_inner()),
+                me.include_text,
+            );
             if let Some(p) = p {
                 me.send(p);
             }
@@ -235,24 +305,34 @@ impl Notifier {
     }
 
     /// Runs the command on its own thread so the run never waits for it (see [`Self::flush`]).
+    /// `task.ended` has its own allowance. A thread or runtime that cannot be made is a warning.
     fn send(self: &Arc<Self>, payload: Value) {
-        if self.sent.fetch_add(1, Ordering::SeqCst) >= MAX_SENT {
+        let counter = if payload["event"] == "task.ended" {
+            (&self.ended, MAX_ENDED)
+        } else {
+            (&self.sent, MAX_SENT)
+        };
+        if counter.0.fetch_add(1, Ordering::SeqCst) >= counter.1 {
             return;
         }
         let me = self.clone();
-        let h = std::thread::spawn(move || {
-            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        let spawned = std::thread::Builder::new().spawn(move || {
+            match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-            else {
-                return;
-            };
-            rt.block_on(me.run(payload));
+            {
+                Ok(rt) => rt.block_on(me.run(payload)),
+                Err(_) => eprintln!("synt: warning: the notify command could not run (no runtime)"),
+            }
         });
-        self.pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(h);
+        match spawned {
+            Ok(h) => self
+                .pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(h),
+            Err(_) => eprintln!("synt: warning: the notify command could not run (no thread)"),
+        }
     }
 
     async fn run(&self, payload: Value) {
@@ -348,10 +428,19 @@ mod tests {
     #[test]
     fn payload_has_ids_status_and_short_reason_only() {
         let mut seen = HashSet::new();
-        let p = payload(&env(ended(&"x".repeat(900))), &mut seen).unwrap();
+        let p = payload(&env(ended(&"x".repeat(900))), &mut seen, true).unwrap();
         assert_eq!(p["event"], "task.ended");
         assert_eq!(p["status"], "failed");
         assert_eq!(p["reason"].as_str().unwrap().len(), MAX_REASON);
+        // default: a code, no text
+        let q = payload(
+            &env(ended("budget_exceeded:max_cost_usd secret-ish text")),
+            &mut seen,
+            false,
+        )
+        .unwrap();
+        assert_eq!(q["reason_code"], "budget_exceeded");
+        assert!(q.get("reason").is_none() && !q.to_string().contains("secret-ish"));
         let text = p.to_string();
         assert!(
             !text.contains("secret/path.rs") && !text.contains("/root"),
@@ -364,17 +453,21 @@ mod tests {
             input_changed: false,
             message: Some("rm -rf secret".into()),
         };
-        let first = payload(&env(b.clone()), &mut seen).unwrap();
+        let first = payload(&env(b.clone()), &mut seen, false).unwrap();
         assert_eq!(first["event"], "approval.blocked");
         assert!(!first.to_string().contains("rm -rf"));
-        assert!(payload(&env(b), &mut seen).is_none(), "once per task");
+        assert!(
+            payload(&env(b), &mut seen, false).is_none(),
+            "once per task"
+        );
         assert!(
             payload(
                 &env(Event::Notice {
                     level: "i".into(),
                     text: "t".into()
                 }),
-                &mut seen
+                &mut seen,
+                false
             )
             .is_none()
         );
@@ -393,6 +486,20 @@ mod tests {
             Kind::Desktop
         );
         assert_eq!(quote("it's $(x)"), r"'it'\''s $(x)'");
+    }
+
+    #[test]
+    fn an_unconfined_run_gets_no_notifier() {
+        use synthesis_terminal::SandboxMode::{BestEffort, Enforce, Off};
+        assert!(confined(Enforce, true).is_ok());
+        for (m, p) in [
+            (Off, true),
+            (BestEffort, true),
+            (Enforce, false),
+            (Off, false),
+        ] {
+            assert!(confined(m, p).is_err(), "{m:?} policy={p}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -419,11 +526,12 @@ mod tests {
         ]);
         let sink = EventSink::new(std::io::sink(), "s1", []);
         let script = format!("cat > {o}; env >> {o}", o = out.display());
-        let n = Notifier::start(
+        let n = Notifier::start_unchecked(
             &NotifyConfig {
                 kind: Kind::Command(vec!["/bin/sh".into(), "-c".into(), script]),
                 timeout: Duration::from_secs(10),
                 network: false,
+                include_text: true,
             },
             rt,
             "s1",

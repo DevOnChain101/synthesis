@@ -121,28 +121,46 @@ impl Harness {
             }
         };
         found.map(|(k, limit, used)| {
-            self.mark_budget(task, agent, k, limit, used);
+            self.mark_budget(task, agent, k, limit, used, None);
             k
         })
     }
 
     /// Pre-turn cost check: refuses a call whose worst case (the estimated prompt plus all
-    /// `max_tokens` of output, at the dearer prices) would take the spend past the cost cap.
-    /// Conservative: it may stop a task that the real, cheaper response would have fitted.
+    /// `max_tokens` of output, at the dearer prices) would take the spend past the cost cap, and a
+    /// call to a model that has no price (its cost could not be counted). Conservative: it may stop
+    /// a task that the real, cheaper response would have fitted. Until the provider has reported a
+    /// size the prompt estimate (chars/4) gets a 20% margin.
     fn estimate_stop(
         &self,
         task: &TaskRun,
         agent: &AgentCtx,
         req: &Request,
-        prompt_tokens: u64,
+        st: &AgentState,
+        raw: u64,
     ) -> Option<&'static str> {
         let cap = task.budget.max_cost_usd?;
-        let worst = self
-            .price_of(agent)?
-            .worst_case(prompt_tokens, u64::from(req.max_tokens));
         let spent = lock(&task.counters).cost;
+        let Some(price) = self.price_of(agent) else {
+            self.mark_budget(task, agent, "max_cost_usd_unpriced", cap, spent, None);
+            return Some("max_cost_usd_unpriced");
+        };
+        let est = st.meter.estimate(raw);
+        let prompt = if st.meter.provider_used().is_some() {
+            est
+        } else {
+            est + est / 5
+        };
+        let worst = price.worst_case(prompt, u64::from(req.max_tokens));
         (spent + worst > cap).then(|| {
-            self.mark_budget(task, agent, "max_cost_usd_estimate", cap, spent + worst);
+            self.mark_budget(
+                task,
+                agent,
+                "max_cost_usd_estimate",
+                cap,
+                spent,
+                Some(worst),
+            );
             "max_cost_usd_estimate"
         })
     }
@@ -155,6 +173,7 @@ impl Harness {
         kind: &'static str,
         limit: f64,
         used: f64,
+        estimate_usd: Option<f64>,
     ) {
         let first = {
             let mut h = lock(&task.hit);
@@ -169,6 +188,8 @@ impl Harness {
                     budget: kind.into(),
                     limit,
                     used,
+                    estimate: estimate_usd.is_some(),
+                    estimate_usd,
                 },
             );
         }
@@ -244,12 +265,7 @@ impl Harness {
     /// Adds usage of a call that is not a turn (compaction summary) to the task counters.
     /// Priced as `model` (its row of `pricing_for`, else the run's price).
     pub(crate) fn charge_usage(&self, task: &TaskRun, model: &str, u: &synthesis_providers::Usage) {
-        let price = self
-            .config
-            .pricing_for
-            .as_ref()
-            .and_then(|f| f(model))
-            .or(self.config.pricing);
+        let price = self.price_for(model);
         let mut c = lock(&task.counters);
         c.input += u.input_tokens.unwrap_or(0);
         c.output += u.output_tokens.unwrap_or(0);
@@ -266,11 +282,16 @@ impl Harness {
             .provider
             .answered_by()
             .unwrap_or_else(|| self.model_of(agent));
-        self.config
-            .pricing_for
-            .as_ref()
-            .and_then(|f| f(&model))
-            .or(self.config.pricing)
+        self.price_for(&model)
+    }
+
+    /// The price of `model`: its row of `pricing_for` when the host priced models one by one (an
+    /// unlisted model has NO price: it never borrows the run's), else the run's price.
+    fn price_for(&self, model: &str) -> Option<crate::harness::Pricing> {
+        match &self.config.pricing_for {
+            Some(f) => f(model),
+            None => self.config.pricing,
+        }
     }
 
     fn account(
@@ -684,7 +705,7 @@ impl Harness {
                 };
             }
             let raw = st.fixed_raw + self.messages_raw(st);
-            if let Some(kind) = self.estimate_stop(task, agent, &req, st.meter.estimate(raw)) {
+            if let Some(kind) = self.estimate_stop(task, agent, &req, st, raw) {
                 return AgentEnd::Budget(kind);
             }
             let turn = uuid();

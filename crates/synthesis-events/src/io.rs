@@ -740,6 +740,8 @@ mod tests {
                 budget: s("turns"),
                 limit: 50.0,
                 used: 51.0,
+                estimate: false,
+                estimate_usd: None,
             },
             Event::MemoryRetrieved {
                 ids: vec![s("m-1")],

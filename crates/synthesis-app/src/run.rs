@@ -477,6 +477,8 @@ pub struct Prepared {
     pub stale_model: Option<String>,
     /// Set when a governed run has `synt.notify` (user/managed settings).
     pub notifier: Option<Arc<crate::notify::Notifier>>,
+    /// Cancelled when the session ends (`Live::close`): stops the `synt stop` watcher.
+    pub stop_end: CancellationToken,
 }
 
 /// A session of this directory: it ran exactly here, or in the worktree this exact directory
@@ -652,27 +654,58 @@ pub fn builtin_pricing(label: &str, model: &str) -> Option<Pricing> {
 fn parse_pricing(v: &Value, label: &str, model: &str) -> Option<Pricing> {
     let table = v.get("synt")?.get("pricing")?;
     let e = table.get(label).or_else(|| table.get(model))?;
-    let num = |k: &str| {
-        e.get(k)
-            .and_then(Value::as_f64)
-            .filter(|n| n.is_finite() && *n >= 0.0)
+    // `None` for an absent key; a present key that is not a number in range makes the whole row
+    // unusable (named on stderr, never its value): a wrong price must not count money wrongly
+    let bad = |k: &str| {
+        eprintln!(
+            "synt: warning: synt.pricing row for {label}: {k} is not valid; the row is ignored"
+        );
     };
-    Some(Pricing {
-        input_per_mtok: num("input_per_mtok")?,
-        output_per_mtok: num("output_per_mtok")?,
-        cache_read_per_mtok: num("cache_read_per_mtok"),
-        cache_write_per_mtok: num("cache_write_per_mtok"),
-        // a row that names a threshold sets the tier (multipliers default to 1: no surcharge);
-        // a row that does not keeps the built-in tier of the model, if any
-        long: match e.get("long_above_tokens").and_then(Value::as_u64) {
-            Some(above_tokens) => Some(LongTier {
-                above_tokens,
-                input_mult: num("long_input_mult").unwrap_or(1.0),
-                output_mult: num("long_output_mult").unwrap_or(1.0),
-            }),
+    let num = |k: &str, min: f64| -> Result<Option<f64>, ()> {
+        match e.get(k) {
+            None => Ok(None),
+            Some(x) => match x.as_f64().filter(|n| n.is_finite() && *n >= min) {
+                Some(n) => Ok(Some(n)),
+                None => {
+                    bad(k);
+                    Err(())
+                }
+            },
+        }
+    };
+    let row = || -> Result<Pricing, ()> {
+        let (Some(input_per_mtok), Some(output_per_mtok)) =
+            (num("input_per_mtok", 0.0)?, num("output_per_mtok", 0.0)?)
+        else {
+            return Err(());
+        };
+        let cache_read_per_mtok = num("cache_read_per_mtok", 0.0)?;
+        let cache_write_per_mtok = num("cache_write_per_mtok", 0.0)?;
+        // a tier can only make a request dearer (multipliers >= 1)
+        let (im, om) = (num("long_input_mult", 1.0)?, num("long_output_mult", 1.0)?);
+        let long = match e.get("long_above_tokens") {
             None => builtin_pricing(label, model).and_then(|b| b.long),
-        },
-    })
+            Some(t) => match t.as_u64() {
+                Some(above_tokens) => Some(LongTier {
+                    above_tokens,
+                    input_mult: im.unwrap_or(1.0),
+                    output_mult: om.unwrap_or(1.0),
+                }),
+                None => {
+                    bad("long_above_tokens");
+                    return Err(());
+                }
+            },
+        };
+        Ok(Pricing {
+            input_per_mtok,
+            output_per_mtok,
+            cache_read_per_mtok,
+            cache_write_per_mtok,
+            long,
+        })
+    };
+    row().ok()
 }
 
 /// `--allow` / `--deny` values: non-empty, one line, `Tool` or `Tool(content)`.
@@ -1592,12 +1625,20 @@ pub fn prepare(
             ) {
                 Ok(n) => Some(n),
                 Err(e) => {
+                    eprintln!(
+                        "synt: WARNING: notifications are off: {}",
+                        sanitize_for_display(&e)
+                    );
                     notices.push(format!("notifications are off: {e}"));
                     None
                 }
             },
             Ok(None) => None,
             Err(e) => {
+                eprintln!(
+                    "synt: WARNING: notifications are off: {}",
+                    sanitize_for_display(&e)
+                );
                 notices.push(format!("notifications are off: {e}"));
                 None
             }
@@ -1834,10 +1875,21 @@ pub fn prepare(
             .map(|(l, m)| (l.clone(), l.clone(), m.clone()))
             .collect();
         for m in agents.table.iter().filter_map(|d| d.model.as_deref()) {
-            if m != "inherit"
-                && let Ok(model) = resolve(m)
-            {
-                wanted.push((model.clone(), format!("{provider_id}/{model}"), model));
+            if m == "inherit" {
+                continue;
+            }
+            match resolve(m) {
+                Ok(model) => {
+                    wanted.push((model.clone(), format!("{provider_id}/{model}"), model));
+                }
+                // its answers could not be priced, and a call without a price is refused under a cap
+                Err(_) if capped => {
+                    return Err(format!(
+                        "--max-cost-usd: the model {} of a sub-agent definition cannot be resolved, so it cannot be priced; fix or remove it",
+                        sanitize_for_display(m)
+                    ));
+                }
+                Err(_) => {}
             }
         }
         for (key, label, model) in wanted {
@@ -2172,6 +2224,7 @@ pub fn prepare(
         }
         tokio_rt.spawn(server.run(l));
     }
+    let stop_end = CancellationToken::new();
     if watch_stop && store.is_some() {
         let _enter = tokio_rt.enter();
         let (c2, hard) = (
@@ -2190,6 +2243,7 @@ pub fn prepare(
                 crate::sessions::StopAction::ExitProcess
             },
             std::time::Duration::from_secs(crate::sessions::STOP_GRACE_SECS),
+            stop_end.clone(),
         );
     }
     Ok(Prepared {
@@ -2223,6 +2277,7 @@ pub fn prepare(
         model_changed,
         stale_model,
         notifier,
+        stop_end,
     })
 }
 
@@ -2962,7 +3017,7 @@ fn on_signals(cancel: CancellationToken, hard: Arc<dyn Fn() + Send + Sync>) -> s
         cancel.cancel();
         tokio::select! { _ = int.recv() => {}, _ = term.recv() => {} }
         hard();
-        synthesis_cli_ui::restore_terminal();
+        synthesis_cli_ui::restore_active_bounded(synthesis_cli_ui::EXIT_RESTORE_WAIT);
         std::process::exit(130); // second signal: stop waiting for a clean shutdown
     });
     Ok(())
@@ -2975,7 +3030,7 @@ fn on_signals(cancel: CancellationToken, hard: Arc<dyn Fn() + Send + Sync>) -> s
         cancel.cancel();
         let _ = tokio::signal::ctrl_c().await;
         hard();
-        synthesis_cli_ui::restore_terminal();
+        synthesis_cli_ui::restore_active_bounded(synthesis_cli_ui::EXIT_RESTORE_WAIT);
         std::process::exit(130);
     });
     Ok(())

@@ -677,6 +677,7 @@ impl Chat {
                 budget,
                 limit,
                 used,
+                ..
             } => self.note(
                 format!("budget exceeded: {budget} {used} / {limit}"),
                 "warn",

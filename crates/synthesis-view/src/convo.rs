@@ -709,6 +709,7 @@ impl Convo {
                 budget,
                 limit,
                 used,
+                ..
             } => self.notice(true, format!("budget exceeded: {budget} {used} / {limit}")),
             Event::HookRan {
                 event,

@@ -247,6 +247,7 @@ impl StatusModel {
                 budget,
                 limit,
                 used,
+                ..
             } => self.budget_exceeded = Some(format!("{budget} {used} / {limit}")),
             Event::TurnStarted { .. } => self.turns += 1,
             Event::ToolRequested { .. } => self.tools += 1,
@@ -405,6 +406,8 @@ mod tests {
                 budget: "turns".into(),
                 limit: 5.0,
                 used: 5.0,
+                estimate: false,
+                estimate_usd: None,
             }),
             0,
         );
