@@ -33,6 +33,7 @@ pub mod agents;
 pub mod asks;
 pub mod ctx;
 pub mod doctor;
+pub mod egress;
 pub mod engine_methods;
 pub mod engine_server;
 pub mod events;

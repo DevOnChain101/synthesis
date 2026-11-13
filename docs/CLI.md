@@ -105,7 +105,8 @@ Flags of `synt run` and of the interactive app (`synt`):
 |---|---|
 | `--cwd DIR` | Start folder / workspace directory (default: the current directory). |
 | `--sandbox MODE` | Command confinement: `enforce` (default), `best-effort` or `off` (loud warning). On Windows the default is `best-effort` with a notice. |
-| `--network MODE` | Network for tool commands: `deny` (default), `loopback` or `allow` (loud warning). |
+| `--network MODE` | Network for tool commands: `deny` (default), `loopback`, `hosts` (only the `--allow-host` hosts, through a per-run proxy; Linux bubblewrap and macOS Seatbelt) or `allow` (loud warning). |
+| `--allow-host HOST` | Host commands may reach with `--network hosts`: `host` (port 443), `host:port`, `*.suffix`, or an exact `ip:port` for a private address (repeatable; adds to the user's `synt.sandbox.network.allowedHosts`, refused when managed settings set that list). Limits destinations, not what is sent to an allowed host (docs/specs/sandbox-hardening.md). |
 | `--sandbox-read PATH` | Extra read-only path for commands, e.g. a toolchain dir. Must exist; `$HOME`, filesystem roots and credential-store directories are refused (repeatable). |
 | `--provider ID` | Provider id (with `--model NAME`); `fake:<script.json>` in test-provider builds. |
 | `--model NAME` | `provider/model`, an alias or a bare model name. |
@@ -118,7 +119,7 @@ Flags of `synt run` and of the interactive app (`synt`):
 | `--deny RULE` | Deny a tool call; deny wins over every allow (repeatable). |
 | `--worktree` | Work in an isolated git worktree on branch `synthesis/<session>`; left in place for review. |
 | `--no-worktree` | Headless runs and the headless engine use a worktree by default in a git repository (starting from the tree as it is, uncommitted work included); this works in the directory itself. |
-| `--unattended` | The safe preset: worktree, sandbox enforce, network deny, wall cap, cost cap required, inferred-only stays unverified, a failing session store ends the task, no peers. Refuses to start when one of these cannot be enforced (docs/UNATTENDED.md). |
+| `--unattended` | The safe preset: worktree, sandbox enforce, network deny (or `hosts`), wall cap, cost cap required, inferred-only stays unverified, a failing session store ends the task, no peers. Refuses to start when one of these cannot be enforced (docs/UNATTENDED.md). |
 | `--cleanup-worktree` | With `--worktree`: remove the worktree at the end when nothing changed. |
 | `--peers` | Turn cross-session messaging on for this run (see above). |
 | `--name NAME` | Session name other sessions can address (`sess:<name>`). |

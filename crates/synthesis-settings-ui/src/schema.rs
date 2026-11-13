@@ -253,6 +253,9 @@ impl SettingsSchema {
             b("synt.sandbox.wsl.hide_windows_drives", Execution, "WSL: hide Windows drives from commands", true)
                 .help("On WSL the sandbox hides /mnt/c and the other Windows drives from commands (the workspace and --sandbox-read folders on a drive stay). Off: drives stay readable (still never writable). Costs when on: sibling projects on a drive and symlinks into /mnt/c are not visible.")
                 .edit(Edit::Confirm("this lets sandboxed commands READ your Windows drives")),
+            Field::new("synt.sandbox.network.allowedHosts", Execution, "Hosts for --network hosts", List(ListItem::Text))
+                .scope(Scope::UserManaged)
+                .help("Hosts commands may reach with `--network hosts`: `host` (port 443), `host:port`, `*.suffix`. Only through the egress proxy; a name never reaches a private address. It limits destinations, not what is sent to an allowed host. Managed settings replace this list."),
             b("synt.modelInfo.fetch", Execution, "Fetch model info at start", true)
                 .help("Ask each provider's /v1/models for context windows and limits."),
             Field::new("synt.compat.write_node_transcripts", Execution, "Write Node-format transcripts", Bool)

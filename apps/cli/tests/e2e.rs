@@ -538,6 +538,61 @@ fn network_allow_warns_and_records_a_notice_deny_and_loopback_are_silent() {
 }
 
 #[test]
+fn network_hosts_needs_hosts_an_enforced_sandbox_and_valid_entries() {
+    let rig = Rig::new();
+    for (args, needle) in [
+        (&["--network", "hosts"][..], "--allow-host"),
+        (&["--allow-host", "a.test"][..], "--network hosts"),
+        (
+            &["--network", "hosts", "--allow-host", "*.com"][..],
+            "wildcard",
+        ),
+        (
+            &[
+                "--network",
+                "hosts",
+                "--allow-host",
+                "a.test",
+                "--sandbox",
+                "off",
+            ][..],
+            "--sandbox enforce",
+        ),
+    ] {
+        let o = rig.cmd(json!([{"text": "ok"}]), args).output().unwrap();
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert_eq!(o.status.code(), Some(2), "{args:?}: {err}");
+        assert!(err.contains(needle), "{args:?}: {err}");
+    }
+}
+
+#[test]
+fn network_hosts_lists_the_hosts_and_the_upload_caveat() {
+    if skip_without_sandbox() {
+        return;
+    }
+    let rig = Rig::new();
+    let (o, ev) = rig.run(
+        json!([{"text": "ok"}]),
+        &["--network", "hosts", "--allow-host", "example.com"],
+    );
+    let err = String::from_utf8_lossy(&o.stderr);
+    // Windows has no backend that can confine to the proxy: refused, never run open
+    if cfg!(windows) {
+        assert_eq!(o.status.code(), Some(2), "{err}");
+        return;
+    }
+    check_stream(&ev);
+    assert!(
+        err.contains("--network hosts") && err.contains("example.com"),
+        "{err}"
+    );
+    assert!(ev.iter().any(
+        |e| e["type"] == "notice" && e["payload"]["text"].as_str().unwrap().contains("uploads")
+    ));
+}
+
+#[test]
 fn sandbox_read_refuses_home_roots_missing_and_credential_ancestors() {
     if skip_without_sandbox() {
         return;
@@ -2343,11 +2398,12 @@ fn unattended_refuses_each_protection_that_is_asked_away() {
     git(&rig.ws(), &["init", "-q"]);
     git(&rig.ws(), &["add", "."]);
     git(&rig.ws(), &["commit", "-q", "-m", "init"]);
-    let cases: [(&[&str], &str); 11] = [
+    let cases: [(&[&str], &str); 12] = [
         (&["--sandbox", "off"], "sandbox"),
         (&["--sandbox", "best-effort"], "sandbox"),
         (&["--network", "allow"], "network"),
         (&["--network", "loopback"], "network"),
+        (&["--network", "hosts"], "network"), // allowed in principle, but with no host listed
         (&["--permission-mode", "bypassPermissions"], "bypass"),
         (&["--trust-project"], "trust-project"),
         (&["--no-worktree"], "no-worktree"),

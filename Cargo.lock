@@ -7178,6 +7178,7 @@ dependencies = [
  "synthesis-config",
  "synthesis-context",
  "synthesis-core",
+ "synthesis-egress",
  "synthesis-events",
  "synthesis-harness",
  "synthesis-hooks",
@@ -7556,8 +7557,10 @@ dependencies = [
  "seccompiler",
  "serde",
  "serde_json",
+ "synthesis-egress",
  "synthesis-platform",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
