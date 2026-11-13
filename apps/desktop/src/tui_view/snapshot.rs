@@ -260,6 +260,24 @@ fn activity_word(l: &Live) -> String {
     .to_string()
 }
 
+/// Whether a session row is lit like the selected workspace: with the keys in the Running list the cursor row
+/// (its preview is what the chat shows); otherwise the previewed session, or the open one when nothing is previewed.
+fn run_row_selected(
+    keys_here: bool,
+    cursor: bool,
+    id: &str,
+    open: &str,
+    preview: Option<&str>,
+) -> bool {
+    if keys_here {
+        return cursor;
+    }
+    match preview {
+        Some(sid) => !sid.is_empty() && id == sid,
+        None => !open.is_empty() && id == open,
+    }
+}
+
 fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Running> {
     let v = &l.view;
     let Some(ws) = v.workspaces.workspaces.iter().find(|w| w.key == l.ws_key) else {
@@ -332,7 +350,13 @@ fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Run
                 },
                 last,
                 live: r.is_live,
-                selected: l.focus == Focus::Running && i == l.run_sel,
+                selected: run_row_selected(
+                    l.focus == Focus::Running,
+                    i == l.run_sel,
+                    &r.id,
+                    &l.sid,
+                    l.preview.as_ref().map(|p| p.sid.as_str()),
+                ),
             }
         })
         .collect();
@@ -487,14 +511,13 @@ fn first_line(s: &str, n: usize) -> String {
     s.lines().next().unwrap_or("").chars().take(n).collect()
 }
 
-/// Recent Activity: what the person asked and what the agent answered (assistant text), strictly newest first by
-/// event time. Commands, tool calls, turns, notices and errors are not listed (the chat and the Running list
+/// Recent Activity: what the person asked and what the agent answered (assistant text), oldest first by
+/// event time (the timeline; the newest is the last row). Commands, tool calls, turns, notices and errors are not listed (the chat and the Running list
 /// show those); a row with no event time (a local notice) is not an event and is left out.
 fn activity_rows(l: &Live, tz_min: i32) -> Vec<ActivityRow> {
     let c = &l.view.convo;
     let mut v: Vec<(i64, ActivityRow)> = vec![];
-    // newest first, so the stable sort keeps the later of two events of the same instant on top
-    for (i, it) in c.items.iter().enumerate().rev() {
+    for (i, it) in c.items.iter().enumerate() {
         let Some(ts) = c.time_of(i) else { continue };
         let (kind, text) = match it {
             Item::User(t) => (ActKind::Prompt, t.clone()),
@@ -514,8 +537,10 @@ fn activity_rows(l: &Live, tz_min: i32) -> Vec<ActivityRow> {
             },
         ));
     }
-    v.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
-    v.into_iter().take(200).map(|(_, r)| r).collect()
+    // stable: two events of the same instant keep their order; only the newest 200 are kept
+    v.sort_by_key(|(ts, _)| *ts);
+    let skip = v.len().saturating_sub(200);
+    v.into_iter().skip(skip).map(|(_, r)| r).collect()
 }
 
 /// What the view paints, from the live state. `now` is epoch ms, `tz_min` minutes east of UTC.
@@ -1006,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_activity_lists_prompts_and_answers_only_newest_first() {
+    fn recent_activity_lists_prompts_and_answers_only_oldest_first() {
         let mut l = Live::new();
         l.starting = false;
         let mut n = 0;
@@ -1069,11 +1094,26 @@ mod tests {
         assert_eq!(
             got,
             [
-                (ActKind::Prompt, "10:02", "second"),
-                (ActKind::Reply, "10:01", "listed it"),
                 (ActKind::Prompt, "10:00", "first"),
+                (ActKind::Reply, "10:01", "listed it"),
+                (ActKind::Prompt, "10:02", "second"),
             ]
         );
+    }
+
+    #[test]
+    fn a_session_row_is_lit_for_the_open_or_previewed_session() {
+        // keys in the list: the cursor row, whatever is open
+        assert!(run_row_selected(true, true, "b", "a", Some("b")));
+        assert!(!run_row_selected(true, false, "a", "a", None));
+        // keys elsewhere: the open session, or the previewed one instead of it
+        assert!(run_row_selected(false, false, "a", "a", None));
+        assert!(!run_row_selected(false, true, "b", "a", None));
+        assert!(run_row_selected(false, false, "b", "a", Some("b")));
+        assert!(!run_row_selected(false, false, "a", "a", Some("b")));
+        // a `new ...` preview and a session not started yet light nothing
+        assert!(!run_row_selected(false, false, "a", "a", Some("")));
+        assert!(!run_row_selected(false, false, "", "", None));
     }
 
     #[test]
