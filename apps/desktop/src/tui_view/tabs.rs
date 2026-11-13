@@ -127,6 +127,10 @@ pub struct TabState {
     pub menu: Option<gpui::Point<gpui::Pixels>>,
     /// Quotes waiting for the next prompt (shown as chips under the input).
     pub quotes: Vec<super::quote::Quote>,
+    /// Cmd/Ctrl+A in the chat: the whole conversation is selected (the list is virtual, so it is a flag, not
+    /// painted text); the right-click menu of the chat.
+    pub chat_all: bool,
+    pub chat_menu: Option<super::chat_sel::ChatMenu>,
 }
 
 /// The project tree of the session's folder.

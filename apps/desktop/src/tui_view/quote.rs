@@ -12,6 +12,7 @@ use synthesis_cli_ui_render::theme as t;
 use super::TuiView;
 use super::panels::{dim, strong, text, with_alpha};
 use crate::theme::hsla;
+use crate::widgets::seltext::SelText;
 
 /// Quotes waiting for the next prompt, bytes and lines of one quote, bytes of all together.
 pub const MAX_QUOTES: usize = 5;
@@ -190,9 +191,16 @@ fn block(lines: &[&str], i: usize) -> Option<(Shown, usize)> {
     ))
 }
 
-/// The chat's drawing of the quotes of a user message: blockquote style, path and range, the first lines.
-pub fn blocks(shown: &[Shown]) -> impl Iterator<Item = gpui::Div> + '_ {
-    shown.iter().map(|q| {
+/// The chat's drawing of the quotes of user message `idx`: blockquote style, path and range, the first lines.
+/// Every line takes part in the window's text selection.
+pub fn blocks(idx: usize, shown: &[Shown]) -> impl Iterator<Item = gpui::Div> + '_ {
+    let line = move |q: usize, n: usize, s: &str| {
+        SelText::new(
+            gpui::ElementId::NamedInteger(format!("quote-{idx}-{q}").into(), n as u64),
+            if s.is_empty() { " " } else { s }.to_string(),
+        )
+    };
+    shown.iter().enumerate().map(move |(qi, q)| {
         let more = q.body.len().saturating_sub(SHOWN_LINES);
         div()
             .mt(px(6.))
@@ -203,20 +211,17 @@ pub fn blocks(shown: &[Shown]) -> impl Iterator<Item = gpui::Div> + '_ {
             .flex_col()
             .child(
                 div()
+                    .whitespace_nowrap()
                     .truncate()
                     .text_color(dim())
-                    .child(format!("{}:{}", q.path, q.range)),
+                    .child(line(qi, usize::MAX, &format!("{}:{}", q.path, q.range))),
             )
-            .children(q.body.iter().take(SHOWN_LINES).map(|l| {
+            .children(q.body.iter().take(SHOWN_LINES).enumerate().map(|(n, l)| {
                 div()
                     .whitespace_nowrap()
                     .truncate()
                     .text_color(text())
-                    .child(if l.is_empty() {
-                        " ".to_string()
-                    } else {
-                        l.clone()
-                    })
+                    .child(line(qi, n, l))
             }))
             .when(more > 0, |d| {
                 d.child(
@@ -226,6 +231,85 @@ pub fn blocks(shown: &[Shown]) -> impl Iterator<Item = gpui::Div> + '_ {
                 )
             })
     })
+}
+
+/// One row of a right-click menu. A disabled row is dimmed and does nothing.
+pub struct MenuEntry {
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+    act: fn(&mut TuiView, &mut Context<TuiView>),
+}
+
+impl MenuEntry {
+    pub fn new(
+        id: &'static str,
+        label: &'static str,
+        enabled: bool,
+        act: fn(&mut TuiView, &mut Context<TuiView>),
+    ) -> Self {
+        Self {
+            id,
+            label,
+            enabled,
+            act,
+        }
+    }
+}
+
+/// A right-click menu at `at` (the explorer's and the chat's): a click anywhere else closes it, so does a click
+/// on a row, after its action.
+pub fn menu_overlay(
+    at: gpui::Point<gpui::Pixels>,
+    entries: Vec<MenuEntry>,
+    cx: &mut Context<TuiView>,
+) -> AnyElement {
+    div()
+        .absolute()
+        .size_full()
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                (this.ts.menu, this.ts.chat_menu) = (None, None);
+                cx.notify();
+            }),
+        )
+        .child(
+            div()
+                .debug_selector(|| "quote-menu".to_string())
+                .absolute()
+                .left(at.x)
+                .top(at.y)
+                .occlude()
+                .p(px(4.))
+                .flex()
+                .flex_col()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(hsla(t::BORDER))
+                .bg(hsla(t::ELEVATED))
+                .children(entries.into_iter().map(|e| {
+                    let row = div()
+                        .id(e.id)
+                        .px(px(10.))
+                        .py(px(3.))
+                        .rounded(px(4.))
+                        .child(e.label);
+                    if !e.enabled {
+                        return row.text_color(dim());
+                    }
+                    let act = e.act;
+                    row.cursor_pointer()
+                        .text_color(strong())
+                        .hover(|d| d.bg(with_alpha(hsla(t::TEXT_STRONG), 0.08)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            act(this, cx);
+                            (this.ts.menu, this.ts.chat_menu) = (None, None);
+                            cx.notify();
+                        }))
+                })),
+        )
+        .into_any_element()
 }
 
 impl TuiView {
@@ -277,56 +361,17 @@ impl TuiView {
         cx.notify();
     }
 
-    /// The right-click menu at the pointer: a click anywhere else closes it.
+    /// The explorer's right-click menu at the pointer.
     pub(super) fn quote_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let at = self.ts.menu?;
-        let item = |id: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .px(px(10.))
-                .py(px(3.))
-                .rounded(px(4.))
-                .cursor_pointer()
-                .text_color(strong())
-                .hover(|d| d.bg(with_alpha(hsla(t::TEXT_STRONG), 0.08)))
-                .child(label)
-        };
-        Some(
-            div()
-                .absolute()
-                .size_full()
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.ts.menu = None;
-                        cx.notify();
-                    }),
-                )
-                .child(
-                    div()
-                        .debug_selector(|| "quote-menu".to_string())
-                        .absolute()
-                        .left(at.x)
-                        .top(at.y)
-                        .occlude()
-                        .p(px(4.))
-                        .flex()
-                        .flex_col()
-                        .rounded(px(6.))
-                        .border_1()
-                        .border_color(hsla(t::BORDER))
-                        .bg(hsla(t::ELEVATED))
-                        .child(
-                            item("menu-quote", "Quote in chat")
-                                .on_click(cx.listener(|this, _, _, cx| this.quote_selection(cx))),
-                        )
-                        .child(
-                            item("menu-copy", "Copy")
-                                .on_click(cx.listener(|this, _, _, cx| this.copy_selection(cx))),
-                        ),
-                )
-                .into_any_element(),
-        )
+        Some(menu_overlay(
+            at,
+            vec![
+                MenuEntry::new("menu-quote", "Quote in chat", true, Self::quote_selection),
+                MenuEntry::new("menu-copy", "Copy", true, Self::copy_selection),
+            ],
+            cx,
+        ))
     }
 
     /// One row per waiting quote under the input, each with a remove button.
