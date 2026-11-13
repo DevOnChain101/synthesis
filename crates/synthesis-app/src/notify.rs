@@ -34,6 +34,8 @@ const MAX_SENT: usize = 50;
 const MAX_ENDED: usize = 50;
 /// Commands running at once; the rest wait for a slot (so a burst is not a fork bomb).
 const MAX_CONCURRENT: usize = 4;
+/// Longest `flush` waits for all notifications together.
+const DRAIN_WAIT: Duration = Duration::from_secs(10);
 const MAX_REASON: usize = 200;
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
 const MAX_TIMEOUT_SECS: u64 = 60;
@@ -275,7 +277,15 @@ impl Notifier {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         let policy = policy.map(|mut p| {
-            if cfg.network {
+            // under `--network hosts` the commands' only way out is the run's proxy: the notifier
+            // keeps it (its host must be on the allow list); `network: true` never widens that
+            if cfg.network
+                && matches!(
+                    p.network,
+                    synthesis_sandbox::NetworkPolicy::Deny
+                        | synthesis_sandbox::NetworkPolicy::Loopback
+                )
+            {
                 p.network = synthesis_sandbox::NetworkPolicy::Allow;
             }
             p
@@ -390,8 +400,18 @@ impl Notifier {
     pub fn flush(&self) {
         let hs: Vec<_> =
             std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
+        // one deadline for all of them (queued commands wait for a slot): what is still running
+        // then is left behind, so shutdown never waits longer than this
+        let deadline = std::time::Instant::now() + DRAIN_WAIT;
         for h in hs {
-            let _ = h.join();
+            while !h.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if h.is_finished() {
+                let _ = h.join();
+            } else {
+                eprintln!("synt: warning: a notify command is still running; not waiting longer");
+            }
         }
     }
 

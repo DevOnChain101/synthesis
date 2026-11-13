@@ -758,6 +758,31 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         frame: Option<String>,
     },
+    /// The egress proxy opened a tunnel for a sandboxed command (sent at the 200 response).
+    /// `ip` is the validated address that was dialled.
+    #[serde(rename = "egress.allowed")]
+    EgressAllowed { host: String, port: u16, ip: String },
+    /// A tunnel opened by `egress.allowed` ended (also when the run is stopped); `up`/`down` are
+    /// bytes client -> server and back, `ms` the lifetime.
+    #[serde(rename = "egress.closed")]
+    EgressClosed {
+        host: String,
+        port: u16,
+        up: u64,
+        down: u64,
+        ms: u64,
+    },
+    /// Flood control: `count` egress events were not sent in the last window.
+    #[serde(rename = "egress.suppressed")]
+    EgressSuppressed { count: u64 },
+    /// The egress proxy refused a connection. `reason`: `unlisted`, `private`, `resolve`,
+    /// `bad_request`, `auth` or `limit`. Rate-limited; never carries the proxy credential.
+    #[serde(rename = "egress.denied")]
+    EgressDenied {
+        host: String,
+        port: u16,
+        reason: String,
+    },
     #[serde(rename = "notice")]
     Notice { level: String, text: String },
 }

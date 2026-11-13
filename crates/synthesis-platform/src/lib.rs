@@ -1,5 +1,7 @@
 //! Cross-platform helpers for pitfalls hit in the Node CLI.
 
+pub mod net;
+
 use std::path::{Path, PathBuf};
 
 /// Absolute path of a Windows system tool under `System32` (avoids PATH hijacking).

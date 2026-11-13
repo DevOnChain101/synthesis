@@ -551,6 +551,24 @@ mod tests {
                 h: 720,
                 bytes: 1234,
             },
+            Event::EgressAllowed {
+                host: s("example.com"),
+                port: 443,
+                ip: s("93.184.216.34"),
+            },
+            Event::EgressClosed {
+                host: s("example.com"),
+                port: 443,
+                up: 10,
+                down: 20,
+                ms: 5,
+            },
+            Event::EgressSuppressed { count: 7 },
+            Event::EgressDenied {
+                host: s("evil.test"),
+                port: 443,
+                reason: s("unlisted"),
+            },
             Event::BrowserAction {
                 action: s("click"),
                 x: Some(640),

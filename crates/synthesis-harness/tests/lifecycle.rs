@@ -306,6 +306,64 @@ async fn a_low_cap_on_a_dear_model_clamps_the_output_limit() {
     assert!((4096..32_000).contains(&sent), "max_tokens sent: {sent}");
 }
 
+fn clamped_opts(p: &Arc<Probe>) -> Opts {
+    let mut o = probe_opts(p);
+    o.budget = Budget {
+        max_cost_usd: Some(1.0),
+        ..Budget::default()
+    };
+    o.config = |c| {
+        c.pricing = Some(Pricing {
+            input_per_mtok: 15.0,
+            output_per_mtok: 75.0,
+            ..Pricing::default()
+        });
+        c.max_output_tokens = 32_000;
+    };
+    o
+}
+
+/// An answer cut at the (clamped) output limit is not presented as a finished one.
+#[tokio::test]
+async fn a_final_answer_cut_at_the_output_limit_is_marked_and_noticed() {
+    let p = Probe::new("Probe", SideEffectClass::Read, 0, "r");
+    let mut rig = Rig::new(clamped_opts(&p), vec![Turn::cut_text("the report begins")]);
+    let out = rig.run("x").await;
+    assert!(
+        out.final_text.contains("[answer cut at the output limit]"),
+        "{}",
+        out.final_text
+    );
+    assert!(out.final_text.starts_with("the report begins"));
+    let notes = rig.find(|e| match e {
+        synthesis_events::Event::Notice { text, .. }
+            if text.contains("cut at the output limit") =>
+        {
+            Some(text.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(notes.len(), 1, "{notes:?}");
+}
+
+/// Tool calls that keep being cut off under a lowered limit end the task with a clear reason.
+#[tokio::test]
+async fn repeated_cut_tool_calls_under_a_clamp_end_the_task() {
+    let p = Probe::new("Probe", SideEffectClass::Read, 0, "r");
+    let turns: Vec<Turn> = (0..5)
+        .map(|i| Turn::truncated_tool(&format!("c{i}"), "Probe", "{\"x\": \"par"))
+        .collect();
+    let mut rig = Rig::new(clamped_opts(&p), turns);
+    let out = rig.run("x").await;
+    assert_eq!(
+        out.reason,
+        "budget_exceeded:max_tokens_clamp",
+        "{}",
+        reason_of(&out)
+    );
+    assert_eq!(rig.requests().len(), 3);
+}
+
 /// A model without a price never borrows the run's: under a cap the call is refused.
 #[tokio::test]
 async fn a_model_without_a_price_is_refused_under_a_cap() {

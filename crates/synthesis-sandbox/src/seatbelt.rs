@@ -199,6 +199,10 @@ pub fn seatbelt_profile(
         s += "(allow network* (remote ip \"localhost:*\"))\n\
               (allow network-bind network-inbound (local ip \"localhost:*\"))\n";
     }
+    if let NetworkPolicy::Proxied(EgressEndpoint::Tcp { port, .. }) = &policy.network {
+        // After the deny (last match wins). Only the rendered integer reaches the profile.
+        s += &format!("(allow network-outbound (remote ip \"localhost:{port}\"))\n");
+    }
     if let (false, Some(e)) = (policy.allow_exec, exec_literal) {
         params.push(("EXEC".into(), canon(e)));
     }
@@ -219,14 +223,17 @@ impl SandboxBackend for SeatbeltBackend {
                 "sandbox-exec is deprecated by Apple; best-effort, may break on any macOS update".into(),
                 "kernel-enforced, inherited by all descendants; file metadata (stat) stays readable".into(),
                 "network Loopback exposes the HOST loopback (databases, Redis, docker TCP) to sandboxed code; a 0.0.0.0 listener is LAN-reachable; AF_UNIX stays denied".into(),
-                "per-host network allowlists unsupported; allow_exec=false permits only the initial program (macOS /bin/sh re-execs bash, so it cannot run)".into(),
+                "network Proxied: only outbound connects to the egress proxy's loopback port are allowed (the proxy enforces the host list); allow_exec=false permits only the initial program (macOS /bin/sh re-execs bash, so it cannot run)".into(),
                 "tree kill is the terminal runtime's job (process group)".into(),
             ],
         }
     }
 
     fn network_guarantee(&self, mode: &NetworkPolicy) -> Guarantee {
-        network_guarantee_for(mode, self.capabilities().network, Guarantee::Weak)
+        match mode {
+            NetworkPolicy::Proxied(EgressEndpoint::Tcp { .. }) => Guarantee::Weak,
+            _ => network_guarantee_for(mode, self.capabilities().network, Guarantee::Weak),
+        }
     }
 
     fn wrap(
@@ -235,6 +242,14 @@ impl SandboxBackend for SeatbeltBackend {
         c: &SandboxedCommand,
     ) -> Result<SandboxedCommand, SandboxError> {
         validate(policy)?;
+        if matches!(
+            policy.network,
+            NetworkPolicy::Proxied(EgressEndpoint::Unix(_))
+        ) {
+            return Err(SandboxError::Unsupported(
+                "Seatbelt reaches the egress proxy over loopback TCP, not a unix socket".into(),
+            ));
+        }
         let exec = if policy.allow_exec {
             None
         } else {
@@ -377,6 +392,32 @@ mod tests {
         assert!(s.contains("(allow network*)") && !s.contains("(deny network*)"));
         assert!(!s.contains("process-fork"));
         assert!(params.iter().any(|(k, _)| k == "EXEC"));
+    }
+
+    #[test]
+    fn proxied_allows_only_the_proxy_port_after_the_deny() {
+        let p = SandboxPolicy {
+            network: NetworkPolicy::Proxied(EgressEndpoint::Tcp {
+                port: 5150,
+                token: "zz9\") (allow network*)".into(),
+            }),
+            ..Default::default()
+        };
+        let s = seatbelt_profile(&p, None).0;
+        let deny = s.find("(deny network*)").unwrap();
+        let allow = s
+            .find("(allow network-outbound (remote ip \"localhost:5150\"))")
+            .unwrap();
+        assert!(deny < allow && !s.contains("(allow network*)") && !s.contains("zz9"));
+        assert_eq!(
+            SeatbeltBackend.network_guarantee(&p.network),
+            Guarantee::Weak
+        );
+        assert_eq!(
+            SeatbeltBackend
+                .network_guarantee(&NetworkPolicy::Proxied(EgressEndpoint::Unix("/a".into()))),
+            Guarantee::None
+        );
     }
 
     #[test]

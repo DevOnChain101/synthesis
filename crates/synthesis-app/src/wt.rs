@@ -23,8 +23,7 @@ pub fn create(
     artifact_root: PathBuf,
     include_uncommitted: bool,
 ) -> Result<(Worktree, WorkspaceContext), String> {
-    let mut opts = WorktreeOptions::new(synthesis_home.to_path_buf());
-    opts.worktrees_dir = Some(synthesis_home.join("worktrees"));
+    let opts = options(synthesis_home).map_err(|e| format!("--worktree: {e}"))?;
     let mgr = WorktreeManager::new(env, opts).map_err(|e| format!("--worktree: {e}"))?;
     let a = mgr
         .create(source, sid, artifact_root, include_uncommitted)
@@ -71,8 +70,7 @@ pub fn reattach(
             info.worktree.display()
         ));
     }
-    let mut opts = WorktreeOptions::new(synthesis_home.to_path_buf());
-    opts.worktrees_dir = Some(synthesis_home.join("worktrees"));
+    let opts = options(synthesis_home).map_err(|e| format!("worktree: {e}"))?;
     let mgr = WorktreeManager::new(env, opts).map_err(|e| format!("worktree: {e}"))?;
     mgr.changes(&info).map_err(|e| {
         format!("session {sid}: its worktree no longer matches what was recorded: {e}")
@@ -102,6 +100,42 @@ pub fn stat(diff: &str) -> (usize, usize, usize) {
         }
     }
     (f, a, r)
+}
+
+/// `synt.worktree.gitPath` (absolute path) from the USER file, then the MANAGED one: the git the
+/// worktree code runs, for a machine whose own git is older than the submodule floor (macOS: the
+/// git of `brew install git`). Its version is checked like any other. A project file never sets it.
+pub fn git_path(home: &Path, managed: &Path) -> Result<Option<PathBuf>, String> {
+    let mut out = None;
+    for (path, what) in [
+        (home.join("settings.json"), "user settings"),
+        (managed.to_path_buf(), "managed settings"),
+    ] {
+        let Some(doc) = synthesis_settings::read_json(&path, what)? else {
+            continue;
+        };
+        if let Some(v) = doc
+            .get("synt")
+            .and_then(|s| s.get("worktree"))
+            .and_then(|w| w.get("gitPath"))
+        {
+            let p = v
+                .as_str()
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .ok_or_else(|| format!("{what}: synt.worktree.gitPath must be an absolute path"))?;
+            out = Some(p);
+        }
+    }
+    Ok(out)
+}
+
+/// Options of the worktree manager: the state dir, the worktrees dir and the configured git.
+fn options(synthesis_home: &Path) -> Result<WorktreeOptions, String> {
+    let mut opts = WorktreeOptions::new(synthesis_home.to_path_buf());
+    opts.worktrees_dir = Some(synthesis_home.join("worktrees"));
+    opts.git_path = git_path(synthesis_home, &synthesis_settings::managed_settings_path())?;
+    Ok(opts)
 }
 
 /// `synt.worktree.submodules` (bool) from the USER file, then the MANAGED one (managed wins). A
@@ -198,6 +232,32 @@ impl Worktree {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_git_path_setting_is_absolute_and_user_or_managed() {
+        let d = tempfile::tempdir().unwrap();
+        let (home, managed) = (d.path(), d.path().join("m.json"));
+        assert_eq!(super::git_path(home, &managed), Ok(None));
+        let abs = if cfg!(windows) {
+            "C:\\\\git\\\\git.exe"
+        } else {
+            "/opt/homebrew/bin/git"
+        };
+        std::fs::write(
+            home.join("settings.json"),
+            format!(r#"{{"synt":{{"worktree":{{"gitPath":"{abs}"}}}}}}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            super::git_path(home, &managed),
+            Ok(Some(std::path::PathBuf::from(abs.replace("\\\\", "\\"))))
+        );
+        std::fs::write(&managed, r#"{"synt":{"worktree":{"gitPath":"git"}}}"#).unwrap();
+        assert!(
+            super::git_path(home, &managed).is_err(),
+            "relative path refused"
+        );
+    }
+
     #[test]
     fn submodules_setting_is_user_or_managed_and_defaults_off() {
         let d = tempfile::tempdir().unwrap();

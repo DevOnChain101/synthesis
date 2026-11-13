@@ -26,3 +26,6 @@ seccompiler = { version = "0.5.0", default-features = false }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# `--network hosts` end-to-end tests run the real proxy
+synthesis-egress = { path = "../synthesis-egress" }
+tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread"] }

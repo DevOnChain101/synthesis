@@ -84,14 +84,20 @@ pub enum NetworkArg {
     Loopback,
     /// Unrestricted network (loud warning).
     Allow,
+    /// Only the hosts of `--allow-host` / `synt.sandbox.network.allowedHosts`, through a per-run
+    /// proxy (Linux bubblewrap, macOS Seatbelt; refused elsewhere). Limits destinations, not what
+    /// is sent to an allowed host.
+    Hosts,
 }
 
 impl NetworkArg {
-    pub fn policy(self) -> NetworkPolicy {
+    /// `None` for `Hosts`: its policy needs the running proxy's endpoint.
+    pub fn policy(self) -> Option<NetworkPolicy> {
         match self {
-            Self::Deny => NetworkPolicy::Deny,
-            Self::Loopback => NetworkPolicy::Loopback,
-            Self::Allow => NetworkPolicy::Allow,
+            Self::Deny => Some(NetworkPolicy::Deny),
+            Self::Loopback => Some(NetworkPolicy::Loopback),
+            Self::Allow => Some(NetworkPolicy::Allow),
+            Self::Hosts => None,
         }
     }
 }
@@ -128,6 +134,7 @@ pub fn sandbox_preflight(
             backend.name(),
             match policy.network {
                 NetworkPolicy::Loopback => "loopback",
+                NetworkPolicy::Proxied(_) => "hosts",
                 _ => "deny",
             }
         ));
@@ -218,9 +225,14 @@ pub struct Common {
     /// where no OS backend can confine, the default is best-effort with a notice at start.
     #[arg(long, value_enum)]
     pub sandbox: Option<SandboxArg>,
-    /// Network for tool commands: deny (default), loopback, or allow (loud warning).
+    /// Network for tool commands: deny (default), loopback, hosts (only --allow-host, through a
+    /// proxy), or allow (loud warning).
     #[arg(long, value_enum, default_value = "deny")]
     pub network: NetworkArg,
+    /// Host commands may reach with `--network hosts`: `host` (port 443), `host:port` or
+    /// `*.suffix`; a private address only as an exact `ip:port` (repeatable).
+    #[arg(long, value_name = "HOST")]
+    pub allow_host: Vec<String>,
     /// Extra read-only path for commands, e.g. a toolchain dir. Must exist; $HOME, filesystem
     /// roots and credential-store directories (or their ancestors) are refused (repeatable).
     #[arg(long, value_name = "PATH")]
@@ -479,6 +491,8 @@ pub struct Prepared {
     pub notifier: Option<Arc<crate::notify::Notifier>>,
     /// Cancelled when the session ends (`Live::close`): stops the `synt stop` watcher.
     pub stop_end: CancellationToken,
+    /// The `--network hosts` proxy; the commands' only way out for as long as this lives.
+    pub egress: Option<crate::egress::EgressRun>,
 }
 
 /// A session of this directory: it ran exactly here, or in the worktree this exact directory
@@ -860,8 +874,13 @@ pub fn check_governance(c: &Common, limits: &Limits, governed: bool) -> Result<(
         if matches!(c.sandbox, Some(SandboxArg::Off | SandboxArg::BestEffort)) {
             return Err("--unattended needs --sandbox enforce (the default); it cannot run commands unconfined".into());
         }
-        if !matches!(c.network, NetworkArg::Deny) {
-            return Err("--unattended needs --network deny (the default)".into());
+        if !matches!(c.network, NetworkArg::Deny | NetworkArg::Hosts) {
+            return Err("--unattended needs --network deny (the default) or hosts".into());
+        }
+        // The list of an unattended run is set beforehand by the person (user settings) or the
+        // organisation (managed settings), never on a command line a script or agent may build.
+        if !c.allow_host.is_empty() {
+            return Err("--unattended refuses --allow-host: set synt.sandbox.network.allowedHosts in your user or managed settings and pass --network hosts".into());
         }
     }
     Ok(())
@@ -1373,7 +1392,29 @@ pub fn prepare(
     let ws = Arc::new(ws);
 
     let sandbox_mode = c.sandbox_mode();
-    let net = c.network.policy();
+    if !c.allow_host.is_empty() && !matches!(c.network, NetworkArg::Hosts) {
+        return Err("--allow-host needs --network hosts".into());
+    }
+    let (net, egress) = match c.network.policy() {
+        Some(p) => (p, None),
+        None => {
+            // entries first: the most specific error wins on every OS
+            let hosts = crate::egress::effective_hosts(&c.allow_host, &settings.synthesis, env)?;
+            if sandbox_mode != SandboxMode::Enforce {
+                return Err("--network hosts needs --sandbox enforce: the proxy is the only way out of the sandbox, so without it nothing limits the hosts".into());
+            }
+            let (run, ep) = crate::egress::start(
+                hosts,
+                synthesis_sandbox::detect().name(),
+                failover_slot.clone(),
+            )?;
+            // the proxy URL carries the token: mask it in events, transcript and database
+            if let synthesis_sandbox::EgressEndpoint::Tcp { token, .. } = &ep {
+                res.secrets.push(token.clone());
+            }
+            (NetworkPolicy::Proxied(ep), Some(run))
+        }
+    };
     let hide_drives = settings.synthesis.wsl_hide_windows_drives != Some(false);
     let git_dir = worktree.as_ref().map(|w| w.info.git_dir.clone());
     let state_paths = synthesis_deny.clone();
@@ -1414,6 +1455,18 @@ pub fn prepare(
         })?;
     }
     let mut notices = sandbox_notices(sandbox_mode, c.network);
+    if let Some(e) = &egress {
+        notices.push(format!(
+            "--network hosts: commands reach only {} (through a local proxy); an allowlist limits destinations, it does not stop data sent to an allowed host that accepts uploads",
+            sanitize_for_display(&e.hosts.join(", "))
+        ));
+        if !e.private_ips.is_empty() {
+            notices.push(format!(
+                "--network hosts: commands can reach the private, loopback or link-local address(es) {} (named exactly in the allowed hosts)",
+                sanitize_for_display(&e.private_ips.join(", "))
+            ));
+        }
+    }
     notices.extend(sandbox_default_notice(c));
     if ws.root != ws.cwd {
         notices.push(format!(
@@ -2296,6 +2349,7 @@ pub fn prepare(
         stale_model,
         notifier,
         stop_end,
+        egress,
     })
 }
 
@@ -3122,6 +3176,24 @@ mod tests {
         assert!(
             check_governance(&u, &free, true).is_err(),
             "no cap is not allowed"
+        );
+        // strictly tighter than allow: hosts through the proxy are accepted, but the list must come
+        // from settings, not from --allow-host
+        let h = W::parse_from(["x", "--unattended", "--network", "hosts"]).c;
+        assert!(check_governance(&h, &capped, true).is_ok());
+        let h = W::parse_from([
+            "x",
+            "--unattended",
+            "--network",
+            "hosts",
+            "--allow-host",
+            "a.test",
+        ])
+        .c;
+        assert!(
+            check_governance(&h, &capped, true)
+                .unwrap_err()
+                .contains("--allow-host")
         );
         for flags in [
             ["--sandbox", "off"],

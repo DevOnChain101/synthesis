@@ -19,6 +19,9 @@ pub struct WorktreeOptions {
     pub worktrees_dir: Option<PathBuf>,
     /// Read the user's global git config (off by default; it can carry filters and aliases).
     pub allow_global_config: bool,
+    /// A git to use instead of the one on PATH (absolute path): how a machine whose own git is
+    /// older than the submodule floor points at a patched one.
+    pub git_path: Option<PathBuf>,
     /// Author / committer for commits we create.
     pub identity: (String, String),
 }
@@ -29,6 +32,7 @@ impl WorktreeOptions {
             state_dir,
             worktrees_dir: None,
             allow_global_config: false,
+            git_path: None,
             identity: ("Synthesis Agent".into(), "synthesis@localhost".into()),
         }
     }
@@ -138,7 +142,12 @@ fn nul_split(b: &[u8]) -> impl Iterator<Item = String> + '_ {
 impl WorktreeManager {
     pub fn new(env: &Env, opts: WorktreeOptions) -> Result<Self> {
         Ok(Self {
-            git: Git::new(env, &opts.state_dir, opts.allow_global_config)?,
+            git: Git::new(
+                env,
+                &opts.state_dir,
+                opts.allow_global_config,
+                opts.git_path.as_deref(),
+            )?,
             opts,
         })
     }
@@ -761,6 +770,10 @@ pub struct SubmodulePolicy {
     /// Tests only: a local fixture repository needs the `file` transport.
     #[cfg(test)]
     allow_file: bool,
+    /// Tests only: the machine's git may be older than the floor; the floor itself is tested on
+    /// version numbers.
+    #[cfg(test)]
+    skip_git_floor: bool,
 }
 
 /// Most submodules (all levels together) and deepest nesting one init will clone.
@@ -832,6 +845,7 @@ fn host_ok(h: &str) -> bool {
 /// policy's job, see docs/UNATTENDED.md.
 fn host_public(h: &str) -> bool {
     let h = h.to_ascii_lowercase();
+    let h = h.trim_end_matches('.'); // `localhost.` is the same name
     if h == "localhost"
         || h.ends_with(".localhost")
         || h.ends_with(".local")
@@ -839,7 +853,13 @@ fn host_public(h: &str) -> bool {
     {
         return false;
     }
-    let numeric = h.bytes().all(|b| b.is_ascii_digit() || b == b'.') || h.contains("0x");
+    // dotted labels that are all decimal or `0x` hex numbers: an address in disguise
+    let numeric = h.split('.').all(|l| {
+        !l.is_empty()
+            && (l.bytes().all(|b| b.is_ascii_digit())
+                || l.strip_prefix("0x")
+                    .is_some_and(|x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_hexdigit())))
+    });
     if !numeric {
         return true;
     }
@@ -868,6 +888,13 @@ fn user_ok(u: &str) -> bool {
 }
 
 impl SubmodulePolicy {
+    fn floor_skipped(self) -> bool {
+        #[cfg(test)]
+        return self.skip_git_floor;
+        #[cfg(not(test))]
+        false
+    }
+
     fn file_allowed(self) -> bool {
         #[cfg(test)]
         return self.allow_file;
@@ -1026,9 +1053,9 @@ impl WorktreeManager {
         }
         let v =
             String::from_utf8_lossy(&self.git.out(&info.worktree, &["--version"])?).into_owned();
-        if !policy.file_allowed() && !parse_git_version(&v).is_some_and(git_version_ok) {
+        if !policy.floor_skipped() && !parse_git_version(&v).is_some_and(git_version_ok) {
             return Err(Error::Refused(format!(
-                "a git with the submodule security fixes is needed (2.50.1 or later, or 2.49.1, 2.48.2, 2.47.3, 2.46.4, 2.45.4, 2.44.4, 2.43.7); found: {}",
+                "a git with the submodule security fixes is needed (2.50.1 or later, or 2.49.1, 2.48.2, 2.47.3, 2.46.4, 2.45.4, 2.44.4, 2.43.7); found: {}. On macOS run `brew install git` (Apple's git is older) and set synt.worktree.gitPath to its absolute path (for example /opt/homebrew/bin/git) in your user settings",
                 v.trim()
             )));
         }
@@ -1225,6 +1252,8 @@ mod submodule_tests {
             "https://h.example/r.git",
             "https://h.example:8443/r.git",
             "https://93.184.216.34/r.git",
+            "https://git0x.io/r.git",
+            "https://a0x.example/r.git",
             "ssh://git@h/r.git",
             "ssh://h:22/r.git",
             "git@h.example:o/r.git",
@@ -1266,6 +1295,9 @@ mod submodule_tests {
             "ssh://169.254.169.254/r.git",
             "git@192.168.1.1:o/r.git",
             "https://localhost/r.git",
+            "https://localhost./r.git",
+            "https://x.local./r.git",
+            "https://x.internal./r.git",
             "https://2130706433/r.git",
             "https://0x7f.1/r.git",
             "https://100.64.0.1/r.git",
@@ -1274,11 +1306,7 @@ mod submodule_tests {
             assert!(p.check(bad).is_err(), "{bad}");
         }
         // the test-only policy is the only way to get a file URL through
-        assert!(
-            SubmodulePolicy { allow_file: true }
-                .check("/abs/path")
-                .is_ok()
-        );
+        assert!(test_policy().check("/abs/path").is_ok());
     }
 
     #[test]
@@ -1362,6 +1390,13 @@ mod submodule_tests {
         (sub, repo)
     }
 
+    fn test_policy() -> SubmodulePolicy {
+        SubmodulePolicy {
+            allow_file: true,
+            skip_git_floor: true,
+        }
+    }
+
     fn manager(base: &Path) -> WorktreeManager {
         WorktreeManager::new(
             &Env::from_process(),
@@ -1398,9 +1433,7 @@ mod submodule_tests {
             .unwrap_err();
         assert!(e.to_string().contains("nothing was cloned"), "{e}");
         assert!(!wt_file.exists());
-        let names = mgr
-            .init_submodules(&info, SubmodulePolicy { allow_file: true })
-            .unwrap();
+        let names = mgr.init_submodules(&info, test_policy()).unwrap();
         assert_eq!(names, ["vendor/sub"]);
         assert_eq!(fs::read_to_string(wt_file).unwrap(), "lib\n");
         // nothing was written to the shared config of the repository
@@ -1431,7 +1464,7 @@ mod submodule_tests {
             Ok(a) => {
                 let info = a.git.unwrap();
                 let e = mgr
-                    .init_submodules(&info, SubmodulePolicy { allow_file: true })
+                    .init_submodules(&info, test_policy())
                     .unwrap_err()
                     .to_string();
                 assert!(e.contains("update runs a command"), "{e}");
@@ -1549,9 +1582,7 @@ mod submodule_tests {
             .unwrap()
             .git
             .unwrap();
-        let names = mgr
-            .init_submodules(&info, SubmodulePolicy { allow_file: true })
-            .unwrap();
+        let names = mgr.init_submodules(&info, test_policy()).unwrap();
         assert_eq!(names, ["vendor/sub", "vendor/sub/deep"]);
         assert_eq!(
             fs::read_to_string(info.worktree.join("vendor/sub/deep/f.txt")).unwrap(),
@@ -1591,8 +1622,7 @@ mod submodule_tests {
             .unwrap()
             .git
             .unwrap();
-        mgr.init_submodules(&info, SubmodulePolicy { allow_file: true })
-            .unwrap();
+        mgr.init_submodules(&info, test_policy()).unwrap();
         let subdir = info.worktree.join("vendor/sub");
         // the agent's move: a gitdir of its own, a filter in it, an attribute that selects it
         let gitfile = fs::read_to_string(subdir.join(".git")).unwrap();
@@ -1627,6 +1657,51 @@ mod submodule_tests {
         assert!(
             !marker.exists(),
             "a filter of a submodule's git directory ran on the host"
+        );
+    }
+
+    /// The agent can also create a repository of its own inside the worktree (no submodule at all)
+    /// with a filter in its config: the host's `add -A`, diff and commit must not run it.
+    #[cfg(unix)]
+    #[test]
+    fn a_filter_in_an_untracked_nested_repo_never_runs_on_the_host() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let base = synthesis_core::canonicalize(tmp.path()).unwrap();
+        let (_sub, repo) = repo_with_submodule(&base, None);
+        let mgr = manager(&base);
+        let info = mgr
+            .create(&repo, "s6", base.join("art"), false)
+            .unwrap()
+            .git
+            .unwrap();
+        let nested = info.worktree.join("agent-repo");
+        fs::create_dir_all(&nested).unwrap();
+        git(&nested, &["init", "-q"]);
+        fs::write(nested.join("f.txt"), "one\n").unwrap();
+        git(&nested, &["add", "."]);
+        git(&nested, &["commit", "-qm", "x"]);
+        let marker = base.join("PWNED2");
+        let mut cfg = fs::read_to_string(nested.join(".git/config")).unwrap();
+        cfg.push_str(&format!(
+            "[filter \"x\"]\n\tclean = touch {}; cat\n\tsmudge = cat\n\trequired = false\n",
+            marker.display()
+        ));
+        fs::write(nested.join(".git/config"), cfg).unwrap();
+        fs::write(nested.join(".gitattributes"), "* filter=x\n").unwrap();
+        fs::write(nested.join("f.txt"), "TWO\n").unwrap();
+        let _ = mgr.changes(&info);
+        let _ = mgr.diff(&info);
+        let _ = mgr.commit_all(&info, "agent work");
+        assert!(
+            !marker.exists(),
+            "a filter of a nested repository ran on the host"
         );
     }
 }

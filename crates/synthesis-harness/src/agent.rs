@@ -86,8 +86,33 @@ fn block_value(b: &Block, tools: &crate::ToolBox) -> Value {
     v
 }
 
+/// The worst-case USD a call holds in the task counters until its response is accounted. Dropping it
+/// (an early return, an aborted sub-agent future) gives the money back, so nothing leaks.
+struct Reservation<'a> {
+    task: &'a TaskRun,
+    amount: f64,
+}
+
+impl Reservation<'_> {
+    fn release(&mut self) {
+        if self.amount > 0.0 {
+            let mut c = lock(&self.task.counters);
+            c.reserved = (c.reserved - self.amount).max(0.0);
+            self.amount = 0.0;
+        }
+    }
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 /// Smallest output limit a capped call is lowered to; below it the call is refused.
 const MIN_OUTPUT: u64 = 4096;
+/// Consecutive batches of only cut-off tool calls, under a lowered output limit, that end the task.
+const MAX_CUT_STREAK: u32 = 3;
 
 /// `(output limit, USD to reserve)` for a call of `prompt` tokens that wants `want` output tokens
 /// when `left` USD of the cap remain (after the calls in flight); `None` when even the floor does
@@ -198,17 +223,17 @@ impl Harness {
     /// what the remainder affords, but never below [`MIN_OUTPUT`] (or the request's own limit if
     /// that is smaller); only below that floor is the call refused. A model with no price is
     /// refused. The worst case of the call that goes ahead is RESERVED in the task counters until
-    /// the response is accounted, so concurrent sub-agents see each other. `Ok` is the reserved USD.
-    fn estimate_stop(
+    /// the response is accounted, so concurrent sub-agents see each other. `Ok` is the reservation guard.
+    fn estimate_stop<'a>(
         &self,
-        task: &TaskRun,
+        task: &'a TaskRun,
         agent: &AgentCtx,
         req: &mut Request,
         st: &mut AgentState,
         raw: u64,
-    ) -> Result<f64, &'static str> {
+    ) -> Result<Reservation<'a>, &'static str> {
         let Some(cap) = task.budget.max_cost_usd else {
-            return Ok(0.0);
+            return Ok(Reservation { task, amount: 0.0 });
         };
         let Some(price) = self.price_of(agent) else {
             let spent = lock(&task.counters).cost;
@@ -221,44 +246,51 @@ impl Harness {
         } else {
             est + est / 5
         };
-        let mut c = lock(&task.counters);
-        let (spent, left) = (c.cost, cap - c.cost - c.reserved);
-        let want = u64::from(req.max_tokens);
-        let Some((out, reserve)) = plan_call(&price, prompt, want, left) else {
-            let worst = price.worst_case(prompt, want.min(MIN_OUTPUT));
-            drop(c);
-            self.mark_budget(
-                task,
-                agent,
-                "max_cost_usd_estimate",
-                cap,
-                spent,
-                Some(worst),
-            );
-            return Err("max_cost_usd_estimate");
-        };
-        if out < want {
-            req.max_tokens = out as u32;
-            if !st.clamp_note {
-                st.clamp_note = true;
-                drop(c);
-                self.notice(
-                    task,
-                    "warn",
-                    format!("output limit lowered to {out} tokens to stay within the cost cap"),
-                );
-                c = lock(&task.counters);
-            }
-        }
-        c.reserved += reserve;
-        Ok(reserve)
-    }
-
-    /// Gives back what [`Self::estimate_stop`] reserved.
-    fn release(&self, task: &TaskRun, reserve: f64) {
-        if reserve > 0.0 {
+        // decide and reserve in ONE critical section: what is left, the plan and the reservation
+        // cannot be separated by a sibling agent
+        let planned = {
             let mut c = lock(&task.counters);
-            c.reserved = (c.reserved - reserve).max(0.0);
+            let (spent, left) = (c.cost, cap - c.cost - c.reserved);
+            let want = u64::from(req.max_tokens);
+            match plan_call(&price, prompt, want, left) {
+                Some((out, reserve)) => {
+                    c.reserved += reserve;
+                    Ok((want, out, reserve))
+                }
+                None => Err((spent, price.worst_case(prompt, want.min(MIN_OUTPUT)))),
+            }
+        };
+        match planned {
+            Err((spent, worst)) => {
+                self.mark_budget(
+                    task,
+                    agent,
+                    "max_cost_usd_estimate",
+                    cap,
+                    spent,
+                    Some(worst),
+                );
+                Err("max_cost_usd_estimate")
+            }
+            Ok((want, out, reserve)) => {
+                if out < want {
+                    req.max_tokens = out as u32;
+                    if !st.clamp_note {
+                        st.clamp_note = true;
+                        self.notice(
+                            task,
+                            "warn",
+                            format!(
+                                "output limit lowered to {out} tokens to stay within the cost cap"
+                            ),
+                        );
+                    }
+                }
+                Ok(Reservation {
+                    task,
+                    amount: reserve,
+                })
+            }
         }
     }
 
@@ -396,10 +428,8 @@ impl Harness {
         task: &TaskRun,
         agent: &AgentCtx,
         u: &synthesis_providers::Usage,
-        reserve: f64,
     ) -> synthesis_events::Usage {
         let mut c = lock(&task.counters);
-        c.reserved = (c.reserved - reserve).max(0.0);
         c.turns += 1;
         let (i, o) = (u.input_tokens.unwrap_or(0), u.output_tokens.unwrap_or(0));
         c.input += i;
@@ -723,6 +753,7 @@ impl Harness {
     ) -> AgentEnd {
         let mut iteration = 0i64;
         let mut recoveries = 0u32;
+        let mut cut_streak = 0u32;
         loop {
             if agent.cancel.is_cancelled() {
                 return AgentEnd::Cancelled;
@@ -804,7 +835,7 @@ impl Harness {
                 };
             }
             let raw = st.fixed_raw + self.messages_raw(st);
-            let reserve = match self.estimate_stop(task, agent, &mut req, st, raw) {
+            let mut reservation = match self.estimate_stop(task, agent, &mut req, st, raw) {
                 Ok(r) => r,
                 Err(kind) => return AgentEnd::Budget(kind),
             };
@@ -824,7 +855,7 @@ impl Harness {
 
             let streamed = self.stream_once(task, agent, &turn, &req).await;
             if streamed.is_err() {
-                self.release(task, reserve);
+                reservation.release();
             }
             let streamed = match streamed {
                 Ok(s) => s,
@@ -896,7 +927,8 @@ impl Harness {
             recoveries = 0;
 
             let Streamed { mut msg, unstopped } = streamed;
-            let usage = self.account(task, agent, &msg.usage, reserve);
+            let usage = self.account(task, agent, &msg.usage);
+            reservation.release();
             self.report_usage(task, agent, st, raw, &msg.usage);
             let has_tools = msg
                 .content
@@ -941,6 +973,16 @@ impl Harness {
             // Fold into history and collect the calls. A call without valid arguments stays in
             // history with `{}` (providers reject a tool_use without input) and gets an error result.
             let max_tokens_hit = msg.stop_reason == Some(StopReason::MaxTokens);
+            if max_tokens_hit {
+                self.notice(
+                    task,
+                    "warn",
+                    format!(
+                        "the response was cut at the output limit ({} tokens)",
+                        req.max_tokens
+                    ),
+                );
+            }
             let mut calls = vec![];
             let mut final_text = String::new();
             for b in &mut msg.content {
@@ -988,10 +1030,19 @@ impl Harness {
                 match msg.stop_reason {
                     Some(StopReason::Refusal) => return AgentEnd::Refusal,
                     Some(StopReason::PauseTurn) => continue,
-                    _ => return AgentEnd::Finished(final_text),
+                    _ => {
+                        // a cut answer is not presented as a finished one
+                        if max_tokens_hit {
+                            final_text.push_str("\n\n[answer cut at the output limit]");
+                        }
+                        return AgentEnd::Finished(final_text);
+                    }
                 }
             }
 
+            let all_cut = calls
+                .iter()
+                .all(|c| matches!(c.problem, Some(Problem::Truncated)));
             let outcome = self.run_batch(task, agent, &turn, calls).await;
             st.messages.push(Message {
                 role: Role::User,
@@ -1002,6 +1053,19 @@ impl Harness {
             }
             if let Some(kind) = *lock(&task.hit) {
                 return AgentEnd::Budget(kind);
+            }
+            // calls that keep being cut off under a lowered output limit cannot succeed
+            cut_streak = if all_cut { cut_streak + 1 } else { 0 };
+            if cut_streak >= MAX_CUT_STREAK && st.clamp_note {
+                self.mark_budget(
+                    task,
+                    agent,
+                    "max_tokens_clamp",
+                    f64::from(req.max_tokens),
+                    0.0,
+                    None,
+                );
+                return AgentEnd::Budget("max_tokens_clamp");
             }
             st.recent.push_back(outcome.fingerprint);
             let window = self.config.no_progress_window.max(1);

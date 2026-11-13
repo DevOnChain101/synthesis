@@ -493,12 +493,24 @@ impl TuiView {
             ended |= lu.live.on_msg(m, now);
         }
         if stopped && let Some(e) = lu.live.engine.take() {
-            // `synt stop` cancelled the session: end it for real (hooks, store, runtime), off the UI thread
-            std::thread::spawn(move || {
-                if let Some(m) = engine::close_shared(e) {
-                    eprintln!("synthesis-desktop: {m}");
-                }
-            });
+            // `synt stop` cancelled the session: end it for real (hooks, store, runtime) off the UI
+            // thread, and say what the close found (or that it did not end cleanly)
+            let job = cx.background_spawn(async move { engine::close_shared(e) });
+            cx.spawn(async move |this, cx| {
+                let found = job.await;
+                this.update(cx, |t, cx| {
+                    if let Some(lu) = &mut t.live {
+                        // `close` returns the worktree report; it has no failure value
+                        if let Some(m) = found {
+                            lu.live.note(m, false);
+                        }
+                        lu.dirty = true;
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
         }
         lu.dirty = true;
         if ended {
