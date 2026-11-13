@@ -22,6 +22,9 @@ use crate::run::{Prepared, finish_store};
 /// The refusal of a second task while one runs (also what a remote engine says).
 pub const ALREADY_RUNNING: &str = "a task is already running";
 
+/// The token of the running task: shared, so another thread (the protocol's reader) can cancel it.
+pub type CancelSlot = Arc<Mutex<Option<CancellationToken>>>;
+
 pub fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -133,7 +136,7 @@ pub struct Live {
     pub last: Arc<Mutex<Option<TaskOutcome>>>,
     /// The session-wide token (`synt stop` cancels it); every task's token is its child.
     root_cancel: CancellationToken,
-    cancel: Mutex<Option<CancellationToken>>,
+    cancel: CancelSlot,
 }
 
 impl Live {
@@ -235,7 +238,7 @@ impl Live {
             history: Arc::new(Mutex::new(history)),
             last: Arc::default(),
             root_cancel,
-            cancel: Mutex::new(None),
+            cancel: Arc::default(),
         };
         // a session never starts in bypassPermissions, whatever a stored session or a setting carried
         if live.mode() == Mode::BypassPermissions {
@@ -277,6 +280,10 @@ impl Live {
         if let Some(t) = lock(&self.cancel).as_ref() {
             t.cancel();
         }
+    }
+
+    pub fn cancel_slot(&self) -> CancelSlot {
+        self.cancel.clone()
     }
 
     /// Takes the session out of its slot for a task; the caller puts it back.

@@ -1232,8 +1232,16 @@ impl SettingsView {
         let mut notes = div().flex().flex_col().gap(px(4.)).px(px(14.)).py(px(10.));
         if let Some(e) = &m.trust_error {
             notes = notes.child(small(
-                format!("The trust store could not be read: {e}"),
-                t::ERROR,
+                if e == super::settings_view::model::TRUST_IN_ENGINE {
+                    e.clone()
+                } else {
+                    format!("The trust store could not be read: {e}")
+                },
+                if e == super::settings_view::model::TRUST_IN_ENGINE {
+                    t::MUTED
+                } else {
+                    t::ERROR
+                },
             ));
         }
         if m.trust_unverified > 0 {

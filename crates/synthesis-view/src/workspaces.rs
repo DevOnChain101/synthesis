@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use synthesis_config::Env;
 use synthesis_core::SessionStatus;
 use synthesis_session::{Reader, SessionRecord};
@@ -26,7 +26,7 @@ pub fn fold_dir(p: &str) -> String {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SessionRow {
     pub id: String,
     /// The stored title, else the first prompt, else `(untitled)`.
@@ -40,14 +40,14 @@ pub struct SessionRow {
 }
 
 /// Uncommitted changes of a trusted folder: `git diff --numstat` summed.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Changes {
     pub added: u64,
     pub deleted: u64,
     pub files: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceRow {
     /// The folder as stored (what `/new` opens).
     pub root: String,
@@ -68,7 +68,7 @@ impl WorkspaceRow {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceList {
     /// Newest session first; a workspace without sessions (the current one) comes last.
     pub workspaces: Vec<WorkspaceRow>,

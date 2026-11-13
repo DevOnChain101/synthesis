@@ -321,6 +321,29 @@ pub fn trust_text(root: &std::path::Path, cwd: &str) -> Vec<String> {
     v
 }
 
+/// What the Trust dialog says when the engine's sandbox does not enforce: a remembered trust is then stored but not
+/// honoured at later starts (a command that can run unconfined could have written the store).
+pub fn enforcement_paragraph(enforcing: Option<bool>) -> Option<String> {
+    (enforcing == Some(false)).then(|| {
+        "The engine's sandbox is NOT enforcing: \"Trust this folder (remember)\" and the parent grant are stored, but at later starts they will NOT be honoured (a command that can run unconfined could have written the store). Only \"Trust for this session only\" applies; the engine must run with --sandbox enforce for remembered trust.".to_string()
+    })
+}
+
+/// What `/trust revoke` says once the store answered.
+fn revoke_message(root: &str, done: Result<bool, String>) -> String {
+    match done {
+        Ok(true) => format!(
+            "revoked trust of {}: it takes effect at the next engine start (a new session, /model or a restart); this session keeps what it already loaded. A session-only trust of that folder ends too",
+            sanitize_for_display(root)
+        ),
+        Ok(false) => format!(
+            "{} was not remembered (a session-only trust of it, if any, ends)",
+            sanitize_for_display(root)
+        ),
+        Err(err) => format!("could not revoke: {err}"),
+    }
+}
+
 /// The suggestion in the shape `permission_options` reads (the CLI's `suggestion_view`).
 fn suggestion_view(s: &Suggestion) -> Value {
     use serde_json::json;
@@ -632,6 +655,8 @@ pub struct Live {
     pub trust_parent: Option<std::path::PathBuf>,
     /// The remembered root the open revoke confirmation is about.
     pub revoke_root: Option<String>,
+    /// Remote mode: the engine's trust state as last seen (`/trust revoke` resolves numbers against it).
+    pub trust_cache: Option<crate::remote::TrustState>,
     /// The root of the session-only trust in force (set by the window after each engine start).
     pub session_grant: Option<String>,
     /// Images for the next message.
@@ -721,6 +746,7 @@ impl Live {
             trust_root: None,
             trust_parent: None,
             revoke_root: None,
+            trust_cache: None,
             session_grant: None,
             images: vec![],
             image_busy: false,
@@ -908,6 +934,34 @@ impl Live {
                     self.arm(now);
                 }
             }
+            UiMsg::CompactQueued => {
+                self.compacting = false;
+                self.note(
+                    "compaction requested: it runs before the next model request",
+                    false,
+                );
+            }
+            UiMsg::Note(t, err) => self.note(t, err),
+            // an answer for a session that is no longer the open one is not applied to this one
+            UiMsg::Renamed(sid, _) if sid != self.sid => {}
+            UiMsg::Renamed(_, r) => match r {
+                Ok(t) => {
+                    self.view.workspaces.set_title(&self.sid, &t);
+                    self.renamed = Some((self.sid.clone(), t.clone()));
+                    self.note(
+                        format!("Session renamed: {}", sanitize_for_display(&t)),
+                        false,
+                    );
+                }
+                Err(why) => self.note(why, true),
+            },
+            UiMsg::TrustList(r) => match r {
+                Ok(st) => {
+                    self.trust_cache = Some(st.clone());
+                    self.trust_cmd_with("", Some(st));
+                }
+                Err(why) => self.note(format!("/trust: cannot ask the engine ({why})"), true),
+            },
             UiMsg::Compacted(r) => {
                 self.compacting = false;
                 match r {
@@ -1237,17 +1291,24 @@ impl Live {
                 if let (Some(e), Some(root), "revoke") =
                     (&self.engine, self.revoke_root.take(), key)
                 {
-                    let msg = match synthesis_session::trust::revoke(&e.synthesis_home, &root) {
-                        Ok(true) => format!(
-                            "revoked trust of {}: it takes effect at the next engine start (a new session, /model or a restart); this session keeps what it already loaded. A session-only trust of that folder ends too",
-                            sanitize_for_display(&root)
-                        ),
-                        Ok(false) => format!(
-                            "{} was not remembered (a session-only trust of it, if any, ends)",
-                            sanitize_for_display(&root)
-                        ),
-                        Err(err) => format!("could not revoke: {err}"),
-                    };
+                    if e.is_remote() {
+                        // in the background: the engine's store call can take a while
+                        let root2 = root.clone();
+                        e.spawn_remote(move |r| {
+                            Some(UiMsg::Note(
+                                revoke_message(&root2, r.trust_revoke(&root2)),
+                                false,
+                            ))
+                        });
+                        self.trust_cache = None;
+                        if self.session_grant.as_deref() == Some(root.as_str()) {
+                            self.session_grant = None;
+                        }
+                        return Some(Action::TrustRevoked(root));
+                    }
+                    let done = synthesis_session::trust::revoke(&e.synthesis_home, &root)
+                        .map_err(|e| e.to_string());
+                    let msg = revoke_message(&root, done);
                     self.note(msg, false);
                     if self.session_grant.as_deref() == Some(root.as_str()) {
                         self.session_grant = None;
@@ -1261,6 +1322,12 @@ impl Live {
                 return None;
             }
             if kind == PickerKind::Remember {
+                // a `#` note is a file of the machine the instruction files live on: never written here for a remote engine
+                if self.engine.as_ref().is_some_and(|e| e.is_remote()) {
+                    self.pending_note = None;
+                    self.note(format!("# note: {}", crate::wsl::LATER), true);
+                    return None;
+                }
                 if let (Some(e), Some(text), "user" | "project") =
                     (&self.engine, self.pending_note.take(), key)
                 {
@@ -2013,6 +2080,10 @@ impl Live {
                 false,
             );
         }
+        if e.is_remote() {
+            e.rename_remote(arg);
+            return self.note_kind(NoticeKind::Bookkeeping, "renaming...");
+        }
         match e.rename(arg) {
             Ok(t) => {
                 self.view.workspaces.set_title(&self.sid, &t);
@@ -2261,6 +2332,10 @@ impl Live {
             t if tiers.iter().any(|x| x == t) => Some(t.to_string()),
             _ => return self.note(format!("usage: /effort [auto|{}]", tiers.join("|")), true),
         };
+        // the engine's state lives on its own machine: nothing of it is written here
+        if e.is_remote() {
+            return self.note(format!("/effort: {}", crate::wsl::LATER), true);
+        }
         // kept for the next start too (state.json), like the CLI
         if let Err(err) = synthesis_config::save_effort(&e.synthesis_home, next.as_deref()) {
             self.note(format!("/effort: not saved ({err})"), false);
@@ -2692,28 +2767,72 @@ impl Live {
                 }
             )
         });
-        // a remote session cannot be trusted (project trust is not in the protocol yet)
-        let Some(e) = self
-            .engine
-            .as_ref()
-            .filter(|e| !e.is_remote() && !self.trusted && !asked)
-        else {
+        let Some(e) = self.engine.as_ref().filter(|_| !self.trusted && !asked) else {
             return false;
         };
-        // the grant is the nearest folder with .git or .synt above the session's folder, not the folder itself
-        let root = crate::engine::root_of(std::path::Path::new(&e.cwd));
-        if let Some(why) = crate::engine::trust_refusal(&root, home, &e.synthesis_home) {
+        // what the dialog needs to know: the local engine's folder is read here; a remote engine says it (it
+        // decides and checks everything itself, the paths are display text)
+        let (root, unfit, changed, parent, refusal, enforcing) = if e.is_remote() {
+            // the snapshot of the engine's start report: no call, nothing to wait for
+            let Some(st) = e.trust.clone() else {
+                self.note("trust: the engine did not report its trust state", true);
+                return false;
+            };
+            // the engine refuses every grant without a fingerprint (nothing could detect a change): not offered
+            if let Some(why) = &st.unfit {
+                self.note(
+                    format!("trust not offered: change detection is not possible here ({why})"),
+                    true,
+                );
+                return false;
+            }
+            let changed = (st.remembered == "changed").then(|| {
+                (
+                    st.changed_files.clone(),
+                    st.since.clone().unwrap_or_default(),
+                )
+            });
+            (
+                std::path::PathBuf::from(&st.root),
+                None,
+                changed,
+                st.parent.clone().map(std::path::PathBuf::from),
+                st.refusal.clone(),
+                Some(st.enforcing),
+            )
+        } else {
+            // the grant is the nearest folder with .git or .synt above the session's folder, not the folder itself
+            let root = crate::engine::root_of(std::path::Path::new(&e.cwd));
+            // the trusted configuration must be fingerprintable: it is what a change is detected against
+            let unfit = synthesis_session::trust::fingerprint(&root, std::path::Path::new(&e.cwd))
+                .err()
+                .map(|u| u.to_string());
+            // trusted before, but the configuration moved on: say what changed (names only)
+            let changed =
+                match crate::engine::remembered_trust(&e.synthesis_home, home, &root, false) {
+                    crate::engine::Remembered::Changed { files, since } => Some((files, since)),
+                    _ => None,
+                };
+            // "all its subfolders" only for a real project parent: never the home folder, a filesystem or drive
+            // root, a parent of home or the config folder (the same refusal as for the root)
+            let parent = root
+                .parent()
+                .filter(|p| {
+                    p.is_dir()
+                        && crate::engine::parent_refusal(p, home, &e.synthesis_home).is_none()
+                })
+                .map(std::path::Path::to_path_buf)
+                .filter(|_| unfit.is_none());
+            let refusal = crate::engine::trust_refusal(&root, home, &e.synthesis_home);
+            (root, unfit, changed, parent, refusal, None)
+        };
+        let cwd = e.remote_cwd.clone().unwrap_or_else(|| e.cwd.clone());
+        if let Some(why) = refusal {
             self.note(why, true);
             return false;
         }
-        // the trusted configuration must be fingerprintable: it is what a change is detected against
-        let unfit =
-            synthesis_session::trust::fingerprint(&root, std::path::Path::new(&e.cwd)).err();
-        let mut paragraphs = trust_text(&root, &e.cwd);
-        // trusted before, but the configuration moved on: say what changed (names only)
-        if let crate::engine::Remembered::Changed { files, since } =
-            crate::engine::remembered_trust(&e.synthesis_home, home, &root, false)
-        {
+        let mut paragraphs = trust_text(&root, &cwd);
+        if let Some((files, since)) = &changed {
             paragraphs.insert(
                 1,
                 format!(
@@ -2721,6 +2840,9 @@ impl Live {
                     clip_left(&sanitize_for_display(&files.join(", ")), 300)
                 ),
             );
+        }
+        if let Some(p) = enforcement_paragraph(enforcing) {
+            paragraphs.insert(1, p);
         }
         if let Some(why) = &unfit {
             paragraphs.insert(
@@ -2731,15 +2853,6 @@ impl Live {
             );
         }
         let headers = paragraphs.into_iter().map(|t| (0, t)).collect();
-        // "all its subfolders" only for a real project parent: never the home folder, a filesystem or drive
-        // root, a parent of home or the config folder (the same refusal as for the root)
-        let parent = root
-            .parent()
-            .filter(|p| {
-                p.is_dir() && crate::engine::parent_refusal(p, home, &e.synthesis_home).is_none()
-            })
-            .map(std::path::Path::to_path_buf);
-        let parent = parent.filter(|_| unfit.is_none());
         let mut options = vec![(
             "no".to_string(),
             "Not now (keep the folder untrusted)".to_string(),
@@ -2785,20 +2898,62 @@ impl Live {
     /// `/trust`: the remembered folders (from the user store) with their date and whether their trusted
     /// configuration changed since; `/trust revoke <n|path>` asks first (Keep is the default).
     fn trust_cmd(&mut self, arg: &str) {
+        let Some(e) = self.engine.clone() else {
+            return self.note("/trust: the session is still starting", true);
+        };
+        if e.is_remote() {
+            // WSL mode: the engine lists its own store (display text; `/trust revoke` names one of its rows). The
+            // list is asked for in the background; a revoke resolves its number against the last one seen
+            if arg.trim().starts_with("revoke") {
+                let Some(st) = self.trust_cache.clone().or_else(|| e.trust.clone()) else {
+                    return self.note("/trust: run /trust first", true);
+                };
+                return self.trust_cmd_with(arg, Some(st));
+            }
+            e.spawn_remote(|r| Some(UiMsg::TrustList(r.trust_state())));
+            return self.note_kind(NoticeKind::Bookkeeping, "asking the engine...");
+        }
+        self.trust_cmd_with(arg, None);
+    }
+
+    fn trust_cmd_with(&mut self, arg: &str, remote: Option<crate::remote::TrustState>) {
         let Some(e) = &self.engine else {
             return self.note("/trust: the session is still starting", true);
         };
-        let listing = match synthesis_session::trust::list(&e.synthesis_home) {
-            Ok(r) => r,
-            Err(err) => return self.note(format!("/trust: cannot read the store: {err}"), true),
+        let listing = if remote.is_some() {
+            synthesis_session::trust::Listing {
+                records: vec![],
+                unverified: 0,
+            }
+        } else {
+            match synthesis_session::trust::list(&e.synthesis_home) {
+                Ok(r) => r,
+                Err(err) => {
+                    return self.note(format!("/trust: cannot read the store: {err}"), true);
+                }
+            }
         };
-        let unverified = listing.unverified;
+        let unverified = remote
+            .as_ref()
+            .map_or(listing.unverified, |r| r.unverified as usize);
         // the per-project baselines of a parent grant are bookkeeping, not something to list
-        let recs: Vec<_> = listing
-            .records
-            .into_iter()
-            .filter(|r| r.scope != synthesis_session::trust::CHILD)
-            .collect();
+        let recs: Vec<_> = if let Some(st) = &remote {
+            st.records
+                .iter()
+                .map(|r| synthesis_session::trust::TrustRecord {
+                    root: r.root.clone(),
+                    scope: r.scope.clone(),
+                    trusted_at: r.trusted_at.clone(),
+                    fingerprint: r.state.clone(),
+                })
+                .collect()
+        } else {
+            listing
+                .records
+                .into_iter()
+                .filter(|r| r.scope != synthesis_session::trust::CHILD)
+                .collect()
+        };
         let arg = arg.trim();
         if let Some(which) = arg.strip_prefix("revoke").map(str::trim) {
             let pick = which
@@ -2857,7 +3012,9 @@ impl Live {
                 "folder not trusted"
             }
         )];
-        if e.sandbox.mode != "enforce" {
+        if remote.as_ref().is_some_and(|r| !r.enforcing)
+            || (remote.is_none() && e.sandbox.mode != "enforce")
+        {
             lines.push(format!(
                 "remembered trust is NOT honoured now: the sandbox is {} (a command that can run unconfined could have written the store); session-only trust and --trust-project still work",
                 if e.sandbox.mode.is_empty() { "not reported" } else { e.sandbox.mode.as_str() }
@@ -2883,7 +3040,10 @@ impl Live {
             lines.push("no remembered folder (/trust ask -> Trust this folder (remember))".into());
         }
         for (i, r) in recs.iter().enumerate() {
-            let state = if r.scope == synthesis_session::trust::PARENT {
+            let state = if remote.is_some() {
+                // the engine's own verdict (the fingerprint field carries it)
+                r.fingerprint.as_str()
+            } else if r.scope == synthesis_session::trust::PARENT {
                 "each project is checked at its first start"
             } else if std::path::Path::new(&r.root).is_dir() {
                 match synthesis_session::trust::fingerprint_root(std::path::Path::new(&r.root)) {
@@ -3093,6 +3253,31 @@ pub fn zone_minutes(t: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rename_answer_for_another_session_is_not_applied() {
+        let mut l = Live::new();
+        l.sid = "open".into();
+        l.on_msg(UiMsg::Renamed("old".into(), Ok("late title".into())), 0);
+        assert!(
+            l.renamed.is_none(),
+            "an answer for a session that is gone changes nothing"
+        );
+        l.on_msg(UiMsg::Renamed("open".into(), Ok("title".into())), 0);
+        assert_eq!(l.renamed, Some(("open".into(), "title".into())));
+    }
+
+    #[test]
+    fn the_trust_dialog_says_when_a_remembered_trust_will_not_be_honoured() {
+        // the engine's sandbox does not enforce: stored, but not honoured later
+        let p = enforcement_paragraph(Some(false)).expect("said");
+        assert!(p.contains("NOT enforcing") && p.contains("NOT be honoured"));
+        assert!(enforcement_paragraph(Some(true)).is_none());
+        assert!(
+            enforcement_paragraph(None).is_none(),
+            "the local engine decides this itself"
+        );
+    }
 
     #[test]
     fn a_dialog_queued_behind_a_picker_is_armed_when_the_picker_is_answered() {

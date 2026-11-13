@@ -25,6 +25,9 @@ use synthesis_harness::{UserReply, sanitize_for_display};
 use synthesis_permissions::Mode;
 
 use crate::engine::UiMsg;
+use serde::Deserialize;
+use synthesis_view::usage::HistoryDay;
+use synthesis_view::workspaces::WorkspaceList;
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 /// `start` loads config, MCP servers and memory.
@@ -45,11 +48,25 @@ const MAX_LINES_PER_SEC: u32 = 5_000;
 const MAX_BYTES_PER_SEC: usize = 32 << 20;
 /// Requests waiting for the writer thread.
 const WRITE_QUEUE: usize = 256;
+/// A store-backed call (lists, preview, trust state): short.
+const STORE_TIMEOUT: Duration = Duration::from_secs(15);
+/// What a list answer may hold, however much the engine sends.
+const MAX_WORKSPACES: usize = 200;
+const MAX_SESSIONS: usize = 200;
+const MAX_DAYS: usize = 400;
+const MAX_PREVIEW_EVENTS: usize = 50_000;
 /// stderr: longest line kept, and lines logged in all.
 const STDERR_LINE: usize = 2048;
 const STDERR_LINES: u32 = 200;
 /// Last stderr lines kept to say why an engine ended.
 const TAIL_LINES: usize = 5;
+
+/// What the engine starts on besides the folder (checked by the engine: the same folder, a stored session, a model).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StartSpec {
+    pub resume: Option<String>,
+    pub model: Option<String>,
+}
 
 /// How to start the engine process. The child gets exactly `env` (see [`allowed_env`]), nothing else.
 #[derive(Clone, Debug)]
@@ -142,7 +159,10 @@ struct Shared {
     /// Milliseconds since `born` of the last line read or request written.
     last: AtomicU64,
     born: Instant,
-    tx: UnboundedSender<UiMsg>,
+    tx: Mutex<UnboundedSender<UiMsg>>,
+    /// A restart is under way: the window of the next session is this channel, set when the call is made.
+    /// Lines of the session being ended are dropped until the engine says `restarted` (or answers).
+    discard: AtomicBool,
     /// The last sanitized stderr lines.
     tail: Mutex<VecDeque<String>>,
 }
@@ -173,7 +193,7 @@ impl Shared {
     }
 
     fn tell(&self, m: UiMsg) {
-        let _ = self.tx.unbounded_send(m);
+        let _ = lock(&self.tx).unbounded_send(m);
     }
 
     fn kill(&self) {
@@ -182,6 +202,17 @@ impl Shared {
         let _ = c.wait();
     }
 }
+
+/// Why a restart did not give a new session: `kept` (the engine refused before ending anything: the session
+/// goes on) or not (the engine is killed).
+#[derive(Debug)]
+pub struct RestartError {
+    pub kept: bool,
+    pub why: String,
+}
+
+/// `(closed, held, failed)` of a `workspace.close`.
+pub type ClosedIds = (Vec<String>, Vec<String>, Vec<(String, String)>);
 
 pub struct Remote {
     shared: Arc<Shared>,
@@ -197,6 +228,7 @@ impl Remote {
         l: &Launcher,
         project: &Path,
         tx: UnboundedSender<UiMsg>,
+        spec: &StartSpec,
     ) -> Result<(Self, Value), String> {
         let cwd = match &l.start_cwd {
             Some(c) => c.clone(),
@@ -235,7 +267,8 @@ impl Remote {
             asks: Mutex::default(),
             last: AtomicU64::new(0),
             born: Instant::now(),
-            tx,
+            tx: Mutex::new(tx),
+            discard: AtomicBool::new(false),
             tail: Mutex::default(),
         });
         let (line_tx, line_rx) = mpsc::sync_channel::<Vec<u8>>(WRITE_QUEUE);
@@ -266,7 +299,14 @@ impl Remote {
             .map_err(|_| why("the engine did not say hello in time".into()))?
             .map_err(why)?;
         let v = remote
-            .call(Call::Start { cwd }, START_TIMEOUT)
+            .call(
+                Call::Start {
+                    cwd,
+                    resume: spec.resume.clone(),
+                    model: spec.model.clone(),
+                },
+                START_TIMEOUT,
+            )
             .map_err(why)?;
         // an engine that does not say its mode is not trusted to be in the default one
         let mode = v["mode"]
@@ -311,6 +351,152 @@ impl Remote {
         };
         lock(&self.shared.waiting).remove(&id);
         r
+    }
+
+    /// A call of the store-backed methods: bounded wait, the answer parsed by the caller.
+    fn store_call(&self, call: Call) -> Result<Value, String> {
+        self.call(call, STORE_TIMEOUT)
+    }
+
+    /// The workspaces of the engine's store (its own machine's), bounded and made printable.
+    pub fn workspaces(&self) -> Result<WorkspaceList, String> {
+        let v = self.store_call(Call::WorkspacesList)?;
+        let mut l: WorkspaceList = serde_json::from_value(v["workspaces"].clone())
+            .map(|workspaces| WorkspaceList { workspaces })
+            .map_err(|e| format!("unreadable workspace list: {e}"))?;
+        l.workspaces.truncate(MAX_WORKSPACES);
+        for w in &mut l.workspaces {
+            w.sessions.truncate(MAX_SESSIONS);
+            (w.root, w.key, w.label) = (clean(&w.root), clean(&w.key), clean(&w.label));
+            for s in &mut w.sessions {
+                (s.id, s.title, s.updated_at) =
+                    (clean(&s.id), clean(&s.title), clean(&s.updated_at));
+            }
+        }
+        Ok(l)
+    }
+
+    pub fn usage(&self, tz_min: i32) -> Result<Vec<HistoryDay>, String> {
+        let v = self.store_call(Call::UsageSummary { tz_min })?;
+        let mut d: Vec<HistoryDay> = serde_json::from_value(v["days"].clone())
+            .map_err(|e| format!("unreadable usage: {e}"))?;
+        d.truncate(MAX_DAYS);
+        Ok(d)
+    }
+
+    /// The stored conversation of `id`, read-only, as events (unreadable ones are skipped, the count is bounded).
+    pub fn preview(&self, id: &str) -> Result<Vec<synthesis_events::Envelope>, String> {
+        let v = self.store_call(Call::SessionPreview { id: id.into() })?;
+        Ok(v["events"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .take(MAX_PREVIEW_EVENTS)
+                    .filter_map(|e| serde_json::from_value(e.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    pub fn trust_state(&self) -> Result<TrustState, String> {
+        TrustState::parse(self.store_call(Call::TrustState)?)
+    }
+
+    pub fn trust_revoke(&self, root: &str) -> Result<bool, String> {
+        let v = self.store_call(Call::TrustRevoke { root: root.into() })?;
+        Ok(v["revoked"].as_bool().unwrap_or(false)
+            || v["session_grant_ended"].as_bool().unwrap_or(false))
+    }
+
+    pub fn rename(&self, id: &str, title: &str) -> Result<String, String> {
+        let v = self.store_call(Call::SessionRename {
+            id: id.into(),
+            title: title.into(),
+        })?;
+        Ok(v["title"].as_str().map(clean).unwrap_or_default())
+    }
+
+    pub fn clear(&self) -> Result<(), String> {
+        self.store_call(Call::Clear).map(|_| ())
+    }
+
+    /// `Ok(true)`: the harness compacts at its next safe point; `Ok(false)`: now, `UiMsg::Compacted` follows.
+    pub fn compact(&self, instructions: Option<String>) -> Result<bool, String> {
+        let v = self.store_call(Call::Compact { instructions })?;
+        Ok(v["started"].as_bool().unwrap_or(false))
+    }
+
+    /// `workspace.close` of a folder other than the engine's own: `(closed, held, failed)`.
+    pub fn close_other_workspace(&self, key: &str) -> Result<ClosedIds, String> {
+        let v = self.store_call(Call::WorkspaceClose {
+            workspace: key.into(),
+        })?;
+        let ids = |k: &str| -> Vec<String> {
+            v[k].as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(clean)
+                        .take(MAX_SESSIONS)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let failed = v["failed"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|p| Some((clean(p[0].as_str()?), clean(p[1].as_str()?))))
+                    .take(MAX_SESSIONS)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok((ids("closed"), ids("held"), failed))
+    }
+
+    /// A call that ends the session and starts another in this same process (`trust.set`, `model.set`,
+    /// `session.*`, `workspace.close` of the own folder). From the moment it is made the events go to `tx`
+    /// (the next session's window); the old session's trailing lines are dropped. `Ok`: the start report of
+    /// the new session. An `Err` leaves the session running (nothing was ended) or, when the engine could not
+    /// continue at all, a dead engine (the caller sees it as ended).
+    pub fn restart(&self, call: Call, tx: UnboundedSender<UiMsg>) -> Result<Value, RestartError> {
+        debug_assert!(call.is_restart());
+        let refused = |why: &str| RestartError {
+            kept: true,
+            why: why.into(),
+        };
+        if !lock(&self.shared.asks).is_empty() || self.running() {
+            return Err(refused(
+                "busy: finish or cancel the task and answer the open dialogs first",
+            ));
+        }
+        *lock(&self.shared.tx) = tx;
+        self.shared.discard.store(true, Ordering::SeqCst);
+        let r = self.call(call, START_TIMEOUT);
+        self.shared.discard.store(false, Ordering::SeqCst);
+        // fail closed: only an error the engine marked as a refusal BEFORE it ended anything leaves the session
+        // as it was; any other (a fatal restart, a timeout, an unmarked error, a dead process) ends this engine
+        let dead = |why: String| {
+            self.shared.kill();
+            RestartError { kept: false, why }
+        };
+        let v = match r {
+            Ok(v) => v,
+            Err(e) if e.starts_with(synthesis_app::proto::REFUSED) => {
+                return Err(refused(&e[synthesis_app::proto::REFUSED.len()..]));
+            }
+            Err(e) => return Err(dead(e)),
+        };
+        // an engine that does not say its mode is not trusted to be in the default one
+        let Some(mode) = v["mode"].as_str().and_then(Mode::parse) else {
+            return Err(dead("the engine did not report its permission mode".into()));
+        };
+        *lock(&self.shared.mode) = mode;
+        Ok(v)
+    }
+
+    pub fn is_dead(&self) -> bool {
+        self.shared.dead.load(Ordering::SeqCst)
     }
 
     pub fn running(&self) -> bool {
@@ -566,18 +752,36 @@ fn open_ask(s: &Shared, id: &str) -> bool {
 }
 
 fn dispatch(s: &Shared, m: Incoming) -> Verdict {
+    let discarding = s.discard.load(Ordering::SeqCst);
     let m = match m {
         Incoming::Event(e) => {
-            s.tell(UiMsg::Event(e));
+            if !discarding {
+                s.tell(UiMsg::Event(e));
+            }
             return Verdict::Fine;
         }
         Incoming::Msg(m) => *m,
     };
+    // while a restart is under way every line of the session being ended is dropped (task ends, asks, notices,
+    // compaction results): only the marker and the answer to the call are of this moment
+    if discarding && !matches!(m, Out::Restarted | Out::Result { .. } | Out::Hello { .. }) {
+        return Verdict::Fine;
+    }
     match m {
         Out::Hello { .. } => {
             s.tell(UiMsg::BadEvent("unexpected hello".into()));
             return Verdict::Bad;
         }
+        // only while a restart that this side asked for is under way: the next lines are the new session's
+        Out::Restarted => {
+            if !s.discard.swap(false, Ordering::SeqCst) {
+                return Verdict::Hostile("the engine restarted without being asked");
+            }
+            lock(&s.asks).clear();
+        }
+        Out::Compacted { error } => s.tell(UiMsg::Compacted(
+            error.map_or(Ok(()), |e| Err(sanitize_for_display(&e))),
+        )),
         Out::Notice { text } => s.tell(UiMsg::BadEvent(sanitize_for_display(&text))),
         Out::Result { id, ok, error } => {
             if let Some(w) = lock(&s.waiting).remove(&id) {
@@ -634,4 +838,80 @@ fn dispatch(s: &Shared, m: Incoming) -> Verdict {
         }
     }
     Verdict::Fine
+}
+
+fn clean(s: &str) -> String {
+    sanitize_for_display(s)
+}
+
+/// What `trust.state` says (display text and the engine's verdicts; the client decides nothing from it).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TrustState {
+    pub root: String,
+    pub cwd: String,
+    pub trusted: bool,
+    pub session_grant: Option<String>,
+    pub refusal: Option<String>,
+    pub unfit: Option<String>,
+    /// `no` | `trusted` | `changed`
+    pub remembered: String,
+    pub changed_files: Vec<String>,
+    pub since: Option<String>,
+    /// The parent folder the engine would trust for "all subfolders" (offered only when it allows it).
+    pub parent: Option<String>,
+    pub enforcing: bool,
+    pub records: Vec<TrustRow>,
+    pub unverified: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TrustRow {
+    pub root: String,
+    pub scope: String,
+    pub trusted_at: String,
+    pub state: String,
+}
+
+impl TrustState {
+    /// The engine's state, bounded and made printable.
+    pub fn parse(v: Value) -> Result<Self, String> {
+        let mut t: Self =
+            serde_json::from_value(v).map_err(|e| format!("unreadable trust state: {e}"))?;
+        t.clean();
+        Ok(t)
+    }
+
+    fn clean(&mut self) {
+        let c = |s: &mut String| *s = clean(s);
+        c(&mut self.root);
+        c(&mut self.cwd);
+        c(&mut self.remembered);
+        self.changed_files.truncate(20);
+        for f in &mut self.changed_files {
+            c(f);
+        }
+        for t in [
+            &mut self.session_grant,
+            &mut self.refusal,
+            &mut self.unfit,
+            &mut self.since,
+            &mut self.parent,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            c(t);
+        }
+        self.records.truncate(200);
+        for r in &mut self.records {
+            (r.root, r.scope, r.trusted_at, r.state) = (
+                clean(&r.root),
+                clean(&r.scope),
+                clean(&r.trusted_at),
+                clean(&r.state),
+            );
+        }
+    }
 }

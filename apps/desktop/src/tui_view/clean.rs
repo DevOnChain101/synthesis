@@ -13,6 +13,14 @@ impl TuiView {
         let Some(e) = lu.live.engine.clone() else {
             return;
         };
+        // the store and the files are the engine's own machine's: PR3b brings them over the protocol
+        if e.is_remote() {
+            lu.live.note(
+                format!("this needs the engine's store: {}", crate::wsl::LATER),
+                true,
+            );
+            return;
+        }
         let home = e.synthesis_home.clone();
         // a counting step that never answers frees the prompt; a deletion keeps it blocked
         if matches!(a, Action::CleanApply { .. }) {

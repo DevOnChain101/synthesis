@@ -33,6 +33,7 @@ pub mod agents;
 pub mod asks;
 pub mod ctx;
 pub mod doctor;
+pub mod engine_methods;
 pub mod engine_server;
 pub mod events;
 #[cfg(feature = "test-provider")]
@@ -54,6 +55,7 @@ pub mod sessions;
 pub mod taskdb;
 pub mod tracker;
 pub mod transcript;
+pub mod trust;
 pub mod verify_cfg;
 pub mod wt;
 

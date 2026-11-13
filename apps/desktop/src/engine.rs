@@ -53,6 +53,15 @@ pub enum UiMsg {
     },
     /// `/compact` between tasks ended (`Err`: the reason, history unchanged).
     Compacted(Result<(), String>),
+    /// `/compact` was accepted while a task runs: the harness compacts at its next safe point.
+    CompactQueued,
+    /// Something a background call to the remote engine has to say (`true`: a problem).
+    Note(String, bool),
+    /// `/rename` ended (`Ok`: the stored title).
+    /// `(session id it was asked for, result)`: applied only while that session is the open one.
+    Renamed(String, Result<String, String>),
+    /// `/trust` asked the engine for its state.
+    TrustList(Result<crate::remote::TrustState, String>),
 }
 
 pub use synthesis_app::asks::{AskApproval, AskInput, Choice, approval_for};
@@ -107,210 +116,11 @@ struct Defaults {
     c: Common,
 }
 
-/// Canonical project root of `cwd` (what `--trust-project` was granted for).
-pub fn root_of(cwd: &Path) -> PathBuf {
-    let r = synthesis_settings::find_project_root(cwd);
-    synthesis_core::canonicalize(&r).unwrap_or(r)
-}
-
-/// `--trust-project` / `--approve-mcp` were granted for ONE project root. After a switch to another
-/// root they are dropped (untrusted, no re-prompt: relaunch with --cwd for that project).
-pub fn common_for(c: &Common, granted: &Path, cwd: &Path) -> (Common, Option<String>) {
-    let mut c = c.clone();
-    let mut note = None;
-    if c.trust_project && root_of(cwd) != granted {
-        note = Some(format!(
-            "project root changed; --trust-project and --approve-mcp apply only to {}, so this project is untrusted",
-            sanitize_for_display(&granted.display().to_string())
-        ));
-        c.trust_project = false;
-        c.approve_mcp.clear();
-    }
-    (c, note)
-}
-
-/// The refusal rules of `synthesis_session::trust` for the folder a session trust would grant.
-fn trust_policy(home: Option<&Path>, synt_home: &Path) -> synthesis_session::trust::Policy {
-    synthesis_session::trust::Policy {
-        home: home.map(Path::to_path_buf),
-        synt_home: synt_home.to_path_buf(),
-    }
-}
-
-fn refusal_text(what: &str, root: &Path) -> String {
-    format!(
-        "trust not offered: it would trust {what} ({}). Trust a specific project folder instead: start Synthesis in it with --trust-project.",
-        sanitize_for_display(&root.display().to_string())
-    )
-}
-
-/// Why `root` (the folder a session trust would grant) must not be trusted, if so: a filesystem root, the
-/// user's home or a parent of it, or Synthesis's own config folder (or inside it). Such a folder is trusted
-/// only by starting in a specific project folder.
-pub fn trust_refusal(root: &Path, home: Option<&Path>, synt_home: &Path) -> Option<String> {
-    trust_policy(home, synt_home)
-        .root_refusal(root)
-        .map(|w| refusal_text(w, root))
-}
-
-/// The same for a PARENT grant ("all its subfolders"): also the generic containers (temp folders, Downloads,
-/// Desktop, Documents, world-writable and root-owned system folders).
-pub fn parent_refusal(parent: &Path, home: Option<&Path>, synt_home: &Path) -> Option<String> {
-    trust_policy(home, synt_home)
-        .parent_refusal(parent)
-        .map(|w| refusal_text(w, parent))
-}
-
-/// The flags of a session the person trusted in the Trust dialog: `--trust-project`, and NO `--approve-mcp`
-/// carried over from the launch (an MCP server is approved by name and hash, never by an earlier flag).
-pub fn session_trusted(c: &Common) -> Common {
-    let mut c = c.clone();
-    c.trust_project = true;
-    c.approve_mcp.clear();
-    c.project_exec_inert = false;
-    c
-}
-
-/// The flags of a REMEMBERED trust (and of "Trust this folder (remember)" for the run that follows it): only the
-/// project's DATA applies (agents, skills, memory, instruction files, the file explorer). Its settings and
-/// provider config load with the untrusted filter (no hooks, MCP servers, allow rules, env, defaultMode,
-/// additionalDirectories, verification checks or provider connection). Only a trust given for this run
-/// (session-only, or `--trust-project`) applies those.
-pub fn remembered_trusted(c: &Common) -> Common {
-    let mut c = session_trusted(c);
-    c.project_exec_inert = true;
-    c
-}
-
-/// A path as shown to the person: control characters made visible.
-pub fn display_path(p: &Path) -> String {
-    sanitize_for_display(&p.display().to_string())
-}
-
-/// What the USER store says about `project` (never a project file, never anything a tool wrote: rows are
-/// MAC-checked in `synthesis_session::trust`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Remembered {
-    /// No remembered trust covers it.
-    No,
-    /// Trusted, and the project's trusted configuration is what it was (the manifest that was checked).
-    Trusted(String),
-    /// Trusted once, but the configuration differs (or cannot be fingerprinted now): NOT honoured. The files
-    /// that differ, and when it was trusted.
-    Changed { files: Vec<String>, since: String },
-}
-
-/// Looks `project` up. A `folder` record is compared with its own manifest; a `parent` record is compared with
-/// the baseline of this project, which the first start under that grant records (`write_baseline`). A store
-/// that cannot be read trusts nothing.
-pub fn remembered_trust(
-    synt_home: &Path,
-    user_home: Option<&Path>,
-    project: &Path,
-    write_baseline: bool,
-) -> Remembered {
-    use synthesis_session::trust::{self, FOLDER};
-    let Ok(listing) = trust::list(synt_home) else {
-        return Remembered::No;
-    };
-    let policy = trust_policy(user_home, synt_home);
-    let root = root_of(project);
-    let Some(rec) = trust::covers(&listing.records, &root, &policy) else {
-        return Remembered::No;
-    };
-    let now = trust::fingerprint(&root, project);
-    let since = rec
-        .trusted_at
-        .get(..10)
-        .unwrap_or(&rec.trusted_at)
-        .to_string();
-    let changed = |old: &str| match &now {
-        Ok(n) if n == old => Remembered::Trusted(n.clone()),
-        Ok(n) => Remembered::Changed {
-            files: trust::changed_files(old, n),
-            since: since.clone(),
-        },
-        Err(e) => Remembered::Changed {
-            files: vec![e.to_string()],
-            since: since.clone(),
-        },
-    };
-    if rec.scope == FOLDER {
-        return changed(&rec.fingerprint);
-    }
-    match trust::child_of(&listing.records, &root, &policy) {
-        Some(c) => changed(&c.fingerprint),
-        None => {
-            // the first start of this project under the parent grant: it is the baseline from now on
-            match &now {
-                // a baseline that cannot be written is no baseline: not trusted
-                Ok(n)
-                    if write_baseline
-                        && trust::add(synt_home, &root, trust::CHILD, n, &policy).is_err() =>
-                {
-                    Remembered::No
-                }
-                Ok(n) => Remembered::Trusted(n.clone()),
-                Err(_) => changed(""),
-            }
-        }
-    }
-}
-
-/// The flags of one launch and its notices: the session-trusted ones when `trust` names the root of `project`;
-/// else the launch flags as `common_for` leaves them, plus trust when the user store remembers the project, its
-/// trusted configuration is unchanged and the sandbox is enforcing (a shell that can run unconfined could have
-/// written the store; session-only trust and `--trust-project` still work then). A changed configuration starts
-/// the project untrusted with a notice naming the files; /trust ask asks again.
-pub fn launch_common(
-    c: &Common,
-    granted: &Path,
-    trust: Option<&(PathBuf, Option<String>, bool)>,
-    remembered: bool,
-    project: &Path,
-    synt_home: &Path,
-    user_home: Option<&Path>,
-) -> (Common, Vec<String>, Option<TrustCheck>) {
-    let check = |root: &Path, manifest: String| TrustCheck {
-        root: root.to_path_buf(),
-        cwd: project.to_path_buf(),
-        manifest,
-        before_compare: None,
-    };
-    if let Some((root, manifest, exec)) = trust.filter(|(root, _, _)| root_of(project) == *root) {
-        let chk = manifest.clone().map(|m| check(root, m));
-        let c = if *exec {
-            session_trusted(c)
-        } else {
-            remembered_trusted(c)
-        };
-        return (c, vec![], chk);
-    }
-    let (mut c, note) = common_for(c, granted, project);
-    let mut notes: Vec<String> = note.into_iter().collect();
-    if c.trust_project || !remembered {
-        return (c, notes, None);
-    }
-    let enforcing = c.sandbox_mode() == synthesis_terminal::SandboxMode::Enforce;
-    let root = root_of(project);
-    let shown = sanitize_for_display(&root.display().to_string());
-    let mut chk = None;
-    match remembered_trust(synt_home, user_home, project, enforcing) {
-        Remembered::No => {}
-        _ if !enforcing => notes.push(format!(
-            "remembered trust of {shown} is not honoured: the sandbox is not enforcing (a command that can run unconfined could have written it); start with --sandbox enforce, or trust the folder for this session only"
-        )),
-        Remembered::Trusted(m) => {
-            c = remembered_trusted(&c);
-            chk = Some(check(&root, m));
-        }
-        Remembered::Changed { files, since } => notes.push(format!(
-            "project config changed since you trusted it on {since} ({}): {shown} starts untrusted; review the files, then run /trust ask to trust it again",
-            sanitize_for_display(&files.join(", "))
-        )),
-    }
-    (c, notes, chk)
-}
+pub use synthesis_app::trust::{
+    Remembered, TRUST_CHANGED, TrustCheck, common_for, display_path, launch_common, parent_refusal,
+    remembered_trust, remembered_trusted, root_of, session_trusted, trust_changed_error,
+    trust_policy, trust_refusal,
+};
 
 /// `--resume ID` (id or unique prefix) or `--continue` (newest session of the start folder).
 pub fn requested_resume(
@@ -391,44 +201,6 @@ pub struct StartOpts {
     pub verify: Option<TrustCheck>,
 }
 
-/// Marks the error of a start that was refused because the trusted configuration changed meanwhile.
-pub const TRUST_CHANGED: &str = "trust-changed";
-
-fn trust_changed_error(files: &[String]) -> String {
-    format!(
-        "{TRUST_CHANGED}: the trusted configuration changed while the session was starting ({})",
-        sanitize_for_display(&files.join(", "))
-    )
-}
-
-/// What was approved: the manifest of `root`'s trusted configuration (session folder `cwd`) when the trust was
-/// decided or stored.
-#[derive(Clone)]
-pub struct TrustCheck {
-    pub root: PathBuf,
-    pub cwd: PathBuf,
-    pub manifest: String,
-    /// Runs just before the comparison (tests change a file here, as a racing writer would).
-    pub before_compare: Option<Arc<dyn Fn() + Send + Sync>>,
-}
-
-impl TrustCheck {
-    /// `Err(files)` when the configuration on disk is no longer the approved one (or cannot be fingerprinted).
-    pub fn verify(&self) -> Result<(), Vec<String>> {
-        if let Some(f) = &self.before_compare {
-            f();
-        }
-        match synthesis_session::trust::fingerprint(&self.root, &self.cwd) {
-            Ok(now) if now == self.manifest => Ok(()),
-            Ok(now) => Err(synthesis_session::trust::changed_files(
-                &self.manifest,
-                &now,
-            )),
-            Err(e) => Err(vec![e.to_string()]),
-        }
-    }
-}
-
 /// One row of the MCP panel.
 #[derive(Debug, Clone)]
 pub struct McpInfo {
@@ -466,6 +238,8 @@ pub struct Engine {
     pub remote_root: Option<String>,
     /// WSL mode only: the distro the engine runs in (to turn its Linux paths into Windows ones).
     pub remote_distro: Option<String>,
+    /// Remote mode: what the engine said the Trust dialog should show, in its start report.
+    pub trust: Option<crate::remote::TrustState>,
     pub synthesis_home: PathBuf,
     /// The environment the session started with (`/memory` and `/doctor` read it, names only).
     pub env: Env,
@@ -547,9 +321,20 @@ impl Engine {
     pub fn start_remote(
         launcher: &crate::remote::Launcher,
         project: &Path,
+        spec: &crate::remote::StartSpec,
     ) -> Result<(Self, futures::channel::mpsc::UnboundedReceiver<UiMsg>), String> {
         let (tx, rx) = unbounded();
-        let (remote, v) = crate::remote::Remote::connect(launcher, project, tx.clone())?;
+        let (remote, v) = crate::remote::Remote::connect(launcher, project, tx.clone(), spec)?;
+        Ok((Self::from_report(remote, &v, project, tx), rx))
+    }
+
+    /// The window's view of a remote session from the engine's start report.
+    fn from_report(
+        remote: crate::remote::Remote,
+        v: &Value,
+        project: &Path,
+        tx: UnboundedSender<UiMsg>,
+    ) -> Self {
         let text = |k: &str| v[k].as_str().map(sanitize_for_display).unwrap_or_default();
         let list = |k: &str| {
             v[k].as_array()
@@ -561,7 +346,7 @@ impl Engine {
                 })
                 .unwrap_or_default()
         };
-        let engine = Self {
+        Self {
             sid: text("sid"),
             label: text("label"),
             models: list("models"),
@@ -577,10 +362,11 @@ impl Engine {
             remote_cwd: Some(text("cwd")),
             remote_root: Some(text("root")),
             remote_distro: None,
+            trust: crate::remote::TrustState::parse(v["trust"].clone()).ok(),
             commands: vec![crate::live::reveal_command()],
             context_window: v["context_window"].as_u64(),
-            // project trust is not available over the protocol: a remote session is untrusted
-            trusted: false,
+            // the engine decided it (the person's choice went through `trust.set`); display state only
+            trusted: v["trusted"].as_bool() == Some(true),
             synthesis_home: PathBuf::new(),
             // the desktop's own environment is not the engine's: nothing is read here
             env: Env::from_pairs::<&str, &str>([]),
@@ -600,8 +386,45 @@ impl Engine {
                 long_term: false,
             },
             followup: Arc::default(),
+        }
+    }
+
+    /// Ends this session and starts another one in the same engine process (`trust.set`, `model.set`,
+    /// `session.*`, `workspace.close` of the own folder). Blocking. The window gets a new receiver; `Ok(note)`
+    /// when the engine refused and the session goes on as it was. `Err`: the engine is gone.
+    pub fn restart_remote(
+        mut self,
+        call: synthesis_app::proto::Call,
+    ) -> Result<
+        (
+            Self,
+            futures::channel::mpsc::UnboundedReceiver<UiMsg>,
+            Option<String>,
+            Value,
+        ),
+        String,
+    > {
+        let Some(remote) = self.remote.take() else {
+            return Err(NOT_REMOTE.into());
         };
-        Ok((engine, rx))
+        let (tx, rx) = unbounded();
+        match remote.restart(call, tx.clone()) {
+            Ok(v) => {
+                let project = PathBuf::from(&self.cwd);
+                let distro = self.remote_distro.take();
+                let mut e = Self::from_report(remote, &v, &project, tx);
+                e.remote_distro = distro;
+                Ok((e, rx, None, v))
+            }
+            // the engine refused before ending anything: the same session continues on the new channel
+            Err(e) if e.kept => {
+                self.remote = Some(remote);
+                self.tx = tx;
+                Ok((self, rx, Some(sanitize_for_display(&e.why)), Value::Null))
+            }
+            // anything else: the engine is dropped (killed), never kept
+            Err(e) => Err(sanitize_for_display(&e.why)),
+        }
     }
 
     /// Builds the harness and starts (or resumes) the session, like `prepare` + `round` in
@@ -755,6 +578,7 @@ impl Engine {
             remote_cwd: None,
             remote_root: None,
             remote_distro: None,
+            trust: None,
             synthesis_home: info.synthesis_home,
             env: env.clone(),
             live: Some(live),
@@ -809,6 +633,25 @@ impl Engine {
         let live = self.live()?;
         let rt = live.tokio.as_ref().ok_or("peers are off")?;
         rt.block_on(live.harness.peer_ask_user(to, text))
+    }
+
+    /// Runs `f` against the remote engine on a worker thread (never the UI thread: a store call can take
+    /// seconds); the message it returns reaches the window like any other. Bounded by the call's own timeout.
+    pub fn spawn_remote(
+        self: &Arc<Self>,
+        f: impl FnOnce(&crate::remote::Remote) -> Option<UiMsg> + Send + 'static,
+    ) {
+        let e = self.clone();
+        std::thread::spawn(move || {
+            if let Some(m) = e.remote().and_then(f) {
+                let _ = e.tx.unbounded_send(m);
+            }
+        });
+    }
+
+    /// The remote engine's handle: its store, trust and restarts (`None`: the session runs in this process).
+    pub fn remote(&self) -> Option<&crate::remote::Remote> {
+        self.remote.as_ref()
     }
 
     /// The session runs in a child process (see `remote.rs`).
@@ -1014,17 +857,27 @@ impl Engine {
     }
 
     /// `/clear`: the next task starts without the earlier conversation.
-    pub fn clear_history(&self) {
-        match self.live() {
-            Ok(l) => lock(&l.history).clear(),
-            Err(_) => self.unsupported(),
+    pub fn clear_history(self: &Arc<Self>) {
+        match (self.live(), &self.remote) {
+            (Ok(l), _) => lock(&l.history).clear(),
+            (_, Some(_)) => self.spawn_remote(|r| r.clear().err().map(|e| UiMsg::Note(e, true))),
+            _ => self.unsupported(),
         }
     }
 
     /// `/compact`. While a task runs the harness compacts at its next safe point (`Ok(true)`);
     /// otherwise the conversation between tasks is compacted now and [`UiMsg::Compacted`] follows
     /// (`Ok(false)`). `Err`: nothing to compact.
-    pub fn compact(&self, instructions: Option<String>) -> Result<bool, &'static str> {
+    pub fn compact(self: &Arc<Self>, instructions: Option<String>) -> Result<bool, &'static str> {
+        if self.remote.is_some() {
+            // asked in the background: `Compacted` follows (or `CompactQueued` while a task runs, or the error)
+            self.spawn_remote(move |r| match r.compact(instructions) {
+                Ok(true) => Some(UiMsg::CompactQueued),
+                Ok(false) => None,
+                Err(e) => Some(UiMsg::Compacted(Err(e))),
+            });
+            return Ok(false);
+        }
         let live = self.live()?;
         if live.running() {
             live.harness.request_compact(instructions);
@@ -1130,6 +983,15 @@ impl Engine {
         }
     }
 
+    /// `/rename` for a remote engine, in the background: `UiMsg::Renamed` follows.
+    pub fn rename_remote(self: &Arc<Self>, title: &str) {
+        let (sid, title) = (self.sid.clone(), title.to_string());
+        self.spawn_remote(move |r| {
+            let done = r.rename(&sid, &title);
+            Some(UiMsg::Renamed(sid, done))
+        });
+    }
+
     /// `/name`: the name other sessions address this one by; `None` when peers are off.
     pub fn peer_name(&self) -> Option<Option<String>> {
         self.live.as_ref()?.harness.peer_summary().map(|(n, _)| n)
@@ -1212,6 +1074,26 @@ impl Engine {
 
 /// Ends an engine other threads may still hold for a moment (a peer poll): waits for them, then
 /// [`Engine::close`]. Blocking; call it off the UI thread.
+/// Another thread (a background call to the engine, a peer poll) still holds this engine: it must not be
+/// restarted or closed now (the window says "busy, try again" instead of dropping it).
+pub fn in_use(e: &Arc<Engine>) -> bool {
+    Arc::strong_count(e) > 1
+}
+
+/// Takes an engine other threads may still hold for a moment (a peer poll) out of its `Arc`.
+pub fn take_shared(mut e: Arc<Engine>) -> Result<Engine, String> {
+    for _ in 0..250 {
+        match Arc::try_unwrap(e) {
+            Ok(e) => return Ok(e),
+            Err(back) => {
+                e = back;
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    }
+    Err("the engine is still in use; try again".into())
+}
+
 pub fn close_shared(mut e: Arc<Engine>) -> Option<String> {
     for _ in 0..250 {
         match Arc::try_unwrap(e) {

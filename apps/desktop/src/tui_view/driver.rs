@@ -17,7 +17,7 @@ use synthesis_cli_ui_base::editor::LineEditor;
 use synthesis_config::Env;
 use synthesis_harness::sanitize_for_display;
 use synthesis_view::convo::{Convo, Item};
-use synthesis_view::workspaces::{LoadOpts, WorkspaceList, fold_dir};
+use synthesis_view::workspaces::{LoadOpts, WorkspaceList};
 
 use super::{TuiView, panels};
 use crate::engine::{self, Args, Engine, StartOpts, UiMsg};
@@ -53,8 +53,9 @@ pub enum Target {
     /// `/close-workspace` in the open folder (the workspace key): close every session of it that no
     /// other process holds, then open a fresh one in the folder.
     CloseWorkspace(String),
-    /// The same session, its folder trusted for project config (the Trust dialog; this session only).
-    Trust,
+    /// The same session, its folder trusted for project config (the Trust dialog). `Some(choice)` in WSL mode:
+    /// the person's choice goes to the engine, which decides and stores it; `None`: the local engine's grant.
+    Trust(Option<synthesis_app::engine_methods::Mode>),
 }
 
 /// `/config`: asks the shell to show the Settings view.
@@ -78,23 +79,34 @@ pub enum Row {
     Activity,
 }
 
-/// The folder a launch may use in WSL mode. Only a first start or a new session in a folder may; every
-/// other target needs the session store, which a WSL engine has not got yet, and is refused, so no
-/// target can fall through to the local engine. Exhaustive on purpose: a new `Target` must decide here.
-fn wsl_folder(target: &Option<Target>, project: &Path) -> Result<PathBuf, String> {
+/// What a launch does in WSL mode. Exhaustive on purpose: a new `Target` must be classified here, and every
+/// variant is served by the WSL engine (a new process or the running one), never by the local engine.
+enum WslPlan {
+    /// A new engine process in this folder (a first start, `/new`).
+    Fresh(PathBuf),
+    /// The running engine ends its session and starts another; the engine decides (trust, model, close).
+    InPlace(synthesis_app::proto::Call),
+    /// A stored session: in place when it is of the engine's own folder, else a new process in its folder.
+    Resume(String),
+}
+
+fn wsl_plan(target: &Option<Target>, project: &Path, sid: &str) -> WslPlan {
+    use synthesis_app::proto::Call;
     match target {
-        None => Ok(project.to_path_buf()),
-        Some(Target::New(p)) => Ok(p.clone()),
-        Some(
-            Target::Resume(_)
-            | Target::Model(_)
-            | Target::Close
-            | Target::CloseWorkspace(_)
-            | Target::Trust,
-        ) => Err(format!(
-            "this needs the session store: {}",
-            crate::wsl::LATER
-        )),
+        None => WslPlan::Fresh(project.to_path_buf()),
+        Some(Target::New(p)) => WslPlan::Fresh(p.clone()),
+        Some(Target::Resume(id)) => WslPlan::Resume(id.clone()),
+        Some(Target::Model(m)) => WslPlan::InPlace(Call::ModelSet { model: m.clone() }),
+        Some(Target::Close) => WslPlan::InPlace(Call::SessionClose {
+            id: sid.to_string(),
+        }),
+        Some(Target::CloseWorkspace(key)) => WslPlan::InPlace(Call::WorkspaceClose {
+            workspace: key.clone(),
+        }),
+        Some(Target::Trust(choice)) => WslPlan::InPlace(Call::TrustSet {
+            // no choice from the person is no trust: deny changes nothing
+            mode: choice.unwrap_or(synthesis_app::engine_methods::Mode::Deny),
+        }),
     }
 }
 
@@ -365,7 +377,7 @@ impl TuiView {
         // `session_trust` names its root and `launch_common` applies it only to that root, so a session-only
         // trust with a manifest stays across sessions of the same folder. A remembered one lives in the store
         // (which honours /trust revoke), and one without a manifest would skip the change check: neither carries
-        if !matches!(target, Some(Target::Trust))
+        if !matches!(target, Some(Target::Trust(_)))
             && lu
                 .session_trust
                 .as_ref()
@@ -541,7 +553,16 @@ impl TuiView {
         let Some(lu) = &mut self.live else { return };
         let cfg = lu.cfg.clone();
         let root = lu.live.engine.as_ref().map(|e| e.root.clone());
-        let job = cx.background_spawn(async move { read_store(&cfg, root.as_deref()) });
+        let job = if let Some(e) = lu.live.engine.clone().filter(|e| e.is_remote()) {
+            // WSL mode: the lists come from the engine; the host's store is never opened
+            let tz = cfg.tz_min;
+            cx.background_spawn(async move { read_store_remote(&e, tz) })
+        } else if crate::wsl::enabled(&cfg.synthesis_home).unwrap_or(true) {
+            // WSL mode (or its setting unreadable) and no engine yet: nothing to read
+            return;
+        } else {
+            cx.background_spawn(async move { read_store(&cfg, root.as_deref()) })
+        };
         let t = cx.spawn(async move |this, cx| {
             let r = job.await;
             this.update(cx, |t, cx| t.store_loaded(r, cx)).ok();
@@ -569,7 +590,7 @@ impl TuiView {
                     .iter()
                     .all(|w| w.key != l.ws_key)
                 {
-                    l.ws_key = fold_dir(l.engine.as_ref().map_or(&l.cwd, |e| &e.root));
+                    l.ws_key = l.live_ws_key();
                 }
             }
             Err(e) => lu
@@ -1341,9 +1362,20 @@ impl TuiView {
         }
         lu.loading.push(id.clone());
         let home = lu.cfg.synthesis_home.clone();
+        let remote = lu.live.engine.clone().filter(|e| e.is_remote());
+        // WSL mode with no engine to ask: the host's store is not the distro's, so nothing is read
+        if remote.is_none() && crate::wsl::enabled(&home).unwrap_or(true) {
+            lu.loading.retain(|x| *x != id);
+            return;
+        }
         let job = {
             let id = id.clone();
-            cx.background_spawn(async move { load_convo(&home, &id) })
+            cx.background_spawn(async move {
+                match remote {
+                    Some(e) => load_convo_remote(&e, &id),
+                    None => load_convo(&home, &id),
+                }
+            })
         };
         cx.spawn(async move |this, cx| {
             let r = job.await;
@@ -1519,6 +1551,16 @@ impl TuiView {
             lu.live
                 .note_kind(NoticeKind::Bookkeeping, "task cancelled: switching");
         }
+        // a background call to the engine is still running: the engine is kept, never dropped under it
+        if lu.live.engine.as_ref().is_some_and(engine::in_use) {
+            lu.live.note(
+                "busy, try again: a call to the engine is still running",
+                true,
+            );
+            lu.dirty = true;
+            cx.notify();
+            return;
+        }
         lu.live.switch_armed = None;
         let project = match &target {
             Target::New(p) => p.clone(),
@@ -1557,7 +1599,27 @@ impl TuiView {
             .find(|w| w.key == key)
             .map_or_else(|| key.clone(), |w| w.label.clone());
         let home = lu.cfg.synthesis_home.clone();
-        let job = cx.background_spawn(async move { crate::close_ws::close_in_store(&home, &key) });
+        let remote = lu.live.engine.clone().filter(|e| e.is_remote());
+        if remote.is_none() && crate::wsl::enabled(&home).unwrap_or(true) {
+            lu.live
+                .note(format!("/close-workspace: {}", crate::wsl::LATER), true);
+            return;
+        }
+        let job = cx.background_spawn(async move {
+            match remote {
+                // the engine closes the sessions in its own store (it knows which another process holds)
+                Some(e) => e
+                    .remote()
+                    .ok_or_else(|| "not a WSL engine".to_string())
+                    .and_then(|r| r.close_other_workspace(&key))
+                    .map(|(closed, held, failed)| synthesis_session::WorkspaceClose {
+                        closed,
+                        held,
+                        failed,
+                    }),
+                None => crate::close_ws::close_in_store(&home, &key),
+            }
+        });
         cx.spawn(async move |this, cx| {
             let r = job.await;
             this.update(cx, |t, cx| {
@@ -1679,6 +1741,19 @@ impl TuiView {
             lu.dirty = true;
             return cx.notify();
         };
+        // WSL mode: the person's choice goes to the engine, which checks the refusal rules, fingerprints with its
+        // own code, stores a remembered trust under its own key and restarts the session; this side holds no
+        // manifest, no store and no path
+        if lu.live.engine.as_ref().is_some_and(|e| e.is_remote()) {
+            use synthesis_app::engine_methods::Mode;
+            let mode = match grant.remember.as_ref().map(|r| r.1) {
+                None => Mode::Session,
+                Some(synthesis_session::trust::FOLDER) => Mode::Remember,
+                Some(synthesis_session::trust::PARENT) => Mode::Parent,
+                Some(_) => return,
+            };
+            return self.switch(Target::Trust(Some(mode)), "trust".into(), cx);
+        }
         // checked again at the answer: the dialog may have been open a while
         if let Some(why) = engine::trust_refusal(
             &root,
@@ -1716,7 +1791,7 @@ impl TuiView {
                         true,
                     );
                     lu.session_trust = Some((root, manifest.ok(), true));
-                    return self.switch(Target::Trust, "trust".into(), cx);
+                    return self.switch(Target::Trust(None), "trust".into(), cx);
                 }
             };
             let note_row = |lu_pending: &mut Vec<(PathBuf, Option<tr::TrustRecord>)>, p: &Path| {
@@ -1773,7 +1848,7 @@ impl TuiView {
             }
         }
         lu.session_trust = Some((root, manifest.ok(), grant.remember.is_none()));
-        self.switch(Target::Trust, "trust".into(), cx);
+        self.switch(Target::Trust(None), "trust".into(), cx);
     }
 
     /// What a command or picker asked the window to do.
@@ -1848,6 +1923,11 @@ impl TuiView {
                 let Some(e) = lu.live.engine.clone() else {
                     return;
                 };
+                if e.is_remote() {
+                    lu.live
+                        .note(format!("/context: {}", crate::wsl::LATER), true);
+                    return;
+                }
                 let (p, m) = e.label.split_once('/').unwrap_or(("", &e.label));
                 let r = if arg.trim().eq_ignore_ascii_case("unset") {
                     Ok(None)
@@ -2429,6 +2509,127 @@ pub fn trust_fallback_note(why: &str) -> String {
     )
 }
 
+/// The stored conversation of `id` as the engine of a resumed session replays it (read-only, off the host).
+fn wsl_replay(e: &Engine, id: &str) -> Option<synthesis_view::state::ViewState> {
+    let events = e.remote()?.preview(id).ok()?;
+    let mut replay = synthesis_view::state::ViewState::default();
+    for ev in &events {
+        replay.apply(ev);
+    }
+    if replay.session.cwd.is_empty() {
+        replay.session.cwd = e.remote_cwd.clone().unwrap_or_default();
+    }
+    Some(replay)
+}
+
+/// The launch in WSL mode (see [`WslPlan`]): a new engine process in a folder, or the running engine
+/// restarting its session. Every store-backed step is a protocol call; the host's store is never opened, the
+/// local engine never started, and a refusal or failure is an error or a note, never a fallback.
+fn wsl_build(
+    cfg: &LiveCfg,
+    project: PathBuf,
+    prior: Option<Arc<Engine>>,
+    target: Option<Target>,
+    model: Option<String>,
+    mut notes: Vec<String>,
+) -> Result<Launched, String> {
+    use crate::remote::StartSpec;
+    let home = &cfg.synthesis_home;
+    // flags that name a stored session or grant trust belong to the local engine: refused, never ignored
+    if prior.is_none() && target.is_none() {
+        let c = &cfg.args.common;
+        if c.resume.is_some() || c.continue_session || c.fork_session {
+            return Err("--resume, --continue and --fork-session are not supported in WSL mode: open the session from the list".into());
+        }
+        if c.trust_project || !c.approve_mcp.is_empty() {
+            return Err("--trust-project and --approve-mcp are not supported in WSL mode: use the Trust dialog (the engine decides)".into());
+        }
+    }
+    let sid = prior.as_ref().map(|p| p.sid.clone()).unwrap_or_default();
+    let mut plan = wsl_plan(&target, &project, &sid);
+    // a stored session of another folder opens in a new process in that folder (its row says which)
+    let mut resume_id = None;
+    if let WslPlan::Resume(id) = &plan {
+        let e = prior.as_ref().ok_or("no engine to resume from")?;
+        let (r, distro) = (
+            e.remote().ok_or("not a WSL engine")?,
+            e.remote_distro.clone(),
+        );
+        let rows = r.workspaces()?;
+        let row = rows
+            .workspaces
+            .iter()
+            .find(|w| w.sessions.iter().any(|s| s.id == *id))
+            .ok_or("that session is not in the store of this distro")?;
+        resume_id = Some(id.clone());
+        plan = if e.remote_cwd.as_deref() == Some(row.root.as_str()) {
+            WslPlan::InPlace(synthesis_app::proto::Call::SessionResume { id: id.clone() })
+        } else {
+            let d = distro.ok_or("the distro is not known")?;
+            WslPlan::Fresh(PathBuf::from(crate::wsl::to_display(&d, &row.root)?))
+        };
+    }
+    let launched = |e: Engine, rx, replay, model| Launched {
+        engine: e,
+        rx,
+        replay,
+        model,
+    };
+    match plan {
+        WslPlan::Fresh(folder) => {
+            if let Some(p) = prior {
+                notes.extend(engine::close_shared(p));
+            }
+            let spec = StartSpec {
+                resume: resume_id.clone(),
+                model: model.clone(),
+            };
+            let (mut e, rx) = crate::wsl::start(&cfg.env, home, &folder, &spec)?;
+            e.notices.extend(notes);
+            let replay = resume_id.and_then(|id| wsl_replay(&e, &id));
+            Ok(launched(e, rx, replay, model))
+        }
+        WslPlan::InPlace(call) => {
+            let p = prior.ok_or("no engine to restart")?;
+            let model = match &call {
+                synthesis_app::proto::Call::ModelSet { model } => Some(model.clone()),
+                _ => model,
+            };
+            let closing_ws = matches!(call, synthesis_app::proto::Call::WorkspaceClose { .. });
+            let e = engine::take_shared(p)?;
+            let (mut e, rx, note, report) = crate::wsl::restart(e, call)?;
+            notes.extend(
+                note.map(|n| format!("could not restart ({n}); the session goes on as it was")),
+            );
+            if closing_ws && let Some(c) = report["closed_report"].as_object() {
+                let list = |k: &str| -> Vec<String> {
+                    c.get(k)
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(sanitize_for_display))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                let name =
+                    synthesis_view::text::basename(e.remote_root.as_deref().unwrap_or(&e.root));
+                let r = synthesis_session::WorkspaceClose {
+                    closed: list("closed"),
+                    held: list("held"),
+                    failed: vec![],
+                };
+                notes.push(crate::close_ws::report(&name, &r));
+            }
+            let replay = resume_id.as_deref().and_then(|id| wsl_replay(&e, id));
+            // shown at the start of the new chat, like the local engine's start notes
+            e.notices.extend(notes);
+            Ok(launched(e, rx, replay, model))
+        }
+        WslPlan::Resume(_) => Err("internal: resume was not resolved".into()),
+    }
+}
+
 /// The worker side of a (re)launch: ends `prior`, then starts the engine on `target`. A model
 /// that cannot be built falls back to the session on the model it had.
 pub fn build(
@@ -2441,6 +2642,12 @@ pub fn build(
     mut notes: Vec<String>,
 ) -> Result<Launched, String> {
     let first_start = prior.is_none() && target.is_none();
+    // WSL mode (Windows, Settings toggle): the engine runs in the distro and owns the store; nothing below
+    // (the host's store, the local engine) is reached. The prior engine is not closed here: a restart reuses
+    // its process.
+    if crate::wsl::enabled(&cfg.synthesis_home).map_err(|e| sanitize_for_display(&e))? {
+        return wsl_build(cfg, project, prior, target, model, notes);
+    }
     let prior_sid = prior.as_ref().map(|p| p.sid.clone());
     let prior_root = prior.as_ref().map(|p| p.root.clone());
     if let Some(p) = prior {
@@ -2452,16 +2659,6 @@ pub fn build(
     let mut model = model;
     let prior_model = model.clone();
     let mut project = project;
-    // WSL mode (Windows, Settings toggle): the engine runs in the distro, which has no session store yet
-    if crate::wsl::enabled(&home).map_err(|e| sanitize_for_display(&e))? {
-        let folder = wsl_folder(&target, &project)?;
-        return crate::wsl::start(&cfg.env, &home, &folder).map(|(engine, rx)| Launched {
-            engine,
-            rx,
-            replay: None,
-            model: None,
-        });
-    }
     let mut resume = None;
     if first_start {
         let keep = cfg.args.common.resume.clone().unwrap_or_default();
@@ -2480,7 +2677,7 @@ pub fn build(
             model = Some(m.clone());
             prior_sid.clone().map(Ok)
         }
-        Some(Target::Trust) => prior_sid.clone().map(Ok),
+        Some(Target::Trust(_)) => prior_sid.clone().map(Ok),
         Some(Target::New(p)) => {
             project.clone_from(p);
             None
@@ -2657,7 +2854,7 @@ pub fn build(
             )
         }
         // a trusted restart that fails must not leave the session without an engine: it continues untrusted
-        Err(e) if matches!(target, Some(Target::Trust)) => {
+        Err(e) if matches!(target, Some(Target::Trust(_))) => {
             notes.push(trust_fallback_note(&e));
             attempt(
                 project,
@@ -2705,12 +2902,34 @@ pub fn load_convo(home: &Path, id: &str) -> Result<Convo, String> {
     Ok(c)
 }
 
+/// The conversation of session `id` from the engine's store (WSL mode), read-only.
+pub fn load_convo_remote(e: &Engine, id: &str) -> Result<Convo, String> {
+    let mut c = Convo::default();
+    for ev in e.remote().ok_or("not a WSL engine")?.preview(id)? {
+        c.apply(&ev);
+    }
+    Ok(c)
+}
+
+/// The workspace list and the usage history from the engine (WSL mode). Blocking: off the UI thread.
+pub fn read_store_remote(
+    e: &Engine,
+    tz_min: i32,
+) -> Result<(WorkspaceList, Vec<synthesis_view::usage::HistoryDay>), String> {
+    let r = e.remote().ok_or("not a WSL engine")?;
+    Ok((r.workspaces()?, r.usage(tz_min)?))
+}
+
 /// The workspace list (with the trust-gated git scan), the sessions a process holds, and the usage
 /// history. Blocking (reads the store, runs git): off the UI thread.
 pub fn read_store(
     cfg: &LiveCfg,
     root: Option<&str>,
 ) -> Result<(WorkspaceList, Vec<synthesis_view::usage::HistoryDay>), String> {
+    // the host's store is never read for a WSL engine (its lists come from the engine); an unreadable setting counts as WSL mode
+    if crate::wsl::enabled(&cfg.synthesis_home).unwrap_or(true) {
+        return Err("WSL mode: the host's session store is not used".into());
+    }
     let _t = crate::trace::span(&cfg.env, "read_store (workspace list, usage)");
     let r = synthesis_session::Reader::open(&cfg.synthesis_home).map_err(|e| e.to_string())?;
     let home = cfg.synthesis_home.clone();
@@ -2882,32 +3101,67 @@ mod tests {
     use synthesis_view::convo::ToolState;
 
     #[test]
-    fn in_wsl_mode_only_a_start_or_a_new_session_goes_on_and_nothing_reaches_the_local_engine() {
+    fn in_wsl_mode_every_target_is_classified_and_none_reaches_the_local_engine() {
+        use synthesis_app::engine_methods::Mode;
+        use synthesis_app::proto::Call;
         let p = Path::new("/p");
-        // start (no target) and new session
-        assert_eq!(wsl_folder(&None, p), Ok(PathBuf::from("/p")));
-        assert_eq!(
-            wsl_folder(&Some(Target::New("/q".into())), p),
-            Ok(PathBuf::from("/q"))
+        // a first start and a new session are new processes in their folder
+        assert!(matches!(wsl_plan(&None, p, ""), WslPlan::Fresh(f) if f == Path::new("/p")));
+        assert!(
+            matches!(wsl_plan(&Some(Target::New("/q".into())), p, ""), WslPlan::Fresh(f) if f == Path::new("/q"))
         );
-        // resume, model change, trust, close and close-workspace are refused, never run locally
-        for t in [
-            Target::Resume("s".into()),
-            Target::Model("a/b".into()),
-            Target::Close,
-            Target::CloseWorkspace("k".into()),
-            Target::Trust,
-        ] {
-            let e = wsl_folder(&Some(t), p).unwrap_err();
-            assert!(e.contains(crate::wsl::LATER), "{e}");
-        }
+        assert!(
+            matches!(wsl_plan(&Some(Target::Resume("s".into())), p, ""), WslPlan::Resume(id) if id == "s")
+        );
+        // every other target is a call the engine decides on
+        let in_place = |t: Target| match wsl_plan(&Some(t), p, "own") {
+            WslPlan::InPlace(c) => c,
+            _ => panic!("an in-place call"),
+        };
+        assert!(
+            matches!(in_place(Target::Model("a/b".into())), Call::ModelSet { model } if model == "a/b")
+        );
+        assert!(matches!(in_place(Target::Close), Call::SessionClose { id } if id == "own"));
+        assert!(
+            matches!(in_place(Target::CloseWorkspace("k".into())), Call::WorkspaceClose { workspace } if workspace == "k")
+        );
+        assert!(matches!(
+            in_place(Target::Trust(Some(Mode::Remember))),
+            Call::TrustSet {
+                mode: Mode::Remember
+            }
+        ));
+        // no choice from the person is never trust
+        assert!(matches!(
+            in_place(Target::Trust(None)),
+            Call::TrustSet { mode: Mode::Deny }
+        ));
         // structure: the gate precedes the only local engine start in `build`, and returns
         let src = include_str!("driver.rs");
         let build = &src[src.find("fn build(").expect("build")..];
-        let gate = build.find("crate::wsl::enabled(&home)").expect("gate");
+        let gate = build
+            .find("crate::wsl::enabled(&cfg.synthesis_home)")
+            .expect("gate");
         let local = build.find("Engine::start_with(").expect("local start");
         assert!(gate < local);
-        assert!(build[gate..local].contains("return crate::wsl::start("));
+        assert!(build[gate..local].contains("return wsl_build("));
+        // the host's store is read in exactly one place, behind the WSL gate, and the window's refresh asks the
+        // engine instead for a remote one
+        let body = &src[src.find("pub fn read_store(").expect("read_store")..];
+        let first = &body[..body
+            .find("let r = synthesis_session::Reader::open")
+            .expect("open")];
+        assert!(
+            first.contains("crate::wsl::enabled(&cfg.synthesis_home)")
+                && first.contains("return Err(")
+        );
+        let refresh = &src[src.find("pub fn refresh_store(").expect("refresh")..];
+        let refresh = &refresh[..refresh.find("fn store_loaded").expect("end")];
+        assert!(
+            refresh.find("read_store_remote").expect("remote")
+                < refresh.find("read_store(&cfg").expect("host"),
+            "a remote engine is asked before the host store is considered"
+        );
         // engine.rs: every local start is `pub(crate)` (the compiler then keeps it inside this crate), the one
         // that only tools use is behind a feature, and the public test wrappers are behind another
         let eng = include_str!("../engine.rs");
@@ -3221,7 +3475,7 @@ mod switch_tests {
         l.starting = false;
         l.sid = "session-a".into();
         l.cwd = dir.to_string_lossy().into();
-        l.ws_key = fold_dir(&l.cwd);
+        l.ws_key = synthesis_view::workspaces::fold_dir(&l.cwd);
         let row = |id: &str, mtime| SessionRow {
             id: id.into(),
             title: id.into(),
@@ -3415,7 +3669,7 @@ mod switch_tests {
             assert!(lu.live.ws_new && !lu.live.starting && lu.engine_task.is_none());
             assert_eq!(
                 lu.live.ws_key,
-                fold_dir(&lu.live.cwd),
+                synthesis_view::workspaces::fold_dir(&lu.live.cwd),
                 "the workspace list keeps its pick"
             );
         });

@@ -4,11 +4,11 @@
 
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use synthesis_session::{Reader, UsageDay};
 
 /// One calendar day of activity (the render indexes days back from the last entry).
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct HistoryDay {
     /// Instant (ms) inside the day; the calendar day is taken in the state's UTC offset.
     pub date_ms: i64,

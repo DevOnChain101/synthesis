@@ -3,7 +3,7 @@
 
 use synthesis_cli_ui_render::dialogs::mode_name;
 use synthesis_view::topology::{Group, Topology, is_busy};
-use synthesis_view::workspaces::{SessionRow, fold_dir};
+use synthesis_view::workspaces::SessionRow;
 
 use super::activity::{
     Activity, RunState, activity_of, run_state_of_live, run_state_of_status, status_word,
@@ -285,7 +285,7 @@ fn session_rows(l: &Live, now: i64, home: Option<&str>, folder: &str) -> Vec<Run
     };
     let mut rows: Vec<SessionRow> = ws.sessions.clone();
     // the open session always shows, even before it has a message
-    let current = fold_dir(&v.session.cwd) == ws.key || fold_dir(&l.cwd) == ws.key;
+    let current = l.key_of(&v.session.cwd) == ws.key || l.cwd_key() == ws.key;
     if current && !l.sid.is_empty() && !rows.iter().any(|r| r.id == l.sid) {
         rows.insert(
             0,
@@ -557,7 +557,7 @@ pub fn build(l: &Live, now: i64, tz_min: i32, home: Option<&str>) -> Snapshot {
         .workspaces
         .workspaces
         .iter()
-        .find(|w| w.key == fold_dir(&l.cwd))
+        .find(|w| w.key == l.cwd_key())
         .map_or_else(
             || {
                 std::path::Path::new(&l.cwd)

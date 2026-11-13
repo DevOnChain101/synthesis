@@ -15,7 +15,33 @@ use synthesis_settings::load_settings_with_managed;
 use synthesis_settings_ui::{Edit, Field, Kind, Origin, Section, SetError, SettingsStore};
 
 /// Everything the model reads from the outside.
+/// Shown instead of the Windows trust store in WSL mode.
+pub const TRUST_IN_ENGINE: &str = "Remembered trust is managed in the engine (WSL): use /trust in the TUI tab. The Windows store is not used for those folders.";
+
+/// WSL mode is on, or its setting cannot be read (then nothing of the host's store is touched either).
+fn wsl_mode(home: &std::path::Path) -> bool {
+    host_store_off(crate::wsl::enabled(home))
+}
+
+/// Fail closed: an unreadable WSL setting is WSL mode.
+fn host_store_off(wsl: Result<bool, String>) -> bool {
+    wsl.unwrap_or(true)
+}
+
+#[cfg(test)]
+mod wsl_tests {
+    use super::*;
+
+    #[test]
+    fn the_windows_trust_store_is_left_alone_in_wsl_mode_and_when_the_setting_is_unreadable() {
+        assert!(host_store_off(Ok(true)));
+        assert!(host_store_off(Err("bad settings".into())));
+        assert!(!host_store_off(Ok(false)));
+    }
+}
+
 #[derive(Clone)]
+
 pub struct Cfg {
     pub env: Env,
     /// `SYNT_HOME`.
@@ -408,14 +434,21 @@ impl Model {
                 (s.name, s.description, src)
             })
             .collect();
-        let listing = match synthesis_session::trust::list(&c.home) {
-            Ok(l) => {
-                self.trust_error = None;
-                l
-            }
-            Err(e) => {
-                self.trust_error = Some(e.to_string());
-                Default::default()
+        // WSL mode: the remembered trust lives in the engine's store inside the distro; the Windows store is not
+        // read (it holds nothing for those folders) and is not revoked from here
+        let listing = if wsl_mode(&c.home) {
+            self.trust_error = Some(TRUST_IN_ENGINE.into());
+            Default::default()
+        } else {
+            match synthesis_session::trust::list(&c.home) {
+                Ok(l) => {
+                    self.trust_error = None;
+                    l
+                }
+                Err(e) => {
+                    self.trust_error = Some(e.to_string());
+                    Default::default()
+                }
             }
         };
         self.trust_unverified = listing.unverified;
@@ -764,6 +797,9 @@ impl Model {
     /// Only servers of the user file can be removed here.
     /// Forgets a remembered trusted folder; it takes effect at the next engine start.
     pub fn revoke_trust(&mut self, root: &str) -> Result<(), String> {
+        if wsl_mode(&self.cfg.home) {
+            return Err(TRUST_IN_ENGINE.into());
+        }
         synthesis_session::trust::revoke(&self.cfg.home, root).map_err(|e| e.to_string())?;
         self.refresh_info();
         Ok(())

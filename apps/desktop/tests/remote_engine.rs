@@ -64,6 +64,7 @@ fn fake_engine(mode: &str) {
                     "die-after-send" => std::process::exit(3),
                     "hang" => std::thread::sleep(Duration::from_secs(600)),
                     "event-flood" => (0..20_000).for_each(|_| println!("{EVENT}")),
+                    "forged-restart" => say(json!({"msg":"restarted"})),
                     "hello-flood" => (0..150).for_each(|_| {
                         say(json!({"msg":"hello","version":VERSION,"protocol":PROTOCOL}))
                     }),
@@ -75,6 +76,62 @@ fn fake_engine(mode: &str) {
                 say(
                     json!({"msg":"ask.approval","id":"a1","agent_id":null,"tool":"Bash","input":{},"dialog":"permission","prompt":"p","reason":"r","origin":null,"suggestions":[]}),
                 );
+            }
+            "workspaces.list" => {
+                let many: Vec<Value> = (0..300)
+                    .map(|i| json!({"root":format!("/r{i}"),"key":format!("/r{i}"),"label":"l","sessions":[],"available":true,"changes":null}))
+                    .collect();
+                let mut ws = vec![
+                    json!({"root":"/home/me/repo","key":"/home/me/repo","label":"re\u{1b}[31mpo","sessions":[{"id":"s1","title":"t\u{1b}[2Jitle","status":"idle","updated_at":"","mtime":0,"is_live":false}],"available":true,"changes":null}),
+                ];
+                ws.extend(many);
+                say(json!({"msg":"result","id":id,"ok":{"workspaces":ws,"truncated":false}}))
+            }
+            "session.preview" => say(
+                json!({"msg":"result","id":id,"ok":{"events":[serde_json::from_str::<Value>(EVENT).unwrap(), {"junk":true}],"truncated":false}}),
+            ),
+            "usage.summary" => say(json!({"msg":"result","id":id,"ok":{"days":[]}})),
+            "trust.state" => say(
+                json!({"msg":"result","id":id,"ok":{"root":"/home/me/re\u{1b}po","cwd":"/home/me/repo","trusted":false,"remembered":"changed","changed_files":["a"],"since":"2026-01-01","records":[{"root":"/x","scope":"folder","trusted_at":"2026-01-01","state":"config unchanged"}]}}),
+            ),
+            "trust.set" | "model.set" | "session.new" if mode == "busy" => say(
+                json!({"msg":"result","id":id,"error":"refused: busy: finish or cancel the task first"}),
+            ),
+            "trust.set" | "model.set" | "session.new" if mode == "fatal" => {
+                say(json!({"msg":"result","id":id,"error":"fatal: the session could not continue"}))
+            }
+            // an error the engine did not mark as a refusal: nothing says the session is still there
+            "trust.set" | "model.set" | "session.new" if mode == "unmarked" => {
+                say(json!({"msg":"result","id":id,"error":"something went wrong"}))
+            }
+            "session.rename" | "clear" | "compact" if mode == "slow" => {
+                std::thread::sleep(Duration::from_millis(1500));
+                say(json!({"msg":"result","id":id,"ok":{"title":"t","started":true}}))
+            }
+            "model.set" if mode == "wsl" => say(
+                json!({"msg":"result","id":id,"ok":{"sid":"s2","label":"fake/model","models":[],"mode":"default","trusted":false,"cwd":"/elsewhere","root":"/elsewhere","notices":[]}}),
+            ),
+            "trust.set" | "model.set" | "session.new" => {
+                // the old session's trailing line, the marker, then the new session
+                println!("{EVENT}");
+                if mode == "stale" {
+                    // the ending session's last words: all dropped by the client
+                    say(json!({"msg":"task_done","error":null}));
+                    say(json!({"msg":"notice","text":"old"}));
+                    say(json!({"msg":"compacted","error":null}));
+                }
+                say(json!({"msg":"restarted"}));
+                println!(
+                    "{}",
+                    EVENT
+                        .replace(r#""seq":1"#, r#""seq":2"#)
+                        .replace("\"s1\"", "\"s2\"")
+                );
+                let cd = std::env::args().skip_while(|a| a != "--cd").nth(1);
+                let cwd = cd.as_deref().unwrap_or("/engine/side");
+                say(
+                    json!({"msg":"result","id":id,"ok":{"sid":"s2","label":"fake/model","models":[],"mode":"default","trusted":req["method"]=="trust.set","cwd":cwd,"root":cwd,"notices":[]}}),
+                )
             }
             "set_mode" => say(json!({"msg":"result","id":id,"ok":{"mode":req["params"]["mode"]}})),
             "answer" => {
@@ -101,7 +158,7 @@ fn launcher(mode: &str) -> Launcher {
 }
 
 fn start_with(l: &Launcher) -> Result<(Engine, UnboundedReceiver<UiMsg>), String> {
-    Engine::start_remote(l, &std::env::temp_dir())
+    Engine::start_remote(l, &std::env::temp_dir(), &Default::default())
 }
 
 fn start(mode: &str) -> Result<(Engine, UnboundedReceiver<UiMsg>), String> {
@@ -166,7 +223,8 @@ fn a_session_over_the_pipe() {
     // the engine's own folder strings are display text; the host opens only the folder it chose
     assert_eq!(e.cwd, std::env::temp_dir().to_string_lossy());
     assert_eq!(e.remote_cwd.as_deref(), Some("/engine/side"));
-    assert!(!e.trusted, "an engine cannot make a folder trusted");
+    // trust is the engine's decision (the person's choice went through `trust.set`); shown as it reports it
+    assert!(e.trusted);
     // the mode is the engine's, not an assumed default; a change shows once the engine accepted it
     assert!(e.is_remote() && e.mode() == Mode::AcceptEdits);
     e.set_mode(Mode::Plan);
@@ -197,9 +255,142 @@ fn a_session_over_the_pipe() {
     assert!(!e.running());
     // what the local engine has and the remote one does not yet says so
     assert_eq!(e.mcp_report(), vec![NOT_REMOTE.to_string()]);
-    assert_eq!(e.compact(None), Err(NOT_REMOTE));
-    assert!(e.rename("x").is_err());
+    // remote compact/rename are background calls: they return at once and answer as messages
+    let e = std::sync::Arc::new(e);
+    assert_eq!(e.compact(None), Ok(false));
+    // no host store, no note file: a `#` note has no place to go in remote mode
+    assert!(e.notes.save(true, "x").is_err());
+    assert!(e.synthesis_home.as_os_str().is_empty());
+    let e = std::sync::Arc::try_unwrap(e).ok().expect("sole owner");
     assert!(e.close().is_none());
+}
+
+fn the_store_methods_are_parsed_bounded_and_made_printable() {
+    let (e, _rx) = start("ok").expect("starts");
+    let r = e.remote().expect("remote");
+    let ws = r.workspaces().unwrap();
+    assert_eq!(
+        ws.workspaces.len(),
+        200,
+        "bounded whatever the engine sends"
+    );
+    let w = &ws.workspaces[0];
+    assert!(!w.label.contains('\u{1b}') && !w.sessions[0].title.contains('\u{1b}'));
+    // events: the unreadable one is skipped
+    assert_eq!(r.preview("s1").unwrap().len(), 1);
+    assert!(r.usage(0).unwrap().is_empty());
+    let t = r.trust_state().unwrap();
+    assert!(!t.root.contains('\u{1b}'));
+    assert_eq!(
+        (
+            t.remembered.as_str(),
+            t.changed_files.len(),
+            t.records.len()
+        ),
+        ("changed", 1, 1)
+    );
+    assert!(e.close().is_none());
+}
+
+fn a_restart_moves_the_window_to_the_new_session_and_drops_the_old_lines() {
+    let (e, mut old_rx) = start("ok").expect("starts");
+    assert!(e.is_remote());
+    let (e, mut rx, note, v) = e
+        .restart_remote(synthesis_app::proto::Call::TrustSet {
+            mode: synthesis_app::engine_methods::Mode::Session,
+        })
+        .expect("restarts");
+    assert!(note.is_none());
+    assert_eq!((e.sid.as_str(), v["sid"].as_str()), ("s2", Some("s2")));
+    assert!(e.trusted);
+    assert_eq!(e.mode(), Mode::Default);
+    // the new window gets the new session's line and not the old session's trailing one
+    assert!(matches!(next(&mut rx, "new event"), UiMsg::Event(ev) if ev.seq == 2));
+    assert!(rx.try_recv().is_err());
+    assert!(
+        old_rx.try_recv().is_err(),
+        "the old window hears nothing more"
+    );
+    assert!(e.close().is_none());
+}
+
+fn the_old_sessions_last_lines_are_dropped_not_shown_in_the_new_window() {
+    let (e, _old) = start("stale").expect("starts");
+    let (e, mut rx, _, _) = e
+        .restart_remote(synthesis_app::proto::Call::SessionNew)
+        .expect("restarts");
+    // the first thing the new window hears is the new session's event: no old task end, notice or compaction
+    assert!(matches!(next(&mut rx, "new event"), UiMsg::Event(ev) if ev.seq == 2));
+    assert!(rx.try_recv().is_err());
+    assert!(e.close().is_none());
+}
+
+fn only_a_marked_refusal_keeps_the_engine_everything_else_ends_it() {
+    for mode in ["fatal", "unmarked"] {
+        let (e, _old) = start(mode).expect("starts");
+        let r = e.restart_remote(synthesis_app::proto::Call::SessionNew);
+        assert!(r.is_err(), "{mode}: the engine is dropped, not kept");
+    }
+}
+
+fn a_slow_engine_never_blocks_the_callers_of_rename_clear_and_compact() {
+    let (e, mut rx) = start("slow").expect("starts");
+    let e = std::sync::Arc::new(e);
+    let t0 = Instant::now();
+    e.rename_remote("x");
+    e.clear_history();
+    assert_eq!(e.compact(None), Ok(false));
+    assert!(
+        t0.elapsed() < Duration::from_millis(500),
+        "returned at once"
+    );
+    // a call in flight keeps the engine from being restarted or closed under it
+    assert!(synthesis_desktop::engine::in_use(&e));
+    // the answers arrive later, as messages
+    let mut renamed = false;
+    let t1 = Instant::now();
+    while !renamed {
+        assert!(t1.elapsed() < Duration::from_secs(30), "no answer");
+        if let UiMsg::Renamed(sid, Ok(t)) = next(&mut rx, "answer") {
+            assert_eq!(sid, "s1", "the answer names the session it was asked for");
+            renamed = t == "t";
+        }
+    }
+}
+
+fn a_busy_engine_is_kept_until_its_calls_ended() {
+    let (e, mut rx) = start("slow").expect("starts");
+    let e = std::sync::Arc::new(e);
+    assert!(!synthesis_desktop::engine::in_use(&e));
+    e.rename_remote("x");
+    assert!(
+        synthesis_desktop::engine::in_use(&e),
+        "the call holds the engine"
+    );
+    // once it answered, the engine is free again
+    while !matches!(next(&mut rx, "answer"), UiMsg::Renamed(..)) {}
+    let t0 = Instant::now();
+    while synthesis_desktop::engine::in_use(&e) {
+        assert!(t0.elapsed() < Duration::from_secs(10), "still held");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn a_refused_restart_leaves_the_session_running() {
+    let (e, _old) = start("busy").expect("starts");
+    let (e, mut rx, note, _) = e
+        .restart_remote(synthesis_app::proto::Call::SessionNew)
+        .expect("not fatal");
+    assert!(note.unwrap().contains("busy"));
+    assert_eq!(e.sid, "s1");
+    // still the same engine, and its events reach the new window
+    e.send("go".into()).unwrap();
+    assert!(matches!(next(&mut rx, "event"), UiMsg::Event(_)));
+    drop(e);
+}
+
+fn a_restart_the_client_did_not_ask_for_kills_the_engine() {
+    killed_after_send("forged-restart", None);
 }
 
 fn a_dead_engine_ends_the_task_instead_of_hanging() {
@@ -281,6 +472,7 @@ fn a_session_through_a_fake_wsl() {
             VERSION,
             &env,
             Path::new(folder),
+            &Default::default(),
             wsl::CostCap::Usd(10.0),
         )
         .unwrap_or_else(|e| panic!("{folder}: {e}"));
@@ -291,6 +483,25 @@ fn a_session_through_a_fake_wsl() {
         e.send("go".into()).unwrap();
         assert!(matches!(next(&mut rx, "event"), UiMsg::Event(_)));
         assert!(e.close().is_none());
+        // a restart that comes back in another folder is refused: the engine is dropped, never used
+        let (idle, _rx) = wsl::start_via(
+            &run,
+            &exe,
+            "",
+            VERSION,
+            &env,
+            Path::new(folder),
+            &Default::default(),
+            wsl::CostCap::Usd(10.0),
+        )
+        .unwrap();
+        let drift = wsl::restart(
+            idle,
+            synthesis_app::proto::Call::ModelSet {
+                model: "a/b".into(),
+            },
+        );
+        assert!(drift.err().unwrap().contains("reports its folder"));
     }
     assert!(
         seen.lock()
@@ -306,6 +517,7 @@ fn a_session_through_a_fake_wsl() {
         VERSION,
         &env,
         Path::new(r"\\wsl$\Debian\x"),
+        &Default::default(),
         wsl::CostCap::Usd(10.0),
     );
     assert!(e.err().unwrap().contains("Debian"));
@@ -337,7 +549,39 @@ fn main() {
     if let Some(i) = args.iter().position(|a| a == "--fake-engine") {
         return fake_engine(&args[i + 1]);
     }
-    let tests: [(&str, fn()); 8] = [
+    let tests: [(&str, fn()); 16] = [
+        (
+            "the_store_methods_are_parsed_bounded_and_made_printable",
+            the_store_methods_are_parsed_bounded_and_made_printable,
+        ),
+        (
+            "a_restart_moves_the_window_to_the_new_session_and_drops_the_old_lines",
+            a_restart_moves_the_window_to_the_new_session_and_drops_the_old_lines,
+        ),
+        (
+            "the_old_sessions_last_lines_are_dropped_not_shown_in_the_new_window",
+            the_old_sessions_last_lines_are_dropped_not_shown_in_the_new_window,
+        ),
+        (
+            "only_a_marked_refusal_keeps_the_engine_everything_else_ends_it",
+            only_a_marked_refusal_keeps_the_engine_everything_else_ends_it,
+        ),
+        (
+            "a_slow_engine_never_blocks_the_callers_of_rename_clear_and_compact",
+            a_slow_engine_never_blocks_the_callers_of_rename_clear_and_compact,
+        ),
+        (
+            "a_busy_engine_is_kept_until_its_calls_ended",
+            a_busy_engine_is_kept_until_its_calls_ended,
+        ),
+        (
+            "a_refused_restart_leaves_the_session_running",
+            a_refused_restart_leaves_the_session_running,
+        ),
+        (
+            "a_restart_the_client_did_not_ask_for_kills_the_engine",
+            a_restart_the_client_did_not_ask_for_kills_the_engine,
+        ),
         ("mismatch_is_refused", mismatch_is_refused),
         (
             "exit_before_hello_is_an_error",
