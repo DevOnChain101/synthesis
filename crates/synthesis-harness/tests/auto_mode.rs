@@ -268,3 +268,25 @@ async fn the_judge_prompt_lists_the_files_written_this_task() {
     let p = judge_text(&rig.requests()[1]);
     assert!(p.contains("files_written_by_the_agent_this_task"), "{p}");
 }
+
+#[tokio::test]
+async fn an_image_the_person_attached_taints_the_actions_that_follow() {
+    let w = Probe::new("Mutate", SideEffectClass::Write, 0, "changed");
+    let mut rig = Rig::new(
+        opts(&w),
+        vec![
+            Turn::tool("m1", "Mutate", json!({})),
+            Turn::text("could not"),
+        ],
+    );
+    let mut r = synthesis_harness::TaskRequest::new("what does this screenshot say");
+    r.images = vec![synthesis_harness::ImageAttachment {
+        media_type: "image/png".into(),
+        data_base64: "iVBORw0KGgo=".into(),
+    }];
+    rig.run_with(r, tokio_util::sync::CancellationToken::new())
+        .await;
+    // never judged by the model (no judge turn was used), asked instead: nobody answers, so it did not run
+    assert_eq!(w.runs(), 0);
+    assert_eq!(verdicts(&rig), vec![("ask".into(), "fail_closed".into())]);
+}

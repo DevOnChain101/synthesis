@@ -734,6 +734,7 @@ impl Srv<'_> {
                 Ok(engine_ops::clean_plan(&mut self.tokens, &ctx, &sid)?)
             }
             Call::CleanApply { token, backup } => {
+                self.heavy()?;
                 self.idle()?;
                 let sid = self.session()?.sid.clone();
                 let ctx = ctx_of(self.common, self.env, &h);
@@ -743,6 +744,7 @@ impl Srv<'_> {
                     &sid,
                     &token,
                     backup,
+                    &hide_paths(&h, self.cwd.as_deref()),
                 )?)
             }
             Call::MemoryList
@@ -764,6 +766,14 @@ impl Srv<'_> {
             Call::MemoryNote { text, user } => {
                 if text.len() > engine_ops::MAX_NOTE_BYTES {
                     return Err("a note must be 1 to 2048 bytes".into());
+                }
+                // a project note is only for a folder the engine trusts (its instruction file is loaded only then);
+                // the client is trusted to be the window the person confirmed the note in
+                if !user && !self.trusted {
+                    return Err(
+                        "a project note needs a trusted folder: save it to the user file instead"
+                            .into(),
+                    );
                 }
                 let hide = hide_paths(&h, self.cwd.as_deref());
                 let done = self
@@ -801,7 +811,6 @@ impl Srv<'_> {
                 env,
                 header,
                 command,
-                force,
             } => {
                 let hide = hide_paths(&h, self.cwd.as_deref());
                 let a = engine_ops::McpAdd {
@@ -811,13 +820,17 @@ impl Srv<'_> {
                     env,
                     header,
                     command,
-                    force,
                 };
                 Ok(engine_ops::mcp_add(&self.ctx(&h), a, &hide)?)
             }
             Call::McpRemove { name } => {
                 let hide = hide_paths(&h, self.cwd.as_deref());
-                Ok(engine_ops::mcp_remove(&self.ctx(&h), &name, &hide)?)
+                Ok(engine_ops::mcp_remove(
+                    &self.ctx(&h),
+                    self.session()?.mcp.as_ref(),
+                    &name,
+                    &hide,
+                )?)
             }
             Call::Clear => {
                 let l = self.session()?;

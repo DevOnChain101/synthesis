@@ -1208,7 +1208,9 @@ fn calm() {
 }
 
 fn png_b64(n: usize) -> (String, Vec<u8>) {
-    let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut v = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    v.extend(10u32.to_be_bytes());
+    v.extend(10u32.to_be_bytes());
     v.resize(n, 9);
     (b64(&v), v)
 }
@@ -1394,6 +1396,15 @@ fn an_image_goes_in_chunks_is_checked_and_is_sent_by_the_id_the_engine_issued() 
         let r = e.ask("image.put", p.clone());
         assert!(r["error"].is_string(), "{p}: {r}");
     }
+    // dimensions come from the header and are capped: 9000 pixels wide is refused
+    let mut wide = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    wide.extend(9000u32.to_be_bytes());
+    wide.extend(10u32.to_be_bytes());
+    let r = e.ask(
+        "image.put",
+        json!({"seq": 0, "mime": "image/png", "size": wide.len(), "data": b64(&wide), "last": true}),
+    );
+    assert!(r["error"].as_str().unwrap().contains("pixels"), "{r}");
     // an id nobody issued is no image
     assert!(
         e.err("send", json!({"text": "look", "images": ["img-nope"]}))
@@ -1479,6 +1490,7 @@ fn a_rewind_needs_the_engines_dry_run_and_a_clean_needs_its_plan() {
         plans.iter().all(|p| p["counts"]["sessions"] == 0),
         "the open session is kept: {plan}"
     );
+    calm();
     assert!(
         e.err(
             "clean.apply",
@@ -1488,6 +1500,7 @@ fn a_rewind_needs_the_engines_dry_run_and_a_clean_needs_its_plan() {
     );
     // a wrong token spends the plans: the old ones are dead, a new plan is needed
     let tok = plans[2]["token"].clone();
+    calm();
     assert!(
         e.err("clean.apply", json!({"token": tok, "backup": false}))
             .contains("no longer valid")
@@ -1495,8 +1508,10 @@ fn a_rewind_needs_the_engines_dry_run_and_a_clean_needs_its_plan() {
     calm();
     let plan = e.ok("clean.plan", Value::Null);
     let tok = plan["plans"][2]["token"].clone();
+    calm();
     let r = e.ok("clean.apply", json!({"token": tok, "backup": false}));
     assert_eq!(r["deleted"], 0, "{r}");
+    calm();
     assert!(
         e.err("clean.apply", json!({"token": tok, "backup": false}))
             .contains("no longer valid")
@@ -1594,31 +1609,45 @@ fn memory_effort_context_doctor_and_mcp_run_on_the_engines_own_files() {
             .all(|r| ["ok", "warn", "fail"].contains(&r["level"].as_str().unwrap()))
     );
     assert!(e.ok("mcp.list", Value::Null)["servers"].is_array());
-    // mcp: user scope only; the credential guard and the name check hold; a project file is never written
-    let add = |name: &str, env: Value| json!({"name": name, "transport": "http", "command": ["srv"], "env": env, "scope": "project"});
-    assert!(e.err("mcp.add", add("../x", json!([]))).contains("name"));
-    assert!(
-        e.err("mcp.add", add("a", json!(["API_KEY=sk-live-0123456789"])))
-            .len()
-            > 3
+    // mcp over the protocol: a URL server into the user file and nothing that runs code, carries environment
+    // or headers, or replaces a server
+    let url = "https://mcp.example.com/mcp";
+    for p in [
+        json!({"name": "a", "transport": "http", "command": ["sh", "-c", "id"]}),
+        json!({"name": "a", "transport": "http", "url": url, "command": ["srv"]}),
+        json!({"name": "a", "transport": "http", "url": url, "env": ["LD_PRELOAD=/tmp/x.so"]}),
+        json!({"name": "a", "transport": "http", "url": url, "header": ["Authorization: Bearer ${SYNT_API_KEY}"]}),
+        json!({"name": "a", "transport": "http", "url": "file:///etc/passwd"}),
+        json!({"name": "../x", "transport": "http", "url": url}),
+    ] {
+        assert!(e.ask("mcp.add", p.clone())["error"].is_string(), "{p}");
+    }
+    assert!(!e.home.join("synt.json").exists(), "nothing was written");
+    e.ok(
+        "mcp.add",
+        json!({"name": "a", "transport": "http", "url": url, "scope": "project", "force": true}),
     );
-    e.ok("mcp.add", add("a", json!([])));
-    let again = e.err("mcp.add", add("a", json!([])));
+    let again = e.err(
+        "mcp.add",
+        json!({"name": "a", "transport": "http", "url": "https://evil.example/x", "force": true}),
+    );
     assert!(
         again.contains("already exists") && !again.contains(&root),
         "{again}"
     );
-    assert!(
-        std::fs::read_to_string(e.home.join("synt.json"))
-            .unwrap()
-            .contains("\"a\"")
-    );
+    let file = std::fs::read_to_string(e.home.join("synt.json")).unwrap();
+    assert!(file.contains("mcp.example.com") && !file.contains("evil.example"));
     assert!(
         !e.ws.join(".mcp.json").exists(),
         "a project-scope server is never written"
     );
     e.ok("mcp.remove", json!({"name": "a"}));
     assert!(e.err("mcp.remove", json!({"name": "a"})).len() > 3);
+    // a `#` note for the project needs a folder the engine trusts; the user file does not
+    assert!(
+        e.err("memory.note", json!({"text": "n", "user": false}))
+            .contains("trusted folder")
+    );
     // a flood of heavy calls is refused, not run
     calm();
     e.ok("doctor.summary", Value::Null);

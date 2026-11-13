@@ -214,7 +214,7 @@ pub enum Call {
     DoctorSummary,
     #[serde(rename = "mcp.list")]
     McpList,
-    /// User scope only: a project-scope server is refused on this engine.
+    /// A URL server into the user file; `command`, `env` and `header` exist only to be refused.
     #[serde(rename = "mcp.add")]
     McpAdd {
         name: String,
@@ -227,8 +227,6 @@ pub enum Call {
         header: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         command: Vec<String>,
-        #[serde(default)]
-        force: bool,
     },
     #[serde(rename = "mcp.remove")]
     McpRemove {

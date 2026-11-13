@@ -111,7 +111,13 @@ impl CleanDialog {
     /// The paragraphs of the confirmation.
     pub fn lines(&self) -> Vec<String> {
         let c = &self.plan.counts;
-        let home = sanitize_for_display(&self.home.display().to_string());
+        // a WSL engine's store is on the engine's machine: the window knows no path of it
+        let wsl = self.home.as_os_str().is_empty();
+        let home = if wsl {
+            "the WSL engine's synt home".to_string()
+        } else {
+            sanitize_for_display(&self.home.display().to_string())
+        };
         let mut v = vec![
             format!("{}: {}", scope_title(self.scope), counts_line(&self.plan)),
             format!(
@@ -129,6 +135,9 @@ impl CleanDialog {
             ),
             "NOT touched: settings, auth and environment variables, the memory store, trust records and trust.key, the model cache, logs outside the sessions, the Node-format transcript copies under projects/, your project files, the current session, and every running session or one open in another window or process (skipped: running).".into(),
         ];
+        if wsl {
+            v.push("This deletes sessions stored INSIDE WSL (the engine's own store). Sessions of a Windows-side store are not touched.".into());
+        }
         v.push("Copies of these conversations remain in projects/*.jsonl and in the backup until you delete them.".into());
         v.push(if self.backup {
             format!(

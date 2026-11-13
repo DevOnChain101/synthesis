@@ -28,8 +28,6 @@ const MAX_QUERY: usize = 500;
 const MAX_ROWS: usize = 100;
 const MAX_DOCTOR_ROWS: usize = 300;
 const MAX_MCP_LIST: usize = 100;
-const MAX_ARGS: usize = 32;
-const MAX_ARG: usize = 4096;
 
 const SCOPES: [(CleanScope, &str); 3] = [
     (CleanScope::ClosedEmpty, "ClosedEmpty"),
@@ -41,9 +39,13 @@ const SCOPES: [(CleanScope, &str); 3] = [
 pub fn scrub(e: &str, hide: &[&Path]) -> String {
     let mut s = e.to_string();
     for p in hide {
-        let t = p.to_string_lossy();
-        if t.len() > 1 {
-            s = s.replace(&*t, "<folder>");
+        // the folder as given and as the system resolves it (`/var` and `/private/var`, links)
+        let real = synthesis_core::canonicalize(p).ok();
+        for q in std::iter::once(p.to_path_buf()).chain(real) {
+            let t = q.to_string_lossy();
+            if t.len() > 1 {
+                s = s.replace(&*t, "<folder>");
+            }
         }
     }
     clean(&s)
@@ -221,6 +223,7 @@ pub fn clean_apply(
     own: &str,
     tok: &str,
     backup: bool,
+    hide: &[&Path],
 ) -> Result<Value, String> {
     let at = t.clean.iter().position(|c| c.token == tok);
     let c = at.map(|i| t.clean.remove(i));
@@ -243,8 +246,8 @@ pub fn clean_apply(
     Ok(
         json!({"deleted": r.deleted, "events": r.events, "skipped_running": r.skipped_running,
         "skipped_other": r.skipped_other, "freed_bytes": r.freed_bytes,
-        "failed": r.failed.iter().take(100).map(|f| clean(f)).collect::<Vec<_>>(),
-        "backup": r.backup.map(|b| clean(&b.display().to_string()))}),
+        "failed": r.failed.iter().take(100).map(|f| scrub(f, hide)).collect::<Vec<_>>(),
+        "backup": r.backup.map(|b| scrub(&b.display().to_string(), hide))}),
     )
 }
 
@@ -481,7 +484,8 @@ pub fn mcp_list(m: Option<&std::sync::Arc<synthesis_mcp::McpManager>>) -> Value 
     json!({"servers": servers})
 }
 
-/// What `mcp.add` carries (user scope only: a project-scope server is refused on this engine).
+/// What `mcp.add` carries. Only `name` and `url` can be used: the other fields exist so that a request that
+/// tries them is refused with a reason (rather than silently losing them).
 pub struct McpAdd {
     pub name: String,
     pub url: Option<String>,
@@ -489,49 +493,58 @@ pub struct McpAdd {
     pub env: Vec<String>,
     pub header: Vec<String>,
     pub command: Vec<String>,
-    pub force: bool,
 }
 
-fn check_args(what: &str, v: &[String]) -> Result<(), String> {
-    if v.len() > MAX_ARGS || v.iter().any(|a| a.len() > MAX_ARG || a.contains('\0')) {
-        return Err(format!("{what} is too long"));
-    }
-    Ok(())
-}
-
-/// `mcp.add`: the same guards as `synt mcp add` (name, credentials need `${VAR}`, URL checks), into the USER
-/// file of this machine.
+/// `mcp.add`: a REMOTE (`http`/`https` URL) server into the USER file of this machine, with `synt mcp add`'s
+/// name and URL guards. Over the protocol it can never be a server that runs a command (that would be code
+/// execution in the engine's machine with no approval), carry environment variables (`LD_PRELOAD`, `PATH`, ...)
+/// or headers (`${VAR}` in a header would send an engine secret to a URL the client chose), or replace an
+/// existing server. A stdio server is added by hand in the engine's own `synt.json`, or (if ever needed here)
+/// through the engine's approval dialogs, never automatically.
 pub fn mcp_add(ctx: &Ctx, a: McpAdd, hide: &[&Path]) -> Result<Value, String> {
-    for (what, v) in [
-        ("the command", &a.command),
-        ("the environment", &a.env),
-        ("the headers", &a.header),
-    ] {
-        check_args(what, v)?;
+    if !a.command.is_empty() || !a.env.is_empty() || !a.header.is_empty() {
+        return Err("only a URL server can be added over the protocol: a command, environment variables or headers are refused (edit the engine's synt.json by hand)".into());
     }
-    if a.url.as_ref().is_some_and(|u| u.len() > 2048)
-        || !matches!(a.transport.as_str(), "http" | "sse")
-    {
-        return Err("not a server definition".into());
+    let url = a.url.ok_or("a URL is required")?;
+    let (scheme_ok, bad) = (
+        url.starts_with("https://") || url.starts_with("http://"),
+        url.len() > 2048 || url.contains('$') || url.chars().any(|c| c.is_control() || c == ' '),
+    );
+    if !scheme_ok || bad || !matches!(a.transport.as_str(), "http" | "sse") {
+        return Err("not an http or https server URL".into());
     }
     let args = crate::mcp::AddArgs {
         name: a.name,
         scope: crate::mcp::ScopeArg::User,
-        url: a.url,
+        url: Some(url),
         transport: a.transport,
-        env: a.env,
-        header: a.header,
+        env: vec![],
+        header: vec![],
         cwd: None,
-        force: a.force,
-        command: a.command,
+        force: false,
+        command: vec![],
     };
     crate::mcp::add_server(&ctx.home.join("synt.json"), &args).map_err(|e| scrub(&e, hide))?;
     Ok(json!({"added": clean(&args.name)}))
 }
 
-pub fn mcp_remove(ctx: &Ctx, name: &str, hide: &[&Path]) -> Result<Value, String> {
+/// `mcp.remove`: a server of the USER file only (never a project or local entry: those files are not opened),
+/// and not one a project server of the same name shadows in the live session.
+pub fn mcp_remove(
+    ctx: &Ctx,
+    live: Option<&std::sync::Arc<synthesis_mcp::McpManager>>,
+    name: &str,
+    hide: &[&Path],
+) -> Result<Value, String> {
     if !synthesis_mcp::valid_server_name(name) {
         return Err("not a server name".into());
+    }
+    if live.is_some_and(|m| {
+        m.status()
+            .iter()
+            .any(|s| s.name == name && s.scope.as_deref().is_some_and(|x| x != "user"))
+    }) {
+        return Err("that server comes from the project, not from your user settings".into());
     }
     crate::mcp::remove_server(&ctx.home.join("synt.json"), name).map_err(|e| scrub(&e, hide))?;
     Ok(json!({"removed": clean(name)}))
@@ -641,7 +654,7 @@ mod tests {
         // no token, a made-up token, or a token of an older plan: nothing is deleted
         for bad in ["", "cl-0", "../x"] {
             assert!(
-                clean_apply(&mut t, &ctx, "own", bad, false)
+                clean_apply(&mut t, &ctx, "own", bad, false, &[])
                     .unwrap_err()
                     .contains("no longer valid")
             );
@@ -649,14 +662,14 @@ mod tests {
         let old = plans[0]["token"].as_str().unwrap().to_string();
         clean_plan(&mut t, &ctx, "own").unwrap();
         assert!(
-            clean_apply(&mut t, &ctx, "own", &old, false).is_err(),
+            clean_apply(&mut t, &ctx, "own", &old, false, &[]).is_err(),
             "a replaced plan's token is dead"
         );
         let p = clean_plan(&mut t, &ctx, "own").unwrap();
         let tok = p["plans"][0]["token"].as_str().unwrap().to_string();
-        assert!(clean_apply(&mut t, &ctx, "own", &tok, false).is_ok());
+        assert!(clean_apply(&mut t, &ctx, "own", &tok, false, &[]).is_ok());
         assert!(
-            clean_apply(&mut t, &ctx, "own", &tok, false).is_err(),
+            clean_apply(&mut t, &ctx, "own", &tok, false, &[]).is_err(),
             "single use"
         );
     }
@@ -692,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_guards_hold_over_the_wire() {
+    fn mcp_over_the_wire_is_a_url_server_and_nothing_that_runs_code() {
         let d = tempfile::tempdir().unwrap();
         let home = d.path().join("h");
         std::fs::create_dir_all(&home).unwrap();
@@ -703,54 +716,90 @@ mod tests {
             env: &e,
             enforcing: true,
         };
-        let add = |name: &str, env: Vec<String>, url: Option<&str>| McpAdd {
+        let add = |name: &str, url: Option<&str>| McpAdd {
             name: name.into(),
             url: url.map(Into::into),
             transport: "http".into(),
-            env,
+            env: vec![],
             header: vec![],
-            command: if url.is_some() {
-                vec![]
-            } else {
-                vec!["srv".into()]
-            },
-            force: false,
+            command: vec![],
+        };
+        let ok = Some("https://mcp.example.com/mcp");
+        // a command (stdio), environment, headers: refused whatever else is right
+        let cmd = McpAdd {
+            command: vec!["sh".into(), "-c".into(), "id".into()],
+            ..add("a", ok)
         };
         assert!(
-            mcp_add(&ctx, add("../x", vec![], None), &[]).is_err(),
-            "name"
+            mcp_add(&ctx, cmd, &[])
+                .unwrap_err()
+                .contains("only a URL server")
         );
-        assert!(
-            mcp_add(
-                &ctx,
-                add("a", vec!["API_KEY=sk-live-0123456789".into()], None),
-                &[]
-            )
-            .is_err(),
-            "credential guard"
-        );
-        assert!(
-            mcp_add(&ctx, add("a", vec![], Some("file:///etc/passwd")), &[]).is_err(),
-            "url"
-        );
-        let long = McpAdd {
-            command: vec!["x".repeat(MAX_ARG + 1)],
-            ..add("a", vec![], None)
+        let cmd = McpAdd {
+            command: vec!["srv".into()],
+            ..add("a", None)
         };
-        assert!(mcp_add(&ctx, long, &[]).is_err());
-        mcp_add(&ctx, add("a", vec![], None), &[]).unwrap();
+        assert!(mcp_add(&ctx, cmd, &[]).is_err());
+        for k in [
+            "LD_PRELOAD=/x.so",
+            "DYLD_INSERT_LIBRARIES=/x",
+            "PATH=/tmp",
+            "A=b",
+        ] {
+            let m = McpAdd {
+                env: vec![k.into()],
+                ..add("a", ok)
+            };
+            assert!(
+                mcp_add(&ctx, m, &[])
+                    .unwrap_err()
+                    .contains("only a URL server"),
+                "{k}"
+            );
+        }
+        let m = McpAdd {
+            header: vec!["Authorization: Bearer ${SYNT_API_KEY}".into()],
+            ..add("a", ok)
+        };
+        assert!(mcp_add(&ctx, m, &[]).is_err());
         assert!(
-            mcp_add(&ctx, add("a", vec![], None), &[&home])
-                .unwrap_err()
-                .contains("already exists")
+            !home.join("synt.json").exists(),
+            "nothing was written by any of these"
+        );
+        // the URL: https or http only, no expansion, no spaces, name checked
+        for u in [
+            "file:///etc/passwd",
+            "ftp://x/y",
+            "https://x/${SYNT_API_KEY}",
+            "https://a b",
+            "javascript:1",
+            "",
+        ] {
+            assert!(mcp_add(&ctx, add("a", Some(u)), &[]).is_err(), "{u}");
+        }
+        assert!(
+            mcp_add(&ctx, add("../x", ok), &[]).is_err()
+                && mcp_add(&ctx, add("a", None), &[]).is_err()
+        );
+        mcp_add(&ctx, add("a", ok), &[]).unwrap();
+        // never replaced (no `force`), and the error hides the folder
+        let again = mcp_add(&ctx, add("a", Some("https://evil.example/x")), &[&home]).unwrap_err();
+        assert!(
+            again.contains("already exists") && !again.contains(&*home.to_string_lossy()),
+            "{again}"
         );
         assert!(
-            !mcp_add(&ctx, add("a", vec![], None), &[&home])
-                .unwrap_err()
-                .contains(&*home.to_string_lossy())
+            std::fs::read_to_string(home.join("synt.json"))
+                .unwrap()
+                .contains("mcp.example.com")
         );
-        mcp_remove(&ctx, "a", &[]).unwrap();
-        assert!(mcp_remove(&ctx, "a", &[]).is_err() && mcp_remove(&ctx, "a b", &[]).is_err());
+        // remove: only a server of the user file; a bad name or a missing one is an error
+        assert!(
+            mcp_remove(&ctx, None, "a b", &[]).is_err()
+                && mcp_remove(&ctx, None, "zzz", &[]).is_err()
+        );
+        mcp_remove(&ctx, None, "a", &[]).unwrap();
+        assert!(mcp_remove(&ctx, None, "a", &[]).is_err());
     }
 
     #[test]

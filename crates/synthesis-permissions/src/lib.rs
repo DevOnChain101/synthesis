@@ -267,6 +267,24 @@ impl Verdict {
     }
 }
 
+/// Whether `p` is a protected path (VCS internals and hooks, shell and CI configuration, `.env*`, ...) of the
+/// workspace `roots` (the first is the project root): what the tools ask about before writing. Fails closed
+/// without a root.
+pub fn is_protected_path(roots: &[PathBuf], p: &Path) -> bool {
+    let Some((first, more)) = roots.split_first() else {
+        return true;
+    };
+    let rules = PermissionRules {
+        additional_directories: more.to_vec(),
+        ..PermissionRules::default()
+    };
+    Permissions::new(
+        rules,
+        Env::new(first.clone(), PathBuf::new(), Mode::Default),
+    )
+    .is_protected(p)
+}
+
 /// `permissions` block of settings.
 #[derive(Debug, Clone, Default)]
 pub struct PermissionRules {

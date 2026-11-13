@@ -164,30 +164,56 @@ pub fn read(root: &Path, rel: &str) -> Result<Value, String> {
     let gone = |_| "cannot read that file".to_string();
     let real_root = synthesis_core::canonicalize(root).map_err(gone)?;
     let real = synthesis_core::canonicalize(root.join(p)).map_err(gone)?;
-    if !contains(&real_root, &real, PathPolicy::NATIVE) {
-        return Err("the file is outside the project folder".into());
+    let inner = real
+        .strip_prefix(&real_root)
+        .ok()
+        .filter(|_| contains(&real_root, &real, PathPolicy::NATIVE))
+        .ok_or("the file is outside the project folder")?;
+    // the checks run on where the file REALLY is as well as on the name the client gave: a link inside the
+    // project that points at `.git/config` or `.env` is refused too
+    if inner
+        .components()
+        .any(|c| c.as_os_str().eq_ignore_ascii_case(".git"))
+    {
+        return Err("a file inside .git is not shown".into());
     }
-    if synthesis_core::secrets::is_secret_path(&real) || synthesis_core::secrets::is_secret_path(p)
+    if [&real, inner, p]
+        .into_iter()
+        .any(synthesis_core::secrets::is_secret_path)
     {
         return Err("a secret file (keys, .env, credentials) is not shown".into());
     }
-    let mut open = std::fs::OpenOptions::new();
+    // hard-link counts are not reliable on a Windows drive: nothing there is shown
+    #[cfg(unix)]
+    if real.starts_with("/mnt/") {
+        return Err(
+            "files on a Windows drive are not shown (their hard links cannot be checked)".into(),
+        );
+    }
+    // opened one component at a time under a handle of the folder (a parent swapped for a link meanwhile cannot
+    // lead out of it), without blocking on a pipe
+    let dir = cap_std::fs::Dir::open_ambient_dir(&real_root, cap_std::ambient_authority())
+        .map_err(gone)?;
+    let mut open = cap_std::fs::OpenOptions::new();
     open.read(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        open.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    let file = open.open(&real).map_err(gone)?;
+    cap_std::fs::OpenOptionsExt::custom_flags(&mut open, libc::O_NONBLOCK);
+    let file = dir.open_with(p, &open).map_err(gone)?;
     let meta = file.metadata().map_err(gone)?;
     if !meta.is_file() {
         return Err("not a regular file".into());
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
+        use cap_std::fs::MetadataExt as _;
+        use std::os::unix::fs::MetadataExt as _;
         if meta.nlink() > 1 {
             return Err("a file with other hard links is not shown".into());
+        }
+        // the file opened is the one that was checked: a path swapped between the checks and the open differs
+        let checked = std::fs::metadata(&real).map_err(gone)?;
+        if (checked.dev(), checked.ino()) != (meta.dev(), meta.ino()) {
+            return Err("the file changed while it was opened".into());
         }
     }
     let mut buf = Vec::new();
@@ -220,6 +246,70 @@ fn sniff(b: &[u8]) -> Option<&'static str> {
         Some("image/webp")
     } else {
         None
+    }
+}
+
+/// Largest side and area an image may have (a model rejects or mis-reads more, and decoders pay for it).
+pub const MAX_SIDE: u32 = 8000;
+pub const MAX_PIXELS: u64 = 40_000_000;
+
+/// `(width, height)` read from the header of a sniffed image; `None` for a truncated or malformed one.
+fn dims(b: &[u8], mime: &str) -> Option<(u32, u32)> {
+    let be32 = |i: usize| {
+        b.get(i..i + 4)
+            .map(|x| u32::from_be_bytes([x[0], x[1], x[2], x[3]]))
+    };
+    let le16 = |i: usize| {
+        b.get(i..i + 2)
+            .map(|x| u32::from(u16::from_le_bytes([x[0], x[1]])))
+    };
+    match mime {
+        // the first chunk must be a 13-byte IHDR
+        "image/png" => {
+            (be32(8)? == 13 && b.get(12..16)? == b"IHDR").then_some((be32(16)?, be32(20)?))
+        }
+        "image/gif" => Some((le16(6)?, le16(8)?)),
+        "image/jpeg" => {
+            // walk the segments to the first start-of-frame marker
+            let mut i = 2;
+            loop {
+                if *b.get(i)? != 0xFF {
+                    return None;
+                }
+                let m = *b.get(i + 1)?;
+                if m == 0xFF {
+                    i += 1;
+                    continue;
+                }
+                let len = usize::from(u16::from_be_bytes([*b.get(i + 2)?, *b.get(i + 3)?]));
+                if (0xC0..=0xCF).contains(&m) && !matches!(m, 0xC4 | 0xC8 | 0xCC) {
+                    let h = u32::from(u16::from_be_bytes([*b.get(i + 5)?, *b.get(i + 6)?]));
+                    let w = u32::from(u16::from_be_bytes([*b.get(i + 7)?, *b.get(i + 8)?]));
+                    return Some((w, h));
+                }
+                if len < 2 || matches!(m, 0xD8..=0xDA) {
+                    return None;
+                }
+                i += 2 + len;
+            }
+        }
+        "image/webp" => {
+            let le24 = |i: usize| {
+                b.get(i..i + 3)
+                    .map(|x| u32::from(x[0]) | u32::from(x[1]) << 8 | u32::from(x[2]) << 16)
+            };
+            match b.get(12..16)? {
+                b"VP8X" => Some((le24(24)? + 1, le24(27)? + 1)),
+                b"VP8 " => Some((le16(26)? & 0x3FFF, le16(28)? & 0x3FFF)),
+                b"VP8L" if *b.get(20)? == 0x2F => {
+                    let v =
+                        u32::from_le_bytes([*b.get(21)?, *b.get(22)?, *b.get(23)?, *b.get(24)?]);
+                    Some(((v & 0x3FFF) + 1, ((v >> 14) & 0x3FFF) + 1))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -332,6 +422,18 @@ impl Images {
         if sniff(&u.bytes) != Some(u.mime) {
             return Err("the bytes are not the declared image type".into());
         }
+        let (w, h) = dims(&u.bytes, u.mime).ok_or("the image header is truncated or malformed")?;
+        if w == 0
+            || h == 0
+            || w > MAX_SIDE
+            || h > MAX_SIDE
+            || u64::from(w) * u64::from(h) > MAX_PIXELS
+        {
+            return Err(format!(
+                "an image may be at most {MAX_SIDE} pixels a side and {} megapixels",
+                MAX_PIXELS / 1_000_000
+            ));
+        }
         let b64 = STANDARD.encode(&u.bytes);
         let attach = ImageAttachment {
             media_type: u.mime.into(),
@@ -370,10 +472,49 @@ impl Images {
 mod tests {
     use super::*;
 
-    fn png(n: usize) -> Vec<u8> {
-        let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
-        v.resize(n, 7);
+    fn png_of(w: u32, h: u32, n: usize) -> Vec<u8> {
+        let mut v = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        v.extend(w.to_be_bytes());
+        v.extend(h.to_be_bytes());
+        v.resize(n.max(v.len()), 7);
         v
+    }
+
+    fn png(n: usize) -> Vec<u8> {
+        png_of(10, 10, n)
+    }
+
+    #[test]
+    fn image_dimensions_are_read_from_the_header_and_capped() {
+        let mut im = Images::default();
+        assert!(put_all(&mut im, "image/png", &png_of(8000, 5000, 100), 100).is_ok());
+        for (w, h) in [(8001, 10), (10, 8001), (7000, 7000), (0, 5)] {
+            let e = put_all(&mut im, "image/png", &png_of(w, h, 100), 100).unwrap_err();
+            assert!(e.contains("pixels"), "{w}x{h}: {e}");
+        }
+        // truncated or malformed headers: PNG without IHDR, a short PNG, a GIF cut before its size, a JPEG without a frame
+        let mut bad = png_of(10, 10, 100);
+        bad[12..16].copy_from_slice(b"JUNK");
+        for (mime, bytes) in [
+            ("image/png", bad),
+            ("image/png", png(12)[..12].to_vec()),
+            ("image/gif", b"GIF89a\x01".to_vec()),
+            ("image/jpeg", vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 4, 0, 0]),
+            ("image/webp", b"RIFF\0\0\0\0WEBPVP8 ".to_vec()),
+        ] {
+            let e = put_all(&mut im, mime, &bytes, 100).unwrap_err();
+            assert!(e.contains("malformed"), "{mime}: {e}");
+        }
+        // the other formats' headers parse
+        let gif: Vec<u8> = b"GIF89a".iter().copied().chain([20, 0, 30, 0]).collect();
+        assert!(put_all(&mut im, "image/gif", &gif, 100).is_ok());
+        let jpeg = vec![
+            0xFF, 0xD8, 0xFF, 0xC0, 0, 11, 8, 0, 40, 0, 50, 3, 1, 0x22, 0,
+        ];
+        assert_eq!(dims(&jpeg, "image/jpeg"), Some((50, 40)));
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8X\0\0\0\0\0\0\0\0".to_vec();
+        webp.extend([99, 0, 0, 49, 0, 0]);
+        assert_eq!(dims(&webp, "image/webp"), Some((100, 50)));
     }
 
     fn put_all(im: &mut Images, mime: &str, bytes: &[u8], chunk: usize) -> Result<Value, String> {
@@ -510,6 +651,19 @@ mod tests {
         std::os::unix::fs::symlink("/etc", w.join("etc")).unwrap();
         std::fs::hard_link(d.path().join("outside.txt"), w.join("hard.txt")).unwrap();
         assert!(read(&w, "real.txt").is_ok());
+        // a link INSIDE the project to `.git` internals or a secret file is refused by where it really points
+        std::fs::create_dir_all(w.join(".git")).unwrap();
+        std::fs::write(w.join(".git/config"), "[remote]").unwrap();
+        std::fs::write(w.join(".env"), "K=1").unwrap();
+        std::os::unix::fs::symlink(".git/config", w.join("cfg.txt")).unwrap();
+        std::os::unix::fs::symlink(".env", w.join("e.txt")).unwrap();
+        std::os::unix::fs::symlink("real.txt", w.join("ok.txt")).unwrap();
+        assert!(read(&w, "cfg.txt").unwrap_err().contains(".git"));
+        assert!(read(&w, "e.txt").unwrap_err().contains("secret"));
+        assert!(
+            read(&w, "ok.txt").is_ok(),
+            "a harmless link inside the folder reads"
+        );
         assert!(read(&w, "out.txt").unwrap_err().contains("outside"));
         assert!(read(&w, "etc/hosts").unwrap_err().contains("outside"));
         assert!(read(&w, "hard.txt").unwrap_err().contains("hard links"));
