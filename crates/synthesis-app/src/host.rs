@@ -128,6 +128,8 @@ pub struct Live {
     pub mcp: Option<Arc<synthesis_mcp::McpManager>>,
     pub worktree: Option<crate::wt::Worktree>,
     pub cleanup_worktree: bool,
+    /// Where `#` notes go (the engine over stdio saves them for its client).
+    pub notes: crate::memory::Notes,
     pub began: bool,
     pub tokio: Option<tokio::runtime::Runtime>,
     pub asks: Asks,
@@ -231,6 +233,7 @@ impl Live {
             mcp,
             worktree,
             cleanup_worktree,
+            notes: notes.clone(),
             began: started.is_ok(),
             tokio: Some(tokio),
             asks,

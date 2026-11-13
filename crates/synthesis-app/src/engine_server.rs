@@ -16,9 +16,11 @@ use synthesis_harness::sanitize_for_display;
 use synthesis_permissions::Mode;
 
 use crate::asks::Asks;
+use crate::engine_fs::{self, Images, Put};
 use crate::engine_methods::{
     Ctx, Mode as TrustMode, check_id, check_instructions, check_key, check_model,
 };
+use crate::engine_ops::{self, Tokens};
 use crate::host::{CancelSlot, Info, Live, lock};
 use crate::proto::{Call, FATAL, MAX_LINE, Out, REFUSED, Request, read_line};
 use crate::run::{Common, Front, Limits, Native, prepare};
@@ -166,7 +168,20 @@ struct Srv<'a> {
     /// Requests over the last second (the rate bound of the store-backed methods).
     window: (Instant, u32),
     last_restart: Option<Instant>,
+    /// `provider/model` and the effort tiers of the live session, as its start report said.
+    label: String,
+    tiers: Vec<String>,
+    /// Images waiting for a `send`, and the rewind and clean plans issued (both end with the session).
+    images: Images,
+    tokens: Tokens,
+    /// The last scan, walk or health check: these are limited to a few a second.
+    heavy_at: Option<Instant>,
+    /// The scan the pages of `fs.list` are cut from.
+    tree: Option<synthesis_view::project::ProjectData>,
 }
+
+/// The shortest gap between two methods that walk the folder, run git or check the installation.
+const HEAVY_GAP: Duration = Duration::from_millis(250);
 
 /// Requests per second the store-backed methods accept.
 const MAX_CALLS_PER_SEC: u32 = 50;
@@ -275,15 +290,45 @@ fn start(
     Ok((live, v, trusted))
 }
 
+/// The folders of this machine an error text must not carry.
+fn hide_paths<'x>(h: &'x crate::Homes, cwd: Option<&'x Path>) -> Vec<&'x Path> {
+    let mut v = vec![h.synthesis.as_path(), h.user.as_path()];
+    v.extend(cwd);
+    v
+}
+
+/// [`Srv::ctx`] without borrowing the server (the methods that also change its state).
+fn ctx_of<'x>(common: &Common, env: &'x Env, h: &'x crate::Homes) -> Ctx<'x> {
+    let user = (!h.user.as_os_str().is_empty()).then_some(h.user.as_path());
+    Ctx {
+        home: &h.synthesis,
+        user_home: user,
+        env,
+        enforcing: common.sandbox_mode() == synthesis_terminal::SandboxMode::Enforce,
+    }
+}
+
 impl Srv<'_> {
     fn ctx<'x>(&'x self, h: &'x crate::Homes) -> Ctx<'x> {
-        let user = (!h.user.as_os_str().is_empty()).then_some(h.user.as_path());
-        Ctx {
-            home: &h.synthesis,
-            user_home: user,
-            env: self.env,
-            enforcing: self.common.sandbox_mode() == synthesis_terminal::SandboxMode::Enforce,
+        ctx_of(self.common, self.env, h)
+    }
+
+    /// The folder the files methods look at: the session's own working folder, never a client path.
+    fn files_root(&self) -> Result<PathBuf, String> {
+        Ok(self.session()?.host.workspace.cwd.clone())
+    }
+
+    /// Methods that walk the folder, run git or check the installation: a few a second at most.
+    fn heavy(&mut self) -> Result<(), String> {
+        let now = Instant::now();
+        if self
+            .heavy_at
+            .is_some_and(|t| now.duration_since(t) < HEAVY_GAP)
+        {
+            return Err("too many requests".into());
         }
+        self.heavy_at = Some(now);
+        Ok(())
     }
 
     fn session(&self) -> Result<&Live, String> {
@@ -293,7 +338,13 @@ impl Srv<'_> {
     }
 
     /// Makes `live` the session and lets the reader thread cancel its tasks.
-    fn adopt(&mut self, live: Live, trusted: bool) {
+    fn adopt(&mut self, live: Live, trusted: bool, report: &Value) {
+        self.label = report["label"].as_str().unwrap_or_default().to_string();
+        self.tiers = serde_json::from_value(report["effort_tiers"].clone()).unwrap_or_default();
+        // what was issued or held for the session that ended is not valid for the next one
+        self.images.clear();
+        self.tokens.clear();
+        self.tree = None;
         *lock(&self.oob.cancel) = Some(live.cancel_slot());
         self.live = Some(live);
         self.trusted = trusted;
@@ -439,7 +490,7 @@ impl Srv<'_> {
         if !extra.is_null() {
             v["closed_report"] = extra;
         }
-        self.adopt(live, trusted);
+        self.adopt(live, trusted, &v);
         Ok(v)
     }
 
@@ -584,6 +635,189 @@ impl Srv<'_> {
                     Some(s) => Ok(crate::rename::rename(s, &title).map(|t| json!({"title": t}))?),
                     None => Err("/rename: this session is not stored".into()),
                 }
+            }
+            Call::FsList { dir, offset } => {
+                // a page after the first continues the same scan; the first one reads the folder again
+                if offset == 0 || self.tree.is_none() {
+                    self.heavy()?;
+                    let root = self.files_root()?;
+                    self.tree = Some(engine_fs::scan(&root, self.trusted, self.env));
+                }
+                let d = self.tree.as_ref().ok_or("no scan")?;
+                Ok(engine_fs::list_of(d, &dir, offset as usize, self.trusted)?)
+            }
+            Call::FsRead { path } => Ok(engine_fs::read(&self.files_root()?, &path)?),
+            Call::FsGitStatus => {
+                if self.trusted {
+                    self.heavy()?;
+                }
+                Ok(engine_fs::git_status(
+                    &self.files_root()?,
+                    self.trusted,
+                    self.env,
+                )?)
+            }
+            Call::FsGitDiff => {
+                if self.trusted {
+                    self.heavy()?;
+                }
+                Ok(engine_fs::git_diff(
+                    &self.files_root()?,
+                    self.trusted,
+                    self.env,
+                )?)
+            }
+            Call::ImagePut {
+                upload,
+                seq,
+                mime,
+                size,
+                data,
+                last,
+            } => {
+                self.session()?;
+                let p = Put {
+                    upload: upload.as_deref(),
+                    seq,
+                    mime: mime.as_deref(),
+                    size,
+                    data: &data,
+                    last,
+                };
+                Ok(self.images.put(&p, Instant::now())?)
+            }
+            Call::ImageDrop { id } => {
+                check_id(&id)?;
+                self.images.remove(&[id]);
+                Ok(json!({}))
+            }
+            Call::RewindList => {
+                let sid = self.session()?.sid.clone();
+                let ctx = ctx_of(self.common, self.env, &h);
+                Ok(engine_ops::rewind_list(
+                    &ctx,
+                    &sid,
+                    &hide_paths(&h, self.cwd.as_deref()),
+                )?)
+            }
+            Call::RewindDryRun { checkpoint } => {
+                self.idle()?;
+                let sid = self.session()?.sid.clone();
+                let ctx = ctx_of(self.common, self.env, &h);
+                let hide = hide_paths(&h, self.cwd.as_deref());
+                Ok(engine_ops::rewind_dry_run(
+                    &mut self.tokens,
+                    &ctx,
+                    &sid,
+                    checkpoint,
+                    &hide,
+                )?)
+            }
+            Call::RewindApply { token } => {
+                self.idle()?;
+                let sid = self.session()?.sid.clone();
+                let ctx = ctx_of(self.common, self.env, &h);
+                let hide = hide_paths(&h, self.cwd.as_deref());
+                Ok(engine_ops::rewind_apply(
+                    &mut self.tokens,
+                    &ctx,
+                    &sid,
+                    &token,
+                    &hide,
+                )?)
+            }
+            Call::CleanPlan => {
+                self.heavy()?;
+                self.idle()?;
+                let sid = self.session()?.sid.clone();
+                let ctx = ctx_of(self.common, self.env, &h);
+                Ok(engine_ops::clean_plan(&mut self.tokens, &ctx, &sid)?)
+            }
+            Call::CleanApply { token, backup } => {
+                self.idle()?;
+                let sid = self.session()?.sid.clone();
+                let ctx = ctx_of(self.common, self.env, &h);
+                Ok(engine_ops::clean_apply(
+                    &mut self.tokens,
+                    &ctx,
+                    &sid,
+                    &token,
+                    backup,
+                )?)
+            }
+            Call::MemoryList
+            | Call::MemoryRetrieve { .. }
+            | Call::MemoryShow { .. }
+            | Call::MemoryAdd { .. }
+            | Call::MemoryForget { .. } => {
+                let cwd = self.cwd.clone().ok_or("not started: send start first")?;
+                let m = engine_ops::Mem::new(&self.ctx(&h), &cwd, self.trusted)?;
+                Ok(match call {
+                    Call::MemoryList => m.list()?,
+                    Call::MemoryRetrieve { query } => m.retrieve(&query)?,
+                    Call::MemoryShow { id } => m.show(&id)?,
+                    Call::MemoryAdd { text, user } => m.add(&text, user)?,
+                    Call::MemoryForget { id } => m.forget(&id)?,
+                    _ => unreachable!("matched above"),
+                })
+            }
+            Call::MemoryNote { text, user } => {
+                if text.len() > engine_ops::MAX_NOTE_BYTES {
+                    return Err("a note must be 1 to 2048 bytes".into());
+                }
+                let hide = hide_paths(&h, self.cwd.as_deref());
+                let done = self
+                    .session()?
+                    .notes
+                    .save(user, &text)
+                    .map_err(|e| engine_ops::scrub(&e, &hide))?;
+                Ok(json!({"text": engine_ops::scrub(&done, &hide)}))
+            }
+            Call::ConfigEffort { effort } => {
+                let ctx = ctx_of(self.common, self.env, &h);
+                Ok(engine_ops::effort(
+                    &ctx,
+                    self.session()?,
+                    &self.tiers,
+                    effort,
+                )?)
+            }
+            Call::ContextSet { value } => {
+                let ctx = ctx_of(self.common, self.env, &h);
+                let hide = hide_paths(&h, self.cwd.as_deref());
+                self.session()?;
+                Ok(engine_ops::context(&ctx, &self.label, &value, &hide)?)
+            }
+            Call::DoctorSummary => {
+                self.heavy()?;
+                let cwd = self.cwd.clone().ok_or("not started: send start first")?;
+                Ok(engine_ops::doctor(&self.ctx(&h), &cwd, self.trusted)?)
+            }
+            Call::McpList => Ok(engine_ops::mcp_list(self.session()?.mcp.as_ref())),
+            Call::McpAdd {
+                name,
+                url,
+                transport,
+                env,
+                header,
+                command,
+                force,
+            } => {
+                let hide = hide_paths(&h, self.cwd.as_deref());
+                let a = engine_ops::McpAdd {
+                    name,
+                    url,
+                    transport,
+                    env,
+                    header,
+                    command,
+                    force,
+                };
+                Ok(engine_ops::mcp_add(&self.ctx(&h), a, &hide)?)
+            }
+            Call::McpRemove { name } => {
+                let hide = hide_paths(&h, self.cwd.as_deref());
+                Ok(engine_ops::mcp_remove(&self.ctx(&h), &name, &hide)?)
             }
             Call::Clear => {
                 let l = self.session()?;
@@ -787,6 +1021,12 @@ pub fn serve(
         compacting: Arc::default(),
         window: (Instant::now(), 0),
         last_restart: None,
+        label: String::new(),
+        tiers: vec![],
+        images: Images::default(),
+        tokens: Tokens::default(),
+        heavy_at: None,
+        tree: None,
     };
     wire.msg(&Out::hello());
     let mut closing = None;
@@ -806,7 +1046,7 @@ pub fn serve(
                 let spec = Spec { resume, model };
                 match start(&srv, &cwd, &spec, None, true) {
                     Ok((l, v, trusted)) => {
-                        srv.adopt(l, trusted);
+                        srv.adopt(l, trusted, &v);
                         srv.cwd = Some(cwd);
                         srv.spec = spec;
                         srv.began = true;
@@ -825,15 +1065,22 @@ pub fn serve(
                     )),
                 );
             }
-            Call::Send { text } => {
+            Call::Send { text, images } => {
                 sends_seen += 1;
                 let w = wire.clone();
-                let r = match &srv.live {
-                    None => Err("not started: send start first"),
-                    Some(l) => l.start_task(text, vec![], false, move |r| {
-                        w.msg(&Out::TaskDone { error: r.err() });
-                    }),
+                let attached = srv.images.peek(&images);
+                let r = match (&srv.live, attached) {
+                    (None, _) => Err("not started: send start first".to_string()),
+                    (_, Err(e)) => Err(e),
+                    (Some(l), Ok(imgs)) => l
+                        .start_task(text, imgs, false, move |r| {
+                            w.msg(&Out::TaskDone { error: r.err() });
+                        })
+                        .map_err(String::from),
                 };
+                if r.is_ok() {
+                    srv.images.remove(&images);
+                }
                 // a `cancel` that reached the reader before this send was dequeued applies to it
                 if r.is_ok()
                     && sends_seen <= srv.oob.cancel_upto.load(Ordering::SeqCst)
@@ -841,7 +1088,7 @@ pub fn serve(
                 {
                     l.cancel();
                 }
-                wire.result(id, r.map(|()| json!({})).map_err(String::from));
+                wire.result(id, r.map(|()| json!({})));
             }
             Call::SetMode { mode } => {
                 let r = match (&srv.live, Mode::parse(&mode)) {

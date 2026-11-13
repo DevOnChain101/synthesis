@@ -1,0 +1,646 @@
+//! The file and image methods of `synt engine --stdio` (protocol 3, docs/specs/desktop.md section 8). They run
+//! in the engine, on its own machine (inside WSL, the distro's Linux): the client names a path RELATIVE to the
+//! session folder (never absolute), every path is validated here, and what comes back is bounded and made
+//! printable. Paths in answers are display text for the client, never something it opens.
+//!
+//! - `fs.list` / `fs.git_*`: [`synthesis_view::project`]'s scans (plain walk when the folder is not trusted,
+//!   git through its hardened wrapper only when it is);
+//! - `fs.read`: a text preview with the refusals of the window's own preview (outside the folder, links out,
+//!   secret files, not regular, binary) plus hard links, `.git`, no blocking on a pipe, 256 KB;
+//! - `image.put`: a pasted or dropped image in bounded base64 chunks, sniffed, held in memory until `send`
+//!   names it by the id the engine issued.
+
+use std::io::Read;
+use std::path::{Component, Path};
+use std::time::{Duration, Instant};
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use serde_json::{Value, json};
+use synthesis_config::Env;
+use synthesis_core::{PathPolicy, contains};
+use synthesis_harness::{ImageAttachment, sanitize_for_display as clean};
+use synthesis_view::project::{self, ProjectData};
+
+/// Rows of the tree per answer.
+pub const PAGE_ROWS: usize = 200;
+const MAX_REL: usize = 1024;
+pub const PREVIEW_BYTES: usize = 256 * 1024;
+pub const PREVIEW_LINES: usize = 2000;
+/// One image, the images waiting for a `send`, their bytes (the window's own limits), and one chunk's base64.
+pub const MAX_IMAGE: usize = 5 << 20;
+pub const MAX_IMAGES: usize = 5;
+pub const MAX_IMAGE_BYTES: usize = 6 << 20;
+pub const MAX_CHUNK_B64: usize = 512 << 10;
+/// An upload that stays silent this long is dropped.
+const UPLOAD_IDLE: Duration = Duration::from_secs(60);
+
+/// A path of the session folder as the client names it: relative, plain components only (no `..`, no `.`, no
+/// drive or root), no control characters, and nothing in `.git`. `allow_empty`: the folder itself.
+pub fn check_rel(p: &str, allow_empty: bool) -> Result<(), String> {
+    if p.is_empty() {
+        return if allow_empty {
+            Ok(())
+        } else {
+            Err("not a path inside the project".into())
+        };
+    }
+    let path = Path::new(p);
+    if p.len() > MAX_REL
+        || p.chars().any(char::is_control)
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|c| !matches!(c, Component::Normal(n) if !n.eq_ignore_ascii_case(".git")))
+    {
+        return Err("not a path inside the project".into());
+    }
+    Ok(())
+}
+
+/// The tree of the session folder: git (hardened) when `trusted`, else a plain walk. The client never decides.
+pub fn scan(root: &Path, trusted: bool, env: &Env) -> ProjectData {
+    if trusted {
+        project::scan(root, env)
+    } else {
+        project::scan_plain(root)
+    }
+}
+
+/// The paths (`a/b/c`) of the rows, in row order.
+fn row_paths(d: &ProjectData) -> Vec<String> {
+    let mut stack: Vec<&str> = vec![];
+    d.rows
+        .iter()
+        .map(|r| {
+            stack.truncate(usize::from(r.depth));
+            let p = stack
+                .iter()
+                .copied()
+                .chain([r.name.as_str()])
+                .collect::<Vec<_>>()
+                .join("/");
+            if r.dir {
+                stack.push(&r.name);
+            }
+            p
+        })
+        .collect()
+}
+
+/// `[depth, name, dir, status]` rows of the scan under `dir` ("" is all of it), from `offset`, at most
+/// [`PAGE_ROWS`].
+pub fn list_of(d: &ProjectData, dir: &str, offset: usize, trusted: bool) -> Result<Value, String> {
+    check_rel(dir, true)?;
+    let paths = row_paths(d);
+    let prefix = format!("{dir}/");
+    let picked: Vec<usize> = if dir.is_empty() {
+        (0..d.rows.len()).collect()
+    } else {
+        let at = (0..d.rows.len())
+            .find(|i| d.rows[*i].dir && paths[*i] == dir)
+            .ok_or("no such folder")?;
+        (at + 1..d.rows.len())
+            .take_while(|i| paths[*i].starts_with(&prefix))
+            .collect()
+    };
+    let page: Vec<Value> = picked
+        .iter()
+        .skip(offset)
+        .take(PAGE_ROWS)
+        .map(|i| {
+            let r = &d.rows[*i];
+            json!([r.depth, clean(&r.name), r.dir, r.status.map(String::from)])
+        })
+        .collect();
+    let end = offset.saturating_add(page.len());
+    Ok(json!({
+        "rows": page, "total": picked.len(),
+        "next": (end < picked.len()).then_some(end),
+        "truncated": d.truncated, "note": d.note.as_deref().map(clean), "trusted": trusted,
+    }))
+}
+
+/// The changed files (`[path, letter]`) of a trusted folder, through the hardened git wrapper.
+pub fn git_status(root: &Path, trusted: bool, env: &Env) -> Result<Value, String> {
+    let d = git_scan(root, trusted, env)?;
+    let files: Vec<Value> = row_paths(&d)
+        .into_iter()
+        .zip(&d.rows)
+        .filter(|(_, r)| !r.dir && r.status.is_some())
+        .map(|(p, r)| json!([clean(&p), r.status.map(String::from)]))
+        .collect();
+    Ok(json!({"files": files, "truncated": d.truncated, "note": d.note.as_deref().map(clean)}))
+}
+
+/// The diff of the tracked changes (bounded lines) and `[added, deleted, path]` of every changed file.
+pub fn git_diff(root: &Path, trusted: bool, env: &Env) -> Result<Value, String> {
+    let d = git_scan(root, trusted, env)?;
+    let stats: Vec<Value> = d
+        .stats
+        .iter()
+        .map(|(a, b, p)| json!([clean(a), clean(b), clean(p)]))
+        .collect();
+    Ok(
+        json!({"diff": d.diff, "stats": stats, "truncated": d.truncated, "note": d.note.as_deref().map(clean)}),
+    )
+}
+
+/// git runs only in a trusted folder: a repository's config can name programs.
+fn git_scan(root: &Path, trusted: bool, env: &Env) -> Result<ProjectData, String> {
+    if !trusted {
+        return Err("the folder is not trusted: git is not run here".into());
+    }
+    Ok(project::scan(root, env))
+}
+
+/// A text preview of `rel` under `root` (the session folder). The same refusals as the window's own preview
+/// plus: a path with a `.git` component, a file with other hard links (a link to something outside cannot
+/// be told from a file inside), and a file that is not opened as a plain file (a pipe never blocks the
+/// engine). Reads at most [`PREVIEW_BYTES`], shows at most [`PREVIEW_LINES`] lines, made printable.
+pub fn read(root: &Path, rel: &str) -> Result<Value, String> {
+    check_rel(rel, false)?;
+    let p = Path::new(rel);
+    let gone = |_| "cannot read that file".to_string();
+    let real_root = synthesis_core::canonicalize(root).map_err(gone)?;
+    let real = synthesis_core::canonicalize(root.join(p)).map_err(gone)?;
+    if !contains(&real_root, &real, PathPolicy::NATIVE) {
+        return Err("the file is outside the project folder".into());
+    }
+    if synthesis_core::secrets::is_secret_path(&real) || synthesis_core::secrets::is_secret_path(p)
+    {
+        return Err("a secret file (keys, .env, credentials) is not shown".into());
+    }
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = open.open(&real).map_err(gone)?;
+    let meta = file.metadata().map_err(gone)?;
+    if !meta.is_file() {
+        return Err("not a regular file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() > 1 {
+            return Err("a file with other hard links is not shown".into());
+        }
+    }
+    let mut buf = Vec::new();
+    file.take(PREVIEW_BYTES as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(gone)?;
+    let cut_bytes = buf.len() > PREVIEW_BYTES;
+    buf.truncate(PREVIEW_BYTES);
+    if buf[..buf.len().min(8192)].contains(&0) {
+        return Err(format!("binary file ({} bytes)", meta.len()));
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<String> = text.lines().map(clean).collect();
+    let cut_lines = lines.len() > PREVIEW_LINES;
+    lines.truncate(PREVIEW_LINES);
+    Ok(json!({"lines": lines, "size": meta.len(), "cut": cut_bytes || cut_lines}))
+}
+
+// ---- images
+
+/// The kinds accepted, by their first bytes (the declared type must agree).
+fn sniff(b: &[u8]) -> Option<&'static str> {
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if b.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if b.len() >= 12 && &b[..4] == b"RIFF" && &b[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+struct Upload {
+    id: String,
+    mime: &'static str,
+    size: usize,
+    bytes: Vec<u8>,
+    next: u32,
+    at: Instant,
+}
+
+/// What one `image.put` carries.
+pub struct Put<'a> {
+    pub upload: Option<&'a str>,
+    pub seq: u32,
+    pub mime: Option<&'a str>,
+    pub size: Option<u64>,
+    pub data: &'a str,
+    pub last: bool,
+}
+
+/// The images of this process: at most one upload open, and the finished ones waiting for a `send`.
+#[derive(Default)]
+pub struct Images {
+    up: Option<Upload>,
+    ready: Vec<(String, ImageAttachment, usize)>,
+}
+
+impl Images {
+    /// Forgets everything (a restart ends the session the images were for).
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn held(&self) -> usize {
+        self.ready.iter().map(|r| r.2).sum()
+    }
+
+    pub fn put(&mut self, p: &Put, now: Instant) -> Result<Value, String> {
+        if self
+            .up
+            .as_ref()
+            .is_some_and(|u| now.duration_since(u.at) > UPLOAD_IDLE)
+        {
+            self.up = None;
+        }
+        let up = match (p.upload, self.up.take()) {
+            (None, None) => self.begin(p, now)?,
+            (None, Some(_)) => return Err("another image is being sent".into()),
+            // any mistake in the middle of an upload ends it (it was already taken out)
+            (Some(id), Some(u)) if u.id == id && u.next == p.seq && p.seq > 0 => u,
+            (Some(_), _) => return Err("no such upload".into()),
+        };
+        self.add(up, p, now)
+    }
+
+    fn begin(&self, p: &Put, now: Instant) -> Result<Upload, String> {
+        let mime = match p.mime {
+            Some("image/png") => "image/png",
+            Some("image/jpeg") => "image/jpeg",
+            Some("image/gif") => "image/gif",
+            Some("image/webp") => "image/webp",
+            _ => return Err("not an image type that can be attached".into()),
+        };
+        let size = usize::try_from(p.size.ok_or("the size is missing")?).unwrap_or(usize::MAX);
+        if p.seq != 0 || size == 0 || size > MAX_IMAGE {
+            return Err(format!("an image must be 1 byte to {} MB", MAX_IMAGE >> 20));
+        }
+        if self.ready.len() >= MAX_IMAGES {
+            return Err(format!("at most {MAX_IMAGES} images per message"));
+        }
+        if self.held() + size > MAX_IMAGE_BYTES {
+            return Err(format!(
+                "a message holds at most {} MB of images",
+                MAX_IMAGE_BYTES >> 20
+            ));
+        }
+        Ok(Upload {
+            id: format!("img-{}", uuid::Uuid::new_v4().simple()),
+            mime,
+            size,
+            bytes: Vec::with_capacity(size.min(1 << 20)),
+            next: 0,
+            at: now,
+        })
+    }
+
+    fn add(&mut self, mut u: Upload, p: &Put, now: Instant) -> Result<Value, String> {
+        if p.data.len() > MAX_CHUNK_B64 {
+            return Err("the chunk is too long".into());
+        }
+        let raw = STANDARD
+            .decode(p.data)
+            .map_err(|_| "the chunk is not base64".to_string())?;
+        if u.bytes.len() + raw.len() > u.size {
+            return Err("more bytes than the declared size".into());
+        }
+        u.bytes.extend_from_slice(&raw);
+        u.next += 1;
+        u.at = now;
+        if !p.last {
+            let id = u.id.clone();
+            self.up = Some(u);
+            return Ok(json!({"upload": id}));
+        }
+        if u.bytes.len() != u.size {
+            return Err("fewer bytes than the declared size".into());
+        }
+        if sniff(&u.bytes) != Some(u.mime) {
+            return Err("the bytes are not the declared image type".into());
+        }
+        let b64 = STANDARD.encode(&u.bytes);
+        let attach = ImageAttachment {
+            media_type: u.mime.into(),
+            data_base64: b64,
+        };
+        let out = json!({"id": u.id, "bytes": u.size});
+        self.ready.push((u.id, attach, u.size));
+        Ok(out)
+    }
+
+    /// The images `ids` names, for a `send` (nothing is removed yet: see [`Images::remove`]).
+    pub fn peek(&self, ids: &[String]) -> Result<Vec<ImageAttachment>, String> {
+        if ids.len() > MAX_IMAGES {
+            return Err(format!("at most {MAX_IMAGES} images per message"));
+        }
+        ids.iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let dup = ids[..i].contains(id);
+                self.ready
+                    .iter()
+                    .find(|r| r.0 == *id && !dup)
+                    .map(|r| r.1.clone())
+                    .ok_or_else(|| "no such image".to_string())
+            })
+            .collect()
+    }
+
+    /// Drops the images `ids` (sent, or removed by the person); unknown ids are ignored.
+    pub fn remove(&mut self, ids: &[String]) {
+        self.ready.retain(|r| !ids.contains(&r.0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn png(n: usize) -> Vec<u8> {
+        let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+        v.resize(n, 7);
+        v
+    }
+
+    fn put_all(im: &mut Images, mime: &str, bytes: &[u8], chunk: usize) -> Result<Value, String> {
+        let mut id: Option<String> = None;
+        let parts: Vec<&[u8]> = bytes.chunks(chunk).collect();
+        let mut last = Ok(Value::Null);
+        for (i, c) in parts.iter().enumerate() {
+            let data = STANDARD.encode(c);
+            last = im.put(
+                &Put {
+                    upload: id.as_deref(),
+                    seq: i as u32,
+                    mime: (i == 0).then_some(mime),
+                    size: (i == 0).then_some(bytes.len() as u64),
+                    data: &data,
+                    last: i + 1 == parts.len(),
+                },
+                Instant::now(),
+            );
+            if let Ok(v) = &last {
+                id = v["upload"].as_str().map(String::from);
+            } else {
+                break;
+            }
+        }
+        last
+    }
+
+    #[test]
+    fn relative_paths_only() {
+        for bad in [
+            "/etc/passwd",
+            "../x",
+            "a/../b",
+            "./a",
+            "a\nb",
+            "a\0b",
+            ".git/config",
+            "a/.GIT/x",
+            &"a/".repeat(600),
+        ] {
+            assert!(check_rel(bad, false).is_err(), "{bad:?}");
+        }
+        #[cfg(windows)]
+        assert!(check_rel("C:\\x", false).is_err() && check_rel("\\\\h\\s", false).is_err());
+        assert!(check_rel("", false).is_err() && check_rel("", true).is_ok());
+        assert!(check_rel("src/a.rs", false).is_ok() && check_rel(".github/x.yml", false).is_ok());
+    }
+
+    #[test]
+    fn the_tree_is_paged_and_a_folder_is_a_row_of_it() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("src/deep")).unwrap();
+        for i in 0..250 {
+            std::fs::write(d.path().join(format!("f{i:03}")), "x").unwrap();
+        }
+        std::fs::write(d.path().join("src/a.rs"), "x").unwrap();
+        std::fs::write(d.path().join("src/deep/b.rs"), "x").unwrap();
+        let env = Env::from_pairs::<&str, &str>([]);
+        let p0 = list_of(&scan(d.path(), false, &env), "", 0, false).unwrap();
+        assert_eq!(p0["rows"].as_array().unwrap().len(), PAGE_ROWS);
+        assert_eq!(p0["next"], PAGE_ROWS);
+        let p1 = list_of(&scan(d.path(), false, &env), "", PAGE_ROWS, false).unwrap();
+        assert!(p1["next"].is_null() && p1["total"] == p0["total"]);
+        let sub = list_of(&scan(d.path(), false, &env), "src", 0, false).unwrap();
+        let names: Vec<String> = sub["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r[1].as_str().unwrap().into())
+            .collect();
+        assert_eq!(names, ["a.rs", "deep", "b.rs"]);
+        // a folder that is not in the tree, or a hostile one, is refused without touching the disk
+        assert!(list_of(&scan(d.path(), false, &env), "nope", 0, false).is_err());
+        assert!(list_of(&scan(d.path(), false, &env), "../..", 0, false).is_err());
+        assert!(
+            list_of(&scan(d.path(), false, &env), "f001", 0, false).is_err(),
+            "a file is not a folder"
+        );
+        // git is never run for a folder that is not trusted
+        assert!(
+            git_diff(d.path(), false, &env).is_err() && git_status(d.path(), false, &env).is_err()
+        );
+    }
+
+    #[test]
+    fn a_preview_refuses_what_must_not_be_shown() {
+        let d = tempfile::tempdir().unwrap();
+        let w = d.path().join("w");
+        std::fs::create_dir_all(w.join("sub")).unwrap();
+        std::fs::create_dir_all(w.join(".git")).unwrap();
+        std::fs::write(w.join("a.txt"), "hello\nbye\x1b[31m\n").unwrap();
+        std::fs::write(w.join(".env"), "K=1").unwrap();
+        std::fs::write(w.join(".git/config"), "[core]").unwrap();
+        std::fs::write(w.join("bin"), [0u8, 1, 2]).unwrap();
+        std::fs::write(w.join("big.txt"), "x\n".repeat(PREVIEW_BYTES)).unwrap();
+        std::fs::write(d.path().join("secret.txt"), "outside").unwrap();
+        let ok = read(&w, "a.txt").unwrap();
+        assert_eq!(ok["lines"][0], "hello");
+        assert!(
+            !ok["lines"].to_string().contains('\u{1b}'),
+            "made printable"
+        );
+        for bad in [
+            ".env",
+            ".git/config",
+            "bin",
+            "../secret.txt",
+            "/etc/hosts",
+            "sub",
+            "missing",
+        ] {
+            assert!(read(&w, bad).is_err(), "{bad}");
+        }
+        let big = read(&w, "big.txt").unwrap();
+        assert_eq!(
+            (big["cut"].clone(), big["lines"].as_array().unwrap().len()),
+            (true.into(), PREVIEW_LINES)
+        );
+        // no error carries a path of this machine
+        let e = read(&w, "missing").unwrap_err();
+        assert!(!e.contains(&*d.path().to_string_lossy()), "{e}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_in_and_out_of_the_folder_are_not_followed() {
+        let d = tempfile::tempdir().unwrap();
+        let w = d.path().join("w");
+        std::fs::create_dir_all(&w).unwrap();
+        std::fs::write(d.path().join("outside.txt"), "secret").unwrap();
+        std::fs::write(w.join("real.txt"), "in").unwrap();
+        std::os::unix::fs::symlink(d.path().join("outside.txt"), w.join("out.txt")).unwrap();
+        std::os::unix::fs::symlink("/etc", w.join("etc")).unwrap();
+        std::fs::hard_link(d.path().join("outside.txt"), w.join("hard.txt")).unwrap();
+        assert!(read(&w, "real.txt").is_ok());
+        assert!(read(&w, "out.txt").unwrap_err().contains("outside"));
+        assert!(read(&w, "etc/hosts").unwrap_err().contains("outside"));
+        assert!(read(&w, "hard.txt").unwrap_err().contains("hard links"));
+        // a pipe in the tree does not block the engine
+        // (no unsafe code in this crate: the shell makes the pipe)
+        let ok = std::process::Command::new("mkfifo")
+            .arg(w.join("pipe"))
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok);
+        assert!(read(&w, "pipe").unwrap_err().contains("regular"));
+    }
+
+    #[test]
+    fn an_image_is_chunked_sniffed_and_named_by_the_engine() {
+        let mut im = Images::default();
+        let bytes = png(10_000);
+        let r = put_all(&mut im, "image/png", &bytes, 3000).unwrap();
+        let id = r["id"].as_str().unwrap().to_string();
+        let got = im.peek(std::slice::from_ref(&id)).unwrap();
+        assert_eq!(STANDARD.decode(&got[0].data_base64).unwrap(), bytes);
+        assert_eq!(got[0].media_type, "image/png");
+        assert!(im.peek(&[id.clone(), id.clone()]).is_err(), "twice is no");
+        im.remove(std::slice::from_ref(&id));
+        assert!(im.peek(&[id]).is_err());
+    }
+
+    #[test]
+    fn hostile_images_are_refused_and_leave_nothing_open() {
+        let mut im = Images::default();
+        // the declared type must be what the bytes are
+        assert!(put_all(&mut im, "image/png", b"GIF89a....", 100).is_err());
+        assert!(put_all(&mut im, "image/svg+xml", &png(20), 100).is_err());
+        assert!(put_all(&mut im, "text/html", b"<script>", 100).is_err());
+        assert!(put_all(&mut im, "image/png", &png(MAX_IMAGE + 1), MAX_CHUNK_B64 / 2).is_err());
+        // more than declared, fewer than declared, not base64, a chunk too long, a bad sequence
+        let put = |im: &mut Images, p: Put| im.put(&p, Instant::now());
+        fn first(data: &str, size: u64) -> Put<'_> {
+            Put {
+                upload: None,
+                seq: 0,
+                mime: Some("image/png"),
+                size: Some(size),
+                data,
+                last: false,
+            }
+        }
+        let b = STANDARD.encode(png(30));
+        assert!(put(&mut im, first(&b, 10)).is_err());
+        assert!(put(&mut im, first("***", 10)).is_err());
+        assert!(
+            put(
+                &mut im,
+                first(&"A".repeat(MAX_CHUNK_B64 + 4), MAX_IMAGE as u64)
+            )
+            .is_err()
+        );
+        let id = put(&mut im, first(&b, 90)).unwrap()["upload"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let more = |seq, last| Put {
+            upload: Some(&id),
+            seq,
+            mime: None,
+            size: None,
+            data: &b,
+            last,
+        };
+        assert!(
+            put(&mut im, more(5, false)).is_err(),
+            "a skipped chunk ends it"
+        );
+        assert!(
+            put(&mut im, more(1, true)).is_err(),
+            "and nothing of it stays"
+        );
+        // short upload
+        let id = put(&mut im, first(&b, 90)).unwrap()["upload"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let end = Put {
+            upload: Some(&id),
+            seq: 1,
+            mime: None,
+            size: None,
+            data: &b,
+            last: true,
+        };
+        assert!(put(&mut im, end).unwrap_err().contains("fewer"));
+        assert!(im.ready.is_empty());
+        // an unknown id cannot be sent
+        assert!(im.peek(&["img-x".into()]).is_err());
+    }
+
+    #[test]
+    fn the_count_and_the_bytes_of_waiting_images_are_bounded() {
+        let mut im = Images::default();
+        for _ in 0..MAX_IMAGES {
+            put_all(&mut im, "image/png", &png(100), 100).unwrap();
+        }
+        assert!(
+            put_all(&mut im, "image/png", &png(100), 100)
+                .unwrap_err()
+                .contains("at most")
+        );
+        let mut im = Images::default();
+        put_all(&mut im, "image/png", &png(MAX_IMAGE), 300_000).unwrap();
+        assert!(
+            put_all(&mut im, "image/png", &png(MAX_IMAGE), 300_000)
+                .unwrap_err()
+                .contains("MB")
+        );
+        // a second upload cannot start while one is open, and an idle one is dropped
+        let mut im = Images::default();
+        let b = STANDARD.encode(png(30));
+        let p = Put {
+            upload: None,
+            seq: 0,
+            mime: Some("image/png"),
+            size: Some(90),
+            data: &b,
+            last: false,
+        };
+        let t0 = Instant::now();
+        im.put(&p, t0).unwrap();
+        assert!(im.put(&p, t0).unwrap_err().contains("another"));
+        assert!(
+            im.put(&p, t0 + UPLOAD_IDLE + Duration::from_secs(1))
+                .is_ok()
+        );
+    }
+}

@@ -190,7 +190,7 @@ impl Engine {
         let h = self.line().unwrap();
         assert_eq!(h["msg"], "hello");
         assert_eq!(h["version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(h["protocol"], 2);
+        assert_eq!(h["protocol"], 3);
     }
 
     fn start(&mut self) -> Value {
@@ -1198,4 +1198,485 @@ fn a_resumed_session_continues_its_hash_chain_and_each_session_has_its_own_basel
         .map(|sid| e.home.join("sessions").join(sid))
         .collect();
     assert!(dirs.iter().all(|d| d.is_dir()) && dirs[0] != dirs[1]);
+}
+
+// ---- protocol 3: files, images, rewind, clean, memory, settings
+
+/// A scan or health check is limited to a few a second: tests wait it out between two of them.
+fn calm() {
+    std::thread::sleep(Duration::from_millis(300));
+}
+
+fn png_b64(n: usize) -> (String, Vec<u8>) {
+    let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+    v.resize(n, 9);
+    (b64(&v), v)
+}
+
+fn b64(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in bytes.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        for k in 0..4 {
+            out.push(if k <= c.len() {
+                T[(n >> (18 - 6 * k) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    out
+}
+
+#[test]
+fn the_files_methods_list_read_and_refuse_what_must_not_leave() {
+    let mut e = desktop_engine(|_| json!([{"text": "ok"}]));
+    let outside = e.ws.parent().unwrap().join("outside.txt");
+    std::fs::write(&outside, "TOPSECRET").unwrap();
+    std::fs::create_dir_all(e.ws.join("src")).unwrap();
+    std::fs::write(e.ws.join("src/a.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(e.ws.join(".env"), "KEY=1").unwrap();
+    std::fs::write(e.ws.join("bin"), [0u8, 1, 2]).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside, e.ws.join("link.txt")).unwrap();
+        std::os::unix::fs::symlink("/etc", e.ws.join("etc")).unwrap();
+        std::fs::hard_link(&outside, e.ws.join("hard.txt")).unwrap();
+    }
+    e.start();
+    let l = e.ok("fs.list", json!({}));
+    let names: Vec<&str> = l["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r[1].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"src") && names.contains(&"a.rs"), "{l}");
+    assert!(
+        !names.contains(&"link.txt") && !names.contains(&"etc"),
+        "links are not listed: {l}"
+    );
+    assert_eq!(
+        l["trusted"], false,
+        "an untrusted folder is walked, git is not run"
+    );
+    assert_eq!(
+        e.ok("fs.read", json!({"path": "src/a.rs"}))["lines"][0],
+        "fn main() {}"
+    );
+    let root = e.ws.parent().unwrap().to_str().unwrap().to_string();
+    let mut errors = vec![];
+    for p in [
+        ".env",
+        "bin",
+        "src",
+        "nope",
+        "../outside.txt",
+        "/etc/passwd",
+        "src/../.env",
+        ".git/config",
+        "a\nb",
+        "link.txt",
+        "etc/hosts",
+        "hard.txt",
+    ] {
+        let r = e.ask("fs.read", json!({"path": p}));
+        if cfg!(not(unix)) && ["link.txt", "etc/hosts", "hard.txt"].contains(&p) {
+            continue;
+        }
+        errors.push(
+            r["error"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{p} must fail: {r}"))
+                .to_string(),
+        );
+    }
+    assert!(
+        errors
+            .iter()
+            .all(|t| !t.contains(&root) && !t.contains("TOPSECRET")),
+        "{errors:?}"
+    );
+    for (m, p) in [
+        ("fs.list", json!({"dir": "../.."})),
+        ("fs.list", json!({"dir": "/"})),
+        ("fs.list", json!({"dir": "nope"})),
+        ("fs.list", json!({"offset": -1})),
+        ("fs.read", json!({})),
+        ("fs.read", json!({"path": 5})),
+    ] {
+        calm();
+        assert!(e.ask(m, p.clone())["error"].is_string(), "{m} {p}");
+    }
+    // git only in a trusted folder: the engine says no, whatever the client asks
+    calm();
+    assert!(e.err("fs.git_diff", Value::Null).contains("not trusted"));
+    assert!(e.err("fs.git_status", Value::Null).contains("not trusted"));
+}
+
+#[test]
+fn git_runs_through_the_engine_only_after_it_trusted_the_folder() {
+    let mut e = engine_with(
+        &["--host", "desktop"],
+        None,
+        true,
+        |_| json!([{"text": "ok"}]),
+    );
+    std::fs::create_dir_all(e.ws.join(".synt")).unwrap();
+    std::fs::write(e.ws.join(".synt/settings.json"), "{}").unwrap();
+    std::fs::write(e.ws.join("a.txt"), "hello\nchanged\n").unwrap();
+    e.start();
+    assert_eq!(
+        e.ok("trust.set", json!({"mode": "session"}))["trusted"],
+        true
+    );
+    gap();
+    let s = e.ok("fs.git_status", Value::Null);
+    assert!(s["files"].to_string().contains("a.txt"), "{s}");
+    calm();
+    let d = e.ok("fs.git_diff", Value::Null);
+    assert!(d["diff"].to_string().contains("+changed"), "{d}");
+    calm();
+    assert_eq!(e.ok("fs.list", json!({}))["trusted"], true);
+    // a request right after another scan is refused, not queued behind it
+    assert!(e.err("fs.list", json!({})).contains("too many requests"));
+}
+
+#[test]
+fn an_image_goes_in_chunks_is_checked_and_is_sent_by_the_id_the_engine_issued() {
+    let mut e = desktop_engine(|_| json!([{"text": "I see it."}]));
+    e.start();
+    let (data, raw) = png_b64(4000);
+    let (first, rest) = data.split_at(2000);
+    let up = e.ok(
+        "image.put",
+        json!({"seq": 0, "mime": "image/png", "size": raw.len(), "data": first, "last": false}),
+    );
+    let upload = up["upload"].as_str().unwrap().to_string();
+    // a forged or skipped upload id leaves nothing behind
+    assert!(
+        e.err(
+            "image.put",
+            json!({"upload": "x", "seq": 1, "data": rest, "last": true})
+        )
+        .contains("no such upload")
+    );
+    assert!(
+        e.err(
+            "image.put",
+            json!({"upload": upload, "seq": 1, "data": rest, "last": true})
+        )
+        .contains("no such upload")
+    );
+    let up = e.ok(
+        "image.put",
+        json!({"seq": 0, "mime": "image/png", "size": raw.len(), "data": first, "last": false}),
+    );
+    let id = e.ok(
+        "image.put",
+        json!({"upload": up["upload"], "seq": 1, "data": rest, "last": true}),
+    )["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // hostile uploads
+    for p in [
+        json!({"seq": 0, "mime": "image/svg+xml", "size": 10, "data": "AAAA", "last": true}),
+        json!({"seq": 0, "mime": "image/png", "size": 10_000_000, "data": "AAAA", "last": false}),
+        json!({"seq": 0, "mime": "image/png", "size": 3, "data": "!!!!", "last": true}),
+        json!({"seq": 0, "mime": "image/png", "size": 3, "data": "AAAA", "last": true}),
+        json!({"seq": 0, "mime": "image/png", "size": 3, "data": "A".repeat(600_000), "last": false}),
+        json!({"seq": 7, "mime": "image/png", "size": 3, "data": "AAAA", "last": true}),
+    ] {
+        let r = e.ask("image.put", p.clone());
+        assert!(r["error"].is_string(), "{p}: {r}");
+    }
+    // an id nobody issued is no image
+    assert!(
+        e.err("send", json!({"text": "look", "images": ["img-nope"]}))
+            .contains("no such image")
+    );
+    e.call("send", json!({"text": "look", "images": [id]}));
+    let seen = e.until("task_done", is_task_done);
+    assert!(seen.last().unwrap()["error"].is_null(), "{seen:?}");
+    let user = seen
+        .iter()
+        .find(|v| v["type"] == "user.message")
+        .expect("user.message");
+    assert!(user["payload"].to_string().contains("image"), "{user}");
+    // the id is spent
+    assert!(
+        e.err("send", json!({"text": "again", "images": [id]}))
+            .contains("no such image")
+    );
+    assert!(
+        e.err("image.drop", json!({"id": "../x"}))
+            .contains("session id")
+    );
+}
+
+#[test]
+fn a_rewind_needs_the_engines_dry_run_and_a_clean_needs_its_plan() {
+    let mut e = desktop_engine(write_script);
+    let target = e.ws.join("hello.txt");
+    e.start();
+    e.ok("set_mode", json!({"mode": "acceptEdits"}));
+    e.call("send", json!({"text": "write it"}));
+    e.until("task_done", is_task_done);
+    assert!(target.exists());
+    let cps = e.ok("rewind.list", Value::Null);
+    assert_eq!(cps["checkpoints"].as_array().unwrap().len(), 1, "{cps}");
+    // no dry run yet: nothing can be applied, and a made-up token is no better
+    for t in ["rw-1", "", "../x"] {
+        assert!(
+            e.err("rewind.apply", json!({"token": t}))
+                .contains("dry run")
+        );
+    }
+    assert!(target.exists());
+    assert!(
+        e.err("rewind.dry_run", json!({"checkpoint": "a\nb"}))
+            .contains("checkpoint")
+    );
+    let dry = e.ok("rewind.dry_run", json!({"checkpoint": null}));
+    let entries = dry["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{dry}");
+    assert_eq!(entries[0]["kind"], "remove");
+    let root = e.ws.parent().unwrap().to_str().unwrap().to_string();
+    assert!(!dry.to_string().contains("TOKEN-LEAK"));
+    // the token is single use: a wrong one spends it, and the right one then no longer works
+    assert!(
+        e.err("rewind.apply", json!({"token": "rw-wrong"}))
+            .contains("no longer valid")
+    );
+    let e2 = e.err("rewind.apply", json!({"token": dry["token"]}));
+    assert!(e2.contains("dry run") && !e2.contains(&root), "{e2}");
+    assert!(target.exists(), "nothing was written");
+    let dry = e.ok("rewind.dry_run", json!({"checkpoint": null}));
+    let done = e.ok("rewind.apply", json!({"token": dry["token"]}));
+    assert_eq!(
+        (
+            done["removed"].as_u64(),
+            done["failed"].as_array().map(Vec::len)
+        ),
+        (Some(1), Some(0)),
+        "{done}"
+    );
+    assert!(!target.exists(), "the file the run created is gone");
+    assert!(
+        e.err("rewind.apply", json!({"token": dry["token"]}))
+            .contains("dry run")
+    );
+    // clean: the plan lists the three scopes; the own session is never in it; the token is single use
+    calm();
+    let plan = e.ok("clean.plan", Value::Null);
+    let plans = plan["plans"].as_array().unwrap();
+    assert_eq!(plans.len(), 3, "{plan}");
+    assert!(
+        plans.iter().all(|p| p["counts"]["sessions"] == 0),
+        "the open session is kept: {plan}"
+    );
+    assert!(
+        e.err(
+            "clean.apply",
+            json!({"token": "cl-made-up", "backup": false})
+        )
+        .contains("no longer valid")
+    );
+    // a wrong token spends the plans: the old ones are dead, a new plan is needed
+    let tok = plans[2]["token"].clone();
+    assert!(
+        e.err("clean.apply", json!({"token": tok, "backup": false}))
+            .contains("no longer valid")
+    );
+    calm();
+    let plan = e.ok("clean.plan", Value::Null);
+    let tok = plan["plans"][2]["token"].clone();
+    let r = e.ok("clean.apply", json!({"token": tok, "backup": false}));
+    assert_eq!(r["deleted"], 0, "{r}");
+    assert!(
+        e.err("clean.apply", json!({"token": tok, "backup": false}))
+            .contains("no longer valid")
+    );
+    assert!(
+        e.ok("workspaces.list", Value::Null)
+            .to_string()
+            .contains("sessions")
+    );
+}
+
+#[test]
+fn memory_effort_context_doctor_and_mcp_run_on_the_engines_own_files() {
+    let mut e = desktop_engine(|_| json!([{"text": "ok"}]));
+    e.start();
+    let root = e.ws.parent().unwrap().to_str().unwrap().to_string();
+    // memory: the person's note is saved, listed, searched and archived; a secret is refused
+    let r = e.ok(
+        "memory.add",
+        json!({"text": "Tests run with cargo test", "user": false}),
+    );
+    assert_eq!(
+        r["scope"], "user",
+        "an untrusted folder only has the user scope: {r}"
+    );
+    let l = e.ok("memory.list", Value::Null);
+    let id = l["records"][0]["id"].as_str().unwrap().to_string();
+    assert_eq!(l["records"][0]["trust"], "owner");
+    assert_eq!(
+        e.ok("memory.retrieve", json!({"query": "cargo"}))["records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        e.ok("memory.show", json!({"id": id}))["text"]
+            .as_str()
+            .unwrap()
+            .contains("cargo test")
+    );
+    assert!(
+        e.err(
+            "memory.add",
+            json!({"text": "k sk-live-abcdefgh12345678901234", "user": true})
+        )
+        .contains("secret")
+    );
+    assert!(
+        e.err("memory.show", json!({"id": "../x"}))
+            .contains("memory id")
+    );
+    e.ok("memory.forget", json!({"id": id}));
+    assert!(
+        e.ok("memory.list", Value::Null)["records"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    // `#` notes land in this machine's instruction file, bounded
+    let n = e.ok("memory.note", json!({"text": "use tabs", "user": true}));
+    assert!(n["text"].as_str().unwrap().contains("saved"), "{n}");
+    assert!(
+        std::fs::read_to_string(e.home.join("AGENTS.md"))
+            .unwrap()
+            .contains("use tabs")
+    );
+    assert!(
+        e.err(
+            "memory.note",
+            json!({"text": "x".repeat(9000), "user": true})
+        )
+        .contains("bytes")
+    );
+    // effort: a tier the model does not declare is refused; "auto" is fine
+    assert!(
+        e.err("config.effort", json!({"effort": "ludicrous"}))
+            .contains("tier")
+    );
+    assert!(e.ok("config.effort", json!({"effort": null}))["effort"].is_null());
+    // context: nothing is declared in this home, so the engine refuses, saying nothing of its folders
+    let c = e.err("context.set", json!({"value": "1m"}));
+    assert!(!c.contains(&root), "{c}");
+    assert!(
+        e.err("context.set", json!({"value": "x".repeat(100)}))
+            .contains("token")
+    );
+    calm();
+    let d = e.ok("doctor.summary", Value::Null);
+    assert!(
+        d["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| ["ok", "warn", "fail"].contains(&r["level"].as_str().unwrap()))
+    );
+    assert!(e.ok("mcp.list", Value::Null)["servers"].is_array());
+    // mcp: user scope only; the credential guard and the name check hold; a project file is never written
+    let add = |name: &str, env: Value| json!({"name": name, "transport": "http", "command": ["srv"], "env": env, "scope": "project"});
+    assert!(e.err("mcp.add", add("../x", json!([]))).contains("name"));
+    assert!(
+        e.err("mcp.add", add("a", json!(["API_KEY=sk-live-0123456789"])))
+            .len()
+            > 3
+    );
+    e.ok("mcp.add", add("a", json!([])));
+    let again = e.err("mcp.add", add("a", json!([])));
+    assert!(
+        again.contains("already exists") && !again.contains(&root),
+        "{again}"
+    );
+    assert!(
+        std::fs::read_to_string(e.home.join("synt.json"))
+            .unwrap()
+            .contains("\"a\"")
+    );
+    assert!(
+        !e.ws.join(".mcp.json").exists(),
+        "a project-scope server is never written"
+    );
+    e.ok("mcp.remove", json!({"name": "a"}));
+    assert!(e.err("mcp.remove", json!({"name": "a"})).len() > 3);
+    // a flood of heavy calls is refused, not run
+    calm();
+    e.ok("doctor.summary", Value::Null);
+    assert!(
+        e.err("doctor.summary", Value::Null)
+            .contains("too many requests")
+    );
+}
+
+#[test]
+fn the_new_methods_need_a_session_and_survive_hostile_input() {
+    let mut e = desktop_engine(|_| json!([{"text": "ok"}]));
+    e.hello();
+    // before `start` nothing of the folder is reachable
+    for m in [
+        "fs.git_diff",
+        "rewind.list",
+        "clean.plan",
+        "memory.list",
+        "mcp.list",
+        "doctor.summary",
+    ] {
+        calm();
+        let r = e.ask(m, Value::Null);
+        assert!(
+            r["error"].as_str().unwrap().contains("not started"),
+            "{m}: {r}"
+        );
+    }
+    calm();
+    assert!(e.err("fs.list", json!({})).contains("not started"));
+    calm();
+    assert!(e.err("fs.list", json!({})).contains("not started"));
+    let ws = e.ws.to_str().unwrap().to_string();
+    e.ok("start", json!({"cwd": ws}));
+    for (m, p) in [
+        ("image.put", json!({"seq": 0, "data": 5, "last": true})),
+        ("rewind.dry_run", json!({"checkpoint": 5})),
+        ("rewind.apply", json!({})),
+        ("clean.apply", json!({"token": "x"})),
+        ("clean.apply", json!({"backup": true})),
+        ("memory.add", json!({"text": "x"})),
+        ("memory.retrieve", json!({"query": "a\u{0}b"})),
+        (
+            "mcp.add",
+            json!({"name": "a", "transport": "ftp", "command": ["x"]}),
+        ),
+        (
+            "mcp.add",
+            json!({"name": "a", "transport": "http", "command": vec!["x"; 40]}),
+        ),
+        ("mcp.remove", json!({"name": "../x"})),
+        ("config.effort", json!({"effort": 3})),
+        ("context.set", json!({})),
+    ] {
+        let r = e.ask(m, p.clone());
+        assert!(r["error"].is_string(), "{m} {p}: {r}");
+    }
+    // a protocol 2 client never gets this far: the engine says protocol 3 and the client compares exactly
+    assert_eq!(e.ok("set_mode", json!({"mode": "plan"}))["mode"], "plan");
 }

@@ -16,7 +16,7 @@ use synthesis_tools::NeedsUser;
 use crate::asks::{Ask, AskApproval, Choice};
 
 /// Bumped when a message changes shape. The version handshake is exact: both numbers must match.
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 /// The engine's own version (one workspace version for the app and the engine).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Longest accepted line (a tool result can carry a big file).
@@ -51,6 +51,9 @@ pub enum Call {
     /// Starts a task; `{msg:"task_done"}` follows when it ended.
     Send {
         text: String,
+        /// Ids `image.put` issued (the engine holds the bytes).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<String>,
     },
     Answer {
         id: String,
@@ -119,6 +122,117 @@ pub enum Call {
     #[serde(rename = "model.set")]
     ModelSet {
         model: String,
+    },
+    /// The tree of the session folder under `dir` ("" is all of it), `offset` rows in; paged.
+    #[serde(rename = "fs.list")]
+    FsList {
+        #[serde(default)]
+        dir: String,
+        #[serde(default)]
+        offset: u32,
+    },
+    /// A text preview of a file of the session folder (relative path).
+    #[serde(rename = "fs.read")]
+    FsRead {
+        path: String,
+    },
+    /// Changed files and the diff, only in a trusted folder and only through the engine's hardened git.
+    #[serde(rename = "fs.git_status")]
+    FsGitStatus,
+    #[serde(rename = "fs.git_diff")]
+    FsGitDiff,
+    /// One chunk of an image (base64); the first names the type and size, the last finishes it.
+    #[serde(rename = "image.put")]
+    ImagePut {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        upload: Option<String>,
+        seq: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<u64>,
+        data: String,
+        last: bool,
+    },
+    #[serde(rename = "image.drop")]
+    ImageDrop {
+        id: String,
+    },
+    #[serde(rename = "rewind.list")]
+    RewindList,
+    #[serde(rename = "rewind.dry_run")]
+    RewindDryRun {
+        checkpoint: Option<String>,
+    },
+    /// Applies the dry run the engine issued `token` for (single use).
+    #[serde(rename = "rewind.apply")]
+    RewindApply {
+        token: String,
+    },
+    #[serde(rename = "clean.plan")]
+    CleanPlan,
+    #[serde(rename = "clean.apply")]
+    CleanApply {
+        token: String,
+        backup: bool,
+    },
+    #[serde(rename = "memory.list")]
+    MemoryList,
+    #[serde(rename = "memory.retrieve")]
+    MemoryRetrieve {
+        query: String,
+    },
+    #[serde(rename = "memory.show")]
+    MemoryShow {
+        id: String,
+    },
+    #[serde(rename = "memory.add")]
+    MemoryAdd {
+        text: String,
+        user: bool,
+    },
+    #[serde(rename = "memory.forget")]
+    MemoryForget {
+        id: String,
+    },
+    /// A `#` note: appended to an instruction file of the engine's machine.
+    #[serde(rename = "memory.note")]
+    MemoryNote {
+        text: String,
+        user: bool,
+    },
+    #[serde(rename = "config.effort")]
+    ConfigEffort {
+        effort: Option<String>,
+    },
+    /// `/context`: a token count (`1m`, `200000`) or `unset`, for the model in use.
+    #[serde(rename = "context.set")]
+    ContextSet {
+        value: String,
+    },
+    #[serde(rename = "doctor.summary")]
+    DoctorSummary,
+    #[serde(rename = "mcp.list")]
+    McpList,
+    /// User scope only: a project-scope server is refused on this engine.
+    #[serde(rename = "mcp.add")]
+    McpAdd {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        transport: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        env: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        header: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        command: Vec<String>,
+        #[serde(default)]
+        force: bool,
+    },
+    #[serde(rename = "mcp.remove")]
+    McpRemove {
+        name: String,
     },
     /// `{started}`: false when it ran between tasks (`{msg:"compacted"}` follows).
     Compact {
@@ -398,7 +512,10 @@ mod tests {
     fn requests_round_trip() {
         let r: Request =
             serde_json::from_str(r#"{"id":3,"method":"send","params":{"text":"hi"}}"#).unwrap();
-        assert!(r.id == 3 && matches!(r.call, Call::Send { ref text } if text == "hi"));
+        assert!(
+            r.id == 3
+                && matches!(r.call, Call::Send { ref text, ref images } if text == "hi" && images.is_empty())
+        );
         let r: Request = serde_json::from_str(r#"{"id":4,"method":"cancel"}"#).unwrap();
         assert!(matches!(r.call, Call::Cancel));
         let r: Request = serde_json::from_str(r#"{"id":5,"method":"shutdown"}"#).unwrap();
@@ -459,6 +576,14 @@ mod tests {
                 .unwrap_err()
                 .contains("mismatch")
         );
+        // a protocol 2 engine is refused cleanly by this client (and the other way round)
+        let v2 = format!(r#"{{"msg":"hello","version":"{VERSION}","protocol":2}}"#);
+        assert!(
+            check_hello(v2.as_bytes())
+                .unwrap_err()
+                .contains("protocol 2")
+        );
+        assert_eq!(PROTOCOL, 3);
         assert!(check_hello(br#"{"msg":"task_done","error":null}"#).is_err());
         assert!(check_hello(b"garbage").is_err());
     }
