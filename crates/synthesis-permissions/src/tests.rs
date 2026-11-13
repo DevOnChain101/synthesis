@@ -4992,3 +4992,47 @@ fn s21_the_read_only_set_holds_under_a_case_sensitive_path_policy() {
         }
     }
 }
+
+#[test]
+fn r9_written_set_matches_absolute_relative_and_backslash_spellings() {
+    let f = fx();
+    fs::create_dir_all(f.cwd.join("scripts")).unwrap();
+    fs::write(f.cwd.join("scripts").join("x.sh"), "echo hi").unwrap();
+    let abs = f
+        .cwd
+        .join("scripts")
+        .join("x.sh")
+        .to_string_lossy()
+        .into_owned();
+    // the harness records the absolute path when it cannot strip the workspace root (different spelling
+    // of the root); the command names the file relatively, or the other way round
+    for w in [abs.as_str(), "scripts/x.sh", "./scripts/x.sh"] {
+        for cmd in [
+            "sh scripts/x.sh",
+            "sh ./scripts/x.sh",
+            &format!("sh '{abs}'"),
+        ] {
+            for mode in [Mode::Auto, Mode::BypassPermissions] {
+                let mut p = f.perms(mode);
+                p.env.written = vec![w.to_string()];
+                assert_eq!(bx(&p, cmd), Q, "{w} / {cmd} / {mode:?}");
+            }
+        }
+    }
+    // a backslash spelling that is identical on both sides matches on every OS
+    let mut p = f.perms(Mode::Auto);
+    p.env.written = vec!["dir\\x.sh".into()];
+    assert_eq!(bx(&p, "sh 'dir\\x.sh'"), Q);
+    // Windows: separators and case are interchangeable
+    #[cfg(windows)]
+    for (w, cmd) in [
+        ("scripts\\x.sh", "sh scripts/x.sh"),
+        ("scripts/x.sh", "sh scripts\\x.sh"),
+        ("SCRIPTS\\X.SH", "sh scripts/x.sh"),
+        ("scripts/x.sh", "sh SCRIPTS\\X.SH"),
+    ] {
+        let mut p = f.perms(Mode::Auto);
+        p.env.written = vec![w.into()];
+        assert_eq!(bx(&p, cmd), Q, "{w} / {cmd}");
+    }
+}

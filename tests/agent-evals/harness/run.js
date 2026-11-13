@@ -30,10 +30,14 @@ export function killTree(pid) {
   }
 }
 
-function cleanEnv(extra) {
-  const env = { ...process.env, PYTHONDONTWRITEBYTECODE: '1', ...extra };
-  delete env.NODE_TEST_CONTEXT; // an outer `node --test` must not leak into the graded `node --test`
-  return env;
+// ALLOWLISTED environments (nothing else of the parent leaks in). Setup and graded checks run code the agent wrote, so
+// they get no credentials; the adapter additionally gets SYNT_*/EVAL_* (its credentials and settings) and proxy/CA vars.
+const BASE_ENV = /^(PATH|HOME|USERPROFILE|TMPDIR|TMP|TEMP|SystemRoot|SYSTEMROOT|ComSpec|COMSPEC|PATHEXT|windir|WINDIR|SystemDrive|SYSTEMDRIVE|APPDATA|LOCALAPPDATA|ProgramData|ProgramFiles(\(x86\))?|USERNAME|PROCESSOR_ARCHITECTURE|NUMBER_OF_PROCESSORS|ProgramW6432|OS|SHELL|XDG_[A-Z_]+|LANG|LC_[A-Z]+|TERM|CI|RUSTUP_HOME|CARGO_HOME|CARGO_TARGET_DIR|PYTHONDONTWRITEBYTECODE)$/;
+const ADAPTER_ENV = /^(SYNT_[A-Z0-9_]+|EVAL_(?!KEY_FILE$)[A-Z0-9_]+|NEMO_NODE_REF|(HTTPS?|ALL|NO)_PROXY|(https?|all|no)_proxy|SSL_CERT_(FILE|DIR))$/;
+function cleanEnv(extra, { credentials = false } = {}) {
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) if (BASE_ENV.test(k) || (credentials && ADAPTER_ENV.test(k))) env[k] = v;
+  return { ...env, PYTHONDONTWRITEBYTECODE: '1', ...extra };
 }
 
 // Runs a command (shell for check commands, direct for the adapter) in its own process group.
@@ -86,10 +90,19 @@ export function copyHidden(task, repo) {
   fs.cpSync(path.join(fixtureDir(task), 'hidden'), path.join(repo, 'hidden'), { recursive: true });
 }
 
+// EVAL_CHECK_SANDBOX=bwrap (Linux): graded checks run agent-written code, so they get their own PID and network
+// namespaces, a read-only root and a writable repo/tmp: /proc/<harness pid>/environ is not reachable and nothing
+// leaves the machine. Opt-in because a check that needs the network (npm install) cannot run that way.
+const sq = (x) => `'${x.replace(/'/g, `'\\''`)}'`;
+function wrapCheck(command, repo) {
+  if (process.env.EVAL_CHECK_SANDBOX !== 'bwrap' || process.platform !== 'linux') return command;
+  return `bwrap --unshare-pid --unshare-net --die-with-parent --ro-bind / / --dev /dev --proc /proc --bind ${sq(repo)} ${sq(repo)} --bind /tmp /tmp --chdir ${sq(repo)} sh -c ${sq(command)}`;
+}
+
 export async function runChecks(checks, repo) {
   const res = [];
   for (const c of checks) {
-    const r = await runCmd(c.command, { cwd: repo, env: cleanEnv(), timeoutMs: c.timeout_ms || 120000 });
+    const r = await runCmd(wrapCheck(c.command, repo), { cwd: repo, env: cleanEnv(), timeoutMs: c.timeout_ms || 120000 });
     res.push({ id: c.id, command: c.command, exit_code: r.code, timed_out: r.timedOut, passed: r.code === 0 && !r.timedOut, ms: r.ms, log: `$ ${c.command}\n${r.out}${r.err}${r.timedOut ? '\n[timed out]\n' : ''}\n[exit ${r.code}]\n` });
   }
   return res;
@@ -184,7 +197,15 @@ async function runOne(task, run, agent, outRoot, opts) {
       if (fs.existsSync(p)) adapterEnv.EVAL_ORACLE_PATCH = p;
       adapterEnv.EVAL_ORACLE_STATUS = task.expected_status;
     }
-    const a = await runCmd(process.execPath, { cwd: repo, env: cleanEnv(adapterEnv), timeoutMs: Math.min(task.budget.max_wall_ms, opts.maxWallMs ?? Infinity), args: [path.join(ROOT, 'adapters', agent, 'run.js')] });
+    // The key never sits in this long-lived process's environment: EVAL_KEY_FILE names a 0600 file, each adapter run gets
+    // its own one-shot copy (copied, not read, here) which the adapter reads and deletes at start.
+    if (process.env.EVAL_KEY_FILE) {
+      const once = path.join(dir, 'key.once');
+      fs.copyFileSync(process.env.EVAL_KEY_FILE, once);
+      fs.chmodSync(once, 0o600);
+      adapterEnv.EVAL_KEY_ONCE = once;
+    }
+    const a = await runCmd(process.execPath, { cwd: repo, env: cleanEnv(adapterEnv, { credentials: true }), timeoutMs: Math.min(task.budget.max_wall_ms, opts.maxWallMs ?? Infinity), args: [path.join(ROOT, 'adapters', agent, 'run.js')] });
     if (a.code === 3 && !a.timedOut) return { ...base, skipped: true, reason: 'adapter unavailable: ' + a.err.trim().split('\n')[0] };
     const graceMs = Number(process.env.EVAL_LEAK_GRACE_MS ?? 5000);
     const leaked = a.timedOut ? (killTree(a.pid), 0) : await leakCheck(a.pid, graceMs);

@@ -2,6 +2,7 @@
 //   EVAL_FAKE_SCRIPT=<script.json>  scripted model (needs a build with --features test-provider; selftest only)
 //   EVAL_EXTRA_ARGS='["--deny","Bash(npm run test:*)"]'  extra `synt run` arguments (JSON array; selftest only)
 //   EVAL_PERMISSION_MODE_OVERRIDE=<mode>  diagnostic only (e.g. bypassPermissions under the sandbox); the task's mode otherwise
+//   EVAL_MAX_COST_USD=<n>           cost cap per run for a real model (else --no-cost-cap)
 //   EVAL_MODEL="provider/model"      optional; real mode needs SYNT_* credentials in the environment
 import fs from 'node:fs';
 import os from 'node:os';
@@ -24,8 +25,14 @@ if (!bin || !fs.existsSync(bin)) die('synt binary not found (cargo build -p synt
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'eval-rust-')));
 // Loopback: tasks start a local server in their tests (still no outside network). The node
 // toolchain (npm lives next to node, often under $HOME) is granted read-only.
-const args = ['run', '--cwd', cwd, '--no-cost-cap', '--no-worktree', '--no-session-store', '--network', 'loopback', '--sandbox-read', path.dirname(path.dirname(fs.realpathSync(process.execPath))), '--permission-mode', process.env.EVAL_PERMISSION_MODE_OVERRIDE || process.env.EVAL_PERMISSION_MODE || 'acceptEdits'];
+// EVAL_MAX_COST_USD caps a real-model run (nightly); the scripted runs and the default keep `--no-cost-cap`.
+const args = ['run', '--cwd', cwd, ...(process.env.EVAL_MAX_COST_USD ? ['--max-cost-usd', process.env.EVAL_MAX_COST_USD] : ['--no-cost-cap']), '--no-worktree', '--no-session-store', '--network', 'loopback', '--sandbox-read', path.dirname(path.dirname(fs.realpathSync(process.execPath))), '--permission-mode', process.env.EVAL_PERMISSION_MODE_OVERRIDE || process.env.EVAL_PERMISSION_MODE || 'acceptEdits'];
 const env = { ...process.env };
+// One-shot credential file from the harness (0600): read, then deleted, so no sibling process finds it later.
+if (process.env.EVAL_KEY_ONCE) {
+  try { env.SYNT_API_KEY = fs.readFileSync(process.env.EVAL_KEY_ONCE, 'utf8').trim(); } finally { fs.rmSync(process.env.EVAL_KEY_ONCE, { force: true }); }
+  delete env.EVAL_KEY_ONCE;
+}
 const fake = process.env.EVAL_FAKE_SCRIPT;
 if (fake) { // never touch the real home in scripted mode
   Object.assign(env, { HOME: tmp, USERPROFILE: tmp, SYNT_HOME: path.join(tmp, 'synthesis') });
