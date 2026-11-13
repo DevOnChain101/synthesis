@@ -335,7 +335,7 @@ const BLOCKED_URLS: [&str; 4] = ["ws://*", "wss://*", "ftp://*", "blob:*"];
 /// CSP cannot be added from the network layer in Chrome 156: `Fetch.continueResponse` ignores header
 /// overrides on navigations and `fulfillRequest` drops the remote address the rebinding check needs); a
 /// Chrome that exposes handshakes to Fetch should replace it. Nothing may call `Page.setBypassCSP`.
-const NO_SOCKETS: &str = "(()=>{for(const k of['WebSocket','WebTransport'])if(k in globalThis)Object.defineProperty(globalThis,k,{value:function(){throw new DOMException('blocked by URL policy','SecurityError')},writable:false,configurable:false})})();if(typeof document!=='undefined'){const add=()=>{const m=document.createElement('meta');m.httpEquiv='Content-Security-Policy';m.content='connect-src http: https: data:';(document.head||document.documentElement).appendChild(m)};if(document.documentElement)add();else new MutationObserver((_,o)=>{if(document.documentElement){o.disconnect();add()}}).observe(document,{childList:true})}";
+const NO_SOCKETS: &str = "(()=>{for(const k of['WebSocket','WebTransport'])if(k in globalThis)Object.defineProperty(globalThis,k,{value:function(){throw new DOMException('blocked by URL policy','SecurityError')},writable:false,configurable:false})})();if(typeof document!=='undefined'){const add=()=>{const m=document.createElementNS('http://www.w3.org/1999/xhtml','meta');m.httpEquiv='Content-Security-Policy';m.content='connect-src http: https: data:';(document.head||document.documentElement).appendChild(m)};if(document.documentElement)add();else new MutationObserver((_,o)=>{if(document.documentElement){o.disconnect();add()}}).observe(document,{childList:true})}";
 
 /// Installs the URL policy hooks on one session and makes it hand out new children paused.
 async fn enable_policy(cdp: &Cdp, session: &str, evaluate: bool) -> Result<()> {
@@ -641,6 +641,10 @@ impl BrowserRuntime {
                 "--disable-sync",
                 "--disable-background-networking",
                 // bfcache would make back/forward skip the load event we wait for
+                // Not a WebTransport block (verified: WebTransport still sends QUIC datagrams with it and
+                // `--disable-blink-features=WebTransport` does not remove the interface); it only keeps
+                // ordinary requests off HTTP/3. See docs/SECURITY.md, WebTransport.
+                "--disable-quic",
                 "--disable-features=BackForwardCache,Translate",
                 "--disable-save-password-bubble",
                 "--password-store=basic",

@@ -1457,13 +1457,48 @@ async fn socket_bypass_matrix_body() {
             });
         }
     });
+    // WebTransport over QUIC is UDP: a datagram on the same port number is a connection attempt
+    let udp_seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    if let Ok(u) = tokio::net::UdpSocket::bind(("127.0.0.1", ws_port)).await {
+        let n = udp_seen.clone();
+        tokio::spawn(async move {
+            let mut b = [0u8; 2048];
+            while u.recv_from(&mut b).await.is_ok() {
+                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+    }
+    // KNOWN GAP: the first inline script of a sandboxed srcdoc iframe (attached unpaused) can start a WebTransport
+    // connection; the constructor override is late and CSP connect-src allows https:. A separate port keeps it
+    // out of the assertions above.
+    let gap_seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let gap_udp = tokio::net::UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+    let gap_port = gap_udp.local_addr().unwrap().port();
+    {
+        let n = gap_seen.clone();
+        tokio::spawn(async move {
+            let mut b = [0u8; 2048];
+            while gap_udp.recv_from(&mut b).await.is_ok() {
+                n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+    }
     let ran = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sock =
         |tag: &str| format!("try{{new WebSocket('ws://127.0.0.1:{ws_port}/{tag}')}}catch(e){{}}");
     let worker_js = format!("fetch('/ran-worker');{}", sock("worker"));
     let shared_js = format!("fetch('/ran-shared');{}", sock("shared"));
     let sw_js = format!("fetch('/ran-sw');{}", sock("sw"));
+    // an XML document: the meta CSP is a no-op there, so only the constructor override covers it
+    let svg_doc = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg'><script>{}</script></svg>",
+        sock("svg")
+    );
     let sandboxed_html = format!("<script>{}</script>", sock("sandboxed-src"));
+    let sandboxed_js = format!(
+        "{}try{{new WebTransport('https://127.0.0.1:{gap_port}/wt-sandboxed')}}catch(e){{}}",
+        sock("srcdoc-sandboxed")
+    );
     let page = format!(
         r#"<title>Main</title><body>
 <button onclick="const w=open('about:blank');try{{new w.WebSocket('ws://127.0.0.1:{ws_port}/popup-blank')}}catch(e){{}}">Blank</button>
@@ -1476,6 +1511,7 @@ try{{new SharedWorker('/shared.js')}}catch(e){{}}
 try{{navigator.serviceWorker.register('/sw.js')}}catch(e){{}}
 const s=document.createElement('iframe');s.srcdoc="<script>{srcdoc}<\/script>";document.body.appendChild(s);
 const sb=document.createElement('iframe');sb.setAttribute('sandbox','allow-scripts');sb.srcdoc="<script>{sandboxed}<\/script>";document.body.appendChild(sb);
+const svg=document.createElement('iframe');svg.src='/s.svg';document.body.appendChild(svg);
 const sbs=document.createElement('iframe');sbs.setAttribute('sandbox','allow-scripts');sbs.src='/sandboxed.html';document.body.appendChild(sbs);
 const f=document.createElement('iframe');document.body.appendChild(f);
 try{{new f.contentWindow.WebSocket('ws://127.0.0.1:{ws_port}/blank-iframe')}}catch(e){{}}
@@ -1483,12 +1519,13 @@ try{{new WebTransport('https://127.0.0.1:{ws_port}/wt')}}catch(e){{fetch('/wt-'+
 fetch('http://127.0.0.1:{ws_port}/fetch-upgrade',{{headers:{{Upgrade:'websocket',Connection:'Upgrade','Sec-WebSocket-Version':'13','Sec-WebSocket-Key':'AAAAAAAAAAAAAAAAAAAAAA=='}}}}).then(()=>fetch('/fu-ok'),e=>fetch('/fu-err-'+e));
 </script></body>"#,
         srcdoc = sock("srcdoc"),
-        sandboxed = sock("srcdoc-sandboxed"),
+        sandboxed = sandboxed_js,
     );
     let (main_port, _) = counting_server(paths_of(&ran, move |p| match p {
         "/worker.js" => ("text/javascript", worker_js.clone()),
         "/shared.js" => ("text/javascript", shared_js.clone()),
         "/sw.js" => ("text/javascript", sw_js.clone()),
+        "/s.svg" => ("image/svg+xml", svg_doc.clone()),
         "/sandboxed.html" => ("text/html", sandboxed_html.clone()),
         _ => ("text/html", page.clone()),
     }))
@@ -1550,6 +1587,19 @@ fetch('http://127.0.0.1:{ws_port}/fetch-upgrade',{{headers:{{Upgrade:'websocket'
         0,
         "a WebSocket handshake reached the server: {:?}",
         ws_seen.lock().unwrap()
+    );
+    assert_eq!(
+        hits(&udp_seen),
+        0,
+        "a QUIC datagram (WebTransport) reached the server"
+    );
+    eprintln!(
+        "KNOWN_GAP sandboxed-srcdoc-webtransport: {}",
+        if hits(&gap_seen) > 0 {
+            "still open (QUIC datagrams sent)"
+        } else {
+            "CLOSED, update docs/SECURITY.md"
+        }
     );
     // fetch cannot upgrade: Chrome drops the forbidden `Upgrade` header, the request is plain HTTP
     assert!(

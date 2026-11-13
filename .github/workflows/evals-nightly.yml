@@ -18,6 +18,10 @@ on:
       tasks:
         description: "comma-separated task ids (empty: all non-gaming tasks)"
         default: ""
+      include_transcripts:
+        description: "also upload raw transcripts (readable by anyone who can read artifacts)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -97,24 +101,50 @@ jobs:
           [[ -z "$TASKS" || "$TASKS" =~ ^[a-z0-9-]+(,[a-z0-9-]+){0,9}$ ]] || { echo "tasks must be up to 10 comma-separated task ids"; exit 2; }
           args=(--agent rust --runs "$RUNS" --out evals-out)
           if [ -n "$TASKS" ]; then args+=(--task "$TASKS"); fi
+          # The key reaches the adapter only through a 0600 file (a one-shot copy per run, deleted by the adapter at
+          # start): the long-lived harness process, whose /proc/<pid>/environ agent-written checks could read, never
+          # holds it. Graded checks run in their own PID and network namespaces (bwrap).
+          key_file="$RUNNER_TEMP/synt-key"
+          trap 'rm -f "$key_file"' EXIT
+          (umask 077; printf '%s' "$SYNT_API_KEY" > "$key_file")
           # exit 70 = an adapter error; a failed task is a result, not a job failure
-          node tests/agent-evals/harness/run.js "${args[@]}" 2>&1 | tee evals.log
+          EVAL_KEY_FILE="$key_file" EVAL_CHECK_SANDBOX=bwrap \
+            env -u SYNT_API_KEY node tests/agent-evals/harness/run.js "${args[@]}" 2>&1 | tee evals.log
       - name: Publish the summary
         if: env.HAVE_KEY == 'yes' && always()
         run: |
-          node tests/agent-evals/harness/summary.mjs evals-out | tee -a "$GITHUB_STEP_SUMMARY"
+          node tests/agent-evals/harness/summary.mjs evals-out | tee -a "$GITHUB_STEP_SUMMARY" > summary.md
+      - name: Choose what to upload
+        if: env.HAVE_KEY == 'yes' && always()
+        env:
+          TRANSCRIPTS: ${{ inputs.include_transcripts }}
+        run: |
+          # Raw transcripts (events, model output, tool output) can be read by anyone who can read the repository's
+          # artifacts: only result.json files and the summary are uploaded unless include_transcripts is true.
+          rm -rf evals-upload; mkdir -p evals-upload
+          if [ "$TRANSCRIPTS" = true ]; then
+            cp -R evals-out/. evals-upload/ 2>/dev/null || true
+          else
+            (cd evals-out 2>/dev/null && find . -name result.json -exec cp --parents {} ../evals-upload \;) || true
+          fi
+          cp summary.md evals-upload/ 2>/dev/null || true
       - name: The key must not be in anything that gets uploaded
         if: env.HAVE_KEY == 'yes' && always()
         env:
           SYNT_API_KEY: ${{ secrets.SYNT_API_KEY }}
         run: |
-          if grep -rqF -- "$SYNT_API_KEY" evals-out evals.log 2>/dev/null; then
-            echo "::error::the API key appears in the eval output; artifact NOT uploaded"; rm -rf evals-out evals.log; exit 1
-          fi
-          echo "no key material found in evals-out or evals.log"
+          # best effort: the key as is, base64, URL-encoded, reversed, and its first and last 8 characters
+          node -e '
+            const k = process.env.SYNT_API_KEY, fs = require("fs"), path = require("path");
+            const needles = new Set([k, Buffer.from(k).toString("base64"), encodeURIComponent(k), [...k].reverse().join(""), k.slice(0, 8), k.slice(-8)]);
+            let hit = false;
+            const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); if (e.isDirectory()) walk(f); else { const t = fs.readFileSync(f, "latin1"); for (const n of needles) if (t.includes(n)) { hit = true; console.log("::error::key material in " + f); break; } } } };
+            walk("evals-upload"); process.exit(hit ? 1 : 0);
+          ' || { rm -rf evals-upload; echo "artifact NOT uploaded"; exit 1; }
+          echo "no key material found in evals-upload"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: env.HAVE_KEY == 'yes' && always()
         with:
           name: evals-nightly
-          path: evals-out/
+          path: evals-upload/
           if-no-files-found: ignore

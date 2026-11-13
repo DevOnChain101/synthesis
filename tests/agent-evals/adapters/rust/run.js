@@ -28,6 +28,11 @@ const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'eval-rust-'))
 // EVAL_MAX_COST_USD caps a real-model run (nightly); the scripted runs and the default keep `--no-cost-cap`.
 const args = ['run', '--cwd', cwd, ...(process.env.EVAL_MAX_COST_USD ? ['--max-cost-usd', process.env.EVAL_MAX_COST_USD] : ['--no-cost-cap']), '--no-worktree', '--no-session-store', '--network', 'loopback', '--sandbox-read', path.dirname(path.dirname(fs.realpathSync(process.execPath))), '--permission-mode', process.env.EVAL_PERMISSION_MODE_OVERRIDE || process.env.EVAL_PERMISSION_MODE || 'acceptEdits'];
 const env = { ...process.env };
+// One-shot credential file from the harness (0600): read, then deleted, so no sibling process finds it later.
+if (process.env.EVAL_KEY_ONCE) {
+  try { env.SYNT_API_KEY = fs.readFileSync(process.env.EVAL_KEY_ONCE, 'utf8').trim(); } finally { fs.rmSync(process.env.EVAL_KEY_ONCE, { force: true }); }
+  delete env.EVAL_KEY_ONCE;
+}
 const fake = process.env.EVAL_FAKE_SCRIPT;
 if (fake) { // never touch the real home in scripted mode
   Object.assign(env, { HOME: tmp, USERPROFILE: tmp, SYNT_HOME: path.join(tmp, 'synthesis') });
