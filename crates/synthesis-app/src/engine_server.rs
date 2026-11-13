@@ -176,6 +176,8 @@ struct Srv<'a> {
     tokens: Tokens,
     /// The last scan, walk or health check: these are limited to a few a second.
     heavy_at: Option<Instant>,
+    /// A heavy call is under way: the gap is counted from its END (a slow scan must not leave the next one free).
+    heavy_running: bool,
     /// The scan the pages of `fs.list` are cut from.
     tree: Option<synthesis_view::project::ProjectData>,
 }
@@ -328,6 +330,7 @@ impl Srv<'_> {
             return Err("too many requests".into());
         }
         self.heavy_at = Some(now);
+        self.heavy_running = true;
         Ok(())
     }
 
@@ -495,6 +498,14 @@ impl Srv<'_> {
     }
 
     fn call(&mut self, call: Call) -> Result<Value, CallError> {
+        let r = self.call_inner(call);
+        if std::mem::take(&mut self.heavy_running) {
+            self.heavy_at = Some(Instant::now());
+        }
+        r
+    }
+
+    fn call_inner(&mut self, call: Call) -> Result<Value, CallError> {
         let h = crate::homes(self.env)?;
         let ws_key = |s: &Self| {
             s.live
@@ -765,7 +776,11 @@ impl Srv<'_> {
             }
             Call::MemoryNote { text, user } => {
                 if text.len() > engine_ops::MAX_NOTE_BYTES {
-                    return Err("a note must be 1 to 2048 bytes".into());
+                    return Err(format!(
+                        "a note must be at most {} bytes",
+                        engine_ops::MAX_NOTE_BYTES
+                    )
+                    .into());
                 }
                 // a project note is only for a folder the engine trusts (its instruction file is loaded only then);
                 // the client is trusted to be the window the person confirmed the note in
@@ -1039,6 +1054,7 @@ pub fn serve(
         images: Images::default(),
         tokens: Tokens::default(),
         heavy_at: None,
+        heavy_running: false,
         tree: None,
     };
     wire.msg(&Out::hello());

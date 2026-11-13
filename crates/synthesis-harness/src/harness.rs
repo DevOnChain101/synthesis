@@ -1000,9 +1000,10 @@ impl Harness {
             .begin_task(bg_tx, task.cancel.clone(), task.task_id.clone());
         self.peer_task_started(&req.request, &main.name, &st.messages);
         *lock(&task.user_texts) = crate::classifier::user_texts(&st.messages, &req.request);
-        // an image the person attached is pixels of unknown origin (a screenshot of a page): its text is
-        // untrusted, so actions with an external effect are asked, never judged, for the rest of the task
-        if !req.images.is_empty() {
+        // an image the person attached (or one the conversation still carries, until a compaction drops it) is
+        // pixels of unknown origin, a screenshot of a page perhaps: its text is untrusted, so actions with an
+        // external effect are asked, never judged, for the rest of the task
+        if !req.images.is_empty() || st.messages.iter().any(carries_image) {
             task.after_image
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
@@ -1674,5 +1675,29 @@ impl Harness {
             );
         }
         Some(out)
+    }
+}
+
+/// The message holds an image block, or a tool result that carries one.
+fn carries_image(m: &Message) -> bool {
+    fn json_image(v: &serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::Array(a) => a.iter().any(json_image),
+            serde_json::Value::Object(o) => {
+                o.get("type").and_then(|t| t.as_str()) == Some("image")
+                    || o.values().any(json_image)
+            }
+            _ => false,
+        }
+    }
+    match &m.content {
+        Content::Blocks(b) => b.iter().any(|x| match x {
+            Block::Image { .. } => true,
+            Block::ToolResult {
+                content: Some(c), ..
+            } => json_image(c),
+            _ => false,
+        }),
+        Content::Text(_) => false,
     }
 }

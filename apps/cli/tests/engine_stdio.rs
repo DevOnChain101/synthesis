@@ -1202,6 +1202,21 @@ fn a_resumed_session_continues_its_hash_chain_and_each_session_has_its_own_basel
 
 // ---- protocol 3: files, images, rewind, clean, memory, settings
 
+/// Reads until the task ends, approving any permission ask once (a Windows path can still ask under acceptEdits).
+fn finish_task(e: &mut Engine) {
+    loop {
+        let seen = e.until("task_done or an ask", |v| {
+            is_task_done(v) || v["msg"] == "ask.approval"
+        });
+        let last = seen.last().unwrap();
+        if is_task_done(last) {
+            return;
+        }
+        let id = last["id"].clone();
+        e.call("answer", json!({"id": id, "choice": "once"}));
+    }
+}
+
 /// A scan or health check is limited to a few a second: tests wait it out between two of them.
 fn calm() {
     std::thread::sleep(Duration::from_millis(300));
@@ -1436,7 +1451,7 @@ fn a_rewind_needs_the_engines_dry_run_and_a_clean_needs_its_plan() {
     e.start();
     e.ok("set_mode", json!({"mode": "acceptEdits"}));
     e.call("send", json!({"text": "write it"}));
-    e.until("task_done", is_task_done);
+    finish_task(&mut e);
     assert!(target.exists());
     let cps = e.ok("rewind.list", Value::Null);
     assert_eq!(cps["checkpoints"].as_array().unwrap().len(), 1, "{cps}");
@@ -1611,13 +1626,18 @@ fn memory_effort_context_doctor_and_mcp_run_on_the_engines_own_files() {
     assert!(e.ok("mcp.list", Value::Null)["servers"].is_array());
     // mcp over the protocol: a URL server into the user file and nothing that runs code, carries environment
     // or headers, or replaces a server
-    let url = "https://mcp.example.com/mcp";
+    let url = "https://8.8.8.8/mcp";
     for p in [
         json!({"name": "a", "transport": "http", "command": ["sh", "-c", "id"]}),
         json!({"name": "a", "transport": "http", "url": url, "command": ["srv"]}),
         json!({"name": "a", "transport": "http", "url": url, "env": ["LD_PRELOAD=/tmp/x.so"]}),
         json!({"name": "a", "transport": "http", "url": url, "header": ["Authorization: Bearer ${SYNT_API_KEY}"]}),
         json!({"name": "a", "transport": "http", "url": "file:///etc/passwd"}),
+        json!({"name": "a", "transport": "http", "url": "https://169.254.169.254/latest/meta-data"}),
+        json!({"name": "a", "transport": "http", "url": "https://10.1.2.3/mcp"}),
+        json!({"name": "a", "transport": "http", "url": "https://localhost/mcp"}),
+        json!({"name": "a", "transport": "http", "url": "http://8.8.8.8/mcp"}),
+        json!({"name": "a__b", "transport": "http", "url": url}),
         json!({"name": "../x", "transport": "http", "url": url}),
     ] {
         assert!(e.ask("mcp.add", p.clone())["error"].is_string(), "{p}");
@@ -1629,14 +1649,14 @@ fn memory_effort_context_doctor_and_mcp_run_on_the_engines_own_files() {
     );
     let again = e.err(
         "mcp.add",
-        json!({"name": "a", "transport": "http", "url": "https://evil.example/x", "force": true}),
+        json!({"name": "a", "transport": "http", "url": "https://1.1.1.1/x", "force": true}),
     );
     assert!(
         again.contains("already exists") && !again.contains(&root),
         "{again}"
     );
     let file = std::fs::read_to_string(e.home.join("synt.json")).unwrap();
-    assert!(file.contains("mcp.example.com") && !file.contains("evil.example"));
+    assert!(file.contains("8.8.8.8") && !file.contains("1.1.1.1"));
     assert!(
         !e.ws.join(".mcp.json").exists(),
         "a project-scope server is never written"

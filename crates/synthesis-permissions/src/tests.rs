@@ -4992,3 +4992,70 @@ fn s21_the_read_only_set_holds_under_a_case_sensitive_path_policy() {
         }
     }
 }
+
+/// A server-wide rule is a prefix that must end at `__`. Tool names are `mcp__<server>__<tool>`, so the split is
+/// only unambiguous because server names never contain `__` (`synthesis_mcp::valid_server_name` refuses them, tested there):
+/// otherwise `mcp__github__x__t` would be both server `github` and server `github__x`.
+#[test]
+fn a_server_rule_covers_that_servers_tools_and_not_a_longer_name() {
+    let f = fx();
+    let p = f.with(rules(&["mcp__github"], &[], &[]), Mode::Default);
+    assert_eq!(d(&p, "mcp__github__issues", json!({})), A);
+    assert_eq!(d(&p, "mcp__githubx__issues", json!({})), Q);
+    assert_eq!(d(&p, "mcp__git__issues", json!({})), Q);
+}
+
+#[test]
+fn the_protected_set_a_rewind_uses_is_the_union_and_folds_case_and_aliases_everywhere() {
+    let root = std::env::temp_dir().join("synt-protected-union");
+    let roots = vec![root.clone()];
+    for bad in [
+        ".git/hooks/pre-commit",
+        ".GIT/hooks/x",
+        "GIT~1/hooks/x",
+        ".git./hooks/x",
+        "Agents.md",
+        "AGENTS~1.MD",
+        ".ENV",
+        ".envrc",
+        ".husky/pre-commit",
+        ".Cargo/config.toml",
+        ".vscode/tasks.json",
+        ".github/workflows/ci.yml",
+        "sub/.mcp.json",
+        ".git",
+    ] {
+        assert!(crate::is_protected_path(&roots, &root.join(bad)), "{bad}");
+    }
+    for ok in [
+        "src/main.rs",
+        "README.md",
+        "docs/git-notes.md",
+        ".gitignore",
+        "a/b.txt",
+    ] {
+        assert!(!crate::is_protected_path(&roots, &root.join(ok)), "{ok}");
+    }
+    assert!(
+        crate::is_protected_path(&[], &root.join("src/a.rs")),
+        "no root: closed"
+    );
+}
+
+#[test]
+fn an_ordinary_8_3_temp_folder_above_the_root_does_not_make_the_project_protected() {
+    // `C:\Users\RUNNER~1\AppData\Local\Temp\.tmpAbC123`: only names BELOW the workspace root count
+    let root = std::env::temp_dir()
+        .join("RUNNER~1")
+        .join("Temp")
+        .join(".tmpAbC123")
+        .join("ws");
+    let roots = vec![root.clone()];
+    for ok in ["hello.txt", "src/a.rs", "sub/dir/x.txt"] {
+        assert!(!crate::is_protected_path(&roots, &root.join(ok)), "{ok}");
+    }
+    assert!(crate::is_protected_path(
+        &roots,
+        &root.join("GIT~1/hooks/x")
+    ));
+}

@@ -34,7 +34,9 @@ pub struct RewindArgs {
     /// Only this checkpoint (default: every checkpoint of the session).
     #[arg(long, value_name = "NAME")]
     pub checkpoint: Option<String>,
-    /// Write the files back (default: show what would happen).
+    /// Write the files back (default: show what would happen). Protected paths (.git and hooks, .env*,
+    /// shell startup files, CI and package-manager config) are never written or removed, not even with
+    /// --force: the dry run lists them as skipped and you revert them by hand.
     #[arg(long)]
     pub apply: bool,
     /// Also overwrite or remove files changed since the run (or whose end state was not recorded),
@@ -110,8 +112,14 @@ pub(crate) fn windows_unsafe_name(name: &str) -> bool {
         })
 }
 
-/// A rewind never writes or deletes what the tools ask about first (the checkpoint may be older than a rule).
-const PROTECTED: &str = "a protected path (VCS internals, hooks, CI or shell configuration, .env): a rewind never writes it";
+/// Why a protected file is skipped, and what to do about it: a rewind never writes or deletes what the tools
+/// refuse or ask about first (the checkpoint may be older than a rule), so the person reverts it by hand.
+fn protected_reason() -> String {
+    format!(
+        "a protected path: a rewind never writes it, revert it by hand (git checkout, or your editor). Protected: {}",
+        synthesis_permissions::PROTECTED_SUMMARY
+    )
+}
 
 fn is_link(p: &Path) -> bool {
     let Ok(m) = std::fs::symlink_metadata(p) else {
@@ -268,7 +276,7 @@ pub fn plan(l: &Loaded, checkpoint: Option<&str>, force: bool) -> Result<Vec<Ent
                 false,
             )
         } else if synthesis_permissions::is_protected_path(&l.roots, &path) {
-            skip(PROTECTED, false)
+            skip(&protected_reason(), false)
         } else if std::fs::symlink_metadata(&path).is_ok_and(|m| !m.is_file()) {
             skip("a symlink or not a regular file", false)
         } else if !force
@@ -348,7 +356,7 @@ pub fn apply_entry(l: &Loaded, e: &Entry) -> Result<(), String> {
             return fail("a directory on its path is a symlink or junction");
         }
         _ if synthesis_permissions::is_protected_path(&l.roots, &e.path) => {
-            return fail(PROTECTED);
+            return fail(&protected_reason());
         }
         _ if file_state_hash(&e.path) != e.state => {
             return fail("changed while the rewind was running: not touched");

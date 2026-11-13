@@ -484,6 +484,29 @@ pub fn mcp_list(m: Option<&std::sync::Arc<synthesis_mcp::McpManager>>) -> Value 
     json!({"servers": servers})
 }
 
+/// Servers the user file may hold when added over the protocol.
+const MAX_USER_SERVERS: usize = 32;
+
+/// One writer at a time for the read-modify-write of the user `synt.json` (a lock file next to it).
+fn edit_lock(ctx: &Ctx) -> Result<std::fs::File, String> {
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(ctx.home.join(".mcp-edit.lock"))
+        .map_err(failed("cannot lock the settings file"))?;
+    f.lock().map_err(failed("cannot lock the settings file"))?;
+    Ok(f)
+}
+
+fn user_server_count(ctx: &Ctx) -> usize {
+    std::fs::read_to_string(ctx.home.join("synt.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v["mcpServers"].as_object().map(|o| o.len()))
+        .unwrap_or(0)
+}
+
 /// What `mcp.add` carries. Only `name` and `url` can be used: the other fields exist so that a request that
 /// tries them is refused with a reason (rather than silently losing them).
 pub struct McpAdd {
@@ -495,7 +518,7 @@ pub struct McpAdd {
     pub command: Vec<String>,
 }
 
-/// `mcp.add`: a REMOTE (`http`/`https` URL) server into the USER file of this machine, with `synt mcp add`'s
+/// `mcp.add`: a REMOTE (`https` URL) server into the USER file of this machine, with `synt mcp add`'s
 /// name and URL guards. Over the protocol it can never be a server that runs a command (that would be code
 /// execution in the engine's machine with no approval), carry environment variables (`LD_PRELOAD`, `PATH`, ...)
 /// or headers (`${VAR}` in a header would send an engine secret to a URL the client chose), or replace an
@@ -506,12 +529,28 @@ pub fn mcp_add(ctx: &Ctx, a: McpAdd, hide: &[&Path]) -> Result<Value, String> {
         return Err("only a URL server can be added over the protocol: a command, environment variables or headers are refused (edit the engine's synt.json by hand)".into());
     }
     let url = a.url.ok_or("a URL is required")?;
-    let (scheme_ok, bad) = (
-        url.starts_with("https://") || url.starts_with("http://"),
-        url.len() > 2048 || url.contains('$') || url.chars().any(|c| c.is_control() || c == ' '),
-    );
-    if !scheme_ok || bad || !matches!(a.transport.as_str(), "http" | "sse") {
-        return Err("not an http or https server URL".into());
+    if url.len() > 2048
+        || url.contains('$')
+        || url.chars().any(|c| c.is_control() || c == ' ')
+        || !matches!(a.transport.as_str(), "http" | "sse")
+    {
+        return Err("not an https server URL".into());
+    }
+    // https only, no user:password, no loopback, and nothing that is or resolves to a private, link-local
+    // (the cloud metadata address) or other internal address: checked here and again at every connect
+    let parsed =
+        synthesis_mcp::Url::parse(&url).map_err(|_| "not an https server URL".to_string())?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(failed("cannot check the URL"))?;
+    rt.block_on(synthesis_mcp::check_remote_url(&parsed))
+        .map_err(|e| scrub(&e, hide))?;
+    let _lock = edit_lock(ctx)?;
+    if user_server_count(ctx) >= MAX_USER_SERVERS {
+        return Err(format!(
+            "at most {MAX_USER_SERVERS} servers can be added over the protocol"
+        ));
     }
     let args = crate::mcp::AddArgs {
         name: a.name,
@@ -546,6 +585,7 @@ pub fn mcp_remove(
     }) {
         return Err("that server comes from the project, not from your user settings".into());
     }
+    let _lock = edit_lock(ctx)?;
     crate::mcp::remove_server(&ctx.home.join("synt.json"), name).map_err(|e| scrub(&e, hide))?;
     Ok(json!({"removed": clean(name)}))
 }
@@ -724,7 +764,7 @@ mod tests {
             header: vec![],
             command: vec![],
         };
-        let ok = Some("https://mcp.example.com/mcp");
+        let ok = Some("https://8.8.8.8/mcp");
         // a command (stdio), environment, headers: refused whatever else is right
         let cmd = McpAdd {
             command: vec!["sh".into(), "-c".into(), "id".into()],
@@ -783,7 +823,7 @@ mod tests {
         );
         mcp_add(&ctx, add("a", ok), &[]).unwrap();
         // never replaced (no `force`), and the error hides the folder
-        let again = mcp_add(&ctx, add("a", Some("https://evil.example/x")), &[&home]).unwrap_err();
+        let again = mcp_add(&ctx, add("a", Some("https://1.1.1.1/x")), &[&home]).unwrap_err();
         assert!(
             again.contains("already exists") && !again.contains(&*home.to_string_lossy()),
             "{again}"
@@ -791,7 +831,7 @@ mod tests {
         assert!(
             std::fs::read_to_string(home.join("synt.json"))
                 .unwrap()
-                .contains("mcp.example.com")
+                .contains("8.8.8.8")
         );
         // remove: only a server of the user file; a bad name or a missing one is an error
         assert!(
@@ -800,6 +840,12 @@ mod tests {
         );
         mcp_remove(&ctx, None, "a", &[]).unwrap();
         assert!(mcp_remove(&ctx, None, "a", &[]).is_err());
+        // the number of servers added this way is capped
+        for i in 0..MAX_USER_SERVERS {
+            let _ = mcp_add(&ctx, add(&format!("s{i}"), ok), &[]);
+        }
+        let full = mcp_add(&ctx, add("one-more", ok), &[]).unwrap_err();
+        assert!(full.contains("at most"), "{full}");
     }
 
     #[test]

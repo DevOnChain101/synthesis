@@ -290,3 +290,55 @@ async fn an_image_the_person_attached_taints_the_actions_that_follow() {
     assert_eq!(w.runs(), 0);
     assert_eq!(verdicts(&rig), vec![("ask".into(), "fail_closed".into())]);
 }
+
+#[tokio::test]
+async fn a_conversation_that_still_carries_an_image_keeps_the_taint_in_later_tasks() {
+    use synthesis_providers::{Block, Content, ImageSource, Message, Role};
+    let image = Message {
+        role: Role::User,
+        content: Content::Blocks(vec![
+            Block::Text {
+                text: "what is this".into(),
+            },
+            Block::Image {
+                source: ImageSource::Base64 {
+                    media_type: "image/png".into(),
+                    data: "iVBORw0KGgo=".into(),
+                },
+            },
+        ]),
+    };
+    let w = Probe::new("Mutate", SideEffectClass::Write, 0, "changed");
+    // an earlier task's image is still in the history: this task has none of its own
+    let mut rig = Rig::new(
+        opts(&w),
+        vec![
+            Turn::tool("m1", "Mutate", json!({})),
+            Turn::text("could not"),
+        ],
+    );
+    let mut r = synthesis_harness::TaskRequest::new("now fix the file");
+    r.history = vec![
+        image,
+        Message {
+            role: Role::Assistant,
+            content: Content::Text("a logo".into()),
+        },
+    ];
+    rig.run_with(r, tokio_util::sync::CancellationToken::new())
+        .await;
+    assert_eq!(w.runs(), 0);
+    assert_eq!(verdicts(&rig), vec![("ask".into(), "fail_closed".into())]);
+    // with no image anywhere the judge decides as before
+    let w = Probe::new("Mutate", SideEffectClass::Write, 0, "changed");
+    let mut rig = Rig::new(
+        opts(&w),
+        vec![
+            Turn::tool("m1", "Mutate", json!({})),
+            Turn::text(ALLOW),
+            Turn::text("done"),
+        ],
+    );
+    rig.run("update the file").await;
+    assert_eq!(verdicts(&rig), vec![("allow".into(), "model".into())]);
+}

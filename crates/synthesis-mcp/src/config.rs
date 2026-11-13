@@ -250,9 +250,12 @@ pub fn from_opencode_shape(name: &str, cfg: &Value, scope: Option<&str>) -> McpS
     e
 }
 
-/// Server names end up in tool names, prompts and the terminal: `^[A-Za-z0-9_.-]{1,64}$`.
+/// Server names end up in tool names, prompts and the terminal: `^[A-Za-z0-9_.-]{1,64}$`, and never `__`: tool
+/// names are `mcp__<server>__<tool>`, so with `__` inside a name `mcp__github__x__t` could be server `github`
+/// (tool `x__t`) or server `github__x` (tool `t`), and a rule for one would cover the other.
 pub fn valid_server_name(n: &str) -> bool {
     (1..=64).contains(&n.len())
+        && !n.contains("__")
         && n.bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
 }
@@ -273,7 +276,7 @@ fn parse_map(map: &Value, mut one: impl FnMut(&str, &Value) -> McpServerConfig) 
             ok.push(one(n, c));
         } else {
             bad.push(format!(
-                "invalid MCP server name {n:?} (allowed: 1-64 of A-Z a-z 0-9 _ . -)"
+                "invalid MCP server name {n:?} (allowed: 1-64 of A-Z a-z 0-9 _ . -, no a double underscore)"
             ));
         }
     }
@@ -493,5 +496,20 @@ mod tests {
         c.headers
             .insert("Authorization".into(), "Bearer sekrit".into());
         assert!(!format!("{c:?}").contains("sekrit"));
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::valid_server_name;
+
+    #[test]
+    fn a_server_name_never_contains_a_double_underscore() {
+        for ok in ["github", "my-server", "a.b", "a_b", "A1"] {
+            assert!(valid_server_name(ok), "{ok}");
+        }
+        for bad in ["github__x", "__", "a__", "__a", "", "a b", "../x"] {
+            assert!(!valid_server_name(bad), "{bad}");
+        }
     }
 }

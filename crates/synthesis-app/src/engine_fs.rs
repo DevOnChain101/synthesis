@@ -155,13 +155,29 @@ fn git_scan(root: &Path, trusted: bool, env: &Env) -> Result<ProjectData, String
 }
 
 /// A text preview of `rel` under `root` (the session folder). The same refusals as the window's own preview
-/// plus: a path with a `.git` component, a file with other hard links (a link to something outside cannot
-/// be told from a file inside), and a file that is not opened as a plain file (a pipe never blocks the
-/// engine). Reads at most [`PREVIEW_BYTES`], shows at most [`PREVIEW_LINES`] lines, made printable.
+/// plus: `.git` and secret names judged on where the file REALLY is as well as on the name given, a file with
+/// other hard links (a link to something outside cannot be told from a file inside), a file on a filesystem
+/// whose link counts cannot be trusted, and a file that is not opened as a plain file (a pipe never blocks the
+/// engine, and the file never becomes a controlling terminal). The file is opened by its canonical relative
+/// path beneath a handle of the folder with no link followed (Linux: `openat2` `RESOLVE_BENEATH |
+/// RESOLVE_NO_SYMLINKS`; elsewhere cap-std), so a parent or the file swapped for a link meanwhile is refused;
+/// it must be the very file that was looked at before (device and inode), and on Linux the path of the open
+/// descriptor is checked once more. Reads at most [`PREVIEW_BYTES`], shows at most [`PREVIEW_LINES`] lines,
+/// made printable.
+#[cfg(not(unix))]
+pub fn read(_root: &Path, _rel: &str) -> Result<Value, String> {
+    // the race-free open is not available: an engine on Windows serves no previews
+    Err("file previews are served by an engine on Linux or macOS only".into())
+}
+
+#[cfg(unix)]
 pub fn read(root: &Path, rel: &str) -> Result<Value, String> {
+    use std::os::unix::fs::MetadataExt as _;
     check_rel(rel, false)?;
     let p = Path::new(rel);
-    let gone = |_| "cannot read that file".to_string();
+    fn gone<E>(_: E) -> String {
+        "cannot read that file".to_string()
+    }
     let real_root = synthesis_core::canonicalize(root).map_err(gone)?;
     let real = synthesis_core::canonicalize(root.join(p)).map_err(gone)?;
     let inner = real
@@ -169,51 +185,51 @@ pub fn read(root: &Path, rel: &str) -> Result<Value, String> {
         .ok()
         .filter(|_| contains(&real_root, &real, PathPolicy::NATIVE))
         .ok_or("the file is outside the project folder")?;
-    // the checks run on where the file REALLY is as well as on the name the client gave: a link inside the
-    // project that points at `.git/config` or `.env` is refused too
-    if inner
-        .components()
-        .any(|c| c.as_os_str().eq_ignore_ascii_case(".git"))
-    {
-        return Err("a file inside .git is not shown".into());
-    }
-    if [&real, inner, p]
+    // where the file really is, not only the name the client gave: a link inside the project that points at
+    // `.git/config` or `.env` is refused too
+    name_checks(inner)?;
+    if [&real, p]
         .into_iter()
         .any(synthesis_core::secrets::is_secret_path)
     {
         return Err("a secret file (keys, .env, credentials) is not shown".into());
     }
-    // hard-link counts are not reliable on a Windows drive: nothing there is shown
-    #[cfg(unix)]
-    if real.starts_with("/mnt/") {
-        return Err(
-            "files on a Windows drive are not shown (their hard links cannot be checked)".into(),
-        );
+    // the file as it is now: a regular file, not a link; what is opened must be this very file
+    let before = std::fs::symlink_metadata(&real).map_err(gone)?;
+    if !before.is_file() {
+        return Err("not a regular file".into());
     }
-    // opened one component at a time under a handle of the folder (a parent swapped for a link meanwhile cannot
-    // lead out of it), without blocking on a pipe
-    let dir = cap_std::fs::Dir::open_ambient_dir(&real_root, cap_std::ambient_authority())
-        .map_err(gone)?;
-    let mut open = cap_std::fs::OpenOptions::new();
-    open.read(true);
-    #[cfg(unix)]
-    cap_std::fs::OpenOptionsExt::custom_flags(&mut open, libc::O_NONBLOCK);
-    let file = dir.open_with(p, &open).map_err(gone)?;
+    let file = open_beneath(&real_root, inner).map_err(gone)?;
     let meta = file.metadata().map_err(gone)?;
     if !meta.is_file() {
         return Err("not a regular file".into());
     }
-    #[cfg(unix)]
+    if (before.dev(), before.ino()) != (meta.dev(), meta.ino()) {
+        return Err("the file changed while it was opened".into());
+    }
+    if meta.nlink() > 1 {
+        return Err("a file with other hard links is not shown".into());
+    }
+    #[cfg(target_os = "linux")]
     {
-        use cap_std::fs::MetadataExt as _;
-        use std::os::unix::fs::MetadataExt as _;
-        if meta.nlink() > 1 {
-            return Err("a file with other hard links is not shown".into());
+        let fs = rustix::fs::fstatfs(&file).map_err(gone)?;
+        #[allow(clippy::cast_sign_loss, clippy::unnecessary_cast)]
+        let f_type = fs.f_type as u64;
+        if links_unreliable(f_type) {
+            return Err("this file system (a Windows drive, a network or FUSE mount) cannot tell whether a file has other hard links: not shown".into());
         }
-        // the file opened is the one that was checked: a path swapped between the checks and the open differs
-        let checked = std::fs::metadata(&real).map_err(gone)?;
-        if (checked.dev(), checked.ino()) != (meta.dev(), meta.ino()) {
-            return Err("the file changed while it was opened".into());
+        // what the descriptor really is, once more with the checks of the name
+        let now = std::fs::read_link(format!(
+            "/proc/self/fd/{}",
+            rustix::fd::AsRawFd::as_raw_fd(&file)
+        ))
+        .map_err(gone)?;
+        let now = now
+            .strip_prefix(&real_root)
+            .map_err(|_| "the file changed while it was opened".to_string())?;
+        name_checks(now)?;
+        if synthesis_core::secrets::is_secret_path(now) {
+            return Err("a secret file (keys, .env, credentials) is not shown".into());
         }
     }
     let mut buf = Vec::new();
@@ -230,6 +246,61 @@ pub fn read(root: &Path, rel: &str) -> Result<Value, String> {
     let cut_lines = lines.len() > PREVIEW_LINES;
     lines.truncate(PREVIEW_LINES);
     Ok(json!({"lines": lines, "size": meta.len(), "cut": cut_bytes || cut_lines}))
+}
+
+/// No `.git` component (any case) in a path relative to the folder.
+#[cfg(unix)]
+fn name_checks(inner: &Path) -> Result<(), String> {
+    if inner
+        .components()
+        .any(|c| c.as_os_str().eq_ignore_ascii_case(".git"))
+    {
+        return Err("a file inside .git is not shown".into());
+    }
+    Ok(())
+}
+
+/// Filesystems whose hard-link counts mean nothing: 9p (WSL's Windows drives), CIFS/SMB, FUSE (drvfs-like and
+/// virtiofs mounts). Everything else (ext4, xfs, btrfs, tmpfs, overlayfs, NFS, ...) counts links correctly,
+/// so a project on a Windows drive is refused here and a Linux one is not.
+#[cfg(target_os = "linux")]
+fn links_unreliable(f_type: u64) -> bool {
+    matches!(
+        f_type & 0xFFFF_FFFF,
+        0x0102_1997 // 9p
+            | 0xFF53_4D42 // cifs
+            | 0xFE53_4D42 // smb2
+            | 0x517B // smb
+            | 0x6573_5546 // fuse (virtiofs, drvfs-like)
+    )
+}
+
+/// Opens `rel` (canonical, relative) beneath `root` with no link followed, non-blocking, not a terminal.
+#[cfg(target_os = "linux")]
+fn open_beneath(root: &Path, rel: &Path) -> std::io::Result<std::fs::File> {
+    use rustix::fs::{Mode, OFlags, ResolveFlags, open, openat2};
+    let dir = open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let fd = openat2(
+        &dir,
+        rel,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
+    )?;
+    Ok(std::fs::File::from(fd))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn open_beneath(root: &Path, rel: &Path) -> std::io::Result<std::fs::File> {
+    let dir = cap_std::fs::Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
+    let mut open = cap_std::fs::OpenOptions::new();
+    open.read(true);
+    cap_std::fs::OpenOptionsExt::custom_flags(&mut open, libc::O_NONBLOCK | libc::O_NOCTTY);
+    Ok(dir.open_with(rel, &open)?.into_std())
 }
 
 // ---- images
@@ -675,6 +746,79 @@ mod tests {
             .is_ok_and(|s| s.success());
         assert!(ok);
         assert!(read(&w, "pipe").unwrap_err().contains("regular"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_or_a_parent_swapped_for_a_link_during_the_read_never_yields_git_or_secret_bytes() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let d = tempfile::tempdir().unwrap();
+        let w = d.path().join("w");
+        std::fs::create_dir_all(w.join(".git")).unwrap();
+        std::fs::create_dir_all(w.join("d")).unwrap();
+        std::fs::write(w.join(".git/config"), "SECRET-GIT").unwrap();
+        std::fs::write(w.join(".env"), "SECRET-ENV").unwrap();
+        std::fs::write(w.join("ok.txt"), "fine").unwrap();
+        std::fs::write(w.join("d/config"), "fine-d").unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let swapper = {
+            let (w, stop) = (w.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    // the file becomes a link to .git/config (and back), the folder a link to .git (and back)
+                    let _ = std::fs::remove_file(w.join("ok.txt"));
+                    let _ = std::os::unix::fs::symlink(".git/config", w.join("ok.txt"));
+                    let _ = std::fs::remove_file(w.join("ok.txt"));
+                    let _ = std::fs::write(w.join("ok.txt"), "fine");
+                    let _ = std::fs::rename(w.join("d"), w.join("d.real"));
+                    let _ = std::os::unix::fs::symlink(".git", w.join("d"));
+                    let _ = std::fs::remove_file(w.join("d"));
+                    let _ = std::fs::rename(w.join("d.real"), w.join("d"));
+                }
+            })
+        };
+        let t0 = Instant::now();
+        let (mut ok, mut refused) = (0, 0);
+        while t0.elapsed() < Duration::from_millis(1500) {
+            for rel in ["ok.txt", "d/config"] {
+                match read(&w, rel) {
+                    Ok(v) => {
+                        assert!(!v.to_string().contains("SECRET"), "{rel}: {v}");
+                        ok += 1;
+                    }
+                    Err(_) => refused += 1,
+                }
+            }
+        }
+        stop.store(true, Ordering::SeqCst);
+        swapper.join().unwrap();
+        assert!(ok + refused > 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_filesystems_that_count_links_wrongly_are_refused() {
+        for bad in [
+            0x0102_1997u64,
+            0xFF53_4D42,
+            0xFE53_4D42,
+            0x517B,
+            0x6573_5546,
+        ] {
+            assert!(links_unreliable(bad), "{bad:#x}");
+        }
+        // ext4, xfs, btrfs, tmpfs, overlayfs, nfs
+        for ok in [
+            0xEF53u64,
+            0x5846_5342,
+            0x9123_683E,
+            0x0102_1994,
+            0x794C_7630,
+            0x6969,
+        ] {
+            assert!(!links_unreliable(ok), "{ok:#x}");
+        }
     }
 
     #[test]

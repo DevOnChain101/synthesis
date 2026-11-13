@@ -74,19 +74,49 @@ fn is_loopback_host(host: &str) -> bool {
 
 /// `Err` = the request must not be made.
 pub(crate) async fn check_url(u: &Url) -> Result<(), String> {
+    check(u, false).await
+}
+
+/// The check for a URL a CLIENT chose (`mcp.add` over the engine protocol, and again at every connect): `https`
+/// only, no user:password, no loopback host (not even `localhost`), no private, link-local (the cloud metadata
+/// address), CGNAT or multicast address, and a name that resolves to one is refused too.
+pub async fn check_remote_url(u: &Url) -> Result<(), String> {
+    if !u.username().is_empty() || u.password().is_some() {
+        return Err("a URL with a user name or password is not allowed".into());
+    }
+    check(u, true).await
+}
+
+/// Is any of the resolved addresses one a request must not go to.
+fn any_blocked(addrs: impl IntoIterator<Item = std::net::SocketAddr>) -> bool {
+    addrs
+        .into_iter()
+        .any(|a| blocked(a.ip()) || a.ip().is_loopback())
+}
+
+async fn check(u: &Url, strict: bool) -> Result<(), String> {
     let host = u.host_str().ok_or("URL has no host")?.to_string();
     let loopback = is_loopback_host(&host);
     match u.scheme() {
         "https" => {}
-        "http" if loopback => {}
+        "http" if loopback && !strict => {}
         s => {
             return Err(format!(
-                "scheme \"{s}\" is not allowed (https, or http to localhost)"
+                "scheme \"{s}\" is not allowed ({})",
+                if strict {
+                    "https only"
+                } else {
+                    "https, or http to localhost"
+                }
             ));
         }
     }
     if loopback {
-        return Ok(());
+        return if strict {
+            Err("a loopback host is not allowed".into())
+        } else {
+            Ok(())
+        };
     }
     if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
         return if blocked(ip) || ip.is_loopback() {
@@ -96,14 +126,18 @@ pub(crate) async fn check_url(u: &Url) -> Result<(), String> {
         };
     }
     let port = u.port_or_known_default().unwrap_or(443);
-    if let Ok(addrs) = tokio::net::lookup_host((host.as_str(), port)).await {
-        for a in addrs {
-            if blocked(a.ip()) || a.ip().is_loopback() {
-                return Err(format!("{host} resolves to a private/internal address"));
+    match tokio::net::lookup_host((host.as_str(), port)).await {
+        Ok(addrs) => {
+            if any_blocked(addrs) {
+                Err(format!("{host} resolves to a private/internal address"))
+            } else {
+                Ok(())
             }
         }
+        // a name that does not resolve cannot be connected to; the strict check does not take it on trust
+        Err(_) if strict => Err(format!("{host} does not resolve")),
+        Err(_) => Ok(()),
     }
-    Ok(())
 }
 
 /// GET with manual redirects; every hop passes [`check_url`]. Configured headers are not forwarded
@@ -330,4 +364,55 @@ pub fn header_map(pairs: &[(String, String)]) -> Result<HeaderMap, String> {
         h.insert(name, val);
     }
     Ok(h)
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    fn u(s: &str) -> Url {
+        Url::parse(s).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_client_chosen_url_must_be_https_to_a_public_address() {
+        for bad in [
+            "https://169.254.169.254/latest/meta-data",
+            "https://10.0.0.5/mcp",
+            "https://192.168.1.1/",
+            "https://172.16.0.1/",
+            "https://100.64.0.1/",
+            "https://127.0.0.1/",
+            "https://localhost/",
+            "https://LOCALHOST:8443/",
+            "https://[::1]/",
+            "https://[fd00::1]/",
+            "https://[fe80::1]/",
+            "https://[::ffff:10.0.0.1]/",
+            "https://0x7f.1/",
+            "https://2130706433/",
+            "http://example.com/mcp",
+            "http://localhost/mcp",
+            "https://user:pw@example.com/",
+            "https://user@example.com/",
+            "ftp://example.com/",
+        ] {
+            assert!(check_remote_url(&u(bad)).await.is_err(), "{bad}");
+        }
+        assert!(check_remote_url(&u("https://8.8.8.8/mcp")).await.is_ok());
+        // the existing (connect-time) check keeps allowing http to localhost for a server the person configured
+        assert!(check_url(&u("http://localhost:3000/mcp")).await.is_ok());
+        assert!(check_url(&u("http://10.0.0.5/")).await.is_err());
+    }
+
+    #[test]
+    fn a_name_that_resolves_to_a_private_address_is_refused() {
+        let sa = |s: &str| format!("{s}:443").parse::<std::net::SocketAddr>().unwrap();
+        assert!(
+            any_blocked([sa("8.8.8.8"), sa("10.1.2.3")]),
+            "one private answer is enough"
+        );
+        assert!(any_blocked([sa("169.254.169.254")]) && any_blocked([sa("127.0.0.1")]));
+        assert!(!any_blocked([sa("8.8.8.8"), sa("1.1.1.1")]));
+    }
 }

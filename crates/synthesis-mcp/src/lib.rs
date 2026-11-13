@@ -5,6 +5,8 @@ mod manager;
 mod naming;
 mod result;
 mod sse;
+pub use reqwest::Url;
+pub use sse::check_remote_url;
 mod ws;
 
 pub use config::*;
