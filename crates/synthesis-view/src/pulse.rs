@@ -128,7 +128,9 @@ pub fn touch_of(e: &Event) -> Touch {
         | ProcessOutput { .. }
         | BrowserLoginRequired { .. }
         | BrowserAction { .. }
-        | BrowserFrame { .. } => Touch::Pulse(Tools),
+        | BrowserFrame { .. }
+        | EgressAllowed { .. }
+        | EgressDenied { .. } => Touch::Pulse(Tools),
         ToolApprovalRequired { approval_id, .. } => open(Guards, "approval", approval_id),
         ToolApprovalResolved { approval_id, .. } => close("approval", approval_id),
         AutoVerdict { .. } | SessionModeChanged { .. } | BudgetExceeded { .. } => {

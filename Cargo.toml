@@ -10,6 +10,7 @@ default-members = [
     "crates/synthesis-config",
     "crates/synthesis-context",
     "crates/synthesis-core",
+    "crates/synthesis-egress",
     "crates/synthesis-events",
     "crates/synthesis-harness",
     "crates/synthesis-hooks",

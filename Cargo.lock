@@ -7215,6 +7215,7 @@ dependencies = [
  "rustix",
  "serde_json",
  "synthesis-config",
+ "synthesis-platform",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
@@ -7395,6 +7396,19 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "synthesis-egress"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.3.4",
+ "httparse",
+ "synthesis-events",
+ "synthesis-platform",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -7625,6 +7639,7 @@ dependencies = [
  "synthesis-browser",
  "synthesis-config",
  "synthesis-core",
+ "synthesis-platform",
  "synthesis-sandbox",
  "synthesis-terminal",
  "synthesis-verification",

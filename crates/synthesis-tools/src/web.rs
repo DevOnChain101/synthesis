@@ -10,7 +10,7 @@
 //! egress proxy is then the enforcement point. Upgrade by resolving+pinning before the proxy hop.
 
 use std::future::Future;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 use synthesis_browser::{UntrustedText, UrlPolicy};
 use synthesis_config::Env;
 use synthesis_core::ToolContext;
+use synthesis_platform::net::ip_blocked;
 
 use crate::native::{Shared, lock};
 use crate::util::str_field;
@@ -58,53 +59,6 @@ fn system_lookup() -> Lookup {
                 .collect())
         })
     })
-}
-
-fn blocked_v4(ip: Ipv4Addr) -> bool {
-    let o = ip.octets();
-    ip.is_unspecified()
-        || ip.is_loopback()
-        || ip.is_private()
-        || ip.is_link_local() // 169.254/16, includes the cloud metadata address
-        || ip.is_broadcast()
-        || ip.is_multicast()
-        || o[0] == 0
-        || (o[0] == 100 && (64..128).contains(&o[1])) // CGNAT
-        || (o[0] == 192 && o[1] == 0 && o[2] == 0) // IETF protocol assignments
-        || (o[0] == 198 && (o[1] & 0xfe) == 18) // benchmarking
-        || o[0] >= 240 // reserved
-}
-
-/// Addresses WebFetch must never connect to (without `allow_private_network`).
-pub(crate) fn ip_blocked(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => blocked_v4(v4),
-        IpAddr::V6(v6) => blocked_v6(v6),
-    }
-}
-
-fn blocked_v6(ip: Ipv6Addr) -> bool {
-    if let Some(v4) = ip.to_ipv4() {
-        return blocked_v4(v4); // ::ffff:a.b.c.d and ::a.b.c.d
-    }
-    let s = ip.segments();
-    let embedded = |a: u16, b: u16| {
-        blocked_v4(Ipv4Addr::new(
-            (a >> 8) as u8,
-            a as u8,
-            (b >> 8) as u8,
-            b as u8,
-        ))
-    };
-    ip.is_unspecified()
-        || ip.is_loopback()
-        || ip.is_multicast()
-        || (s[0] & 0xfe00) == 0xfc00 // ULA
-        || (s[0] & 0xffc0) == 0xfe80 // link-local
-        || (s[0] & 0xffc0) == 0xfec0 // site-local
-        || (s[0] == 0x64 && s[1] == 0xff9b && embedded(s[6], s[7])) // NAT64
-        || (s[0] == 0x2002 && embedded(s[1], s[2])) // 6to4
-        || (s[0] == 0x2001 && s[1] == 0) // Teredo: embeds a v4 server and an obfuscated client
 }
 
 struct Guard {

@@ -11,7 +11,7 @@
 //! boundary.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use url::{Host, Url};
@@ -173,53 +173,7 @@ pub struct UrlPolicy {
     pub resolver: Resolver,
 }
 
-fn private_v4(ip: Ipv4Addr) -> bool {
-    let o = ip.octets();
-    ip.is_loopback()
-        || ip.is_private()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.is_broadcast()
-        || ip.is_multicast()
-        || o[0] == 0
-        || (o[0] == 100 && (64..128).contains(&o[1])) // CGNAT
-        || (o[0] == 192 && o[1] == 0 && o[2] == 0) // IETF protocol assignments
-        || (o[0] == 198 && (o[1] & 0xfe) == 18) // benchmarking
-        || o[0] >= 240 // reserved
-}
-
-pub fn ip_is_private(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v) => private_v4(v),
-        IpAddr::V6(v) => private_v6(v),
-    }
-}
-
-fn private_v6(ip: Ipv6Addr) -> bool {
-    let seg = ip.segments();
-    // IPv4-mapped (::ffff:a.b.c.d), IPv4-compatible (::a.b.c.d) and NAT64 (64:ff9b::/96)
-    let embedded = ip.to_ipv4_mapped().or_else(|| ip.to_ipv4()).or_else(|| {
-        (seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0]).then(|| Ipv4Addr::from(ip.to_bits() as u32))
-    });
-    if let Some(v4) = embedded {
-        return private_v4(v4);
-    }
-    let sixtofour = seg[0] == 0x2002
-        && private_v4(Ipv4Addr::new(
-            (seg[1] >> 8) as u8,
-            seg[1] as u8,
-            (seg[2] >> 8) as u8,
-            seg[2] as u8,
-        ));
-    ip.is_loopback()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        || (seg[0] & 0xfe00) == 0xfc00 // ULA
-        || (seg[0] & 0xffc0) == 0xfe80 // link-local
-        || (seg[0] & 0xffc0) == 0xfec0 // site-local
-        || (seg[0] == 0x2001 && seg[1] == 0) // Teredo: embeds a v4 server and an obfuscated client
-        || sixtofour
-}
+pub use synthesis_platform::net::ip_blocked as ip_is_private;
 
 /// Canonical form used for every comparison: lowercase, IDNA (punycode), no trailing dots,
 /// IPv4 in dotted form (decimal/hex/octal accepted), IPv6 without brackets or zone id.
@@ -349,8 +303,8 @@ impl UrlPolicy {
             return Err(format!("domain `{name}` is not in the allow list"));
         }
         let private = match host {
-            Host::Ipv4(ip) => private_v4(ip),
-            Host::Ipv6(ip) => private_v6(ip),
+            Host::Ipv4(ip) => ip_is_private(ip.into()),
+            Host::Ipv6(ip) => ip_is_private(ip.into()),
             Host::Domain(_) => {
                 name == "localhost"
                     || [".localhost", ".internal", ".local"]
