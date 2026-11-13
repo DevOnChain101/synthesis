@@ -1,6 +1,6 @@
 //! One agent's model loop (main agent or sub-agent): build context, stream, fold, run tools.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use futures_util::StreamExt;
 use serde_json::{Value, json};
@@ -851,18 +851,30 @@ impl Harness {
                 return AgentEnd::Budget(kind);
             }
             st.recent.push_back(outcome.fingerprint);
-            while st.recent.len() > self.config.no_progress_window.max(1) {
+            let window = self.config.no_progress_window.max(1);
+            while st.recent.len() > window.max(OSCILLATION_WINDOW) {
                 st.recent.pop_front();
             }
-            if st.recent.len() == self.config.no_progress_window.max(1)
-                && st.recent.iter().all(|f| *f == st.recent[0])
-            {
+            if stalled(&st.recent, window) {
                 return AgentEnd::NoProgress {
                     approval_unavailable: outcome.all_unavailable,
                 };
             }
         }
     }
+}
+
+/// Batches remembered to spot an A,B,A,B (period 2) or A,B,C,A,B,C (period 3) loop.
+const OSCILLATION_WINDOW: usize = 6;
+
+/// No progress: the last `window` batches are identical, or the last 4 / 6 repeat with period
+/// 2 / 3 (each batch fingerprint covers the calls and their results).
+pub(crate) fn stalled(recent: &VecDeque<u64>, window: usize) -> bool {
+    let r: Vec<u64> = recent.iter().copied().collect();
+    let tail = |n: usize| r.len().checked_sub(n).map(|i| &r[i..]);
+    tail(window).is_some_and(|t| t.iter().all(|f| *f == t[0]))
+        || tail(4).is_some_and(|t| t[0] == t[2] && t[1] == t[3])
+        || tail(6).is_some_and(|t| (0..3).all(|i| t[i] == t[i + 3]))
 }
 
 pub(crate) fn tool_status_for(is_error: bool, soft: bool) -> ToolStatus {
@@ -882,4 +894,23 @@ const REQUEST_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 /// request copy (the history keeps them); returns how many.
 fn strip_images(messages: &mut [synthesis_providers::Message]) -> usize {
     messages.iter_mut().map(|m| m.content.strip_images()).sum()
+}
+
+#[cfg(test)]
+mod stalled_tests {
+    use super::stalled;
+
+    fn s(v: &[u64]) -> bool {
+        stalled(&v.iter().copied().collect(), 3)
+    }
+
+    #[test]
+    fn detects_constant_and_periodic_loops_only() {
+        assert!(s(&[7, 7, 7]));
+        assert!(s(&[1, 2, 1, 2])); // A,B,A,B
+        assert!(s(&[1, 2, 3, 1, 2, 3])); // A,B,C,A,B,C
+        assert!(!s(&[1, 2, 3, 4, 5, 6]));
+        assert!(!s(&[1, 2, 1])); // too short to call
+        assert!(!s(&[1, 2, 1, 3, 1, 2]));
+    }
 }

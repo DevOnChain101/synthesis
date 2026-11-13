@@ -276,11 +276,15 @@ fn aggregate_inferred_pass_with_a_blocked_check_is_passed_with_a_limitation() {
         .unwrap()
     };
     let p = InferredOnlyPolicy::default();
+    let lint = |c: CheckResult| CheckResult {
+        kind: CheckKind::Lint,
+        ..c
+    };
     let (s, lim) = aggregate(
         &mut [],
         &[
             mk("a", VerificationStatus::Passed),
-            mk("b", VerificationStatus::Blocked),
+            lint(mk("b", VerificationStatus::Blocked)),
         ],
         p,
     );
@@ -699,7 +703,7 @@ async fn edit_without_a_relevant_check_is_unverified_not_not_applicable() {
 /// A check whose stdout is a node:test summary (portable: no node needed).
 fn summary_criteria(pass: u32, skipped: u32) -> Vec<Criterion> {
     let cmd = format!(
-        "echo 'ok 1 - needs db # SKIP'; echo '# pass {pass}'; echo '# fail 0'; echo '# skipped {skipped}'; echo '# todo 0'"
+        "echo 'ok 1 - needs db # SKIP'; echo '# pass {pass}'; echo '# fail 0'; echo '# skipped {skipped}'; echo '# todo 0'; hostname"
     );
     vec![Criterion::user("c1", "db works", Some(&cmd))]
 }
@@ -813,4 +817,411 @@ async fn node_skip_is_detected_end_to_end() {
         "{:?}",
         r.limitations
     );
+}
+
+// ---- gate hardening: weak passes, redefined checks, shell edits, flaky checks ---------------
+
+fn result(id: &str, kind: CheckKind, by: Declarer, status: VerificationStatus) -> CheckResult {
+    CheckResult {
+        id: id.into(),
+        kind,
+        command: Some(id.into()),
+        cwd: Path::new("/").into(),
+        declared_by: by,
+        started_at: String::new(),
+        finished_at: String::new(),
+        duration_ms: 0,
+        exit_code: None,
+        timed_out: false,
+        status,
+        blocked_reason: None,
+        summary: String::new(),
+        failure_fingerprint: None,
+        criteria_ids: vec![],
+        artifacts: vec![],
+        tests: None,
+    }
+}
+
+#[test]
+fn a_lint_pass_never_verifies_a_task_whose_tests_did_not_pass() {
+    use CheckKind::*;
+    use Declarer::*;
+    use VerificationStatus::*;
+    let p = InferredOnlyPolicy::default();
+    for unit in [Blocked, Unverified] {
+        let (s, lim) = aggregate(
+            &mut [],
+            &[
+                result("fmt", Lint, Harness, Passed),
+                result("test", Unit, Harness, unit),
+            ],
+            p,
+        );
+        assert_eq!(s, Unverified, "{unit:?}");
+        assert!(
+            lim.iter()
+                .any(|l| l.starts_with("planned test check not passed")),
+            "{lim:?}"
+        );
+    }
+    // no test planned: a lint pass still counts; a passed test completes
+    assert_eq!(
+        aggregate(&mut [], &[result("fmt", Lint, Harness, Passed)], p).0,
+        Passed
+    );
+    let both = [
+        result("fmt", Lint, Harness, Passed),
+        result("test", Unit, Harness, Passed),
+    ];
+    assert_eq!(aggregate(&mut [], &both, p).0, Passed);
+    // a user criterion that passed does not excuse a planned test that did not run
+    let mut c = vec![Criterion::user("c1", "", None)];
+    let mut user = result("u", Custom, User, Passed);
+    user.criteria_ids = vec!["c1".into()];
+    let (s, _) = aggregate(&mut c, &[user, result("test", Unit, Harness, Blocked)], p);
+    assert_eq!(s, Unverified);
+}
+
+#[test]
+fn model_declared_checks_alone_never_pass() {
+    use CheckKind::*;
+    use Declarer::*;
+    use VerificationStatus::*;
+    let p = InferredOnlyPolicy::default();
+    let (s, lim) = aggregate(&mut [], &[result("m1", Custom, Model, Passed)], p);
+    assert_eq!(s, Unverified);
+    assert!(
+        lim.iter()
+            .any(|l| l.starts_with("model-declared checks only")),
+        "{lim:?}"
+    );
+    let mixed = [
+        result("m1", Custom, Model, Passed),
+        result("fmt", Lint, Harness, Passed),
+    ];
+    assert_eq!(aggregate(&mut [], &mixed, p).0, Passed);
+    // a model's unit check that did not pass does not block a planned pass
+    let blocked = [
+        result("m1", Unit, Model, Blocked),
+        result("fmt", Lint, Harness, Passed),
+    ];
+    assert_eq!(aggregate(&mut [], &blocked, p).0, Passed);
+}
+
+fn block(prefixes: &[&'static str]) -> Policy {
+    Policy(
+        prefixes
+            .iter()
+            .map(|p| (*p, CheckAuth::Blocked("approval denied".into())))
+            .collect(),
+    )
+}
+
+async fn eval_with(
+    g: &mut CompletionGate,
+    st: &TaskState,
+    auth: Option<&dyn CheckAuthorizer>,
+) -> GateDecision {
+    g.evaluate_with(st, true, &CancellationToken::new(), auth)
+        .await
+}
+
+#[tokio::test]
+async fn fmt_passes_while_cargo_test_is_blocked_ends_unverified() {
+    if !have("cargo") {
+        return;
+    }
+    let f = fx(&[
+        (
+            "Cargo.toml",
+            "[package]\nname=\"fx\"\nversion=\"0.1.0\"\nedition=\"2021\"\n[lib]\npath=\"lib.rs\"\n",
+        ),
+        ("lib.rs", "#[test]\nfn t() {\n    assert_eq!(1, 1);\n}\n"),
+    ]);
+    let mut g = f.gate(GateConfig::default());
+    g.begin_now();
+    let auth = block(&["cargo test", "cargo clippy"]);
+    let r = unverified(eval_with(&mut g, &state(vec![], &["lib.rs"]), Some(&auth)).await);
+    let fmt = r
+        .checks
+        .iter()
+        .find(|k| k.command.as_deref() == Some("cargo fmt --check"))
+        .unwrap();
+    assert_eq!(fmt.status, VerificationStatus::Passed, "{}", fmt.summary);
+    assert_eq!(r.status, VerificationStatus::Unverified);
+    assert!(
+        r.summary().contains("planned test check not passed"),
+        "{}",
+        r.summary()
+    );
+}
+
+fn pkg_fixture(extra: &[(&str, &str)]) -> Fx {
+    let mut files = vec![("package.json", r#"{"scripts":{"lint":"x"}}"#)];
+    files.extend_from_slice(extra);
+    fx(&files)
+}
+
+/// A user criterion whose check passes on any host (no tool needed).
+fn cd_criteria() -> Vec<Criterion> {
+    vec![Criterion::user("c1", "ok", Some("hostname"))]
+}
+
+#[tokio::test]
+async fn changing_a_check_definition_during_the_task_caps_at_unverified() {
+    let auth = block(&["npm"]);
+    let f = pkg_fixture(&[]);
+    let mut g = f.gate(GateConfig::default());
+    g.begin_now();
+    let d = eval_with(&mut g, &state(cd_criteria(), &[]), Some(&auth)).await;
+    assert!(
+        matches!(d, GateDecision::Complete(Some(_))),
+        "control: {d:?}"
+    );
+
+    let f = pkg_fixture(&[]);
+    let mut g = f.gate(GateConfig::default());
+    g.begin_now();
+    fs::write(
+        f.ws.cwd.join("package.json"),
+        r#"{"scripts":{"lint":"true"}}"#,
+    )
+    .unwrap();
+    let r = unverified(eval_with(&mut g, &state(cd_criteria(), &[]), Some(&auth)).await);
+    assert!(
+        r.limitations
+            .iter()
+            .any(|l| l.starts_with("check definitions changed") && l.contains("package.json")),
+        "{:?}",
+        r.limitations
+    );
+    assert!(r.summary().contains("check definitions changed"));
+}
+
+#[tokio::test]
+async fn shell_made_test_changes_are_seen_without_any_edit_record() {
+    let t = "tests/a.test.js";
+    let body = "test('a', () => {\n  assert.equal(add(1, 1), 2);\n  assert.equal(add(2, 2), 4);\n});\ntest('b', () => {});\n";
+    type Case = (&'static str, fn(&Path), &'static str);
+    let cases: [Case; 5] = [
+        (
+            "rm",
+            |p| fs::remove_file(p.join("tests/a.test.js")).unwrap(),
+            "deleted or renamed",
+        ),
+        (
+            "mv",
+            |p| fs::rename(p.join("tests/a.test.js"), p.join("tests/b.js")).unwrap(),
+            "deleted or renamed",
+        ),
+        (
+            "truncate",
+            |p| fs::write(p.join("tests/a.test.js"), "").unwrap(),
+            "truncated",
+        ),
+        (
+            "sed",
+            |p| {
+                let f = p.join("tests/a.test.js");
+                let s = fs::read_to_string(&f)
+                    .unwrap()
+                    .replace("assert.equal(add(2, 2), 4);", "");
+                fs::write(f, s).unwrap();
+            },
+            "removed assertions",
+        ),
+        (
+            "sed-expected-value",
+            |p| {
+                let f = p.join("tests/a.test.js");
+                let s = fs::read_to_string(&f)
+                    .unwrap()
+                    .replace("add(2, 2), 4)", "add(2, 2), 0)");
+                fs::write(f, s).unwrap();
+            },
+            "existing assertions changed",
+        ),
+    ];
+    for (name, act, want) in cases {
+        let f = fx(&[]);
+        fs::create_dir(f.ws.cwd.join("tests")).unwrap();
+        fs::write(f.ws.cwd.join(t), body).unwrap();
+        let mut g = f.gate(GateConfig::default());
+        g.begin_now();
+        let d = eval_with(&mut g, &state(cd_criteria(), &[]), None).await;
+        assert!(
+            matches!(d, GateDecision::Complete(Some(_))),
+            "{name} control: {d:?}"
+        );
+        act(&f.ws.cwd);
+        let r = unverified(eval_with(&mut g, &state(cd_criteria(), &[]), None).await);
+        let lim = r.limitations.join("|");
+        assert!(
+            lim.contains("test files modified") && lim.contains(want),
+            "{name}: {lim}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn no_op_checks_are_unverified() {
+    // a user criterion proven by `echo` proves nothing
+    let f = fx(&[]);
+    let c = vec![Criterion::user("c1", "ok", Some("echo all good"))];
+    let r = unverified(eval_with(&mut f.gate(GateConfig::default()), &state(c, &[]), None).await);
+    assert!(
+        r.limitations.iter().any(|l| l.starts_with("no-op check")),
+        "{:?}",
+        r.limitations
+    );
+    // `"test": "true"` in package.json is the same
+    if !have("npm") {
+        return;
+    }
+    let f = fx(&[("package.json", r#"{"scripts":{"test":"true"}}"#)]);
+    let r = unverified(
+        eval_with(
+            &mut f.gate(GateConfig::default()),
+            &state(vec![], &["a.js"]),
+            None,
+        )
+        .await,
+    );
+    assert_eq!(r.status, VerificationStatus::Unverified);
+    assert!(
+        r.limitations.iter().any(|l| l.starts_with("no-op check")),
+        "{:?}",
+        r.limitations
+    );
+}
+
+#[tokio::test]
+async fn a_check_failing_then_passing_is_flaky_and_stays_failed() {
+    if !have("node") {
+        return;
+    }
+    let js = "const fs=require('fs');if(fs.existsSync('seen')){process.exit(0)}fs.writeFileSync('seen','1');console.log('boom');process.exit(1);";
+    let f = fx(&[("flaky.js", js)]);
+    let mut st = state(vec![], &["x.rs"]);
+    st.model_checks = vec![check(&f, "m1", "node flaky.js", 60_000)];
+    let mut g = f.gate(GateConfig::default());
+    // failed once, passed on the re-run: reported as failed, with the flake named
+    let r = unverified(eval_with(&mut g, &st, None).await);
+    assert_eq!(r.status, VerificationStatus::Failed);
+    assert!(r.summary().contains("flaky"), "{}", r.summary());
+    // later it passes 3 runs in a row: not blocked forever, but the earlier flake is on record
+    let r = unverified(eval_with(&mut g, &st, None).await);
+    assert!(
+        r.limitations
+            .iter()
+            .any(|l| l.contains("passed 3 runs in a row")),
+        "{:?}",
+        r.limitations
+    );
+}
+
+#[tokio::test]
+async fn a_model_check_with_a_planned_command_cannot_stand_in_for_it() {
+    let f = fx(&[("package.json", r#"{"scripts":{"test":"node --test"}}"#)]);
+    let mut g = f.gate(GateConfig::default());
+    g.begin_now();
+    let mut st = state(vec![], &["a.js"]);
+    st.model_checks = vec![check(&f, "m1", "npm run test", 60_000)];
+    let auth = block(&["npm"]);
+    let r = unverified(eval_with(&mut g, &st, Some(&auth)).await);
+    assert_eq!(r.status, VerificationStatus::Unverified);
+    assert!(
+        r.limitations
+            .iter()
+            .any(|l| l.starts_with("planned test check not passed")),
+        "{:?}",
+        r.limitations
+    );
+    assert!(
+        r.checks.iter().all(|k| k.declared_by != Declarer::Model),
+        "model duplicate was planned"
+    );
+}
+
+#[tokio::test]
+async fn inline_rust_tests_and_ignore_in_src_are_seen() {
+    let lib = "pub fn f() -> u8 { 1 }\n#[cfg(test)]\nmod t {\n    #[test]\n    fn a() {\n        assert_eq!(super::f(), 1);\n    }\n}\n";
+    for (name, new) in [
+        (
+            "deleted assert",
+            "pub fn f() -> u8 { 1 }\n#[cfg(test)]\nmod t {\n    #[test]\n    fn a() {\n    }\n}\n",
+        ),
+        (
+            "ignore",
+            "pub fn f() -> u8 { 1 }\n#[cfg(test)]\nmod t {\n    #[test]\n    #[ignore]\n    fn a() {\n        assert_eq!(super::f(), 1);\n    }\n}\n",
+        ),
+    ] {
+        let f = fx(&[]);
+        fs::create_dir(f.ws.cwd.join("src")).unwrap();
+        fs::write(f.ws.cwd.join("src/lib.rs"), lib).unwrap();
+        let mut g = f.gate(GateConfig::default());
+        g.begin_now();
+        fs::write(f.ws.cwd.join("src/lib.rs"), new).unwrap();
+        let r = unverified(eval_with(&mut g, &state(cd_criteria(), &[]), None).await);
+        let lim = r.limitations.join("|");
+        assert!(
+            lim.contains("test files modified") && lim.contains("src/lib.rs"),
+            "{name}: {lim}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_planned_test_that_counts_no_tests_is_unverified() {
+    if !have("npm") {
+        return;
+    }
+    let f = fx(&[(
+        "package.json",
+        r#"{"scripts":{"test":"node -e \"console.log(1)\""}}"#,
+    )]);
+    let r = unverified(
+        eval_with(
+            &mut f.gate(GateConfig::default()),
+            &state(vec![], &["a.js"]),
+            None,
+        )
+        .await,
+    );
+    assert_eq!(r.status, VerificationStatus::Unverified);
+    assert!(
+        r.limitations
+            .iter()
+            .any(|l| l.contains("counts no passing test")),
+        "{:?}",
+        r.limitations
+    );
+}
+
+#[tokio::test]
+async fn a_shell_that_only_touches_files_still_triggers_the_gate() {
+    let f = fx(&[]);
+    let mut g = f.gate(GateConfig::default());
+    g.begin_now();
+    let mut st = state(vec![], &[]);
+    st.side_effects = false;
+    let d = eval_with(&mut g, &st, None).await;
+    assert!(matches!(d, GateDecision::Complete(None)), "control: {d:?}");
+    fs::write(f.ws.cwd.join("made-by-an-inert-looking-command.txt"), "x").unwrap();
+    let d = eval_with(&mut g, &st, None).await;
+    assert!(!matches!(d, GateDecision::Complete(None)), "{d:?}");
+}
+
+#[tokio::test]
+async fn changes_from_earlier_tasks_do_not_make_a_question_need_the_gate() {
+    let f = fx(&[]);
+    let mut g = f.gate(GateConfig::default());
+    g.begin_now();
+    fs::write(f.ws.cwd.join("earlier.txt"), "x").unwrap();
+    g.set_preexisting(vec!["earlier.txt".into()]);
+    let mut st = state(vec![], &[]);
+    st.side_effects = false;
+    let d = eval_with(&mut g, &st, None).await;
+    assert!(matches!(d, GateDecision::Complete(None)), "{d:?}");
 }

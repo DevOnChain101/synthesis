@@ -69,6 +69,7 @@
 pub mod automode;
 mod automode_defaults;
 pub mod bash;
+pub mod irreversible;
 pub mod paths;
 
 use std::path::{Component, Path, PathBuf};
@@ -337,6 +338,169 @@ pub struct Env {
     pub project_root: Option<PathBuf>,
     /// Memory authorship (see [`NoteOracle`]); `None` = no store, so every note asks.
     pub memory_notes: Option<NoteOracle>,
+    /// Allow rules written in USER-level settings (`$SYNT_HOME`), never a project's. Only these
+    /// can lift the read-only-path refusal of the edit tools and the irreversible-action table.
+    pub user_allow: Vec<String>,
+    /// Commands are confined by an ENFORCING sandbox (not Strong/Weak-by-request, not `off`).
+    /// Without it, build/test commands that run project code are not auto-safe.
+    pub sandbox_enforcing: bool,
+    /// The session runs in its own git worktree (`git reset --hard` / `clean -f` there are the
+    /// session's own business).
+    pub worktree: bool,
+    /// Files (workspace-root relative, as the harness records them) the agent wrote this task.
+    pub written: Vec<String>,
+    /// Hashes of the build/test definition files at session start (`snapshot_definitions`): any
+    /// later difference, whoever caused it (Bash, another task, a sub-agent), cuts the project-code
+    /// trust. `None` = not taken; only `written` is consulted then.
+    pub def_baseline: Option<std::collections::BTreeMap<PathBuf, DefEntry>>,
+}
+
+/// One definition file as the baseline remembers it: the hash decides, `(len, mtime)` only saves
+/// re-hashing a file that has not been touched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefEntry {
+    hash: String,
+    len: u64,
+    mtime: Option<std::time::SystemTime>,
+}
+
+fn def_entry(path: &Path) -> DefEntry {
+    use sha2::{Digest, Sha256};
+    let m = std::fs::metadata(path).ok();
+    let hash = m
+        .as_ref()
+        .filter(|m| m.len() <= (1 << 20))
+        .and_then(|_| std::fs::read(path).ok())
+        .map_or_else(
+            || "unreadable".into(),
+            |b| format!("{:x}", Sha256::digest(b)),
+        );
+    DefEntry {
+        hash,
+        len: m.as_ref().map_or(0, std::fs::Metadata::len),
+        mtime: m.and_then(|m| m.modified().ok()),
+    }
+}
+
+/// Definition files under `root` (depth <= 8, build/vendor dirs skipped, link targets not
+/// followed). `None` = more than 20000 entries: too big to watch, so never trusted.
+fn list_definitions(root: &Path) -> Option<Vec<PathBuf>> {
+    const SKIP: &[&str] = &[
+        ".git",
+        "target",
+        "node_modules",
+        ".venv",
+        "venv",
+        "dist",
+        "build",
+        "__pycache__",
+        ".next",
+    ];
+    let (mut out, mut seen) = (Vec::new(), 0usize);
+    let mut stack = vec![(root.to_path_buf(), 0u8)];
+    while let Some((dir, depth)) = stack.pop() {
+        for e in std::fs::read_dir(&dir).ok()?.flatten() {
+            seen += 1;
+            if seen > 20_000 {
+                return None;
+            }
+            let (path, name) = (e.path(), e.file_name().to_string_lossy().to_lowercase());
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                if depth < 8 && !SKIP.contains(&name.as_str()) {
+                    stack.push((path, depth + 1));
+                }
+            } else if synthesis_core::definitions::is_definition(&paths::relative(root, &path)) {
+                out.push(path);
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Scripts a manifest names (`bash scripts/ci.sh`, `node tools/build.js`, a Makefile recipe).
+fn referenced_scripts(manifest: &Path) -> Vec<PathBuf> {
+    static R: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"[A-Za-z0-9_./-]+\.(?:sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|ps1|bat|cmd)\b")
+            .unwrap()
+    });
+    let name = manifest
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if !matches!(
+        name.as_str(),
+        "package.json" | "makefile" | "gnumakefile" | "justfile" | "taskfile.yml"
+    ) {
+        return vec![];
+    }
+    let dir = manifest.parent().unwrap_or(Path::new("."));
+    let Some(text) = std::fs::metadata(manifest)
+        .ok()
+        .filter(|m| m.len() <= 1 << 20)
+        .and_then(|_| std::fs::read_to_string(manifest).ok())
+    else {
+        return vec![];
+    };
+    R.find_iter(&text)
+        .map(|m| dir.join(m.as_str().trim_start_matches("./")))
+        .filter(|p| p.is_file())
+        .collect()
+}
+
+/// Hashes of the definition files and the scripts they name. `None` = too big to watch.
+fn definition_hashes(root: &Path) -> Option<std::collections::BTreeMap<PathBuf, DefEntry>> {
+    let defs = list_definitions(root)?;
+    let mut all: std::collections::BTreeSet<PathBuf> = defs.iter().cloned().collect();
+    for d in &defs {
+        all.extend(referenced_scripts(d));
+    }
+    Some(
+        all.into_iter()
+            .map(|p| {
+                let e = def_entry(&p);
+                (p, e)
+            })
+            .collect(),
+    )
+}
+
+/// Nothing in `root` differs from `base`: no new definition file, none gone, none with other
+/// content. Costs a directory walk and a `stat` per file; only a touched file is re-hashed.
+fn definitions_unchanged(
+    root: &Path,
+    base: &std::collections::BTreeMap<PathBuf, DefEntry>,
+) -> bool {
+    let Some(live) = list_definitions(root) else {
+        return false;
+    };
+    live.iter().all(|p| base.contains_key(p))
+        && base.iter().all(|(p, e)| match std::fs::metadata(p) {
+            Ok(m) if m.len() == e.len && m.modified().ok() == e.mtime => true,
+            Ok(_) => def_entry(p).hash == e.hash,
+            Err(_) => false,
+        })
+}
+
+fn has_word(args: &[String], w: &str) -> bool {
+    args.iter().any(|a| a == w)
+}
+
+/// A path that names a test: a `test`/`tests`/`spec` directory or a test-shaped file name.
+fn is_test_path(p: &str) -> bool {
+    let low = p.to_lowercase();
+    let segs: Vec<&str> = low.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+    let file = segs.last().copied().unwrap_or("");
+    segs.iter().any(|s| {
+        matches!(
+            *s,
+            "test" | "tests" | "__tests__" | "spec" | "specs" | "e2e"
+        )
+    }) || file.starts_with("test_")
+        || file == "conftest.py"
+        || [".test.", "_test.", ".spec.", "_spec."]
+            .iter()
+            .any(|m| file.contains(m))
 }
 
 /// `/proc/...` and `/dev/fd/...` (also `/dev/fd` itself), by their spelling.
@@ -396,7 +560,24 @@ impl Env {
             protected_hard: false,
             project_root: None,
             memory_notes: None,
+            user_allow: vec![],
+            sandbox_enforcing: false,
+            worktree: false,
+            written: vec![],
+            def_baseline: None,
         }
+    }
+
+    /// Records the definition files (`synthesis_core::definitions`) under the project root now.
+    pub fn snapshot_definitions(&mut self) {
+        self.def_baseline = definition_hashes(self.anchor());
+    }
+
+    /// The commands run in an ENFORCING sandbox: marks it and takes the definitions baseline. The
+    /// only way to earn project-code trust; a missing baseline is never trusted.
+    pub fn enforce_sandbox(&mut self) {
+        self.sandbox_enforcing = true;
+        self.snapshot_definitions();
     }
 
     pub fn with_project_root(mut self, root: impl Into<PathBuf>) -> Self {
@@ -1091,49 +1272,498 @@ impl Permissions {
         let roots: Vec<PathBuf> = self
             .roots()
             .into_iter()
-            .flat_map(|r| [Some(r.clone()), paths::real_of(&r)])
+            .flat_map(|r| {
+                [
+                    Some(r.clone()),
+                    paths::real_of(&r),
+                    paths::resolve_links(&r),
+                ]
+            })
             .flatten()
             .collect();
-        [Some(paths::lexical_normalize(p)), paths::real_of(p)]
-            .into_iter()
-            .flatten()
-            .any(|c| {
-                if self
-                    .env
-                    .protected
-                    .iter()
-                    .any(|x| paths::within(x, &c, policy))
-                {
-                    return true;
+        [
+            Some(paths::lexical_normalize(p)),
+            paths::real_of(p),
+            paths::resolve_links(p),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|c| {
+            if self
+                .env
+                .protected
+                .iter()
+                .any(|x| paths::within(x, &c, policy))
+            {
+                return true;
+            }
+            let mut root: Option<&PathBuf> = None;
+            for r in roots.iter().filter(|r| paths::within(r, &c, policy)) {
+                if root.is_none_or(|b| r.as_os_str().len() > b.as_os_str().len()) {
+                    root = Some(r);
                 }
-                let mut root: Option<&PathBuf> = None;
-                for r in roots.iter().filter(|r| paths::within(r, &c, policy)) {
-                    if root.is_none_or(|b| r.as_os_str().len() > b.as_os_str().len()) {
-                        root = Some(r);
+            }
+            let s = match root {
+                Some(r) => paths::relative(r, &c),
+                None => c.to_string_lossy().into_owned(),
+            };
+            if paths::win_unsafe(&s, policy) {
+                return true;
+            }
+            // Splits on `\` on POSIX too: over-protecting is the safe side here.
+            let segs: Vec<String> = s
+                .split(['\\', '/'])
+                .filter(|x| !x.is_empty())
+                .map(|x| paths::fold(x, policy))
+                .collect();
+            let next = |i: usize, n: &str| segs.get(i + 1).is_some_and(|x| x == n);
+            segs.iter().enumerate().any(|(i, s)| {
+                PROTECTED_DIRS.contains(&s.as_str())
+                    || (s == ".config" && next(i, "git"))
+                    || (s == ".github" && next(i, "workflows"))
+            }) || segs
+                .last()
+                .is_some_and(|l| PROTECTED_FILES.contains(&l.as_str()) || l.starts_with(".env"))
+        })
+    }
+
+    // --- tool-layer read-only set, irreversible actions, files the agent wrote ----------------
+
+    /// Workspace-root relative, case-folded segments of `p` (or the whole path outside a root),
+    /// for the lexical path, its realpath, and its path with every link (dangling ones too)
+    /// followed by hand. Windows aliases are reduced to the name they alias: trailing dots and
+    /// spaces dropped, an NTFS stream (`name::$DATA`) cut. Same on every OS (over-protecting).
+    fn rel_segments(&self, p: &Path) -> Vec<Vec<String>> {
+        let policy = self.policy();
+        let roots: Vec<PathBuf> = self
+            .roots()
+            .into_iter()
+            .flat_map(|r| {
+                [
+                    Some(r.clone()),
+                    paths::real_of(&r),
+                    paths::resolve_links(&r),
+                ]
+            })
+            .flatten()
+            .collect();
+        [
+            Some(paths::lexical_normalize(p)),
+            paths::real_of(p),
+            paths::resolve_links(p),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|c| {
+            let root = roots
+                .iter()
+                .filter(|r| paths::within(r, &c, policy))
+                .max_by_key(|r| r.as_os_str().len());
+            let s = root.map_or_else(
+                || c.to_string_lossy().into_owned(),
+                |r| paths::relative(r, &c),
+            );
+            s.split(['\\', '/'])
+                .filter(|x| !x.is_empty())
+                .map(|x| {
+                    let x = x.split(':').next().unwrap_or("");
+                    // lower-cased on EVERY platform: the policy folds only where the filesystem does, and
+                    // `AGENTS.md` must be refused on case-sensitive Linux too (over-protecting `Agents.md`)
+                    paths::fold(x.trim_end_matches(['.', ' ']), policy).to_lowercase()
+                })
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
+        .collect()
+    }
+
+    /// What the edit tools never write, in any mode: the whole `.git` tree (and a `.git` pointer
+    /// file), what the sandbox keeps read-only (`.gitmodules`, `.synt`, `AGENTS.md`) and what git,
+    /// direnv, hook managers and toolchains run on their own (`.envrc`, `.gitattributes`,
+    /// `.husky`, `.mcp.json`, `.cargo`, `.npmrc`, `.devcontainer`, `.vscode/tasks.json` ...). The
+    /// in-process tools are not sandboxed, so they refuse these themselves.
+    fn is_tool_readonly(&self, p: &Path) -> bool {
+        const FILES: &[&str] = &[
+            ".gitmodules",
+            ".gitattributes",
+            ".envrc",
+            ".mcp.json",
+            "agents.md",
+            ".npmrc",
+            ".yarnrc.yml",
+            ".yarnrc",
+            ".pre-commit-config.yaml",
+        ];
+        const DIRS: &[&str] = &[".git", ".synt", ".husky", ".cargo", ".devcontainer"];
+        const VSCODE: &[&str] = &["tasks.json", "settings.json", "launch.json"];
+        // `GIT~1`, `AGENTS~1.MD`: the real 8.3 form of a protected name = its first 6 name
+        // characters (leading dot dropped) + `~N` + the first 3 extension characters
+        let short = |s: &str| {
+            let Some((stem, rest)) = s.split_once('~') else {
+                return false;
+            };
+            let (digits, ext) = rest.split_once('.').map_or((rest, ""), |(d, e)| (d, e));
+            !digits.is_empty()
+                && digits.chars().all(|c| c.is_ascii_digit())
+                && DIRS.iter().chain(FILES).any(|n| {
+                    let n = n.trim_start_matches('.');
+                    let (nstem, next) = n.rsplit_once('.').map_or((n, ""), |(a, b)| (a, b));
+                    let nstem: String = nstem.chars().filter(|c| *c != '.').take(6).collect();
+                    stem == nstem && ext == next.chars().take(3).collect::<String>()
+                })
+        };
+        self.rel_segments(p).iter().any(|segs| {
+            segs.iter().enumerate().any(|(i, s)| {
+                DIRS.contains(&s.as_str())
+                    || short(s)
+                    || (s == ".vscode"
+                        && segs
+                            .get(i + 1)
+                            .is_some_and(|n| VSCODE.contains(&n.as_str())))
+            }) || segs.last().is_some_and(|l| {
+                FILES.contains(&l.as_str())
+                    || l.starts_with("lefthook")
+                    || l.starts_with(".lefthook")
+            })
+        })
+    }
+
+    /// Rules of the user's own settings that name something: a tool-wide rule never counts.
+    /// `key`: a Bash rule must also contain this text (`git push`).
+    fn user_named(&self, key: Option<&str>) -> Vec<String> {
+        self.env
+            .user_allow
+            .iter()
+            .filter(|r| match bash::parse_rule(r) {
+                ("Bash", Some(s)) => {
+                    !s.contains('*') || s.ends_with(":*") && !s[..s.len() - 2].contains('*')
+                }
+                (_, Some(s)) => !s.trim_matches(['/', '*', '.', '?']).is_empty(),
+                _ => false,
+            })
+            .filter(|r| key.is_none_or(|k| bash::parse_rule(r).1.is_some_and(|s| s.contains(k))))
+            .cloned()
+            .collect()
+    }
+
+    /// A user-level allow rule (never a project's) that names exactly this file: the rule has no
+    /// wildcard and, resolved the way the call's path is (cwd/project root, `..`, links), is the
+    /// same path. `Edit(*.md)` does not lift `AGENTS.md`; `Edit(.envrc)` does not lift `sub/.envrc`.
+    fn user_lifts_edit(&self, tool: &str, input: &Value) -> bool {
+        let Some(f) = path_of(tool, input) else {
+            return false;
+        };
+        let canon = |p: PathBuf| {
+            let n = paths::lexical_normalize(&p);
+            paths::resolve_links(&n).unwrap_or(n)
+        };
+        let target = canon(paths::resolve(&self.env.cwd, f));
+        let policy = self.policy();
+        let literal: Vec<String> = self
+            .user_named(None)
+            .into_iter()
+            .filter(|r| {
+                bash::parse_rule(r).1.is_some_and(|s| {
+                    if s.contains(['*', '?', '[']) {
+                        return false;
+                    }
+                    let (rest, base) = self.rule_base(s);
+                    let rule = if let Some(abs) = rest.strip_prefix("//") {
+                        canon(PathBuf::from(format!("/{abs}")))
+                    } else {
+                        canon(base.join(rest.trim_start_matches('/')))
+                    };
+                    paths::fold(&rule.to_string_lossy(), policy)
+                        == paths::fold(&target.to_string_lossy(), policy)
+                })
+            })
+            .collect();
+        self.allow_match(&literal, tool, input)
+    }
+
+    /// A user-level Bash rule that names the hit and covers the command.
+    fn user_lifts_hit(&self, cmd: &str, h: &irreversible::Hit) -> bool {
+        self.user_named(Some(h.key)).iter().any(|r| {
+            bash::bash_all_match_or(std::slice::from_ref(r), cmd, |seg| {
+                bash::is_read_only_simple(seg) || seg.first().is_some_and(|w| w == "cd")
+            })
+        })
+    }
+
+    /// The irreversible-action table (`irreversible.rs`), before any mode, allow rule or judge.
+    fn irreversible_verdict(&self, cmd: &str, mode: Mode) -> Option<Verdict> {
+        let hits = irreversible::scan(cmd, self.env.worktree, &self.env.cwd);
+        let open: Vec<&irreversible::Hit> = hits
+            .iter()
+            .filter(|h| !self.user_lifts_hit(cmd, h))
+            .collect();
+        let h = open.iter().find(|h| h.force).or(open.first())?;
+        let why = format!(
+            "irreversible external action: {} (always-allow rules for it go in USER settings, not the project's)",
+            h.reason
+        );
+        if h.force || matches!(mode, Mode::DontAsk | Mode::Plan) {
+            return Some(Verdict::new(Decision::Deny, why));
+        }
+        let mut v = Verdict::new(Decision::Ask, why);
+        v.hard = true;
+        Some(v)
+    }
+
+    /// Build/test commands may run code the agent wrote or can rewrite (test files, `package.json`
+    /// scripts, `Makefile`, `conftest.py`, `build.rs`): they are auto-safe only when an
+    /// ENFORCING sandbox confines them and no definition file (`synthesis_core::definitions`)
+    /// differs from the session-start snapshot or was written by the file tools this task.
+    pub fn project_code_trusted(&self) -> bool {
+        self.env.sandbox_enforcing
+            && !self
+                .env
+                .written
+                .iter()
+                .any(|w| synthesis_core::definitions::is_definition(w))
+            && self
+                .env
+                .def_baseline
+                .as_ref()
+                .is_some_and(|b| definitions_unchanged(self.env.anchor(), b))
+    }
+
+    /// Files the agent wrote this task that the command could run. Inverted rule: any program
+    /// that is not read-only and not a known file mover/archiver gets EVERY argument checked
+    /// against the written set (so `awk -f x.awk`, `make -f x.mk`, `pwsh -File x.ps1`, `cmd /c
+    /// x.bat`, `node dir`, `python -m pkg.mod` and an unknown runner are all seen), with `cd`
+    /// tracked. `Err(())` = unparsable while something was written.
+    fn written_exec(&self, cmd: &str) -> Result<Vec<PathBuf>, ()> {
+        // programs that move, store or print a file without running it
+        const NO_RUN: &[&str] = &[
+            "git",
+            "cp",
+            "mv",
+            "rm",
+            "rmdir",
+            "unlink",
+            "chmod",
+            "chown",
+            "chgrp",
+            "mkdir",
+            "touch",
+            "ln",
+            "tee",
+            "install",
+            "tar",
+            "zip",
+            "unzip",
+            "gzip",
+            "gunzip",
+            "bzip2",
+            "xz",
+            "diff",
+            "cmp",
+            "echo",
+            "printf",
+            "true",
+            "false",
+            "test",
+            "[",
+            "pwd",
+            "ls",
+            "stat",
+            "file",
+            "wc",
+            "du",
+            "basename",
+            "dirname",
+            "realpath",
+            "readlink",
+            "sha256sum",
+            "shasum",
+            "md5sum",
+            "cat",
+            "head",
+            "tail",
+            "less",
+            "more",
+            "grep",
+            "rg",
+            "egrep",
+            "fgrep",
+            "sort",
+            "uniq",
+            "code",
+            "vim",
+            "nano",
+            "emacs",
+            "open",
+        ];
+        // programs that run a directory / the current directory when given no file
+        const RUN_DIR: &[&str] = &[
+            "node", "nodejs", "python", "python3", "pypy", "ruby", "php", "tsx", "ts-node", "deno",
+            "bun", "go", "cargo",
+        ];
+        if self.env.written.is_empty() {
+            return Ok(vec![]);
+        }
+        let Some(segs) = bash::deep_segments(cmd, 0) else {
+            return Err(());
+        };
+        let policy = self.policy();
+        let key = |p: &Path| paths::fold(&paths::lexical_normalize(p).to_string_lossy(), policy);
+        let wrote: Vec<(String, PathBuf)> = self
+            .env
+            .written
+            .iter()
+            .map(|w| {
+                let abs = self.env.anchor().join(w);
+                (key(&abs), abs)
+            })
+            .collect();
+        let under = |dir: &Path| -> Vec<PathBuf> {
+            let k = key(dir);
+            wrote
+                .iter()
+                .filter(|(wk, _)| {
+                    wk.starts_with(&format!(
+                        "{}{}",
+                        k.trim_end_matches(['/', '\\']),
+                        std::path::MAIN_SEPARATOR
+                    ))
+                })
+                .map(|(_, a)| a.clone())
+                .collect()
+        };
+        let mut dir = self.env.cwd.clone();
+        let mut hit: Vec<PathBuf> = vec![];
+        for seg in &segs {
+            let u = bash::unwrap_words(seg, true);
+            let Some(first) = u.first() else { continue };
+            let name = first.rsplit(['/', '\\']).next().unwrap_or("");
+            if name == "cd" {
+                dir = match u.get(1) {
+                    Some(d) if d != "-" => paths::resolve(&dir, d),
+                    _ => self.env.home.clone(),
+                };
+                continue;
+            }
+            if NO_RUN.contains(&name) || bash::is_read_only_simple(&u) {
+                continue;
+            }
+            let lang = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+            let args = &u[1..];
+            let mut cands: Vec<String> = vec![];
+            if first.contains('/') || first.contains('\\') {
+                cands.push(first.clone());
+            }
+            for (i, a) in args.iter().enumerate() {
+                let a = a
+                    .split_once('=')
+                    .filter(|_| a.starts_with('-'))
+                    .map_or(a.as_str(), |(_, v)| v);
+                if a.starts_with('-') || a.is_empty() {
+                    continue;
+                }
+                // `python -m pkg.mod` runs pkg/mod.py or pkg/mod/__init__.py
+                if i > 0 && args[i - 1] == "-m" {
+                    let m = a.replace('.', "/");
+                    cands.push(format!("{m}.py"));
+                    cands.push(format!("{m}/__init__.py"));
+                }
+                cands.push(a.to_string());
+            }
+            let runs_dir = RUN_DIR.contains(&lang)
+                && (!matches!(lang, "go" | "cargo" | "deno" | "bun") || has_word(args, "run"));
+            if runs_dir
+                && !args
+                    .iter()
+                    .any(|a| !a.starts_with('-') && a != "run" && a != "-m")
+            {
+                cands.push(".".into());
+            }
+            for c in cands {
+                for base in [&dir, &self.env.cwd] {
+                    let p = paths::resolve(base, &c);
+                    let k = key(&p);
+                    if let Some((_, abs)) = wrote.iter().find(|(wk, _)| *wk == k) {
+                        hit.push(abs.clone());
+                    } else if runs_dir && p.is_dir() {
+                        hit.extend(under(&p));
                     }
                 }
-                let s = match root {
-                    Some(r) => paths::relative(r, &c),
-                    None => c.to_string_lossy().into_owned(),
-                };
-                if paths::win_unsafe(&s, policy) {
-                    return true;
-                }
-                // Splits on `\` on POSIX too: over-protecting is the safe side here.
-                let segs: Vec<String> = s
-                    .split(['\\', '/'])
-                    .filter(|x| !x.is_empty())
-                    .map(|x| paths::fold(x, policy))
-                    .collect();
-                let next = |i: usize, n: &str| segs.get(i + 1).is_some_and(|x| x == n);
-                segs.iter().enumerate().any(|(i, s)| {
-                    PROTECTED_DIRS.contains(&s.as_str())
-                        || (s == ".config" && next(i, "git"))
-                        || (s == ".github" && next(i, "workflows"))
-                }) || segs
-                    .last()
-                    .is_some_and(|l| PROTECTED_FILES.contains(&l.as_str()) || l.starts_with(".env"))
-            })
+            }
+        }
+        hit.sort();
+        hit.dedup();
+        Ok(hit)
+    }
+
+    /// Running a file the agent wrote this task asks in every mode but plan (headless: denied; a
+    /// test runner under an enforcing sandbox excepted unless the file itself names a table action).
+    fn written_exec_verdict(&self, cmd: &str, mode: Mode) -> Option<Verdict> {
+        if mode == Mode::Plan {
+            return None;
+        }
+        let files = match self.written_exec(cmd) {
+            Ok(f) if f.is_empty() => return None,
+            Ok(f) => f,
+            Err(()) => vec![],
+        };
+        let names_action = files.iter().any(|f| {
+            std::fs::metadata(f).is_ok_and(|m| m.len() > (1 << 20))
+                || std::fs::read_to_string(f).map_or(true, |t| irreversible::text_hits(&t))
+        });
+        if self.env.sandbox_enforcing && bash::is_test_runner(cmd) && !names_action {
+            return None;
+        }
+        let input = serde_json::json!({ "command": cmd });
+        if self.allow_match(&self.user_named(None), "Bash", &input) {
+            return None;
+        }
+        let why = "runs a file the agent wrote this task (or the command cannot be parsed)";
+        if mode == Mode::DontAsk {
+            return Some(Verdict::new(Decision::Deny, format!("dontAsk mode: {why}")));
+        }
+        let mut v = Verdict::new(Decision::Ask, why);
+        v.hard = true;
+        Some(v)
+    }
+
+    /// `rm` that deletes a test file, more than `MAX_RM` files, or a directory tree that is not a
+    /// build output: not rewound by file checkpoints, so a person decides (acceptEdits / auto).
+    fn risky_delete(&self, cmd: &str) -> bool {
+        const MAX_RM: usize = 10;
+        const BUILD: &[&str] = &[
+            "target",
+            "node_modules",
+            "dist",
+            "build",
+            "out",
+            ".next",
+            ".cache",
+            "__pycache__",
+            ".pytest_cache",
+            ".turbo",
+            "coverage",
+        ];
+        let Some(segs) = bash::parse_simple_commands(cmd) else {
+            return false;
+        };
+        segs.iter().any(|seg| {
+            let w = bash::unwrap_words(seg, false);
+            if w.first().map(String::as_str) != Some("rm") {
+                return false;
+            }
+            let recursive = w[1..].iter().any(|a| {
+                a == "--recursive"
+                    || (a.starts_with('-') && !a.starts_with("--") && a.contains(['r', 'R']))
+            });
+            let Some(ops) = bash::fs_operands("rm", &w[1..]) else {
+                return true;
+            };
+            // a build output anywhere on the path (`build/*.o`, `a/target`) is rebuilt, not lost
+            let in_build = |o: &str| o.split(['/', '\\']).any(|x| BUILD.contains(&x));
+            ops.len() > MAX_RM
+                || ops.iter().any(|o| is_test_path(o))
+                || (recursive && ops.iter().any(|o| !in_build(o)))
+        })
     }
 
     /// Per-mode answer for a write to a protected path. `Classify` = ask the auto mode classifier.
@@ -1335,7 +1965,8 @@ impl Permissions {
     /// operand resolves, from `base`, inside the workspace.
     fn seg_safe(&self, w: &[String], base: Option<&Path>, auto: bool) -> bool {
         let ok = if auto {
-            bash::is_auto_safe_simple(w)
+            bash::is_read_only_simple(w)
+                || (bash::is_auto_safe_simple(w) && self.project_code_trusted())
         } else {
             bash::is_read_only_simple(w)
         };
@@ -1954,6 +2585,19 @@ impl Permissions {
             );
         }
 
+        // Publishing, pushing, deploying, remote shells, cloud writes: ask (a force push: deny) in
+        // EVERY mode, bypass and the judge included, unless a user-level rule names the action.
+        if tool == "Bash"
+            && let Some(r) = self.irreversible_verdict(bash_cmd, mode)
+        {
+            return r;
+        }
+        if tool == "Bash"
+            && let Some(r) = self.written_exec_verdict(bash_cmd, mode)
+        {
+            return r;
+        }
+
         // Read/Grep/Glob outside the working directories
         let outside = self.outside_read(tool, input);
         if outside.is_some() && self.block_outside_reads {
@@ -1982,6 +2626,18 @@ impl Permissions {
                 .as_ref()
                 .is_some_and(|i| i.targets.iter().any(|t| self.is_protected(t)))
             || (tool == "Bash" && self.bash_hits_protected(bash_cmd));
+
+        // The edit tools are not sandboxed: the sandbox's read-only set (hooks, .git/config,
+        // .gitmodules, .synt, AGENTS.md ...) is refused here in EVERY mode, bypass included, unless
+        // a user-level rule names the path. A hard link or symlink into it resolves to it.
+        if fp.is_some_and(|f| self.is_tool_readonly(&paths::resolve(&self.env.cwd, f)))
+            && !self.user_lifts_edit(tool, input)
+        {
+            return v(
+                Deny,
+                "read-only path: the .git tree, .gitmodules, .synt, AGENTS.md, .envrc, .cargo and similar config that runs code are never written by the edit tools (only a user-level rule naming that exact path can allow one; put it in USER settings)",
+            );
+        }
 
         // an ask rule is a tripwire the user set on purpose: it prompts in every mode but dontAsk;
         // work for a peer (`protected_hard`) also never skips the protected-path check
@@ -2196,6 +2852,12 @@ impl Permissions {
                 }
             }
             if matches!(mode, Mode::AcceptEdits | Mode::Auto) && fs_info.ok {
+                if self.risky_delete(bash_cmd) {
+                    return v(
+                        Ask,
+                        "deletes test files, many files or a directory tree (file checkpoints do not cover rm)",
+                    );
+                }
                 return v(
                     Allow,
                     format!("{} mode: file commands inside workspace", mode.as_str()),

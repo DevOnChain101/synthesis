@@ -1,6 +1,7 @@
 //! Workspace, session and tool-context types plus the session state machine
 //! (docs/specs/workspace-context.md).
 
+pub mod definitions;
 mod key;
 pub mod secrets;
 mod session;

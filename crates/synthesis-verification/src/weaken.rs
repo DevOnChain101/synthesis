@@ -19,13 +19,16 @@ fn re(p: &str) -> Regex {
 
 static TEST_PATH: LazyLock<Regex> = LazyLock::new(|| {
     re(
-        r"(?i)(^|/)(tests?|__tests__|specs?|e2e|fixtures?|testdata)/|\.(test|spec)\.\w+$|(^|/)test_[^/]*$|_tests?\.\w+$|(^|/)conftest\.py$",
+        r"(?i)(^|/)(tests?|__tests__|specs?|e2e|fixtures?|testdata|__snapshots__|golden|snapshots|expected)/|\.(test|spec|snap)\.\w+$|\.snap$|(^|/)test_[^/]*$|_tests?\.\w+$|_spec\.rb$|(Test|Tests|IT)\.java$|(^|/)conftest[^/]*\.py$",
     )
 });
 static SKIP: LazyLock<Regex> = LazyLock::new(|| {
     re(
         r"\.(skip|only|todo)\b|\b(xit|xdescribe|xtest|fit|fdescribe)\(|\bskip\s*[:=(]|@(pytest\.mark\.(skip|skipif|xfail)|unittest\.(skip|expectedFailure)|Disabled|Ignore)|pytest\.(skip|xfail)\(|#\[ignore|\bt\.Skip|\bxfail\b|\bpending\(",
     )
+});
+static TEST_CASE: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"#\[(tokio::)?test\b|\b(it|test)(\.\w+)?\(|\bdef test_|\bfunc Test\w*\(|@Test\b")
 });
 static ENV_SHORTCUT: LazyLock<Regex> = LazyLock::new(|| {
     re(
@@ -46,6 +49,33 @@ static GUARD: LazyLock<Regex> = LazyLock::new(|| {
 });
 static ENV_NAME: LazyLock<Regex> = LazyLock::new(|| re(r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b|(?i)\benv"));
 
+/// Whether `path` (workspace-relative) is a test or fixture file.
+pub(crate) fn is_test_path(path: &str) -> bool {
+    TEST_PATH.is_match(&path.replace('\\', "/"))
+}
+
+/// Fixture, snapshot and golden files: any change to an existing one moves the expected values.
+pub(crate) fn is_golden_path(path: &str) -> bool {
+    static GOLDEN: LazyLock<Regex> = LazyLock::new(|| {
+        re(r"(?i)(^|/)(fixtures?|testdata|__snapshots__|golden|snapshots|expected)/|\.snap$")
+    });
+    GOLDEN.is_match(&path.replace('\\', "/"))
+}
+
+pub(crate) fn count_test_cases(lines: &[String]) -> usize {
+    count(lines, &TEST_CASE)
+}
+
+/// A one-line literal table row (`{"a", 1, 2},`): changing one changes an expected value.
+pub(crate) fn count_table_rows(lines: &[String]) -> usize {
+    static ROW: LazyLock<Regex> = LazyLock::new(|| re(r"^\s*[\{\[\(].*,.*[\}\]\)],?\s*$"));
+    count(lines, &ROW)
+}
+
+pub(crate) fn count_assertions(lines: &[String]) -> usize {
+    count(lines, &ASSERT)
+}
+
 fn count(lines: &[String], r: &Regex) -> usize {
     lines.iter().filter(|l| r.is_match(l)).count()
 }
@@ -56,7 +86,7 @@ fn count(lines: &[String], r: &Regex) -> usize {
 pub fn weakened_tests(edits: &[FileEdit]) -> Option<String> {
     let mut found = vec![];
     for e in edits {
-        let is_test = TEST_PATH.is_match(&e.path.replace('\\', "/"));
+        let is_test = is_test_path(&e.path);
         let mut why = vec![];
         // `#[ignore]` is unambiguous in any Rust file (unit tests live next to the code).
         if (is_test && count(&e.added, &SKIP) > 0)
@@ -69,6 +99,9 @@ pub fn weakened_tests(edits: &[FileEdit]) -> Option<String> {
         }
         if is_test && count(&e.removed, &ASSERT) > count(&e.added, &ASSERT) {
             why.push("removed assertions");
+        }
+        if is_test && count(&e.removed, &TEST_CASE) > count(&e.added, &TEST_CASE) {
+            why.push("removed test cases");
         }
         if !why.is_empty() {
             found.push(format!("{} ({})", e.path, why.join("; ")));

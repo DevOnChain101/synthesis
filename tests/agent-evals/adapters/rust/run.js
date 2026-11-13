@@ -1,5 +1,6 @@
 // Runs `synt run` (the Rust binary) on the task. Binary: $SYNT_BIN, else target/{debug,release}/synt.
 //   EVAL_FAKE_SCRIPT=<script.json>  scripted model (needs a build with --features test-provider; selftest only)
+//   EVAL_EXTRA_ARGS='["--deny","Bash(npm run test:*)"]'  extra `synt run` arguments (JSON array; selftest only)
 //   EVAL_PERMISSION_MODE_OVERRIDE=<mode>  diagnostic only (e.g. bypassPermissions under the sandbox); the task's mode otherwise
 //   EVAL_MODEL="provider/model"      optional; real mode needs SYNT_* credentials in the environment
 import fs from 'node:fs';
@@ -32,6 +33,7 @@ if (fake) { // never touch the real home in scripted mode
 } else if (process.env.EVAL_MODEL) {
   args.push('--model', process.env.EVAL_MODEL);
 }
+if (process.env.EVAL_EXTRA_ARGS) args.push(...JSON.parse(process.env.EVAL_EXTRA_ARGS)); // selftest scenarios, e.g. a --deny rule
 for (const [env_, flag] of [['EVAL_MAX_TURNS', '--max-turns'], ['EVAL_MAX_TOOL_CALLS', '--max-tool-calls']]) if (process.env[env_]) args.push(flag, process.env[env_]);
 if (process.env.EVAL_MAX_WALL_MS) args.push('--max-wall-secs', String(Math.ceil(Number(process.env.EVAL_MAX_WALL_MS) / 1000)));
 
@@ -45,6 +47,13 @@ if (!sandbox) {
 }
 process.stderr.write(`adapter "rust": --sandbox ${sandbox}\n`);
 args.push('--sandbox', sandbox);
+// Without an enforcing sandbox, `npm run` / `npm test` are not auto-safe (they run project code the
+// agent may have rewritten), so a headless run would deny them. A scripted run on such a host (a CI
+// Linux box without bubblewrap, Windows) states the permission the operator would: a USER-level
+// allow for the fixture's runners. Hosts that enforce keep the real defaults.
+if (process.env.EVAL_FAKE_SCRIPT && sandbox !== 'enforce') {
+  for (const pre of ['npm run', 'npm test', 'node --test']) args.push('--allow', `Bash(${pre}:*)`);
+}
 
 // `node --test test/*.test.js` -> `node --test`; `python3 -m unittest discover -s tests` -> `python3 -m unittest`;
 // `cargo test --offline` -> `cargo test`: the program, its mode flag (`--test`, `-m <module>`) or subcommand.

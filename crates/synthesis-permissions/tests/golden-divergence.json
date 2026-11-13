@@ -38,5 +38,9 @@
   "rules-auto-mode-classify-all-shell": "L2: plan mode is read-only even with the judge setting on; only the plan column changes (ask/classify -> deny)",
   "rules-malformed-rules-ignored": "L2: plan mode is read-only even with the judge setting on; only the plan column changes (ask/classify -> deny)",
   "rules-plan-without-auto-classifier": "L2: plan mode is read-only even with the judge setting on; only the plan column changes (ask/classify -> deny)",
-  "unknown-and-mcp-tools": "L2: plan mode is read-only even with the judge setting on; only the plan column changes (ask/classify -> deny)"
+  "unknown-and-mcp-tools": "L2: plan mode is read-only even with the judge setting on; only the plan column changes (ask/classify -> deny)",
+  "write-03-ws-git-config": "harness audit P1: the in-process edit tools refuse the sandbox's read-only set (git hooks/config, .gitmodules, .synt, AGENTS.md, .envrc, .mcp.json ...) with a hard deny in every mode, bypassPermissions included (Node: ask / bypass allow)",
+  "write-04-ws-synthesis-settings-json": "harness audit P1: the in-process edit tools refuse the sandbox's read-only set (git hooks/config, .gitmodules, .synt, AGENTS.md, .envrc, .mcp.json ...) with a hard deny in every mode, bypassPermissions included (Node: ask / bypass allow)",
+  "write-07-ws-mcp-json": "harness audit P1: the in-process edit tools refuse the sandbox's read-only set (git hooks/config, .gitmodules, .synt, AGENTS.md, .envrc, .mcp.json ...) with a hard deny in every mode, bypassPermissions included (Node: ask / bypass allow)",
+  "write-05-ws-sub-vscode-tasks-json": "harness audit P1: the in-process edit tools refuse the sandbox's read-only set (git hooks/config, .gitmodules, .synt, AGENTS.md, .envrc, .mcp.json ...) with a hard deny in every mode, bypassPermissions included (Node: ask / bypass allow); .vscode/tasks.json|settings.json|launch.json are in the set (they run commands on folder open)"
 }

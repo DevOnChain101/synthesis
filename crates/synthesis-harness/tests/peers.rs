@@ -3096,7 +3096,8 @@ async fn peer_work_under_bypass_still_asks_for_protected_paths_and_unclear_bash(
             "Write",
             json!({"file_path": ".git/hooks/pre-push", "content": "x"}),
             Some(".git/hooks/pre-push"),
-            true,
+            // the edit tools' read-only set is a hard deny now: nobody is asked
+            false,
         ),
         (
             "Bash",
