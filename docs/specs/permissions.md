@@ -38,3 +38,12 @@ See the NOT_FIXED list in the commit message / SECURITY.md limits: Bash writes t
 - Recipes: `project_scripts` reads only the named targets plus prerequisites, once each (`Ctx.seen`), at most 5000 lines.
 - `Env::enforce_sandbox()` is the only way to get project-code trust (it takes the baseline); `Env.sandbox_enforcing` set by hand without a baseline is untrusted.
 - A Bash snapshot is taken from `tool.started`, which `Persist` writes synchronously before the harness runs the command.
+
+
+## Rewind and protected paths
+
+`/rewind` and `synt rewind` put files back to their checkpoints, so they obey the same protected set as the edit tools, as the UNION of the paths the tools ask about before writing and the paths they refuse outright (`synthesis_permissions::is_protected_path`): the `.git` tree and hooks, `.synt`, `.husky`, `.cargo`, `.devcontainer`, `.vscode`/`.idea`/`.claude` settings, `.github/workflows`, shell startup files (`.bashrc`, `.zshrc`, `.profile`, ...), `.env*`, `.envrc`, `.npmrc`, `.yarnrc`, `.mcp.json`, `AGENTS.md`, `.gitattributes`, `.gitmodules`, package-manager and CI configuration. Names are folded to lower case on every OS and Windows aliases (`GIT~1`, `.git.`, `name::$DATA`) are reduced to the name they alias, so `.GIT/hooks/x` is protected on Linux too. Such a file is skipped both in the plan and when applied, even with `--force` or a forged entry; the reason text names the set and tells the person to revert the file by hand (`git checkout` or an editor). It is not restored from the checkpoint because a checkpoint may be older than a rule, and a restored hook or rc file runs by itself.
+
+## MCP server names
+
+A server name never contains `__` (`synthesis_mcp::valid_server_name`; a configured name that does is refused at load and by `synt mcp add`). Tool names are `mcp__<server>__<tool>` and a rule `mcp__<server>` covers `mcp__<server>__*`; with `__` inside a server name the split would be ambiguous and a rule for `github` would also cover a server `github__x`.

@@ -481,6 +481,9 @@ pub(crate) struct TaskRun {
     /// A tool result of this task carried an image: its text is untrusted pixels, so in auto an
     /// action with an external effect is asked, never judged (classifier.rs).
     pub after_image: AtomicBool,
+    /// The conversation this task started from (or a result of it) still carries an image block: a person's
+    /// answer does not clear `after_image` while this is set.
+    pub image_in_history: AtomicBool,
     /// Recent user messages, the task last: what the auto-mode judge is told the task is.
     pub user_texts: Mutex<Vec<String>>,
     pub auto: Mutex<crate::classifier::AutoState>,
@@ -589,6 +592,9 @@ pub struct Harness {
     pub(crate) compact_wanted: Mutex<Option<Option<String>>>,
     /// `reasoning_effort` of the next requests (OpenAI protocol); `None` = the provider's default.
     pub(crate) reasoning_effort: Mutex<Option<String>>,
+    /// An image entered this session (the person's attachment or a tool result) and no human answer has cleared
+    /// it since: it outlives a compaction that drops the image block but keeps what was read from it.
+    pub(crate) image_taint: AtomicBool,
     /// Gate check commands the person approved as a set; valid for the whole session.
     /// Called with the allow rules a person accepted with "allow always" (to persist them).
     pub(crate) rule_store: Option<RuleStore>,
@@ -645,6 +651,7 @@ impl Harness {
             read_ledger: Arc::default(),
             compact_wanted: Mutex::default(),
             reasoning_effort: Mutex::default(),
+            image_taint: AtomicBool::new(false),
             window_noted: AtomicBool::new(false),
             verify_ok: Mutex::default(),
             procs_exited: Mutex::default(),
@@ -1046,6 +1053,20 @@ impl Harness {
             .begin_task(bg_tx, task.cancel.clone(), task.task_id.clone());
         self.peer_task_started(&req.request, &main.name, &st.messages);
         *lock(&task.user_texts) = crate::classifier::user_texts(&st.messages, &req.request);
+        // an image the person attached (or one the conversation still carries, until a compaction drops it) is
+        // pixels of unknown origin, a screenshot of a page perhaps: its text is untrusted, so actions with an
+        // external effect are asked, never judged, for the rest of the task
+        let in_history = st.messages.iter().any(carries_image);
+        task.image_in_history
+            .store(in_history, std::sync::atomic::Ordering::SeqCst);
+        if !req.images.is_empty() || in_history {
+            self.image_taint
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        if self.image_taint.load(std::sync::atomic::Ordering::SeqCst) {
+            task.after_image
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         // images stay in the history; a model without vision gets "[image]" in its request copy
         // (`make_request`), also after a model switch
         let content = if req.images.is_empty() {
@@ -1296,6 +1317,7 @@ impl Harness {
             needed: Mutex::default(),
             gate_blocked: AtomicBool::new(false),
             after_image: AtomicBool::new(false),
+            image_in_history: AtomicBool::new(false),
             user_texts: Mutex::default(),
             auto: Mutex::default(),
             tool_search: Mutex::default(),
@@ -1714,5 +1736,29 @@ impl Harness {
             );
         }
         Some(out)
+    }
+}
+
+/// The message holds an image block, or a tool result that carries one.
+fn carries_image(m: &Message) -> bool {
+    fn json_image(v: &serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::Array(a) => a.iter().any(json_image),
+            serde_json::Value::Object(o) => {
+                o.get("type").and_then(|t| t.as_str()) == Some("image")
+                    || o.values().any(json_image)
+            }
+            _ => false,
+        }
+    }
+    match &m.content {
+        Content::Blocks(b) => b.iter().any(|x| match x {
+            Block::Image { .. } => true,
+            Block::ToolResult {
+                content: Some(c), ..
+            } => json_image(c),
+            _ => false,
+        }),
+        Content::Text(_) => false,
     }
 }

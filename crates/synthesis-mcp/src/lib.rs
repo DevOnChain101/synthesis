@@ -1,10 +1,13 @@
 //! MCP client manager on the official `rmcp` crate (stdio child process + streamable HTTP).
 
 mod config;
+mod guard;
 mod manager;
 mod naming;
 mod result;
 mod sse;
+pub use reqwest::Url;
+pub use sse::check_remote_url;
 mod ws;
 
 pub use config::*;

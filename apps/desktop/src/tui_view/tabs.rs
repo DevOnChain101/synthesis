@@ -392,7 +392,20 @@ impl TuiView {
         }
         let epoch = self.tree.begin();
         let (dir, env, trusted) = (PathBuf::from(&cwd), lu.cfg.env.clone(), lu.live.trusted);
+        // WSL mode: the engine scans its own folder (a path of this machine would be the Windows view of it)
+        let remote = lu.live.engine.clone().filter(|e| e.is_remote());
         let job = cx.background_spawn(async move {
+            if let Some(e) = remote {
+                return e
+                    .remote()
+                    .ok_or_else(|| "not a WSL engine".to_string())
+                    .and_then(|r| r.fs_list())
+                    .unwrap_or_else(|why| ProjectData {
+                        loaded: true,
+                        note: Some(why),
+                        ..Default::default()
+                    });
+            }
             if trusted {
                 project::scan(&dir, &env)
             } else {
@@ -430,7 +443,17 @@ impl TuiView {
         (self.ts.sel, self.ts.menu) = (None, None);
         let rel = path.clone();
         let epoch = self.tree.epoch;
-        let job = cx.background_spawn(async move { read_preview(&root, &rel) });
+        let remote = lu.live.engine.clone().filter(|e| e.is_remote());
+        let job = cx.background_spawn(async move {
+            match remote {
+                Some(e) => e
+                    .remote()
+                    .ok_or_else(|| "not a WSL engine".to_string())
+                    .and_then(|r| r.fs_read(&rel))
+                    .map(|(lines, size, cut)| PreviewText { lines, size, cut }),
+                None => read_preview(&root, &rel),
+            }
+        });
         cx.spawn(async move |this, cx| {
             let body = job.await;
             this.update(cx, |t, cx| {

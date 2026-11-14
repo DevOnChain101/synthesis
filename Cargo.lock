@@ -7163,6 +7163,8 @@ dependencies = [
 name = "synthesis-app"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "cap-std",
  "clap",
  "futures-util",
  "globset",
@@ -7476,6 +7478,7 @@ dependencies = [
  "serde_json",
  "sha1 0.10.7",
  "synthesis-config",
+ "synthesis-platform",
  "tempfile",
  "tokio",
  "tokio-tungstenite",

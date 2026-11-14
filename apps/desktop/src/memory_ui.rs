@@ -564,12 +564,92 @@ impl Live {
             Ok(None) => return,
             Err(e) => return self.note(e, true),
         };
+        if let Some(e) = self.engine.clone().filter(|e| e.is_remote()) {
+            return self.memory_remote(&e, cmd, now);
+        }
         let r = self
             .memory_ctx()
             .and_then(|c| self.memory_run(&c, cmd, now));
         if let Err(e) = r {
             self.note(format!("/memory: {e}"), true);
         }
+    }
+
+    /// `/memory` on a WSL engine: the engine's own store answers (every rule is applied there); reads run in the
+    /// background, a write is confirmed in the dock first and then done by the engine.
+    fn memory_remote(&mut self, e: &std::sync::Arc<crate::engine::Engine>, cmd: Cmd, now: i64) {
+        use crate::engine::UiMsg;
+        let say = |r: Result<String, String>| {
+            Some(match r {
+                Ok(t) => UiMsg::Note(t, false),
+                Err(why) => UiMsg::Note(format!("/memory: {why}"), true),
+            })
+        };
+        match cmd {
+            Cmd::List => e.spawn_remote(move |r| say(r.memory_rows(None).map(|v| v.join("\n")))),
+            Cmd::Search(q) => {
+                e.spawn_remote(move |r| say(r.memory_rows(Some(&q)).map(|v| v.join("\n"))));
+            }
+            Cmd::Show { id, .. } => e.spawn_remote(move |r| say(r.memory_show(&id))),
+            Cmd::Add { text, user } => self.confirm_remote(Pending::Add { text, user }, now),
+            Cmd::Forget(id) => self.confirm_remote(Pending::Forget { id }, now),
+            Cmd::Edit { .. } | Cmd::Review => self.note(
+                "/memory: edit and review are not available in WSL mode yet (list, search, show, add and forget are)",
+                true,
+            ),
+        }
+    }
+
+    /// The confirmation of a WSL write: the whole text, "no" first. The engine checks it again (secrets, size).
+    fn confirm_remote(&mut self, p: Pending, now: i64) {
+        const FLAGGED: &[(&str, &str)] = &[
+            ("no", "No, do not save (esc also cancels)"),
+            (
+                "yes_token",
+                "Yes, save it: I checked that the long random-looking string is not a secret",
+            ),
+        ];
+        const PLAIN: &[(&str, &str)] = &[
+            ("no", "No, do not save (esc also cancels)"),
+            ("yes", "Yes, save it"),
+        ];
+        let (title, header, options): (&str, String, &[(&str, &str)]) = match &p {
+            Pending::Add { text, user } => {
+                if let Err(e) = check_len("the note", text) {
+                    return self.note(format!("/memory: {e}"), true);
+                }
+                (
+                    "Save this to memory in WSL?",
+                    format!(
+                        "{}Saved by the engine in WSL with trust 'owner'; later sessions give it to the model as data. The engine refuses secret-shaped text and decides the scope (a folder that is not trusted only has the user scope).\n{}",
+                        if *user {
+                            "USER SCOPE: applies to EVERY repository.\n"
+                        } else {
+                            ""
+                        },
+                        whole(text)
+                    ),
+                    if long_token(text) { FLAGGED } else { PLAIN },
+                )
+            }
+            Pending::Forget { id } => (
+                "Forget this memory note in WSL?",
+                format!(
+                    "Archives {} in the engine's store: it stays there with its provenance but is no longer given to the model.",
+                    san(id)
+                ),
+                &[
+                    ("no", "No, keep it (esc also cancels)"),
+                    ("yes", "Yes, archive it"),
+                ],
+            ),
+            _ => return,
+        };
+        self.push_memory_dialog(
+            dialog(PickerKind::MemConfirm, title, header, options),
+            Some((p, String::new())),
+            now,
+        );
     }
 
     fn memory_run(&mut self, c: &Ctx, cmd: Cmd, now: i64) -> Result<(), String> {
@@ -718,6 +798,27 @@ impl Live {
 
     /// An answer of the review list or of a confirmation (called from [`Live::answer`]).
     pub fn memory_answer(&mut self, kind: PickerKind, key: &str, now: i64) {
+        if let Some(e) = self.engine.clone().filter(|e| e.is_remote()) {
+            use crate::engine::UiMsg;
+            let pending = self.mem_pending.take();
+            let note = |r: Result<String, String>| {
+                Some(match r {
+                    Ok(t) => UiMsg::Note(t, false),
+                    Err(why) => UiMsg::Note(format!("/memory: {why}"), true),
+                })
+            };
+            match (pending, key) {
+                (Some((Pending::Add { text, user }, _)), "yes" | "yes_token") => {
+                    e.spawn_remote(move |r| note(r.memory_add(&text, user)));
+                }
+                (Some((Pending::Forget { id }, _)), "yes") => {
+                    e.spawn_remote(move |r| note(r.memory_forget(&id)));
+                }
+                _ => {}
+            }
+            let _ = kind;
+            return;
+        }
         let r = self
             .memory_ctx()
             .and_then(|c| match (kind, self.mem_pending.take(), key) {

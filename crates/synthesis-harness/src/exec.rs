@@ -1530,8 +1530,15 @@ impl Harness {
         if matches!(&out.content, ToolContent::Blocks(b) if b.iter().any(|x| !matches!(x, ToolBlock::Text { .. })))
         {
             task.after_image.store(true, Ordering::SeqCst);
-        } else if name == "AskUserQuestion" && !out.is_error {
+            task.image_in_history.store(true, Ordering::SeqCst);
+            self.image_taint.store(true, Ordering::SeqCst);
+        } else if name == "AskUserQuestion"
+            && !out.is_error
+            && !task.image_in_history.load(Ordering::SeqCst)
+        {
+            // only the person's own answer, and only once no image block is left in the conversation
             task.after_image.store(false, Ordering::SeqCst);
+            self.image_taint.store(false, Ordering::SeqCst);
         }
         self.mcp_observe(task, name, &input, &text, out.is_error);
         if let Some(post) = self

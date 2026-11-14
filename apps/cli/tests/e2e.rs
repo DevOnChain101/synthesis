@@ -1997,8 +1997,9 @@ fn delegate_run(
     user_settings(&rig, deleg_peers());
     // the second main turn answers the gate's feedback when the worker changed files
     let mut a_script = vec![
-        // A's own task waits for B's delegation to arrive; a slow runner (Windows) needs longer
-        json!({"delay_ms": if cfg!(windows) { 20000 } else { 5000 }, "text": "A done"}),
+        // A's own task waits for B's delegation to arrive. `cmd_for` triples delays on Windows, so 10 s is
+        // 30 s there: it must stay well under `Live::finish`'s 60 s, which starts when B (quick) has ended.
+        json!({"delay_ms": if cfg!(windows) { 10000 } else { 5000 }, "text": "A done"}),
         json!({"text": "A done again"}),
     ];
     a_script.extend(worker.as_array().unwrap().iter().cloned());

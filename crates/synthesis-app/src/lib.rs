@@ -34,7 +34,9 @@ pub mod asks;
 pub mod ctx;
 pub mod doctor;
 pub mod egress;
+pub mod engine_fs;
 pub mod engine_methods;
+pub mod engine_ops;
 pub mod engine_server;
 pub mod events;
 #[cfg(feature = "test-provider")]

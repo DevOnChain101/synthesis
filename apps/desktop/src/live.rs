@@ -956,6 +956,12 @@ impl Live {
                 );
             }
             UiMsg::Note(t, err) => self.note(t, err),
+            UiMsg::Doctor(r) => self.doctor_done(r),
+            UiMsg::Effort(Ok(e)) => {
+                self.note(format!("effort: {}", e.as_deref().unwrap_or("auto")), false);
+                self.view.status.effort = e;
+            }
+            UiMsg::Effort(Err(why)) => self.note(format!("/effort: {why}"), true),
             // the window closes the engine itself (`apply_batch`); here only the state
             UiMsg::Stopped => {
                 self.busy = false;
@@ -1359,10 +1365,18 @@ impl Live {
                 return None;
             }
             if kind == PickerKind::Remember {
-                // a `#` note is a file of the machine the instruction files live on: never written here for a remote engine
-                if self.engine.as_ref().is_some_and(|e| e.is_remote()) {
-                    self.pending_note = None;
-                    self.note(format!("# note: {}", crate::wsl::LATER), true);
+                // a `#` note is a file of the machine the instruction files live on: the engine writes it there,
+                // this side never does
+                if let Some(e) = self.engine.clone().filter(|e| e.is_remote()) {
+                    if let (Some(text), "user" | "project") = (self.pending_note.take(), key) {
+                        let user = key == "user";
+                        e.spawn_remote(move |r| {
+                            Some(match r.memory_note(&text, user) {
+                                Ok(done) => UiMsg::Note(done, false),
+                                Err(why) => UiMsg::Note(format!("# note not saved: {why}"), true),
+                            })
+                        });
+                    }
                     return None;
                 }
                 if let (Some(e), Some(text), "user" | "project") =
@@ -1964,6 +1978,16 @@ impl Live {
             {
                 self.note(format!("/{name}: the session is still starting"), true)
             }
+            "mcp" if self.engine.as_ref().is_some_and(|e| e.is_remote()) => {
+                if let Some(e) = &self.engine {
+                    e.spawn_remote(|r| {
+                        Some(match r.mcp_report() {
+                            Ok(l) => UiMsg::Note(l.join("\n"), false),
+                            Err(why) => UiMsg::Note(format!("/mcp: {why}"), true),
+                        })
+                    });
+                }
+            }
             "mcp" => self.info(|e| e.mcp_report()),
             "memory" if arg.is_empty() && self.local() => self.open_menu(crate::menu::memory()),
             "memory" if arg == "status" => self.info(|e| e.memory_report.clone()),
@@ -2397,9 +2421,13 @@ impl Live {
             t if tiers.iter().any(|x| x == t) => Some(t.to_string()),
             _ => return self.note(format!("usage: /effort [auto|{}]", tiers.join("|")), true),
         };
-        // the engine's state lives on its own machine: nothing of it is written here
+        // the engine's state lives on its own machine: nothing of it is written here, the engine saves it
         if e.is_remote() {
-            return self.note(format!("/effort: {}", crate::wsl::LATER), true);
+            let tier = next.clone();
+            e.spawn_remote(move |r| {
+                Some(UiMsg::Effort(r.config_effort(tier.clone()).map(|()| tier)))
+            });
+            return;
         }
         // kept for the next start too (state.json), like the CLI
         if let Err(err) = synthesis_config::save_effort(&e.synthesis_home, next.as_deref()) {

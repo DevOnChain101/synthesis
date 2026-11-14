@@ -267,6 +267,46 @@ impl Verdict {
     }
 }
 
+/// Whether `p` is a protected path (VCS internals and hooks, shell and CI configuration, `.env*`, ...) of the
+/// workspace `roots` (the first is the project root): the UNION of what the tools ask about before writing and
+/// what they refuse outright (case folded and Windows aliases such as `GIT~1` or `.git.` on every OS). Fails
+/// closed without a root.
+pub fn is_protected_path(roots: &[PathBuf], p: &Path) -> bool {
+    // real paths on both sides (no `\\?\` form, links followed): only the part BELOW the workspace root is judged,
+    // never the names above it (a Windows temp folder such as `RUNNER~1` or `ADMINI~1` is not a protected name)
+    let canon = |x: &Path| synthesis_core::realpath_lenient(x).unwrap_or_else(|| x.to_path_buf());
+    let roots: Vec<PathBuf> = roots.iter().map(|r| canon(r)).collect();
+    // the parent is resolved, the file itself is not (a link there is the caller's business, and its target
+    // must not decide what this name is)
+    let p = match (p.parent(), p.file_name()) {
+        (Some(dir), Some(name)) => canon(dir).join(name),
+        _ => canon(p),
+    };
+    let Some((first, more)) = roots.split_first() else {
+        return true;
+    };
+    // a path that is not under any root is not a file a rewind may write at all
+    if !roots.iter().any(|r| p.starts_with(r)) {
+        return true;
+    }
+    let rules = PermissionRules {
+        additional_directories: more.to_vec(),
+        ..PermissionRules::default()
+    };
+    let mut env = Env::new(first.clone(), PathBuf::new(), Mode::Default);
+    // judged as on the strictest file system (case folded, Windows aliases reduced) on every OS: `.ENV` and
+    // `.GIT/hooks` are the same files on macOS and Windows, and over-protecting on Linux is the safe side
+    env.path_policy = PathPolicy {
+        case_insensitive: true,
+        windows_separators: true,
+    };
+    let perms = Permissions::new(rules, env);
+    perms.is_protected(&p) || perms.is_tool_readonly(&p)
+}
+
+/// The paths a rewind skips for being protected, in words (for the user who must revert them by hand).
+pub const PROTECTED_SUMMARY: &str = "VCS internals and hooks (.git), .synt, .husky, .cargo, .devcontainer, .vscode/.idea/.claude settings, .github/workflows, shell startup files (.bashrc, .zshrc, .profile ...), .env*, .envrc, .npmrc, .yarnrc, .mcp.json, AGENTS.md, .gitattributes, .gitmodules, package-manager and CI config";
+
 /// `permissions` block of settings.
 #[derive(Debug, Clone, Default)]
 pub struct PermissionRules {

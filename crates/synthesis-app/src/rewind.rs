@@ -34,7 +34,9 @@ pub struct RewindArgs {
     /// Only this checkpoint (default: every checkpoint of the session).
     #[arg(long, value_name = "NAME")]
     pub checkpoint: Option<String>,
-    /// Write the files back (default: show what would happen).
+    /// Write the files back (default: show what would happen). Protected paths (.git and hooks, .env*,
+    /// shell startup files, CI and package-manager config) are never written or removed, not even with
+    /// --force: the dry run lists them as skipped and you revert them by hand.
     #[arg(long)]
     pub apply: bool,
     /// Also overwrite or remove files changed since the run (or whose end state was not recorded),
@@ -108,6 +110,15 @@ pub(crate) fn windows_unsafe_name(name: &str) -> bool {
             stem.strip_prefix(p)
                 .is_some_and(|n| n.len() == 1 && n.as_bytes()[0].is_ascii_digit() && n != "0")
         })
+}
+
+/// Why a protected file is skipped, and what to do about it: a rewind never writes or deletes what the tools
+/// refuse or ask about first (the checkpoint may be older than a rule), so the person reverts it by hand.
+fn protected_reason() -> String {
+    format!(
+        "a protected path: a rewind never writes it, revert it by hand (git checkout, or your editor). Protected: {}",
+        synthesis_permissions::PROTECTED_SUMMARY
+    )
 }
 
 fn is_link(p: &Path) -> bool {
@@ -264,6 +275,8 @@ pub fn plan(l: &Loaded, checkpoint: Option<&str>, force: bool) -> Result<Vec<Ent
                 "the snapshot is not the exact file (secrets were masked)",
                 false,
             )
+        } else if synthesis_permissions::is_protected_path(&l.roots, &path) {
+            skip(&protected_reason(), false)
         } else if std::fs::symlink_metadata(&path).is_ok_and(|m| !m.is_file()) {
             skip("a symlink or not a regular file", false)
         } else if !force
@@ -341,6 +354,9 @@ pub fn apply_entry(l: &Loaded, e: &Entry) -> Result<(), String> {
         _ if !inside(&e.path, &l.roots) => return fail("outside the session's workspace"),
         _ if path_problem(&e.path, &l.roots).is_some() => {
             return fail("a directory on its path is a symlink or junction");
+        }
+        _ if synthesis_permissions::is_protected_path(&l.roots, &e.path) => {
+            return fail(&protected_reason());
         }
         _ if file_state_hash(&e.path) != e.state => {
             return fail("changed while the rewind was running: not touched");
@@ -590,6 +606,37 @@ mod tests {
         assert_eq!(v[1].size, 7);
         assert_eq!(fs::read_to_string(&a).unwrap(), "new content");
         assert!(b.exists());
+    }
+
+    #[test]
+    fn a_protected_path_in_a_checkpoint_is_never_restored_or_removed() {
+        let mut g = rig();
+        fs::create_dir_all(g.ws.join(".git/hooks")).unwrap();
+        fs::write(g.ws.join(".git/hooks/pre-commit"), "old").unwrap();
+        let hook = g.run_wrote(".git/hooks/pre-commit", "new");
+        let created = g.run_wrote(".github_ok.txt", "x");
+        let env = g.run_wrote(".env", "K=1");
+        let v = g.plan();
+        assert_eq!(v.len(), 3);
+        for e in v.iter().filter(|e| e.path != created) {
+            assert!(skip_reason(e).contains("protected"), "{}", e.shown);
+        }
+        assert!(
+            matches!(v[1].step, Step::Remove),
+            "an ordinary file still rewinds"
+        );
+        // even a forged entry that asks for the write is refused when it is applied
+        let mut forged = v[0].clone();
+        forged.step = Step::Restore {
+            artifact_id: "x".into(),
+            sha256: None,
+        };
+        let err = apply_entry(&g.loaded(), &forged).unwrap_err();
+        assert!(err.contains("protected"), "{err}");
+        apply_confirmed(&g.loaded(), None, &v).unwrap();
+        assert_eq!(fs::read_to_string(hook).unwrap(), "new");
+        assert_eq!(fs::read_to_string(env).unwrap(), "K=1");
+        assert!(!created.exists());
     }
 
     #[test]

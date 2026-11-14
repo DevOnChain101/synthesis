@@ -474,11 +474,22 @@ impl Shared {
                 (handler.serve(t).await.map_err(|e| e.to_string())?, pid)
             }
             TransportKind::Http => {
+                // the same address policy as the other transports (metadata, private ranges, a name that
+                // resolves to one), and redirects are never followed to another origin
+                let raw = cfg
+                    .url
+                    .as_deref()
+                    .filter(|u| !u.is_empty())
+                    .ok_or("http server has no url")?;
+                let url = reqwest::Url::parse(&self.expand(cfg, raw)?)
+                    .map_err(|e| format!("bad url: {e}"))?;
+                sse::check_url(&url).await?;
                 let (conf, client) = self.http_config(cfg)?;
-                let t = match client {
-                    Some(c) => StreamableHttpClientTransport::with_client(c, conf),
-                    None => StreamableHttpClientTransport::from_config(conf),
+                let client = match client {
+                    Some(c) => c,
+                    None => http_client(None)?,
                 };
+                let t = StreamableHttpClientTransport::with_client(client, conf);
                 (handler.serve(t).await.map_err(|e| e.to_string())?, None)
             }
             TransportKind::Sse => {
@@ -715,12 +726,22 @@ fn merge_env(env: &mut BTreeMap<String, String>, k: &str, v: String, fold: bool)
 /// calls, the SSE stream, DELETE, re-initialisation). Redirects follow rmcp's default: only 307/308
 /// to the same origin, so the credential never reaches another host.
 fn authorized_client(auth: &str) -> Result<reqwest::Client, String> {
-    let mut v = http::HeaderValue::from_str(auth)
-        .map_err(|_| "invalid value for header \"Authorization\"".to_string())?;
-    v.set_sensitive(true);
+    http_client(Some(auth))
+}
+
+/// The client of a streamable-HTTP server: `auth` (a non-Bearer `Authorization`) is a default header, and a
+/// redirect is followed only for 307/308 within the same origin (so neither a header nor a request can be
+/// led to an internal address by a redirect; anything else stops with the redirect's own status).
+fn http_client(auth: Option<&str>) -> Result<reqwest::Client, String> {
     let mut h = http::HeaderMap::new();
-    h.insert(http::header::AUTHORIZATION, v);
+    if let Some(auth) = auth {
+        let mut v = http::HeaderValue::from_str(auth)
+            .map_err(|_| "invalid value for header \"Authorization\"".to_string())?;
+        v.set_sensitive(true);
+        h.insert(http::header::AUTHORIZATION, v);
+    }
     reqwest::Client::builder()
+        .dns_resolver(crate::guard::GuardResolver::system())
         .default_headers(h)
         .pool_max_idle_per_host(0)
         .redirect(reqwest::redirect::Policy::custom(|a| {
@@ -1247,6 +1268,40 @@ impl McpManager {
             let _ = t.await;
         }
         self.inner.emit();
+    }
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[tokio::test]
+    async fn a_redirect_to_a_private_address_or_another_origin_is_not_followed() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut s in l.incoming().flatten() {
+                let mut b = [0u8; 2048];
+                let _ = s.read(&mut b);
+                let _ = s.write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        for auth in [None, Some("Basic abc")] {
+            let r = http_client(auth)
+                .unwrap()
+                .get(format!("http://127.0.0.1:{port}/mcp"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                r.status().as_u16(),
+                302,
+                "the redirect is returned, not followed"
+            );
+        }
     }
 }
 

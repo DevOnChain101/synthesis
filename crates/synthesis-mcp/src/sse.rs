@@ -9,7 +9,7 @@
 //! doing the resolving) passes; upgrade by connecting through a validating resolver as synthesis-tools
 //! `web.rs` does.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -36,32 +36,9 @@ impl std::fmt::Display for SseError {
 }
 impl std::error::Error for SseError {}
 
-fn blocked_v4(ip: Ipv4Addr) -> bool {
-    let o = ip.octets();
-    ip.is_unspecified()
-        || ip.is_private()
-        || ip.is_link_local() // includes the cloud metadata address
-        || ip.is_broadcast()
-        || ip.is_multicast()
-        || (o[0] == 100 && (64..128).contains(&o[1])) // CGNAT
-        || o[0] >= 240
-}
-
-/// Loopback is judged separately (allowed for explicit loopback hosts only).
+/// The one list of addresses an agent-driven connection must never reach (`synthesis_platform::net`).
 fn blocked(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v) => blocked_v4(v),
-        IpAddr::V6(v) => match v.to_ipv4_mapped() {
-            Some(m) => blocked_v4(m) || m.is_loopback(),
-            None => {
-                let s = v.segments();
-                v.is_unspecified()
-                    || v.is_multicast()
-                    || (s[0] & 0xfe00) == 0xfc00 // ULA
-                    || (s[0] & 0xffc0) == 0xfe80 // link-local
-            }
-        },
-    }
+    synthesis_platform::net::ip_blocked(ip)
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -72,21 +49,46 @@ fn is_loopback_host(host: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
-/// `Err` = the request must not be made.
+/// `Err` = the request must not be made. Strict for every host but an explicit loopback name or address (which a
+/// person may write by hand, with `http` too): `https` only, no private or internal address, and a name that
+/// does not resolve, or resolves to such an address, is refused (the connection itself is then restricted to
+/// validated addresses by [`crate::guard::GuardResolver`], so what was checked is what is connected to).
 pub(crate) async fn check_url(u: &Url) -> Result<(), String> {
+    check(u, !u.host_str().is_some_and(is_loopback_host)).await
+}
+
+/// The check for a URL a CLIENT chose (`mcp.add` over the engine protocol): strict for every host, loopback
+/// included, and no user:password.
+pub async fn check_remote_url(u: &Url) -> Result<(), String> {
+    if !u.username().is_empty() || u.password().is_some() {
+        return Err("a URL with a user name or password is not allowed".into());
+    }
+    check(u, true).await
+}
+
+async fn check(u: &Url, strict: bool) -> Result<(), String> {
     let host = u.host_str().ok_or("URL has no host")?.to_string();
     let loopback = is_loopback_host(&host);
     match u.scheme() {
         "https" => {}
-        "http" if loopback => {}
+        "http" if loopback && !strict => {}
         s => {
             return Err(format!(
-                "scheme \"{s}\" is not allowed (https, or http to localhost)"
+                "scheme \"{s}\" is not allowed ({})",
+                if strict {
+                    "https only"
+                } else {
+                    "https, or http to localhost"
+                }
             ));
         }
     }
     if loopback {
-        return Ok(());
+        return if strict {
+            Err("a loopback host is not allowed".into())
+        } else {
+            Ok(())
+        };
     }
     if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
         return if blocked(ip) || ip.is_loopback() {
@@ -95,15 +97,9 @@ pub(crate) async fn check_url(u: &Url) -> Result<(), String> {
             Ok(())
         };
     }
-    let port = u.port_or_known_default().unwrap_or(443);
-    if let Ok(addrs) = tokio::net::lookup_host((host.as_str(), port)).await {
-        for a in addrs {
-            if blocked(a.ip()) || a.ip().is_loopback() {
-                return Err(format!("{host} resolves to a private/internal address"));
-            }
-        }
-    }
-    Ok(())
+    crate::guard::resolve_validated(&host, &crate::guard::system_lookup())
+        .await
+        .map(drop)
 }
 
 /// GET with manual redirects; every hop passes [`check_url`]. Configured headers are not forwarded
@@ -238,6 +234,7 @@ pub async fn connect(url: &str, headers: HeaderMap) -> Result<(SseTx, SseRx), St
     // redirects are handled above; no automatic ones
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(crate::guard::GuardResolver::system())
         .build()
         .map_err(|e| e.to_string())?;
     let resp = get_stream(&client, &url, &headers).await?;
@@ -330,4 +327,44 @@ pub fn header_map(pairs: &[(String, String)]) -> Result<HeaderMap, String> {
         h.insert(name, val);
     }
     Ok(h)
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    fn u(s: &str) -> Url {
+        Url::parse(s).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_client_chosen_url_must_be_https_to_a_public_address() {
+        for bad in [
+            "https://169.254.169.254/latest/meta-data",
+            "https://10.0.0.5/mcp",
+            "https://192.168.1.1/",
+            "https://172.16.0.1/",
+            "https://100.64.0.1/",
+            "https://127.0.0.1/",
+            "https://localhost/",
+            "https://LOCALHOST:8443/",
+            "https://[::1]/",
+            "https://[fd00::1]/",
+            "https://[fe80::1]/",
+            "https://[::ffff:10.0.0.1]/",
+            "https://0x7f.1/",
+            "https://2130706433/",
+            "http://example.com/mcp",
+            "http://localhost/mcp",
+            "https://user:pw@example.com/",
+            "https://user@example.com/",
+            "ftp://example.com/",
+        ] {
+            assert!(check_remote_url(&u(bad)).await.is_err(), "{bad}");
+        }
+        assert!(check_remote_url(&u("https://8.8.8.8/mcp")).await.is_ok());
+        // the existing (connect-time) check keeps allowing http to localhost for a server the person configured
+        assert!(check_url(&u("http://localhost:3000/mcp")).await.is_ok());
+        assert!(check_url(&u("http://10.0.0.5/")).await.is_err());
+    }
 }

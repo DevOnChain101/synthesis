@@ -1988,8 +1988,22 @@ impl TuiView {
                     return;
                 };
                 if e.is_remote() {
-                    lu.live
-                        .note(format!("/context: {}", crate::wsl::LATER), true);
+                    // written into the engine's own synt.json; the window of the session is read at its next start
+                    let label = e.label.clone();
+                    lu.live.note("/context: writing in WSL...", false);
+                    e.spawn_remote(move |r| {
+                        Some(match r.context_set(&arg) {
+                            Ok(Some(n)) => crate::engine::UiMsg::Note(
+                                format!("context window of {label} set to {n} tokens in the engine's synt.json; it applies from the next session (run /model and pick the same model once idle)"),
+                                false,
+                            ),
+                            Ok(None) => crate::engine::UiMsg::Note(
+                                format!("context window of {label} removed from the engine's synt.json"),
+                                false,
+                            ),
+                            Err(why) => crate::engine::UiMsg::Note(format!("/context: {why}"), true),
+                        })
+                    });
                     return;
                 }
                 let (p, m) = e.label.split_once('/').unwrap_or(("", &e.label));
@@ -2124,7 +2138,8 @@ impl TuiView {
                     return;
                 };
                 if e.is_remote() {
-                    lu.live.note(crate::engine::NOT_REMOTE, true);
+                    // the checks run in the engine, on its own machine (`doctor: checking...` is already said)
+                    e.spawn_remote(|r| Some(crate::engine::UiMsg::Doctor(r.doctor_rows())));
                     return;
                 }
                 let (env, cwd, trusted) = (e.env.clone(), e.cwd.clone(), lu.live.trusted);
