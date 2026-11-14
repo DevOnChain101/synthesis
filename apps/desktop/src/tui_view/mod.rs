@@ -185,6 +185,8 @@ pub struct TuiView {
     month_used: std::cell::Cell<f32>,
     /// The slide-over column that is open (only a collapsed column has one; closed by default).
     pub(crate) drawer: Option<Side>,
+    /// Id of the agent request (approval, plan, question) whose first frame was drawn: Enter answers it.
+    pub(crate) auto_ready: String,
     /// Side-panel sections folded to their header (by panel id), kept for the session.
     folded: std::collections::HashSet<&'static str>,
     /// `Some` with the header hidden: the drawer buttons it would hold (left, right) move to a strip over the
@@ -255,6 +257,7 @@ impl TuiView {
             sub_scroll: gpui::ScrollHandle::new(),
             centre_w: 600.,
             drawer: None,
+            auto_ready: String::new(),
             folded: Default::default(),
             input_strip: None,
             window_active: None,
@@ -289,21 +292,21 @@ impl TuiView {
     fn refresh(&mut self, window: &mut Window, cx: &gpui::App) {
         let Some(lu) = &mut self.live else { return };
         let _ = window;
-        // The agent's own requests (approval, plan, question) are ready for Enter the moment they show, when
-        // nothing is typed in the prompt: while the dialog is up the keys do not reach the prompt, so an empty
-        // prompt means no Enter in flight was meant for it. Text typed ahead keeps the old guard (arrows/Tab/click).
+        // The agent's own requests (approval, plan, question) are ready for Enter once their first frame is drawn
+        // with nothing typed in the prompt: while the dialog is up the keys do not reach the prompt, so an empty
+        // prompt means no Enter in flight was meant for it. A key that arrived before this frame is swallowed.
+        // Digits stay locked for the broadening options ("always allow", auto mode) until the person touches the
+        // dialog (arrow, Tab or click: `engaged`).
         if lu.prompt.read(cx).value().is_empty()
-            && let Some(d) = lu.live.dialogs.first_mut()
+            && let Some(d) = lu.live.dialogs.first()
             && matches!(
                 d.kind,
                 crate::live::DialogKind::Approval(_)
                     | crate::live::DialogKind::Plan { .. }
                     | crate::live::DialogKind::Question { .. }
             )
-            && !d.engaged
         {
-            d.engaged = true;
-            lu.dirty = true;
+            self.auto_ready = d.id().to_string();
         }
         // the tabs belong to the session: leaving one keeps them, coming back finds them
         if lu.live.sid != self.tab_sid && !lu.live.sid.is_empty() {
@@ -1703,10 +1706,13 @@ mod tests {
         assert_eq!(pending(&view, vcx), 0);
     }
 
-    /// An approval is ready for Enter the moment it shows (no arrow key first) when nothing is typed in the
-    /// prompt; with text typed ahead the guard stays (that Enter was meant for the prompt).
+    /// An approval is ready for Enter once its first frame is drawn (no arrow key first) when nothing is typed in the
+    /// prompt; a key before that frame, or with text typed ahead, is swallowed; a digit never picks a broadening
+    /// option ("always allow") before the person touched the dialog.
     #[gpui::test]
-    fn an_approval_answers_enter_at_once_unless_text_was_typed_ahead(cx: &mut TestAppContext) {
+    fn an_approval_answers_enter_after_its_first_frame_and_digits_never_widen_untouched(
+        cx: &mut TestAppContext,
+    ) {
         use crate::live::{Dialog, DialogKind, Live};
         cx.update(gpui_component::init);
         let dialog = || Dialog {
@@ -1714,12 +1720,24 @@ mod tests {
                 id: "p".into(),
                 plan: "do it".into(),
             },
-            options: vec![("yes".into(), "Yes".into()), ("no".into(), "No".into())],
+            options: vec![
+                ("yes".into(), "Yes".into()),
+                ("always".into(), "Always".into()),
+                ("no".into(), "No".into()),
+            ],
             sel: 0,
             armed_until: 0,
             engaged: false,
         };
-        for typed in [false, true] {
+        // (typed ahead, draw first, key, dialogs left)
+        for (typed, drawn, key, left) in [
+            (false, true, "enter", 0),
+            (false, false, "enter", 1),
+            (true, true, "enter", 1),
+            (false, true, "2", 1),
+            (false, true, "1", 0),
+            (false, true, "3", 0),
+        ] {
             let (view, vcx) = cx.add_window_view(|window, cx| {
                 TuiView::live(window, cx, live_cfg(), Hidden::default(), 0.)
             });
@@ -1735,12 +1753,14 @@ mod tests {
             view.update(vcx, |t, _| {
                 t.live.as_mut().unwrap().live.dialogs.push(dialog())
             });
-            vcx.simulate_resize(size(px(1400.), px(900.)));
-            vcx.run_until_parked();
-            let ks = gpui::Keystroke::parse("enter").unwrap();
+            if drawn {
+                vcx.simulate_resize(size(px(1400.), px(900.)));
+                vcx.run_until_parked();
+            }
+            let ks = gpui::Keystroke::parse(key).unwrap();
             view.update_in(vcx, |t, window, cx| t.on_key(&ks, window, cx));
-            let left = view.read_with(vcx, |t, _| t.live.as_ref().unwrap().live.dialogs.len());
-            assert_eq!(left, usize::from(typed), "typed ahead = {typed}");
+            let n = view.read_with(vcx, |t, _| t.live.as_ref().unwrap().live.dialogs.len());
+            assert_eq!(n, left, "typed={typed} drawn={drawn} key={key}");
         }
     }
 

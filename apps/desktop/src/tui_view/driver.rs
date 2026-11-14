@@ -952,19 +952,30 @@ impl TuiView {
                     return true;
                 }
             }
+            // drawn once, nothing typed ahead (see `refresh`): Enter answers, digits answer except the broadening options
+            let ready = !self.auto_ready.is_empty() && self.auto_ready == lu.live.dialogs[0].id();
             match key {
                 "up" => lu.live.move_sel(false),
                 "down" => lu.live.move_sel(true),
                 "tab" => lu.live.move_sel(!shift),
                 // Enter and digits answer only a dialog the person has engaged (arrows, Tab, a click); before
                 // that they are swallowed (they were meant for the prompt) and the footer says how to choose
-                "enter" if enter_answers(ctrl, cmd, lu.live.dialogs[0].answerable()) => {
+                "enter" if enter_answers(ctrl, cmd, lu.live.dialogs[0].answerable() || ready) => {
                     let sel = lu.live.dialogs[0].sel;
                     out = lu.live.pick(sel, now);
                 }
                 "escape" => out = lu.live.reject(),
                 "c" if ctrl => out = lu.live.reject(),
-                _ if digit && !ctrl && !cmd && lu.live.dialogs[0].answerable() => {
+                _ if digit
+                    && !ctrl
+                    && !cmd
+                    && (lu.live.dialogs[0].answerable()
+                        || (ready
+                            && !lu.live.dialogs[0]
+                                .options
+                                .get(usize::from(key.as_bytes()[0] - b'1'))
+                                .is_some_and(|(k, _)| broadens(k)))) =>
+                {
                     out = lu.live.pick(usize::from(key.as_bytes()[0] - b'1'), now);
                 }
                 _ => {}
@@ -3106,6 +3117,11 @@ fn editor_at(text: &str, cursor: usize) -> LineEditor {
         .count();
     ed.cur = cur;
     ed
+}
+
+/// Options that widen what the agent may do from now on: a digit never picks one before the person touched the dialog.
+fn broadens(key: &str) -> bool {
+    matches!(key, "always" | "auto-mode" | "accept")
 }
 
 /// Plain Enter answers an engaged dialog; Cmd/Ctrl+Enter (send now) never does.

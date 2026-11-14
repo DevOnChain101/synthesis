@@ -397,6 +397,24 @@ async fn a_program_missing_from_the_sandbox_path_is_named_once() {
     );
 }
 
+/// The program named is the one the shell could not find, not the first word of the command line.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_missing_program_is_named_from_the_shell_message() {
+    let f = fx_path(&[], Some("/nonexistent"));
+    for cmd in [
+        "cd . && definitely-missing-xyz test",
+        "/bin/sh -c 'definitely-missing-xyz'",
+    ] {
+        let r = f
+            .runner()
+            .run_one(&check(&f, "k1", cmd, 5000), &CancellationToken::new())
+            .await;
+        let why = r.blocked_reason.unwrap_or_default();
+        assert!(why.ends_with("definitely-missing-xyz"), "{cmd}: {why}");
+    }
+}
+
 #[tokio::test]
 async fn missing_binary_is_blocked_not_failed() {
     let f = fx(&[]);
